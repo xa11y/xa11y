@@ -623,14 +623,384 @@ We intentionally **diverge** from accesskit in:
 
 ---
 
-## Open Questions
+## Event Subscriptions
 
-1. **Event/change notification:** Should xa11y support subscribing to accessibility events (focus changed, value changed, tree structure changed)? agent-desktop doesn't need this (snapshot-based), but it would be useful for real-time monitoring tools. Could be added as an optional `EventListener` trait.
+xa11y supports subscribing to accessibility events from running applications. This enables real-time monitoring, reactive automation, and serves as the foundation for a future Playwright-compatible desktop backend.
 
-2. **Text interface:** Rich text operations (cursor position, selection, text ranges) are complex and vary across platforms. Initial version exposes `value` as a plain string. A dedicated `TextProvider` trait for fine-grained text operations could come later.
+### Design Inspirations
 
-3. **Table interface:** Table-specific queries (get cell at row/col, get headers) could have a dedicated API. Currently tables are just trees of TableRow/TableCell nodes.
+- **Playwright** — `page.on(event, handler)`, `page.waitForEvent()`, `locator.waitFor({state})`. The event emitter + wait-for pattern is the primary design target. xa11y's event API should map cleanly to these patterns so a Playwright-compatible desktop adapter can delegate directly.
+- **Node.js EventEmitter** — `on`, `off`, `once`, `removeAllListeners`. Familiar pattern for JS consumers via FFI.
+- **Rust async streams** — `tokio::sync::broadcast` / `async_channel`. Events are inherently async; the Rust API uses streams with RAII-based unsubscription.
+- **macOS AXObserver** — Register for named notifications on specific elements or the app root. Maps naturally to per-target subscriptions.
+- **Windows UIA Event Handlers** — `AddAutomationEventHandler`, `AddFocusChangedEventHandler`, `AddPropertyChangedEventHandler`, `AddStructureChangedEventHandler`. Scoped by element + tree scope.
+- **Linux AT-SPI2 D-Bus signals** — `object:state-changed:focused`, `object:property-change:accessible-value`, `object:children-changed`, etc. Event-name hierarchy with class:major:minor structure.
 
-4. **Window management:** agent-desktop has screenshot and window focus capabilities. Should xa11y include these, or keep them separate? Recommendation: keep xa11y focused on accessibility trees; window management can be a sibling crate.
+### Event Types
 
-5. **Caching strategy:** Should the library cache trees across calls, or always re-traverse? Current design always re-traverses for simplicity and correctness. Caching could improve performance but introduces staleness risks.
+```rust
+/// Categories of accessibility events, normalized across platforms.
+#[repr(u8)]
+pub enum EventKind {
+    /// An element gained keyboard focus.
+    /// Playwright mapping: essential for `locator.waitFor({state: 'visible'})` and focus tracking.
+    FocusChanged,
+
+    /// An element's value changed (text content, slider position, etc.).
+    ValueChanged,
+
+    /// An element's name/label changed.
+    NameChanged,
+
+    /// A boolean state flag changed (enabled, checked, expanded, selected, busy, etc.).
+    /// The specific state is captured in `Event::state_flag`.
+    StateChanged,
+
+    /// Children were added or removed from an element.
+    /// Playwright mapping: maps to element attached/detached detection.
+    StructureChanged,
+
+    /// A new window was created.
+    /// Playwright mapping: `page.on('popup')` / `browserContext.on('page')`.
+    WindowOpened,
+
+    /// A window was closed/destroyed.
+    /// Playwright mapping: `page.on('close')`.
+    WindowClosed,
+
+    /// A window was activated (brought to front / received focus).
+    WindowActivated,
+
+    /// A window was deactivated (lost focus to another window).
+    WindowDeactivated,
+
+    /// Selection changed in a list, table, or text.
+    SelectionChanged,
+
+    /// A menu was opened.
+    MenuOpened,
+
+    /// A menu was closed.
+    MenuClosed,
+
+    /// An alert or notification was posted.
+    /// Playwright mapping: `page.on('dialog')`.
+    Alert,
+}
+```
+
+#### Platform Mapping
+
+| xa11y EventKind | macOS (AXObserver) | Windows (UIA) | Linux (AT-SPI2 D-Bus) |
+|---|---|---|---|
+| `FocusChanged` | `AXFocusedUIElementChanged` | `AddFocusChangedEventHandler` | `focus:` / `object:state-changed:focused` |
+| `ValueChanged` | `AXValueChanged` | `PropertyChanged(Value)` | `object:property-change:accessible-value` |
+| `NameChanged` | `AXTitleChanged` | `PropertyChanged(Name)` | `object:property-change:accessible-name` |
+| `StateChanged` | `AXValueChanged` (checkbox), inferred | `PropertyChanged(ToggleState, IsEnabled, ExpandCollapseState, ...)` | `object:state-changed:*` |
+| `StructureChanged` | `AXUIElementDestroyed`, `AXCreated` | `AddStructureChangedEventHandler` | `object:children-changed:add/remove` |
+| `WindowOpened` | `AXWindowCreated`, `AXSheetCreated` | `StructureChanged(ChildAdded)` on desktop root | `window:create` |
+| `WindowClosed` | `AXUIElementDestroyed` (on window) | `StructureChanged(ChildRemoved)` on desktop root | `window:destroy` |
+| `WindowActivated` | `AXApplicationActivated`, `AXFocusedWindowChanged` | `PropertyChanged(HasKeyboardFocus)` on window | `window:activate` |
+| `WindowDeactivated` | `AXApplicationDeactivated` | `PropertyChanged(HasKeyboardFocus)` on window | `window:deactivate` |
+| `SelectionChanged` | `AXSelectedChildrenChanged` | Selection events via `SelectionPattern` | `object:selection-changed` |
+| `MenuOpened` | `AXMenuOpened` | `StructureChanged` + role check | `object:state-changed:visible` on Menu |
+| `MenuClosed` | `AXMenuClosed` | `StructureChanged` + role check | `object:state-changed:visible` on Menu |
+| `Alert` | Inferred from `AXWindowCreated` with Alert role | `AutomationEvent(Notification)` | `object:state-changed:showing` on Alert/Notification |
+
+### Event Payload
+
+```rust
+/// An accessibility event delivered to subscribers.
+pub struct Event {
+    /// What kind of event occurred.
+    pub kind: EventKind,
+
+    /// The application that produced this event.
+    pub app: AppInfo,
+
+    /// A snapshot of the element that triggered the event, if available.
+    /// None if the element was destroyed or is not capturable.
+    pub target: Option<Node>,
+
+    /// For StateChanged events: which state flag changed.
+    pub state_flag: Option<StateFlag>,
+
+    /// For StateChanged events: the new value of the flag.
+    pub state_value: Option<bool>,
+
+    /// Monotonic timestamp (time since subscription started).
+    pub timestamp: std::time::Duration,
+}
+
+/// Individual state flags, for use in StateChanged events and filters.
+#[repr(u8)]
+pub enum StateFlag {
+    Enabled,
+    Visible,
+    Focused,
+    Checked,
+    Selected,
+    Expanded,
+    Editable,
+    Required,
+    Busy,
+}
+```
+
+### Subscription API
+
+The event API is an optional extension to `Provider`, exposed as a separate trait. Backends that don't support events (or where events aren't needed) don't implement it.
+
+```rust
+/// Optional trait for backends that support event subscriptions.
+/// Extends Provider with reactive capabilities.
+pub trait EventProvider: Provider {
+    /// Subscribe to events matching the given filter.
+    /// Returns a stream of events and a handle to manage the subscription.
+    ///
+    /// Dropping the `Subscription` unsubscribes automatically (RAII).
+    ///
+    /// Playwright mapping: `page.on(event, handler)` becomes
+    ///   `let sub = provider.subscribe(target, filter)?;`
+    ///   `while let Some(event) = sub.stream.recv().await { handler(event); }`
+    fn subscribe(
+        &self,
+        target: &AppTarget,
+        filter: EventFilter,
+    ) -> Result<Subscription>;
+
+    /// Wait for a single event matching the filter, with timeout.
+    /// Returns the first matching event or a timeout error.
+    ///
+    /// Playwright mapping: `page.waitForEvent('popup')` becomes
+    ///   `provider.wait_for_event(target, EventFilter::kinds(&[EventKind::WindowOpened]), timeout)?`
+    fn wait_for_event(
+        &self,
+        target: &AppTarget,
+        filter: EventFilter,
+        timeout: std::time::Duration,
+    ) -> Result<Event>;
+
+    /// Wait for an element matching the selector to reach the desired state.
+    /// Returns a snapshot of the element once the condition is met.
+    ///
+    /// Playwright mapping: `locator.waitFor({state: 'visible'})` becomes
+    ///   `provider.wait_for(target, "button[name='Submit']", ElementState::Visible, timeout)?`
+    fn wait_for(
+        &self,
+        target: &AppTarget,
+        selector: &str,
+        state: ElementState,
+        timeout: std::time::Duration,
+    ) -> Result<Node>;
+}
+```
+
+### Subscription Handle
+
+```rust
+/// A live event subscription. Drop to unsubscribe.
+pub struct Subscription {
+    /// Receive events from this channel.
+    /// Bounded channel — slow consumers drop oldest events.
+    pub rx: EventReceiver,
+
+    // Internal: dropping this signals the backend to stop delivering events.
+    _cancel: CancelHandle,
+}
+
+/// Platform-agnostic event receiver.
+/// Wraps a bounded async channel in the Rust API.
+/// FFI bindings expose this as a callback or polling interface.
+pub struct EventReceiver { /* ... */ }
+
+impl EventReceiver {
+    /// Receive the next event (async).
+    pub async fn recv(&self) -> Option<Event>;
+
+    /// Try to receive without blocking (returns None if no event ready).
+    pub fn try_recv(&self) -> Option<Event>;
+}
+```
+
+### Event Filter
+
+Filters are applied at subscription time so backends can minimize overhead by only registering for relevant platform events.
+
+```rust
+/// Filter to narrow which events are delivered.
+pub struct EventFilter {
+    /// Which event kinds to subscribe to. Empty = all events.
+    pub kinds: Vec<EventKind>,
+
+    /// Only deliver events from elements matching this selector.
+    /// None = all elements in the target app.
+    pub selector: Option<String>,
+
+    /// For StateChanged events: only these state flags.
+    /// Empty = all state changes.
+    pub state_flags: Vec<StateFlag>,
+}
+
+impl EventFilter {
+    /// Subscribe to all events from the target.
+    pub fn all() -> Self;
+
+    /// Subscribe to specific event kinds.
+    pub fn kinds(kinds: &[EventKind]) -> Self;
+
+    /// Subscribe to events on elements matching a selector.
+    pub fn selector(selector: &str) -> Self;
+
+    /// Combine kind filter with selector filter.
+    pub fn new(kinds: &[EventKind], selector: Option<&str>) -> Self;
+}
+```
+
+### Element Wait States
+
+Used by `wait_for` to express what condition to wait for. Directly mirrors Playwright's `locator.waitFor({state})`.
+
+```rust
+/// Desired element state for wait_for operations.
+pub enum ElementState {
+    /// Wait until an element matching the selector exists in the tree.
+    /// Playwright: `{state: 'attached'}`
+    Attached,
+
+    /// Wait until no element matches the selector.
+    /// Playwright: `{state: 'detached'}`
+    Detached,
+
+    /// Wait until a matching element exists and is visible.
+    /// Playwright: `{state: 'visible'}`
+    Visible,
+
+    /// Wait until a matching element is hidden or doesn't exist.
+    /// Playwright: `{state: 'hidden'}`
+    Hidden,
+
+    /// Wait until a matching element is enabled (not disabled/busy).
+    /// Playwright: `:enabled` pseudo-selector in waitForSelector.
+    Enabled,
+}
+```
+
+### FFI Bindings for Events
+
+#### Python
+
+```python
+import xa11y
+
+provider = xa11y.create_provider()
+
+# Subscribe — returns an iterable subscription
+sub = provider.subscribe(name="Safari", kinds=["FocusChanged", "ValueChanged"])
+for event in sub:
+    print(f"{event.kind}: {event.target.name}")
+
+# Wait for event (blocking with timeout)
+event = provider.wait_for_event(name="Safari", kinds=["WindowOpened"], timeout=5.0)
+
+# Wait for element state
+node = provider.wait_for(name="Safari", selector='button[name="Submit"]', state="visible", timeout=10.0)
+
+# Context manager for automatic cleanup
+with provider.subscribe(name="Safari", kinds=["FocusChanged"]) as sub:
+    for event in sub:
+        handle(event)
+```
+
+#### JavaScript/TypeScript
+
+```typescript
+import { createProvider } from 'xa11y';
+
+const provider = createProvider();
+
+// Event emitter pattern — maps directly to Playwright's page.on()
+const sub = provider.subscribe({ name: 'Chrome' }, { kinds: ['FocusChanged', 'ValueChanged'] });
+sub.on('event', (event) => {
+  console.log(`${event.kind}: ${event.target?.name}`);
+});
+
+// One-shot — maps to Playwright's page.waitForEvent()
+const event = await provider.waitForEvent(
+  { name: 'Chrome' },
+  { kinds: ['WindowOpened'] },
+  5000
+);
+
+// Wait for element state — maps to Playwright's locator.waitFor()
+const node = await provider.waitFor(
+  { name: 'Chrome' },
+  'button[name="Submit"]',
+  'visible',
+  10000
+);
+
+// Cleanup
+sub.unsubscribe();
+```
+
+### Playwright Compatibility Mapping
+
+The event system is designed so a Playwright-compatible desktop adapter can map directly:
+
+| Playwright API | xa11y equivalent |
+|---|---|
+| `page.on('close', fn)` | `subscribe(app, EventFilter::kinds(&[WindowClosed]))` |
+| `page.on('popup', fn)` | `subscribe(app, EventFilter::kinds(&[WindowOpened]))` |
+| `page.on('dialog', fn)` | `subscribe(app, EventFilter::kinds(&[Alert]))` |
+| `page.waitForEvent('popup')` | `wait_for_event(app, EventFilter::kinds(&[WindowOpened]), timeout)` |
+| `locator.waitFor({state: 'visible'})` | `wait_for(app, selector, ElementState::Visible, timeout)` |
+| `locator.waitFor({state: 'detached'})` | `wait_for(app, selector, ElementState::Detached, timeout)` |
+| `locator.waitFor({state: 'hidden'})` | `wait_for(app, selector, ElementState::Hidden, timeout)` |
+| `page.waitForSelector(sel)` | `wait_for(app, sel, ElementState::Attached, timeout)` |
+| `page.off('close', fn)` | `drop(subscription)` |
+
+### Implementation Strategy
+
+Each platform backend implements `EventProvider` by wrapping the native event mechanism:
+
+**macOS:** Create an `AXObserver` with `AXObserverCreate()` and register notifications via `AXObserverAddNotification()`. The observer is added to the current `CFRunLoop`. Each subscription maps to one or more AX notification registrations on the target app's accessibility element (or its root for global events).
+
+**Windows:** Use `IUIAutomation::AddAutomationEventHandler`, `AddFocusChangedEventHandler`, `AddPropertyChangedEventHandler`, and `AddStructureChangedEventHandler`. Scope subscriptions using `TreeScope` (element, children, subtree). Handler groups (`IUIAutomationEventHandlerGroup`) are preferred to batch registrations and avoid the known ~60s delay per individual handler registration.
+
+**Linux:** Register D-Bus match rules via `atspi_event_listener_register()` for the relevant AT-SPI event classes (`focus:`, `object:state-changed:*`, `object:children-changed:*`, `window:*`, etc.). The async D-Bus listener runs on the internal tokio runtime; events are forwarded to subscriber channels.
+
+### Edge Cases
+
+- **Subscription to dead apps:** If the target app exits, the subscription stream closes (yields `None`). Consumers should handle this gracefully.
+- **Event storms:** Bounded channels with configurable capacity (default: 256). Oldest events are dropped when the consumer is slow. This prevents unbounded memory growth.
+- **Selector-filtered subscriptions:** The backend receives all events for the target, then filters locally using the selector engine. Platform APIs don't support selector-level filtering, so this is a client-side filter. This is acceptable because event volume per-app is typically low.
+- **`wait_for` implementation:** Implemented as poll + subscribe. First checks if the condition is already met (snapshot), then subscribes to relevant events and re-checks after each event. This avoids the race between checking and subscribing.
+- **Thread safety:** `Subscription` is `Send` but not `Clone`. The `EventReceiver` can be moved to another thread but not shared. For multi-consumer patterns, users should fan out manually.
+- **Multiple subscriptions:** Multiple concurrent subscriptions to the same app are supported. Each gets its own channel. The backend deduplicates platform-level registrations internally.
+
+### Crate Structure Update
+
+Event types and traits live in `xa11y-core`:
+
+```
+xa11y-core/
+├── ...
+├── event.rs           # EventKind, Event, EventFilter, ElementState, StateFlag
+├── event_provider.rs  # EventProvider trait, Subscription, EventReceiver
+└── lib.rs
+```
+
+---
+
+## Resolved Questions
+
+1. **Event/change notification:** ✅ **Yes.** xa11y will support event subscriptions. See the [Event Subscriptions](#event-subscriptions) section above for the full design. This enables real-time monitoring and is essential for a future Playwright-compatible desktop automation backend.
+
+2. **Text interface:** ❌ **No.** Rich text operations (cursor position, selection, text ranges) are out of scope. The `value` field exposes text as a plain string. Fine-grained text manipulation can use `SetValue` or be handled at a higher layer.
+
+3. **Table interface:** ❌ **No.** No dedicated table API. Tables are trees of `TableRow`/`TableCell` nodes, queryable with the existing selector system (e.g., `table > table_row:nth(3) > table_cell:nth(2)`).
+
+4. **Window management:** ❌ **No.** Screenshots, window focus, and window manipulation stay in a sibling crate. xa11y is focused on accessibility trees.
+
+5. **Caching strategy:** ❌ **No.** Always re-traverse. Simplicity and correctness over performance. The snapshot model is inherently cache-free. Event subscriptions provide the reactive alternative to polling with cached trees.
