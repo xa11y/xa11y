@@ -7,6 +7,10 @@
 //! the crate compiles but exports nothing.
 
 #[cfg(target_os = "macos")]
+mod ax_ffi;
+#[cfg(target_os = "macos")]
+mod mapping;
+#[cfg(target_os = "macos")]
 mod platform;
 
 #[cfg(target_os = "macos")]

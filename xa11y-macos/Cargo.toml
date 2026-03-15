@@ -11,3 +11,5 @@ xa11y-core.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
 core-foundation-sys = "0.8"
+core-graphics = "0.24"
+serde_json.workspace = true

@@ -7,6 +7,10 @@
 //! the crate compiles but exports nothing.
 
 #[cfg(target_os = "linux")]
+mod atspi;
+#[cfg(target_os = "linux")]
+mod mapping;
+#[cfg(target_os = "linux")]
 mod platform;
 
 #[cfg(target_os = "linux")]

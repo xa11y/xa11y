@@ -7,6 +7,8 @@
 //! the crate compiles but exports nothing.
 
 #[cfg(target_os = "windows")]
+mod mapping;
+#[cfg(target_os = "windows")]
 mod platform;
 
 #[cfg(target_os = "windows")]
