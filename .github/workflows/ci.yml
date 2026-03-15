@@ -1,0 +1,169 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  # Core crate tests — run on all platforms (platform-agnostic)
+  test-core:
+    name: Core Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-core-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-core-
+
+      - name: Build xa11y-core
+        run: cargo build -p xa11y-core
+
+      - name: Test xa11y-core
+        run: cargo test -p xa11y-core --verbose
+
+  # Platform-specific integration tests
+  test-linux:
+    name: Linux Integration Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install AT-SPI2 dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            at-spi2-core \
+            libatspi2.0-dev \
+            libdbus-1-dev \
+            pkg-config
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-cargo-integ-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            linux-cargo-integ-
+
+      - name: Build all crates
+        run: cargo build --workspace
+
+      - name: Run all tests
+        run: cargo test --workspace --verbose
+
+  test-macos:
+    name: macOS Integration Tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-cargo-integ-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            macos-cargo-integ-
+
+      - name: Build all crates
+        run: cargo build --workspace
+
+      - name: Run all tests
+        run: cargo test --workspace --verbose
+
+  test-windows:
+    name: Windows Integration Tests
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cargo-integ-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            windows-cargo-integ-
+
+      - name: Build all crates
+        run: cargo build --workspace
+
+      - name: Run all tests
+        run: cargo test --workspace --verbose
+
+  # Lint and format check
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Install AT-SPI2 dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            at-spi2-core \
+            libatspi2.0-dev \
+            libdbus-1-dev \
+            pkg-config
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-cargo-lint-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            linux-cargo-lint-
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy (all crates)
+        run: cargo clippy --workspace -- -D warnings

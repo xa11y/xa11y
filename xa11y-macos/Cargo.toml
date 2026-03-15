@@ -1,0 +1,13 @@
+[package]
+name = "xa11y-macos"
+description = "macOS backend for xa11y (AXUIElement via ApplicationServices)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+xa11y-core.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+core-foundation-sys = "0.8"

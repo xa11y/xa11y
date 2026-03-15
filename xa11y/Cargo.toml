@@ -1,0 +1,21 @@
+[package]
+name = "xa11y"
+description = "Cross-platform accessibility client library"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+xa11y-core.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+xa11y-macos = { path = "../xa11y-macos" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+xa11y-windows = { path = "../xa11y-windows" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+xa11y-linux = { path = "../xa11y-linux" }
+
+[dev-dependencies]
+serde_json.workspace = true

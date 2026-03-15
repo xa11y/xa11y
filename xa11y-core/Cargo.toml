@@ -1,0 +1,14 @@
+[package]
+name = "xa11y-core"
+description = "Core types, traits, and selectors for xa11y cross-platform accessibility"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
