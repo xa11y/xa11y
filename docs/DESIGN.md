@@ -71,7 +71,8 @@ pub enum Role {
 |---|---|---|---|
 | `Window` | AXWindow, AXSheet | UIA_WindowControlTypeId | Frame, Window |
 | `Button` | AXButton | UIA_ButtonControlTypeId | PushButton, PushButtonMenu |
-| `TextField` | AXTextField, AXTextArea, AXSearchField, AXSecureTextField | UIA_EditControlTypeId | Entry, PasswordText, SpinButton |
+| `TextField` | AXTextField, AXSearchField, AXSecureTextField | UIA_EditControlTypeId (single-line) | Entry, PasswordText, SpinButton |
+| `TextArea` | AXTextArea | UIA_EditControlTypeId (multi-line) | Text (multi-line) |
 | `StaticText` | AXStaticText | UIA_TextControlTypeId | Label, Static, Caption |
 | `CheckBox` | AXCheckBox | UIA_CheckBoxControlTypeId | CheckBox, CheckMenuItem |
 | `RadioButton` | AXRadioButton | UIA_RadioButtonControlTypeId | RadioButton, RadioMenuItem |
@@ -92,14 +93,14 @@ pub enum Role {
 | `Image` | AXImage | UIA_ImageControlTypeId | Image, Icon, DesktopIcon |
 | `Link` | AXLink | UIA_HyperlinkControlTypeId | Link |
 | `Group` | AXGroup, AXLayoutArea, AXScrollArea | UIA_GroupControlTypeId, UIA_PaneControlTypeId | Panel, Section, Form, Filler |
-| `Dialog` | AXDialog | *(via Window with dialog subrole)* | Dialog, FileChooser |
+| `Dialog` | AXDialog | UIA_WindowControlTypeId with `IsDialog` property | Dialog, FileChooser |
 | `Alert` | *(via AXDialog subrole)* | *(via UIA alert pattern)* | Alert, Notification |
 | `ProgressBar` | AXProgressIndicator, AXBusyIndicator | UIA_ProgressBarControlTypeId | ProgressBar |
 | `TreeItem` | AXDisclosureTriangle | UIA_TreeItemControlTypeId | TreeItem |
 | `WebArea` | AXWebArea | UIA_DocumentControlTypeId | DocumentWeb, DocumentFrame |
 | `Heading` | AXHeading | *(via landmark/heading pattern)* | Heading |
 | `Separator` | AXSplitter | UIA_SeparatorControlTypeId | Separator |
-| `SplitGroup` | AXSplitGroup | UIA_SplitButtonControlTypeId | SplitPane |
+| `SplitGroup` | AXSplitGroup | UIA_PaneControlTypeId (split pane) | SplitPane |
 | `Application` | AXApplication | *(root element)* | Application |
 
 **Edge cases:**
@@ -118,7 +119,17 @@ A normalized enum of interactions. Inspired by accesskit's `Action` enum but sco
 pub enum Action {
     Press,          // Click / tap / invoke
     Focus,
-    SetValue,       // Set text content or numeric value
+    /// Set text content or numeric value.
+    ///
+    /// Accepts `ActionData::Value(String)` for text or
+    /// `ActionData::NumericValue(f64)` for numeric values.
+    ///
+    /// **Platform note:** On Linux AT-SPI, the Value interface only supports
+    /// numeric values (`f64`). Setting text requires the Text interface. The
+    /// backend will attempt text input via the Text interface if the element
+    /// is editable and `ActionData::Value` is provided. If text input is not
+    /// supported, returns `Error::TextValueNotSupported`.
+    SetValue,
     Toggle,         // CheckBox, Switch
     Expand,
     Collapse,
@@ -147,7 +158,7 @@ pub enum Action {
 | `Decrement` | AXDecrement | RangeValuePattern (adjust) | Action "decrement" |
 
 **Edge cases:**
-- **SetValue on Linux AT-SPI:** The Value interface only supports numeric values. For text input, the Text interface must be used. xa11y will try Value first, then fall back to simulating text input if the element is editable.
+- **SetValue on Linux AT-SPI:** The Value interface only supports numeric values. For text input, the Text interface must be used. xa11y will try Value first, then fall back to the Text interface if the element is editable. Returns `Error::TextValueNotSupported` if neither works.
 - **Toggle on macOS:** There's no dedicated toggle — AXPress on a checkbox toggles it. xa11y maps both `Press` and `Toggle` to `AXPress` for checkboxes.
 - **ShowMenu on Windows:** No direct pattern. Can be accomplished via keyboard simulation (Shift+F10) or by expanding a combo box. xa11y will attempt `ExpandCollapse.Expand()` as fallback.
 - **Action discovery:** macOS reports actions via `AXUIElementCopyActionNames()`. Windows uses UIA patterns (each pattern implies certain actions). Linux AT-SPI reports actions via the Action interface with indexed names. xa11y normalizes all these into the `Action` enum.
@@ -205,6 +216,17 @@ pub type NodeId = u32;
 #### `StateSet` — Boolean state flags
 
 ```rust
+/// Boolean state flags for a node.
+///
+/// **Semantics for non-applicable states:** When a state doesn't apply to an
+/// element's role (e.g., `enabled` on a `StaticText`), the backend uses the
+/// platform's reported value or the following defaults:
+/// - `enabled`: `true` (elements are enabled unless explicitly disabled)
+/// - `visible`: `true` (elements are visible unless explicitly hidden/offscreen)
+/// - `focused`, `selected`, `editable`, `required`, `busy`: `false`
+///
+/// States that are inherently inapplicable use `Option`: `checked` is `None`
+/// for non-checkable elements, `expanded` is `None` for non-expandable elements.
 pub struct StateSet {
     pub enabled: bool,
     pub visible: bool,
@@ -244,21 +266,24 @@ pub enum Toggled {
 ### 4. `Rect` and `NormalizedRect` — Geometry
 
 ```rust
-/// Screen-pixel bounding rectangle
+/// Screen-pixel bounding rectangle (origin + size).
+/// `x`/`y` are signed to support negative multi-monitor coordinates.
+/// `width`/`height` are unsigned (always non-negative).
 pub struct Rect {
     pub x: i32,
     pub y: i32,
-    pub width: i32,
-    pub height: i32,
+    pub width: u32,
+    pub height: u32,
 }
 
 /// Bounding rectangle normalized to [0.0, 1.0] range
-/// relative to screen dimensions
+/// relative to screen dimensions. Uses corner-pair representation
+/// (distinct from `Rect`'s origin+size representation).
 pub struct NormalizedRect {
-    pub x1: f64,  // left
-    pub y1: f64,  // top
-    pub x2: f64,  // right
-    pub y2: f64,  // bottom
+    pub left: f64,    // 0.0 = left edge of screen
+    pub top: f64,     // 0.0 = top edge of screen
+    pub right: f64,   // 1.0 = right edge of screen
+    pub bottom: f64,  // 1.0 = bottom edge of screen
 }
 ```
 
@@ -273,11 +298,16 @@ Geometry uses accesskit-style `Rect` for pixel coordinates. The `NormalizedRect`
 
 ```rust
 pub struct Tree {
+    /// Opaque snapshot identifier, assigned by the Provider.
+    /// Used by `perform_action` to look up the correct handle cache.
+    /// Not meaningful across Provider instances or serialization boundaries.
+    pub(crate) tree_id: u64,
+
     /// Application name
     pub app_name: String,
 
-    /// Process ID (0 for multi-app queries)
-    pub pid: u32,
+    /// Process ID. `None` for multi-app queries.
+    pub pid: Option<u32>,
 
     /// Screen dimensions at capture time
     pub screen_size: (u32, u32),
@@ -326,8 +356,26 @@ impl Tree {
 
     /// Find nodes by name (substring, case-insensitive)
     pub fn find_by_name(&self, pattern: &str) -> Vec<&Node>;
+
+    /// Render the tree as an indented text representation for debugging.
+    /// Format: one line per node, indented by depth, showing role, name, and states.
+    ///
+    /// Example output:
+    /// ```text
+    /// [0] Window "My App"
+    ///   [1] Toolbar
+    ///     [2] Button "Back"
+    ///     [3] TextField "Address" value="https://..."
+    ///   [4] WebArea
+    ///     [5] Heading "Welcome"
+    /// ```
+    pub fn dump(&self) -> String;
 }
 ```
+
+`Tree` implements `serde::Serialize` and `serde::Deserialize` for JSON/msgpack serialization.
+Note: `tree_id` is not serialized — a deserialized Tree cannot be used for action dispatch.
+Deserialized trees are read-only data snapshots.
 
 ### 6. `Selector` — CSS-like Query Language
 
@@ -347,27 +395,81 @@ toolbar > text_field[name*="Address"]  — combined
 
 Supported attributes: `name`, `value`, `description`, `role`.
 
+#### Formal Grammar
+
+```
+selector      := simple_selector (combinator simple_selector)*
+combinator    := " "          // descendant (any depth)
+               | " > "       // direct child
+
+simple_selector := role_name? attr_filter* pseudo?
+
+role_name     := [a-z_]+     // snake_case role name (e.g., text_field, menu_item)
+                              // Maps to Role enum: text_field → Role::TextField
+
+attr_filter   := "[" attr_name op value "]"
+attr_name     := "name" | "value" | "description" | "role"
+op            := "="          // exact match (case-sensitive)
+               | "*="        // substring match (case-insensitive)
+               | "^="        // starts-with match (case-insensitive)
+               | "$="        // ends-with match (case-insensitive)
+value         := '"' [^"]* '"'   // double-quoted string
+
+pseudo        := ":nth(" integer ")"   // 1-based index among matches
+integer       := [1-9][0-9]*
+```
+
+**Notes:**
+- Role names use `snake_case` in selectors, mapping to `PascalCase` enum variants.
+- Attribute presence (`[name]`) is not supported — use `[name*=""]` as a workaround.
+- No comma-separated selector lists (union). Use multiple queries instead.
+
 ### 7. `Provider` — Platform backend trait
 
 ```rust
 pub trait Provider: Send + Sync {
-    /// Snapshot a specific application's accessibility tree
+    /// Snapshot a specific application's accessibility tree.
+    /// The returned Tree contains an opaque `tree_id` used by `perform_action`
+    /// to look up cached platform handles.
     fn get_app_tree(&self, target: &AppTarget, opts: &QueryOptions) -> Result<Tree>;
 
-    /// Snapshot all running applications (shallow)
+    /// Snapshot all running applications (shallow).
     fn get_all_apps(&self, opts: &QueryOptions) -> Result<Tree>;
 
-    /// Perform an action on an element from the last snapshot
-    fn perform_action(&self, node_id: NodeId, action: Action, data: Option<ActionData>) -> Result<()>;
+    /// Perform an action on an element from a specific snapshot.
+    ///
+    /// The `tree` parameter identifies which snapshot the `node_id` came from,
+    /// allowing the provider to look up the correct platform handle cache.
+    /// If the handle is stale, the provider re-traverses using the tree's
+    /// stored `QueryOptions` to rebuild the cache.
+    ///
+    /// Multiple trees can coexist — calling `get_app_tree` does not
+    /// invalidate handles from previous snapshots.
+    fn perform_action(
+        &self,
+        tree: &Tree,
+        node_id: NodeId,
+        action: Action,
+        data: Option<ActionData>,
+    ) -> Result<()>;
 
-    /// Check if accessibility permissions are granted
+    /// Check if accessibility permissions are granted.
     fn check_permissions(&self) -> Result<PermissionStatus>;
 
-    /// List running applications with their PIDs
+    /// List running applications with their PIDs.
     fn list_apps(&self) -> Result<Vec<AppInfo>>;
 }
 
 pub enum AppTarget {
+    /// Match by human-readable display name (case-insensitive, substring match).
+    ///
+    /// Resolution is platform-specific:
+    /// - **macOS:** Matches against the localized app name (from NSRunningApplication).
+    /// - **Windows:** Matches against window titles. Multiple windows may match;
+    ///   the first (foreground) match is used.
+    /// - **Linux:** Matches against AT-SPI application name from the registry.
+    ///
+    /// For precise targeting, use `ByPid` or `ByWindow`.
     ByName(String),
     ByPid(u32),
     /// Target a specific window by platform-specific handle
@@ -375,11 +477,25 @@ pub enum AppTarget {
 }
 
 pub struct QueryOptions {
-    pub max_depth: u32,
-    pub max_elements: u32,
+    /// Maximum tree depth to traverse. `None` = unlimited.
+    pub max_depth: Option<u32>,
+    /// Maximum number of elements to collect. `None` = unlimited.
+    pub max_elements: Option<u32>,
     pub visible_only: bool,
     pub roles: Option<Vec<Role>>,   // filter to specific roles
     pub include_raw: bool,           // include platform-specific data
+}
+
+impl Default for QueryOptions {
+    fn default() -> Self {
+        Self {
+            max_depth: None,
+            max_elements: None,
+            visible_only: false,
+            roles: None,
+            include_raw: false,
+        }
+    }
 }
 
 pub enum ActionData {
@@ -401,7 +517,47 @@ pub struct AppInfo {
 }
 ```
 
-### 8. `RawPlatformData` — Escape hatch
+### 8. `Error` — Structured error type
+
+All fallible operations return `Result<T, Error>`. Errors are designed to be
+informative across FFI boundaries (Python exceptions, JS errors, C error codes).
+
+```rust
+#[derive(Debug)]
+pub enum Error {
+    /// Accessibility permissions not granted.
+    /// Contains platform-specific instructions for enabling access.
+    PermissionDenied { instructions: String },
+
+    /// The target application was not found or is no longer running.
+    AppNotFound { target: String },
+
+    /// The node ID does not exist in the referenced snapshot.
+    NodeNotFound { node_id: NodeId },
+
+    /// The node's platform handle is stale (UI changed since snapshot)
+    /// and re-traversal could not relocate the element.
+    ElementStale { node_id: NodeId },
+
+    /// The requested action is not supported by this element.
+    ActionNotSupported { action: Action, role: Role },
+
+    /// Text value input is not supported for this element on this platform.
+    /// Common on Linux AT-SPI where the Value interface only supports numerics.
+    TextValueNotSupported,
+
+    /// A wait_for or wait_for_event call exceeded its timeout.
+    Timeout { elapsed: std::time::Duration },
+
+    /// The selector string could not be parsed.
+    InvalidSelector { selector: String, message: String },
+
+    /// A platform-specific error occurred.
+    Platform { code: i64, message: String },
+}
+```
+
+### 9. `RawPlatformData` — Escape hatch
 
 ```rust
 pub enum RawPlatformData {
@@ -493,11 +649,15 @@ Each platform backend implements the `Provider` trait. Internally, each backend:
 
 Actions follow the **re-traversal pattern** from agent-desktop:
 
-1. Consumer calls `provider.perform_action(node_id, Action::Press, None)`
-2. Backend checks its internal element cache for `node_id`
-3. If stale (or first call since snapshot), backend re-traverses using stored `QueryOptions` to rebuild the cache
+1. Consumer calls `provider.perform_action(&tree, node_id, Action::Press, None)`
+2. Backend uses `tree.tree_id` to look up its internal handle cache for that snapshot
+3. If the handle for `node_id` is stale (or missing), backend re-traverses using the tree's stored `QueryOptions` to rebuild the cache
 4. Backend maps the xa11y `Action` to platform-specific calls
-5. Returns `Ok(())` or an error
+5. Returns `Ok(())` or `Err(Error::ElementStale)` if the element can't be relocated
+
+Multiple trees can coexist — taking a new snapshot does not invalidate handles
+from previous snapshots. The provider manages handle caches internally, keyed by
+`tree_id`, and evicts them when the `Tree` is dropped (via a reference-counted guard).
 
 This is necessary because:
 - **macOS:** AXUIElementRef handles are process-local and can't be serialized. They may become invalid if the UI updates.
@@ -534,7 +694,7 @@ This is necessary because:
 - **Bus name instability:** D-Bus bus names can change across connections. Object paths are more stable but may still be invalidated if the UI is rebuilt.
 
 ### Cross-Platform
-- **Element ID stability:** IDs are assigned in DFS order during traversal. If the UI changes between snapshot and action dispatch, IDs may no longer match. The re-traversal mechanism mitigates this, but there's an inherent race condition.
+- **Element ID stability:** IDs are assigned in DFS order during traversal. If the UI changes between snapshot and action dispatch, IDs may no longer match. The re-traversal mechanism mitigates this (using the platform handle cache keyed by `tree_id`), but there's an inherent race condition. If re-traversal cannot relocate the element, `Error::ElementStale` is returned.
 - **Role granularity mismatch:** macOS has fewer roles (AXGroup covers many things), Windows has more specific control types, and Linux AT-SPI has the most roles. Normalization loses some information — `include_raw: true` preserves the original.
 - **Text input:** Programmatic text input varies wildly:
   - macOS: Set AXValue attribute (works for text fields, not for all editable areas)
@@ -561,9 +721,9 @@ tree = provider.get_app_tree(name="Safari")
 buttons = tree.query("button")
 submit = tree.query('button[name="Submit"]')
 
-# Interact
-provider.press(submit[0].id)
-provider.set_value(text_field.id, "hello@example.com")
+# Interact — tree is passed so the provider can look up handles
+provider.press(tree, submit[0].id)
+provider.set_value(tree, text_field.id, "hello@example.com")
 ```
 
 ### JavaScript/TypeScript (napi-rs)
@@ -575,7 +735,7 @@ const provider = createProvider();
 const tree = await provider.getAppTree({ name: 'Chrome' });
 
 const buttons = tree.query('button');
-await provider.press(buttons[0].id);
+await provider.press(tree, buttons[0].id);
 ```
 
 ### Design Constraints for FFI
@@ -728,8 +888,11 @@ pub struct Event {
     /// For StateChanged events: the new value of the flag.
     pub state_value: Option<bool>,
 
-    /// Monotonic timestamp (time since subscription started).
-    pub timestamp: std::time::Duration,
+    /// Monotonic timestamp from `Instant::now()` at event receipt.
+    /// Uses system monotonic clock so timestamps are comparable across
+    /// subscriptions and can be correlated with other monotonic timestamps
+    /// in the same process.
+    pub timestamp: std::time::Instant,
 }
 
 /// Individual state flags, for use in StateChanged events and filters.
@@ -800,27 +963,35 @@ pub trait EventProvider: Provider {
 
 ```rust
 /// A live event subscription. Drop to unsubscribe.
+///
+/// `Subscription` is `Send` but not `Clone`. It can be moved to another
+/// thread but not shared. For multi-consumer patterns, fan out manually
+/// from a single subscription.
+///
+/// The receiver and cancel handle have coupled lifetimes — the receiver
+/// cannot outlive the subscription. Access the receiver via methods on
+/// `Subscription` rather than taking ownership of it.
 pub struct Subscription {
-    /// Receive events from this channel.
-    /// Bounded channel — slow consumers drop oldest events.
-    pub rx: EventReceiver,
+    // Internal: bounded async channel receiver.
+    rx: EventReceiver,
 
     // Internal: dropping this signals the backend to stop delivering events.
     _cancel: CancelHandle,
 }
 
-/// Platform-agnostic event receiver.
-/// Wraps a bounded async channel in the Rust API.
-/// FFI bindings expose this as a callback or polling interface.
-pub struct EventReceiver { /* ... */ }
-
-impl EventReceiver {
-    /// Receive the next event (async).
+impl Subscription {
+    /// Receive the next event (async). Returns `None` when the subscription
+    /// is closed (e.g., target app exited).
     pub async fn recv(&self) -> Option<Event>;
 
     /// Try to receive without blocking (returns None if no event ready).
     pub fn try_recv(&self) -> Option<Event>;
 }
+
+/// Platform-agnostic event receiver (internal).
+/// Wraps a bounded async channel in the Rust API.
+/// FFI bindings expose this as a callback or polling interface.
+struct EventReceiver { /* ... */ }
 ```
 
 ### Event Filter
