@@ -1,0 +1,14 @@
+[package]
+name = "xa11y-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Linux accessibility backend for xa11y (AT-SPI2)"
+
+[dependencies]
+xa11y-core = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# AT-SPI2 dependencies will be added during implementation
+# atspi = "0.22"
+# zbus = "4"

@@ -1,0 +1,16 @@
+[package]
+name = "xa11y-windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Windows accessibility backend for xa11y (UI Automation)"
+
+[dependencies]
+xa11y-core = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_UI_Accessibility",
+    "Win32_System_Com",
+    "Win32_Foundation",
+] }

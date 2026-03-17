@@ -1,0 +1,21 @@
+[package]
+name = "xa11y"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cross-platform accessibility client library — unified API for reading and interacting with accessibility trees"
+
+[dependencies]
+xa11y-core = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+xa11y-macos = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+xa11y-windows = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+xa11y-linux = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

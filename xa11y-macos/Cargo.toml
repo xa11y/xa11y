@@ -1,0 +1,12 @@
+[package]
+name = "xa11y-macos"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "macOS accessibility backend for xa11y (AXUIElement)"
+
+[dependencies]
+xa11y-core = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
