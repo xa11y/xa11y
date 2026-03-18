@@ -1,0 +1,900 @@
+//! Real AT-SPI2 backend implementation using zbus D-Bus bindings.
+
+use std::sync::Mutex;
+
+use xa11y_core::{
+    Action, ActionData, AppInfo, AppTarget, Error, Node, NodeId, NormalizedRect, PermissionStatus,
+    Provider, QueryOptions, Rect, Result, Role, StateSet, Toggled, Tree,
+};
+use zbus::blocking::{Connection, Proxy};
+
+/// Linux accessibility provider using AT-SPI2 over D-Bus.
+pub struct LinuxProvider {
+    a11y_bus: Connection,
+    next_tree_id: Mutex<u64>,
+}
+
+/// AT-SPI2 accessible reference: (bus_name, object_path).
+#[derive(Debug, Clone)]
+struct AccessibleRef {
+    bus_name: String,
+    path: String,
+}
+
+impl LinuxProvider {
+    /// Create a new Linux accessibility provider.
+    ///
+    /// Connects to the AT-SPI2 bus. Falls back to the session bus
+    /// if the dedicated AT-SPI bus is unavailable.
+    pub fn new() -> Result<Self> {
+        let a11y_bus = Self::connect_a11y_bus()?;
+        Ok(Self {
+            a11y_bus,
+            next_tree_id: Mutex::new(1),
+        })
+    }
+
+    fn connect_a11y_bus() -> Result<Connection> {
+        // Try getting the AT-SPI bus address from the a11y bus launcher,
+        // then connect to it. If that fails, fall back to the session bus
+        // (AT-SPI2 may use the session bus directly).
+        if let Ok(session) = Connection::session() {
+            let proxy = Proxy::new(&session, "org.a11y.Bus", "/org/a11y/bus", "org.a11y.Bus")
+                .map_err(|e| Error::Platform {
+                    code: -1,
+                    message: format!("Failed to create a11y bus proxy: {}", e),
+                })?;
+
+            if let Ok(addr_reply) = proxy.call_method("GetAddress", &()) {
+                if let Ok(address) = addr_reply.body().deserialize::<String>() {
+                    if let Ok(addr) = zbus::Address::try_from(address.as_str()) {
+                        if let Ok(Ok(conn)) =
+                            zbus::blocking::connection::Builder::address(addr).map(|b| b.build())
+                        {
+                            return Ok(conn);
+                        }
+                    }
+                }
+            }
+
+            // Fall back to session bus
+            return Ok(session);
+        }
+
+        Connection::session().map_err(|e| Error::Platform {
+            code: -1,
+            message: format!("Failed to connect to D-Bus session bus: {}", e),
+        })
+    }
+
+    fn next_tree_id(&self) -> u64 {
+        let mut id = self.next_tree_id.lock().unwrap();
+        let current = *id;
+        *id += 1;
+        current
+    }
+
+    fn make_proxy(&self, bus_name: &str, path: &str, interface: &str) -> Result<Proxy<'_>> {
+        Proxy::new(
+            &self.a11y_bus,
+            bus_name.to_owned(),
+            path.to_owned(),
+            interface.to_owned(),
+        )
+        .map_err(|e| Error::Platform {
+            code: -1,
+            message: format!("Failed to create proxy: {}", e),
+        })
+    }
+
+    /// Get the AT-SPI role name string.
+    fn get_role_name(&self, aref: &AccessibleRef) -> Result<String> {
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
+        let reply = proxy
+            .call_method("GetRoleName", &())
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("GetRoleName failed: {}", e),
+            })?;
+        reply
+            .body()
+            .deserialize::<String>()
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("GetRoleName deserialize failed: {}", e),
+            })
+    }
+
+    /// Get the name of an accessible element.
+    fn get_name(&self, aref: &AccessibleRef) -> Result<String> {
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
+        proxy
+            .get_property::<String>("Name")
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("Get Name property failed: {}", e),
+            })
+    }
+
+    /// Get the description of an accessible element.
+    fn get_description(&self, aref: &AccessibleRef) -> Result<String> {
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
+        proxy
+            .get_property::<String>("Description")
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("Get Description property failed: {}", e),
+            })
+    }
+
+    /// Get children via the GetChildren method.
+    /// AT-SPI registryd doesn't always implement standard D-Bus Properties,
+    /// so we use GetChildren which is more reliable.
+    fn get_children(&self, aref: &AccessibleRef) -> Result<Vec<AccessibleRef>> {
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
+        let reply = proxy
+            .call_method("GetChildren", &())
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("GetChildren failed: {}", e),
+            })?;
+        let children: Vec<(String, zbus::zvariant::OwnedObjectPath)> =
+            reply.body().deserialize().map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("GetChildren deserialize failed: {}", e),
+            })?;
+        Ok(children
+            .into_iter()
+            .map(|(bus_name, path)| AccessibleRef {
+                bus_name,
+                path: path.to_string(),
+            })
+            .collect())
+    }
+
+    /// Get the interfaces supported by this accessible.
+    fn get_interfaces(&self, aref: &AccessibleRef) -> Vec<String> {
+        let proxy = match self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible") {
+            Ok(p) => p,
+            Err(_) => return vec![],
+        };
+        proxy
+            .get_property::<Vec<String>>("Interfaces")
+            .unwrap_or_default()
+    }
+
+    /// Get the state set as raw u32 values.
+    fn get_state(&self, aref: &AccessibleRef) -> Result<Vec<u32>> {
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
+        let reply = proxy
+            .call_method("GetState", &())
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("GetState failed: {}", e),
+            })?;
+        reply
+            .body()
+            .deserialize::<Vec<u32>>()
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("GetState deserialize failed: {}", e),
+            })
+    }
+
+    /// Get bounds via Component interface.
+    fn get_extents(&self, aref: &AccessibleRef) -> Option<Rect> {
+        let proxy = self
+            .make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Component")
+            .ok()?;
+        // GetExtents(coord_type: u32) -> (x, y, width, height)
+        // coord_type 0 = screen coordinates
+        let reply = proxy.call_method("GetExtents", &(0u32,)).ok()?;
+        let (x, y, w, h): (i32, i32, i32, i32) = reply.body().deserialize().ok()?;
+        if w <= 0 && h <= 0 {
+            return None;
+        }
+        Some(Rect {
+            x,
+            y,
+            width: w.max(0) as u32,
+            height: h.max(0) as u32,
+        })
+    }
+
+    /// Get available actions via Action interface.
+    fn get_actions(&self, aref: &AccessibleRef) -> Vec<Action> {
+        let interfaces = self.get_interfaces(aref);
+        if !interfaces.iter().any(|i| i.contains("Action")) {
+            return vec![];
+        }
+
+        let proxy = match self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Action") {
+            Ok(p) => p,
+            Err(_) => return vec![],
+        };
+
+        let n_actions: i32 = proxy.get_property("NActions").unwrap_or(0);
+
+        let mut actions = Vec::new();
+        for i in 0..n_actions {
+            if let Ok(reply) = proxy.call_method("GetName", &(i,)) {
+                if let Ok(name) = reply.body().deserialize::<String>() {
+                    if let Some(action) = map_atspi_action(&name) {
+                        if !actions.contains(&action) {
+                            actions.push(action);
+                        }
+                    }
+                }
+            }
+        }
+
+        // If component interface is available, Focus is possible
+        if interfaces.iter().any(|i| i.contains("Component")) && !actions.contains(&Action::Focus) {
+            actions.push(Action::Focus);
+        }
+
+        actions
+    }
+
+    /// Get value via Value or Text interface.
+    fn get_value(&self, aref: &AccessibleRef) -> Option<String> {
+        let interfaces = self.get_interfaces(aref);
+        if interfaces.iter().any(|i| i.contains("Value")) {
+            let proxy = self
+                .make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Value")
+                .ok()?;
+            let val: f64 = proxy.get_property("CurrentValue").ok()?;
+            return Some(val.to_string());
+        }
+        // Try Text interface for text content
+        if interfaces.iter().any(|i| i.contains("Text")) {
+            let proxy = self
+                .make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Text")
+                .ok()?;
+            let char_count: i32 = proxy.get_property("CharacterCount").ok()?;
+            if char_count > 0 {
+                let reply = proxy.call_method("GetText", &(0i32, char_count)).ok()?;
+                let text: String = reply.body().deserialize().ok()?;
+                if !text.is_empty() {
+                    return Some(text);
+                }
+            }
+        }
+        None
+    }
+
+    /// Traverse the accessibility tree rooted at `aref`, building nodes.
+    #[allow(clippy::too_many_arguments)]
+    fn traverse(
+        &self,
+        aref: &AccessibleRef,
+        opts: &QueryOptions,
+        app_name: &str,
+        nodes: &mut Vec<Node>,
+        parent_id: Option<NodeId>,
+        depth: u32,
+        screen_size: (u32, u32),
+    ) {
+        if let Some(max_depth) = opts.max_depth {
+            if depth > max_depth {
+                return;
+            }
+        }
+        if let Some(max_elements) = opts.max_elements {
+            if nodes.len() >= max_elements as usize {
+                return;
+            }
+        }
+
+        let role_name = self.get_role_name(aref).unwrap_or_default();
+        let role = map_atspi_role(&role_name);
+
+        if let Some(ref filter_roles) = opts.roles {
+            if !filter_roles.contains(&role) {
+                return;
+            }
+        }
+
+        let name = self.get_name(aref).ok().filter(|s| !s.is_empty());
+        let description = self.get_description(aref).ok().filter(|s| !s.is_empty());
+        let value = self.get_value(aref);
+        let bounds = self.get_extents(aref);
+        let states = self.parse_states(aref, role);
+        let actions = self.get_actions(aref);
+
+        if opts.visible_only && !states.visible {
+            return;
+        }
+
+        let bounds_normalized = bounds.map(|b| {
+            let (sw, sh) = screen_size;
+            if sw == 0 || sh == 0 {
+                return NormalizedRect {
+                    left: 0.0,
+                    top: 0.0,
+                    right: 0.0,
+                    bottom: 0.0,
+                };
+            }
+            NormalizedRect {
+                left: b.x as f64 / sw as f64,
+                top: b.y as f64 / sh as f64,
+                right: (b.x as f64 + b.width as f64) / sw as f64,
+                bottom: (b.y as f64 + b.height as f64) / sh as f64,
+            }
+        });
+
+        let raw = if opts.include_raw {
+            Some(xa11y_core::RawPlatformData::Linux {
+                atspi_role: role_name,
+                bus_name: aref.bus_name.clone(),
+                object_path: aref.path.clone(),
+            })
+        } else {
+            None
+        };
+
+        let node_id = nodes.len() as NodeId;
+        nodes.push(Node {
+            id: node_id,
+            role,
+            name,
+            value,
+            description,
+            bounds,
+            bounds_normalized,
+            actions,
+            states,
+            children: vec![], // filled in below
+            parent: parent_id,
+            depth,
+            app_name: Some(app_name.to_string()),
+            raw,
+        });
+
+        // Get children
+        let children = self.get_children(aref).unwrap_or_default();
+        let mut child_ids = Vec::new();
+
+        for child_ref in &children {
+            if let Some(max_elements) = opts.max_elements {
+                if nodes.len() >= max_elements as usize {
+                    break;
+                }
+            }
+            // Skip invalid refs
+            if child_ref.path == "/org/a11y/atspi/null"
+                || child_ref.bus_name.is_empty()
+                || child_ref.path.is_empty()
+            {
+                continue;
+            }
+            let child_node_id = nodes.len() as NodeId;
+            child_ids.push(child_node_id);
+            self.traverse(
+                child_ref,
+                opts,
+                app_name,
+                nodes,
+                Some(node_id),
+                depth + 1,
+                screen_size,
+            );
+        }
+
+        // Update children list
+        nodes[node_id as usize].children = child_ids;
+    }
+
+    /// Parse AT-SPI2 state bitfield into xa11y StateSet.
+    fn parse_states(&self, aref: &AccessibleRef, role: Role) -> StateSet {
+        let state_bits = self.get_state(aref).unwrap_or_default();
+
+        // AT-SPI2 states are a bitfield across two u32s
+        let bits: u64 = if state_bits.len() >= 2 {
+            (state_bits[0] as u64) | ((state_bits[1] as u64) << 32)
+        } else if state_bits.len() == 1 {
+            state_bits[0] as u64
+        } else {
+            0
+        };
+
+        // AT-SPI2 state bit positions (AtspiStateType enum values)
+        const BUSY: u64 = 1 << 3;
+        const CHECKED: u64 = 1 << 4;
+        const EDITABLE: u64 = 1 << 7;
+        const ENABLED: u64 = 1 << 8;
+        const EXPANDABLE: u64 = 1 << 9;
+        const EXPANDED: u64 = 1 << 10;
+        const FOCUSED: u64 = 1 << 12;
+        const SELECTED: u64 = 1 << 23;
+        const SENSITIVE: u64 = 1 << 24;
+        const SHOWING: u64 = 1 << 25;
+        const VISIBLE: u64 = 1 << 30;
+        const INDETERMINATE: u64 = 1 << 32;
+        const REQUIRED: u64 = 1 << 33;
+
+        let enabled = (bits & ENABLED) != 0 || (bits & SENSITIVE) != 0;
+        let visible = (bits & VISIBLE) != 0 || (bits & SHOWING) != 0;
+
+        let checked = match role {
+            Role::CheckBox | Role::RadioButton | Role::MenuItem => {
+                if (bits & INDETERMINATE) != 0 {
+                    Some(Toggled::Mixed)
+                } else if (bits & CHECKED) != 0 {
+                    Some(Toggled::On)
+                } else {
+                    Some(Toggled::Off)
+                }
+            }
+            _ => None,
+        };
+
+        let expanded = if (bits & EXPANDABLE) != 0 {
+            Some((bits & EXPANDED) != 0)
+        } else {
+            None
+        };
+
+        StateSet {
+            enabled,
+            visible,
+            focused: (bits & FOCUSED) != 0,
+            checked,
+            selected: (bits & SELECTED) != 0,
+            expanded,
+            editable: (bits & EDITABLE) != 0,
+            required: (bits & REQUIRED) != 0,
+            busy: (bits & BUSY) != 0,
+        }
+    }
+
+    /// Get screen size.
+    fn detect_screen_size() -> (u32, u32) {
+        if let Ok(output) = std::process::Command::new("xdpyinfo").output() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for line in stdout.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("dimensions:") {
+                    if let Some(dims) = trimmed.split_whitespace().nth(1) {
+                        let parts: Vec<&str> = dims.split('x').collect();
+                        if parts.len() == 2 {
+                            if let (Ok(w), Ok(h)) = (parts[0].parse(), parts[1].parse()) {
+                                return (w, h);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        (1920, 1080)
+    }
+
+    /// Find an application by name.
+    fn find_app_by_name(&self, name: &str) -> Result<AccessibleRef> {
+        let registry = AccessibleRef {
+            bus_name: "org.a11y.atspi.Registry".to_string(),
+            path: "/org/a11y/atspi/accessible/root".to_string(),
+        };
+        let children = self.get_children(&registry)?;
+        let name_lower = name.to_lowercase();
+
+        for child in &children {
+            if child.path == "/org/a11y/atspi/null" {
+                continue;
+            }
+            if let Ok(app_name) = self.get_name(child) {
+                if app_name.to_lowercase().contains(&name_lower) {
+                    return Ok(child.clone());
+                }
+            }
+        }
+
+        Err(Error::AppNotFound {
+            target: name.to_string(),
+        })
+    }
+
+    /// Find an application by PID.
+    fn find_app_by_pid(&self, pid: u32) -> Result<AccessibleRef> {
+        let registry = AccessibleRef {
+            bus_name: "org.a11y.atspi.Registry".to_string(),
+            path: "/org/a11y/atspi/accessible/root".to_string(),
+        };
+        let children = self.get_children(&registry)?;
+
+        for child in &children {
+            if child.path == "/org/a11y/atspi/null" {
+                continue;
+            }
+            if let Ok(proxy) =
+                self.make_proxy(&child.bus_name, &child.path, "org.a11y.atspi.Application")
+            {
+                if let Ok(app_pid) = proxy.get_property::<i32>("Id") {
+                    if app_pid as u32 == pid {
+                        return Ok(child.clone());
+                    }
+                }
+            }
+        }
+
+        Err(Error::AppNotFound {
+            target: format!("PID {}", pid),
+        })
+    }
+
+    /// Perform an AT-SPI action by name.
+    fn do_atspi_action(&self, aref: &AccessibleRef, action_name: &str) -> Result<()> {
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Action")?;
+        let n_actions: i32 = proxy.get_property("NActions").unwrap_or(0);
+
+        for i in 0..n_actions {
+            if let Ok(reply) = proxy.call_method("GetName", &(i,)) {
+                if let Ok(name) = reply.body().deserialize::<String>() {
+                    if name == action_name {
+                        let _ =
+                            proxy
+                                .call_method("DoAction", &(i,))
+                                .map_err(|e| Error::Platform {
+                                    code: -1,
+                                    message: format!("DoAction failed: {}", e),
+                                })?;
+                        return Ok(());
+                    }
+                }
+            }
+        }
+
+        Err(Error::Platform {
+            code: -1,
+            message: format!("Action '{}' not found", action_name),
+        })
+    }
+
+    /// Get PID from Application interface.
+    fn get_app_pid(&self, aref: &AccessibleRef) -> Option<u32> {
+        let proxy = self
+            .make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Application")
+            .ok()?;
+        let pid: i32 = proxy.get_property("Id").ok()?;
+        if pid > 0 {
+            Some(pid as u32)
+        } else {
+            None
+        }
+    }
+}
+
+impl Provider for LinuxProvider {
+    fn get_app_tree(&self, target: &AppTarget, opts: &QueryOptions) -> Result<Tree> {
+        let app_ref = match target {
+            AppTarget::ByName(name) => self.find_app_by_name(name)?,
+            AppTarget::ByPid(pid) => self.find_app_by_pid(*pid)?,
+            AppTarget::ByWindow(_) => {
+                return Err(Error::Platform {
+                    code: -1,
+                    message: "ByWindow not supported on Linux AT-SPI2".to_string(),
+                });
+            }
+        };
+
+        let app_name = self.get_name(&app_ref).unwrap_or_default();
+        let screen_size = Self::detect_screen_size();
+        let mut nodes = Vec::new();
+
+        self.traverse(&app_ref, opts, &app_name, &mut nodes, None, 0, screen_size);
+
+        if nodes.is_empty() {
+            return Err(Error::AppNotFound {
+                target: format!("{:?}", target),
+            });
+        }
+
+        let pid = self.get_app_pid(&app_ref);
+
+        Ok(Tree::new(
+            self.next_tree_id(),
+            app_name,
+            pid,
+            screen_size,
+            nodes,
+            opts.clone(),
+        ))
+    }
+
+    fn get_all_apps(&self, opts: &QueryOptions) -> Result<Tree> {
+        let screen_size = Self::detect_screen_size();
+        let mut nodes = Vec::new();
+
+        nodes.push(Node {
+            id: 0,
+            role: Role::Application,
+            name: Some("Desktop".to_string()),
+            value: None,
+            description: None,
+            bounds: Some(Rect {
+                x: 0,
+                y: 0,
+                width: screen_size.0,
+                height: screen_size.1,
+            }),
+            bounds_normalized: Some(NormalizedRect {
+                left: 0.0,
+                top: 0.0,
+                right: 1.0,
+                bottom: 1.0,
+            }),
+            actions: vec![],
+            states: StateSet::default(),
+            children: vec![],
+            parent: None,
+            depth: 0,
+            app_name: Some("Desktop".to_string()),
+            raw: None,
+        });
+
+        let registry = AccessibleRef {
+            bus_name: "org.a11y.atspi.Registry".to_string(),
+            path: "/org/a11y/atspi/accessible/root".to_string(),
+        };
+        let children = self.get_children(&registry).unwrap_or_default();
+        let mut root_children = Vec::new();
+
+        for child in &children {
+            if child.path == "/org/a11y/atspi/null" {
+                continue;
+            }
+            let app_name = self.get_name(child).unwrap_or_default();
+            if app_name.is_empty() {
+                continue;
+            }
+            let child_node_id = nodes.len() as NodeId;
+            root_children.push(child_node_id);
+            self.traverse(child, opts, &app_name, &mut nodes, Some(0), 1, screen_size);
+        }
+
+        nodes[0].children = root_children;
+
+        Ok(Tree::new(
+            self.next_tree_id(),
+            "Desktop".to_string(),
+            None,
+            screen_size,
+            nodes,
+            opts.clone(),
+        ))
+    }
+
+    fn perform_action(
+        &self,
+        tree: &Tree,
+        node_id: NodeId,
+        action: Action,
+        data: Option<ActionData>,
+    ) -> Result<()> {
+        let node = tree.get(node_id).ok_or(Error::NodeNotFound { node_id })?;
+
+        let target = if let Some(ref raw) = node.raw {
+            match raw {
+                xa11y_core::RawPlatformData::Linux {
+                    bus_name,
+                    object_path,
+                    ..
+                } => AccessibleRef {
+                    bus_name: bus_name.clone(),
+                    path: object_path.clone(),
+                },
+                _ => return Err(Error::ElementStale { node_id }),
+            }
+        } else {
+            return Err(Error::Platform {
+                code: -1,
+                message: "Action dispatch requires include_raw: true in QueryOptions".to_string(),
+            });
+        };
+
+        match action {
+            Action::Press => self
+                .do_atspi_action(&target, "click")
+                .or_else(|_| self.do_atspi_action(&target, "activate"))
+                .or_else(|_| self.do_atspi_action(&target, "press")),
+            Action::Focus => {
+                let proxy =
+                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")?;
+                proxy
+                    .call_method("GrabFocus", &())
+                    .map_err(|e| Error::Platform {
+                        code: -1,
+                        message: format!("GrabFocus failed: {}", e),
+                    })?;
+                Ok(())
+            }
+            Action::SetValue => match data {
+                Some(ActionData::NumericValue(v)) => {
+                    let proxy =
+                        self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Value")?;
+                    proxy
+                        .set_property("CurrentValue", v)
+                        .map_err(|e| Error::Platform {
+                            code: -1,
+                            message: format!("SetValue failed: {}", e),
+                        })
+                }
+                Some(ActionData::Value(text)) => {
+                    let proxy = self
+                        .make_proxy(
+                            &target.bus_name,
+                            &target.path,
+                            "org.a11y.atspi.EditableText",
+                        )
+                        .map_err(|_| Error::TextValueNotSupported)?;
+                    let _ = proxy.call_method("DeleteText", &(0i32, i32::MAX));
+                    proxy
+                        .call_method("InsertText", &(0i32, &*text, text.len() as i32))
+                        .map_err(|_| Error::TextValueNotSupported)?;
+                    Ok(())
+                }
+                _ => Err(Error::Platform {
+                    code: -1,
+                    message: "SetValue requires ActionData".to_string(),
+                }),
+            },
+            Action::Toggle => self
+                .do_atspi_action(&target, "toggle")
+                .or_else(|_| self.do_atspi_action(&target, "click"))
+                .or_else(|_| self.do_atspi_action(&target, "activate")),
+            Action::Expand => self
+                .do_atspi_action(&target, "expand")
+                .or_else(|_| self.do_atspi_action(&target, "open")),
+            Action::Collapse => self
+                .do_atspi_action(&target, "collapse")
+                .or_else(|_| self.do_atspi_action(&target, "close")),
+            Action::Select => self.do_atspi_action(&target, "select"),
+            Action::ShowMenu => self
+                .do_atspi_action(&target, "menu")
+                .or_else(|_| self.do_atspi_action(&target, "showmenu")),
+            Action::ScrollIntoView => {
+                let proxy =
+                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")?;
+                proxy
+                    .call_method("ScrollTo", &(0u32,))
+                    .map_err(|e| Error::Platform {
+                        code: -1,
+                        message: format!("ScrollTo failed: {}", e),
+                    })?;
+                Ok(())
+            }
+            Action::Increment => self.do_atspi_action(&target, "increment"),
+            Action::Decrement => self.do_atspi_action(&target, "decrement"),
+        }
+    }
+
+    fn check_permissions(&self) -> Result<PermissionStatus> {
+        let registry = AccessibleRef {
+            bus_name: "org.a11y.atspi.Registry".to_string(),
+            path: "/org/a11y/atspi/accessible/root".to_string(),
+        };
+        match self.get_children(&registry) {
+            Ok(_) => Ok(PermissionStatus::Granted),
+            Err(_) => Ok(PermissionStatus::Denied {
+                instructions:
+                    "Enable accessibility: gsettings set org.gnome.desktop.interface toolkit-accessibility true\nEnsure at-spi2-core is installed."
+                        .to_string(),
+            }),
+        }
+    }
+
+    fn list_apps(&self) -> Result<Vec<AppInfo>> {
+        let registry = AccessibleRef {
+            bus_name: "org.a11y.atspi.Registry".to_string(),
+            path: "/org/a11y/atspi/accessible/root".to_string(),
+        };
+        let children = self.get_children(&registry)?;
+        let mut apps = Vec::new();
+
+        for child in &children {
+            if child.path == "/org/a11y/atspi/null" {
+                continue;
+            }
+            let name = self.get_name(child).unwrap_or_default();
+            if name.is_empty() {
+                continue;
+            }
+            let pid = self.get_app_pid(child);
+            apps.push(AppInfo {
+                name,
+                pid: pid.unwrap_or(0),
+                bundle_id: None,
+            });
+        }
+
+        Ok(apps)
+    }
+}
+
+/// Map AT-SPI2 role name to xa11y Role.
+fn map_atspi_role(role_name: &str) -> Role {
+    match role_name.to_lowercase().as_str() {
+        "application" => Role::Application,
+        "window" | "frame" => Role::Window,
+        "dialog" | "file chooser" => Role::Dialog,
+        "alert" | "notification" => Role::Alert,
+        "push button" | "push button menu" => Role::Button,
+        "check box" | "check menu item" => Role::CheckBox,
+        "radio button" | "radio menu item" => Role::RadioButton,
+        "entry" | "password text" | "spin button" => Role::TextField,
+        "text" => Role::TextArea,
+        "label" | "static" | "caption" => Role::StaticText,
+        "combo box" => Role::ComboBox,
+        "list" | "list box" => Role::List,
+        "list item" => Role::ListItem,
+        "menu" => Role::Menu,
+        "menu item" | "tearoff menu item" => Role::MenuItem,
+        "menu bar" => Role::MenuBar,
+        "page tab" => Role::Tab,
+        "page tab list" => Role::TabGroup,
+        "table" | "tree table" => Role::Table,
+        "table row" => Role::TableRow,
+        "table cell" | "table column header" | "table row header" => Role::TableCell,
+        "tool bar" => Role::Toolbar,
+        "scroll bar" => Role::ScrollBar,
+        "slider" => Role::Slider,
+        "image" | "icon" | "desktop icon" => Role::Image,
+        "link" => Role::Link,
+        "panel" | "section" | "form" | "filler" | "viewport" | "scroll pane" => Role::Group,
+        "progress bar" => Role::ProgressBar,
+        "tree item" => Role::TreeItem,
+        "document web" | "document frame" => Role::WebArea,
+        "heading" => Role::Heading,
+        "separator" => Role::Separator,
+        "split pane" => Role::SplitGroup,
+        _ => Role::Unknown,
+    }
+}
+
+/// Map AT-SPI2 action name to xa11y Action.
+fn map_atspi_action(action_name: &str) -> Option<Action> {
+    match action_name.to_lowercase().as_str() {
+        "click" | "activate" | "press" | "invoke" => Some(Action::Press),
+        "toggle" | "check" | "uncheck" => Some(Action::Toggle),
+        "expand" | "open" => Some(Action::Expand),
+        "collapse" | "close" => Some(Action::Collapse),
+        "select" => Some(Action::Select),
+        "menu" | "showmenu" | "popup" | "show menu" => Some(Action::ShowMenu),
+        "increment" => Some(Action::Increment),
+        "decrement" => Some(Action::Decrement),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_role_mapping() {
+        assert_eq!(map_atspi_role("push button"), Role::Button);
+        assert_eq!(map_atspi_role("check box"), Role::CheckBox);
+        assert_eq!(map_atspi_role("entry"), Role::TextField);
+        assert_eq!(map_atspi_role("label"), Role::StaticText);
+        assert_eq!(map_atspi_role("window"), Role::Window);
+        assert_eq!(map_atspi_role("frame"), Role::Window);
+        assert_eq!(map_atspi_role("dialog"), Role::Dialog);
+        assert_eq!(map_atspi_role("combo box"), Role::ComboBox);
+        assert_eq!(map_atspi_role("slider"), Role::Slider);
+        assert_eq!(map_atspi_role("panel"), Role::Group);
+        assert_eq!(map_atspi_role("unknown_thing"), Role::Unknown);
+    }
+
+    #[test]
+    fn test_action_mapping() {
+        assert_eq!(map_atspi_action("click"), Some(Action::Press));
+        assert_eq!(map_atspi_action("activate"), Some(Action::Press));
+        assert_eq!(map_atspi_action("toggle"), Some(Action::Toggle));
+        assert_eq!(map_atspi_action("expand"), Some(Action::Expand));
+        assert_eq!(map_atspi_action("collapse"), Some(Action::Collapse));
+        assert_eq!(map_atspi_action("select"), Some(Action::Select));
+        assert_eq!(map_atspi_action("increment"), Some(Action::Increment));
+        assert_eq!(map_atspi_action("foobar"), None);
+    }
+}

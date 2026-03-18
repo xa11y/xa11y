@@ -1,0 +1,15 @@
+[package]
+name = "xa11y-test-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "GTK3 test application for xa11y integration tests"
+
+[[bin]]
+name = "xa11y-test-app"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = { version = "0.18", package = "gtk" }
+
+[dependencies]

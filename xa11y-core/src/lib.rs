@@ -1,0 +1,20 @@
+pub mod action;
+pub mod error;
+pub mod event;
+pub mod event_provider;
+pub mod node;
+pub mod provider;
+pub mod role;
+pub mod selector;
+pub mod tree;
+
+// Re-export primary types at the crate root for convenience.
+pub use action::{Action, ActionData, ScrollDirection};
+pub use error::{Error, Result};
+pub use event::{ElementState, Event, EventFilter, EventKind, StateFlag};
+pub use event_provider::{CancelHandle, EventProvider, EventReceiver, Subscription};
+pub use node::{Node, NodeId, NormalizedRect, RawPlatformData, Rect, StateSet, Toggled};
+pub use provider::{AppInfo, AppTarget, PermissionStatus, Provider, QueryOptions, WindowHandle};
+pub use role::Role;
+pub use selector::Selector;
+pub use tree::Tree;
