@@ -5,6 +5,7 @@ members = [
     "xa11y-windows",
     "xa11y-linux",
     "xa11y",
+    "xa11y-test-app",
 ]
 resolver = "2"
 

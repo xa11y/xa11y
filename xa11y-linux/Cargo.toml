@@ -9,6 +9,5 @@ description = "Linux accessibility backend for xa11y (AT-SPI2)"
 xa11y-core = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# AT-SPI2 dependencies will be added during implementation
-# atspi = "0.22"
-# zbus = "4"
+zbus = { version = "5", default-features = false, features = ["blocking-api", "tokio"] }
+tokio = { version = "1", features = ["rt"] }

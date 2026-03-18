@@ -11,7 +11,7 @@ env:
   RUSTFLAGS: -Dwarnings
 
 jobs:
-  # Run unit and integration tests on all platforms
+  # Run unit tests on all platforms
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -51,11 +51,46 @@ jobs:
       - name: Run unit tests (platform backend)
         run: cargo test -p ${{ matrix.platform_crate }}
 
-      - name: Run integration tests
-        run: cargo test -p xa11y --test integration_test
+      - name: Run unit tests (xa11y)
+        run: cargo test -p xa11y --test unit_test
 
       - name: Run all workspace tests
         run: cargo test --workspace
+
+  # Linux integration tests with AT-SPI2 + GTK test app
+  integ-test:
+    name: Integration Tests (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-integ-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-integ-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            xvfb \
+            dbus-x11 \
+            at-spi2-core \
+            libatk1.0-dev \
+            libgtk-3-dev \
+            libatspi2.0-dev
+
+      - name: Run integration tests
+        run: ./run_integ_tests.sh
 
   # Lint and format checks (single OS is sufficient)
   lint:
@@ -79,6 +114,11 @@ jobs:
           key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-lint-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libatk1.0-dev
 
       - name: Check formatting
         run: cargo fmt --all -- --check
