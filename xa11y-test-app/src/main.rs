@@ -224,22 +224,22 @@ fn main() {
     let name_col = gtk::TreeViewColumn::new();
     name_col.set_title("Name");
     let name_cell = gtk::CellRendererText::new();
-    name_col.pack_start(&name_cell, true);
-    name_col.add_attribute(&name_cell, "text", 0);
+    gtk::prelude::CellLayoutExt::pack_start(&name_col, &name_cell, true);
+    gtk::prelude::CellLayoutExt::add_attribute(&name_col, &name_cell, "text", 0);
     tree_view.append_column(&name_col);
 
     let email_col = gtk::TreeViewColumn::new();
     email_col.set_title("Email");
     let email_cell = gtk::CellRendererText::new();
-    email_col.pack_start(&email_cell, true);
-    email_col.add_attribute(&email_cell, "text", 1);
+    gtk::prelude::CellLayoutExt::pack_start(&email_col, &email_cell, true);
+    gtk::prelude::CellLayoutExt::add_attribute(&email_col, &email_cell, "text", 1);
     tree_view.append_column(&email_col);
 
     let role_col = gtk::TreeViewColumn::new();
     role_col.set_title("Role");
     let role_cell = gtk::CellRendererText::new();
-    role_col.pack_start(&role_cell, true);
-    role_col.add_attribute(&role_cell, "text", 2);
+    gtk::prelude::CellLayoutExt::pack_start(&role_col, &role_cell, true);
+    gtk::prelude::CellLayoutExt::add_attribute(&role_col, &role_cell, "text", 2);
     tree_view.append_column(&role_col);
 
     let scrolled_table = gtk::ScrolledWindow::new(gtk::Adjustment::NONE, gtk::Adjustment::NONE);
