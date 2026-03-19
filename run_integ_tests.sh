@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Integration test harness for xa11y on Linux.
 #
-# Sets up Xvfb, D-Bus session, AT-SPI2, launches the GTK test app,
+# Sets up Xvfb, D-Bus session, AT-SPI2, launches the accesskit+winit test app,
 # then runs the integration tests with --ignored.
 #
 # Usage: ./run_integ_tests.sh
@@ -52,7 +52,6 @@ echo "Starting AT-SPI2 infrastructure..."
 
 # Enable AT-SPI
 export NO_AT_BRIDGE=0
-export GTK_MODULES=atk-bridge
 export AT_SPI_CLIENT=true
 
 # The AT-SPI bus launcher creates a separate accessibility bus

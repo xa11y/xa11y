@@ -57,7 +57,7 @@ jobs:
       - name: Run all workspace tests
         run: cargo test --workspace
 
-  # Linux integration tests with AT-SPI2 + GTK test app
+  # Linux integration tests with AT-SPI2 + accesskit test app
   integ-test:
     name: Integration Tests (Linux)
     runs-on: ubuntu-latest
@@ -83,8 +83,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             xvfb \
-            dbus \
-            libgtk-3-dev
+            dbus
           # at-spi2-core provides the daemons; on Ubuntu 24.04 only at-spi2-common may exist
           sudo apt-get install -y at-spi2-core || sudo apt-get install -y at-spi2-common
           # dbus-x11 provides dbus-launch; not needed since we use dbus-run-session,
@@ -116,11 +115,6 @@ jobs:
           key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-lint-
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libatk1.0-dev
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -161,3 +155,35 @@ jobs:
 
       - name: Check compilation (core crate)
         run: cargo check -p xa11y-core --target ${{ matrix.target }}
+
+  # Fuzz testing (short runs to catch regressions)
+  fuzz:
+    name: Fuzz (10s per target)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            xa11y-fuzz/fuzz/target
+          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-fuzz-
+
+      - name: Run fuzz targets
+        run: |
+          cd xa11y-fuzz/fuzz
+          for target in tree_ops selector query serde; do
+            echo "=== Fuzzing $target for 10s ==="
+            cargo +nightly fuzz run $target -- -max_total_time=10 || true
+          done

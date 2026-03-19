@@ -3,13 +3,13 @@ name = "xa11y-test-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "GTK3 test application for xa11y integration tests"
+description = "Cross-platform accessibility test application for xa11y integration tests"
 
 [[bin]]
 name = "xa11y-test-app"
 path = "src/main.rs"
 
-[target.'cfg(target_os = "linux")'.dependencies]
-gtk = { version = "0.18", package = "gtk" }
-
 [dependencies]
+accesskit = "0.24"
+accesskit_winit = "0.32"
+winit = "0.30"

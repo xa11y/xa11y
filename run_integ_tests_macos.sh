@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Integration test harness for xa11y on macOS.
+#
+# Launches the accesskit+winit test app and runs integration tests.
+# Requires macOS accessibility permissions and a working xa11y-macos provider.
+#
+# Usage: ./run_integ_tests_macos.sh
+
+set -euo pipefail
+
+CLEANUP_PIDS=()
+
+cleanup() {
+    echo "Cleaning up..."
+    for pid in "${CLEANUP_PIDS[@]}"; do
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    done
+}
+trap cleanup EXIT
+
+echo "=== xa11y macOS integration test harness ==="
+
+# 1. Build everything
+echo "Building workspace..."
+cargo build --workspace 2>&1
+
+# 2. Launch the test application (run binary directly, not via cargo run,
+#    because cargo run changes the process owner name in CGWindowListCopyWindowInfo)
+echo "Launching xa11y-test-app..."
+./target/debug/xa11y-test-app --headless &
+CLEANUP_PIDS+=($!)
+
+# Wait for accessibility registration
+echo "Waiting for test app to register..."
+sleep 2
+
+# 3. Run integration tests
+echo "Running integration tests..."
+set +e
+cargo test -p xa11y --test integ_test -- --ignored --test-threads=1 2>&1
+TEST_EXIT=$?
+set -e
+
+echo "=== Integration tests finished (exit code: $TEST_EXIT) ==="
+exit $TEST_EXIT

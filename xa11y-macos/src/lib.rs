@@ -1,79 +1,64 @@
-//! macOS accessibility backend using AXUIElement.
+//! macOS accessibility backend using AXUIElement API.
 //!
-//! This backend implements the `Provider` trait using macOS Accessibility API.
-//! It requires the "Accessibility" permission in System Preferences.
+//! Implements the `Provider` trait by reading the macOS accessibility tree
+//! via the Accessibility framework (ApplicationServices/HIServices).
 
-use xa11y_core::{
-    Action, ActionData, AppInfo, AppTarget, Error, NodeId, PermissionStatus, Provider,
-    QueryOptions, Result, Tree,
-};
+#[cfg(target_os = "macos")]
+mod ax;
 
-/// macOS accessibility provider using AXUIElement API.
-#[derive(Default)]
-pub struct MacOSProvider {
-    // Internal state will be added during implementation
-}
+#[cfg(target_os = "macos")]
+pub use ax::MacOSProvider;
 
-impl MacOSProvider {
-    /// Create a new macOS accessibility provider.
-    pub fn new() -> Result<Self> {
-        Ok(Self {})
+#[cfg(not(target_os = "macos"))]
+mod stub {
+    use xa11y_core::*;
+
+    pub struct MacOSProvider;
+
+    impl MacOSProvider {
+        pub fn new() -> Result<Self> {
+            Err(Error::Platform {
+                code: -1,
+                message: "macOS backend only available on macOS".to_string(),
+            })
+        }
+    }
+
+    impl Provider for MacOSProvider {
+        fn get_app_tree(&self, _: &AppTarget, _: &QueryOptions) -> Result<Tree> {
+            unreachable!()
+        }
+        fn get_all_apps(&self, _: &QueryOptions) -> Result<Tree> {
+            unreachable!()
+        }
+        fn perform_action(&self, _: &Tree, _: NodeId, _: Action, _: Option<ActionData>) -> Result<()> {
+            unreachable!()
+        }
+        fn check_permissions(&self) -> Result<PermissionStatus> {
+            unreachable!()
+        }
+        fn list_apps(&self) -> Result<Vec<AppInfo>> {
+            unreachable!()
+        }
     }
 }
 
-impl Provider for MacOSProvider {
-    fn get_app_tree(&self, _target: &AppTarget, _opts: &QueryOptions) -> Result<Tree> {
-        Err(Error::Platform {
-            code: -1,
-            message: "macOS backend not yet implemented".to_string(),
-        })
-    }
-
-    fn get_all_apps(&self, _opts: &QueryOptions) -> Result<Tree> {
-        Err(Error::Platform {
-            code: -1,
-            message: "macOS backend not yet implemented".to_string(),
-        })
-    }
-
-    fn perform_action(
-        &self,
-        _tree: &Tree,
-        _node_id: NodeId,
-        _action: Action,
-        _data: Option<ActionData>,
-    ) -> Result<()> {
-        Err(Error::Platform {
-            code: -1,
-            message: "macOS backend not yet implemented".to_string(),
-        })
-    }
-
-    fn check_permissions(&self) -> Result<PermissionStatus> {
-        // Stub: always report denied until real implementation
-        Ok(PermissionStatus::Denied {
-            instructions:
-                "Enable Accessibility in System Preferences → Privacy & Security → Accessibility"
-                    .to_string(),
-        })
-    }
-
-    fn list_apps(&self) -> Result<Vec<AppInfo>> {
-        Err(Error::Platform {
-            code: -1,
-            message: "macOS backend not yet implemented".to_string(),
-        })
-    }
-}
+#[cfg(not(target_os = "macos"))]
+pub use stub::MacOSProvider;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xa11y_core::*;
 
     #[test]
     fn create_provider() {
-        let provider = MacOSProvider::new().unwrap();
-        let status = provider.check_permissions().unwrap();
-        assert!(matches!(status, PermissionStatus::Denied { .. }));
+        let result = MacOSProvider::new();
+        // On macOS: should succeed (may or may not have permissions)
+        // On other platforms: should fail
+        #[cfg(target_os = "macos")]
+        assert!(result.is_ok());
+        #[cfg(not(target_os = "macos"))]
+        assert!(result.is_err());
     }
 }
