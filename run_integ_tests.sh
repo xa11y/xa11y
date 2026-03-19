@@ -5,8 +5,16 @@
 # then runs the integration tests with --ignored.
 #
 # Usage: ./run_integ_tests.sh
+#
+# Compatible with Ubuntu 22.04+ and 24.04+ (uses dbus-run-session).
 
 set -euo pipefail
+
+# If we're not already inside a D-Bus session, re-exec under dbus-run-session.
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+    echo "No D-Bus session found, re-launching under dbus-run-session..."
+    exec dbus-run-session -- bash "$0" "$@"
+fi
 
 CLEANUP_PIDS=()
 
@@ -20,8 +28,9 @@ cleanup() {
 trap cleanup EXIT
 
 echo "=== xa11y integration test harness ==="
+echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"
 
-# 1. Find a free display number
+# 1. Find a free display number and start Xvfb
 XVFB_DISPLAY=":99"
 for d in 99 98 97 96 95; do
     if [ ! -e "/tmp/.X${d}-lock" ]; then
@@ -38,13 +47,7 @@ sleep 1
 export DISPLAY="$XVFB_DISPLAY"
 echo "DISPLAY=$DISPLAY"
 
-# 2. Start a D-Bus session bus
-echo "Starting D-Bus session bus..."
-eval "$(dbus-launch --sh-syntax)"
-echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"
-CLEANUP_PIDS+=("$DBUS_SESSION_BUS_PID")
-
-# 3. Start AT-SPI2 bus launcher and registryd
+# 2. Start AT-SPI2 bus launcher and registryd
 echo "Starting AT-SPI2 infrastructure..."
 
 # Enable AT-SPI
@@ -78,11 +81,11 @@ fi
 
 sleep 1
 
-# 4. Build everything
+# 3. Build everything
 echo "Building workspace..."
 cargo build --workspace 2>&1
 
-# 5. Launch the test application
+# 4. Launch the test application
 echo "Launching xa11y-test-app..."
 cargo run -p xa11y-test-app -- --headless &
 CLEANUP_PIDS+=($!)
@@ -91,7 +94,7 @@ CLEANUP_PIDS+=($!)
 echo "Waiting for test app to register with AT-SPI..."
 sleep 3
 
-# 6. Run integration tests
+# 5. Run integration tests
 echo "Running integration tests..."
 set +e
 cargo test -p xa11y --test integ_test -- --ignored --test-threads=1 2>&1
