@@ -60,21 +60,6 @@ extern "C" {
 #[link(name = "ApplicationServices", kind = "framework")]
 extern "C" {
     fn AXIsProcessTrusted() -> bool;
-    fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
-    fn AXUIElementCopyAttributeValue(
-        element: AXUIElementRef,
-        attribute: CFStringRef,
-        value: *mut CFTypeRef,
-    ) -> i32;
-    fn AXUIElementCopyActionNames(element: AXUIElementRef, names: *mut CFArrayRef) -> i32;
-    fn AXUIElementPerformAction(element: AXUIElementRef, action: CFStringRef) -> i32;
-    fn AXUIElementSetAttributeValue(
-        element: AXUIElementRef,
-        attribute: CFStringRef,
-        value: CFTypeRef,
-    ) -> i32;
-    fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> i32;
-    fn AXValueGetValue(value: CFTypeRef, the_type: i32, value_ptr: *mut c_void) -> bool;
 }
 
 #[link(name = "CoreGraphics", kind = "framework")]
@@ -82,7 +67,33 @@ extern "C" {
     fn CGMainDisplayID() -> u32;
     fn CGDisplayPixelsWide(display: u32) -> usize;
     fn CGDisplayPixelsHigh(display: u32) -> usize;
-    fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> CFArrayRef;
+}
+
+// ── ObjC Exception-Safe Wrappers (from exception_safe.m) ─────────────────────
+//
+// ALL CF/AX operations that touch accessibility objects go through these
+// C wrappers which use @try/@catch to prevent ObjC exceptions from unwinding
+// through Rust frames.
+
+extern "C" {
+    // AX API wrappers
+    fn safe_ax_copy_attribute_value(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        value: *mut CFTypeRef,
+    ) -> i32;
+    fn safe_ax_copy_action_names(element: AXUIElementRef, names: *mut CFArrayRef) -> i32;
+    fn safe_ax_perform_action(element: AXUIElementRef, action: CFStringRef) -> i32;
+    fn safe_ax_set_attribute_value(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        value: CFTypeRef,
+    ) -> i32;
+    fn safe_ax_create_application(pid: i32) -> AXUIElementRef;
+    fn safe_ax_value_get_value(value: CFTypeRef, the_type: i32, value_ptr: *mut c_void) -> bool;
+    fn safe_cg_window_list_copy(option: u32, relative_to: u32) -> CFArrayRef;
+    // Test helpers
+    fn test_throw_and_catch_nsexception() -> i32;
 }
 
 // ── AXElement RAII Wrapper ────────────────────────────────────────────────────
@@ -135,7 +146,7 @@ fn ax_attr(element: AXUIElementRef, attribute: &str) -> Option<CFTypeRef> {
     let attr = CFString::new(attribute);
     let mut value: CFTypeRef = std::ptr::null();
     let err = unsafe {
-        AXUIElementCopyAttributeValue(element, attr.as_concrete_TypeRef() as CFTypeRef, &mut value)
+        safe_ax_copy_attribute_value(element, attr.as_concrete_TypeRef() as CFTypeRef, &mut value)
     };
     if err == AX_ERROR_SUCCESS && !value.is_null() {
         Some(value)
@@ -241,7 +252,7 @@ fn ax_children(element: AXUIElementRef) -> Vec<AXElement> {
 
 fn ax_action_names(element: AXUIElementRef) -> Vec<String> {
     let mut names: CFArrayRef = std::ptr::null();
-    let err = unsafe { AXUIElementCopyActionNames(element, &mut names) };
+    let err = unsafe { safe_ax_copy_action_names(element, &mut names) };
     if err != AX_ERROR_SUCCESS || names.is_null() {
         return vec![];
     }
@@ -264,7 +275,7 @@ fn ax_position(element: AXUIElementRef) -> Option<(f64, f64)> {
     let value = ax_attr(element, "AXPosition")?;
     let mut point = CGPoint::default();
     let ok = unsafe {
-        AXValueGetValue(value, AX_VALUE_CGPOINT, &mut point as *mut _ as *mut c_void)
+        safe_ax_value_get_value(value, AX_VALUE_CGPOINT, &mut point as *mut _ as *mut c_void)
     };
     unsafe { CFRelease(value) };
     if ok { Some((point.x, point.y)) } else { None }
@@ -274,7 +285,7 @@ fn ax_size(element: AXUIElementRef) -> Option<(f64, f64)> {
     let value = ax_attr(element, "AXSize")?;
     let mut size = CGSize::default();
     let ok = unsafe {
-        AXValueGetValue(value, AX_VALUE_CGSIZE, &mut size as *mut _ as *mut c_void)
+        safe_ax_value_get_value(value, AX_VALUE_CGSIZE, &mut size as *mut _ as *mut c_void)
     };
     unsafe { CFRelease(value) };
     if ok { Some((size.width, size.height)) } else { None }
@@ -329,6 +340,18 @@ fn ax_value_int(element: AXUIElementRef) -> Option<i32> {
         CFRelease(value);
         None
     }
+}
+
+// ── Safe FFI Wrappers ────────────────────────────────────────────────────────
+
+/// Perform an AX action, catching ObjC exceptions via the C wrapper.
+fn do_perform_action(element: AXUIElementRef, action: &CFString) -> i32 {
+    unsafe { safe_ax_perform_action(element, action.as_concrete_TypeRef() as CFTypeRef) }
+}
+
+/// Set an AX attribute value, catching ObjC exceptions via the C wrapper.
+fn do_set_attribute(element: AXUIElementRef, attribute: &CFString, value: CFTypeRef) -> i32 {
+    unsafe { safe_ax_set_attribute_value(element, attribute.as_concrete_TypeRef() as CFTypeRef, value) }
 }
 
 // ── Role Mapping ──────────────────────────────────────────────────────────────
@@ -521,7 +544,7 @@ impl MacOSProvider {
 
     /// List running GUI apps using CGWindowListCopyWindowInfo.
     fn list_gui_apps() -> Vec<(i32, String)> {
-        let info = unsafe { CGWindowListCopyWindowInfo(0, 0) }; // kCGWindowListOptionAll
+        let info = unsafe { safe_cg_window_list_copy(0, 0) }; // kCGWindowListOptionAll
         if info.is_null() {
             return vec![];
         }
@@ -578,7 +601,7 @@ impl MacOSProvider {
 
         for (pid, app_name) in &apps {
             if app_name.to_lowercase().contains(&name_lower) {
-                let element = AXElement::from_owned(unsafe { AXUIElementCreateApplication(*pid) });
+                let element = AXElement::from_owned(unsafe { safe_ax_create_application(*pid) });
                 if element.is_null() {
                     continue;
                 }
@@ -592,7 +615,7 @@ impl MacOSProvider {
     }
 
     fn find_app_by_pid(&self, pid: u32) -> Result<(AXElement, String)> {
-        let element = AXElement::from_owned(unsafe { AXUIElementCreateApplication(pid as i32) });
+        let element = AXElement::from_owned(unsafe { safe_ax_create_application(pid as i32) });
         if element.is_null() {
             return Err(Error::AppNotFound {
                 target: format!("PID {}", pid),
@@ -661,7 +684,8 @@ impl MacOSProvider {
             false
         };
 
-        // If role is filtered out, skip this node but still recurse into children
+        // If role is filtered out, skip this node but still recurse into children.
+        // Still increment depth to respect the hard limit.
         if role_filtered {
             let children = ax_children(element.as_ptr());
             for child in &children {
@@ -670,7 +694,7 @@ impl MacOSProvider {
                         break;
                     }
                 }
-                self.traverse(child, opts, app_name, nodes, elements, parent_id, depth, screen_size, visited);
+                self.traverse(child, opts, app_name, nodes, elements, parent_id, depth + 1, screen_size, visited);
             }
             return;
         }
@@ -697,10 +721,11 @@ impl MacOSProvider {
         let states = parse_states(element.as_ptr(), role);
 
         if opts.visible_only && !states.visible {
-            // Skip invisible node but still recurse children (they may be visible)
+            // Skip invisible node but still recurse children (they may be visible).
+            // Still increment depth to respect the hard limit.
             let children = ax_children(element.as_ptr());
             for child in &children {
-                self.traverse(child, opts, app_name, nodes, elements, parent_id, depth, screen_size, visited);
+                self.traverse(child, opts, app_name, nodes, elements, parent_id, depth + 1, screen_size, visited);
             }
             return;
         }
@@ -920,7 +945,7 @@ impl Provider for MacOSProvider {
 
         let mut visited = HashSet::new();
         for (pid, app_name) in &apps {
-            let app_element = AXElement::from_owned(unsafe { AXUIElementCreateApplication(*pid) });
+            let app_element = AXElement::from_owned(unsafe { safe_ax_create_application(*pid) });
             if app_element.is_null() {
                 continue;
             }
@@ -981,9 +1006,7 @@ impl Provider for MacOSProvider {
         match action {
             Action::Press | Action::Toggle | Action::Select => {
                 let ax_action = CFString::new("AXPress");
-                let err = unsafe {
-                    AXUIElementPerformAction(el_ptr, ax_action.as_concrete_TypeRef() as CFTypeRef)
-                };
+                let err = do_perform_action(el_ptr, &ax_action);
                 if err != AX_ERROR_SUCCESS {
                     return Err(Error::Platform {
                         code: err as i64,
@@ -996,13 +1019,7 @@ impl Provider for MacOSProvider {
             Action::Focus => {
                 let attr = CFString::new("AXFocused");
                 let val = core_foundation::boolean::CFBoolean::true_value();
-                let err = unsafe {
-                    AXUIElementSetAttributeValue(
-                        el_ptr,
-                        attr.as_concrete_TypeRef() as CFTypeRef,
-                        val.as_CFTypeRef(),
-                    )
-                };
+                let err = do_set_attribute(el_ptr, &attr, val.as_CFTypeRef());
                 if err != AX_ERROR_SUCCESS {
                     return Err(Error::Platform {
                         code: err as i64,
@@ -1016,13 +1033,7 @@ impl Provider for MacOSProvider {
                 Some(ActionData::NumericValue(v)) => {
                     let attr = CFString::new("AXValue");
                     let num = CFNumber::from(v);
-                    let err = unsafe {
-                        AXUIElementSetAttributeValue(
-                            el_ptr,
-                            attr.as_concrete_TypeRef() as CFTypeRef,
-                            num.as_CFTypeRef(),
-                        )
-                    };
+                    let err = do_set_attribute(el_ptr, &attr, num.as_CFTypeRef());
                     if err != AX_ERROR_SUCCESS {
                         return Err(Error::Platform {
                             code: err as i64,
@@ -1034,13 +1045,11 @@ impl Provider for MacOSProvider {
                 Some(ActionData::Value(text)) => {
                     let attr = CFString::new("AXValue");
                     let val = CFString::new(&text);
-                    let err = unsafe {
-                        AXUIElementSetAttributeValue(
-                            el_ptr,
-                            attr.as_concrete_TypeRef() as CFTypeRef,
-                            val.as_concrete_TypeRef() as CFTypeRef,
-                        )
-                    };
+                    let err = do_set_attribute(
+                        el_ptr,
+                        &attr,
+                        val.as_concrete_TypeRef() as CFTypeRef,
+                    );
                     if err != AX_ERROR_SUCCESS {
                         return Err(Error::TextValueNotSupported);
                     }
@@ -1055,19 +1064,10 @@ impl Provider for MacOSProvider {
             Action::Expand => {
                 let attr = CFString::new("AXExpanded");
                 let val = core_foundation::boolean::CFBoolean::true_value();
-                let err = unsafe {
-                    AXUIElementSetAttributeValue(
-                        el_ptr,
-                        attr.as_concrete_TypeRef() as CFTypeRef,
-                        val.as_CFTypeRef(),
-                    )
-                };
+                let err = do_set_attribute(el_ptr, &attr, val.as_CFTypeRef());
                 if err != AX_ERROR_SUCCESS {
-                    // Try AXPress as fallback (disclosure triangles)
                     let press = CFString::new("AXPress");
-                    let _ = unsafe {
-                        AXUIElementPerformAction(el_ptr, press.as_concrete_TypeRef() as CFTypeRef)
-                    };
+                    let _ = do_perform_action(el_ptr, &press);
                 }
                 Ok(())
             }
@@ -1075,27 +1075,17 @@ impl Provider for MacOSProvider {
             Action::Collapse => {
                 let attr = CFString::new("AXExpanded");
                 let val = core_foundation::boolean::CFBoolean::false_value();
-                let err = unsafe {
-                    AXUIElementSetAttributeValue(
-                        el_ptr,
-                        attr.as_concrete_TypeRef() as CFTypeRef,
-                        val.as_CFTypeRef(),
-                    )
-                };
+                let err = do_set_attribute(el_ptr, &attr, val.as_CFTypeRef());
                 if err != AX_ERROR_SUCCESS {
                     let press = CFString::new("AXPress");
-                    let _ = unsafe {
-                        AXUIElementPerformAction(el_ptr, press.as_concrete_TypeRef() as CFTypeRef)
-                    };
+                    let _ = do_perform_action(el_ptr, &press);
                 }
                 Ok(())
             }
 
             Action::Increment => {
                 let ax_action = CFString::new("AXIncrement");
-                let err = unsafe {
-                    AXUIElementPerformAction(el_ptr, ax_action.as_concrete_TypeRef() as CFTypeRef)
-                };
+                let err = do_perform_action(el_ptr, &ax_action);
                 if err != AX_ERROR_SUCCESS {
                     return Err(Error::Platform {
                         code: err as i64,
@@ -1107,9 +1097,7 @@ impl Provider for MacOSProvider {
 
             Action::Decrement => {
                 let ax_action = CFString::new("AXDecrement");
-                let err = unsafe {
-                    AXUIElementPerformAction(el_ptr, ax_action.as_concrete_TypeRef() as CFTypeRef)
-                };
+                let err = do_perform_action(el_ptr, &ax_action);
                 if err != AX_ERROR_SUCCESS {
                     return Err(Error::Platform {
                         code: err as i64,
@@ -1121,9 +1109,7 @@ impl Provider for MacOSProvider {
 
             Action::ShowMenu => {
                 let ax_action = CFString::new("AXShowMenu");
-                let err = unsafe {
-                    AXUIElementPerformAction(el_ptr, ax_action.as_concrete_TypeRef() as CFTypeRef)
-                };
+                let err = do_perform_action(el_ptr, &ax_action);
                 if err != AX_ERROR_SUCCESS {
                     return Err(Error::Platform {
                         code: err as i64,
@@ -1162,5 +1148,193 @@ impl Provider for MacOSProvider {
                 bundle_id: None,
             })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn objc_exception_is_caught_by_c_wrapper() {
+        // The C test helper throws an NSException inside @try/@catch.
+        // Verifies the ObjC exception safety mechanism works end-to-end.
+        let result = unsafe { test_throw_and_catch_nsexception() };
+        assert_eq!(result, 1, "C wrapper should have caught the NSException");
+    }
+
+    #[test]
+    fn safe_ax_copy_attribute_returns_error_on_null_element() {
+        // Calling the safe wrapper with null element should return error, not crash.
+        let attr = CFString::new("AXRole");
+        let mut value: CFTypeRef = std::ptr::null();
+        let err = unsafe {
+            safe_ax_copy_attribute_value(
+                std::ptr::null(),
+                attr.as_concrete_TypeRef() as CFTypeRef,
+                &mut value,
+            )
+        };
+        // Should return an error code (not 0/success) and not crash
+        assert_ne!(err, AX_ERROR_SUCCESS);
+    }
+
+    #[test]
+    fn ax_attr_returns_none_for_null_element() {
+        // A null element should not crash — should return None gracefully
+        let result = ax_attr(std::ptr::null(), "AXRole");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn ax_string_returns_none_for_null_element() {
+        let result = ax_string(std::ptr::null(), "AXTitle");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn ax_children_returns_empty_for_null_element() {
+        let result = ax_children(std::ptr::null());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn ax_action_names_returns_empty_for_null_element() {
+        let result = ax_action_names(std::ptr::null());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn ax_bool_returns_none_for_null_element() {
+        let result = ax_bool(std::ptr::null(), "AXEnabled");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn ax_position_returns_none_for_null_element() {
+        let result = ax_position(std::ptr::null());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn ax_size_returns_none_for_null_element() {
+        let result = ax_size(std::ptr::null());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn do_perform_action_returns_error_for_null_element() {
+        let action = CFString::new("AXPress");
+        let err = do_perform_action(std::ptr::null(), &action);
+        assert_ne!(err, AX_ERROR_SUCCESS);
+    }
+
+    #[test]
+    fn do_set_attribute_returns_error_for_null_element() {
+        let attr = CFString::new("AXFocused");
+        let val = core_foundation::boolean::CFBoolean::true_value();
+        let err = do_set_attribute(std::ptr::null(), &attr, val.as_CFTypeRef());
+        assert_ne!(err, AX_ERROR_SUCCESS);
+    }
+
+    #[test]
+    fn map_ax_role_covers_all_known_roles() {
+        // Verify subrole precedence
+        assert_eq!(map_ax_role("AXWindow", Some("AXDialog")), Role::Dialog);
+        assert_eq!(map_ax_role("AXGroup", Some("AXApplicationAlert")), Role::Alert);
+        assert_eq!(map_ax_role("AXGroup", Some("AXSystemAlert")), Role::Alert);
+        assert_eq!(map_ax_role("AXButton", Some("AXTabButton")), Role::Tab);
+        assert_eq!(map_ax_role("AXRow", Some("AXOutlineRow")), Role::TreeItem);
+        assert_eq!(map_ax_role("AXStaticText", Some("AXHeading")), Role::Heading);
+
+        // Verify main role mappings
+        assert_eq!(map_ax_role("AXApplication", None), Role::Application);
+        assert_eq!(map_ax_role("AXWindow", None), Role::Window);
+        assert_eq!(map_ax_role("AXSheet", None), Role::Dialog);
+        assert_eq!(map_ax_role("AXDrawer", None), Role::Window);
+        assert_eq!(map_ax_role("AXButton", None), Role::Button);
+        assert_eq!(map_ax_role("AXButton", Some("AXDisclosureTriangle")), Role::TreeItem);
+        assert_eq!(map_ax_role("AXRadioButton", None), Role::RadioButton);
+        assert_eq!(map_ax_role("AXCheckBox", None), Role::CheckBox);
+        assert_eq!(map_ax_role("AXTextField", None), Role::TextField);
+        assert_eq!(map_ax_role("AXSecureTextField", None), Role::TextField);
+        assert_eq!(map_ax_role("AXTextArea", None), Role::TextArea);
+        assert_eq!(map_ax_role("AXStaticText", None), Role::StaticText);
+        assert_eq!(map_ax_role("AXComboBox", None), Role::ComboBox);
+        assert_eq!(map_ax_role("AXPopUpButton", None), Role::ComboBox);
+        assert_eq!(map_ax_role("AXList", None), Role::List);
+        assert_eq!(map_ax_role("AXTable", None), Role::Table);
+        assert_eq!(map_ax_role("AXOutline", None), Role::List);
+        assert_eq!(map_ax_role("AXRow", None), Role::TableRow);
+        assert_eq!(map_ax_role("AXCell", None), Role::TableCell);
+        assert_eq!(map_ax_role("AXMenu", None), Role::Menu);
+        assert_eq!(map_ax_role("AXMenuItem", None), Role::MenuItem);
+        assert_eq!(map_ax_role("AXMenuBarItem", None), Role::MenuItem);
+        assert_eq!(map_ax_role("AXMenuBar", None), Role::MenuBar);
+        assert_eq!(map_ax_role("AXMenuBarExtra", None), Role::MenuBar);
+        assert_eq!(map_ax_role("AXTabGroup", None), Role::TabGroup);
+        assert_eq!(map_ax_role("AXToolbar", None), Role::Toolbar);
+        assert_eq!(map_ax_role("AXScrollBar", None), Role::ScrollBar);
+        assert_eq!(map_ax_role("AXSlider", None), Role::Slider);
+        assert_eq!(map_ax_role("AXImage", None), Role::Image);
+        assert_eq!(map_ax_role("AXLink", None), Role::Link);
+        assert_eq!(map_ax_role("AXGroup", None), Role::Group);
+        assert_eq!(map_ax_role("AXScrollArea", None), Role::Group);
+        assert_eq!(map_ax_role("AXLayoutArea", None), Role::Group);
+        assert_eq!(map_ax_role("AXRadioGroup", None), Role::Group);
+        assert_eq!(map_ax_role("AXDialog", None), Role::Dialog);
+        assert_eq!(map_ax_role("AXProgressIndicator", None), Role::ProgressBar);
+        assert_eq!(map_ax_role("AXBusyIndicator", None), Role::ProgressBar);
+        assert_eq!(map_ax_role("AXLevelIndicator", None), Role::ProgressBar);
+        assert_eq!(map_ax_role("AXDisclosureTriangle", None), Role::TreeItem);
+        assert_eq!(map_ax_role("AXHeading", None), Role::Heading);
+        assert_eq!(map_ax_role("Heading", None), Role::Heading);
+        assert_eq!(map_ax_role("AXSplitGroup", None), Role::SplitGroup);
+        assert_eq!(map_ax_role("AXSplitter", None), Role::Separator);
+        assert_eq!(map_ax_role("AXWebArea", None), Role::WebArea);
+        assert_eq!(map_ax_role("AXIncrementor", None), Role::TextField);
+        assert_eq!(map_ax_role("AXColorWell", None), Role::Unknown);
+        assert_eq!(map_ax_role("AXValueIndicator", None), Role::Unknown);
+        assert_eq!(map_ax_role("TotallyUnknownRole", None), Role::Unknown);
+    }
+
+    #[test]
+    fn map_ax_action_covers_all_mappings() {
+        assert_eq!(map_ax_action("AXPress"), Some(Action::Press));
+        assert_eq!(map_ax_action("AXConfirm"), Some(Action::Press));
+        assert_eq!(map_ax_action("AXShowMenu"), Some(Action::ShowMenu));
+        assert_eq!(map_ax_action("AXIncrement"), Some(Action::Increment));
+        assert_eq!(map_ax_action("AXDecrement"), Some(Action::Decrement));
+        assert_eq!(map_ax_action("AXRaise"), None);
+        assert_eq!(map_ax_action("AXCancel"), None);
+        assert_eq!(map_ax_action("UnknownAction"), None);
+    }
+
+    #[test]
+    fn xa11y_action_to_ax_covers_all_mappings() {
+        assert_eq!(xa11y_action_to_ax(Action::Press), Some("AXPress"));
+        assert_eq!(xa11y_action_to_ax(Action::Toggle), Some("AXPress"));
+        assert_eq!(xa11y_action_to_ax(Action::Select), Some("AXPress"));
+        assert_eq!(xa11y_action_to_ax(Action::ShowMenu), Some("AXShowMenu"));
+        assert_eq!(xa11y_action_to_ax(Action::Increment), Some("AXIncrement"));
+        assert_eq!(xa11y_action_to_ax(Action::Decrement), Some("AXDecrement"));
+        assert_eq!(xa11y_action_to_ax(Action::Focus), None);
+        assert_eq!(xa11y_action_to_ax(Action::SetValue), None);
+        assert_eq!(xa11y_action_to_ax(Action::Expand), None);
+        assert_eq!(xa11y_action_to_ax(Action::Collapse), None);
+        assert_eq!(xa11y_action_to_ax(Action::ScrollIntoView), None);
+    }
+
+    #[test]
+    fn provider_new_succeeds() {
+        let provider = MacOSProvider::new();
+        assert!(provider.is_ok());
+    }
+
+    #[test]
+    fn detect_screen_size_returns_nonzero() {
+        let (w, h) = MacOSProvider::detect_screen_size();
+        assert!(w > 0);
+        assert!(h > 0);
     }
 }
