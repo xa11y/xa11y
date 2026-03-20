@@ -1,0 +1,25 @@
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# System deps for AT-SPI2 + Xvfb + X11 (matches CI)
+RUN apt-get update && apt-get install -y \
+    curl build-essential pkg-config \
+    xvfb dbus dbus-x11 \
+    libxkbcommon-x11-0 libxkbcommon-x11-dev libxkbcommon-dev \
+    libxcursor1 libxcursor-dev \
+    libxrandr2 libxrandr-dev \
+    libxi6 libxi-dev \
+    libx11-xcb1 libx11-xcb-dev \
+    libxcb-render0 libxcb-render0-dev \
+    libxcb-shape0 libxcb-shape0-dev \
+    libxcb-xfixes0 libxcb-xfixes0-dev \
+    x11-utils \
+    && (apt-get install -y at-spi2-core || apt-get install -y at-spi2-common) \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust toolchain
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+WORKDIR /xa11y

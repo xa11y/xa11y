@@ -53,6 +53,7 @@ echo "Starting AT-SPI2 infrastructure..."
 # Enable AT-SPI
 export NO_AT_BRIDGE=0
 export AT_SPI_CLIENT=true
+export ACCESSIBILITY_ENABLED=1
 
 # The AT-SPI bus launcher creates a separate accessibility bus
 if command -v /usr/libexec/at-spi-bus-launcher &>/dev/null; then
@@ -80,9 +81,26 @@ fi
 
 sleep 1
 
+# 2b. Enable accessibility on the AT-SPI bus (required for apps to register)
+echo "Enabling AT-SPI accessibility..."
+dbus-send --session --print-reply --dest=org.a11y.Bus /org/a11y/bus \
+    org.freedesktop.DBus.Properties.Set \
+    string:org.a11y.Status string:IsEnabled variant:boolean:true \
+    2>/dev/null || true
+dbus-send --session --print-reply --dest=org.a11y.Bus /org/a11y/bus \
+    org.freedesktop.DBus.Properties.Set \
+    string:org.a11y.Status string:ScreenReaderEnabled variant:boolean:true \
+    2>/dev/null || true
+
 # 3. Build everything
 echo "Building workspace..."
 cargo build --workspace 2>&1
+
+# Support BUILD_ONLY mode (for pre-warming the build cache)
+if [ "${BUILD_ONLY:-}" = "1" ]; then
+    echo "=== Build complete (build-only mode) ==="
+    exit 0
+fi
 
 # 4. Launch the test application (run binary directly, not via cargo run,
 #    because cargo run changes the process owner name in AT-SPI)
@@ -96,8 +114,13 @@ sleep 3
 
 # 5. Run integration tests
 echo "Running integration tests..."
+TEST_FILTER="${TEST_FILTER:-}"
 set +e
-cargo test -p xa11y --test integ_test -- --ignored --test-threads=1 2>&1
+if [ -n "$TEST_FILTER" ]; then
+    cargo test -p xa11y --test integ_test -- --ignored --test-threads=1 $TEST_FILTER 2>&1
+else
+    cargo test -p xa11y --test integ_test -- --ignored --test-threads=1 2>&1
+fi
 TEST_EXIT=$?
 set -e
 

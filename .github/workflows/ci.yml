@@ -85,7 +85,14 @@ jobs:
             xvfb \
             dbus \
             libxkbcommon-x11-0 \
-            libxkbcommon-x11-dev
+            libxkbcommon-x11-dev \
+            libxcursor1 \
+            libxrandr2 \
+            libxi6 \
+            libx11-xcb1 \
+            libxcb-render0 \
+            libxcb-shape0 \
+            libxcb-xfixes0
           # at-spi2-core provides the daemons; on Ubuntu 24.04 only at-spi2-common may exist
           sudo apt-get install -y at-spi2-core || sudo apt-get install -y at-spi2-common
           # dbus-x11 provides dbus-launch; not needed since we use dbus-run-session,

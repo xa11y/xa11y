@@ -52,6 +52,11 @@ cargo test --workspace
 # Integration tests (Linux — needs Xvfb + D-Bus + AT-SPI2)
 ./run_integ_tests.sh
 
+# Integration tests (Linux from macOS — via Finch container)
+./run_integ_container.sh                      # all tests
+./run_integ_container.sh tree_has_buttons      # single test
+./run_integ_container.sh --shell               # interactive debug
+
 # Integration tests (macOS — needs xa11y-macos provider)
 ./run_integ_tests_macos.sh
 

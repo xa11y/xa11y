@@ -87,6 +87,24 @@ impl LinuxProvider {
         })
     }
 
+    /// Get the numeric AT-SPI role via GetRole method.
+    fn get_role_number(&self, aref: &AccessibleRef) -> Result<u32> {
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
+        let reply = proxy
+            .call_method("GetRole", &())
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("GetRole failed: {}", e),
+            })?;
+        reply
+            .body()
+            .deserialize::<u32>()
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("GetRole deserialize failed: {}", e),
+            })
+    }
+
     /// Get the AT-SPI role name string.
     fn get_role_name(&self, aref: &AccessibleRef) -> Result<String> {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
@@ -152,17 +170,6 @@ impl LinuxProvider {
             .collect())
     }
 
-    /// Get the interfaces supported by this accessible.
-    fn get_interfaces(&self, aref: &AccessibleRef) -> Vec<String> {
-        let proxy = match self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible") {
-            Ok(p) => p,
-            Err(_) => return vec![],
-        };
-        proxy
-            .get_property::<Vec<String>>("Interfaces")
-            .unwrap_or_default()
-    }
-
     /// Get the state set as raw u32 values.
     fn get_state(&self, aref: &AccessibleRef) -> Result<Vec<u32>> {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
@@ -202,62 +209,73 @@ impl LinuxProvider {
     }
 
     /// Get available actions via Action interface.
+    /// Probes the interface directly rather than relying on the Interfaces property,
+    /// which some AT-SPI adapters (e.g. AccessKit) don't expose.
     fn get_actions(&self, aref: &AccessibleRef) -> Vec<Action> {
-        let interfaces = self.get_interfaces(aref);
-        if !interfaces.iter().any(|i| i.contains("Action")) {
-            return vec![];
-        }
-
-        let proxy = match self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Action") {
-            Ok(p) => p,
-            Err(_) => return vec![],
-        };
-
-        let n_actions: i32 = proxy.get_property("NActions").unwrap_or(0);
-
         let mut actions = Vec::new();
-        for i in 0..n_actions {
-            if let Ok(reply) = proxy.call_method("GetName", &(i,)) {
-                if let Ok(name) = reply.body().deserialize::<String>() {
-                    if let Some(action) = map_atspi_action(&name) {
-                        if !actions.contains(&action) {
-                            actions.push(action);
+
+        // Try Action interface directly
+        if let Ok(proxy) = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Action") {
+            if let Ok(n_actions) = proxy.get_property::<i32>("NActions") {
+                for i in 0..n_actions {
+                    if let Ok(reply) = proxy.call_method("GetName", &(i,)) {
+                        if let Ok(name) = reply.body().deserialize::<String>() {
+                            if let Some(action) = map_atspi_action(&name) {
+                                if !actions.contains(&action) {
+                                    actions.push(action);
+                                }
+                            }
                         }
                     }
                 }
             }
         }
 
-        // If component interface is available, Focus is possible
-        if interfaces.iter().any(|i| i.contains("Component")) && !actions.contains(&Action::Focus) {
-            actions.push(Action::Focus);
+        // Try Component interface for Focus
+        if !actions.contains(&Action::Focus) {
+            if let Ok(proxy) =
+                self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Component")
+            {
+                // Verify the interface exists by trying a method
+                if proxy.call_method("GetExtents", &(0u32,)).is_ok() {
+                    actions.push(Action::Focus);
+                }
+            }
         }
 
         actions
     }
 
     /// Get value via Value or Text interface.
+    /// Probes interfaces directly rather than relying on the Interfaces property.
     fn get_value(&self, aref: &AccessibleRef) -> Option<String> {
-        let interfaces = self.get_interfaces(aref);
-        if interfaces.iter().any(|i| i.contains("Value")) {
-            let proxy = self
-                .make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Value")
-                .ok()?;
-            let val: f64 = proxy.get_property("CurrentValue").ok()?;
-            return Some(val.to_string());
+        // Try Text interface first for text content (text fields, labels, combo boxes).
+        // This must come before Value because some AT-SPI adapters (e.g. AccessKit)
+        // may expose both interfaces, and Value.CurrentValue returns 0.0 for text nodes.
+        let text_value = self.get_text_content(aref);
+        if text_value.is_some() {
+            return text_value;
         }
-        // Try Text interface for text content
-        if interfaces.iter().any(|i| i.contains("Text")) {
-            let proxy = self
-                .make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Text")
-                .ok()?;
-            let char_count: i32 = proxy.get_property("CharacterCount").ok()?;
-            if char_count > 0 {
-                let reply = proxy.call_method("GetText", &(0i32, char_count)).ok()?;
-                let text: String = reply.body().deserialize().ok()?;
-                if !text.is_empty() {
-                    return Some(text);
-                }
+        // Try Value interface (sliders, progress bars, scroll bars, spinners)
+        if let Ok(proxy) = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Value") {
+            if let Ok(val) = proxy.get_property::<f64>("CurrentValue") {
+                return Some(val.to_string());
+            }
+        }
+        None
+    }
+
+    /// Read text content via the AT-SPI Text interface.
+    fn get_text_content(&self, aref: &AccessibleRef) -> Option<String> {
+        let proxy = self
+            .make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Text")
+            .ok()?;
+        let char_count: i32 = proxy.get_property("CharacterCount").ok()?;
+        if char_count > 0 {
+            let reply = proxy.call_method("GetText", &(0i32, char_count)).ok()?;
+            let text: String = reply.body().deserialize().ok()?;
+            if !text.is_empty() {
+                return Some(text);
             }
         }
         None
@@ -287,22 +305,74 @@ impl LinuxProvider {
         }
 
         let role_name = self.get_role_name(aref).unwrap_or_default();
-        let role = map_atspi_role(&role_name);
+        let role_num = self.get_role_number(aref).unwrap_or(0);
+        let role = if !role_name.is_empty() {
+            map_atspi_role(&role_name)
+        } else {
+            map_atspi_role_number(role_num)
+        };
 
-        if let Some(ref filter_roles) = opts.roles {
-            if !filter_roles.contains(&role) {
-                return;
+        // Don't apply role/visibility filters to the root node (depth 0)
+        // so the tree always has at least the application node.
+        let is_root = depth == 0;
+
+        // For role filtering, skip adding this node but still traverse children
+        // so descendant nodes matching the filter can be found.
+        let skip_for_role = if !is_root {
+            if let Some(ref filter_roles) = opts.roles {
+                !filter_roles.contains(&role)
+            } else {
+                false
             }
+        } else {
+            false
+        };
+
+        // If role-filtered, skip this node but still traverse children
+        // so that descendant nodes matching the filter can be found.
+        if skip_for_role {
+            let children = self.get_children(aref).unwrap_or_default();
+            for child_ref in &children {
+                if let Some(max_elements) = opts.max_elements {
+                    if nodes.len() >= max_elements as usize {
+                        break;
+                    }
+                }
+                if child_ref.path == "/org/a11y/atspi/null"
+                    || child_ref.bus_name.is_empty()
+                    || child_ref.path.is_empty()
+                {
+                    continue;
+                }
+                self.traverse(
+                    child_ref,
+                    opts,
+                    app_name,
+                    nodes,
+                    parent_id,
+                    depth + 1,
+                    screen_size,
+                );
+            }
+            return;
         }
 
-        let name = self.get_name(aref).ok().filter(|s| !s.is_empty());
+        let mut name = self.get_name(aref).ok().filter(|s| !s.is_empty());
         let description = self.get_description(aref).ok().filter(|s| !s.is_empty());
         let value = self.get_value(aref);
+
+        // For label/static text nodes, AT-SPI may put content in the Text interface
+        // (returned as value) rather than the Name property. Use it as the name.
+        if name.is_none() && role == Role::StaticText {
+            if let Some(ref v) = value {
+                name = Some(v.clone());
+            }
+        }
         let bounds = self.get_extents(aref);
         let states = self.parse_states(aref, role);
         let actions = self.get_actions(aref);
 
-        if opts.visible_only && !states.visible {
+        if !is_root && opts.visible_only && !states.visible {
             return;
         }
 
@@ -325,8 +395,13 @@ impl LinuxProvider {
         });
 
         let raw = if opts.include_raw {
+            let raw_role = if role_name.is_empty() {
+                format!("role_num:{}", role_num)
+            } else {
+                role_name
+            };
             Some(xa11y_core::RawPlatformData::Linux {
-                atspi_role: role_name,
+                atspi_role: raw_role,
                 bus_name: aref.bus_name.clone(),
                 object_path: aref.path.clone(),
             })
@@ -507,6 +582,7 @@ impl LinuxProvider {
             if child.path == "/org/a11y/atspi/null" {
                 continue;
             }
+            // Try Application.Id first
             if let Ok(proxy) =
                 self.make_proxy(&child.bus_name, &child.path, "org.a11y.atspi.Application")
             {
@@ -516,11 +592,37 @@ impl LinuxProvider {
                     }
                 }
             }
+            // Fall back to D-Bus connection PID
+            if let Some(app_pid) = self.get_dbus_pid(&child.bus_name) {
+                if app_pid == pid {
+                    return Ok(child.clone());
+                }
+            }
         }
 
         Err(Error::AppNotFound {
             target: format!("PID {}", pid),
         })
+    }
+
+    /// Get PID via D-Bus GetConnectionUnixProcessID.
+    fn get_dbus_pid(&self, bus_name: &str) -> Option<u32> {
+        let proxy = self
+            .make_proxy(
+                "org.freedesktop.DBus",
+                "/org/freedesktop/DBus",
+                "org.freedesktop.DBus",
+            )
+            .ok()?;
+        let reply = proxy
+            .call_method("GetConnectionUnixProcessID", &(bus_name,))
+            .ok()?;
+        let pid: u32 = reply.body().deserialize().ok()?;
+        if pid > 0 {
+            Some(pid)
+        } else {
+            None
+        }
     }
 
     /// Perform an AT-SPI action by name.
@@ -551,17 +653,36 @@ impl LinuxProvider {
         })
     }
 
-    /// Get PID from Application interface.
+    /// Get PID from Application interface, falling back to D-Bus connection PID.
     fn get_app_pid(&self, aref: &AccessibleRef) -> Option<u32> {
-        let proxy = self
-            .make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Application")
-            .ok()?;
-        let pid: i32 = proxy.get_property("Id").ok()?;
-        if pid > 0 {
-            Some(pid as u32)
-        } else {
-            None
+        // Try Application.Id first
+        if let Ok(proxy) = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Application")
+        {
+            if let Ok(pid) = proxy.get_property::<i32>("Id") {
+                if pid > 0 {
+                    return Some(pid as u32);
+                }
+            }
         }
+
+        // Fall back to D-Bus GetConnectionUnixProcessID
+        if let Ok(proxy) = self.make_proxy(
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+        ) {
+            if let Ok(reply) =
+                proxy.call_method("GetConnectionUnixProcessID", &(aref.bus_name.as_str(),))
+            {
+                if let Ok(pid) = reply.body().deserialize::<u32>() {
+                    if pid > 0 {
+                        return Some(pid);
+                    }
+                }
+            }
+        }
+
+        None
     }
 }
 
@@ -699,15 +820,16 @@ impl Provider for LinuxProvider {
                 .or_else(|_| self.do_atspi_action(&target, "activate"))
                 .or_else(|_| self.do_atspi_action(&target, "press")),
             Action::Focus => {
-                let proxy =
-                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")?;
-                proxy
-                    .call_method("GrabFocus", &())
-                    .map_err(|e| Error::Platform {
-                        code: -1,
-                        message: format!("GrabFocus failed: {}", e),
-                    })?;
-                Ok(())
+                // Try Component.GrabFocus first, then fall back to Action interface
+                if let Ok(proxy) =
+                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")
+                {
+                    if proxy.call_method("GrabFocus", &()).is_ok() {
+                        return Ok(());
+                    }
+                }
+                self.do_atspi_action(&target, "focus")
+                    .or_else(|_| self.do_atspi_action(&target, "setFocus"))
             }
             Action::SetValue => match data {
                 Some(ActionData::NumericValue(v)) => {
@@ -764,8 +886,45 @@ impl Provider for LinuxProvider {
                     })?;
                 Ok(())
             }
-            Action::Increment => self.do_atspi_action(&target, "increment"),
-            Action::Decrement => self.do_atspi_action(&target, "decrement"),
+            Action::Increment => self.do_atspi_action(&target, "increment").or_else(|_| {
+                // Fall back to Value interface: current + step (or +1)
+                let proxy =
+                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Value")?;
+                let current: f64 =
+                    proxy
+                        .get_property("CurrentValue")
+                        .map_err(|e| Error::Platform {
+                            code: -1,
+                            message: format!("Value.CurrentValue failed: {}", e),
+                        })?;
+                let step: f64 = proxy.get_property("MinimumIncrement").unwrap_or(1.0);
+                let step = if step <= 0.0 { 1.0 } else { step };
+                proxy
+                    .set_property("CurrentValue", current + step)
+                    .map_err(|e| Error::Platform {
+                        code: -1,
+                        message: format!("Value.SetCurrentValue failed: {}", e),
+                    })
+            }),
+            Action::Decrement => self.do_atspi_action(&target, "decrement").or_else(|_| {
+                let proxy =
+                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Value")?;
+                let current: f64 =
+                    proxy
+                        .get_property("CurrentValue")
+                        .map_err(|e| Error::Platform {
+                            code: -1,
+                            message: format!("Value.CurrentValue failed: {}", e),
+                        })?;
+                let step: f64 = proxy.get_property("MinimumIncrement").unwrap_or(1.0);
+                let step = if step <= 0.0 { 1.0 } else { step };
+                proxy
+                    .set_property("CurrentValue", current - step)
+                    .map_err(|e| Error::Platform {
+                        code: -1,
+                        message: format!("Value.SetCurrentValue failed: {}", e),
+                    })
+            }),
         }
     }
 
@@ -848,6 +1007,71 @@ fn map_atspi_role(role_name: &str) -> Role {
         "heading" => Role::Heading,
         "separator" => Role::Separator,
         "split pane" => Role::SplitGroup,
+        _ => Role::Unknown,
+    }
+}
+
+/// Map AT-SPI2 numeric role (AtspiRole enum) to xa11y Role.
+/// Values from atspi-common Role enum (repr(u32)).
+fn map_atspi_role_number(role: u32) -> Role {
+    match role {
+        2 => Role::Alert,        // Alert
+        7 => Role::CheckBox,     // CheckBox
+        8 => Role::CheckBox,     // CheckMenuItem
+        11 => Role::ComboBox,    // ComboBox
+        16 => Role::Dialog,      // Dialog
+        19 => Role::Dialog,      // FileChooser
+        20 => Role::Group,       // Filler
+        23 => Role::Window,      // Frame
+        26 => Role::Image,       // Icon
+        27 => Role::Image,       // Image
+        29 => Role::StaticText,  // Label
+        31 => Role::List,        // List
+        32 => Role::ListItem,    // ListItem
+        33 => Role::Menu,        // Menu
+        34 => Role::MenuBar,     // MenuBar
+        35 => Role::MenuItem,    // MenuItem
+        37 => Role::Tab,         // PageTab
+        38 => Role::TabGroup,    // PageTabList
+        39 => Role::Group,       // Panel
+        40 => Role::TextField,   // PasswordText
+        42 => Role::ProgressBar, // ProgressBar
+        43 => Role::Button,      // Button (push button)
+        44 => Role::RadioButton, // RadioButton
+        45 => Role::RadioButton, // RadioMenuItem
+        48 => Role::ScrollBar,   // ScrollBar
+        49 => Role::Group,       // ScrollPane
+        50 => Role::Separator,   // Separator
+        51 => Role::Slider,      // Slider
+        52 => Role::TextField,   // SpinButton
+        53 => Role::SplitGroup,  // SplitPane
+        55 => Role::Table,       // Table
+        56 => Role::TableCell,   // TableCell
+        57 => Role::TableCell,   // TableColumnHeader
+        58 => Role::TableCell,   // TableRowHeader
+        61 => Role::TextArea,    // Text
+        62 => Role::Button,      // ToggleButton
+        63 => Role::Toolbar,     // ToolBar
+        65 => Role::Group,       // Tree
+        66 => Role::Table,       // TreeTable
+        67 => Role::Unknown,     // Unknown
+        68 => Role::Group,       // Viewport
+        69 => Role::Window,      // Window
+        75 => Role::Application, // Application
+        79 => Role::TextField,   // Entry
+        82 => Role::WebArea,     // DocumentFrame
+        83 => Role::Heading,     // Heading
+        85 => Role::Group,       // Section
+        86 => Role::Group,       // RedundantObject
+        87 => Role::Group,       // Form
+        88 => Role::Link,        // Link
+        90 => Role::TableRow,    // TableRow
+        91 => Role::TreeItem,    // TreeItem
+        95 => Role::WebArea,     // DocumentWeb
+        98 => Role::List,        // ListBox
+        101 => Role::Alert,      // Notification
+        116 => Role::StaticText, // Static
+        129 => Role::Button,     // PushButtonMenu
         _ => Role::Unknown,
     }
 }
