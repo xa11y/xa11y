@@ -124,25 +124,17 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets
 
-  # Cross-compilation check (ensures each platform crate compiles for its target)
+  # Cross-compilation check (ensures core crate compiles for all targets)
   cross-check:
-    name: Cross-check (${{ matrix.target }})
+    name: Cross-check (all targets)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - x86_64-apple-darwin
-          - aarch64-apple-darwin
-          - x86_64-unknown-linux-gnu
-          - aarch64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: x86_64-apple-darwin,aarch64-apple-darwin,x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
 
       - name: Cache cargo registry & build
         uses: actions/cache@v4
@@ -151,12 +143,16 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-cross-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-cross-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-cross-${{ matrix.target }}-
+            ${{ runner.os }}-cargo-cross-
 
-      - name: Check compilation (core crate)
-        run: cargo check -p xa11y-core --target ${{ matrix.target }}
+      - name: Check compilation (all targets)
+        run: |
+          for target in x86_64-apple-darwin aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            echo "=== Checking $target ==="
+            cargo check -p xa11y-core --target $target
+          done
 
   # Fuzz testing (short runs to catch regressions)
   fuzz:
