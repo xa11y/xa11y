@@ -212,13 +212,14 @@ mod macos_fuzz {
                 let op = ops[rng.gen_range(0..ops.len())];
                 let values = ["Submit", "Cancel", "test", "", "Volume", "Alice", "x"];
                 let val = values[rng.gen_range(0..values.len())];
-                format!("{}[{}{}\"{}\"", role, attr, op, val)
-                    + "]"
+                format!("{}[{}{}\"{}\"", role, attr, op, val) + "]"
             }
             // 10% garbage
             8 => {
                 let len = rng.gen_range(0..30);
-                (0..len).map(|_| rng.gen_range(b' '..=b'~') as char).collect()
+                (0..len)
+                    .map(|_| rng.gen_range(b' '..=b'~') as char)
+                    .collect()
             }
             // 10% empty or whitespace
             _ => {
@@ -339,10 +340,10 @@ mod macos_fuzz {
                     include_raw: true,
                     ..QueryOptions::default()
                 };
-                match self.provider.get_app_tree(
-                    &AppTarget::ByName("xa11y".to_string()),
-                    &opts,
-                ) {
+                match self
+                    .provider
+                    .get_app_tree(&AppTarget::ByName("xa11y".to_string()), &opts)
+                {
                     Ok(tree) => self.tree_raw = Some(tree),
                     Err(e) => self.log(&format!("ensure_tree_raw failed: {}", e)),
                 }
@@ -391,7 +392,10 @@ mod macos_fuzz {
 
     fn op_get_tree_by_pid(state: &mut FuzzState) {
         let opts = random_query_options(&mut state.rng);
-        state.log(&format!("get_app_tree(ByPid({}), {:?})", state.test_app_pid, opts));
+        state.log(&format!(
+            "get_app_tree(ByPid({}), {:?})",
+            state.test_app_pid, opts
+        ));
         match state
             .provider
             .get_app_tree(&AppTarget::ByPid(state.test_app_pid), &opts)
@@ -421,10 +425,9 @@ mod macos_fuzz {
 
     fn op_get_tree_by_pid_not_found(state: &mut FuzzState) {
         state.log("get_app_tree(ByPid(99999))");
-        let result = state.provider.get_app_tree(
-            &AppTarget::ByPid(99999),
-            &QueryOptions::default(),
-        );
+        let result = state
+            .provider
+            .get_app_tree(&AppTarget::ByPid(99999), &QueryOptions::default());
         // May succeed (some PID might exist) or fail — both are fine
         match result {
             Ok(tree) => inspect_tree(&tree, &mut state.rng),
@@ -474,7 +477,10 @@ mod macos_fuzz {
         match status {
             PermissionStatus::Granted => {}
             PermissionStatus::Denied { instructions } => {
-                panic!("Fuzzer requires accessibility permissions: {}", instructions);
+                panic!(
+                    "Fuzzer requires accessibility permissions: {}",
+                    instructions
+                );
             }
         }
     }
@@ -485,7 +491,11 @@ mod macos_fuzz {
         assert!(!apps.is_empty(), "list_apps returned empty");
         // Verify test app is in the list
         let has_test_app = apps.iter().any(|a| a.name.contains("xa11y"));
-        state.log(&format!("  -> {} apps, test_app_present={}", apps.len(), has_test_app));
+        state.log(&format!(
+            "  -> {} apps, test_app_present={}",
+            apps.len(),
+            has_test_app
+        ));
     }
 
     fn op_action_on_node(state: &mut FuzzState) {
@@ -547,9 +557,14 @@ mod macos_fuzz {
         }
 
         let node_id = state.rng.gen_range(0..tree.len()) as NodeId;
-        state.log(&format!("perform_action without include_raw, node={}", node_id));
+        state.log(&format!(
+            "perform_action without include_raw, node={}",
+            node_id
+        ));
 
-        let result = state.provider.perform_action(tree, node_id, Action::Press, None);
+        let result = state
+            .provider
+            .perform_action(tree, node_id, Action::Press, None);
         // Should fail because raw data is needed
         match result {
             Err(_) => state.errors += 1,
@@ -571,7 +586,9 @@ mod macos_fuzz {
         let bad_id = tree.len() as NodeId + state.rng.gen_range(1..1000);
         state.log(&format!("perform_action on invalid node_id={}", bad_id));
 
-        let result = state.provider.perform_action(tree, bad_id, Action::Press, None);
+        let result = state
+            .provider
+            .perform_action(tree, bad_id, Action::Press, None);
         assert!(result.is_err(), "Expected error for invalid node ID");
         state.errors += 1;
     }
@@ -628,8 +645,19 @@ mod macos_fuzz {
         };
 
         let names = [
-            "Submit", "Cancel", "Volume", "Alice", "xa11y", "", "nonexistent",
-            "Name", "Option A", "Apple", "quit", "SUBMIT", "test",
+            "Submit",
+            "Cancel",
+            "Volume",
+            "Alice",
+            "xa11y",
+            "",
+            "nonexistent",
+            "Name",
+            "Option A",
+            "Apple",
+            "quit",
+            "SUBMIT",
+            "test",
         ];
         let name = names[state.rng.gen_range(0..names.len())];
         state.log(&format!("tree.find_by_name(\"{}\")", name));
@@ -664,7 +692,10 @@ mod macos_fuzz {
         state.log(&format!("tree.subtree({})", node_id));
         let sub = tree.subtree(node_id);
         // Subtree should contain at least the node itself
-        assert!(!sub.is_empty(), "subtree should not be empty for valid node");
+        assert!(
+            !sub.is_empty(),
+            "subtree should not be empty for valid node"
+        );
     }
 
     fn op_tree_children(state: &mut FuzzState) {
@@ -823,7 +854,11 @@ mod macos_fuzz {
             // Tree fetching — exercises traverse, role mapping, state parsing, etc.
             (15, "get_tree_by_name", op_get_tree_by_name as OpFn),
             (8, "get_tree_by_pid", op_get_tree_by_pid),
-            (2, "get_tree_by_name_not_found", op_get_tree_by_name_not_found),
+            (
+                2,
+                "get_tree_by_name_not_found",
+                op_get_tree_by_name_not_found,
+            ),
             (1, "get_tree_by_pid_not_found", op_get_tree_by_pid_not_found),
             (1, "get_tree_by_window", op_get_tree_by_window),
             (1, "get_all_apps", op_get_all_apps),

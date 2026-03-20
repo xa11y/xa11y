@@ -49,6 +49,7 @@ pub use stub::MacOSProvider;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[allow(unused_imports)]
     use xa11y_core::*;
 
     #[test]

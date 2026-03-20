@@ -26,6 +26,7 @@ const AX_VALUE_CGPOINT: i32 = 1;
 const AX_VALUE_CGSIZE: i32 = 2;
 const CF_NUMBER_FLOAT64: i32 = 13;
 const CF_NUMBER_SINT32: i32 = 3;
+#[allow(dead_code)]
 const CF_NUMBER_SINT64: i32 = 4;
 
 #[repr(C)]
@@ -93,6 +94,7 @@ extern "C" {
     fn safe_ax_value_get_value(value: CFTypeRef, the_type: i32, value_ptr: *mut c_void) -> bool;
     fn safe_cg_window_list_copy(option: u32, relative_to: u32) -> CFArrayRef;
     // Test helpers
+    #[cfg(test)]
     fn test_throw_and_catch_nsexception() -> i32;
 }
 
@@ -182,14 +184,23 @@ fn ax_bool(element: AXUIElementRef, attribute: &str) -> Option<bool> {
     }
 }
 
+#[allow(dead_code)]
 fn ax_number_f64(element: AXUIElementRef, attribute: &str) -> Option<f64> {
     let value = ax_attr(element, attribute)?;
     unsafe {
         if CFGetTypeID(value) == CFNumberGetTypeID() {
             let mut result: f64 = 0.0;
-            let ok = CFNumberGetValue(value, CF_NUMBER_FLOAT64, &mut result as *mut _ as *mut c_void);
+            let ok = CFNumberGetValue(
+                value,
+                CF_NUMBER_FLOAT64,
+                &mut result as *mut _ as *mut c_void,
+            );
             CFRelease(value);
-            if ok { Some(result) } else { None }
+            if ok {
+                Some(result)
+            } else {
+                None
+            }
         } else {
             CFRelease(value);
             None
@@ -197,14 +208,23 @@ fn ax_number_f64(element: AXUIElementRef, attribute: &str) -> Option<f64> {
     }
 }
 
+#[allow(dead_code)]
 fn ax_number_i32(element: AXUIElementRef, attribute: &str) -> Option<i32> {
     let value = ax_attr(element, attribute)?;
     unsafe {
         if CFGetTypeID(value) == CFNumberGetTypeID() {
             let mut result: i32 = 0;
-            let ok = CFNumberGetValue(value, CF_NUMBER_SINT32, &mut result as *mut _ as *mut c_void);
+            let ok = CFNumberGetValue(
+                value,
+                CF_NUMBER_SINT32,
+                &mut result as *mut _ as *mut c_void,
+            );
             CFRelease(value);
-            if ok { Some(result) } else { None }
+            if ok {
+                Some(result)
+            } else {
+                None
+            }
         } else {
             CFRelease(value);
             None
@@ -212,14 +232,23 @@ fn ax_number_i32(element: AXUIElementRef, attribute: &str) -> Option<i32> {
     }
 }
 
+#[allow(dead_code)]
 fn ax_number_i64(element: AXUIElementRef, attribute: &str) -> Option<i64> {
     let value = ax_attr(element, attribute)?;
     unsafe {
         if CFGetTypeID(value) == CFNumberGetTypeID() {
             let mut result: i64 = 0;
-            let ok = CFNumberGetValue(value, CF_NUMBER_SINT64, &mut result as *mut _ as *mut c_void);
+            let ok = CFNumberGetValue(
+                value,
+                CF_NUMBER_SINT64,
+                &mut result as *mut _ as *mut c_void,
+            );
             CFRelease(value);
-            if ok { Some(result) } else { None }
+            if ok {
+                Some(result)
+            } else {
+                None
+            }
         } else {
             CFRelease(value);
             None
@@ -278,7 +307,11 @@ fn ax_position(element: AXUIElementRef) -> Option<(f64, f64)> {
         safe_ax_value_get_value(value, AX_VALUE_CGPOINT, &mut point as *mut _ as *mut c_void)
     };
     unsafe { CFRelease(value) };
-    if ok { Some((point.x, point.y)) } else { None }
+    if ok {
+        Some((point.x, point.y))
+    } else {
+        None
+    }
 }
 
 fn ax_size(element: AXUIElementRef) -> Option<(f64, f64)> {
@@ -288,7 +321,11 @@ fn ax_size(element: AXUIElementRef) -> Option<(f64, f64)> {
         safe_ax_value_get_value(value, AX_VALUE_CGSIZE, &mut size as *mut _ as *mut c_void)
     };
     unsafe { CFRelease(value) };
-    if ok { Some((size.width, size.height)) } else { None }
+    if ok {
+        Some((size.width, size.height))
+    } else {
+        None
+    }
 }
 
 /// Get value as string, handling both string and numeric AXValue.
@@ -313,6 +350,7 @@ fn ax_value_string(element: AXUIElementRef) -> Option<String> {
 }
 
 /// Get numeric value from AXValue attribute.
+#[allow(dead_code)]
 fn ax_value_number(element: AXUIElementRef) -> Option<f64> {
     let value = ax_attr(element, "AXValue")?;
     unsafe {
@@ -320,7 +358,9 @@ fn ax_value_number(element: AXUIElementRef) -> Option<f64> {
             let mut f: f64 = 0.0;
             let ok = CFNumberGetValue(value, CF_NUMBER_FLOAT64, &mut f as *mut _ as *mut c_void);
             CFRelease(value);
-            if ok { return Some(f); }
+            if ok {
+                return Some(f);
+            }
         }
         CFRelease(value);
         None
@@ -335,7 +375,9 @@ fn ax_value_int(element: AXUIElementRef) -> Option<i32> {
             let mut i: i32 = 0;
             let ok = CFNumberGetValue(value, CF_NUMBER_SINT32, &mut i as *mut _ as *mut c_void);
             CFRelease(value);
-            if ok { return Some(i); }
+            if ok {
+                return Some(i);
+            }
         }
         CFRelease(value);
         None
@@ -351,7 +393,9 @@ fn do_perform_action(element: AXUIElementRef, action: &CFString) -> i32 {
 
 /// Set an AX attribute value, catching ObjC exceptions via the C wrapper.
 fn do_set_attribute(element: AXUIElementRef, attribute: &CFString, value: CFTypeRef) -> i32 {
-    unsafe { safe_ax_set_attribute_value(element, attribute.as_concrete_TypeRef() as CFTypeRef, value) }
+    unsafe {
+        safe_ax_set_attribute_value(element, attribute.as_concrete_TypeRef() as CFTypeRef, value)
+    }
 }
 
 // ── Role Mapping ──────────────────────────────────────────────────────────────
@@ -370,14 +414,16 @@ fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
     match role {
         "AXApplication" => Role::Application,
         "AXWindow" | "AXSheet" | "AXDrawer" => {
-            if role == "AXSheet" { Role::Dialog } else { Role::Window }
-        }
-        "AXButton" => {
-            match subrole {
-                Some("AXDisclosureTriangle") => Role::TreeItem,
-                _ => Role::Button,
+            if role == "AXSheet" {
+                Role::Dialog
+            } else {
+                Role::Window
             }
         }
+        "AXButton" => match subrole {
+            Some("AXDisclosureTriangle") => Role::TreeItem,
+            _ => Role::Button,
+        },
         "AXRadioButton" => Role::RadioButton,
         "AXCheckBox" => Role::CheckBox,
         "AXTextField" | "AXSecureTextField" => Role::TextField,
@@ -407,8 +453,8 @@ fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
         "AXSplitter" => Role::Separator,
         "AXWebArea" => Role::WebArea,
         "AXIncrementor" => Role::TextField, // spin button
-        "AXColorWell" | "AXValueIndicator" | "AXGrid" | "AXRuler"
-        | "AXGrowArea" | "AXMatte" | "AXDockItem" | "AXBrowser" => Role::Unknown,
+        "AXColorWell" | "AXValueIndicator" | "AXGrid" | "AXRuler" | "AXGrowArea" | "AXMatte"
+        | "AXDockItem" | "AXBrowser" => Role::Unknown,
         _ => Role::Unknown,
     }
 }
@@ -425,6 +471,7 @@ fn map_ax_action(name: &str) -> Option<Action> {
     }
 }
 
+#[allow(dead_code)]
 fn xa11y_action_to_ax(action: Action) -> Option<&'static str> {
     match action {
         Action::Press | Action::Toggle | Action::Select => Some("AXPress"),
@@ -563,8 +610,10 @@ impl MacOSProvider {
                     continue;
                 }
 
-                let pid_val = CFDictionaryGetValue(dict, pid_key.as_concrete_TypeRef() as CFTypeRef);
-                let name_val = CFDictionaryGetValue(dict, name_key.as_concrete_TypeRef() as CFTypeRef);
+                let pid_val =
+                    CFDictionaryGetValue(dict, pid_key.as_concrete_TypeRef() as CFTypeRef);
+                let name_val =
+                    CFDictionaryGetValue(dict, name_key.as_concrete_TypeRef() as CFTypeRef);
 
                 if pid_val.is_null() {
                     continue;
@@ -694,7 +743,17 @@ impl MacOSProvider {
                         break;
                     }
                 }
-                self.traverse(child, opts, app_name, nodes, elements, parent_id, depth + 1, screen_size, visited);
+                self.traverse(
+                    child,
+                    opts,
+                    app_name,
+                    nodes,
+                    elements,
+                    parent_id,
+                    depth + 1,
+                    screen_size,
+                    visited,
+                );
             }
             return;
         }
@@ -725,7 +784,17 @@ impl MacOSProvider {
             // Still increment depth to respect the hard limit.
             let children = ax_children(element.as_ptr());
             for child in &children {
-                self.traverse(child, opts, app_name, nodes, elements, parent_id, depth + 1, screen_size, visited);
+                self.traverse(
+                    child,
+                    opts,
+                    app_name,
+                    nodes,
+                    elements,
+                    parent_id,
+                    depth + 1,
+                    screen_size,
+                    visited,
+                );
             }
             return;
         }
@@ -745,7 +814,10 @@ impl MacOSProvider {
             let (sw, sh) = screen_size;
             if sw == 0 || sh == 0 {
                 return NormalizedRect {
-                    left: 0.0, top: 0.0, right: 0.0, bottom: 0.0,
+                    left: 0.0,
+                    top: 0.0,
+                    right: 0.0,
+                    bottom: 0.0,
                 };
             }
             NormalizedRect {
@@ -758,10 +830,7 @@ impl MacOSProvider {
 
         // Actions
         let ax_actions = ax_action_names(element.as_ptr());
-        let mut actions: Vec<Action> = ax_actions
-            .iter()
-            .filter_map(|a| map_ax_action(a))
-            .collect();
+        let mut actions: Vec<Action> = ax_actions.iter().filter_map(|a| map_ax_action(a)).collect();
 
         // Add Focus if the element can be focused
         if ax_bool(element.as_ptr(), "AXFocused").is_some() && !actions.contains(&Action::Focus) {
@@ -827,7 +896,8 @@ impl MacOSProvider {
             }
             if role == Role::Window {
                 let child_subrole = ax_string(child.as_ptr(), "AXSubrole").unwrap_or_default();
-                if matches!(child_subrole.as_str(),
+                if matches!(
+                    child_subrole.as_str(),
                     "AXCloseButton" | "AXMinimizeButton" | "AXFullScreenButton" | "AXZoomButton"
                 ) {
                     continue;
@@ -850,7 +920,17 @@ impl MacOSProvider {
             }
             let child_node_id = nodes.len() as NodeId;
             child_ids.push(child_node_id);
-            self.traverse(child, opts, app_name, nodes, elements, Some(node_id), depth + 1, screen_size, visited);
+            self.traverse(
+                child,
+                opts,
+                app_name,
+                nodes,
+                elements,
+                Some(node_id),
+                depth + 1,
+                screen_size,
+                visited,
+            );
         }
 
         nodes[node_id as usize].children = child_ids;
@@ -928,7 +1008,10 @@ impl Provider for MacOSProvider {
                 height: screen_size.1,
             }),
             bounds_normalized: Some(NormalizedRect {
-                left: 0.0, top: 0.0, right: 1.0, bottom: 1.0,
+                left: 0.0,
+                top: 0.0,
+                right: 1.0,
+                bottom: 1.0,
             }),
             actions: vec![],
             states: StateSet::default(),
@@ -997,7 +1080,9 @@ impl Provider for MacOSProvider {
 
         // Look up cached element
         let cache = self.cached_elements.lock().unwrap();
-        let element = cache.get(node_id as usize).ok_or(Error::ElementStale { node_id })?;
+        let element = cache
+            .get(node_id as usize)
+            .ok_or(Error::ElementStale { node_id })?;
         if element.is_null() {
             return Err(Error::ElementStale { node_id });
         }
@@ -1045,11 +1130,8 @@ impl Provider for MacOSProvider {
                 Some(ActionData::Value(text)) => {
                     let attr = CFString::new("AXValue");
                     let val = CFString::new(&text);
-                    let err = do_set_attribute(
-                        el_ptr,
-                        &attr,
-                        val.as_concrete_TypeRef() as CFTypeRef,
-                    );
+                    let err =
+                        do_set_attribute(el_ptr, &attr, val.as_concrete_TypeRef() as CFTypeRef);
                     if err != AX_ERROR_SUCCESS {
                         return Err(Error::TextValueNotSupported);
                     }
@@ -1241,11 +1323,17 @@ mod tests {
     fn map_ax_role_covers_all_known_roles() {
         // Verify subrole precedence
         assert_eq!(map_ax_role("AXWindow", Some("AXDialog")), Role::Dialog);
-        assert_eq!(map_ax_role("AXGroup", Some("AXApplicationAlert")), Role::Alert);
+        assert_eq!(
+            map_ax_role("AXGroup", Some("AXApplicationAlert")),
+            Role::Alert
+        );
         assert_eq!(map_ax_role("AXGroup", Some("AXSystemAlert")), Role::Alert);
         assert_eq!(map_ax_role("AXButton", Some("AXTabButton")), Role::Tab);
         assert_eq!(map_ax_role("AXRow", Some("AXOutlineRow")), Role::TreeItem);
-        assert_eq!(map_ax_role("AXStaticText", Some("AXHeading")), Role::Heading);
+        assert_eq!(
+            map_ax_role("AXStaticText", Some("AXHeading")),
+            Role::Heading
+        );
 
         // Verify main role mappings
         assert_eq!(map_ax_role("AXApplication", None), Role::Application);
@@ -1253,7 +1341,10 @@ mod tests {
         assert_eq!(map_ax_role("AXSheet", None), Role::Dialog);
         assert_eq!(map_ax_role("AXDrawer", None), Role::Window);
         assert_eq!(map_ax_role("AXButton", None), Role::Button);
-        assert_eq!(map_ax_role("AXButton", Some("AXDisclosureTriangle")), Role::TreeItem);
+        assert_eq!(
+            map_ax_role("AXButton", Some("AXDisclosureTriangle")),
+            Role::TreeItem
+        );
         assert_eq!(map_ax_role("AXRadioButton", None), Role::RadioButton);
         assert_eq!(map_ax_role("AXCheckBox", None), Role::CheckBox);
         assert_eq!(map_ax_role("AXTextField", None), Role::TextField);
