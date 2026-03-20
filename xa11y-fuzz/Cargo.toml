@@ -6,12 +6,9 @@ publish = false
 
 [dependencies]
 xa11y-core = { path = "../xa11y-core" }
-
-[target.'cfg(target_os = "macos")'.dependencies]
 xa11y = { path = "../xa11y" }
 rand = "0.8"
 
 [[bin]]
-name = "macos-provider-fuzz"
-path = "src/bin/macos_provider_fuzz.rs"
-required-features = []
+name = "provider-fuzz"
+path = "src/bin/provider_fuzz.rs"

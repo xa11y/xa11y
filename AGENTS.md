@@ -55,7 +55,11 @@ cargo test --workspace
 # Integration tests (macOS — needs xa11y-macos provider)
 ./run_integ_tests_macos.sh
 
-# Fuzz tests (requires nightly)
+# Platform provider fuzzer (needs test app running)
+./run_provider_fuzz.sh                    # random seed, 10k iterations
+./run_provider_fuzz.sh --seed 42 -n 5000  # reproducible
+
+# Core fuzz tests (requires nightly)
 cd xa11y-fuzz/fuzz && cargo +nightly fuzz run tree_ops -- -max_total_time=60
 
 # Coverage report

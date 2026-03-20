@@ -1,24 +1,18 @@
-//! macOS platform fuzzer for xa11y.
+//! Cross-platform accessibility provider fuzzer for xa11y.
 //!
-//! Exercises all code paths in xa11y-macos by randomly querying and acting on
-//! a live xa11y-test-app via the Provider API. Uses a seeded PRNG so crashes
-//! are reproducible: re-run with the same --seed to replay.
+//! Exercises all code paths in the platform provider by randomly querying and
+//! acting on a live xa11y-test-app via the Provider API. Uses a seeded PRNG
+//! so crashes are reproducible: re-run with the same --seed to replay.
 //!
-//! Usage: macos-provider-fuzz [--seed N] [--iterations N] [--verbose]
+//! Works on macOS (AXUIElement), Linux (AT-SPI2), and Windows (UIA).
+//!
+//! Usage: provider-fuzz [--seed N] [--iterations N] [--verbose]
 
-#[cfg(not(target_os = "macos"))]
 fn main() {
-    eprintln!("This fuzzer only runs on macOS");
-    std::process::exit(1);
+    provider_fuzz::run();
 }
 
-#[cfg(target_os = "macos")]
-fn main() {
-    macos_fuzz::run();
-}
-
-#[cfg(target_os = "macos")]
-mod macos_fuzz {
+mod provider_fuzz {
     use rand::prelude::*;
     use std::time::{SystemTime, UNIX_EPOCH};
     use xa11y::*;
@@ -446,9 +440,8 @@ mod macos_fuzz {
     }
 
     fn op_get_all_apps(state: &mut FuzzState) {
-        // Cap depth and elements — other apps can have stale CF objects that
-        // crash on access. Our AX-level @try/@catch guards handle most cases
-        // but CF-level races with other apps are unavoidable.
+        // Cap depth and elements — traversing all system apps can be slow
+        // (AT-SPI on Linux, AX on macOS) and other apps may have stale objects.
         let mut opts = random_query_options(&mut state.rng);
         opts.max_depth = Some(opts.max_depth.map_or(3, |d| d.min(3)));
         opts.max_elements = Some(opts.max_elements.map_or(100, |n| n.min(100)));
@@ -793,7 +786,7 @@ mod macos_fuzz {
     pub fn run() {
         let args = parse_args();
 
-        eprintln!("=== xa11y macOS Provider Fuzzer ===");
+        eprintln!("=== xa11y Provider Fuzzer ===");
         eprintln!("Seed:       {}", args.seed);
         eprintln!("Iterations: {}", args.iterations);
         eprintln!();

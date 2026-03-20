@@ -84,9 +84,10 @@ sleep 1
 echo "Building workspace..."
 cargo build --workspace 2>&1
 
-# 4. Launch the test application
+# 4. Launch the test application (run binary directly, not via cargo run,
+#    because cargo run changes the process owner name in AT-SPI)
 echo "Launching xa11y-test-app..."
-cargo run -p xa11y-test-app -- --headless &
+./target/debug/xa11y-test-app --headless &
 CLEANUP_PIDS+=($!)
 
 # Wait for the app to start and register with AT-SPI
