@@ -26,6 +26,23 @@ Integration tests use shared helpers from `xa11y/tests/integ/mod.rs`:
 - **EventProvider** — no tests at all (not yet implemented for any provider)
 - **macOS integration tests** — blocked on `xa11y-macos` provider implementation
 
+## Pre-Commit / Pre-PR Checklist
+
+CI runs with `RUSTFLAGS: -Dwarnings`, so all warnings are errors. Before committing or opening a PR, verify:
+
+1. **Formatting** — `cargo fmt --all` (CI runs `cargo fmt --all -- --check`)
+2. **No warnings** — `RUSTFLAGS="-Dwarnings" cargo check --workspace` (catches unused imports, dead code, etc.)
+3. **Unit tests pass** — `cargo test --workspace`
+4. **Integration tests pass** (if touching provider/test-app code):
+   - Linux: `./run_integ_tests.sh`
+   - macOS: `./run_integ_tests_macos.sh`
+5. **No new `#[allow(...)]` without justification** — if you must suppress a warning, add a comment explaining why
+
+Common CI failures:
+- `unused import` / `dead_code` — remove the unused code or add `#[allow(dead_code)]` with a reason
+- Formatting diffs — run `cargo fmt`
+- Platform stubs (`xa11y-macos` on Linux, `xa11y-linux` on macOS) — make sure stub modules compile cleanly on all platforms
+
 ## Running Tests
 
 ```bash
@@ -49,9 +66,9 @@ cd xa11y-fuzz/fuzz && cargo +nightly fuzz run tree_ops -- -max_total_time=60
 
 - `xa11y-core/` — Platform-independent types, traits, selector engine
 - `xa11y-linux/` — AT-SPI2 backend via zbus
-- `xa11y-macos/` — macOS backend (stub)
+- `xa11y-macos/` — macOS backend (AXUIElement, with ObjC exception safety)
 - `xa11y-windows/` — Windows backend (stub)
 - `xa11y/` — Umbrella crate, unit tests, integration tests
 - `xa11y-test-app/` — AccessKit + winit app used as target for integration tests
-- `xa11y-fuzz/` — Fuzz targets for xa11y-core (tree, selector, serde)
+- `xa11y-fuzz/` — Fuzz targets for xa11y-core (tree, selector, serde) and macOS platform fuzzer
 - `docs/DESIGN.md` — Full design specification
