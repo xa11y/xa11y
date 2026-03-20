@@ -130,7 +130,12 @@ fn build_tree(state: &AppState) -> TreeUpdate {
     let mut window = Node::new(Role::Window);
     window.set_label(WINDOW_TITLE);
     window.set_children(vec![
-        MENU_BAR, TOOLBAR, TAB_GROUP, MAIN_PANEL, LISTS_PANEL, EXTRA_PANEL,
+        MENU_BAR,
+        TOOLBAR,
+        TAB_GROUP,
+        MAIN_PANEL,
+        LISTS_PANEL,
+        EXTRA_PANEL,
     ]);
     window.set_bounds(Rect {
         x0: 0.0,
@@ -183,7 +188,11 @@ fn build_menu_bar(nodes: &mut Vec<(NodeId, Node)>) {
     file_menu.set_children(vec![OPEN_ITEM, SAVE_ITEM, FILE_SEPARATOR, QUIT_ITEM]);
     nodes.push((FILE_MENU, file_menu));
 
-    for (id, label) in [(OPEN_ITEM, "Open"), (SAVE_ITEM, "Save"), (QUIT_ITEM, "Quit")] {
+    for (id, label) in [
+        (OPEN_ITEM, "Open"),
+        (SAVE_ITEM, "Save"),
+        (QUIT_ITEM, "Quit"),
+    ] {
         let mut item = Node::new(Role::MenuItem);
         item.set_label(label);
         item.add_action(Action::Click);
@@ -251,7 +260,11 @@ fn build_tab_group(nodes: &mut Vec<(NodeId, Node)>) {
     tab_group.set_children(vec![MAIN_TAB, LISTS_TAB, EXTRA_TAB]);
     nodes.push((TAB_GROUP, tab_group));
 
-    for (id, label) in [(MAIN_TAB, "Main"), (LISTS_TAB, "Lists"), (EXTRA_TAB, "Extra")] {
+    for (id, label) in [
+        (MAIN_TAB, "Main"),
+        (LISTS_TAB, "Lists"),
+        (EXTRA_TAB, "Extra"),
+    ] {
         let mut tab = Node::new(Role::Tab);
         tab.set_label(label);
         tab.add_action(Action::Click);
@@ -753,8 +766,7 @@ impl ApplicationHandler<AccessKitEvent> for Application {
             .create_window(window_attributes)
             .expect("Failed to create window");
 
-        let adapter =
-            Adapter::with_event_loop_proxy(event_loop, &window, self.proxy.clone());
+        let adapter = Adapter::with_event_loop_proxy(event_loop, &window, self.proxy.clone());
 
         window.set_visible(true);
 

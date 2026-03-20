@@ -31,7 +31,13 @@ mod stub {
         fn get_all_apps(&self, _: &QueryOptions) -> Result<Tree> {
             unreachable!()
         }
-        fn perform_action(&self, _: &Tree, _: NodeId, _: Action, _: Option<ActionData>) -> Result<()> {
+        fn perform_action(
+            &self,
+            _: &Tree,
+            _: NodeId,
+            _: Action,
+            _: Option<ActionData>,
+        ) -> Result<()> {
             unreachable!()
         }
         fn check_permissions(&self) -> Result<PermissionStatus> {
