@@ -819,7 +819,7 @@ fn get_process_name(pid: u32) -> Option<String> {
         let ok = QueryFullProcessImageNameW(
             handle,
             PROCESS_NAME_WIN32,
-            PWSTR(buf.as_mut_ptr()),
+            windows::core::PWSTR(buf.as_mut_ptr()),
             &mut size,
         );
         let _ = CloseHandle(handle);
