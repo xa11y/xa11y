@@ -184,7 +184,6 @@ fn ax_bool(element: AXUIElementRef, attribute: &str) -> Option<bool> {
     }
 }
 
-#[allow(dead_code)]
 fn ax_number_f64(element: AXUIElementRef, attribute: &str) -> Option<f64> {
     let value = ax_attr(element, attribute)?;
     unsafe {
@@ -350,7 +349,6 @@ fn ax_value_string(element: AXUIElementRef) -> Option<String> {
 }
 
 /// Get numeric value from AXValue attribute.
-#[allow(dead_code)]
 fn ax_value_number(element: AXUIElementRef) -> Option<f64> {
     let value = ax_attr(element, "AXValue")?;
     unsafe {
@@ -408,6 +406,7 @@ fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
         Some("AXTabButton") => return Role::Tab,
         Some("AXOutlineRow") => return Role::TreeItem,
         Some("AXHeading") => return Role::Heading,
+        Some("AXSwitch") => return Role::Switch,
         _ => {}
     }
 
@@ -452,7 +451,9 @@ fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
         "AXSplitGroup" => Role::SplitGroup,
         "AXSplitter" => Role::Separator,
         "AXWebArea" => Role::WebArea,
-        "AXIncrementor" => Role::TextField, // spin button
+        "AXIncrementor" => Role::SpinButton,
+        "AXToolTip" => Role::Tooltip,
+        "AXStatusBar" => Role::Status,
         "AXColorWell" | "AXValueIndicator" | "AXGrid" | "AXRuler" | "AXGrowArea" | "AXMatte"
         | "AXDockItem" | "AXBrowser" => Role::Unknown,
         _ => Role::Unknown,
@@ -478,6 +479,11 @@ fn xa11y_action_to_ax(action: Action) -> Option<&'static str> {
         Action::ShowMenu => Some("AXShowMenu"),
         Action::Increment => Some("AXIncrement"),
         Action::Decrement => Some("AXDecrement"),
+        Action::Scroll
+        | Action::Blur
+        | Action::SetTextSelection
+        | Action::TypeText
+        | Action::DragTo => None,
         _ => None,
     }
 }
@@ -541,10 +547,33 @@ fn parse_states(element: AXUIElementRef, role: Role) -> StateSet {
         _ => false,
     };
 
+    // Focusable: interactive roles that can receive keyboard focus
+    let focusable = matches!(
+        role,
+        Role::Button
+            | Role::TextField
+            | Role::TextArea
+            | Role::CheckBox
+            | Role::RadioButton
+            | Role::ComboBox
+            | Role::Slider
+            | Role::Link
+            | Role::Tab
+            | Role::MenuItem
+            | Role::ListItem
+            | Role::TreeItem
+            | Role::SpinButton
+            | Role::Switch
+    ) || ax_bool(element, "AXFocused").is_some();
+
+    let modal = ax_bool(element, "AXModal").unwrap_or(false);
+
     StateSet {
         enabled,
         visible,
         focused,
+        focusable,
+        modal,
         checked,
         selected,
         expanded,
@@ -683,7 +712,6 @@ impl MacOSProvider {
         &self,
         element: &AXElement,
         opts: &QueryOptions,
-        app_name: &str,
         nodes: &mut Vec<Node>,
         elements: &mut Vec<AXElement>,
         parent_idx: Option<u32>,
@@ -737,7 +765,6 @@ impl MacOSProvider {
                 self.traverse(
                     child,
                     opts,
-                    app_name,
                     nodes,
                     elements,
                     parent_idx,
@@ -778,7 +805,6 @@ impl MacOSProvider {
                 self.traverse(
                     child,
                     opts,
-                    app_name,
                     nodes,
                     elements,
                     parent_idx,
@@ -849,6 +875,21 @@ impl MacOSProvider {
             None
         };
 
+        // Numeric value for range controls
+        let numeric_value = match role {
+            Role::Slider | Role::ProgressBar | Role::SpinButton => ax_value_number(element.as_ptr()),
+            _ => None,
+        };
+
+        // Min/Max values for sliders
+        let (min_value, max_value) = match role {
+            Role::Slider => (
+                ax_number_f64(element.as_ptr(), "AXMinValue"),
+                ax_number_f64(element.as_ptr(), "AXMaxValue"),
+            ),
+            _ => (None, None),
+        };
+
         let node_idx = nodes.len() as u32;
         let name_ref = name.clone(); // keep for window chrome filter below
         nodes.push(Node {
@@ -862,7 +903,9 @@ impl MacOSProvider {
             states,
             depth,
             stable_id: ax_identifier,
-            app_name: Some(app_name.to_string()),
+            numeric_value,
+            min_value,
+            max_value,
             raw,
             index: node_idx,
             children_indices: vec![], // filled below
@@ -918,7 +961,6 @@ impl MacOSProvider {
             self.traverse(
                 child,
                 opts,
-                app_name,
                 nodes,
                 elements,
                 Some(node_idx),
@@ -956,7 +998,6 @@ impl Provider for MacOSProvider {
         self.traverse(
             &app_element,
             opts,
-            &app_name,
             &mut nodes,
             &mut elements,
             None,
@@ -1013,7 +1054,9 @@ impl Provider for MacOSProvider {
             parent_index: None,
             depth: 0,
             stable_id: None,
-            app_name: Some("Desktop".to_string()),
+            numeric_value: None,
+            min_value: None,
+            max_value: None,
             raw: None,
         });
         elements.push(AXElement(std::ptr::null())); // placeholder
@@ -1022,7 +1065,7 @@ impl Provider for MacOSProvider {
         let mut root_children = Vec::new();
 
         let mut visited = HashSet::new();
-        for (pid, app_name) in &apps {
+        for (pid, _app_name) in &apps {
             let app_element = AXElement::from_owned(unsafe { safe_ax_create_application(*pid) });
             if app_element.is_null() {
                 continue;
@@ -1032,7 +1075,6 @@ impl Provider for MacOSProvider {
             self.traverse(
                 &app_element,
                 opts,
-                app_name,
                 &mut nodes,
                 &mut elements,
                 Some(0),
@@ -1193,6 +1235,15 @@ impl Provider for MacOSProvider {
                 // No direct AX equivalent; no-op
                 Ok(())
             }
+
+            Action::Scroll
+            | Action::Blur
+            | Action::SetTextSelection
+            | Action::TypeText
+            | Action::DragTo => Err(Error::ActionNotSupported {
+                action,
+                role: node.role,
+            }),
         }
     }
 
@@ -1371,7 +1422,7 @@ mod tests {
         assert_eq!(map_ax_role("AXSplitGroup", None), Role::SplitGroup);
         assert_eq!(map_ax_role("AXSplitter", None), Role::Separator);
         assert_eq!(map_ax_role("AXWebArea", None), Role::WebArea);
-        assert_eq!(map_ax_role("AXIncrementor", None), Role::TextField);
+        assert_eq!(map_ax_role("AXIncrementor", None), Role::SpinButton);
         assert_eq!(map_ax_role("AXColorWell", None), Role::Unknown);
         assert_eq!(map_ax_role("AXValueIndicator", None), Role::Unknown);
         assert_eq!(map_ax_role("TotallyUnknownRole", None), Role::Unknown);

@@ -726,7 +726,9 @@ mod provider_fuzz {
             let _ = &node.actions;
             let _ = &node.states;
             let _ = &node.depth;
-            let _ = &node.app_name;
+            let _ = &node.numeric_value;
+            let _ = &node.min_value;
+            let _ = &node.max_value;
             let _ = &node.raw;
             let _ = &node.stable_id;
         }

@@ -72,12 +72,9 @@ mod tests {
         assert_eq!(tree.app_name, "Desktop");
         assert!(tree.pid.is_none(), "Multi-app tree should have no PID");
         // With limited traversal, test app should still appear at depth 1-2
-        let has_test_app = tree.iter().any(|n| {
-            n.app_name
-                .as_deref()
-                .is_some_and(|name| name.contains("xa11y"))
-                || n.name.as_deref().is_some_and(|name| name.contains("xa11y"))
-        });
+        let has_test_app = tree
+            .iter()
+            .any(|n| n.name.as_deref().is_some_and(|name| name.contains("xa11y")));
         assert!(
             has_test_app,
             "get_all_apps should include the test app. Apps: {:?}",
@@ -667,10 +664,8 @@ mod tests {
         let children = tree.children(root);
         assert!(!children.is_empty());
         for child in &children {
-            assert!(
-                child.role != Role::Unknown || true,
-                "Child should be a valid node"
-            );
+            // Verify child is a valid node (role may be Unknown for unrecognized elements)
+            let _ = child.role;
         }
     }
 
@@ -1587,18 +1582,4 @@ mod tests {
         assert_eq!(deser.app_name, tree.app_name);
     }
 
-    #[test]
-    #[ignore]
-    fn app_name_populated_all_nodes() {
-        let p = h::provider();
-        let tree = h::app_tree(&*p);
-        for node in tree.iter() {
-            assert!(node.app_name.is_some(), "All nodes should have app_name");
-            assert!(
-                node.app_name.as_deref().unwrap().contains("xa11y"),
-                "app_name should contain 'xa11y', got: {:?}",
-                node.app_name
-            );
-        }
-    }
 }

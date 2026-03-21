@@ -44,6 +44,16 @@ pub enum Role {
     Heading,
     Separator,
     SplitGroup,
+    /// Toggle switch (distinct from CheckBox)
+    Switch,
+    /// Numeric spinner input
+    SpinButton,
+    /// Tooltip popup
+    Tooltip,
+    /// Status bar or live region
+    Status,
+    /// Navigation landmark
+    Navigation,
 }
 
 impl Role {
@@ -85,6 +95,11 @@ impl Role {
             "heading" => Some(Role::Heading),
             "separator" => Some(Role::Separator),
             "split_group" => Some(Role::SplitGroup),
+            "switch" => Some(Role::Switch),
+            "spin_button" | "spinbutton" => Some(Role::SpinButton),
+            "tooltip" | "tool_tip" => Some(Role::Tooltip),
+            "status" | "status_bar" => Some(Role::Status),
+            "navigation" => Some(Role::Navigation),
             _ => None,
         }
     }
@@ -126,6 +141,11 @@ impl Role {
             Role::Heading => "heading",
             Role::Separator => "separator",
             Role::SplitGroup => "split_group",
+            Role::Switch => "switch",
+            Role::SpinButton => "spin_button",
+            Role::Tooltip => "tooltip",
+            Role::Status => "status",
+            Role::Navigation => "navigation",
         }
     }
 }
