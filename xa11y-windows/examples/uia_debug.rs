@@ -6,7 +6,7 @@ fn main() {
     use windows::Win32::UI::Accessibility::*;
 
     unsafe {
-        let _ = CoInitializeEx(None, COINIT(0x2)); // STA
+        let _ = CoInitializeEx(None, COINIT(0x0)); // MTA (COINIT_MULTITHREADED)
 
         let automation: IUIAutomation = CoCreateInstance(&CUIAutomation8, None, CLSCTX_ALL)
             .expect("CoCreateInstance failed");
