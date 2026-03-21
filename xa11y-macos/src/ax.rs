@@ -838,10 +838,10 @@ impl MacOSProvider {
         }
 
         // Add SetValue for text fields and sliders
-        if matches!(role, Role::TextField | Role::TextArea | Role::Slider) {
-            if !actions.contains(&Action::SetValue) {
-                actions.push(Action::SetValue);
-            }
+        if matches!(role, Role::TextField | Role::TextArea | Role::Slider)
+            && !actions.contains(&Action::SetValue)
+        {
+            actions.push(Action::SetValue);
         }
 
         // Raw platform data

@@ -545,7 +545,7 @@ mod provider_fuzz {
             None => return,
         };
 
-        if tree.len() == 0 {
+        if tree.is_empty() {
             return;
         }
 
@@ -677,7 +677,7 @@ mod provider_fuzz {
             None => return,
         };
 
-        if tree.len() == 0 {
+        if tree.is_empty() {
             return;
         }
 
@@ -698,7 +698,7 @@ mod provider_fuzz {
             None => return,
         };
 
-        if tree.len() == 0 {
+        if tree.is_empty() {
             return;
         }
 
@@ -754,7 +754,7 @@ mod provider_fuzz {
                     let _ = tree.dump();
                 }
                 1 => {
-                    if tree.len() > 0 {
+                    if !tree.is_empty() {
                         let id = rng.gen_range(0..tree.len()) as NodeId;
                         let _ = tree.get(id);
                         let _ = tree.children(id);
@@ -771,7 +771,7 @@ mod provider_fuzz {
                     let _ = tree.query("button");
                 }
                 5 => {
-                    if tree.len() > 0 {
+                    if !tree.is_empty() {
                         let id = rng.gen_range(0..tree.len()) as NodeId;
                         let _ = tree.subtree(id);
                     }
@@ -806,15 +806,12 @@ mod provider_fuzz {
         // Find test app
         let mut test_app_pid = 0u32;
         for attempt in 0..10 {
-            match provider.list_apps() {
-                Ok(apps) => {
-                    if let Some(app) = apps.iter().find(|a| a.name.contains("xa11y")) {
-                        test_app_pid = app.pid;
-                        eprintln!("Test app:   {} (PID {})", app.name, app.pid);
-                        break;
-                    }
+            if let Ok(apps) = provider.list_apps() {
+                if let Some(app) = apps.iter().find(|a| a.name.contains("xa11y")) {
+                    test_app_pid = app.pid;
+                    eprintln!("Test app:   {} (PID {})", app.name, app.pid);
+                    break;
                 }
-                Err(_) => {}
             }
             if attempt < 9 {
                 eprintln!("Waiting for xa11y-test-app... (attempt {})", attempt + 1);

@@ -11,20 +11,10 @@ env:
   RUSTFLAGS: -Dwarnings
 
 jobs:
-  # Run unit tests on all platforms
-  test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            platform_crate: xa11y-linux
-          - os: macos-latest
-            platform_crate: xa11y-macos
-          - os: windows-latest
-            platform_crate: xa11y-windows
+  # ── Linux: unit tests + integration tests ──────────────────────────
+  linux:
+    name: Linux
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -42,42 +32,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
-      - name: Build all crates
-        run: cargo build --workspace
-
-      - name: Run unit tests (xa11y-core)
-        run: cargo test -p xa11y-core
-
-      - name: Run unit tests (platform backend)
-        run: cargo test -p ${{ matrix.platform_crate }}
-
-      - name: Run unit tests (xa11y)
-        run: cargo test -p xa11y --test unit_test
-
-      - name: Run all workspace tests
-        run: cargo test --workspace
-
-  # Linux integration tests with AT-SPI2 + accesskit test app
-  integ-test:
-    name: Integration Tests (Linux)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-integ-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-integ-
-
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -93,23 +47,79 @@ jobs:
             libxcb-render0 \
             libxcb-shape0 \
             libxcb-xfixes0
-          # at-spi2-core provides the daemons; on Ubuntu 24.04 only at-spi2-common may exist
           sudo apt-get install -y at-spi2-core || sudo apt-get install -y at-spi2-common
-          # dbus-x11 provides dbus-launch; not needed since we use dbus-run-session,
-          # but install if available for broader compat
           sudo apt-get install -y dbus-x11 || true
+
+      - name: Run unit tests
+        run: cargo test --workspace
 
       - name: Run integration tests
         run: ./run_integ_tests.sh
 
-  # Lint and format checks (single OS is sufficient)
+  # ── macOS: unit tests ──────────────────────────────────────────────
+  macos:
+    name: macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run unit tests
+        run: cargo test --workspace
+
+      # Integration tests require accessibility permissions (TCC),
+      # which GitHub Actions runners don't grant. Run locally with:
+      #   ./run_integ_tests_macos.sh
+
+  # ── Windows: unit tests ────────────────────────────────────────────
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Run unit tests
+        run: cargo test --workspace
+
+      # Integration tests require an interactive desktop session for UIA.
+      # GitHub Actions runners don't provide one. Run locally or on EC2 with:
+      #   .\run_integ_tests_windows.ps1
+
+  # ── Lint & format ──────────────────────────────────────────────────
   lint:
     name: Lint & Format
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust toolchain with clippy and rustfmt
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -131,9 +141,12 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets
 
-  # Cross-compilation check (ensures core crate compiles for all targets)
-  cross-check:
-    name: Cross-check (all targets)
+  # ── Cross-compilation ──────────────────────────────────────────────
+  # Verifies xa11y-core compiles for targets we can't run tests on
+  # (e.g., cross-compiling the platform-agnostic core from Linux to
+  # macOS/ARM). Catches conditional compilation issues early.
+  cross-compile:
+    name: Cross-compile check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -154,14 +167,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-cross-
 
-      - name: Check compilation (all targets)
+      - name: Check xa11y-core compiles for all targets
         run: |
           for target in x86_64-apple-darwin aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
             echo "=== Checking $target ==="
             cargo check -p xa11y-core --target $target
           done
 
-  # Fuzz testing (short runs to catch regressions)
+  # ── Fuzz testing ───────────────────────────────────────────────────
   fuzz:
     name: Fuzz (10s per target)
     runs-on: ubuntu-latest
