@@ -839,9 +839,10 @@ impl MacOSProvider {
 
         // Add SetValue for text fields and sliders
         if matches!(role, Role::TextField | Role::TextArea | Role::Slider)
-            && !actions.contains(&Action::SetValue) {
-                actions.push(Action::SetValue);
-            }
+            && !actions.contains(&Action::SetValue)
+        {
+            actions.push(Action::SetValue);
+        }
 
         // Raw platform data
         let raw = if opts.include_raw {
