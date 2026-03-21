@@ -24,16 +24,10 @@ impl ComInit {
         // Try STA first — UIA needs STA for proper IRawElementProviderFragmentRoot
         // callbacks (e.g., AccessKit virtual elements). If already initialized as
         // MTA (common in multi-threaded apps), fall back gracefully.
-        let result = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-        match result {
-            Ok(()) => {}
-            Err(ref e) if e.code().0 as u32 == 0x80010106 => {
-                // RPC_E_CHANGED_MODE: already initialized with MTA, that's OK
-            }
-            Err(ref e) if e.code().0 == 1 => {
-                // S_FALSE: COM already initialized on this thread, that's OK
-            }
-            Err(e) => return Err(e),
+        let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        // S_OK (0) or S_FALSE (1) = success, RPC_E_CHANGED_MODE = already MTA (OK)
+        if hr.is_err() && hr.0 as u32 != 0x80010106 {
+            hr.ok()?;
         }
         Ok(Self)
     }
