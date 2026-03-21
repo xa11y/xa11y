@@ -244,8 +244,8 @@ This would be a thin layer over existing primitives. The `Locator` would hold `(
 ## 9. Summary of Recommendations
 
 ### High Priority
-1. **Add `stable_id: Option<String>`** to `Node` — carry platform stable identifiers (`AXIdentifier`, `AutomationId`, `AccessibleId`) for cross-snapshot correlation
-2. **Decouple `include_raw` from action dispatch** — always capture platform handles internally for action dispatch, make `include_raw` only control user-visible raw data
+1. ~~**Add `stable_id: Option<String>`** to `Node`~~ — **DONE** (included in §10 refactor)
+2. ~~**Decouple `include_raw` from action dispatch**~~ — **DONE** (included in §10 refactor)
 3. **Add a `Locator` abstraction** — thin wrapper that auto-resolves selectors against fresh snapshots on each action, completing the Playwright pattern
 
 ### Medium Priority
@@ -263,7 +263,7 @@ This would be a thin layer over existing primitives. The `Locator` would hold `(
 
 ---
 
-## 10. Planned Refactor: Node Identity and Tree Navigation
+## 10. ~~Planned Refactor: Node Identity and Tree Navigation~~ — DONE
 
 ### Goal
 
