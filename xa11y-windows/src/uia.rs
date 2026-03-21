@@ -5,9 +5,7 @@ use std::sync::Mutex;
 
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, ReleaseDC, HORZRES, VERTRES};
-use windows::Win32::System::Com::{
-    CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED,
-};
+use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT};
 use windows::Win32::System::Threading::*;
 use windows::Win32::UI::Accessibility::*;
 
@@ -24,7 +22,8 @@ impl ComInit {
         // Try STA first — UIA needs STA for proper IRawElementProviderFragmentRoot
         // callbacks (e.g., AccessKit virtual elements). If already initialized as
         // MTA (common in multi-threaded apps), fall back gracefully.
-        let hr = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        // COINIT_APARTMENTTHREADED = 0x2
+        let hr = unsafe { CoInitializeEx(None, COINIT(0x2)) };
         // S_OK (0) or S_FALSE (1) = success, RPC_E_CHANGED_MODE = already MTA (OK)
         if hr.is_err() && hr.0 as u32 != 0x80010106 {
             hr.ok()?;
