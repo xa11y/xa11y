@@ -1043,27 +1043,34 @@ impl Provider for LinuxProvider {
                         })
                     }
                 };
-                // Focus the element first
-                if let Ok(proxy) =
-                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")
-                {
-                    let _ = proxy.call_method("GrabFocus", &());
-                }
-                // Use AT-SPI DeviceEventController.GenerateKeyboardEvent
-                let dec = self.make_proxy(
-                    "org.a11y.atspi.Registry",
-                    "/org/a11y/atspi/registry/deviceeventcontroller",
-                    "org.a11y.atspi.DeviceEventController",
-                )?;
-                for ch in text.chars() {
-                    let ch_str = ch.to_string();
-                    // synth_type 4 = KEY_STRING (generate from UTF-8 string)
-                    dec.call_method("GenerateKeyboardEvent", &(0i32, &*ch_str, 4u32))
-                        .map_err(|e| Error::Platform {
-                            code: -1,
-                            message: format!("GenerateKeyboardEvent failed: {}", e),
-                        })?;
-                }
+                // Insert text via EditableText interface (accessibility API, not input simulation).
+                // Get cursor position from Text interface, then insert at that position.
+                let text_proxy =
+                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Text");
+                let insert_pos = text_proxy
+                    .as_ref()
+                    .ok()
+                    .and_then(|p| p.get_property::<i32>("CaretOffset").ok())
+                    .unwrap_or(-1); // -1 = append at end
+
+                let proxy = self
+                    .make_proxy(
+                        &target.bus_name,
+                        &target.path,
+                        "org.a11y.atspi.EditableText",
+                    )
+                    .map_err(|_| Error::TextValueNotSupported)?;
+                let pos = if insert_pos >= 0 {
+                    insert_pos
+                } else {
+                    i32::MAX
+                };
+                proxy
+                    .call_method("InsertText", &(pos, &*text, text.len() as i32))
+                    .map_err(|e| Error::Platform {
+                        code: -1,
+                        message: format!("EditableText.InsertText failed: {}", e),
+                    })?;
                 Ok(())
             }
 

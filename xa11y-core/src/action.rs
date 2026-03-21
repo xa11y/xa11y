@@ -44,7 +44,11 @@ pub enum Action {
     ///
     /// Accepts `ActionData::TextSelection { start, end }`.
     SetTextSelection,
-    /// Type text character-by-character (input simulation).
+    /// Insert text at the current cursor position via the accessibility API.
+    ///
+    /// Uses platform text-editing interfaces (AXSelectedText on macOS,
+    /// EditableText.InsertText on Linux, ValuePattern on Windows) — never
+    /// synthetic keyboard events.
     ///
     /// Accepts `ActionData::Value(String)`.
     TypeText,

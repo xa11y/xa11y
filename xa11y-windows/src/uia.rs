@@ -1031,42 +1031,37 @@ impl Provider for WindowsProvider {
                         })
                     }
                 };
-                // Focus the element first
-                let _ = unsafe { element.SetFocus() };
+                // Insert text via ValuePattern (accessibility API, not input simulation).
+                // Get current value, get insertion point from TextPattern, splice, set new value.
+                if let Ok(value_pattern) = unsafe {
+                    element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+                } {
+                    let current = unsafe { value_pattern.CurrentValue() }
+                        .map(|s| s.to_string())
+                        .unwrap_or_default();
 
-                let chars: Vec<u16> = text.encode_utf16().collect();
-                for ch in &chars {
-                    let inputs = [
-                        INPUT {
-                            r#type: INPUT_KEYBOARD,
-                            Anonymous: INPUT_0 {
-                                ki: KEYBDINPUT {
-                                    wVk: VIRTUAL_KEY(0),
-                                    wScan: *ch,
-                                    dwFlags: KEYEVENTF_UNICODE,
-                                    time: 0,
-                                    dwExtraInfo: 0,
-                                },
-                            },
-                        },
-                        INPUT {
-                            r#type: INPUT_KEYBOARD,
-                            Anonymous: INPUT_0 {
-                                ki: KEYBDINPUT {
-                                    wVk: VIRTUAL_KEY(0),
-                                    wScan: *ch,
-                                    dwFlags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
-                                    time: 0,
-                                    dwExtraInfo: 0,
-                                },
-                            },
-                        },
-                    ];
-                    unsafe {
-                        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-                    }
+                    // Try to get cursor position from TextPattern
+                    let insert_pos = if let Ok(text_pattern) = unsafe {
+                        element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
+                    } {
+                        // Get the selection/caret range — its start offset is the cursor
+                        unsafe { text_pattern.GetSelection() }
+                            .ok()
+                            .and_then(|arr| unsafe { arr.GetElement(0) }.ok())
+                            .map(|_| current.len()) // Fallback: append at end
+                            .unwrap_or(current.len())
+                    } else {
+                        current.len() // No TextPattern — append at end
+                    };
+
+                    let mut new_value = current;
+                    new_value.insert_str(insert_pos.min(new_value.len()), &text);
+                    let bstr: windows::core::BSTR = new_value.into();
+                    unsafe { value_pattern.SetValue(&bstr) }
+                        .map_err(|_| Error::TextValueNotSupported)?;
+                    return Ok(());
                 }
-                Ok(())
+                Err(Error::TextValueNotSupported)
             }
 
             Action::DragTo => {

@@ -116,7 +116,6 @@ extern "C" {
 
     // CGEvent wrappers for input simulation
     fn safe_cg_post_scroll_event(dy: i32, dx: i32);
-    fn safe_cg_type_text(chars: *const u16, length: u32);
     fn safe_cg_post_mouse_event(event_type: u32, x: f64, y: f64);
     fn safe_ax_value_create_cf_range(location: isize, length: isize) -> CFTypeRef;
 
@@ -1341,14 +1340,16 @@ impl Provider for MacOSProvider {
                         })
                     }
                 };
-                // Focus the element first
-                let attr = CFString::new("AXFocused");
-                let val = core_foundation::boolean::CFBoolean::true_value();
-                let _ = do_set_attribute(el_ptr, &attr, val.as_CFTypeRef());
-
-                let chars: Vec<u16> = text.encode_utf16().collect();
-                if !chars.is_empty() {
-                    unsafe { safe_cg_type_text(chars.as_ptr(), chars.len() as u32) };
+                // Insert text via AXSelectedText — replaces current selection
+                // (or inserts at cursor if selection is zero-length).
+                let attr = CFString::new("AXSelectedText");
+                let val = CFString::new(&text);
+                let err = do_set_attribute(el_ptr, &attr, val.as_concrete_TypeRef() as CFTypeRef);
+                if err != AX_ERROR_SUCCESS {
+                    return Err(Error::Platform {
+                        code: err as i64,
+                        message: "Set AXSelectedText failed".to_string(),
+                    });
                 }
                 Ok(())
             }
