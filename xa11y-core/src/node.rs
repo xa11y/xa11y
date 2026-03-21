@@ -39,6 +39,15 @@ pub struct Node {
     /// Depth in the tree (0 = root)
     pub depth: u32,
 
+    /// Numeric value for range controls (sliders, progress bars, spinners).
+    pub numeric_value: Option<f64>,
+
+    /// Minimum value for range controls.
+    pub min_value: Option<f64>,
+
+    /// Maximum value for range controls.
+    pub max_value: Option<f64>,
+
     /// Platform-assigned stable identifier for cross-snapshot correlation.
     /// - macOS: `AXIdentifier`
     /// - Windows: `AutomationId`
@@ -46,9 +55,6 @@ pub struct Node {
     ///
     /// Not all elements have one.
     pub stable_id: Option<String>,
-
-    /// Application name (useful when querying all apps)
-    pub app_name: Option<String>,
 
     /// Platform-specific raw data (opt-in, for debugging)
     pub raw: Option<RawPlatformData>,
@@ -77,7 +83,7 @@ pub struct Node {
 /// element's role, the backend uses the platform's reported value or defaults:
 /// - `enabled`: `true` (elements are enabled unless explicitly disabled)
 /// - `visible`: `true` (elements are visible unless explicitly hidden/offscreen)
-/// - `focused`, `selected`, `editable`, `required`, `busy`: `false`
+/// - `focused`, `focusable`, `modal`, `selected`, `editable`, `required`, `busy`: `false`
 ///
 /// States that are inherently inapplicable use `Option`: `checked` is `None`
 /// for non-checkable elements, `expanded` is `None` for non-expandable elements.
@@ -92,6 +98,10 @@ pub struct StateSet {
     /// None = not expandable
     pub expanded: Option<bool>,
     pub editable: bool,
+    /// Whether the element can receive keyboard focus
+    pub focusable: bool,
+    /// Whether the element is a modal dialog
+    pub modal: bool,
     /// Form field required
     pub required: bool,
     /// Async operation in progress
@@ -108,6 +118,8 @@ impl Default for StateSet {
             selected: false,
             expanded: None,
             editable: false,
+            focusable: false,
+            modal: false,
             required: false,
             busy: false,
         }

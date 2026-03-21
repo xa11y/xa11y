@@ -33,6 +33,12 @@ pub enum EventKind {
     MenuClosed,
     /// An alert or notification was posted.
     Alert,
+    /// Text content changed in an editable element.
+    ///
+    /// On Linux, position comes from the AT-SPI event signal.
+    /// On Windows 10+, position comes from `TextEditTextChangedEventId`.
+    /// On macOS, position is inferred by diffing (may be `None` for ambiguous changes).
+    TextChanged,
 }
 
 /// An accessibility event delivered to subscribers.
@@ -48,8 +54,33 @@ pub struct Event {
     pub state_flag: Option<StateFlag>,
     /// For StateChanged events: the new value of the flag.
     pub state_value: Option<bool>,
+    /// For TextChanged events: details about the text modification.
+    pub text_change: Option<TextChangeData>,
     /// Monotonic timestamp at event receipt.
     pub timestamp: std::time::Instant,
+}
+
+/// Details about a text change event.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextChangeData {
+    /// What kind of text change occurred.
+    pub change_type: TextChangeType,
+    /// Character position where the change occurred.
+    /// `None` on macOS when the change is ambiguous (e.g., full replacement).
+    pub position: Option<u32>,
+}
+
+/// The type of text modification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TextChangeType {
+    /// Text was inserted.
+    Insert,
+    /// Text was deleted.
+    Delete,
+    /// Text was replaced (simultaneous insert + delete).
+    Replace,
+    /// Change type could not be determined (macOS fallback).
+    Unknown,
 }
 
 /// Individual state flags, for use in StateChanged events and filters.
@@ -63,6 +94,8 @@ pub enum StateFlag {
     Selected,
     Expanded,
     Editable,
+    Focusable,
+    Modal,
     Required,
     Busy,
 }

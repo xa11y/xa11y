@@ -234,7 +234,6 @@ impl WindowsProvider {
         &self,
         element: &IUIAutomationElement,
         opts: &QueryOptions,
-        app_name: &str,
         nodes: &mut Vec<Node>,
         elements: &mut Vec<IUIAutomationElement>,
         parent_idx: Option<u32>,
@@ -301,7 +300,6 @@ impl WindowsProvider {
             self.traverse_children(
                 element,
                 opts,
-                app_name,
                 nodes,
                 elements,
                 parent_idx,
@@ -351,7 +349,6 @@ impl WindowsProvider {
             self.traverse_children(
                 element,
                 opts,
-                app_name,
                 nodes,
                 elements,
                 parent_idx,
@@ -425,6 +422,20 @@ impl WindowsProvider {
             .map(|s| s.to_string())
             .filter(|s| !s.is_empty());
 
+        let (numeric_value, min_value, max_value) = if matches!(role, Role::Slider | Role::ProgressBar | Role::ScrollBar | Role::SpinButton) {
+            if let Ok(pattern) = unsafe { element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId) } {
+                (
+                    unsafe { pattern.CurrentValue() }.ok(),
+                    unsafe { pattern.CurrentMinimum() }.ok(),
+                    unsafe { pattern.CurrentMaximum() }.ok(),
+                )
+            } else {
+                (None, None, None)
+            }
+        } else {
+            (None, None, None)
+        };
+
         let node_idx = nodes.len() as u32;
         nodes.push(Node {
             role,
@@ -437,7 +448,9 @@ impl WindowsProvider {
             states,
             depth,
             stable_id,
-            app_name: Some(app_name.to_string()),
+            numeric_value,
+            min_value,
+            max_value,
             raw,
             index: node_idx,
             children_indices: vec![],
@@ -466,7 +479,6 @@ impl WindowsProvider {
                             self.traverse(
                                 &child_el,
                                 opts,
-                                app_name,
                                 nodes,
                                 elements,
                                 Some(node_idx),
@@ -501,7 +513,6 @@ impl WindowsProvider {
                     self.traverse(
                         child_el,
                         opts,
-                        app_name,
                         nodes,
                         elements,
                         Some(node_idx),
@@ -522,7 +533,6 @@ impl WindowsProvider {
         &self,
         element: &IUIAutomationElement,
         opts: &QueryOptions,
-        app_name: &str,
         nodes: &mut Vec<Node>,
         elements: &mut Vec<IUIAutomationElement>,
         parent_idx: Option<u32>,
@@ -544,7 +554,6 @@ impl WindowsProvider {
             self.traverse(
                 child_el,
                 opts,
-                app_name,
                 nodes,
                 elements,
                 parent_idx,
@@ -579,7 +588,6 @@ impl Provider for WindowsProvider {
         self.traverse(
             &app_element,
             opts,
-            &app_name,
             &mut nodes,
             &mut elements,
             None,
@@ -630,7 +638,9 @@ impl Provider for WindowsProvider {
             states: StateSet::default(),
             depth: 0,
             stable_id: None,
-            app_name: Some("Desktop".to_string()),
+            numeric_value: None,
+            min_value: None,
+            max_value: None,
             raw: None,
             index: 0,
             children_indices: vec![],
@@ -683,7 +693,6 @@ impl Provider for WindowsProvider {
                 self.traverse(
                     &el,
                     opts,
-                    &name,
                     &mut nodes,
                     &mut elements,
                     Some(0),
@@ -906,6 +915,10 @@ impl Provider for WindowsProvider {
                     let _ = unsafe { pattern.ScrollIntoView() };
                 }
                 Ok(())
+            }
+
+            Action::Scroll | Action::Blur | Action::SetTextSelection | Action::TypeText | Action::DragTo => {
+                Err(Error::ActionNotSupported { action, role: node.role })
             }
         }
     }
@@ -1142,10 +1155,16 @@ fn parse_states(element: &IUIAutomationElement, role: Role) -> StateSet {
         _ => false,
     };
 
+    let focusable = unsafe { element.CurrentIsKeyboardFocusable() }
+        .unwrap_or(FALSE)
+        == TRUE;
+
     StateSet {
         enabled,
         visible,
         focused,
+        focusable,
+        modal: false,
         checked,
         selected,
         expanded,
@@ -1190,12 +1209,12 @@ fn map_uia_control_type(control_type: UIA_CONTROLTYPE_ID) -> Role {
         UIA_HeaderControlTypeId => Role::Group,
         UIA_HeaderItemControlTypeId => Role::TableCell,
         UIA_SeparatorControlTypeId => Role::Separator,
-        UIA_SpinnerControlTypeId => Role::TextField,
+        UIA_SpinnerControlTypeId => Role::SpinButton,
         UIA_SplitButtonControlTypeId => Role::Button,
-        UIA_StatusBarControlTypeId => Role::Group,
+        UIA_StatusBarControlTypeId => Role::Status,
         UIA_ThumbControlTypeId => Role::Unknown,
         UIA_TitleBarControlTypeId => Role::Group,
-        UIA_ToolTipControlTypeId => Role::Group,
+        UIA_ToolTipControlTypeId => Role::Tooltip,
         UIA_CalendarControlTypeId => Role::Group,
         UIA_CustomControlTypeId => Role::Unknown,
         _ => Role::Unknown,

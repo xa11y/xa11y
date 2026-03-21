@@ -281,7 +281,6 @@ impl LinuxProvider {
         &self,
         aref: &AccessibleRef,
         opts: &QueryOptions,
-        app_name: &str,
         nodes: &mut Vec<Node>,
         refs: &mut Vec<AccessibleRef>,
         parent_idx: Option<u32>,
@@ -342,7 +341,6 @@ impl LinuxProvider {
                 self.traverse(
                     child_ref,
                     opts,
-                    app_name,
                     nodes,
                     refs,
                     parent_idx,
@@ -405,6 +403,20 @@ impl LinuxProvider {
             None
         };
 
+        let (numeric_value, min_value, max_value) = if matches!(role, Role::Slider | Role::ProgressBar | Role::ScrollBar | Role::SpinButton) {
+            if let Ok(proxy) = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Value") {
+                (
+                    proxy.get_property::<f64>("CurrentValue").ok(),
+                    proxy.get_property::<f64>("MinimumValue").ok(),
+                    proxy.get_property::<f64>("MaximumValue").ok(),
+                )
+            } else {
+                (None, None, None)
+            }
+        } else {
+            (None, None, None)
+        };
+
         let node_idx = nodes.len() as u32;
         nodes.push(Node {
             role,
@@ -416,8 +428,10 @@ impl LinuxProvider {
             actions,
             states,
             depth,
+            numeric_value,
+            min_value,
+            max_value,
             stable_id: Some(aref.path.clone()),
-            app_name: Some(app_name.to_string()),
             raw,
             index: node_idx,
             children_indices: vec![], // filled in below
@@ -447,7 +461,6 @@ impl LinuxProvider {
             self.traverse(
                 child_ref,
                 opts,
-                app_name,
                 nodes,
                 refs,
                 Some(node_idx),
@@ -480,7 +493,9 @@ impl LinuxProvider {
         const ENABLED: u64 = 1 << 8;
         const EXPANDABLE: u64 = 1 << 9;
         const EXPANDED: u64 = 1 << 10;
+        const FOCUSABLE: u64 = 1 << 11;
         const FOCUSED: u64 = 1 << 12;
+        const MODAL: u64 = 1 << 16;
         const SELECTED: u64 = 1 << 23;
         const SENSITIVE: u64 = 1 << 24;
         const SHOWING: u64 = 1 << 25;
@@ -518,6 +533,8 @@ impl LinuxProvider {
             selected: (bits & SELECTED) != 0,
             expanded,
             editable: (bits & EDITABLE) != 0,
+            focusable: (bits & FOCUSABLE) != 0,
+            modal: (bits & MODAL) != 0,
             required: (bits & REQUIRED) != 0,
             busy: (bits & BUSY) != 0,
         }
@@ -706,7 +723,6 @@ impl Provider for LinuxProvider {
         self.traverse(
             &app_ref,
             opts,
-            &app_name,
             &mut nodes,
             &mut refs,
             None,
@@ -752,8 +768,10 @@ impl Provider for LinuxProvider {
             actions: vec![],
             states: StateSet::default(),
             depth: 0,
+            numeric_value: None,
+            min_value: None,
+            max_value: None,
             stable_id: None,
-            app_name: Some("Desktop".to_string()),
             raw: None,
             index: 0,
             children_indices: vec![],
@@ -786,7 +804,6 @@ impl Provider for LinuxProvider {
             self.traverse(
                 child,
                 opts,
-                &app_name,
                 &mut nodes,
                 &mut refs,
                 Some(0),
@@ -938,6 +955,14 @@ impl Provider for LinuxProvider {
                         message: format!("Value.SetCurrentValue failed: {}", e),
                     })
             }),
+            Action::Scroll
+            | Action::Blur
+            | Action::SetTextSelection
+            | Action::TypeText
+            | Action::DragTo => Err(Error::ActionNotSupported {
+                action,
+                role: node.role,
+            }),
         }
     }
 
@@ -994,7 +1019,8 @@ fn map_atspi_role(role_name: &str) -> Role {
         "push button" | "push button menu" => Role::Button,
         "check box" | "check menu item" => Role::CheckBox,
         "radio button" | "radio menu item" => Role::RadioButton,
-        "entry" | "password text" | "spin button" => Role::TextField,
+        "entry" | "password text" => Role::TextField,
+        "spin button" => Role::SpinButton,
         "text" => Role::TextArea,
         "label" | "static" | "caption" => Role::StaticText,
         "combo box" => Role::ComboBox,
@@ -1020,6 +1046,9 @@ fn map_atspi_role(role_name: &str) -> Role {
         "heading" => Role::Heading,
         "separator" => Role::Separator,
         "split pane" => Role::SplitGroup,
+        "tooltip" | "tool tip" => Role::Tooltip,
+        "status bar" | "statusbar" => Role::Status,
+        "landmark" | "navigation" => Role::Navigation,
         _ => Role::Unknown,
     }
 }
@@ -1056,7 +1085,7 @@ fn map_atspi_role_number(role: u32) -> Role {
         49 => Role::Group,       // ScrollPane
         50 => Role::Separator,   // Separator
         51 => Role::Slider,      // Slider
-        52 => Role::TextField,   // SpinButton
+        52 => Role::SpinButton,  // SpinButton
         53 => Role::SplitGroup,  // SplitPane
         55 => Role::Table,       // Table
         56 => Role::TableCell,   // TableCell
@@ -1082,6 +1111,8 @@ fn map_atspi_role_number(role: u32) -> Role {
         91 => Role::TreeItem,    // TreeItem
         95 => Role::WebArea,     // DocumentWeb
         98 => Role::List,        // ListBox
+        93 => Role::Tooltip,     // Tooltip
+        97 => Role::Status,      // StatusBar
         101 => Role::Alert,      // Notification
         116 => Role::StaticText, // Static
         129 => Role::Button,     // PushButtonMenu

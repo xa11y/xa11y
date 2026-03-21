@@ -249,163 +249,21 @@ This would be a thin layer over existing primitives. The `Locator` would hold `(
 3. **Add a `Locator` abstraction** — thin wrapper that auto-resolves selectors against fresh snapshots on each action, completing the Playwright pattern
 
 ### Medium Priority
-4. **Add `TextChanged` event kind** — with insertion/deletion position and content
-5. **Add `SetTextSelection` action** — for text editing automation
-6. **Add `numeric_value: Option<f64>`, `min_value: Option<f64>`, `max_value: Option<f64>`** to Node — range control support
-7. **Add `Scroll` action** to pair with existing `ScrollAmount` ActionData
-8. **Add a few more roles**: `Switch`, `SpinButton`, `Tooltip`, `Status`, `Navigation`, `Heading` (with level)
+4. ~~**Add `TextChanged` event kind**~~ — **DONE** (EventKind::TextChanged + TextChangeData with change_type and position)
+5. ~~**Add `SetTextSelection` action**~~ — **DONE** (with ActionData::TextSelection { start, end })
+6. ~~**Add `numeric_value: Option<f64>`, `min_value: Option<f64>`, `max_value: Option<f64>`** to Node~~ — **DONE** (populated from platform range APIs for sliders/progress bars/spinners)
+7. ~~**Add `Scroll` action**~~ — **DONE** (pairs with existing ScrollAmount ActionData)
+8. ~~**Add a few more roles**: `Switch`, `SpinButton`, `Tooltip`, `Status`, `Navigation`~~ — **DONE** (Heading already existed; all mapped to platform equivalents)
 
 ### Low Priority
-9. Add `focusable` and `modal` to StateSet
-10. Add `Blur` action
-11. Consider removing `app_name` from `Node` (it's on `Tree`)
-12. Document platform behavior asymmetries (e.g., `ScrollIntoView` no-op on macOS)
+9. ~~Add `focusable` and `modal` to StateSet~~ — **DONE**
+10. ~~Add `Blur` action~~ — **DONE** (stub; returns ActionNotSupported on all platforms for now)
+11. ~~Remove `app_name` from `Node`~~ — **DONE** (still on `Tree`)
+12. ~~Document platform behavior asymmetries~~ — **DONE** (`ScrollIntoView` doc comment notes macOS no-op)
 
----
+### Additional (automation foundation)
+13. ~~**Add `TypeText` action**~~ — **DONE** (stub; input simulation, accepts ActionData::Value)
+14. ~~**Add `DragTo` action**~~ — **DONE** (stub; accepts ActionData::Point for drop destination)
+15. ~~**Remove `Selector` from public API**~~ — **DONE** (internals remain pub(crate))
+16. **Implement Locator** — design finalized, implementation pending
 
-## 10. ~~Planned Refactor: Node Identity and Tree Navigation~~ — DONE
-
-### Goal
-
-Match Playwright's pattern: users think in selectors and element properties, never in handles or indices. No IDs or indices leak into the public Rust API.
-
-### Rename NodeId → NodeIndex, hide from public API
-
-`NodeId = u32` is a DFS array index, not a stable identity. Rename to `NodeIndex` and make it `pub(crate)`:
-
-```rust
-pub struct Node {
-    // Public — things users care about
-    pub role: Role,
-    pub name: Option<String>,
-    pub value: Option<String>,
-    pub description: Option<String>,
-    pub bounds: Option<Rect>,
-    pub bounds_normalized: Option<NormalizedRect>,
-    pub actions: Vec<Action>,
-    pub states: StateSet,
-    pub depth: u32,
-    pub stable_id: Option<String>,  // NEW: platform-assigned stable identifier
-    pub app_name: Option<String>,
-    pub raw: Option<RawPlatformData>,
-
-    // Internal — present in serialized output for FFI consumers,
-    // but not part of the Rust public API
-    #[doc(hidden)]
-    pub(crate) index: u32,
-    #[doc(hidden)]
-    pub(crate) children_indices: Vec<u32>,
-    #[doc(hidden)]
-    pub(crate) parent_index: Option<u32>,
-}
-```
-
-### Add stable_id
-
-Carry the platform's native stable identifier when available:
-- macOS: `AXIdentifier`
-- Windows: `AutomationId`
-- Linux: D-Bus `object_path`
-
-Not all elements have one. This enables cross-snapshot correlation without selectors.
-
-### Remove the HashMap
-
-The `HashMap<NodeId, usize>` is redundant — node index always equals array position (assigned as `nodes.len()` during DFS). Remove the HashMap and `rebuild_index()`. Use direct array indexing: `self.nodes[index as usize]`.
-
-### Remove tree_id
-
-Currently unused for cache lookup. Remove. Re-add later if Locator needs snapshot validation.
-
-### Make nodes private, navigate through Tree methods
-
-```rust
-pub struct Tree {
-    pub app_name: String,
-    pub pid: Option<u32>,
-    pub screen_size: (u32, u32),
-    pub query: QueryOptions,
-    nodes: Vec<Node>,  // private — access through methods only
-}
-
-impl Tree {
-    pub fn root(&self) -> &Node;
-    pub fn parent(&self, node: &Node) -> Option<&Node>;
-    pub fn children(&self, node: &Node) -> Vec<&Node>;
-    pub fn subtree(&self, node: &Node) -> Vec<&Node>;
-    pub fn query(&self, selector: &str) -> Result<Vec<&Node>>;
-    pub fn find_by_role(&self, role: Role) -> Vec<&Node>;
-    pub fn find_by_name(&self, pattern: &str) -> Vec<&Node>;
-    pub fn iter(&self) -> impl Iterator<Item = &Node>;
-    pub fn dump(&self) -> String;
-    pub fn len(&self) -> usize;
-    pub fn is_empty(&self) -> bool;
-}
-```
-
-Users get `&Node` references from the tree, pass them back to the tree for navigation. No indices visible.
-
-### Update perform_action to take &Node
-
-```rust
-pub trait Provider: Send + Sync {
-    fn get_app_tree(&self, target: &AppTarget, opts: &QueryOptions) -> Result<Tree>;
-    fn get_all_apps(&self, opts: &QueryOptions) -> Result<Tree>;
-    fn perform_action(
-        &self,
-        tree: &Tree,
-        node: &Node,  // was: node_id: NodeId
-        action: Action,
-        data: Option<ActionData>,
-    ) -> Result<()>;
-    fn check_permissions(&self) -> Result<PermissionStatus>;
-    fn list_apps(&self) -> Result<Vec<AppInfo>>;
-}
-```
-
-### Add selector-based action convenience
-
-```rust
-impl Tree {
-    pub fn perform(
-        &self,
-        provider: &dyn Provider,
-        selector: &str,
-        action: Action,
-        data: Option<ActionData>,
-    ) -> Result<()>;
-}
-```
-
-### Future: Locator type
-
-Thin wrapper that auto-resolves selectors against fresh snapshots on each action, completing the Playwright pattern:
-
-```rust
-pub struct Locator { /* selector + target + provider ref */ }
-impl Locator {
-    pub fn click(&self) -> Result<()>;
-    pub fn fill(&self, value: &str) -> Result<()>;
-    pub fn wait_visible(&self, timeout: Duration) -> Result<()>;
-}
-```
-
-### Serialization strategy
-
-Indices remain in serialized output (JSON/msgpack) for FFI consumers (Python, JS, LLMs) who don't have `Tree` methods. They're hidden from the Rust API via `pub(crate)` + `#[doc(hidden)]`. The `depth` field serves as a redundant structural hint.
-
-### Decouple include_raw from action dispatch
-
-Currently both macOS and Linux require `include_raw: true` in `QueryOptions` to perform actions. This leaks an implementation detail. Instead, always capture platform handles internally for action dispatch. Make `include_raw` only control whether `RawPlatformData` appears in the user-visible `node.raw` field.
-
-### Error type updates
-
-```rust
-pub enum Error {
-    // Remove NodeNotFound { node_id } and ElementStale { node_id }
-    // Replace with selector-oriented errors:
-    SelectorNotMatched { selector: String },
-    ElementStale { selector: String },  // for Locator use
-    // ... rest unchanged
-}
-```

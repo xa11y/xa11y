@@ -26,12 +26,32 @@ pub enum Action {
     Select,
     /// Show context menu or dropdown
     ShowMenu,
-    /// Scroll element into visible area
+    /// Scroll element into visible area.
+    ///
+    /// **Platform note:** No-op on macOS (no direct AX equivalent).
     ScrollIntoView,
+    /// Scroll by a given amount and direction.
+    ///
+    /// Accepts `ActionData::ScrollAmount { direction, amount }`.
+    Scroll,
     /// Increment a slider or spinner
     Increment,
     /// Decrement a slider or spinner
     Decrement,
+    /// Remove keyboard focus from element
+    Blur,
+    /// Select a text range within an editable element.
+    ///
+    /// Accepts `ActionData::TextSelection { start, end }`.
+    SetTextSelection,
+    /// Type text character-by-character (input simulation).
+    ///
+    /// Accepts `ActionData::Value(String)`.
+    TypeText,
+    /// Drag this element to a target point.
+    ///
+    /// Accepts `ActionData::Point { x, y }` for the drop destination.
+    DragTo,
 }
 
 impl std::fmt::Display for Action {
@@ -46,8 +66,13 @@ impl std::fmt::Display for Action {
             Action::Select => write!(f, "Select"),
             Action::ShowMenu => write!(f, "ShowMenu"),
             Action::ScrollIntoView => write!(f, "ScrollIntoView"),
+            Action::Scroll => write!(f, "Scroll"),
             Action::Increment => write!(f, "Increment"),
             Action::Decrement => write!(f, "Decrement"),
+            Action::Blur => write!(f, "Blur"),
+            Action::SetTextSelection => write!(f, "SetTextSelection"),
+            Action::TypeText => write!(f, "TypeText"),
+            Action::DragTo => write!(f, "DragTo"),
         }
     }
 }
@@ -66,6 +91,8 @@ pub enum ActionData {
     },
     /// Screen coordinate point
     Point { x: f64, y: f64 },
+    /// Text selection range (character offsets, 0-based)
+    TextSelection { start: u32, end: u32 },
 }
 
 /// Direction for scroll actions.
