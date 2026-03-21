@@ -296,7 +296,8 @@ impl WindowsProvider {
         }
         .ok()
         .and_then(|v| {
-            let s: String = v.try_into().ok()?;
+            let bstr: windows::core::BSTR = windows::core::BSTR::try_from(&v).ok()?;
+            let s = bstr.to_string();
             if s.is_empty() { None } else { Some(s) }
         });
 
@@ -815,7 +816,12 @@ fn get_process_name(pid: u32) -> Option<String> {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut buf = [0u16; 260];
         let mut size = buf.len() as u32;
-        let ok = QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, &mut buf, &mut size);
+        let ok = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut size,
+        );
         let _ = CloseHandle(handle);
         if ok.is_ok() && size > 0 {
             let path = String::from_utf16_lossy(&buf[..size as usize]);
