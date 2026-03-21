@@ -21,7 +21,20 @@ struct ComInit;
 
 impl ComInit {
     fn new() -> windows::core::Result<Self> {
-        unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).ok()? };
+        // Try STA first — UIA needs STA for proper IRawElementProviderFragmentRoot
+        // callbacks (e.g., AccessKit virtual elements). If already initialized as
+        // MTA (common in multi-threaded apps), fall back gracefully.
+        let result = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        match result {
+            Ok(()) => {}
+            Err(ref e) if e.code().0 as u32 == 0x80010106 => {
+                // RPC_E_CHANGED_MODE: already initialized with MTA, that's OK
+            }
+            Err(ref e) if e.code().0 == 1 => {
+                // S_FALSE: COM already initialized on this thread, that's OK
+            }
+            Err(e) => return Err(e),
+        }
         Ok(Self)
     }
 }
@@ -385,35 +398,73 @@ impl WindowsProvider {
         });
         elements.push(element.clone());
 
-        // Recurse children using RawViewWalker to pick up AccessKit virtual elements.
-        // The ControlViewWalker and FindAll may skip AccessKit's fragment root.
+        // Recurse children. Try FindAll first (works with AccessKit fragment roots),
+        // fall back to RawViewWalker for native elements.
         let mut child_ids = Vec::new();
-        let walker = match unsafe { self.automation.RawViewWalker() } {
-            Ok(w) => w,
-            Err(_) => return,
+
+        let children_found = if let Ok(true_cond) = unsafe { self.automation.CreateTrueCondition() } {
+            if let Ok(children) = unsafe { element.FindAll(TreeScope_Children, &true_cond) } {
+                let count = unsafe { children.Length() }.unwrap_or(0);
+                if count > 0 {
+                    for i in 0..count {
+                        if let Some(max_elements) = opts.max_elements {
+                            if nodes.len() >= max_elements as usize {
+                                break;
+                            }
+                        }
+                        if let Ok(child_el) = unsafe { children.GetElement(i) } {
+                            let child_node_id = nodes.len() as NodeId;
+                            child_ids.push(child_node_id);
+                            self.traverse(
+                                &child_el,
+                                opts,
+                                app_name,
+                                nodes,
+                                elements,
+                                Some(node_id),
+                                depth + 1,
+                                screen_size,
+                                visited,
+                            );
+                        }
+                    }
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
         };
 
-        let mut child = unsafe { walker.GetFirstChildElement(element) }.ok();
-        while let Some(ref child_el) = child {
-            if let Some(max_elements) = opts.max_elements {
-                if nodes.len() >= max_elements as usize {
-                    break;
+        // Fall back to RawViewWalker if FindAll found nothing
+        if !children_found {
+            if let Ok(walker) = unsafe { self.automation.RawViewWalker() } {
+                let mut child = unsafe { walker.GetFirstChildElement(element) }.ok();
+                while let Some(ref child_el) = child {
+                    if let Some(max_elements) = opts.max_elements {
+                        if nodes.len() >= max_elements as usize {
+                            break;
+                        }
+                    }
+                    let child_node_id = nodes.len() as NodeId;
+                    child_ids.push(child_node_id);
+                    self.traverse(
+                        child_el,
+                        opts,
+                        app_name,
+                        nodes,
+                        elements,
+                        Some(node_id),
+                        depth + 1,
+                        screen_size,
+                        visited,
+                    );
+                    child = unsafe { walker.GetNextSiblingElement(child_el) }.ok();
                 }
             }
-            let child_node_id = nodes.len() as NodeId;
-            child_ids.push(child_node_id);
-            self.traverse(
-                child_el,
-                opts,
-                app_name,
-                nodes,
-                elements,
-                Some(node_id),
-                depth + 1,
-                screen_size,
-                visited,
-            );
-            child = unsafe { walker.GetNextSiblingElement(child_el) }.ok();
         }
 
         nodes[node_id as usize].children = child_ids;
