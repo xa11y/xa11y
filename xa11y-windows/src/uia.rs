@@ -271,11 +271,9 @@ impl WindowsProvider {
             return;
         }
 
-        // Cycle detection via COM pointer identity
-        let ptr_key = element as *const IUIAutomationElement as usize;
-        if !visited.insert(ptr_key) {
-            return;
-        }
+        // Depth limit is sufficient for cycle protection on UIA trees.
+        // (COM pointer identity is unreliable for cycle detection because
+        // UIA creates proxy objects with different addresses for the same element.)
 
         if let Some(max_depth) = opts.max_depth {
             if depth > max_depth {
