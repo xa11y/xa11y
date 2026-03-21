@@ -184,8 +184,21 @@ impl WindowsProvider {
 
                 if el_name.to_lowercase().contains(&name_lower) {
                     // Re-acquire element via HWND to trigger WM_GETOBJECT
-                    // and properly initialize AccessKit's UIA provider
+                    let hwnd = unsafe { el.CurrentNativeWindowHandle() }.ok();
+                    eprintln!(
+                        "[xa11y-windows] find_app_by_name matched: '{}' PID={} HWND={:?}",
+                        el_name, pid, hwnd
+                    );
                     let el = self.reacquire_via_hwnd(&el).unwrap_or(el);
+                    // Debug: count children
+                    if let Ok(tc) = unsafe { self.automation.CreateTrueCondition() } {
+                        if let Ok(ch) = unsafe { el.FindAll(TreeScope_Children, &tc) } {
+                            eprintln!(
+                                "[xa11y-windows] FindAll children count: {}",
+                                unsafe { ch.Length() }.unwrap_or(-1)
+                            );
+                        }
+                    }
                     return Ok((el, pid, el_name));
                 }
 
