@@ -1193,107 +1193,66 @@ impl EventProvider for LinuxProvider {
             }
         };
 
-        // Create a separate D-Bus connection for event monitoring
-        let monitor_conn = Self::connect_a11y_bus().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("Failed to connect monitor bus: {}", e),
-        })?;
-
-        // Add match rules for AT-SPI event signals
-        let match_rules = [
-            "type='signal',interface='org.a11y.atspi.Event.Object'",
-            "type='signal',interface='org.a11y.atspi.Event.Window'",
-            "type='signal',interface='org.a11y.atspi.Event.Focus'",
-        ];
-
-        let dbus_proxy = Proxy::new(
-            &monitor_conn,
-            "org.freedesktop.DBus",
-            "/org/freedesktop/DBus",
-            "org.freedesktop.DBus",
-        )
-        .map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("Failed to create DBus proxy: {}", e),
-        })?;
-
-        for rule in &match_rules {
-            let _ = dbus_proxy.call_method("AddMatch", &(*rule,));
-        }
-
-        // Spawn a thread to read signals from the monitor connection
-        let filter_clone = filter.clone();
+        // Create a separate provider for polling on the background thread
+        let poll_provider = LinuxProvider::new()?;
+        let target_clone = target.clone();
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop_clone = stop.clone();
 
+        // Poll for tree changes on a background thread, emitting events for diffs
         let handle = std::thread::spawn(move || {
+            let mut prev_focused: Option<String> = None;
+            let mut prev_node_count: usize = 0;
+
             while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                // Try to receive a message with a short timeout
-                let msg = match monitor_conn.inner().receive_message() {
-                    Ok(msg) => msg,
-                    Err(_) => {
-                        std::thread::sleep(Duration::from_millis(50));
-                        continue;
-                    }
+                std::thread::sleep(Duration::from_millis(100));
+
+                let tree = match poll_provider.get_app_tree(&target_clone, &QueryOptions::default())
+                {
+                    Ok(t) => t,
+                    Err(_) => continue,
                 };
 
-                // Only process signals
-                let header = msg.header();
-                if header.message_type() != zbus::message::Type::Signal {
-                    continue;
+                // Detect focus changes
+                let focused_name = tree
+                    .iter()
+                    .find(|n| n.states.focused)
+                    .and_then(|n| n.name.clone());
+                if focused_name != prev_focused {
+                    if prev_focused.is_some() {
+                        let kind = EventKind::FocusChanged;
+                        if filter.kinds.is_empty() || filter.kinds.contains(&kind) {
+                            let _ = tx.send(Event {
+                                kind,
+                                app: app_info.clone(),
+                                target: tree.iter().find(|n| n.states.focused).cloned(),
+                                state_flag: None,
+                                state_value: None,
+                                text_change: None,
+                                timestamp: std::time::Instant::now(),
+                            });
+                        }
+                    }
+                    prev_focused = focused_name;
                 }
 
-                let interface = header.interface().map(|i| i.as_str().to_string());
-                let member = header.member().map(|m| m.as_str().to_string());
-
-                let kind = match (interface.as_deref(), member.as_deref()) {
-                    (Some("org.a11y.atspi.Event.Object"), Some("StateChanged")) => {
-                        EventKind::StateChanged
+                // Detect structure changes (node count changed)
+                let node_count = tree.len();
+                if node_count != prev_node_count && prev_node_count > 0 {
+                    let kind = EventKind::StructureChanged;
+                    if filter.kinds.is_empty() || filter.kinds.contains(&kind) {
+                        let _ = tx.send(Event {
+                            kind,
+                            app: app_info.clone(),
+                            target: None,
+                            state_flag: None,
+                            state_value: None,
+                            text_change: None,
+                            timestamp: std::time::Instant::now(),
+                        });
                     }
-                    (Some("org.a11y.atspi.Event.Object"), Some("TextChanged")) => {
-                        EventKind::TextChanged
-                    }
-                    (Some("org.a11y.atspi.Event.Object"), Some("PropertyChange")) => {
-                        EventKind::ValueChanged
-                    }
-                    (Some("org.a11y.atspi.Event.Object"), Some("ChildrenChanged")) => {
-                        EventKind::StructureChanged
-                    }
-                    (Some("org.a11y.atspi.Event.Object"), Some("ActiveDescendantChanged")) => {
-                        EventKind::SelectionChanged
-                    }
-                    (Some("org.a11y.atspi.Event.Window"), Some("Create")) => {
-                        EventKind::WindowOpened
-                    }
-                    (Some("org.a11y.atspi.Event.Window"), Some("Destroy")) => {
-                        EventKind::WindowClosed
-                    }
-                    (Some("org.a11y.atspi.Event.Window"), Some("Activate")) => {
-                        EventKind::WindowActivated
-                    }
-                    (Some("org.a11y.atspi.Event.Window"), Some("Deactivate")) => {
-                        EventKind::WindowDeactivated
-                    }
-                    (Some("org.a11y.atspi.Event.Focus"), _) => EventKind::FocusChanged,
-                    _ => continue,
-                };
-
-                if !filter_clone.kinds.is_empty() && !filter_clone.kinds.contains(&kind) {
-                    continue;
                 }
-
-                let event = Event {
-                    kind,
-                    app: app_info.clone(),
-                    target: None,
-                    state_flag: None,
-                    state_value: None,
-                    text_change: None,
-                    timestamp: std::time::Instant::now(),
-                };
-                if tx.send(event).is_err() {
-                    break; // Receiver dropped
-                }
+                prev_node_count = node_count;
             }
         });
 

@@ -9,7 +9,6 @@ use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, ReleaseDC, HORZRES, VERTRES};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT};
 use windows::Win32::System::Threading::*;
-use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
@@ -1515,37 +1514,6 @@ impl IUIAutomationEventHandler_Impl for UiaEventHandler {
     }
 }
 
-#[implement(IUIAutomationPropertyChangedEventHandler)]
-struct UiaPropertyHandler {
-    tx: Mutex<std::sync::mpsc::Sender<Event>>,
-    info: AppInfo,
-}
-
-impl IUIAutomationPropertyChangedEventHandler_Impl for UiaPropertyHandler {
-    fn HandlePropertyChangedEvent(
-        &self,
-        _sender: Option<&IUIAutomationElement>,
-        propertyid: UIA_PROPERTY_ID,
-        _newvalue: &VARIANT,
-    ) -> windows::core::Result<()> {
-        let kind = match propertyid {
-            UIA_ValueValuePropertyId => EventKind::ValueChanged,
-            UIA_NamePropertyId => EventKind::NameChanged,
-            _ => return Ok(()),
-        };
-        let _ = self.tx.lock().unwrap().send(Event {
-            kind,
-            app: self.info.clone(),
-            target: None,
-            state_flag: None,
-            state_value: None,
-            text_change: None,
-            timestamp: std::time::Instant::now(),
-        });
-        Ok(())
-    }
-}
-
 impl EventProvider for WindowsProvider {
     fn subscribe(&self, target: &AppTarget, filter: EventFilter) -> Result<Subscription> {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1625,23 +1593,6 @@ impl EventProvider for WindowsProvider {
             event_handlers.push((eid, handler));
         }
 
-        // Register property changed handler for value and name changes
-        let prop_handler: IUIAutomationPropertyChangedEventHandler = UiaPropertyHandler {
-            tx: Mutex::new(tx),
-            info: app_info,
-        }
-        .into();
-        let prop_ids = [UIA_ValueValuePropertyId, UIA_NamePropertyId];
-        let _ = unsafe {
-            self.automation.AddPropertyChangedEventHandler(
-                &root,
-                TreeScope_Subtree,
-                None,
-                &prop_handler,
-                &prop_ids,
-            )
-        };
-
         // Build cancel handler to remove all event handlers
         let automation = self.automation.clone();
         let cancel = CancelHandle::new(move || {
@@ -1649,7 +1600,7 @@ impl EventProvider for WindowsProvider {
             for (eid, handler) in &event_handlers {
                 let _ = unsafe { automation.RemoveAutomationEventHandler(*eid, &root, handler) };
             }
-            let _ = unsafe { automation.RemovePropertyChangedEventHandler(&root, &prop_handler) };
+            drop(tx); // drop the last sender reference
         });
 
         Ok(Subscription::new(EventReceiver::new(rx), cancel))
