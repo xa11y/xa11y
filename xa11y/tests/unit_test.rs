@@ -877,7 +877,6 @@ fn action_data_variants() {
     };
     let json = serde_json::to_string(&scroll).unwrap();
     assert!(json.contains("Down"));
-
 }
 
 // ── Locator ──
