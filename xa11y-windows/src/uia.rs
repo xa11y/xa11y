@@ -51,18 +51,17 @@ impl WindowsProvider {
             code: e.code().0 as i64,
             message: format!("COM initialization failed: {}", e),
         })?;
-        let automation: IUIAutomation =
-            unsafe { windows::core::ComInterface::cast(&windows::Win32::System::Com::CoCreateInstance::<_, IUIAutomation>(
+        let automation: IUIAutomation = unsafe {
+            windows::Win32::System::Com::CoCreateInstance(
                 &CUIAutomation,
                 None,
                 windows::Win32::System::Com::CLSCTX_INPROC_SERVER,
-            ).map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("Failed to create IUIAutomation: {}", e),
-            })?) }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("Failed to cast IUIAutomation: {}", e),
-            })?;
+            )
+        }
+        .map_err(|e| Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("Failed to create IUIAutomation: {}", e),
+        })?;
         Ok(Self {
             automation,
             next_tree_id: Mutex::new(1),
@@ -245,33 +244,9 @@ impl WindowsProvider {
             return;
         }
 
-        // Cycle detection via runtime ID
-        let runtime_id = unsafe { element.GetRuntimeId() }
-            .map(|arr| {
-                let sa = arr;
-                let mut hash: usize = 0;
-                if let (Ok(lb), Ok(ub)) = (
-                    unsafe { windows::Win32::System::Com::SafeArrayGetLBound(&sa, 1) },
-                    unsafe { windows::Win32::System::Com::SafeArrayGetUBound(&sa, 1) },
-                ) {
-                    for idx in lb..=ub {
-                        let mut val: i32 = 0;
-                        let _ = unsafe {
-                            windows::Win32::System::Com::SafeArrayGetElement(
-                                &sa,
-                                &idx,
-                                &mut val as *mut _ as *mut _,
-                            )
-                        };
-                        hash = hash.wrapping_mul(31).wrapping_add(val as usize);
-                    }
-                }
-                let _ = unsafe { windows::Win32::System::Com::SafeArrayDestroy(&sa) };
-                hash
-            })
-            .unwrap_or(0);
-
-        if runtime_id != 0 && !visited.insert(runtime_id) {
+        // Cycle detection via COM pointer identity
+        let ptr_key = element as *const IUIAutomationElement as usize;
+        if !visited.insert(ptr_key) {
             return;
         }
 
@@ -286,7 +261,8 @@ impl WindowsProvider {
             }
         }
 
-        let control_type = unsafe { element.CurrentControlType() }.unwrap_or(0);
+        let control_type = unsafe { element.CurrentControlType() }
+            .unwrap_or(UIA_CONTROLTYPE_ID(0));
         let role = map_uia_control_type(control_type);
 
         // Role filter: skip node but still traverse children
@@ -335,14 +311,14 @@ impl WindowsProvider {
 
         // Bounds
         let bounds = unsafe { element.CurrentBoundingRectangle() }.ok().and_then(|r| {
-            let width = (r.right - r.left).max(0.0) as u32;
-            let height = (r.bottom - r.top).max(0.0) as u32;
+            let width = (r.right - r.left).max(0) as u32;
+            let height = (r.bottom - r.top).max(0) as u32;
             if width == 0 && height == 0 {
                 None
             } else {
                 Some(Rect {
-                    x: r.left as i32,
-                    y: r.top as i32,
+                    x: r.left,
+                    y: r.top,
                     width,
                     height,
                 })
@@ -381,7 +357,7 @@ impl WindowsProvider {
                 .map(|s| s.to_string())
                 .filter(|s| !s.is_empty());
             Some(RawPlatformData::Windows {
-                control_type_id: control_type,
+                control_type_id: control_type.0,
                 automation_id,
                 class_name,
             })
@@ -947,7 +923,7 @@ fn get_actions(element: &IUIAutomationElement, role: Role) -> Vec<Action> {
     }
 
     // Focus: most elements can be focused
-    if unsafe { element.CurrentIsKeyboardFocusable() }.unwrap_or(FALSE) == TRUE {
+    if unsafe { element.CurrentIsKeyboardFocusable() }.unwrap_or(BOOL(0)).as_bool() {
         actions.push(Action::Focus);
     }
 
@@ -963,10 +939,10 @@ fn get_actions(element: &IUIAutomationElement, role: Role) -> Vec<Action> {
 
 /// Parse UIA element properties into xa11y StateSet.
 fn parse_states(element: &IUIAutomationElement, role: Role) -> StateSet {
-    let enabled = unsafe { element.CurrentIsEnabled() }.unwrap_or(TRUE) == TRUE;
-    let offscreen = unsafe { element.CurrentIsOffscreen() }.unwrap_or(FALSE) == TRUE;
+    let enabled = unsafe { element.CurrentIsEnabled() }.unwrap_or(BOOL(1)).as_bool();
+    let offscreen = unsafe { element.CurrentIsOffscreen() }.unwrap_or(BOOL(0)).as_bool();
     let visible = !offscreen;
-    let focused = unsafe { element.CurrentHasKeyboardFocus() }.unwrap_or(FALSE) == TRUE;
+    let focused = unsafe { element.CurrentHasKeyboardFocus() }.unwrap_or(BOOL(0)).as_bool();
 
     // Checked: from TogglePattern
     let checked = match role {
@@ -988,7 +964,7 @@ fn parse_states(element: &IUIAutomationElement, role: Role) -> StateSet {
                         UIA_SelectionItemPatternId,
                     )
                 } {
-                    if unsafe { pattern.CurrentIsSelected() }.unwrap_or(FALSE) == TRUE {
+                    if unsafe { pattern.CurrentIsSelected() }.unwrap_or(BOOL(0)).as_bool() {
                         Some(Toggled::On)
                     } else {
                         Some(Toggled::Off)
@@ -1022,7 +998,7 @@ fn parse_states(element: &IUIAutomationElement, role: Role) -> StateSet {
             UIA_SelectionItemPatternId,
         )
     } {
-        unsafe { pattern.CurrentIsSelected() }.unwrap_or(FALSE) == TRUE
+        unsafe { pattern.CurrentIsSelected() }.unwrap_or(BOOL(0)).as_bool()
     } else {
         false
     };
@@ -1032,7 +1008,7 @@ fn parse_states(element: &IUIAutomationElement, role: Role) -> StateSet {
             if let Ok(pattern) = unsafe {
                 element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
             } {
-                unsafe { pattern.CurrentIsReadOnly() }.unwrap_or(TRUE) == FALSE
+                unsafe { pattern.CurrentIsReadOnly() }.unwrap_or(BOOL(1)) == BOOL(0)
             } else {
                 true
             }
@@ -1054,48 +1030,47 @@ fn parse_states(element: &IUIAutomationElement, role: Role) -> StateSet {
 }
 
 /// Map UIA ControlTypeId to xa11y Role.
-fn map_uia_control_type(control_type: i32) -> Role {
-    // UIA control type IDs (UIA_*ControlTypeId constants)
+fn map_uia_control_type(control_type: UIA_CONTROLTYPE_ID) -> Role {
     match control_type {
-        _ if control_type == UIA_ButtonControlTypeId => Role::Button,
-        _ if control_type == UIA_CheckBoxControlTypeId => Role::CheckBox,
-        _ if control_type == UIA_RadioButtonControlTypeId => Role::RadioButton,
-        _ if control_type == UIA_EditControlTypeId => Role::TextField,
-        _ if control_type == UIA_TextControlTypeId => Role::StaticText,
-        _ if control_type == UIA_ComboBoxControlTypeId => Role::ComboBox,
-        _ if control_type == UIA_ListControlTypeId => Role::List,
-        _ if control_type == UIA_ListItemControlTypeId => Role::ListItem,
-        _ if control_type == UIA_MenuControlTypeId => Role::Menu,
-        _ if control_type == UIA_MenuItemControlTypeId => Role::MenuItem,
-        _ if control_type == UIA_MenuBarControlTypeId => Role::MenuBar,
-        _ if control_type == UIA_TabControlTypeId => Role::TabGroup,
-        _ if control_type == UIA_TabItemControlTypeId => Role::Tab,
-        _ if control_type == UIA_TableControlTypeId => Role::Table,
-        _ if control_type == UIA_DataGridControlTypeId => Role::Table,
-        _ if control_type == UIA_DataItemControlTypeId => Role::TableRow,
-        _ if control_type == UIA_ToolBarControlTypeId => Role::Toolbar,
-        _ if control_type == UIA_ScrollBarControlTypeId => Role::ScrollBar,
-        _ if control_type == UIA_SliderControlTypeId => Role::Slider,
-        _ if control_type == UIA_ImageControlTypeId => Role::Image,
-        _ if control_type == UIA_HyperlinkControlTypeId => Role::Link,
-        _ if control_type == UIA_GroupControlTypeId => Role::Group,
-        _ if control_type == UIA_WindowControlTypeId => Role::Window,
-        _ if control_type == UIA_PaneControlTypeId => Role::Group,
-        _ if control_type == UIA_ProgressBarControlTypeId => Role::ProgressBar,
-        _ if control_type == UIA_TreeItemControlTypeId => Role::TreeItem,
-        _ if control_type == UIA_TreeControlTypeId => Role::List,
-        _ if control_type == UIA_DocumentControlTypeId => Role::WebArea,
-        _ if control_type == UIA_HeaderControlTypeId => Role::Group,
-        _ if control_type == UIA_HeaderItemControlTypeId => Role::TableCell,
-        _ if control_type == UIA_SeparatorControlTypeId => Role::Separator,
-        _ if control_type == UIA_SpinnerControlTypeId => Role::TextField,
-        _ if control_type == UIA_SplitButtonControlTypeId => Role::Button,
-        _ if control_type == UIA_StatusBarControlTypeId => Role::Group,
-        _ if control_type == UIA_ThumbControlTypeId => Role::Unknown,
-        _ if control_type == UIA_TitleBarControlTypeId => Role::Group,
-        _ if control_type == UIA_ToolTipControlTypeId => Role::Group,
-        _ if control_type == UIA_CalendarControlTypeId => Role::Group,
-        _ if control_type == UIA_CustomControlTypeId => Role::Unknown,
+        UIA_ButtonControlTypeId => Role::Button,
+        UIA_CheckBoxControlTypeId => Role::CheckBox,
+        UIA_RadioButtonControlTypeId => Role::RadioButton,
+        UIA_EditControlTypeId => Role::TextField,
+        UIA_TextControlTypeId => Role::StaticText,
+        UIA_ComboBoxControlTypeId => Role::ComboBox,
+        UIA_ListControlTypeId => Role::List,
+        UIA_ListItemControlTypeId => Role::ListItem,
+        UIA_MenuControlTypeId => Role::Menu,
+        UIA_MenuItemControlTypeId => Role::MenuItem,
+        UIA_MenuBarControlTypeId => Role::MenuBar,
+        UIA_TabControlTypeId => Role::TabGroup,
+        UIA_TabItemControlTypeId => Role::Tab,
+        UIA_TableControlTypeId => Role::Table,
+        UIA_DataGridControlTypeId => Role::Table,
+        UIA_DataItemControlTypeId => Role::TableRow,
+        UIA_ToolBarControlTypeId => Role::Toolbar,
+        UIA_ScrollBarControlTypeId => Role::ScrollBar,
+        UIA_SliderControlTypeId => Role::Slider,
+        UIA_ImageControlTypeId => Role::Image,
+        UIA_HyperlinkControlTypeId => Role::Link,
+        UIA_GroupControlTypeId => Role::Group,
+        UIA_WindowControlTypeId => Role::Window,
+        UIA_PaneControlTypeId => Role::Group,
+        UIA_ProgressBarControlTypeId => Role::ProgressBar,
+        UIA_TreeItemControlTypeId => Role::TreeItem,
+        UIA_TreeControlTypeId => Role::List,
+        UIA_DocumentControlTypeId => Role::WebArea,
+        UIA_HeaderControlTypeId => Role::Group,
+        UIA_HeaderItemControlTypeId => Role::TableCell,
+        UIA_SeparatorControlTypeId => Role::Separator,
+        UIA_SpinnerControlTypeId => Role::TextField,
+        UIA_SplitButtonControlTypeId => Role::Button,
+        UIA_StatusBarControlTypeId => Role::Group,
+        UIA_ThumbControlTypeId => Role::Unknown,
+        UIA_TitleBarControlTypeId => Role::Group,
+        UIA_ToolTipControlTypeId => Role::Group,
+        UIA_CalendarControlTypeId => Role::Group,
+        UIA_CustomControlTypeId => Role::Unknown,
         _ => Role::Unknown,
     }
 }
@@ -1126,7 +1101,7 @@ mod tests {
         assert_eq!(map_uia_control_type(UIA_ImageControlTypeId), Role::Image);
         assert_eq!(map_uia_control_type(UIA_HyperlinkControlTypeId), Role::Link);
         assert_eq!(map_uia_control_type(UIA_GroupControlTypeId), Role::Group);
-        assert_eq!(map_uia_control_type(99999), Role::Unknown);
+        assert_eq!(map_uia_control_type(UIA_CONTROLTYPE_ID(99999)), Role::Unknown);
     }
 
     #[test]
