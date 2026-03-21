@@ -3,6 +3,7 @@ name = "xa11y-windows"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Windows accessibility backend for xa11y (UI Automation)"
 
 [dependencies]

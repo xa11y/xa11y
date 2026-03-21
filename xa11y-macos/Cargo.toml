@@ -3,6 +3,7 @@ name = "xa11y-macos"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "macOS accessibility backend for xa11y (AXUIElement)"
 
 [dependencies]
