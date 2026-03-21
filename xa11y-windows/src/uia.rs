@@ -53,7 +53,7 @@ impl WindowsProvider {
         })?;
         let automation: IUIAutomation = unsafe {
             windows::Win32::System::Com::CoCreateInstance(
-                &CUIAutomation,
+                &CUIAutomation8,
                 None,
                 windows::Win32::System::Com::CLSCTX_INPROC_SERVER,
             )
