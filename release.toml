@@ -1,0 +1,16 @@
+[workspace]
+allow-branch = ["main"]
+consolidate-commits = true
+shared-version = true
+tag-name = "v{{version}}"
+tag-message = "Release {{version}}"
+
+# cargo-release will update workspace.dependencies version fields automatically
+dependent-version = "upgrade"
+
+# Push the version bump commit and tag
+push = true
+tag = true
+
+# Don't publish from local — the GH Actions workflow handles that
+publish = false

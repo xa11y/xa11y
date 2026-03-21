@@ -3,92 +3,86 @@ name: Publish
 on:
   workflow_dispatch:
     inputs:
-      crate:
-        description: "Which crate(s) to publish"
+      level:
+        description: "Version bump level"
         required: true
         type: choice
         options:
-          - all
-          - xa11y-core
-          - xa11y-macos
-          - xa11y-windows
-          - xa11y-linux
-          - xa11y
-      dry_run:
-        description: "Dry run (no actual publish)"
-        required: false
-        type: boolean
-        default: true
+          - release  # publish current version without bumping
+          - patch
+          - minor
+          - major
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  publish-crates:
-    name: Publish to crates.io
+  version-bump:
+    name: Bump version
+    if: inputs.level != 'release'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry & build
-        uses: actions/cache@v4
+      - name: Install cargo-release
+        run: cargo install cargo-release
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump version
+        run: cargo release ${{ inputs.level }} --execute --no-confirm
+
+  publish-crates:
+    name: Publish to crates.io
+    needs: [version-bump]
+    if: always() && (needs.version-bump.result == 'success' || needs.version-bump.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-publish-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-publish-
+          ref: main
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Publish xa11y-core
-        if: inputs.crate == 'all' || inputs.crate == 'xa11y-core'
-        run: cargo publish -p xa11y-core ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: cargo publish -p xa11y-core
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
+      - name: Wait for crates.io index
+        run: sleep 30
+
       - name: Publish xa11y-macos
-        if: inputs.crate == 'all' || inputs.crate == 'xa11y-macos'
-        run: cargo publish -p xa11y-macos ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: cargo publish -p xa11y-macos
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Publish xa11y-windows
-        if: inputs.crate == 'all' || inputs.crate == 'xa11y-windows'
-        run: cargo publish -p xa11y-windows ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: cargo publish -p xa11y-windows
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Publish xa11y-linux
-        if: inputs.crate == 'all' || inputs.crate == 'xa11y-linux'
-        run: cargo publish -p xa11y-linux ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: cargo publish -p xa11y-linux
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
-      # xa11y depends on the platform crates via path+version;
-      # wait for crates.io index to update before publishing
       - name: Wait for crates.io index
-        if: inputs.crate == 'all' && !inputs.dry_run
         run: sleep 30
 
       - name: Publish xa11y
-        if: inputs.crate == 'all' || inputs.crate == 'xa11y'
-        run: cargo publish -p xa11y ${{ inputs.dry_run && '--dry-run' || '' }}
+        run: cargo publish -p xa11y
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-  publish-pypi:
-    name: Publish to PyPI
-    if: inputs.crate == 'all' || inputs.crate == 'xa11y'
-    runs-on: ubuntu-latest
-    environment: release
-    permissions:
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Placeholder for future Python bindings
-        run: echo "Python bindings not yet implemented — skipping PyPI publish"
