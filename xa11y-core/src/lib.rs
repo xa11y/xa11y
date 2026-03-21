@@ -13,7 +13,7 @@ pub use action::{Action, ActionData, ScrollDirection};
 pub use error::{Error, Result};
 pub use event::{ElementState, Event, EventFilter, EventKind, StateFlag};
 pub use event_provider::{CancelHandle, EventProvider, EventReceiver, Subscription};
-pub use node::{Node, NodeId, NormalizedRect, RawPlatformData, Rect, StateSet, Toggled};
+pub use node::{Node, NormalizedRect, RawPlatformData, Rect, StateSet, Toggled};
 pub use provider::{AppInfo, AppTarget, PermissionStatus, Provider, QueryOptions, WindowHandle};
 pub use role::Role;
 pub use selector::Selector;

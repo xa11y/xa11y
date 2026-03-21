@@ -9,7 +9,7 @@ use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
 
 use xa11y_core::{
-    Action, ActionData, AppInfo, AppTarget, Error, Node, NodeId, NormalizedRect, PermissionStatus,
+    Action, ActionData, AppInfo, AppTarget, Error, Node, NormalizedRect, PermissionStatus,
     Provider, QueryOptions, RawPlatformData, Rect, Result, Role, StateSet, Toggled, Tree,
 };
 
@@ -557,25 +557,16 @@ fn parse_states(element: AXUIElementRef, role: Role) -> StateSet {
 // ── MacOS Provider ────────────────────────────────────────────────────────────
 
 pub struct MacOSProvider {
-    next_tree_id: Mutex<u64>,
     /// Cached AXElement refs from the most recent tree build.
-    /// Index corresponds to NodeId.
+    /// Index corresponds to the node's DFS index.
     cached_elements: Mutex<Vec<AXElement>>,
 }
 
 impl MacOSProvider {
     pub fn new() -> Result<Self> {
         Ok(Self {
-            next_tree_id: Mutex::new(1),
             cached_elements: Mutex::new(Vec::new()),
         })
-    }
-
-    fn next_tree_id(&self) -> u64 {
-        let mut id = self.next_tree_id.lock().unwrap();
-        let current = *id;
-        *id += 1;
-        current
     }
 
     fn detect_screen_size() -> (u32, u32) {
@@ -695,7 +686,7 @@ impl MacOSProvider {
         app_name: &str,
         nodes: &mut Vec<Node>,
         elements: &mut Vec<AXElement>,
-        parent_id: Option<NodeId>,
+        parent_idx: Option<u32>,
         depth: u32,
         screen_size: (u32, u32),
         visited: &mut HashSet<usize>,
@@ -749,7 +740,7 @@ impl MacOSProvider {
                     app_name,
                     nodes,
                     elements,
-                    parent_id,
+                    parent_idx,
                     depth + 1,
                     screen_size,
                     visited,
@@ -790,7 +781,7 @@ impl MacOSProvider {
                     app_name,
                     nodes,
                     elements,
-                    parent_id,
+                    parent_idx,
                     depth + 1,
                     screen_size,
                     visited,
@@ -844,21 +835,23 @@ impl MacOSProvider {
             actions.push(Action::SetValue);
         }
 
-        // Raw platform data
+        // Stable ID: AXIdentifier (always captured for cross-snapshot correlation)
+        let ax_identifier = ax_string(element.as_ptr(), "AXIdentifier");
+
+        // Raw platform data (user-visible, opt-in)
         let raw = if opts.include_raw {
             Some(RawPlatformData::MacOS {
                 ax_role: role_str,
                 ax_subrole: subrole_str,
-                ax_identifier: ax_string(element.as_ptr(), "AXIdentifier"),
+                ax_identifier: ax_identifier.clone(),
             })
         } else {
             None
         };
 
-        let node_id = nodes.len() as NodeId;
+        let node_idx = nodes.len() as u32;
         let name_ref = name.clone(); // keep for window chrome filter below
         nodes.push(Node {
-            id: node_id,
             role,
             name,
             value,
@@ -867,11 +860,13 @@ impl MacOSProvider {
             bounds_normalized,
             actions,
             states,
-            children: vec![], // filled below
-            parent: parent_id,
             depth,
+            stable_id: ax_identifier,
             app_name: Some(app_name.to_string()),
             raw,
+            index: node_idx,
+            children_indices: vec![], // filled below
+            parent_index: parent_idx,
         });
         elements.push(element.clone());
 
@@ -918,22 +913,22 @@ impl MacOSProvider {
                     }
                 }
             }
-            let child_node_id = nodes.len() as NodeId;
-            child_ids.push(child_node_id);
+            let child_idx = nodes.len() as u32;
+            child_ids.push(child_idx);
             self.traverse(
                 child,
                 opts,
                 app_name,
                 nodes,
                 elements,
-                Some(node_id),
+                Some(node_idx),
                 depth + 1,
                 screen_size,
                 visited,
             );
         }
 
-        nodes[node_id as usize].children = child_ids;
+        nodes[node_idx as usize].children_indices = child_ids;
     }
 }
 
@@ -980,7 +975,6 @@ impl Provider for MacOSProvider {
         *self.cached_elements.lock().unwrap() = elements;
 
         Ok(Tree::new(
-            self.next_tree_id(),
             app_name,
             Some(pid as u32),
             screen_size,
@@ -996,7 +990,7 @@ impl Provider for MacOSProvider {
 
         // Desktop root
         nodes.push(Node {
-            id: 0,
+            index: 0,
             role: Role::Application,
             name: Some("Desktop".to_string()),
             value: None,
@@ -1015,9 +1009,10 @@ impl Provider for MacOSProvider {
             }),
             actions: vec![],
             states: StateSet::default(),
-            children: vec![],
-            parent: None,
+            children_indices: vec![],
+            parent_index: None,
             depth: 0,
+            stable_id: None,
             app_name: Some("Desktop".to_string()),
             raw: None,
         });
@@ -1032,8 +1027,8 @@ impl Provider for MacOSProvider {
             if app_element.is_null() {
                 continue;
             }
-            let child_node_id = nodes.len() as NodeId;
-            root_children.push(child_node_id);
+            let child_idx = nodes.len() as u32;
+            root_children.push(child_idx);
             self.traverse(
                 &app_element,
                 opts,
@@ -1047,12 +1042,11 @@ impl Provider for MacOSProvider {
             );
         }
 
-        nodes[0].children = root_children;
+        nodes[0].children_indices = root_children;
 
         *self.cached_elements.lock().unwrap() = elements;
 
         Ok(Tree::new(
-            self.next_tree_id(),
             "Desktop".to_string(),
             None,
             screen_size,
@@ -1064,27 +1058,21 @@ impl Provider for MacOSProvider {
     fn perform_action(
         &self,
         tree: &Tree,
-        node_id: NodeId,
+        node: &Node,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()> {
-        let node = tree.get(node_id).ok_or(Error::NodeNotFound { node_id })?;
-
-        // Require include_raw (consistent with Linux provider behavior)
-        if node.raw.is_none() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "Action dispatch requires include_raw: true in QueryOptions".to_string(),
-            });
-        }
+        let node_idx = tree.node_index(node);
 
         // Look up cached element
         let cache = self.cached_elements.lock().unwrap();
-        let element = cache
-            .get(node_id as usize)
-            .ok_or(Error::ElementStale { node_id })?;
+        let element = cache.get(node_idx as usize).ok_or(Error::ElementStale {
+            selector: format!("index:{}", node_idx),
+        })?;
         if element.is_null() {
-            return Err(Error::ElementStale { node_id });
+            return Err(Error::ElementStale {
+                selector: format!("index:{}", node_idx),
+            });
         }
         let el_ptr = element.as_ptr();
 

@@ -10,7 +10,7 @@ This library is designed to replace the cross-platform accessibility layer in [a
 
 1. **Client-side focus** — xa11y *reads* accessibility trees exposed by other applications. It is not a toolkit for *providing* accessibility (that's what accesskit does). However, we borrow accesskit's data model where it makes sense.
 2. **Platform concepts mapped, not hidden** — Each platform has unique behaviors. The abstraction normalizes them but exposes raw/platform-specific data when needed.
-3. **Snapshot-based** — Trees are captured as point-in-time snapshots. Handles to live elements are held internally for action dispatch but are not exposed to the consumer.
+3. **Snapshot-based** — Trees are captured as point-in-time snapshots. Platform handles are always cached internally for action dispatch and are not exposed to the consumer.
 4. **FFI-first** — Core types are designed to be representable in C, Python, and JavaScript. No lifetimes or complex generics in the public API.
 
 ---
@@ -167,8 +167,13 @@ pub enum Action {
 
 ```rust
 pub struct Node {
-    /// Unique ID within a snapshot (sequential, deterministic DFS order)
-    pub id: NodeId,
+    /// Internal index within a snapshot (sequential, deterministic DFS order).
+    /// This is `#[doc(hidden)]` and not part of the public Rust API.
+    #[doc(hidden)]
+    pub(crate) index: NodeIndex,
+
+    /// Optional stable identifier for relocating elements across snapshots.
+    pub stable_id: Option<String>,
 
     /// Element role
     pub role: Role,
@@ -194,11 +199,11 @@ pub struct Node {
     /// Current state flags
     pub states: StateSet,
 
-    /// Child node IDs (direct children only)
-    pub children: Vec<NodeId>,
+    /// Child node indices (direct children only, internal use)
+    pub(crate) children_indices: Vec<NodeIndex>,
 
-    /// Parent node ID (None for root)
-    pub parent: Option<NodeId>,
+    /// Parent node index (None for root, internal use)
+    pub(crate) parent_index: Option<NodeIndex>,
 
     /// Depth in the tree (0 = root)
     pub depth: u32,
@@ -210,7 +215,9 @@ pub struct Node {
     pub raw: Option<RawPlatformData>,
 }
 
-pub type NodeId = u32;
+/// Internal index type, not part of the public API.
+#[doc(hidden)]
+pub type NodeIndex = u32;
 ```
 
 #### `StateSet` — Boolean state flags
@@ -298,11 +305,6 @@ Geometry uses accesskit-style `Rect` for pixel coordinates. The `NormalizedRect`
 
 ```rust
 pub struct Tree {
-    /// Opaque snapshot identifier, assigned by the Provider.
-    /// Used by `perform_action` to look up the correct handle cache.
-    /// Not meaningful across Provider instances or serialization boundaries.
-    pub(crate) tree_id: u64,
-
     /// Application name
     pub app_name: String,
 
@@ -312,11 +314,8 @@ pub struct Tree {
     /// Screen dimensions at capture time
     pub screen_size: (u32, u32),
 
-    /// All nodes in DFS order
-    pub nodes: Vec<Node>,
-
-    /// Index from NodeId -> position in nodes vec (for O(1) lookup)
-    node_index: HashMap<NodeId, usize>,
+    /// All nodes in DFS order (private — access via methods)
+    nodes: Vec<Node>,
 
     /// Query options used to produce this snapshot
     /// (stored for deterministic re-traversal during action dispatch)
@@ -324,18 +323,15 @@ pub struct Tree {
 }
 ```
 
-The tree is a **flattened snapshot** — nodes reference each other by `NodeId` rather than holding direct pointers. This is critical for:
+The tree is a **flattened snapshot** — nodes reference each other by internal `NodeIndex` rather than holding direct pointers. The `nodes` field is private; consumers access nodes through tree methods. This is critical for:
 - Serialization (JSON, msgpack) for FFI
-- Deterministic re-traversal for action dispatch (same DFS order → same IDs)
+- Deterministic re-traversal for action dispatch (same DFS order → same indices)
 - Thread safety without lifetimes
 
 #### Tree Methods
 
 ```rust
 impl Tree {
-    /// Get a node by ID
-    pub fn get(&self, id: NodeId) -> Option<&Node>;
-
     /// Get the root node
     pub fn root(&self) -> &Node;
 
@@ -346,16 +342,22 @@ impl Tree {
     pub fn query(&self, selector: &str) -> Result<Vec<&Node>>;
 
     /// Get children of a node
-    pub fn children(&self, id: NodeId) -> Vec<&Node>;
+    pub fn children(&self, node: &Node) -> Vec<&Node>;
+
+    /// Get the parent of a node
+    pub fn parent(&self, node: &Node) -> Option<&Node>;
 
     /// Get the subtree rooted at a node
-    pub fn subtree(&self, id: NodeId) -> Vec<&Node>;
+    pub fn subtree(&self, node: &Node) -> Vec<&Node>;
 
     /// Find nodes by role
     pub fn find_by_role(&self, role: Role) -> Vec<&Node>;
 
     /// Find nodes by name (substring, case-insensitive)
     pub fn find_by_name(&self, pattern: &str) -> Vec<&Node>;
+
+    /// Convenience method to perform an action on a node in this tree.
+    pub fn perform(&self, node: &Node, action: Action, data: Option<ActionData>) -> Result<()>;
 
     /// Render the tree as an indented text representation for debugging.
     /// Format: one line per node, indented by depth, showing role, name, and states.
@@ -374,8 +376,7 @@ impl Tree {
 ```
 
 `Tree` implements `serde::Serialize` and `serde::Deserialize` for JSON/msgpack serialization.
-Note: `tree_id` is not serialized — a deserialized Tree cannot be used for action dispatch.
-Deserialized trees are read-only data snapshots.
+Deserialized trees are read-only data snapshots and cannot be used for action dispatch.
 
 ### 6. `Selector` — CSS-like Query Language
 
@@ -429,8 +430,7 @@ integer       := [1-9][0-9]*
 ```rust
 pub trait Provider: Send + Sync {
     /// Snapshot a specific application's accessibility tree.
-    /// The returned Tree contains an opaque `tree_id` used by `perform_action`
-    /// to look up cached platform handles.
+    /// Platform handles are cached internally for action dispatch.
     fn get_app_tree(&self, target: &AppTarget, opts: &QueryOptions) -> Result<Tree>;
 
     /// Snapshot all running applications (shallow).
@@ -438,8 +438,8 @@ pub trait Provider: Send + Sync {
 
     /// Perform an action on an element from a specific snapshot.
     ///
-    /// The `tree` parameter identifies which snapshot the `node_id` came from,
-    /// allowing the provider to look up the correct platform handle cache.
+    /// The `node` parameter identifies the element to act on. The provider
+    /// uses the node's internal index to look up the correct platform handle.
     /// If the handle is stale, the provider re-traverses using the tree's
     /// stored `QueryOptions` to rebuild the cache.
     ///
@@ -448,7 +448,7 @@ pub trait Provider: Send + Sync {
     fn perform_action(
         &self,
         tree: &Tree,
-        node_id: NodeId,
+        node: &Node,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()>;
@@ -483,8 +483,12 @@ pub struct QueryOptions {
     pub max_elements: Option<u32>,
     pub visible_only: bool,
     pub roles: Option<Vec<Role>>,   // filter to specific roles
-    pub include_raw: bool,           // include platform-specific data
+    pub include_raw: bool,           // include platform-specific data in nodes
 }
+// Note: `include_raw` controls whether RawPlatformData is populated on nodes.
+// It is decoupled from action dispatch — platform handles are always cached
+// internally regardless of this setting.
+
 
 impl Default for QueryOptions {
     fn default() -> Self {
@@ -532,12 +536,12 @@ pub enum Error {
     /// The target application was not found or is no longer running.
     AppNotFound { target: String },
 
-    /// The node ID does not exist in the referenced snapshot.
-    NodeNotFound { node_id: NodeId },
+    /// No element matched the given selector.
+    SelectorNotMatched { selector: String },
 
     /// The node's platform handle is stale (UI changed since snapshot)
     /// and re-traversal could not relocate the element.
-    ElementStale { node_id: NodeId },
+    ElementStale { selector: String },
 
     /// The requested action is not supported by this element.
     ActionNotSupported { action: Action, role: Role },
@@ -616,8 +620,8 @@ Each platform backend implements the `Provider` trait. Internally, each backend:
 
 1. **Traverses** the platform's accessibility tree (DFS)
 2. **Maps** platform-specific roles, states, and actions to xa11y types
-3. **Builds** a `Tree` snapshot with sequential IDs
-4. **Caches** live element handles internally (keyed by NodeId) for action dispatch
+3. **Builds** a `Tree` snapshot with sequential indices
+4. **Caches** live element handles internally (keyed by NodeIndex) for action dispatch
 5. **Re-traverses** on action dispatch to ensure handle validity (handles can go stale if the UI changes)
 
 ```
@@ -649,15 +653,15 @@ Each platform backend implements the `Provider` trait. Internally, each backend:
 
 Actions follow the **re-traversal pattern** from agent-desktop:
 
-1. Consumer calls `provider.perform_action(&tree, node_id, Action::Press, None)`
-2. Backend uses `tree.tree_id` to look up its internal handle cache for that snapshot
-3. If the handle for `node_id` is stale (or missing), backend re-traverses using the tree's stored `QueryOptions` to rebuild the cache
+1. Consumer calls `tree.perform(&node, Action::Press, None)` (or `provider.perform_action(&tree, &node, Action::Press, None)`)
+2. Backend uses the node's internal index to look up its cached platform handle
+3. If the handle is stale (or missing), backend re-traverses using the tree's stored `QueryOptions` to rebuild the cache
 4. Backend maps the xa11y `Action` to platform-specific calls
 5. Returns `Ok(())` or `Err(Error::ElementStale)` if the element can't be relocated
 
 Multiple trees can coexist — taking a new snapshot does not invalidate handles
-from previous snapshots. The provider manages handle caches internally, keyed by
-`tree_id`, and evicts them when the `Tree` is dropped (via a reference-counted guard).
+from previous snapshots. The provider manages handle caches internally and evicts
+them when the `Tree` is dropped (via a reference-counted guard).
 
 This is necessary because:
 - **macOS:** AXUIElementRef handles are process-local and can't be serialized. They may become invalid if the UI updates.
@@ -694,8 +698,8 @@ This is necessary because:
 - **Bus name instability:** D-Bus bus names can change across connections. Object paths are more stable but may still be invalidated if the UI is rebuilt.
 
 ### Cross-Platform
-- **Element ID stability:** IDs are assigned in DFS order during traversal. If the UI changes between snapshot and action dispatch, IDs may no longer match. The re-traversal mechanism mitigates this (using the platform handle cache keyed by `tree_id`), but there's an inherent race condition. If re-traversal cannot relocate the element, `Error::ElementStale` is returned.
-- **Role granularity mismatch:** macOS has fewer roles (AXGroup covers many things), Windows has more specific control types, and Linux AT-SPI has the most roles. Normalization loses some information — `include_raw: true` preserves the original.
+- **Element index stability:** Internal indices are assigned in DFS order during traversal. If the UI changes between snapshot and action dispatch, indices may no longer match. The re-traversal mechanism mitigates this (using the platform handle cache), but there's an inherent race condition. If re-traversal cannot relocate the element, `Error::ElementStale` is returned.
+- **Role granularity mismatch:** macOS has fewer roles (AXGroup covers many things), Windows has more specific control types, and Linux AT-SPI has the most roles. Normalization loses some information — `include_raw: true` preserves the original platform data on each node.
 - **Text input:** Programmatic text input varies wildly:
   - macOS: Set AXValue attribute (works for text fields, not for all editable areas)
   - Windows: ValuePattern.SetValue() or TextPattern
@@ -721,9 +725,9 @@ tree = provider.get_app_tree(name="Safari")
 buttons = tree.query("button")
 submit = tree.query('button[name="Submit"]')
 
-# Interact — tree is passed so the provider can look up handles
-provider.press(tree, submit[0].id)
-provider.set_value(tree, text_field.id, "hello@example.com")
+# Interact — tree + node are passed so the provider can look up handles
+tree.press(submit[0])
+tree.set_value(text_field, "hello@example.com")
 ```
 
 ### JavaScript/TypeScript (napi-rs)
@@ -735,7 +739,7 @@ const provider = createProvider();
 const tree = await provider.getAppTree({ name: 'Chrome' });
 
 const buttons = tree.query('button');
-await provider.press(tree, buttons[0].id);
+await tree.press(buttons[0]);
 ```
 
 ### Design Constraints for FFI
@@ -743,7 +747,7 @@ await provider.press(tree, buttons[0].id);
 - All public types are `Send + Sync`
 - No lifetimes in public API — everything is owned
 - `Tree` and `Node` are serializable to JSON
-- `NodeId` is a simple `u32` (trivially representable in any language)
+- Node identity is managed internally (`NodeIndex` is `#[doc(hidden)]`); consumers pass `&Node` references
 - Error handling uses `Result<T, Error>` in Rust, exceptions in Python/JS
 - Async: Linux backend is internally async but the public API is synchronous. Python/JS bindings can offer async wrappers.
 
@@ -757,7 +761,7 @@ We borrow from accesskit where concepts align:
 - **Role enum:** Our role list is a subset of accesskit's ~150 roles, keeping only roles that commonly appear in desktop applications. We use the same names where possible.
 - **Action enum:** Similar to accesskit's Action enum but scoped to client-observable actions (e.g., we don't need `SetTextSelection` or `SetSequentialFocusNavigationStartingPoint`).
 - **Geometry types:** We use a similar `Rect` type. We don't need `Affine` transforms since we're reading screen coordinates, not widget-local coordinates.
-- **Node ID:** AccessKit uses `u64` NodeIds (unique within a tree). We use `u32` sequential IDs (unique within a snapshot) for simplicity and FFI friendliness. AccessKit's IDs are assigned by the application; ours are assigned during traversal.
+- **Node ID:** AccessKit uses `u64` NodeIds (unique within a tree). We use `u32` sequential indices internally (`NodeIndex`, `#[doc(hidden)]`) that are not part of the public API. Consumers work with `&Node` references. Nodes may optionally carry a `stable_id: Option<String>` for cross-snapshot identification. AccessKit's IDs are assigned by the application; ours are assigned during traversal.
 
 We intentionally **diverge** from accesskit in:
 - **Tree model:** AccessKit uses `TreeUpdate` (incremental diffs). We use full snapshots because we're reading external state, not maintaining internal state.

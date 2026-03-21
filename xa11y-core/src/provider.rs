@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::action::{Action, ActionData};
 use crate::error::Result;
-use crate::node::NodeId;
+use crate::node::Node;
 use crate::role::Role;
 use crate::tree::Tree;
 
@@ -18,7 +18,7 @@ pub trait Provider: Send + Sync {
     fn perform_action(
         &self,
         tree: &Tree,
-        node_id: NodeId,
+        node: &Node,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()>;
@@ -63,7 +63,8 @@ pub struct QueryOptions {
     pub visible_only: bool,
     /// Filter to specific roles.
     pub roles: Option<Vec<Role>>,
-    /// Include platform-specific raw data.
+    /// Include platform-specific raw data in the user-visible `node.raw` field.
+    /// Note: action dispatch works regardless of this setting.
     pub include_raw: bool,
 }
 

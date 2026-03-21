@@ -1,5 +1,4 @@
 use crate::action::Action;
-use crate::node::NodeId;
 use crate::role::Role;
 
 /// Result type alias for xa11y operations.
@@ -17,13 +16,13 @@ pub enum Error {
     #[error("Application not found: {target}")]
     AppNotFound { target: String },
 
-    /// The node ID does not exist in the referenced snapshot.
-    #[error("Node not found: {node_id}")]
-    NodeNotFound { node_id: NodeId },
+    /// No element matched the selector.
+    #[error("No element matched selector: {selector}")]
+    SelectorNotMatched { selector: String },
 
     /// The node's platform handle is stale and re-traversal could not relocate it.
-    #[error("Element stale: node {node_id} could not be relocated")]
-    ElementStale { node_id: NodeId },
+    #[error("Element stale: could not relocate element")]
+    ElementStale { selector: String },
 
     /// The requested action is not supported by this element.
     #[error("Action {action} not supported on {role}")]

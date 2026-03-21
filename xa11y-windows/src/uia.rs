@@ -10,7 +10,7 @@ use windows::Win32::System::Threading::*;
 use windows::Win32::UI::Accessibility::*;
 
 use xa11y_core::{
-    Action, ActionData, AppInfo, AppTarget, Error, Node, NodeId, NormalizedRect, PermissionStatus,
+    Action, ActionData, AppInfo, AppTarget, Error, Node, NormalizedRect, PermissionStatus,
     Provider, QueryOptions, RawPlatformData, Rect, Result, Role, StateSet, Toggled, Tree,
 };
 
@@ -30,8 +30,7 @@ fn ensure_com_initialized() -> windows::core::Result<()> {
 /// Windows accessibility provider using UI Automation.
 pub struct WindowsProvider {
     automation: IUIAutomation,
-    next_tree_id: Mutex<u64>,
-    /// Cached UIA elements for action dispatch (keyed by NodeId).
+    /// Cached UIA elements for action dispatch (keyed by node index).
     cached_elements: Mutex<Vec<IUIAutomationElement>>,
 }
 
@@ -58,7 +57,6 @@ impl WindowsProvider {
         })?;
         Ok(Self {
             automation,
-            next_tree_id: Mutex::new(1),
             cached_elements: Mutex::new(Vec::new()),
         })
     }
@@ -75,13 +73,6 @@ impl WindowsProvider {
             return Err(());
         }
         unsafe { self.automation.ElementFromHandle(hwnd) }.map_err(|_| ())
-    }
-
-    fn next_tree_id(&self) -> u64 {
-        let mut id = self.next_tree_id.lock().unwrap();
-        let current = *id;
-        *id += 1;
-        current
     }
 
     fn detect_screen_size() -> (u32, u32) {
@@ -246,7 +237,7 @@ impl WindowsProvider {
         app_name: &str,
         nodes: &mut Vec<Node>,
         elements: &mut Vec<IUIAutomationElement>,
-        parent_id: Option<NodeId>,
+        parent_idx: Option<u32>,
         depth: u32,
         screen_size: (u32, u32),
     ) {
@@ -313,7 +304,7 @@ impl WindowsProvider {
                 app_name,
                 nodes,
                 elements,
-                parent_id,
+                parent_idx,
                 depth,
                 screen_size,
             );
@@ -363,7 +354,7 @@ impl WindowsProvider {
                 app_name,
                 nodes,
                 elements,
-                parent_id,
+                parent_idx,
                 depth,
                 screen_size,
             );
@@ -428,9 +419,14 @@ impl WindowsProvider {
             None
         };
 
-        let node_id = nodes.len() as NodeId;
+        // Stable ID: AutomationId (always captured for cross-snapshot correlation)
+        let stable_id = unsafe { element.CurrentAutomationId() }
+            .ok()
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty());
+
+        let node_idx = nodes.len() as u32;
         nodes.push(Node {
-            id: node_id,
             role,
             name,
             value,
@@ -439,11 +435,13 @@ impl WindowsProvider {
             bounds_normalized,
             actions,
             states,
-            children: vec![],
-            parent: parent_id,
             depth,
+            stable_id,
             app_name: Some(app_name.to_string()),
             raw,
+            index: node_idx,
+            children_indices: vec![],
+            parent_index: parent_idx,
         });
         elements.push(element.clone());
 
@@ -463,15 +461,15 @@ impl WindowsProvider {
                             }
                         }
                         if let Ok(child_el) = unsafe { children.GetElement(i) } {
-                            let child_node_id = nodes.len() as NodeId;
-                            child_ids.push(child_node_id);
+                            let child_idx = nodes.len() as u32;
+                            child_ids.push(child_idx);
                             self.traverse(
                                 &child_el,
                                 opts,
                                 app_name,
                                 nodes,
                                 elements,
-                                Some(node_id),
+                                Some(node_idx),
                                 depth + 1,
                                 screen_size,
                             );
@@ -498,15 +496,15 @@ impl WindowsProvider {
                             break;
                         }
                     }
-                    let child_node_id = nodes.len() as NodeId;
-                    child_ids.push(child_node_id);
+                    let child_idx = nodes.len() as u32;
+                    child_ids.push(child_idx);
                     self.traverse(
                         child_el,
                         opts,
                         app_name,
                         nodes,
                         elements,
-                        Some(node_id),
+                        Some(node_idx),
                         depth + 1,
                         screen_size,
                     );
@@ -515,7 +513,7 @@ impl WindowsProvider {
             }
         }
 
-        nodes[node_id as usize].children = child_ids;
+        nodes[node_idx as usize].children_indices = child_ids;
     }
 
     /// Traverse children only (used when current node is filtered out).
@@ -527,7 +525,7 @@ impl WindowsProvider {
         app_name: &str,
         nodes: &mut Vec<Node>,
         elements: &mut Vec<IUIAutomationElement>,
-        parent_id: Option<NodeId>,
+        parent_idx: Option<u32>,
         depth: u32,
         screen_size: (u32, u32),
     ) {
@@ -549,7 +547,7 @@ impl WindowsProvider {
                 app_name,
                 nodes,
                 elements,
-                parent_id,
+                parent_idx,
                 depth + 1,
                 screen_size,
             );
@@ -598,7 +596,6 @@ impl Provider for WindowsProvider {
         *self.cached_elements.lock().unwrap() = elements;
 
         Ok(Tree::new(
-            self.next_tree_id(),
             app_name,
             Some(pid),
             screen_size,
@@ -613,7 +610,6 @@ impl Provider for WindowsProvider {
         let mut elements = Vec::new();
 
         nodes.push(Node {
-            id: 0,
             role: Role::Application,
             name: Some("Desktop".to_string()),
             value: None,
@@ -632,11 +628,13 @@ impl Provider for WindowsProvider {
             }),
             actions: vec![],
             states: StateSet::default(),
-            children: vec![],
-            parent: None,
             depth: 0,
+            stable_id: None,
             app_name: Some("Desktop".to_string()),
             raw: None,
+            index: 0,
+            children_indices: vec![],
+            parent_index: None,
         });
 
         let root = unsafe { self.automation.GetRootElement() }.map_err(|e| Error::Platform {
@@ -680,8 +678,8 @@ impl Provider for WindowsProvider {
                 if name.is_empty() {
                     continue;
                 }
-                let child_node_id = nodes.len() as NodeId;
-                root_children.push(child_node_id);
+                let child_idx = nodes.len() as u32;
+                root_children.push(child_idx);
                 self.traverse(
                     &el,
                     opts,
@@ -695,11 +693,10 @@ impl Provider for WindowsProvider {
             }
         }
 
-        nodes[0].children = root_children;
+        nodes[0].children_indices = root_children;
         *self.cached_elements.lock().unwrap() = elements;
 
         Ok(Tree::new(
-            self.next_tree_id(),
             "Desktop".to_string(),
             None,
             screen_size,
@@ -711,23 +708,16 @@ impl Provider for WindowsProvider {
     fn perform_action(
         &self,
         tree: &Tree,
-        node_id: NodeId,
+        node: &Node,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()> {
-        let node = tree.get(node_id).ok_or(Error::NodeNotFound { node_id })?;
-
-        if node.raw.is_none() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "Action dispatch requires include_raw: true in QueryOptions".to_string(),
-            });
-        }
+        let node_idx = tree.node_index(node);
 
         let cache = self.cached_elements.lock().unwrap();
-        let element = cache
-            .get(node_id as usize)
-            .ok_or(Error::ElementStale { node_id })?;
+        let element = cache.get(node_idx as usize).ok_or(Error::ElementStale {
+            selector: format!("index:{}", node_idx),
+        })?;
 
         match action {
             Action::Press | Action::Toggle | Action::Select => {

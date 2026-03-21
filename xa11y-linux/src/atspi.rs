@@ -3,7 +3,7 @@
 use std::sync::Mutex;
 
 use xa11y_core::{
-    Action, ActionData, AppInfo, AppTarget, Error, Node, NodeId, NormalizedRect, PermissionStatus,
+    Action, ActionData, AppInfo, AppTarget, Error, Node, NormalizedRect, PermissionStatus,
     Provider, QueryOptions, Rect, Result, Role, StateSet, Toggled, Tree,
 };
 use zbus::blocking::{Connection, Proxy};
@@ -11,7 +11,8 @@ use zbus::blocking::{Connection, Proxy};
 /// Linux accessibility provider using AT-SPI2 over D-Bus.
 pub struct LinuxProvider {
     a11y_bus: Connection,
-    next_tree_id: Mutex<u64>,
+    /// Cached AT-SPI accessible refs for action dispatch (keyed by node index).
+    cached_refs: Mutex<Vec<AccessibleRef>>,
 }
 
 /// AT-SPI2 accessible reference: (bus_name, object_path).
@@ -30,7 +31,7 @@ impl LinuxProvider {
         let a11y_bus = Self::connect_a11y_bus()?;
         Ok(Self {
             a11y_bus,
-            next_tree_id: Mutex::new(1),
+            cached_refs: Mutex::new(Vec::new()),
         })
     }
 
@@ -65,13 +66,6 @@ impl LinuxProvider {
             code: -1,
             message: format!("Failed to connect to D-Bus session bus: {}", e),
         })
-    }
-
-    fn next_tree_id(&self) -> u64 {
-        let mut id = self.next_tree_id.lock().unwrap();
-        let current = *id;
-        *id += 1;
-        current
     }
 
     fn make_proxy(&self, bus_name: &str, path: &str, interface: &str) -> Result<Proxy<'_>> {
@@ -289,7 +283,8 @@ impl LinuxProvider {
         opts: &QueryOptions,
         app_name: &str,
         nodes: &mut Vec<Node>,
-        parent_id: Option<NodeId>,
+        refs: &mut Vec<AccessibleRef>,
+        parent_idx: Option<u32>,
         depth: u32,
         screen_size: (u32, u32),
     ) {
@@ -349,7 +344,8 @@ impl LinuxProvider {
                     opts,
                     app_name,
                     nodes,
-                    parent_id,
+                    refs,
+                    parent_idx,
                     depth + 1,
                     screen_size,
                 );
@@ -409,9 +405,8 @@ impl LinuxProvider {
             None
         };
 
-        let node_id = nodes.len() as NodeId;
+        let node_idx = nodes.len() as u32;
         nodes.push(Node {
-            id: node_id,
             role,
             name,
             value,
@@ -420,12 +415,15 @@ impl LinuxProvider {
             bounds_normalized,
             actions,
             states,
-            children: vec![], // filled in below
-            parent: parent_id,
             depth,
+            stable_id: Some(aref.path.clone()),
             app_name: Some(app_name.to_string()),
             raw,
+            index: node_idx,
+            children_indices: vec![], // filled in below
+            parent_index: parent_idx,
         });
+        refs.push(aref.clone());
 
         // Get children
         let children = self.get_children(aref).unwrap_or_default();
@@ -444,21 +442,22 @@ impl LinuxProvider {
             {
                 continue;
             }
-            let child_node_id = nodes.len() as NodeId;
-            child_ids.push(child_node_id);
+            let child_idx = nodes.len() as u32;
+            child_ids.push(child_idx);
             self.traverse(
                 child_ref,
                 opts,
                 app_name,
                 nodes,
-                Some(node_id),
+                refs,
+                Some(node_idx),
                 depth + 1,
                 screen_size,
             );
         }
 
         // Update children list
-        nodes[node_id as usize].children = child_ids;
+        nodes[node_idx as usize].children_indices = child_ids;
     }
 
     /// Parse AT-SPI2 state bitfield into xa11y StateSet.
@@ -702,8 +701,18 @@ impl Provider for LinuxProvider {
         let app_name = self.get_name(&app_ref).unwrap_or_default();
         let screen_size = Self::detect_screen_size();
         let mut nodes = Vec::new();
+        let mut refs = Vec::new();
 
-        self.traverse(&app_ref, opts, &app_name, &mut nodes, None, 0, screen_size);
+        self.traverse(
+            &app_ref,
+            opts,
+            &app_name,
+            &mut nodes,
+            &mut refs,
+            None,
+            0,
+            screen_size,
+        );
 
         if nodes.is_empty() {
             return Err(Error::AppNotFound {
@@ -711,16 +720,12 @@ impl Provider for LinuxProvider {
             });
         }
 
+        // Cache refs for action dispatch
+        *self.cached_refs.lock().unwrap() = refs;
+
         let pid = self.get_app_pid(&app_ref);
 
-        Ok(Tree::new(
-            self.next_tree_id(),
-            app_name,
-            pid,
-            screen_size,
-            nodes,
-            opts.clone(),
-        ))
+        Ok(Tree::new(app_name, pid, screen_size, nodes, opts.clone()))
     }
 
     fn get_all_apps(&self, opts: &QueryOptions) -> Result<Tree> {
@@ -728,7 +733,6 @@ impl Provider for LinuxProvider {
         let mut nodes = Vec::new();
 
         nodes.push(Node {
-            id: 0,
             role: Role::Application,
             name: Some("Desktop".to_string()),
             value: None,
@@ -747,12 +751,20 @@ impl Provider for LinuxProvider {
             }),
             actions: vec![],
             states: StateSet::default(),
-            children: vec![],
-            parent: None,
             depth: 0,
+            stable_id: None,
             app_name: Some("Desktop".to_string()),
             raw: None,
+            index: 0,
+            children_indices: vec![],
+            parent_index: None,
         });
+
+        let mut refs = Vec::new();
+        refs.push(AccessibleRef {
+            bus_name: String::new(),
+            path: String::new(),
+        }); // placeholder for desktop root
 
         let registry = AccessibleRef {
             bus_name: "org.a11y.atspi.Registry".to_string(),
@@ -769,15 +781,25 @@ impl Provider for LinuxProvider {
             if app_name.is_empty() {
                 continue;
             }
-            let child_node_id = nodes.len() as NodeId;
-            root_children.push(child_node_id);
-            self.traverse(child, opts, &app_name, &mut nodes, Some(0), 1, screen_size);
+            let child_idx = nodes.len() as u32;
+            root_children.push(child_idx);
+            self.traverse(
+                child,
+                opts,
+                &app_name,
+                &mut nodes,
+                &mut refs,
+                Some(0),
+                1,
+                screen_size,
+            );
         }
 
-        nodes[0].children = root_children;
+        nodes[0].children_indices = root_children;
+
+        *self.cached_refs.lock().unwrap() = refs;
 
         Ok(Tree::new(
-            self.next_tree_id(),
             "Desktop".to_string(),
             None,
             screen_size,
@@ -789,30 +811,21 @@ impl Provider for LinuxProvider {
     fn perform_action(
         &self,
         tree: &Tree,
-        node_id: NodeId,
+        node: &Node,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()> {
-        let node = tree.get(node_id).ok_or(Error::NodeNotFound { node_id })?;
+        let node_idx = tree.node_index(node);
 
-        let target = if let Some(ref raw) = node.raw {
-            match raw {
-                xa11y_core::RawPlatformData::Linux {
-                    bus_name,
-                    object_path,
-                    ..
-                } => AccessibleRef {
-                    bus_name: bus_name.clone(),
-                    path: object_path.clone(),
-                },
-                _ => return Err(Error::ElementStale { node_id }),
-            }
-        } else {
-            return Err(Error::Platform {
-                code: -1,
-                message: "Action dispatch requires include_raw: true in QueryOptions".to_string(),
-            });
-        };
+        // Look up cached accessible ref for action dispatch
+        let cache = self.cached_refs.lock().unwrap();
+        let target = cache
+            .get(node_idx as usize)
+            .ok_or(Error::ElementStale {
+                selector: format!("index:{}", node_idx),
+            })?
+            .clone();
+        drop(cache);
 
         match action {
             Action::Press => self

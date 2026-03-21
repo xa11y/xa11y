@@ -326,7 +326,7 @@ impl Selector {
                 match segment.combinator {
                     Combinator::Child => {
                         // Direct children of candidate that match
-                        for child in tree.children(candidate.id) {
+                        for child in tree.children(candidate) {
                             if Self::matches_simple(child, &segment.simple) {
                                 next_candidates.push(child);
                             }
@@ -334,7 +334,7 @@ impl Selector {
                     }
                     Combinator::Descendant => {
                         // All descendants of candidate that match
-                        let subtree = tree.subtree(candidate.id);
+                        let subtree = tree.subtree(candidate);
                         for node in subtree.into_iter().skip(1) {
                             if Self::matches_simple(node, &segment.simple) {
                                 next_candidates.push(node);
@@ -346,7 +346,7 @@ impl Selector {
             }
             // Deduplicate while preserving order
             let mut seen = std::collections::HashSet::new();
-            next_candidates.retain(|n| seen.insert(n.id));
+            next_candidates.retain(|n| seen.insert(n.index));
             candidates = next_candidates;
         }
 
