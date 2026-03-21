@@ -3,15 +3,15 @@ use serde::{Deserialize, Serialize};
 use crate::action::Action;
 use crate::role::Role;
 
-/// Unique ID for a node within a snapshot (sequential, deterministic DFS order).
-pub type NodeId = u32;
+/// Internal index for a node within a snapshot (sequential DFS order).
+/// This is an array index, not a stable identity — it changes between snapshots.
+/// Internal index type for node positions within a snapshot.
+#[doc(hidden)]
+pub type NodeIndex = u32;
 
 /// A single element in the accessibility tree snapshot.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
-    /// Unique ID within a snapshot (sequential, deterministic DFS order)
-    pub id: NodeId,
-
     /// Element role
     pub role: Role,
 
@@ -36,20 +36,39 @@ pub struct Node {
     /// Current state flags
     pub states: StateSet,
 
-    /// Child node IDs (direct children only)
-    pub children: Vec<NodeId>,
-
-    /// Parent node ID (None for root)
-    pub parent: Option<NodeId>,
-
     /// Depth in the tree (0 = root)
     pub depth: u32,
+
+    /// Platform-assigned stable identifier for cross-snapshot correlation.
+    /// - macOS: `AXIdentifier`
+    /// - Windows: `AutomationId`
+    /// - Linux: D-Bus `object_path`
+    ///
+    /// Not all elements have one.
+    pub stable_id: Option<String>,
 
     /// Application name (useful when querying all apps)
     pub app_name: Option<String>,
 
     /// Platform-specific raw data (opt-in, for debugging)
     pub raw: Option<RawPlatformData>,
+
+    // ── Internal fields ──────────────────────────────────────────────────────
+    // Present in serialized output for FFI consumers (Python, JS, LLMs),
+    // but not part of the Rust public API.
+    /// Sequential DFS index within the snapshot.
+    /// Internal — present in serialized output for FFI consumers,
+    /// but not intended as part of the primary Rust API.
+    #[doc(hidden)]
+    pub index: NodeIndex,
+
+    /// Child node indices (direct children only).
+    #[doc(hidden)]
+    pub children_indices: Vec<NodeIndex>,
+
+    /// Parent node index (None for root).
+    #[doc(hidden)]
+    pub parent_index: Option<NodeIndex>,
 }
 
 /// Boolean state flags for a node.

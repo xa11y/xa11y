@@ -73,20 +73,20 @@ pub fn named<'a>(tree: &'a Tree, substring: &str) -> &'a Node {
 }
 
 /// Perform an action on a node, wait briefly, then re-read the tree.
-pub fn act(p: &dyn Provider, tree: &Tree, id: NodeId, action: Action) -> Tree {
-    act_with(p, tree, id, action, None)
+pub fn act(p: &dyn Provider, tree: &Tree, node: &Node, action: Action) -> Tree {
+    act_with(p, tree, node, action, None)
 }
 
 /// Perform an action with data on a node, wait, then re-read the tree.
 pub fn act_with(
     p: &dyn Provider,
     tree: &Tree,
-    id: NodeId,
+    node: &Node,
     action: Action,
     data: Option<ActionData>,
 ) -> Tree {
-    p.perform_action(tree, id, action, data)
-        .unwrap_or_else(|e| panic!("Action {:?} on node {} failed: {}", action, id, e));
+    p.perform_action(tree, node, action, data)
+        .unwrap_or_else(|e| panic!("Action {:?} failed: {}", action, e));
     std::thread::sleep(std::time::Duration::from_millis(100));
     raw_tree(p)
 }

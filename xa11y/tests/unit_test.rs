@@ -10,7 +10,6 @@ use xa11y::*;
 fn sample_tree() -> Tree {
     let nodes = vec![
         Node {
-            id: 0,
             role: Role::Window,
             name: Some("My App".to_string()),
             value: None,
@@ -29,14 +28,15 @@ fn sample_tree() -> Tree {
             }),
             actions: vec![],
             states: StateSet::default(),
-            children: vec![1, 4],
-            parent: None,
             depth: 0,
+            stable_id: None,
             app_name: Some("My App".to_string()),
             raw: None,
+            index: 0,
+            children_indices: vec![1, 4],
+            parent_index: None,
         },
         Node {
-            id: 1,
             role: Role::Toolbar,
             name: Some("Main Toolbar".to_string()),
             value: None,
@@ -50,14 +50,15 @@ fn sample_tree() -> Tree {
             bounds_normalized: None,
             actions: vec![],
             states: StateSet::default(),
-            children: vec![2, 3],
-            parent: Some(0),
             depth: 1,
+            stable_id: None,
             app_name: Some("My App".to_string()),
             raw: None,
+            index: 1,
+            children_indices: vec![2, 3],
+            parent_index: Some(0),
         },
         Node {
-            id: 2,
             role: Role::Button,
             name: Some("Back".to_string()),
             value: None,
@@ -75,14 +76,15 @@ fn sample_tree() -> Tree {
                 visible: true,
                 ..StateSet::default()
             },
-            children: vec![],
-            parent: Some(1),
             depth: 2,
+            stable_id: None,
             app_name: Some("My App".to_string()),
             raw: None,
+            index: 2,
+            children_indices: vec![],
+            parent_index: Some(1),
         },
         Node {
-            id: 3,
             role: Role::TextField,
             name: Some("Address Bar".to_string()),
             value: Some("https://example.com".to_string()),
@@ -101,14 +103,15 @@ fn sample_tree() -> Tree {
                 editable: true,
                 ..StateSet::default()
             },
-            children: vec![],
-            parent: Some(1),
             depth: 2,
+            stable_id: None,
             app_name: Some("My App".to_string()),
             raw: None,
+            index: 3,
+            children_indices: vec![],
+            parent_index: Some(1),
         },
         Node {
-            id: 4,
             role: Role::WebArea,
             name: None,
             value: None,
@@ -122,14 +125,15 @@ fn sample_tree() -> Tree {
             bounds_normalized: None,
             actions: vec![],
             states: StateSet::default(),
-            children: vec![5, 6, 7, 8],
-            parent: Some(0),
             depth: 1,
+            stable_id: None,
             app_name: Some("My App".to_string()),
             raw: None,
+            index: 4,
+            children_indices: vec![5, 6, 7, 8],
+            parent_index: Some(0),
         },
         Node {
-            id: 5,
             role: Role::Heading,
             name: Some("Welcome".to_string()),
             value: None,
@@ -138,14 +142,15 @@ fn sample_tree() -> Tree {
             bounds_normalized: None,
             actions: vec![],
             states: StateSet::default(),
-            children: vec![],
-            parent: Some(4),
             depth: 2,
+            stable_id: None,
             app_name: Some("My App".to_string()),
             raw: None,
+            index: 5,
+            children_indices: vec![],
+            parent_index: Some(4),
         },
         Node {
-            id: 6,
             role: Role::Button,
             name: Some("Submit".to_string()),
             value: None,
@@ -158,14 +163,15 @@ fn sample_tree() -> Tree {
                 visible: true,
                 ..StateSet::default()
             },
-            children: vec![],
-            parent: Some(4),
             depth: 2,
+            stable_id: None,
             app_name: Some("My App".to_string()),
             raw: None,
+            index: 6,
+            children_indices: vec![],
+            parent_index: Some(4),
         },
         Node {
-            id: 7,
             role: Role::Button,
             name: Some("Cancel".to_string()),
             value: None,
@@ -178,14 +184,15 @@ fn sample_tree() -> Tree {
                 visible: true,
                 ..StateSet::default()
             },
-            children: vec![],
-            parent: Some(4),
             depth: 2,
+            stable_id: None,
             app_name: Some("My App".to_string()),
             raw: None,
+            index: 7,
+            children_indices: vec![],
+            parent_index: Some(4),
         },
         Node {
-            id: 8,
             role: Role::CheckBox,
             name: Some("I agree to terms".to_string()),
             value: None,
@@ -199,16 +206,17 @@ fn sample_tree() -> Tree {
                 checked: Some(Toggled::Off),
                 ..StateSet::default()
             },
-            children: vec![],
-            parent: Some(4),
             depth: 2,
+            stable_id: None,
             app_name: Some("My App".to_string()),
             raw: None,
+            index: 8,
+            children_indices: vec![],
+            parent_index: Some(4),
         },
     ];
 
     Tree::new(
-        1,
         "My App".to_string(),
         Some(1234),
         (1920, 1080),
@@ -223,13 +231,12 @@ fn sample_tree() -> Tree {
 fn tree_root() {
     let tree = sample_tree();
     let root = tree.root();
-    assert_eq!(root.id, 0);
     assert_eq!(root.role, Role::Window);
     assert_eq!(root.name.as_deref(), Some("My App"));
 }
 
 #[test]
-fn tree_get_by_id() {
+fn tree_get_by_index() {
     let tree = sample_tree();
     let button = tree.get(2).unwrap();
     assert_eq!(button.role, Role::Button);
@@ -252,20 +259,31 @@ fn tree_len() {
 #[test]
 fn tree_children() {
     let tree = sample_tree();
-    let children = tree.children(1);
+    let toolbar = tree.get(1).unwrap();
+    let children = tree.children(toolbar);
     assert_eq!(children.len(), 2);
     assert_eq!(children[0].role, Role::Button);
     assert_eq!(children[1].role, Role::TextField);
 }
 
 #[test]
+fn tree_parent() {
+    let tree = sample_tree();
+    let button = tree.get(2).unwrap();
+    let parent = tree.parent(button).unwrap();
+    assert_eq!(parent.role, Role::Toolbar);
+    assert!(tree.parent(tree.root()).is_none());
+}
+
+#[test]
 fn tree_subtree() {
     let tree = sample_tree();
-    let subtree = tree.subtree(1);
+    let toolbar = tree.get(1).unwrap();
+    let subtree = tree.subtree(toolbar);
     assert_eq!(subtree.len(), 3);
-    assert_eq!(subtree[0].id, 1);
-    assert_eq!(subtree[1].id, 2);
-    assert_eq!(subtree[2].id, 3);
+    assert_eq!(subtree[0].role, Role::Toolbar);
+    assert_eq!(subtree[1].role, Role::Button);
+    assert_eq!(subtree[2].role, Role::TextField);
 }
 
 #[test]
@@ -288,7 +306,7 @@ fn tree_find_by_name_case_insensitive() {
     let tree = sample_tree();
     let results = tree.find_by_name("BACK");
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].id, 2);
+    assert_eq!(results[0].role, Role::Button);
 }
 
 #[test]
@@ -312,8 +330,8 @@ fn tree_dump() {
 #[test]
 fn tree_iter() {
     let tree = sample_tree();
-    let ids: Vec<NodeId> = tree.iter().map(|n| n.id).collect();
-    assert_eq!(ids, vec![0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    let count = tree.iter().count();
+    assert_eq!(count, 9);
 }
 
 // ── Selector queries ──
@@ -330,7 +348,7 @@ fn query_by_exact_name() {
     let tree = sample_tree();
     let results = tree.query(r#"[name="Submit"]"#).unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].id, 6);
+    assert_eq!(results[0].role, Role::Button);
 }
 
 #[test]
@@ -338,7 +356,7 @@ fn query_role_and_name() {
     let tree = sample_tree();
     let results = tree.query(r#"button[name="Submit"]"#).unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].id, 6);
+    assert_eq!(results[0].name.as_deref(), Some("Submit"));
 }
 
 #[test]
@@ -401,7 +419,6 @@ fn query_complex() {
         .query(r#"toolbar > text_field[name*="Address"]"#)
         .unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].id, 3);
     assert_eq!(results[0].value.as_deref(), Some("https://example.com"));
 }
 
@@ -410,7 +427,7 @@ fn query_by_value() {
     let tree = sample_tree();
     let results = tree.query(r#"[value*="example"]"#).unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].id, 3);
+    assert_eq!(results[0].role, Role::TextField);
 }
 
 #[test]
@@ -565,10 +582,14 @@ fn error_display() {
     };
     assert!(format!("{}", err).contains("Safari"));
 
-    let err = Error::NodeNotFound { node_id: 42 };
-    assert!(format!("{}", err).contains("42"));
+    let err = Error::SelectorNotMatched {
+        selector: "button[name=\"Submit\"]".to_string(),
+    };
+    assert!(format!("{}", err).contains("Submit"));
 
-    let err = Error::ElementStale { node_id: 7 };
+    let err = Error::ElementStale {
+        selector: "button".to_string(),
+    };
     assert!(format!("{}", err).contains("stale"));
 
     let err = Error::ActionNotSupported {
@@ -609,7 +630,6 @@ fn tree_json_roundtrip() {
 #[test]
 fn node_json_serialization() {
     let node = Node {
-        id: 0,
         role: Role::Button,
         name: Some("Submit".to_string()),
         value: None,
@@ -628,11 +648,13 @@ fn node_json_serialization() {
             focused: true,
             ..StateSet::default()
         },
-        children: vec![],
-        parent: None,
         depth: 0,
+        stable_id: None,
         app_name: None,
         raw: None,
+        index: 0,
+        children_indices: vec![],
+        parent_index: None,
     };
 
     let json = serde_json::to_string_pretty(&node).unwrap();
@@ -754,15 +776,9 @@ fn permission_status_variants() {
 }
 
 // ── Platform backend ──
-//
-// These tests require a D-Bus session (Linux) or platform accessibility.
-// They are skipped gracefully if `create_provider()` fails (e.g., in headless CI
-// without a D-Bus session).
 
 #[test]
 fn platform_provider_creates_or_fails_gracefully() {
-    // create_provider may fail if no D-Bus session is available (Linux)
-    // or if accessibility isn't enabled — that's fine for unit tests.
     let _result = xa11y::create_provider();
 }
 
@@ -770,7 +786,7 @@ fn platform_provider_creates_or_fails_gracefully() {
 fn platform_provider_check_permissions() {
     let provider = match xa11y::create_provider() {
         Ok(p) => p,
-        Err(_) => return, // skip if no provider available
+        Err(_) => return,
     };
     let status = provider.check_permissions().unwrap();
     match status {
@@ -782,7 +798,7 @@ fn platform_provider_check_permissions() {
 fn platform_provider_operations_return_errors() {
     let provider = match xa11y::create_provider() {
         Ok(p) => p,
-        Err(_) => return, // skip if no provider available
+        Err(_) => return,
     };
 
     let result = provider.get_app_tree(
@@ -791,7 +807,6 @@ fn platform_provider_operations_return_errors() {
     );
     assert!(result.is_err());
 
-    // list_apps may succeed on a real system, so we just verify it doesn't panic
     let _result = provider.list_apps();
 }
 
@@ -804,7 +819,7 @@ fn selector_multiple_attr_filters() {
         .query(r#"[name*="address"][role="text_field"]"#)
         .unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].id, 3);
+    assert_eq!(results[0].role, Role::TextField);
 }
 
 #[test]

@@ -4,7 +4,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use xa11y_core::{Node, NodeId, QueryOptions, Role, StateSet, Tree};
+use xa11y_core::{Node, QueryOptions, Role, StateSet, Tree};
 
 const ROLES: [Role; 33] = [
     Role::Unknown,
@@ -62,7 +62,6 @@ fn build_tree(fuzz_nodes: &[FuzzNode]) -> Tree {
 
     if node_count == 0 {
         return Tree::new(
-            0,
             "fuzz-app".to_string(),
             None,
             (1920, 1080),
@@ -76,7 +75,6 @@ fn build_tree(fuzz_nodes: &[FuzzNode]) -> Tree {
         let fuzz = &fuzz_nodes[i];
         let role = ROLES[fuzz.role_idx as usize % ROLES.len()];
         nodes.push(Node {
-            id: i as NodeId,
             role,
             name: fuzz.name.clone(),
             value: fuzz.value.clone(),
@@ -85,11 +83,13 @@ fn build_tree(fuzz_nodes: &[FuzzNode]) -> Tree {
             bounds_normalized: None,
             actions: vec![],
             states: StateSet::default(),
-            children: vec![],
-            parent: None,
             depth: 0,
+            stable_id: None,
             app_name: None,
             raw: None,
+            index: i as u32,
+            children_indices: vec![],
+            parent_index: None,
         });
     }
 
@@ -105,14 +105,13 @@ fn build_tree(fuzz_nodes: &[FuzzNode]) -> Tree {
         let desired = (fuzz_nodes[parent_idx].child_count as usize).min(8);
         let actual = desired.min(node_count - next_child);
         let parent_depth = nodes[parent_idx].depth;
-        let parent_id = nodes[parent_idx].id;
 
         for _ in 0..actual {
             let child_idx = next_child;
             next_child += 1;
-            nodes[child_idx].parent = Some(parent_id);
+            nodes[child_idx].parent_index = Some(parent_idx as u32);
             nodes[child_idx].depth = parent_depth + 1;
-            nodes[parent_idx].children.push(child_idx as NodeId);
+            nodes[parent_idx].children_indices.push(child_idx as u32);
             queue.push(child_idx);
         }
         if next_child >= node_count {
@@ -122,14 +121,13 @@ fn build_tree(fuzz_nodes: &[FuzzNode]) -> Tree {
 
     // Remaining unassigned nodes become children of root.
     while next_child < node_count {
-        nodes[next_child].parent = Some(0);
+        nodes[next_child].parent_index = Some(0);
         nodes[next_child].depth = 1;
-        nodes[0].children.push(next_child as NodeId);
+        nodes[0].children_indices.push(next_child as u32);
         next_child += 1;
     }
 
     Tree::new(
-        0,
         "fuzz-app".to_string(),
         None,
         (1920, 1080),

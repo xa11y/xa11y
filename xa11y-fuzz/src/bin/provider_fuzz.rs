@@ -276,7 +276,6 @@ mod provider_fuzz {
             Action::SetValue => {
                 let kind: u8 = rng.gen_range(0..10);
                 match kind {
-                    // Text value
                     0..=3 => {
                         let texts = [
                             "hello",
@@ -291,14 +290,12 @@ mod provider_fuzz {
                             texts[rng.gen_range(0..texts.len())].to_string(),
                         ))
                     }
-                    // Numeric value
                     4..=7 => {
                         let values = [0.0, 50.0, 100.0, -1.0, 999.0, 0.5, 42.0];
                         Some(ActionData::NumericValue(
                             values[rng.gen_range(0..values.len())],
                         ))
                     }
-                    // Missing data (exercises error path)
                     _ => None,
                 }
             }
@@ -312,11 +309,9 @@ mod provider_fuzz {
         provider: Box<dyn Provider>,
         rng: StdRng,
         verbose: bool,
-        // Trees with and without include_raw
         tree_raw: Option<Tree>,
         tree_no_raw: Option<Tree>,
         test_app_pid: u32,
-        // Stats
         ops: u64,
         errors: u64,
     }
@@ -358,9 +353,6 @@ mod provider_fuzz {
     }
 
     // ── Operations ───────────────────────────────────────────────────────────
-
-    // Each operation returns Ok(()) on success (including expected errors),
-    // panics propagate as bugs.
 
     fn op_get_tree_by_name(state: &mut FuzzState) {
         let opts = random_query_options(&mut state.rng);
@@ -422,7 +414,6 @@ mod provider_fuzz {
         let result = state
             .provider
             .get_app_tree(&AppTarget::ByPid(99999), &QueryOptions::default());
-        // May succeed (some PID might exist) or fail — both are fine
         match result {
             Ok(tree) => inspect_tree(&tree, &mut state.rng),
             Err(_) => state.errors += 1,
@@ -440,8 +431,6 @@ mod provider_fuzz {
     }
 
     fn op_get_all_apps(state: &mut FuzzState) {
-        // Cap depth and elements — traversing all system apps can be slow
-        // (AT-SPI on Linux, AX on macOS) and other apps may have stale objects.
         let mut opts = random_query_options(&mut state.rng);
         opts.max_depth = Some(opts.max_depth.map_or(3, |d| d.min(3)));
         opts.max_elements = Some(opts.max_elements.map_or(100, |n| n.min(100)));
@@ -482,7 +471,6 @@ mod provider_fuzz {
         state.log("list_apps()");
         let apps = state.provider.list_apps().unwrap();
         assert!(!apps.is_empty(), "list_apps returned empty");
-        // Verify test app is in the list
         let has_test_app = apps.iter().any(|a| a.name.contains("xa11y"));
         state.log(&format!(
             "  -> {} apps, test_app_present={}",
@@ -504,8 +492,8 @@ mod provider_fuzz {
         }
 
         // Pick a random node
-        let node_id = state.rng.gen_range(0..node_count) as NodeId;
-        let node = match tree.get(node_id) {
+        let node_idx = state.rng.gen_range(0..node_count) as u32;
+        let node = match tree.get(node_idx) {
             Some(n) => n,
             None => return,
         };
@@ -520,14 +508,12 @@ mod provider_fuzz {
         let data = random_action_data(&mut state.rng, action, node);
         state.log(&format!(
             "perform_action(node={}, role={:?}, action={:?}, data={:?})",
-            node_id, node.role, action, data
+            node_idx, node.role, action, data
         ));
 
-        match state.provider.perform_action(tree, node_id, action, data) {
+        match state.provider.perform_action(tree, node, action, data) {
             Ok(()) => {
-                // Brief sleep to let the app update its tree
                 std::thread::sleep(std::time::Duration::from_millis(20));
-                // Invalidate cached trees so next operation gets fresh state
                 state.tree_raw = None;
                 state.tree_no_raw = None;
             }
@@ -549,20 +535,22 @@ mod provider_fuzz {
             return;
         }
 
-        let node_id = state.rng.gen_range(0..tree.len()) as NodeId;
+        let node_idx = state.rng.gen_range(0..tree.len()) as u32;
+        let node = match tree.get(node_idx) {
+            Some(n) => n,
+            None => return,
+        };
         state.log(&format!(
             "perform_action without include_raw, node={}",
-            node_id
+            node_idx
         ));
 
         let result = state
             .provider
-            .perform_action(tree, node_id, Action::Press, None);
-        // Should fail because raw data is needed
+            .perform_action(tree, node, Action::Press, None);
         match result {
             Err(_) => state.errors += 1,
             Ok(()) => {
-                // Some providers might succeed — both are fine
                 state.tree_raw = None;
                 state.tree_no_raw = None;
             }
@@ -576,13 +564,16 @@ mod provider_fuzz {
             None => return,
         };
 
-        let bad_id = tree.len() as NodeId + state.rng.gen_range(1..1000);
-        state.log(&format!("perform_action on invalid node_id={}", bad_id));
-
-        let result = state
-            .provider
-            .perform_action(tree, bad_id, Action::Press, None);
-        assert!(result.is_err(), "Expected error for invalid node ID");
+        // Try performing an action via a selector that won't match
+        state.log("perform via non-matching selector");
+        let result = tree.perform(
+            &*state.provider,
+            "nonexistent_role_xyz",
+            Action::Press,
+            None,
+        );
+        // May get InvalidSelector or SelectorNotMatched
+        assert!(result.is_err(), "Expected error for non-matching selector");
         state.errors += 1;
     }
 
@@ -598,7 +589,6 @@ mod provider_fuzz {
         match tree.query(&selector) {
             Ok(results) => {
                 state.log(&format!("  -> {} matches", results.len()));
-                // Inspect results
                 for node in &results {
                     let _ = &node.name;
                     let _ = &node.value;
@@ -681,10 +671,13 @@ mod provider_fuzz {
             return;
         }
 
-        let node_id = state.rng.gen_range(0..tree.len()) as NodeId;
-        state.log(&format!("tree.subtree({})", node_id));
-        let sub = tree.subtree(node_id);
-        // Subtree should contain at least the node itself
+        let node_idx = state.rng.gen_range(0..tree.len()) as u32;
+        let node = match tree.get(node_idx) {
+            Some(n) => n,
+            None => return,
+        };
+        state.log(&format!("tree.subtree({})", node_idx));
+        let sub = tree.subtree(node);
         assert!(
             !sub.is_empty(),
             "subtree should not be empty for valid node"
@@ -702,10 +695,13 @@ mod provider_fuzz {
             return;
         }
 
-        let node_id = state.rng.gen_range(0..tree.len()) as NodeId;
-        state.log(&format!("tree.children({})", node_id));
-        let children = tree.children(node_id);
-        // Just ensure no crash — leaf nodes have 0 children
+        let node_idx = state.rng.gen_range(0..tree.len()) as u32;
+        let node = match tree.get(node_idx) {
+            Some(n) => n,
+            None => return,
+        };
+        state.log(&format!("tree.children({})", node_idx));
+        let children = tree.children(node);
         let _ = children.len();
     }
 
@@ -720,9 +716,7 @@ mod provider_fuzz {
         let count = tree.iter().count();
         assert_eq!(count, tree.len(), "iter count should match len");
 
-        // Deep inspection of every node
         for node in tree.iter() {
-            let _ = &node.id;
             let _ = &node.role;
             let _ = &node.name;
             let _ = &node.value;
@@ -731,11 +725,10 @@ mod provider_fuzz {
             let _ = &node.bounds_normalized;
             let _ = &node.actions;
             let _ = &node.states;
-            let _ = &node.children;
-            let _ = &node.parent;
             let _ = &node.depth;
             let _ = &node.app_name;
             let _ = &node.raw;
+            let _ = &node.stable_id;
         }
     }
 
@@ -746,7 +739,6 @@ mod provider_fuzz {
         let _ = tree.is_empty();
         let _ = tree.root();
 
-        // Random subset of inspections
         let inspection_count = rng.gen_range(1..=5);
         for _ in 0..inspection_count {
             match rng.gen_range(0u8..6) {
@@ -755,9 +747,10 @@ mod provider_fuzz {
                 }
                 1 => {
                     if !tree.is_empty() {
-                        let id = rng.gen_range(0..tree.len()) as NodeId;
-                        let _ = tree.get(id);
-                        let _ = tree.children(id);
+                        let idx = rng.gen_range(0..tree.len()) as u32;
+                        if let Some(node) = tree.get(idx) {
+                            let _ = tree.children(node);
+                        }
                     }
                 }
                 2 => {
@@ -772,8 +765,10 @@ mod provider_fuzz {
                 }
                 5 => {
                     if !tree.is_empty() {
-                        let id = rng.gen_range(0..tree.len()) as NodeId;
-                        let _ = tree.subtree(id);
+                        let idx = rng.gen_range(0..tree.len()) as u32;
+                        if let Some(node) = tree.get(idx) {
+                            let _ = tree.subtree(node);
+                        }
                     }
                 }
                 _ => unreachable!(),
@@ -791,10 +786,8 @@ mod provider_fuzz {
         eprintln!("Iterations: {}", args.iterations);
         eprintln!();
 
-        // Create provider
         let provider = create_provider().expect("Failed to create provider");
 
-        // Check permissions
         match provider.check_permissions().unwrap() {
             PermissionStatus::Granted => eprintln!("Permissions: granted"),
             PermissionStatus::Denied { instructions } => {
@@ -803,7 +796,6 @@ mod provider_fuzz {
             }
         }
 
-        // Find test app
         let mut test_app_pid = 0u32;
         for attempt in 0..10 {
             if let Ok(apps) = provider.list_apps() {
@@ -836,12 +828,8 @@ mod provider_fuzz {
             errors: 0,
         };
 
-        // Weighted operation table: (weight, name, function)
-        // Weights control how often each operation is chosen.
-        // Higher weight = more frequent.
         type OpFn = fn(&mut FuzzState);
         let ops: Vec<(u32, &str, OpFn)> = vec![
-            // Tree fetching — exercises traverse, role mapping, state parsing, etc.
             (15, "get_tree_by_name", op_get_tree_by_name as OpFn),
             (8, "get_tree_by_pid", op_get_tree_by_pid),
             (
@@ -854,11 +842,9 @@ mod provider_fuzz {
             (1, "get_all_apps", op_get_all_apps),
             (1, "check_permissions", op_check_permissions),
             (2, "list_apps", op_list_apps),
-            // Actions — exercises perform_action with all action types
             (20, "action_on_node", op_action_on_node),
             (3, "action_without_raw", op_action_without_raw),
             (2, "action_invalid_node", op_action_invalid_node),
-            // Tree inspection — exercises query, find_by_role, etc.
             (15, "query_tree", op_query_tree),
             (5, "find_by_role", op_find_by_role),
             (5, "find_by_name", op_find_by_name),
@@ -871,7 +857,6 @@ mod provider_fuzz {
         let total_weight: u32 = ops.iter().map(|(w, _, _)| *w).sum();
 
         for i in 0..args.iterations {
-            // Pick operation by weight
             let mut roll = state.rng.gen_range(0..total_weight);
             let mut chosen_name = "";
             let mut chosen_fn: OpFn = op_check_permissions;
@@ -888,11 +873,9 @@ mod provider_fuzz {
                 eprintln!("[{}/{}] {}", i + 1, args.iterations, chosen_name);
             }
 
-            // Direct call — any crash is a real bug. Re-run with --seed to reproduce.
             chosen_fn(&mut state);
             state.ops += 1;
 
-            // Progress report every 1000 iterations
             if (i + 1) % 1000 == 0 && !args.verbose {
                 eprintln!(
                     "  [{}/{}] ops={}, errors={}",

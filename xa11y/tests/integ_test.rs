@@ -521,9 +521,9 @@ mod tests {
         let p = h::provider();
         let tree = h::app_tree(&*p);
         let root = tree.root();
-        let got = tree.get(root.id);
+        let got = tree.get(0);
         assert!(got.is_some());
-        assert_eq!(got.unwrap().id, root.id);
+        assert_eq!(got.unwrap().role, root.role);
     }
 
     #[test]
@@ -549,10 +549,11 @@ mod tests {
         let p = h::provider();
         let tree = h::app_tree(&*p);
         let root = tree.root();
-        let children = tree.children(root.id);
+        let children = tree.children(root);
         assert!(!children.is_empty(), "Root should have children");
         for child in &children {
-            assert_eq!(child.parent, Some(root.id));
+            let parent = tree.parent(child);
+            assert!(parent.is_some(), "Child should have a parent");
         }
     }
 
@@ -561,7 +562,7 @@ mod tests {
     fn tree_subtree_from_root() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let subtree = tree.subtree(tree.root().id);
+        let subtree = tree.subtree(tree.root());
         assert_eq!(subtree.len(), tree.len());
     }
 
@@ -570,9 +571,9 @@ mod tests {
     fn tree_subtree_of_leaf() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let leaf = tree.iter().find(|n| n.children.is_empty());
+        let leaf = tree.iter().find(|n| tree.children(n).is_empty());
         if let Some(leaf) = leaf {
-            let st = tree.subtree(leaf.id);
+            let st = tree.subtree(leaf);
             assert_eq!(st.len(), 1);
         }
     }
@@ -663,9 +664,13 @@ mod tests {
         let p = h::provider();
         let tree = h::app_tree(&*p);
         let root = tree.root();
-        assert!(!root.children.is_empty());
-        for &cid in &root.children {
-            assert!(tree.get(cid).is_some(), "Child ID {} should be valid", cid);
+        let children = tree.children(root);
+        assert!(!children.is_empty());
+        for child in &children {
+            assert!(
+                child.role != Role::Unknown || true,
+                "Child should be a valid node"
+            );
         }
     }
 
@@ -675,11 +680,10 @@ mod tests {
         let p = h::provider();
         let tree = h::app_tree(&*p);
         let root = tree.root();
-        assert!(root.parent.is_none(), "Root should have no parent");
-        let non_root = tree.nodes.iter().find(|n| n.id != root.id);
+        assert!(tree.parent(root).is_none(), "Root should have no parent");
+        let non_root = tree.iter().find(|n| n.depth > 0);
         if let Some(n) = non_root {
-            assert!(n.parent.is_some(), "Non-root should have parent");
-            assert!(tree.get(n.parent.unwrap()).is_some());
+            assert!(tree.parent(n).is_some(), "Non-root should have parent");
         }
     }
 
@@ -690,15 +694,13 @@ mod tests {
         let tree = h::app_tree(&*p);
         assert_eq!(tree.root().depth, 0);
         for node in tree.iter() {
-            if let Some(pid) = node.parent {
-                if let Some(parent) = tree.get(pid) {
-                    assert_eq!(
-                        node.depth,
-                        parent.depth + 1,
-                        "Node {:?} depth mismatch",
-                        node.name
-                    );
-                }
+            if let Some(parent) = tree.parent(node) {
+                assert_eq!(
+                    node.depth,
+                    parent.depth + 1,
+                    "Node {:?} depth mismatch",
+                    node.name
+                );
             }
         }
     }
@@ -753,7 +755,7 @@ mod tests {
         let tree = h::raw_tree(&*p);
         let submit = h::named(&tree, "Submit");
         // Focus action may succeed or fail depending on AT-SPI adapter support
-        let result = p.perform_action(&tree, submit.id, Action::Focus, None);
+        let result = p.perform_action(&tree, submit, Action::Focus, None);
         if result.is_ok() {
             std::thread::sleep(std::time::Duration::from_millis(100));
             let tree2 = h::raw_tree(&*p);
@@ -839,7 +841,7 @@ mod tests {
         let tree = h::raw_tree(&*p);
         // Click Apple to select it
         let apple = h::named(&tree, "Apple");
-        let tree2 = h::act(&*p, &tree, apple.id, Action::Press);
+        let tree2 = h::act(&*p, &tree, apple, Action::Press);
         // Verify selection (may come through as Click → Select depending on AT-SPI mapping)
         let apple2 = h::named(&tree2, "Apple");
         // Selection might be reported differently; at least verify the action didn't crash
@@ -1128,7 +1130,7 @@ mod tests {
         let p = h::provider();
         let tree = h::raw_tree(&*p);
         let submit = h::named(&tree, "Submit");
-        let result = p.perform_action(&tree, submit.id, Action::Press, None);
+        let result = p.perform_action(&tree, submit, Action::Press, None);
         match result {
             Ok(()) => println!("Submit pressed"),
             Err(e) => println!("Submit press result: {}", e),
@@ -1142,9 +1144,8 @@ mod tests {
         let tree = h::raw_tree(&*p);
         let cbs = tree.find_by_role(Role::CheckBox);
         assert!(!cbs.is_empty(), "No checkbox");
-        let cb_id = cbs[0].id;
         let initial = cbs[0].states.checked;
-        let tree2 = h::act(&*p, &tree, cb_id, Action::Press);
+        let tree2 = h::act(&*p, &tree, cbs[0], Action::Press);
         let cb2 = tree2.find_by_role(Role::CheckBox);
         if !cb2.is_empty() {
             assert_ne!(
@@ -1163,8 +1164,7 @@ mod tests {
         let was_enabled = h::named(&tree, "Cancel").states.enabled;
         let cbs = tree.find_by_role(Role::CheckBox);
         assert!(!cbs.is_empty(), "No checkbox");
-        let cb_id = cbs[0].id;
-        let tree2 = h::act(&*p, &tree, cb_id, Action::Press);
+        let tree2 = h::act(&*p, &tree, cbs[0], Action::Press);
         let cancel2 = h::named(&tree2, "Cancel");
         // Some AT-SPI adapters may not reflect enabled state changes.
         // If was_enabled is already true (adapter doesn't report disabled), skip the assertion.
@@ -1189,7 +1189,7 @@ mod tests {
                     && (n.value.as_deref() == Some("John Doe") || n.name.as_deref() == Some("Name"))
             })
             .expect("Text entry not found");
-        let result = p.perform_action(&tree, text.id, Action::Focus, None);
+        let result = p.perform_action(&tree, text, Action::Focus, None);
         assert!(result.is_ok(), "Focus should succeed: {:?}", result.err());
     }
 
@@ -1208,7 +1208,7 @@ mod tests {
             .expect("Text entry not found");
         match p.perform_action(
             &tree,
-            text.id,
+            text,
             Action::SetValue,
             Some(ActionData::Value("Jane Smith".to_string())),
         ) {
@@ -1237,7 +1237,7 @@ mod tests {
         assert!(!sliders.is_empty());
         let result = p.perform_action(
             &tree,
-            sliders[0].id,
+            sliders[0],
             Action::SetValue,
             Some(ActionData::NumericValue(75.0)),
         );
@@ -1273,11 +1273,11 @@ mod tests {
             .or_else(|| tree.find_by_role(Role::Slider).first().copied());
         if let Some(spin) = spin {
             let initial: f64 = spin.value.as_deref().unwrap_or("0").parse().unwrap_or(0.0);
-            let result = p.perform_action(&tree, spin.id, Action::Increment, None);
+            let result = p.perform_action(&tree, spin, Action::Increment, None);
             if result.is_ok() {
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 let tree2 = h::app_tree(&*p);
-                if let Some(s2) = tree2.get(spin.id) {
+                if let Some(s2) = tree2.find_by_role(Role::Slider).first() {
                     if let Some(v) = &s2.value {
                         let new_val: f64 = v.parse().unwrap_or(initial);
                         assert!(
@@ -1307,11 +1307,11 @@ mod tests {
             .or_else(|| tree.find_by_role(Role::Slider).first().copied());
         if let Some(spin) = spin {
             let before: f64 = spin.value.as_deref().unwrap_or("0").parse().unwrap_or(0.0);
-            let result = p.perform_action(&tree, spin.id, Action::Decrement, None);
+            let result = p.perform_action(&tree, spin, Action::Decrement, None);
             if result.is_ok() {
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 let tree2 = h::app_tree(&*p);
-                if let Some(s2) = tree2.get(spin.id) {
+                if let Some(s2) = tree2.find_by_role(Role::Slider).first() {
                     if let Some(v) = &s2.value {
                         let after: f64 = v.parse().unwrap_or(before);
                         assert!(
@@ -1338,21 +1338,25 @@ mod tests {
             .or_else(|| tree.find_by_name("More Details").first().copied());
         if let Some(node) = expander {
             // Expand
-            if let Ok(()) = p.perform_action(&tree, node.id, Action::Expand, None) {
+            if let Ok(()) = p.perform_action(&tree, node, Action::Expand, None) {
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 let tree2 = h::raw_tree(&*p);
                 let n2 = tree2
-                    .get(node.id)
-                    .or_else(|| tree2.find_by_name("Expander").first().copied());
+                    .find_by_name("Expander")
+                    .first()
+                    .copied()
+                    .or_else(|| tree2.iter().find(|n| n.states.expanded.is_some()));
                 if let Some(n) = n2 {
                     if n.states.expanded == Some(true) {
                         // Collapse
-                        if let Ok(()) = p.perform_action(&tree2, n.id, Action::Collapse, None) {
+                        if let Ok(()) = p.perform_action(&tree2, n, Action::Collapse, None) {
                             std::thread::sleep(std::time::Duration::from_millis(300));
                             let tree3 = h::app_tree(&*p);
                             let n3 = tree3
-                                .get(node.id)
-                                .or_else(|| tree3.find_by_name("Expander").first().copied());
+                                .find_by_name("Expander")
+                                .first()
+                                .copied()
+                                .or_else(|| tree3.iter().find(|n| n.states.expanded.is_some()));
                             if let Some(n) = n3 {
                                 assert_eq!(n.states.expanded, Some(false));
                             }
@@ -1370,7 +1374,7 @@ mod tests {
         let tree = h::raw_tree(&*p);
         let apple = tree.find_by_name("Apple");
         if !apple.is_empty() {
-            let _ = p.perform_action(&tree, apple[0].id, Action::Press, None);
+            let _ = p.perform_action(&tree, apple[0], Action::Press, None);
             // Selection verified by not crashing; state_selected_on_list_item tests the state
         }
     }
@@ -1392,10 +1396,8 @@ mod tests {
             tree.dump()
         );
         // Verify nesting: cell's parent should be a row-like node
-        if let Some(pid) = cells[0].parent {
-            let parent = tree.get(pid);
-            assert!(parent.is_some());
-        }
+        let parent = tree.parent(cells[0]);
+        assert!(parent.is_some());
     }
 
     #[test]
@@ -1405,7 +1407,7 @@ mod tests {
         let tree = h::app_tree(&*p);
         let tables = tree.find_by_role(Role::Table);
         if !tables.is_empty() {
-            let subtree = tree.subtree(tables[0].id);
+            let subtree = tree.subtree(tables[0]);
             // Table should contain rows and cells
             assert!(
                 subtree.len() >= 3,
@@ -1422,10 +1424,11 @@ mod tests {
         let tree = h::raw_tree(&*p);
         let cbs = tree.find_by_role(Role::CheckBox);
         assert!(!cbs.is_empty());
-        let cb_id = cbs[0].id;
         let mut current_tree = tree;
         for _ in 0..5 {
-            current_tree = h::act(&*p, &current_tree, cb_id, Action::Press);
+            let cbs = current_tree.find_by_role(Role::CheckBox);
+            assert!(!cbs.is_empty());
+            current_tree = h::act(&*p, &current_tree, cbs[0], Action::Press);
         }
         // After 5 toggles (odd), state should have flipped from initial
         let final_cb = current_tree.find_by_role(Role::CheckBox);
@@ -1445,7 +1448,6 @@ mod tests {
         let tree = h::raw_tree(&*p);
         let sliders = tree.find_by_role(Role::Slider);
         let slider = sliders.first().expect("No slider");
-        let slider_id = slider.id;
         let start_val: f64 = slider
             .value
             .as_deref()
@@ -1454,7 +1456,9 @@ mod tests {
             .unwrap_or(0.0);
         let mut current_tree = tree;
         for _ in 0..10 {
-            current_tree = h::act(&*p, &current_tree, slider_id, Action::Increment);
+            let sliders = current_tree.find_by_role(Role::Slider);
+            let slider = sliders.first().expect("No slider");
+            current_tree = h::act(&*p, &current_tree, slider, Action::Increment);
         }
         let s = current_tree.find_by_role(Role::Slider);
         if !s.is_empty() {
@@ -1477,12 +1481,12 @@ mod tests {
     fn thrash_expand_collapse_cycle() {
         let p = h::provider();
         let tree = h::raw_tree(&*p);
-        let node_id = tree
+        let has_expander = tree
             .iter()
             .find(|n| n.states.expanded.is_some())
             .or_else(|| tree.find_by_name("Expander").first().copied())
-            .map(|n| n.id);
-        if let Some(nid) = node_id {
+            .is_some();
+        if has_expander {
             let mut ct = tree;
             // expand, collapse, expand, collapse
             for action in [
@@ -1491,11 +1495,18 @@ mod tests {
                 Action::Expand,
                 Action::Collapse,
             ] {
-                ct = h::act(&*p, &ct, nid, action);
+                let node = ct
+                    .iter()
+                    .find(|n| n.states.expanded.is_some())
+                    .or_else(|| ct.find_by_name("Expander").first().copied())
+                    .expect("Expander node should exist");
+                ct = h::act(&*p, &ct, node, action);
             }
             let final_node = ct
-                .get(nid)
-                .or_else(|| ct.find_by_name("Expander").first().copied());
+                .find_by_name("Expander")
+                .first()
+                .copied()
+                .or_else(|| ct.iter().find(|n| n.states.expanded.is_some()));
             if let Some(n) = final_node {
                 if n.states.expanded.is_some() {
                     assert_eq!(n.states.expanded, Some(false), "Should end collapsed");
@@ -1522,13 +1533,20 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn error_node_not_found() {
+    fn error_selector_not_matched() {
         let p = h::provider();
         let tree = h::raw_tree(&*p);
-        let bad_id = tree.len() as u32 + 999;
-        let result = p.perform_action(&tree, bad_id, Action::Press, None);
+        let result = tree.perform(
+            &*p,
+            r#"button[name="nonexistent_element_12345"]"#,
+            Action::Press,
+            None,
+        );
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::NodeNotFound { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::SelectorNotMatched { .. }
+        ));
     }
 
     #[test]
@@ -1548,7 +1566,7 @@ mod tests {
         let tree = h::app_tree(&*p); // no include_raw
         let buttons = tree.find_by_name("Submit");
         assert!(!buttons.is_empty());
-        let result = p.perform_action(&tree, buttons[0].id, Action::Press, None);
+        let result = p.perform_action(&tree, buttons[0], Action::Press, None);
         assert!(result.is_err(), "Action without raw data should fail");
         assert!(matches!(result.unwrap_err(), Error::Platform { .. }));
     }

@@ -1,29 +1,19 @@
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
-use crate::node::{Node, NodeId};
-use crate::provider::QueryOptions;
+use crate::action::{Action, ActionData};
+use crate::error::{Error, Result};
+use crate::node::{Node, NodeIndex};
+use crate::provider::{Provider, QueryOptions};
 use crate::role::Role;
 use crate::selector::Selector;
 
 /// A snapshot of an application's accessibility tree.
 ///
-/// The tree is a flattened snapshot — nodes reference each other by `NodeId`
-/// rather than holding direct pointers. This is critical for:
-/// - Serialization (JSON, msgpack) for FFI
-/// - Deterministic re-traversal for action dispatch (same DFS order → same IDs)
-/// - Thread safety without lifetimes
+/// The tree is a flattened snapshot — nodes are stored in DFS order and
+/// reference each other by internal indices. Navigation is done through
+/// `Tree` methods that accept `&Node` references.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tree {
-    /// Opaque snapshot identifier, assigned by the Provider.
-    /// Used by `perform_action` to look up the correct handle cache.
-    /// Not meaningful across Provider instances or serialization boundaries.
-    #[serde(skip)]
-    #[allow(dead_code)]
-    pub(crate) tree_id: u64,
-
     /// Application name
     pub app_name: String,
 
@@ -33,12 +23,8 @@ pub struct Tree {
     /// Screen dimensions at capture time (width, height)
     pub screen_size: (u32, u32),
 
-    /// All nodes in DFS order
-    pub nodes: Vec<Node>,
-
-    /// Index from NodeId -> position in nodes vec (for O(1) lookup)
-    #[serde(skip)]
-    node_index: HashMap<NodeId, usize>,
+    /// All nodes in DFS order (access through methods)
+    nodes: Vec<Node>,
 
     /// Query options used to produce this snapshot
     pub query: QueryOptions,
@@ -47,49 +33,66 @@ pub struct Tree {
 impl Tree {
     /// Create a new Tree from a list of nodes.
     pub fn new(
-        tree_id: u64,
         app_name: String,
         pid: Option<u32>,
         screen_size: (u32, u32),
         nodes: Vec<Node>,
         query: QueryOptions,
     ) -> Self {
-        let node_index = nodes
-            .iter()
-            .enumerate()
-            .map(|(i, node)| (node.id, i))
-            .collect();
         Self {
-            tree_id,
             app_name,
             pid,
             screen_size,
             nodes,
-            node_index,
             query,
         }
     }
 
-    /// Rebuild the node index (needed after deserialization).
+    /// Rebuild internal state after deserialization.
+    /// (No-op now that the HashMap is removed, but kept for API compatibility
+    /// with FFI consumers that deserialize trees.)
     pub fn rebuild_index(&mut self) {
-        self.node_index = self
-            .nodes
-            .iter()
-            .enumerate()
-            .map(|(i, node)| (node.id, i))
-            .collect();
+        // Node index == array position, no rebuild needed.
     }
 
-    /// Get a node by ID.
-    pub fn get(&self, id: NodeId) -> Option<&Node> {
-        self.node_index
-            .get(&id)
-            .and_then(|&idx| self.nodes.get(idx))
+    /// Get a node by its internal index. Primarily for FFI consumers.
+    pub fn get(&self, index: u32) -> Option<&Node> {
+        self.nodes.get(index as usize)
     }
 
     /// Get the root node.
     pub fn root(&self) -> &Node {
         &self.nodes[0]
+    }
+
+    /// Get the parent of a node.
+    pub fn parent(&self, node: &Node) -> Option<&Node> {
+        node.parent_index
+            .and_then(|idx| self.nodes.get(idx as usize))
+    }
+
+    /// Get direct children of a node.
+    pub fn children(&self, node: &Node) -> Vec<&Node> {
+        node.children_indices
+            .iter()
+            .filter_map(|&idx| self.nodes.get(idx as usize))
+            .collect()
+    }
+
+    /// Get the subtree rooted at a node (including the node itself).
+    pub fn subtree(&self, node: &Node) -> Vec<&Node> {
+        let mut result = Vec::new();
+        self.collect_subtree(node.index, &mut result);
+        result
+    }
+
+    fn collect_subtree<'a>(&'a self, index: NodeIndex, result: &mut Vec<&'a Node>) {
+        if let Some(node) = self.nodes.get(index as usize) {
+            result.push(node);
+            for &child_idx in &node.children_indices {
+                self.collect_subtree(child_idx, result);
+            }
+        }
     }
 
     /// Iterate all nodes.
@@ -101,34 +104,6 @@ impl Tree {
     pub fn query(&self, selector_str: &str) -> Result<Vec<&Node>> {
         let selector = Selector::parse(selector_str)?;
         Ok(selector.match_nodes(self))
-    }
-
-    /// Get direct children of a node.
-    pub fn children(&self, id: NodeId) -> Vec<&Node> {
-        self.get(id)
-            .map(|node| {
-                node.children
-                    .iter()
-                    .filter_map(|child_id| self.get(*child_id))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
-    /// Get the subtree rooted at a node (including the node itself).
-    pub fn subtree(&self, id: NodeId) -> Vec<&Node> {
-        let mut result = Vec::new();
-        self.collect_subtree(id, &mut result);
-        result
-    }
-
-    fn collect_subtree<'a>(&'a self, id: NodeId, result: &mut Vec<&'a Node>) {
-        if let Some(node) = self.get(id) {
-            result.push(node);
-            for child_id in &node.children {
-                self.collect_subtree(*child_id, result);
-            }
-        }
     }
 
     /// Find nodes by role.
@@ -149,6 +124,21 @@ impl Tree {
             .collect()
     }
 
+    /// Perform an action on the first element matching a selector.
+    pub fn perform(
+        &self,
+        provider: &dyn Provider,
+        selector: &str,
+        action: Action,
+        data: Option<ActionData>,
+    ) -> Result<()> {
+        let results = self.query(selector)?;
+        let node = results.first().ok_or_else(|| Error::SelectorNotMatched {
+            selector: selector.to_string(),
+        })?;
+        provider.perform_action(self, node, action, data)
+    }
+
     /// Render the tree as an indented text representation for debugging.
     pub fn dump(&self) -> String {
         let mut output = String::new();
@@ -167,7 +157,7 @@ impl Tree {
             output.push_str(&format!(
                 "{}[{}] {}{}{}\n",
                 indent,
-                node.id,
+                node.index,
                 node.role.to_snake_case(),
                 name_part,
                 value_part,
@@ -184,5 +174,12 @@ impl Tree {
     /// Check if the tree is empty.
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
+    }
+
+    /// Get the internal node index for a node. Used by platform providers
+    /// to look up cached element handles.
+    #[doc(hidden)]
+    pub fn node_index(&self, node: &Node) -> NodeIndex {
+        node.index
     }
 }
