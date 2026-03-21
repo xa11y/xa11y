@@ -5,7 +5,7 @@ use std::sync::Mutex;
 
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, ReleaseDC, HORZRES, VERTRES};
-use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT};
+use windows::Win32::System::Com::{CoInitializeEx, COINIT};
 use windows::Win32::System::Threading::*;
 use windows::Win32::UI::Accessibility::*;
 
@@ -14,28 +14,17 @@ use xa11y_core::{
     Provider, QueryOptions, RawPlatformData, Rect, Result, Role, StateSet, Toggled, Tree,
 };
 
-/// RAII wrapper for COM initialization.
-struct ComInit;
-
-impl ComInit {
-    fn new() -> windows::core::Result<Self> {
-        // Try STA first — UIA needs STA for proper IRawElementProviderFragmentRoot
-        // callbacks (e.g., AccessKit virtual elements). If already initialized as
-        // MTA (common in multi-threaded apps), fall back gracefully.
-        // COINIT_APARTMENTTHREADED = 0x2
-        let hr = unsafe { CoInitializeEx(None, COINIT(0x2)) };
-        // S_OK (0) or S_FALSE (1) = success, RPC_E_CHANGED_MODE = already MTA (OK)
-        if hr.is_err() && hr.0 as u32 != 0x80010106 {
-            hr.ok()?;
-        }
-        Ok(Self)
+/// Initialize COM for UIA. Called once per WindowsProvider creation.
+/// Does not uninitialize on drop — COM lifetime is managed by the process.
+fn ensure_com_initialized() -> windows::core::Result<()> {
+    // Use MTA (0x0) — same mode as the Rust runtime default.
+    // STA (0x2) would conflict with Rust's thread pool.
+    let hr = unsafe { CoInitializeEx(None, COINIT(0x0)) };
+    // S_OK, S_FALSE (already initialized), or RPC_E_CHANGED_MODE are all fine
+    if hr.is_err() && hr.0 as u32 != 0x80010106 {
+        hr.ok()?;
     }
-}
-
-impl Drop for ComInit {
-    fn drop(&mut self) {
-        unsafe { CoUninitialize() };
-    }
+    Ok(())
 }
 
 /// Windows accessibility provider using UI Automation.
@@ -44,7 +33,6 @@ pub struct WindowsProvider {
     next_tree_id: Mutex<u64>,
     /// Cached UIA elements for action dispatch (keyed by NodeId).
     cached_elements: Mutex<Vec<IUIAutomationElement>>,
-    _com: ComInit,
 }
 
 // IUIAutomation is COM and thread-safe via proxy
@@ -53,7 +41,7 @@ unsafe impl Sync for WindowsProvider {}
 
 impl WindowsProvider {
     pub fn new() -> Result<Self> {
-        let com = ComInit::new().map_err(|e| Error::Platform {
+        ensure_com_initialized().map_err(|e| Error::Platform {
             code: e.code().0 as i64,
             message: format!("COM initialization failed: {}", e),
         })?;
@@ -72,7 +60,6 @@ impl WindowsProvider {
             automation,
             next_tree_id: Mutex::new(1),
             cached_elements: Mutex::new(Vec::new()),
-            _com: com,
         })
     }
 
