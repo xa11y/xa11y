@@ -52,10 +52,6 @@ pub enum Action {
     ///
     /// Accepts `ActionData::Value(String)`.
     TypeText,
-    /// Drag this element to a target point.
-    ///
-    /// Accepts `ActionData::Point { x, y }` for the drop destination.
-    DragTo,
 }
 
 impl std::fmt::Display for Action {
@@ -76,7 +72,6 @@ impl std::fmt::Display for Action {
             Action::Blur => write!(f, "Blur"),
             Action::SetTextSelection => write!(f, "SetTextSelection"),
             Action::TypeText => write!(f, "TypeText"),
-            Action::DragTo => write!(f, "DragTo"),
         }
     }
 }
@@ -93,8 +88,6 @@ pub enum ActionData {
         direction: ScrollDirection,
         amount: f64,
     },
-    /// Screen coordinate point
-    Point { x: f64, y: f64 },
     /// Text selection range (character offsets, 0-based)
     TextSelection { start: u32, end: u32 },
 }

@@ -878,9 +878,6 @@ fn action_data_variants() {
     let json = serde_json::to_string(&scroll).unwrap();
     assert!(json.contains("Down"));
 
-    let point = ActionData::Point { x: 10.0, y: 20.0 };
-    let json = serde_json::to_string(&point).unwrap();
-    assert!(json.contains("10.0"));
 }
 
 // ── Locator ──

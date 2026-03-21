@@ -116,7 +116,6 @@ extern "C" {
 
     // CGEvent wrappers for input simulation
     fn safe_cg_post_scroll_event(dy: i32, dx: i32);
-    fn safe_cg_post_mouse_event(event_type: u32, x: f64, y: f64);
     fn safe_ax_value_create_cf_range(location: isize, length: isize) -> CFTypeRef;
 
     // Test helpers
@@ -505,11 +504,7 @@ fn xa11y_action_to_ax(action: Action) -> Option<&'static str> {
         Action::ShowMenu => Some("AXShowMenu"),
         Action::Increment => Some("AXIncrement"),
         Action::Decrement => Some("AXDecrement"),
-        Action::Scroll
-        | Action::Blur
-        | Action::SetTextSelection
-        | Action::TypeText
-        | Action::DragTo => None,
+        Action::Scroll | Action::Blur | Action::SetTextSelection | Action::TypeText => None,
         _ => None,
     }
 }
@@ -1350,36 +1345,6 @@ impl Provider for MacOSProvider {
                         code: err as i64,
                         message: "Set AXSelectedText failed".to_string(),
                     });
-                }
-                Ok(())
-            }
-
-            Action::DragTo => {
-                let (target_x, target_y) = match data {
-                    Some(ActionData::Point { x, y }) => (x, y),
-                    _ => {
-                        return Err(Error::Platform {
-                            code: -1,
-                            message: "DragTo requires ActionData::Point".to_string(),
-                        })
-                    }
-                };
-                let bounds = node.bounds.ok_or(Error::Platform {
-                    code: -1,
-                    message: "Cannot determine element bounds for DragTo".to_string(),
-                })?;
-                let cx = bounds.x as f64 + bounds.width as f64 / 2.0;
-                let cy = bounds.y as f64 + bounds.height as f64 / 2.0;
-
-                unsafe {
-                    // Mouse down at element center
-                    safe_cg_post_mouse_event(1, cx, cy); // kCGEventLeftMouseDown
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                    // Drag to target
-                    safe_cg_post_mouse_event(6, target_x, target_y); // kCGEventLeftMouseDragged
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                    // Mouse up at target
-                    safe_cg_post_mouse_event(2, target_x, target_y); // kCGEventLeftMouseUp
                 }
                 Ok(())
             }

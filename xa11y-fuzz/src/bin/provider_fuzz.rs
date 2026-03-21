@@ -129,7 +129,6 @@ mod provider_fuzz {
         Action::Blur,
         Action::SetTextSelection,
         Action::TypeText,
-        Action::DragTo,
     ];
 
     // ── Selector Generation ──────────────────────────────────────────────────
@@ -326,10 +325,6 @@ mod provider_fuzz {
             Action::SetTextSelection => Some(ActionData::TextSelection {
                 start: rng.gen_range(0..10),
                 end: rng.gen_range(0..20),
-            }),
-            Action::DragTo => Some(ActionData::Point {
-                x: rng.gen_range(0.0..500.0),
-                y: rng.gen_range(0.0..500.0),
             }),
             _ => None,
         }

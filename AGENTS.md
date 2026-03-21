@@ -30,6 +30,8 @@ Integration tests use shared helpers from `xa11y/tests/integ/mod.rs`:
 
 1. **No silent fallbacks.** If an operation fails, return the error — don't silently try a different mechanism. Fallbacks hide bugs and make behavior unpredictable for consumers. Surface failures clearly so callers can handle them.
 
+2. **Only expose what accessibility APIs support.** If a platform has no accessibility interface for an operation, don't implement it with input simulation — leave it out.
+
 ## Pre-Commit / Pre-PR Checklist
 
 CI runs with `RUSTFLAGS: -Dwarnings`, so all warnings are errors. Before committing or opening a PR, verify:

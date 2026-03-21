@@ -9,7 +9,6 @@ use windows::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, ReleaseDC, HORZRES, VE
 use windows::Win32::System::Com::{CoInitializeEx, COINIT};
 use windows::Win32::System::Threading::*;
 use windows::Win32::UI::Accessibility::*;
-use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
 use xa11y_core::{
     Action, ActionData, AppInfo, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
@@ -1062,93 +1061,6 @@ impl Provider for WindowsProvider {
                     return Ok(());
                 }
                 Err(Error::TextValueNotSupported)
-            }
-
-            Action::DragTo => {
-                let (target_x, target_y) = match data {
-                    Some(ActionData::Point { x, y }) => (x, y),
-                    _ => {
-                        return Err(Error::Platform {
-                            code: -1,
-                            message: "DragTo requires ActionData::Point".to_string(),
-                        })
-                    }
-                };
-                let bounds = node.bounds.ok_or(Error::Platform {
-                    code: -1,
-                    message: "Cannot determine element bounds for DragTo".to_string(),
-                })?;
-                let cx = bounds.x as f64 + bounds.width as f64 / 2.0;
-                let cy = bounds.y as f64 + bounds.height as f64 / 2.0;
-
-                let screen = Self::detect_screen_size();
-                let norm_sx = (cx / screen.0 as f64 * 65535.0) as i32;
-                let norm_sy = (cy / screen.1 as f64 * 65535.0) as i32;
-                let norm_tx = (target_x / screen.0 as f64 * 65535.0) as i32;
-                let norm_ty = (target_y / screen.1 as f64 * 65535.0) as i32;
-
-                let inputs = [
-                    // Move to source
-                    INPUT {
-                        r#type: INPUT_MOUSE,
-                        Anonymous: INPUT_0 {
-                            mi: MOUSEINPUT {
-                                dx: norm_sx,
-                                dy: norm_sy,
-                                mouseData: 0,
-                                dwFlags: MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE,
-                                time: 0,
-                                dwExtraInfo: 0,
-                            },
-                        },
-                    },
-                    // Mouse down
-                    INPUT {
-                        r#type: INPUT_MOUSE,
-                        Anonymous: INPUT_0 {
-                            mi: MOUSEINPUT {
-                                dx: 0,
-                                dy: 0,
-                                mouseData: 0,
-                                dwFlags: MOUSEEVENTF_LEFTDOWN,
-                                time: 0,
-                                dwExtraInfo: 0,
-                            },
-                        },
-                    },
-                    // Move to target
-                    INPUT {
-                        r#type: INPUT_MOUSE,
-                        Anonymous: INPUT_0 {
-                            mi: MOUSEINPUT {
-                                dx: norm_tx,
-                                dy: norm_ty,
-                                mouseData: 0,
-                                dwFlags: MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE,
-                                time: 0,
-                                dwExtraInfo: 0,
-                            },
-                        },
-                    },
-                    // Mouse up
-                    INPUT {
-                        r#type: INPUT_MOUSE,
-                        Anonymous: INPUT_0 {
-                            mi: MOUSEINPUT {
-                                dx: 0,
-                                dy: 0,
-                                mouseData: 0,
-                                dwFlags: MOUSEEVENTF_LEFTUP,
-                                time: 0,
-                                dwExtraInfo: 0,
-                            },
-                        },
-                    },
-                ];
-                unsafe {
-                    SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-                }
-                Ok(())
             }
         }
     }

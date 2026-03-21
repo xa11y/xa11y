@@ -1595,7 +1595,7 @@ mod tests {
     }
 
     // ════════════════════════════════════════════════════════════════
-    // New Actions — Blur, Scroll, SetTextSelection, TypeText, DragTo
+    // New Actions — Blur, Scroll, SetTextSelection, TypeText
     // ════════════════════════════════════════════════════════════════
 
     #[test]
@@ -1713,30 +1713,6 @@ mod tests {
         match result {
             Ok(()) => println!("TypeText succeeded"),
             Err(e) => println!("TypeText result: {}", e),
-        }
-    }
-
-    #[test]
-    #[ignore]
-    fn action_drag_to() {
-        let p = h::provider();
-        let tree = h::raw_tree(&*p);
-        // Find submit button (it has known bounds)
-        let submit = h::named(&tree, "Submit");
-        assert!(
-            submit.bounds.is_some(),
-            "Submit button should have bounds for DragTo"
-        );
-        let result = p.perform_action(
-            &tree,
-            submit,
-            Action::DragTo,
-            Some(ActionData::Point { x: 200.0, y: 200.0 }),
-        );
-        // DragTo may not produce visible results on a button; verify no crash
-        match result {
-            Ok(()) => println!("DragTo succeeded"),
-            Err(e) => println!("DragTo result: {}", e),
         }
     }
 

@@ -266,7 +266,7 @@ void safe_cf_run_loop_stop(CFRunLoopRef rl) {
     }
 }
 
-// ── CGEvent Helpers (for Scroll, TypeText, DragTo actions) ───────────────────
+// ── CGEvent Helpers (for Scroll action) ──────────────────────────────────────
 
 // Post a scroll wheel event with pixel-based amounts.
 // dy: positive = scroll up, negative = scroll down
@@ -274,44 +274,6 @@ void safe_cf_run_loop_stop(CFRunLoopRef rl) {
 void safe_cg_post_scroll_event(int32_t dy, int32_t dx) {
     @try {
         CGEventRef event = CGEventCreateScrollWheelEvent(NULL, kCGScrollEventUnitPixel, 2, dy, dx);
-        if (event) {
-            CGEventPost(kCGHIDEventTap, event);
-            CFRelease(event);
-        }
-    } @catch (NSException *e) {
-        // swallow
-    }
-}
-
-// Type a string of Unicode characters by posting keyboard events.
-void safe_cg_type_text(const uint16_t *chars, uint32_t length) {
-    @try {
-        for (uint32_t i = 0; i < length; i++) {
-            CGEventRef keyDown = CGEventCreateKeyboardEvent(NULL, 0, true);
-            if (keyDown) {
-                CGEventKeyboardSetUnicodeString(keyDown, 1, &chars[i]);
-                CGEventPost(kCGHIDEventTap, keyDown);
-                CFRelease(keyDown);
-            }
-            CGEventRef keyUp = CGEventCreateKeyboardEvent(NULL, 0, false);
-            if (keyUp) {
-                CGEventKeyboardSetUnicodeString(keyUp, 1, &chars[i]);
-                CGEventPost(kCGHIDEventTap, keyUp);
-                CFRelease(keyUp);
-            }
-        }
-    } @catch (NSException *e) {
-        // swallow
-    }
-}
-
-// Post a mouse event at the given point.
-// eventType: kCGEventLeftMouseDown=1, kCGEventLeftMouseUp=2,
-//            kCGEventLeftMouseDragged=6
-void safe_cg_post_mouse_event(uint32_t eventType, double x, double y) {
-    @try {
-        CGPoint point = CGPointMake(x, y);
-        CGEventRef event = CGEventCreateMouseEvent(NULL, (CGEventType)eventType, point, kCGMouseButtonLeft);
         if (event) {
             CGEventPost(kCGHIDEventTap, event);
             CFRelease(event);

@@ -1073,55 +1073,6 @@ impl Provider for LinuxProvider {
                     })?;
                 Ok(())
             }
-
-            Action::DragTo => {
-                let (target_x, target_y) = match data {
-                    Some(ActionData::Point { x, y }) => (x, y),
-                    _ => {
-                        return Err(Error::Platform {
-                            code: -1,
-                            message: "DragTo requires ActionData::Point".to_string(),
-                        })
-                    }
-                };
-                let bounds = node.bounds.ok_or(Error::Platform {
-                    code: -1,
-                    message: "Cannot determine element bounds for DragTo".to_string(),
-                })?;
-                let cx = (bounds.x as f64 + bounds.width as f64 / 2.0) as i32;
-                let cy = (bounds.y as f64 + bounds.height as f64 / 2.0) as i32;
-
-                let dec = self.make_proxy(
-                    "org.a11y.atspi.Registry",
-                    "/org/a11y/atspi/registry/deviceeventcontroller",
-                    "org.a11y.atspi.DeviceEventController",
-                )?;
-                // Mouse down at element center
-                dec.call_method("GenerateMouseEvent", &(cx, cy, "b1p"))
-                    .map_err(|e| Error::Platform {
-                        code: -1,
-                        message: format!("GenerateMouseEvent press failed: {}", e),
-                    })?;
-                // Move to target
-                dec.call_method(
-                    "GenerateMouseEvent",
-                    &(target_x as i32, target_y as i32, "abs"),
-                )
-                .map_err(|e| Error::Platform {
-                    code: -1,
-                    message: format!("GenerateMouseEvent move failed: {}", e),
-                })?;
-                // Mouse up at target
-                dec.call_method(
-                    "GenerateMouseEvent",
-                    &(target_x as i32, target_y as i32, "b1r"),
-                )
-                .map_err(|e| Error::Platform {
-                    code: -1,
-                    message: format!("GenerateMouseEvent release failed: {}", e),
-                })?;
-                Ok(())
-            }
         }
     }
 

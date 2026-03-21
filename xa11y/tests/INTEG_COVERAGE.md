@@ -101,7 +101,6 @@ Last updated: 2026-03-19
 | `Decrement` | Covered | `action_decrement_spinner` |
 | `SetTextSelection` | Covered | `action_set_text_selection` |
 | `TypeText` | Covered | `action_type_text` |
-| `DragTo` | Covered | `action_drag_to` |
 
 ## Selector Features
 
@@ -166,11 +165,11 @@ Covered via test app nodes: `Application`, `Window`, `Button`, `CheckBox`, `Radi
 - All Tree methods covered
 - All Node fields covered
 - All QueryOptions fields covered
-- 14/16 Action variants covered (all except Toggle, ShowMenu)
+- 13/15 Action variants covered (all except Toggle, ShowMenu)
 - All selector features covered except description attribute
 - 14 role-specific tests covering 30+ Role variants
 - 5 stress/complex scenario tests
 - 4 error path tests
 - 2 serialization tests
 - Fuzz targets cover xa11y-core: tree_ops, selector, query, serde
-- Provider fuzzer covers all 16 Action variants
+- Provider fuzzer covers all 15 Action variants
