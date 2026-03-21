@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Cross-platform accessibility test application for xa11y integration tests"
+publish = false
 
 [[bin]]
 name = "xa11y-test-app"

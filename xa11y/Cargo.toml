@@ -3,6 +3,7 @@ name = "xa11y"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Cross-platform accessibility client library — unified API for reading and interacting with accessibility trees"
 
 [dependencies]

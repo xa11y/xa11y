@@ -3,6 +3,7 @@ name = "xa11y-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
 description = "Core types, traits, and selector engine for xa11y cross-platform accessibility"
 
 [dependencies]
