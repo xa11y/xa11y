@@ -28,11 +28,7 @@ Integration tests use shared helpers from `xa11y/tests/integ/mod.rs`:
 
 ## Design Tenets
 
-1. **Accessibility APIs over input simulation.** Actions must use platform accessibility interfaces (AXUIElement attributes, AT-SPI EditableText, UIA ValuePattern) — never synthetic keyboard/mouse events. Input simulation is unreliable on headless systems, creates focus dependencies, introduces timing sensitivity, and behaves differently across platforms. The only exception is `DragTo`, where no accessibility API exists.
-
-2. **No silent fallbacks between strategies.** Each action should have one clear implementation path per platform. If that path fails, return an error — don't silently try a different mechanism. Fallbacks hide bugs and make behavior unpredictable. (Fallback *within* the same API layer is fine, e.g., trying "click" then "activate" on AT-SPI are both accessibility actions.)
-
-3. **Validate inputs before dispatch.** Check ActionData constraints (ranges within text length, coordinates within screen bounds, positive scroll amounts) before calling platform APIs. Platform APIs silently clamp or ignore invalid inputs, making bugs invisible.
+1. **No silent fallbacks.** If an operation fails, return the error — don't silently try a different mechanism. Fallbacks hide bugs and make behavior unpredictable for consumers. Surface failures clearly so callers can handle them.
 
 ## Pre-Commit / Pre-PR Checklist
 
