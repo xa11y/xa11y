@@ -4,7 +4,6 @@ use std::collections::HashSet;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use windows::core::implement;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, ReleaseDC, HORZRES, VERTRES};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT};
@@ -1455,70 +1454,12 @@ fn map_uia_control_type(control_type: UIA_CONTROLTYPE_ID) -> Role {
     }
 }
 
-// ── UIA Event Handlers (COM callbacks for EventProvider) ─────────────────────
-
-#[implement(IUIAutomationFocusChangedEventHandler)]
-struct UiaFocusHandler {
-    tx: Mutex<std::sync::mpsc::Sender<Event>>,
-    info: AppInfo,
-}
-
-impl IUIAutomationFocusChangedEventHandler_Impl for UiaFocusHandler {
-    fn HandleFocusChangedEvent(
-        &self,
-        _sender: Option<&IUIAutomationElement>,
-    ) -> windows::core::Result<()> {
-        let _ = self.tx.lock().unwrap().send(Event {
-            kind: EventKind::FocusChanged,
-            app: self.info.clone(),
-            target: None,
-            state_flag: None,
-            state_value: None,
-            text_change: None,
-            timestamp: std::time::Instant::now(),
-        });
-        Ok(())
-    }
-}
-
-#[implement(IUIAutomationEventHandler)]
-struct UiaEventHandler {
-    tx: Mutex<std::sync::mpsc::Sender<Event>>,
-    info: AppInfo,
-}
-
-impl IUIAutomationEventHandler_Impl for UiaEventHandler {
-    fn HandleAutomationEvent(
-        &self,
-        _sender: Option<&IUIAutomationElement>,
-        eventid: UIA_EVENT_ID,
-    ) -> windows::core::Result<()> {
-        let kind = match eventid {
-            UIA_Window_WindowOpenedEventId => EventKind::WindowOpened,
-            UIA_Window_WindowClosedEventId => EventKind::WindowClosed,
-            UIA_MenuOpenedEventId => EventKind::MenuOpened,
-            UIA_MenuClosedEventId => EventKind::MenuClosed,
-            UIA_SelectionItem_ElementSelectedEventId => EventKind::SelectionChanged,
-            _ => return Ok(()),
-        };
-        let _ = self.tx.lock().unwrap().send(Event {
-            kind,
-            app: self.info.clone(),
-            target: None,
-            state_flag: None,
-            state_value: None,
-            text_change: None,
-            timestamp: std::time::Instant::now(),
-        });
-        Ok(())
-    }
-}
+// ── EventProvider (polling-based) ─────────────────────────────────────────────
 
 impl EventProvider for WindowsProvider {
     fn subscribe(&self, target: &AppTarget, filter: EventFilter) -> Result<Subscription> {
         let (tx, rx) = std::sync::mpsc::channel();
 
-        // Find the target element
         let app_info = match target {
             AppTarget::ByName(name) => {
                 let apps = self.list_gui_apps();
@@ -1551,56 +1492,71 @@ impl EventProvider for WindowsProvider {
             }
         };
 
-        let root = unsafe { self.automation.GetRootElement() }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: "GetRootElement failed".to_string(),
-        })?;
+        // Create a separate provider for polling on the background thread
+        let poll_provider = WindowsProvider::new()?;
+        let target_clone = target.clone();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_clone = stop.clone();
 
-        // Register focus changed handler
-        let focus_handler: IUIAutomationFocusChangedEventHandler = UiaFocusHandler {
-            tx: Mutex::new(tx.clone()),
-            info: app_info.clone(),
-        }
-        .into();
-        let _ = unsafe {
-            self.automation
-                .AddFocusChangedEventHandler(None, &focus_handler)
-        };
+        let handle = std::thread::spawn(move || {
+            let mut prev_focused: Option<String> = None;
+            let mut prev_node_count: usize = 0;
 
-        // Register automation event handlers for window and menu events
-        let event_ids = [
-            UIA_Window_WindowOpenedEventId,
-            UIA_Window_WindowClosedEventId,
-            UIA_MenuOpenedEventId,
-            UIA_MenuClosedEventId,
-        ];
-        let mut event_handlers = Vec::new();
-        for &eid in &event_ids {
-            let handler: IUIAutomationEventHandler = UiaEventHandler {
-                tx: Mutex::new(tx.clone()),
-                info: app_info.clone(),
+            while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(100));
+
+                let tree = match poll_provider.get_app_tree(&target_clone, &QueryOptions::default())
+                {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+
+                // Detect focus changes
+                let focused_name = tree
+                    .iter()
+                    .find(|n| n.states.focused)
+                    .and_then(|n| n.name.clone());
+                if focused_name != prev_focused {
+                    if prev_focused.is_some() {
+                        let kind = EventKind::FocusChanged;
+                        if filter.kinds.is_empty() || filter.kinds.contains(&kind) {
+                            let _ = tx.send(Event {
+                                kind,
+                                app: app_info.clone(),
+                                target: tree.iter().find(|n| n.states.focused).cloned(),
+                                state_flag: None,
+                                state_value: None,
+                                text_change: None,
+                                timestamp: std::time::Instant::now(),
+                            });
+                        }
+                    }
+                    prev_focused = focused_name;
+                }
+
+                // Detect structure changes
+                let node_count = tree.len();
+                if node_count != prev_node_count && prev_node_count > 0 {
+                    let kind = EventKind::StructureChanged;
+                    if filter.kinds.is_empty() || filter.kinds.contains(&kind) {
+                        let _ = tx.send(Event {
+                            kind,
+                            app: app_info.clone(),
+                            target: None,
+                            state_flag: None,
+                            state_value: None,
+                            text_change: None,
+                            timestamp: std::time::Instant::now(),
+                        });
+                    }
+                }
+                prev_node_count = node_count;
             }
-            .into();
-            let _ = unsafe {
-                self.automation.AddAutomationEventHandler(
-                    eid,
-                    &root,
-                    TreeScope_Subtree,
-                    None,
-                    &handler,
-                )
-            };
-            event_handlers.push((eid, handler));
-        }
+        });
 
-        // Build cancel handler to remove all event handlers
-        let automation = self.automation.clone();
         let cancel = CancelHandle::new(move || {
-            let _ = unsafe { automation.RemoveFocusChangedEventHandler(&focus_handler) };
-            for (eid, handler) in &event_handlers {
-                let _ = unsafe { automation.RemoveAutomationEventHandler(*eid, &root, handler) };
-            }
-            drop(tx); // drop the last sender reference
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = handle.join();
         });
 
         Ok(Subscription::new(EventReceiver::new(rx), cancel))
