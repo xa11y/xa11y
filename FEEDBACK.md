@@ -265,5 +265,5 @@ This would be a thin layer over existing primitives. The `Locator` would hold `(
 13. ~~**Add `TypeText` action**~~ — **DONE** (stub; input simulation, accepts ActionData::Value)
 14. ~~**Add `DragTo` action**~~ — **DONE** (stub; accepts ActionData::Point for drop destination)
 15. ~~**Remove `Selector` from public API**~~ — **DONE** (internals remain pub(crate))
-16. **Implement Locator** — design finalized, implementation pending
+16. ~~**Implement Locator**~~ — **DONE** (Locator struct + ProviderExt trait, poll-based wait, 8 unit tests)
 

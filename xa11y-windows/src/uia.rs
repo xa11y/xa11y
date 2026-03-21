@@ -422,8 +422,14 @@ impl WindowsProvider {
             .map(|s| s.to_string())
             .filter(|s| !s.is_empty());
 
-        let (numeric_value, min_value, max_value) = if matches!(role, Role::Slider | Role::ProgressBar | Role::ScrollBar | Role::SpinButton) {
-            if let Ok(pattern) = unsafe { element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId) } {
+        let (numeric_value, min_value, max_value) = if matches!(
+            role,
+            Role::Slider | Role::ProgressBar | Role::ScrollBar | Role::SpinButton
+        ) {
+            if let Ok(pattern) = unsafe {
+                element
+                    .GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId)
+            } {
                 (
                     unsafe { pattern.CurrentValue() }.ok(),
                     unsafe { pattern.CurrentMinimum() }.ok(),
@@ -917,9 +923,14 @@ impl Provider for WindowsProvider {
                 Ok(())
             }
 
-            Action::Scroll | Action::Blur | Action::SetTextSelection | Action::TypeText | Action::DragTo => {
-                Err(Error::ActionNotSupported { action, role: node.role })
-            }
+            Action::Scroll
+            | Action::Blur
+            | Action::SetTextSelection
+            | Action::TypeText
+            | Action::DragTo => Err(Error::ActionNotSupported {
+                action,
+                role: node.role,
+            }),
         }
     }
 
@@ -1155,9 +1166,7 @@ fn parse_states(element: &IUIAutomationElement, role: Role) -> StateSet {
         _ => false,
     };
 
-    let focusable = unsafe { element.CurrentIsKeyboardFocusable() }
-        .unwrap_or(FALSE)
-        == TRUE;
+    let focusable = unsafe { element.CurrentIsKeyboardFocusable() }.unwrap_or(FALSE) == TRUE;
 
     StateSet {
         enabled,
