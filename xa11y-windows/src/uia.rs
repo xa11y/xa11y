@@ -385,37 +385,35 @@ impl WindowsProvider {
         });
         elements.push(element.clone());
 
-        // Recurse children using FindAll to pick up AccessKit virtual elements
+        // Recurse children using RawViewWalker to pick up AccessKit virtual elements.
+        // The ControlViewWalker and FindAll may skip AccessKit's fragment root.
         let mut child_ids = Vec::new();
-        let true_cond = match unsafe { self.automation.CreateTrueCondition() } {
-            Ok(c) => c,
+        let walker = match unsafe { self.automation.RawViewWalker() } {
+            Ok(w) => w,
             Err(_) => return,
         };
 
-        if let Ok(children) = unsafe { element.FindAll(TreeScope_Children, &true_cond) } {
-            let count = unsafe { children.Length() }.unwrap_or(0);
-            for i in 0..count {
-                if let Some(max_elements) = opts.max_elements {
-                    if nodes.len() >= max_elements as usize {
-                        break;
-                    }
-                }
-                if let Ok(child_el) = unsafe { children.GetElement(i) } {
-                    let child_node_id = nodes.len() as NodeId;
-                    child_ids.push(child_node_id);
-                    self.traverse(
-                        &child_el,
-                        opts,
-                        app_name,
-                        nodes,
-                        elements,
-                        Some(node_id),
-                        depth + 1,
-                        screen_size,
-                        visited,
-                    );
+        let mut child = unsafe { walker.GetFirstChildElement(element) }.ok();
+        while let Some(ref child_el) = child {
+            if let Some(max_elements) = opts.max_elements {
+                if nodes.len() >= max_elements as usize {
+                    break;
                 }
             }
+            let child_node_id = nodes.len() as NodeId;
+            child_ids.push(child_node_id);
+            self.traverse(
+                child_el,
+                opts,
+                app_name,
+                nodes,
+                elements,
+                Some(node_id),
+                depth + 1,
+                screen_size,
+                visited,
+            );
+            child = unsafe { walker.GetNextSiblingElement(child_el) }.ok();
         }
 
         nodes[node_id as usize].children = child_ids;
@@ -435,33 +433,30 @@ impl WindowsProvider {
         screen_size: (u32, u32),
         visited: &mut HashSet<usize>,
     ) {
-        let true_cond = match unsafe { self.automation.CreateTrueCondition() } {
-            Ok(c) => c,
+        let walker = match unsafe { self.automation.RawViewWalker() } {
+            Ok(w) => w,
             Err(_) => return,
         };
 
-        if let Ok(children) = unsafe { element.FindAll(TreeScope_Children, &true_cond) } {
-            let count = unsafe { children.Length() }.unwrap_or(0);
-            for i in 0..count {
-                if let Some(max_elements) = opts.max_elements {
-                    if nodes.len() >= max_elements as usize {
-                        break;
-                    }
-                }
-                if let Ok(child_el) = unsafe { children.GetElement(i) } {
-                    self.traverse(
-                        &child_el,
-                        opts,
-                        app_name,
-                        nodes,
-                        elements,
-                        parent_id,
-                        depth + 1,
-                        screen_size,
-                        visited,
-                    );
+        let mut child = unsafe { walker.GetFirstChildElement(element) }.ok();
+        while let Some(ref child_el) = child {
+            if let Some(max_elements) = opts.max_elements {
+                if nodes.len() >= max_elements as usize {
+                    break;
                 }
             }
+            self.traverse(
+                child_el,
+                opts,
+                app_name,
+                nodes,
+                elements,
+                parent_id,
+                depth + 1,
+                screen_size,
+                visited,
+            );
+            child = unsafe { walker.GetNextSiblingElement(child_el) }.ok();
         }
     }
 }
