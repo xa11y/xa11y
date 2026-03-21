@@ -76,6 +76,20 @@ impl WindowsProvider {
         })
     }
 
+    /// Re-acquire a UIA element via its native window handle.
+    /// This triggers WM_GETOBJECT which activates AccessKit's UIA provider,
+    /// ensuring the element's children include virtual accessibility nodes.
+    fn reacquire_via_hwnd(
+        &self,
+        element: &IUIAutomationElement,
+    ) -> std::result::Result<IUIAutomationElement, ()> {
+        let hwnd = unsafe { element.CurrentNativeWindowHandle() }.map_err(|_| ())?;
+        if hwnd.0.is_null() {
+            return Err(());
+        }
+        unsafe { self.automation.ElementFromHandle(hwnd) }.map_err(|_| ())
+    }
+
     fn next_tree_id(&self) -> u64 {
         let mut id = self.next_tree_id.lock().unwrap();
         let current = *id;
@@ -182,6 +196,9 @@ impl WindowsProvider {
                     .unwrap_or_default();
 
                 if el_name.to_lowercase().contains(&name_lower) {
+                    // Re-acquire element via HWND to trigger WM_GETOBJECT
+                    // and properly initialize AccessKit's UIA provider
+                    let el = self.reacquire_via_hwnd(&el).unwrap_or(el);
                     return Ok((el, pid, el_name));
                 }
 
@@ -189,6 +206,7 @@ impl WindowsProvider {
                 if pid > 0 && seen_pids.insert(pid) {
                     if let Some(proc_name) = get_process_name(pid) {
                         if proc_name.to_lowercase().contains(&name_lower) {
+                            let el = self.reacquire_via_hwnd(&el).unwrap_or(el);
                             return Ok((el, pid, proc_name));
                         }
                     }
@@ -223,6 +241,9 @@ impl WindowsProvider {
                 target: format!("PID {}", pid),
             }
         })?;
+
+        // Re-acquire via HWND to activate AccessKit provider
+        let el = self.reacquire_via_hwnd(&el).unwrap_or(el);
 
         let name = unsafe { el.CurrentName() }
             .map(|s| s.to_string())
