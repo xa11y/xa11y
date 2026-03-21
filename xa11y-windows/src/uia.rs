@@ -249,7 +249,6 @@ impl WindowsProvider {
         parent_id: Option<NodeId>,
         depth: u32,
         screen_size: (u32, u32),
-        visited: &mut HashSet<usize>,
     ) {
         const MAX_DEPTH: u32 = 50;
         if depth > MAX_DEPTH {
@@ -271,13 +270,15 @@ impl WindowsProvider {
             }
         }
 
-        let control_type = unsafe { element.CurrentControlType() }
-            .unwrap_or(UIA_CONTROLTYPE_ID(0));
+        let control_type = unsafe { element.CurrentControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
         let mut role = map_uia_control_type(control_type);
 
         // Refine role using AriaRole property for elements that UIA maps ambiguously
         // (e.g., Alert/Heading both become ControlType.Text, Dialog becomes Window)
-        if matches!(role, Role::StaticText | Role::Window | Role::Group | Role::Unknown) {
+        if matches!(
+            role,
+            Role::StaticText | Role::Window | Role::Group | Role::Unknown
+        ) {
             if let Ok(v) = unsafe { element.GetCurrentPropertyValue(UIA_AriaRolePropertyId) } {
                 if let Ok(aria) = windows::core::BSTR::try_from(&v) {
                     let aria_str = aria.to_string();
@@ -307,7 +308,14 @@ impl WindowsProvider {
 
         if role_filtered {
             self.traverse_children(
-                element, opts, app_name, nodes, elements, parent_id, depth, screen_size, visited,
+                element,
+                opts,
+                app_name,
+                nodes,
+                elements,
+                parent_id,
+                depth,
+                screen_size,
             );
             return;
         }
@@ -321,49 +329,64 @@ impl WindowsProvider {
         let value = get_value(element, role);
 
         // Try FullDescription first (AccessKit's description), then HelpText
-        let description = unsafe {
-            element.GetCurrentPropertyValue(UIA_FullDescriptionPropertyId)
-        }
-        .ok()
-        .and_then(|v| {
-            let bstr = windows::core::BSTR::try_from(&v).ok()?;
-            let s = bstr.to_string();
-            if s.is_empty() { None } else { Some(s) }
-        })
-        .or_else(|| {
-            unsafe { element.GetCurrentPropertyValue(UIA_HelpTextPropertyId) }
-                .ok()
-                .and_then(|v| {
-                    let bstr = windows::core::BSTR::try_from(&v).ok()?;
-                    let s = bstr.to_string();
-                    if s.is_empty() { None } else { Some(s) }
-                })
-        });
+        let description = unsafe { element.GetCurrentPropertyValue(UIA_FullDescriptionPropertyId) }
+            .ok()
+            .and_then(|v| {
+                let bstr = windows::core::BSTR::try_from(&v).ok()?;
+                let s = bstr.to_string();
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s)
+                }
+            })
+            .or_else(|| {
+                unsafe { element.GetCurrentPropertyValue(UIA_HelpTextPropertyId) }
+                    .ok()
+                    .and_then(|v| {
+                        let bstr = windows::core::BSTR::try_from(&v).ok()?;
+                        let s = bstr.to_string();
+                        if s.is_empty() {
+                            None
+                        } else {
+                            Some(s)
+                        }
+                    })
+            });
 
         let states = parse_states(element, role);
 
         if depth > 0 && opts.visible_only && !states.visible {
             self.traverse_children(
-                element, opts, app_name, nodes, elements, parent_id, depth, screen_size, visited,
+                element,
+                opts,
+                app_name,
+                nodes,
+                elements,
+                parent_id,
+                depth,
+                screen_size,
             );
             return;
         }
 
         // Bounds
-        let bounds = unsafe { element.CurrentBoundingRectangle() }.ok().and_then(|r| {
-            let width = (r.right - r.left).max(0) as u32;
-            let height = (r.bottom - r.top).max(0) as u32;
-            if width == 0 && height == 0 {
-                None
-            } else {
-                Some(Rect {
-                    x: r.left,
-                    y: r.top,
-                    width,
-                    height,
-                })
-            }
-        });
+        let bounds = unsafe { element.CurrentBoundingRectangle() }
+            .ok()
+            .and_then(|r| {
+                let width = (r.right - r.left).max(0) as u32;
+                let height = (r.bottom - r.top).max(0) as u32;
+                if width == 0 && height == 0 {
+                    None
+                } else {
+                    Some(Rect {
+                        x: r.left,
+                        y: r.top,
+                        width,
+                        height,
+                    })
+                }
+            });
 
         let bounds_normalized = bounds.map(|b| {
             let (sw, sh) = screen_size;
@@ -428,7 +451,8 @@ impl WindowsProvider {
         // fall back to RawViewWalker for native elements.
         let mut child_ids = Vec::new();
 
-        let children_found = if let Ok(true_cond) = unsafe { self.automation.CreateTrueCondition() } {
+        let children_found = if let Ok(true_cond) = unsafe { self.automation.CreateTrueCondition() }
+        {
             if let Ok(children) = unsafe { element.FindAll(TreeScope_Children, &true_cond) } {
                 let count = unsafe { children.Length() }.unwrap_or(0);
                 if count > 0 {
@@ -450,7 +474,6 @@ impl WindowsProvider {
                                 Some(node_id),
                                 depth + 1,
                                 screen_size,
-                                visited,
                             );
                         }
                     }
@@ -486,7 +509,6 @@ impl WindowsProvider {
                         Some(node_id),
                         depth + 1,
                         screen_size,
-                        visited,
                     );
                     child = unsafe { walker.GetNextSiblingElement(child_el) }.ok();
                 }
@@ -508,7 +530,6 @@ impl WindowsProvider {
         parent_id: Option<NodeId>,
         depth: u32,
         screen_size: (u32, u32),
-        visited: &mut HashSet<usize>,
     ) {
         let walker = match unsafe { self.automation.RawViewWalker() } {
             Ok(w) => w,
@@ -531,7 +552,6 @@ impl WindowsProvider {
                 parent_id,
                 depth + 1,
                 screen_size,
-                visited,
             );
             child = unsafe { walker.GetNextSiblingElement(child_el) }.ok();
         }
@@ -557,7 +577,6 @@ impl Provider for WindowsProvider {
         let screen_size = Self::detect_screen_size();
         let mut nodes = Vec::new();
         let mut elements = Vec::new();
-        let mut visited = HashSet::new();
 
         self.traverse(
             &app_element,
@@ -568,7 +587,6 @@ impl Provider for WindowsProvider {
             None,
             0,
             screen_size,
-            &mut visited,
         );
 
         if nodes.is_empty() {
@@ -648,7 +666,6 @@ impl Provider for WindowsProvider {
 
         let count = unsafe { windows.Length() }.unwrap_or(0);
         let mut root_children = Vec::new();
-        let mut visited = HashSet::new();
         let mut seen_pids = HashSet::new();
 
         for i in 0..count {
@@ -674,7 +691,6 @@ impl Provider for WindowsProvider {
                     Some(0),
                     1,
                     screen_size,
-                    &mut visited,
                 );
             }
         }
@@ -716,21 +732,29 @@ impl Provider for WindowsProvider {
         match action {
             Action::Press | Action::Toggle | Action::Select => {
                 // Try InvokePattern first, then TogglePattern, then SelectionItemPattern
-                if let Ok(pattern) = unsafe { element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId) } {
+                if let Ok(pattern) = unsafe {
+                    element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+                } {
                     unsafe { pattern.Invoke() }.map_err(|e| Error::Platform {
                         code: e.code().0 as i64,
                         message: "Invoke failed".to_string(),
                     })?;
                     return Ok(());
                 }
-                if let Ok(pattern) = unsafe { element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId) } {
+                if let Ok(pattern) = unsafe {
+                    element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
+                } {
                     unsafe { pattern.Toggle() }.map_err(|e| Error::Platform {
                         code: e.code().0 as i64,
                         message: "Toggle failed".to_string(),
                     })?;
                     return Ok(());
                 }
-                if let Ok(pattern) = unsafe { element.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId) } {
+                if let Ok(pattern) = unsafe {
+                    element.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                        UIA_SelectionItemPatternId,
+                    )
+                } {
                     unsafe { pattern.Select() }.map_err(|e| Error::Platform {
                         code: e.code().0 as i64,
                         message: "Select failed".to_string(),
@@ -753,7 +777,11 @@ impl Provider for WindowsProvider {
 
             Action::SetValue => match data {
                 Some(ActionData::NumericValue(v)) => {
-                    if let Ok(pattern) = unsafe { element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId) } {
+                    if let Ok(pattern) = unsafe {
+                        element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(
+                            UIA_RangeValuePatternId,
+                        )
+                    } {
                         unsafe { pattern.SetValue(v) }.map_err(|e| Error::Platform {
                             code: e.code().0 as i64,
                             message: "RangeValue.SetValue failed".to_string(),
@@ -761,7 +789,9 @@ impl Provider for WindowsProvider {
                         return Ok(());
                     }
                     // Fall back to ValuePattern with string
-                    if let Ok(pattern) = unsafe { element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) } {
+                    if let Ok(pattern) = unsafe {
+                        element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+                    } {
                         let s: windows::core::BSTR = v.to_string().into();
                         unsafe { pattern.SetValue(&s) }.map_err(|e| Error::Platform {
                             code: e.code().0 as i64,
@@ -775,11 +805,12 @@ impl Provider for WindowsProvider {
                     })
                 }
                 Some(ActionData::Value(text)) => {
-                    if let Ok(pattern) = unsafe { element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) } {
+                    if let Ok(pattern) = unsafe {
+                        element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+                    } {
                         let s: windows::core::BSTR = text.into();
-                        unsafe { pattern.SetValue(&s) }.map_err(|_| {
-                            Error::TextValueNotSupported
-                        })?;
+                        unsafe { pattern.SetValue(&s) }
+                            .map_err(|_| Error::TextValueNotSupported)?;
                         return Ok(());
                     }
                     Err(Error::TextValueNotSupported)
@@ -791,31 +822,47 @@ impl Provider for WindowsProvider {
             },
 
             Action::Expand => {
-                if let Ok(pattern) = unsafe { element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(UIA_ExpandCollapsePatternId) } {
+                if let Ok(pattern) = unsafe {
+                    element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
+                        UIA_ExpandCollapsePatternId,
+                    )
+                } {
                     // Ignore errors (may already be expanded)
                     let _ = unsafe { pattern.Expand() };
                     return Ok(());
                 }
-                if let Ok(pattern) = unsafe { element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId) } {
+                if let Ok(pattern) = unsafe {
+                    element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+                } {
                     let _ = unsafe { pattern.Invoke() };
                 }
                 Ok(())
             }
 
             Action::Collapse => {
-                if let Ok(pattern) = unsafe { element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(UIA_ExpandCollapsePatternId) } {
+                if let Ok(pattern) = unsafe {
+                    element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
+                        UIA_ExpandCollapsePatternId,
+                    )
+                } {
                     // Ignore errors (may already be collapsed)
                     let _ = unsafe { pattern.Collapse() };
                     return Ok(());
                 }
-                if let Ok(pattern) = unsafe { element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId) } {
+                if let Ok(pattern) = unsafe {
+                    element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+                } {
                     let _ = unsafe { pattern.Invoke() };
                 }
                 Ok(())
             }
 
             Action::Increment => {
-                if let Ok(pattern) = unsafe { element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId) } {
+                if let Ok(pattern) = unsafe {
+                    element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(
+                        UIA_RangeValuePatternId,
+                    )
+                } {
                     let current = unsafe { pattern.CurrentValue() }.unwrap_or(0.0);
                     let small = unsafe { pattern.CurrentSmallChange() }.unwrap_or(1.0);
                     let step = if small <= 0.0 { 1.0 } else { small };
@@ -832,7 +879,11 @@ impl Provider for WindowsProvider {
             }
 
             Action::Decrement => {
-                if let Ok(pattern) = unsafe { element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId) } {
+                if let Ok(pattern) = unsafe {
+                    element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(
+                        UIA_RangeValuePatternId,
+                    )
+                } {
                     let current = unsafe { pattern.CurrentValue() }.unwrap_or(0.0);
                     let small = unsafe { pattern.CurrentSmallChange() }.unwrap_or(1.0);
                     let step = if small <= 0.0 { 1.0 } else { small };
@@ -857,7 +908,11 @@ impl Provider for WindowsProvider {
             }
 
             Action::ScrollIntoView => {
-                if let Ok(pattern) = unsafe { element.GetCurrentPatternAs::<IUIAutomationScrollItemPattern>(UIA_ScrollItemPatternId) } {
+                if let Ok(pattern) = unsafe {
+                    element.GetCurrentPatternAs::<IUIAutomationScrollItemPattern>(
+                        UIA_ScrollItemPatternId,
+                    )
+                } {
                     let _ = unsafe { pattern.ScrollIntoView() };
                 }
                 Ok(())
@@ -940,18 +995,14 @@ fn get_value(element: &IUIAutomationElement, role: Role) -> Option<String> {
 fn get_actions(element: &IUIAutomationElement, role: Role) -> Vec<Action> {
     let mut actions = Vec::new();
 
-    if unsafe {
-        element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
-    }
-    .is_ok()
+    if unsafe { element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId) }
+        .is_ok()
     {
         actions.push(Action::Press);
     }
 
-    if unsafe {
-        element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
-    }
-    .is_ok()
+    if unsafe { element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId) }
+        .is_ok()
     {
         if !actions.contains(&Action::Press) {
             actions.push(Action::Press);
@@ -959,9 +1010,8 @@ fn get_actions(element: &IUIAutomationElement, role: Role) -> Vec<Action> {
     }
 
     if unsafe {
-        element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
-            UIA_ExpandCollapsePatternId,
-        )
+        element
+            .GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(UIA_ExpandCollapsePatternId)
     }
     .is_ok()
     {
@@ -969,10 +1019,8 @@ fn get_actions(element: &IUIAutomationElement, role: Role) -> Vec<Action> {
         actions.push(Action::Collapse);
     }
 
-    if unsafe {
-        element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
-    }
-    .is_ok()
+    if unsafe { element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) }
+        .is_ok()
     {
         if !actions.contains(&Action::SetValue) {
             actions.push(Action::SetValue);
@@ -992,9 +1040,7 @@ fn get_actions(element: &IUIAutomationElement, role: Role) -> Vec<Action> {
     }
 
     if unsafe {
-        element.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
-            UIA_SelectionItemPatternId,
-        )
+        element.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId)
     }
     .is_ok()
     {
@@ -1002,7 +1048,10 @@ fn get_actions(element: &IUIAutomationElement, role: Role) -> Vec<Action> {
     }
 
     // Focus: most elements can be focused
-    if unsafe { element.CurrentIsKeyboardFocusable() }.unwrap_or(BOOL(0)).as_bool() {
+    if unsafe { element.CurrentIsKeyboardFocusable() }
+        .unwrap_or(BOOL(0))
+        .as_bool()
+    {
         actions.push(Action::Focus);
     }
 
@@ -1017,18 +1066,24 @@ fn get_actions(element: &IUIAutomationElement, role: Role) -> Vec<Action> {
 }
 
 /// Parse UIA element properties into xa11y StateSet.
+#[allow(non_upper_case_globals)]
 fn parse_states(element: &IUIAutomationElement, role: Role) -> StateSet {
-    let enabled = unsafe { element.CurrentIsEnabled() }.unwrap_or(BOOL(1)).as_bool();
-    let offscreen = unsafe { element.CurrentIsOffscreen() }.unwrap_or(BOOL(0)).as_bool();
+    let enabled = unsafe { element.CurrentIsEnabled() }
+        .unwrap_or(BOOL(1))
+        .as_bool();
+    let offscreen = unsafe { element.CurrentIsOffscreen() }
+        .unwrap_or(BOOL(0))
+        .as_bool();
     let visible = !offscreen;
-    let focused = unsafe { element.CurrentHasKeyboardFocus() }.unwrap_or(BOOL(0)).as_bool();
+    let focused = unsafe { element.CurrentHasKeyboardFocus() }
+        .unwrap_or(BOOL(0))
+        .as_bool();
 
     // Checked: from TogglePattern
     let checked = match role {
         Role::CheckBox | Role::RadioButton => {
             if let Ok(pattern) = unsafe {
-                element
-                    .GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
+                element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
             } {
                 match unsafe { pattern.CurrentToggleState() } {
                     Ok(ToggleState_On) => Some(Toggled::On),
@@ -1043,7 +1098,10 @@ fn parse_states(element: &IUIAutomationElement, role: Role) -> StateSet {
                         UIA_SelectionItemPatternId,
                     )
                 } {
-                    if unsafe { pattern.CurrentIsSelected() }.unwrap_or(BOOL(0)).as_bool() {
+                    if unsafe { pattern.CurrentIsSelected() }
+                        .unwrap_or(BOOL(0))
+                        .as_bool()
+                    {
                         Some(Toggled::On)
                     } else {
                         Some(Toggled::Off)
@@ -1058,9 +1116,8 @@ fn parse_states(element: &IUIAutomationElement, role: Role) -> StateSet {
 
     // Expanded: from ExpandCollapsePattern
     let expanded = if let Ok(pattern) = unsafe {
-        element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
-            UIA_ExpandCollapsePatternId,
-        )
+        element
+            .GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(UIA_ExpandCollapsePatternId)
     } {
         match unsafe { pattern.CurrentExpandCollapseState() } {
             Ok(ExpandCollapseState_Expanded) => Some(true),
@@ -1073,11 +1130,11 @@ fn parse_states(element: &IUIAutomationElement, role: Role) -> StateSet {
 
     // Selected: from SelectionItemPattern
     let selected = if let Ok(pattern) = unsafe {
-        element.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
-            UIA_SelectionItemPatternId,
-        )
+        element.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(UIA_SelectionItemPatternId)
     } {
-        unsafe { pattern.CurrentIsSelected() }.unwrap_or(BOOL(0)).as_bool()
+        unsafe { pattern.CurrentIsSelected() }
+            .unwrap_or(BOOL(0))
+            .as_bool()
     } else {
         false
     };
@@ -1109,6 +1166,7 @@ fn parse_states(element: &IUIAutomationElement, role: Role) -> StateSet {
 }
 
 /// Map UIA ControlTypeId to xa11y Role.
+#[allow(non_upper_case_globals)]
 fn map_uia_control_type(control_type: UIA_CONTROLTYPE_ID) -> Role {
     match control_type {
         UIA_ButtonControlTypeId => Role::Button,
@@ -1155,32 +1213,63 @@ fn map_uia_control_type(control_type: UIA_CONTROLTYPE_ID) -> Role {
 }
 
 #[cfg(test)]
+#[allow(non_upper_case_globals)]
 mod tests {
     use super::*;
 
     #[test]
     fn role_mapping_covers_common_types() {
         assert_eq!(map_uia_control_type(UIA_ButtonControlTypeId), Role::Button);
-        assert_eq!(map_uia_control_type(UIA_CheckBoxControlTypeId), Role::CheckBox);
+        assert_eq!(
+            map_uia_control_type(UIA_CheckBoxControlTypeId),
+            Role::CheckBox
+        );
         assert_eq!(map_uia_control_type(UIA_EditControlTypeId), Role::TextField);
-        assert_eq!(map_uia_control_type(UIA_TextControlTypeId), Role::StaticText);
-        assert_eq!(map_uia_control_type(UIA_ComboBoxControlTypeId), Role::ComboBox);
+        assert_eq!(
+            map_uia_control_type(UIA_TextControlTypeId),
+            Role::StaticText
+        );
+        assert_eq!(
+            map_uia_control_type(UIA_ComboBoxControlTypeId),
+            Role::ComboBox
+        );
         assert_eq!(map_uia_control_type(UIA_ListControlTypeId), Role::List);
-        assert_eq!(map_uia_control_type(UIA_ListItemControlTypeId), Role::ListItem);
+        assert_eq!(
+            map_uia_control_type(UIA_ListItemControlTypeId),
+            Role::ListItem
+        );
         assert_eq!(map_uia_control_type(UIA_MenuControlTypeId), Role::Menu);
-        assert_eq!(map_uia_control_type(UIA_MenuItemControlTypeId), Role::MenuItem);
-        assert_eq!(map_uia_control_type(UIA_MenuBarControlTypeId), Role::MenuBar);
+        assert_eq!(
+            map_uia_control_type(UIA_MenuItemControlTypeId),
+            Role::MenuItem
+        );
+        assert_eq!(
+            map_uia_control_type(UIA_MenuBarControlTypeId),
+            Role::MenuBar
+        );
         assert_eq!(map_uia_control_type(UIA_TabControlTypeId), Role::TabGroup);
         assert_eq!(map_uia_control_type(UIA_TabItemControlTypeId), Role::Tab);
         assert_eq!(map_uia_control_type(UIA_SliderControlTypeId), Role::Slider);
         assert_eq!(map_uia_control_type(UIA_WindowControlTypeId), Role::Window);
-        assert_eq!(map_uia_control_type(UIA_ProgressBarControlTypeId), Role::ProgressBar);
-        assert_eq!(map_uia_control_type(UIA_TreeItemControlTypeId), Role::TreeItem);
-        assert_eq!(map_uia_control_type(UIA_SeparatorControlTypeId), Role::Separator);
+        assert_eq!(
+            map_uia_control_type(UIA_ProgressBarControlTypeId),
+            Role::ProgressBar
+        );
+        assert_eq!(
+            map_uia_control_type(UIA_TreeItemControlTypeId),
+            Role::TreeItem
+        );
+        assert_eq!(
+            map_uia_control_type(UIA_SeparatorControlTypeId),
+            Role::Separator
+        );
         assert_eq!(map_uia_control_type(UIA_ImageControlTypeId), Role::Image);
         assert_eq!(map_uia_control_type(UIA_HyperlinkControlTypeId), Role::Link);
         assert_eq!(map_uia_control_type(UIA_GroupControlTypeId), Role::Group);
-        assert_eq!(map_uia_control_type(UIA_CONTROLTYPE_ID(99999)), Role::Unknown);
+        assert_eq!(
+            map_uia_control_type(UIA_CONTROLTYPE_ID(99999)),
+            Role::Unknown
+        );
     }
 
     #[test]

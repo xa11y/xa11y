@@ -1,8 +1,8 @@
 //! Stub backend for non-Windows platforms (allows compilation on all targets).
 
 use xa11y_core::{
-    Action, ActionData, AppInfo, AppTarget, Error, NodeId, PermissionStatus, Provider, QueryOptions,
-    Result, Tree,
+    Action, ActionData, AppInfo, AppTarget, Error, NodeId, PermissionStatus, Provider,
+    QueryOptions, Result, Tree,
 };
 
 #[derive(Default)]
