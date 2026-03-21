@@ -61,7 +61,7 @@ impl WindowsProvider {
             windows::Win32::System::Com::CoCreateInstance(
                 &CUIAutomation8,
                 None,
-                windows::Win32::System::Com::CLSCTX_INPROC_SERVER,
+                windows::Win32::System::Com::CLSCTX_ALL,
             )
         }
         .map_err(|e| Error::Platform {
