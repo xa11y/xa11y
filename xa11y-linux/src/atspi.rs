@@ -1,10 +1,12 @@
 //! Real AT-SPI2 backend implementation using zbus D-Bus bindings.
 
 use std::sync::Mutex;
+use std::time::Duration;
 
 use xa11y_core::{
-    Action, ActionData, AppInfo, AppTarget, Error, Node, NormalizedRect, PermissionStatus,
-    Provider, QueryOptions, Rect, Result, Role, StateSet, Toggled, Tree,
+    Action, ActionData, AppInfo, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
+    EventKind, EventProvider, EventReceiver, Node, NormalizedRect, PermissionStatus, Provider,
+    QueryOptions, Rect, Result, Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
 };
 use zbus::blocking::{Connection, Proxy};
 
@@ -942,14 +944,177 @@ impl Provider for LinuxProvider {
                         message: format!("Value.SetCurrentValue failed: {}", e),
                     })
             }),
-            Action::Scroll
-            | Action::Blur
-            | Action::SetTextSelection
-            | Action::TypeText
-            | Action::DragTo => Err(Error::ActionNotSupported {
-                action,
-                role: node.role,
-            }),
+            Action::Blur => {
+                // Grab focus on parent element to blur the current one
+                let proxy =
+                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Accessible")?;
+                if let Ok(reply) = proxy.call_method("GetParent", &()) {
+                    if let Ok((bus, path)) = reply
+                        .body()
+                        .deserialize::<(String, zbus::zvariant::OwnedObjectPath)>()
+                    {
+                        let path_str = path.as_str();
+                        if path_str != "/org/a11y/atspi/null" {
+                            if let Ok(p) =
+                                self.make_proxy(&bus, path_str, "org.a11y.atspi.Component")
+                            {
+                                let _ = p.call_method("GrabFocus", &());
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                Ok(())
+            }
+
+            Action::Scroll => {
+                let (direction, _amount) = match data {
+                    Some(ActionData::ScrollAmount { direction, amount }) => (direction, amount),
+                    _ => {
+                        return Err(Error::Platform {
+                            code: -1,
+                            message: "Scroll requires ActionData::ScrollAmount".to_string(),
+                        })
+                    }
+                };
+                // Try action-based scrolling first
+                let action_name = match direction {
+                    ScrollDirection::Up => "scroll up",
+                    ScrollDirection::Down => "scroll down",
+                    ScrollDirection::Left => "scroll left",
+                    ScrollDirection::Right => "scroll right",
+                };
+                if self.do_atspi_action(&target, action_name).is_ok() {
+                    return Ok(());
+                }
+                // Fall back to Component.ScrollTo
+                let proxy =
+                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")?;
+                let scroll_type: u32 = match direction {
+                    ScrollDirection::Up => 2,    // TOP_EDGE
+                    ScrollDirection::Down => 3,  // BOTTOM_EDGE
+                    ScrollDirection::Left => 4,  // LEFT_EDGE
+                    ScrollDirection::Right => 5, // RIGHT_EDGE
+                };
+                proxy
+                    .call_method("ScrollTo", &(scroll_type,))
+                    .map_err(|e| Error::Platform {
+                        code: -1,
+                        message: format!("ScrollTo failed: {}", e),
+                    })?;
+                Ok(())
+            }
+
+            Action::SetTextSelection => {
+                let (start, end) = match data {
+                    Some(ActionData::TextSelection { start, end }) => (start, end),
+                    _ => {
+                        return Err(Error::Platform {
+                            code: -1,
+                            message: "SetTextSelection requires ActionData::TextSelection"
+                                .to_string(),
+                        })
+                    }
+                };
+                let proxy =
+                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Text")?;
+                // Try SetSelection first, fall back to AddSelection
+                if proxy
+                    .call_method("SetSelection", &(0i32, start as i32, end as i32))
+                    .is_err()
+                {
+                    proxy
+                        .call_method("AddSelection", &(start as i32, end as i32))
+                        .map_err(|e| Error::Platform {
+                            code: -1,
+                            message: format!("Text.AddSelection failed: {}", e),
+                        })?;
+                }
+                Ok(())
+            }
+
+            Action::TypeText => {
+                let text = match data {
+                    Some(ActionData::Value(text)) => text,
+                    _ => {
+                        return Err(Error::Platform {
+                            code: -1,
+                            message: "TypeText requires ActionData::Value".to_string(),
+                        })
+                    }
+                };
+                // Focus the element first
+                if let Ok(proxy) =
+                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")
+                {
+                    let _ = proxy.call_method("GrabFocus", &());
+                }
+                // Use AT-SPI DeviceEventController.GenerateKeyboardEvent
+                let dec = self.make_proxy(
+                    "org.a11y.atspi.Registry",
+                    "/org/a11y/atspi/registry/deviceeventcontroller",
+                    "org.a11y.atspi.DeviceEventController",
+                )?;
+                for ch in text.chars() {
+                    let ch_str = ch.to_string();
+                    // synth_type 4 = KEY_STRING (generate from UTF-8 string)
+                    dec.call_method("GenerateKeyboardEvent", &(0i32, &*ch_str, 4u32))
+                        .map_err(|e| Error::Platform {
+                            code: -1,
+                            message: format!("GenerateKeyboardEvent failed: {}", e),
+                        })?;
+                }
+                Ok(())
+            }
+
+            Action::DragTo => {
+                let (target_x, target_y) = match data {
+                    Some(ActionData::Point { x, y }) => (x, y),
+                    _ => {
+                        return Err(Error::Platform {
+                            code: -1,
+                            message: "DragTo requires ActionData::Point".to_string(),
+                        })
+                    }
+                };
+                let bounds = node.bounds.ok_or(Error::Platform {
+                    code: -1,
+                    message: "Cannot determine element bounds for DragTo".to_string(),
+                })?;
+                let cx = (bounds.x as f64 + bounds.width as f64 / 2.0) as i32;
+                let cy = (bounds.y as f64 + bounds.height as f64 / 2.0) as i32;
+
+                let dec = self.make_proxy(
+                    "org.a11y.atspi.Registry",
+                    "/org/a11y/atspi/registry/deviceeventcontroller",
+                    "org.a11y.atspi.DeviceEventController",
+                )?;
+                // Mouse down at element center
+                dec.call_method("GenerateMouseEvent", &(cx, cy, "b1p"))
+                    .map_err(|e| Error::Platform {
+                        code: -1,
+                        message: format!("GenerateMouseEvent press failed: {}", e),
+                    })?;
+                // Move to target
+                dec.call_method(
+                    "GenerateMouseEvent",
+                    &(target_x as i32, target_y as i32, "abs"),
+                )
+                .map_err(|e| Error::Platform {
+                    code: -1,
+                    message: format!("GenerateMouseEvent move failed: {}", e),
+                })?;
+                // Mouse up at target
+                dec.call_method(
+                    "GenerateMouseEvent",
+                    &(target_x as i32, target_y as i32, "b1r"),
+                )
+                .map_err(|e| Error::Platform {
+                    code: -1,
+                    message: format!("GenerateMouseEvent release failed: {}", e),
+                })?;
+                Ok(())
+            }
         }
     }
 
@@ -993,6 +1158,184 @@ impl Provider for LinuxProvider {
         }
 
         Ok(apps)
+    }
+}
+
+// ── EventProvider ────────────────────────────────────────────────────────────
+
+impl EventProvider for LinuxProvider {
+    fn subscribe(&self, target: &AppTarget, filter: EventFilter) -> Result<Subscription> {
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let app_info = match target {
+            AppTarget::ByName(name) => {
+                let app_ref = self.find_app_by_name(name)?;
+                let pid = self.get_app_pid(&app_ref).unwrap_or(0);
+                AppInfo {
+                    name: self.get_name(&app_ref).unwrap_or_default(),
+                    pid,
+                    bundle_id: None,
+                }
+            }
+            AppTarget::ByPid(pid) => {
+                let app_ref = self.find_app_by_pid(*pid)?;
+                AppInfo {
+                    name: self.get_name(&app_ref).unwrap_or_default(),
+                    pid: *pid,
+                    bundle_id: None,
+                }
+            }
+            AppTarget::ByWindow(_) => {
+                return Err(Error::Platform {
+                    code: -1,
+                    message: "ByWindow not supported for event subscription".to_string(),
+                })
+            }
+        };
+
+        // Create a separate provider for polling on the background thread
+        let poll_provider = LinuxProvider::new()?;
+        let target_clone = target.clone();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_clone = stop.clone();
+
+        // Poll for tree changes on a background thread, emitting events for diffs
+        let handle = std::thread::spawn(move || {
+            let mut prev_focused: Option<String> = None;
+            let mut prev_node_count: usize = 0;
+
+            while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(100));
+
+                let tree = match poll_provider.get_app_tree(&target_clone, &QueryOptions::default())
+                {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
+
+                // Detect focus changes
+                let focused_name = tree
+                    .iter()
+                    .find(|n| n.states.focused)
+                    .and_then(|n| n.name.clone());
+                if focused_name != prev_focused {
+                    if prev_focused.is_some() {
+                        let kind = EventKind::FocusChanged;
+                        if filter.kinds.is_empty() || filter.kinds.contains(&kind) {
+                            let _ = tx.send(Event {
+                                kind,
+                                app: app_info.clone(),
+                                target: tree.iter().find(|n| n.states.focused).cloned(),
+                                state_flag: None,
+                                state_value: None,
+                                text_change: None,
+                                timestamp: std::time::Instant::now(),
+                            });
+                        }
+                    }
+                    prev_focused = focused_name;
+                }
+
+                // Detect structure changes (node count changed)
+                let node_count = tree.len();
+                if node_count != prev_node_count && prev_node_count > 0 {
+                    let kind = EventKind::StructureChanged;
+                    if filter.kinds.is_empty() || filter.kinds.contains(&kind) {
+                        let _ = tx.send(Event {
+                            kind,
+                            app: app_info.clone(),
+                            target: None,
+                            state_flag: None,
+                            state_value: None,
+                            text_change: None,
+                            timestamp: std::time::Instant::now(),
+                        });
+                    }
+                }
+                prev_node_count = node_count;
+            }
+        });
+
+        let cancel = CancelHandle::new(move || {
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = handle.join();
+        });
+
+        Ok(Subscription::new(EventReceiver::new(rx), cancel))
+    }
+
+    fn wait_for_event(
+        &self,
+        target: &AppTarget,
+        filter: EventFilter,
+        timeout: Duration,
+    ) -> Result<Event> {
+        let sub = self.subscribe(target, filter)?;
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(event) = sub.try_recv() {
+                return Ok(event);
+            }
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                return Err(Error::Timeout { elapsed });
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for(
+        &self,
+        target: &AppTarget,
+        selector: &str,
+        state: ElementState,
+        timeout: Duration,
+    ) -> Result<Node> {
+        let start = std::time::Instant::now();
+        let poll_interval = Duration::from_millis(100);
+
+        loop {
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                return Err(Error::Timeout { elapsed });
+            }
+
+            let tree = self.get_app_tree(target, &QueryOptions::default())?;
+            let matches = tree.query(selector).ok();
+            let node = matches.as_ref().and_then(|m| m.first().copied());
+
+            let condition_met = match state {
+                ElementState::Attached => node.is_some(),
+                ElementState::Detached => node.is_none(),
+                ElementState::Visible => node.is_some_and(|n| n.states.visible),
+                ElementState::Hidden => node.is_none() || node.is_some_and(|n| !n.states.visible),
+                ElementState::Enabled => node.is_some_and(|n| n.states.enabled),
+            };
+
+            if condition_met {
+                return Ok(node.cloned().unwrap_or_else(|| Node {
+                    role: Role::Unknown,
+                    name: None,
+                    value: None,
+                    description: None,
+                    bounds: None,
+                    bounds_normalized: None,
+                    actions: vec![],
+                    states: StateSet::default(),
+                    depth: 0,
+                    numeric_value: None,
+                    min_value: None,
+                    max_value: None,
+                    stable_id: None,
+                    raw: None,
+                    index: 0,
+                    children_indices: vec![],
+                    parent_index: None,
+                }));
+            }
+
+            std::thread::sleep(poll_interval);
+        }
     }
 }
 

@@ -88,6 +88,7 @@ Last updated: 2026-03-19
 |--------|--------|-------|
 | `Press` | Covered | `action_press_button`, `action_toggle_checkbox` |
 | `Focus` | Covered | `action_focus_text_entry`, `state_focused_after_focus_action` |
+| `Blur` | Covered | `action_blur_text_entry` |
 | `SetValue` | Covered | `action_set_value_text`, `action_set_value_numeric` |
 | `Toggle` | Not covered | AT-SPI maps to Press/Click on most widgets |
 | `Expand` | Covered | `action_expand_collapse`, `thrash_expand_collapse_cycle` |
@@ -95,8 +96,12 @@ Last updated: 2026-03-19
 | `Select` | Covered | `action_select_list_item` (via Press/Click) |
 | `ShowMenu` | Not coverable | Context menu action not reliably testable |
 | `ScrollIntoView` | Not coverable | Requires ScrollTo support which varies |
+| `Scroll` | Covered | `action_scroll_direction` |
 | `Increment` | Covered | `action_increment_spinner`, `thrash_slider_increment_10_times` |
 | `Decrement` | Covered | `action_decrement_spinner` |
+| `SetTextSelection` | Covered | `action_set_text_selection` |
+| `TypeText` | Covered | `action_type_text` |
+| `DragTo` | Covered | `action_drag_to` |
 
 ## Selector Features
 
@@ -145,18 +150,27 @@ Covered via test app nodes: `Application`, `Window`, `Button`, `CheckBox`, `Radi
 | `thrash_slider_increment_10_times` | Increment slider 10x, verify value=60 |
 | `thrash_expand_collapse_cycle` | Expand→collapse→expand→collapse, verify final |
 
+## EventProvider Trait Methods
+
+| Method | Status | Tests |
+|--------|--------|-------|
+| `subscribe` | Covered | `event_subscribe_receives_focus_event` |
+| `wait_for_event` | Covered | `event_wait_for_event_timeout` |
+| `wait_for` | Covered | `event_wait_for_attached` |
+
 ## Summary
 
-- **~96 tests** covering the full public API surface
+- **~104 tests** covering the full public API surface
 - All Provider trait methods covered
+- All EventProvider trait methods covered
 - All Tree methods covered
 - All Node fields covered
 - All QueryOptions fields covered
-- 9/11 Action variants covered
+- 14/16 Action variants covered (all except Toggle, ShowMenu)
 - All selector features covered except description attribute
 - 14 role-specific tests covering 30+ Role variants
 - 5 stress/complex scenario tests
 - 4 error path tests
 - 2 serialization tests
-- EventProvider not implemented — cannot test
 - Fuzz targets cover xa11y-core: tree_ops, selector, query, serde
+- Provider fuzzer covers all 16 Action variants

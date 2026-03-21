@@ -60,3 +60,32 @@ pub fn create_provider() -> Result<Box<dyn Provider>> {
         })
     }
 }
+
+/// Create a platform-appropriate event provider (supports subscribe/wait).
+///
+/// Returns a boxed `EventProvider` trait object for the current platform.
+/// EventProvider extends Provider with event subscription capabilities.
+pub fn create_event_provider() -> Result<Box<dyn EventProvider>> {
+    #[cfg(target_os = "macos")]
+    {
+        Ok(Box::new(xa11y_macos::MacOSProvider::new()?))
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        Ok(Box::new(xa11y_windows::WindowsProvider::new()?))
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        Ok(Box::new(xa11y_linux::LinuxProvider::new()?))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        Err(Error::Platform {
+            code: -1,
+            message: format!("Unsupported platform: {}", std::env::consts::OS),
+        })
+    }
+}

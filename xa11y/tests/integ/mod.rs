@@ -10,6 +10,14 @@ pub fn provider() -> Box<dyn Provider> {
     }
 }
 
+/// Create an event provider for the current platform.
+pub fn event_provider() -> Box<dyn EventProvider> {
+    match create_event_provider() {
+        Ok(p) => p,
+        Err(e) => panic!("EventProvider unavailable: {}", e),
+    }
+}
+
 /// Get the test app tree with default options, retrying briefly for registration.
 pub fn app_tree(p: &dyn Provider) -> Tree {
     app_tree_with(p, &QueryOptions::default())
