@@ -205,6 +205,132 @@ CFTypeRef safe_cf_dict_get_value(CFDictionaryRef dict, CFTypeRef key) {
     }
 }
 
+// ── AXObserver Helpers (for EventProvider) ───────────────────────────────────
+
+// Create an AXObserver for a given PID with a callback.
+int safe_ax_observer_create(pid_t pid, AXObserverCallback callback, AXObserverRef *outObserver) {
+    @try {
+        return AXObserverCreate(pid, callback, outObserver);
+    } @catch (NSException *e) {
+        *outObserver = NULL;
+        return -9999;
+    }
+}
+
+// Add a notification to an AXObserver.
+int safe_ax_observer_add_notification(AXObserverRef observer, AXUIElementRef element,
+                                       CFStringRef notification, void *refcon) {
+    @try {
+        return AXObserverAddNotification(observer, element, notification, refcon);
+    } @catch (NSException *e) {
+        return -9999;
+    }
+}
+
+// Get the RunLoop source for an AXObserver.
+CFRunLoopSourceRef safe_ax_observer_get_run_loop_source(AXObserverRef observer) {
+    @try {
+        return AXObserverGetRunLoopSource(observer);
+    } @catch (NSException *e) {
+        return NULL;
+    }
+}
+
+// Add a source to the current thread's RunLoop (default mode).
+void safe_cf_run_loop_add_source(CFRunLoopSourceRef source) {
+    @try {
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, kCFRunLoopDefaultMode);
+    } @catch (NSException *e) {
+        // swallow
+    }
+}
+
+// Get the current thread's RunLoop.
+CFRunLoopRef safe_cf_run_loop_get_current(void) {
+    return CFRunLoopGetCurrent();
+}
+
+// Run the current thread's RunLoop (blocks until stopped).
+void safe_cf_run_loop_run(void) {
+    CFRunLoopRun();
+}
+
+// Stop a RunLoop (thread-safe, can be called from any thread).
+void safe_cf_run_loop_stop(CFRunLoopRef rl) {
+    @try {
+        if (rl != NULL) {
+            CFRunLoopStop(rl);
+        }
+    } @catch (NSException *e) {
+        // swallow
+    }
+}
+
+// ── CGEvent Helpers (for Scroll, TypeText, DragTo actions) ───────────────────
+
+// Post a scroll wheel event with pixel-based amounts.
+// dy: positive = scroll up, negative = scroll down
+// dx: positive = scroll left, negative = scroll right
+void safe_cg_post_scroll_event(int32_t dy, int32_t dx) {
+    @try {
+        CGEventRef event = CGEventCreateScrollWheelEvent(NULL, kCGScrollEventUnitPixel, 2, dy, dx);
+        if (event) {
+            CGEventPost(kCGHIDEventTap, event);
+            CFRelease(event);
+        }
+    } @catch (NSException *e) {
+        // swallow
+    }
+}
+
+// Type a string of Unicode characters by posting keyboard events.
+void safe_cg_type_text(const uint16_t *chars, uint32_t length) {
+    @try {
+        for (uint32_t i = 0; i < length; i++) {
+            CGEventRef keyDown = CGEventCreateKeyboardEvent(NULL, 0, true);
+            if (keyDown) {
+                CGEventKeyboardSetUnicodeString(keyDown, 1, &chars[i]);
+                CGEventPost(kCGHIDEventTap, keyDown);
+                CFRelease(keyDown);
+            }
+            CGEventRef keyUp = CGEventCreateKeyboardEvent(NULL, 0, false);
+            if (keyUp) {
+                CGEventKeyboardSetUnicodeString(keyUp, 1, &chars[i]);
+                CGEventPost(kCGHIDEventTap, keyUp);
+                CFRelease(keyUp);
+            }
+        }
+    } @catch (NSException *e) {
+        // swallow
+    }
+}
+
+// Post a mouse event at the given point.
+// eventType: kCGEventLeftMouseDown=1, kCGEventLeftMouseUp=2,
+//            kCGEventLeftMouseDragged=6
+void safe_cg_post_mouse_event(uint32_t eventType, double x, double y) {
+    @try {
+        CGPoint point = CGPointMake(x, y);
+        CGEventRef event = CGEventCreateMouseEvent(NULL, (CGEventType)eventType, point, kCGMouseButtonLeft);
+        if (event) {
+            CGEventPost(kCGHIDEventTap, event);
+            CFRelease(event);
+        }
+    } @catch (NSException *e) {
+        // swallow
+    }
+}
+
+// Create an AXValue containing a CFRange (for AXSelectedTextRange).
+CFTypeRef safe_ax_value_create_cf_range(CFIndex location, CFIndex length) {
+    @try {
+        CFRange range = CFRangeMake(location, length);
+        return AXValueCreate(kAXValueCFRangeType, &range);
+    } @catch (NSException *e) {
+        return NULL;
+    }
+}
+
 // ── Test Helpers ─────────────────────────────────────────────────────────────
 
 // Throw an NSException (for testing that our Rust code handles it properly).

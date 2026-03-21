@@ -18,6 +18,7 @@ use crate::tree::Tree;
 /// # Example
 /// ```no_run
 /// # use xa11y_core::*;
+/// # use std::time::Duration;
 /// # fn example(provider: &dyn Provider) -> Result<()> {
 /// let target = AppTarget::ByName("MyApp".into());
 /// let save_btn = Locator::new(provider, target, "button[name=\"Save\"]");

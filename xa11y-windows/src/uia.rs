@@ -2,16 +2,22 @@
 
 use std::collections::HashSet;
 use std::sync::Mutex;
+use std::time::Duration;
 
+use windows::core::implement;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, ReleaseDC, HORZRES, VERTRES};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT};
 use windows::Win32::System::Threading::*;
+use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::*;
+use windows::Win32::UI::Input::KeyboardAndMouse::*;
 
 use xa11y_core::{
-    Action, ActionData, AppInfo, AppTarget, Error, Node, NormalizedRect, PermissionStatus,
-    Provider, QueryOptions, RawPlatformData, Rect, Result, Role, StateSet, Toggled, Tree,
+    Action, ActionData, AppInfo, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
+    EventKind, EventProvider, EventReceiver, Node, NormalizedRect, PermissionStatus, Provider,
+    QueryOptions, RawPlatformData, Rect, Result, Role, ScrollDirection, StateSet, Subscription,
+    Toggled, Tree,
 };
 
 /// Initialize COM for UIA. Called once per WindowsProvider creation.
@@ -923,14 +929,234 @@ impl Provider for WindowsProvider {
                 Ok(())
             }
 
-            Action::Scroll
-            | Action::Blur
-            | Action::SetTextSelection
-            | Action::TypeText
-            | Action::DragTo => Err(Error::ActionNotSupported {
-                action,
-                role: node.role,
-            }),
+            Action::Blur => {
+                // Focus the desktop root to blur the current element
+                let root =
+                    unsafe { self.automation.GetRootElement() }.map_err(|e| Error::Platform {
+                        code: e.code().0 as i64,
+                        message: "GetRootElement failed".to_string(),
+                    })?;
+                unsafe { root.SetFocus() }.map_err(|e| Error::Platform {
+                    code: e.code().0 as i64,
+                    message: "SetFocus on root failed".to_string(),
+                })?;
+                Ok(())
+            }
+
+            Action::Scroll => {
+                let (direction, amount) = match data {
+                    Some(ActionData::ScrollAmount { direction, amount }) => (direction, amount),
+                    _ => {
+                        return Err(Error::Platform {
+                            code: -1,
+                            message: "Scroll requires ActionData::ScrollAmount".to_string(),
+                        })
+                    }
+                };
+                if let Ok(pattern) = unsafe {
+                    element.GetCurrentPatternAs::<IUIAutomationScrollPattern>(UIA_ScrollPatternId)
+                } {
+                    let count = (amount as u32).max(1);
+                    for _ in 0..count {
+                        let (h, v) = match direction {
+                            ScrollDirection::Up => {
+                                (ScrollAmount_NoAmount, ScrollAmount_SmallDecrement)
+                            }
+                            ScrollDirection::Down => {
+                                (ScrollAmount_NoAmount, ScrollAmount_SmallIncrement)
+                            }
+                            ScrollDirection::Left => {
+                                (ScrollAmount_SmallDecrement, ScrollAmount_NoAmount)
+                            }
+                            ScrollDirection::Right => {
+                                (ScrollAmount_SmallIncrement, ScrollAmount_NoAmount)
+                            }
+                        };
+                        let _ = unsafe { pattern.Scroll(h, v) };
+                    }
+                    return Ok(());
+                }
+                Err(Error::ActionNotSupported {
+                    action,
+                    role: node.role,
+                })
+            }
+
+            Action::SetTextSelection => {
+                let (start, end) = match data {
+                    Some(ActionData::TextSelection { start, end }) => (start, end),
+                    _ => {
+                        return Err(Error::Platform {
+                            code: -1,
+                            message: "SetTextSelection requires ActionData::TextSelection"
+                                .to_string(),
+                        })
+                    }
+                };
+                if let Ok(pattern) = unsafe {
+                    element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
+                } {
+                    let range =
+                        unsafe { pattern.DocumentRange() }.map_err(|e| Error::Platform {
+                            code: e.code().0 as i64,
+                            message: "DocumentRange failed".to_string(),
+                        })?;
+                    // Collapse and move to start position
+                    let _ = unsafe { range.Move(TextUnit_Character, start as i32) };
+                    // Extend end to selection length
+                    let _ = unsafe {
+                        range.MoveEndpointByUnit(
+                            TextPatternRangeEndpoint_End,
+                            TextUnit_Character,
+                            (end - start) as i32,
+                        )
+                    };
+                    unsafe { range.Select() }.map_err(|e| Error::Platform {
+                        code: e.code().0 as i64,
+                        message: "Select range failed".to_string(),
+                    })?;
+                    return Ok(());
+                }
+                Err(Error::ActionNotSupported {
+                    action,
+                    role: node.role,
+                })
+            }
+
+            Action::TypeText => {
+                let text = match data {
+                    Some(ActionData::Value(text)) => text,
+                    _ => {
+                        return Err(Error::Platform {
+                            code: -1,
+                            message: "TypeText requires ActionData::Value".to_string(),
+                        })
+                    }
+                };
+                // Focus the element first
+                let _ = unsafe { element.SetFocus() };
+
+                let chars: Vec<u16> = text.encode_utf16().collect();
+                for ch in &chars {
+                    let inputs = [
+                        INPUT {
+                            r#type: INPUT_KEYBOARD,
+                            Anonymous: INPUT_0 {
+                                ki: KEYBDINPUT {
+                                    wVk: VIRTUAL_KEY(0),
+                                    wScan: *ch,
+                                    dwFlags: KEYEVENTF_UNICODE,
+                                    time: 0,
+                                    dwExtraInfo: 0,
+                                },
+                            },
+                        },
+                        INPUT {
+                            r#type: INPUT_KEYBOARD,
+                            Anonymous: INPUT_0 {
+                                ki: KEYBDINPUT {
+                                    wVk: VIRTUAL_KEY(0),
+                                    wScan: *ch,
+                                    dwFlags: KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+                                    time: 0,
+                                    dwExtraInfo: 0,
+                                },
+                            },
+                        },
+                    ];
+                    unsafe {
+                        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+                    }
+                }
+                Ok(())
+            }
+
+            Action::DragTo => {
+                let (target_x, target_y) = match data {
+                    Some(ActionData::Point { x, y }) => (x, y),
+                    _ => {
+                        return Err(Error::Platform {
+                            code: -1,
+                            message: "DragTo requires ActionData::Point".to_string(),
+                        })
+                    }
+                };
+                let bounds = node.bounds.ok_or(Error::Platform {
+                    code: -1,
+                    message: "Cannot determine element bounds for DragTo".to_string(),
+                })?;
+                let cx = bounds.x as f64 + bounds.width as f64 / 2.0;
+                let cy = bounds.y as f64 + bounds.height as f64 / 2.0;
+
+                let screen = Self::detect_screen_size();
+                let norm_sx = (cx / screen.0 as f64 * 65535.0) as i32;
+                let norm_sy = (cy / screen.1 as f64 * 65535.0) as i32;
+                let norm_tx = (target_x / screen.0 as f64 * 65535.0) as i32;
+                let norm_ty = (target_y / screen.1 as f64 * 65535.0) as i32;
+
+                let inputs = [
+                    // Move to source
+                    INPUT {
+                        r#type: INPUT_MOUSE,
+                        Anonymous: INPUT_0 {
+                            mi: MOUSEINPUT {
+                                dx: norm_sx,
+                                dy: norm_sy,
+                                mouseData: 0,
+                                dwFlags: MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE,
+                                time: 0,
+                                dwExtraInfo: 0,
+                            },
+                        },
+                    },
+                    // Mouse down
+                    INPUT {
+                        r#type: INPUT_MOUSE,
+                        Anonymous: INPUT_0 {
+                            mi: MOUSEINPUT {
+                                dx: 0,
+                                dy: 0,
+                                mouseData: 0,
+                                dwFlags: MOUSEEVENTF_LEFTDOWN,
+                                time: 0,
+                                dwExtraInfo: 0,
+                            },
+                        },
+                    },
+                    // Move to target
+                    INPUT {
+                        r#type: INPUT_MOUSE,
+                        Anonymous: INPUT_0 {
+                            mi: MOUSEINPUT {
+                                dx: norm_tx,
+                                dy: norm_ty,
+                                mouseData: 0,
+                                dwFlags: MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_MOVE,
+                                time: 0,
+                                dwExtraInfo: 0,
+                            },
+                        },
+                    },
+                    // Mouse up
+                    INPUT {
+                        r#type: INPUT_MOUSE,
+                        Anonymous: INPUT_0 {
+                            mi: MOUSEINPUT {
+                                dx: 0,
+                                dy: 0,
+                                mouseData: 0,
+                                dwFlags: MOUSEEVENTF_LEFTUP,
+                                time: 0,
+                                dwExtraInfo: 0,
+                            },
+                        },
+                    },
+                ];
+                unsafe {
+                    SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+                }
+                Ok(())
+            }
         }
     }
 
@@ -1227,6 +1453,280 @@ fn map_uia_control_type(control_type: UIA_CONTROLTYPE_ID) -> Role {
         UIA_CalendarControlTypeId => Role::Group,
         UIA_CustomControlTypeId => Role::Unknown,
         _ => Role::Unknown,
+    }
+}
+
+// ── UIA Event Handlers (COM callbacks for EventProvider) ─────────────────────
+
+#[implement(IUIAutomationFocusChangedEventHandler)]
+struct UiaFocusHandler {
+    tx: Mutex<std::sync::mpsc::Sender<Event>>,
+    info: AppInfo,
+}
+
+impl IUIAutomationFocusChangedEventHandler_Impl for UiaFocusHandler {
+    fn HandleFocusChangedEvent(
+        &self,
+        _sender: Option<&IUIAutomationElement>,
+    ) -> windows::core::Result<()> {
+        let _ = self.tx.lock().unwrap().send(Event {
+            kind: EventKind::FocusChanged,
+            app: self.info.clone(),
+            target: None,
+            state_flag: None,
+            state_value: None,
+            text_change: None,
+            timestamp: std::time::Instant::now(),
+        });
+        Ok(())
+    }
+}
+
+#[implement(IUIAutomationEventHandler)]
+struct UiaEventHandler {
+    tx: Mutex<std::sync::mpsc::Sender<Event>>,
+    info: AppInfo,
+}
+
+impl IUIAutomationEventHandler_Impl for UiaEventHandler {
+    fn HandleAutomationEvent(
+        &self,
+        _sender: Option<&IUIAutomationElement>,
+        eventid: UIA_EVENT_ID,
+    ) -> windows::core::Result<()> {
+        let kind = match eventid {
+            UIA_Window_WindowOpenedEventId => EventKind::WindowOpened,
+            UIA_Window_WindowClosedEventId => EventKind::WindowClosed,
+            UIA_MenuOpenedEventId => EventKind::MenuOpened,
+            UIA_MenuClosedEventId => EventKind::MenuClosed,
+            UIA_SelectionItem_ElementSelectedEventId => EventKind::SelectionChanged,
+            _ => return Ok(()),
+        };
+        let _ = self.tx.lock().unwrap().send(Event {
+            kind,
+            app: self.info.clone(),
+            target: None,
+            state_flag: None,
+            state_value: None,
+            text_change: None,
+            timestamp: std::time::Instant::now(),
+        });
+        Ok(())
+    }
+}
+
+#[implement(IUIAutomationPropertyChangedEventHandler)]
+struct UiaPropertyHandler {
+    tx: Mutex<std::sync::mpsc::Sender<Event>>,
+    info: AppInfo,
+}
+
+impl IUIAutomationPropertyChangedEventHandler_Impl for UiaPropertyHandler {
+    fn HandlePropertyChangedEvent(
+        &self,
+        _sender: Option<&IUIAutomationElement>,
+        propertyid: UIA_PROPERTY_ID,
+        _newvalue: &VARIANT,
+    ) -> windows::core::Result<()> {
+        let kind = match propertyid {
+            UIA_ValueValuePropertyId => EventKind::ValueChanged,
+            UIA_NamePropertyId => EventKind::NameChanged,
+            _ => return Ok(()),
+        };
+        let _ = self.tx.lock().unwrap().send(Event {
+            kind,
+            app: self.info.clone(),
+            target: None,
+            state_flag: None,
+            state_value: None,
+            text_change: None,
+            timestamp: std::time::Instant::now(),
+        });
+        Ok(())
+    }
+}
+
+impl EventProvider for WindowsProvider {
+    fn subscribe(&self, target: &AppTarget, filter: EventFilter) -> Result<Subscription> {
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        // Find the target element
+        let app_info = match target {
+            AppTarget::ByName(name) => {
+                let apps = self.list_gui_apps();
+                let found = apps
+                    .iter()
+                    .find(|(_, n)| n.to_lowercase().contains(&name.to_lowercase()));
+                match found {
+                    Some((pid, name)) => AppInfo {
+                        name: name.clone(),
+                        pid: *pid,
+                        bundle_id: None,
+                    },
+                    None => {
+                        return Err(Error::AppNotFound {
+                            target: name.clone(),
+                        })
+                    }
+                }
+            }
+            AppTarget::ByPid(pid) => AppInfo {
+                name: String::new(),
+                pid: *pid,
+                bundle_id: None,
+            },
+            AppTarget::ByWindow(_) => {
+                return Err(Error::Platform {
+                    code: -1,
+                    message: "ByWindow not supported for event subscription".to_string(),
+                })
+            }
+        };
+
+        let root = unsafe { self.automation.GetRootElement() }.map_err(|e| Error::Platform {
+            code: e.code().0 as i64,
+            message: "GetRootElement failed".to_string(),
+        })?;
+
+        // Register focus changed handler
+        let focus_handler: IUIAutomationFocusChangedEventHandler = UiaFocusHandler {
+            tx: Mutex::new(tx.clone()),
+            info: app_info.clone(),
+        }
+        .into();
+        let _ = unsafe {
+            self.automation
+                .AddFocusChangedEventHandler(None, &focus_handler)
+        };
+
+        // Register automation event handlers for window and menu events
+        let event_ids = [
+            UIA_Window_WindowOpenedEventId,
+            UIA_Window_WindowClosedEventId,
+            UIA_MenuOpenedEventId,
+            UIA_MenuClosedEventId,
+        ];
+        let mut event_handlers = Vec::new();
+        for &eid in &event_ids {
+            let handler: IUIAutomationEventHandler = UiaEventHandler {
+                tx: Mutex::new(tx.clone()),
+                info: app_info.clone(),
+            }
+            .into();
+            let _ = unsafe {
+                self.automation.AddAutomationEventHandler(
+                    eid,
+                    &root,
+                    TreeScope_Subtree,
+                    None,
+                    &handler,
+                )
+            };
+            event_handlers.push((eid, handler));
+        }
+
+        // Register property changed handler for value and name changes
+        let prop_handler: IUIAutomationPropertyChangedEventHandler = UiaPropertyHandler {
+            tx: Mutex::new(tx),
+            info: app_info,
+        }
+        .into();
+        let prop_ids = [UIA_ValueValuePropertyId, UIA_NamePropertyId];
+        let _ = unsafe {
+            self.automation.AddPropertyChangedEventHandler(
+                &root,
+                TreeScope_Subtree,
+                None,
+                &prop_handler,
+                &prop_ids,
+            )
+        };
+
+        // Build cancel handler to remove all event handlers
+        let automation = self.automation.clone();
+        let cancel = CancelHandle::new(move || {
+            let _ = unsafe { automation.RemoveFocusChangedEventHandler(&focus_handler) };
+            for (eid, handler) in &event_handlers {
+                let _ = unsafe { automation.RemoveAutomationEventHandler(*eid, &root, handler) };
+            }
+            let _ = unsafe { automation.RemovePropertyChangedEventHandler(&root, &prop_handler) };
+        });
+
+        Ok(Subscription::new(EventReceiver::new(rx), cancel))
+    }
+
+    fn wait_for_event(
+        &self,
+        target: &AppTarget,
+        filter: EventFilter,
+        timeout: Duration,
+    ) -> Result<Event> {
+        let sub = self.subscribe(target, filter)?;
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(event) = sub.try_recv() {
+                return Ok(event);
+            }
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                return Err(Error::Timeout { elapsed });
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for(
+        &self,
+        target: &AppTarget,
+        selector: &str,
+        state: ElementState,
+        timeout: Duration,
+    ) -> Result<Node> {
+        let start = std::time::Instant::now();
+        let poll_interval = Duration::from_millis(100);
+
+        loop {
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                return Err(Error::Timeout { elapsed });
+            }
+
+            let tree = self.get_app_tree(target, &QueryOptions::default())?;
+            let matches = tree.query(selector).ok();
+            let node = matches.as_ref().and_then(|m| m.first().copied());
+
+            let condition_met = match state {
+                ElementState::Attached => node.is_some(),
+                ElementState::Detached => node.is_none(),
+                ElementState::Visible => node.is_some_and(|n| n.states.visible),
+                ElementState::Hidden => node.is_none() || node.is_some_and(|n| !n.states.visible),
+                ElementState::Enabled => node.is_some_and(|n| n.states.enabled),
+            };
+
+            if condition_met {
+                return Ok(node.cloned().unwrap_or_else(|| Node {
+                    role: Role::Unknown,
+                    name: None,
+                    value: None,
+                    description: None,
+                    bounds: None,
+                    bounds_normalized: None,
+                    actions: vec![],
+                    states: StateSet::default(),
+                    depth: 0,
+                    numeric_value: None,
+                    min_value: None,
+                    max_value: None,
+                    stable_id: None,
+                    raw: None,
+                    index: 0,
+                    children_indices: vec![],
+                    parent_index: None,
+                }));
+            }
+
+            std::thread::sleep(poll_interval);
+        }
     }
 }
 

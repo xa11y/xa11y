@@ -3,14 +3,17 @@
 use std::collections::HashSet;
 use std::ffi::c_void;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use core_foundation::base::TCFType;
 use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
 
 use xa11y_core::{
-    Action, ActionData, AppInfo, AppTarget, Error, Node, NormalizedRect, PermissionStatus,
-    Provider, QueryOptions, RawPlatformData, Rect, Result, Role, StateSet, Toggled, Tree,
+    Action, ActionData, AppInfo, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
+    EventKind, EventProvider, EventReceiver, Node, NormalizedRect, PermissionStatus, Provider,
+    QueryOptions, RawPlatformData, Rect, Result, Role, ScrollDirection, StateSet, Subscription,
+    Toggled, Tree,
 };
 
 // ── FFI Declarations ──────────────────────────────────────────────────────────
@@ -93,6 +96,30 @@ extern "C" {
     fn safe_ax_create_application(pid: i32) -> AXUIElementRef;
     fn safe_ax_value_get_value(value: CFTypeRef, the_type: i32, value_ptr: *mut c_void) -> bool;
     fn safe_cg_window_list_copy(option: u32, relative_to: u32) -> CFArrayRef;
+    // AXObserver wrappers for EventProvider
+    fn safe_ax_observer_create(
+        pid: i32,
+        callback: unsafe extern "C" fn(CFTypeRef, AXUIElementRef, CFTypeRef, *mut c_void),
+        observer: *mut CFTypeRef,
+    ) -> i32;
+    fn safe_ax_observer_add_notification(
+        observer: CFTypeRef,
+        element: AXUIElementRef,
+        notification: CFStringRef,
+        refcon: *mut c_void,
+    ) -> i32;
+    fn safe_ax_observer_get_run_loop_source(observer: CFTypeRef) -> CFTypeRef;
+    fn safe_cf_run_loop_add_source(source: CFTypeRef);
+    fn safe_cf_run_loop_get_current() -> CFTypeRef;
+    fn safe_cf_run_loop_run();
+    fn safe_cf_run_loop_stop(run_loop: CFTypeRef);
+
+    // CGEvent wrappers for input simulation
+    fn safe_cg_post_scroll_event(dy: i32, dx: i32);
+    fn safe_cg_type_text(chars: *const u16, length: u32);
+    fn safe_cg_post_mouse_event(event_type: u32, x: f64, y: f64);
+    fn safe_ax_value_create_cf_range(location: isize, length: isize) -> CFTypeRef;
+
     // Test helpers
     #[cfg(test)]
     fn test_throw_and_catch_nsexception() -> i32;
@@ -1238,14 +1265,123 @@ impl Provider for MacOSProvider {
                 Ok(())
             }
 
-            Action::Scroll
-            | Action::Blur
-            | Action::SetTextSelection
-            | Action::TypeText
-            | Action::DragTo => Err(Error::ActionNotSupported {
-                action,
-                role: node.role,
-            }),
+            Action::Blur => {
+                let attr = CFString::new("AXFocused");
+                let val = core_foundation::boolean::CFBoolean::false_value();
+                let err = do_set_attribute(el_ptr, &attr, val.as_CFTypeRef());
+                if err != AX_ERROR_SUCCESS {
+                    return Err(Error::Platform {
+                        code: err as i64,
+                        message: "Set AXFocused=false failed".to_string(),
+                    });
+                }
+                Ok(())
+            }
+
+            Action::Scroll => {
+                let (direction, amount) = match data {
+                    Some(ActionData::ScrollAmount { direction, amount }) => (direction, amount),
+                    _ => {
+                        return Err(Error::Platform {
+                            code: -1,
+                            message: "Scroll requires ActionData::ScrollAmount".to_string(),
+                        })
+                    }
+                };
+                let pixels = amount as i32;
+                let (dy, dx) = match direction {
+                    ScrollDirection::Up => (pixels, 0),
+                    ScrollDirection::Down => (-pixels, 0),
+                    ScrollDirection::Left => (0, pixels),
+                    ScrollDirection::Right => (0, -pixels),
+                };
+                unsafe { safe_cg_post_scroll_event(dy, dx) };
+                Ok(())
+            }
+
+            Action::SetTextSelection => {
+                let (start, end) = match data {
+                    Some(ActionData::TextSelection { start, end }) => (start, end),
+                    _ => {
+                        return Err(Error::Platform {
+                            code: -1,
+                            message: "SetTextSelection requires ActionData::TextSelection"
+                                .to_string(),
+                        })
+                    }
+                };
+                let location = start as isize;
+                let length = (end - start) as isize;
+                let range_value = unsafe { safe_ax_value_create_cf_range(location, length) };
+                if range_value.is_null() {
+                    return Err(Error::Platform {
+                        code: -1,
+                        message: "Failed to create CFRange value".to_string(),
+                    });
+                }
+                let attr = CFString::new("AXSelectedTextRange");
+                let err = do_set_attribute(el_ptr, &attr, range_value);
+                unsafe { CFRelease(range_value) };
+                if err != AX_ERROR_SUCCESS {
+                    return Err(Error::Platform {
+                        code: err as i64,
+                        message: "Set AXSelectedTextRange failed".to_string(),
+                    });
+                }
+                Ok(())
+            }
+
+            Action::TypeText => {
+                let text = match data {
+                    Some(ActionData::Value(text)) => text,
+                    _ => {
+                        return Err(Error::Platform {
+                            code: -1,
+                            message: "TypeText requires ActionData::Value".to_string(),
+                        })
+                    }
+                };
+                // Focus the element first
+                let attr = CFString::new("AXFocused");
+                let val = core_foundation::boolean::CFBoolean::true_value();
+                let _ = do_set_attribute(el_ptr, &attr, val.as_CFTypeRef());
+
+                let chars: Vec<u16> = text.encode_utf16().collect();
+                if !chars.is_empty() {
+                    unsafe { safe_cg_type_text(chars.as_ptr(), chars.len() as u32) };
+                }
+                Ok(())
+            }
+
+            Action::DragTo => {
+                let (target_x, target_y) = match data {
+                    Some(ActionData::Point { x, y }) => (x, y),
+                    _ => {
+                        return Err(Error::Platform {
+                            code: -1,
+                            message: "DragTo requires ActionData::Point".to_string(),
+                        })
+                    }
+                };
+                let bounds = node.bounds.ok_or(Error::Platform {
+                    code: -1,
+                    message: "Cannot determine element bounds for DragTo".to_string(),
+                })?;
+                let cx = bounds.x as f64 + bounds.width as f64 / 2.0;
+                let cy = bounds.y as f64 + bounds.height as f64 / 2.0;
+
+                unsafe {
+                    // Mouse down at element center
+                    safe_cg_post_mouse_event(1, cx, cy); // kCGEventLeftMouseDown
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    // Drag to target
+                    safe_cg_post_mouse_event(6, target_x, target_y); // kCGEventLeftMouseDragged
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    // Mouse up at target
+                    safe_cg_post_mouse_event(2, target_x, target_y); // kCGEventLeftMouseUp
+                }
+                Ok(())
+            }
         }
     }
 
@@ -1271,6 +1407,294 @@ impl Provider for MacOSProvider {
                 bundle_id: None,
             })
             .collect())
+    }
+}
+
+// ── EventProvider ────────────────────────────────────────────────────────────
+
+/// Context passed to AXObserver callback via refcon pointer.
+struct ObserverContext {
+    sender: std::sync::mpsc::Sender<Event>,
+    filter: EventFilter,
+    app_info: AppInfo,
+}
+
+/// AXObserver callback: maps AX notifications to xa11y events and sends them.
+unsafe extern "C" fn ax_observer_callback(
+    _observer: CFTypeRef,
+    element: AXUIElementRef,
+    notification: CFTypeRef, // CFStringRef
+    refcon: *mut c_void,
+) {
+    let ctx = &*(refcon as *const ObserverContext);
+
+    let notif_str = {
+        let cf = CFString::wrap_under_get_rule(notification as *const _);
+        cf.to_string()
+    };
+
+    let kind = match notif_str.as_str() {
+        "AXValueChanged" => EventKind::ValueChanged,
+        "AXFocusedUIElementChanged" => EventKind::FocusChanged,
+        "AXWindowCreated" => EventKind::WindowOpened,
+        "AXWindowMiniaturized" => EventKind::WindowDeactivated,
+        "AXWindowDeminiaturized" => EventKind::WindowActivated,
+        "AXUIElementDestroyed" => EventKind::StructureChanged,
+        "AXSelectedTextChanged" => EventKind::SelectionChanged,
+        "AXMenuOpened" => EventKind::MenuOpened,
+        "AXMenuClosed" => EventKind::MenuClosed,
+        "AXTitleChanged" => EventKind::NameChanged,
+        _ => return,
+    };
+
+    if !ctx.filter.kinds.is_empty() && !ctx.filter.kinds.contains(&kind) {
+        return;
+    }
+
+    // Build minimal target node from the AX element
+    let target = if !element.is_null() {
+        let role_str = ax_string(element, "AXRole").unwrap_or_default();
+        let subrole = ax_string(element, "AXSubrole");
+        let role = map_ax_role(&role_str, subrole.as_deref());
+        Some(Node {
+            role,
+            name: ax_string(element, "AXTitle"),
+            value: ax_value_string(element),
+            description: ax_string(element, "AXDescription"),
+            bounds: None,
+            bounds_normalized: None,
+            actions: vec![],
+            states: StateSet::default(),
+            depth: 0,
+            numeric_value: None,
+            min_value: None,
+            max_value: None,
+            stable_id: None,
+            raw: None,
+            index: 0,
+            children_indices: vec![],
+            parent_index: None,
+        })
+    } else {
+        None
+    };
+
+    let event = Event {
+        kind,
+        app: ctx.app_info.clone(),
+        target,
+        state_flag: None,
+        state_value: None,
+        text_change: None,
+        timestamp: std::time::Instant::now(),
+    };
+    let _ = ctx.sender.send(event);
+}
+
+impl EventProvider for MacOSProvider {
+    fn subscribe(&self, target: &AppTarget, filter: EventFilter) -> Result<Subscription> {
+        let (pid, app_name) = match target {
+            AppTarget::ByName(name) => {
+                let apps = Self::list_gui_apps();
+                let found = apps
+                    .iter()
+                    .find(|(_, n)| n.to_lowercase().contains(&name.to_lowercase()));
+                match found {
+                    Some((pid, name)) => (*pid, name.clone()),
+                    None => {
+                        return Err(Error::AppNotFound {
+                            target: name.clone(),
+                        })
+                    }
+                }
+            }
+            AppTarget::ByPid(pid) => (*pid as i32, String::new()),
+            AppTarget::ByWindow(_) => {
+                return Err(Error::Platform {
+                    code: -1,
+                    message: "ByWindow not supported for event subscription".to_string(),
+                })
+            }
+        };
+
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        let ctx = Box::new(ObserverContext {
+            sender: tx,
+            filter,
+            app_info: AppInfo {
+                name: app_name,
+                pid: pid as u32,
+                bundle_id: None,
+            },
+        });
+        let ctx_ptr = Box::into_raw(ctx) as *mut c_void;
+
+        // Create AXObserver
+        let mut observer: CFTypeRef = std::ptr::null();
+        let err = unsafe { safe_ax_observer_create(pid, ax_observer_callback, &mut observer) };
+        if err != AX_ERROR_SUCCESS || observer.is_null() {
+            unsafe { drop(Box::from_raw(ctx_ptr as *mut ObserverContext)) };
+            return Err(Error::Platform {
+                code: err as i64,
+                message: "AXObserverCreate failed".to_string(),
+            });
+        }
+
+        // Create app element and add notifications
+        let app_element = unsafe { safe_ax_create_application(pid) };
+        if app_element.is_null() {
+            unsafe {
+                CFRelease(observer);
+                drop(Box::from_raw(ctx_ptr as *mut ObserverContext));
+            }
+            return Err(Error::AppNotFound {
+                target: format!("pid:{}", pid),
+            });
+        }
+
+        let notifications = [
+            "AXValueChanged",
+            "AXFocusedUIElementChanged",
+            "AXWindowCreated",
+            "AXWindowMiniaturized",
+            "AXWindowDeminiaturized",
+            "AXUIElementDestroyed",
+            "AXSelectedTextChanged",
+            "AXMenuOpened",
+            "AXMenuClosed",
+            "AXTitleChanged",
+        ];
+
+        for notif in &notifications {
+            let name = CFString::new(notif);
+            let _ = unsafe {
+                safe_ax_observer_add_notification(
+                    observer,
+                    app_element,
+                    name.as_concrete_TypeRef() as CFTypeRef,
+                    ctx_ptr,
+                )
+            };
+        }
+
+        unsafe { CFRelease(app_element) };
+
+        // Spawn background RunLoop thread — communicates RunLoop ref via channel.
+        // Use usize casts to make raw pointers Send-safe across threads.
+        let (rl_tx, rl_rx) = std::sync::mpsc::sync_channel::<usize>(1);
+        let observer_usize = observer as usize;
+
+        let handle = std::thread::spawn(move || {
+            let obs = observer_usize as CFTypeRef;
+            unsafe {
+                let source = safe_ax_observer_get_run_loop_source(obs);
+                if source.is_null() {
+                    return;
+                }
+                safe_cf_run_loop_add_source(source);
+                let rl = safe_cf_run_loop_get_current();
+                let _ = rl_tx.send(rl as usize);
+                safe_cf_run_loop_run(); // blocks until CFRunLoopStop
+            }
+        });
+
+        let run_loop_usize =
+            rl_rx
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| Error::Platform {
+                    code: -1,
+                    message: "Failed to start observer RunLoop".to_string(),
+                })?;
+
+        let ctx_usize = ctx_ptr as usize;
+
+        let cancel = CancelHandle::new(move || {
+            unsafe {
+                safe_cf_run_loop_stop(run_loop_usize as CFTypeRef);
+            }
+            let _ = handle.join();
+            unsafe {
+                drop(Box::from_raw(ctx_usize as *mut ObserverContext));
+                CFRelease(observer_usize as CFTypeRef);
+            }
+        });
+
+        Ok(Subscription::new(EventReceiver::new(rx), cancel))
+    }
+
+    fn wait_for_event(
+        &self,
+        target: &AppTarget,
+        filter: EventFilter,
+        timeout: Duration,
+    ) -> Result<Event> {
+        let sub = self.subscribe(target, filter)?;
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(event) = sub.try_recv() {
+                return Ok(event);
+            }
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                return Err(Error::Timeout { elapsed });
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn wait_for(
+        &self,
+        target: &AppTarget,
+        selector: &str,
+        state: ElementState,
+        timeout: Duration,
+    ) -> Result<Node> {
+        let start = std::time::Instant::now();
+        let poll_interval = Duration::from_millis(100);
+
+        loop {
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                return Err(Error::Timeout { elapsed });
+            }
+
+            let tree = self.get_app_tree(target, &QueryOptions::default())?;
+            let matches = tree.query(selector).ok();
+            let node = matches.as_ref().and_then(|m| m.first().copied());
+
+            let condition_met = match state {
+                ElementState::Attached => node.is_some(),
+                ElementState::Detached => node.is_none(),
+                ElementState::Visible => node.is_some_and(|n| n.states.visible),
+                ElementState::Hidden => node.is_none() || node.is_some_and(|n| !n.states.visible),
+                ElementState::Enabled => node.is_some_and(|n| n.states.enabled),
+            };
+
+            if condition_met {
+                return Ok(node.cloned().unwrap_or_else(|| Node {
+                    role: Role::Unknown,
+                    name: None,
+                    value: None,
+                    description: None,
+                    bounds: None,
+                    bounds_normalized: None,
+                    actions: vec![],
+                    states: StateSet::default(),
+                    depth: 0,
+                    numeric_value: None,
+                    min_value: None,
+                    max_value: None,
+                    stable_id: None,
+                    raw: None,
+                    index: 0,
+                    children_indices: vec![],
+                    parent_index: None,
+                }));
+            }
+
+            std::thread::sleep(poll_interval);
+        }
     }
 }
 

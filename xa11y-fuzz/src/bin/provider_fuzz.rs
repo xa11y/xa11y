@@ -123,8 +123,13 @@ mod provider_fuzz {
         Action::Select,
         Action::ShowMenu,
         Action::ScrollIntoView,
+        Action::Scroll,
         Action::Increment,
         Action::Decrement,
+        Action::Blur,
+        Action::SetTextSelection,
+        Action::TypeText,
+        Action::DragTo,
     ];
 
     // ── Selector Generation ──────────────────────────────────────────────────
@@ -299,6 +304,33 @@ mod provider_fuzz {
                     _ => None,
                 }
             }
+            Action::TypeText => {
+                let texts = ["a", "hello", "test 123", "ñ", " ", ""];
+                Some(ActionData::Value(
+                    texts[rng.gen_range(0..texts.len())].to_string(),
+                ))
+            }
+            Action::Scroll => {
+                let directions = [
+                    ScrollDirection::Up,
+                    ScrollDirection::Down,
+                    ScrollDirection::Left,
+                    ScrollDirection::Right,
+                ];
+                let amounts = [1.0, 3.0, 10.0, 0.5];
+                Some(ActionData::ScrollAmount {
+                    direction: directions[rng.gen_range(0..directions.len())],
+                    amount: amounts[rng.gen_range(0..amounts.len())],
+                })
+            }
+            Action::SetTextSelection => Some(ActionData::TextSelection {
+                start: rng.gen_range(0..10),
+                end: rng.gen_range(0..20),
+            }),
+            Action::DragTo => Some(ActionData::Point {
+                x: rng.gen_range(0.0..500.0),
+                y: rng.gen_range(0.0..500.0),
+            }),
             _ => None,
         }
     }
