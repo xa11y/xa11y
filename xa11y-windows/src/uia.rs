@@ -183,22 +183,7 @@ impl WindowsProvider {
                     .unwrap_or_default();
 
                 if el_name.to_lowercase().contains(&name_lower) {
-                    // Re-acquire element via HWND to trigger WM_GETOBJECT
-                    let hwnd = unsafe { el.CurrentNativeWindowHandle() }.ok();
-                    eprintln!(
-                        "[xa11y-windows] find_app_by_name matched: '{}' PID={} HWND={:?}",
-                        el_name, pid, hwnd
-                    );
                     let el = self.reacquire_via_hwnd(&el).unwrap_or(el);
-                    // Debug: count children
-                    if let Ok(tc) = unsafe { self.automation.CreateTrueCondition() } {
-                        if let Ok(ch) = unsafe { el.FindAll(TreeScope_Children, &tc) } {
-                            eprintln!(
-                                "[xa11y-windows] FindAll children count: {}",
-                                unsafe { ch.Length() }.unwrap_or(-1)
-                            );
-                        }
-                    }
                     return Ok((el, pid, el_name));
                 }
 
@@ -288,7 +273,26 @@ impl WindowsProvider {
 
         let control_type = unsafe { element.CurrentControlType() }
             .unwrap_or(UIA_CONTROLTYPE_ID(0));
-        let role = map_uia_control_type(control_type);
+        let mut role = map_uia_control_type(control_type);
+
+        // Refine role using AriaRole property for elements that UIA maps ambiguously
+        // (e.g., Alert/Heading both become ControlType.Text, Dialog becomes Window)
+        if matches!(role, Role::StaticText | Role::Window | Role::Group | Role::Unknown) {
+            if let Ok(v) = unsafe { element.GetCurrentPropertyValue(UIA_AriaRolePropertyId) } {
+                if let Ok(aria) = windows::core::BSTR::try_from(&v) {
+                    let aria_str = aria.to_string();
+                    match aria_str.as_str() {
+                        "alert" => role = Role::Alert,
+                        "dialog" | "alertdialog" => role = Role::Dialog,
+                        "heading" => role = Role::Heading,
+                        "separator" => role = Role::Separator,
+                        "progressbar" => role = Role::ProgressBar,
+                        "link" => role = Role::Link,
+                        _ => {}
+                    }
+                }
+            }
+        }
 
         // Role filter: skip node but still traverse children
         let role_filtered = if depth > 0 {
@@ -316,14 +320,24 @@ impl WindowsProvider {
         // Value: use ValuePattern or RangeValuePattern
         let value = get_value(element, role);
 
+        // Try FullDescription first (AccessKit's description), then HelpText
         let description = unsafe {
-            element.GetCurrentPropertyValue(UIA_HelpTextPropertyId)
+            element.GetCurrentPropertyValue(UIA_FullDescriptionPropertyId)
         }
         .ok()
         .and_then(|v| {
-            let bstr: windows::core::BSTR = windows::core::BSTR::try_from(&v).ok()?;
+            let bstr = windows::core::BSTR::try_from(&v).ok()?;
             let s = bstr.to_string();
             if s.is_empty() { None } else { Some(s) }
+        })
+        .or_else(|| {
+            unsafe { element.GetCurrentPropertyValue(UIA_HelpTextPropertyId) }
+                .ok()
+                .and_then(|v| {
+                    let bstr = windows::core::BSTR::try_from(&v).ok()?;
+                    let s = bstr.to_string();
+                    if s.is_empty() { None } else { Some(s) }
+                })
         });
 
         let states = parse_states(element, role);
@@ -778,13 +792,10 @@ impl Provider for WindowsProvider {
 
             Action::Expand => {
                 if let Ok(pattern) = unsafe { element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(UIA_ExpandCollapsePatternId) } {
-                    unsafe { pattern.Expand() }.map_err(|e| Error::Platform {
-                        code: e.code().0 as i64,
-                        message: "Expand failed".to_string(),
-                    })?;
+                    // Ignore errors (may already be expanded)
+                    let _ = unsafe { pattern.Expand() };
                     return Ok(());
                 }
-                // Fall back to Invoke
                 if let Ok(pattern) = unsafe { element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId) } {
                     let _ = unsafe { pattern.Invoke() };
                 }
@@ -793,10 +804,8 @@ impl Provider for WindowsProvider {
 
             Action::Collapse => {
                 if let Ok(pattern) = unsafe { element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(UIA_ExpandCollapsePatternId) } {
-                    unsafe { pattern.Collapse() }.map_err(|e| Error::Platform {
-                        code: e.code().0 as i64,
-                        message: "Collapse failed".to_string(),
-                    })?;
+                    // Ignore errors (may already be collapsed)
+                    let _ = unsafe { pattern.Collapse() };
                     return Ok(());
                 }
                 if let Ok(pattern) = unsafe { element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId) } {
