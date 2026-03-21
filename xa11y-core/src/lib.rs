@@ -2,6 +2,7 @@ pub mod action;
 pub mod error;
 pub mod event;
 pub mod event_provider;
+pub mod locator;
 pub mod node;
 pub mod provider;
 pub mod role;
@@ -15,6 +16,7 @@ pub use event::{
     ElementState, Event, EventFilter, EventKind, StateFlag, TextChangeData, TextChangeType,
 };
 pub use event_provider::{CancelHandle, EventProvider, EventReceiver, Subscription};
+pub use locator::{Locator, ProviderExt};
 pub use node::{Node, NormalizedRect, RawPlatformData, Rect, StateSet, Toggled};
 pub use provider::{AppInfo, AppTarget, PermissionStatus, Provider, QueryOptions, WindowHandle};
 pub use role::Role;

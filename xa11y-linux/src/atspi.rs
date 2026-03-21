@@ -403,7 +403,10 @@ impl LinuxProvider {
             None
         };
 
-        let (numeric_value, min_value, max_value) = if matches!(role, Role::Slider | Role::ProgressBar | Role::ScrollBar | Role::SpinButton) {
+        let (numeric_value, min_value, max_value) = if matches!(
+            role,
+            Role::Slider | Role::ProgressBar | Role::ScrollBar | Role::SpinButton
+        ) {
             if let Ok(proxy) = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Value") {
                 (
                     proxy.get_property::<f64>("CurrentValue").ok(),
@@ -720,15 +723,7 @@ impl Provider for LinuxProvider {
         let mut nodes = Vec::new();
         let mut refs = Vec::new();
 
-        self.traverse(
-            &app_ref,
-            opts,
-            &mut nodes,
-            &mut refs,
-            None,
-            0,
-            screen_size,
-        );
+        self.traverse(&app_ref, opts, &mut nodes, &mut refs, None, 0, screen_size);
 
         if nodes.is_empty() {
             return Err(Error::AppNotFound {
@@ -801,15 +796,7 @@ impl Provider for LinuxProvider {
             }
             let child_idx = nodes.len() as u32;
             root_children.push(child_idx);
-            self.traverse(
-                child,
-                opts,
-                &mut nodes,
-                &mut refs,
-                Some(0),
-                1,
-                screen_size,
-            );
+            self.traverse(child, opts, &mut nodes, &mut refs, Some(0), 1, screen_size);
         }
 
         nodes[0].children_indices = root_children;

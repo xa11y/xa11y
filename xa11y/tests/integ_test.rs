@@ -1581,5 +1581,4 @@ mod tests {
         assert_eq!(deser.len(), tree.len());
         assert_eq!(deser.app_name, tree.app_name);
     }
-
 }

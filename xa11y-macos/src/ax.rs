@@ -877,7 +877,9 @@ impl MacOSProvider {
 
         // Numeric value for range controls
         let numeric_value = match role {
-            Role::Slider | Role::ProgressBar | Role::SpinButton => ax_value_number(element.as_ptr()),
+            Role::Slider | Role::ProgressBar | Role::SpinButton => {
+                ax_value_number(element.as_ptr())
+            }
             _ => None,
         };
 

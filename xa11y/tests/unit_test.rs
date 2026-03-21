@@ -882,3 +882,132 @@ fn action_data_variants() {
     let json = serde_json::to_string(&point).unwrap();
     assert!(json.contains("10.0"));
 }
+
+// ── Locator ──
+
+/// Mock provider that returns a fixed tree for Locator tests.
+struct MockProvider {
+    tree: Tree,
+    last_action: std::sync::Mutex<Option<(u32, Action)>>,
+}
+
+impl MockProvider {
+    fn new() -> Self {
+        Self {
+            tree: sample_tree(),
+            last_action: std::sync::Mutex::new(None),
+        }
+    }
+}
+
+impl Provider for MockProvider {
+    fn get_app_tree(&self, _target: &AppTarget, _opts: &QueryOptions) -> xa11y::Result<Tree> {
+        Ok(self.tree.clone())
+    }
+
+    fn get_all_apps(&self, _opts: &QueryOptions) -> xa11y::Result<Tree> {
+        Ok(self.tree.clone())
+    }
+
+    fn perform_action(
+        &self,
+        _tree: &Tree,
+        node: &Node,
+        action: Action,
+        _data: Option<ActionData>,
+    ) -> xa11y::Result<()> {
+        *self.last_action.lock().unwrap() = Some((node.index, action));
+        Ok(())
+    }
+
+    fn check_permissions(&self) -> xa11y::Result<PermissionStatus> {
+        Ok(PermissionStatus::Granted)
+    }
+
+    fn list_apps(&self) -> xa11y::Result<Vec<AppInfo>> {
+        Ok(vec![])
+    }
+}
+
+#[test]
+fn locator_basic_query() {
+    use xa11y::ProviderExt;
+    let p = MockProvider::new();
+    let target = AppTarget::ByName("My App".into());
+    let loc = p.locator(target, "button[name=\"Submit\"]");
+    assert_eq!(loc.role().unwrap(), Role::Button);
+    assert_eq!(loc.name().unwrap().as_deref(), Some("Submit"));
+    assert!(loc.exists().unwrap());
+}
+
+#[test]
+fn locator_press_dispatches_action() {
+    use xa11y::ProviderExt;
+    let p = MockProvider::new();
+    let target = AppTarget::ByName("My App".into());
+    let loc = p.locator(target, "button[name=\"Submit\"]");
+    loc.press().unwrap();
+    let (idx, action) = p.last_action.lock().unwrap().unwrap();
+    assert_eq!(action, Action::Press);
+    // Submit button is index 6 in sample_tree
+    assert_eq!(idx, 6);
+}
+
+#[test]
+fn locator_not_found() {
+    use xa11y::ProviderExt;
+    let p = MockProvider::new();
+    let target = AppTarget::ByName("My App".into());
+    let loc = p.locator(target, "button[name=\"NonExistent\"]");
+    assert!(!loc.exists().unwrap());
+    assert!(loc.press().is_err());
+}
+
+#[test]
+fn locator_nth() {
+    use xa11y::ProviderExt;
+    let p = MockProvider::new();
+    let target = AppTarget::ByName("My App".into());
+    // There are 3 buttons: Back(2), Submit(6), Cancel(7)
+    let loc = p.locator(target, "button").nth(1);
+    assert_eq!(loc.name().unwrap().as_deref(), Some("Submit"));
+}
+
+#[test]
+fn locator_count() {
+    use xa11y::ProviderExt;
+    let p = MockProvider::new();
+    let target = AppTarget::ByName("My App".into());
+    let loc = p.locator(target, "button");
+    assert_eq!(loc.count().unwrap(), 3);
+}
+
+#[test]
+fn locator_child() {
+    use xa11y::ProviderExt;
+    let p = MockProvider::new();
+    let target = AppTarget::ByName("My App".into());
+    let loc = p.locator(target, "toolbar").child("button");
+    // Toolbar has one button child: "Back"
+    assert_eq!(loc.name().unwrap().as_deref(), Some("Back"));
+}
+
+#[test]
+fn locator_states() {
+    use xa11y::ProviderExt;
+    let p = MockProvider::new();
+    let target = AppTarget::ByName("My App".into());
+    // Cancel button is disabled
+    let loc = p.locator(target, "button[name=\"Cancel\"]");
+    assert!(!loc.is_enabled().unwrap());
+    assert!(loc.is_visible().unwrap());
+}
+
+#[test]
+fn locator_selector_getter() {
+    use xa11y::ProviderExt;
+    let p = MockProvider::new();
+    let target = AppTarget::ByName("My App".into());
+    let loc = p.locator(target, "button").child("text_field");
+    assert_eq!(loc.selector(), "button > text_field");
+}
