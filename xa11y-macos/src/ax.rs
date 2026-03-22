@@ -1282,7 +1282,8 @@ impl Provider for MacOSProvider {
                         })
                     }
                 };
-                let pixels = amount as i32;
+                // 1 logical scroll unit ≈ 10 pixels
+                let pixels = (amount * 10.0) as i32;
                 let (dy, dx) = match direction {
                     ScrollDirection::Up => (pixels, 0),
                     ScrollDirection::Down => (-pixels, 0),

@@ -968,7 +968,7 @@ impl Provider for LinuxProvider {
             }
 
             Action::Scroll => {
-                let (direction, _amount) = match data {
+                let (direction, amount) = match data {
                     Some(ActionData::ScrollAmount { direction, amount }) => (direction, amount),
                     _ => {
                         return Err(Error::Platform {
@@ -977,31 +977,37 @@ impl Provider for LinuxProvider {
                         })
                     }
                 };
-                // Try action-based scrolling first
+                // Repeat scroll action for each logical unit (AT-SPI has no scroll-by-amount)
+                let count = (amount.abs() as u32).max(1);
                 let action_name = match direction {
                     ScrollDirection::Up => "scroll up",
                     ScrollDirection::Down => "scroll down",
                     ScrollDirection::Left => "scroll left",
                     ScrollDirection::Right => "scroll right",
                 };
-                if self.do_atspi_action(&target, action_name).is_ok() {
-                    return Ok(());
+                for _ in 0..count {
+                    if self.do_atspi_action(&target, action_name).is_err() {
+                        // Fall back to Component.ScrollTo (single call, not repeatable)
+                        let proxy = self.make_proxy(
+                            &target.bus_name,
+                            &target.path,
+                            "org.a11y.atspi.Component",
+                        )?;
+                        let scroll_type: u32 = match direction {
+                            ScrollDirection::Up => 2,    // TOP_EDGE
+                            ScrollDirection::Down => 3,  // BOTTOM_EDGE
+                            ScrollDirection::Left => 4,  // LEFT_EDGE
+                            ScrollDirection::Right => 5, // RIGHT_EDGE
+                        };
+                        proxy
+                            .call_method("ScrollTo", &(scroll_type,))
+                            .map_err(|e| Error::Platform {
+                                code: -1,
+                                message: format!("ScrollTo failed: {}", e),
+                            })?;
+                        return Ok(());
+                    }
                 }
-                // Fall back to Component.ScrollTo
-                let proxy =
-                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")?;
-                let scroll_type: u32 = match direction {
-                    ScrollDirection::Up => 2,    // TOP_EDGE
-                    ScrollDirection::Down => 3,  // BOTTOM_EDGE
-                    ScrollDirection::Left => 4,  // LEFT_EDGE
-                    ScrollDirection::Right => 5, // RIGHT_EDGE
-                };
-                proxy
-                    .call_method("ScrollTo", &(scroll_type,))
-                    .map_err(|e| Error::Platform {
-                        code: -1,
-                        message: format!("ScrollTo failed: {}", e),
-                    })?;
                 Ok(())
             }
 

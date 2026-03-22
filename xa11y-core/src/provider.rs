@@ -15,6 +15,10 @@ pub trait Provider: Send + Sync {
     fn get_all_apps(&self, opts: &QueryOptions) -> Result<Tree>;
 
     /// Perform an action on an element from a specific snapshot.
+    ///
+    /// `Ok(())` means the platform API accepted the request without error.
+    /// It does **not** guarantee the action had an observable effect — use
+    /// tree queries or `Locator::wait_*` methods to verify state changes.
     fn perform_action(
         &self,
         tree: &Tree,

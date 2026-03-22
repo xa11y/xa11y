@@ -40,6 +40,10 @@ pub enum Error {
     #[error("Invalid selector '{selector}': {message}")]
     InvalidSelector { selector: String, message: String },
 
+    /// The ActionData provided is invalid (e.g., reversed range, non-finite number).
+    #[error("Invalid action data: {message}")]
+    InvalidActionData { message: String },
+
     /// A platform-specific error occurred.
     #[error("Platform error ({code}): {message}")]
     Platform { code: i64, message: String },

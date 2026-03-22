@@ -953,7 +953,8 @@ impl Provider for WindowsProvider {
                 if let Ok(pattern) = unsafe {
                     element.GetCurrentPatternAs::<IUIAutomationScrollPattern>(UIA_ScrollPatternId)
                 } {
-                    let count = (amount as u32).max(1);
+                    // 1 logical scroll unit = 1 SmallIncrement
+                    let count = (amount.abs() as u32).max(1);
                     for _ in 0..count {
                         let (h, v) = match direction {
                             ScrollDirection::Up => {

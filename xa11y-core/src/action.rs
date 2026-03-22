@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::error::{Error, Result};
+
 /// A normalized enum of interactions that can be performed on accessibility elements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
@@ -33,6 +35,12 @@ pub enum Action {
     /// Scroll by a given amount and direction.
     ///
     /// Accepts `ActionData::ScrollAmount { direction, amount }`.
+    /// Amount is in logical scroll units (≈ one mouse wheel notch).
+    ///
+    /// **Platform mapping:**
+    /// - macOS: `CGEventCreateScrollWheelEvent` with pixel delta (1 unit ≈ 10px)
+    /// - Windows: `IUIAutomationScrollPattern.Scroll()` with `SmallIncrement` repeated
+    /// - Linux: AT-SPI `Component.ScrollTo` with edge alignment
     Scroll,
     /// Increment a slider or spinner
     Increment,
@@ -90,6 +98,40 @@ pub enum ActionData {
     },
     /// Text selection range (character offsets, 0-based)
     TextSelection { start: u32, end: u32 },
+}
+
+impl ActionData {
+    /// Validate that this ActionData has valid values for the given action.
+    ///
+    /// Checks constraints that are always wrong regardless of element state:
+    /// - `TextSelection`: `start` must be ≤ `end`
+    /// - `NumericValue`: must be finite (not NaN or infinity)
+    ///
+    /// Does NOT query the element (e.g., does not check if indices are within
+    /// text length or if numeric value is within min/max range).
+    pub fn validate(&self, action: Action) -> Result<()> {
+        match self {
+            ActionData::TextSelection { start, end } => {
+                if start > end {
+                    return Err(Error::InvalidActionData {
+                        message: format!(
+                            "TextSelection start ({}) must be <= end ({})",
+                            start, end
+                        ),
+                    });
+                }
+            }
+            ActionData::NumericValue(v) => {
+                if !v.is_finite() {
+                    return Err(Error::InvalidActionData {
+                        message: format!("{} requires a finite numeric value, got {}", action, v),
+                    });
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
 }
 
 /// Direction for scroll actions.

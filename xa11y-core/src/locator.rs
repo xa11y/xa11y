@@ -211,6 +211,9 @@ impl<'p> Locator<'p> {
 
     /// Perform an arbitrary action on the matched element.
     pub fn perform(&self, action: Action, data: Option<ActionData>) -> Result<()> {
+        if let Some(ref d) = data {
+            d.validate(action)?;
+        }
         let r = self.resolve()?;
         let node = r
             .tree

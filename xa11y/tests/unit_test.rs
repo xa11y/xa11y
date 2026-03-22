@@ -588,6 +588,72 @@ fn action_display() {
     assert_eq!(format!("{}", Action::ScrollIntoView), "ScrollIntoView");
 }
 
+#[test]
+fn validate_text_selection_start_must_be_lte_end() {
+    let valid = ActionData::TextSelection { start: 0, end: 5 };
+    assert!(valid.validate(Action::SetTextSelection).is_ok());
+
+    let equal = ActionData::TextSelection { start: 3, end: 3 };
+    assert!(equal.validate(Action::SetTextSelection).is_ok());
+
+    let reversed = ActionData::TextSelection { start: 5, end: 2 };
+    assert!(matches!(
+        reversed.validate(Action::SetTextSelection),
+        Err(Error::InvalidActionData { .. })
+    ));
+}
+
+#[test]
+fn validate_numeric_value_must_be_finite() {
+    let valid = ActionData::NumericValue(42.0);
+    assert!(valid.validate(Action::SetValue).is_ok());
+
+    let zero = ActionData::NumericValue(0.0);
+    assert!(zero.validate(Action::SetValue).is_ok());
+
+    let negative = ActionData::NumericValue(-10.0);
+    assert!(negative.validate(Action::SetValue).is_ok());
+
+    let nan = ActionData::NumericValue(f64::NAN);
+    assert!(matches!(
+        nan.validate(Action::SetValue),
+        Err(Error::InvalidActionData { .. })
+    ));
+
+    let inf = ActionData::NumericValue(f64::INFINITY);
+    assert!(matches!(
+        inf.validate(Action::SetValue),
+        Err(Error::InvalidActionData { .. })
+    ));
+
+    let neg_inf = ActionData::NumericValue(f64::NEG_INFINITY);
+    assert!(matches!(
+        neg_inf.validate(Action::SetValue),
+        Err(Error::InvalidActionData { .. })
+    ));
+}
+
+#[test]
+fn validate_other_action_data_always_ok() {
+    let text = ActionData::Value("hello".to_string());
+    assert!(text.validate(Action::TypeText).is_ok());
+
+    let empty = ActionData::Value(String::new());
+    assert!(empty.validate(Action::TypeText).is_ok());
+
+    let scroll = ActionData::ScrollAmount {
+        direction: ScrollDirection::Down,
+        amount: 0.0,
+    };
+    assert!(scroll.validate(Action::Scroll).is_ok());
+
+    let neg_scroll = ActionData::ScrollAmount {
+        direction: ScrollDirection::Up,
+        amount: -3.0,
+    };
+    assert!(neg_scroll.validate(Action::Scroll).is_ok());
+}
+
 // ── Error ──
 
 #[test]
