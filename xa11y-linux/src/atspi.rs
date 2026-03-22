@@ -83,6 +83,24 @@ impl LinuxProvider {
         })
     }
 
+    /// Check whether an accessible object implements a given interface.
+    /// Queries the AT-SPI GetInterfaces method on the Accessible interface.
+    fn has_interface(&self, aref: &AccessibleRef, iface: &str) -> bool {
+        let proxy = match self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible") {
+            Ok(p) => p,
+            Err(_) => return false,
+        };
+        let reply = match proxy.call_method("GetInterfaces", &()) {
+            Ok(r) => r,
+            Err(_) => return false,
+        };
+        let interfaces: Vec<String> = match reply.body().deserialize() {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        interfaces.iter().any(|i| i.contains(iface))
+    }
+
     /// Get the numeric AT-SPI role via GetRole method.
     fn get_role_number(&self, aref: &AccessibleRef) -> Result<u32> {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
@@ -185,7 +203,12 @@ impl LinuxProvider {
     }
 
     /// Get bounds via Component interface.
+    /// Checks for Component support first to avoid GTK CRITICAL warnings
+    /// on objects (e.g. TreeView cell renderers) that don't implement it.
     fn get_extents(&self, aref: &AccessibleRef) -> Option<Rect> {
+        if !self.has_interface(aref, "Component") {
+            return None;
+        }
         let proxy = self
             .make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Component")
             .ok()?;
