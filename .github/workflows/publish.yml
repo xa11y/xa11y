@@ -86,3 +86,133 @@ jobs:
         run: cargo publish -p xa11y
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # ── Python wheels ──────────────────────────────────────────────────────
+
+  build-wheels-linux:
+    name: Build wheels (Linux)
+    needs: [version-bump]
+    if: always() && (needs.version-bump.result == 'success' || needs.version-bump.result == 'skipped')
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          manylinux: auto
+          working-directory: xa11y-python
+          before-script-linux: |
+            # Install dbus development headers for zbus compilation
+            if command -v yum &> /dev/null; then
+              yum install -y dbus-devel
+            elif command -v apt-get &> /dev/null; then
+              apt-get update && apt-get install -y libdbus-1-dev
+            fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-${{ matrix.target }}
+          path: xa11y-python/dist
+
+  build-wheels-macos:
+    name: Build wheels (macOS)
+    needs: [version-bump]
+    if: always() && (needs.version-bump.result == 'success' || needs.version-bump.result == 'skipped')
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          working-directory: xa11y-python
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: xa11y-python/dist
+
+  build-wheels-windows:
+    name: Build wheels (Windows)
+    needs: [version-bump]
+    if: always() && (needs.version-bump.result == 'success' || needs.version-bump.result == 'skipped')
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: x86_64
+          args: --release --out dist
+          working-directory: xa11y-python
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-windows-x86_64
+          path: xa11y-python/dist
+
+  build-sdist:
+    name: Build sdist
+    needs: [version-bump]
+    if: always() && (needs.version-bump.result == 'success' || needs.version-bump.result == 'skipped')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+          working-directory: xa11y-python
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-sdist
+          path: xa11y-python/dist
+
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [build-wheels-linux, build-wheels-macos, build-wheels-windows, build-sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

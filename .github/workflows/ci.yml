@@ -185,6 +185,41 @@ jobs:
             cargo check -p xa11y-core --target $target
           done
 
+  # ── Python bindings ───────────────────────────────────────────────
+  python:
+    name: Python bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Create virtualenv and install tools
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install maturin ruff pytest
+
+      - name: Ruff lint
+        working-directory: xa11y-python
+        run: ../.venv/bin/ruff check python/ tests/
+
+      - name: Ruff format
+        working-directory: xa11y-python
+        run: ../.venv/bin/ruff format --check python/ tests/
+
+      - name: Build & install
+        working-directory: xa11y-python
+        run: ../.venv/bin/maturin develop --release
+
+      - name: Run tests
+        working-directory: xa11y-python
+        run: ../.venv/bin/pytest tests/ -v
+
   # ── Fuzz testing ───────────────────────────────────────────────────
   fuzz:
     name: Fuzz (10s per target)
