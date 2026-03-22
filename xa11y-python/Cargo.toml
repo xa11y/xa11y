@@ -1,0 +1,14 @@
+[package]
+name = "xa11y-python"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false # Published to PyPI, not crates.io
+
+[lib]
+name = "xa11y_python"
+crate-type = ["cdylib"]
+
+[dependencies]
+xa11y = { path = "../xa11y" }
+pyo3 = { version = "0.23", features = ["abi3-py39"] }

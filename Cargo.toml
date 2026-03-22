@@ -8,6 +8,7 @@ members = [
     "xa11y-test-app",
     "xa11y-fuzz",
 ]
+exclude = ["xa11y-python"]
 resolver = "2"
 
 [workspace.package]
