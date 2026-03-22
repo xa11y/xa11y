@@ -1,10 +1,6 @@
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-# When PyO3 bindings are ready, switch to:
-#   requires = ["maturin>=1.0,<2.0"]
-#   build-backend = "maturin"
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
 
 [project]
 name = "xa11y"
@@ -14,7 +10,7 @@ license = { text = "MIT" }
 requires-python = ">=3.9"
 authors = [{ name = "xa11y contributors" }]
 classifiers = [
-    "Development Status :: 1 - Planning",
+    "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -24,6 +20,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
     "Topic :: Software Development :: Testing",
     "Typing :: Typed",
 ]
@@ -34,8 +31,7 @@ Homepage = "https://github.com/xa11y/xa11y"
 Repository = "https://github.com/xa11y/xa11y"
 Issues = "https://github.com/xa11y/xa11y/issues"
 
-# Uncomment when adding PyO3 bindings:
-# [tool.maturin]
-# python-source = "."
-# module-name = "xa11y._native"
-# features = ["pyo3/extension-module"]
+[tool.maturin]
+python-source = "."
+module-name = "xa11y._native"
+features = ["pyo3/extension-module"]

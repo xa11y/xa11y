@@ -13,36 +13,80 @@ defaults:
     working-directory: python
 
 jobs:
-  build:
-    name: Build package
+  # ── Build sdist ───────────────────────────────────────────────────
+  sdist:
+    name: Build sdist
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
-      - name: Install build tools
-        run: pip install build
 
       - name: Set version
         if: inputs.version != ''
         run: |
           sed -i "s/^version = .*/version = \"${{ inputs.version }}\"/" pyproject.toml
+          sed -i "s/^version = .*/version = \"${{ inputs.version }}\"/" Cargo.toml
           sed -i "s/^__version__ = .*/__version__ = \"${{ inputs.version }}\"/" xa11y/__init__.py
 
-      - name: Build sdist and wheel
-        run: python -m build
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+          working-directory: python
 
       - uses: actions/upload-artifact@v4
         with:
-          name: dist
-          path: python/dist/
+          name: sdist
+          path: python/dist/*.tar.gz
 
+  # ── Build wheels per platform ─────────────────────────────────────
+  wheels:
+    name: Build wheels (${{ matrix.target.os }})
+    runs-on: ${{ matrix.target.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - { os: linux-x86_64, runner: ubuntu-latest, args: "--target x86_64-unknown-linux-gnu" }
+          - { os: linux-aarch64, runner: ubuntu-latest, args: "--target aarch64-unknown-linux-gnu" }
+          - { os: macos-x86_64, runner: macos-13, args: "--target x86_64-apple-darwin" }
+          - { os: macos-aarch64, runner: macos-latest, args: "--target aarch64-apple-darwin" }
+          - { os: windows-x86_64, runner: windows-latest, args: "--target x86_64-pc-windows-msvc" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version
+        if: inputs.version != ''
+        shell: bash
+        run: |
+          sed -i "s/^version = .*/version = \"${{ inputs.version }}\"/" pyproject.toml
+          sed -i "s/^version = .*/version = \"${{ inputs.version }}\"/" Cargo.toml
+          sed -i "s/^__version__ = .*/__version__ = \"${{ inputs.version }}\"/" xa11y/__init__.py
+
+      # AT-SPI2 headers needed for Linux builds
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          args: --release --out dist ${{ matrix.target.args }}
+          working-directory: python
+          manylinux: auto
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.target.os }}
+          path: python/dist/*.whl
+
+  # ── Publish to PyPI ───────────────────────────────────────────────
   publish:
     name: Publish to PyPI
-    needs: [build]
+    needs: [sdist, wheels]
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -50,8 +94,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: dist
-          path: dist/
+          path: dist
+          merge-multiple: true
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
