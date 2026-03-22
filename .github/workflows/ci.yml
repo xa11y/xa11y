@@ -141,6 +141,17 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --all-targets
 
+  # ── License check ─────────────────────────────────────────────────
+  license-check:
+    name: License Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
+
   # ── Cross-compilation ──────────────────────────────────────────────
   # Verifies xa11y-core compiles for targets we can't run tests on
   # (e.g., cross-compiling the platform-agnostic core from Linux to
