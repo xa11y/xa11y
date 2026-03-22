@@ -85,6 +85,25 @@ pub fn act(p: &dyn Provider, tree: &Tree, node: &Node, action: Action) -> Tree {
     act_with(p, tree, node, action, None)
 }
 
+/// Get the webview test app tree with retries, searching by name "xa11y-test-webview".
+pub fn webview_tree(p: &dyn Provider) -> Tree {
+    webview_tree_with(p, &QueryOptions::default())
+}
+
+/// Get the webview test app tree with custom QueryOptions.
+pub fn webview_tree_with(p: &dyn Provider, opts: &QueryOptions) -> Tree {
+    for attempt in 0..5 {
+        match p.get_app_tree(&AppTarget::ByName("webview".to_string()), opts) {
+            Ok(tree) => return tree,
+            Err(_) if attempt < 4 => {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            Err(e) => panic!("Could not find webview test app after retries: {}", e),
+        }
+    }
+    unreachable!()
+}
+
 /// Perform an action with data on a node, wait, then re-read the tree.
 pub fn act_with(
     p: &dyn Provider,

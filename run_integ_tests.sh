@@ -96,21 +96,38 @@ dbus-send --session --print-reply --dest=org.a11y.Bus /org/a11y/bus \
 echo "Building workspace..."
 cargo build --workspace 2>&1
 
+# Build the webview test app separately (requires libwebkit2gtk-4.1-dev)
+echo "Building xa11y-test-webview (optional, requires libwebkit2gtk-4.1-dev)..."
+if pkg-config --exists webkit2gtk-4.1 2>/dev/null; then
+    cargo build --manifest-path xa11y-test-webview/Cargo.toml 2>&1 || echo "WARNING: xa11y-test-webview build failed"
+else
+    echo "SKIP: webkit2gtk-4.1 not found, skipping webview test app build"
+fi
+
 # Support BUILD_ONLY mode (for pre-warming the build cache)
 if [ "${BUILD_ONLY:-}" = "1" ]; then
     echo "=== Build complete (build-only mode) ==="
     exit 0
 fi
 
-# 4. Launch the test application (run binary directly, not via cargo run,
+# 4. Launch the test applications (run binaries directly, not via cargo run,
 #    because cargo run changes the process owner name in AT-SPI)
 echo "Launching xa11y-test-app..."
 ./target/debug/xa11y-test-app --headless &
 CLEANUP_PIDS+=($!)
 
-# Wait for the app to start and register with AT-SPI
-echo "Waiting for test app to register with AT-SPI..."
-sleep 3
+WEBVIEW_BIN="./xa11y-test-webview/target/debug/xa11y-test-webview"
+echo "Launching xa11y-test-webview..."
+if [ -f "$WEBVIEW_BIN" ]; then
+    "$WEBVIEW_BIN" &
+    CLEANUP_PIDS+=($!)
+else
+    echo "WARNING: xa11y-test-webview not found (requires libwebkit2gtk-4.1-dev), skipping webview tests"
+fi
+
+# Wait for the apps to start and register with AT-SPI
+echo "Waiting for test apps to register with AT-SPI..."
+sleep 5
 
 # 5. Run integration tests
 echo "Running integration tests..."

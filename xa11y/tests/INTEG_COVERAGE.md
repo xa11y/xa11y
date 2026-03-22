@@ -123,7 +123,9 @@ Last updated: 2026-03-19
 
 Covered via test app nodes: `Application`, `Window`, `Button`, `CheckBox`, `RadioButton`, `TextField`, `TextArea`, `StaticText`, `Slider`, `ProgressBar`, `ComboBox`, `Group`, `MenuBar`, `MenuItem`, `Menu`, `Toolbar`, `Tab`, `TabGroup`, `Separator`, `Image`, `Table`, `TableRow`, `TableCell`, `List`, `ListItem`, `Link`, `TreeItem`, `Dialog`, `Alert`, `Heading`, `ScrollBar`.
 
-**Not tested**: `Unknown`, `WebArea`, `SplitGroup` (requires AT-SPI mapping investigation).
+**Not tested**: `Unknown`, `SplitGroup` (requires AT-SPI mapping investigation).
+
+**Tested via webview app**: `WebArea` (see webview compatibility tests).
 
 ## Error Variants
 
@@ -157,9 +159,24 @@ Covered via test app nodes: `Application`, `Window`, `Button`, `CheckBox`, `Radi
 | `wait_for_event` | Covered | `event_wait_for_event_timeout` |
 | `wait_for` | Covered | `event_wait_for_attached` |
 
+## WebView / Electron Compatibility
+
+Tests using a separate WebKitGTK-based webview app (`xa11y-test-webview`) to verify that
+web content inside a WebView is visible through the platform accessibility tree.
+
+| Test | Description |
+|------|-------------|
+| `webview_app_discoverable` | WebView app appears in `list_apps()` |
+| `webview_tree_has_web_area` | Tree contains a `WebArea` node |
+| `webview_has_button` | HTML `<button>` visible as `Button` role |
+| `webview_has_heading` | HTML `<h1>` visible as `Heading` role |
+| `webview_has_link` | HTML `<a>` visible as `Link` role |
+
+**Requires**: `libwebkit2gtk-4.1-dev` system package on Linux.
+
 ## Summary
 
-- **~104 tests** covering the full public API surface
+- **~109 tests** covering the full public API surface
 - All Provider trait methods covered
 - All EventProvider trait methods covered
 - All Tree methods covered

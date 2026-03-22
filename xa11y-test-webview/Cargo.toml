@@ -1,0 +1,15 @@
+[package]
+name = "xa11y-test-webview"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "WebView test application for xa11y integration tests (Electron/webview compatibility)"
+publish = false
+
+[[bin]]
+name = "xa11y-test-webview"
+path = "src/main.rs"
+
+[dependencies]
+tao = "0.34"
+wry = "0.54"

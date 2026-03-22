@@ -1791,4 +1791,75 @@ mod tests {
         let node = result.unwrap();
         assert_eq!(node.role, Role::Button);
     }
+
+    // ════════════════════════════════════════════════════════════════
+    // WebView / Electron Compatibility (5 tests)
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    #[ignore]
+    fn webview_app_discoverable() {
+        let p = h::provider();
+        let apps = p.list_apps().unwrap();
+        assert!(
+            apps.iter().any(|a| a.name.contains("webview")),
+            "WebView test app not in app list: {:?}",
+            apps.iter().map(|a| &a.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn webview_tree_has_web_area() {
+        let p = h::provider();
+        let tree = h::webview_tree(&*p);
+        let web_areas = tree.find_by_role(Role::WebArea);
+        assert!(
+            !web_areas.is_empty(),
+            "WebView tree should contain a WebArea node. Tree:\n{}",
+            tree.dump()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn webview_has_button() {
+        let p = h::provider();
+        let tree = h::webview_tree(&*p);
+        let btn = h::named(&tree, "Click Me WebView");
+        assert_eq!(
+            btn.role,
+            Role::Button,
+            "Expected Button role, got {:?}",
+            btn.role
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn webview_has_heading() {
+        let p = h::provider();
+        let tree = h::webview_tree(&*p);
+        let heading = h::named(&tree, "WebView Test Page");
+        assert_eq!(
+            heading.role,
+            Role::Heading,
+            "Expected Heading role, got {:?}",
+            heading.role
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn webview_has_link() {
+        let p = h::provider();
+        let tree = h::webview_tree(&*p);
+        let link = h::named(&tree, "Example Link");
+        assert_eq!(
+            link.role,
+            Role::Link,
+            "Expected Link role, got {:?}",
+            link.role
+        );
+    }
 }

@@ -7,6 +7,8 @@ members = [
     "xa11y",
     "xa11y-test-app",
     "xa11y-fuzz",
+    # xa11y-test-webview is NOT in the workspace — it requires libwebkit2gtk-4.1-dev
+    # and is built separately by run_integ_tests.sh when available.
 ]
 resolver = "2"
 
