@@ -1,4 +1,3 @@
-[workspace]
 allow-branch = ["main"]
 consolidate-commits = true
 shared-version = true
