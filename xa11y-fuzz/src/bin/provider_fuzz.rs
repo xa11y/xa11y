@@ -193,35 +193,35 @@ mod provider_fuzz {
     ];
 
     fn random_selector(rng: &mut StdRng) -> String {
-        let kind: u8 = rng.gen_range(0..10);
+        let kind: u8 = rng.random_range(0..10);
         match kind {
             // 60% known-valid selectors
-            0..=5 => KNOWN_SELECTORS[rng.gen_range(0..KNOWN_SELECTORS.len())].to_string(),
+            0..=5 => KNOWN_SELECTORS[rng.random_range(0..KNOWN_SELECTORS.len())].to_string(),
             // 10% random role
-            6 => ALL_ROLES[rng.gen_range(0..ALL_ROLES.len())]
+            6 => ALL_ROLES[rng.random_range(0..ALL_ROLES.len())]
                 .to_snake_case()
                 .to_string(),
             // 10% random attribute filter
             7 => {
-                let role = ALL_ROLES[rng.gen_range(0..ALL_ROLES.len())].to_snake_case();
+                let role = ALL_ROLES[rng.random_range(0..ALL_ROLES.len())].to_snake_case();
                 let attrs = ["name", "value", "description"];
-                let attr = attrs[rng.gen_range(0..attrs.len())];
+                let attr = attrs[rng.random_range(0..attrs.len())];
                 let ops = ["=", "*=", "^=", "$="];
-                let op = ops[rng.gen_range(0..ops.len())];
+                let op = ops[rng.random_range(0..ops.len())];
                 let values = ["Submit", "Cancel", "test", "", "Volume", "Alice", "x"];
-                let val = values[rng.gen_range(0..values.len())];
+                let val = values[rng.random_range(0..values.len())];
                 format!("{}[{}{}\"{}\"", role, attr, op, val) + "]"
             }
             // 10% garbage
             8 => {
-                let len = rng.gen_range(0..30);
+                let len = rng.random_range(0..30);
                 (0..len)
-                    .map(|_| rng.gen_range(b' '..=b'~') as char)
+                    .map(|_| rng.random_range(b' '..=b'~') as char)
                     .collect()
             }
             // 10% empty or whitespace
             _ => {
-                if rng.gen_bool(0.5) {
+                if rng.random_bool(0.5) {
                     String::new()
                 } else {
                     " ".to_string()
@@ -233,36 +233,36 @@ mod provider_fuzz {
     // ── QueryOptions Generation ──────────────────────────────────────────────
 
     fn random_query_options(rng: &mut StdRng) -> QueryOptions {
-        let max_depth = match rng.gen_range(0u8..10) {
+        let max_depth = match rng.random_range(0u8..10) {
             0..=3 => None,
             4 => Some(0),
             5 => Some(1),
-            6..=7 => Some(rng.gen_range(2..6)),
-            _ => Some(rng.gen_range(10..100)),
+            6..=7 => Some(rng.random_range(2..6)),
+            _ => Some(rng.random_range(10..100)),
         };
 
-        let max_elements = match rng.gen_range(0u8..10) {
+        let max_elements = match rng.random_range(0u8..10) {
             0..=5 => None,
             6 => Some(1),
-            7 => Some(rng.gen_range(2..10)),
-            8 => Some(rng.gen_range(10..50)),
-            _ => Some(rng.gen_range(50..500)),
+            7 => Some(rng.random_range(2..10)),
+            8 => Some(rng.random_range(10..50)),
+            _ => Some(rng.random_range(50..500)),
         };
 
-        let visible_only = rng.gen_bool(0.3);
+        let visible_only = rng.random_bool(0.3);
 
-        let roles = if rng.gen_bool(0.2) {
-            let count = rng.gen_range(1..=5);
+        let roles = if rng.random_bool(0.2) {
+            let count = rng.random_range(1..=5);
             let mut r = Vec::with_capacity(count);
             for _ in 0..count {
-                r.push(ALL_ROLES[rng.gen_range(0..ALL_ROLES.len())]);
+                r.push(ALL_ROLES[rng.random_range(0..ALL_ROLES.len())]);
             }
             Some(r)
         } else {
             None
         };
 
-        let include_raw = rng.gen_bool(0.5);
+        let include_raw = rng.random_bool(0.5);
 
         QueryOptions {
             max_depth,
@@ -278,7 +278,7 @@ mod provider_fuzz {
     fn random_action_data(rng: &mut StdRng, action: Action, _node: &Node) -> Option<ActionData> {
         match action {
             Action::SetValue => {
-                let kind: u8 = rng.gen_range(0..10);
+                let kind: u8 = rng.random_range(0..10);
                 match kind {
                     0..=3 => {
                         let texts = [
@@ -291,13 +291,13 @@ mod provider_fuzz {
                             "special <>&\"'",
                         ];
                         Some(ActionData::Value(
-                            texts[rng.gen_range(0..texts.len())].to_string(),
+                            texts[rng.random_range(0..texts.len())].to_string(),
                         ))
                     }
                     4..=7 => {
                         let values = [0.0, 50.0, 100.0, -1.0, 999.0, 0.5, 42.0];
                         Some(ActionData::NumericValue(
-                            values[rng.gen_range(0..values.len())],
+                            values[rng.random_range(0..values.len())],
                         ))
                     }
                     _ => None,
@@ -306,7 +306,7 @@ mod provider_fuzz {
             Action::TypeText => {
                 let texts = ["a", "hello", "test 123", "ñ", " ", ""];
                 Some(ActionData::Value(
-                    texts[rng.gen_range(0..texts.len())].to_string(),
+                    texts[rng.random_range(0..texts.len())].to_string(),
                 ))
             }
             Action::Scroll => {
@@ -318,13 +318,13 @@ mod provider_fuzz {
                 ];
                 let amounts = [1.0, 3.0, 10.0, 0.5];
                 Some(ActionData::ScrollAmount {
-                    direction: directions[rng.gen_range(0..directions.len())],
-                    amount: amounts[rng.gen_range(0..amounts.len())],
+                    direction: directions[rng.random_range(0..directions.len())],
+                    amount: amounts[rng.random_range(0..amounts.len())],
                 })
             }
             Action::SetTextSelection => Some(ActionData::TextSelection {
-                start: rng.gen_range(0..10),
-                end: rng.gen_range(0..20),
+                start: rng.random_range(0..10),
+                end: rng.random_range(0..20),
             }),
             _ => None,
         }
@@ -519,17 +519,17 @@ mod provider_fuzz {
         }
 
         // Pick a random node
-        let node_idx = state.rng.gen_range(0..node_count) as u32;
+        let node_idx = state.rng.random_range(0..node_count) as u32;
         let node = match tree.get(node_idx) {
             Some(n) => n,
             None => return,
         };
 
         // Pick action: 80% from node's supported actions, 20% random
-        let action = if !node.actions.is_empty() && state.rng.gen_bool(0.8) {
-            node.actions[state.rng.gen_range(0..node.actions.len())]
+        let action = if !node.actions.is_empty() && state.rng.random_bool(0.8) {
+            node.actions[state.rng.random_range(0..node.actions.len())]
         } else {
-            ALL_ACTIONS[state.rng.gen_range(0..ALL_ACTIONS.len())]
+            ALL_ACTIONS[state.rng.random_range(0..ALL_ACTIONS.len())]
         };
 
         let data = random_action_data(&mut state.rng, action, node);
@@ -562,7 +562,7 @@ mod provider_fuzz {
             return;
         }
 
-        let node_idx = state.rng.gen_range(0..tree.len()) as u32;
+        let node_idx = state.rng.random_range(0..tree.len()) as u32;
         let node = match tree.get(node_idx) {
             Some(n) => n,
             None => return,
@@ -641,7 +641,7 @@ mod provider_fuzz {
             None => return,
         };
 
-        let role = ALL_ROLES[state.rng.gen_range(0..ALL_ROLES.len())];
+        let role = ALL_ROLES[state.rng.random_range(0..ALL_ROLES.len())];
         state.log(&format!("tree.find_by_role({:?})", role));
         let results = tree.find_by_role(role);
         state.log(&format!("  -> {} matches", results.len()));
@@ -669,7 +669,7 @@ mod provider_fuzz {
             "SUBMIT",
             "test",
         ];
-        let name = names[state.rng.gen_range(0..names.len())];
+        let name = names[state.rng.random_range(0..names.len())];
         state.log(&format!("tree.find_by_name(\"{}\")", name));
         let results = tree.find_by_name(name);
         state.log(&format!("  -> {} matches", results.len()));
@@ -698,7 +698,7 @@ mod provider_fuzz {
             return;
         }
 
-        let node_idx = state.rng.gen_range(0..tree.len()) as u32;
+        let node_idx = state.rng.random_range(0..tree.len()) as u32;
         let node = match tree.get(node_idx) {
             Some(n) => n,
             None => return,
@@ -722,7 +722,7 @@ mod provider_fuzz {
             return;
         }
 
-        let node_idx = state.rng.gen_range(0..tree.len()) as u32;
+        let node_idx = state.rng.random_range(0..tree.len()) as u32;
         let node = match tree.get(node_idx) {
             Some(n) => n,
             None => return,
@@ -768,22 +768,22 @@ mod provider_fuzz {
         let _ = tree.is_empty();
         let _ = tree.root();
 
-        let inspection_count = rng.gen_range(1..=5);
+        let inspection_count = rng.random_range(1..=5);
         for _ in 0..inspection_count {
-            match rng.gen_range(0u8..6) {
+            match rng.random_range(0u8..6) {
                 0 => {
                     let _ = tree.dump();
                 }
                 1 => {
                     if !tree.is_empty() {
-                        let idx = rng.gen_range(0..tree.len()) as u32;
+                        let idx = rng.random_range(0..tree.len()) as u32;
                         if let Some(node) = tree.get(idx) {
                             let _ = tree.children(node);
                         }
                     }
                 }
                 2 => {
-                    let role = ALL_ROLES[rng.gen_range(0..ALL_ROLES.len())];
+                    let role = ALL_ROLES[rng.random_range(0..ALL_ROLES.len())];
                     let _ = tree.find_by_role(role);
                 }
                 3 => {
@@ -794,7 +794,7 @@ mod provider_fuzz {
                 }
                 5 => {
                     if !tree.is_empty() {
-                        let idx = rng.gen_range(0..tree.len()) as u32;
+                        let idx = rng.random_range(0..tree.len()) as u32;
                         if let Some(node) = tree.get(idx) {
                             let _ = tree.subtree(node);
                         }
@@ -886,7 +886,7 @@ mod provider_fuzz {
         let total_weight: u32 = ops.iter().map(|(w, _, _)| *w).sum();
 
         for i in 0..args.iterations {
-            let mut roll = state.rng.gen_range(0..total_weight);
+            let mut roll = state.rng.random_range(0..total_weight);
             let mut chosen_name = "";
             let mut chosen_fn: OpFn = op_check_permissions;
             for (weight, name, f) in &ops {
