@@ -199,24 +199,26 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install tools
-        run: pip install maturin ruff pytest
+      - name: Create virtualenv and install tools
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install maturin ruff pytest
 
       - name: Ruff lint
         working-directory: xa11y-python
-        run: ruff check python/ tests/
+        run: ../.venv/bin/ruff check python/ tests/
 
       - name: Ruff format
         working-directory: xa11y-python
-        run: ruff format --check python/ tests/
+        run: ../.venv/bin/ruff format --check python/ tests/
 
       - name: Build & install
         working-directory: xa11y-python
-        run: maturin develop --release
+        run: ../.venv/bin/maturin develop --release
 
       - name: Run tests
         working-directory: xa11y-python
-        run: pytest tests/ -v
+        run: ../.venv/bin/pytest tests/ -v
 
   # ── Fuzz testing ───────────────────────────────────────────────────
   fuzz:
