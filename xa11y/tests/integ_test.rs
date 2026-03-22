@@ -629,6 +629,24 @@ mod tests {
         assert!(b.height > 0, "height > 0");
     }
 
+    /// Nodes without the Component interface (e.g. Application root) should
+    /// have `bounds: None` without triggering GTK CRITICAL warnings.
+    #[test]
+    #[ignore]
+    fn node_bounds_none_for_non_component_nodes() {
+        let p = h::provider();
+        let tree = h::app_tree(&*p);
+        // Application node never implements Component
+        let root = tree.root();
+        assert!(
+            root.bounds.is_none(),
+            "Application root should not have bounds (no Component interface)"
+        );
+        // But a visible widget like a button should still have bounds
+        let submit = h::named(&tree, "Submit");
+        assert!(submit.bounds.is_some(), "Submit button should have bounds");
+    }
+
     #[test]
     #[ignore]
     fn node_bounds_normalized_valid() {
