@@ -38,3 +38,7 @@ On native Linux, run directly:
 - `xa11y/` — Umbrella crate with unit + integration tests
 - `xa11y-test-app/` — AccessKit + winit test application
 - `xa11y-fuzz/` — Fuzz targets for xa11y-core
+
+## License
+
+All dependencies are permissively licensed (MIT, Apache-2.0, BSD, or similar). License compliance is enforced in CI via `cargo-deny`.
