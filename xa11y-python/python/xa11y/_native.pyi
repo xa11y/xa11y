@@ -52,7 +52,7 @@ class Rect:
     def __eq__(self, other: object) -> bool: ...
 
 class NormalizedRect:
-    """A bounding rectangle normalized to 0.0–1.0 relative to the display."""
+    """A bounding rectangle normalized to 0.0-1.0 relative to the display."""
 
     @property
     def left(self) -> float:
@@ -126,7 +126,7 @@ class Node:
         """Bounding rectangle in screen coordinates."""
     @property
     def bounds_normalized(self) -> NormalizedRect | None:
-        """Bounding rectangle normalized to 0.0–1.0 relative to the display."""
+        """Bounding rectangle normalized to 0.0-1.0 relative to the display."""
     @property
     def enabled(self) -> bool:
         """Whether the element is interactive."""
@@ -399,7 +399,10 @@ class Locator:
     def select_text(self, start: int, end: int) -> None:
         """Select a text range by character offsets."""
     def scroll(self, direction: str, amount: float = 1.0) -> None:
-        """Scroll the matched element. *direction* is ``"up"``, ``"down"``, ``"left"``, or ``"right"``."""
+        """Scroll the matched element.
+
+        *direction*: ``"up"``, ``"down"``, ``"left"``, or ``"right"``.
+        """
     def wait_visible(self, timeout: float = 5.0) -> None:
         """Wait until the element is visible (default 5s timeout)."""
     def wait_attached(self, timeout: float = 5.0) -> None:
@@ -427,8 +430,9 @@ def app(
     roles: list[str] | None = None,
     include_raw: bool = False,
 ) -> Tree:
-    """Convenience function — creates a provider and returns the accessibility tree for the given app.
+    """Get the accessibility tree for the given app.
 
+    Convenience function that creates a provider internally.
     Identify the app by *name* (substring match) or *pid* (exact).
     """
 
