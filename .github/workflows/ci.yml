@@ -231,6 +231,34 @@ jobs:
         working-directory: xa11y-python
         run: ../.venv/bin/pytest tests/ -v
 
+  # ── Docs build ──────────────────────────────────────────────────
+  docs:
+    name: Docs build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: docs/site/package-lock.json
+
+      - name: Generate Python API docs
+        run: python docs/generate_python_api.py
+
+      - name: Install npm dependencies
+        working-directory: docs/site
+        run: npm ci
+
+      - name: Build Starlight site
+        working-directory: docs/site
+        run: npm run build
+
   # ── Fuzz testing ───────────────────────────────────────────────────
   fuzz:
     name: Fuzz (10s per target)
