@@ -87,8 +87,8 @@ class AppInfo:
 class Node:
     """A single element in the accessibility tree.
 
-    Nodes are immutable snapshots. Tree navigation (children, parent)
-    requires going through the :class:`Tree` that produced this node.
+    Nodes are immutable snapshots that form a navigable graph —
+    use :attr:`children` and :attr:`parent` to traverse.
     """
 
     @property
@@ -121,6 +121,12 @@ class Node:
     @property
     def actions(self) -> list[str]:
         """List of supported action names."""
+    @property
+    def children(self) -> list[Node]:
+        """Direct children of this node."""
+    @property
+    def parent(self) -> Node | None:
+        """Parent node, or ``None`` for the root."""
     @property
     def bounds(self) -> Rect | None:
         """Bounding rectangle in screen coordinates."""
@@ -190,10 +196,6 @@ class Tree:
     @property
     def root(self) -> Node:
         """The root node of the tree."""
-    def children(self, node: Node) -> list[Node]:
-        """Get direct children of a node."""
-    def parent(self, node: Node) -> Node | None:
-        """Get the parent of a node, or ``None`` for the root."""
     def query(self, selector: str) -> list[Node]:
         """Find all nodes matching a CSS-like selector string."""
     def find_by_role(self, role: str) -> list[Node]:
