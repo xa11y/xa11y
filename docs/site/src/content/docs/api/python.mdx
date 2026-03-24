@@ -1,0 +1,252 @@
+---
+title: Python API Reference
+description: API reference for the xa11y Python package.
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+The `xa11y` Python package provides bindings to the xa11y Rust library via PyO3.
+
+Install from PyPI:
+
+```bash
+pip install xa11y
+```
+
+---
+
+## Module Functions
+
+### `xa11y.connect() → Provider`
+
+Create a platform accessibility provider. Use as a context manager:
+
+```python
+with xa11y.connect() as provider:
+    tree = provider.app("Safari")
+```
+
+### `xa11y.app(name, *, pid=None, include_raw=False, timeout=None) → Tree`
+
+Convenience function — creates a provider and returns the accessibility tree for the given app.
+
+```python
+tree = xa11y.app("Safari")
+tree = xa11y.app(pid=12345)
+```
+
+**Parameters:**
+- `name` (`str`, optional) — application name (substring match)
+- `pid` (`int`, optional) — process ID (exact match)
+- `include_raw` (`bool`) — include platform-specific raw data
+- `timeout` (`float`, optional) — seconds to wait for the app
+
+### `xa11y.list_apps() → list[AppInfo]`
+
+List all running applications that expose accessibility trees.
+
+```python
+for app in xa11y.list_apps():
+    print(f"{app.name} (pid: {app.pid})")
+```
+
+### `xa11y.check_permissions() → str`
+
+Check whether accessibility permissions are granted. Returns a status string.
+
+---
+
+## Classes
+
+### `Provider`
+
+The main entry point for accessibility operations. Implements the context manager protocol.
+
+#### Methods
+
+| Method | Returns | Description |
+| ------ | ------- | ----------- |
+| `app(name, *, pid=None, include_raw=False, timeout=None)` | `Tree` | Get accessibility tree for an app |
+| `all_apps(*, include_raw=False, timeout=None)` | `Tree` | Get combined tree for all apps |
+| `list_apps()` | `list[AppInfo]` | List running applications |
+| `check_permissions()` | `str` | Check accessibility permission status |
+| `locator(selector, *, app=None, pid=None)` | `Locator` | Create a locator bound to this provider |
+
+---
+
+### `Tree`
+
+A snapshot of an application's accessibility tree. Iterable (yields all nodes).
+
+#### Properties & Methods
+
+| Member | Type / Returns | Description |
+| ------ | -------------- | ----------- |
+| `root` | `Node` | The root node of the tree |
+| `children(node)` | `list[Node]` | Get children of a node |
+| `parent(node)` | `Node \| None` | Get parent of a node |
+| `query(selector)` | `list[Node]` | Find all nodes matching a CSS-like selector |
+| `find_by_role(role)` | `list[Node]` | Find nodes by role name |
+| `find_by_name(pattern)` | `list[Node]` | Find nodes whose name contains `pattern` |
+| `locator(selector)` | `Locator` | Create a locator for resilient interaction |
+| `dump()` | `str` | Pretty-print the full tree |
+| `len(tree)` | `int` | Total number of nodes |
+
+#### Action Shortcuts
+
+These methods accept a selector string or a `Node`:
+
+| Method | Description |
+| ------ | ----------- |
+| `press(target)` | Press / activate |
+| `focus(target)` | Focus an element |
+| `blur(target)` | Remove focus |
+| `toggle(target)` | Toggle a checkbox |
+| `expand(target)` | Expand a disclosure |
+| `collapse(target)` | Collapse a disclosure |
+| `select(target)` | Select an item |
+| `increment(target)` | Increment a slider |
+| `decrement(target)` | Decrement a slider |
+| `show_menu(target)` | Open context menu |
+| `scroll_into_view(target)` | Scroll into viewport |
+| `set_value(target, value)` | Set text value |
+| `set_numeric_value(target, value)` | Set numeric value |
+| `type_text(target, text)` | Type text into an element |
+| `scroll(target, direction, amount)` | Scroll (`"up"`, `"down"`, `"left"`, `"right"`) |
+| `select_text(target, start, end)` | Select a text range |
+
+---
+
+### `Node`
+
+A single element in the accessibility tree. Immutable.
+
+#### Properties
+
+| Property | Type | Description |
+| -------- | ---- | ----------- |
+| `id` | `int` | Unique node ID within the tree |
+| `role` | `str` | Role name (e.g. `"button"`, `"textfield"`) |
+| `name` | `str \| None` | Accessible name |
+| `description` | `str \| None` | Accessible description |
+| `value` | `str \| None` | Current value |
+| `role_description` | `str \| None` | Platform-provided role description |
+| `children` | `list[int]` | Child node IDs |
+| `parent` | `int \| None` | Parent node ID |
+| `states` | `list[str]` | Active state flags |
+| `actions` | `list[str]` | Supported actions |
+| `bounds()` | `Rect \| None` | Bounding rectangle (screen coords) |
+| `bounds_normalized()` | `NormalizedRect \| None` | Normalized bounding rectangle (0.0–1.0) |
+
+---
+
+### `Locator`
+
+A resilient element reference that re-queries the tree on each interaction. Locators are chainable.
+
+#### Navigation
+
+| Method | Returns | Description |
+| ------ | ------- | ----------- |
+| `nth(n)` | `Locator` | Select the Nth match (0-indexed) |
+| `first()` | `Locator` | Select the first match |
+| `child(selector)` | `Locator` | Scope to direct children matching selector |
+| `descendant(selector)` | `Locator` | Scope to descendants matching selector |
+
+#### Inspection
+
+| Method | Returns | Description |
+| ------ | ------- | ----------- |
+| `role()` | `str` | Role of the matched element |
+| `name()` | `str \| None` | Accessible name |
+| `value()` | `str \| None` | Current value |
+| `description()` | `str \| None` | Accessible description |
+| `is_visible()` | `bool` | Whether the element is visible |
+| `is_enabled()` | `bool` | Whether the element is enabled |
+| `is_focused()` | `bool` | Whether the element has focus |
+| `exists()` | `bool` | Whether the selector matches any element |
+| `count()` | `int` | Number of matching elements |
+| `get()` | `Node` | Resolve to a `Node` snapshot |
+
+#### Actions
+
+| Method | Description |
+| ------ | ----------- |
+| `press()` | Press / activate |
+| `focus()` | Focus the element |
+| `blur()` | Remove focus |
+| `toggle()` | Toggle a checkbox |
+| `expand()` | Expand a disclosure |
+| `collapse()` | Collapse a disclosure |
+| `select_item()` | Select an item |
+| `show_menu()` | Open context menu |
+| `scroll_into_view()` | Scroll into viewport |
+| `increment()` | Increment a slider |
+| `decrement()` | Decrement a slider |
+| `set_value(value)` | Set text value |
+| `set_numeric_value(value)` | Set numeric value |
+| `type_text(text)` | Type text |
+| `select_text(start, end)` | Select a text range |
+| `scroll(direction, amount)` | Scroll in a direction |
+
+#### Waiting
+
+| Method | Description |
+| ------ | ----------- |
+| `wait_visible(timeout)` | Wait until the element is visible |
+| `wait_attached(timeout)` | Wait until the selector matches |
+| `wait_detached(timeout)` | Wait until the selector no longer matches |
+| `wait_enabled(timeout)` | Wait until the element is enabled |
+| `wait_hidden(timeout)` | Wait until the element is hidden |
+
+---
+
+### `AppInfo`
+
+Information about a running application.
+
+| Property | Type | Description |
+| -------- | ---- | ----------- |
+| `name` | `str` | Application name |
+| `pid` | `int` | Process ID |
+
+---
+
+### `Rect`
+
+A bounding rectangle in screen coordinates.
+
+| Property | Type |
+| -------- | ---- |
+| `x` | `float` |
+| `y` | `float` |
+| `width` | `float` |
+| `height` | `float` |
+
+### `NormalizedRect`
+
+A bounding rectangle normalized to 0.0–1.0 relative to the display.
+
+| Property | Type |
+| -------- | ---- |
+| `x` | `float` |
+| `y` | `float` |
+| `width` | `float` |
+| `height` | `float` |
+
+---
+
+## Exceptions
+
+All xa11y exceptions inherit from `xa11y.XA11yError`.
+
+| Exception | When |
+| --------- | ---- |
+| `XA11yError` | Base exception for all xa11y errors |
+| `PermissionDeniedError` | Accessibility access not granted |
+| `AppNotFoundError` | Target application not running |
+| `SelectorNotMatchedError` | No element matched the selector |
+| `ActionNotSupportedError` | Action not available on this element |
+| `InvalidSelectorError` | Malformed selector syntax |
+| `PlatformError` | OS-level error |
+| `TimeoutError` | Operation timed out |

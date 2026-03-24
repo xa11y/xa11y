@@ -1,0 +1,102 @@
+---
+title: Rust API Reference
+description: Generated API documentation for the xa11y Rust crates.
+---
+
+The full Rust API documentation is generated from source with `cargo doc` and hosted alongside this site.
+
+## Browse the Docs
+
+<a href="/xa11y/rustdoc/xa11y/" class="sl-flex" style="display:inline-flex;align-items:center;gap:0.5rem;padding:0.5rem 1rem;background:var(--sl-color-accent);color:var(--sl-color-black);border-radius:0.5rem;text-decoration:none;font-weight:600;">
+  Open Rust API Docs →
+</a>
+
+## Crates
+
+| Crate | Description |
+| ----- | ----------- |
+| [`xa11y`](/xa11y/rustdoc/xa11y/) | Umbrella crate — re-exports all core types and provides `create_provider()` |
+| [`xa11y_core`](/xa11y/rustdoc/xa11y_core/) | Platform-independent types, traits, selector engine |
+| [`xa11y_linux`](/xa11y/rustdoc/xa11y_linux/) | Linux AT-SPI2 backend |
+| [`xa11y_macos`](/xa11y/rustdoc/xa11y_macos/) | macOS AXUIElement backend |
+| [`xa11y_windows`](/xa11y/rustdoc/xa11y_windows/) | Windows UI Automation backend |
+
+## Key Types
+
+### Provider
+
+The main entry point. Create one with `xa11y::create_provider()`.
+
+```rust
+use xa11y::*;
+
+let provider = create_provider()?;
+
+// Check permissions
+let status = provider.check_permissions()?;
+
+// List running applications
+let apps = provider.list_apps()?;
+
+// Get an app's accessibility tree
+let tree = provider.get_app_tree(
+    &AppTarget::ByName("Safari".to_string()),
+    &QueryOptions::default(),
+)?;
+```
+
+### Tree
+
+A snapshot of an application's accessibility tree.
+
+```rust
+// Query elements with CSS-like selectors
+let buttons = tree.query("button")?;
+let submit = tree.query_one("button[name='Submit']")?;
+
+// Access the root node
+let root = tree.root();
+
+// Create a locator for resilient interaction
+let loc = tree.locator("button[name='OK']");
+```
+
+### Node
+
+A single element in the tree.
+
+```rust
+let node: &Node = tree.root();
+
+println!("Role: {:?}", node.role);
+println!("Name: {:?}", node.name);
+println!("Description: {:?}", node.description);
+println!("Value: {:?}", node.value);
+println!("Bounds: {:?}", node.bounding_rect);
+println!("States: {:?}", node.states);
+println!("Children: {}", node.children.len());
+```
+
+### Locator
+
+A resilient element reference that re-queries on each interaction.
+
+```rust
+let loc = tree.locator("textfield[name='Email']");
+
+loc.press(&*provider)?;
+loc.set_value(&*provider, "user@example.com")?;
+loc.focus(&*provider)?;
+```
+
+### Error
+
+All operations return `xa11y::Result<T>`, which uses the `xa11y::Error` enum:
+
+- `PermissionDenied` — accessibility access not granted
+- `AppNotFound` — target application not running
+- `SelectorNotMatched` — no element matched the selector
+- `ActionNotSupported` — action not available on this element
+- `InvalidSelector` — malformed selector syntax
+- `Platform` — OS-level error
+- `Timeout` — operation timed out
