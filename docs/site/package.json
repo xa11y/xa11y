@@ -1,0 +1,19 @@
+{
+  "name": "xa11y-docs",
+  "type": "module",
+  "version": "0.0.1",
+  "scripts": {
+    "dev": "astro dev",
+    "start": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "0.33.2",
+    "astro": "5.7.13"
+  },
+  "overrides": {
+    "@astrojs/sitemap": "3.3.1"
+  }
+}

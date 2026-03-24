@@ -1,0 +1,233 @@
+---
+title: Quick Start
+description: Get up and running with xa11y in Rust or Python.
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+## Installation
+
+<Tabs>
+  <TabItem label="Rust">
+    Add `xa11y` to your `Cargo.toml`:
+
+    ```toml
+    [dependencies]
+    xa11y = "0.1"
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    Install from PyPI:
+
+    ```bash
+    pip install xa11y
+    ```
+
+    Requires Python 3.9+. Pre-built wheels are available for Linux (x86_64, aarch64), macOS (x86_64, aarch64), and Windows (x86_64).
+  </TabItem>
+</Tabs>
+
+## Platform Setup
+
+<Tabs>
+  <TabItem label="macOS">
+    Grant accessibility permissions to your terminal app (or IDE) in **System Settings → Privacy & Security → Accessibility**.
+
+    xa11y can check this for you:
+
+    <Tabs>
+      <TabItem label="Rust">
+        ```rust
+        use xa11y::*;
+
+        let provider = create_provider()?;
+        match provider.check_permissions()? {
+            PermissionStatus::Granted => println!("Ready!"),
+            PermissionStatus::Denied { instructions } => {
+                eprintln!("{}", instructions);
+            }
+        }
+        ```
+      </TabItem>
+      <TabItem label="Python">
+        ```python
+        import xa11y
+
+        status = xa11y.check_permissions()
+        print(status)
+        ```
+      </TabItem>
+    </Tabs>
+  </TabItem>
+  <TabItem label="Linux">
+    Ensure AT-SPI2 is running (it is by default on GNOME and most desktop environments). No special permissions are needed.
+  </TabItem>
+  <TabItem label="Windows">
+    No special permissions needed — UI Automation is available to all processes.
+  </TabItem>
+</Tabs>
+
+## Reading an Accessibility Tree
+
+<Tabs>
+  <TabItem label="Rust">
+    ```rust
+    use xa11y::*;
+
+    fn main() -> Result<()> {
+        let provider = create_provider()?;
+
+        // Get the accessibility tree for an app by name
+        let tree = provider.get_app_tree(
+            &AppTarget::ByName("Safari".to_string()),
+            &QueryOptions::default(),
+        )?;
+
+        println!("Root: {:?}", tree.root().role);
+        println!("Children: {}", tree.root().children.len());
+
+        Ok(())
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import xa11y
+
+    # One-liner: get the tree for an app by name
+    tree = xa11y.app("Safari")
+
+    print(f"Root role: {tree.root.role}")
+    print(f"Children: {len(tree.root.children)}")
+    ```
+  </TabItem>
+</Tabs>
+
+## Querying Elements
+
+xa11y supports CSS-like selectors to find elements in the tree.
+
+<Tabs>
+  <TabItem label="Rust">
+    ```rust
+    use xa11y::*;
+
+    let provider = create_provider()?;
+    let tree = provider.get_app_tree(
+        &AppTarget::ByName("Safari".to_string()),
+        &QueryOptions::default(),
+    )?;
+
+    // Find all buttons
+    let buttons = tree.query("button")?;
+
+    // Find a button by name
+    let submit = tree.query_one("button[name='Submit']")?;
+    println!("Found: {}", submit.name.as_deref().unwrap_or("unnamed"));
+
+    // Find text fields
+    let fields = tree.query("textfield")?;
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import xa11y
+
+    tree = xa11y.app("Safari")
+
+    # Find all buttons
+    for button in tree.query("button"):
+        print(button.name)
+
+    # Find a specific button
+    submit = tree.query_one("button[name='Submit']")
+    print(f"Found: {submit.name}")
+
+    # Find text fields
+    fields = tree.query("textfield")
+    ```
+  </TabItem>
+</Tabs>
+
+## Performing Actions
+
+<Tabs>
+  <TabItem label="Rust">
+    ```rust
+    use xa11y::*;
+
+    let provider = create_provider()?;
+    let tree = provider.get_app_tree(
+        &AppTarget::ByName("Safari".to_string()),
+        &QueryOptions::default(),
+    )?;
+
+    // Use a Locator for resilient element interaction
+    let locator = tree.locator("button[name='Submit']");
+
+    // Press the button
+    locator.press(&*provider)?;
+
+    // Type into a text field
+    let search = tree.locator("textfield[name^='Search']");
+    search.set_value(&*provider, "hello world")?;
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import xa11y
+
+    tree = xa11y.app("Safari")
+
+    # Press a button (shorthand)
+    tree.press("button[name='Submit']")
+
+    # Use a Locator for multiple interactions
+    search = tree.locator("textfield[name^='Search']")
+    search.set_value("hello world")
+    ```
+  </TabItem>
+</Tabs>
+
+## Listing Applications
+
+<Tabs>
+  <TabItem label="Rust">
+    ```rust
+    use xa11y::*;
+
+    let provider = create_provider()?;
+    let apps = provider.list_apps()?;
+
+    for app in &apps {
+        println!("{} (pid: {})", app.name, app.pid);
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import xa11y
+
+    apps = xa11y.list_apps()
+    for app in apps:
+        print(f"{app.name} (pid: {app.pid})")
+    ```
+  </TabItem>
+</Tabs>
+
+## Selector Syntax Reference
+
+| Pattern                        | Meaning                          |
+| ------------------------------ | -------------------------------- |
+| `button`                       | Elements with role `Button`      |
+| `button[name='OK']`            | Button named exactly "OK"        |
+| `textfield[name^='Search']`    | Text field whose name starts with "Search" |
+| `checkbox:checked`             | Checked checkboxes               |
+| `group > button`               | Buttons that are direct children of a group |
+| `window button[name='OK']`     | Button named "OK" anywhere inside a window |
+
+## Next Steps
+
+- [Overview](/xa11y/guides/overview/) — architecture and design principles
+- [Rust API Reference](/xa11y/api/rust/) — full Rust API documentation
+- [Python API Reference](/xa11y/api/python/) — full Python API documentation

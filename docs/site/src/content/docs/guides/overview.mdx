@@ -1,0 +1,92 @@
+---
+title: Overview
+description: What xa11y is and how it works.
+---
+
+import { Card, CardGrid } from "@astrojs/starlight/components";
+
+**xa11y** is a cross-platform accessibility client library. It reads accessibility trees exposed by other applications and lets you interact with UI elements — clicking buttons, reading text, filling fields — through a single, unified API.
+
+## What It Does
+
+Desktop operating systems expose UI structure through accessibility APIs (originally designed for screen readers). xa11y provides a clean abstraction over these platform-specific APIs:
+
+| Platform | Underlying API         |
+| -------- | ---------------------- |
+| macOS    | AXUIElement (Core Accessibility) |
+| Windows  | UI Automation          |
+| Linux    | AT-SPI2 via D-Bus      |
+
+## Design Principles
+
+<CardGrid>
+  <Card title="Client-side focus" icon="magnifier">
+    xa11y *reads* accessibility trees exposed by other applications. It is not a toolkit for *providing* accessibility — that's what [AccessKit](https://github.com/AccessKit/accesskit) does.
+  </Card>
+  <Card title="Platform concepts mapped, not hidden" icon="setting">
+    Each platform has unique behaviors. The abstraction normalizes them but exposes raw/platform-specific data when needed.
+  </Card>
+  <Card title="Snapshot-based" icon="document">
+    Trees are captured as point-in-time snapshots. Platform handles are cached internally for action dispatch and are not exposed to the consumer.
+  </Card>
+  <Card title="FFI-first" icon="laptop">
+    Core types are designed to be representable in C, Python, and JavaScript. No lifetimes or complex generics in the public API.
+  </Card>
+</CardGrid>
+
+## Architecture
+
+```
+┌─────────────────────────────────────────┐
+│              xa11y (umbrella)            │
+│   create_provider() → Box<dyn Provider> │
+├─────────────────────────────────────────┤
+│             xa11y-core                  │
+│  Tree, Node, Role, Selector, Locator    │
+├───────────┬──────────────┬──────────────┤
+│ xa11y-mac │ xa11y-linux   │ xa11y-win   │
+│ AXUIElem  │ AT-SPI2/zbus  │ UIA (stub)  │
+└───────────┴──────────────┴──────────────┘
+```
+
+## Crate Structure
+
+- **`xa11y-core`** — Platform-independent types, traits, and selector engine. Defines `Provider`, `Tree`, `Node`, `Role`, `Selector`, `Locator`, and error types.
+- **`xa11y-linux`** — Linux backend using AT-SPI2 over D-Bus (via the `zbus` crate).
+- **`xa11y-macos`** — macOS backend using `AXUIElement` with Objective-C exception safety.
+- **`xa11y-windows`** — Windows backend using UI Automation (stub — in progress).
+- **`xa11y`** — Umbrella crate that re-exports `xa11y-core` and provides `create_provider()` to get the right backend for the current platform.
+- **`xa11y-python`** — Python bindings via PyO3, published to PyPI as `xa11y`.
+
+## Selectors
+
+xa11y uses a CSS-like selector syntax to query accessibility trees:
+
+```
+button                          # by role
+button[name='Submit']           # role + attribute
+textfield[name^='Search']       # starts-with
+checkbox:checked                # pseudo-class (state)
+group > button                  # direct child
+window button[name='OK']        # descendant
+```
+
+Supported attributes: `name`, `description`, `value`, `role_description`.
+Supported pseudo-classes: `:checked`, `:disabled`, `:expanded`, `:focused`, `:selected`.
+
+## Supported Actions
+
+| Action             | Description                        |
+| ------------------ | ---------------------------------- |
+| `press`            | Click / activate                   |
+| `focus`            | Move keyboard focus                |
+| `blur`             | Remove keyboard focus              |
+| `toggle`           | Toggle a checkbox or switch        |
+| `expand` / `collapse` | Expand or collapse a disclosure  |
+| `select`           | Select an item                     |
+| `set_value`        | Set a text field's value           |
+| `type_text`        | Type text into an element          |
+| `increment` / `decrement` | Adjust a slider or stepper  |
+| `scroll`           | Scroll in a direction              |
+| `scroll_into_view` | Scroll element into the viewport   |
+| `show_menu`        | Open a context menu                |
