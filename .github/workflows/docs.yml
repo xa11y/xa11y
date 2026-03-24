@@ -50,7 +50,7 @@ jobs:
         run: npm run build
 
       - name: Generate Rust API docs
-        run: cargo doc --workspace --no-deps --document-private-items=false
+        run: cargo doc --workspace --no-deps
         env:
           RUSTDOCFLAGS: --default-theme ayu
 
