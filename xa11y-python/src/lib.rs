@@ -217,6 +217,7 @@ fn make_py_node(py: Python<'_>, n: &xa11y::Node) -> PyResult<Py<Node>> {
             children_indices: n.children_indices.clone(),
             parent_idx: n.parent_index,
             _index: n.index,
+            _all_nodes: None,
         },
     )
 }
@@ -302,11 +303,8 @@ impl AppInfo {
 
 // ── Node ────────────────────────────────────────────────────────────────────
 
-/// A node in the accessibility tree. Nodes are returned from Tree queries
-/// and carry their own data + indices for tree navigation.
-///
-/// Tree navigation (children, parent) requires going through the Tree
-/// that produced this node.
+/// A node in the accessibility tree. Nodes form a navigable graph —
+/// use `node.children` and `node.parent` to traverse.
 #[pyclass]
 struct Node {
     #[pyo3(get)]
@@ -356,15 +354,39 @@ struct Node {
     #[pyo3(get)]
     busy: bool,
 
-    // Indices for tree navigation (resolved via Tree)
     children_indices: Vec<u32>,
     parent_idx: Option<u32>,
-
     _index: u32,
+
+    /// Shared reference to all nodes in the tree (for graph navigation).
+    _all_nodes: Option<Py<PyList>>,
 }
 
 #[pymethods]
 impl Node {
+    #[getter]
+    fn children(&self, py: Python<'_>) -> PyResult<Vec<PyObject>> {
+        let Some(ref all) = self._all_nodes else {
+            return Ok(vec![]);
+        };
+        let list = all.bind(py);
+        self.children_indices
+            .iter()
+            .map(|&idx| list.get_item(idx as usize).map(|item| item.unbind()))
+            .collect()
+    }
+
+    #[getter]
+    fn parent(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
+        let Some(ref all) = self._all_nodes else {
+            return Ok(None);
+        };
+        match self.parent_idx {
+            Some(idx) => Ok(Some(all.bind(py).get_item(idx as usize)?.unbind())),
+            None => Ok(None),
+        }
+    }
+
     #[getter]
     fn bounds(&self) -> Option<Rect> {
         self.bounds_data.map(|(x, y, w, h)| Rect {
@@ -447,20 +469,6 @@ impl Tree {
             .first()
             .map(|n| n.clone_ref(py))
             .ok_or_else(|| PyValueError::new_err("Tree has no nodes"))
-    }
-
-    /// Get children of a node.
-    fn children(&self, py: Python<'_>, node: &Node) -> Vec<Py<Node>> {
-        node.children_indices
-            .iter()
-            .filter_map(|&idx| self.py_nodes.get(idx as usize).map(|n| n.clone_ref(py)))
-            .collect()
-    }
-
-    /// Get the parent of a node.
-    fn parent(&self, py: Python<'_>, node: &Node) -> Option<Py<Node>> {
-        node.parent_idx
-            .and_then(|idx| self.py_nodes.get(idx as usize).map(|n| n.clone_ref(py)))
     }
 
     /// Query nodes matching a CSS-like selector string.
@@ -759,6 +767,12 @@ fn convert_tree(
             .get(i as u32)
             .expect("index valid in range 0..len");
         py_nodes.push(make_py_node(py, n)?);
+    }
+
+    // Build a shared PyList so every Node can navigate to children/parent directly.
+    let all_nodes_list: Py<PyList> = PyList::new(py, &py_nodes)?.unbind();
+    for py_node in &py_nodes {
+        py_node.borrow_mut(py)._all_nodes = Some(all_nodes_list.clone_ref(py));
     }
 
     Py::new(

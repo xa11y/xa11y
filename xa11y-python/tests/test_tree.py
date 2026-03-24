@@ -31,19 +31,19 @@ def test_tree_root_depth_zero(tree):
     assert tree.root.depth == 0
 
 
-# ── Navigation ───────────────────────────────────────────────────────────────
+# ── Navigation (via Node.children / Node.parent) ────────────────────────────
 
 
 def test_children_of_root(tree):
-    children = tree.children(tree.root)
+    children = tree.root.children
     assert len(children) == 1
     assert children[0].role == "window"
     assert children[0].name == "Main Window"
 
 
 def test_children_of_window(tree):
-    window = tree.children(tree.root)[0]
-    children = tree.children(window)
+    window = tree.root.children[0]
+    children = window.children
     assert len(children) == 2
     assert children[0].role == "toolbar"
     assert children[1].role == "group"
@@ -52,26 +52,36 @@ def test_children_of_window(tree):
 def test_children_of_leaf(tree):
     buttons = tree.query("button")
     back = next(b for b in buttons if b.name == "Back")
-    assert tree.children(back) == []
+    assert back.children == []
 
 
 def test_parent_of_root_is_none(tree):
-    assert tree.parent(tree.root) is None
+    assert tree.root.parent is None
 
 
 def test_parent_of_button(tree):
     buttons = tree.query("button")
     back = next(b for b in buttons if b.name == "Back")
-    parent = tree.parent(back)
+    parent = back.parent
     assert parent is not None
     assert parent.role == "toolbar"
     assert parent.name == "Navigation"
 
 
 def test_parent_child_roundtrip(tree):
-    window = tree.children(tree.root)[0]
-    toolbar = tree.children(window)[0]
-    assert tree.parent(toolbar).name == "Main Window"
+    window = tree.root.children[0]
+    toolbar = window.children[0]
+    assert toolbar.parent.name == "Main Window"
+
+
+def test_deep_graph_traversal(tree):
+    """Verify node.children[i].children[j] style navigation works."""
+    root = tree.root
+    toolbar = root.children[0].children[0]
+    assert toolbar.role == "toolbar"
+    back = toolbar.children[0]
+    assert back.name == "Back"
+    assert back.parent.parent.role == "window"
 
 
 # ── Query ────────────────────────────────────────────────────────────────────

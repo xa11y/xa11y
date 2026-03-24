@@ -43,7 +43,7 @@ def test_node_description_none(tree):
 
 def test_node_depth(tree):
     assert tree.root.depth == 0
-    window = tree.children(tree.root)[0]
+    window = tree.root.children[0]
     assert window.depth == 1
     buttons = tree.query("button")
     assert all(b.depth == 3 for b in buttons)
@@ -106,7 +106,7 @@ def test_visible_false(tree):
 
 
 def test_focused(tree):
-    window = tree.children(tree.root)[0]
+    window = tree.root.children[0]
     assert window.focused is True
     assert tree.root.focused is False
 
@@ -285,7 +285,7 @@ def test_node_repr_hidden(tree):
 
 
 def test_node_repr_focused(tree):
-    window = tree.children(tree.root)[0]
+    window = tree.root.children[0]
     r = repr(window)
     assert "focused=True" in r
 
@@ -297,7 +297,7 @@ def test_node_str_is_repr(tree):
 def test_node_len_children_count(tree):
     root = tree.root
     assert len(root) == 1  # one child (window)
-    window = tree.children(root)[0]
+    window = root.children[0]
     assert len(window) == 2  # toolbar + group
     back = next(b for b in tree.query("button") if b.name == "Back")
     assert len(back) == 0  # leaf
