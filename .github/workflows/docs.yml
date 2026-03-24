@@ -41,6 +41,14 @@ jobs:
           key: docs-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: docs-cargo-
 
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+
+      - name: Generate Python API docs
+        run: python docs/generate_python_api.py
+
       - name: Install npm dependencies
         working-directory: docs/site
         run: npm ci
