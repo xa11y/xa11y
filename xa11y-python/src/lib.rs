@@ -1210,13 +1210,12 @@ impl Locator {
                 return Err(to_py_err(xa11y::Error::Timeout { elapsed }));
             }
 
-            let tree_result = self.provider.get_app_tree(&self.target, &self.opts);
-            let node = tree_result.ok().and_then(|tree| {
-                tree.query(&self.selector).ok().and_then(|matches| {
-                    let idx = self.nth.unwrap_or(0);
-                    matches.get(idx).cloned()
-                })
-            });
+            let node: Option<xa11y::Node> = (|| {
+                let tree = self.provider.get_app_tree(&self.target, &self.opts).ok()?;
+                let matches = tree.query(&self.selector).ok()?;
+                let idx = self.nth.unwrap_or(0);
+                matches.get(idx).copied().cloned()
+            })();
 
             let met = Python::with_gil(|py| -> PyResult<bool> {
                 let arg: PyObject = match node.as_ref() {

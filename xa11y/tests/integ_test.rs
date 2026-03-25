@@ -79,7 +79,7 @@ mod tests {
             has_test_app,
             "get_all_apps should include the test app. Apps: {:?}",
             tree.iter()
-                .filter(|n| n.parent_index.map_or(true, |p| p == 0))
+                .filter(|n| n.parent_index.is_none_or(|p| p == 0))
                 .map(|n| &n.name)
                 .collect::<Vec<_>>()
         );
