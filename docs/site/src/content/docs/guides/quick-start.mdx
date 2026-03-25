@@ -7,7 +7,7 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
 
 ## Installation
 
-<Tabs>
+<Tabs syncKey="lang">
   <TabItem label="Rust">
     Add `xa11y` to your `Cargo.toml`:
 
@@ -29,13 +29,13 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
 
 ## Platform Setup
 
-<Tabs>
+<Tabs syncKey="platform">
   <TabItem label="macOS">
     Grant accessibility permissions to your terminal app (or IDE) in **System Settings → Privacy & Security → Accessibility**.
 
     xa11y can check this for you:
 
-    <Tabs>
+    <Tabs syncKey="lang">
       <TabItem label="Rust">
         ```rust
         use xa11y::*;
@@ -69,7 +69,7 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
 
 ## Reading an Accessibility Tree
 
-<Tabs>
+<Tabs syncKey="lang">
   <TabItem label="Rust">
     ```rust
     use xa11y::*;
@@ -107,7 +107,7 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
 
 xa11y supports CSS-like selectors to find elements in the tree.
 
-<Tabs>
+<Tabs syncKey="lang">
   <TabItem label="Rust">
     ```rust
     use xa11y::*;
@@ -151,7 +151,7 @@ xa11y supports CSS-like selectors to find elements in the tree.
 
 ## Performing Actions
 
-<Tabs>
+<Tabs syncKey="lang">
   <TabItem label="Rust">
     ```rust
     use xa11y::*;
@@ -191,7 +191,7 @@ xa11y supports CSS-like selectors to find elements in the tree.
 
 ## Listing Applications
 
-<Tabs>
+<Tabs syncKey="lang">
   <TabItem label="Rust">
     ```rust
     use xa11y::*;

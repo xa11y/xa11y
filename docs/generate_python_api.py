@@ -224,13 +224,18 @@ def _render_function_section(func: ast.FunctionDef, *, prefix: str = "xa11y") ->
     return "\n".join(lines).rstrip()
 
 
+def _escape_table_pipe(text: str) -> str:
+    """Escape pipe characters in text destined for a Markdown table cell."""
+    return text.replace("|", "\\|")
+
+
 def _render_properties_table(members: list[ast.FunctionDef]) -> str:
     lines = [
         "| Property | Type | Description |",
         "| -------- | ---- | ----------- |",
     ]
     for m in members:
-        ret = _unparse_annotation(m.returns)
+        ret = _escape_table_pipe(_unparse_annotation(m.returns))
         doc = _first_line_docstring(m)
         lines.append(f"| `{m.name}` | `{ret}` | {doc} |")
     return "\n".join(lines)
@@ -250,11 +255,11 @@ def _render_methods_table(
         ]
     )
     for m in members:
-        sig = _format_signature(m)
+        sig = _escape_table_pipe(_format_signature(m))
         ret = _unparse_annotation(m.returns)
         doc = _first_line_docstring(m)
         # Suppress None return type for __init__ and void actions
-        ret_display = f"`{ret}`" if ret and ret != "None" else ""
+        ret_display = f"`{_escape_table_pipe(ret)}`" if ret and ret != "None" else ""
         lines.append(f"| `{m.name}({sig})` | {ret_display} | {doc} |")
     return "\n".join(lines)
 
