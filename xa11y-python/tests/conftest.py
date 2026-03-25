@@ -11,5 +11,4 @@ def tree():
 @pytest.fixture
 def provider():
     """A mock provider that returns the canonical test tree."""
-    with _make_test_provider() as p:
-        yield p
+    return _make_test_provider()

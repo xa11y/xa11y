@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from types import TracebackType
 
 # ── Exceptions ───────────────────────────────────────────────────────────────
 
@@ -264,12 +263,10 @@ class Tree:
 class Provider:
     """The main entry point for accessibility operations.
 
-    Must be used as a context manager::
+    Example::
 
-        with xa11y.connect() as provider:
-            tree = provider.app("Safari")
-
-    Calling methods outside a ``with`` block raises ``RuntimeError``.
+        provider = xa11y.connect()
+        tree = provider.app("Safari")
     """
 
     def __init__(self) -> None:
@@ -319,13 +316,6 @@ class Provider:
         include_raw: bool = False,
     ) -> Locator:
         """Create a :class:`Locator` bound to this provider and a target app."""
-    def __enter__(self) -> Provider: ...
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None = None,
-        exc_val: BaseException | None = None,
-        exc_tb: TracebackType | None = None,
-    ) -> bool: ...
     def __repr__(self) -> str: ...
 
 # ── Locator ──────────────────────────────────────────────────────────────────
@@ -417,7 +407,7 @@ class Locator:
 # ── Module-level functions ───────────────────────────────────────────────────
 
 def connect() -> Provider:
-    """Create a platform accessibility provider. Use as a context manager."""
+    """Create a platform accessibility provider."""
 
 def app(
     name: str | None = None,

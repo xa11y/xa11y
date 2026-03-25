@@ -788,7 +788,6 @@ fn convert_tree(
 #[pyclass]
 struct Provider {
     inner: Arc<dyn xa11y::Provider>,
-    activated: bool,
 }
 
 #[pymethods]
@@ -798,18 +797,7 @@ impl Provider {
         let provider = xa11y::create_provider().map_err(to_py_err)?;
         Ok(Self {
             inner: Arc::from(provider),
-            activated: false,
         })
-    }
-
-    fn _require_active(&self) -> PyResult<()> {
-        if !self.activated {
-            Err(PyRuntimeError::new_err(
-                "Provider must be used as a context manager: `with xa11y.connect() as provider:`",
-            ))
-        } else {
-            Ok(())
-        }
     }
 
     /// Get an application's accessibility tree.
@@ -825,7 +813,6 @@ impl Provider {
         roles: Option<Vec<String>>,
         include_raw: bool,
     ) -> PyResult<Py<Tree>> {
-        self._require_active()?;
         let target = resolve_app_target(name, pid)?;
         let opts = build_query_options(max_depth, max_elements, visible_only, roles, include_raw);
         let inner = self.inner.clone();
@@ -846,7 +833,6 @@ impl Provider {
         roles: Option<Vec<String>>,
         include_raw: bool,
     ) -> PyResult<Py<Tree>> {
-        self._require_active()?;
         let opts = build_query_options(max_depth, max_elements, visible_only, roles, include_raw);
         let inner = self.inner.clone();
         let rust_tree = py
@@ -858,7 +844,6 @@ impl Provider {
 
     /// List running applications.
     fn list_apps(&self, py: Python<'_>) -> PyResult<Vec<AppInfo>> {
-        self._require_active()?;
         let inner = self.inner.clone();
         let apps = py.allow_threads(|| inner.list_apps()).map_err(to_py_err)?;
         Ok(apps
@@ -873,7 +858,6 @@ impl Provider {
 
     /// Check accessibility permissions. Returns "granted" or raises PermissionDeniedError.
     fn check_permissions(&self, py: Python<'_>) -> PyResult<String> {
-        self._require_active()?;
         let inner = self.inner.clone();
         let status = py
             .allow_threads(|| inner.check_permissions())
@@ -899,7 +883,6 @@ impl Provider {
         roles: Option<Vec<String>>,
         include_raw: bool,
     ) -> PyResult<Locator> {
-        self._require_active()?;
         let target = resolve_app_target(name, pid)?;
         let opts = build_query_options(max_depth, max_elements, visible_only, roles, include_raw);
         Ok(Locator {
@@ -909,22 +892,6 @@ impl Provider {
             opts,
             nth: None,
         })
-    }
-
-    fn __enter__(mut self_: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
-        self_.activated = true;
-        self_
-    }
-
-    #[pyo3(signature = (_exc_type=None, _exc_val=None, _exc_tb=None))]
-    fn __exit__(
-        &mut self,
-        _exc_type: Option<&Bound<'_, PyAny>>,
-        _exc_val: Option<&Bound<'_, PyAny>>,
-        _exc_tb: Option<&Bound<'_, PyAny>>,
-    ) -> bool {
-        self.activated = false;
-        false
     }
 
     fn __repr__(&self) -> &'static str {
@@ -1314,8 +1281,7 @@ fn app(
     roles: Option<Vec<String>>,
     include_raw: bool,
 ) -> PyResult<Py<Tree>> {
-    let mut provider = Provider::new()?;
-    provider.activated = true;
+    let provider = Provider::new()?;
     provider.app(
         py,
         name,
@@ -1331,16 +1297,14 @@ fn app(
 /// List running applications (convenience — creates provider internally).
 #[pyfunction]
 fn list_apps(py: Python<'_>) -> PyResult<Vec<AppInfo>> {
-    let mut provider = Provider::new()?;
-    provider.activated = true;
+    let provider = Provider::new()?;
     provider.list_apps(py)
 }
 
 /// Check accessibility permissions (convenience — creates provider internally).
 #[pyfunction]
 fn check_permissions(py: Python<'_>) -> PyResult<String> {
-    let mut provider = Provider::new()?;
-    provider.activated = true;
+    let provider = Provider::new()?;
     provider.check_permissions(py)
 }
 
@@ -1834,8 +1798,5 @@ fn _make_test_provider() -> PyResult<Provider> {
         tree,
         actions: std::sync::Mutex::new(Vec::new()),
     });
-    Ok(Provider {
-        inner: provider,
-        activated: false,
-    })
+    Ok(Provider { inner: provider })
 }
