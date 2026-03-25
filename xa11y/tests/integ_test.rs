@@ -79,7 +79,7 @@ mod tests {
             has_test_app,
             "get_all_apps should include the test app. Apps: {:?}",
             tree.iter()
-                .filter(|n| n.depth <= 1)
+                .filter(|n| n.parent_index.map_or(true, |p| p == 0))
                 .map(|n| &n.name)
                 .collect::<Vec<_>>()
         );
@@ -696,27 +696,9 @@ mod tests {
         let tree = h::app_tree(&*p);
         let root = tree.root();
         assert!(tree.parent(root).is_none(), "Root should have no parent");
-        let non_root = tree.iter().find(|n| n.depth > 0);
+        let non_root = tree.iter().find(|n| n.parent_index.is_some());
         if let Some(n) = non_root {
             assert!(tree.parent(n).is_some(), "Non-root should have parent");
-        }
-    }
-
-    #[test]
-    #[ignore]
-    fn node_depth_consistent() {
-        let p = h::provider();
-        let tree = h::app_tree(&*p);
-        assert_eq!(tree.root().depth, 0);
-        for node in tree.iter() {
-            if let Some(parent) = tree.parent(node) {
-                assert_eq!(
-                    node.depth,
-                    parent.depth + 1,
-                    "Node {:?} depth mismatch",
-                    node.name
-                );
-            }
         }
     }
 
@@ -1101,10 +1083,10 @@ mod tests {
                 ..QueryOptions::default()
             },
         );
-        // The root node (depth 0) is always included even if not visible,
+        // The root node is always included even if not visible,
         // so skip it when checking visibility.
         for node in tree.iter() {
-            if node.depth == 0 {
+            if node.parent_index.is_none() {
                 continue;
             }
             assert!(
@@ -1127,9 +1109,9 @@ mod tests {
                 ..QueryOptions::default()
             },
         );
-        // The root node (depth 0) is always included to anchor the tree.
+        // The root node is always included to anchor the tree.
         for node in tree.iter() {
-            if node.depth == 0 {
+            if node.parent_index.is_none() {
                 continue;
             }
             assert_eq!(node.role, Role::Button);

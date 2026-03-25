@@ -141,9 +141,21 @@ impl Tree {
 
     /// Render the tree as an indented text representation for debugging.
     pub fn dump(&self) -> String {
+        // Compute depth from parent_index so Node doesn't need a depth field.
+        let mut depths = vec![0u32; self.nodes.len()];
+        for node in &self.nodes {
+            let d = depths[node.index as usize];
+            for &child_idx in &node.children_indices {
+                if let Some(cd) = depths.get_mut(child_idx as usize) {
+                    *cd = d + 1;
+                }
+            }
+        }
+
         let mut output = String::new();
         for node in &self.nodes {
-            let indent = "  ".repeat(node.depth as usize);
+            let depth = depths.get(node.index as usize).copied().unwrap_or(0);
+            let indent = "  ".repeat(depth as usize);
             let name_part = node
                 .name
                 .as_ref()

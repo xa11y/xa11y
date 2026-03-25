@@ -192,7 +192,6 @@ fn make_py_node(py: Python<'_>, n: &xa11y::Node) -> PyResult<Py<Node>> {
             name: n.name.clone(),
             value: n.value.clone(),
             description: n.description.clone(),
-            depth: n.depth,
             numeric_value: n.numeric_value,
             min_value: n.min_value,
             max_value: n.max_value,
@@ -315,8 +314,6 @@ struct Node {
     value: Option<String>,
     #[pyo3(get)]
     description: Option<String>,
-    #[pyo3(get)]
-    depth: u32,
     #[pyo3(get)]
     numeric_value: Option<f64>,
     #[pyo3(get)]
@@ -685,10 +682,6 @@ impl Tree {
             opts,
             nth: None,
         }
-    }
-
-    fn dump(&self) -> String {
-        self.rust_tree.dump()
     }
 
     fn __len__(&self) -> usize {
@@ -1404,7 +1397,7 @@ fn build_test_tree() -> xa11y::Tree {
             }),
             actions: vec![],
             states: StateSet::default(),
-            depth: 0,
+
             numeric_value: None,
             min_value: None,
             max_value: None,
@@ -1437,7 +1430,7 @@ fn build_test_tree() -> xa11y::Tree {
                 focused: true,
                 ..StateSet::default()
             },
-            depth: 1,
+
             numeric_value: None,
             min_value: None,
             max_value: None,
@@ -1457,7 +1450,7 @@ fn build_test_tree() -> xa11y::Tree {
             bounds_normalized: None,
             actions: vec![],
             states: StateSet::default(),
-            depth: 2,
+
             numeric_value: None,
             min_value: None,
             max_value: None,
@@ -1485,7 +1478,7 @@ fn build_test_tree() -> xa11y::Tree {
                 focusable: true,
                 ..StateSet::default()
             },
-            depth: 3,
+
             numeric_value: None,
             min_value: None,
             max_value: None,
@@ -1514,7 +1507,7 @@ fn build_test_tree() -> xa11y::Tree {
                 focusable: true,
                 ..StateSet::default()
             },
-            depth: 3,
+
             numeric_value: None,
             min_value: None,
             max_value: None,
@@ -1534,7 +1527,7 @@ fn build_test_tree() -> xa11y::Tree {
             bounds_normalized: None,
             actions: vec![],
             states: StateSet::default(),
-            depth: 2,
+
             numeric_value: None,
             min_value: None,
             max_value: None,
@@ -1563,7 +1556,7 @@ fn build_test_tree() -> xa11y::Tree {
                 focusable: true,
                 ..StateSet::default()
             },
-            depth: 3,
+
             numeric_value: None,
             min_value: None,
             max_value: None,
@@ -1587,7 +1580,7 @@ fn build_test_tree() -> xa11y::Tree {
                 focusable: true,
                 ..StateSet::default()
             },
-            depth: 3,
+
             numeric_value: None,
             min_value: None,
             max_value: None,
@@ -1615,7 +1608,7 @@ fn build_test_tree() -> xa11y::Tree {
                 focusable: true,
                 ..StateSet::default()
             },
-            depth: 3,
+
             numeric_value: Some(75.0),
             min_value: Some(0.0),
             max_value: Some(100.0),
@@ -1638,7 +1631,7 @@ fn build_test_tree() -> xa11y::Tree {
                 visible: false,
                 ..StateSet::default()
             },
-            depth: 3,
+
             numeric_value: None,
             min_value: None,
             max_value: None,
@@ -1661,7 +1654,7 @@ fn build_test_tree() -> xa11y::Tree {
                 expanded: Some(true),
                 ..StateSet::default()
             },
-            depth: 3,
+
             numeric_value: None,
             min_value: None,
             max_value: None,
@@ -1685,7 +1678,7 @@ fn build_test_tree() -> xa11y::Tree {
                 focusable: true,
                 ..StateSet::default()
             },
-            depth: 4,
+
             numeric_value: None,
             min_value: None,
             max_value: None,
@@ -1708,7 +1701,7 @@ fn build_test_tree() -> xa11y::Tree {
                 focusable: true,
                 ..StateSet::default()
             },
-            depth: 4,
+
             numeric_value: None,
             min_value: None,
             max_value: None,

@@ -83,7 +83,6 @@ fn build_tree(fuzz_nodes: &[FuzzNode]) -> Tree {
             bounds_normalized: None,
             actions: vec![],
             states: StateSet::default(),
-            depth: 0,
             stable_id: None,
             numeric_value: None,
             min_value: None,
@@ -106,13 +105,10 @@ fn build_tree(fuzz_nodes: &[FuzzNode]) -> Tree {
         }
         let desired = (fuzz_nodes[parent_idx].child_count as usize).min(8);
         let actual = desired.min(node_count - next_child);
-        let parent_depth = nodes[parent_idx].depth;
-
         for _ in 0..actual {
             let child_idx = next_child;
             next_child += 1;
             nodes[child_idx].parent_index = Some(parent_idx as u32);
-            nodes[child_idx].depth = parent_depth + 1;
             nodes[parent_idx].children_indices.push(child_idx as u32);
             queue.push(child_idx);
         }
@@ -124,7 +120,6 @@ fn build_tree(fuzz_nodes: &[FuzzNode]) -> Tree {
     // Remaining unassigned nodes become children of root.
     while next_child < node_count {
         nodes[next_child].parent_index = Some(0);
-        nodes[next_child].depth = 1;
         nodes[0].children_indices.push(next_child as u32);
         next_child += 1;
     }

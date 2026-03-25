@@ -36,9 +36,6 @@ pub struct Node {
     /// Current state flags
     pub states: StateSet,
 
-    /// Depth in the tree (0 = root)
-    pub depth: u32,
-
     /// Numeric value for range controls (sliders, progress bars, spinners).
     pub numeric_value: Option<f64>,
 

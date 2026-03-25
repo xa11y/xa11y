@@ -288,7 +288,7 @@ def _categorize_tree_methods(
         "select_text",
         "perform",
     }
-    other_names = {"locator", "dump", "__len__", "__iter__"}
+    other_names = {"locator", "__len__", "__iter__"}
 
     groups: dict[str, list[ast.FunctionDef]] = {
         "Query & Navigation": [],

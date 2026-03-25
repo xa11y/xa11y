@@ -28,7 +28,7 @@ fn sample_tree() -> Tree {
             }),
             actions: vec![],
             states: StateSet::default(),
-            depth: 0,
+
             stable_id: None,
             numeric_value: None,
             min_value: None,
@@ -52,7 +52,7 @@ fn sample_tree() -> Tree {
             bounds_normalized: None,
             actions: vec![],
             states: StateSet::default(),
-            depth: 1,
+
             stable_id: None,
             numeric_value: None,
             min_value: None,
@@ -80,7 +80,7 @@ fn sample_tree() -> Tree {
                 visible: true,
                 ..StateSet::default()
             },
-            depth: 2,
+
             stable_id: None,
             numeric_value: None,
             min_value: None,
@@ -109,7 +109,7 @@ fn sample_tree() -> Tree {
                 editable: true,
                 ..StateSet::default()
             },
-            depth: 2,
+
             stable_id: None,
             numeric_value: None,
             min_value: None,
@@ -133,7 +133,7 @@ fn sample_tree() -> Tree {
             bounds_normalized: None,
             actions: vec![],
             states: StateSet::default(),
-            depth: 1,
+
             stable_id: None,
             numeric_value: None,
             min_value: None,
@@ -152,7 +152,7 @@ fn sample_tree() -> Tree {
             bounds_normalized: None,
             actions: vec![],
             states: StateSet::default(),
-            depth: 2,
+
             stable_id: None,
             numeric_value: None,
             min_value: None,
@@ -175,7 +175,7 @@ fn sample_tree() -> Tree {
                 visible: true,
                 ..StateSet::default()
             },
-            depth: 2,
+
             stable_id: None,
             numeric_value: None,
             min_value: None,
@@ -198,7 +198,7 @@ fn sample_tree() -> Tree {
                 visible: true,
                 ..StateSet::default()
             },
-            depth: 2,
+
             stable_id: None,
             numeric_value: None,
             min_value: None,
@@ -222,7 +222,7 @@ fn sample_tree() -> Tree {
                 checked: Some(Toggled::Off),
                 ..StateSet::default()
             },
-            depth: 2,
+
             stable_id: None,
             numeric_value: None,
             min_value: None,
@@ -734,7 +734,6 @@ fn node_json_serialization() {
             focused: true,
             ..StateSet::default()
         },
-        depth: 0,
         stable_id: None,
         numeric_value: None,
         min_value: None,
