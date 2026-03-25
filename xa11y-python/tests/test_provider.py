@@ -3,7 +3,6 @@
 import pytest
 from xa11y._native import _make_test_provider
 
-
 # ── Provider creation ────────────────────────────────────────────────────────
 
 

@@ -48,6 +48,7 @@ CI runs with `RUSTFLAGS: -Dwarnings`, so all warnings are errors. Before committ
    - Build: `cd xa11y-python && pip install -e .`
    - Check: `cd xa11y-python && cargo check` (compile the Rust extension)
    - Format: `cd xa11y-python && cargo fmt -- --check`
+   - Lint: `cd xa11y-python && ruff check .` (import sorting, style — config in `pyproject.toml`)
    - Tests: `cd xa11y-python && python -m pytest tests/ -v`
 
 Common CI failures:
