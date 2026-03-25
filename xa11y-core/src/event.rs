@@ -144,7 +144,10 @@ impl EventFilter {
 }
 
 /// Desired element state for wait_for operations.
-/// Directly mirrors Playwright's `locator.waitFor({state})`.
+///
+/// Basic variants (`Attached`, `Detached`, `Visible`, `Hidden`, `Enabled`,
+/// `Disabled`, `Focused`, `Unfocused`) cover common cases. For arbitrary
+/// conditions, use [`Locator::wait_until`] with a closure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ElementState {
     /// Wait until an element matching the selector exists in the tree.
@@ -157,4 +160,34 @@ pub enum ElementState {
     Hidden,
     /// Wait until a matching element is enabled.
     Enabled,
+    /// Wait until a matching element is disabled (exists but not enabled).
+    Disabled,
+    /// Wait until a matching element has keyboard focus.
+    Focused,
+    /// Wait until a matching element does not have keyboard focus.
+    Unfocused,
+}
+
+impl ElementState {
+    /// Evaluate whether the condition is met for the given node.
+    ///
+    /// `node` is `None` when no element matched the selector.
+    pub fn is_met(self, node: Option<&Node>) -> bool {
+        match self {
+            Self::Attached => node.is_some(),
+            Self::Detached => node.is_none(),
+            Self::Visible => node.is_some_and(|n| n.states.visible),
+            Self::Hidden => node.is_none() || node.is_some_and(|n| !n.states.visible),
+            Self::Enabled => node.is_some_and(|n| n.states.enabled),
+            Self::Disabled => node.is_some_and(|n| !n.states.enabled),
+            Self::Focused => node.is_some_and(|n| n.states.focused),
+            Self::Unfocused => node.is_some_and(|n| !n.states.focused),
+        }
+    }
+
+    /// Whether this state represents an "absent" condition where the node may
+    /// not exist in the tree when the condition is met.
+    pub fn is_absence_state(self) -> bool {
+        matches!(self, Self::Detached | Self::Hidden)
+    }
 }

@@ -74,6 +74,31 @@ pub struct Node {
     pub parent_index: Option<NodeIndex>,
 }
 
+impl Node {
+    /// Create a synthetic empty node, used as a placeholder when a wait
+    /// condition is satisfied by the *absence* of a node (e.g. Detached/Hidden).
+    pub fn synthetic_empty() -> Self {
+        Self {
+            role: Role::Unknown,
+            name: None,
+            value: None,
+            description: None,
+            bounds: None,
+            bounds_normalized: None,
+            actions: vec![],
+            states: StateSet::default(),
+            numeric_value: None,
+            min_value: None,
+            max_value: None,
+            stable_id: None,
+            raw: None,
+            index: 0,
+            children_indices: vec![],
+            parent_index: None,
+        }
+    }
+}
+
 /// Boolean state flags for a node.
 ///
 /// **Semantics for non-applicable states:** When a state doesn't apply to an

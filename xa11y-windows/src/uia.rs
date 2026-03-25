@@ -1508,33 +1508,8 @@ impl EventProvider for WindowsProvider {
             let matches = tree.query(selector).ok();
             let node = matches.as_ref().and_then(|m| m.first().copied());
 
-            let condition_met = match state {
-                ElementState::Attached => node.is_some(),
-                ElementState::Detached => node.is_none(),
-                ElementState::Visible => node.is_some_and(|n| n.states.visible),
-                ElementState::Hidden => node.is_none() || node.is_some_and(|n| !n.states.visible),
-                ElementState::Enabled => node.is_some_and(|n| n.states.enabled),
-            };
-
-            if condition_met {
-                return Ok(node.cloned().unwrap_or_else(|| Node {
-                    role: Role::Unknown,
-                    name: None,
-                    value: None,
-                    description: None,
-                    bounds: None,
-                    bounds_normalized: None,
-                    actions: vec![],
-                    states: StateSet::default(),
-                    numeric_value: None,
-                    min_value: None,
-                    max_value: None,
-                    stable_id: None,
-                    raw: None,
-                    index: 0,
-                    children_indices: vec![],
-                    parent_index: None,
-                }));
+            if state.is_met(node) {
+                return Ok(node.cloned().unwrap_or_else(Node::synthetic_empty));
             }
 
             std::thread::sleep(poll_interval);
