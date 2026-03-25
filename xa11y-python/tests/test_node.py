@@ -41,14 +41,6 @@ def test_node_description_none(tree):
     assert fwd.description is None
 
 
-def test_node_depth(tree):
-    assert tree.root.depth == 0
-    window = tree.root.children[0]
-    assert window.depth == 1
-    buttons = tree.query("button")
-    assert all(b.depth == 3 for b in buttons)
-
-
 def test_node_stable_id(tree):
     assert tree.root.stable_id == "app-root"
     back = next(b for b in tree.query("button") if b.name == "Back")

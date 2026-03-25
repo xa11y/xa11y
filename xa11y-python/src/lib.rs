@@ -192,7 +192,6 @@ fn make_py_node(py: Python<'_>, n: &xa11y::Node) -> PyResult<Py<Node>> {
             name: n.name.clone(),
             value: n.value.clone(),
             description: n.description.clone(),
-            depth: n.depth,
             numeric_value: n.numeric_value,
             min_value: n.min_value,
             max_value: n.max_value,
@@ -315,8 +314,6 @@ struct Node {
     value: Option<String>,
     #[pyo3(get)]
     description: Option<String>,
-    #[pyo3(get)]
-    depth: u32,
     #[pyo3(get)]
     numeric_value: Option<f64>,
     #[pyo3(get)]
@@ -685,10 +682,6 @@ impl Tree {
             opts,
             nth: None,
         }
-    }
-
-    fn dump(&self) -> String {
-        self.rust_tree.dump()
     }
 
     fn __len__(&self) -> usize {

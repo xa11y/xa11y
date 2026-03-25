@@ -104,9 +104,6 @@ class Node:
     def description(self) -> str | None:
         """Accessible description."""
     @property
-    def depth(self) -> int:
-        """Depth in the tree (root = 0)."""
-    @property
     def numeric_value(self) -> float | None:
         """Numeric value (for sliders, progress bars, etc.)."""
     @property
@@ -168,8 +165,7 @@ class Node:
         """Whether the element is in a busy/loading state."""
     def __repr__(self) -> str: ...
     def __str__(self) -> str: ...
-    def __len__(self) -> int:
-        """Number of direct children."""
+    def __len__(self) -> int: ...
 
 # ── Target type for action methods ───────────────────────────────────────────
 
@@ -258,12 +254,8 @@ class Tree:
         include_raw: bool = False,
     ) -> Locator:
         """Create a :class:`Locator` for resilient, lazy element interaction."""
-    def dump(self) -> str:
-        """Return a human-readable string representation of the full tree."""
-    def __len__(self) -> int:
-        """Total number of nodes in the tree."""
-    def __iter__(self) -> Iterator[Node]:
-        """Iterate over all nodes in depth-first order."""
+    def __len__(self) -> int: ...
+    def __iter__(self) -> Iterator[Node]: ...
     def __repr__(self) -> str: ...
     def __str__(self) -> str: ...
 

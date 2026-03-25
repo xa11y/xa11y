@@ -27,10 +27,6 @@ def test_tree_root_is_application(tree):
     assert root.name == "TestApp"
 
 
-def test_tree_root_depth_zero(tree):
-    assert tree.root.depth == 0
-
-
 # ── Navigation (via Node.children / Node.parent) ────────────────────────────
 
 
@@ -175,15 +171,8 @@ def test_tree_repr(tree):
     assert "13" in r
 
 
-def test_tree_str_is_dump(tree):
+def test_tree_str(tree):
     s = str(tree)
     assert "[0] application" in s
     assert "button" in s
     assert "Back" in s
-
-
-def test_tree_dump(tree):
-    d = tree.dump()
-    lines = d.strip().split("\n")
-    assert len(lines) == 13
-    assert lines[0].startswith("[0]")
