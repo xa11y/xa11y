@@ -368,7 +368,6 @@ impl<'p> Locator<'p> {
                             bounds_normalized: None,
                             actions: vec![],
                             states: StateSet::default(),
-                            depth: 0,
                             numeric_value: None,
                             min_value: None,
                             max_value: None,

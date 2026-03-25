@@ -1397,7 +1397,7 @@ fn build_test_tree() -> xa11y::Tree {
             }),
             actions: vec![],
             states: StateSet::default(),
-            depth: 0,
+
             numeric_value: None,
             min_value: None,
             max_value: None,
@@ -1430,7 +1430,7 @@ fn build_test_tree() -> xa11y::Tree {
                 focused: true,
                 ..StateSet::default()
             },
-            depth: 1,
+
             numeric_value: None,
             min_value: None,
             max_value: None,
@@ -1450,7 +1450,7 @@ fn build_test_tree() -> xa11y::Tree {
             bounds_normalized: None,
             actions: vec![],
             states: StateSet::default(),
-            depth: 2,
+
             numeric_value: None,
             min_value: None,
             max_value: None,
@@ -1478,7 +1478,7 @@ fn build_test_tree() -> xa11y::Tree {
                 focusable: true,
                 ..StateSet::default()
             },
-            depth: 3,
+
             numeric_value: None,
             min_value: None,
             max_value: None,
@@ -1507,7 +1507,7 @@ fn build_test_tree() -> xa11y::Tree {
                 focusable: true,
                 ..StateSet::default()
             },
-            depth: 3,
+
             numeric_value: None,
             min_value: None,
             max_value: None,
@@ -1527,7 +1527,7 @@ fn build_test_tree() -> xa11y::Tree {
             bounds_normalized: None,
             actions: vec![],
             states: StateSet::default(),
-            depth: 2,
+
             numeric_value: None,
             min_value: None,
             max_value: None,
@@ -1556,7 +1556,7 @@ fn build_test_tree() -> xa11y::Tree {
                 focusable: true,
                 ..StateSet::default()
             },
-            depth: 3,
+
             numeric_value: None,
             min_value: None,
             max_value: None,
@@ -1580,7 +1580,7 @@ fn build_test_tree() -> xa11y::Tree {
                 focusable: true,
                 ..StateSet::default()
             },
-            depth: 3,
+
             numeric_value: None,
             min_value: None,
             max_value: None,
@@ -1608,7 +1608,7 @@ fn build_test_tree() -> xa11y::Tree {
                 focusable: true,
                 ..StateSet::default()
             },
-            depth: 3,
+
             numeric_value: Some(75.0),
             min_value: Some(0.0),
             max_value: Some(100.0),
@@ -1631,7 +1631,7 @@ fn build_test_tree() -> xa11y::Tree {
                 visible: false,
                 ..StateSet::default()
             },
-            depth: 3,
+
             numeric_value: None,
             min_value: None,
             max_value: None,
@@ -1654,7 +1654,7 @@ fn build_test_tree() -> xa11y::Tree {
                 expanded: Some(true),
                 ..StateSet::default()
             },
-            depth: 3,
+
             numeric_value: None,
             min_value: None,
             max_value: None,
@@ -1678,7 +1678,7 @@ fn build_test_tree() -> xa11y::Tree {
                 focusable: true,
                 ..StateSet::default()
             },
-            depth: 4,
+
             numeric_value: None,
             min_value: None,
             max_value: None,
@@ -1701,7 +1701,7 @@ fn build_test_tree() -> xa11y::Tree {
                 focusable: true,
                 ..StateSet::default()
             },
-            depth: 4,
+
             numeric_value: None,
             min_value: None,
             max_value: None,
