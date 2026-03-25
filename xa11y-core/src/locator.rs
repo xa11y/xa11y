@@ -320,19 +320,68 @@ impl<'p> Locator<'p> {
         self.wait_for_state(ElementState::Enabled, timeout)
     }
 
+    /// Wait until the element is disabled (exists but not enabled).
+    pub fn wait_disabled(&self, timeout: Duration) -> Result<Node> {
+        self.wait_for_state(ElementState::Disabled, timeout)
+    }
+
     /// Wait until the element is hidden or removed.
     pub fn wait_hidden(&self, timeout: Duration) -> Result<Node> {
         self.wait_for_state(ElementState::Hidden, timeout)
     }
 
-    fn wait_for_state(&self, state: ElementState, timeout: Duration) -> Result<Node> {
-        // Try to downcast to EventProvider for native wait support.
-        // Since we can't downcast trait objects, fall back to polling.
-        self.poll_for_state(state, timeout)
+    /// Wait until the element has keyboard focus.
+    pub fn wait_focused(&self, timeout: Duration) -> Result<Node> {
+        self.wait_for_state(ElementState::Focused, timeout)
     }
 
-    /// Poll-based wait: repeatedly snapshot + check until state is reached or timeout.
-    fn poll_for_state(&self, state: ElementState, timeout: Duration) -> Result<Node> {
+    /// Wait until the element does not have keyboard focus.
+    pub fn wait_unfocused(&self, timeout: Duration) -> Result<Node> {
+        self.wait_for_state(ElementState::Unfocused, timeout)
+    }
+
+    /// Wait for an [`ElementState`] condition to be met.
+    pub fn wait_for_state(&self, state: ElementState, timeout: Duration) -> Result<Node> {
+        self.poll_until(|node| state.is_met(node), state.is_absence_state(), timeout)
+    }
+
+    /// Wait until an arbitrary predicate is satisfied, polling with fresh
+    /// snapshots at ~100 ms intervals.
+    ///
+    /// The predicate receives `Some(&Node)` when the selector matches, or
+    /// `None` when no element matches. Return `true` to stop waiting.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use xa11y_core::*;
+    /// # use std::time::Duration;
+    /// # fn example(loc: &Locator) -> Result<()> {
+    /// // Wait until the element's value becomes "Done":
+    /// let node = loc.wait_until(
+    ///     |n| n.is_some_and(|n| n.value.as_deref() == Some("Done")),
+    ///     Duration::from_secs(5),
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn wait_until(
+        &self,
+        predicate: impl Fn(Option<&Node>) -> bool,
+        timeout: Duration,
+    ) -> Result<Node> {
+        self.poll_until(&predicate, false, timeout)
+    }
+
+    /// Core polling loop shared by `wait_for_state` and `wait_until`.
+    ///
+    /// `allow_absent`: when true, the condition can be satisfied even when no
+    /// node matches (used for Detached/Hidden states).
+    fn poll_until(
+        &self,
+        predicate: impl Fn(Option<&Node>) -> bool,
+        allow_absent: bool,
+        timeout: Duration,
+    ) -> Result<Node> {
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
 
@@ -347,40 +396,11 @@ impl<'p> Locator<'p> {
             let idx = self.nth.unwrap_or(0);
             let node = matches.as_ref().and_then(|m| m.get(idx).copied());
 
-            let condition_met = match state {
-                ElementState::Attached => node.is_some(),
-                ElementState::Detached => node.is_none(),
-                ElementState::Visible => node.is_some_and(|n| n.states.visible),
-                ElementState::Hidden => node.is_none() || node.is_some_and(|n| !n.states.visible),
-                ElementState::Enabled => node.is_some_and(|n| n.states.enabled),
-            };
-
-            if condition_met {
-                return match state {
-                    ElementState::Detached | ElementState::Hidden => {
-                        // For "gone" states, return the last known node or a synthetic one
-                        Ok(node.cloned().unwrap_or_else(|| Node {
-                            role: Role::Unknown,
-                            name: None,
-                            value: None,
-                            description: None,
-                            bounds: None,
-                            bounds_normalized: None,
-                            actions: vec![],
-                            states: StateSet::default(),
-                            numeric_value: None,
-                            min_value: None,
-                            max_value: None,
-                            stable_id: None,
-                            raw: None,
-                            index: 0,
-                            children_indices: vec![],
-                            parent_index: None,
-                        }))
-                    }
-                    _ => Ok(node
-                        .expect("node exists for attached/visible/enabled")
-                        .clone()),
+            if predicate(node) {
+                return if allow_absent {
+                    Ok(node.cloned().unwrap_or_else(Node::synthetic_empty))
+                } else {
+                    Ok(node.expect("predicate requires node to exist").clone())
                 };
             }
 

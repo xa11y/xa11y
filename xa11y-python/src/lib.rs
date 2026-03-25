@@ -1118,6 +1118,35 @@ impl Locator {
         self.poll_state(WaitState::Hidden, Duration::from_secs_f64(timeout))
     }
 
+    #[pyo3(signature = (timeout=5.0))]
+    fn wait_disabled(&self, timeout: f64) -> PyResult<()> {
+        self.poll_state(WaitState::Disabled, Duration::from_secs_f64(timeout))
+    }
+
+    #[pyo3(signature = (timeout=5.0))]
+    fn wait_focused(&self, timeout: f64) -> PyResult<()> {
+        self.poll_state(WaitState::Focused, Duration::from_secs_f64(timeout))
+    }
+
+    #[pyo3(signature = (timeout=5.0))]
+    fn wait_unfocused(&self, timeout: f64) -> PyResult<()> {
+        self.poll_state(WaitState::Unfocused, Duration::from_secs_f64(timeout))
+    }
+
+    /// Wait until an arbitrary predicate is satisfied.
+    ///
+    /// The callback receives a dict with the node's properties when the element
+    /// exists, or ``None`` when no element matches the selector. Return ``True``
+    /// to stop waiting.
+    ///
+    /// Example::
+    ///
+    ///     locator.wait_until(lambda n: n is not None and n["value"] == "Done")
+    #[pyo3(signature = (predicate, timeout=5.0))]
+    fn wait_until(&self, predicate: PyObject, timeout: f64) -> PyResult<()> {
+        self.poll_predicate(predicate, Duration::from_secs_f64(timeout))
+    }
+
     fn __repr__(&self) -> String {
         format!("Locator(selector='{}')", self.selector)
     }
@@ -1129,6 +1158,9 @@ enum WaitState {
     Visible,
     Hidden,
     Enabled,
+    Disabled,
+    Focused,
+    Unfocused,
 }
 
 impl Locator {
@@ -1168,6 +1200,40 @@ impl Locator {
             .map_err(to_py_err)
     }
 
+    fn poll_predicate(&self, predicate: PyObject, timeout: Duration) -> PyResult<()> {
+        let start = std::time::Instant::now();
+        let poll_interval = Duration::from_millis(100);
+
+        loop {
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                return Err(to_py_err(xa11y::Error::Timeout { elapsed }));
+            }
+
+            let node: Option<xa11y::Node> = (|| {
+                let tree = self.provider.get_app_tree(&self.target, &self.opts).ok()?;
+                let matches = tree.query(&self.selector).ok()?;
+                let idx = self.nth.unwrap_or(0);
+                matches.get(idx).copied().cloned()
+            })();
+
+            let met = Python::with_gil(|py| -> PyResult<bool> {
+                let arg: PyObject = match node.as_ref() {
+                    Some(n) => make_py_node(py, n)?.into_any(),
+                    None => py.None(),
+                };
+                let result = predicate.call1(py, (arg,))?;
+                result.extract::<bool>(py)
+            })?;
+
+            if met {
+                return Ok(());
+            }
+
+            std::thread::sleep(poll_interval);
+        }
+    }
+
     fn poll_state(&self, state: WaitState, timeout: Duration) -> PyResult<()> {
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
@@ -1194,6 +1260,9 @@ impl Locator {
                     states.is_none() || states.as_ref().is_some_and(|s| !s.visible)
                 }
                 WaitState::Enabled => states.as_ref().is_some_and(|s| s.enabled),
+                WaitState::Disabled => states.as_ref().is_some_and(|s| !s.enabled),
+                WaitState::Focused => states.as_ref().is_some_and(|s| s.focused),
+                WaitState::Unfocused => states.as_ref().is_some_and(|s| !s.focused),
             };
 
             if met {
