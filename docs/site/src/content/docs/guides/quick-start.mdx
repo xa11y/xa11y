@@ -5,6 +5,50 @@ description: Get up and running with xa11y in Rust or Python.
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
 
+## Testing with pytest
+
+xa11y is designed for accessibility testing. Here's a real-world example using pytest:
+
+```python
+import xa11y
+import pytest
+
+@pytest.fixture
+def app():
+    """Get the accessibility tree for your app under test."""
+    return xa11y.app("MyApp")
+
+def test_submit_form(app):
+    # Fill in the name field
+    app.set_value("text_input[name='Name']", "Alice")
+
+    # Check the terms checkbox
+    app.press("check_box[name='I agree to terms']")
+
+    # Click Submit
+    app.press("button[name='Submit']")
+
+    # Re-read the tree and verify the status changed
+    app = xa11y.app("MyApp")
+    status = app.find_by_name("Submitted")
+    assert len(status) >= 1, "Form should show 'Submitted' status"
+
+def test_slider_adjustment(app):
+    # Use a locator for richer assertions
+    slider = app.locator("slider[name='Volume']")
+    assert slider.is_enabled()
+    assert slider.get().numeric_value == 50.0
+
+    # Increment and verify
+    slider.increment()
+    app = xa11y.app("MyApp")
+    assert app.locator("slider[name='Volume']").get().numeric_value == 51.0
+
+def test_disabled_button(app):
+    cancel = app.locator("button[name='Cancel']")
+    assert not cancel.is_enabled(), "Cancel should be disabled until terms are accepted"
+```
+
 ## Installation
 
 <Tabs syncKey="lang">

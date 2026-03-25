@@ -51,3 +51,6 @@ select = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "integ: integration tests requiring live test app + AT-SPI2 (run via run_python_integ_tests.sh)",
+]

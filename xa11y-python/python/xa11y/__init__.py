@@ -12,6 +12,30 @@ With explicit provider:
     ...     tree = provider.app("Safari")
     ...     loc = tree.locator("button[name='Submit']")
     ...     loc.press()
+
+Testing with pytest::
+
+    import xa11y
+    import pytest
+
+    @pytest.fixture
+    def app():
+        return xa11y.app("MyApp")
+
+    def test_submit_form(app):
+        app.set_value("text_input[name='Name']", "Alice")
+        app.press("check_box[name='I agree']")
+        app.press("button[name='Submit']")
+
+        app = xa11y.app("MyApp")
+        assert app.find_by_name("Submitted")
+
+    def test_slider(app):
+        slider = app.locator("slider[name='Volume']")
+        assert slider.get().numeric_value == 50.0
+        slider.increment()
+        app = xa11y.app("MyApp")
+        assert app.locator("slider[name='Volume']").get().numeric_value == 51.0
 """
 
 from xa11y._native import (
