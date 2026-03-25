@@ -1,6 +1,8 @@
 """Tests for Provider: app(), all_apps(), list_apps(), check_permissions(), context manager."""
 
 import pytest
+from xa11y._native import _make_test_provider
+
 
 # ── Provider creation ────────────────────────────────────────────────────────
 
@@ -92,12 +94,26 @@ def test_check_permissions(provider):
 # ── Context manager ──────────────────────────────────────────────────────────
 
 
-def test_context_manager(provider):
-    with provider as p:
+def test_context_manager():
+    with _make_test_provider() as p:
         tree = p.app("TestApp")
         assert len(tree) > 0
 
 
-def test_context_manager_does_not_suppress_exceptions(provider):
-    with pytest.raises(ValueError), provider:
+def test_context_manager_does_not_suppress_exceptions():
+    with pytest.raises(ValueError), _make_test_provider():
         raise ValueError("test")
+
+
+def test_methods_fail_without_context_manager():
+    p = _make_test_provider()
+    with pytest.raises(RuntimeError, match="context manager"):
+        p.app("TestApp")
+
+
+def test_methods_fail_after_exit():
+    p = _make_test_provider()
+    with p:
+        p.app("TestApp")  # works inside
+    with pytest.raises(RuntimeError, match="context manager"):
+        p.app("TestApp")  # fails after exit
