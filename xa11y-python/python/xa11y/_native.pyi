@@ -264,7 +264,12 @@ class Tree:
 class Provider:
     """The main entry point for accessibility operations.
 
-    Implements the context manager protocol.
+    Must be used as a context manager::
+
+        with xa11y.connect() as provider:
+            tree = provider.app("Safari")
+
+    Calling methods outside a ``with`` block raises ``RuntimeError``.
     """
 
     def __init__(self) -> None:

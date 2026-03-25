@@ -7,7 +7,7 @@ Quick start:
     ...     print(button.name)
     >>> tree.press("button[name='OK']")
 
-With explicit provider:
+With explicit provider (context manager required):
     >>> with xa11y.connect() as provider:
     ...     tree = provider.app("Safari")
     ...     loc = tree.locator("button[name='Submit']")

@@ -43,17 +43,28 @@ CI runs with `RUSTFLAGS: -Dwarnings`, so all warnings are errors. Before committ
    - Linux: `./run_integ_tests.sh`
    - macOS: `./run_integ_tests_macos.sh`
 5. **No new `#[allow(...)]` without justification** — if you must suppress a warning, add a comment explaining why
+6. **Python bindings** (if touching `xa11y-python/`):
+   - `xa11y-python` is excluded from the Cargo workspace — `cargo check --workspace` does **not** cover it
+   - Build: `cd xa11y-python && pip install -e .`
+   - Check: `cd xa11y-python && cargo check` (compile the Rust extension)
+   - Format: `cd xa11y-python && cargo fmt -- --check`
+   - Lint: `cd xa11y-python && ruff check .` (import sorting, style — config in `pyproject.toml`)
+   - Tests: `cd xa11y-python && python -m pytest tests/ -v`
 
 Common CI failures:
 - `unused import` / `dead_code` — remove the unused code or add `#[allow(dead_code)]` with a reason
 - Formatting diffs — run `cargo fmt`
 - Platform stubs (`xa11y-macos` on Linux, `xa11y-linux` on macOS) — make sure stub modules compile cleanly on all platforms
+- Python binding failures — `xa11y-python` is **not** in the Cargo workspace, so workspace-wide commands skip it. You must build and test it separately (`cd xa11y-python`)
 
 ## Running Tests
 
 ```bash
 # Unit tests (no infrastructure needed)
 cargo test --workspace
+
+# Python binding tests (xa11y-python is excluded from the workspace)
+cd xa11y-python && pip install -e . && python -m pytest tests/ -v
 
 # Integration tests (Linux — needs Xvfb + D-Bus + AT-SPI2)
 ./run_integ_tests.sh
@@ -85,5 +96,6 @@ cd xa11y-fuzz/fuzz && cargo +nightly fuzz run tree_ops -- -max_total_time=60
 - `xa11y-windows/` — Windows backend (stub)
 - `xa11y/` — Umbrella crate, unit tests, integration tests
 - `xa11y-test-app/` — AccessKit + winit app used as target for integration tests
+- `xa11y-python/` — Python bindings via PyO3/maturin (excluded from Cargo workspace)
 - `xa11y-fuzz/` — Fuzz targets for xa11y-core (tree, selector, serde) and macOS platform fuzzer
 - `docs/DESIGN.md` — Full design specification
