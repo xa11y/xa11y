@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::action::{Action, ActionData};
@@ -18,8 +19,9 @@ use crate::tree::Tree;
 /// # Example
 /// ```no_run
 /// # use xa11y_core::*;
+/// # use std::sync::Arc;
 /// # use std::time::Duration;
-/// # fn example(provider: &dyn Provider) -> Result<()> {
+/// # fn example(provider: Arc<dyn Provider>) -> Result<()> {
 /// let target = AppTarget::ByName("MyApp".into());
 /// let save_btn = Locator::new(provider, target, "button[name=\"Save\"]");
 /// save_btn.press()?;           // snapshot → query → press
@@ -28,8 +30,8 @@ use crate::tree::Tree;
 /// # Ok(())
 /// # }
 /// ```
-pub struct Locator<'p> {
-    provider: &'p dyn Provider,
+pub struct Locator {
+    provider: Arc<dyn Provider>,
     target: AppTarget,
     selector: String,
     opts: QueryOptions,
@@ -45,9 +47,9 @@ struct Resolved {
     node_index: u32,
 }
 
-impl<'p> Locator<'p> {
+impl Locator {
     /// Create a new Locator with default query options.
-    pub fn new(provider: &'p dyn Provider, target: AppTarget, selector: &str) -> Self {
+    pub fn new(provider: Arc<dyn Provider>, target: AppTarget, selector: &str) -> Self {
         Self {
             provider,
             target,
@@ -59,7 +61,7 @@ impl<'p> Locator<'p> {
 
     /// Create a new Locator with custom query options.
     pub fn with_opts(
-        provider: &'p dyn Provider,
+        provider: Arc<dyn Provider>,
         target: AppTarget,
         selector: &str,
         opts: QueryOptions,
@@ -406,49 +408,5 @@ impl<'p> Locator<'p> {
 
             std::thread::sleep(poll_interval);
         }
-    }
-}
-
-/// Extension trait to create Locators directly from a Provider.
-pub trait ProviderExt {
-    /// Create a Locator targeting a specific application.
-    fn locator(&self, target: AppTarget, selector: &str) -> Locator<'_>;
-
-    /// Create a Locator with custom query options.
-    fn locator_with_opts(
-        &self,
-        target: AppTarget,
-        selector: &str,
-        opts: QueryOptions,
-    ) -> Locator<'_>;
-}
-
-impl ProviderExt for dyn Provider + '_ {
-    fn locator(&self, target: AppTarget, selector: &str) -> Locator<'_> {
-        Locator::new(self, target, selector)
-    }
-
-    fn locator_with_opts(
-        &self,
-        target: AppTarget,
-        selector: &str,
-        opts: QueryOptions,
-    ) -> Locator<'_> {
-        Locator::with_opts(self, target, selector, opts)
-    }
-}
-
-impl<P: Provider> ProviderExt for P {
-    fn locator(&self, target: AppTarget, selector: &str) -> Locator<'_> {
-        Locator::new(self, target, selector)
-    }
-
-    fn locator_with_opts(
-        &self,
-        target: AppTarget,
-        selector: &str,
-        opts: QueryOptions,
-    ) -> Locator<'_> {
-        Locator::with_opts(self, target, selector, opts)
     }
 }

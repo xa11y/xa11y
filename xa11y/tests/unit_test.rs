@@ -810,16 +810,15 @@ fn permission_status_variants() {
 
 #[test]
 fn platform_provider_creates_or_fails_gracefully() {
-    let _result = xa11y::create_provider();
+    let _result = xa11y::check_permissions();
 }
 
 #[test]
 fn platform_provider_check_permissions() {
-    let provider = match xa11y::create_provider() {
-        Ok(p) => p,
+    let status = match xa11y::check_permissions() {
+        Ok(s) => s,
         Err(_) => return,
     };
-    let status = provider.check_permissions().unwrap();
     match status {
         PermissionStatus::Granted | PermissionStatus::Denied { .. } => {}
     }
@@ -827,18 +826,17 @@ fn platform_provider_check_permissions() {
 
 #[test]
 fn platform_provider_operations_return_errors() {
-    let provider = match xa11y::create_provider() {
-        Ok(p) => p,
-        Err(_) => return,
-    };
+    if xa11y::check_permissions().is_err() {
+        return;
+    }
 
-    let result = provider.get_app_tree(
+    let result = xa11y::app(
         &AppTarget::ByName("NonexistentApp12345".to_string()),
         &QueryOptions::default(),
     );
     assert!(result.is_err());
 
-    let _result = provider.list_apps();
+    let _result = xa11y::list_apps();
 }
 
 // ── Selector edge cases ──
@@ -936,10 +934,10 @@ impl Provider for MockProvider {
 
 #[test]
 fn locator_basic_query() {
-    use xa11y::ProviderExt;
-    let p = MockProvider::new();
+    use std::sync::Arc;
+    let p: Arc<dyn Provider> = Arc::new(MockProvider::new());
     let target = AppTarget::ByName("My App".into());
-    let loc = p.locator(target, "button[name=\"Submit\"]");
+    let loc = Locator::new(Arc::clone(&p), target, "button[name=\"Submit\"]");
     assert_eq!(loc.role().unwrap(), Role::Button);
     assert_eq!(loc.name().unwrap().as_deref(), Some("Submit"));
     assert!(loc.exists().unwrap());
@@ -947,10 +945,14 @@ fn locator_basic_query() {
 
 #[test]
 fn locator_press_dispatches_action() {
-    use xa11y::ProviderExt;
-    let p = MockProvider::new();
+    use std::sync::Arc;
+    let p = Arc::new(MockProvider::new());
     let target = AppTarget::ByName("My App".into());
-    let loc = p.locator(target, "button[name=\"Submit\"]");
+    let loc = Locator::new(
+        Arc::clone(&p) as Arc<dyn Provider>,
+        target,
+        "button[name=\"Submit\"]",
+    );
     loc.press().unwrap();
     let (idx, action) = p.last_action.lock().unwrap().unwrap();
     assert_eq!(action, Action::Press);
@@ -960,59 +962,59 @@ fn locator_press_dispatches_action() {
 
 #[test]
 fn locator_not_found() {
-    use xa11y::ProviderExt;
-    let p = MockProvider::new();
+    use std::sync::Arc;
+    let p: Arc<dyn Provider> = Arc::new(MockProvider::new());
     let target = AppTarget::ByName("My App".into());
-    let loc = p.locator(target, "button[name=\"NonExistent\"]");
+    let loc = Locator::new(Arc::clone(&p), target, "button[name=\"NonExistent\"]");
     assert!(!loc.exists().unwrap());
     assert!(loc.press().is_err());
 }
 
 #[test]
 fn locator_nth() {
-    use xa11y::ProviderExt;
-    let p = MockProvider::new();
+    use std::sync::Arc;
+    let p: Arc<dyn Provider> = Arc::new(MockProvider::new());
     let target = AppTarget::ByName("My App".into());
     // There are 3 buttons: Back(2), Submit(6), Cancel(7)
-    let loc = p.locator(target, "button").nth(1);
+    let loc = Locator::new(Arc::clone(&p), target, "button").nth(1);
     assert_eq!(loc.name().unwrap().as_deref(), Some("Submit"));
 }
 
 #[test]
 fn locator_count() {
-    use xa11y::ProviderExt;
-    let p = MockProvider::new();
+    use std::sync::Arc;
+    let p: Arc<dyn Provider> = Arc::new(MockProvider::new());
     let target = AppTarget::ByName("My App".into());
-    let loc = p.locator(target, "button");
+    let loc = Locator::new(Arc::clone(&p), target, "button");
     assert_eq!(loc.count().unwrap(), 3);
 }
 
 #[test]
 fn locator_child() {
-    use xa11y::ProviderExt;
-    let p = MockProvider::new();
+    use std::sync::Arc;
+    let p: Arc<dyn Provider> = Arc::new(MockProvider::new());
     let target = AppTarget::ByName("My App".into());
-    let loc = p.locator(target, "toolbar").child("button");
+    let loc = Locator::new(Arc::clone(&p), target, "toolbar").child("button");
     // Toolbar has one button child: "Back"
     assert_eq!(loc.name().unwrap().as_deref(), Some("Back"));
 }
 
 #[test]
 fn locator_states() {
-    use xa11y::ProviderExt;
-    let p = MockProvider::new();
+    use std::sync::Arc;
+    let p: Arc<dyn Provider> = Arc::new(MockProvider::new());
     let target = AppTarget::ByName("My App".into());
     // Cancel button is disabled
-    let loc = p.locator(target, "button[name=\"Cancel\"]");
+    let loc = Locator::new(Arc::clone(&p), target, "button[name=\"Cancel\"]");
     assert!(!loc.is_enabled().unwrap());
     assert!(loc.is_visible().unwrap());
 }
 
 #[test]
 fn locator_selector_getter() {
-    use xa11y::ProviderExt;
-    let p = MockProvider::new();
+    use std::sync::Arc;
+    let p: Arc<dyn Provider> = Arc::new(MockProvider::new());
     let target = AppTarget::ByName("My App".into());
-    let loc = p.locator(target, "button").child("text_field");
+    let loc = Locator::new(Arc::clone(&p), target, "button").child("text_field");
     assert_eq!(loc.selector(), "button > text_field");
 }
