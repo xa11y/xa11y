@@ -33,13 +33,21 @@ pub use xa11y_core::*;
 
 // ── Internal singleton ──────────────────────────────────────────────────────
 
+// The singleton leaks one Arc ref-count so the provider is never dropped
+// during static destructor teardown — Windows COM objects crash if dropped
+// after CoUninitialize has already run.
 static PROVIDER: OnceLock<std::result::Result<Arc<dyn Provider>, String>> = OnceLock::new();
 
 fn get_provider() -> Result<Arc<dyn Provider>> {
     PROVIDER
         .get_or_init(|| {
             create_provider_boxed()
-                .map(Arc::from)
+                .map(|b| {
+                    let arc: Arc<dyn Provider> = Arc::from(b);
+                    // Leak one ref-count so Drop never runs at process exit.
+                    std::mem::forget(arc.clone());
+                    arc
+                })
                 .map_err(|e| format!("{e}"))
         })
         .as_ref()
