@@ -250,7 +250,6 @@ class Tree:
         max_elements: int | None = None,
         visible_only: bool = False,
         roles: list[str] | None = None,
-        include_raw: bool = False,
     ) -> Locator:
         """Create a :class:`Locator` for resilient, lazy element interaction."""
     def __len__(self) -> int: ...
@@ -362,7 +361,6 @@ def app(
     max_elements: int | None = None,
     visible_only: bool = False,
     roles: list[str] | None = None,
-    include_raw: bool = False,
 ) -> Tree:
     """Get the accessibility tree for the given app.
 
@@ -375,7 +373,6 @@ def all_apps(
     max_elements: int | None = None,
     visible_only: bool = False,
     roles: list[str] | None = None,
-    include_raw: bool = False,
 ) -> Tree:
     """Get a combined accessibility tree for all running applications."""
 
@@ -388,7 +385,6 @@ def locator(
     max_elements: int | None = None,
     visible_only: bool = False,
     roles: list[str] | None = None,
-    include_raw: bool = False,
 ) -> Locator:
     """Create a :class:`Locator` for lazy element resolution."""
 

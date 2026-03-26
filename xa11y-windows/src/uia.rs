@@ -401,7 +401,7 @@ impl WindowsProvider {
         let actions = get_actions(element, role);
 
         // Raw platform data
-        let raw = if opts.include_raw {
+        let raw = {
             let automation_id = unsafe { element.CurrentAutomationId() }
                 .ok()
                 .map(|s| s.to_string())
@@ -410,13 +410,11 @@ impl WindowsProvider {
                 .ok()
                 .map(|s| s.to_string())
                 .filter(|s| !s.is_empty());
-            Some(RawPlatformData::Windows {
+            RawPlatformData::Windows {
                 control_type_id: control_type.0,
                 automation_id,
                 class_name,
-            })
-        } else {
-            None
+            }
         };
 
         // Stable ID: AutomationId (always captured for cross-snapshot correlation)
@@ -648,7 +646,7 @@ impl Provider for WindowsProvider {
             numeric_value: None,
             min_value: None,
             max_value: None,
-            raw: None,
+            raw: RawPlatformData::Synthetic,
             index: 0,
             children_indices: vec![],
             parent_index: None,

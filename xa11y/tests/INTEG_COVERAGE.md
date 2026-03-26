@@ -56,7 +56,7 @@ Last updated: 2026-03-19
 | `parent` | Covered | `node_parent_field` |
 | `depth` | Covered | `node_depth_consistent` |
 | `app_name` | Covered | `app_name_populated_all_nodes` |
-| `raw` | Covered | `opts_include_raw` |
+| `raw` | Covered | `raw_data_always_present` |
 
 ## StateSet Fields
 
@@ -78,7 +78,6 @@ Last updated: 2026-03-19
 |-------|--------|-------|
 | `max_depth` | Covered | `opts_max_depth` |
 | `max_elements` | Covered | `opts_max_elements` |
-| `include_raw` | Covered | `opts_include_raw` |
 | `visible_only` | Covered | `opts_visible_only` |
 | `roles` | Covered | `opts_roles_filter` |
 

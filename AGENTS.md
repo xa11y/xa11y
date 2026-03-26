@@ -17,7 +17,6 @@ When adding new tests:
 Integration tests use shared helpers from `xa11y/tests/integ/mod.rs`:
 - `h::provider()` — create platform provider
 - `h::app_tree(p)` — get test app tree with retries
-- `h::raw_tree(p)` — get tree with `include_raw: true`
 - `h::named(tree, "Submit")` — find node by name substring
 - `h::act(p, tree, id, action)` — perform action, wait, re-read tree
 

@@ -885,15 +885,10 @@ impl MacOSProvider {
         // Stable ID: AXIdentifier (always captured for cross-snapshot correlation)
         let ax_identifier = ax_string(element.as_ptr(), "AXIdentifier");
 
-        // Raw platform data (user-visible, opt-in)
-        let raw = if opts.include_raw {
-            Some(RawPlatformData::MacOS {
-                ax_role: role_str,
-                ax_subrole: subrole_str,
-                ax_identifier: ax_identifier.clone(),
-            })
-        } else {
-            None
+        let raw = RawPlatformData::MacOS {
+            ax_role: role_str,
+            ax_subrole: subrole_str,
+            ax_identifier: ax_identifier.clone(),
         };
 
         // Numeric value for range controls
@@ -1078,7 +1073,7 @@ impl Provider for MacOSProvider {
             numeric_value: None,
             min_value: None,
             max_value: None,
-            raw: None,
+            raw: RawPlatformData::Synthetic,
         });
         elements.push(AXElement(std::ptr::null())); // placeholder
 
@@ -1434,7 +1429,7 @@ unsafe extern "C" fn ax_observer_callback(
             min_value: None,
             max_value: None,
             stable_id: None,
-            raw: None,
+            raw: RawPlatformData::Synthetic,
             index: 0,
             children_indices: vec![],
             parent_index: None,

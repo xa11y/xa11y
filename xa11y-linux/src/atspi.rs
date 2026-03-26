@@ -413,19 +413,17 @@ impl LinuxProvider {
             }
         });
 
-        let raw = if opts.include_raw {
+        let raw = {
             let raw_role = if role_name.is_empty() {
                 format!("role_num:{}", role_num)
             } else {
                 role_name
             };
-            Some(xa11y_core::RawPlatformData::Linux {
+            xa11y_core::RawPlatformData::Linux {
                 atspi_role: raw_role,
                 bus_name: aref.bus_name.clone(),
                 object_path: aref.path.clone(),
-            })
-        } else {
-            None
+            }
         };
 
         let (numeric_value, min_value, max_value) = if matches!(
@@ -790,7 +788,7 @@ impl Provider for LinuxProvider {
             min_value: None,
             max_value: None,
             stable_id: None,
-            raw: None,
+            raw: xa11y_core::RawPlatformData::Synthetic,
             index: 0,
             children_indices: vec![],
             parent_index: None,

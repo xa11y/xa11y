@@ -37,17 +37,6 @@ pub fn app_tree_with(p: &dyn Provider, opts: &QueryOptions) -> Tree {
     unreachable!()
 }
 
-/// Get the test app tree with `include_raw: true`.
-pub fn raw_tree(p: &dyn Provider) -> Tree {
-    app_tree_with(
-        p,
-        &QueryOptions {
-            include_raw: true,
-            ..QueryOptions::default()
-        },
-    )
-}
-
 /// Find exactly one node by selector. Panics with tree dump on failure.
 pub fn one<'a>(tree: &'a Tree, selector: &str) -> &'a Node {
     let results = tree.query(selector).unwrap_or_else(|e| {
@@ -96,5 +85,5 @@ pub fn act_with(
     p.perform_action(tree, node, action, data)
         .unwrap_or_else(|e| panic!("Action {:?} failed: {}", action, e));
     std::thread::sleep(std::time::Duration::from_millis(100));
-    raw_tree(p)
+    app_tree(p)
 }

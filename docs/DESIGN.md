@@ -483,24 +483,9 @@ pub struct QueryOptions {
     pub max_elements: Option<u32>,
     pub visible_only: bool,
     pub roles: Option<Vec<Role>>,   // filter to specific roles
-    pub include_raw: bool,           // include platform-specific data in nodes
 }
-// Note: `include_raw` controls whether RawPlatformData is populated on nodes.
-// It is decoupled from action dispatch — platform handles are always cached
-// internally regardless of this setting.
-
-
-impl Default for QueryOptions {
-    fn default() -> Self {
-        Self {
-            max_depth: None,
-            max_elements: None,
-            visible_only: false,
-            roles: None,
-            include_raw: false,
-        }
-    }
-}
+// Note: RawPlatformData is always populated on nodes. Platform handles are
+// always cached internally for action dispatch.
 
 pub enum ActionData {
     Value(String),
@@ -699,7 +684,7 @@ This is necessary because:
 
 ### Cross-Platform
 - **Element index stability:** Internal indices are assigned in DFS order during traversal. If the UI changes between snapshot and action dispatch, indices may no longer match. The re-traversal mechanism mitigates this (using the platform handle cache), but there's an inherent race condition. If re-traversal cannot relocate the element, `Error::ElementStale` is returned.
-- **Role granularity mismatch:** macOS has fewer roles (AXGroup covers many things), Windows has more specific control types, and Linux AT-SPI has the most roles. Normalization loses some information — `include_raw: true` preserves the original platform data on each node.
+- **Role granularity mismatch:** macOS has fewer roles (AXGroup covers many things), Windows has more specific control types, and Linux AT-SPI has the most roles. Normalization loses some information — the `raw` field on each node preserves the original platform data.
 - **Text input:** Programmatic text input varies wildly:
   - macOS: Set AXValue attribute (works for text fields, not for all editable areas)
   - Windows: ValuePattern.SetValue() or TextPattern
