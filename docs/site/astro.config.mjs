@@ -2,8 +2,7 @@ import { defineConfig } from "astro/config";
 import starlight from "@astrojs/starlight";
 
 export default defineConfig({
-  site: "https://xa11y.github.io",
-  base: "/xa11y",
+  site: "https://xa11y.dev",
   integrations: [
     starlight({
       title: "xa11y",

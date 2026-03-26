@@ -28,7 +28,7 @@ OUTPUT_PATH = (
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 PRIVATE_PREFIXES = ("_",)
-DUNDER_ALLOWLIST = {"__init__", "__len__", "__iter__"}
+DUNDER_ALLOWLIST = {"__init__", "__iter__"}
 SKIP_DUNDERS = {"__repr__", "__str__", "__eq__", "__enter__", "__exit__"}
 
 
@@ -209,18 +209,57 @@ with xa11y.connect() as provider:
 ```"""
 
 
+def _render_param_table(func: ast.FunctionDef, *, skip_self: bool = True) -> list[str]:
+    """Render function parameters as a Markdown table."""
+    args = func.args
+    all_args = args.args
+    defaults = args.defaults
+    num_no_default = len(all_args) - len(defaults)
+    rows: list[str] = []
+
+    for i, arg in enumerate(all_args):
+        if skip_self and i == 0 and arg.arg in ("self", "cls"):
+            continue
+        ann = _escape_table_pipe(_unparse_annotation(arg.annotation))
+        default_idx = i - num_no_default
+        default = ""
+        if default_idx >= 0 and defaults[default_idx] is not None:
+            default = f"`{ast.unparse(defaults[default_idx])}`"
+        rows.append(f"| `{arg.arg}` | `{ann}` | {default} |")
+
+    for i, arg in enumerate(args.kwonlyargs):
+        ann = _escape_table_pipe(_unparse_annotation(arg.annotation))
+        default = ""
+        if i < len(args.kw_defaults) and args.kw_defaults[i] is not None:
+            default = f"`{ast.unparse(args.kw_defaults[i])}`"
+        rows.append(f"| `{arg.arg}` | `{ann}` | {default} |")
+
+    if not rows:
+        return []
+    return [
+        "| Parameter | Type | Default |",
+        "| --------- | ---- | ------- |",
+        *rows,
+    ]
+
+
 def _render_function_section(func: ast.FunctionDef, *, prefix: str = "xa11y") -> str:
-    sig = _format_signature(func, skip_self=False)
     ret = _unparse_annotation(func.returns)
     doc = _full_docstring(func)
-    lines = [f"### `{prefix}.{func.name}({sig}){_format_return(ret)}`"]
+    lines = [f"### `{prefix}.{func.name}(){_format_return(ret)}`"]
     if doc:
         lines.append("")
-        # Render each paragraph as a separate block, removing rst-style indentation
         for paragraph in doc.split("\n\n"):
             cleaned = "\n".join(line.strip() for line in paragraph.splitlines())
             lines.append(cleaned)
             lines.append("")
+
+    param_table = _render_param_table(func, skip_self=False)
+    if param_table:
+        lines.append("")
+        lines.extend(param_table)
+        lines.append("")
+
     return "\n".join(lines).rstrip()
 
 
@@ -269,26 +308,6 @@ def _categorize_tree_methods(
 ) -> dict[str, list[ast.FunctionDef]]:
     """Split Tree methods into semantic groups."""
     query_names = {"children", "parent", "query", "find_by_role", "find_by_name"}
-    action_names = {
-        "press",
-        "focus",
-        "blur",
-        "toggle",
-        "expand",
-        "collapse",
-        "select",
-        "increment",
-        "decrement",
-        "show_menu",
-        "scroll_into_view",
-        "set_value",
-        "set_numeric_value",
-        "type_text",
-        "scroll",
-        "select_text",
-        "perform",
-    }
-    other_names = {"locator", "__len__", "__iter__"}
 
     groups: dict[str, list[ast.FunctionDef]] = {
         "Query & Navigation": [],
@@ -298,10 +317,10 @@ def _categorize_tree_methods(
     for m in methods:
         if m.name in query_names:
             groups["Query & Navigation"].append(m)
-        elif m.name in action_names:
-            groups["Action Shortcuts"].append(m)
-        elif m.name in other_names:
+        elif m.name.startswith("__"):
             groups["Other"].append(m)
+        else:
+            groups["Action Shortcuts"].append(m)
     return groups
 
 
@@ -321,31 +340,6 @@ def _categorize_locator_methods(
         "count",
         "get",
     }
-    action_names = {
-        "press",
-        "focus",
-        "blur",
-        "toggle",
-        "expand",
-        "collapse",
-        "select_item",
-        "show_menu",
-        "scroll_into_view",
-        "increment",
-        "decrement",
-        "set_value",
-        "set_numeric_value",
-        "type_text",
-        "select_text",
-        "scroll",
-    }
-    wait_names = {
-        "wait_visible",
-        "wait_attached",
-        "wait_detached",
-        "wait_enabled",
-        "wait_hidden",
-    }
 
     groups: dict[str, list[ast.FunctionDef]] = {
         "Navigation": [],
@@ -358,10 +352,10 @@ def _categorize_locator_methods(
             groups["Navigation"].append(m)
         elif m.name in inspect_names:
             groups["Inspection"].append(m)
-        elif m.name in action_names:
-            groups["Actions"].append(m)
-        elif m.name in wait_names:
+        elif m.name.startswith("wait_"):
             groups["Waiting"].append(m)
+        else:
+            groups["Actions"].append(m)
     return groups
 
 
