@@ -54,7 +54,7 @@ jobs:
         run: cargo test --workspace
 
       - name: Run integration tests
-        run: ./run_integ_tests.sh
+        run: ./scripts/run_integ_tests.sh
 
   # ── macOS: unit tests ──────────────────────────────────────────────
   macos:

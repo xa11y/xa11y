@@ -8,9 +8,9 @@ When adding new tests:
 
 1. Check the coverage file to identify gaps — prioritize uncovered areas.
 2. If the test app (`xa11y-test-app`) lacks a widget needed for a test, add it to the test app first. The test app uses AccessKit + winit and is defined in `xa11y-test-app/src/main.rs`.
-3. All integration tests must be `#[ignore]` and run via `./run_integ_tests.sh` (Linux) or `./run_integ_tests_macos.sh` (macOS).
+3. All integration tests must be `#[ignore]` and run via `cargo xtask test-integ`.
 4. After adding tests, update `INTEG_COVERAGE.md` to reflect the new coverage.
-5. Run `./run_integ_tests.sh` to verify tests pass before committing.
+5. Run `cargo xtask test-integ` to verify tests pass before committing.
 
 ### Test helpers
 
@@ -33,58 +33,45 @@ Integration tests use shared helpers from `xa11y/tests/integ/mod.rs`:
 
 ## Pre-Commit / Pre-PR Checklist
 
-CI runs with `RUSTFLAGS: -Dwarnings`, so all warnings are errors. Before committing or opening a PR, verify:
+Run `cargo xtask check` to run all pre-PR checks in one command. It covers formatting, linting, unit tests, and Python bindings.
 
-1. **Formatting** — `cargo fmt --all` (CI runs `cargo fmt --all -- --check`)
-2. **No warnings** — `RUSTFLAGS="-Dwarnings" cargo check --workspace` (catches unused imports, dead code, etc.)
-3. **Unit tests pass** — `cargo test --workspace`
-4. **Integration tests pass** (if touching provider/test-app code):
-   - Linux: `./run_integ_tests.sh`
-   - macOS: `./run_integ_tests_macos.sh`
-5. **No new `#[allow(...)]` without justification** — if you must suppress a warning, add a comment explaining why
-6. **Python bindings** (if touching `xa11y-python/`):
-   - `xa11y-python` is excluded from the Cargo workspace — `cargo check --workspace` does **not** cover it
-   - Build: `cd xa11y-python && pip install -e .`
-   - Check: `cd xa11y-python && cargo check` (compile the Rust extension)
-   - Format: `cd xa11y-python && cargo fmt -- --check`
-   - Lint: `cd xa11y-python && ruff check .` (import sorting, style — config in `pyproject.toml`)
-   - Tests: `cd xa11y-python && python -m pytest tests/ -v`
+CI runs with `RUSTFLAGS: -Dwarnings`, so all warnings are errors. Individual checks:
+
+1. **Formatting** — `cargo xtask fmt` (use `cargo xtask fmt --check` to verify without modifying)
+2. **Lint** — `cargo xtask lint` (clippy + ruff check + Python Rust check)
+3. **Unit tests** — `cargo xtask test`
+4. **Integration tests** (if touching provider/test-app code) — `cargo xtask test-integ`
+5. **Python bindings** — `cargo xtask test-python`
+6. **No new `#[allow(...)]` without justification** — if you must suppress a warning, add a comment explaining why
 
 Common CI failures:
 - `unused import` / `dead_code` — remove the unused code or add `#[allow(dead_code)]` with a reason
-- Formatting diffs — run `cargo fmt`
+- Formatting diffs — run `cargo xtask fmt`
 - Platform stubs (`xa11y-macos` on Linux, `xa11y-linux` on macOS) — make sure stub modules compile cleanly on all platforms
-- Python binding failures — `xa11y-python` is **not** in the Cargo workspace, so workspace-wide commands skip it. You must build and test it separately (`cd xa11y-python`)
+- Python binding failures — `xa11y-python` is **not** in the Cargo workspace, so workspace-wide commands skip it. `cargo xtask lint` and `cargo xtask test-python` handle this automatically.
 
 ## Running Tests
 
 ```bash
-# Unit tests (no infrastructure needed)
-cargo test --workspace
+# All pre-PR checks (fmt, lint, test, test-python)
+cargo xtask check
 
-# Python binding tests (xa11y-python is excluded from the workspace)
-cd xa11y-python && pip install -e . && python -m pytest tests/ -v
-
-# Integration tests (Linux — needs Xvfb + D-Bus + AT-SPI2)
-./run_integ_tests.sh
-
-# Integration tests (Linux from macOS — via Finch container)
-./run_integ_container.sh                      # all tests
-./run_integ_container.sh tree_has_buttons      # single test
-./run_integ_container.sh --shell               # interactive debug
-
-# Integration tests (macOS — needs xa11y-macos provider)
-./run_integ_tests_macos.sh
-
-# Platform provider fuzzer (needs test app running)
-./run_provider_fuzz.sh                    # random seed, 10k iterations
-./run_provider_fuzz.sh --seed 42 -n 5000  # reproducible
+# Individual commands
+cargo xtask fmt                               # format Rust + Python
+cargo xtask fmt --check                       # check without modifying
+cargo xtask lint                              # clippy + ruff + Python Rust check
+cargo xtask test                              # unit tests
+cargo xtask test-python                       # build + test Python bindings
+cargo xtask test-integ                        # integration tests (auto-detects OS)
+cargo xtask test-integ-container              # Linux integration tests via Finch
+cargo xtask test-integ-container tree_has_buttons  # single test in container
+cargo xtask fuzz                              # provider fuzzer
+cargo xtask fuzz --seed 42 -n 5000            # reproducible fuzz run
+cargo xtask coverage                          # code coverage report
+cargo xtask docs                              # build documentation
 
 # Core fuzz tests (requires nightly)
 cd xa11y-fuzz/fuzz && cargo +nightly fuzz run tree_ops -- -max_total_time=60
-
-# Coverage report
-./coverage.sh
 ```
 
 ## Project Structure
@@ -97,4 +84,6 @@ cd xa11y-fuzz/fuzz && cargo +nightly fuzz run tree_ops -- -max_total_time=60
 - `xa11y-test-app/` — AccessKit + winit app used as target for integration tests
 - `xa11y-python/` — Python bindings via PyO3/maturin (excluded from Cargo workspace)
 - `xa11y-fuzz/` — Fuzz targets for xa11y-core (tree, selector, serde) and macOS platform fuzzer
+- `xtask/` — Development workflow commands (`cargo xtask <command>`)
+- `scripts/` — Shell scripts for integration tests, fuzzing, coverage
 - `docs/DESIGN.md` — Full design specification
