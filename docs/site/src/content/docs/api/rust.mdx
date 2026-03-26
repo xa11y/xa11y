@@ -52,13 +52,13 @@ A snapshot of an application's accessibility tree.
 ```rust
 // Query elements with CSS-like selectors
 let buttons = tree.query("button")?;
-let submit = tree.query_one("button[name='Submit']")?;
 
 // Access the root node
 let root = tree.root();
 
-// Create a locator for resilient interaction
-let loc = tree.locator("button[name='OK']");
+// Navigate the tree
+let children = tree.children(root);
+let parent = tree.parent(&children[0]);
 ```
 
 ### Node
@@ -72,21 +72,30 @@ println!("Role: {:?}", node.role);
 println!("Name: {:?}", node.name);
 println!("Description: {:?}", node.description);
 println!("Value: {:?}", node.value);
-println!("Bounds: {:?}", node.bounding_rect);
+println!("Bounds: {:?}", node.bounds);
 println!("States: {:?}", node.states);
-println!("Children: {}", node.children.len());
+println!("Children: {}", tree.children(node).len());
 ```
 
 ### Locator
 
-A resilient element reference that re-queries on each interaction.
+A lazy element descriptor that re-queries against a fresh tree snapshot on every operation, making it immune to staleness.
 
 ```rust
-let loc = tree.locator("textfield[name='Email']");
+use xa11y::*;
 
-loc.press(&*provider)?;
-loc.set_value(&*provider, "user@example.com")?;
-loc.focus(&*provider)?;
+let provider = create_provider()?;
+let target = AppTarget::ByName("MyApp".to_string());
+
+let email = Locator::new(&*provider, target, "textfield[name='Email']");
+
+email.press()?;
+email.set_value("user@example.com")?;
+email.focus()?;
+
+// Wait for state changes
+use std::time::Duration;
+email.wait_visible(Duration::from_secs(5))?;
 ```
 
 ### Error
@@ -96,7 +105,10 @@ All operations return `xa11y::Result<T>`, which uses the `xa11y::Error` enum:
 - `PermissionDenied` — accessibility access not granted
 - `AppNotFound` — target application not running
 - `SelectorNotMatched` — no element matched the selector
+- `ElementStale` — element no longer exists after re-query
 - `ActionNotSupported` — action not available on this element
+- `TextValueNotSupported` — element does not support text values
 - `InvalidSelector` — malformed selector syntax
+- `InvalidActionData` — action data does not match the action
 - `Platform` — OS-level error
 - `Timeout` — operation timed out

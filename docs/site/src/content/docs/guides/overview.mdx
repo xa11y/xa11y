@@ -37,16 +37,16 @@ Desktop operating systems expose UI structure through accessibility APIs (origin
 ## Architecture
 
 ```
-┌─────────────────────────────────────────┐
-│              xa11y (umbrella)            │
-│   create_provider() → Box<dyn Provider> │
-├─────────────────────────────────────────┤
-│             xa11y-core                  │
-│  Tree, Node, Role, Selector, Locator    │
-├───────────┬──────────────┬──────────────┤
-│ xa11y-mac │ xa11y-linux   │ xa11y-win   │
-│ AXUIElem  │ AT-SPI2/zbus  │ UIA (stub)  │
-└───────────┴──────────────┴──────────────┘
+┌──────────────────────────────────────────────┐
+│               xa11y (umbrella)               │
+│    create_provider() → Box<dyn Provider>     │
+├──────────────────────────────────────────────┤
+│              xa11y-core                      │
+│   Tree, Node, Role, Selector, Locator        │
+├──────────────┬──────────────┬────────────────┤
+│ xa11y-macos  │ xa11y-linux  │ xa11y-windows  │
+│ AXUIElement  │ AT-SPI2/zbus │ UIA (stub)     │
+└──────────────┴──────────────┴────────────────┘
 ```
 
 ## Crate Structure
@@ -64,15 +64,18 @@ xa11y uses a CSS-like selector syntax to query accessibility trees:
 
 ```
 button                          # by role
-button[name='Submit']           # role + attribute
+button[name='Submit']           # role + exact attribute match
 textfield[name^='Search']       # starts-with
-checkbox:checked                # pseudo-class (state)
+textfield[name*='email']        # contains (case-insensitive)
+button[name$='Cancel']          # ends-with
 group > button                  # direct child
 window button[name='OK']        # descendant
+button:nth(2)                   # 2nd match
 ```
 
-Supported attributes: `name`, `description`, `value`, `role_description`.
-Supported pseudo-classes: `:checked`, `:disabled`, `:expanded`, `:focused`, `:selected`.
+Supported attributes: `name`, `value`, `description`, `role`.
+Supported operators: `=` (exact), `*=` (contains), `^=` (starts-with), `$=` (ends-with).
+Pseudo-selectors: `:nth(n)` to select the nth match.
 
 ## Supported Actions
 
@@ -86,6 +89,7 @@ Supported pseudo-classes: `:checked`, `:disabled`, `:expanded`, `:focused`, `:se
 | `select`           | Select an item                     |
 | `set_value`        | Set a text field's value           |
 | `type_text`        | Type text into an element          |
+| `set_text_selection` | Select a text range by offsets   |
 | `increment` / `decrement` | Adjust a slider or stepper  |
 | `scroll`           | Scroll in a direction              |
 | `scroll_into_view` | Scroll element into the viewport   |

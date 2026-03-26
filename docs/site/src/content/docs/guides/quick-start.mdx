@@ -84,7 +84,7 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
         )?;
 
         println!("Root: {:?}", tree.root().role);
-        println!("Children: {}", tree.root().children.len());
+        println!("Children: {}", tree.children(tree.root()).len());
 
         Ok(())
     }
@@ -122,8 +122,9 @@ xa11y supports CSS-like selectors to find elements in the tree.
     let buttons = tree.query("button")?;
 
     // Find a button by name
-    let submit = tree.query_one("button[name='Submit']")?;
-    println!("Found: {}", submit.name.as_deref().unwrap_or("unnamed"));
+    let submit = tree.query("button[name='Submit']")?;
+    let first = &submit[0];
+    println!("Found: {}", first.name.as_deref().unwrap_or("unnamed"));
 
     // Find text fields
     let fields = tree.query("textfield")?;
@@ -140,7 +141,7 @@ xa11y supports CSS-like selectors to find elements in the tree.
         print(button.name)
 
     # Find a specific button
-    submit = tree.query_one("button[name='Submit']")
+    submit = tree.query("button[name='Submit']")[0]
     print(f"Found: {submit.name}")
 
     # Find text fields
@@ -157,20 +158,17 @@ xa11y supports CSS-like selectors to find elements in the tree.
     use xa11y::*;
 
     let provider = create_provider()?;
-    let tree = provider.get_app_tree(
-        &AppTarget::ByName("Safari".to_string()),
-        &QueryOptions::default(),
-    )?;
+    let target = AppTarget::ByName("Safari".to_string());
 
     // Use a Locator for resilient element interaction
-    let locator = tree.locator("button[name='Submit']");
+    let submit = Locator::new(&*provider, target.clone(), "button[name='Submit']");
 
     // Press the button
-    locator.press(&*provider)?;
+    submit.press()?;
 
     // Type into a text field
-    let search = tree.locator("textfield[name^='Search']");
-    search.set_value(&*provider, "hello world")?;
+    let search = Locator::new(&*provider, target, "textfield[name^='Search']");
+    search.set_value("hello world")?;
     ```
   </TabItem>
   <TabItem label="Python">
@@ -222,9 +220,10 @@ xa11y supports CSS-like selectors to find elements in the tree.
 | `button`                       | Elements with role `Button`      |
 | `button[name='OK']`            | Button named exactly "OK"        |
 | `textfield[name^='Search']`    | Text field whose name starts with "Search" |
-| `checkbox:checked`             | Checked checkboxes               |
+| `textfield[name*='email']`     | Text field whose name contains "email" |
 | `group > button`               | Buttons that are direct children of a group |
 | `window button[name='OK']`     | Button named "OK" anywhere inside a window |
+| `button:nth(2)`                | The 2nd button match             |
 
 ## Next Steps
 
