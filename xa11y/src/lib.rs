@@ -123,18 +123,24 @@ pub fn locator(target: AppTarget, selector: &str) -> Result<Locator> {
 
 /// Create a Locator with custom query options.
 pub fn locator_with_opts(target: AppTarget, selector: &str, opts: QueryOptions) -> Result<Locator> {
-    Ok(Locator::with_opts(get_provider_arc()?, target, selector, opts))
+    Ok(Locator::with_opts(
+        get_provider_arc()?,
+        target,
+        selector,
+        opts,
+    ))
 }
 
 // ── Platform provider construction (internal) ───────────────────────────────
 
-/// Create a platform-appropriate accessibility provider.
+/// Create a new platform-appropriate accessibility provider.
 ///
-/// This is an internal implementation detail. Prefer the module-level functions
-/// (`app`, `all_apps`, `perform_action`, etc.) which use a shared singleton.
+/// Returns a fresh provider instance (not the global singleton). Prefer
+/// the module-level functions (`app`, `all_apps`, `perform_action`, etc.)
+/// for normal use.
 #[doc(hidden)]
 pub fn create_provider() -> Result<Arc<dyn Provider>> {
-    get_provider_arc()
+    create_provider_boxed().map(Arc::from)
 }
 
 fn create_provider_boxed() -> Result<Box<dyn Provider>> {

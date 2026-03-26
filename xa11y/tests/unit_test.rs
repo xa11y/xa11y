@@ -807,18 +807,22 @@ fn permission_status_variants() {
 }
 
 // ── Platform backend ──
+// These tests use create_provider() to get a local Arc rather than the global
+// singleton. On Windows, leaked COM objects in the singleton cause
+// STATUS_ACCESS_VIOLATION during process exit.
 
 #[test]
 fn platform_provider_creates_or_fails_gracefully() {
-    let _result = xa11y::check_permissions();
+    let _result = xa11y::create_provider();
 }
 
 #[test]
 fn platform_provider_check_permissions() {
-    let status = match xa11y::check_permissions() {
-        Ok(s) => s,
+    let provider = match xa11y::create_provider() {
+        Ok(p) => p,
         Err(_) => return,
     };
+    let status = provider.check_permissions().unwrap();
     match status {
         PermissionStatus::Granted | PermissionStatus::Denied { .. } => {}
     }
@@ -826,17 +830,18 @@ fn platform_provider_check_permissions() {
 
 #[test]
 fn platform_provider_operations_return_errors() {
-    if xa11y::check_permissions().is_err() {
-        return;
-    }
+    let provider = match xa11y::create_provider() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
 
-    let result = xa11y::app(
+    let result = provider.get_app_tree(
         &AppTarget::ByName("NonexistentApp12345".to_string()),
         &QueryOptions::default(),
     );
     assert!(result.is_err());
 
-    let _result = xa11y::list_apps();
+    let _result = provider.list_apps();
 }
 
 // ── Selector edge cases ──
