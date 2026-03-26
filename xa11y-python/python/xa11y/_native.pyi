@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from types import TracebackType
 
 # ── Exceptions ───────────────────────────────────────────────────────────────
 
@@ -259,75 +258,6 @@ class Tree:
     def __repr__(self) -> str: ...
     def __str__(self) -> str: ...
 
-# ── Provider ─────────────────────────────────────────────────────────────────
-
-class Provider:
-    """The main entry point for accessibility operations.
-
-    Must be used as a context manager::
-
-        with xa11y.connect() as provider:
-            tree = provider.app("Safari")
-
-    Calling methods outside a ``with`` block raises ``RuntimeError``.
-    """
-
-    def __init__(self) -> None:
-        """Create a new platform accessibility provider."""
-    def app(
-        self,
-        name: str | None = None,
-        *,
-        pid: int | None = None,
-        max_depth: int | None = None,
-        max_elements: int | None = None,
-        visible_only: bool = False,
-        roles: list[str] | None = None,
-        include_raw: bool = False,
-    ) -> Tree:
-        """Get the accessibility tree for an application.
-
-        Identify the app by *name* (substring match) or *pid* (exact).
-        """
-    def all_apps(
-        self,
-        *,
-        max_depth: int | None = None,
-        max_elements: int | None = None,
-        visible_only: bool = False,
-        roles: list[str] | None = None,
-        include_raw: bool = False,
-    ) -> Tree:
-        """Get a combined accessibility tree for all running applications."""
-    def list_apps(self) -> list[AppInfo]:
-        """List all running applications that expose accessibility trees."""
-    def check_permissions(self) -> str:
-        """Check accessibility permission status.
-
-        Returns ``"granted"`` or raises :exc:`PermissionDeniedError`.
-        """
-    def locator(
-        self,
-        name: str | None = None,
-        *,
-        pid: int | None = None,
-        selector: str,
-        max_depth: int | None = None,
-        max_elements: int | None = None,
-        visible_only: bool = False,
-        roles: list[str] | None = None,
-        include_raw: bool = False,
-    ) -> Locator:
-        """Create a :class:`Locator` bound to this provider and a target app."""
-    def __enter__(self) -> Provider: ...
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None = None,
-        exc_val: BaseException | None = None,
-        exc_tb: TracebackType | None = None,
-    ) -> bool: ...
-    def __repr__(self) -> str: ...
-
 # ── Locator ──────────────────────────────────────────────────────────────────
 
 class Locator:
@@ -416,9 +346,6 @@ class Locator:
 
 # ── Module-level functions ───────────────────────────────────────────────────
 
-def connect() -> Provider:
-    """Create a platform accessibility provider. Use as a context manager."""
-
 def app(
     name: str | None = None,
     *,
@@ -431,24 +358,42 @@ def app(
 ) -> Tree:
     """Get the accessibility tree for the given app.
 
-    Convenience function that creates a provider internally.
     Identify the app by *name* (substring match) or *pid* (exact).
     """
 
-def list_apps() -> list[AppInfo]:
-    """List all running applications that expose accessibility trees.
+def all_apps(
+    *,
+    max_depth: int | None = None,
+    max_elements: int | None = None,
+    visible_only: bool = False,
+    roles: list[str] | None = None,
+    include_raw: bool = False,
+) -> Tree:
+    """Get a combined accessibility tree for all running applications."""
 
-    Convenience function — creates a provider internally.
-    """
+def locator(
+    name: str | None = None,
+    *,
+    pid: int | None = None,
+    selector: str,
+    max_depth: int | None = None,
+    max_elements: int | None = None,
+    visible_only: bool = False,
+    roles: list[str] | None = None,
+    include_raw: bool = False,
+) -> Locator:
+    """Create a :class:`Locator` for lazy element resolution."""
+
+def list_apps() -> list[AppInfo]:
+    """List all running applications that expose accessibility trees."""
 
 def check_permissions() -> str:
     """Check whether accessibility permissions are granted.
 
     Returns ``"granted"`` or raises :exc:`PermissionDeniedError`.
-    Convenience function — creates a provider internally.
     """
 
 # ── Test helpers ─────────────────────────────────────────────────────────────
 
 def _make_test_tree() -> Tree: ...
-def _make_test_provider() -> Provider: ...
+def _make_test_apps() -> list[AppInfo]: ...

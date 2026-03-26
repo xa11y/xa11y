@@ -7,11 +7,9 @@ Quick start:
     ...     print(button.name)
     >>> tree.press("button[name='OK']")
 
-With explicit provider (context manager required):
-    >>> with xa11y.connect() as provider:
-    ...     tree = provider.app("Safari")
-    ...     loc = tree.locator("button[name='Submit']")
-    ...     loc.press()
+Reuse a locator for lazy resolution:
+    >>> loc = xa11y.locator("Safari", selector="button[name='Submit']")
+    >>> loc.press()
 """
 
 from xa11y._native import (
@@ -24,19 +22,18 @@ from xa11y._native import (
     NormalizedRect,
     PermissionDeniedError,
     PlatformError,
-    # Classes
-    Provider,
     Rect,
     SelectorNotMatchedError,
     TimeoutError,
     Tree,
     # Exceptions
     XA11yError,
+    all_apps,
     app,
     check_permissions,
-    # Convenience functions
-    connect,
     list_apps,
+    # Functions
+    locator,
 )
 
 __all__ = [
@@ -49,14 +46,14 @@ __all__ = [
     "NormalizedRect",
     "PermissionDeniedError",
     "PlatformError",
-    "Provider",
     "Rect",
     "SelectorNotMatchedError",
     "TimeoutError",
     "Tree",
     "XA11yError",
+    "all_apps",
     "app",
     "check_permissions",
-    "connect",
     "list_apps",
+    "locator",
 ]
