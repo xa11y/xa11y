@@ -1012,12 +1012,7 @@ impl Provider for MacOSProvider {
         // Cache elements for action dispatch
         *self.cached_elements.lock().unwrap() = elements;
 
-        Ok(Tree::new(
-            app_name,
-            Some(pid as u32),
-            screen_size,
-            nodes,
-        ))
+        Ok(Tree::new(app_name, Some(pid as u32), screen_size, nodes))
     }
 
     fn get_all_apps(&self, opts: &QueryOptions) -> Result<Tree> {
@@ -1077,12 +1072,7 @@ impl Provider for MacOSProvider {
 
         *self.cached_elements.lock().unwrap() = elements;
 
-        Ok(Tree::new(
-            "Desktop".to_string(),
-            None,
-            screen_size,
-            nodes,
-        ))
+        Ok(Tree::new("Desktop".to_string(), None, screen_size, nodes))
     }
 
     fn perform_action(

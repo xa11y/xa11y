@@ -1325,8 +1325,18 @@ mod tests {
         let expander = tree
             .iter()
             .find(|n| n.states.expanded.is_some())
-            .or_else(|| tree.query(r#"[name*="Expander"]"#).unwrap().first().copied())
-            .or_else(|| tree.query(r#"[name*="More Details"]"#).unwrap().first().copied());
+            .or_else(|| {
+                tree.query(r#"[name*="Expander"]"#)
+                    .unwrap()
+                    .first()
+                    .copied()
+            })
+            .or_else(|| {
+                tree.query(r#"[name*="More Details"]"#)
+                    .unwrap()
+                    .first()
+                    .copied()
+            });
         if let Some(node) = expander {
             // Expand
             if let Ok(()) = p.perform_action(&tree, node, Action::Expand, None) {
@@ -1477,7 +1487,12 @@ mod tests {
         let has_expander = tree
             .iter()
             .find(|n| n.states.expanded.is_some())
-            .or_else(|| tree.query(r#"[name*="Expander"]"#).unwrap().first().copied())
+            .or_else(|| {
+                tree.query(r#"[name*="Expander"]"#)
+                    .unwrap()
+                    .first()
+                    .copied()
+            })
             .is_some();
         if has_expander {
             let mut ct = tree;

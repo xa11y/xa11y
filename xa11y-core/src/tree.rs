@@ -22,7 +22,6 @@ pub struct Tree {
 
     /// All nodes in DFS order (access through methods)
     nodes: Vec<Node>,
-
 }
 
 impl Tree {

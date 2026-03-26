@@ -589,12 +589,7 @@ impl Provider for WindowsProvider {
 
         *self.cached_elements.lock().unwrap() = elements;
 
-        Ok(Tree::new(
-            app_name,
-            Some(pid),
-            screen_size,
-            nodes,
-        ))
+        Ok(Tree::new(app_name, Some(pid), screen_size, nodes))
     }
 
     fn get_all_apps(&self, opts: &QueryOptions) -> Result<Tree> {
@@ -683,12 +678,7 @@ impl Provider for WindowsProvider {
         nodes[0].children_indices = root_children;
         *self.cached_elements.lock().unwrap() = elements;
 
-        Ok(Tree::new(
-            "Desktop".to_string(),
-            None,
-            screen_size,
-            nodes,
-        ))
+        Ok(Tree::new("Desktop".to_string(), None, screen_size, nodes))
     }
 
     fn perform_action(

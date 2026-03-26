@@ -800,12 +800,7 @@ impl Provider for LinuxProvider {
 
         *self.cached_refs.lock().unwrap() = refs;
 
-        Ok(Tree::new(
-            "Desktop".to_string(),
-            None,
-            screen_size,
-            nodes,
-        ))
+        Ok(Tree::new("Desktop".to_string(), None, screen_size, nodes))
     }
 
     fn perform_action(
