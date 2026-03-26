@@ -67,9 +67,6 @@ pub struct QueryOptions {
     pub visible_only: bool,
     /// Filter to specific roles.
     pub roles: Option<Vec<Role>>,
-    /// Include platform-specific raw data in the user-visible `node.raw` field.
-    /// Note: action dispatch works regardless of this setting.
-    pub include_raw: bool,
 }
 
 /// Result of a permission check.

@@ -262,14 +262,11 @@ mod provider_fuzz {
             None
         };
 
-        let include_raw = rng.random_bool(0.5);
-
         QueryOptions {
             max_depth,
             max_elements,
             visible_only,
             roles,
-            include_raw,
         }
     }
 
@@ -336,8 +333,7 @@ mod provider_fuzz {
         provider: Box<dyn Provider>,
         rng: StdRng,
         verbose: bool,
-        tree_raw: Option<Tree>,
-        tree_no_raw: Option<Tree>,
+        tree: Option<Tree>,
         test_app_pid: u32,
         ops: u64,
         errors: u64,
@@ -350,30 +346,14 @@ mod provider_fuzz {
             }
         }
 
-        fn ensure_tree_raw(&mut self) {
-            if self.tree_raw.is_none() {
-                let opts = QueryOptions {
-                    include_raw: true,
-                    ..QueryOptions::default()
-                };
-                match self
-                    .provider
-                    .get_app_tree(&AppTarget::ByName("xa11y".to_string()), &opts)
-                {
-                    Ok(tree) => self.tree_raw = Some(tree),
-                    Err(e) => self.log(&format!("ensure_tree_raw failed: {}", e)),
-                }
-            }
-        }
-
-        fn ensure_tree_no_raw(&mut self) {
-            if self.tree_no_raw.is_none() {
+        fn ensure_tree(&mut self) {
+            if self.tree.is_none() {
                 match self.provider.get_app_tree(
                     &AppTarget::ByName("xa11y".to_string()),
                     &QueryOptions::default(),
                 ) {
-                    Ok(tree) => self.tree_no_raw = Some(tree),
-                    Err(e) => self.log(&format!("ensure_tree_no_raw failed: {}", e)),
+                    Ok(tree) => self.tree = Some(tree),
+                    Err(e) => self.log(&format!("ensure_tree failed: {}", e)),
                 }
             }
         }
@@ -390,11 +370,7 @@ mod provider_fuzz {
         {
             Ok(tree) => {
                 inspect_tree(&tree, &mut state.rng);
-                if opts.include_raw {
-                    state.tree_raw = Some(tree);
-                } else {
-                    state.tree_no_raw = Some(tree);
-                }
+                state.tree = Some(tree);
             }
             Err(e) => {
                 state.log(&format!("  -> error (expected): {}", e));
@@ -415,9 +391,7 @@ mod provider_fuzz {
         {
             Ok(tree) => {
                 inspect_tree(&tree, &mut state.rng);
-                if opts.include_raw {
-                    state.tree_raw = Some(tree);
-                }
+                state.tree = Some(tree);
             }
             Err(e) => {
                 state.log(&format!("  -> error (expected): {}", e));
@@ -507,8 +481,8 @@ mod provider_fuzz {
     }
 
     fn op_action_on_node(state: &mut FuzzState) {
-        state.ensure_tree_raw();
-        let tree = match &state.tree_raw {
+        state.ensure_tree();
+        let tree = match &state.tree {
             Some(t) => t,
             None => return,
         };
@@ -541,8 +515,7 @@ mod provider_fuzz {
         match state.provider.perform_action(tree, node, action, data) {
             Ok(()) => {
                 std::thread::sleep(std::time::Duration::from_millis(20));
-                state.tree_raw = None;
-                state.tree_no_raw = None;
+                state.tree = None;
             }
             Err(e) => {
                 state.log(&format!("  -> error (expected): {}", e));
@@ -551,9 +524,9 @@ mod provider_fuzz {
         }
     }
 
-    fn op_action_without_raw(state: &mut FuzzState) {
-        state.ensure_tree_no_raw();
-        let tree = match &state.tree_no_raw {
+    fn op_action_press(state: &mut FuzzState) {
+        state.ensure_tree();
+        let tree = match &state.tree {
             Some(t) => t,
             None => return,
         };
@@ -567,10 +540,7 @@ mod provider_fuzz {
             Some(n) => n,
             None => return,
         };
-        state.log(&format!(
-            "perform_action without include_raw, node={}",
-            node_idx
-        ));
+        state.log(&format!("perform_action press, node={}", node_idx));
 
         let result = state
             .provider
@@ -578,15 +548,14 @@ mod provider_fuzz {
         match result {
             Err(_) => state.errors += 1,
             Ok(()) => {
-                state.tree_raw = None;
-                state.tree_no_raw = None;
+                state.tree = None;
             }
         }
     }
 
     fn op_action_invalid_node(state: &mut FuzzState) {
-        state.ensure_tree_raw();
-        let tree = match &state.tree_raw {
+        state.ensure_tree();
+        let tree = match &state.tree {
             Some(t) => t,
             None => return,
         };
@@ -605,8 +574,8 @@ mod provider_fuzz {
     }
 
     fn op_query_tree(state: &mut FuzzState) {
-        state.ensure_tree_raw();
-        let tree = match &state.tree_raw {
+        state.ensure_tree();
+        let tree = match &state.tree {
             Some(t) => t,
             None => return,
         };
@@ -635,8 +604,8 @@ mod provider_fuzz {
     }
 
     fn op_find_by_role(state: &mut FuzzState) {
-        state.ensure_tree_raw();
-        let tree = match &state.tree_raw {
+        state.ensure_tree();
+        let tree = match &state.tree {
             Some(t) => t,
             None => return,
         };
@@ -648,8 +617,8 @@ mod provider_fuzz {
     }
 
     fn op_find_by_name(state: &mut FuzzState) {
-        state.ensure_tree_raw();
-        let tree = match &state.tree_raw {
+        state.ensure_tree();
+        let tree = match &state.tree {
             Some(t) => t,
             None => return,
         };
@@ -676,8 +645,8 @@ mod provider_fuzz {
     }
 
     fn op_tree_dump(state: &mut FuzzState) {
-        state.ensure_tree_raw();
-        let tree = match &state.tree_raw {
+        state.ensure_tree();
+        let tree = match &state.tree {
             Some(t) => t,
             None => return,
         };
@@ -688,8 +657,8 @@ mod provider_fuzz {
     }
 
     fn op_tree_subtree(state: &mut FuzzState) {
-        state.ensure_tree_raw();
-        let tree = match &state.tree_raw {
+        state.ensure_tree();
+        let tree = match &state.tree {
             Some(t) => t,
             None => return,
         };
@@ -712,8 +681,8 @@ mod provider_fuzz {
     }
 
     fn op_tree_children(state: &mut FuzzState) {
-        state.ensure_tree_raw();
-        let tree = match &state.tree_raw {
+        state.ensure_tree();
+        let tree = match &state.tree {
             Some(t) => t,
             None => return,
         };
@@ -733,8 +702,8 @@ mod provider_fuzz {
     }
 
     fn op_tree_iterate(state: &mut FuzzState) {
-        state.ensure_tree_raw();
-        let tree = match &state.tree_raw {
+        state.ensure_tree();
+        let tree = match &state.tree {
             Some(t) => t,
             None => return,
         };
@@ -849,8 +818,7 @@ mod provider_fuzz {
             provider,
             rng: StdRng::seed_from_u64(args.seed),
             verbose: args.verbose,
-            tree_raw: None,
-            tree_no_raw: None,
+            tree: None,
             test_app_pid,
             ops: 0,
             errors: 0,
@@ -871,7 +839,7 @@ mod provider_fuzz {
             (1, "check_permissions", op_check_permissions),
             (2, "list_apps", op_list_apps),
             (20, "action_on_node", op_action_on_node),
-            (3, "action_without_raw", op_action_without_raw),
+            (3, "action_press", op_action_press),
             (2, "action_invalid_node", op_action_invalid_node),
             (15, "query_tree", op_query_tree),
             (5, "find_by_role", op_find_by_role),

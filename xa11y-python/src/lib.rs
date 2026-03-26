@@ -127,7 +127,6 @@ fn build_query_options(
     max_elements: Option<u32>,
     visible_only: bool,
     roles: Option<Vec<String>>,
-    include_raw: bool,
 ) -> xa11y::QueryOptions {
     xa11y::QueryOptions {
         max_depth,
@@ -138,7 +137,6 @@ fn build_query_options(
                 .filter_map(|s| xa11y::Role::from_snake_case(s))
                 .collect()
         }),
-        include_raw,
     }
 }
 
@@ -680,7 +678,7 @@ impl Tree {
 
     // ── Locator factory ──
 
-    #[pyo3(signature = (selector, *, max_depth=None, max_elements=None, visible_only=false, roles=None, include_raw=false))]
+    #[pyo3(signature = (selector, *, max_depth=None, max_elements=None, visible_only=false, roles=None))]
     fn locator(
         &self,
         selector: &str,
@@ -688,9 +686,8 @@ impl Tree {
         max_elements: Option<u32>,
         visible_only: bool,
         roles: Option<Vec<String>>,
-        include_raw: bool,
     ) -> Locator {
-        let opts = build_query_options(max_depth, max_elements, visible_only, roles, include_raw);
+        let opts = build_query_options(max_depth, max_elements, visible_only, roles);
         Locator {
             provider: self.provider.clone(),
             target: self.target.clone(),
@@ -1164,7 +1161,7 @@ impl Locator {
 
 /// Get an app's accessibility tree.
 #[pyfunction]
-#[pyo3(signature = (name=None, *, pid=None, max_depth=None, max_elements=None, visible_only=false, roles=None, include_raw=false))]
+#[pyo3(signature = (name=None, *, pid=None, max_depth=None, max_elements=None, visible_only=false, roles=None))]
 fn app(
     py: Python<'_>,
     name: Option<&str>,
@@ -1173,11 +1170,10 @@ fn app(
     max_elements: Option<u32>,
     visible_only: bool,
     roles: Option<Vec<String>>,
-    include_raw: bool,
 ) -> PyResult<Py<Tree>> {
     let provider = get_provider()?;
     let target = resolve_app_target(name, pid)?;
-    let opts = build_query_options(max_depth, max_elements, visible_only, roles, include_raw);
+    let opts = build_query_options(max_depth, max_elements, visible_only, roles);
     let p = provider.clone();
     let rust_tree = py
         .allow_threads(|| p.get_app_tree(&target, &opts))
@@ -1187,17 +1183,16 @@ fn app(
 
 /// Get accessibility trees for all running applications.
 #[pyfunction]
-#[pyo3(signature = (*, max_depth=None, max_elements=None, visible_only=false, roles=None, include_raw=false))]
+#[pyo3(signature = (*, max_depth=None, max_elements=None, visible_only=false, roles=None))]
 fn all_apps(
     py: Python<'_>,
     max_depth: Option<u32>,
     max_elements: Option<u32>,
     visible_only: bool,
     roles: Option<Vec<String>>,
-    include_raw: bool,
 ) -> PyResult<Py<Tree>> {
     let provider = get_provider()?;
-    let opts = build_query_options(max_depth, max_elements, visible_only, roles, include_raw);
+    let opts = build_query_options(max_depth, max_elements, visible_only, roles);
     let p = provider.clone();
     let rust_tree = py
         .allow_threads(|| p.get_all_apps(&opts))
@@ -1208,7 +1203,7 @@ fn all_apps(
 
 /// Create a Locator for lazy element resolution.
 #[pyfunction]
-#[pyo3(signature = (name=None, *, pid=None, selector, max_depth=None, max_elements=None, visible_only=false, roles=None, include_raw=false))]
+#[pyo3(signature = (name=None, *, pid=None, selector, max_depth=None, max_elements=None, visible_only=false, roles=None))]
 fn locator(
     name: Option<&str>,
     pid: Option<u32>,
@@ -1217,11 +1212,10 @@ fn locator(
     max_elements: Option<u32>,
     visible_only: bool,
     roles: Option<Vec<String>>,
-    include_raw: bool,
 ) -> PyResult<Locator> {
     let provider = get_provider()?;
     let target = resolve_app_target(name, pid)?;
-    let opts = build_query_options(max_depth, max_elements, visible_only, roles, include_raw);
+    let opts = build_query_options(max_depth, max_elements, visible_only, roles);
     Ok(Locator {
         provider,
         target,
@@ -1412,7 +1406,7 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: None,
             max_value: None,
             stable_id: Some("app-root".to_string()),
-            raw: None,
+            raw: xa11y::RawPlatformData::Synthetic,
             index: 0,
             children_indices: vec![1],
             parent_index: None,
@@ -1445,7 +1439,7 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: None,
             max_value: None,
             stable_id: None,
-            raw: None,
+            raw: xa11y::RawPlatformData::Synthetic,
             index: 1,
             children_indices: vec![2, 5],
             parent_index: Some(0),
@@ -1465,7 +1459,7 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: None,
             max_value: None,
             stable_id: None,
-            raw: None,
+            raw: xa11y::RawPlatformData::Synthetic,
             index: 2,
             children_indices: vec![3, 4],
             parent_index: Some(1),
@@ -1493,7 +1487,7 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: None,
             max_value: None,
             stable_id: Some("btn-back".to_string()),
-            raw: None,
+            raw: xa11y::RawPlatformData::Synthetic,
             index: 3,
             children_indices: vec![],
             parent_index: Some(2),
@@ -1522,7 +1516,7 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: None,
             max_value: None,
             stable_id: None,
-            raw: None,
+            raw: xa11y::RawPlatformData::Synthetic,
             index: 4,
             children_indices: vec![],
             parent_index: Some(2),
@@ -1542,7 +1536,7 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: None,
             max_value: None,
             stable_id: None,
-            raw: None,
+            raw: xa11y::RawPlatformData::Synthetic,
             index: 5,
             children_indices: vec![6, 7, 8, 9, 10],
             parent_index: Some(1),
@@ -1571,7 +1565,7 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: None,
             max_value: None,
             stable_id: None,
-            raw: None,
+            raw: xa11y::RawPlatformData::Synthetic,
             index: 6,
             children_indices: vec![],
             parent_index: Some(5),
@@ -1595,7 +1589,7 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: None,
             max_value: None,
             stable_id: None,
-            raw: None,
+            raw: xa11y::RawPlatformData::Synthetic,
             index: 7,
             children_indices: vec![],
             parent_index: Some(5),
@@ -1623,7 +1617,7 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: Some(0.0),
             max_value: Some(100.0),
             stable_id: None,
-            raw: None,
+            raw: xa11y::RawPlatformData::Synthetic,
             index: 8,
             children_indices: vec![],
             parent_index: Some(5),
@@ -1646,7 +1640,7 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: None,
             max_value: None,
             stable_id: None,
-            raw: None,
+            raw: xa11y::RawPlatformData::Synthetic,
             index: 9,
             children_indices: vec![],
             parent_index: Some(5),
@@ -1669,7 +1663,7 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: None,
             max_value: None,
             stable_id: None,
-            raw: None,
+            raw: xa11y::RawPlatformData::Synthetic,
             index: 10,
             children_indices: vec![11, 12],
             parent_index: Some(5),
@@ -1693,7 +1687,7 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: None,
             max_value: None,
             stable_id: None,
-            raw: None,
+            raw: xa11y::RawPlatformData::Synthetic,
             index: 11,
             children_indices: vec![],
             parent_index: Some(10),
@@ -1716,7 +1710,7 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: None,
             max_value: None,
             stable_id: None,
-            raw: None,
+            raw: xa11y::RawPlatformData::Synthetic,
             index: 12,
             children_indices: vec![],
             parent_index: Some(10),

@@ -53,8 +53,8 @@ pub struct Node {
     /// Not all elements have one.
     pub stable_id: Option<String>,
 
-    /// Platform-specific raw data (opt-in, for debugging)
-    pub raw: Option<RawPlatformData>,
+    /// Platform-specific raw data
+    pub raw: RawPlatformData,
 
     // ── Internal fields ──────────────────────────────────────────────────────
     // Present in serialized output for FFI consumers (Python, JS, LLMs),
@@ -91,7 +91,7 @@ impl Node {
             min_value: None,
             max_value: None,
             stable_id: None,
-            raw: None,
+            raw: RawPlatformData::Synthetic,
             index: 0,
             children_indices: vec![],
             parent_index: None,
@@ -182,7 +182,7 @@ pub struct NormalizedRect {
     pub bottom: f64,
 }
 
-/// Platform-specific raw data, available when `include_raw: true` in QueryOptions.
+/// Platform-specific raw data attached to every node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RawPlatformData {
     MacOS {
@@ -200,4 +200,6 @@ pub enum RawPlatformData {
         bus_name: String,
         object_path: String,
     },
+    /// Placeholder for synthetic nodes with no real platform backing.
+    Synthetic,
 }

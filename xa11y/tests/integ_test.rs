@@ -749,13 +749,13 @@ mod tests {
     #[ignore]
     fn state_focused_after_focus_action() {
         let p = h::provider();
-        let tree = h::raw_tree(&*p);
+        let tree = h::app_tree(&*p);
         let submit = h::named(&tree, "Submit");
         // Focus action may succeed or fail depending on AT-SPI adapter support
         let result = p.perform_action(&tree, submit, Action::Focus, None);
         if result.is_ok() {
             std::thread::sleep(std::time::Duration::from_millis(100));
-            let tree2 = h::raw_tree(&*p);
+            let tree2 = h::app_tree(&*p);
             let submit2 = h::named(&tree2, "Submit");
             // Some adapters may not reflect focused state change
             if !submit2.states.focused {
@@ -837,7 +837,7 @@ mod tests {
     #[ignore]
     fn state_selected_on_list_item() {
         let p = h::provider();
-        let tree = h::raw_tree(&*p);
+        let tree = h::app_tree(&*p);
         // Click Apple to select it
         let apple = h::named(&tree, "Apple");
         let tree2 = h::act(&*p, &tree, apple, Action::Press);
@@ -1058,17 +1058,23 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn opts_include_raw() {
+    fn raw_data_always_present() {
         let p = h::provider();
-        let tree = h::raw_tree(&*p);
+        let tree = h::app_tree(&*p);
         let root = tree.root();
-        assert!(root.raw.is_some(), "Root should have raw data");
         #[cfg(target_os = "linux")]
-        match root.raw.as_ref().unwrap() {
+        match &root.raw {
             RawPlatformData::Linux { atspi_role, .. } => {
                 assert!(!atspi_role.is_empty());
             }
             _ => panic!("Expected Linux raw data"),
+        }
+        #[cfg(target_os = "macos")]
+        match &root.raw {
+            RawPlatformData::MacOS { ax_role, .. } => {
+                assert!(!ax_role.is_empty());
+            }
+            _ => panic!("Expected macOS raw data"),
         }
     }
 
@@ -1127,7 +1133,7 @@ mod tests {
     #[ignore]
     fn action_press_button() {
         let p = h::provider();
-        let tree = h::raw_tree(&*p);
+        let tree = h::app_tree(&*p);
         let submit = h::named(&tree, "Submit");
         let result = p.perform_action(&tree, submit, Action::Press, None);
         match result {
@@ -1140,7 +1146,7 @@ mod tests {
     #[ignore]
     fn action_toggle_checkbox() {
         let p = h::provider();
-        let tree = h::raw_tree(&*p);
+        let tree = h::app_tree(&*p);
         let cbs = tree.find_by_role(Role::CheckBox);
         assert!(!cbs.is_empty(), "No checkbox");
         let initial = cbs[0].states.checked;
@@ -1159,7 +1165,7 @@ mod tests {
     #[ignore]
     fn action_toggle_enables_cancel() {
         let p = h::provider();
-        let tree = h::raw_tree(&*p);
+        let tree = h::app_tree(&*p);
         let was_enabled = h::named(&tree, "Cancel").states.enabled;
         let cbs = tree.find_by_role(Role::CheckBox);
         assert!(!cbs.is_empty(), "No checkbox");
@@ -1179,7 +1185,7 @@ mod tests {
     #[ignore]
     fn action_focus_text_entry() {
         let p = h::provider();
-        let tree = h::raw_tree(&*p);
+        let tree = h::app_tree(&*p);
         // Find text entry by name "Name" (AT-SPI may not expose the string value)
         let text = tree
             .iter()
@@ -1196,7 +1202,7 @@ mod tests {
     #[ignore]
     fn action_set_value_text() {
         let p = h::provider();
-        let tree = h::raw_tree(&*p);
+        let tree = h::app_tree(&*p);
         // Find text entry by name "Name" (AT-SPI may not expose the string value)
         let text = tree
             .iter()
@@ -1231,7 +1237,7 @@ mod tests {
     #[ignore]
     fn action_set_value_numeric() {
         let p = h::provider();
-        let tree = h::raw_tree(&*p);
+        let tree = h::app_tree(&*p);
         let sliders = tree.find_by_role(Role::Slider);
         assert!(!sliders.is_empty());
         let result = p.perform_action(
@@ -1260,7 +1266,7 @@ mod tests {
     #[ignore]
     fn action_increment_spinner() {
         let p = h::provider();
-        let tree = h::raw_tree(&*p);
+        let tree = h::app_tree(&*p);
         // Find spin button (maps to TextField on AT-SPI)
         let spin = tree
             .iter()
@@ -1295,7 +1301,7 @@ mod tests {
     #[ignore]
     fn action_decrement_spinner() {
         let p = h::provider();
-        let tree = h::raw_tree(&*p);
+        let tree = h::app_tree(&*p);
         let spin = tree
             .iter()
             .find(|n| {
@@ -1329,7 +1335,7 @@ mod tests {
     #[ignore]
     fn action_expand_collapse() {
         let p = h::provider();
-        let tree = h::raw_tree(&*p);
+        let tree = h::app_tree(&*p);
         let expander = tree
             .iter()
             .find(|n| n.states.expanded.is_some())
@@ -1339,7 +1345,7 @@ mod tests {
             // Expand
             if let Ok(()) = p.perform_action(&tree, node, Action::Expand, None) {
                 std::thread::sleep(std::time::Duration::from_millis(300));
-                let tree2 = h::raw_tree(&*p);
+                let tree2 = h::app_tree(&*p);
                 let n2 = tree2
                     .find_by_name("Expander")
                     .first()
@@ -1370,7 +1376,7 @@ mod tests {
     #[ignore]
     fn action_select_list_item() {
         let p = h::provider();
-        let tree = h::raw_tree(&*p);
+        let tree = h::app_tree(&*p);
         let apple = tree.find_by_name("Apple");
         if !apple.is_empty() {
             let _ = p.perform_action(&tree, apple[0], Action::Press, None);
@@ -1420,7 +1426,7 @@ mod tests {
     #[ignore]
     fn thrash_toggle_checkbox_5_times() {
         let p = h::provider();
-        let tree = h::raw_tree(&*p);
+        let tree = h::app_tree(&*p);
         let cbs = tree.find_by_role(Role::CheckBox);
         assert!(!cbs.is_empty());
         let mut current_tree = tree;
@@ -1444,7 +1450,7 @@ mod tests {
     #[ignore]
     fn thrash_slider_increment_10_times() {
         let p = h::provider();
-        let tree = h::raw_tree(&*p);
+        let tree = h::app_tree(&*p);
         let sliders = tree.find_by_role(Role::Slider);
         let slider = sliders.first().expect("No slider");
         let start_val: f64 = slider
@@ -1479,7 +1485,7 @@ mod tests {
     #[ignore]
     fn thrash_expand_collapse_cycle() {
         let p = h::provider();
-        let tree = h::raw_tree(&*p);
+        let tree = h::app_tree(&*p);
         let has_expander = tree
             .iter()
             .find(|n| n.states.expanded.is_some())
@@ -1534,7 +1540,7 @@ mod tests {
     #[ignore]
     fn error_selector_not_matched() {
         let p = h::provider();
-        let tree = h::raw_tree(&*p);
+        let tree = h::app_tree(&*p);
         let result = tree.perform(
             &*p,
             r#"button[name="nonexistent_element_12345"]"#,
@@ -1560,16 +1566,14 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn error_action_without_raw_data() {
+    fn action_on_default_tree() {
         let p = h::provider();
-        let tree = h::app_tree(&*p); // no include_raw
+        let tree = h::app_tree(&*p);
         let buttons = tree.find_by_name("Submit");
         assert!(!buttons.is_empty());
-        // Actions work regardless of include_raw — element refs are always cached.
-        // On some platforms this may succeed; on others it may fail.
         let result = p.perform_action(&tree, buttons[0], Action::Press, None);
         match result {
-            Ok(()) => println!("Action without raw data succeeded (expected on some platforms)"),
+            Ok(()) => {}
             Err(e) => assert!(
                 matches!(e, Error::Platform { .. } | Error::ElementStale { .. }),
                 "Unexpected error: {}",
@@ -1602,7 +1606,7 @@ mod tests {
     #[ignore]
     fn action_blur_text_entry() {
         let p = h::provider();
-        let tree = h::raw_tree(&*p);
+        let tree = h::app_tree(&*p);
         let text = tree
             .iter()
             .find(|n| {
@@ -1616,7 +1620,7 @@ mod tests {
         assert!(result.is_ok(), "Focus should succeed: {:?}", result.err());
 
         // Then blur
-        let tree2 = h::raw_tree(&*p);
+        let tree2 = h::app_tree(&*p);
         let text2 = tree2
             .iter()
             .find(|n| {
@@ -1632,7 +1636,7 @@ mod tests {
     #[ignore]
     fn action_scroll_direction() {
         let p = h::provider();
-        let tree = h::raw_tree(&*p);
+        let tree = h::app_tree(&*p);
         // Try scroll on the window or any scrollable element
         let target = tree
             .iter()
@@ -1662,7 +1666,7 @@ mod tests {
     #[ignore]
     fn action_set_text_selection() {
         let p = h::provider();
-        let tree = h::raw_tree(&*p);
+        let tree = h::app_tree(&*p);
         let text = tree
             .iter()
             .find(|n| {
@@ -1691,7 +1695,7 @@ mod tests {
     #[ignore]
     fn action_type_text() {
         let p = h::provider();
-        let tree = h::raw_tree(&*p);
+        let tree = h::app_tree(&*p);
         let text = tree
             .iter()
             .find(|n| {
