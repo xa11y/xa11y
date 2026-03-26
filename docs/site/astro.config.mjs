@@ -26,8 +26,8 @@ export default defineConfig({
         {
           label: "API Reference",
           items: [
-            { label: "Rust API", slug: "api/rust" },
-            { label: "Python API", slug: "api/python" },
+            { label: "Rust API", link: "/api/rust/reference/xa11y/" },
+            { label: "Python API", link: "/api/python/reference/api/xa11y/" },
           ],
         },
       ],

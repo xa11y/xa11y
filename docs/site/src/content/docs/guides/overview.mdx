@@ -3,9 +3,17 @@ title: Overview
 description: What xa11y is and how it works.
 ---
 
-import { Card, CardGrid } from "@astrojs/starlight/components";
-
 **xa11y** is a cross-platform accessibility client library. It reads accessibility trees exposed by other applications and lets you interact with UI elements — clicking buttons, reading text, filling fields — through a single, unified API.
+
+```
+xa11y/
+├── xa11y-core      # Platform-independent types, traits, selector engine
+├── xa11y-macos     # macOS backend (AXUIElement)
+├── xa11y-linux     # Linux backend (AT-SPI2 via D-Bus)
+├── xa11y-windows   # Windows backend (UI Automation)
+├── xa11y           # Umbrella crate — re-exports core, picks the right backend
+└── xa11y-python    # Python bindings via PyO3
+```
 
 ## What It Does
 
@@ -16,47 +24,6 @@ Desktop operating systems expose UI structure through accessibility APIs (origin
 | macOS    | AXUIElement (Core Accessibility) |
 | Windows  | UI Automation          |
 | Linux    | AT-SPI2 via D-Bus      |
-
-## Design Principles
-
-<CardGrid>
-  <Card title="Client-side focus" icon="magnifier">
-    xa11y *reads* accessibility trees exposed by other applications. It is not a toolkit for *providing* accessibility — that's what [AccessKit](https://github.com/AccessKit/accesskit) does.
-  </Card>
-  <Card title="Platform concepts mapped, not hidden" icon="setting">
-    Each platform has unique behaviors. The abstraction normalizes them but exposes raw/platform-specific data when needed.
-  </Card>
-  <Card title="Snapshot-based" icon="document">
-    Trees are captured as point-in-time snapshots. Platform handles are cached internally for action dispatch and are not exposed to the consumer.
-  </Card>
-  <Card title="FFI-first" icon="laptop">
-    Core types are designed to be representable in C, Python, and JavaScript. No lifetimes or complex generics in the public API.
-  </Card>
-</CardGrid>
-
-## Architecture
-
-```
-┌──────────────────────────────────────────────┐
-│               xa11y (umbrella)               │
-│    create_provider() → Box<dyn Provider>     │
-├──────────────────────────────────────────────┤
-│              xa11y-core                      │
-│   Tree, Node, Role, Selector, Locator        │
-├──────────────┬──────────────┬────────────────┤
-│ xa11y-macos  │ xa11y-linux  │ xa11y-windows  │
-│ AXUIElement  │ AT-SPI2/zbus │ UIA (stub)     │
-└──────────────┴──────────────┴────────────────┘
-```
-
-## Crate Structure
-
-- **`xa11y-core`** — Platform-independent types, traits, and selector engine. Defines `Provider`, `Tree`, `Node`, `Role`, `Selector`, `Locator`, and error types.
-- **`xa11y-linux`** — Linux backend using AT-SPI2 over D-Bus (via the `zbus` crate).
-- **`xa11y-macos`** — macOS backend using `AXUIElement` with Objective-C exception safety.
-- **`xa11y-windows`** — Windows backend using UI Automation (stub — in progress).
-- **`xa11y`** — Umbrella crate that re-exports `xa11y-core` and provides `create_provider()` to get the right backend for the current platform.
-- **`xa11y-python`** — Python bindings via PyO3, published to PyPI as `xa11y`.
 
 ## Selectors
 

@@ -3,7 +3,7 @@ title: xa11y
 description: Cross-platform accessibility library for reading and interacting with accessibility trees.
 template: splash
 hero:
-  tagline: A unified API for reading and interacting with accessibility trees across macOS, Windows, and Linux — from Rust and Python.
+  tagline: A unified API for accessibility trees across macOS, Windows, and Linux. Test desktop apps, power AI agents, or build assistive tools.
   actions:
     - text: Get Started
       link: /guides/quick-start/
@@ -17,20 +17,20 @@ hero:
 import { Card, CardGrid } from "@astrojs/starlight/components";
 
 <CardGrid stagger>
+  <Card title="Simple Interface" icon="open-book">
+    Read the accessibility tree, find nodes, perform actions. A small, intuitive
+    API that stays out of your way.
+  </Card>
   <Card title="Cross-Platform" icon="laptop">
     One API for macOS (AXUIElement), Windows (UI Automation), and Linux
     (AT-SPI2). Write once, query anywhere.
   </Card>
-  <Card title="Rust & Python" icon="setting">
-    First-class Rust crate and Python bindings via PyO3. Use the language that
-    fits your workflow.
-  </Card>
-  <Card title="CSS-like Selectors" icon="magnifier">
-    Query accessibility trees with familiar syntax:
+  <Card title="Flexible Selectors" icon="magnifier">
+    Query accessibility trees with CSS-like syntax:
     `button[name='Submit']`, `textfield[name^='Search']`, `group > button`.
   </Card>
-  <Card title="Snapshot-Based" icon="document">
-    Trees are captured as point-in-time snapshots — no dangling handles, no
-    stale references, fully serializable.
+  <Card title="Permissive Licensing" icon="approve-check">
+    MIT-licensed, with permissively licensed dependencies throughout. Use it
+    freely in commercial and open-source projects alike.
   </Card>
 </CardGrid>

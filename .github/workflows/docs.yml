@@ -46,8 +46,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Generate Python API docs
-        run: python docs/generate_python_api.py
+      - name: Install Sphinx
+        run: pip install sphinx sphinx-rtd-theme sphinx-autoapi
 
       - name: Install npm dependencies
         working-directory: docs/site
@@ -62,8 +62,15 @@ jobs:
         env:
           RUSTDOCFLAGS: --default-theme ayu
 
+      - name: Build Python API docs (Sphinx)
+        working-directory: docs/python
+        run: sphinx-build -b html . _build/html
+
       - name: Copy Rust docs into site output
-        run: cp -r target/doc docs/site/dist/rustdoc
+        run: cp -r target/doc docs/site/dist/api/rust/reference
+
+      - name: Copy Python docs into site output
+        run: cp -r docs/python/_build/html docs/site/dist/api/python/reference
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

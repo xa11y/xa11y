@@ -3,112 +3,26 @@ title: Rust API Reference
 description: Generated API documentation for the xa11y Rust crates.
 ---
 
-The full Rust API documentation is generated from source with `cargo doc` and hosted alongside this site.
+The full Rust API documentation is generated from source with `cargo doc`.
 
-## Browse the Docs
-
-<a href="/rustdoc/xa11y/" class="sl-flex" style="display:inline-flex;align-items:center;gap:0.5rem;padding:0.5rem 1rem;background:var(--sl-color-accent);color:var(--sl-color-black);border-radius:0.5rem;text-decoration:none;font-weight:600;">
-  Open Rust API Docs →
-</a>
-
-## Crates
-
-| Crate | Description |
-| ----- | ----------- |
-| [`xa11y`](/rustdoc/xa11y/) | Umbrella crate — re-exports all core types and provides `create_provider()` |
-| [`xa11y_core`](/rustdoc/xa11y_core/) | Platform-independent types, traits, selector engine |
-| [`xa11y_linux`](/rustdoc/xa11y_linux/) | Linux AT-SPI2 backend |
-| [`xa11y_macos`](/rustdoc/xa11y_macos/) | macOS AXUIElement backend |
-| [`xa11y_windows`](/rustdoc/xa11y_windows/) | Windows UI Automation backend |
-
-## Key Types
-
-### Provider
-
-The main entry point. Create one with `xa11y::create_provider()`.
+```bash
+cargo add xa11y
+```
 
 ```rust
 use xa11y::*;
 
 let provider = create_provider()?;
-
-// Check permissions
-let status = provider.check_permissions()?;
-
-// List running applications
-let apps = provider.list_apps()?;
-
-// Get an app's accessibility tree
 let tree = provider.get_app_tree(
     &AppTarget::ByName("Safari".to_string()),
     &QueryOptions::default(),
 )?;
+
+for node in tree.query("button")? {
+    println!("{:?}", node.name);
+}
 ```
 
-### Tree
-
-A snapshot of an application's accessibility tree.
-
-```rust
-// Query elements with CSS-like selectors
-let buttons = tree.query("button")?;
-
-// Access the root node
-let root = tree.root();
-
-// Navigate the tree
-let children = tree.children(root);
-let parent = tree.parent(&children[0]);
-```
-
-### Node
-
-A single element in the tree.
-
-```rust
-let node: &Node = tree.root();
-
-println!("Role: {:?}", node.role);
-println!("Name: {:?}", node.name);
-println!("Description: {:?}", node.description);
-println!("Value: {:?}", node.value);
-println!("Bounds: {:?}", node.bounds);
-println!("States: {:?}", node.states);
-println!("Children: {}", tree.children(node).len());
-```
-
-### Locator
-
-A lazy element descriptor that re-queries against a fresh tree snapshot on every operation, making it immune to staleness.
-
-```rust
-use xa11y::*;
-
-let provider = create_provider()?;
-let target = AppTarget::ByName("MyApp".to_string());
-
-let email = Locator::new(&*provider, target, "textfield[name='Email']");
-
-email.press()?;
-email.set_value("user@example.com")?;
-email.focus()?;
-
-// Wait for state changes
-use std::time::Duration;
-email.wait_visible(Duration::from_secs(5))?;
-```
-
-### Error
-
-All operations return `xa11y::Result<T>`, which uses the `xa11y::Error` enum:
-
-- `PermissionDenied` — accessibility access not granted
-- `AppNotFound` — target application not running
-- `SelectorNotMatched` — no element matched the selector
-- `ElementStale` — element no longer exists after re-query
-- `ActionNotSupported` — action not available on this element
-- `TextValueNotSupported` — element does not support text values
-- `InvalidSelector` — malformed selector syntax
-- `InvalidActionData` — action data does not match the action
-- `Platform` — OS-level error
-- `Timeout` — operation timed out
+<a href="/api/rust/reference/xa11y/" class="sl-flex" style="display:inline-flex;align-items:center;gap:0.5rem;padding:0.5rem 1rem;background:var(--sl-color-accent);color:var(--sl-color-black);border-radius:0.5rem;text-decoration:none;font-weight:600;">
+  Open Rust API Docs →
+</a>

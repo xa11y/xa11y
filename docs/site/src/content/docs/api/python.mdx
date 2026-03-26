@@ -1,0 +1,25 @@
+---
+title: Python API Reference
+description: API reference for the xa11y Python package.
+---
+
+The full Python API documentation is generated from type stubs with Sphinx.
+
+```bash
+pip install xa11y
+```
+
+```python
+import xa11y
+
+tree = xa11y.app("Safari")
+
+for button in tree.query("button"):
+    print(button.name)
+
+tree.press("button[name='OK']")
+```
+
+<a href="/api/python/reference/api/xa11y/" class="sl-flex" style="display:inline-flex;align-items:center;gap:0.5rem;padding:0.5rem 1rem;background:var(--sl-color-accent);color:var(--sl-color-black);border-radius:0.5rem;text-decoration:none;font-weight:600;">
+  Open Python API Docs →
+</a>
