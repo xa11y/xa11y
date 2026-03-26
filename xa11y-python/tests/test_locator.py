@@ -11,21 +11,6 @@ def test_locator_from_tree(tree):
     assert loc.selector == "button"
 
 
-def test_locator_from_provider(provider):
-    loc = provider.locator("TestApp", selector="button")
-    assert loc.selector == "button"
-
-
-def test_locator_from_provider_by_pid(provider):
-    loc = provider.locator(pid=1234, selector="button")
-    assert loc.selector == "button"
-
-
-def test_locator_from_provider_no_target(provider):
-    with pytest.raises(ValueError, match="Either name or pid"):
-        provider.locator(selector="button")
-
-
 def test_locator_repr(tree):
     loc = tree.locator('button[name="Back"]')
     assert "button" in repr(loc)

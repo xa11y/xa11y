@@ -1,9 +1,25 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use pyo3::exceptions::*;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
+
+// ── Singleton provider ─────────────────────────────────────────────────────
+
+static PROVIDER: OnceLock<Result<Arc<dyn xa11y::Provider>, String>> = OnceLock::new();
+
+fn get_provider() -> PyResult<Arc<dyn xa11y::Provider>> {
+    PROVIDER
+        .get_or_init(|| {
+            xa11y::create_provider()
+                .map(Arc::from)
+                .map_err(|e| format!("{e}"))
+        })
+        .as_ref()
+        .map(Arc::clone)
+        .map_err(|msg| PlatformError::new_err(msg.clone()))
+}
 
 // ── Exceptions ──────────────────────────────────────────────────────────────
 
@@ -776,136 +792,6 @@ fn convert_tree(
     )
 }
 
-// ── Provider ────────────────────────────────────────────────────────────────
-
-#[pyclass]
-struct Provider {
-    inner: Arc<dyn xa11y::Provider>,
-}
-
-#[pymethods]
-impl Provider {
-    #[new]
-    fn new() -> PyResult<Self> {
-        let provider = xa11y::create_provider().map_err(to_py_err)?;
-        Ok(Self {
-            inner: Arc::from(provider),
-        })
-    }
-
-    /// Get an application's accessibility tree.
-    #[pyo3(signature = (name=None, *, pid=None, max_depth=None, max_elements=None, visible_only=false, roles=None, include_raw=false))]
-    fn app(
-        &self,
-        py: Python<'_>,
-        name: Option<&str>,
-        pid: Option<u32>,
-        max_depth: Option<u32>,
-        max_elements: Option<u32>,
-        visible_only: bool,
-        roles: Option<Vec<String>>,
-        include_raw: bool,
-    ) -> PyResult<Py<Tree>> {
-        let target = resolve_app_target(name, pid)?;
-        let opts = build_query_options(max_depth, max_elements, visible_only, roles, include_raw);
-        let inner = self.inner.clone();
-        let rust_tree = py
-            .allow_threads(|| inner.get_app_tree(&target, &opts))
-            .map_err(to_py_err)?;
-        convert_tree(py, rust_tree, self.inner.clone(), target, opts)
-    }
-
-    /// Get accessibility trees for all running applications.
-    #[pyo3(signature = (*, max_depth=None, max_elements=None, visible_only=false, roles=None, include_raw=false))]
-    fn all_apps(
-        &self,
-        py: Python<'_>,
-        max_depth: Option<u32>,
-        max_elements: Option<u32>,
-        visible_only: bool,
-        roles: Option<Vec<String>>,
-        include_raw: bool,
-    ) -> PyResult<Py<Tree>> {
-        let opts = build_query_options(max_depth, max_elements, visible_only, roles, include_raw);
-        let inner = self.inner.clone();
-        let rust_tree = py
-            .allow_threads(|| inner.get_all_apps(&opts))
-            .map_err(to_py_err)?;
-        let target = xa11y::AppTarget::ByName(String::new());
-        convert_tree(py, rust_tree, self.inner.clone(), target, opts)
-    }
-
-    /// List running applications.
-    fn list_apps(&self, py: Python<'_>) -> PyResult<Vec<AppInfo>> {
-        let inner = self.inner.clone();
-        let apps = py.allow_threads(|| inner.list_apps()).map_err(to_py_err)?;
-        Ok(apps
-            .into_iter()
-            .map(|a| AppInfo {
-                name: a.name,
-                pid: a.pid,
-                bundle_id: a.bundle_id,
-            })
-            .collect())
-    }
-
-    /// Check accessibility permissions. Returns "granted" or raises PermissionDeniedError.
-    fn check_permissions(&self, py: Python<'_>) -> PyResult<String> {
-        let inner = self.inner.clone();
-        let status = py
-            .allow_threads(|| inner.check_permissions())
-            .map_err(to_py_err)?;
-        match status {
-            xa11y::PermissionStatus::Granted => Ok("granted".to_string()),
-            xa11y::PermissionStatus::Denied { instructions } => {
-                Err(PermissionDeniedError::new_err(instructions))
-            }
-        }
-    }
-
-    /// Create a Locator for lazy element resolution.
-    #[pyo3(signature = (name=None, *, pid=None, selector, max_depth=None, max_elements=None, visible_only=false, roles=None, include_raw=false))]
-    fn locator(
-        &self,
-        name: Option<&str>,
-        pid: Option<u32>,
-        selector: &str,
-        max_depth: Option<u32>,
-        max_elements: Option<u32>,
-        visible_only: bool,
-        roles: Option<Vec<String>>,
-        include_raw: bool,
-    ) -> PyResult<Locator> {
-        let target = resolve_app_target(name, pid)?;
-        let opts = build_query_options(max_depth, max_elements, visible_only, roles, include_raw);
-        Ok(Locator {
-            provider: self.inner.clone(),
-            target,
-            selector: selector.to_string(),
-            opts,
-            nth: None,
-        })
-    }
-
-    fn __enter__(self_: Py<Self>) -> Py<Self> {
-        self_
-    }
-
-    #[pyo3(signature = (_exc_type=None, _exc_val=None, _exc_tb=None))]
-    fn __exit__(
-        &self,
-        _exc_type: Option<&Bound<'_, PyAny>>,
-        _exc_val: Option<&Bound<'_, PyAny>>,
-        _exc_tb: Option<&Bound<'_, PyAny>>,
-    ) -> bool {
-        false
-    }
-
-    fn __repr__(&self) -> &'static str {
-        "Provider()"
-    }
-}
-
 // ── Locator ─────────────────────────────────────────────────────────────────
 
 #[pyclass]
@@ -1198,15 +1084,9 @@ impl Locator {
     }
 }
 
-// ── Module-level convenience functions ──────────────────────────────────────
+// ── Module-level functions ──────────────────────────────────────────────────
 
-/// Create a Provider.
-#[pyfunction]
-fn connect() -> PyResult<Provider> {
-    Provider::new()
-}
-
-/// Get an app's accessibility tree (convenience — creates provider internally).
+/// Get an app's accessibility tree.
 #[pyfunction]
 #[pyo3(signature = (name=None, *, pid=None, max_depth=None, max_elements=None, visible_only=false, roles=None, include_raw=false))]
 fn app(
@@ -1219,38 +1099,98 @@ fn app(
     roles: Option<Vec<String>>,
     include_raw: bool,
 ) -> PyResult<Py<Tree>> {
-    let provider = Provider::new()?;
-    provider.app(
-        py,
-        name,
-        pid,
-        max_depth,
-        max_elements,
-        visible_only,
-        roles,
-        include_raw,
-    )
+    let provider = get_provider()?;
+    let target = resolve_app_target(name, pid)?;
+    let opts = build_query_options(max_depth, max_elements, visible_only, roles, include_raw);
+    let p = provider.clone();
+    let rust_tree = py
+        .allow_threads(|| p.get_app_tree(&target, &opts))
+        .map_err(to_py_err)?;
+    convert_tree(py, rust_tree, provider, target, opts)
 }
 
-/// List running applications (convenience — creates provider internally).
+/// Get accessibility trees for all running applications.
+#[pyfunction]
+#[pyo3(signature = (*, max_depth=None, max_elements=None, visible_only=false, roles=None, include_raw=false))]
+fn all_apps(
+    py: Python<'_>,
+    max_depth: Option<u32>,
+    max_elements: Option<u32>,
+    visible_only: bool,
+    roles: Option<Vec<String>>,
+    include_raw: bool,
+) -> PyResult<Py<Tree>> {
+    let provider = get_provider()?;
+    let opts = build_query_options(max_depth, max_elements, visible_only, roles, include_raw);
+    let p = provider.clone();
+    let rust_tree = py
+        .allow_threads(|| p.get_all_apps(&opts))
+        .map_err(to_py_err)?;
+    let target = xa11y::AppTarget::ByName(String::new());
+    convert_tree(py, rust_tree, provider, target, opts)
+}
+
+/// Create a Locator for lazy element resolution.
+#[pyfunction]
+#[pyo3(signature = (name=None, *, pid=None, selector, max_depth=None, max_elements=None, visible_only=false, roles=None, include_raw=false))]
+fn locator(
+    name: Option<&str>,
+    pid: Option<u32>,
+    selector: &str,
+    max_depth: Option<u32>,
+    max_elements: Option<u32>,
+    visible_only: bool,
+    roles: Option<Vec<String>>,
+    include_raw: bool,
+) -> PyResult<Locator> {
+    let provider = get_provider()?;
+    let target = resolve_app_target(name, pid)?;
+    let opts = build_query_options(max_depth, max_elements, visible_only, roles, include_raw);
+    Ok(Locator {
+        provider,
+        target,
+        selector: selector.to_string(),
+        opts,
+        nth: None,
+    })
+}
+
+/// List running applications.
 #[pyfunction]
 fn list_apps(py: Python<'_>) -> PyResult<Vec<AppInfo>> {
-    let provider = Provider::new()?;
-    provider.list_apps(py)
+    let provider = get_provider()?;
+    let apps = py
+        .allow_threads(|| provider.list_apps())
+        .map_err(to_py_err)?;
+    Ok(apps
+        .into_iter()
+        .map(|a| AppInfo {
+            name: a.name,
+            pid: a.pid,
+            bundle_id: a.bundle_id,
+        })
+        .collect())
 }
 
-/// Check accessibility permissions (convenience — creates provider internally).
+/// Check accessibility permissions. Returns "granted" or raises PermissionDeniedError.
 #[pyfunction]
 fn check_permissions(py: Python<'_>) -> PyResult<String> {
-    let provider = Provider::new()?;
-    provider.check_permissions(py)
+    let provider = get_provider()?;
+    let status = py
+        .allow_threads(|| provider.check_permissions())
+        .map_err(to_py_err)?;
+    match status {
+        xa11y::PermissionStatus::Granted => Ok("granted".to_string()),
+        xa11y::PermissionStatus::Denied { instructions } => {
+            Err(PermissionDeniedError::new_err(instructions))
+        }
+    }
 }
 
 // ── Module definition ───────────────────────────────────────────────────────
 
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<Provider>()?;
     m.add_class::<Tree>()?;
     m.add_class::<Node>()?;
     m.add_class::<Locator>()?;
@@ -1279,14 +1219,15 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add("PlatformError", m.py().get_type::<PlatformError>())?;
 
-    m.add_function(wrap_pyfunction!(connect, m)?)?;
     m.add_function(wrap_pyfunction!(app, m)?)?;
+    m.add_function(wrap_pyfunction!(all_apps, m)?)?;
+    m.add_function(wrap_pyfunction!(locator, m)?)?;
     m.add_function(wrap_pyfunction!(list_apps, m)?)?;
     m.add_function(wrap_pyfunction!(check_permissions, m)?)?;
 
     // Test helpers
     m.add_function(wrap_pyfunction!(_make_test_tree, m)?)?;
-    m.add_function(wrap_pyfunction!(_make_test_provider, m)?)?;
+    m.add_function(wrap_pyfunction!(_make_test_apps, m)?)?;
 
     Ok(())
 }
@@ -1728,13 +1669,19 @@ fn _make_test_tree(py: Python<'_>) -> PyResult<Py<Tree>> {
     convert_tree(py, tree, provider, target, opts)
 }
 
-/// Create a test provider (for Python unit tests). Returns a Provider backed by a mock.
+/// Create a mock-backed list of apps (for Python unit tests).
 #[pyfunction]
-fn _make_test_provider() -> PyResult<Provider> {
-    let tree = build_test_tree();
-    let provider: Arc<dyn xa11y::Provider> = Arc::new(MockProvider {
-        tree,
-        actions: std::sync::Mutex::new(Vec::new()),
-    });
-    Ok(Provider { inner: provider })
+fn _make_test_apps() -> Vec<AppInfo> {
+    vec![
+        AppInfo {
+            name: "TestApp".to_string(),
+            pid: 1234,
+            bundle_id: Some("com.test.app".to_string()),
+        },
+        AppInfo {
+            name: "OtherApp".to_string(),
+            pid: 5678,
+            bundle_id: None,
+        },
+    ]
 }

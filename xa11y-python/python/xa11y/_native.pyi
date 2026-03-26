@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from types import TracebackType
 
 # ── Exceptions ───────────────────────────────────────────────────────────────
 
@@ -167,53 +166,6 @@ class Tree:
     def __repr__(self) -> str: ...
     def __str__(self) -> str: ...
 
-# ── Provider ─────────────────────────────────────────────────────────────────
-
-class Provider:
-    def __init__(self) -> None: ...
-    def app(
-        self,
-        name: str | None = None,
-        *,
-        pid: int | None = None,
-        max_depth: int | None = None,
-        max_elements: int | None = None,
-        visible_only: bool = False,
-        roles: list[str] | None = None,
-        include_raw: bool = False,
-    ) -> Tree: ...
-    def all_apps(
-        self,
-        *,
-        max_depth: int | None = None,
-        max_elements: int | None = None,
-        visible_only: bool = False,
-        roles: list[str] | None = None,
-        include_raw: bool = False,
-    ) -> Tree: ...
-    def list_apps(self) -> list[AppInfo]: ...
-    def check_permissions(self) -> str: ...
-    def locator(
-        self,
-        name: str | None = None,
-        *,
-        pid: int | None = None,
-        selector: str,
-        max_depth: int | None = None,
-        max_elements: int | None = None,
-        visible_only: bool = False,
-        roles: list[str] | None = None,
-        include_raw: bool = False,
-    ) -> Locator: ...
-    def __enter__(self) -> Provider: ...
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None = None,
-        exc_val: BaseException | None = None,
-        exc_tb: TracebackType | None = None,
-    ) -> bool: ...
-    def __repr__(self) -> str: ...
-
 # ── Locator ──────────────────────────────────────────────────────────────────
 
 class Locator:
@@ -258,7 +210,6 @@ class Locator:
 
 # ── Module-level functions ───────────────────────────────────────────────────
 
-def connect() -> Provider: ...
 def app(
     name: str | None = None,
     *,
@@ -269,10 +220,29 @@ def app(
     roles: list[str] | None = None,
     include_raw: bool = False,
 ) -> Tree: ...
+def all_apps(
+    *,
+    max_depth: int | None = None,
+    max_elements: int | None = None,
+    visible_only: bool = False,
+    roles: list[str] | None = None,
+    include_raw: bool = False,
+) -> Tree: ...
+def locator(
+    name: str | None = None,
+    *,
+    pid: int | None = None,
+    selector: str,
+    max_depth: int | None = None,
+    max_elements: int | None = None,
+    visible_only: bool = False,
+    roles: list[str] | None = None,
+    include_raw: bool = False,
+) -> Locator: ...
 def list_apps() -> list[AppInfo]: ...
 def check_permissions() -> str: ...
 
 # ── Test helpers ─────────────────────────────────────────────────────────────
 
 def _make_test_tree() -> Tree: ...
-def _make_test_provider() -> Provider: ...
+def _make_test_apps() -> list[AppInfo]: ...

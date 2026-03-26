@@ -6,7 +6,6 @@ import xa11y
 
 
 def test_all_classes_exported():
-    assert hasattr(xa11y, "Provider")
     assert hasattr(xa11y, "Tree")
     assert hasattr(xa11y, "Node")
     assert hasattr(xa11y, "Locator")
@@ -27,8 +26,9 @@ def test_all_exceptions_exported():
 
 
 def test_all_functions_exported():
-    assert callable(xa11y.connect)
     assert callable(xa11y.app)
+    assert callable(xa11y.all_apps)
+    assert callable(xa11y.locator)
     assert callable(xa11y.list_apps)
     assert callable(xa11y.check_permissions)
 
@@ -38,18 +38,15 @@ def test_all_functions_exported():
 
 def test_all_list():
     assert isinstance(xa11y.__all__, list)
-    assert "Provider" in xa11y.__all__
     assert "Tree" in xa11y.__all__
     assert "Node" in xa11y.__all__
-    assert "connect" in xa11y.__all__
+    assert "app" in xa11y.__all__
+    assert "all_apps" in xa11y.__all__
+    assert "locator" in xa11y.__all__
     assert "XA11yError" in xa11y.__all__
 
 
 # ── Types are correct classes ────────────────────────────────────────────────
-
-
-def test_provider_is_type():
-    assert isinstance(xa11y.Provider, type)
 
 
 def test_tree_is_type():
