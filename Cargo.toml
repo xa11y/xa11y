@@ -7,6 +7,7 @@ members = [
     "xa11y",
     "xa11y-test-app",
     "xa11y-fuzz",
+    "xtask",
 ]
 exclude = ["xa11y-python"]
 resolver = "2"

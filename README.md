@@ -6,27 +6,26 @@ Cross-platform accessibility library for reading and interacting with accessibil
 
 ```bash
 cargo build --workspace
-cargo test --workspace        # unit tests
+cargo xtask test              # unit tests
+cargo xtask check             # all pre-PR checks (fmt, lint, test, python)
 ```
 
-## Running Linux Integration Tests (from macOS)
+## Development Commands
 
-Requires [Finch](https://github.com/runfinch/finch) (or any OCI-compatible container runtime).
-
-```bash
-# First run builds a base image (~2min), then compiles + tests (~1min)
-./run_integ_container.sh
-
-# Subsequent runs reuse the build cache (~45s, or ~10s for a single test)
-./run_integ_container.sh tree_has_buttons   # run one test
-./run_integ_container.sh --build-only       # compile without testing
-./run_integ_container.sh --shell            # interactive shell in container
-```
-
-On native Linux, run directly:
+All workflow commands are available via `cargo xtask`:
 
 ```bash
-./run_integ_tests.sh
+cargo xtask fmt               # format Rust + Python
+cargo xtask lint              # clippy + ruff
+cargo xtask test              # unit tests
+cargo xtask test-python       # build + test Python bindings
+cargo xtask test-integ        # integration tests (auto-detects OS)
+cargo xtask test-integ-container              # Linux tests via Finch container
+cargo xtask test-integ-container tree_has_buttons  # single test
+cargo xtask fuzz              # provider fuzzer
+cargo xtask coverage          # code coverage report
+cargo xtask docs              # build documentation
+cargo xtask check             # ALL pre-PR checks
 ```
 
 ## Project Structure

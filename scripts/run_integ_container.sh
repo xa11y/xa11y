@@ -11,7 +11,7 @@
 #   ./run_integ_container.sh --shell             # drop into shell
 
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "$(dirname "$0")/.."
 
 IMAGE="xa11y-base"
 VOLUME="xa11y-cargo-cache"
@@ -47,4 +47,4 @@ finch run --rm \
     -v "$VOLUME:/xa11y/target" \
     -e "BUILD_ONLY=$BUILD_ONLY" \
     -e "TEST_FILTER=$TEST_FILTER" \
-    "$IMAGE" bash /xa11y/run_integ_tests.sh
+    "$IMAGE" bash /xa11y/scripts/run_integ_tests.sh
