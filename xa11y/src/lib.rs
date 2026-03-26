@@ -33,41 +33,67 @@ pub use xa11y_core::*;
 
 // ── Internal singleton ──────────────────────────────────────────────────────
 
-// The singleton leaks one Arc ref-count so the provider is never dropped
-// during static destructor teardown — Windows COM objects crash if dropped
-// after CoUninitialize has already run.
-static PROVIDER: OnceLock<std::result::Result<Arc<dyn Provider>, String>> = OnceLock::new();
+// Use Box::leak so the provider is never dropped — avoids Windows COM
+// teardown crashes (STATUS_ACCESS_VIOLATION at process exit).
+static PROVIDER: OnceLock<std::result::Result<&'static dyn Provider, String>> = OnceLock::new();
 
-fn get_provider() -> Result<Arc<dyn Provider>> {
+fn get_provider_ref() -> Result<&'static dyn Provider> {
     PROVIDER
         .get_or_init(|| {
             create_provider_boxed()
-                .map(|b| {
-                    let arc: Arc<dyn Provider> = Arc::from(b);
-                    // Leak one ref-count so Drop never runs at process exit.
-                    std::mem::forget(arc.clone());
-                    arc
-                })
+                .map(|b| &*Box::leak(b))
                 .map_err(|e| format!("{e}"))
         })
         .as_ref()
-        .map(Arc::clone)
-        .map_err(|msg: &String| Error::Platform {
+        .copied()
+        .map_err(|msg| Error::Platform {
             code: -1,
             message: msg.clone(),
         })
+}
+
+/// Wrapper that lets a `&'static dyn Provider` be shared as `Arc<dyn Provider>`
+/// for use with `Locator`.
+struct StaticProviderRef(&'static dyn Provider);
+
+impl Provider for StaticProviderRef {
+    fn get_app_tree(&self, target: &AppTarget, opts: &QueryOptions) -> Result<Tree> {
+        self.0.get_app_tree(target, opts)
+    }
+    fn get_all_apps(&self, opts: &QueryOptions) -> Result<Tree> {
+        self.0.get_all_apps(opts)
+    }
+    fn perform_action(
+        &self,
+        tree: &Tree,
+        node: &Node,
+        action: Action,
+        data: Option<ActionData>,
+    ) -> Result<()> {
+        self.0.perform_action(tree, node, action, data)
+    }
+    fn check_permissions(&self) -> Result<PermissionStatus> {
+        self.0.check_permissions()
+    }
+    fn list_apps(&self) -> Result<Vec<AppInfo>> {
+        self.0.list_apps()
+    }
+}
+
+fn get_provider_arc() -> Result<Arc<dyn Provider>> {
+    Ok(Arc::new(StaticProviderRef(get_provider_ref()?)))
 }
 
 // ── Module-level API ────────────────────────────────────────────────────────
 
 /// Snapshot a specific application's accessibility tree.
 pub fn app(target: &AppTarget, opts: &QueryOptions) -> Result<Tree> {
-    get_provider()?.get_app_tree(target, opts)
+    get_provider_ref()?.get_app_tree(target, opts)
 }
 
 /// Snapshot all running applications (shallow).
 pub fn all_apps(opts: &QueryOptions) -> Result<Tree> {
-    get_provider()?.get_all_apps(opts)
+    get_provider_ref()?.get_all_apps(opts)
 }
 
 /// Perform an action on an element from a specific snapshot.
@@ -77,27 +103,27 @@ pub fn perform_action(
     action: Action,
     data: Option<ActionData>,
 ) -> Result<()> {
-    get_provider()?.perform_action(tree, node, action, data)
+    get_provider_ref()?.perform_action(tree, node, action, data)
 }
 
 /// Check if accessibility permissions are granted.
 pub fn check_permissions() -> Result<PermissionStatus> {
-    get_provider()?.check_permissions()
+    get_provider_ref()?.check_permissions()
 }
 
 /// List running applications with their PIDs.
 pub fn list_apps() -> Result<Vec<AppInfo>> {
-    get_provider()?.list_apps()
+    get_provider_ref()?.list_apps()
 }
 
 /// Create a Locator targeting a specific application.
 pub fn locator(target: AppTarget, selector: &str) -> Result<Locator> {
-    Ok(Locator::new(get_provider()?, target, selector))
+    Ok(Locator::new(get_provider_arc()?, target, selector))
 }
 
 /// Create a Locator with custom query options.
 pub fn locator_with_opts(target: AppTarget, selector: &str, opts: QueryOptions) -> Result<Locator> {
-    Ok(Locator::with_opts(get_provider()?, target, selector, opts))
+    Ok(Locator::with_opts(get_provider_arc()?, target, selector, opts))
 }
 
 // ── Platform provider construction (internal) ───────────────────────────────
@@ -108,7 +134,7 @@ pub fn locator_with_opts(target: AppTarget, selector: &str, opts: QueryOptions) 
 /// (`app`, `all_apps`, `perform_action`, etc.) which use a shared singleton.
 #[doc(hidden)]
 pub fn create_provider() -> Result<Arc<dyn Provider>> {
-    get_provider()
+    get_provider_arc()
 }
 
 fn create_provider_boxed() -> Result<Box<dyn Provider>> {
