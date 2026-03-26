@@ -2,7 +2,9 @@
 
 from xa11y._native import _make_test_apps
 
+
 # ── app() (via _make_test_tree mock) ────────────────────────────────────────
+
 
 
 def test_app_tree_has_nodes(tree):
