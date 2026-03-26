@@ -1047,16 +1047,16 @@ mod tests {
     fn raw_data_always_present() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let root = tree.root();
+        let _root = tree.root();
         #[cfg(target_os = "linux")]
-        match &root.raw {
+        match &_root.raw {
             RawPlatformData::Linux { atspi_role, .. } => {
                 assert!(!atspi_role.is_empty());
             }
             _ => panic!("Expected Linux raw data"),
         }
         #[cfg(target_os = "macos")]
-        match &root.raw {
+        match &_root.raw {
             RawPlatformData::MacOS { ax_role, .. } => {
                 assert!(!ax_role.is_empty());
             }
