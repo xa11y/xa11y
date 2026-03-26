@@ -1,6 +1,7 @@
 **/target
 **/corpus
 **/artifacts
+.venv/
 
 # Auto-generated docs (regenerate with: python docs/generate_python_api.py)
 docs/site/src/content/docs/api/python.mdx
