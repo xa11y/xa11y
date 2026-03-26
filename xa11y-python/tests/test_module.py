@@ -10,7 +10,6 @@ def test_all_classes_exported():
     assert hasattr(xa11y, "Node")
     assert hasattr(xa11y, "Locator")
     assert hasattr(xa11y, "Rect")
-    assert hasattr(xa11y, "NormalizedRect")
     assert hasattr(xa11y, "AppInfo")
 
 
@@ -63,10 +62,6 @@ def test_locator_is_type():
 
 def test_rect_is_type():
     assert isinstance(xa11y.Rect, type)
-
-
-def test_normalized_rect_is_type():
-    assert isinstance(xa11y.NormalizedRect, type)
 
 
 def test_app_info_is_type():

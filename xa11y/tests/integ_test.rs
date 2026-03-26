@@ -649,20 +649,6 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn node_bounds_normalized_valid() {
-        let p = h::provider();
-        let tree = h::app_tree(&*p);
-        let submit = h::named(&tree, "Submit");
-        assert!(submit.bounds_normalized.is_some());
-        let nb = submit.bounds_normalized.unwrap();
-        assert!(nb.left >= 0.0 && nb.left <= 1.0);
-        assert!(nb.top >= 0.0 && nb.top <= 1.0);
-        assert!(nb.right >= nb.left);
-        assert!(nb.bottom >= nb.top);
-    }
-
-    #[test]
-    #[ignore]
     fn node_actions_list_on_button() {
         let p = h::provider();
         let tree = h::app_tree(&*p);

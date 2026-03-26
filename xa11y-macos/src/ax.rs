@@ -11,9 +11,8 @@ use core_foundation::string::CFString;
 
 use xa11y_core::{
     Action, ActionData, AppInfo, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
-    EventKind, EventProvider, EventReceiver, Node, NormalizedRect, PermissionStatus, Provider,
-    QueryOptions, RawPlatformData, Rect, Result, Role, ScrollDirection, StateSet, Subscription,
-    Toggled, Tree,
+    EventKind, EventProvider, EventReceiver, Node, PermissionStatus, Provider, QueryOptions,
+    RawPlatformData, Rect, Result, Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
 };
 
 // ── FFI Declarations ──────────────────────────────────────────────────────────
@@ -848,24 +847,6 @@ impl MacOSProvider {
             _ => None,
         };
 
-        let bounds_normalized = bounds.map(|b| {
-            let (sw, sh) = screen_size;
-            if sw == 0 || sh == 0 {
-                return NormalizedRect {
-                    left: 0.0,
-                    top: 0.0,
-                    right: 0.0,
-                    bottom: 0.0,
-                };
-            }
-            NormalizedRect {
-                left: b.x as f64 / sw as f64,
-                top: b.y as f64 / sh as f64,
-                right: (b.x as f64 + b.width as f64) / sw as f64,
-                bottom: (b.y as f64 + b.height as f64) / sh as f64,
-            }
-        });
-
         // Actions
         let ax_actions = ax_action_names(element.as_ptr());
         let mut actions: Vec<Action> = ax_actions.iter().filter_map(|a| map_ax_action(a)).collect();
@@ -916,7 +897,6 @@ impl MacOSProvider {
             value,
             description,
             bounds,
-            bounds_normalized,
             actions,
             states,
             stable_id: ax_identifier,
@@ -1058,12 +1038,6 @@ impl Provider for MacOSProvider {
                 y: 0,
                 width: screen_size.0,
                 height: screen_size.1,
-            }),
-            bounds_normalized: Some(NormalizedRect {
-                left: 0.0,
-                top: 0.0,
-                right: 1.0,
-                bottom: 1.0,
             }),
             actions: vec![],
             states: StateSet::default(),
@@ -1422,7 +1396,6 @@ unsafe extern "C" fn ax_observer_callback(
             value: ax_value_string(element),
             description: ax_string(element, "AXDescription"),
             bounds: None,
-            bounds_normalized: None,
             actions: vec![],
             states: StateSet::default(),
             numeric_value: None,

@@ -190,9 +190,6 @@ pub struct Node {
     /// Bounding rectangle in screen pixels
     pub bounds: Option<Rect>,
 
-    /// Bounding box normalized to [0.0, 1.0] relative to screen dimensions
-    pub bounds_normalized: Option<NormalizedRect>,
-
     /// Available actions
     pub actions: Vec<Action>,
 
@@ -270,7 +267,7 @@ pub enum Toggled {
 - **Checked on macOS:** Reported via AXValue as "0"/"1" strings, not a boolean. Must be parsed.
 - **Toggled::Mixed:** Windows supports tri-state via ToggleState_Indeterminate. macOS uses AXValue "2". Linux uses a separate Mixed state. xa11y normalizes these.
 
-### 4. `Rect` and `NormalizedRect` — Geometry
+### 4. `Rect` — Geometry
 
 ```rust
 /// Screen-pixel bounding rectangle (origin + size).
@@ -282,19 +279,9 @@ pub struct Rect {
     pub width: u32,
     pub height: u32,
 }
-
-/// Bounding rectangle normalized to [0.0, 1.0] range
-/// relative to screen dimensions. Uses corner-pair representation
-/// (distinct from `Rect`'s origin+size representation).
-pub struct NormalizedRect {
-    pub left: f64,    // 0.0 = left edge of screen
-    pub top: f64,     // 0.0 = top edge of screen
-    pub right: f64,   // 1.0 = right edge of screen
-    pub bottom: f64,  // 1.0 = bottom edge of screen
-}
 ```
 
-Geometry uses accesskit-style `Rect` for pixel coordinates. The `NormalizedRect` is kept for agent-desktop compatibility (useful for vision models that work in normalized coordinates).
+Geometry uses accesskit-style `Rect` for pixel coordinates.
 
 **Edge cases:**
 - **Multi-monitor:** Coordinates are in the global screen space. On macOS, the origin (0,0) is top-left of the primary display. On Windows, coordinates can be negative for monitors left of or above the primary. On Linux/X11, coordinates are in the X screen space.

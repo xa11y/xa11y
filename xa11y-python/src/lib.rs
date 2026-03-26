@@ -212,10 +212,6 @@ fn make_py_node(py: Python<'_>, n: &xa11y::Node) -> PyResult<Py<Node>> {
             stable_id: n.stable_id.clone(),
             actions,
             bounds_data: n.bounds.as_ref().map(|r| (r.x, r.y, r.width, r.height)),
-            bounds_norm_data: n
-                .bounds_normalized
-                .as_ref()
-                .map(|r| (r.left, r.top, r.right, r.bottom)),
             enabled: n.states.enabled,
             visible: n.states.visible,
             focused: n.states.focused,
@@ -269,29 +265,6 @@ impl Rect {
 
 #[pyclass(frozen)]
 #[derive(Clone)]
-struct NormalizedRect {
-    #[pyo3(get)]
-    left: f64,
-    #[pyo3(get)]
-    top: f64,
-    #[pyo3(get)]
-    right: f64,
-    #[pyo3(get)]
-    bottom: f64,
-}
-
-#[pymethods]
-impl NormalizedRect {
-    fn __repr__(&self) -> String {
-        format!(
-            "NormalizedRect(left={:.4}, top={:.4}, right={:.4}, bottom={:.4})",
-            self.left, self.top, self.right, self.bottom
-        )
-    }
-}
-
-#[pyclass(frozen)]
-#[derive(Clone)]
 struct AppInfo {
     #[pyo3(get)]
     name: String,
@@ -340,8 +313,6 @@ struct Node {
     actions: Vec<String>,
 
     bounds_data: Option<(i32, i32, u32, u32)>,
-    bounds_norm_data: Option<(f64, f64, f64, f64)>,
-
     #[pyo3(get)]
     enabled: bool,
     #[pyo3(get)]
@@ -405,16 +376,6 @@ impl Node {
             y,
             width: w,
             height: h,
-        })
-    }
-
-    #[getter]
-    fn bounds_normalized(&self) -> Option<NormalizedRect> {
-        self.bounds_norm_data.map(|(l, t, r, b)| NormalizedRect {
-            left: l,
-            top: t,
-            right: r,
-            bottom: b,
         })
     }
 
@@ -1265,7 +1226,6 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Node>()?;
     m.add_class::<Locator>()?;
     m.add_class::<Rect>()?;
-    m.add_class::<NormalizedRect>()?;
     m.add_class::<AppInfo>()?;
 
     m.add("XA11yError", m.py().get_type::<XA11yError>())?;
@@ -1393,12 +1353,7 @@ fn build_test_tree() -> xa11y::Tree {
                 width: 1920,
                 height: 1080,
             }),
-            bounds_normalized: Some(NormalizedRect {
-                left: 0.0,
-                top: 0.0,
-                right: 1.0,
-                bottom: 1.0,
-            }),
+
             actions: vec![],
             states: StateSet::default(),
 
@@ -1423,12 +1378,7 @@ fn build_test_tree() -> xa11y::Tree {
                 width: 800,
                 height: 600,
             }),
-            bounds_normalized: Some(NormalizedRect {
-                left: 0.052,
-                top: 0.046,
-                right: 0.469,
-                bottom: 0.602,
-            }),
+
             actions: vec![],
             states: StateSet {
                 focused: true,
@@ -1451,7 +1401,7 @@ fn build_test_tree() -> xa11y::Tree {
             value: None,
             description: None,
             bounds: None,
-            bounds_normalized: None,
+
             actions: vec![],
             states: StateSet::default(),
 
@@ -1476,7 +1426,7 @@ fn build_test_tree() -> xa11y::Tree {
                 width: 50,
                 height: 30,
             }),
-            bounds_normalized: None,
+
             actions: vec![Action::Press, Action::Focus],
             states: StateSet {
                 focusable: true,
@@ -1504,7 +1454,7 @@ fn build_test_tree() -> xa11y::Tree {
                 width: 50,
                 height: 30,
             }),
-            bounds_normalized: None,
+
             actions: vec![Action::Press, Action::Focus],
             states: StateSet {
                 enabled: false,
@@ -1528,7 +1478,7 @@ fn build_test_tree() -> xa11y::Tree {
             value: None,
             description: None,
             bounds: None,
-            bounds_normalized: None,
+
             actions: vec![],
             states: StateSet::default(),
 
@@ -1553,7 +1503,7 @@ fn build_test_tree() -> xa11y::Tree {
                 width: 300,
                 height: 25,
             }),
-            bounds_normalized: None,
+
             actions: vec![Action::Focus, Action::SetValue, Action::TypeText],
             states: StateSet {
                 editable: true,
@@ -1577,7 +1527,7 @@ fn build_test_tree() -> xa11y::Tree {
             value: None,
             description: None,
             bounds: None,
-            bounds_normalized: None,
+
             actions: vec![Action::Toggle, Action::Focus],
             states: StateSet {
                 checked: Some(Toggled::On),
@@ -1601,7 +1551,7 @@ fn build_test_tree() -> xa11y::Tree {
             value: Some("75".to_string()),
             description: None,
             bounds: None,
-            bounds_normalized: None,
+
             actions: vec![
                 Action::Increment,
                 Action::Decrement,
@@ -1629,7 +1579,7 @@ fn build_test_tree() -> xa11y::Tree {
             value: Some("Loading...".to_string()),
             description: None,
             bounds: None,
-            bounds_normalized: None,
+
             actions: vec![],
             states: StateSet {
                 visible: false,
@@ -1652,7 +1602,7 @@ fn build_test_tree() -> xa11y::Tree {
             value: None,
             description: None,
             bounds: None,
-            bounds_normalized: None,
+
             actions: vec![],
             states: StateSet {
                 expanded: Some(true),
@@ -1675,7 +1625,7 @@ fn build_test_tree() -> xa11y::Tree {
             value: None,
             description: None,
             bounds: None,
-            bounds_normalized: None,
+
             actions: vec![Action::Select, Action::Focus],
             states: StateSet {
                 selected: true,
@@ -1699,7 +1649,7 @@ fn build_test_tree() -> xa11y::Tree {
             value: None,
             description: None,
             bounds: None,
-            bounds_normalized: None,
+
             actions: vec![Action::Select, Action::Focus],
             states: StateSet {
                 focusable: true,

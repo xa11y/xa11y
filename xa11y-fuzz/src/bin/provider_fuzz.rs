@@ -591,7 +591,6 @@ mod provider_fuzz {
                     let _ = &node.role;
                     let _ = &node.states;
                     let _ = &node.bounds;
-                    let _ = &node.bounds_normalized;
                     let _ = &node.actions;
                     let _ = &node.raw;
                 }
@@ -718,7 +717,6 @@ mod provider_fuzz {
             let _ = &node.value;
             let _ = &node.description;
             let _ = &node.bounds;
-            let _ = &node.bounds_normalized;
             let _ = &node.actions;
             let _ = &node.states;
             let _ = &node.numeric_value;

@@ -211,22 +211,7 @@ def test_bounds_none(tree):
     assert toolbar.bounds is None
 
 
-def test_bounds_normalized(tree):
-    root = tree.root
-    bn = root.bounds_normalized
-    assert bn is not None
-    assert bn.left == 0.0
-    assert bn.top == 0.0
-    assert bn.right == 1.0
-    assert bn.bottom == 1.0
-
-
-def test_bounds_normalized_none(tree):
-    back = next(b for b in tree.query("button") if b.name == "Back")
-    assert back.bounds_normalized is None
-
-
-# ── Rect / NormalizedRect repr ───────────────────────────────────────────────
+# ── Rect repr ────────────────────────────────────────────────────────────────
 
 
 def test_rect_repr(tree):
@@ -241,12 +226,6 @@ def test_rect_eq(tree):
     b1 = tree.root.bounds
     b2 = tree.root.bounds
     assert b1 == b2
-
-
-def test_normalized_rect_repr(tree):
-    bn = tree.root.bounds_normalized
-    r = repr(bn)
-    assert "NormalizedRect(" in r
 
 
 # ── Node dunders ─────────────────────────────────────────────────────────────

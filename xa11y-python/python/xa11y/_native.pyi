@@ -50,23 +50,6 @@ class Rect:
     def __repr__(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...
 
-class NormalizedRect:
-    """A bounding rectangle normalized to 0.0-1.0 relative to the display."""
-
-    @property
-    def left(self) -> float:
-        """Left edge (0.0 = left of screen)."""
-    @property
-    def top(self) -> float:
-        """Top edge (0.0 = top of screen)."""
-    @property
-    def right(self) -> float:
-        """Right edge (1.0 = right of screen)."""
-    @property
-    def bottom(self) -> float:
-        """Bottom edge (1.0 = bottom of screen)."""
-    def __repr__(self) -> str: ...
-
 class AppInfo:
     """Information about a running application."""
 
@@ -126,9 +109,6 @@ class Node:
     @property
     def bounds(self) -> Rect | None:
         """Bounding rectangle in screen coordinates."""
-    @property
-    def bounds_normalized(self) -> NormalizedRect | None:
-        """Bounding rectangle normalized to 0.0-1.0 relative to the display."""
     @property
     def enabled(self) -> bool:
         """Whether the element is interactive."""

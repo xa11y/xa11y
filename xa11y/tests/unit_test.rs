@@ -20,12 +20,7 @@ fn sample_tree() -> Tree {
                 width: 1920,
                 height: 1080,
             }),
-            bounds_normalized: Some(NormalizedRect {
-                left: 0.0,
-                top: 0.0,
-                right: 1.0,
-                bottom: 1.0,
-            }),
+
             actions: vec![],
             states: StateSet::default(),
 
@@ -49,7 +44,7 @@ fn sample_tree() -> Tree {
                 width: 1920,
                 height: 44,
             }),
-            bounds_normalized: None,
+
             actions: vec![],
             states: StateSet::default(),
 
@@ -73,7 +68,7 @@ fn sample_tree() -> Tree {
                 width: 60,
                 height: 34,
             }),
-            bounds_normalized: None,
+
             actions: vec![Action::Press, Action::Focus],
             states: StateSet {
                 enabled: true,
@@ -101,7 +96,7 @@ fn sample_tree() -> Tree {
                 width: 600,
                 height: 34,
             }),
-            bounds_normalized: None,
+
             actions: vec![Action::Focus, Action::SetValue],
             states: StateSet {
                 enabled: true,
@@ -130,7 +125,7 @@ fn sample_tree() -> Tree {
                 width: 1920,
                 height: 1036,
             }),
-            bounds_normalized: None,
+
             actions: vec![],
             states: StateSet::default(),
 
@@ -149,7 +144,7 @@ fn sample_tree() -> Tree {
             value: None,
             description: None,
             bounds: None,
-            bounds_normalized: None,
+
             actions: vec![],
             states: StateSet::default(),
 
@@ -168,7 +163,7 @@ fn sample_tree() -> Tree {
             value: None,
             description: None,
             bounds: None,
-            bounds_normalized: None,
+
             actions: vec![Action::Press, Action::Focus],
             states: StateSet {
                 enabled: true,
@@ -191,7 +186,7 @@ fn sample_tree() -> Tree {
             value: None,
             description: None,
             bounds: None,
-            bounds_normalized: None,
+
             actions: vec![Action::Press, Action::Focus],
             states: StateSet {
                 enabled: false,
@@ -214,7 +209,7 @@ fn sample_tree() -> Tree {
             value: None,
             description: None,
             bounds: None,
-            bounds_normalized: None,
+
             actions: vec![Action::Press, Action::Toggle],
             states: StateSet {
                 enabled: true,
@@ -553,7 +548,7 @@ fn toggled_variants() {
     assert_ne!(Toggled::Off, Toggled::Mixed);
 }
 
-// ── Rect and NormalizedRect ──
+// ── Rect ──
 
 #[test]
 fn rect_negative_coords() {
@@ -565,18 +560,6 @@ fn rect_negative_coords() {
     };
     assert_eq!(rect.x, -1920);
     assert_eq!(rect.y, -500);
-}
-
-#[test]
-fn normalized_rect_range() {
-    let rect = NormalizedRect {
-        left: 0.0,
-        top: 0.0,
-        right: 1.0,
-        bottom: 1.0,
-    };
-    assert!(rect.left >= 0.0 && rect.left <= 1.0);
-    assert!(rect.right >= 0.0 && rect.right <= 1.0);
 }
 
 // ── Action ──
@@ -726,7 +709,6 @@ fn node_json_serialization() {
             width: 80,
             height: 30,
         }),
-        bounds_normalized: None,
         actions: vec![Action::Press],
         states: StateSet {
             enabled: true,

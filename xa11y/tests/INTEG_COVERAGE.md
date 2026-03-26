@@ -49,7 +49,6 @@ Last updated: 2026-03-19
 | `value` | Covered | Slider, text entry, spinner value checks |
 | `description` | Covered | `node_description_on_image` |
 | `bounds` | Covered | `node_bounds_present` |
-| `bounds_normalized` | Covered | `node_bounds_normalized_valid` |
 | `actions` | Covered | `node_actions_list_on_button` |
 | `states` | Covered | See StateSet below |
 | `children` | Covered | `node_children_ids_valid` |

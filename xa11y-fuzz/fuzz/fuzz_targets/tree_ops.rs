@@ -93,7 +93,6 @@ fn build_tree(input: &FuzzInput) -> Tree {
             value: fuzz.value.clone(),
             description: None,
             bounds: None,
-            bounds_normalized: None,
             actions: vec![],
             states: StateSet::default(),
             stable_id: None,

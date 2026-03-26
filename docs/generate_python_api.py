@@ -169,7 +169,7 @@ def _classify_class(cls: ast.ClassDef) -> str:
             "BaseException",
         ):
             return "exception"
-    if cls.name in ("Rect", "NormalizedRect", "AppInfo"):
+    if cls.name in ("Rect", "AppInfo"):
         return "data"
     return "main"
 

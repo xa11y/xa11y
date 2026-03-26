@@ -27,9 +27,6 @@ pub struct Node {
     /// Bounding rectangle in screen pixels
     pub bounds: Option<Rect>,
 
-    /// Bounding box normalized to [0.0, 1.0] relative to screen dimensions
-    pub bounds_normalized: Option<NormalizedRect>,
-
     /// Available actions
     pub actions: Vec<Action>,
 
@@ -84,7 +81,6 @@ impl Node {
             value: None,
             description: None,
             bounds: None,
-            bounds_normalized: None,
             actions: vec![],
             states: StateSet::default(),
             numeric_value: None,
@@ -166,20 +162,6 @@ pub struct Rect {
     pub y: i32,
     pub width: u32,
     pub height: u32,
-}
-
-/// Bounding rectangle normalized to [0.0, 1.0] range relative to screen dimensions.
-/// Uses corner-pair representation (distinct from `Rect`'s origin+size).
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
-pub struct NormalizedRect {
-    /// 0.0 = left edge of screen
-    pub left: f64,
-    /// 0.0 = top edge of screen
-    pub top: f64,
-    /// 1.0 = right edge of screen
-    pub right: f64,
-    /// 1.0 = bottom edge of screen
-    pub bottom: f64,
 }
 
 /// Platform-specific raw data attached to every node.

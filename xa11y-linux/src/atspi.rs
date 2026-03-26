@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use xa11y_core::{
     Action, ActionData, AppInfo, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
-    EventKind, EventProvider, EventReceiver, Node, NormalizedRect, PermissionStatus, Provider,
-    QueryOptions, Rect, Result, Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
+    EventKind, EventProvider, EventReceiver, Node, PermissionStatus, Provider, QueryOptions, Rect,
+    Result, Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
 };
 use zbus::blocking::{Connection, Proxy};
 
@@ -395,24 +395,6 @@ impl LinuxProvider {
             return;
         }
 
-        let bounds_normalized = bounds.map(|b| {
-            let (sw, sh) = screen_size;
-            if sw == 0 || sh == 0 {
-                return NormalizedRect {
-                    left: 0.0,
-                    top: 0.0,
-                    right: 0.0,
-                    bottom: 0.0,
-                };
-            }
-            NormalizedRect {
-                left: b.x as f64 / sw as f64,
-                top: b.y as f64 / sh as f64,
-                right: (b.x as f64 + b.width as f64) / sw as f64,
-                bottom: (b.y as f64 + b.height as f64) / sh as f64,
-            }
-        });
-
         let raw = {
             let raw_role = if role_name.is_empty() {
                 format!("role_num:{}", role_num)
@@ -450,7 +432,6 @@ impl LinuxProvider {
             value,
             description,
             bounds,
-            bounds_normalized,
             actions,
             states,
             numeric_value,
@@ -775,12 +756,6 @@ impl Provider for LinuxProvider {
                 y: 0,
                 width: screen_size.0,
                 height: screen_size.1,
-            }),
-            bounds_normalized: Some(NormalizedRect {
-                left: 0.0,
-                top: 0.0,
-                right: 1.0,
-                bottom: 1.0,
             }),
             actions: vec![],
             states: StateSet::default(),
