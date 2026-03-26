@@ -302,6 +302,7 @@ impl LinuxProvider {
 
     /// Traverse the accessibility tree rooted at `aref`, building nodes.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::only_used_in_recursion)]
     fn traverse(
         &self,
         aref: &AccessibleRef,

@@ -474,6 +474,7 @@ impl Tree {
     }
 
     /// Perform an action on a node or selector target.
+    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (target, action, *, value=None, numeric_value=None, direction=None, amount=None, start=None, end=None))]
     fn perform(
         &self,
