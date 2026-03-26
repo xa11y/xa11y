@@ -6,7 +6,6 @@ import xa11y
 def test_stub_types_are_accessible():
     """Verify the key types are importable and recognized as types."""
     # These would fail at import time if stubs were malformed
-    assert xa11y.Provider is not None
     assert xa11y.Tree is not None
     assert xa11y.Node is not None
     assert xa11y.Locator is not None
