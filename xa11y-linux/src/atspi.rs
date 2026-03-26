@@ -740,7 +740,7 @@ impl Provider for LinuxProvider {
 
         let pid = self.get_app_pid(&app_ref);
 
-        Ok(Tree::new(app_name, pid, screen_size, nodes, opts.clone()))
+        Ok(Tree::new(app_name, pid, screen_size, nodes))
     }
 
     fn get_all_apps(&self, opts: &QueryOptions) -> Result<Tree> {
@@ -805,7 +805,6 @@ impl Provider for LinuxProvider {
             None,
             screen_size,
             nodes,
-            opts.clone(),
         ))
     }
 

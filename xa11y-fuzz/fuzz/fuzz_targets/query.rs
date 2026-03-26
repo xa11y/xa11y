@@ -4,7 +4,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use xa11y_core::{Node, QueryOptions, RawPlatformData, Role, StateSet, Tree};
+use xa11y_core::{Node, RawPlatformData, Role, StateSet, Tree};
 
 const ROLES: [Role; 33] = [
     Role::Unknown,
@@ -61,13 +61,7 @@ fn build_tree(fuzz_nodes: &[FuzzNode]) -> Tree {
     let node_count = fuzz_nodes.len().min(max_nodes);
 
     if node_count == 0 {
-        return Tree::new(
-            "fuzz-app".to_string(),
-            None,
-            (1920, 1080),
-            vec![],
-            QueryOptions::default(),
-        );
+        return Tree::new("fuzz-app".to_string(), None, (1920, 1080), vec![]);
     }
 
     let mut nodes: Vec<Node> = Vec::with_capacity(node_count);
@@ -128,7 +122,6 @@ fn build_tree(fuzz_nodes: &[FuzzNode]) -> Tree {
         None,
         (1920, 1080),
         nodes,
-        QueryOptions::default(),
     )
 }
 

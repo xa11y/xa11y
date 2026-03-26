@@ -173,10 +173,6 @@ class Tree:
         """The root node of the tree."""
     def query(self, selector: str) -> list[Node]:
         """Find all nodes matching a CSS-like selector string."""
-    def find_by_role(self, role: str) -> list[Node]:
-        """Find all nodes with the given role name."""
-    def find_by_name(self, pattern: str) -> list[Node]:
-        """Find all nodes whose name contains *pattern* (case-insensitive)."""
     def perform(
         self,
         target: _Target,

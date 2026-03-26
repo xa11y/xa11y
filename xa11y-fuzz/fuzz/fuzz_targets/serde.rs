@@ -43,10 +43,7 @@ const ROLES: [Role; 33] = [
 
 fuzz_target!(|data: &[u8]| {
     // Strategy 1: Try to deserialize raw bytes as JSON into a Tree.
-    if let Ok(mut tree) = serde_json::from_slice::<Tree>(data) {
-        // Rebuild the index since it's skipped during deserialization.
-        tree.rebuild_index();
-
+    if let Ok(tree) = serde_json::from_slice::<Tree>(data) {
         // Exercise tree methods on the deserialized tree.
         let _ = tree.len();
         let _ = tree.is_empty();
@@ -64,13 +61,6 @@ fuzz_target!(|data: &[u8]| {
             let _ = tree.subtree(root.id);
             let _ = tree.dump();
 
-            // Try find_by_role with a few roles.
-            for role in &ROLES[..5] {
-                let _ = tree.find_by_role(*role);
-            }
-
-            let _ = tree.find_by_name("test");
-
             // Try a query.
             let _ = tree.query("button");
             let _ = tree.query("[name*=\"a\"]");
@@ -82,8 +72,7 @@ fuzz_target!(|data: &[u8]| {
 
     // Strategy 2: Try to interpret as a UTF-8 JSON string.
     if let Ok(s) = std::str::from_utf8(data) {
-        if let Ok(mut tree) = serde_json::from_str::<Tree>(s) {
-            tree.rebuild_index();
+        if let Ok(tree) = serde_json::from_str::<Tree>(s) {
             let _ = tree.len();
             if !tree.is_empty() {
                 let _ = tree.root();

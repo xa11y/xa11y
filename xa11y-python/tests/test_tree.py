@@ -121,35 +121,6 @@ def test_query_invalid_selector(tree):
         tree.query("[[[invalid")
 
 
-# ── find_by_role / find_by_name ──────────────────────────────────────────────
-
-
-def test_find_by_role(tree):
-    items = tree.find_by_role("list_item")
-    assert len(items) == 2
-    assert {i.name for i in items} == {"Item 1", "Item 2"}
-
-
-def test_find_by_role_unknown(tree):
-    with pytest.raises(ValueError, match="Unknown role"):
-        tree.find_by_role("nonexistent_role")
-
-
-def test_find_by_name(tree):
-    results = tree.find_by_name("item")
-    assert len(results) == 3  # "Items" list + "Item 1" + "Item 2"
-
-
-def test_find_by_name_case_insensitive(tree):
-    results = tree.find_by_name("SEARCH")
-    assert len(results) == 1
-    assert results[0].role == "text_field"
-
-
-def test_find_by_name_no_match(tree):
-    assert tree.find_by_name("zzz_no_match") == []
-
-
 # ── Dunder protocols ─────────────────────────────────────────────────────────
 
 

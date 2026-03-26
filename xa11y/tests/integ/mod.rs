@@ -59,7 +59,15 @@ pub fn one<'a>(tree: &'a Tree, selector: &str) -> &'a Node {
 
 /// Find first node whose name contains `substring` (case-insensitive).
 pub fn named<'a>(tree: &'a Tree, substring: &str) -> &'a Node {
-    let results = tree.find_by_name(substring);
+    let selector = format!("[name*=\"{}\"]", substring);
+    let results = tree.query(&selector).unwrap_or_else(|e| {
+        panic!(
+            "Selector '{}' failed: {}. Tree:\n{}",
+            selector,
+            e,
+            tree.dump()
+        )
+    });
     assert!(
         !results.is_empty(),
         "No node with name containing '{}'. Tree:\n{}",

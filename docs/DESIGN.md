@@ -337,15 +337,6 @@ impl Tree {
     /// Get the subtree rooted at a node
     pub fn subtree(&self, node: &Node) -> Vec<&Node>;
 
-    /// Find nodes by role
-    pub fn find_by_role(&self, role: Role) -> Vec<&Node>;
-
-    /// Find nodes by name (substring, case-insensitive)
-    pub fn find_by_name(&self, pattern: &str) -> Vec<&Node>;
-
-    /// Convenience method to perform an action on a node in this tree.
-    pub fn perform(&self, node: &Node, action: Action, data: Option<ActionData>) -> Result<()>;
-
     /// Render the tree as an indented text representation for debugging.
     /// Format: one line per node, indented by depth, showing role, name, and states.
     ///
@@ -427,8 +418,7 @@ pub trait Provider: Send + Sync {
     ///
     /// The `node` parameter identifies the element to act on. The provider
     /// uses the node's internal index to look up the correct platform handle.
-    /// If the handle is stale, the provider re-traverses using the tree's
-    /// stored `QueryOptions` to rebuild the cache.
+    /// If the handle is stale, the provider re-traverses to rebuild the cache.
     ///
     /// Multiple trees can coexist — calling `get_app_tree` does not
     /// invalidate handles from previous snapshots.
@@ -625,9 +615,9 @@ Each platform backend implements the `Provider` trait. Internally, each backend:
 
 Actions follow the **re-traversal pattern** from agent-desktop:
 
-1. Consumer calls `tree.perform(&node, Action::Press, None)` (or `provider.perform_action(&tree, &node, Action::Press, None)`)
+1. Consumer calls `provider.perform_action(&tree, &node, Action::Press, None)`
 2. Backend uses the node's internal index to look up its cached platform handle
-3. If the handle is stale (or missing), backend re-traverses using the tree's stored `QueryOptions` to rebuild the cache
+3. If the handle is stale (or missing), backend re-traverses to rebuild the cache
 4. Backend maps the xa11y `Action` to platform-specific calls
 5. Returns `Ok(())` or `Err(Error::ElementStale)` if the element can't be relocated
 

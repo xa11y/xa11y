@@ -1,11 +1,11 @@
 //! Fuzz target for xa11y-core tree operations (NOT platform providers).
 //! Builds random trees and exercises Tree methods: get, root, iter, children,
-//! subtree, find_by_role, find_by_name, dump, query, len, is_empty.
+//! subtree, dump, query, len, is_empty.
 #![no_main]
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use xa11y_core::{Node, QueryOptions, RawPlatformData, Role, StateSet, Tree};
+use xa11y_core::{Node, RawPlatformData, Role, StateSet, Tree};
 
 /// Roles indexed by u8 for fuzzer-driven selection.
 const ROLES: [Role; 33] = [
@@ -79,7 +79,6 @@ fn build_tree(input: &FuzzInput) -> Tree {
             input.pid,
             (input.screen_w.max(1), input.screen_h.max(1)),
             vec![],
-            QueryOptions::default(),
         );
     }
 
@@ -142,7 +141,6 @@ fn build_tree(input: &FuzzInput) -> Tree {
         input.pid,
         (input.screen_w.max(1), input.screen_h.max(1)),
         nodes,
-        QueryOptions::default(),
     )
 }
 
@@ -182,13 +180,6 @@ fuzz_target!(|input: FuzzInput| {
             let _ = tree.subtree(node);
         }
     }
-
-    // Exercise find_by_role
-    let role = ROLES[input.role_idx as usize % ROLES.len()];
-    let _ = tree.find_by_role(role);
-
-    // Exercise find_by_name
-    let _ = tree.find_by_name(&input.name_pattern);
 
     // Exercise dump
     let _ = tree.dump();

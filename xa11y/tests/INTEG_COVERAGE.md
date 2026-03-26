@@ -32,13 +32,10 @@ Last updated: 2026-03-19
 | `iter()` | Covered | `tree_iter_all_nodes` |
 | `children(id)` | Covered | `tree_children_of_root` |
 | `subtree(id)` | Covered | `tree_subtree_from_root`, `tree_subtree_of_leaf` |
-| `find_by_role` | Covered | Multiple tree_has_* and role_* tests |
-| `find_by_name` | Covered | Used extensively via `h::named()` helper |
 | `query` | Covered | 12 selector tests covering all features |
 | `dump()` | Covered | `tree_dump_readable` |
 | `len()` | Covered | `opts_max_depth`, `opts_max_elements` |
 | `is_empty()` | Covered | `tree_is_not_empty` |
-| `rebuild_index()` | Covered | `json_roundtrip_real_tree` |
 
 ## Node Fields
 

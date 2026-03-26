@@ -1017,7 +1017,6 @@ impl Provider for MacOSProvider {
             Some(pid as u32),
             screen_size,
             nodes,
-            opts.clone(),
         ))
     }
 
@@ -1083,7 +1082,6 @@ impl Provider for MacOSProvider {
             None,
             screen_size,
             nodes,
-            opts.clone(),
         ))
     }
 

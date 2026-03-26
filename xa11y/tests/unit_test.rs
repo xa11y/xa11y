@@ -229,13 +229,7 @@ fn sample_tree() -> Tree {
         },
     ];
 
-    Tree::new(
-        "My App".to_string(),
-        Some(1234),
-        (1920, 1080),
-        nodes,
-        QueryOptions::default(),
-    )
+    Tree::new("My App".to_string(), Some(1234), (1920, 1080), nodes)
 }
 
 // ── Tree basic operations ──
@@ -297,36 +291,6 @@ fn tree_subtree() {
     assert_eq!(subtree[0].role, Role::Toolbar);
     assert_eq!(subtree[1].role, Role::Button);
     assert_eq!(subtree[2].role, Role::TextField);
-}
-
-#[test]
-fn tree_find_by_role() {
-    let tree = sample_tree();
-    let buttons = tree.find_by_role(Role::Button);
-    assert_eq!(buttons.len(), 3);
-}
-
-#[test]
-fn tree_find_by_name() {
-    let tree = sample_tree();
-    let results = tree.find_by_name("submit");
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].name.as_deref(), Some("Submit"));
-}
-
-#[test]
-fn tree_find_by_name_case_insensitive() {
-    let tree = sample_tree();
-    let results = tree.find_by_name("BACK");
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].role, Role::Button);
-}
-
-#[test]
-fn tree_find_by_name_substring() {
-    let tree = sample_tree();
-    let results = tree.find_by_name("bar");
-    assert_eq!(results.len(), 2); // "Main Toolbar" and "Address Bar"
 }
 
 #[test]
@@ -680,8 +644,7 @@ fn error_display() {
 fn tree_json_roundtrip() {
     let tree = sample_tree();
     let json = serde_json::to_string(&tree).unwrap();
-    let mut deserialized: Tree = serde_json::from_str(&json).unwrap();
-    deserialized.rebuild_index();
+    let deserialized: Tree = serde_json::from_str(&json).unwrap();
 
     assert_eq!(deserialized.app_name, "My App");
     assert_eq!(deserialized.pid, Some(1234));

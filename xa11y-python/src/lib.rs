@@ -452,27 +452,6 @@ impl Tree {
             .collect())
     }
 
-    /// Find nodes by role name.
-    fn find_by_role(&self, py: Python<'_>, role: &str) -> PyResult<Vec<Py<Node>>> {
-        let rust_role = xa11y::Role::from_snake_case(role)
-            .ok_or_else(|| PyValueError::new_err(format!("Unknown role: {role}")))?;
-        Ok(self
-            .rust_tree
-            .find_by_role(rust_role)
-            .iter()
-            .filter_map(|n| self.py_nodes.get(n.index as usize).map(|p| p.clone_ref(py)))
-            .collect())
-    }
-
-    /// Find nodes by name (substring, case-insensitive).
-    fn find_by_name(&self, py: Python<'_>, pattern: &str) -> Vec<Py<Node>> {
-        self.rust_tree
-            .find_by_name(pattern)
-            .iter()
-            .filter_map(|n| self.py_nodes.get(n.index as usize).map(|p| p.clone_ref(py)))
-            .collect()
-    }
-
     /// Perform an action on a node or selector target.
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (target, action, *, value=None, numeric_value=None, direction=None, amount=None, start=None, end=None))]
@@ -1668,13 +1647,7 @@ fn build_test_tree() -> xa11y::Tree {
         },
     ];
 
-    Tree::new(
-        "TestApp".to_string(),
-        Some(1234),
-        (1920, 1080),
-        nodes,
-        QueryOptions::default(),
-    )
+    Tree::new("TestApp".to_string(), Some(1234), (1920, 1080), nodes)
 }
 
 /// Create a test tree (for Python unit tests). Returns a Tree backed by a mock provider.

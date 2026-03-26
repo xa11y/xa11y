@@ -307,7 +307,7 @@ def _categorize_tree_methods(
     methods: list[ast.FunctionDef],
 ) -> dict[str, list[ast.FunctionDef]]:
     """Split Tree methods into semantic groups."""
-    query_names = {"children", "parent", "query", "find_by_role", "find_by_name"}
+    query_names = {"children", "parent", "query"}
 
     groups: dict[str, list[ast.FunctionDef]] = {
         "Query & Navigation": [],

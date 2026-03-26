@@ -594,7 +594,6 @@ impl Provider for WindowsProvider {
             Some(pid),
             screen_size,
             nodes,
-            opts.clone(),
         ))
     }
 
@@ -689,7 +688,6 @@ impl Provider for WindowsProvider {
             None,
             screen_size,
             nodes,
-            opts.clone(),
         ))
     }
 

@@ -553,26 +553,6 @@ mod provider_fuzz {
         }
     }
 
-    fn op_action_invalid_node(state: &mut FuzzState) {
-        state.ensure_tree();
-        let tree = match &state.tree {
-            Some(t) => t,
-            None => return,
-        };
-
-        // Try performing an action via a selector that won't match
-        state.log("perform via non-matching selector");
-        let result = tree.perform(
-            &*state.provider,
-            "nonexistent_role_xyz",
-            Action::Press,
-            None,
-        );
-        // May get InvalidSelector or SelectorNotMatched
-        assert!(result.is_err(), "Expected error for non-matching selector");
-        state.errors += 1;
-    }
-
     fn op_query_tree(state: &mut FuzzState) {
         state.ensure_tree();
         let tree = match &state.tree {
@@ -600,47 +580,6 @@ mod provider_fuzz {
                 state.errors += 1;
             }
         }
-    }
-
-    fn op_find_by_role(state: &mut FuzzState) {
-        state.ensure_tree();
-        let tree = match &state.tree {
-            Some(t) => t,
-            None => return,
-        };
-
-        let role = ALL_ROLES[state.rng.random_range(0..ALL_ROLES.len())];
-        state.log(&format!("tree.find_by_role({:?})", role));
-        let results = tree.find_by_role(role);
-        state.log(&format!("  -> {} matches", results.len()));
-    }
-
-    fn op_find_by_name(state: &mut FuzzState) {
-        state.ensure_tree();
-        let tree = match &state.tree {
-            Some(t) => t,
-            None => return,
-        };
-
-        let names = [
-            "Submit",
-            "Cancel",
-            "Volume",
-            "Alice",
-            "xa11y",
-            "",
-            "nonexistent",
-            "Name",
-            "Option A",
-            "Apple",
-            "quit",
-            "SUBMIT",
-            "test",
-        ];
-        let name = names[state.rng.random_range(0..names.len())];
-        state.log(&format!("tree.find_by_name(\"{}\")", name));
-        let results = tree.find_by_name(name);
-        state.log(&format!("  -> {} matches", results.len()));
     }
 
     fn op_tree_dump(state: &mut FuzzState) {
@@ -736,7 +675,7 @@ mod provider_fuzz {
 
         let inspection_count = rng.random_range(1..=5);
         for _ in 0..inspection_count {
-            match rng.random_range(0u8..6) {
+            match rng.random_range(0u8..4) {
                 0 => {
                     let _ = tree.dump();
                 }
@@ -749,16 +688,9 @@ mod provider_fuzz {
                     }
                 }
                 2 => {
-                    let role = ALL_ROLES[rng.random_range(0..ALL_ROLES.len())];
-                    let _ = tree.find_by_role(role);
-                }
-                3 => {
-                    let _ = tree.find_by_name("test");
-                }
-                4 => {
                     let _ = tree.query("button");
                 }
-                5 => {
+                3 => {
                     if !tree.is_empty() {
                         let idx = rng.random_range(0..tree.len()) as u32;
                         if let Some(node) = tree.get(idx) {
@@ -838,10 +770,7 @@ mod provider_fuzz {
             (2, "list_apps", op_list_apps),
             (20, "action_on_node", op_action_on_node),
             (3, "action_press", op_action_press),
-            (2, "action_invalid_node", op_action_invalid_node),
             (15, "query_tree", op_query_tree),
-            (5, "find_by_role", op_find_by_role),
-            (5, "find_by_name", op_find_by_name),
             (3, "tree_dump", op_tree_dump),
             (3, "tree_subtree", op_tree_subtree),
             (3, "tree_children", op_tree_children),

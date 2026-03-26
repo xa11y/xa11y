@@ -1,10 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::action::{Action, ActionData};
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::node::{Node, NodeIndex};
-use crate::provider::{Provider, QueryOptions};
-use crate::role::Role;
 use crate::selector::Selector;
 
 /// A snapshot of an application's accessibility tree.
@@ -26,8 +23,6 @@ pub struct Tree {
     /// All nodes in DFS order (access through methods)
     nodes: Vec<Node>,
 
-    /// Query options used to produce this snapshot
-    pub query: QueryOptions,
 }
 
 impl Tree {
@@ -37,22 +32,13 @@ impl Tree {
         pid: Option<u32>,
         screen_size: (u32, u32),
         nodes: Vec<Node>,
-        query: QueryOptions,
     ) -> Self {
         Self {
             app_name,
             pid,
             screen_size,
             nodes,
-            query,
         }
-    }
-
-    /// Rebuild internal state after deserialization.
-    /// (No-op now that the HashMap is removed, but kept for API compatibility
-    /// with FFI consumers that deserialize trees.)
-    pub fn rebuild_index(&mut self) {
-        // Node index == array position, no rebuild needed.
     }
 
     /// Get a node by its internal index. Primarily for FFI consumers.
@@ -104,39 +90,6 @@ impl Tree {
     pub fn query(&self, selector_str: &str) -> Result<Vec<&Node>> {
         let selector = Selector::parse(selector_str)?;
         Ok(selector.match_nodes(self))
-    }
-
-    /// Find nodes by role.
-    pub fn find_by_role(&self, role: Role) -> Vec<&Node> {
-        self.nodes.iter().filter(|n| n.role == role).collect()
-    }
-
-    /// Find nodes by name (substring, case-insensitive).
-    pub fn find_by_name(&self, pattern: &str) -> Vec<&Node> {
-        let pattern_lower = pattern.to_lowercase();
-        self.nodes
-            .iter()
-            .filter(|n| {
-                n.name
-                    .as_ref()
-                    .is_some_and(|name| name.to_lowercase().contains(&pattern_lower))
-            })
-            .collect()
-    }
-
-    /// Perform an action on the first element matching a selector.
-    pub fn perform(
-        &self,
-        provider: &dyn Provider,
-        selector: &str,
-        action: Action,
-        data: Option<ActionData>,
-    ) -> Result<()> {
-        let results = self.query(selector)?;
-        let node = results.first().ok_or_else(|| Error::SelectorNotMatched {
-            selector: selector.to_string(),
-        })?;
-        provider.perform_action(self, node, action, data)
     }
 
     /// Render the tree as an indented text representation for debugging.

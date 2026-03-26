@@ -131,7 +131,7 @@ mod tests {
     fn tree_has_window() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let windows = tree.find_by_role(Role::Window);
+        let windows = tree.query("window").unwrap();
         assert!(
             !windows.is_empty(),
             "No windows found. Tree:\n{}",
@@ -144,7 +144,7 @@ mod tests {
     fn tree_has_buttons() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let buttons = tree.find_by_role(Role::Button);
+        let buttons = tree.query("button").unwrap();
         assert!(
             buttons.len() >= 2,
             "Expected >=2 buttons, found {}. Tree:\n{}",
@@ -217,10 +217,10 @@ mod tests {
         // On Linux/AT-SPI with AccessKit, Label nodes may not expose their text
         // through the Name property or Text interface. Look for the node by name
         // first, then fall back to checking that StaticText nodes exist.
-        let welcome = tree.find_by_name("Welcome");
+        let welcome = tree.query(r#"[name*="Welcome"]"#).unwrap();
         if welcome.is_empty() {
             // Fall back: verify that static text nodes exist (labels are present even if unnamed)
-            let labels = tree.find_by_role(Role::StaticText);
+            let labels = tree.query("static_text").unwrap();
             assert!(
                 !labels.is_empty(),
                 "No StaticText/label nodes found. Tree:\n{}",
@@ -240,7 +240,7 @@ mod tests {
     fn tree_has_slider_at_50() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let sliders = tree.find_by_role(Role::Slider);
+        let sliders = tree.query("slider").unwrap();
         assert!(
             !sliders.is_empty(),
             "No sliders found. Tree:\n{}",
@@ -261,7 +261,7 @@ mod tests {
     fn tree_has_progress_bar() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let progress = tree.find_by_role(Role::ProgressBar);
+        let progress = tree.query("progress_bar").unwrap();
         assert!(
             !progress.is_empty(),
             "No progress bars found. Tree:\n{}",
@@ -274,7 +274,7 @@ mod tests {
     fn tree_has_radio_buttons() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let radios = tree.find_by_role(Role::RadioButton);
+        let radios = tree.query("radio_button").unwrap();
         assert!(
             radios.len() >= 2,
             "Expected >=2 radio buttons, found {}. Tree:\n{}",
@@ -288,7 +288,7 @@ mod tests {
     fn tree_has_combo_box() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let combos = tree.find_by_role(Role::ComboBox);
+        let combos = tree.query("combo_box").unwrap();
         assert!(
             !combos.is_empty(),
             "ComboBox not found. Tree:\n{}",
@@ -301,8 +301,8 @@ mod tests {
     fn tree_has_list_with_items() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let lists = tree.find_by_role(Role::List);
-        let items = tree.find_by_role(Role::ListItem);
+        let lists = tree.query("list").unwrap();
+        let items = tree.query("list_item").unwrap();
         assert!(
             !lists.is_empty() || !items.is_empty(),
             "Neither List nor ListItem found. Tree:\n{}",
@@ -315,8 +315,8 @@ mod tests {
     fn tree_has_table_with_cells() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let tables = tree.find_by_role(Role::Table);
-        let cells = tree.find_by_role(Role::TableCell);
+        let tables = tree.query("table").unwrap();
+        let cells = tree.query("table_cell").unwrap();
         assert!(
             !tables.is_empty() || !cells.is_empty(),
             "Neither Table nor TableCell found. Tree:\n{}",
@@ -333,7 +333,7 @@ mod tests {
     fn role_menu_bar() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let nodes = tree.find_by_role(Role::MenuBar);
+        let nodes = tree.query("menu_bar").unwrap();
         assert!(
             !nodes.is_empty(),
             "MenuBar not found. Tree:\n{}",
@@ -346,7 +346,7 @@ mod tests {
     fn role_menu_item() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let nodes = tree.find_by_role(Role::MenuItem);
+        let nodes = tree.query("menu_item").unwrap();
         assert!(
             !nodes.is_empty(),
             "MenuItem not found. Tree:\n{}",
@@ -361,7 +361,7 @@ mod tests {
     fn role_toolbar() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let nodes = tree.find_by_role(Role::Toolbar);
+        let nodes = tree.query("toolbar").unwrap();
         assert!(
             !nodes.is_empty(),
             "Toolbar not found. Tree:\n{}",
@@ -374,8 +374,8 @@ mod tests {
     fn role_tab_and_tab_group() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let tab_groups = tree.find_by_role(Role::TabGroup);
-        let tabs = tree.find_by_role(Role::Tab);
+        let tab_groups = tree.query("tab_group").unwrap();
+        let tabs = tree.query("tab").unwrap();
         assert!(
             !tab_groups.is_empty() || !tabs.is_empty(),
             "Neither TabGroup nor Tab found. Tree:\n{}",
@@ -388,7 +388,7 @@ mod tests {
     fn role_separator() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let seps = tree.find_by_role(Role::Separator);
+        let seps = tree.query("separator").unwrap();
         assert!(
             !seps.is_empty(),
             "Separator not found. Tree:\n{}",
@@ -401,7 +401,7 @@ mod tests {
     fn role_image() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let images = tree.find_by_role(Role::Image);
+        let images = tree.query("image").unwrap();
         assert!(
             !images.is_empty(),
             "Image not found. Tree:\n{}",
@@ -414,7 +414,7 @@ mod tests {
     fn role_link() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let links = tree.find_by_role(Role::Link);
+        let links = tree.query("link").unwrap();
         assert!(!links.is_empty(), "Link not found. Tree:\n{}", tree.dump());
     }
 
@@ -423,7 +423,7 @@ mod tests {
     fn role_tree_item() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let items = tree.find_by_role(Role::TreeItem);
+        let items = tree.query("tree_item").unwrap();
         assert!(
             !items.is_empty(),
             "TreeItem not found. Tree:\n{}",
@@ -436,7 +436,7 @@ mod tests {
     fn role_dialog() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let dialogs = tree.find_by_role(Role::Dialog);
+        let dialogs = tree.query("dialog").unwrap();
         assert!(
             !dialogs.is_empty(),
             "Dialog not found. Tree:\n{}",
@@ -449,7 +449,7 @@ mod tests {
     fn role_alert() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let alerts = tree.find_by_role(Role::Alert);
+        let alerts = tree.query("alert").unwrap();
         assert!(
             !alerts.is_empty(),
             "Alert not found. Tree:\n{}",
@@ -462,7 +462,7 @@ mod tests {
     fn role_heading() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let headings = tree.find_by_role(Role::Heading);
+        let headings = tree.query("heading").unwrap();
         assert!(
             !headings.is_empty(),
             "Heading not found. Tree:\n{}",
@@ -475,7 +475,7 @@ mod tests {
     fn role_scroll_bar() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let scrollbars = tree.find_by_role(Role::ScrollBar);
+        let scrollbars = tree.query("scroll_bar").unwrap();
         assert!(
             !scrollbars.is_empty(),
             "ScrollBar not found. Tree:\n{}",
@@ -489,7 +489,7 @@ mod tests {
         let p = h::provider();
         let tree = h::app_tree(&*p);
         // SplitGroup may map through AT-SPI as Group due to accesskit's Pane role
-        let node = tree.find_by_name("SplitGroup");
+        let node = tree.query(r#"[name*="SplitGroup"]"#).unwrap();
         assert!(
             !node.is_empty(),
             "SplitGroup node not found. Tree:\n{}",
@@ -502,7 +502,7 @@ mod tests {
     fn role_static_text() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let labels = tree.find_by_role(Role::StaticText);
+        let labels = tree.query("static_text").unwrap();
         assert!(
             !labels.is_empty(),
             "StaticText not found. Tree:\n{}",
@@ -604,7 +604,7 @@ mod tests {
     fn node_description_on_image() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let images = tree.find_by_role(Role::Image);
+        let images = tree.query("image").unwrap();
         if !images.is_empty() {
             let img = images.iter().find(|n| {
                 n.name.as_deref() == Some("Info Icon")
@@ -766,7 +766,7 @@ mod tests {
     fn state_checked_on_radio() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let radios = tree.find_by_role(Role::RadioButton);
+        let radios = tree.query("radio_button").unwrap();
         let opt_a = radios
             .iter()
             .find(|n| n.name.as_deref() == Some("Option A"));
@@ -784,7 +784,7 @@ mod tests {
             .iter()
             .filter(|n| n.states.expanded.is_some())
             .collect();
-        let expander_by_name = tree.find_by_name("Expander");
+        let expander_by_name = tree.query(r#"[name*="Expander"]"#).unwrap();
         // On macOS, GenericContainer with expanded state may not expose AXExpanded.
         // The expand/collapse actions still work (tested by action_expand_collapse).
         if expandable.is_empty() && expander_by_name.is_empty() {
@@ -1133,11 +1133,11 @@ mod tests {
     fn action_toggle_checkbox() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let cbs = tree.find_by_role(Role::CheckBox);
+        let cbs = tree.query("check_box").unwrap();
         assert!(!cbs.is_empty(), "No checkbox");
         let initial = cbs[0].states.checked;
         let tree2 = h::act(&*p, &tree, cbs[0], Action::Press);
-        let cb2 = tree2.find_by_role(Role::CheckBox);
+        let cb2 = tree2.query("check_box").unwrap();
         if !cb2.is_empty() {
             assert_ne!(
                 cb2[0].states.checked, initial,
@@ -1153,7 +1153,7 @@ mod tests {
         let p = h::provider();
         let tree = h::app_tree(&*p);
         let was_enabled = h::named(&tree, "Cancel").states.enabled;
-        let cbs = tree.find_by_role(Role::CheckBox);
+        let cbs = tree.query("check_box").unwrap();
         assert!(!cbs.is_empty(), "No checkbox");
         let tree2 = h::act(&*p, &tree, cbs[0], Action::Press);
         let cancel2 = h::named(&tree2, "Cancel");
@@ -1224,7 +1224,7 @@ mod tests {
     fn action_set_value_numeric() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let sliders = tree.find_by_role(Role::Slider);
+        let sliders = tree.query("slider").unwrap();
         assert!(!sliders.is_empty());
         let result = p.perform_action(
             &tree,
@@ -1235,7 +1235,7 @@ mod tests {
         assert!(result.is_ok(), "SetValue numeric: {:?}", result.err());
         std::thread::sleep(std::time::Duration::from_millis(300));
         let tree2 = h::app_tree(&*p);
-        let s2 = tree2.find_by_role(Role::Slider);
+        let s2 = tree2.query("slider").unwrap();
         if !s2.is_empty() {
             if let Some(v) = &s2[0].value {
                 let val: f64 = v.parse().unwrap_or(0.0);
@@ -1261,14 +1261,14 @@ mod tests {
                     && n.value.is_some()
                     && n.value.as_deref().unwrap_or("").parse::<f64>().is_ok()
             })
-            .or_else(|| tree.find_by_role(Role::Slider).first().copied());
+            .or_else(|| tree.query("slider").unwrap().first().copied());
         if let Some(spin) = spin {
             let initial: f64 = spin.value.as_deref().unwrap_or("0").parse().unwrap_or(0.0);
             let result = p.perform_action(&tree, spin, Action::Increment, None);
             if result.is_ok() {
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 let tree2 = h::app_tree(&*p);
-                if let Some(s2) = tree2.find_by_role(Role::Slider).first() {
+                if let Some(s2) = tree2.query("slider").unwrap().first() {
                     if let Some(v) = &s2.value {
                         let new_val: f64 = v.parse().unwrap_or(initial);
                         assert!(
@@ -1295,14 +1295,14 @@ mod tests {
                     && n.value.is_some()
                     && n.value.as_deref().unwrap_or("").parse::<f64>().is_ok()
             })
-            .or_else(|| tree.find_by_role(Role::Slider).first().copied());
+            .or_else(|| tree.query("slider").unwrap().first().copied());
         if let Some(spin) = spin {
             let before: f64 = spin.value.as_deref().unwrap_or("0").parse().unwrap_or(0.0);
             let result = p.perform_action(&tree, spin, Action::Decrement, None);
             if result.is_ok() {
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 let tree2 = h::app_tree(&*p);
-                if let Some(s2) = tree2.find_by_role(Role::Slider).first() {
+                if let Some(s2) = tree2.query("slider").unwrap().first() {
                     if let Some(v) = &s2.value {
                         let after: f64 = v.parse().unwrap_or(before);
                         assert!(
@@ -1325,15 +1325,16 @@ mod tests {
         let expander = tree
             .iter()
             .find(|n| n.states.expanded.is_some())
-            .or_else(|| tree.find_by_name("Expander").first().copied())
-            .or_else(|| tree.find_by_name("More Details").first().copied());
+            .or_else(|| tree.query(r#"[name*="Expander"]"#).unwrap().first().copied())
+            .or_else(|| tree.query(r#"[name*="More Details"]"#).unwrap().first().copied());
         if let Some(node) = expander {
             // Expand
             if let Ok(()) = p.perform_action(&tree, node, Action::Expand, None) {
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 let tree2 = h::app_tree(&*p);
                 let n2 = tree2
-                    .find_by_name("Expander")
+                    .query(r#"[name*="Expander"]"#)
+                    .unwrap()
                     .first()
                     .copied()
                     .or_else(|| tree2.iter().find(|n| n.states.expanded.is_some()));
@@ -1344,7 +1345,8 @@ mod tests {
                             std::thread::sleep(std::time::Duration::from_millis(300));
                             let tree3 = h::app_tree(&*p);
                             let n3 = tree3
-                                .find_by_name("Expander")
+                                .query(r#"[name*="Expander"]"#)
+                                .unwrap()
                                 .first()
                                 .copied()
                                 .or_else(|| tree3.iter().find(|n| n.states.expanded.is_some()));
@@ -1363,7 +1365,7 @@ mod tests {
     fn action_select_list_item() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let apple = tree.find_by_name("Apple");
+        let apple = tree.query(r#"[name*="Apple"]"#).unwrap();
         if !apple.is_empty() {
             let _ = p.perform_action(&tree, apple[0], Action::Press, None);
             // Selection verified by not crashing; state_selected_on_list_item tests the state
@@ -1380,7 +1382,7 @@ mod tests {
         let p = h::provider();
         let tree = h::app_tree(&*p);
         // Query inside table → row → cell
-        let cells = tree.find_by_name("Alice");
+        let cells = tree.query(r#"[name*="Alice"]"#).unwrap();
         assert!(
             !cells.is_empty(),
             "Alice cell not found. Tree:\n{}",
@@ -1396,7 +1398,7 @@ mod tests {
     fn nesting_subtree_of_table() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let tables = tree.find_by_role(Role::Table);
+        let tables = tree.query("table").unwrap();
         if !tables.is_empty() {
             let subtree = tree.subtree(tables[0]);
             // Table should contain rows and cells
@@ -1413,16 +1415,16 @@ mod tests {
     fn thrash_toggle_checkbox_5_times() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let cbs = tree.find_by_role(Role::CheckBox);
+        let cbs = tree.query("check_box").unwrap();
         assert!(!cbs.is_empty());
         let mut current_tree = tree;
         for _ in 0..5 {
-            let cbs = current_tree.find_by_role(Role::CheckBox);
+            let cbs = current_tree.query("check_box").unwrap();
             assert!(!cbs.is_empty());
             current_tree = h::act(&*p, &current_tree, cbs[0], Action::Press);
         }
         // After 5 toggles (odd), state should have flipped from initial
-        let final_cb = current_tree.find_by_role(Role::CheckBox);
+        let final_cb = current_tree.query("check_box").unwrap();
         if !final_cb.is_empty() {
             assert_eq!(
                 final_cb[0].states.checked,
@@ -1437,7 +1439,7 @@ mod tests {
     fn thrash_slider_increment_10_times() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let sliders = tree.find_by_role(Role::Slider);
+        let sliders = tree.query("slider").unwrap();
         let slider = sliders.first().expect("No slider");
         let start_val: f64 = slider
             .value
@@ -1447,11 +1449,11 @@ mod tests {
             .unwrap_or(0.0);
         let mut current_tree = tree;
         for _ in 0..10 {
-            let sliders = current_tree.find_by_role(Role::Slider);
+            let sliders = current_tree.query("slider").unwrap();
             let slider = sliders.first().expect("No slider");
             current_tree = h::act(&*p, &current_tree, slider, Action::Increment);
         }
-        let s = current_tree.find_by_role(Role::Slider);
+        let s = current_tree.query("slider").unwrap();
         if !s.is_empty() {
             if let Some(v) = &s[0].value {
                 let val: f64 = v.parse().unwrap_or(0.0);
@@ -1475,7 +1477,7 @@ mod tests {
         let has_expander = tree
             .iter()
             .find(|n| n.states.expanded.is_some())
-            .or_else(|| tree.find_by_name("Expander").first().copied())
+            .or_else(|| tree.query(r#"[name*="Expander"]"#).unwrap().first().copied())
             .is_some();
         if has_expander {
             let mut ct = tree;
@@ -1489,12 +1491,13 @@ mod tests {
                 let node = ct
                     .iter()
                     .find(|n| n.states.expanded.is_some())
-                    .or_else(|| ct.find_by_name("Expander").first().copied())
+                    .or_else(|| ct.query(r#"[name*="Expander"]"#).unwrap().first().copied())
                     .expect("Expander node should exist");
                 ct = h::act(&*p, &ct, node, action);
             }
             let final_node = ct
-                .find_by_name("Expander")
+                .query(r#"[name*="Expander"]"#)
+                .unwrap()
                 .first()
                 .copied()
                 .or_else(|| ct.iter().find(|n| n.states.expanded.is_some()));
@@ -1527,17 +1530,8 @@ mod tests {
     fn error_selector_not_matched() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let result = tree.perform(
-            &*p,
-            r#"button[name="nonexistent_element_12345"]"#,
-            Action::Press,
-            None,
-        );
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            Error::SelectorNotMatched { .. }
-        ));
+        let result = tree.query(r#"button[name="nonexistent_element_12345"]"#);
+        assert!(result.unwrap().is_empty());
     }
 
     #[test]
@@ -1555,7 +1549,7 @@ mod tests {
     fn action_on_default_tree() {
         let p = h::provider();
         let tree = h::app_tree(&*p);
-        let buttons = tree.find_by_name("Submit");
+        let buttons = tree.query(r#"[name*="Submit"]"#).unwrap();
         assert!(!buttons.is_empty());
         let result = p.perform_action(&tree, buttons[0], Action::Press, None);
         match result {
@@ -1578,8 +1572,7 @@ mod tests {
         let p = h::provider();
         let tree = h::app_tree(&*p);
         let json = serde_json::to_string(&tree).unwrap();
-        let mut deser: Tree = serde_json::from_str(&json).unwrap();
-        deser.rebuild_index();
+        let deser: Tree = serde_json::from_str(&json).unwrap();
         assert_eq!(deser.len(), tree.len());
         assert_eq!(deser.app_name, tree.app_name);
     }
@@ -1627,7 +1620,7 @@ mod tests {
         let target = tree
             .iter()
             .find(|n| n.role == Role::ScrollBar)
-            .or_else(|| tree.find_by_role(Role::Window).first().copied())
+            .or_else(|| tree.query("window").unwrap().first().copied())
             .expect("No scrollable element found");
         let result = p.perform_action(
             &tree,
