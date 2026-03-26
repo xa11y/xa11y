@@ -1,7 +1,6 @@
 """Tests for module-level functions: app(), all_apps(), list_apps(), check_permissions()."""
 
-from xa11y._native import _make_test_apps, _make_test_tree
-
+from xa11y._native import _make_test_apps
 
 # ── app() (via _make_test_tree mock) ────────────────────────────────────────
 
