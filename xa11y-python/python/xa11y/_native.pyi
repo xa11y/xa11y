@@ -331,7 +331,104 @@ class Locator:
         """Wait until *predicate(node)* returns ``True`` (default 5s timeout)."""
     def __repr__(self) -> str: ...
 
+# ── Event types ──────────────────────────────────────────────────────────────
+
+class TextChangeData:
+    """Details about a text change event."""
+
+    @property
+    def change_type(self) -> str:
+        """Type of text change: ``"insert"``, ``"delete"``, ``"replace"``, or ``"unknown"``."""
+    @property
+    def position(self) -> int | None:
+        """Character position where the change occurred, or ``None`` if ambiguous."""
+    def __repr__(self) -> str: ...
+
+class Event:
+    """An accessibility event delivered to subscribers."""
+
+    @property
+    def kind(self) -> str:
+        """Event kind (e.g. ``"focus_changed"``, ``"value_changed"``)."""
+    @property
+    def app(self) -> AppInfo:
+        """The application that produced this event."""
+    @property
+    def target(self) -> Node | None:
+        """Snapshot of the element that triggered the event, if available."""
+    @property
+    def state_flag(self) -> str | None:
+        """For state_changed events: which state flag changed."""
+    @property
+    def state_value(self) -> bool | None:
+        """For state_changed events: the new value of the flag."""
+    @property
+    def text_change(self) -> TextChangeData | None:
+        """For text_changed events: details about the text modification."""
+    def __repr__(self) -> str: ...
+
+class Subscription:
+    """A live event subscription. Use as a context manager or call :meth:`close` to stop.
+
+    Example::
+
+        with xa11y.subscribe("Safari", kinds=["focus_changed"]) as sub:
+            event = sub.try_recv()
+    """
+
+    def try_recv(self) -> Event | None:
+        """Try to receive an event without blocking. Returns ``None`` if no event is ready."""
+    def close(self) -> None:
+        """Close the subscription, stopping event delivery."""
+    def __repr__(self) -> str: ...
+    def __enter__(self) -> Subscription: ...
+    def __exit__(
+        self,
+        exc_type: type | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None: ...
+
 # ── Module-level functions ───────────────────────────────────────────────────
+
+def subscribe(
+    name: str | None = None,
+    *,
+    pid: int | None = None,
+    kinds: list[str] | None = None,
+    selector: str | None = None,
+    state_flags: list[str] | None = None,
+) -> Subscription:
+    """Subscribe to accessibility events from an application.
+
+    *kinds*: event kinds to filter (e.g. ``["focus_changed", "value_changed"]``).
+    Empty or ``None`` subscribes to all events.
+    """
+
+def wait_for_event(
+    name: str | None = None,
+    *,
+    pid: int | None = None,
+    kinds: list[str] | None = None,
+    selector: str | None = None,
+    state_flags: list[str] | None = None,
+    timeout: float = 5.0,
+) -> Event:
+    """Wait for a single event matching the filter, with timeout."""
+
+def wait_for(
+    name: str | None = None,
+    *,
+    pid: int | None = None,
+    selector: str,
+    state: str,
+    timeout: float = 5.0,
+) -> Node:
+    """Wait for an element to reach a desired state.
+
+    *state*: ``"attached"``, ``"detached"``, ``"visible"``, ``"hidden"``,
+    ``"enabled"``, ``"disabled"``, ``"focused"``, or ``"unfocused"``.
+    """
 
 def app(
     name: str | None = None,

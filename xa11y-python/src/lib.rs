@@ -21,6 +21,20 @@ fn get_provider() -> PyResult<Arc<dyn xa11y::Provider>> {
         .map_err(|msg| PlatformError::new_err(msg.clone()))
 }
 
+static EVENT_PROVIDER: OnceLock<Result<Arc<dyn xa11y::EventProvider>, String>> = OnceLock::new();
+
+fn get_event_provider() -> PyResult<Arc<dyn xa11y::EventProvider>> {
+    EVENT_PROVIDER
+        .get_or_init(|| {
+            xa11y::create_event_provider()
+                .map(Arc::from)
+                .map_err(|e| format!("{e}"))
+        })
+        .as_ref()
+        .map(Arc::clone)
+        .map_err(|msg| PlatformError::new_err(msg.clone()))
+}
+
 // ── Exceptions ──────────────────────────────────────────────────────────────
 
 pyo3::create_exception!(_native, XA11yError, PyException);
@@ -1119,6 +1133,313 @@ impl Locator {
     }
 }
 
+// ── Event helpers ───────────────────────────────────────────────────────────
+
+fn parse_event_kind(s: &str) -> PyResult<xa11y::EventKind> {
+    match s {
+        "focus_changed" => Ok(xa11y::EventKind::FocusChanged),
+        "value_changed" => Ok(xa11y::EventKind::ValueChanged),
+        "name_changed" => Ok(xa11y::EventKind::NameChanged),
+        "state_changed" => Ok(xa11y::EventKind::StateChanged),
+        "structure_changed" => Ok(xa11y::EventKind::StructureChanged),
+        "window_opened" => Ok(xa11y::EventKind::WindowOpened),
+        "window_closed" => Ok(xa11y::EventKind::WindowClosed),
+        "window_activated" => Ok(xa11y::EventKind::WindowActivated),
+        "window_deactivated" => Ok(xa11y::EventKind::WindowDeactivated),
+        "selection_changed" => Ok(xa11y::EventKind::SelectionChanged),
+        "menu_opened" => Ok(xa11y::EventKind::MenuOpened),
+        "menu_closed" => Ok(xa11y::EventKind::MenuClosed),
+        "alert" => Ok(xa11y::EventKind::Alert),
+        "text_changed" => Ok(xa11y::EventKind::TextChanged),
+        _ => Err(PyValueError::new_err(format!("Unknown event kind: {s}"))),
+    }
+}
+
+fn event_kind_to_str(k: xa11y::EventKind) -> &'static str {
+    match k {
+        xa11y::EventKind::FocusChanged => "focus_changed",
+        xa11y::EventKind::ValueChanged => "value_changed",
+        xa11y::EventKind::NameChanged => "name_changed",
+        xa11y::EventKind::StateChanged => "state_changed",
+        xa11y::EventKind::StructureChanged => "structure_changed",
+        xa11y::EventKind::WindowOpened => "window_opened",
+        xa11y::EventKind::WindowClosed => "window_closed",
+        xa11y::EventKind::WindowActivated => "window_activated",
+        xa11y::EventKind::WindowDeactivated => "window_deactivated",
+        xa11y::EventKind::SelectionChanged => "selection_changed",
+        xa11y::EventKind::MenuOpened => "menu_opened",
+        xa11y::EventKind::MenuClosed => "menu_closed",
+        xa11y::EventKind::Alert => "alert",
+        xa11y::EventKind::TextChanged => "text_changed",
+    }
+}
+
+fn parse_state_flag(s: &str) -> PyResult<xa11y::StateFlag> {
+    match s {
+        "enabled" => Ok(xa11y::StateFlag::Enabled),
+        "visible" => Ok(xa11y::StateFlag::Visible),
+        "focused" => Ok(xa11y::StateFlag::Focused),
+        "checked" => Ok(xa11y::StateFlag::Checked),
+        "selected" => Ok(xa11y::StateFlag::Selected),
+        "expanded" => Ok(xa11y::StateFlag::Expanded),
+        "editable" => Ok(xa11y::StateFlag::Editable),
+        "focusable" => Ok(xa11y::StateFlag::Focusable),
+        "modal" => Ok(xa11y::StateFlag::Modal),
+        "required" => Ok(xa11y::StateFlag::Required),
+        "busy" => Ok(xa11y::StateFlag::Busy),
+        _ => Err(PyValueError::new_err(format!("Unknown state flag: {s}"))),
+    }
+}
+
+fn state_flag_to_str(f: xa11y::StateFlag) -> &'static str {
+    match f {
+        xa11y::StateFlag::Enabled => "enabled",
+        xa11y::StateFlag::Visible => "visible",
+        xa11y::StateFlag::Focused => "focused",
+        xa11y::StateFlag::Checked => "checked",
+        xa11y::StateFlag::Selected => "selected",
+        xa11y::StateFlag::Expanded => "expanded",
+        xa11y::StateFlag::Editable => "editable",
+        xa11y::StateFlag::Focusable => "focusable",
+        xa11y::StateFlag::Modal => "modal",
+        xa11y::StateFlag::Required => "required",
+        xa11y::StateFlag::Busy => "busy",
+    }
+}
+
+fn parse_element_state(s: &str) -> PyResult<xa11y::ElementState> {
+    match s {
+        "attached" => Ok(xa11y::ElementState::Attached),
+        "detached" => Ok(xa11y::ElementState::Detached),
+        "visible" => Ok(xa11y::ElementState::Visible),
+        "hidden" => Ok(xa11y::ElementState::Hidden),
+        "enabled" => Ok(xa11y::ElementState::Enabled),
+        "disabled" => Ok(xa11y::ElementState::Disabled),
+        "focused" => Ok(xa11y::ElementState::Focused),
+        "unfocused" => Ok(xa11y::ElementState::Unfocused),
+        _ => Err(PyValueError::new_err(format!("Unknown element state: {s}"))),
+    }
+}
+
+fn text_change_type_to_str(t: xa11y::TextChangeType) -> &'static str {
+    match t {
+        xa11y::TextChangeType::Insert => "insert",
+        xa11y::TextChangeType::Delete => "delete",
+        xa11y::TextChangeType::Replace => "replace",
+        xa11y::TextChangeType::Unknown => "unknown",
+    }
+}
+
+fn build_event_filter(
+    kinds: Option<Vec<String>>,
+    selector: Option<String>,
+    state_flags: Option<Vec<String>>,
+) -> PyResult<xa11y::EventFilter> {
+    let kinds = match kinds {
+        Some(ks) => ks
+            .iter()
+            .map(|s| parse_event_kind(s))
+            .collect::<PyResult<Vec<_>>>()?,
+        None => vec![],
+    };
+    let state_flags = match state_flags {
+        Some(fs) => fs
+            .iter()
+            .map(|s| parse_state_flag(s))
+            .collect::<PyResult<Vec<_>>>()?,
+        None => vec![],
+    };
+    Ok(xa11y::EventFilter {
+        kinds,
+        selector,
+        state_flags,
+    })
+}
+
+// ── Event data classes ──────────────────────────────────────────────────────
+
+#[pyclass(frozen)]
+#[derive(Clone)]
+struct TextChangeData {
+    #[pyo3(get)]
+    change_type: String,
+    #[pyo3(get)]
+    position: Option<u32>,
+}
+
+#[pymethods]
+impl TextChangeData {
+    fn __repr__(&self) -> String {
+        match self.position {
+            Some(pos) => format!(
+                "TextChangeData(change_type='{}', position={})",
+                self.change_type, pos
+            ),
+            None => format!("TextChangeData(change_type='{}')", self.change_type),
+        }
+    }
+}
+
+#[pyclass(frozen)]
+struct Event {
+    #[pyo3(get)]
+    kind: String,
+    #[pyo3(get)]
+    app: AppInfo,
+    #[pyo3(get)]
+    target: Option<Py<Node>>,
+    #[pyo3(get)]
+    state_flag: Option<String>,
+    #[pyo3(get)]
+    state_value: Option<bool>,
+    #[pyo3(get)]
+    text_change: Option<TextChangeData>,
+}
+
+#[pymethods]
+impl Event {
+    fn __repr__(&self) -> String {
+        format!("Event(kind='{}', app='{}')", self.kind, self.app.name)
+    }
+}
+
+fn make_py_event(py: Python<'_>, e: &xa11y::Event) -> PyResult<Event> {
+    let target = match &e.target {
+        Some(n) => Some(make_py_node(py, n)?),
+        None => None,
+    };
+    let text_change = e.text_change.as_ref().map(|tc| TextChangeData {
+        change_type: text_change_type_to_str(tc.change_type).to_string(),
+        position: tc.position,
+    });
+    Ok(Event {
+        kind: event_kind_to_str(e.kind).to_string(),
+        app: AppInfo {
+            name: e.app.name.clone(),
+            pid: e.app.pid,
+            bundle_id: e.app.bundle_id.clone(),
+        },
+        target,
+        state_flag: e.state_flag.map(|f| state_flag_to_str(f).to_string()),
+        state_value: e.state_value,
+        text_change,
+    })
+}
+
+// ── Subscription ────────────────────────────────────────────────────────────
+
+#[pyclass(unsendable)]
+struct Subscription {
+    inner: Option<xa11y::Subscription>,
+}
+
+#[pymethods]
+impl Subscription {
+    /// Try to receive an event without blocking. Returns None if no event is ready.
+    fn try_recv(&self, py: Python<'_>) -> PyResult<Option<Event>> {
+        let inner = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("Subscription has been closed"))?;
+        match inner.try_recv() {
+            Some(e) => Ok(Some(make_py_event(py, &e)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Close the subscription, stopping event delivery.
+    fn close(&mut self) {
+        self.inner.take();
+    }
+
+    fn __repr__(&self) -> String {
+        if self.inner.is_some() {
+            "Subscription(active)".to_string()
+        } else {
+            "Subscription(closed)".to_string()
+        }
+    }
+
+    fn __enter__(slf: Py<Self>) -> Py<Self> {
+        slf
+    }
+
+    #[pyo3(signature = (_exc_type=None, _exc_val=None, _exc_tb=None))]
+    fn __exit__(
+        &mut self,
+        _exc_type: Option<&Bound<'_, PyAny>>,
+        _exc_val: Option<&Bound<'_, PyAny>>,
+        _exc_tb: Option<&Bound<'_, PyAny>>,
+    ) {
+        self.close();
+    }
+}
+
+// ── Module-level functions ──────────────────────────────────────────────────
+
+/// Subscribe to accessibility events from an application.
+#[pyfunction]
+#[pyo3(signature = (name=None, *, pid=None, kinds=None, selector=None, state_flags=None))]
+fn subscribe(
+    py: Python<'_>,
+    name: Option<&str>,
+    pid: Option<u32>,
+    kinds: Option<Vec<String>>,
+    selector: Option<String>,
+    state_flags: Option<Vec<String>>,
+) -> PyResult<Subscription> {
+    let provider = get_event_provider()?;
+    let target = resolve_app_target(name, pid)?;
+    let filter = build_event_filter(kinds, selector, state_flags)?;
+    let sub = py
+        .allow_threads(|| provider.subscribe(&target, filter))
+        .map_err(to_py_err)?;
+    Ok(Subscription { inner: Some(sub) })
+}
+
+/// Wait for a single event matching the filter, with timeout.
+#[pyfunction]
+#[pyo3(signature = (name=None, *, pid=None, kinds=None, selector=None, state_flags=None, timeout=5.0))]
+fn wait_for_event(
+    py: Python<'_>,
+    name: Option<&str>,
+    pid: Option<u32>,
+    kinds: Option<Vec<String>>,
+    selector: Option<String>,
+    state_flags: Option<Vec<String>>,
+    timeout: f64,
+) -> PyResult<Event> {
+    let provider = get_event_provider()?;
+    let target = resolve_app_target(name, pid)?;
+    let filter = build_event_filter(kinds, selector, state_flags)?;
+    let dur = Duration::from_secs_f64(timeout);
+    let event = py
+        .allow_threads(|| provider.wait_for_event(&target, filter, dur))
+        .map_err(to_py_err)?;
+    make_py_event(py, &event)
+}
+
+/// Wait for an element to reach a desired state.
+#[pyfunction]
+#[pyo3(signature = (name=None, *, pid=None, selector, state, timeout=5.0))]
+fn wait_for(
+    py: Python<'_>,
+    name: Option<&str>,
+    pid: Option<u32>,
+    selector: &str,
+    state: &str,
+    timeout: f64,
+) -> PyResult<Py<Node>> {
+    let provider = get_event_provider()?;
+    let target = resolve_app_target(name, pid)?;
+    let element_state = parse_element_state(state)?;
+    let dur = Duration::from_secs_f64(timeout);
+    let node = py
+        .allow_threads(|| provider.wait_for(&target, selector, element_state, dur))
+        .map_err(to_py_err)?;
+    make_py_node(py, &node)
+}
+
 // ── Module-level functions ──────────────────────────────────────────────────
 
 /// Get an app's accessibility tree.
@@ -1228,6 +1549,9 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Locator>()?;
     m.add_class::<Rect>()?;
     m.add_class::<AppInfo>()?;
+    m.add_class::<Event>()?;
+    m.add_class::<TextChangeData>()?;
+    m.add_class::<Subscription>()?;
 
     m.add("XA11yError", m.py().get_type::<XA11yError>())?;
     m.add(
@@ -1255,6 +1579,9 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(locator, m)?)?;
     m.add_function(wrap_pyfunction!(list_apps, m)?)?;
     m.add_function(wrap_pyfunction!(check_permissions, m)?)?;
+    m.add_function(wrap_pyfunction!(subscribe, m)?)?;
+    m.add_function(wrap_pyfunction!(wait_for_event, m)?)?;
+    m.add_function(wrap_pyfunction!(wait_for, m)?)?;
 
     // Test helpers
     m.add_function(wrap_pyfunction!(_make_test_tree, m)?)?;

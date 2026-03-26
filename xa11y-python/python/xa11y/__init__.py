@@ -10,12 +10,20 @@ Quick start:
 Reuse a locator for lazy resolution:
     >>> loc = xa11y.locator("Safari", selector="button[name='Submit']")
     >>> loc.press()
+
+Subscribe to accessibility events:
+    >>> with xa11y.subscribe("Safari", kinds=["focus_changed"]) as sub:
+    ...     event = sub.try_recv()
+
+Wait for an element state:
+    >>> node = xa11y.wait_for("Safari", selector="button[name='OK']", state="attached")
 """
 
 from xa11y._native import (
     ActionNotSupportedError,
     AppInfo,
     AppNotFoundError,
+    Event,
     InvalidSelectorError,
     Locator,
     Node,
@@ -23,6 +31,8 @@ from xa11y._native import (
     PlatformError,
     Rect,
     SelectorNotMatchedError,
+    Subscription,
+    TextChangeData,
     TimeoutError,
     Tree,
     # Exceptions
@@ -33,12 +43,16 @@ from xa11y._native import (
     list_apps,
     # Functions
     locator,
+    subscribe,
+    wait_for,
+    wait_for_event,
 )
 
 __all__ = [
     "ActionNotSupportedError",
     "AppInfo",
     "AppNotFoundError",
+    "Event",
     "InvalidSelectorError",
     "Locator",
     "Node",
@@ -46,6 +60,8 @@ __all__ = [
     "PlatformError",
     "Rect",
     "SelectorNotMatchedError",
+    "Subscription",
+    "TextChangeData",
     "TimeoutError",
     "Tree",
     "XA11yError",
@@ -54,4 +70,7 @@ __all__ = [
     "check_permissions",
     "list_apps",
     "locator",
+    "subscribe",
+    "wait_for",
+    "wait_for_event",
 ]
