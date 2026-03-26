@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 # ── Exceptions ───────────────────────────────────────────────────────────────
 
@@ -342,6 +342,14 @@ class Locator:
         """Wait until the element is enabled (default 5s timeout)."""
     def wait_hidden(self, timeout: float = 5.0) -> None:
         """Wait until the element is hidden (default 5s timeout)."""
+    def wait_disabled(self, timeout: float = 5.0) -> None:
+        """Wait until the element is disabled (default 5s timeout)."""
+    def wait_focused(self, timeout: float = 5.0) -> None:
+        """Wait until the element is focused (default 5s timeout)."""
+    def wait_unfocused(self, timeout: float = 5.0) -> None:
+        """Wait until the element loses focus (default 5s timeout)."""
+    def wait_until(self, predicate: Callable[[Node], bool], timeout: float = 5.0) -> None:
+        """Wait until *predicate(node)* returns ``True`` (default 5s timeout)."""
     def __repr__(self) -> str: ...
 
 # ── Module-level functions ───────────────────────────────────────────────────
