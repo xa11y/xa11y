@@ -148,9 +148,19 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - name: Cache cargo-deny binary
+        id: cache-cargo-deny
+        uses: actions/cache@v5
         with:
-          command: check licenses
+          path: ~/.cargo/bin/cargo-deny
+          key: cargo-deny-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install cargo-deny
+        if: steps.cache-cargo-deny.outputs.cache-hit != 'true'
+        run: cargo install cargo-deny --locked
+
+      - name: Check licenses
+        run: cargo deny check licenses
 
   # ── Cross-compilation ──────────────────────────────────────────────
   # Verifies xa11y-core compiles for targets we can't run tests on
