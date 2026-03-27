@@ -8,12 +8,11 @@
 //! ```no_run
 //! use xa11y::*;
 //!
-//! let provider = create_provider().expect("Failed to create provider");
-//! let status = provider.check_permissions().expect("Permission check failed");
+//! let status = check_permissions().expect("Permission check failed");
 //!
 //! match status {
 //!     PermissionStatus::Granted => {
-//!         let tree = provider.get_app_tree(
+//!         let tree = app(
 //!             &AppTarget::ByName("Safari".to_string()),
 //!             &QueryOptions::default(),
 //!         ).expect("Failed to get tree");
@@ -27,16 +26,124 @@
 //! }
 //! ```
 
+use std::sync::{Arc, OnceLock};
+
 // Re-export all core types
 pub use xa11y_core::*;
 
-// Platform-specific provider creation
+// ── Internal singleton ──────────────────────────────────────────────────────
 
-/// Create a platform-appropriate accessibility provider.
+// Use Box::leak so the provider is never dropped — avoids Windows COM
+// teardown crashes (STATUS_ACCESS_VIOLATION at process exit).
+static PROVIDER: OnceLock<std::result::Result<&'static dyn Provider, String>> = OnceLock::new();
+
+fn get_provider_ref() -> Result<&'static dyn Provider> {
+    PROVIDER
+        .get_or_init(|| {
+            create_provider_boxed()
+                .map(|b| &*Box::leak(b))
+                .map_err(|e| format!("{e}"))
+        })
+        .as_ref()
+        .copied()
+        .map_err(|msg| Error::Platform {
+            code: -1,
+            message: msg.clone(),
+        })
+}
+
+/// Wrapper that lets a `&'static dyn Provider` be shared as `Arc<dyn Provider>`
+/// for use with `Locator`.
+struct StaticProviderRef(&'static dyn Provider);
+
+impl Provider for StaticProviderRef {
+    fn get_app_tree(&self, target: &AppTarget, opts: &QueryOptions) -> Result<Tree> {
+        self.0.get_app_tree(target, opts)
+    }
+    fn get_all_apps(&self, opts: &QueryOptions) -> Result<Tree> {
+        self.0.get_all_apps(opts)
+    }
+    fn perform_action(
+        &self,
+        tree: &Tree,
+        node: &Node,
+        action: Action,
+        data: Option<ActionData>,
+    ) -> Result<()> {
+        self.0.perform_action(tree, node, action, data)
+    }
+    fn check_permissions(&self) -> Result<PermissionStatus> {
+        self.0.check_permissions()
+    }
+    fn list_apps(&self) -> Result<Vec<AppInfo>> {
+        self.0.list_apps()
+    }
+}
+
+fn get_provider_arc() -> Result<Arc<dyn Provider>> {
+    Ok(Arc::new(StaticProviderRef(get_provider_ref()?)))
+}
+
+// ── Module-level API ────────────────────────────────────────────────────────
+
+/// Snapshot a specific application's accessibility tree.
+pub fn app(target: &AppTarget, opts: &QueryOptions) -> Result<Tree> {
+    get_provider_ref()?.get_app_tree(target, opts)
+}
+
+/// Snapshot all running applications (shallow).
+pub fn all_apps(opts: &QueryOptions) -> Result<Tree> {
+    get_provider_ref()?.get_all_apps(opts)
+}
+
+/// Perform an action on an element from a specific snapshot.
+pub fn perform_action(
+    tree: &Tree,
+    node: &Node,
+    action: Action,
+    data: Option<ActionData>,
+) -> Result<()> {
+    get_provider_ref()?.perform_action(tree, node, action, data)
+}
+
+/// Check if accessibility permissions are granted.
+pub fn check_permissions() -> Result<PermissionStatus> {
+    get_provider_ref()?.check_permissions()
+}
+
+/// List running applications with their PIDs.
+pub fn list_apps() -> Result<Vec<AppInfo>> {
+    get_provider_ref()?.list_apps()
+}
+
+/// Create a Locator targeting a specific application.
+pub fn locator(target: AppTarget, selector: &str) -> Result<Locator> {
+    Ok(Locator::new(get_provider_arc()?, target, selector))
+}
+
+/// Create a Locator with custom query options.
+pub fn locator_with_opts(target: AppTarget, selector: &str, opts: QueryOptions) -> Result<Locator> {
+    Ok(Locator::with_opts(
+        get_provider_arc()?,
+        target,
+        selector,
+        opts,
+    ))
+}
+
+// ── Platform provider construction (internal) ───────────────────────────────
+
+/// Create a new platform-appropriate accessibility provider.
 ///
-/// Returns a boxed `Provider` trait object for the current platform.
-/// On unsupported platforms, returns a `Platform` error.
-pub fn create_provider() -> Result<Box<dyn Provider>> {
+/// Returns a fresh provider instance (not the global singleton). Prefer
+/// the module-level functions (`app`, `all_apps`, `perform_action`, etc.)
+/// for normal use.
+#[doc(hidden)]
+pub fn create_provider() -> Result<Arc<dyn Provider>> {
+    create_provider_boxed().map(Arc::from)
+}
+
+fn create_provider_boxed() -> Result<Box<dyn Provider>> {
     #[cfg(target_os = "macos")]
     {
         Ok(Box::new(xa11y_macos::MacOSProvider::new()?))

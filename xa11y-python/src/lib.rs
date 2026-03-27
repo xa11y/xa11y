@@ -1,4 +1,4 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use pyo3::exceptions::*;
@@ -7,18 +7,8 @@ use pyo3::types::PyList;
 
 // ── Singleton provider ─────────────────────────────────────────────────────
 
-static PROVIDER: OnceLock<Result<Arc<dyn xa11y::Provider>, String>> = OnceLock::new();
-
 fn get_provider() -> PyResult<Arc<dyn xa11y::Provider>> {
-    PROVIDER
-        .get_or_init(|| {
-            xa11y::create_provider()
-                .map(Arc::from)
-                .map_err(|e| format!("{e}"))
-        })
-        .as_ref()
-        .map(Arc::clone)
-        .map_err(|msg| PlatformError::new_err(msg.clone()))
+    xa11y::create_provider().map_err(|e| PlatformError::new_err(format!("{e}")))
 }
 
 // ── Exceptions ──────────────────────────────────────────────────────────────

@@ -807,6 +807,9 @@ fn permission_status_variants() {
 }
 
 // ── Platform backend ──
+// These tests use create_provider() to get a local Arc rather than the global
+// singleton. On Windows, leaked COM objects in the singleton cause
+// STATUS_ACCESS_VIOLATION during process exit.
 
 #[test]
 fn platform_provider_creates_or_fails_gracefully() {
@@ -936,10 +939,10 @@ impl Provider for MockProvider {
 
 #[test]
 fn locator_basic_query() {
-    use xa11y::ProviderExt;
-    let p = MockProvider::new();
+    use std::sync::Arc;
+    let p: Arc<dyn Provider> = Arc::new(MockProvider::new());
     let target = AppTarget::ByName("My App".into());
-    let loc = p.locator(target, "button[name=\"Submit\"]");
+    let loc = Locator::new(Arc::clone(&p), target, "button[name=\"Submit\"]");
     assert_eq!(loc.role().unwrap(), Role::Button);
     assert_eq!(loc.name().unwrap().as_deref(), Some("Submit"));
     assert!(loc.exists().unwrap());
@@ -947,10 +950,14 @@ fn locator_basic_query() {
 
 #[test]
 fn locator_press_dispatches_action() {
-    use xa11y::ProviderExt;
-    let p = MockProvider::new();
+    use std::sync::Arc;
+    let p = Arc::new(MockProvider::new());
     let target = AppTarget::ByName("My App".into());
-    let loc = p.locator(target, "button[name=\"Submit\"]");
+    let loc = Locator::new(
+        Arc::clone(&p) as Arc<dyn Provider>,
+        target,
+        "button[name=\"Submit\"]",
+    );
     loc.press().unwrap();
     let (idx, action) = p.last_action.lock().unwrap().unwrap();
     assert_eq!(action, Action::Press);
@@ -960,59 +967,59 @@ fn locator_press_dispatches_action() {
 
 #[test]
 fn locator_not_found() {
-    use xa11y::ProviderExt;
-    let p = MockProvider::new();
+    use std::sync::Arc;
+    let p: Arc<dyn Provider> = Arc::new(MockProvider::new());
     let target = AppTarget::ByName("My App".into());
-    let loc = p.locator(target, "button[name=\"NonExistent\"]");
+    let loc = Locator::new(Arc::clone(&p), target, "button[name=\"NonExistent\"]");
     assert!(!loc.exists().unwrap());
     assert!(loc.press().is_err());
 }
 
 #[test]
 fn locator_nth() {
-    use xa11y::ProviderExt;
-    let p = MockProvider::new();
+    use std::sync::Arc;
+    let p: Arc<dyn Provider> = Arc::new(MockProvider::new());
     let target = AppTarget::ByName("My App".into());
     // There are 3 buttons: Back(2), Submit(6), Cancel(7)
-    let loc = p.locator(target, "button").nth(1);
+    let loc = Locator::new(Arc::clone(&p), target, "button").nth(1);
     assert_eq!(loc.name().unwrap().as_deref(), Some("Submit"));
 }
 
 #[test]
 fn locator_count() {
-    use xa11y::ProviderExt;
-    let p = MockProvider::new();
+    use std::sync::Arc;
+    let p: Arc<dyn Provider> = Arc::new(MockProvider::new());
     let target = AppTarget::ByName("My App".into());
-    let loc = p.locator(target, "button");
+    let loc = Locator::new(Arc::clone(&p), target, "button");
     assert_eq!(loc.count().unwrap(), 3);
 }
 
 #[test]
 fn locator_child() {
-    use xa11y::ProviderExt;
-    let p = MockProvider::new();
+    use std::sync::Arc;
+    let p: Arc<dyn Provider> = Arc::new(MockProvider::new());
     let target = AppTarget::ByName("My App".into());
-    let loc = p.locator(target, "toolbar").child("button");
+    let loc = Locator::new(Arc::clone(&p), target, "toolbar").child("button");
     // Toolbar has one button child: "Back"
     assert_eq!(loc.name().unwrap().as_deref(), Some("Back"));
 }
 
 #[test]
 fn locator_states() {
-    use xa11y::ProviderExt;
-    let p = MockProvider::new();
+    use std::sync::Arc;
+    let p: Arc<dyn Provider> = Arc::new(MockProvider::new());
     let target = AppTarget::ByName("My App".into());
     // Cancel button is disabled
-    let loc = p.locator(target, "button[name=\"Cancel\"]");
+    let loc = Locator::new(Arc::clone(&p), target, "button[name=\"Cancel\"]");
     assert!(!loc.is_enabled().unwrap());
     assert!(loc.is_visible().unwrap());
 }
 
 #[test]
 fn locator_selector_getter() {
-    use xa11y::ProviderExt;
-    let p = MockProvider::new();
+    use std::sync::Arc;
+    let p: Arc<dyn Provider> = Arc::new(MockProvider::new());
     let target = AppTarget::ByName("My App".into());
-    let loc = p.locator(target, "button").child("text_field");
+    let loc = Locator::new(Arc::clone(&p), target, "button").child("text_field");
     assert_eq!(loc.selector(), "button > text_field");
 }

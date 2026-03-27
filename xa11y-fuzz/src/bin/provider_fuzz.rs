@@ -330,7 +330,7 @@ mod provider_fuzz {
     // ── Fuzzer State ─────────────────────────────────────────────────────────
 
     struct FuzzState {
-        provider: Box<dyn Provider>,
+        provider: std::sync::Arc<dyn Provider>,
         rng: StdRng,
         verbose: bool,
         tree: Option<Tree>,
