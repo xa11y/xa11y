@@ -289,8 +289,8 @@ impl WindowsProvider {
 
         // Role filter: skip node but still traverse children
         let role_filtered = if depth > 0 {
-            if let Some(ref filter_roles) = opts.roles {
-                !filter_roles.contains(&role)
+            if !opts.roles.is_empty() {
+                !opts.roles.contains(&role)
             } else {
                 false
             }

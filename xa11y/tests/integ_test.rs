@@ -1009,7 +1009,7 @@ mod tests {
     #[ignore]
     fn opts_roles_filter() {
         let tree = h::app_tree_with(&QueryOptions {
-            roles: Some(vec![Role::Button]),
+            roles: vec![Role::Button],
             ..QueryOptions::default()
         });
         // The root node is always included to anchor the tree.

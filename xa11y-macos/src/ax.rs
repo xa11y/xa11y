@@ -766,8 +766,8 @@ impl MacOSProvider {
         let subrole_str = ax_string(element.as_ptr(), "AXSubrole");
         let role = map_ax_role(&role_str, subrole_str.as_deref());
 
-        let role_filtered = if let Some(ref filter_roles) = opts.roles {
-            !filter_roles.contains(&role)
+        let role_filtered = if !opts.roles.is_empty() {
+            !opts.roles.contains(&role)
         } else {
             false
         };

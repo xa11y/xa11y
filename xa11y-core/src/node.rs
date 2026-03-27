@@ -3,10 +3,8 @@ use serde::{Deserialize, Serialize};
 use crate::action::Action;
 use crate::role::Role;
 
-/// Internal index for a node within a snapshot (sequential DFS order).
+/// Positional index for a node within a snapshot (sequential DFS order).
 /// This is an array index, not a stable identity — it changes between snapshots.
-/// Internal index type for node positions within a snapshot.
-#[doc(hidden)]
 pub type NodeIndex = u32;
 
 /// A single element in the accessibility tree snapshot.
@@ -72,6 +70,24 @@ pub struct Node {
 }
 
 impl Node {
+    /// Sequential DFS index of this node within the snapshot.
+    ///
+    /// This is a positional index, not a stable identity — it changes between snapshots.
+    /// Useful for state persistence, serialization, and ID-based lookups within a single snapshot.
+    pub fn index(&self) -> NodeIndex {
+        self.index
+    }
+
+    /// Indices of this node's direct children within the snapshot.
+    pub fn children_indices(&self) -> &[NodeIndex] {
+        &self.children_indices
+    }
+
+    /// Index of this node's parent, or `None` for the root node.
+    pub fn parent_index(&self) -> Option<NodeIndex> {
+        self.parent_index
+    }
+
     /// Create a synthetic empty node, used as a placeholder when a wait
     /// condition is satisfied by the *absence* of a node (e.g. Detached/Hidden).
     pub fn synthetic_empty() -> Self {

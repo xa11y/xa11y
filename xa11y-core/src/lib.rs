@@ -17,7 +17,7 @@ pub use event::{
 };
 pub use event_provider::{CancelHandle, EventProvider, EventReceiver, Subscription};
 pub use locator::Locator;
-pub use node::{Node, RawPlatformData, Rect, StateSet, Toggled};
+pub use node::{Node, NodeIndex, RawPlatformData, Rect, StateSet, Toggled};
 pub use provider::{AppInfo, AppTarget, PermissionStatus, Provider, QueryOptions, WindowHandle};
 pub use role::Role;
 pub use tree::Tree;

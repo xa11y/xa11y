@@ -100,6 +100,21 @@ pub enum ActionData {
     TextSelection { start: u32, end: u32 },
 }
 
+impl std::fmt::Display for ActionData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ActionData::Value(s) => write!(f, "Value({s:?})"),
+            ActionData::NumericValue(v) => write!(f, "NumericValue({v})"),
+            ActionData::ScrollAmount { direction, amount } => {
+                write!(f, "ScrollAmount({direction:?}, {amount})")
+            }
+            ActionData::TextSelection { start, end } => {
+                write!(f, "TextSelection({start}..{end})")
+            }
+        }
+    }
+}
+
 impl ActionData {
     /// Validate that this ActionData has valid values for the given action.
     ///
