@@ -80,7 +80,11 @@ impl Provider for StaticProviderRef {
     }
 }
 
-fn get_provider_arc() -> Result<Arc<dyn Provider>> {
+/// Get the global provider as an `Arc<dyn Provider>`.
+///
+/// Returns a handle to the same singleton used by `app()`, `all_apps()`, etc.
+/// Useful when you need to pass a provider to objects that store it (e.g. `Locator`).
+pub fn provider() -> Result<Arc<dyn Provider>> {
     Ok(Arc::new(StaticProviderRef(get_provider_ref()?)))
 }
 
@@ -119,17 +123,12 @@ pub fn list_apps() -> Result<Vec<AppInfo>> {
 
 /// Create a Locator targeting a specific application.
 pub fn locator(target: AppTarget, selector: &str) -> Result<Locator> {
-    Ok(Locator::new(get_provider_arc()?, target, selector))
+    Ok(Locator::new(provider()?, target, selector))
 }
 
 /// Create a Locator with custom query options.
 pub fn locator_with_opts(target: AppTarget, selector: &str, opts: QueryOptions) -> Result<Locator> {
-    Ok(Locator::with_opts(
-        get_provider_arc()?,
-        target,
-        selector,
-        opts,
-    ))
+    Ok(Locator::with_opts(provider()?, target, selector, opts))
 }
 
 // ── Platform provider construction (internal) ───────────────────────────────
@@ -137,6 +136,7 @@ pub fn locator_with_opts(target: AppTarget, selector: &str, opts: QueryOptions) 
 /// Create a new platform-appropriate accessibility provider.
 ///
 /// Returns a fresh provider instance (not the global singleton).
+#[cfg(feature = "testing")]
 pub fn create_provider() -> Result<Arc<dyn Provider>> {
     create_provider_boxed().map(Arc::from)
 }

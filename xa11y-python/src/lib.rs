@@ -8,7 +8,7 @@ use pyo3::types::PyList;
 // ── Singleton provider ─────────────────────────────────────────────────────
 
 fn get_provider() -> PyResult<Arc<dyn xa11y::Provider>> {
-    xa11y::create_provider().map_err(|e| PlatformError::new_err(format!("{e}")))
+    xa11y::provider().map_err(|e| PlatformError::new_err(format!("{e}")))
 }
 
 // ── Exceptions ──────────────────────────────────────────────────────────────

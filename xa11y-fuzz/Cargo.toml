@@ -6,7 +6,7 @@ publish = false
 
 [dependencies]
 xa11y-core = { path = "../xa11y-core" }
-xa11y = { path = "../xa11y" }
+xa11y = { path = "../xa11y", features = ["testing"] }
 rand = "0.10"
 
 [[bin]]

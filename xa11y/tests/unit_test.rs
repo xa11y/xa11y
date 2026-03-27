@@ -807,9 +807,9 @@ fn permission_status_variants() {
 }
 
 // ── Platform backend ──
-// These tests use create_provider() to get a local Arc rather than the global
-// singleton. On Windows, leaked COM objects in the singleton cause
-// STATUS_ACCESS_VIOLATION during process exit.
+// These tests use create_provider() to get a fresh instance rather than the
+// global singleton. On Windows, initializing the COM singleton in unit tests
+// causes STATUS_ACCESS_VIOLATION during process exit.
 
 #[test]
 fn platform_provider_creates_or_fails_gracefully() {
