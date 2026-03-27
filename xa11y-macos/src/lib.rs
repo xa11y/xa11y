@@ -31,10 +31,10 @@ mod stub {
         fn get_all_apps(&self, _: &QueryOptions) -> Result<Tree> {
             unreachable!()
         }
-        fn perform_action(
+        fn perform_action_raw(
             &self,
             _: &Tree,
-            _: &Node,
+            _: u32,
             _: Action,
             _: Option<ActionData>,
         ) -> Result<()> {

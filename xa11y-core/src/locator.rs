@@ -4,10 +4,10 @@ use std::time::Duration;
 use crate::action::{Action, ActionData, ScrollDirection};
 use crate::error::{Error, Result};
 use crate::event::ElementState;
-use crate::node::{Node, Rect, StateSet};
+use crate::node::{Node, RawNode, Rect, StateSet, TreeData};
 use crate::provider::{AppTarget, Provider, QueryOptions};
 use crate::role::Role;
-use crate::tree::Tree;
+use crate::selector::Selector;
 
 /// A lazy element descriptor that re-resolves against a fresh accessibility
 /// tree snapshot on every operation.
@@ -39,11 +39,15 @@ pub struct Locator {
     nth: Option<usize>,
 }
 
-/// Snapshot produced by a single resolve call.
-/// Bundles the tree and the index of the matched node so that callers
-/// can use both without lifetime issues.
+/// Snapshot produced by a single resolve call (wraps in Arc<TreeData>).
 struct Resolved {
-    tree: Tree,
+    data: Arc<TreeData>,
+    node_index: u32,
+}
+
+/// Raw resolution for action dispatch (avoids Arc wrapping).
+struct ResolvedRaw {
+    tree: crate::tree::Tree,
     node_index: u32,
 }
 
@@ -81,12 +85,6 @@ impl Locator {
         self
     }
 
-    /// Return a new Locator that selects the first match.
-    /// Equivalent to `.nth(0)` — mainly for readability.
-    pub fn first(self) -> Self {
-        self.nth(0)
-    }
-
     /// Return a new Locator scoped to a direct child matching `child_selector`.
     ///
     /// Appends ` > {child_selector}` to the current selector.
@@ -115,77 +113,92 @@ impl Locator {
     /// Snapshot the tree and resolve the selector to a single node.
     fn resolve(&self) -> Result<Resolved> {
         let tree = self.provider.get_app_tree(&self.target, &self.opts)?;
-        let matches = tree.query(&self.selector)?;
+        let data = Arc::new(TreeData {
+            app_name: tree.app_name,
+            pid: tree.pid,
+            screen_size: tree.screen_size,
+            nodes: tree.nodes,
+            provider: Some(Arc::clone(&self.provider)),
+            target: Some(self.target.clone()),
+        });
+
+        let selector = Selector::parse(&self.selector)?;
+        let matches = selector.match_raw_nodes(&data.nodes);
         let idx = self.nth.unwrap_or(0);
-        let node = matches.get(idx).ok_or_else(|| Error::SelectorNotMatched {
+        let &node_index = matches.get(idx).ok_or_else(|| Error::SelectorNotMatched {
             selector: self.selector.clone(),
         })?;
-        Ok(Resolved {
-            node_index: node.index,
-            tree,
-        })
+        Ok(Resolved { data, node_index })
     }
 
-    /// Resolve and return a clone of the matched node.
-    /// This is the safe way to get node data out without lifetime issues.
+    /// Resolve for action dispatch (returns raw Tree, no Arc wrapping).
+    fn resolve_raw(&self) -> Result<ResolvedRaw> {
+        let tree = self.provider.get_app_tree(&self.target, &self.opts)?;
+        let selector = Selector::parse(&self.selector)?;
+        let matches = selector.match_raw_nodes(&tree.nodes);
+        let idx = self.nth.unwrap_or(0);
+        let &node_index = matches.get(idx).ok_or_else(|| Error::SelectorNotMatched {
+            selector: self.selector.clone(),
+        })?;
+        Ok(ResolvedRaw { tree, node_index })
+    }
+
+    /// Resolve and return a Node cursor for the matched element.
     fn resolve_node(&self) -> Result<Node> {
         let r = self.resolve()?;
-        Ok(r.tree
-            .get(r.node_index)
-            .expect("node_index valid after resolve")
-            .clone())
+        Ok(Node::new(r.data, r.node_index))
     }
 
     // ── Queries (each takes a fresh snapshot) ───────────────────────
 
     /// Get the matched element's role.
     pub fn role(&self) -> Result<Role> {
-        Ok(self.resolve_node()?.role)
+        Ok(self.resolve_node()?.role())
     }
 
     /// Get the matched element's name.
     pub fn name(&self) -> Result<Option<String>> {
-        Ok(self.resolve_node()?.name)
+        Ok(self.resolve_node()?.name().map(|s| s.to_string()))
     }
 
     /// Get the matched element's value.
     pub fn value(&self) -> Result<Option<String>> {
-        Ok(self.resolve_node()?.value)
+        Ok(self.resolve_node()?.value().map(|s| s.to_string()))
     }
 
     /// Get the matched element's description.
     pub fn description(&self) -> Result<Option<String>> {
-        Ok(self.resolve_node()?.description)
+        Ok(self.resolve_node()?.description().map(|s| s.to_string()))
     }
 
     /// Get the matched element's bounding rectangle.
     pub fn bounds(&self) -> Result<Option<Rect>> {
-        Ok(self.resolve_node()?.bounds)
+        Ok(self.resolve_node()?.bounds())
     }
 
     /// Get the matched element's state flags.
     pub fn states(&self) -> Result<StateSet> {
-        Ok(self.resolve_node()?.states)
+        Ok(self.resolve_node()?.states().clone())
     }
 
     /// Get the matched element's numeric value (for range controls).
     pub fn numeric_value(&self) -> Result<Option<f64>> {
-        Ok(self.resolve_node()?.numeric_value)
+        Ok(self.resolve_node()?.numeric_value())
     }
 
     /// Check if the matched element is visible.
     pub fn is_visible(&self) -> Result<bool> {
-        Ok(self.resolve_node()?.states.visible)
+        Ok(self.resolve_node()?.states().visible)
     }
 
     /// Check if the matched element is enabled.
     pub fn is_enabled(&self) -> Result<bool> {
-        Ok(self.resolve_node()?.states.enabled)
+        Ok(self.resolve_node()?.states().enabled)
     }
 
     /// Check if the matched element is focused.
     pub fn is_focused(&self) -> Result<bool> {
-        Ok(self.resolve_node()?.states.focused)
+        Ok(self.resolve_node()?.states().focused)
     }
 
     /// Check if a matching element exists in the current tree.
@@ -200,13 +213,34 @@ impl Locator {
     /// Count matching elements in the current tree.
     pub fn count(&self) -> Result<usize> {
         let tree = self.provider.get_app_tree(&self.target, &self.opts)?;
-        let matches = tree.query(&self.selector)?;
+        let selector = Selector::parse(&self.selector)?;
+        let matches = selector.match_raw_nodes(&tree.nodes);
         Ok(matches.len())
     }
 
-    /// Get a clone of the matched node from a fresh snapshot.
-    pub fn get(&self) -> Result<Node> {
+    /// Resolve and return the first matching element as a [`Node`] snapshot.
+    pub fn first(&self) -> Result<Node> {
         self.resolve_node()
+    }
+
+    /// Resolve and return all matching elements as [`Node`] snapshots.
+    pub fn all(&self) -> Result<Vec<Node>> {
+        let tree = self.provider.get_app_tree(&self.target, &self.opts)?;
+        let data = Arc::new(TreeData {
+            app_name: tree.app_name,
+            pid: tree.pid,
+            screen_size: tree.screen_size,
+            nodes: tree.nodes,
+            provider: Some(Arc::clone(&self.provider)),
+            target: Some(self.target.clone()),
+        });
+
+        let selector = Selector::parse(&self.selector)?;
+        let indices = selector.match_raw_nodes(&data.nodes);
+        Ok(indices
+            .into_iter()
+            .map(|idx| Node::new(Arc::clone(&data), idx))
+            .collect())
     }
 
     // ── Actions (each takes a fresh snapshot) ───────────────────────
@@ -216,12 +250,9 @@ impl Locator {
         if let Some(ref d) = data {
             d.validate(action)?;
         }
-        let r = self.resolve()?;
-        let node = r
-            .tree
-            .get(r.node_index)
-            .expect("node_index valid after resolve");
-        self.provider.perform_action(&r.tree, node, action, data)
+        let r = self.resolve_raw()?;
+        self.provider
+            .perform_action_raw(&r.tree, r.node_index, action, data)
     }
 
     /// Click / invoke the matched element.
@@ -303,8 +334,6 @@ impl Locator {
     }
 
     /// Scroll the matched element upward.
-    ///
-    /// `amount` is in logical scroll units (≈ one mouse wheel notch).
     pub fn scroll_up(&self, amount: f64) -> Result<()> {
         self.perform(
             Action::Scroll,
@@ -316,8 +345,6 @@ impl Locator {
     }
 
     /// Scroll the matched element downward.
-    ///
-    /// `amount` is in logical scroll units (≈ one mouse wheel notch).
     pub fn scroll_down(&self, amount: f64) -> Result<()> {
         self.perform(
             Action::Scroll,
@@ -329,8 +356,6 @@ impl Locator {
     }
 
     /// Scroll the matched element leftward.
-    ///
-    /// `amount` is in logical scroll units (≈ one mouse wheel notch).
     pub fn scroll_left(&self, amount: f64) -> Result<()> {
         self.perform(
             Action::Scroll,
@@ -342,8 +367,6 @@ impl Locator {
     }
 
     /// Scroll the matched element rightward.
-    ///
-    /// `amount` is in logical scroll units (≈ one mouse wheel notch).
     pub fn scroll_right(&self, amount: f64) -> Result<()> {
         self.perform(
             Action::Scroll,
@@ -357,9 +380,6 @@ impl Locator {
     // ── Wait operations ─────────────────────────────────────────────
 
     /// Wait until the element is visible, polling with fresh snapshots.
-    ///
-    /// If the provider implements `EventProvider`, delegates to its
-    /// `wait_for` method. Otherwise, polls at ~100ms intervals.
     pub fn wait_visible(&self, timeout: Duration) -> Result<Node> {
         self.wait_for_state(ElementState::Visible, timeout)
     }
@@ -407,37 +427,20 @@ impl Locator {
     /// Wait until an arbitrary predicate is satisfied, polling with fresh
     /// snapshots at ~100 ms intervals.
     ///
-    /// The predicate receives `Some(&Node)` when the selector matches, or
+    /// The predicate receives `Some(&RawNode)` when the selector matches, or
     /// `None` when no element matches. Return `true` to stop waiting.
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use xa11y_core::*;
-    /// # use std::time::Duration;
-    /// # fn example(loc: &Locator) -> Result<()> {
-    /// // Wait until the element's value becomes "Done":
-    /// let node = loc.wait_until(
-    ///     |n| n.is_some_and(|n| n.value.as_deref() == Some("Done")),
-    ///     Duration::from_secs(5),
-    /// )?;
-    /// # Ok(())
-    /// # }
-    /// ```
     pub fn wait_until(
         &self,
-        predicate: impl Fn(Option<&Node>) -> bool,
+        predicate: impl Fn(Option<&RawNode>) -> bool,
         timeout: Duration,
     ) -> Result<Node> {
         self.poll_until(&predicate, false, timeout)
     }
 
     /// Core polling loop shared by `wait_for_state` and `wait_until`.
-    ///
-    /// `allow_absent`: when true, the condition can be satisfied even when no
-    /// node matches (used for Detached/Hidden states).
     fn poll_until(
         &self,
-        predicate: impl Fn(Option<&Node>) -> bool,
+        predicate: impl Fn(Option<&RawNode>) -> bool,
         allow_absent: bool,
         timeout: Duration,
     ) -> Result<Node> {
@@ -451,15 +454,44 @@ impl Locator {
             }
 
             let tree = self.provider.get_app_tree(&self.target, &self.opts)?;
-            let matches = tree.query(&self.selector).ok();
+            let selector = Selector::parse(&self.selector).ok();
+            let matches = selector.as_ref().map(|s| s.match_raw_nodes(&tree.nodes));
             let idx = self.nth.unwrap_or(0);
-            let node = matches.as_ref().and_then(|m| m.get(idx).copied());
+            let node_index = matches.as_ref().and_then(|m| m.get(idx).copied());
+            let node = node_index.and_then(|i| tree.nodes.get(i as usize));
 
             if predicate(node) {
+                let data = Arc::new(TreeData {
+                    app_name: tree.app_name,
+                    pid: tree.pid,
+                    screen_size: tree.screen_size,
+                    nodes: tree.nodes,
+                    provider: Some(Arc::clone(&self.provider)),
+                    target: Some(self.target.clone()),
+                });
+
                 return if allow_absent {
-                    Ok(node.cloned().unwrap_or_else(Node::synthetic_empty))
+                    Ok(node_index
+                        .map(|idx| Node::new(Arc::clone(&data), idx))
+                        .unwrap_or_else(|| {
+                            // Can't mutate Arc'd data, so create a standalone node
+                            Node::new(
+                                Arc::new(TreeData {
+                                    app_name: data.app_name.clone(),
+                                    pid: data.pid,
+                                    screen_size: data.screen_size,
+                                    nodes: vec![RawNode::synthetic_empty()],
+                                    provider: Some(Arc::clone(&self.provider)),
+                                    target: Some(self.target.clone()),
+                                }),
+                                0,
+                            )
+                        }))
                 } else {
-                    Ok(node.expect("predicate requires node to exist").clone())
+                    Ok(Node::new(
+                        data,
+                        node_index.expect("predicate requires node to exist"),
+                    ))
                 };
             }
 

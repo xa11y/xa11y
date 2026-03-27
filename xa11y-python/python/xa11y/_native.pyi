@@ -245,9 +245,11 @@ class Locator:
     def selector(self) -> str:
         """The CSS-like selector string for this locator."""
     def nth(self, n: int) -> Locator:
-        """Select the *n*-th match (0-indexed)."""
-    def first(self) -> Locator:
-        """Select the first match (shorthand for ``nth(0)``)."""
+        """Select the *n*-th match (0-indexed). Returns a narrowed Locator."""
+    def first(self) -> Node:
+        """Resolve and return the first matching Node snapshot (Playwright-style)."""
+    def all(self) -> list[Node]:
+        """Resolve and return all matching Node snapshots (Playwright-style)."""
     def child(self, selector: str) -> Locator:
         """Narrow to direct children matching *selector*."""
     def descendant(self, selector: str) -> Locator:
@@ -371,6 +373,25 @@ def all_apps(
     roles: list[str] | None = None,
 ) -> Tree:
     """Get a combined accessibility tree for all running applications."""
+
+def apps(
+    *,
+    max_depth: int | None = None,
+    max_elements: int | None = None,
+    visible_only: bool = False,
+    roles: list[str] | None = None,
+) -> list[Node]:
+    """Get all running applications as Node snapshots (sugar for ``query("app")``)."""
+
+def query(
+    selector: str,
+    *,
+    max_depth: int | None = None,
+    max_elements: int | None = None,
+    visible_only: bool = False,
+    roles: list[str] | None = None,
+) -> list[Node]:
+    """Query across all running applications."""
 
 def locator(
     name: str | None = None,

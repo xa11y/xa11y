@@ -272,7 +272,7 @@ mod provider_fuzz {
 
     // ── ActionData Generation ────────────────────────────────────────────────
 
-    fn random_action_data(rng: &mut StdRng, action: Action, _node: &Node) -> Option<ActionData> {
+    fn random_action_data(rng: &mut StdRng, action: Action, _node: &RawNode) -> Option<ActionData> {
         match action {
             Action::SetValue => {
                 let kind: u8 = rng.random_range(0..10);

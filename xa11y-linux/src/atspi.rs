@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use xa11y_core::{
     Action, ActionData, AppInfo, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
-    EventKind, EventProvider, EventReceiver, Node, PermissionStatus, Provider, QueryOptions, Rect,
-    Result, Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
+    EventKind, EventProvider, EventReceiver, PermissionStatus, Provider, QueryOptions, RawNode,
+    Rect, Result, Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
 };
 use zbus::blocking::{Connection, Proxy};
 
@@ -307,7 +307,7 @@ impl LinuxProvider {
         &self,
         aref: &AccessibleRef,
         opts: &QueryOptions,
-        nodes: &mut Vec<Node>,
+        nodes: &mut Vec<RawNode>,
         refs: &mut Vec<AccessibleRef>,
         parent_idx: Option<u32>,
         depth: u32,
@@ -423,7 +423,12 @@ impl LinuxProvider {
         };
 
         let node_idx = nodes.len() as u32;
-        nodes.push(Node {
+        let node_pid = if role == Role::Application {
+            self.get_app_pid(aref)
+        } else {
+            None
+        };
+        nodes.push(RawNode {
             role,
             name,
             value,
@@ -436,6 +441,8 @@ impl LinuxProvider {
             max_value,
             stable_id: Some(aref.path.clone()),
             raw,
+            pid: node_pid,
+            bundle_id: None,
             index: node_idx,
             children_indices: vec![], // filled in below
             parent_index: parent_idx,
@@ -743,7 +750,7 @@ impl Provider for LinuxProvider {
         let screen_size = Self::detect_screen_size();
         let mut nodes = Vec::new();
 
-        nodes.push(Node {
+        nodes.push(RawNode {
             role: Role::Application,
             name: Some("Desktop".to_string()),
             value: None,
@@ -761,6 +768,8 @@ impl Provider for LinuxProvider {
             max_value: None,
             stable_id: None,
             raw: xa11y_core::RawPlatformData::Synthetic,
+            pid: None,
+            bundle_id: None,
             index: 0,
             children_indices: vec![],
             parent_index: None,
@@ -799,14 +808,14 @@ impl Provider for LinuxProvider {
         Ok(Tree::new("Desktop".to_string(), None, screen_size, nodes))
     }
 
-    fn perform_action(
+    fn perform_action_raw(
         &self,
-        tree: &Tree,
-        node: &Node,
+        _tree: &Tree,
+        node_index: u32,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()> {
-        let node_idx = tree.node_index(node);
+        let node_idx = node_index;
 
         // Look up cached accessible ref for action dispatch
         let cache = self.cached_refs.lock().unwrap();
@@ -1239,7 +1248,7 @@ impl EventProvider for LinuxProvider {
         selector: &str,
         state: ElementState,
         timeout: Duration,
-    ) -> Result<Node> {
+    ) -> Result<RawNode> {
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
 
@@ -1254,7 +1263,7 @@ impl EventProvider for LinuxProvider {
             let node = matches.as_ref().and_then(|m| m.first().copied());
 
             if state.is_met(node) {
-                return Ok(node.cloned().unwrap_or_else(Node::synthetic_empty));
+                return Ok(node.cloned().unwrap_or_else(RawNode::synthetic_empty));
             }
 
             std::thread::sleep(poll_interval);

@@ -12,7 +12,7 @@ use windows::Win32::UI::Accessibility::*;
 
 use xa11y_core::{
     Action, ActionData, AppInfo, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
-    EventKind, EventProvider, EventReceiver, Node, PermissionStatus, Provider, QueryOptions,
+    EventKind, EventProvider, EventReceiver, PermissionStatus, Provider, QueryOptions, RawNode,
     RawPlatformData, Rect, Result, Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
 };
 
@@ -236,7 +236,7 @@ impl WindowsProvider {
         &self,
         element: &IUIAutomationElement,
         opts: &QueryOptions,
-        nodes: &mut Vec<Node>,
+        nodes: &mut Vec<RawNode>,
         elements: &mut Vec<IUIAutomationElement>,
         parent_idx: Option<u32>,
         depth: u32,
@@ -421,7 +421,7 @@ impl WindowsProvider {
         };
 
         let node_idx = nodes.len() as u32;
-        nodes.push(Node {
+        nodes.push(RawNode {
             role,
             name,
             value,
@@ -434,6 +434,8 @@ impl WindowsProvider {
             min_value,
             max_value,
             raw,
+            pid: None,
+            bundle_id: None,
             index: node_idx,
             children_indices: vec![],
             parent_index: parent_idx,
@@ -515,7 +517,7 @@ impl WindowsProvider {
         &self,
         element: &IUIAutomationElement,
         opts: &QueryOptions,
-        nodes: &mut Vec<Node>,
+        nodes: &mut Vec<RawNode>,
         elements: &mut Vec<IUIAutomationElement>,
         parent_idx: Option<u32>,
         depth: u32,
@@ -593,7 +595,7 @@ impl Provider for WindowsProvider {
         let mut nodes = Vec::new();
         let mut elements = Vec::new();
 
-        nodes.push(Node {
+        nodes.push(RawNode {
             role: Role::Application,
             name: Some("Desktop".to_string()),
             value: None,
@@ -611,6 +613,8 @@ impl Provider for WindowsProvider {
             min_value: None,
             max_value: None,
             raw: RawPlatformData::Synthetic,
+            pid: None,
+            bundle_id: None,
             index: 0,
             children_indices: vec![],
             parent_index: None,
@@ -677,14 +681,15 @@ impl Provider for WindowsProvider {
         Ok(Tree::new("Desktop".to_string(), None, screen_size, nodes))
     }
 
-    fn perform_action(
+    fn perform_action_raw(
         &self,
         tree: &Tree,
-        node: &Node,
+        node_index: u32,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()> {
-        let node_idx = tree.node_index(node);
+        let node_idx = node_index;
+        let node_role = tree.get(node_idx).map(|n| n.role).unwrap_or(Role::Unknown);
 
         let cache = self.cached_elements.lock().unwrap();
         let element = cache.get(node_idx as usize).ok_or(Error::ElementStale {
@@ -725,7 +730,7 @@ impl Provider for WindowsProvider {
                 }
                 Err(Error::ActionNotSupported {
                     action,
-                    role: node.role,
+                    role: node_role,
                 })
             }
 
@@ -836,7 +841,7 @@ impl Provider for WindowsProvider {
                 }
                 Err(Error::ActionNotSupported {
                     action,
-                    role: node.role,
+                    role: node_role,
                 })
             }
 
@@ -857,7 +862,7 @@ impl Provider for WindowsProvider {
                 }
                 Err(Error::ActionNotSupported {
                     action,
-                    role: node.role,
+                    role: node_role,
                 })
             }
 
@@ -865,7 +870,7 @@ impl Provider for WindowsProvider {
                 // No direct UIA equivalent; try context menu via legacy
                 Err(Error::ActionNotSupported {
                     action,
-                    role: node.role,
+                    role: node_role,
                 })
             }
 
@@ -930,7 +935,7 @@ impl Provider for WindowsProvider {
                 }
                 Err(Error::ActionNotSupported {
                     action,
-                    role: node.role,
+                    role: node_role,
                 })
             }
 
@@ -971,7 +976,7 @@ impl Provider for WindowsProvider {
                 }
                 Err(Error::ActionNotSupported {
                     action,
-                    role: node.role,
+                    role: node_role,
                 })
             }
 
@@ -1450,7 +1455,7 @@ impl EventProvider for WindowsProvider {
         selector: &str,
         state: ElementState,
         timeout: Duration,
-    ) -> Result<Node> {
+    ) -> Result<RawNode> {
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
 
@@ -1465,7 +1470,7 @@ impl EventProvider for WindowsProvider {
             let node = matches.as_ref().and_then(|m| m.first().copied());
 
             if state.is_met(node) {
-                return Ok(node.cloned().unwrap_or_else(Node::synthetic_empty));
+                return Ok(node.cloned().unwrap_or_else(RawNode::synthetic_empty));
             }
 
             std::thread::sleep(poll_interval);

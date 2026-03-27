@@ -44,6 +44,10 @@ pub enum Error {
     #[error("Invalid action data: {message}")]
     InvalidActionData { message: String },
 
+    /// The node is detached (no provider) — cannot perform queries or actions.
+    #[error("Node is detached: no provider available for queries or actions")]
+    Detached,
+
     /// A platform-specific error occurred.
     #[error("Platform error ({code}): {message}")]
     Platform { code: i64, message: String },

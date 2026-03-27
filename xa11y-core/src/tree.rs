@@ -1,14 +1,14 @@
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::node::{Node, NodeIndex};
+use crate::node::{NodeIndex, RawNode};
 use crate::selector::Selector;
 
-/// A snapshot of an application's accessibility tree.
+/// Internal snapshot of an application's accessibility tree.
 ///
-/// The tree is a flattened snapshot — nodes are stored in DFS order and
-/// reference each other by internal indices. Navigation is done through
-/// `Tree` methods that accept `&Node` references.
+/// Nodes are stored in DFS order and reference each other by internal indices.
+/// This type is used internally by providers. The public API exposes [`Node`](crate::node::Node)
+/// cursors instead.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tree {
     /// Application name
@@ -20,17 +20,17 @@ pub struct Tree {
     /// Screen dimensions at capture time (width, height)
     pub screen_size: (u32, u32),
 
-    /// All nodes in DFS order (access through methods)
-    nodes: Vec<Node>,
+    /// All nodes in DFS order
+    pub nodes: Vec<RawNode>,
 }
 
 impl Tree {
-    /// Create a new Tree from a list of nodes.
+    /// Create a new Tree from a list of raw nodes.
     pub fn new(
         app_name: String,
         pid: Option<u32>,
         screen_size: (u32, u32),
-        nodes: Vec<Node>,
+        nodes: Vec<RawNode>,
     ) -> Self {
         Self {
             app_name,
@@ -40,24 +40,24 @@ impl Tree {
         }
     }
 
-    /// Get a node by its internal index. Primarily for FFI consumers.
-    pub fn get(&self, index: u32) -> Option<&Node> {
+    /// Get a node by its internal index.
+    pub fn get(&self, index: u32) -> Option<&RawNode> {
         self.nodes.get(index as usize)
     }
 
     /// Get the root node.
-    pub fn root(&self) -> &Node {
+    pub fn root(&self) -> &RawNode {
         &self.nodes[0]
     }
 
     /// Get the parent of a node.
-    pub fn parent(&self, node: &Node) -> Option<&Node> {
+    pub fn parent(&self, node: &RawNode) -> Option<&RawNode> {
         node.parent_index
             .and_then(|idx| self.nodes.get(idx as usize))
     }
 
     /// Get direct children of a node.
-    pub fn children(&self, node: &Node) -> Vec<&Node> {
+    pub fn children(&self, node: &RawNode) -> Vec<&RawNode> {
         node.children_indices
             .iter()
             .filter_map(|&idx| self.nodes.get(idx as usize))
@@ -65,13 +65,13 @@ impl Tree {
     }
 
     /// Get the subtree rooted at a node (including the node itself).
-    pub fn subtree(&self, node: &Node) -> Vec<&Node> {
+    pub fn subtree(&self, node: &RawNode) -> Vec<&RawNode> {
         let mut result = Vec::new();
         self.collect_subtree(node.index, &mut result);
         result
     }
 
-    fn collect_subtree<'a>(&'a self, index: NodeIndex, result: &mut Vec<&'a Node>) {
+    fn collect_subtree<'a>(&'a self, index: NodeIndex, result: &mut Vec<&'a RawNode>) {
         if let Some(node) = self.nodes.get(index as usize) {
             result.push(node);
             for &child_idx in &node.children_indices {
@@ -81,19 +81,23 @@ impl Tree {
     }
 
     /// Iterate all nodes.
-    pub fn iter(&self) -> impl Iterator<Item = &Node> {
+    pub fn iter(&self) -> impl Iterator<Item = &RawNode> {
         self.nodes.iter()
     }
 
     /// Query nodes matching a CSS-like selector string.
-    pub fn query(&self, selector_str: &str) -> Result<Vec<&Node>> {
+    pub fn query(&self, selector_str: &str) -> Result<Vec<&RawNode>> {
         let selector = Selector::parse(selector_str)?;
-        Ok(selector.match_nodes(self))
+        let indices = selector.match_raw_nodes(&self.nodes);
+        Ok(indices
+            .into_iter()
+            .filter_map(|idx| self.nodes.get(idx as usize))
+            .collect())
     }
 
     /// Render the tree as an indented text representation for debugging.
     pub fn dump(&self) -> String {
-        // Compute depth from parent_index so Node doesn't need a depth field.
+        // Compute depth from parent_index so RawNode doesn't need a depth field.
         let mut depths = vec![0u32; self.nodes.len()];
         for node in &self.nodes {
             let d = depths[node.index as usize];
@@ -143,7 +147,7 @@ impl Tree {
     /// Get the internal node index for a node. Used by platform providers
     /// to look up cached element handles.
     #[doc(hidden)]
-    pub fn node_index(&self, node: &Node) -> NodeIndex {
+    pub fn node_index(&self, node: &RawNode) -> NodeIndex {
         node.index
     }
 }

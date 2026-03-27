@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::action::{Action, ActionData};
 use crate::error::Result;
-use crate::node::Node;
+use crate::node::RawNode;
 use crate::role::Role;
 use crate::tree::Tree;
 
@@ -14,15 +14,14 @@ pub trait Provider: Send + Sync {
     /// Snapshot all running applications (shallow).
     fn get_all_apps(&self, opts: &QueryOptions) -> Result<Tree>;
 
-    /// Perform an action on an element from a specific snapshot.
+    /// Perform an action on an element identified by its index in the tree.
     ///
     /// `Ok(())` means the platform API accepted the request without error.
-    /// It does **not** guarantee the action had an observable effect — use
-    /// tree queries or `Locator::wait_*` methods to verify state changes.
-    fn perform_action(
+    /// It does **not** guarantee the action had an observable effect.
+    fn perform_action_raw(
         &self,
         tree: &Tree,
-        node: &Node,
+        node_index: u32,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()>;
@@ -31,6 +30,8 @@ pub trait Provider: Send + Sync {
     fn check_permissions(&self) -> Result<PermissionStatus>;
 
     /// List running applications with their PIDs.
+    ///
+    /// Deprecated: use `get_all_apps` + query for `application` nodes instead.
     fn list_apps(&self) -> Result<Vec<AppInfo>>;
 }
 
@@ -85,4 +86,33 @@ pub struct AppInfo {
     pub pid: u32,
     /// macOS bundle identifier
     pub bundle_id: Option<String>,
+}
+
+// ── Compatibility shim ──────────────────────────────────────────────────────
+
+/// Extension trait providing the old `perform_action(&Tree, &RawNode, ...)` signature
+/// by delegating to `perform_action_raw`.
+///
+/// This allows backends that haven't migrated yet to keep working through
+/// a blanket impl, and also allows callers with `&RawNode` to dispatch easily.
+pub trait ProviderExt: Provider {
+    fn perform_action(
+        &self,
+        tree: &Tree,
+        node: &RawNode,
+        action: Action,
+        data: Option<ActionData>,
+    ) -> Result<()>;
+}
+
+impl<T: Provider + ?Sized> ProviderExt for T {
+    fn perform_action(
+        &self,
+        tree: &Tree,
+        node: &RawNode,
+        action: Action,
+        data: Option<ActionData>,
+    ) -> Result<()> {
+        self.perform_action_raw(tree, node.index, action, data)
+    }
 }

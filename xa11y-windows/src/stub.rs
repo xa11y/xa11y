@@ -1,7 +1,7 @@
 //! Stub backend for non-Windows platforms (allows compilation on all targets).
 
 use xa11y_core::{
-    Action, ActionData, AppInfo, AppTarget, Error, Node, PermissionStatus, Provider, QueryOptions,
+    Action, ActionData, AppInfo, AppTarget, Error, PermissionStatus, Provider, QueryOptions,
     Result, Tree,
 };
 
@@ -24,7 +24,7 @@ impl Provider for WindowsProvider {
     fn get_all_apps(&self, _: &QueryOptions) -> Result<Tree> {
         unreachable!()
     }
-    fn perform_action(&self, _: &Tree, _: &Node, _: Action, _: Option<ActionData>) -> Result<()> {
+    fn perform_action_raw(&self, _: &Tree, _: u32, _: Action, _: Option<ActionData>) -> Result<()> {
         unreachable!()
     }
     fn check_permissions(&self) -> Result<PermissionStatus> {

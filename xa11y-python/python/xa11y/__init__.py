@@ -13,7 +13,9 @@ Reuse a locator for lazy resolution:
 """
 
 from xa11y._native import (
+    # Exceptions
     ActionNotSupportedError,
+    # Data classes
     AppInfo,
     AppNotFoundError,
     InvalidSelectorError,
@@ -25,14 +27,15 @@ from xa11y._native import (
     SelectorNotMatchedError,
     TimeoutError,
     Tree,
-    # Exceptions
     XA11yError,
+    # Functions
     all_apps,
     app,
+    apps,
     check_permissions,
     list_apps,
-    # Functions
     locator,
+    query,
 )
 
 __all__ = [
@@ -51,7 +54,9 @@ __all__ = [
     "XA11yError",
     "all_apps",
     "app",
+    "apps",
     "check_permissions",
     "list_apps",
     "locator",
+    "query",
 ]

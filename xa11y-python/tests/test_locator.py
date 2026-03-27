@@ -26,8 +26,17 @@ def test_nth(tree):
 
 
 def test_first(tree):
-    loc = tree.locator("button").first()
-    assert loc.name() == "Back"
+    node = tree.locator("button").first()
+    assert isinstance(node, xa11y.Node)
+    assert node.name == "Back"
+
+
+def test_all(tree):
+    nodes = tree.locator("button").all()
+    assert len(nodes) == 2
+    assert all(isinstance(n, xa11y.Node) for n in nodes)
+    assert nodes[0].name == "Back"
+    assert nodes[1].name == "Forward"
 
 
 def test_child(tree):

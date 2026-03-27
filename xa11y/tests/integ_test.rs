@@ -57,12 +57,14 @@ mod tests {
     #[ignore]
     fn get_all_apps_returns_nonempty() {
         // Limit depth/elements to avoid traversing every app on the system
-        let tree = xa11y::all_apps(&QueryOptions {
-            max_depth: Some(2),
-            max_elements: Some(200),
-            ..QueryOptions::default()
-        })
-        .unwrap();
+        let provider = xa11y::provider().unwrap();
+        let tree = provider
+            .get_all_apps(&QueryOptions {
+                max_depth: Some(2),
+                max_elements: Some(200),
+                ..QueryOptions::default()
+            })
+            .unwrap();
         assert!(!tree.is_empty(), "get_all_apps should return nodes");
         assert_eq!(tree.app_name, "Desktop");
         assert!(tree.pid.is_none(), "Multi-app tree should have no PID");
@@ -87,7 +89,10 @@ mod tests {
         let test_app = apps.iter().find(|a| a.name.contains("xa11y")).unwrap();
         let pid = test_app.pid;
         assert!(pid > 0);
-        let tree = xa11y::app(&AppTarget::ByPid(pid), &QueryOptions::default()).unwrap();
+        let provider = xa11y::provider().unwrap();
+        let tree = provider
+            .get_app_tree(&AppTarget::ByPid(pid), &QueryOptions::default())
+            .unwrap();
         assert!(!tree.is_empty());
         assert_eq!(tree.pid, Some(pid));
     }
@@ -179,7 +184,7 @@ mod tests {
         let tree = h::app_tree();
         // Prior action tests (TypeText, SetValue) may have changed or cleared the value.
         // Just verify a text field exists (by role + name), value may or may not be present.
-        let text_nodes: Vec<&Node> = tree
+        let text_nodes: Vec<&RawNode> = tree
             .iter()
             .filter(|n| {
                 (n.role == Role::TextField || n.role == Role::TextArea)
@@ -722,7 +727,7 @@ mod tests {
     fn state_expanded_collapsed_on_expander() {
         let tree = h::app_tree();
         // Look for expandable nodes or expander by name
-        let expandable: Vec<&Node> = tree
+        let expandable: Vec<&RawNode> = tree
             .iter()
             .filter(|n| n.states.expanded.is_some())
             .collect();
@@ -745,7 +750,7 @@ mod tests {
         let tree = h::app_tree();
         // Prior action tests (TypeText, SetValue) may have changed or cleared the value.
         // Find text field by role + name, not by value presence.
-        let text: Vec<&Node> = tree
+        let text: Vec<&RawNode> = tree
             .iter()
             .filter(|n| {
                 (n.role == Role::TextField || n.role == Role::TextArea)
@@ -1427,7 +1432,8 @@ mod tests {
     #[test]
     #[ignore]
     fn error_app_not_found() {
-        let result = xa11y::app(
+        let provider = xa11y::provider().unwrap();
+        let result = provider.get_app_tree(
             &AppTarget::ByName("nonexistent_app_12345".to_string()),
             &QueryOptions::default(),
         );

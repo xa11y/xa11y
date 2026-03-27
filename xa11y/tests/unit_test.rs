@@ -9,7 +9,7 @@ use xa11y::*;
 /// Helper to build a sample accessibility tree for testing.
 fn sample_tree() -> Tree {
     let nodes = vec![
-        Node {
+        RawNode {
             role: Role::Window,
             name: Some("My App".to_string()),
             value: None,
@@ -29,11 +29,13 @@ fn sample_tree() -> Tree {
             min_value: None,
             max_value: None,
             raw: RawPlatformData::Synthetic,
+            pid: None,
+            bundle_id: None,
             index: 0,
             children_indices: vec![1, 4],
             parent_index: None,
         },
-        Node {
+        RawNode {
             role: Role::Toolbar,
             name: Some("Main Toolbar".to_string()),
             value: None,
@@ -53,11 +55,13 @@ fn sample_tree() -> Tree {
             min_value: None,
             max_value: None,
             raw: RawPlatformData::Synthetic,
+            pid: None,
+            bundle_id: None,
             index: 1,
             children_indices: vec![2, 3],
             parent_index: Some(0),
         },
-        Node {
+        RawNode {
             role: Role::Button,
             name: Some("Back".to_string()),
             value: None,
@@ -81,11 +85,13 @@ fn sample_tree() -> Tree {
             min_value: None,
             max_value: None,
             raw: RawPlatformData::Synthetic,
+            pid: None,
+            bundle_id: None,
             index: 2,
             children_indices: vec![],
             parent_index: Some(1),
         },
-        Node {
+        RawNode {
             role: Role::TextField,
             name: Some("Address Bar".to_string()),
             value: Some("https://example.com".to_string()),
@@ -110,11 +116,13 @@ fn sample_tree() -> Tree {
             min_value: None,
             max_value: None,
             raw: RawPlatformData::Synthetic,
+            pid: None,
+            bundle_id: None,
             index: 3,
             children_indices: vec![],
             parent_index: Some(1),
         },
-        Node {
+        RawNode {
             role: Role::WebArea,
             name: None,
             value: None,
@@ -134,11 +142,13 @@ fn sample_tree() -> Tree {
             min_value: None,
             max_value: None,
             raw: RawPlatformData::Synthetic,
+            pid: None,
+            bundle_id: None,
             index: 4,
             children_indices: vec![5, 6, 7, 8],
             parent_index: Some(0),
         },
-        Node {
+        RawNode {
             role: Role::Heading,
             name: Some("Welcome".to_string()),
             value: None,
@@ -153,11 +163,13 @@ fn sample_tree() -> Tree {
             min_value: None,
             max_value: None,
             raw: RawPlatformData::Synthetic,
+            pid: None,
+            bundle_id: None,
             index: 5,
             children_indices: vec![],
             parent_index: Some(4),
         },
-        Node {
+        RawNode {
             role: Role::Button,
             name: Some("Submit".to_string()),
             value: None,
@@ -176,11 +188,13 @@ fn sample_tree() -> Tree {
             min_value: None,
             max_value: None,
             raw: RawPlatformData::Synthetic,
+            pid: None,
+            bundle_id: None,
             index: 6,
             children_indices: vec![],
             parent_index: Some(4),
         },
-        Node {
+        RawNode {
             role: Role::Button,
             name: Some("Cancel".to_string()),
             value: None,
@@ -199,11 +213,13 @@ fn sample_tree() -> Tree {
             min_value: None,
             max_value: None,
             raw: RawPlatformData::Synthetic,
+            pid: None,
+            bundle_id: None,
             index: 7,
             children_indices: vec![],
             parent_index: Some(4),
         },
-        Node {
+        RawNode {
             role: Role::CheckBox,
             name: Some("I agree to terms".to_string()),
             value: None,
@@ -223,6 +239,8 @@ fn sample_tree() -> Tree {
             min_value: None,
             max_value: None,
             raw: RawPlatformData::Synthetic,
+            pid: None,
+            bundle_id: None,
             index: 8,
             children_indices: vec![],
             parent_index: Some(4),
@@ -661,7 +679,7 @@ fn tree_json_roundtrip() {
 
 #[test]
 fn node_json_serialization() {
-    let node = Node {
+    let node = RawNode {
         role: Role::Button,
         name: Some("Submit".to_string()),
         value: None,
@@ -684,13 +702,15 @@ fn node_json_serialization() {
         min_value: None,
         max_value: None,
         raw: RawPlatformData::Synthetic,
+        pid: None,
+        bundle_id: None,
         index: 0,
         children_indices: vec![],
         parent_index: None,
     };
 
     let json = serde_json::to_string_pretty(&node).unwrap();
-    let deserialized: Node = serde_json::from_str(&json).unwrap();
+    let deserialized: RawNode = serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized.role, Role::Button);
     assert_eq!(deserialized.name.as_deref(), Some("Submit"));
     assert!(deserialized.states.focused);
@@ -917,14 +937,14 @@ impl Provider for MockProvider {
         Ok(self.tree.clone())
     }
 
-    fn perform_action(
+    fn perform_action_raw(
         &self,
         _tree: &Tree,
-        node: &Node,
+        node_index: u32,
         action: Action,
         _data: Option<ActionData>,
     ) -> xa11y::Result<()> {
-        *self.last_action.lock().unwrap() = Some((node.index, action));
+        *self.last_action.lock().unwrap() = Some((node_index, action));
         Ok(())
     }
 

@@ -5,8 +5,8 @@
 //! selector      := simple_selector (combinator simple_selector)*
 //! combinator    := " "          // descendant (any depth)
 //!                | " > "       // direct child
-//! simple_selector := role_name? attr_filter* pseudo?
-//! role_name     := [a-z_]+     // snake_case role name
+//! simple_selector := ("*" | role_name)? attr_filter* pseudo?
+//! role_name     := [a-z_]+     // snake_case role name ("app" is an alias for "application")
 //! attr_filter   := "[" attr_name op value "]"
 //! attr_name     := "name" | "value" | "description" | "role"
 //! op            := "=" | "*=" | "^=" | "$="
@@ -16,9 +16,8 @@
 //! ```
 
 use crate::error::{Error, Result};
-use crate::node::Node;
+use crate::node::RawNode;
 use crate::role::Role;
-use crate::tree::Tree;
 
 /// A parsed CSS-like selector for matching accessibility tree nodes.
 #[derive(Debug, Clone)]
@@ -48,6 +47,8 @@ pub(crate) struct SimpleSelector {
     pub role: Option<Role>,
     pub filters: Vec<AttrFilter>,
     pub nth: Option<usize>,
+    /// True for the `*` wildcard selector (matches any role)
+    pub wildcard: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -148,21 +149,28 @@ impl Selector {
         let mut role = None;
         let mut filters = Vec::new();
         let mut nth = None;
+        let mut wildcard = false;
 
-        // Try to parse role name (sequence of [a-z_])
-        let start = pos;
-        while pos < chars.len() && (chars[pos].is_ascii_lowercase() || chars[pos] == '_') {
+        // Check for wildcard `*`
+        if pos < chars.len() && chars[pos] == '*' {
+            wildcard = true;
             pos += 1;
-        }
-        if pos > start {
-            let role_str: String = chars[start..pos].iter().collect();
-            match Role::from_snake_case(&role_str) {
-                Some(r) => role = Some(r),
-                None => {
-                    return Err(Error::InvalidSelector {
-                        selector: input.to_string(),
-                        message: format!("unknown role '{}'", role_str),
-                    });
+        } else {
+            // Try to parse role name (sequence of [a-z_])
+            let start = pos;
+            while pos < chars.len() && (chars[pos].is_ascii_lowercase() || chars[pos] == '_') {
+                pos += 1;
+            }
+            if pos > start {
+                let role_str: String = chars[start..pos].iter().collect();
+                match Role::from_snake_case(&role_str) {
+                    Some(r) => role = Some(r),
+                    None => {
+                        return Err(Error::InvalidSelector {
+                            selector: input.to_string(),
+                            message: format!("unknown role '{}'", role_str),
+                        });
+                    }
                 }
             }
         }
@@ -216,14 +224,22 @@ impl Selector {
             }
         }
 
-        if role.is_none() && filters.is_empty() && nth.is_none() {
+        if !wildcard && role.is_none() && filters.is_empty() && nth.is_none() {
             return Err(Error::InvalidSelector {
                 selector: input.to_string(),
                 message: "empty simple selector".to_string(),
             });
         }
 
-        Ok((SimpleSelector { role, filters, nth }, pos))
+        Ok((
+            SimpleSelector {
+                role,
+                filters,
+                nth,
+                wildcard,
+            },
+            pos,
+        ))
     }
 
     fn parse_attr_filter(
@@ -306,47 +322,73 @@ impl Selector {
         Ok((AttrFilter { attr, op, value }, pos))
     }
 
-    /// Match nodes in the tree against this selector.
-    pub fn match_nodes<'a>(&self, tree: &'a Tree) -> Vec<&'a Node> {
+    /// Match against a flat slice of raw nodes, returning matched indices.
+    ///
+    /// This is the primary matching method. It works directly on `&[RawNode]`
+    /// without requiring a `Tree` wrapper.
+    pub fn match_raw_nodes(&self, nodes: &[RawNode]) -> Vec<u32> {
         if self.segments.is_empty() {
             return vec![];
         }
 
         // Start with all nodes matching the first simple selector
         let first = &self.segments[0].simple;
-        let mut candidates: Vec<&Node> = tree
+        let mut candidates: Vec<u32> = nodes
             .iter()
             .filter(|n| Self::matches_simple(n, first))
+            .map(|n| n.index)
             .collect();
 
         // Apply subsequent segments with combinators
         for segment in &self.segments[1..] {
             let mut next_candidates = Vec::new();
-            for candidate in &candidates {
+            for &candidate_idx in &candidates {
+                let Some(candidate) = nodes.get(candidate_idx as usize) else {
+                    continue;
+                };
                 match segment.combinator {
                     Combinator::Child => {
                         // Direct children of candidate that match
-                        for child in tree.children(candidate) {
-                            if Self::matches_simple(child, &segment.simple) {
-                                next_candidates.push(child);
+                        for &child_idx in &candidate.children_indices {
+                            if let Some(child) = nodes.get(child_idx as usize) {
+                                if Self::matches_simple(child, &segment.simple) {
+                                    next_candidates.push(child.index);
+                                }
                             }
                         }
                     }
                     Combinator::Descendant => {
                         // All descendants of candidate that match
-                        let subtree = tree.subtree(candidate);
-                        for node in subtree.into_iter().skip(1) {
-                            if Self::matches_simple(node, &segment.simple) {
-                                next_candidates.push(node);
+                        fn collect_descendants(
+                            nodes: &[RawNode],
+                            index: u32,
+                            simple: &SimpleSelector,
+                            result: &mut Vec<u32>,
+                        ) {
+                            if let Some(node) = nodes.get(index as usize) {
+                                for &child_idx in &node.children_indices {
+                                    if let Some(child) = nodes.get(child_idx as usize) {
+                                        if Selector::matches_simple(child, simple) {
+                                            result.push(child.index);
+                                        }
+                                    }
+                                    collect_descendants(nodes, child_idx, simple, result);
+                                }
                             }
                         }
+                        collect_descendants(
+                            nodes,
+                            candidate_idx,
+                            &segment.simple,
+                            &mut next_candidates,
+                        );
                     }
                     Combinator::Root => unreachable!(),
                 }
             }
             // Deduplicate while preserving order
             let mut seen = std::collections::HashSet::new();
-            next_candidates.retain(|n| seen.insert(n.index));
+            next_candidates.retain(|idx| seen.insert(*idx));
             candidates = next_candidates;
         }
 
@@ -362,11 +404,14 @@ impl Selector {
         candidates
     }
 
-    fn matches_simple(node: &Node, simple: &SimpleSelector) -> bool {
-        // Check role
-        if let Some(role) = simple.role {
-            if node.role != role {
-                return false;
+    fn matches_simple(node: &RawNode, simple: &SimpleSelector) -> bool {
+        // Wildcard matches everything (no role check)
+        if !simple.wildcard {
+            // Check role
+            if let Some(role) = simple.role {
+                if node.role != role {
+                    return false;
+                }
             }
         }
 
@@ -395,8 +440,6 @@ impl Selector {
                 }
             };
 
-            // For Role attr, the value is always Some (from to_snake_case)
-            // but for other attrs it might be None — which means no match
             if !matches {
                 return false;
             }
@@ -499,5 +542,27 @@ mod tests {
     #[test]
     fn parse_nth_zero_error() {
         assert!(Selector::parse("button:nth(0)").is_err());
+    }
+
+    #[test]
+    fn parse_wildcard() {
+        let sel = Selector::parse("*").unwrap();
+        assert_eq!(sel.segments.len(), 1);
+        assert!(sel.segments[0].simple.wildcard);
+        assert!(sel.segments[0].simple.role.is_none());
+    }
+
+    #[test]
+    fn parse_app_alias() {
+        let sel = Selector::parse("app").unwrap();
+        assert_eq!(sel.segments[0].simple.role, Some(Role::Application));
+    }
+
+    #[test]
+    fn parse_app_with_name_filter() {
+        let sel = Selector::parse(r#"app[name*="Slack"]"#).unwrap();
+        assert_eq!(sel.segments[0].simple.role, Some(Role::Application));
+        assert_eq!(sel.segments[0].simple.filters[0].op, MatchOp::Contains);
+        assert_eq!(sel.segments[0].simple.filters[0].value, "Slack");
     }
 }

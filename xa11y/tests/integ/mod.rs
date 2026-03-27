@@ -10,7 +10,8 @@ pub fn app_tree() -> Tree {
 /// Get the test app tree with custom QueryOptions, retrying for registration.
 pub fn app_tree_with(opts: &QueryOptions) -> Tree {
     for attempt in 0..3 {
-        match xa11y::app(&AppTarget::ByName("xa11y".to_string()), opts) {
+        match provider().and_then(|p| p.get_app_tree(&AppTarget::ByName("xa11y".to_string()), opts))
+        {
             Ok(tree) => return tree,
             Err(_) if attempt < 2 => {
                 std::thread::sleep(std::time::Duration::from_millis(200));
@@ -21,8 +22,13 @@ pub fn app_tree_with(opts: &QueryOptions) -> Tree {
     unreachable!()
 }
 
+/// Create a platform provider for direct use.
+pub fn provider() -> Result<std::sync::Arc<dyn Provider>> {
+    xa11y::create_provider()
+}
+
 /// Find exactly one node by selector. Panics with tree dump on failure.
-pub fn one<'a>(tree: &'a Tree, selector: &str) -> &'a Node {
+pub fn one<'a>(tree: &'a Tree, selector: &str) -> &'a RawNode {
     let results = tree.query(selector).unwrap_or_else(|e| {
         panic!(
             "Selector '{}' failed: {}. Tree:\n{}",
@@ -42,7 +48,7 @@ pub fn one<'a>(tree: &'a Tree, selector: &str) -> &'a Node {
 }
 
 /// Find first node whose name contains `substring` (case-insensitive).
-pub fn named<'a>(tree: &'a Tree, substring: &str) -> &'a Node {
+pub fn named<'a>(tree: &'a Tree, substring: &str) -> &'a RawNode {
     let selector = format!("[name*=\"{}\"]", substring);
     let results = tree.query(&selector).unwrap_or_else(|e| {
         panic!(
@@ -62,14 +68,14 @@ pub fn named<'a>(tree: &'a Tree, substring: &str) -> &'a Node {
 }
 
 /// Try to perform an action on a node. Returns the result without panicking.
-pub fn try_act(tree: &Tree, node: &Node, action: Action) -> Result<()> {
+pub fn try_act(tree: &Tree, node: &RawNode, action: Action) -> Result<()> {
     try_act_with(tree, node, action, None)
 }
 
 /// Try to perform an action with data on a node. Returns the result without panicking.
 pub fn try_act_with(
     tree: &Tree,
-    node: &Node,
+    node: &RawNode,
     action: Action,
     data: Option<ActionData>,
 ) -> Result<()> {
@@ -77,12 +83,12 @@ pub fn try_act_with(
 }
 
 /// Perform an action on a node, wait briefly, then re-read the tree.
-pub fn act(tree: &Tree, node: &Node, action: Action) -> Tree {
+pub fn act(tree: &Tree, node: &RawNode, action: Action) -> Tree {
     act_with(tree, node, action, None)
 }
 
 /// Perform an action with data on a node, wait, then re-read the tree.
-pub fn act_with(tree: &Tree, node: &Node, action: Action, data: Option<ActionData>) -> Tree {
+pub fn act_with(tree: &Tree, node: &RawNode, action: Action, data: Option<ActionData>) -> Tree {
     try_act_with(tree, node, action, data)
         .unwrap_or_else(|e| panic!("Action {:?} failed: {}", action, e));
     std::thread::sleep(std::time::Duration::from_millis(100));

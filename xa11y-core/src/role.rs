@@ -63,7 +63,7 @@ impl Role {
         match s {
             "unknown" => Some(Role::Unknown),
             "window" => Some(Role::Window),
-            "application" => Some(Role::Application),
+            "application" | "app" => Some(Role::Application),
             "button" => Some(Role::Button),
             "check_box" => Some(Role::CheckBox),
             "radio_button" => Some(Role::RadioButton),
