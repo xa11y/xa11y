@@ -257,9 +257,9 @@ mod provider_fuzz {
             for _ in 0..count {
                 r.push(ALL_ROLES[rng.random_range(0..ALL_ROLES.len())]);
             }
-            Some(r)
+            r
         } else {
-            None
+            Vec::new()
         };
 
         QueryOptions {

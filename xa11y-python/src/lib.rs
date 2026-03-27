@@ -122,11 +122,11 @@ fn build_query_options(
         max_depth,
         max_elements,
         visible_only,
-        roles: roles.map(|rs| {
-            rs.iter()
-                .filter_map(|s| xa11y::Role::from_snake_case(s))
-                .collect()
-        }),
+        roles: roles
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|s| xa11y::Role::from_snake_case(s))
+            .collect(),
     }
 }
 

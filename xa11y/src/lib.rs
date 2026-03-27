@@ -97,6 +97,7 @@ pub fn all_apps(opts: &QueryOptions) -> Result<Tree> {
 }
 
 /// Perform an action on an element from a specific snapshot.
+#[cfg(feature = "testing")]
 pub fn perform_action(
     tree: &Tree,
     node: &Node,
@@ -135,10 +136,7 @@ pub fn locator_with_opts(target: AppTarget, selector: &str, opts: QueryOptions) 
 
 /// Create a new platform-appropriate accessibility provider.
 ///
-/// Returns a fresh provider instance (not the global singleton). Prefer
-/// the module-level functions (`app`, `all_apps`, `perform_action`, etc.)
-/// for normal use.
-#[doc(hidden)]
+/// Returns a fresh provider instance (not the global singleton).
 pub fn create_provider() -> Result<Arc<dyn Provider>> {
     create_provider_boxed().map(Arc::from)
 }
@@ -172,6 +170,7 @@ fn create_provider_boxed() -> Result<Box<dyn Provider>> {
 ///
 /// Returns a boxed `EventProvider` trait object for the current platform.
 /// EventProvider extends Provider with event subscription capabilities.
+#[cfg(feature = "testing")]
 pub fn create_event_provider() -> Result<Box<dyn EventProvider>> {
     #[cfg(target_os = "macos")]
     {

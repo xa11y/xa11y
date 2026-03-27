@@ -771,7 +771,7 @@ fn query_options_default() {
     assert!(opts.max_depth.is_none());
     assert!(opts.max_elements.is_none());
     assert!(!opts.visible_only);
-    assert!(opts.roles.is_none());
+    assert!(opts.roles.is_empty());
 }
 
 // ── Provider trait / AppTarget ──

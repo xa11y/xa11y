@@ -134,6 +134,21 @@ impl ActionData {
     }
 }
 
+impl std::fmt::Display for ActionData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ActionData::Value(s) => write!(f, "Value({s:?})"),
+            ActionData::NumericValue(n) => write!(f, "NumericValue({n})"),
+            ActionData::ScrollAmount { direction, amount } => {
+                write!(f, "ScrollAmount({direction:?}, {amount})")
+            }
+            ActionData::TextSelection { start, end } => {
+                write!(f, "TextSelection({start}..{end})")
+            }
+        }
+    }
+}
+
 /// Direction for scroll actions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ScrollDirection {

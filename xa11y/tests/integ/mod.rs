@@ -1,6 +1,11 @@
 //! Integration test helpers — minimize boilerplate for cross-platform tests.
 
+use std::sync::Arc;
 use xa11y::*;
+
+fn provider() -> Arc<dyn Provider> {
+    xa11y::create_provider().expect("Failed to create provider")
+}
 
 /// Get the test app tree with default options, retrying briefly for registration.
 pub fn app_tree() -> Tree {
@@ -61,6 +66,21 @@ pub fn named<'a>(tree: &'a Tree, substring: &str) -> &'a Node {
     results[0]
 }
 
+/// Try to perform an action on a node. Returns the result without panicking.
+pub fn try_act(tree: &Tree, node: &Node, action: Action) -> Result<()> {
+    try_act_with(tree, node, action, None)
+}
+
+/// Try to perform an action with data on a node. Returns the result without panicking.
+pub fn try_act_with(
+    tree: &Tree,
+    node: &Node,
+    action: Action,
+    data: Option<ActionData>,
+) -> Result<()> {
+    provider().perform_action(tree, node, action, data)
+}
+
 /// Perform an action on a node, wait briefly, then re-read the tree.
 pub fn act(tree: &Tree, node: &Node, action: Action) -> Tree {
     act_with(tree, node, action, None)
@@ -68,7 +88,7 @@ pub fn act(tree: &Tree, node: &Node, action: Action) -> Tree {
 
 /// Perform an action with data on a node, wait, then re-read the tree.
 pub fn act_with(tree: &Tree, node: &Node, action: Action, data: Option<ActionData>) -> Tree {
-    xa11y::perform_action(tree, node, action, data)
+    try_act_with(tree, node, action, data)
         .unwrap_or_else(|e| panic!("Action {:?} failed: {}", action, e));
     std::thread::sleep(std::time::Duration::from_millis(100));
     app_tree()
