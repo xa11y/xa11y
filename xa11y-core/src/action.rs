@@ -62,29 +62,6 @@ pub enum Action {
     TypeText,
 }
 
-impl Action {
-    /// Return the snake_case string representation of this action.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Action::Press => "press",
-            Action::Focus => "focus",
-            Action::SetValue => "set_value",
-            Action::Toggle => "toggle",
-            Action::Expand => "expand",
-            Action::Collapse => "collapse",
-            Action::Select => "select",
-            Action::ShowMenu => "show_menu",
-            Action::ScrollIntoView => "scroll_into_view",
-            Action::Scroll => "scroll",
-            Action::Increment => "increment",
-            Action::Decrement => "decrement",
-            Action::Blur => "blur",
-            Action::SetTextSelection => "set_text_selection",
-            Action::TypeText => "type_text",
-        }
-    }
-}
-
 impl std::fmt::Display for Action {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
