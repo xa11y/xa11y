@@ -1,43 +1,134 @@
 # xa11y
 
-Cross-platform accessibility library for reading and interacting with accessibility trees.
+[![Crates.io](https://img.shields.io/crates/v/xa11y)](https://crates.io/crates/xa11y)
+[![PyPI](https://img.shields.io/pypi/v/xa11y)](https://pypi.org/project/xa11y/)
+[![CI](https://github.com/xa11y/xa11y/actions/workflows/ci.yml/badge.svg)](https://github.com/xa11y/xa11y/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-xa11y.dev-blueviolet)](https://xa11y.dev)
 
-## Quick Start
+Cross-platform accessibility library for reading and interacting with accessibility trees. One API for macOS, Windows, and Linux.
+
+**Use cases:** UI testing, AI agent tooling, assistive technology, desktop automation.
+
+**[Documentation](https://xa11y.dev)** | **[Rust API](https://docs.rs/xa11y)** | **[Python API](https://xa11y.dev/api/python/)**
+
+## Quick Example
+
+<!-- rust-only -->
+```rust
+use xa11y::*;
+
+fn main() -> Result<()> {
+    let provider = create_provider()?;
+
+    // Get the accessibility tree for an app
+    let tree = provider.get_app_tree(
+        &AppTarget::ByName("Safari".to_string()),
+        &QueryOptions::default(),
+    )?;
+
+    // Find elements with CSS-like selectors
+    let buttons = tree.query("button[name='Submit']")?;
+    println!("Found {} buttons", buttons.len());
+
+    // Interact with elements
+    let submit = Locator::new(&*provider, AppTarget::ByName("Safari".to_string()), "button[name='Submit']");
+    submit.press()?;
+
+    Ok(())
+}
+```
+<!-- /rust-only -->
+
+<!-- python-only -->
+```python
+import xa11y
+
+# Get the accessibility tree for an app
+tree = xa11y.app("Safari")
+
+# Find elements with CSS-like selectors
+for button in tree.query("button"):
+    print(button.name)
+
+# Interact with elements
+tree.press("button[name='Submit']")
+
+search = tree.locator("textfield[name^='Search']")
+search.set_value("hello world")
+```
+<!-- /python-only -->
+
+## Installation
+
+<!-- rust-only -->
+```toml
+[dependencies]
+xa11y = "0.2"
+```
+<!-- /rust-only -->
+
+<!-- python-only -->
+```bash
+pip install xa11y
+```
+
+Requires Python 3.9+. Pre-built wheels available for Linux, macOS, and Windows.
+<!-- /python-only -->
+
+> **macOS:** Grant accessibility permissions to your terminal in **System Settings > Privacy & Security > Accessibility**.
+>
+> **Linux:** AT-SPI2 must be running (default on GNOME/most DEs). No special permissions needed.
+>
+> **Windows:** No special permissions needed.
+
+## Selector Syntax
+
+Query accessibility trees with CSS-like selectors:
+
+| Pattern | Meaning |
+| --- | --- |
+| `button` | Elements with role Button |
+| `button[name='OK']` | Button named exactly "OK" |
+| `textfield[name^='Search']` | Text field whose name starts with "Search" |
+| `textfield[name*='email']` | Text field whose name contains "email" |
+| `group > button` | Buttons that are direct children of a group |
+| `window button` | Buttons anywhere inside a window |
+| `button:nth(2)` | The 2nd button match |
+
+## Supported Actions
+
+| Action | Description |
+| --- | --- |
+| `press` | Click / activate |
+| `focus` / `blur` | Move or remove keyboard focus |
+| `toggle` | Toggle a checkbox or switch |
+| `expand` / `collapse` | Expand or collapse a disclosure |
+| `select` | Select an item |
+| `set_value` | Set a text field's value |
+| `type_text` | Type text into an element |
+| `increment` / `decrement` | Adjust a slider or stepper |
+| `scroll` | Scroll in a direction |
+| `show_menu` | Open a context menu |
+
+## Platform Support
+
+| Platform | Backend |
+| --- | --- |
+| macOS | AXUIElement |
+| Linux | AT-SPI2 (D-Bus) |
+| Windows | UI Automation |
+
+## Contributing
 
 ```bash
+git clone https://github.com/xa11y/xa11y && cd xa11y
 cargo build --workspace
-cargo xtask test              # unit tests
-cargo xtask check             # all pre-PR checks (fmt, lint, test, python)
+cargo xtask check   # fmt, lint, test, python bindings
 ```
 
-## Development Commands
-
-All workflow commands are available via `cargo xtask`:
-
-```bash
-cargo xtask fmt               # format Rust + Python
-cargo xtask lint              # clippy + ruff
-cargo xtask test              # unit tests
-cargo xtask test-python       # build + test Python bindings
-cargo xtask test-integ        # integration tests (auto-detects OS)
-cargo xtask test-integ-container              # Linux tests via Finch container
-cargo xtask test-integ-container tree_has_buttons  # single test
-cargo xtask fuzz              # provider fuzzer
-cargo xtask coverage          # code coverage report
-cargo xtask docs              # build documentation
-cargo xtask check             # ALL pre-PR checks
-```
-
-## Project Structure
-
-- `xa11y-core/` — Platform-independent types, traits, selector engine
-- `xa11y-linux/` — AT-SPI2 backend via zbus
-- `xa11y-macos/` — macOS backend (AXUIElement)
-- `xa11y-windows/` — Windows backend (stub)
-- `xa11y/` — Umbrella crate with unit + integration tests
-- `xa11y-test-app/` — AccessKit + winit test application
-- `xa11y-fuzz/` — Fuzz targets for xa11y-core
+See the [development docs](https://xa11y.dev/guides/overview/) for architecture and setup.
 
 ## License
 
-All dependencies are permissively licensed (MIT, Apache-2.0, BSD, or similar). License compliance is enforced in CI via `cargo-deny`.
+MIT. All dependencies are permissively licensed (MIT, Apache-2.0, BSD, or similar), enforced via `cargo-deny`.
