@@ -148,9 +148,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: EmbarkStudios/cargo-deny-action@v2
-        with:
-          command: check licenses
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: Check licenses
+        run: cargo deny check licenses
 
   # ── Cross-compilation ──────────────────────────────────────────────
   # Verifies xa11y-core compiles for targets we can't run tests on
