@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::action::{Action, ActionData};
+use crate::action::{Action, ActionData, ScrollDirection};
 use crate::error::{Error, Result};
 use crate::event::ElementState;
 use crate::node::{Node, Rect, StateSet};
@@ -209,8 +209,8 @@ impl<'p> Locator<'p> {
 
     // ── Actions (each takes a fresh snapshot) ───────────────────────
 
-    /// Perform an arbitrary action on the matched element.
-    pub fn perform(&self, action: Action, data: Option<ActionData>) -> Result<()> {
+    /// Perform an action on the matched element (internal dispatch).
+    fn perform(&self, action: Action, data: Option<ActionData>) -> Result<()> {
         if let Some(ref d) = data {
             d.validate(action)?;
         }
@@ -292,6 +292,63 @@ impl<'p> Locator<'p> {
         self.perform(
             Action::SetTextSelection,
             Some(ActionData::TextSelection { start, end }),
+        )
+    }
+
+    /// Remove keyboard focus from the matched element.
+    pub fn blur(&self) -> Result<()> {
+        self.perform(Action::Blur, None)
+    }
+
+    /// Scroll the matched element upward.
+    ///
+    /// `amount` is in logical scroll units (≈ one mouse wheel notch).
+    pub fn scroll_up(&self, amount: f64) -> Result<()> {
+        self.perform(
+            Action::Scroll,
+            Some(ActionData::ScrollAmount {
+                direction: ScrollDirection::Up,
+                amount,
+            }),
+        )
+    }
+
+    /// Scroll the matched element downward.
+    ///
+    /// `amount` is in logical scroll units (≈ one mouse wheel notch).
+    pub fn scroll_down(&self, amount: f64) -> Result<()> {
+        self.perform(
+            Action::Scroll,
+            Some(ActionData::ScrollAmount {
+                direction: ScrollDirection::Down,
+                amount,
+            }),
+        )
+    }
+
+    /// Scroll the matched element leftward.
+    ///
+    /// `amount` is in logical scroll units (≈ one mouse wheel notch).
+    pub fn scroll_left(&self, amount: f64) -> Result<()> {
+        self.perform(
+            Action::Scroll,
+            Some(ActionData::ScrollAmount {
+                direction: ScrollDirection::Left,
+                amount,
+            }),
+        )
+    }
+
+    /// Scroll the matched element rightward.
+    ///
+    /// `amount` is in logical scroll units (≈ one mouse wheel notch).
+    pub fn scroll_right(&self, amount: f64) -> Result<()> {
+        self.perform(
+            Action::Scroll,
+            Some(ActionData::ScrollAmount {
+                direction: ScrollDirection::Right,
+                amount,
+            }),
         )
     }
 

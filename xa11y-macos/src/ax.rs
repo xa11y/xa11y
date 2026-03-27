@@ -9,10 +9,11 @@ use core_foundation::base::TCFType;
 use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
 
+use xa11y_core::action::{Action, ActionData, ScrollDirection};
 use xa11y_core::{
-    Action, ActionData, AppInfo, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
-    EventKind, EventProvider, EventReceiver, Node, PermissionStatus, Provider, QueryOptions,
-    RawPlatformData, Rect, Result, Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
+    AppInfo, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter, EventKind,
+    EventProvider, EventReceiver, Node, PermissionStatus, Provider, QueryOptions, RawPlatformData,
+    Rect, Result, Role, StateSet, Subscription, Toggled, Tree,
 };
 
 // ── FFI Declarations ──────────────────────────────────────────────────────────
@@ -849,18 +850,24 @@ impl MacOSProvider {
 
         // Actions
         let ax_actions = ax_action_names(element.as_ptr());
-        let mut actions: Vec<Action> = ax_actions.iter().filter_map(|a| map_ax_action(a)).collect();
+        let mut actions: Vec<String> = ax_actions
+            .iter()
+            .filter_map(|a| map_ax_action(a))
+            .map(|a| a.as_str().to_string())
+            .collect();
 
         // Add Focus if the element can be focused
-        if ax_bool(element.as_ptr(), "AXFocused").is_some() && !actions.contains(&Action::Focus) {
-            actions.push(Action::Focus);
+        if ax_bool(element.as_ptr(), "AXFocused").is_some()
+            && !actions.iter().any(|a| a == Action::Focus.as_str())
+        {
+            actions.push(Action::Focus.as_str().to_string());
         }
 
         // Add SetValue for text fields and sliders
         if matches!(role, Role::TextField | Role::TextArea | Role::Slider)
-            && !actions.contains(&Action::SetValue)
+            && !actions.iter().any(|a| a == Action::SetValue.as_str())
         {
-            actions.push(Action::SetValue);
+            actions.push(Action::SetValue.as_str().to_string());
         }
 
         // Stable ID: AXIdentifier (always captured for cross-snapshot correlation)

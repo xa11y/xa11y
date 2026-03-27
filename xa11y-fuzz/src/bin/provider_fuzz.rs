@@ -15,6 +15,7 @@ fn main() {
 mod provider_fuzz {
     use rand::prelude::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use xa11y::action::{Action, ActionData, ScrollDirection};
     use xa11y::*;
 
     // ── CLI ──────────────────────────────────────────────────────────────────
@@ -501,7 +502,12 @@ mod provider_fuzz {
 
         // Pick action: 80% from node's supported actions, 20% random
         let action = if !node.actions.is_empty() && state.rng.random_bool(0.8) {
-            node.actions[state.rng.random_range(0..node.actions.len())]
+            let action_str = &node.actions[state.rng.random_range(0..node.actions.len())];
+            ALL_ACTIONS
+                .iter()
+                .find(|a| a.as_str() == action_str)
+                .copied()
+                .unwrap_or(ALL_ACTIONS[state.rng.random_range(0..ALL_ACTIONS.len())])
         } else {
             ALL_ACTIONS[state.rng.random_range(0..ALL_ACTIONS.len())]
         };

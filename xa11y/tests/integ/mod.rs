@@ -1,5 +1,6 @@
 //! Integration test helpers — minimize boilerplate for cross-platform tests.
 
+use xa11y::action::{Action, ActionData};
 use xa11y::*;
 
 /// Create a provider for the current platform.

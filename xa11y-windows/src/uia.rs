@@ -10,10 +10,11 @@ use windows::Win32::System::Com::{CoInitializeEx, COINIT};
 use windows::Win32::System::Threading::*;
 use windows::Win32::UI::Accessibility::*;
 
+use xa11y_core::action::{Action, ActionData, ScrollDirection};
 use xa11y_core::{
-    Action, ActionData, AppInfo, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
-    EventKind, EventProvider, EventReceiver, Node, PermissionStatus, Provider, QueryOptions,
-    RawPlatformData, Rect, Result, Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
+    AppInfo, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter, EventKind,
+    EventProvider, EventReceiver, Node, PermissionStatus, Provider, QueryOptions, RawPlatformData,
+    Rect, Result, Role, StateSet, Subscription, Toggled, Tree,
 };
 
 /// Initialize COM for UIA. Called once per WindowsProvider creation.
@@ -728,7 +729,7 @@ impl Provider for WindowsProvider {
                     return Ok(());
                 }
                 Err(Error::ActionNotSupported {
-                    action,
+                    action: action.to_string(),
                     role: node.role,
                 })
             }
@@ -839,7 +840,7 @@ impl Provider for WindowsProvider {
                     return Ok(());
                 }
                 Err(Error::ActionNotSupported {
-                    action,
+                    action: action.to_string(),
                     role: node.role,
                 })
             }
@@ -860,7 +861,7 @@ impl Provider for WindowsProvider {
                     return Ok(());
                 }
                 Err(Error::ActionNotSupported {
-                    action,
+                    action: action.to_string(),
                     role: node.role,
                 })
             }
@@ -868,7 +869,7 @@ impl Provider for WindowsProvider {
             Action::ShowMenu => {
                 // No direct UIA equivalent; try context menu via legacy
                 Err(Error::ActionNotSupported {
-                    action,
+                    action: action.to_string(),
                     role: node.role,
                 })
             }
@@ -933,7 +934,7 @@ impl Provider for WindowsProvider {
                     return Ok(());
                 }
                 Err(Error::ActionNotSupported {
-                    action,
+                    action: action.to_string(),
                     role: node.role,
                 })
             }
@@ -974,7 +975,7 @@ impl Provider for WindowsProvider {
                     return Ok(());
                 }
                 Err(Error::ActionNotSupported {
-                    action,
+                    action: action.to_string(),
                     role: node.role,
                 })
             }
@@ -1096,20 +1097,20 @@ fn get_value(element: &IUIAutomationElement, role: Role) -> Option<String> {
 }
 
 /// Determine available actions from UIA patterns.
-fn get_actions(element: &IUIAutomationElement, role: Role) -> Vec<Action> {
-    let mut actions = Vec::new();
+fn get_actions(element: &IUIAutomationElement, role: Role) -> Vec<String> {
+    let mut actions: Vec<String> = Vec::new();
 
     if unsafe { element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId) }
         .is_ok()
     {
-        actions.push(Action::Press);
+        actions.push(Action::Press.as_str().to_string());
     }
 
     if unsafe { element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId) }
         .is_ok()
     {
-        if !actions.contains(&Action::Press) {
-            actions.push(Action::Press);
+        if !actions.iter().any(|a| a == Action::Press.as_str()) {
+            actions.push(Action::Press.as_str().to_string());
         }
     }
 
@@ -1119,15 +1120,15 @@ fn get_actions(element: &IUIAutomationElement, role: Role) -> Vec<Action> {
     }
     .is_ok()
     {
-        actions.push(Action::Expand);
-        actions.push(Action::Collapse);
+        actions.push(Action::Expand.as_str().to_string());
+        actions.push(Action::Collapse.as_str().to_string());
     }
 
     if unsafe { element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId) }
         .is_ok()
     {
-        if !actions.contains(&Action::SetValue) {
-            actions.push(Action::SetValue);
+        if !actions.iter().any(|a| a == Action::SetValue.as_str()) {
+            actions.push(Action::SetValue.as_str().to_string());
         }
     }
 
@@ -1136,11 +1137,11 @@ fn get_actions(element: &IUIAutomationElement, role: Role) -> Vec<Action> {
     }
     .is_ok()
     {
-        if !actions.contains(&Action::SetValue) {
-            actions.push(Action::SetValue);
+        if !actions.iter().any(|a| a == Action::SetValue.as_str()) {
+            actions.push(Action::SetValue.as_str().to_string());
         }
-        actions.push(Action::Increment);
-        actions.push(Action::Decrement);
+        actions.push(Action::Increment.as_str().to_string());
+        actions.push(Action::Decrement.as_str().to_string());
     }
 
     if unsafe {
@@ -1148,7 +1149,7 @@ fn get_actions(element: &IUIAutomationElement, role: Role) -> Vec<Action> {
     }
     .is_ok()
     {
-        actions.push(Action::Select);
+        actions.push(Action::Select.as_str().to_string());
     }
 
     // Focus: most elements can be focused
@@ -1156,14 +1157,14 @@ fn get_actions(element: &IUIAutomationElement, role: Role) -> Vec<Action> {
         .unwrap_or(BOOL(0))
         .as_bool()
     {
-        actions.push(Action::Focus);
+        actions.push(Action::Focus.as_str().to_string());
     }
 
     // For text fields and sliders, ensure SetValue is present
     if matches!(role, Role::TextField | Role::TextArea | Role::Slider)
-        && !actions.contains(&Action::SetValue)
+        && !actions.iter().any(|a| a == Action::SetValue.as_str())
     {
-        actions.push(Action::SetValue);
+        actions.push(Action::SetValue.as_str().to_string());
     }
 
     actions

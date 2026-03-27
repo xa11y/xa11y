@@ -4,6 +4,7 @@
 //! permissions, using manually constructed trees. No real accessibility backend
 //! or running applications are needed.
 
+use xa11y::action::{Action, ActionData, ScrollDirection};
 use xa11y::*;
 
 /// Helper to build a sample accessibility tree for testing.
@@ -69,7 +70,7 @@ fn sample_tree() -> Tree {
                 height: 34,
             }),
 
-            actions: vec![Action::Press, Action::Focus],
+            actions: vec!["press".into(), "focus".into()],
             states: StateSet {
                 enabled: true,
                 visible: true,
@@ -97,7 +98,7 @@ fn sample_tree() -> Tree {
                 height: 34,
             }),
 
-            actions: vec![Action::Focus, Action::SetValue],
+            actions: vec!["focus".into(), "set_value".into()],
             states: StateSet {
                 enabled: true,
                 visible: true,
@@ -164,7 +165,7 @@ fn sample_tree() -> Tree {
             description: None,
             bounds: None,
 
-            actions: vec![Action::Press, Action::Focus],
+            actions: vec!["press".into(), "focus".into()],
             states: StateSet {
                 enabled: true,
                 visible: true,
@@ -187,7 +188,7 @@ fn sample_tree() -> Tree {
             description: None,
             bounds: None,
 
-            actions: vec![Action::Press, Action::Focus],
+            actions: vec!["press".into(), "focus".into()],
             states: StateSet {
                 enabled: false,
                 visible: true,
@@ -210,7 +211,7 @@ fn sample_tree() -> Tree {
             description: None,
             bounds: None,
 
-            actions: vec![Action::Press, Action::Toggle],
+            actions: vec!["press".into(), "toggle".into()],
             states: StateSet {
                 enabled: true,
                 visible: true,
@@ -626,10 +627,10 @@ fn error_display() {
     assert!(format!("{}", err).contains("stale"));
 
     let err = Error::ActionNotSupported {
-        action: Action::Toggle,
+        action: "toggle".to_string(),
         role: Role::StaticText,
     };
-    assert!(format!("{}", err).contains("Toggle"));
+    assert!(format!("{}", err).contains("toggle"));
 
     let err = Error::InvalidSelector {
         selector: "bad".to_string(),
@@ -672,7 +673,7 @@ fn node_json_serialization() {
             width: 80,
             height: 30,
         }),
-        actions: vec![Action::Press],
+        actions: vec!["press".into()],
         states: StateSet {
             enabled: true,
             visible: true,

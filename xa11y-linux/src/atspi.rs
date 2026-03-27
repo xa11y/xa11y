@@ -3,10 +3,11 @@
 use std::sync::Mutex;
 use std::time::Duration;
 
+use xa11y_core::action::{Action, ActionData, ScrollDirection};
 use xa11y_core::{
-    Action, ActionData, AppInfo, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
-    EventKind, EventProvider, EventReceiver, Node, PermissionStatus, Provider, QueryOptions, Rect,
-    Result, Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
+    AppInfo, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter, EventKind,
+    EventProvider, EventReceiver, Node, PermissionStatus, Provider, QueryOptions, Rect, Result,
+    Role, StateSet, Subscription, Toggled, Tree,
 };
 use zbus::blocking::{Connection, Proxy};
 
@@ -230,7 +231,7 @@ impl LinuxProvider {
     /// Get available actions via Action interface.
     /// Probes the interface directly rather than relying on the Interfaces property,
     /// which some AT-SPI adapters (e.g. AccessKit) don't expose.
-    fn get_actions(&self, aref: &AccessibleRef) -> Vec<Action> {
+    fn get_actions(&self, aref: &AccessibleRef) -> Vec<String> {
         let mut actions = Vec::new();
 
         // Try Action interface directly
@@ -240,8 +241,9 @@ impl LinuxProvider {
                     if let Ok(reply) = proxy.call_method("GetName", &(i,)) {
                         if let Ok(name) = reply.body().deserialize::<String>() {
                             if let Some(action) = map_atspi_action(&name) {
-                                if !actions.contains(&action) {
-                                    actions.push(action);
+                                let s = action.as_str().to_string();
+                                if !actions.contains(&s) {
+                                    actions.push(s);
                                 }
                             }
                         }
@@ -251,13 +253,14 @@ impl LinuxProvider {
         }
 
         // Try Component interface for Focus
-        if !actions.contains(&Action::Focus) {
+        let focus_str = Action::Focus.as_str().to_string();
+        if !actions.contains(&focus_str) {
             if let Ok(proxy) =
                 self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Component")
             {
                 // Verify the interface exists by trying a method
                 if proxy.call_method("GetExtents", &(0u32,)).is_ok() {
-                    actions.push(Action::Focus);
+                    actions.push(focus_str);
                 }
             }
         }
