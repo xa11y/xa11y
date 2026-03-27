@@ -223,6 +223,9 @@ jobs:
         working-directory: xa11y-python
         run: ../.venv/bin/ruff format --check python/ tests/
 
+      - name: Generate READMEs
+        run: cargo xtask sync-readmes
+
       - name: Build & install
         working-directory: xa11y-python
         run: ../.venv/bin/maturin develop --release
