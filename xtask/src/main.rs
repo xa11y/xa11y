@@ -193,8 +193,14 @@ fn do_test_integ_container(args: &[String]) -> bool {
 }
 
 fn do_docs() -> bool {
-    heading("Generate Python API docs");
+    heading("Check doc links");
     let root = project_root();
+    let links_ok = run_in("python", &["docs/check_links.py"], &root);
+    if !links_ok {
+        return false;
+    }
+
+    heading("Generate Python API docs");
     let gen_ok = run_in("python", &["docs/generate_python_api.py"], &root);
     if !gen_ok {
         return false;
