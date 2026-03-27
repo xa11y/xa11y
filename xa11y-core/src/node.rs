@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::action::Action;
 use crate::role::Role;
 
 /// Internal index for a node within a snapshot (sequential DFS order).
@@ -26,8 +27,8 @@ pub struct Node {
     /// Bounding rectangle in screen pixels
     pub bounds: Option<Rect>,
 
-    /// Available actions (snake_case names, e.g. "press", "focus", "set_value")
-    pub actions: Vec<String>,
+    /// Available actions
+    pub actions: Vec<Action>,
 
     /// Current state flags
     pub states: StateSet,

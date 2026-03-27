@@ -13,7 +13,6 @@ mod integ;
 #[cfg(test)]
 mod tests {
     use super::integ as h;
-    use xa11y::action::{Action, ActionData, ScrollDirection};
     use xa11y::*;
 
     // ════════════════════════════════════════════════════════════════
@@ -656,8 +655,8 @@ mod tests {
         let submit = h::named(&tree, "Submit");
         assert!(!submit.actions.is_empty());
         assert!(
-            submit.actions.iter().any(|a| a == "press"),
-            "Submit should support press, got: {:?}",
+            submit.actions.contains(&Action::Press),
+            "Submit should support Press, got: {:?}",
             submit.actions
         );
     }

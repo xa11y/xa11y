@@ -11,7 +11,6 @@ pub use ax::MacOSProvider;
 
 #[cfg(not(target_os = "macos"))]
 mod stub {
-    use xa11y_core::action::{Action, ActionData};
     use xa11y_core::*;
 
     pub struct MacOSProvider;

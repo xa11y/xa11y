@@ -5,8 +5,6 @@ use pyo3::exceptions::*;
 use pyo3::prelude::*;
 use pyo3::types::PyList;
 
-use xa11y::action::{Action, ActionData, ScrollDirection};
-
 // ── Singleton provider ─────────────────────────────────────────────────────
 
 static PROVIDER: OnceLock<Result<Arc<dyn xa11y::Provider>, String>> = OnceLock::new();
@@ -71,33 +69,53 @@ fn to_py_err(e: xa11y::Error) -> PyErr {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-fn parse_action(s: &str) -> PyResult<Action> {
+fn parse_action(s: &str) -> PyResult<xa11y::Action> {
     match s {
-        "press" => Ok(Action::Press),
-        "focus" => Ok(Action::Focus),
-        "set_value" => Ok(Action::SetValue),
-        "toggle" => Ok(Action::Toggle),
-        "expand" => Ok(Action::Expand),
-        "collapse" => Ok(Action::Collapse),
-        "select" => Ok(Action::Select),
-        "show_menu" => Ok(Action::ShowMenu),
-        "scroll_into_view" => Ok(Action::ScrollIntoView),
-        "scroll" => Ok(Action::Scroll),
-        "increment" => Ok(Action::Increment),
-        "decrement" => Ok(Action::Decrement),
-        "blur" => Ok(Action::Blur),
-        "set_text_selection" => Ok(Action::SetTextSelection),
-        "type_text" => Ok(Action::TypeText),
+        "press" => Ok(xa11y::Action::Press),
+        "focus" => Ok(xa11y::Action::Focus),
+        "set_value" => Ok(xa11y::Action::SetValue),
+        "toggle" => Ok(xa11y::Action::Toggle),
+        "expand" => Ok(xa11y::Action::Expand),
+        "collapse" => Ok(xa11y::Action::Collapse),
+        "select" => Ok(xa11y::Action::Select),
+        "show_menu" => Ok(xa11y::Action::ShowMenu),
+        "scroll_into_view" => Ok(xa11y::Action::ScrollIntoView),
+        "scroll" => Ok(xa11y::Action::Scroll),
+        "increment" => Ok(xa11y::Action::Increment),
+        "decrement" => Ok(xa11y::Action::Decrement),
+        "blur" => Ok(xa11y::Action::Blur),
+        "set_text_selection" => Ok(xa11y::Action::SetTextSelection),
+        "type_text" => Ok(xa11y::Action::TypeText),
         _ => Err(PyValueError::new_err(format!("Unknown action: {s}"))),
     }
 }
 
-fn parse_scroll_direction(s: &str) -> PyResult<ScrollDirection> {
+fn action_to_str(a: &xa11y::Action) -> &'static str {
+    match a {
+        xa11y::Action::Press => "press",
+        xa11y::Action::Focus => "focus",
+        xa11y::Action::SetValue => "set_value",
+        xa11y::Action::Toggle => "toggle",
+        xa11y::Action::Expand => "expand",
+        xa11y::Action::Collapse => "collapse",
+        xa11y::Action::Select => "select",
+        xa11y::Action::ShowMenu => "show_menu",
+        xa11y::Action::ScrollIntoView => "scroll_into_view",
+        xa11y::Action::Scroll => "scroll",
+        xa11y::Action::Increment => "increment",
+        xa11y::Action::Decrement => "decrement",
+        xa11y::Action::Blur => "blur",
+        xa11y::Action::SetTextSelection => "set_text_selection",
+        xa11y::Action::TypeText => "type_text",
+    }
+}
+
+fn parse_scroll_direction(s: &str) -> PyResult<xa11y::ScrollDirection> {
     match s {
-        "up" => Ok(ScrollDirection::Up),
-        "down" => Ok(ScrollDirection::Down),
-        "left" => Ok(ScrollDirection::Left),
-        "right" => Ok(ScrollDirection::Right),
+        "up" => Ok(xa11y::ScrollDirection::Up),
+        "down" => Ok(xa11y::ScrollDirection::Down),
+        "left" => Ok(xa11y::ScrollDirection::Left),
+        "right" => Ok(xa11y::ScrollDirection::Right),
         _ => Err(PyValueError::new_err(format!(
             "Unknown scroll direction: {s} (expected up/down/left/right)"
         ))),
@@ -131,35 +149,35 @@ fn resolve_app_target(name: Option<&str>, pid: Option<u32>) -> PyResult<xa11y::A
 }
 
 fn build_action_data(
-    action: Action,
+    action: xa11y::Action,
     value: Option<String>,
     numeric_value: Option<f64>,
     direction: Option<String>,
     amount: Option<f64>,
     start: Option<u32>,
     end: Option<u32>,
-) -> PyResult<Option<ActionData>> {
+) -> PyResult<Option<xa11y::ActionData>> {
     let data = match action {
-        Action::SetValue => match (value, numeric_value) {
-            (Some(v), _) => Some(ActionData::Value(v)),
-            (_, Some(n)) => Some(ActionData::NumericValue(n)),
+        xa11y::Action::SetValue => match (value, numeric_value) {
+            (Some(v), _) => Some(xa11y::ActionData::Value(v)),
+            (_, Some(n)) => Some(xa11y::ActionData::NumericValue(n)),
             _ => None,
         },
-        Action::TypeText => value.map(ActionData::Value),
-        Action::Scroll => {
+        xa11y::Action::TypeText => value.map(xa11y::ActionData::Value),
+        xa11y::Action::Scroll => {
             let dir = direction
                 .as_deref()
                 .ok_or_else(|| PyValueError::new_err("scroll requires direction"))?;
-            Some(ActionData::ScrollAmount {
+            Some(xa11y::ActionData::ScrollAmount {
                 direction: parse_scroll_direction(dir)?,
                 amount: amount.unwrap_or(1.0),
             })
         }
-        Action::SetTextSelection => {
+        xa11y::Action::SetTextSelection => {
             let s =
                 start.ok_or_else(|| PyValueError::new_err("set_text_selection requires start"))?;
             let e = end.ok_or_else(|| PyValueError::new_err("set_text_selection requires end"))?;
-            Some(ActionData::TextSelection { start: s, end: e })
+            Some(xa11y::ActionData::TextSelection { start: s, end: e })
         }
         _ => None,
     };
@@ -176,7 +194,11 @@ fn make_py_node(py: Python<'_>, n: &xa11y::Node) -> PyResult<Py<Node>> {
         xa11y::Toggled::On => "on".to_string(),
         xa11y::Toggled::Mixed => "mixed".to_string(),
     });
-    let actions = n.actions.clone();
+    let actions: Vec<String> = n
+        .actions
+        .iter()
+        .map(|a| action_to_str(a).to_string())
+        .collect();
     Py::new(
         py,
         Node {
@@ -467,47 +489,47 @@ impl Tree {
     // ── Action convenience methods ──
 
     fn press(&self, target: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.perform_simple(target, Action::Press)
+        self.perform_simple(target, xa11y::Action::Press)
     }
 
     fn focus(&self, target: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.perform_simple(target, Action::Focus)
+        self.perform_simple(target, xa11y::Action::Focus)
     }
 
     fn blur(&self, target: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.perform_simple(target, Action::Blur)
+        self.perform_simple(target, xa11y::Action::Blur)
     }
 
     fn toggle(&self, target: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.perform_simple(target, Action::Toggle)
+        self.perform_simple(target, xa11y::Action::Toggle)
     }
 
     fn expand(&self, target: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.perform_simple(target, Action::Expand)
+        self.perform_simple(target, xa11y::Action::Expand)
     }
 
     fn collapse(&self, target: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.perform_simple(target, Action::Collapse)
+        self.perform_simple(target, xa11y::Action::Collapse)
     }
 
     fn select(&self, target: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.perform_simple(target, Action::Select)
+        self.perform_simple(target, xa11y::Action::Select)
     }
 
     fn increment(&self, target: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.perform_simple(target, Action::Increment)
+        self.perform_simple(target, xa11y::Action::Increment)
     }
 
     fn decrement(&self, target: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.perform_simple(target, Action::Decrement)
+        self.perform_simple(target, xa11y::Action::Decrement)
     }
 
     fn show_menu(&self, target: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.perform_simple(target, Action::ShowMenu)
+        self.perform_simple(target, xa11y::Action::ShowMenu)
     }
 
     fn scroll_into_view(&self, target: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.perform_simple(target, Action::ScrollIntoView)
+        self.perform_simple(target, xa11y::Action::ScrollIntoView)
     }
 
     fn set_value(&self, target: &Bound<'_, PyAny>, value: &str) -> PyResult<()> {
@@ -520,8 +542,8 @@ impl Tree {
             .perform_action(
                 &self.rust_tree,
                 rust_node,
-                Action::SetValue,
-                Some(ActionData::Value(value.to_string())),
+                xa11y::Action::SetValue,
+                Some(xa11y::ActionData::Value(value.to_string())),
             )
             .map_err(to_py_err)
     }
@@ -536,8 +558,8 @@ impl Tree {
             .perform_action(
                 &self.rust_tree,
                 rust_node,
-                Action::SetValue,
-                Some(ActionData::NumericValue(value)),
+                xa11y::Action::SetValue,
+                Some(xa11y::ActionData::NumericValue(value)),
             )
             .map_err(to_py_err)
     }
@@ -552,8 +574,8 @@ impl Tree {
             .perform_action(
                 &self.rust_tree,
                 rust_node,
-                Action::TypeText,
-                Some(ActionData::Value(text.to_string())),
+                xa11y::Action::TypeText,
+                Some(xa11y::ActionData::Value(text.to_string())),
             )
             .map_err(to_py_err)
     }
@@ -570,8 +592,8 @@ impl Tree {
             .perform_action(
                 &self.rust_tree,
                 rust_node,
-                Action::Scroll,
-                Some(ActionData::ScrollAmount {
+                xa11y::Action::Scroll,
+                Some(xa11y::ActionData::ScrollAmount {
                     direction: dir,
                     amount,
                 }),
@@ -589,8 +611,8 @@ impl Tree {
             .perform_action(
                 &self.rust_tree,
                 rust_node,
-                Action::SetTextSelection,
-                Some(ActionData::TextSelection { start, end }),
+                xa11y::Action::SetTextSelection,
+                Some(xa11y::ActionData::TextSelection { start, end }),
             )
             .map_err(to_py_err)
     }
@@ -647,7 +669,7 @@ impl Tree {
 }
 
 impl Tree {
-    fn perform_simple(&self, target: &Bound<'_, PyAny>, action: Action) -> PyResult<()> {
+    fn perform_simple(&self, target: &Bound<'_, PyAny>, action: xa11y::Action) -> PyResult<()> {
         let node_index = self.resolve_target_index(target)?;
         let rust_node = self
             .rust_tree
@@ -810,65 +832,74 @@ impl Locator {
     // ── Actions ──
 
     fn press(&self) -> PyResult<()> {
-        self.perform_action(Action::Press, None)
+        self.perform_action(xa11y::Action::Press, None)
     }
 
     fn focus(&self) -> PyResult<()> {
-        self.perform_action(Action::Focus, None)
+        self.perform_action(xa11y::Action::Focus, None)
     }
 
     fn blur(&self) -> PyResult<()> {
-        self.perform_action(Action::Blur, None)
+        self.perform_action(xa11y::Action::Blur, None)
     }
 
     fn toggle(&self) -> PyResult<()> {
-        self.perform_action(Action::Toggle, None)
+        self.perform_action(xa11y::Action::Toggle, None)
     }
 
     fn expand(&self) -> PyResult<()> {
-        self.perform_action(Action::Expand, None)
+        self.perform_action(xa11y::Action::Expand, None)
     }
 
     fn collapse(&self) -> PyResult<()> {
-        self.perform_action(Action::Collapse, None)
+        self.perform_action(xa11y::Action::Collapse, None)
     }
 
     fn select_item(&self) -> PyResult<()> {
-        self.perform_action(Action::Select, None)
+        self.perform_action(xa11y::Action::Select, None)
     }
 
     fn show_menu(&self) -> PyResult<()> {
-        self.perform_action(Action::ShowMenu, None)
+        self.perform_action(xa11y::Action::ShowMenu, None)
     }
 
     fn scroll_into_view(&self) -> PyResult<()> {
-        self.perform_action(Action::ScrollIntoView, None)
+        self.perform_action(xa11y::Action::ScrollIntoView, None)
     }
 
     fn increment(&self) -> PyResult<()> {
-        self.perform_action(Action::Increment, None)
+        self.perform_action(xa11y::Action::Increment, None)
     }
 
     fn decrement(&self) -> PyResult<()> {
-        self.perform_action(Action::Decrement, None)
+        self.perform_action(xa11y::Action::Decrement, None)
     }
 
     fn set_value(&self, value: &str) -> PyResult<()> {
-        self.perform_action(Action::SetValue, Some(ActionData::Value(value.to_string())))
+        self.perform_action(
+            xa11y::Action::SetValue,
+            Some(xa11y::ActionData::Value(value.to_string())),
+        )
     }
 
     fn set_numeric_value(&self, value: f64) -> PyResult<()> {
-        self.perform_action(Action::SetValue, Some(ActionData::NumericValue(value)))
+        self.perform_action(
+            xa11y::Action::SetValue,
+            Some(xa11y::ActionData::NumericValue(value)),
+        )
     }
 
     fn type_text(&self, text: &str) -> PyResult<()> {
-        self.perform_action(Action::TypeText, Some(ActionData::Value(text.to_string())))
+        self.perform_action(
+            xa11y::Action::TypeText,
+            Some(xa11y::ActionData::Value(text.to_string())),
+        )
     }
 
     fn select_text(&self, start: u32, end: u32) -> PyResult<()> {
         self.perform_action(
-            Action::SetTextSelection,
-            Some(ActionData::TextSelection { start, end }),
+            xa11y::Action::SetTextSelection,
+            Some(xa11y::ActionData::TextSelection { start, end }),
         )
     }
 
@@ -876,8 +907,8 @@ impl Locator {
     fn scroll(&self, direction: &str, amount: f64) -> PyResult<()> {
         let dir = parse_scroll_direction(direction)?;
         self.perform_action(
-            Action::Scroll,
-            Some(ActionData::ScrollAmount {
+            xa11y::Action::Scroll,
+            Some(xa11y::ActionData::ScrollAmount {
                 direction: dir,
                 amount,
             }),
@@ -978,7 +1009,11 @@ impl Locator {
         Ok(tree.get(idx).expect("valid after resolve").clone())
     }
 
-    fn perform_action(&self, action: Action, data: Option<ActionData>) -> PyResult<()> {
+    fn perform_action(
+        &self,
+        action: xa11y::Action,
+        data: Option<xa11y::ActionData>,
+    ) -> PyResult<()> {
         if let Some(ref d) = data {
             d.validate(action).map_err(to_py_err)?;
         }
@@ -1233,8 +1268,8 @@ impl xa11y::Provider for MockProvider {
         &self,
         _tree: &xa11y::Tree,
         node: &xa11y::Node,
-        action: Action,
-        data: Option<ActionData>,
+        action: xa11y::Action,
+        data: Option<xa11y::ActionData>,
     ) -> xa11y::Result<()> {
         let data_debug = data.map(|d| format!("{d:?}"));
         self.actions
@@ -1372,7 +1407,7 @@ fn build_test_tree() -> xa11y::Tree {
                 height: 30,
             }),
 
-            actions: vec!["press".into(), "focus".into()],
+            actions: vec![xa11y::Action::Press, xa11y::Action::Focus],
             states: StateSet {
                 focusable: true,
                 ..StateSet::default()
@@ -1400,7 +1435,7 @@ fn build_test_tree() -> xa11y::Tree {
                 height: 30,
             }),
 
-            actions: vec!["press".into(), "focus".into()],
+            actions: vec![xa11y::Action::Press, xa11y::Action::Focus],
             states: StateSet {
                 enabled: false,
                 focusable: true,
@@ -1449,7 +1484,11 @@ fn build_test_tree() -> xa11y::Tree {
                 height: 25,
             }),
 
-            actions: vec!["focus".into(), "set_value".into(), "type_text".into()],
+            actions: vec![
+                xa11y::Action::Focus,
+                xa11y::Action::SetValue,
+                xa11y::Action::TypeText,
+            ],
             states: StateSet {
                 editable: true,
                 focusable: true,
@@ -1473,7 +1512,7 @@ fn build_test_tree() -> xa11y::Tree {
             description: None,
             bounds: None,
 
-            actions: vec!["toggle".into(), "focus".into()],
+            actions: vec![xa11y::Action::Toggle, xa11y::Action::Focus],
             states: StateSet {
                 checked: Some(Toggled::On),
                 focusable: true,
@@ -1498,10 +1537,10 @@ fn build_test_tree() -> xa11y::Tree {
             bounds: None,
 
             actions: vec![
-                "increment".into(),
-                "decrement".into(),
-                "set_value".into(),
-                "focus".into(),
+                xa11y::Action::Increment,
+                xa11y::Action::Decrement,
+                xa11y::Action::SetValue,
+                xa11y::Action::Focus,
             ],
             states: StateSet {
                 focusable: true,
@@ -1571,7 +1610,7 @@ fn build_test_tree() -> xa11y::Tree {
             description: None,
             bounds: None,
 
-            actions: vec!["select".into(), "focus".into()],
+            actions: vec![xa11y::Action::Select, xa11y::Action::Focus],
             states: StateSet {
                 selected: true,
                 focusable: true,
@@ -1595,7 +1634,7 @@ fn build_test_tree() -> xa11y::Tree {
             description: None,
             bounds: None,
 
-            actions: vec!["select".into(), "focus".into()],
+            actions: vec![xa11y::Action::Select, xa11y::Action::Focus],
             states: StateSet {
                 focusable: true,
                 ..StateSet::default()

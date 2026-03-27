@@ -1,6 +1,3 @@
-/// Internal action types used by platform backends.
-/// Not part of the public API — use convenience methods on [`Locator`] instead.
-#[doc(hidden)]
 pub mod action;
 pub mod error;
 pub mod event;
@@ -13,6 +10,7 @@ pub mod selector;
 pub mod tree;
 
 // Re-export primary types at the crate root for convenience.
+pub use action::{Action, ActionData, ScrollDirection};
 pub use error::{Error, Result};
 pub use event::{
     ElementState, Event, EventFilter, EventKind, StateFlag, TextChangeData, TextChangeType,
