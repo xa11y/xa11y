@@ -1,4 +1,5 @@
 use std::env;
+use std::fs;
 use std::process::{Command, ExitCode};
 
 const HELP: &str = "\
@@ -17,6 +18,7 @@ COMMANDS:
     docs                Build documentation
     coverage            Generate code coverage report
     fuzz [ARGS..]       Run provider fuzzer (pass-through args)
+    sync-readmes        Generate crates.io/PyPI READMEs from root README.md
     check               Run ALL pre-PR checks (fmt, lint, test, test-python, docs)
     help                Show this help
 ";
@@ -36,6 +38,7 @@ fn main() -> ExitCode {
         "docs" => do_docs(),
         "coverage" => do_coverage(),
         "fuzz" => do_fuzz(rest),
+        "sync-readmes" => do_sync_readmes(),
         "check" => do_check(),
         "help" | "--help" | "-h" => {
             print!("{HELP}");
@@ -226,6 +229,73 @@ fn do_fuzz(args: &[String]) -> bool {
     let mut cmd_args = vec!["scripts/run_provider_fuzz.sh"];
     cmd_args.extend(&str_args);
     run("bash", &cmd_args)
+}
+
+fn do_sync_readmes() -> bool {
+    heading("Sync READMEs");
+    let root = project_root();
+    let source = match fs::read_to_string(root.join("README.md")) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to read README.md: {e}");
+            return false;
+        }
+    };
+
+    let targets: &[(&str, &str)] = &[
+        ("rust", "xa11y/README.md"),
+        ("python", "xa11y-python/README.md"),
+    ];
+
+    let mut ok = true;
+    for &(keep, dest) in targets {
+        let remove = if keep == "rust" { "python" } else { "rust" };
+        let text = strip_lang_blocks(&source, keep, remove);
+
+        let path = root.join(dest);
+        if let Err(e) = fs::write(&path, &text) {
+            eprintln!("Failed to write {dest}: {e}");
+            ok = false;
+        } else {
+            eprintln!("Wrote {dest}");
+        }
+    }
+    ok
+}
+
+/// Remove `<!-- {remove}-only -->...<!-- /{remove}-only -->` blocks entirely,
+/// and unwrap `<!-- {keep}-only -->...<!-- /{keep}-only -->` markers (keeping content).
+fn strip_lang_blocks(source: &str, keep: &str, remove: &str) -> String {
+    let open_remove = format!("<!-- {remove}-only -->\n");
+    let close_remove = format!("<!-- /{remove}-only -->\n");
+    let open_keep = format!("<!-- {keep}-only -->\n");
+    let close_keep = format!("<!-- /{keep}-only -->\n");
+
+    // Remove the other language's blocks
+    let mut result = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(start) = rest.find(&open_remove) {
+        result.push_str(&rest[..start]);
+        rest = &rest[start + open_remove.len()..];
+        if let Some(end) = rest.find(&close_remove) {
+            rest = &rest[end + close_remove.len()..];
+        } else {
+            // Unclosed marker — keep the rest as-is
+            break;
+        }
+    }
+    result.push_str(rest);
+
+    // Unwrap the kept language's markers
+    result = result.replace(&open_keep, "");
+    result = result.replace(&close_keep, "");
+
+    // Collapse triple+ blank lines
+    while result.contains("\n\n\n") {
+        result = result.replace("\n\n\n", "\n\n");
+    }
+
+    result
 }
 
 fn do_check() -> bool {

@@ -64,6 +64,9 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Generate crates.io README
+        run: cargo xtask sync-readmes
+
       - name: Publish xa11y-core
         run: cargo publish -p xa11y-core
         env:
@@ -114,6 +117,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Generate PyPI README
+        run: cargo xtask sync-readmes
+
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
@@ -150,6 +156,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Generate PyPI README
+        run: cargo xtask sync-readmes
+
       - uses: PyO3/maturin-action@v1
         with:
           target: ${{ matrix.target }}
@@ -175,6 +184,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Generate PyPI README
+        run: cargo xtask sync-readmes
+
       - uses: PyO3/maturin-action@v1
         with:
           target: x86_64
@@ -195,6 +207,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: main
+
+      - name: Generate PyPI README
+        run: cargo xtask sync-readmes
 
       - uses: PyO3/maturin-action@v1
         with:

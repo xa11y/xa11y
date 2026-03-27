@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Cross-platform accessibility client library — unified API for reading and interacting with accessibility trees"
+readme = "README.md"
 
 [dependencies]
 xa11y-core = { workspace = true }
