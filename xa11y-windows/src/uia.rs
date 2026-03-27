@@ -1097,7 +1097,7 @@ fn get_value(element: &IUIAutomationElement, role: Role) -> Option<String> {
 
 /// Determine available actions from UIA patterns.
 fn get_actions(element: &IUIAutomationElement, role: Role) -> Vec<Action> {
-    let mut actions = Vec::new();
+    let mut actions: Vec<Action> = Vec::new();
 
     if unsafe { element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId) }
         .is_ok()

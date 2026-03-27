@@ -1407,7 +1407,7 @@ fn build_test_tree() -> xa11y::Tree {
                 height: 30,
             }),
 
-            actions: vec![Action::Press, Action::Focus],
+            actions: vec![xa11y::Action::Press, xa11y::Action::Focus],
             states: StateSet {
                 focusable: true,
                 ..StateSet::default()
@@ -1435,7 +1435,7 @@ fn build_test_tree() -> xa11y::Tree {
                 height: 30,
             }),
 
-            actions: vec![Action::Press, Action::Focus],
+            actions: vec![xa11y::Action::Press, xa11y::Action::Focus],
             states: StateSet {
                 enabled: false,
                 focusable: true,
@@ -1484,7 +1484,11 @@ fn build_test_tree() -> xa11y::Tree {
                 height: 25,
             }),
 
-            actions: vec![Action::Focus, Action::SetValue, Action::TypeText],
+            actions: vec![
+                xa11y::Action::Focus,
+                xa11y::Action::SetValue,
+                xa11y::Action::TypeText,
+            ],
             states: StateSet {
                 editable: true,
                 focusable: true,
@@ -1508,7 +1512,7 @@ fn build_test_tree() -> xa11y::Tree {
             description: None,
             bounds: None,
 
-            actions: vec![Action::Toggle, Action::Focus],
+            actions: vec![xa11y::Action::Toggle, xa11y::Action::Focus],
             states: StateSet {
                 checked: Some(Toggled::On),
                 focusable: true,
@@ -1533,10 +1537,10 @@ fn build_test_tree() -> xa11y::Tree {
             bounds: None,
 
             actions: vec![
-                Action::Increment,
-                Action::Decrement,
-                Action::SetValue,
-                Action::Focus,
+                xa11y::Action::Increment,
+                xa11y::Action::Decrement,
+                xa11y::Action::SetValue,
+                xa11y::Action::Focus,
             ],
             states: StateSet {
                 focusable: true,
@@ -1606,7 +1610,7 @@ fn build_test_tree() -> xa11y::Tree {
             description: None,
             bounds: None,
 
-            actions: vec![Action::Select, Action::Focus],
+            actions: vec![xa11y::Action::Select, xa11y::Action::Focus],
             states: StateSet {
                 selected: true,
                 focusable: true,
@@ -1630,7 +1634,7 @@ fn build_test_tree() -> xa11y::Tree {
             description: None,
             bounds: None,
 
-            actions: vec![Action::Select, Action::Focus],
+            actions: vec![xa11y::Action::Select, xa11y::Action::Focus],
             states: StateSet {
                 focusable: true,
                 ..StateSet::default()
