@@ -339,11 +339,7 @@ impl LinuxProvider {
         // For role filtering, skip adding this node but still traverse children
         // so descendant nodes matching the filter can be found.
         let skip_for_role = if !is_root {
-            if let Some(ref filter_roles) = opts.roles {
-                !filter_roles.contains(&role)
-            } else {
-                false
-            }
+            !opts.roles.is_empty() && !opts.roles.contains(&role)
         } else {
             false
         };

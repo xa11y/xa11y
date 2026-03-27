@@ -2679,6 +2679,7 @@ name = "xa11y"
 version = "0.2.1"
 dependencies = [
  "serde_json",
+ "xa11y",
  "xa11y-core",
  "xa11y-linux",
  "xa11y-macos",

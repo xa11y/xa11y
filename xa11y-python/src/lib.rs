@@ -8,7 +8,7 @@ use pyo3::types::PyList;
 // ── Singleton provider ─────────────────────────────────────────────────────
 
 fn get_provider() -> PyResult<Arc<dyn xa11y::Provider>> {
-    xa11y::create_provider().map_err(|e| PlatformError::new_err(format!("{e}")))
+    xa11y::provider().map_err(|e| PlatformError::new_err(format!("{e}")))
 }
 
 // ── Exceptions ──────────────────────────────────────────────────────────────
@@ -122,11 +122,11 @@ fn build_query_options(
         max_depth,
         max_elements,
         visible_only,
-        roles: roles.map(|rs| {
-            rs.iter()
-                .filter_map(|s| xa11y::Role::from_snake_case(s))
-                .collect()
-        }),
+        roles: roles
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|s| xa11y::Role::from_snake_case(s))
+            .collect(),
     }
 }
 

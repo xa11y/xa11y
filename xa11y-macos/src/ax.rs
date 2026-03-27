@@ -766,11 +766,7 @@ impl MacOSProvider {
         let subrole_str = ax_string(element.as_ptr(), "AXSubrole");
         let role = map_ax_role(&role_str, subrole_str.as_deref());
 
-        let role_filtered = if let Some(ref filter_roles) = opts.roles {
-            !filter_roles.contains(&role)
-        } else {
-            false
-        };
+        let role_filtered = !opts.roles.is_empty() && !opts.roles.contains(&role);
 
         // If role is filtered out, skip this node but still recurse into children.
         // Still increment depth to respect the hard limit.

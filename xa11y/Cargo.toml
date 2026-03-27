@@ -7,6 +7,9 @@ repository.workspace = true
 description = "Cross-platform accessibility client library — unified API for reading and interacting with accessibility trees"
 readme = "README.md"
 
+[features]
+testing = []
+
 [dependencies]
 xa11y-core = { workspace = true }
 
@@ -20,4 +23,5 @@ xa11y-windows = { workspace = true }
 xa11y-linux = { workspace = true }
 
 [dev-dependencies]
+xa11y = { path = ".", features = ["testing"] }
 serde_json = { workspace = true }

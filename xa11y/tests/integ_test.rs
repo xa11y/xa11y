@@ -683,7 +683,7 @@ mod tests {
         let tree = h::app_tree();
         let submit = h::named(&tree, "Submit");
         // Focus action may succeed or fail depending on AT-SPI adapter support
-        let result = xa11y::perform_action(&tree, submit, Action::Focus, None);
+        let result = h::try_act(&tree, submit, Action::Focus);
         if result.is_ok() {
             std::thread::sleep(std::time::Duration::from_millis(100));
             let tree2 = h::app_tree();
@@ -1009,7 +1009,7 @@ mod tests {
     #[ignore]
     fn opts_roles_filter() {
         let tree = h::app_tree_with(&QueryOptions {
-            roles: Some(vec![Role::Button]),
+            roles: vec![Role::Button],
             ..QueryOptions::default()
         });
         // The root node is always included to anchor the tree.
@@ -1031,7 +1031,7 @@ mod tests {
     fn action_press_button() {
         let tree = h::app_tree();
         let submit = h::named(&tree, "Submit");
-        let result = xa11y::perform_action(&tree, submit, Action::Press, None);
+        let result = h::try_act(&tree, submit, Action::Press);
         match result {
             Ok(()) => println!("Submit pressed"),
             Err(e) => println!("Submit press result: {}", e),
@@ -1087,7 +1087,7 @@ mod tests {
                     && (n.value.as_deref() == Some("John Doe") || n.name.as_deref() == Some("Name"))
             })
             .expect("Text entry not found");
-        let result = xa11y::perform_action(&tree, text, Action::Focus, None);
+        let result = h::try_act(&tree, text, Action::Focus);
         assert!(result.is_ok(), "Focus should succeed: {:?}", result.err());
     }
 
@@ -1103,7 +1103,7 @@ mod tests {
                     && (n.value.as_deref() == Some("John Doe") || n.name.as_deref() == Some("Name"))
             })
             .expect("Text entry not found");
-        match xa11y::perform_action(
+        match h::try_act_with(
             &tree,
             text,
             Action::SetValue,
@@ -1131,7 +1131,7 @@ mod tests {
         let tree = h::app_tree();
         let sliders = tree.query("slider").unwrap();
         assert!(!sliders.is_empty());
-        let result = xa11y::perform_action(
+        let result = h::try_act_with(
             &tree,
             sliders[0],
             Action::SetValue,
@@ -1168,7 +1168,7 @@ mod tests {
             .or_else(|| tree.query("slider").unwrap().first().copied());
         if let Some(spin) = spin {
             let initial: f64 = spin.value.as_deref().unwrap_or("0").parse().unwrap_or(0.0);
-            let result = xa11y::perform_action(&tree, spin, Action::Increment, None);
+            let result = h::try_act(&tree, spin, Action::Increment);
             if result.is_ok() {
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 let tree2 = h::app_tree();
@@ -1201,7 +1201,7 @@ mod tests {
             .or_else(|| tree.query("slider").unwrap().first().copied());
         if let Some(spin) = spin {
             let before: f64 = spin.value.as_deref().unwrap_or("0").parse().unwrap_or(0.0);
-            let result = xa11y::perform_action(&tree, spin, Action::Decrement, None);
+            let result = h::try_act(&tree, spin, Action::Decrement);
             if result.is_ok() {
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 let tree2 = h::app_tree();
@@ -1241,7 +1241,7 @@ mod tests {
             });
         if let Some(node) = expander {
             // Expand
-            if let Ok(()) = xa11y::perform_action(&tree, node, Action::Expand, None) {
+            if let Ok(()) = h::try_act(&tree, node, Action::Expand) {
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 let tree2 = h::app_tree();
                 let n2 = tree2
@@ -1253,7 +1253,7 @@ mod tests {
                 if let Some(n) = n2 {
                     if n.states.expanded == Some(true) {
                         // Collapse
-                        if let Ok(()) = xa11y::perform_action(&tree2, n, Action::Collapse, None) {
+                        if let Ok(()) = h::try_act(&tree2, n, Action::Collapse) {
                             std::thread::sleep(std::time::Duration::from_millis(300));
                             let tree3 = h::app_tree();
                             let n3 = tree3
@@ -1278,7 +1278,7 @@ mod tests {
         let tree = h::app_tree();
         let apple = tree.query(r#"[name*="Apple"]"#).unwrap();
         if !apple.is_empty() {
-            let _ = xa11y::perform_action(&tree, apple[0], Action::Press, None);
+            let _ = h::try_act(&tree, apple[0], Action::Press);
             // Selection verified by not crashing; state_selected_on_list_item tests the state
         }
     }
@@ -1458,7 +1458,7 @@ mod tests {
         let tree = h::app_tree();
         let buttons = tree.query(r#"[name*="Submit"]"#).unwrap();
         assert!(!buttons.is_empty());
-        let result = xa11y::perform_action(&tree, buttons[0], Action::Press, None);
+        let result = h::try_act(&tree, buttons[0], Action::Press);
         match result {
             Ok(()) => {}
             Err(e) => assert!(
@@ -1500,7 +1500,7 @@ mod tests {
             .expect("Text entry not found");
 
         // Focus first
-        let result = xa11y::perform_action(&tree, text, Action::Focus, None);
+        let result = h::try_act(&tree, text, Action::Focus);
         assert!(result.is_ok(), "Focus should succeed: {:?}", result.err());
 
         // Then blur
@@ -1512,7 +1512,7 @@ mod tests {
                     && (n.value.as_deref() == Some("John Doe") || n.name.as_deref() == Some("Name"))
             })
             .expect("Text entry not found after focus");
-        let result = xa11y::perform_action(&tree2, text2, Action::Blur, None);
+        let result = h::try_act(&tree2, text2, Action::Blur);
         assert!(result.is_ok(), "Blur should succeed: {:?}", result.err());
     }
 
@@ -1526,7 +1526,7 @@ mod tests {
             .find(|n| n.role == Role::ScrollBar)
             .or_else(|| tree.query("window").unwrap().first().copied())
             .expect("No scrollable element found");
-        let result = xa11y::perform_action(
+        let result = h::try_act_with(
             &tree,
             target,
             Action::Scroll,
@@ -1558,10 +1558,10 @@ mod tests {
             .expect("Text entry not found");
 
         // Focus first
-        let _ = xa11y::perform_action(&tree, text, Action::Focus, None);
+        let _ = h::try_act(&tree, text, Action::Focus);
 
         // Select characters 0..4 ("John")
-        let result = xa11y::perform_action(
+        let result = h::try_act_with(
             &tree,
             text,
             Action::SetTextSelection,
@@ -1586,10 +1586,10 @@ mod tests {
             .expect("Text entry not found");
 
         // Focus first
-        let _ = xa11y::perform_action(&tree, text, Action::Focus, None);
+        let _ = h::try_act(&tree, text, Action::Focus);
 
         // Type text
-        let result = xa11y::perform_action(
+        let result = h::try_act_with(
             &tree,
             text,
             Action::TypeText,

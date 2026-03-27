@@ -80,7 +80,11 @@ impl Provider for StaticProviderRef {
     }
 }
 
-fn get_provider_arc() -> Result<Arc<dyn Provider>> {
+/// Get the global provider as an `Arc<dyn Provider>`.
+///
+/// Returns a handle to the same singleton used by `app()`, `all_apps()`, etc.
+/// Useful when you need to pass a provider to objects that store it (e.g. `Locator`).
+pub fn provider() -> Result<Arc<dyn Provider>> {
     Ok(Arc::new(StaticProviderRef(get_provider_ref()?)))
 }
 
@@ -97,6 +101,7 @@ pub fn all_apps(opts: &QueryOptions) -> Result<Tree> {
 }
 
 /// Perform an action on an element from a specific snapshot.
+#[cfg(feature = "testing")]
 pub fn perform_action(
     tree: &Tree,
     node: &Node,
@@ -118,27 +123,20 @@ pub fn list_apps() -> Result<Vec<AppInfo>> {
 
 /// Create a Locator targeting a specific application.
 pub fn locator(target: AppTarget, selector: &str) -> Result<Locator> {
-    Ok(Locator::new(get_provider_arc()?, target, selector))
+    Ok(Locator::new(provider()?, target, selector))
 }
 
 /// Create a Locator with custom query options.
 pub fn locator_with_opts(target: AppTarget, selector: &str, opts: QueryOptions) -> Result<Locator> {
-    Ok(Locator::with_opts(
-        get_provider_arc()?,
-        target,
-        selector,
-        opts,
-    ))
+    Ok(Locator::with_opts(provider()?, target, selector, opts))
 }
 
 // ── Platform provider construction (internal) ───────────────────────────────
 
 /// Create a new platform-appropriate accessibility provider.
 ///
-/// Returns a fresh provider instance (not the global singleton). Prefer
-/// the module-level functions (`app`, `all_apps`, `perform_action`, etc.)
-/// for normal use.
-#[doc(hidden)]
+/// Returns a fresh provider instance (not the global singleton).
+#[cfg(feature = "testing")]
 pub fn create_provider() -> Result<Arc<dyn Provider>> {
     create_provider_boxed().map(Arc::from)
 }
@@ -172,6 +170,7 @@ fn create_provider_boxed() -> Result<Box<dyn Provider>> {
 ///
 /// Returns a boxed `EventProvider` trait object for the current platform.
 /// EventProvider extends Provider with event subscription capabilities.
+#[cfg(feature = "testing")]
 pub fn create_event_provider() -> Result<Box<dyn EventProvider>> {
     #[cfg(target_os = "macos")]
     {

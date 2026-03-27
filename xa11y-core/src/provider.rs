@@ -65,8 +65,8 @@ pub struct QueryOptions {
     pub max_elements: Option<u32>,
     /// Only include visible elements.
     pub visible_only: bool,
-    /// Filter to specific roles.
-    pub roles: Option<Vec<Role>>,
+    /// Filter to specific roles. Empty = no filter.
+    pub roles: Vec<Role>,
 }
 
 /// Result of a permission check.
