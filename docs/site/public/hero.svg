@@ -1,0 +1,497 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 520" width="600" height="520">
+  <defs>
+    <style>
+  .light { display: none; }
+  @media (prefers-color-scheme: light) {
+    .dark { display: none; }
+    .light { display: inline; }
+  }
+</style>
+    <clipPath id="clip-cmd-dark-0">
+      <rect x="76" y="57" width="0" height="21">
+        <animate attributeName="width" values="0;9.8;17.7;25.5;33.3;41.1;49.0;56.8;64.6;72.4;80.3;88.1;95.9;103.7;111.6;119.4;127.2;135.0;142.9;150.7;158.5;166.3;174.2;182.0;189.8;197.6;205.5;213.3;221.1;229.0;236.8;244.6;252.4;260.3;268.1;275.9;283.7;291.6;299.4;307.2;315.0;322.9;330.7;338.5;346.3;354.2;362.0;369.8;377.6;385.5;393.3;401.1;409.0;416.8;424.6;432.4;440.3;448.1;455.9;463.7;471.6;479.4;487.2;495.0" keyTimes="0;0.0213;0.0273;0.0332;0.0391;0.0650;0.0881;0.1214;0.1273;0.1384;0.1443;0.1502;0.1652;0.1711;0.1770;0.1988;0.2157;0.2216;0.2406;0.2700;0.2759;0.3051;0.3292;0.3364;0.3423;0.3787;0.3857;0.3916;0.3975;0.4287;0.4484;0.4776;0.5033;0.5197;0.5568;0.5659;0.5831;0.6134;0.6338;0.6656;0.6840;0.7085;0.7144;0.7203;0.7262;0.7321;0.7380;0.7439;0.7498;0.7710;0.7793;0.7880;0.7939;0.7998;0.8352;0.8569;0.8768;0.8827;0.9083;0.9142;0.9233;0.9612;0.9825;1.0000" begin="m.begin+1.500s" dur="1.694s" fill="freeze" calcMode="linear" />
+        <set attributeName="width" to="0" begin="m.begin+0.000s" />
+      </rect>
+    </clipPath>
+    <clipPath id="clip-cmd-dark-1">
+      <rect x="76" y="57" width="0" height="21">
+        <animate attributeName="width" values="0;9.8;17.7;25.5;33.3;41.1;49.0;56.8;64.6;72.4;80.3;88.1" keyTimes="0;0.1262;0.2925;0.4418;0.4736;0.5053;0.5377;0.5695;0.6012;0.7929;0.9677;1.0000" begin="m.begin+4.594s" dur="0.315s" fill="freeze" calcMode="linear" />
+        <set attributeName="width" to="0" begin="m.begin+0.000s" />
+      </rect>
+    </clipPath>
+    <clipPath id="clip-cmd-dark-2">
+      <rect x="76" y="57" width="0" height="21">
+        <animate attributeName="width" values="0;9.8;17.7;25.5;33.3;41.1;49.0;56.8;64.6;72.4;80.3;88.1;95.9;103.7;111.6;119.4;127.2;135.0;142.9;150.7;158.5;166.3;174.2;182.0;189.8;197.6;205.5;213.3;221.1;229.0;236.8;244.6;252.4;260.3;268.1;275.9;283.7;291.6;299.4;307.2;315.0;322.9;330.7;338.5;346.3;354.2;362.0;369.8;377.6;385.5;393.3;401.1;409.0;416.8;424.6;432.4;440.3;448.1;455.9;463.7;471.6;479.4;487.2;495.0;502.9;510.7;518.5;526.3" keyTimes="0;0.0187;0.0271;0.0562;0.0670;0.0720;0.0770;0.0920;0.0970;0.1129;0.1413;0.1498;0.1548;0.1872;0.2001;0.2051;0.2101;0.2151;0.2327;0.2569;0.2663;0.2713;0.2791;0.3115;0.3251;0.3565;0.3834;0.3884;0.4098;0.4296;0.4435;0.4486;0.4667;0.4717;0.4816;0.4923;0.5229;0.5505;0.5555;0.5680;0.5730;0.6020;0.6294;0.6344;0.6524;0.6693;0.6743;0.6973;0.7114;0.7351;0.7488;0.7538;0.7593;0.7643;0.7940;0.8216;0.8474;0.8524;0.8574;0.8850;0.9154;0.9204;0.9324;0.9374;0.9603;0.9835;0.9885;1.0000" begin="m.begin+7.109s" dur="1.999s" fill="freeze" calcMode="linear" />
+        <set attributeName="width" to="0" begin="m.begin+0.000s" />
+      </rect>
+    </clipPath>
+    <clipPath id="clip-cmd-dark-3">
+      <rect x="76" y="57" width="0" height="21">
+        <animate attributeName="width" values="0;9.8;17.7;25.5;33.3;41.1;49.0;56.8;64.6;72.4;80.3;88.1;95.9;103.7;111.6;119.4;127.2;135.0;142.9;150.7;158.5;166.3;174.2;182.0;189.8;197.6;205.5;213.3;221.1;229.0;236.8;244.6;252.4;260.3;268.1;275.9;283.7;291.6;299.4;307.2;315.0;322.9" keyTimes="0;0.0272;0.0366;0.0880;0.1057;0.1151;0.1415;0.1823;0.1917;0.2011;0.2617;0.2964;0.3153;0.3401;0.3494;0.3588;0.3701;0.4002;0.4096;0.4190;0.4284;0.4617;0.4711;0.5250;0.5755;0.5849;0.5943;0.6305;0.6398;0.6492;0.7054;0.7342;0.7556;0.8005;0.8470;0.8564;0.8658;0.8841;0.9018;0.9228;0.9635;1.0000" begin="m.begin+10.508s" dur="1.065s" fill="freeze" calcMode="linear" />
+        <set attributeName="width" to="0" begin="m.begin+0.000s" />
+      </rect>
+    </clipPath>
+    <clipPath id="clip-cmd-dark-4">
+      <rect x="76" y="57" width="0" height="21">
+        <animate attributeName="width" values="0;9.8;17.7;25.5;33.3;41.1;49.0;56.8;64.6;72.4;80.3;88.1;95.9;103.7;111.6;119.4;127.2;135.0;142.9;150.7;158.5;166.3;174.2;182.0;189.8;197.6;205.5;213.3;221.1;229.0;236.8;244.6;252.4;260.3;268.1;275.9;283.7;291.6;299.4;307.2;315.0;322.9;330.7;338.5;346.3;354.2;362.0;369.8;377.6;385.5;393.3;401.1;409.0;416.8;424.6;432.4;440.3;448.1;455.9;463.7;471.6" keyTimes="0;0.0350;0.0405;0.0499;0.0566;0.0862;0.0917;0.0972;0.1087;0.1190;0.1245;0.1300;0.1623;0.1735;0.2031;0.2191;0.2246;0.2603;0.2887;0.3231;0.3556;0.3846;0.3901;0.4032;0.4087;0.4181;0.4236;0.4320;0.4670;0.4725;0.4987;0.5105;0.5208;0.5547;0.5902;0.6063;0.6297;0.6352;0.6407;0.6750;0.6922;0.7078;0.7324;0.7379;0.7553;0.7692;0.7984;0.8039;0.8379;0.8434;0.8489;0.8668;0.8882;0.8937;0.8992;0.9301;0.9356;0.9534;0.9724;0.9826;1.0000" begin="m.begin+13.773s" dur="1.821s" fill="freeze" calcMode="linear" />
+        <set attributeName="width" to="0" begin="m.begin+0.000s" />
+      </rect>
+    </clipPath>
+    <clipPath id="clip-cmd-dark-5">
+      <rect x="76" y="57" width="0" height="21">
+        <animate attributeName="width" values="0;9.8;17.7;25.5;33.3;41.1;49.0;56.8;64.6;72.4;80.3;88.1;95.9;103.7;111.6;119.4;127.2;135.0;142.9;150.7;158.5;166.3;174.2;182.0" keyTimes="0;0.0379;0.1224;0.1365;0.1963;0.2104;0.2339;0.2887;0.3028;0.3173;0.3811;0.3953;0.4259;0.5176;0.6090;0.6231;0.6372;0.6514;0.7357;0.8140;0.8922;0.9128;0.9269;1.0000" begin="m.begin+16.994s" dur="0.708s" fill="freeze" calcMode="linear" />
+        <set attributeName="width" to="0" begin="m.begin+0.000s" />
+      </rect>
+    </clipPath>
+    <clipPath id="clip-cmd-dark-6">
+      <rect x="76" y="57" width="0" height="21">
+        <animate attributeName="width" values="0;9.8;17.7;25.5;33.3;41.1;49.0;56.8;64.6;72.4;80.3;88.1;95.9;103.7;111.6;119.4;127.2;135.0;142.9;150.7;158.5;166.3;174.2;182.0;189.8;197.6;205.5;213.3;221.1;229.0;236.8;244.6;252.4;260.3;268.1;275.9;283.7;291.6;299.4;307.2;315.0;322.9;330.7;338.5;346.3;354.2;362.0;369.8;377.6;385.5;393.3;401.1;409.0;416.8;424.6;432.4;440.3;448.1" keyTimes="0;0.0232;0.0423;0.0783;0.0993;0.1049;0.1333;0.1389;0.1603;0.1941;0.1997;0.2054;0.2110;0.2275;0.2331;0.2519;0.2757;0.2814;0.3015;0.3071;0.3206;0.3529;0.3826;0.3882;0.3988;0.4045;0.4101;0.4363;0.4566;0.4622;0.4871;0.5035;0.5143;0.5200;0.5256;0.5569;0.5891;0.6052;0.6344;0.6521;0.6578;0.6634;0.6690;0.7010;0.7284;0.7587;0.7907;0.7964;0.8020;0.8076;0.8343;0.8656;0.8755;0.8950;0.9006;0.9340;0.9645;1.0000" begin="m.begin+19.901s" dur="1.778s" fill="freeze" calcMode="linear" />
+        <set attributeName="width" to="0" begin="m.begin+0.000s" />
+      </rect>
+    </clipPath>
+    <clipPath id="clip-cmd-dark-7">
+      <rect x="76" y="57" width="0" height="21">
+        <animate attributeName="width" values="0;9.8;17.7;25.5;33.3;41.1;49.0;56.8;64.6;72.4;80.3;88.1;95.9;103.7;111.6;119.4;127.2;135.0;142.9;150.7;158.5;166.3;174.2;182.0;189.8;197.6;205.5;213.3;221.1;229.0;236.8;244.6;252.4;260.3;268.1" keyTimes="0;0.0431;0.0912;0.0998;0.1378;0.1478;0.1993;0.2418;0.2886;0.3318;0.3404;0.3819;0.3906;0.4380;0.4844;0.4931;0.5366;0.5555;0.5641;0.6062;0.6148;0.6235;0.6322;0.6419;0.6887;0.7427;0.7513;0.7827;0.7974;0.8524;0.8765;0.9285;0.9372;0.9913;1.0000" begin="m.begin+23.079s" dur="1.156s" fill="freeze" calcMode="linear" />
+        <set attributeName="width" to="0" begin="m.begin+0.000s" />
+      </rect>
+    </clipPath>
+    <clipPath id="clip-val-dark-3">
+      <rect x="290.52" y="412" width="0" height="32">
+        <animate attributeName="width" from="0" to="223.1" begin="m.begin+12.173s" dur="0.360s" fill="freeze" />
+        <set attributeName="width" to="0" begin="m.begin+0.000s" />
+      </rect>
+    </clipPath>
+    <clipPath id="clip-cmd-light-0">
+      <rect x="76" y="57" width="0" height="21">
+        <animate attributeName="width" values="0;9.8;17.7;25.5;33.3;41.1;49.0;56.8;64.6;72.4;80.3;88.1;95.9;103.7;111.6;119.4;127.2;135.0;142.9;150.7;158.5;166.3;174.2;182.0;189.8;197.6;205.5;213.3;221.1;229.0;236.8;244.6;252.4;260.3;268.1;275.9;283.7;291.6;299.4;307.2;315.0;322.9;330.7;338.5;346.3;354.2;362.0;369.8;377.6;385.5;393.3;401.1;409.0;416.8;424.6;432.4;440.3;448.1;455.9;463.7;471.6;479.4;487.2;495.0" keyTimes="0;0.0213;0.0273;0.0332;0.0391;0.0650;0.0881;0.1214;0.1273;0.1384;0.1443;0.1502;0.1652;0.1711;0.1770;0.1988;0.2157;0.2216;0.2406;0.2700;0.2759;0.3051;0.3292;0.3364;0.3423;0.3787;0.3857;0.3916;0.3975;0.4287;0.4484;0.4776;0.5033;0.5197;0.5568;0.5659;0.5831;0.6134;0.6338;0.6656;0.6840;0.7085;0.7144;0.7203;0.7262;0.7321;0.7380;0.7439;0.7498;0.7710;0.7793;0.7880;0.7939;0.7998;0.8352;0.8569;0.8768;0.8827;0.9083;0.9142;0.9233;0.9612;0.9825;1.0000" begin="m.begin+1.500s" dur="1.694s" fill="freeze" calcMode="linear" />
+        <set attributeName="width" to="0" begin="m.begin+0.000s" />
+      </rect>
+    </clipPath>
+    <clipPath id="clip-cmd-light-1">
+      <rect x="76" y="57" width="0" height="21">
+        <animate attributeName="width" values="0;9.8;17.7;25.5;33.3;41.1;49.0;56.8;64.6;72.4;80.3;88.1" keyTimes="0;0.1262;0.2925;0.4418;0.4736;0.5053;0.5377;0.5695;0.6012;0.7929;0.9677;1.0000" begin="m.begin+4.594s" dur="0.315s" fill="freeze" calcMode="linear" />
+        <set attributeName="width" to="0" begin="m.begin+0.000s" />
+      </rect>
+    </clipPath>
+    <clipPath id="clip-cmd-light-2">
+      <rect x="76" y="57" width="0" height="21">
+        <animate attributeName="width" values="0;9.8;17.7;25.5;33.3;41.1;49.0;56.8;64.6;72.4;80.3;88.1;95.9;103.7;111.6;119.4;127.2;135.0;142.9;150.7;158.5;166.3;174.2;182.0;189.8;197.6;205.5;213.3;221.1;229.0;236.8;244.6;252.4;260.3;268.1;275.9;283.7;291.6;299.4;307.2;315.0;322.9;330.7;338.5;346.3;354.2;362.0;369.8;377.6;385.5;393.3;401.1;409.0;416.8;424.6;432.4;440.3;448.1;455.9;463.7;471.6;479.4;487.2;495.0;502.9;510.7;518.5;526.3" keyTimes="0;0.0187;0.0271;0.0562;0.0670;0.0720;0.0770;0.0920;0.0970;0.1129;0.1413;0.1498;0.1548;0.1872;0.2001;0.2051;0.2101;0.2151;0.2327;0.2569;0.2663;0.2713;0.2791;0.3115;0.3251;0.3565;0.3834;0.3884;0.4098;0.4296;0.4435;0.4486;0.4667;0.4717;0.4816;0.4923;0.5229;0.5505;0.5555;0.5680;0.5730;0.6020;0.6294;0.6344;0.6524;0.6693;0.6743;0.6973;0.7114;0.7351;0.7488;0.7538;0.7593;0.7643;0.7940;0.8216;0.8474;0.8524;0.8574;0.8850;0.9154;0.9204;0.9324;0.9374;0.9603;0.9835;0.9885;1.0000" begin="m.begin+7.109s" dur="1.999s" fill="freeze" calcMode="linear" />
+        <set attributeName="width" to="0" begin="m.begin+0.000s" />
+      </rect>
+    </clipPath>
+    <clipPath id="clip-cmd-light-3">
+      <rect x="76" y="57" width="0" height="21">
+        <animate attributeName="width" values="0;9.8;17.7;25.5;33.3;41.1;49.0;56.8;64.6;72.4;80.3;88.1;95.9;103.7;111.6;119.4;127.2;135.0;142.9;150.7;158.5;166.3;174.2;182.0;189.8;197.6;205.5;213.3;221.1;229.0;236.8;244.6;252.4;260.3;268.1;275.9;283.7;291.6;299.4;307.2;315.0;322.9" keyTimes="0;0.0272;0.0366;0.0880;0.1057;0.1151;0.1415;0.1823;0.1917;0.2011;0.2617;0.2964;0.3153;0.3401;0.3494;0.3588;0.3701;0.4002;0.4096;0.4190;0.4284;0.4617;0.4711;0.5250;0.5755;0.5849;0.5943;0.6305;0.6398;0.6492;0.7054;0.7342;0.7556;0.8005;0.8470;0.8564;0.8658;0.8841;0.9018;0.9228;0.9635;1.0000" begin="m.begin+10.508s" dur="1.065s" fill="freeze" calcMode="linear" />
+        <set attributeName="width" to="0" begin="m.begin+0.000s" />
+      </rect>
+    </clipPath>
+    <clipPath id="clip-cmd-light-4">
+      <rect x="76" y="57" width="0" height="21">
+        <animate attributeName="width" values="0;9.8;17.7;25.5;33.3;41.1;49.0;56.8;64.6;72.4;80.3;88.1;95.9;103.7;111.6;119.4;127.2;135.0;142.9;150.7;158.5;166.3;174.2;182.0;189.8;197.6;205.5;213.3;221.1;229.0;236.8;244.6;252.4;260.3;268.1;275.9;283.7;291.6;299.4;307.2;315.0;322.9;330.7;338.5;346.3;354.2;362.0;369.8;377.6;385.5;393.3;401.1;409.0;416.8;424.6;432.4;440.3;448.1;455.9;463.7;471.6" keyTimes="0;0.0350;0.0405;0.0499;0.0566;0.0862;0.0917;0.0972;0.1087;0.1190;0.1245;0.1300;0.1623;0.1735;0.2031;0.2191;0.2246;0.2603;0.2887;0.3231;0.3556;0.3846;0.3901;0.4032;0.4087;0.4181;0.4236;0.4320;0.4670;0.4725;0.4987;0.5105;0.5208;0.5547;0.5902;0.6063;0.6297;0.6352;0.6407;0.6750;0.6922;0.7078;0.7324;0.7379;0.7553;0.7692;0.7984;0.8039;0.8379;0.8434;0.8489;0.8668;0.8882;0.8937;0.8992;0.9301;0.9356;0.9534;0.9724;0.9826;1.0000" begin="m.begin+13.773s" dur="1.821s" fill="freeze" calcMode="linear" />
+        <set attributeName="width" to="0" begin="m.begin+0.000s" />
+      </rect>
+    </clipPath>
+    <clipPath id="clip-cmd-light-5">
+      <rect x="76" y="57" width="0" height="21">
+        <animate attributeName="width" values="0;9.8;17.7;25.5;33.3;41.1;49.0;56.8;64.6;72.4;80.3;88.1;95.9;103.7;111.6;119.4;127.2;135.0;142.9;150.7;158.5;166.3;174.2;182.0" keyTimes="0;0.0379;0.1224;0.1365;0.1963;0.2104;0.2339;0.2887;0.3028;0.3173;0.3811;0.3953;0.4259;0.5176;0.6090;0.6231;0.6372;0.6514;0.7357;0.8140;0.8922;0.9128;0.9269;1.0000" begin="m.begin+16.994s" dur="0.708s" fill="freeze" calcMode="linear" />
+        <set attributeName="width" to="0" begin="m.begin+0.000s" />
+      </rect>
+    </clipPath>
+    <clipPath id="clip-cmd-light-6">
+      <rect x="76" y="57" width="0" height="21">
+        <animate attributeName="width" values="0;9.8;17.7;25.5;33.3;41.1;49.0;56.8;64.6;72.4;80.3;88.1;95.9;103.7;111.6;119.4;127.2;135.0;142.9;150.7;158.5;166.3;174.2;182.0;189.8;197.6;205.5;213.3;221.1;229.0;236.8;244.6;252.4;260.3;268.1;275.9;283.7;291.6;299.4;307.2;315.0;322.9;330.7;338.5;346.3;354.2;362.0;369.8;377.6;385.5;393.3;401.1;409.0;416.8;424.6;432.4;440.3;448.1" keyTimes="0;0.0232;0.0423;0.0783;0.0993;0.1049;0.1333;0.1389;0.1603;0.1941;0.1997;0.2054;0.2110;0.2275;0.2331;0.2519;0.2757;0.2814;0.3015;0.3071;0.3206;0.3529;0.3826;0.3882;0.3988;0.4045;0.4101;0.4363;0.4566;0.4622;0.4871;0.5035;0.5143;0.5200;0.5256;0.5569;0.5891;0.6052;0.6344;0.6521;0.6578;0.6634;0.6690;0.7010;0.7284;0.7587;0.7907;0.7964;0.8020;0.8076;0.8343;0.8656;0.8755;0.8950;0.9006;0.9340;0.9645;1.0000" begin="m.begin+19.901s" dur="1.778s" fill="freeze" calcMode="linear" />
+        <set attributeName="width" to="0" begin="m.begin+0.000s" />
+      </rect>
+    </clipPath>
+    <clipPath id="clip-cmd-light-7">
+      <rect x="76" y="57" width="0" height="21">
+        <animate attributeName="width" values="0;9.8;17.7;25.5;33.3;41.1;49.0;56.8;64.6;72.4;80.3;88.1;95.9;103.7;111.6;119.4;127.2;135.0;142.9;150.7;158.5;166.3;174.2;182.0;189.8;197.6;205.5;213.3;221.1;229.0;236.8;244.6;252.4;260.3;268.1" keyTimes="0;0.0431;0.0912;0.0998;0.1378;0.1478;0.1993;0.2418;0.2886;0.3318;0.3404;0.3819;0.3906;0.4380;0.4844;0.4931;0.5366;0.5555;0.5641;0.6062;0.6148;0.6235;0.6322;0.6419;0.6887;0.7427;0.7513;0.7827;0.7974;0.8524;0.8765;0.9285;0.9372;0.9913;1.0000" begin="m.begin+23.079s" dur="1.156s" fill="freeze" calcMode="linear" />
+        <set attributeName="width" to="0" begin="m.begin+0.000s" />
+      </rect>
+    </clipPath>
+    <clipPath id="clip-val-light-3">
+      <rect x="290.52" y="412" width="0" height="32">
+        <animate attributeName="width" from="0" to="223.1" begin="m.begin+12.173s" dur="0.360s" fill="freeze" />
+        <set attributeName="width" to="0" begin="m.begin+0.000s" />
+      </rect>
+    </clipPath>
+  </defs>
+  <rect width="0" height="0" opacity="0">
+    <animate id="m" attributeName="visibility" from="hidden" to="hidden" begin="0s;m.end" dur="30.43s" />
+  </rect>
+  <g class="dark">
+    <rect width="600" height="520" fill="#0f1117" />
+    <g>
+      <g>
+        <rect x="40" y="110" width="137.564" height="28" rx="6" fill="#1a1d27" stroke="#3a3d4a" stroke-width="1" />
+        <text x="54" y="128.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#6b7080">window </text>
+        <text x="108.782" y="128.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#94a3b8">"Slack"</text>
+      </g>
+      <path d="M 52 140 L 52 162 L 64 162" stroke="#3a3d4a" stroke-width="1.5" fill="none" stroke-linecap="round" />
+      <g>
+        <rect x="68" y="148" width="145.39" height="28" rx="6" fill="#1a1d27" stroke="#3a3d4a" stroke-width="1" />
+        <text x="82" y="166.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#6b7080">list </text>
+        <text x="121.13" y="166.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#94a3b8">"Channels"</text>
+      </g>
+      <path d="M 80 178 L 80 200 L 92 200" stroke="#3a3d4a" stroke-width="1.5" fill="none" stroke-linecap="round" />
+      <g>
+        <rect x="96" y="186" width="153.216" height="28" rx="6" fill="#1a1d27" stroke="#3a3d4a" stroke-width="1" />
+        <text x="110" y="204.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#6b7080">button </text>
+        <text x="164.78199999999998" y="204.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#94a3b8">"general"</text>
+      </g>
+      <path d="M 80 178 L 80 238 L 92 238" stroke="#3a3d4a" stroke-width="1.5" fill="none" stroke-linecap="round" />
+      <g>
+        <rect x="96" y="224" width="145.39" height="28" rx="6" fill="#1a1d27" stroke="#3a3d4a" stroke-width="1" />
+        <text x="110" y="242.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#6b7080">button </text>
+        <text x="164.78199999999998" y="242.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#94a3b8">"random"</text>
+      </g>
+      <path d="M 80 178 L 80 276 L 92 276" stroke="#3a3d4a" stroke-width="1.5" fill="none" stroke-linecap="round" />
+      <g>
+        <rect x="96" y="262" width="184.51999999999998" height="28" rx="6" fill="#1a1d27" stroke="#3a3d4a" stroke-width="1" />
+        <text x="110" y="280.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#6b7080">button </text>
+        <text x="164.78199999999998" y="280.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#94a3b8">"engineering"</text>
+      </g>
+      <path d="M 52 140 L 52 314 L 64 314" stroke="#3a3d4a" stroke-width="1.5" fill="none" stroke-linecap="round" />
+      <g>
+        <rect x="68" y="300" width="153.216" height="28" rx="6" fill="#1a1d27" stroke="#3a3d4a" stroke-width="1" />
+        <text x="82" y="318.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#6b7080">group </text>
+        <text x="128.956" y="318.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#94a3b8">"Messages"</text>
+      </g>
+      <path d="M 80 330 L 80 352 L 92 352" stroke="#3a3d4a" stroke-width="1.5" fill="none" stroke-linecap="round" />
+      <g>
+        <rect x="96" y="338" width="247.128" height="28" rx="6" fill="#1a1d27" stroke="#3a3d4a" stroke-width="1" />
+        <text x="110" y="356.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#6b7080">text </text>
+        <text x="149.13" y="356.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#94a3b8">"Hey team, PR is ready"</text>
+      </g>
+      <path d="M 80 330 L 80 390 L 92 390" stroke="#3a3d4a" stroke-width="1.5" fill="none" stroke-linecap="round" />
+      <g>
+        <rect x="96" y="376" width="215.82399999999998" height="28" rx="6" fill="#1a1d27" stroke="#3a3d4a" stroke-width="1" />
+        <text x="110" y="394.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#6b7080">text </text>
+        <text x="149.13" y="394.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#94a3b8">"LGTM, merging now"</text>
+      </g>
+      <path d="M 80 330 L 80 428 L 92 428" stroke="#3a3d4a" stroke-width="1.5" fill="none" stroke-linecap="round" />
+      <g>
+        <rect x="96" y="414" width="184.51999999999998" height="28" rx="6" fill="#1a1d27" stroke="#3a3d4a" stroke-width="1" />
+        <text x="110" y="432.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#6b7080">text_field </text>
+        <text x="196.086" y="432.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#94a3b8">"Message"</text>
+      </g>
+      <path d="M 80 330 L 80 466 L 92 466" stroke="#3a3d4a" stroke-width="1.5" fill="none" stroke-linecap="round" />
+      <g>
+        <rect x="96" y="452" width="129.738" height="28" rx="6" fill="#1a1d27" stroke="#3a3d4a" stroke-width="1" />
+        <text x="110" y="470.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#6b7080">button </text>
+        <text x="164.78199999999998" y="470.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#94a3b8">"Send"</text>
+      </g>
+    </g>
+    <g>
+      <text x="40" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#6366f1">&gt;&gt;&gt;</text>
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#22d3ee" clip-path="url(#clip-cmd-dark-0)" visibility="hidden">loc = xa11y.locator("Slack", selector='button[name="general"]')<set attributeName="visibility" to="visible" begin="m.begin+1.500s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+4.594s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
+      </text>
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#e2e8f0" clip-path="url(#clip-cmd-dark-1)" visibility="hidden">loc.press()<set attributeName="visibility" to="visible" begin="m.begin+4.594s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+7.109s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
+      </text>
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#22d3ee" clip-path="url(#clip-cmd-dark-2)" visibility="hidden">loc = xa11y.locator("Slack", selector='text_field[name="Message"]')<set attributeName="visibility" to="visible" begin="m.begin+7.109s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+10.508s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
+      </text>
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#e2e8f0" clip-path="url(#clip-cmd-dark-3)" visibility="hidden">loc.type_text("Looks good, shipping it!")<set attributeName="visibility" to="visible" begin="m.begin+10.508s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+13.773s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
+      </text>
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#22d3ee" clip-path="url(#clip-cmd-dark-4)" visibility="hidden">loc = xa11y.locator("Slack", selector='button[name="Send"]')<set attributeName="visibility" to="visible" begin="m.begin+13.773s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+16.994s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
+      </text>
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#4ade80" clip-path="url(#clip-cmd-dark-5)" visibility="hidden">assert loc.is_enabled()<set attributeName="visibility" to="visible" begin="m.begin+16.994s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+19.901s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
+      </text>
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#22d3ee" clip-path="url(#clip-cmd-dark-6)" visibility="hidden">loc = xa11y.locator("Slack", selector='text[name*="PR"]')<set attributeName="visibility" to="visible" begin="m.begin+19.901s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+23.079s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
+      </text>
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#f87171" clip-path="url(#clip-cmd-dark-7)" visibility="hidden">assert loc.value() == "wrong text"<set attributeName="visibility" to="visible" begin="m.begin+23.079s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
+      </text>
+      <rect x="76" y="57" width="2" height="17" fill="#e2e8f0">
+        <animate attributeName="opacity" values="1;1;0;0" dur="1s" repeatCount="indefinite" />
+        <animate attributeName="x" values="76;84.8;92.7;100.5;108.3;116.1;124.0;131.8;139.6;147.4;155.3;163.1;170.9;178.7;186.6;194.4;202.2;210.0;217.9;225.7;233.5;241.3;249.2;257.0;264.8;272.6;280.5;288.3;296.1;304.0;311.8;319.6;327.4;335.3;343.1;350.9;358.7;366.6;374.4;382.2;390.0;397.9;405.7;413.5;421.3;429.2;437.0;444.8;452.6;460.5;468.3;476.1;484.0;491.8;499.6;507.4;515.3;523.1;530.9;538.7;546.6;554.4;562.2;570.0" keyTimes="0;0.0213;0.0273;0.0332;0.0391;0.0650;0.0881;0.1214;0.1273;0.1384;0.1443;0.1502;0.1652;0.1711;0.1770;0.1988;0.2157;0.2216;0.2406;0.2700;0.2759;0.3051;0.3292;0.3364;0.3423;0.3787;0.3857;0.3916;0.3975;0.4287;0.4484;0.4776;0.5033;0.5197;0.5568;0.5659;0.5831;0.6134;0.6338;0.6656;0.6840;0.7085;0.7144;0.7203;0.7262;0.7321;0.7380;0.7439;0.7498;0.7710;0.7793;0.7880;0.7939;0.7998;0.8352;0.8569;0.8768;0.8827;0.9083;0.9142;0.9233;0.9612;0.9825;1.0000" begin="m.begin+1.500s" dur="1.694s" fill="freeze" calcMode="linear" />
+        <animate attributeName="x" values="76;84.8;92.7;100.5;108.3;116.1;124.0;131.8;139.6;147.4;155.3;163.1" keyTimes="0;0.1262;0.2925;0.4418;0.4736;0.5053;0.5377;0.5695;0.6012;0.7929;0.9677;1.0000" begin="m.begin+4.594s" dur="0.315s" fill="freeze" calcMode="linear" />
+        <animate attributeName="x" values="76;84.8;92.7;100.5;108.3;116.1;124.0;131.8;139.6;147.4;155.3;163.1;170.9;178.7;186.6;194.4;202.2;210.0;217.9;225.7;233.5;241.3;249.2;257.0;264.8;272.6;280.5;288.3;296.1;304.0;311.8;319.6;327.4;335.3;343.1;350.9;358.7;366.6;374.4;382.2;390.0;397.9;405.7;413.5;421.3;429.2;437.0;444.8;452.6;460.5;468.3;476.1;484.0;491.8;499.6;507.4;515.3;523.1;530.9;538.7;546.6;554.4;562.2;570.0;577.9;585.7;593.5;601.3" keyTimes="0;0.0187;0.0271;0.0562;0.0670;0.0720;0.0770;0.0920;0.0970;0.1129;0.1413;0.1498;0.1548;0.1872;0.2001;0.2051;0.2101;0.2151;0.2327;0.2569;0.2663;0.2713;0.2791;0.3115;0.3251;0.3565;0.3834;0.3884;0.4098;0.4296;0.4435;0.4486;0.4667;0.4717;0.4816;0.4923;0.5229;0.5505;0.5555;0.5680;0.5730;0.6020;0.6294;0.6344;0.6524;0.6693;0.6743;0.6973;0.7114;0.7351;0.7488;0.7538;0.7593;0.7643;0.7940;0.8216;0.8474;0.8524;0.8574;0.8850;0.9154;0.9204;0.9324;0.9374;0.9603;0.9835;0.9885;1.0000" begin="m.begin+7.109s" dur="1.999s" fill="freeze" calcMode="linear" />
+        <animate attributeName="x" values="76;84.8;92.7;100.5;108.3;116.1;124.0;131.8;139.6;147.4;155.3;163.1;170.9;178.7;186.6;194.4;202.2;210.0;217.9;225.7;233.5;241.3;249.2;257.0;264.8;272.6;280.5;288.3;296.1;304.0;311.8;319.6;327.4;335.3;343.1;350.9;358.7;366.6;374.4;382.2;390.0;397.9" keyTimes="0;0.0272;0.0366;0.0880;0.1057;0.1151;0.1415;0.1823;0.1917;0.2011;0.2617;0.2964;0.3153;0.3401;0.3494;0.3588;0.3701;0.4002;0.4096;0.4190;0.4284;0.4617;0.4711;0.5250;0.5755;0.5849;0.5943;0.6305;0.6398;0.6492;0.7054;0.7342;0.7556;0.8005;0.8470;0.8564;0.8658;0.8841;0.9018;0.9228;0.9635;1.0000" begin="m.begin+10.508s" dur="1.065s" fill="freeze" calcMode="linear" />
+        <animate attributeName="x" values="76;84.8;92.7;100.5;108.3;116.1;124.0;131.8;139.6;147.4;155.3;163.1;170.9;178.7;186.6;194.4;202.2;210.0;217.9;225.7;233.5;241.3;249.2;257.0;264.8;272.6;280.5;288.3;296.1;304.0;311.8;319.6;327.4;335.3;343.1;350.9;358.7;366.6;374.4;382.2;390.0;397.9;405.7;413.5;421.3;429.2;437.0;444.8;452.6;460.5;468.3;476.1;484.0;491.8;499.6;507.4;515.3;523.1;530.9;538.7;546.6" keyTimes="0;0.0350;0.0405;0.0499;0.0566;0.0862;0.0917;0.0972;0.1087;0.1190;0.1245;0.1300;0.1623;0.1735;0.2031;0.2191;0.2246;0.2603;0.2887;0.3231;0.3556;0.3846;0.3901;0.4032;0.4087;0.4181;0.4236;0.4320;0.4670;0.4725;0.4987;0.5105;0.5208;0.5547;0.5902;0.6063;0.6297;0.6352;0.6407;0.6750;0.6922;0.7078;0.7324;0.7379;0.7553;0.7692;0.7984;0.8039;0.8379;0.8434;0.8489;0.8668;0.8882;0.8937;0.8992;0.9301;0.9356;0.9534;0.9724;0.9826;1.0000" begin="m.begin+13.773s" dur="1.821s" fill="freeze" calcMode="linear" />
+        <animate attributeName="x" values="76;84.8;92.7;100.5;108.3;116.1;124.0;131.8;139.6;147.4;155.3;163.1;170.9;178.7;186.6;194.4;202.2;210.0;217.9;225.7;233.5;241.3;249.2;257.0" keyTimes="0;0.0379;0.1224;0.1365;0.1963;0.2104;0.2339;0.2887;0.3028;0.3173;0.3811;0.3953;0.4259;0.5176;0.6090;0.6231;0.6372;0.6514;0.7357;0.8140;0.8922;0.9128;0.9269;1.0000" begin="m.begin+16.994s" dur="0.708s" fill="freeze" calcMode="linear" />
+        <animate attributeName="x" values="76;84.8;92.7;100.5;108.3;116.1;124.0;131.8;139.6;147.4;155.3;163.1;170.9;178.7;186.6;194.4;202.2;210.0;217.9;225.7;233.5;241.3;249.2;257.0;264.8;272.6;280.5;288.3;296.1;304.0;311.8;319.6;327.4;335.3;343.1;350.9;358.7;366.6;374.4;382.2;390.0;397.9;405.7;413.5;421.3;429.2;437.0;444.8;452.6;460.5;468.3;476.1;484.0;491.8;499.6;507.4;515.3;523.1" keyTimes="0;0.0232;0.0423;0.0783;0.0993;0.1049;0.1333;0.1389;0.1603;0.1941;0.1997;0.2054;0.2110;0.2275;0.2331;0.2519;0.2757;0.2814;0.3015;0.3071;0.3206;0.3529;0.3826;0.3882;0.3988;0.4045;0.4101;0.4363;0.4566;0.4622;0.4871;0.5035;0.5143;0.5200;0.5256;0.5569;0.5891;0.6052;0.6344;0.6521;0.6578;0.6634;0.6690;0.7010;0.7284;0.7587;0.7907;0.7964;0.8020;0.8076;0.8343;0.8656;0.8755;0.8950;0.9006;0.9340;0.9645;1.0000" begin="m.begin+19.901s" dur="1.778s" fill="freeze" calcMode="linear" />
+        <animate attributeName="x" values="76;84.8;92.7;100.5;108.3;116.1;124.0;131.8;139.6;147.4;155.3;163.1;170.9;178.7;186.6;194.4;202.2;210.0;217.9;225.7;233.5;241.3;249.2;257.0;264.8;272.6;280.5;288.3;296.1;304.0;311.8;319.6;327.4;335.3;343.1" keyTimes="0;0.0431;0.0912;0.0998;0.1378;0.1478;0.1993;0.2418;0.2886;0.3318;0.3404;0.3819;0.3906;0.4380;0.4844;0.4931;0.5366;0.5555;0.5641;0.6062;0.6148;0.6235;0.6322;0.6419;0.6887;0.7427;0.7513;0.7827;0.7974;0.8524;0.8765;0.9285;0.9372;0.9913;1.0000" begin="m.begin+23.079s" dur="1.156s" fill="freeze" calcMode="linear" />
+        <set attributeName="x" to="76" begin="m.begin+0.000s" />
+      </rect>
+    </g>
+    <g>
+      <rect x="94" y="184" width="157.216" height="32" rx="8" fill="none" stroke="#22d3ee" stroke-width="2" opacity="0">
+        <animate attributeName="opacity" from="0" to="1" begin="m.begin+3.394s" dur="0.3s" fill="freeze" />
+        <animate attributeName="opacity" from="1" to="0" begin="m.begin+7.109s" dur="0.3s" fill="freeze" />
+        <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+      </rect>
+      <rect x="94" y="184" width="157.216" height="32" rx="8" fill="none" stroke="#22d3ee" stroke-width="2" opacity="0">
+        <animate attributeName="opacity" from="0" to="1" begin="m.begin+5.109s" dur="0.3s" fill="freeze" />
+        <animate attributeName="opacity" from="1" to="0" begin="m.begin+7.109s" dur="0.3s" fill="freeze" />
+        <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+        <animate attributeName="stroke-width" values="2;5;2" begin="m.begin+5.509s" dur="0.35s" fill="freeze" />
+      </rect>
+      <rect x="92" y="182" width="161.216" height="36" rx="10" fill="#22d3ee" opacity="0">
+        <animate attributeName="opacity" values="0;0.35;0" begin="m.begin+5.509s" dur="0.35s" fill="freeze" />
+      </rect>
+      <rect x="94" y="412" width="188.51999999999998" height="32" rx="8" fill="none" stroke="#22d3ee" stroke-width="2" opacity="0">
+        <animate attributeName="opacity" from="0" to="1" begin="m.begin+9.308s" dur="0.3s" fill="freeze" />
+        <animate attributeName="opacity" from="1" to="0" begin="m.begin+13.773s" dur="0.3s" fill="freeze" />
+        <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+      </rect>
+      <rect x="94" y="412" width="188.51999999999998" height="32" rx="8" fill="none" stroke="#22d3ee" stroke-width="2" opacity="0">
+        <animate attributeName="opacity" from="0" to="1" begin="m.begin+11.773s" dur="0.3s" fill="freeze" />
+        <animate attributeName="opacity" from="1" to="0" begin="m.begin+13.773s" dur="0.3s" fill="freeze" />
+        <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+      </rect>
+      <text x="290.52" y="432.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="12" fill="#22d3ee" opacity="0" clip-path="url(#clip-val-dark-3)">= "Looks good, shipping it!"<set attributeName="opacity" to="1" begin="m.begin+12.173s" />
+        <animate attributeName="opacity" from="1" to="0" begin="m.begin+13.773s" dur="0.3s" fill="freeze" />
+        <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+      </text>
+      <rect x="94" y="450" width="133.738" height="32" rx="8" fill="none" stroke="#22d3ee" stroke-width="2" opacity="0">
+        <animate attributeName="opacity" from="0" to="1" begin="m.begin+15.794s" dur="0.3s" fill="freeze" />
+        <animate attributeName="opacity" from="1" to="0" begin="m.begin+19.901s" dur="0.3s" fill="freeze" />
+        <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+      </rect>
+      <rect x="94" y="450" width="133.738" height="32" rx="8" fill="none" stroke="#4ade80" stroke-width="2" opacity="0">
+        <animate attributeName="opacity" from="0" to="1" begin="m.begin+17.901s" dur="0.3s" fill="freeze" />
+        <animate attributeName="opacity" from="1" to="0" begin="m.begin+19.901s" dur="0.3s" fill="freeze" />
+        <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+      </rect>
+      <rect x="94" y="336" width="251.128" height="32" rx="8" fill="none" stroke="#22d3ee" stroke-width="2" opacity="0">
+        <animate attributeName="opacity" from="0" to="1" begin="m.begin+21.879s" dur="0.3s" fill="freeze" />
+        <animate attributeName="opacity" from="1" to="0" begin="m.begin+29.435s" dur="0.3s" fill="freeze" />
+        <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+      </rect>
+      <rect x="94" y="336" width="251.128" height="32" rx="8" fill="none" stroke="#f87171" stroke-width="2" opacity="0">
+        <animate attributeName="opacity" from="0" to="1" begin="m.begin+24.435s" dur="0.3s" fill="freeze" />
+        <animate attributeName="opacity" from="1" to="0" begin="m.begin+29.435s" dur="0.3s" fill="freeze" />
+        <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+      </rect>
+    </g>
+    <g>
+      <g opacity="0">
+        <rect x="259.216" y="186" width="59" height="28" rx="14" fill="#0a2030" stroke="#22d3ee" stroke-width="1" />
+        <text x="269.216" y="204.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="12" fill="#22d3ee">press</text>
+        <animate attributeName="opacity" from="0" to="1" begin="m.begin+5.509s" dur="0.2s" fill="freeze" />
+        <animate attributeName="opacity" from="1" to="0" begin="m.begin+7.109s" dur="0.3s" fill="freeze" />
+        <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+      </g>
+      <g opacity="0">
+        <rect x="235.738" y="452" width="130" height="28" rx="14" fill="#0a2e1a" stroke="#4ade80" stroke-width="1" />
+        <text x="245.738" y="470.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="12" fill="#4ade80">is_enabled() ✓</text>
+        <animate attributeName="opacity" from="0" to="1" begin="m.begin+18.301s" dur="0.2s" fill="freeze" />
+        <animate attributeName="opacity" from="1" to="0" begin="m.begin+19.901s" dur="0.3s" fill="freeze" />
+        <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+      </g>
+      <g opacity="0">
+        <rect x="353.128" y="338" width="90" height="28" rx="14" fill="#2e0a0a" stroke="#f87171" stroke-width="1" />
+        <text x="363.128" y="356.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="12" fill="#f87171">value() ✗</text>
+        <animate attributeName="opacity" from="0" to="1" begin="m.begin+24.835s" dur="0.2s" fill="freeze" />
+        <animate attributeName="opacity" from="1" to="0" begin="m.begin+29.435s" dur="0.3s" fill="freeze" />
+        <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+      </g>
+    </g>
+    <rect width="600" height="520" fill="#0f1117" opacity="0" pointer-events="none">
+      <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.45;0.55;1" begin="m.begin+29.435s" dur="1.00s" fill="freeze" />
+      <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+    </rect>
+  </g>
+  <g class="light">
+    <rect width="600" height="520" fill="#ffffff" />
+    <g>
+      <g>
+        <rect x="40" y="110" width="137.564" height="28" rx="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1" />
+        <text x="54" y="128.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#656d76">window </text>
+        <text x="108.782" y="128.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#1f2328">"Slack"</text>
+      </g>
+      <path d="M 52 140 L 52 162 L 64 162" stroke="#d1d9e0" stroke-width="1.5" fill="none" stroke-linecap="round" />
+      <g>
+        <rect x="68" y="148" width="145.39" height="28" rx="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1" />
+        <text x="82" y="166.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#656d76">list </text>
+        <text x="121.13" y="166.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#1f2328">"Channels"</text>
+      </g>
+      <path d="M 80 178 L 80 200 L 92 200" stroke="#d1d9e0" stroke-width="1.5" fill="none" stroke-linecap="round" />
+      <g>
+        <rect x="96" y="186" width="153.216" height="28" rx="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1" />
+        <text x="110" y="204.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#656d76">button </text>
+        <text x="164.78199999999998" y="204.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#1f2328">"general"</text>
+      </g>
+      <path d="M 80 178 L 80 238 L 92 238" stroke="#d1d9e0" stroke-width="1.5" fill="none" stroke-linecap="round" />
+      <g>
+        <rect x="96" y="224" width="145.39" height="28" rx="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1" />
+        <text x="110" y="242.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#656d76">button </text>
+        <text x="164.78199999999998" y="242.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#1f2328">"random"</text>
+      </g>
+      <path d="M 80 178 L 80 276 L 92 276" stroke="#d1d9e0" stroke-width="1.5" fill="none" stroke-linecap="round" />
+      <g>
+        <rect x="96" y="262" width="184.51999999999998" height="28" rx="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1" />
+        <text x="110" y="280.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#656d76">button </text>
+        <text x="164.78199999999998" y="280.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#1f2328">"engineering"</text>
+      </g>
+      <path d="M 52 140 L 52 314 L 64 314" stroke="#d1d9e0" stroke-width="1.5" fill="none" stroke-linecap="round" />
+      <g>
+        <rect x="68" y="300" width="153.216" height="28" rx="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1" />
+        <text x="82" y="318.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#656d76">group </text>
+        <text x="128.956" y="318.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#1f2328">"Messages"</text>
+      </g>
+      <path d="M 80 330 L 80 352 L 92 352" stroke="#d1d9e0" stroke-width="1.5" fill="none" stroke-linecap="round" />
+      <g>
+        <rect x="96" y="338" width="247.128" height="28" rx="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1" />
+        <text x="110" y="356.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#656d76">text </text>
+        <text x="149.13" y="356.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#1f2328">"Hey team, PR is ready"</text>
+      </g>
+      <path d="M 80 330 L 80 390 L 92 390" stroke="#d1d9e0" stroke-width="1.5" fill="none" stroke-linecap="round" />
+      <g>
+        <rect x="96" y="376" width="215.82399999999998" height="28" rx="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1" />
+        <text x="110" y="394.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#656d76">text </text>
+        <text x="149.13" y="394.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#1f2328">"LGTM, merging now"</text>
+      </g>
+      <path d="M 80 330 L 80 428 L 92 428" stroke="#d1d9e0" stroke-width="1.5" fill="none" stroke-linecap="round" />
+      <g>
+        <rect x="96" y="414" width="184.51999999999998" height="28" rx="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1" />
+        <text x="110" y="432.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#656d76">text_field </text>
+        <text x="196.086" y="432.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#1f2328">"Message"</text>
+      </g>
+      <path d="M 80 330 L 80 466 L 92 466" stroke="#d1d9e0" stroke-width="1.5" fill="none" stroke-linecap="round" />
+      <g>
+        <rect x="96" y="452" width="129.738" height="28" rx="6" fill="#f6f8fa" stroke="#d1d9e0" stroke-width="1" />
+        <text x="110" y="470.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#656d76">button </text>
+        <text x="164.78199999999998" y="470.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#1f2328">"Send"</text>
+      </g>
+    </g>
+    <g>
+      <text x="40" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#6366f1">&gt;&gt;&gt;</text>
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#0891b2" clip-path="url(#clip-cmd-light-0)" visibility="hidden">loc = xa11y.locator("Slack", selector='button[name="general"]')<set attributeName="visibility" to="visible" begin="m.begin+1.500s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+4.594s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
+      </text>
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#1f2328" clip-path="url(#clip-cmd-light-1)" visibility="hidden">loc.press()<set attributeName="visibility" to="visible" begin="m.begin+4.594s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+7.109s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
+      </text>
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#0891b2" clip-path="url(#clip-cmd-light-2)" visibility="hidden">loc = xa11y.locator("Slack", selector='text_field[name="Message"]')<set attributeName="visibility" to="visible" begin="m.begin+7.109s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+10.508s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
+      </text>
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#1f2328" clip-path="url(#clip-cmd-light-3)" visibility="hidden">loc.type_text("Looks good, shipping it!")<set attributeName="visibility" to="visible" begin="m.begin+10.508s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+13.773s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
+      </text>
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#0891b2" clip-path="url(#clip-cmd-light-4)" visibility="hidden">loc = xa11y.locator("Slack", selector='button[name="Send"]')<set attributeName="visibility" to="visible" begin="m.begin+13.773s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+16.994s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
+      </text>
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#16a34a" clip-path="url(#clip-cmd-light-5)" visibility="hidden">assert loc.is_enabled()<set attributeName="visibility" to="visible" begin="m.begin+16.994s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+19.901s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
+      </text>
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#0891b2" clip-path="url(#clip-cmd-light-6)" visibility="hidden">loc = xa11y.locator("Slack", selector='text[name*="PR"]')<set attributeName="visibility" to="visible" begin="m.begin+19.901s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+23.079s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
+      </text>
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#dc2626" clip-path="url(#clip-cmd-light-7)" visibility="hidden">assert loc.value() == "wrong text"<set attributeName="visibility" to="visible" begin="m.begin+23.079s" />
+        <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
+      </text>
+      <rect x="76" y="57" width="2" height="17" fill="#1f2328">
+        <animate attributeName="opacity" values="1;1;0;0" dur="1s" repeatCount="indefinite" />
+        <animate attributeName="x" values="76;84.8;92.7;100.5;108.3;116.1;124.0;131.8;139.6;147.4;155.3;163.1;170.9;178.7;186.6;194.4;202.2;210.0;217.9;225.7;233.5;241.3;249.2;257.0;264.8;272.6;280.5;288.3;296.1;304.0;311.8;319.6;327.4;335.3;343.1;350.9;358.7;366.6;374.4;382.2;390.0;397.9;405.7;413.5;421.3;429.2;437.0;444.8;452.6;460.5;468.3;476.1;484.0;491.8;499.6;507.4;515.3;523.1;530.9;538.7;546.6;554.4;562.2;570.0" keyTimes="0;0.0213;0.0273;0.0332;0.0391;0.0650;0.0881;0.1214;0.1273;0.1384;0.1443;0.1502;0.1652;0.1711;0.1770;0.1988;0.2157;0.2216;0.2406;0.2700;0.2759;0.3051;0.3292;0.3364;0.3423;0.3787;0.3857;0.3916;0.3975;0.4287;0.4484;0.4776;0.5033;0.5197;0.5568;0.5659;0.5831;0.6134;0.6338;0.6656;0.6840;0.7085;0.7144;0.7203;0.7262;0.7321;0.7380;0.7439;0.7498;0.7710;0.7793;0.7880;0.7939;0.7998;0.8352;0.8569;0.8768;0.8827;0.9083;0.9142;0.9233;0.9612;0.9825;1.0000" begin="m.begin+1.500s" dur="1.694s" fill="freeze" calcMode="linear" />
+        <animate attributeName="x" values="76;84.8;92.7;100.5;108.3;116.1;124.0;131.8;139.6;147.4;155.3;163.1" keyTimes="0;0.1262;0.2925;0.4418;0.4736;0.5053;0.5377;0.5695;0.6012;0.7929;0.9677;1.0000" begin="m.begin+4.594s" dur="0.315s" fill="freeze" calcMode="linear" />
+        <animate attributeName="x" values="76;84.8;92.7;100.5;108.3;116.1;124.0;131.8;139.6;147.4;155.3;163.1;170.9;178.7;186.6;194.4;202.2;210.0;217.9;225.7;233.5;241.3;249.2;257.0;264.8;272.6;280.5;288.3;296.1;304.0;311.8;319.6;327.4;335.3;343.1;350.9;358.7;366.6;374.4;382.2;390.0;397.9;405.7;413.5;421.3;429.2;437.0;444.8;452.6;460.5;468.3;476.1;484.0;491.8;499.6;507.4;515.3;523.1;530.9;538.7;546.6;554.4;562.2;570.0;577.9;585.7;593.5;601.3" keyTimes="0;0.0187;0.0271;0.0562;0.0670;0.0720;0.0770;0.0920;0.0970;0.1129;0.1413;0.1498;0.1548;0.1872;0.2001;0.2051;0.2101;0.2151;0.2327;0.2569;0.2663;0.2713;0.2791;0.3115;0.3251;0.3565;0.3834;0.3884;0.4098;0.4296;0.4435;0.4486;0.4667;0.4717;0.4816;0.4923;0.5229;0.5505;0.5555;0.5680;0.5730;0.6020;0.6294;0.6344;0.6524;0.6693;0.6743;0.6973;0.7114;0.7351;0.7488;0.7538;0.7593;0.7643;0.7940;0.8216;0.8474;0.8524;0.8574;0.8850;0.9154;0.9204;0.9324;0.9374;0.9603;0.9835;0.9885;1.0000" begin="m.begin+7.109s" dur="1.999s" fill="freeze" calcMode="linear" />
+        <animate attributeName="x" values="76;84.8;92.7;100.5;108.3;116.1;124.0;131.8;139.6;147.4;155.3;163.1;170.9;178.7;186.6;194.4;202.2;210.0;217.9;225.7;233.5;241.3;249.2;257.0;264.8;272.6;280.5;288.3;296.1;304.0;311.8;319.6;327.4;335.3;343.1;350.9;358.7;366.6;374.4;382.2;390.0;397.9" keyTimes="0;0.0272;0.0366;0.0880;0.1057;0.1151;0.1415;0.1823;0.1917;0.2011;0.2617;0.2964;0.3153;0.3401;0.3494;0.3588;0.3701;0.4002;0.4096;0.4190;0.4284;0.4617;0.4711;0.5250;0.5755;0.5849;0.5943;0.6305;0.6398;0.6492;0.7054;0.7342;0.7556;0.8005;0.8470;0.8564;0.8658;0.8841;0.9018;0.9228;0.9635;1.0000" begin="m.begin+10.508s" dur="1.065s" fill="freeze" calcMode="linear" />
+        <animate attributeName="x" values="76;84.8;92.7;100.5;108.3;116.1;124.0;131.8;139.6;147.4;155.3;163.1;170.9;178.7;186.6;194.4;202.2;210.0;217.9;225.7;233.5;241.3;249.2;257.0;264.8;272.6;280.5;288.3;296.1;304.0;311.8;319.6;327.4;335.3;343.1;350.9;358.7;366.6;374.4;382.2;390.0;397.9;405.7;413.5;421.3;429.2;437.0;444.8;452.6;460.5;468.3;476.1;484.0;491.8;499.6;507.4;515.3;523.1;530.9;538.7;546.6" keyTimes="0;0.0350;0.0405;0.0499;0.0566;0.0862;0.0917;0.0972;0.1087;0.1190;0.1245;0.1300;0.1623;0.1735;0.2031;0.2191;0.2246;0.2603;0.2887;0.3231;0.3556;0.3846;0.3901;0.4032;0.4087;0.4181;0.4236;0.4320;0.4670;0.4725;0.4987;0.5105;0.5208;0.5547;0.5902;0.6063;0.6297;0.6352;0.6407;0.6750;0.6922;0.7078;0.7324;0.7379;0.7553;0.7692;0.7984;0.8039;0.8379;0.8434;0.8489;0.8668;0.8882;0.8937;0.8992;0.9301;0.9356;0.9534;0.9724;0.9826;1.0000" begin="m.begin+13.773s" dur="1.821s" fill="freeze" calcMode="linear" />
+        <animate attributeName="x" values="76;84.8;92.7;100.5;108.3;116.1;124.0;131.8;139.6;147.4;155.3;163.1;170.9;178.7;186.6;194.4;202.2;210.0;217.9;225.7;233.5;241.3;249.2;257.0" keyTimes="0;0.0379;0.1224;0.1365;0.1963;0.2104;0.2339;0.2887;0.3028;0.3173;0.3811;0.3953;0.4259;0.5176;0.6090;0.6231;0.6372;0.6514;0.7357;0.8140;0.8922;0.9128;0.9269;1.0000" begin="m.begin+16.994s" dur="0.708s" fill="freeze" calcMode="linear" />
+        <animate attributeName="x" values="76;84.8;92.7;100.5;108.3;116.1;124.0;131.8;139.6;147.4;155.3;163.1;170.9;178.7;186.6;194.4;202.2;210.0;217.9;225.7;233.5;241.3;249.2;257.0;264.8;272.6;280.5;288.3;296.1;304.0;311.8;319.6;327.4;335.3;343.1;350.9;358.7;366.6;374.4;382.2;390.0;397.9;405.7;413.5;421.3;429.2;437.0;444.8;452.6;460.5;468.3;476.1;484.0;491.8;499.6;507.4;515.3;523.1" keyTimes="0;0.0232;0.0423;0.0783;0.0993;0.1049;0.1333;0.1389;0.1603;0.1941;0.1997;0.2054;0.2110;0.2275;0.2331;0.2519;0.2757;0.2814;0.3015;0.3071;0.3206;0.3529;0.3826;0.3882;0.3988;0.4045;0.4101;0.4363;0.4566;0.4622;0.4871;0.5035;0.5143;0.5200;0.5256;0.5569;0.5891;0.6052;0.6344;0.6521;0.6578;0.6634;0.6690;0.7010;0.7284;0.7587;0.7907;0.7964;0.8020;0.8076;0.8343;0.8656;0.8755;0.8950;0.9006;0.9340;0.9645;1.0000" begin="m.begin+19.901s" dur="1.778s" fill="freeze" calcMode="linear" />
+        <animate attributeName="x" values="76;84.8;92.7;100.5;108.3;116.1;124.0;131.8;139.6;147.4;155.3;163.1;170.9;178.7;186.6;194.4;202.2;210.0;217.9;225.7;233.5;241.3;249.2;257.0;264.8;272.6;280.5;288.3;296.1;304.0;311.8;319.6;327.4;335.3;343.1" keyTimes="0;0.0431;0.0912;0.0998;0.1378;0.1478;0.1993;0.2418;0.2886;0.3318;0.3404;0.3819;0.3906;0.4380;0.4844;0.4931;0.5366;0.5555;0.5641;0.6062;0.6148;0.6235;0.6322;0.6419;0.6887;0.7427;0.7513;0.7827;0.7974;0.8524;0.8765;0.9285;0.9372;0.9913;1.0000" begin="m.begin+23.079s" dur="1.156s" fill="freeze" calcMode="linear" />
+        <set attributeName="x" to="76" begin="m.begin+0.000s" />
+      </rect>
+    </g>
+    <g>
+      <rect x="94" y="184" width="157.216" height="32" rx="8" fill="none" stroke="#0891b2" stroke-width="2" opacity="0">
+        <animate attributeName="opacity" from="0" to="1" begin="m.begin+3.394s" dur="0.3s" fill="freeze" />
+        <animate attributeName="opacity" from="1" to="0" begin="m.begin+7.109s" dur="0.3s" fill="freeze" />
+        <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+      </rect>
+      <rect x="94" y="184" width="157.216" height="32" rx="8" fill="none" stroke="#0891b2" stroke-width="2" opacity="0">
+        <animate attributeName="opacity" from="0" to="1" begin="m.begin+5.109s" dur="0.3s" fill="freeze" />
+        <animate attributeName="opacity" from="1" to="0" begin="m.begin+7.109s" dur="0.3s" fill="freeze" />
+        <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+        <animate attributeName="stroke-width" values="2;5;2" begin="m.begin+5.509s" dur="0.35s" fill="freeze" />
+      </rect>
+      <rect x="92" y="182" width="161.216" height="36" rx="10" fill="#0891b2" opacity="0">
+        <animate attributeName="opacity" values="0;0.35;0" begin="m.begin+5.509s" dur="0.35s" fill="freeze" />
+      </rect>
+      <rect x="94" y="412" width="188.51999999999998" height="32" rx="8" fill="none" stroke="#0891b2" stroke-width="2" opacity="0">
+        <animate attributeName="opacity" from="0" to="1" begin="m.begin+9.308s" dur="0.3s" fill="freeze" />
+        <animate attributeName="opacity" from="1" to="0" begin="m.begin+13.773s" dur="0.3s" fill="freeze" />
+        <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+      </rect>
+      <rect x="94" y="412" width="188.51999999999998" height="32" rx="8" fill="none" stroke="#0891b2" stroke-width="2" opacity="0">
+        <animate attributeName="opacity" from="0" to="1" begin="m.begin+11.773s" dur="0.3s" fill="freeze" />
+        <animate attributeName="opacity" from="1" to="0" begin="m.begin+13.773s" dur="0.3s" fill="freeze" />
+        <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+      </rect>
+      <text x="290.52" y="432.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="12" fill="#0891b2" opacity="0" clip-path="url(#clip-val-light-3)">= "Looks good, shipping it!"<set attributeName="opacity" to="1" begin="m.begin+12.173s" />
+        <animate attributeName="opacity" from="1" to="0" begin="m.begin+13.773s" dur="0.3s" fill="freeze" />
+        <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+      </text>
+      <rect x="94" y="450" width="133.738" height="32" rx="8" fill="none" stroke="#0891b2" stroke-width="2" opacity="0">
+        <animate attributeName="opacity" from="0" to="1" begin="m.begin+15.794s" dur="0.3s" fill="freeze" />
+        <animate attributeName="opacity" from="1" to="0" begin="m.begin+19.901s" dur="0.3s" fill="freeze" />
+        <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+      </rect>
+      <rect x="94" y="450" width="133.738" height="32" rx="8" fill="none" stroke="#16a34a" stroke-width="2" opacity="0">
+        <animate attributeName="opacity" from="0" to="1" begin="m.begin+17.901s" dur="0.3s" fill="freeze" />
+        <animate attributeName="opacity" from="1" to="0" begin="m.begin+19.901s" dur="0.3s" fill="freeze" />
+        <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+      </rect>
+      <rect x="94" y="336" width="251.128" height="32" rx="8" fill="none" stroke="#0891b2" stroke-width="2" opacity="0">
+        <animate attributeName="opacity" from="0" to="1" begin="m.begin+21.879s" dur="0.3s" fill="freeze" />
+        <animate attributeName="opacity" from="1" to="0" begin="m.begin+29.435s" dur="0.3s" fill="freeze" />
+        <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+      </rect>
+      <rect x="94" y="336" width="251.128" height="32" rx="8" fill="none" stroke="#dc2626" stroke-width="2" opacity="0">
+        <animate attributeName="opacity" from="0" to="1" begin="m.begin+24.435s" dur="0.3s" fill="freeze" />
+        <animate attributeName="opacity" from="1" to="0" begin="m.begin+29.435s" dur="0.3s" fill="freeze" />
+        <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+      </rect>
+    </g>
+    <g>
+      <g opacity="0">
+        <rect x="259.216" y="186" width="59" height="28" rx="14" fill="#cffafe" stroke="#0891b2" stroke-width="1" />
+        <text x="269.216" y="204.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="12" fill="#0891b2">press</text>
+        <animate attributeName="opacity" from="0" to="1" begin="m.begin+5.509s" dur="0.2s" fill="freeze" />
+        <animate attributeName="opacity" from="1" to="0" begin="m.begin+7.109s" dur="0.3s" fill="freeze" />
+        <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+      </g>
+      <g opacity="0">
+        <rect x="235.738" y="452" width="130" height="28" rx="14" fill="#dcfce7" stroke="#16a34a" stroke-width="1" />
+        <text x="245.738" y="470.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="12" fill="#16a34a">is_enabled() ✓</text>
+        <animate attributeName="opacity" from="0" to="1" begin="m.begin+18.301s" dur="0.2s" fill="freeze" />
+        <animate attributeName="opacity" from="1" to="0" begin="m.begin+19.901s" dur="0.3s" fill="freeze" />
+        <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+      </g>
+      <g opacity="0">
+        <rect x="353.128" y="338" width="90" height="28" rx="14" fill="#fee2e2" stroke="#dc2626" stroke-width="1" />
+        <text x="363.128" y="356.55" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="12" fill="#dc2626">value() ✗</text>
+        <animate attributeName="opacity" from="0" to="1" begin="m.begin+24.835s" dur="0.2s" fill="freeze" />
+        <animate attributeName="opacity" from="1" to="0" begin="m.begin+29.435s" dur="0.3s" fill="freeze" />
+        <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+      </g>
+    </g>
+    <rect width="600" height="520" fill="#ffffff" opacity="0" pointer-events="none">
+      <animate attributeName="opacity" values="0;1;1;0" keyTimes="0;0.45;0.55;1" begin="m.begin+29.435s" dur="1.00s" fill="freeze" />
+      <set attributeName="opacity" to="0" begin="m.begin+0.000s" />
+    </rect>
+  </g>
+</svg>
