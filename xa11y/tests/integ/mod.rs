@@ -1,11 +1,6 @@
 //! Integration test helpers — minimize boilerplate for cross-platform tests.
 
-use std::sync::Arc;
 use xa11y::*;
-
-fn provider() -> Arc<dyn Provider> {
-    xa11y::create_provider().expect("Failed to create provider")
-}
 
 /// Get the test app tree with default options, retrying briefly for registration.
 pub fn app_tree() -> Tree {
@@ -78,7 +73,7 @@ pub fn try_act_with(
     action: Action,
     data: Option<ActionData>,
 ) -> Result<()> {
-    provider().perform_action(tree, node, action, data)
+    xa11y::perform_action(tree, node, action, data)
 }
 
 /// Perform an action on a node, wait briefly, then re-read the tree.
