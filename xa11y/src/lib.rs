@@ -96,16 +96,6 @@ pub fn all_apps(opts: &QueryOptions) -> Result<Tree> {
     get_provider_ref()?.get_all_apps(opts)
 }
 
-/// Perform an action on an element from a specific snapshot.
-pub fn perform_action(
-    tree: &Tree,
-    node: &Node,
-    action: Action,
-    data: Option<ActionData>,
-) -> Result<()> {
-    get_provider_ref()?.perform_action(tree, node, action, data)
-}
-
 /// Check if accessibility permissions are granted.
 pub fn check_permissions() -> Result<PermissionStatus> {
     get_provider_ref()?.check_permissions()
@@ -114,6 +104,15 @@ pub fn check_permissions() -> Result<PermissionStatus> {
 /// List running applications with their PIDs.
 pub fn list_apps() -> Result<Vec<AppInfo>> {
     get_provider_ref()?.list_apps()
+}
+
+/// Get a reference to the global platform provider.
+///
+/// Use this to call `Provider` trait methods directly (e.g. `perform_action`).
+/// For most use cases, prefer `Locator` which handles action dispatch,
+/// retries, and re-querying automatically.
+pub fn provider() -> Result<&'static dyn Provider> {
+    get_provider_ref()
 }
 
 /// Create a Locator targeting a specific application.
@@ -136,7 +135,7 @@ pub fn locator_with_opts(target: AppTarget, selector: &str, opts: QueryOptions) 
 /// Create a new platform-appropriate accessibility provider.
 ///
 /// Returns a fresh provider instance (not the global singleton). Prefer
-/// the module-level functions (`app`, `all_apps`, `perform_action`, etc.)
+/// the module-level functions (`app`, `all_apps`, `provider`, etc.)
 /// for normal use.
 #[doc(hidden)]
 pub fn create_provider() -> Result<Arc<dyn Provider>> {

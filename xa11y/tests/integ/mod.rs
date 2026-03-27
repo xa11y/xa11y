@@ -68,7 +68,9 @@ pub fn act(tree: &Tree, node: &Node, action: Action) -> Tree {
 
 /// Perform an action with data on a node, wait, then re-read the tree.
 pub fn act_with(tree: &Tree, node: &Node, action: Action, data: Option<ActionData>) -> Tree {
-    xa11y::perform_action(tree, node, action, data)
+    xa11y::provider()
+        .expect("provider")
+        .perform_action(tree, node, action, data)
         .unwrap_or_else(|e| panic!("Action {:?} failed: {}", action, e));
     std::thread::sleep(std::time::Duration::from_millis(100));
     app_tree()
