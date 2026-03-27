@@ -260,12 +260,32 @@ class Locator:
         """Get the current value of the matched element."""
     def description(self) -> str | None:
         """Get the accessible description of the matched element."""
+    def bounds(self) -> Rect | None:
+        """Get the bounding rectangle of the matched element."""
+    def numeric_value(self) -> float | None:
+        """Get the numeric value of the matched element (e.g. slider position)."""
     def is_visible(self) -> bool:
         """Check whether the matched element is visible."""
     def is_enabled(self) -> bool:
         """Check whether the matched element is enabled."""
     def is_focused(self) -> bool:
         """Check whether the matched element has keyboard focus."""
+    def is_selected(self) -> bool:
+        """Check whether the matched element is selected."""
+    def checked(self) -> str | None:
+        """Check state: ``"on"``, ``"off"``, ``"mixed"``, or ``None``."""
+    def is_expanded(self) -> bool | None:
+        """Expansion state (``None`` if not expandable)."""
+    def is_editable(self) -> bool:
+        """Check whether the matched element supports text editing."""
+    def is_focusable(self) -> bool:
+        """Check whether the matched element can receive focus."""
+    def is_modal(self) -> bool:
+        """Check whether the matched element is a modal dialog."""
+    def is_required(self) -> bool:
+        """Check whether the matched element is a required form field."""
+    def is_busy(self) -> bool:
+        """Check whether the matched element is in a busy/loading state."""
     def exists(self) -> bool:
         """Check whether the selector matches any element."""
     def count(self) -> int:
