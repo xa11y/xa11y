@@ -784,6 +784,19 @@ impl Locator {
         Ok(self.resolve_node()?.description.clone())
     }
 
+    fn bounds(&self) -> PyResult<Option<Rect>> {
+        Ok(self.resolve_node()?.bounds.as_ref().map(|r| Rect {
+            x: r.x,
+            y: r.y,
+            width: r.width,
+            height: r.height,
+        }))
+    }
+
+    fn numeric_value(&self) -> PyResult<Option<f64>> {
+        Ok(self.resolve_node()?.numeric_value)
+    }
+
     fn is_visible(&self) -> PyResult<bool> {
         Ok(self.resolve_node()?.states.visible)
     }
@@ -794,6 +807,42 @@ impl Locator {
 
     fn is_focused(&self) -> PyResult<bool> {
         Ok(self.resolve_node()?.states.focused)
+    }
+
+    fn is_selected(&self) -> PyResult<bool> {
+        Ok(self.resolve_node()?.states.selected)
+    }
+
+    fn checked(&self) -> PyResult<Option<String>> {
+        Ok(self.resolve_node()?.states.checked.map(|t| match t {
+            xa11y::Toggled::Off => "off".to_string(),
+            xa11y::Toggled::On => "on".to_string(),
+            xa11y::Toggled::Mixed => "mixed".to_string(),
+        }))
+    }
+
+    fn is_expanded(&self) -> PyResult<Option<bool>> {
+        Ok(self.resolve_node()?.states.expanded)
+    }
+
+    fn is_editable(&self) -> PyResult<bool> {
+        Ok(self.resolve_node()?.states.editable)
+    }
+
+    fn is_focusable(&self) -> PyResult<bool> {
+        Ok(self.resolve_node()?.states.focusable)
+    }
+
+    fn is_modal(&self) -> PyResult<bool> {
+        Ok(self.resolve_node()?.states.modal)
+    }
+
+    fn is_required(&self) -> PyResult<bool> {
+        Ok(self.resolve_node()?.states.required)
+    }
+
+    fn is_busy(&self) -> PyResult<bool> {
+        Ok(self.resolve_node()?.states.busy)
     }
 
     fn exists(&self) -> PyResult<bool> {
