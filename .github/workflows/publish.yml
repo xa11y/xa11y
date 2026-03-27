@@ -43,6 +43,14 @@ jobs:
       - name: Bump version
         run: cargo release ${{ inputs.level }} --execute --no-confirm
 
+      - name: Sync Python package version
+        run: |
+          VERSION=$(sed -n '/\[workspace\.package\]/,/\[/{s/^version = "\(.*\)"/\1/p}' Cargo.toml)
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" xa11y-python/Cargo.toml
+          git add xa11y-python/Cargo.toml
+          git commit -m "chore: sync xa11y-python version to $VERSION"
+          git push
+
   publish-crates:
     name: Publish to crates.io
     needs: [version-bump]
