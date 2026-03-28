@@ -1008,3 +1008,123 @@ fn locator_selector_getter() {
     let loc = Locator::new(Arc::clone(&p), target, "button").child("text_field");
     assert_eq!(loc.selector(), "button > text_field");
 }
+
+// ── Unicode invisible character stripping ─────────────────────────────
+
+#[test]
+fn strip_ltr_mark_from_name() {
+    let mut nd = make_node(Role::StaticText, 0);
+    nd.name = Some("\u{200e}5".to_string());
+    nd.strip_invisible_chars();
+    assert_eq!(nd.name.as_deref(), Some("5"));
+}
+
+#[test]
+fn strip_rtl_mark_from_value() {
+    let mut nd = make_node(Role::StaticText, 0);
+    nd.value = Some("hello\u{200f}".to_string());
+    nd.strip_invisible_chars();
+    assert_eq!(nd.value.as_deref(), Some("hello"));
+}
+
+#[test]
+fn strip_zero_width_space_from_description() {
+    let mut nd = make_node(Role::Button, 0);
+    nd.description = Some("\u{200b}tooltip".to_string());
+    nd.strip_invisible_chars();
+    assert_eq!(nd.description.as_deref(), Some("tooltip"));
+}
+
+#[test]
+fn strip_multiple_invisible_chars() {
+    let mut nd = make_node(Role::StaticText, 0);
+    nd.value = Some("\u{feff}\u{200e}42\u{200f}\u{2060}".to_string());
+    nd.strip_invisible_chars();
+    assert_eq!(nd.value.as_deref(), Some("42"));
+}
+
+#[test]
+fn strip_preserves_regular_whitespace() {
+    let mut nd = make_node(Role::StaticText, 0);
+    nd.name = Some("hello world".to_string());
+    nd.value = Some("line1\nline2".to_string());
+    nd.strip_invisible_chars();
+    assert_eq!(nd.name.as_deref(), Some("hello world"));
+    assert_eq!(nd.value.as_deref(), Some("line1\nline2"));
+}
+
+#[test]
+fn strip_preserves_non_breaking_space() {
+    let mut nd = make_node(Role::StaticText, 0);
+    nd.name = Some("10\u{00a0}000".to_string());
+    nd.strip_invisible_chars();
+    assert_eq!(nd.name.as_deref(), Some("10\u{00a0}000"));
+}
+
+#[test]
+fn strip_none_fields_unchanged() {
+    let mut nd = make_node(Role::Button, 0);
+    nd.name = None;
+    nd.value = None;
+    nd.description = None;
+    nd.strip_invisible_chars();
+    assert!(nd.name.is_none());
+    assert!(nd.value.is_none());
+    assert!(nd.description.is_none());
+}
+
+#[test]
+fn strip_clean_strings_unchanged() {
+    let mut nd = make_node(Role::Button, 0);
+    nd.name = Some("OK".to_string());
+    nd.value = Some("100".to_string());
+    nd.description = Some("Confirm action".to_string());
+    nd.strip_invisible_chars();
+    assert_eq!(nd.name.as_deref(), Some("OK"));
+    assert_eq!(nd.value.as_deref(), Some("100"));
+    assert_eq!(nd.description.as_deref(), Some("Confirm action"));
+}
+
+#[test]
+fn strip_all_invisible_becomes_empty() {
+    let mut nd = make_node(Role::StaticText, 0);
+    nd.name = Some("\u{200b}\u{200e}\u{feff}".to_string());
+    nd.strip_invisible_chars();
+    // All-invisible string should become empty (not None)
+    assert_eq!(nd.name.as_deref(), Some(""));
+}
+
+#[test]
+fn tree_new_strips_invisible_chars() {
+    let mut nd = make_node(Role::StaticText, 0);
+    nd.name = Some("\u{200e}Calculator".to_string());
+    nd.value = Some("\u{200e}42".to_string());
+    nd.children_indices = vec![];
+    nd.parent_index = None;
+
+    let tree = Tree::new("Test".to_string(), None, (1920, 1080), vec![nd]);
+    let root = tree.root_data();
+    assert_eq!(root.name.as_deref(), Some("Calculator"));
+    assert_eq!(root.value.as_deref(), Some("42"));
+}
+
+fn make_node(role: Role, index: u32) -> NodeData {
+    NodeData {
+        role,
+        name: None,
+        value: None,
+        description: None,
+        bounds: None,
+        actions: vec![],
+        states: StateSet::default(),
+        numeric_value: None,
+        min_value: None,
+        max_value: None,
+        stable_id: None,
+        pid: None,
+        raw: RawPlatformData::Synthetic,
+        index,
+        children_indices: vec![],
+        parent_index: None,
+    }
+}

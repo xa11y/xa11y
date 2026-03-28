@@ -84,6 +84,40 @@ pub struct NodeData {
     pub parent_index: Option<NodeIndex>,
 }
 
+impl NodeData {
+    /// Strip Unicode invisible characters from `name`, `value`, and `description`.
+    ///
+    /// Platform accessibility APIs sometimes embed directional marks (LTR/RTL),
+    /// zero-width spaces, byte-order marks, and similar formatting characters
+    /// that are not meaningful accessibility data. This method removes them so
+    /// consumers get clean strings.
+    ///
+    /// Preserved: regular whitespace (space, tab, newline) and non-breaking
+    /// spaces (`\u{00A0}`), which can be semantically meaningful.
+    pub fn strip_invisible_chars(&mut self) {
+        fn clean(s: &mut Option<String>) {
+            if let Some(val) = s {
+                let cleaned: String = val
+                    .chars()
+                    .filter(|c| {
+                        !matches!(c,
+                            '\u{200B}'..='\u{200F}'  // zero-width space, joiners, LTR/RTL marks
+                            | '\u{2028}'..='\u{202F}' // line/para separators, directional embeddings
+                            | '\u{2060}'..='\u{2064}' // word joiner, invisible operators
+                            | '\u{FEFF}'              // byte-order mark / zero-width no-break space
+                        )
+                    })
+                    .collect();
+                *val = cleaned;
+            }
+        }
+
+        clean(&mut self.name);
+        clean(&mut self.value);
+        clean(&mut self.description);
+    }
+}
+
 /// A node in an accessibility tree snapshot, with navigation.
 ///
 /// `Node` dereferences to [`NodeData`], so all properties (`role`, `name`,

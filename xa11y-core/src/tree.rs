@@ -35,8 +35,11 @@ impl Tree {
         app_name: String,
         pid: Option<u32>,
         screen_size: (u32, u32),
-        nodes: Vec<NodeData>,
+        mut nodes: Vec<NodeData>,
     ) -> Self {
+        for node in &mut nodes {
+            node.strip_invisible_chars();
+        }
         Self {
             app_name,
             pid,
