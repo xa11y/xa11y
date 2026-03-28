@@ -1,4 +1,5 @@
 pub mod action;
+pub mod app;
 pub mod error;
 pub mod event;
 pub mod event_provider;
@@ -11,6 +12,7 @@ pub mod tree;
 
 // Re-export primary types at the crate root for convenience.
 pub use action::{Action, ActionData};
+pub use app::App;
 pub use error::{Error, Result};
 pub use event::{
     ElementState, Event, EventFilter, EventKind, StateFlag, TextChangeData, TextChangeType,

@@ -8,42 +8,29 @@
 //! ```no_run
 //! use xa11y::*;
 //!
-//! let status = check_permissions().expect("Permission check failed");
+//! let safari = app(&AppTarget::ByName("Safari".to_string()))
+//!     .expect("Failed to get app");
 //!
-//! match status {
-//!     PermissionStatus::Granted => {
-//!         let root = app(
-//!             &AppTarget::ByName("Safari".to_string()),
-//!         ).expect("Failed to get app");
-//!
-//!         // Snapshot navigation — no refetch
-//!         let buttons = root.query("button").expect("Query failed");
-//!         println!("Found {} buttons", buttons.len());
-//!         for btn in &buttons {
-//!             if let Some(parent) = btn.parent() {
-//!                 println!("  {} (parent: {})", btn.name.as_deref().unwrap_or("?"), parent.role);
-//!             }
-//!         }
-//!
-//!         // Locator for actions — refetches every time
-//!         let loc = locator(
-//!             AppTarget::ByName("Safari".to_string()),
-//!             "button[name=\"OK\"]",
-//!         ).expect("Failed to create locator");
-//!         loc.press().expect("Failed to press");
-//!     }
-//!     PermissionStatus::Denied { instructions } => {
-//!         eprintln!("Accessibility not enabled: {}", instructions);
-//!     }
+//! // Snapshot navigation — read-only tree
+//! let root = safari.nodes().expect("Failed to snapshot");
+//! for child in root.children() {
+//!     println!("{}: {:?}", child.role, child.name);
 //! }
+//!
+//! // Locator for actions — refetches every time
+//! safari.locator("button[name=\"OK\"]").press().expect("Failed to press");
+//!
+//! // Locator to get matching nodes
+//! let buttons = safari.locator("button").nodes().expect("Query failed");
+//! println!("Found {} buttons", buttons.len());
 //! ```
 
 use std::sync::{Arc, OnceLock};
 
 // Re-export public types. Tree is exported because Provider trait methods reference it,
-// but end users should interact with Node (returned by app/apps), not Tree directly.
+// but end users should interact with App/Node/Locator, not Tree directly.
 pub use xa11y_core::{
-    Action, ActionData, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
+    Action, ActionData, App, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
     EventKind, EventReceiver, Locator, Node, NodeData, PermissionStatus, RawPlatformData, Rect,
     Result, Role, StateFlag, StateSet, Subscription, TextChangeData, TextChangeType, Toggled, Tree,
     WindowHandle,
@@ -110,24 +97,22 @@ pub fn provider() -> Result<Arc<dyn Provider>> {
 
 // ── Module-level API ────────────────────────────────────────────────────────
 
-/// Snapshot a specific application's accessibility tree.
+/// Get a handle to a specific application.
 ///
-/// Returns the root [`Node`], which you can navigate via
-/// `parent()`, `children()`, and `query()` — all using the snapshot
-/// (no platform refetch).
-pub fn app(target: &AppTarget) -> Result<Node> {
+/// Returns an [`App`] that can create locators and take tree snapshots.
+/// Validates that the application exists at construction time.
+pub fn app(target: &AppTarget) -> Result<App> {
+    let prov = provider()?;
+    // Validate the app exists and cache its metadata
     let tree = get_provider_ref()?.get_app_tree(target)?;
-    let tree = Arc::new(tree);
-    Ok(Node::new(tree, 0))
+    Ok(App::new(prov, target.clone(), tree.app_name.clone(), tree.pid))
 }
 
-/// Snapshot all running applications (shallow).
+/// List all running applications.
 ///
-/// Returns the root [`Node`] of a merged tree containing all apps.
-pub fn apps() -> Result<Node> {
-    let tree = get_provider_ref()?.get_apps()?;
-    let tree = Arc::new(tree);
-    Ok(Node::new(tree, 0))
+/// Returns one [`App`] per discovered application.
+pub fn apps() -> Result<Vec<App>> {
+    App::all(provider()?)
 }
 
 /// Perform an action on a node from a specific snapshot.
@@ -146,14 +131,6 @@ pub fn perform_action(node: &Node, action: Action, data: Option<ActionData>) -> 
 /// Check if accessibility permissions are granted.
 pub fn check_permissions() -> Result<PermissionStatus> {
     get_provider_ref()?.check_permissions()
-}
-
-/// Create a Locator targeting a specific application.
-///
-/// Locators re-resolve against a fresh snapshot on every operation,
-/// making them immune to staleness.
-pub fn locator(target: AppTarget, selector: &str) -> Result<Locator> {
-    Ok(Locator::new(provider()?, target, selector))
 }
 
 // ── Platform provider construction (internal) ───────────────────────────────

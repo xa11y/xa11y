@@ -186,11 +186,29 @@ impl Locator {
         Ok(matches.len())
     }
 
-    /// Get a [`Node`] handle from a fresh snapshot, with snapshot navigation.
-    pub fn get(&self) -> Result<Node> {
+    /// Get a single [`Node`] handle from a fresh snapshot, with snapshot navigation.
+    pub fn node(&self) -> Result<Node> {
         let r = self.resolve()?;
         let tree = Arc::new(r.tree);
         Ok(Node::new(tree, r.node_index))
+    }
+
+    /// Get all matching nodes from a fresh snapshot.
+    ///
+    /// All returned nodes share the same snapshot, so parent/children
+    /// navigation is consistent across the result set.
+    pub fn nodes(&self) -> Result<Vec<Node>> {
+        let tree = self.provider.get_app_tree(&self.target)?;
+        let indices: Vec<u32> = tree
+            .query(&self.selector)?
+            .iter()
+            .map(|n| n.index)
+            .collect();
+        let tree = Arc::new(tree);
+        Ok(indices
+            .into_iter()
+            .map(|idx| Node::new(Arc::clone(&tree), idx))
+            .collect())
     }
 
     // ── Actions (each takes a fresh snapshot) ───────────────────────
