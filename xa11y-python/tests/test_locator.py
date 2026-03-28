@@ -233,17 +233,20 @@ def test_locator_select_text(tree):
     tree.locator("text_field").select_text(0, 3)
 
 
-def test_locator_scroll(tree):
-    tree.locator("list").scroll("down")
+def test_locator_scroll_down(tree):
+    tree.locator("list").scroll_down()
 
 
-def test_locator_scroll_with_amount(tree):
-    tree.locator("list").scroll("up", 5.0)
+def test_locator_scroll_up_with_amount(tree):
+    tree.locator("list").scroll_up(5.0)
 
 
-def test_locator_scroll_invalid_direction(tree):
-    with pytest.raises(ValueError, match="scroll direction"):
-        tree.locator("list").scroll("sideways")
+def test_locator_scroll_left(tree):
+    tree.locator("list").scroll_left()
+
+
+def test_locator_scroll_right(tree):
+    tree.locator("list").scroll_right(2.0)
 
 
 # ── Wait operations ──────────────────────────────────────────────────────────
