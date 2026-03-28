@@ -11,9 +11,9 @@ use windows::Win32::System::Threading::*;
 use windows::Win32::UI::Accessibility::*;
 
 use xa11y_core::{
-    Action, ActionData, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
-    EventKind, EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, RawPlatformData,
-    Rect, Result, Role, StateSet, Subscription, Toggled, Tree,
+    Action, ActionData, CancelHandle, ElementState, Error, Event, EventFilter, EventKind,
+    EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, RawPlatformData, Rect,
+    Result, Role, StateSet, Subscription, Toggled, Tree, WindowHandle,
 };
 
 /// Initialize COM for UIA. Called once per WindowsProvider creation.
@@ -454,44 +454,49 @@ impl WindowsProvider {
     }
 }
 
-impl Provider for WindowsProvider {
-    fn get_app_tree(&self, target: &AppTarget) -> Result<Tree> {
-        let (app_element, pid, app_name) = match target {
-            AppTarget::ByName(name) => self.find_app_by_name(name)?,
-            AppTarget::ByPid(pid) => {
-                let (el, name) = self.find_app_by_pid(*pid)?;
-                (el, *pid, name)
-            }
-            AppTarget::ByWindow(handle) => {
-                return Err(Error::Platform {
-                    code: -1,
-                    message: format!("ByWindow not yet supported: {:?}", handle),
-                });
-            }
-        };
-
+impl WindowsProvider {
+    /// Shared helper: build a Tree from a resolved UIA element.
+    fn build_tree(
+        &self,
+        app_element: &IUIAutomationElement,
+        pid: u32,
+        app_name: String,
+        target_label: &str,
+    ) -> Result<Tree> {
         let screen_size = Self::detect_screen_size();
         let mut nodes = Vec::new();
         let mut elements = Vec::new();
 
-        self.traverse(
-            &app_element,
-            &mut nodes,
-            &mut elements,
-            None,
-            0,
-            screen_size,
-        );
+        self.traverse(app_element, &mut nodes, &mut elements, None, 0, screen_size);
 
         if nodes.is_empty() {
             return Err(Error::AppNotFound {
-                target: format!("{:?}", target),
+                target: target_label.to_string(),
             });
         }
 
         *self.cached_elements.lock().unwrap() = elements;
 
         Ok(Tree::new(app_name, Some(pid), screen_size, nodes))
+    }
+}
+
+impl Provider for WindowsProvider {
+    fn get_tree_by_name(&self, name: &str) -> Result<Tree> {
+        let (app_element, pid, app_name) = self.find_app_by_name(name)?;
+        self.build_tree(&app_element, pid, app_name, name)
+    }
+
+    fn get_tree_by_pid(&self, pid: u32) -> Result<Tree> {
+        let (app_element, app_name) = self.find_app_by_pid(pid)?;
+        self.build_tree(&app_element, pid, app_name, &format!("PID {}", pid))
+    }
+
+    fn get_tree_by_window(&self, handle: &WindowHandle) -> Result<Tree> {
+        Err(Error::Platform {
+            code: -1,
+            message: format!("get_tree_by_window not yet supported: {:?}", handle),
+        })
     }
 
     fn get_apps(&self) -> Result<Tree> {
@@ -1206,37 +1211,21 @@ fn map_uia_control_type(control_type: UIA_CONTROLTYPE_ID) -> Role {
 
 // ── EventProvider (polling-based) ─────────────────────────────────────────────
 
-impl EventProvider for WindowsProvider {
-    fn subscribe(&self, target: &AppTarget, filter: EventFilter) -> Result<Subscription> {
+impl WindowsProvider {
+    /// Shared subscribe implementation: spawns a polling thread that calls the
+    /// given `tree_fn` closure to fetch the tree on each tick.
+    fn subscribe_impl<F>(
+        &self,
+        app_name: String,
+        app_pid: u32,
+        filter: EventFilter,
+        tree_fn: F,
+    ) -> Result<Subscription>
+    where
+        F: Fn(&WindowsProvider) -> Result<Tree> + Send + 'static,
+    {
         let (tx, rx) = std::sync::mpsc::channel();
-
-        let (app_name, app_pid) = match target {
-            AppTarget::ByName(name) => {
-                let apps = self.list_gui_apps();
-                let found = apps
-                    .iter()
-                    .find(|(_, n)| n.to_lowercase().contains(&name.to_lowercase()));
-                match found {
-                    Some((pid, name)) => (name.clone(), *pid),
-                    None => {
-                        return Err(Error::AppNotFound {
-                            target: name.clone(),
-                        })
-                    }
-                }
-            }
-            AppTarget::ByPid(pid) => (String::new(), *pid),
-            AppTarget::ByWindow(_) => {
-                return Err(Error::Platform {
-                    code: -1,
-                    message: "ByWindow not supported for event subscription".to_string(),
-                })
-            }
-        };
-
-        // Create a separate provider for polling on the background thread
         let poll_provider = WindowsProvider::new()?;
-        let target_clone = target.clone();
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let stop_clone = stop.clone();
 
@@ -1247,7 +1236,7 @@ impl EventProvider for WindowsProvider {
             while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(100));
 
-                let tree = match poll_provider.get_app_tree(&target_clone) {
+                let tree = match tree_fn(&poll_provider) {
                     Ok(t) => t,
                     Err(_) => continue,
                 };
@@ -1305,13 +1294,8 @@ impl EventProvider for WindowsProvider {
         Ok(Subscription::new(EventReceiver::new(rx), cancel))
     }
 
-    fn wait_for_event(
-        &self,
-        target: &AppTarget,
-        filter: EventFilter,
-        timeout: Duration,
-    ) -> Result<Event> {
-        let sub = self.subscribe(target, filter)?;
+    /// Shared wait_for_event: subscribe then poll until an event arrives or timeout.
+    fn wait_for_event_impl(&self, sub: Subscription, timeout: Duration) -> Result<Event> {
         let start = std::time::Instant::now();
         loop {
             if let Some(event) = sub.try_recv() {
@@ -1325,13 +1309,17 @@ impl EventProvider for WindowsProvider {
         }
     }
 
-    fn wait_for(
+    /// Shared wait_for: poll tree until selector matches desired state or timeout.
+    fn wait_for_impl<F>(
         &self,
-        target: &AppTarget,
         selector: &str,
         state: ElementState,
         timeout: Duration,
-    ) -> Result<Option<NodeData>> {
+        tree_fn: F,
+    ) -> Result<Option<NodeData>>
+    where
+        F: Fn(&Self) -> Result<Tree>,
+    {
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
 
@@ -1341,7 +1329,7 @@ impl EventProvider for WindowsProvider {
                 return Err(Error::Timeout { elapsed });
             }
 
-            let tree = self.get_app_tree(target)?;
+            let tree = tree_fn(self)?;
             let matches = tree.query(selector).ok();
             let node = matches.as_ref().and_then(|m| m.first().copied());
 
@@ -1351,6 +1339,74 @@ impl EventProvider for WindowsProvider {
 
             std::thread::sleep(poll_interval);
         }
+    }
+}
+
+impl EventProvider for WindowsProvider {
+    fn subscribe_by_name(&self, name: &str, filter: EventFilter) -> Result<Subscription> {
+        let apps = self.list_gui_apps();
+        let found = apps
+            .iter()
+            .find(|(_, n)| n.to_lowercase().contains(&name.to_lowercase()));
+        let (app_pid, app_name) = match found {
+            Some((pid, n)) => (*pid, n.clone()),
+            None => {
+                return Err(Error::AppNotFound {
+                    target: name.to_string(),
+                })
+            }
+        };
+        let name_owned = name.to_string();
+        self.subscribe_impl(app_name, app_pid, filter, move |p| {
+            p.get_tree_by_name(&name_owned)
+        })
+    }
+
+    fn subscribe_by_pid(&self, pid: u32, filter: EventFilter) -> Result<Subscription> {
+        self.subscribe_impl(String::new(), pid, filter, move |p| p.get_tree_by_pid(pid))
+    }
+
+    fn wait_for_event_by_name(
+        &self,
+        name: &str,
+        filter: EventFilter,
+        timeout: Duration,
+    ) -> Result<Event> {
+        let sub = self.subscribe_by_name(name, filter)?;
+        self.wait_for_event_impl(sub, timeout)
+    }
+
+    fn wait_for_event_by_pid(
+        &self,
+        pid: u32,
+        filter: EventFilter,
+        timeout: Duration,
+    ) -> Result<Event> {
+        let sub = self.subscribe_by_pid(pid, filter)?;
+        self.wait_for_event_impl(sub, timeout)
+    }
+
+    fn wait_for_by_name(
+        &self,
+        name: &str,
+        selector: &str,
+        state: ElementState,
+        timeout: Duration,
+    ) -> Result<Option<NodeData>> {
+        let name_owned = name.to_string();
+        self.wait_for_impl(selector, state, timeout, |p| {
+            p.get_tree_by_name(&name_owned)
+        })
+    }
+
+    fn wait_for_by_pid(
+        &self,
+        pid: u32,
+        selector: &str,
+        state: ElementState,
+        timeout: Duration,
+    ) -> Result<Option<NodeData>> {
+        self.wait_for_impl(selector, state, timeout, |p| p.get_tree_by_pid(pid))
     }
 }
 

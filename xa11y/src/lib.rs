@@ -8,7 +8,8 @@
 //! ```no_run
 //! use xa11y::*;
 //!
-//! let safari = app("Safari").expect("Failed to get app");
+//! let safari = App::from_name(provider().unwrap(), "Safari")
+//!     .expect("Failed to get app");
 //!
 //! // Snapshot navigation — read-only tree
 //! let root = safari.nodes().expect("Failed to snapshot");
@@ -24,10 +25,7 @@
 //! println!("Found {} buttons", buttons.len());
 //!
 //! // By PID
-//! let app = app_by_pid(1234).expect("Failed to get app");
-//!
-//! // By window handle
-//! let app = app_by_window(WindowHandle::MacOS(42)).expect("Failed to get app");
+//! let app = App::from_pid(provider().unwrap(), 1234).expect("Failed to get app");
 //! ```
 
 use std::sync::{Arc, OnceLock};
@@ -40,9 +38,9 @@ pub use xa11y_core::{
     StateFlag, StateSet, Subscription, TextChangeData, TextChangeType, Toggled, Tree, WindowHandle,
 };
 
-// Internal types used by platform backends, Python bindings, and tests.
+// Provider traits are implementation details used by platform backends and Python bindings.
 #[doc(hidden)]
-pub use xa11y_core::{AppTarget, EventProvider, Provider};
+pub use xa11y_core::{AppLookup, EventProvider, Provider};
 
 // ── Internal singleton ──────────────────────────────────────────────────────
 
@@ -66,12 +64,18 @@ fn get_provider_ref() -> Result<&'static dyn Provider> {
 }
 
 /// Wrapper that lets a `&'static dyn Provider` be shared as `Arc<dyn Provider>`
-/// for use with `Locator`.
+/// for use with `App` and `Locator`.
 struct StaticProviderRef(&'static dyn Provider);
 
 impl Provider for StaticProviderRef {
-    fn get_app_tree(&self, target: &AppTarget) -> Result<xa11y_core::Tree> {
-        self.0.get_app_tree(target)
+    fn get_tree_by_name(&self, name: &str) -> Result<xa11y_core::Tree> {
+        self.0.get_tree_by_name(name)
+    }
+    fn get_tree_by_pid(&self, pid: u32) -> Result<xa11y_core::Tree> {
+        self.0.get_tree_by_pid(pid)
+    }
+    fn get_tree_by_window(&self, handle: &WindowHandle) -> Result<xa11y_core::Tree> {
+        self.0.get_tree_by_window(handle)
     }
     fn get_apps(&self) -> Result<xa11y_core::Tree> {
         self.0.get_apps()
@@ -92,48 +96,9 @@ impl Provider for StaticProviderRef {
 
 /// Get the global provider as an `Arc<dyn Provider>`.
 ///
-/// Returns a handle to the same singleton used by `app()`, `apps()`, etc.
-#[doc(hidden)]
+/// Pass this to `App::from_name()`, `App::from_pid()`, etc.
 pub fn provider() -> Result<Arc<dyn Provider>> {
     Ok(Arc::new(StaticProviderRef(get_provider_ref()?)))
-}
-
-// ── Module-level API ────────────────────────────────────────────────────────
-
-/// Find an application by display name.
-///
-/// Case-insensitive substring match. Returns an [`App`] for locators and snapshots.
-///
-/// ```no_run
-/// let slack = xa11y::app("Slack").unwrap();
-/// ```
-pub fn app(name: &str) -> Result<App> {
-    App::from_name(provider()?, name)
-}
-
-/// Find an application by process ID.
-///
-/// ```no_run
-/// let app = xa11y::app_by_pid(1234).unwrap();
-/// ```
-pub fn app_by_pid(pid: u32) -> Result<App> {
-    App::from_pid(provider()?, pid)
-}
-
-/// Find an application by platform-specific window handle.
-///
-/// ```no_run
-/// let app = xa11y::app_by_window(xa11y::WindowHandle::MacOS(42)).unwrap();
-/// ```
-pub fn app_by_window(handle: WindowHandle) -> Result<App> {
-    App::from_window(provider()?, handle)
-}
-
-/// List all running applications.
-///
-/// Returns one [`App`] per discovered application.
-pub fn apps() -> Result<Vec<App>> {
-    App::all(provider()?)
 }
 
 /// Perform an action on a node from a specific snapshot.

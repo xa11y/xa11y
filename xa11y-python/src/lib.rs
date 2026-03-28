@@ -377,7 +377,7 @@ fn convert_to_nodes_at(
 #[derive(Clone)]
 struct Locator {
     provider: Arc<dyn xa11y::Provider>,
-    target: xa11y::AppTarget,
+    lookup: xa11y::AppLookup,
     #[pyo3(get)]
     selector: String,
     nth: Option<usize>,
@@ -387,7 +387,7 @@ impl Locator {
     fn from_core(loc: xa11y::Locator) -> Self {
         Self {
             provider: loc.provider().clone(),
-            target: loc.target().clone(),
+            lookup: loc.lookup().clone(),
             selector: loc.selector().to_string(),
             nth: loc.nth_index(),
         }
@@ -430,10 +430,7 @@ impl Locator {
     }
 
     fn count(&self) -> PyResult<usize> {
-        let tree = self
-            .provider
-            .get_app_tree(&self.target)
-            .map_err(to_py_err)?;
+        let tree = self.lookup.fetch_tree(&*self.provider).map_err(to_py_err)?;
         let matches = tree.query(&self.selector).map_err(to_py_err)?;
         Ok(matches.len())
     }
@@ -446,10 +443,7 @@ impl Locator {
 
     /// Get all matching nodes as a snapshot (with full tree context for navigation).
     fn nodes(&self, py: Python<'_>) -> PyResult<Vec<Py<Node>>> {
-        let tree = self
-            .provider
-            .get_app_tree(&self.target)
-            .map_err(to_py_err)?;
+        let tree = self.lookup.fetch_tree(&*self.provider).map_err(to_py_err)?;
         let matches = tree.query(&self.selector).map_err(to_py_err)?;
         let indices: Vec<u32> = matches.iter().map(|n| n.index).collect();
         convert_to_nodes_at(py, &tree, &indices)
@@ -635,10 +629,7 @@ enum WaitState {
 
 impl Locator {
     fn resolve(&self) -> PyResult<(xa11y::Tree, u32)> {
-        let tree = self
-            .provider
-            .get_app_tree(&self.target)
-            .map_err(to_py_err)?;
+        let tree = self.lookup.fetch_tree(&*self.provider).map_err(to_py_err)?;
         let matches = tree.query(&self.selector).map_err(to_py_err)?;
         let idx = self.nth.unwrap_or(0);
         let node = matches.get(idx).ok_or_else(|| {
@@ -676,7 +667,7 @@ impl Locator {
             }
 
             let node: Option<xa11y::NodeData> = (|| {
-                let tree = self.provider.get_app_tree(&self.target).ok()?;
+                let tree = self.lookup.fetch_tree(&*self.provider).ok()?;
                 let matches = tree.query(&self.selector).ok()?;
                 let idx = self.nth.unwrap_or(0);
                 matches.get(idx).copied().cloned()
@@ -709,7 +700,7 @@ impl Locator {
                 return Err(to_py_err(xa11y::Error::Timeout { elapsed }));
             }
 
-            let tree_result = self.provider.get_app_tree(&self.target);
+            let tree_result = self.lookup.fetch_tree(&*self.provider);
             let states = tree_result.ok().and_then(|tree| {
                 tree.query(&self.selector).ok().and_then(|matches| {
                     let idx = self.nth.unwrap_or(0);
@@ -781,9 +772,9 @@ impl App {
     /// Snapshot the app's accessibility tree. Returns the root Node.
     fn nodes(&self, py: Python<'_>) -> PyResult<Py<Node>> {
         let p = self.inner.provider().clone();
-        let target = self.inner.target().clone();
+        let lookup = self.inner.lookup().clone();
         let rust_tree = py
-            .allow_threads(move || p.get_app_tree(&target))
+            .allow_threads(move || lookup.fetch_tree(&*p))
             .map_err(to_py_err)?;
         convert_to_root_node(py, &rust_tree)
     }
@@ -883,7 +874,15 @@ struct MockProvider {
 }
 
 impl xa11y::Provider for MockProvider {
-    fn get_app_tree(&self, _target: &xa11y::AppTarget) -> xa11y::Result<xa11y::Tree> {
+    fn get_tree_by_name(&self, _name: &str) -> xa11y::Result<xa11y::Tree> {
+        Ok(self.tree.clone())
+    }
+
+    fn get_tree_by_pid(&self, _pid: u32) -> xa11y::Result<xa11y::Tree> {
+        Ok(self.tree.clone())
+    }
+
+    fn get_tree_by_window(&self, _handle: &xa11y::WindowHandle) -> xa11y::Result<xa11y::Tree> {
         Ok(self.tree.clone())
     }
 

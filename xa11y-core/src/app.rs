@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::error::Result;
 use crate::locator::Locator;
 use crate::node::Node;
-use crate::provider::{AppTarget, Provider, WindowHandle};
+use crate::provider::{AppLookup, Provider, WindowHandle};
 use crate::role::Role;
 
 /// A handle to a running application.
@@ -26,7 +26,7 @@ use crate::role::Role;
 #[derive(Clone)]
 pub struct App {
     provider: Arc<dyn Provider>,
-    target: AppTarget,
+    lookup: AppLookup,
     app_name: String,
     pid: Option<u32>,
 }
@@ -37,11 +37,11 @@ impl App {
     /// Performs a case-insensitive substring match against running applications.
     /// Validates the app exists and caches its metadata.
     pub fn from_name(provider: Arc<dyn Provider>, name: &str) -> Result<Self> {
-        let target = AppTarget::ByName(name.to_string());
-        let tree = provider.get_app_tree(&target)?;
+        let lookup = AppLookup::ByName(name.to_string());
+        let tree = lookup.fetch_tree(&*provider)?;
         Ok(Self {
             provider,
-            target,
+            lookup,
             app_name: tree.app_name.clone(),
             pid: tree.pid,
         })
@@ -51,11 +51,11 @@ impl App {
     ///
     /// Validates the app exists and caches its metadata.
     pub fn from_pid(provider: Arc<dyn Provider>, pid: u32) -> Result<Self> {
-        let target = AppTarget::ByPid(pid);
-        let tree = provider.get_app_tree(&target)?;
+        let lookup = AppLookup::ByPid(pid);
+        let tree = lookup.fetch_tree(&*provider)?;
         Ok(Self {
             provider,
-            target,
+            lookup,
             app_name: tree.app_name.clone(),
             pid: tree.pid,
         })
@@ -65,11 +65,11 @@ impl App {
     ///
     /// Validates the app exists and caches its metadata.
     pub fn from_window(provider: Arc<dyn Provider>, handle: WindowHandle) -> Result<Self> {
-        let target = AppTarget::ByWindow(handle);
-        let tree = provider.get_app_tree(&target)?;
+        let lookup = AppLookup::ByWindow(handle);
+        let tree = lookup.fetch_tree(&*provider)?;
         Ok(Self {
             provider,
-            target,
+            lookup,
             app_name: tree.app_name.clone(),
             pid: tree.pid,
         })
@@ -79,13 +79,13 @@ impl App {
     #[doc(hidden)]
     pub fn new(
         provider: Arc<dyn Provider>,
-        target: AppTarget,
+        lookup: AppLookup,
         app_name: String,
         pid: Option<u32>,
     ) -> Self {
         Self {
             provider,
-            target,
+            lookup,
             app_name,
             pid,
         }
@@ -101,16 +101,16 @@ impl App {
         self.pid
     }
 
-    /// The target used to identify this application.
-    #[doc(hidden)]
-    pub fn target(&self) -> &AppTarget {
-        &self.target
-    }
-
     /// Get the underlying provider (for Python bindings and internal use).
     #[doc(hidden)]
     pub fn provider(&self) -> &Arc<dyn Provider> {
         &self.provider
+    }
+
+    /// Get the internal lookup key (for Python bindings and internal use).
+    #[doc(hidden)]
+    pub fn lookup(&self) -> &AppLookup {
+        &self.lookup
     }
 
     /// Create a [`Locator`] for lazy element interaction.
@@ -118,7 +118,7 @@ impl App {
     /// The locator re-resolves against a fresh tree snapshot on every
     /// operation, making it immune to staleness.
     pub fn locator(&self, selector: &str) -> Locator {
-        Locator::new(Arc::clone(&self.provider), self.target.clone(), selector)
+        Locator::new(Arc::clone(&self.provider), self.lookup.clone(), selector)
     }
 
     /// Snapshot the application's accessibility tree.
@@ -126,7 +126,7 @@ impl App {
     /// Returns the root [`Node`] of the snapshot. Navigate with
     /// `children()` and `parent()` — all within the same consistent snapshot.
     pub fn nodes(&self) -> Result<Node> {
-        let tree = self.provider.get_app_tree(&self.target)?;
+        let tree = self.lookup.fetch_tree(&*self.provider)?;
         let tree = Arc::new(tree);
         Ok(Node::new(tree, 0))
     }
@@ -144,11 +144,11 @@ impl App {
             .filter(|child| child.role == Role::Application)
             .filter_map(|child| {
                 let name = child.name.clone()?;
-                let target = match child.pid {
-                    Some(pid) => AppTarget::ByPid(pid),
-                    None => AppTarget::ByName(name.clone()),
+                let lookup = match child.pid {
+                    Some(pid) => AppLookup::ByPid(pid),
+                    None => AppLookup::ByName(name.clone()),
                 };
-                Some(App::new(Arc::clone(&provider), target, name, child.pid))
+                Some(App::new(Arc::clone(&provider), lookup, name, child.pid))
             })
             .collect();
         Ok(apps)
@@ -160,7 +160,7 @@ impl std::fmt::Debug for App {
         f.debug_struct("App")
             .field("name", &self.app_name)
             .field("pid", &self.pid)
-            .field("target", &self.target)
+            .field("lookup", &self.lookup)
             .finish()
     }
 }

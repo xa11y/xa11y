@@ -7,8 +7,16 @@ use crate::tree::Tree;
 
 /// Platform backend trait for accessibility tree access.
 pub trait Provider: Send + Sync {
-    /// Snapshot a specific application's accessibility tree.
-    fn get_app_tree(&self, target: &AppTarget) -> Result<Tree>;
+    /// Snapshot a specific application's tree by display name.
+    ///
+    /// Name matching is case-insensitive substring.
+    fn get_tree_by_name(&self, name: &str) -> Result<Tree>;
+
+    /// Snapshot a specific application's tree by process ID.
+    fn get_tree_by_pid(&self, pid: u32) -> Result<Tree>;
+
+    /// Snapshot a specific application's tree by platform window handle.
+    fn get_tree_by_window(&self, handle: &WindowHandle) -> Result<Tree>;
 
     /// Snapshot all running applications (shallow).
     fn get_apps(&self) -> Result<Tree>;
@@ -30,17 +38,6 @@ pub trait Provider: Send + Sync {
     fn check_permissions(&self) -> Result<PermissionStatus>;
 }
 
-/// Target for identifying an application.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum AppTarget {
-    /// Match by human-readable display name (case-insensitive, substring match).
-    ByName(String),
-    /// Match by process ID.
-    ByPid(u32),
-    /// Target a specific window by platform-specific handle.
-    ByWindow(WindowHandle),
-}
-
 /// Platform-specific window handle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WindowHandle {
@@ -59,4 +56,28 @@ pub enum PermissionStatus {
     Granted,
     /// Permissions denied, with platform-specific instructions.
     Denied { instructions: String },
+}
+
+/// Internal lookup key for identifying an application across snapshots.
+///
+/// Used by `App` and `Locator` to dispatch to the correct `Provider` method.
+/// Not part of the public API.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub enum AppLookup {
+    ByName(String),
+    ByPid(u32),
+    ByWindow(WindowHandle),
+}
+
+impl AppLookup {
+    /// Fetch the tree for this lookup target.
+    #[doc(hidden)]
+    pub fn fetch_tree(&self, provider: &dyn Provider) -> Result<Tree> {
+        match self {
+            Self::ByName(name) => provider.get_tree_by_name(name),
+            Self::ByPid(pid) => provider.get_tree_by_pid(*pid),
+            Self::ByWindow(handle) => provider.get_tree_by_window(handle),
+        }
+    }
 }

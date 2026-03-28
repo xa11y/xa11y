@@ -33,7 +33,7 @@ mod tests {
     #[test]
     #[ignore]
     fn apps_returns_nonempty() {
-        let apps = xa11y::apps().unwrap();
+        let apps = App::all(xa11y::provider().unwrap()).unwrap();
         assert!(!apps.is_empty(), "apps should return at least one app");
         let has_test_app = apps.iter().any(|a| a.name().contains("xa11y"));
         assert!(
@@ -50,7 +50,7 @@ mod tests {
         let by_name = h::app_tree();
         let pid = by_name.tree().pid.expect("app tree should have a PID");
         assert!(pid > 0);
-        let app = xa11y::app_by_pid(pid).unwrap();
+        let app = App::from_pid(xa11y::provider().unwrap(), pid).unwrap();
         let root = app.nodes().unwrap();
         assert!(!root.tree().is_empty());
         assert_eq!(root.tree().pid, Some(pid));
@@ -1286,7 +1286,7 @@ mod tests {
     #[test]
     #[ignore]
     fn error_app_not_found() {
-        let result = xa11y::app("nonexistent_app_12345");
+        let result = App::from_name(xa11y::provider().unwrap(), "nonexistent_app_12345");
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::AppNotFound { .. }));
     }
@@ -1468,10 +1468,7 @@ mod tests {
         let root = h::app_tree();
 
         let sub = ep
-            .subscribe(
-                &AppTarget::ByName("xa11y".to_string()),
-                EventFilter::kinds(&[EventKind::FocusChanged]),
-            )
+            .subscribe_by_name("xa11y", EventFilter::kinds(&[EventKind::FocusChanged]))
             .unwrap();
 
         // Trigger a focus change
@@ -1499,8 +1496,8 @@ mod tests {
         let ep = xa11y::create_event_provider().expect("EventProvider unavailable");
 
         // Wait for an event with a very short timeout — should timeout
-        let result = ep.wait_for_event(
-            &AppTarget::ByName("xa11y".to_string()),
+        let result = ep.wait_for_event_by_name(
+            "xa11y",
             EventFilter::kinds(&[EventKind::Alert]),
             Duration::from_millis(100),
         );
@@ -1518,8 +1515,8 @@ mod tests {
         let ep = xa11y::create_event_provider().expect("EventProvider unavailable");
 
         // Wait for Submit button to be attached (it already exists)
-        let result = ep.wait_for(
-            &AppTarget::ByName("xa11y".to_string()),
+        let result = ep.wait_for_by_name(
+            "xa11y",
             "button[name=\"Submit\"]",
             ElementState::Attached,
             Duration::from_secs(2),

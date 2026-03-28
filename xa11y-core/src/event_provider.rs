@@ -3,28 +3,46 @@ use std::time::Duration;
 use crate::error::Result;
 use crate::event::{ElementState, Event, EventFilter};
 use crate::node::NodeData;
-use crate::provider::{AppTarget, Provider};
+use crate::provider::Provider;
 
 /// Optional trait for backends that support event subscriptions.
 /// Extends Provider with reactive capabilities.
 pub trait EventProvider: Provider {
-    /// Subscribe to events matching the given filter.
-    /// Returns a stream of events and a handle to manage the subscription.
-    /// Dropping the `Subscription` unsubscribes automatically (RAII).
-    fn subscribe(&self, target: &AppTarget, filter: EventFilter) -> Result<Subscription>;
+    /// Subscribe to events for an app identified by name.
+    fn subscribe_by_name(&self, name: &str, filter: EventFilter) -> Result<Subscription>;
 
-    /// Wait for a single event matching the filter, with timeout.
-    fn wait_for_event(
+    /// Subscribe to events for an app identified by PID.
+    fn subscribe_by_pid(&self, pid: u32, filter: EventFilter) -> Result<Subscription>;
+
+    /// Wait for a single event matching the filter, with timeout (by name).
+    fn wait_for_event_by_name(
         &self,
-        target: &AppTarget,
+        name: &str,
         filter: EventFilter,
         timeout: Duration,
     ) -> Result<Event>;
 
-    /// Wait for an element matching the selector to reach the desired state.
-    fn wait_for(
+    /// Wait for a single event matching the filter, with timeout (by PID).
+    fn wait_for_event_by_pid(
         &self,
-        target: &AppTarget,
+        pid: u32,
+        filter: EventFilter,
+        timeout: Duration,
+    ) -> Result<Event>;
+
+    /// Wait for an element to reach a state (by name).
+    fn wait_for_by_name(
+        &self,
+        name: &str,
+        selector: &str,
+        state: ElementState,
+        timeout: Duration,
+    ) -> Result<Option<NodeData>>;
+
+    /// Wait for an element to reach a state (by PID).
+    fn wait_for_by_pid(
+        &self,
+        pid: u32,
         selector: &str,
         state: ElementState,
         timeout: Duration,
