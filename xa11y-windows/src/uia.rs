@@ -1434,7 +1434,7 @@ impl EventProvider for WindowsProvider {
         selector: &str,
         state: ElementState,
         timeout: Duration,
-    ) -> Result<NodeData> {
+    ) -> Result<Option<NodeData>> {
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
 
@@ -1449,7 +1449,7 @@ impl EventProvider for WindowsProvider {
             let node = matches.as_ref().and_then(|m| m.first().copied());
 
             if state.is_met(node) {
-                return Ok(node.cloned().unwrap_or_else(NodeData::synthetic_empty));
+                return Ok(node.cloned());
             }
 
             std::thread::sleep(poll_interval);

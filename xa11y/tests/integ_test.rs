@@ -1634,7 +1634,7 @@ mod tests {
             "wait_for attached should succeed: {:?}",
             result.err()
         );
-        let node = result.unwrap();
+        let node = result.unwrap().expect("attached node should exist");
         assert_eq!(node.role, Role::Button);
     }
 }
