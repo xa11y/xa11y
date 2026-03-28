@@ -146,12 +146,8 @@ class Node:
     @property
     def busy(self) -> bool:
         """Whether the element is in a busy/loading state."""
-    def subtree(self) -> list[Node]:
-        """Get all nodes in this node's subtree (including this node)."""
     def query(self, selector: str) -> list[Node]:
         """Find all nodes matching a CSS-like selector string within this snapshot."""
-    def dump(self) -> str:
-        """Render the tree as an indented text representation for debugging."""
     def locator(
         self,
         selector: str,

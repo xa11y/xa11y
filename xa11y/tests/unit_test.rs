@@ -307,14 +307,14 @@ fn tree_subtree() {
 }
 
 #[test]
-fn tree_dump() {
+fn tree_display() {
     let tree = sample_tree();
-    let dump = tree.dump();
-    assert!(dump.contains("[0] window \"My App\""));
-    assert!(dump.contains("  [1] toolbar \"Main Toolbar\""));
-    assert!(dump.contains("    [2] button \"Back\""));
-    assert!(dump.contains("    [3] text_field \"Address Bar\""));
-    assert!(dump.contains("value=\"https://example.com\""));
+    let display = tree.to_string();
+    assert!(display.contains("[0] window \"My App\""));
+    assert!(display.contains("  [1] toolbar \"Main Toolbar\""));
+    assert!(display.contains("    [2] button \"Back\""));
+    assert!(display.contains("    [3] text_field \"Address Bar\""));
+    assert!(display.contains("value=\"https://example.com\""));
 }
 
 #[test]

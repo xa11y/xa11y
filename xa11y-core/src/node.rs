@@ -140,6 +140,12 @@ impl fmt::Debug for Node {
     }
 }
 
+impl fmt::Display for Node {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.snapshot, f)
+    }
+}
+
 impl Serialize for Node {
     fn serialize<S: serde::Serializer>(
         &self,
@@ -209,13 +215,6 @@ impl Node {
             .into_iter()
             .map(|idx| Node::new(Arc::clone(&self.snapshot), idx))
             .collect())
-    }
-
-    /// Render the tree as an indented text representation for debugging.
-    ///
-    /// Uses the snapshot — no platform refetch.
-    pub fn dump(&self) -> String {
-        self.snapshot.dump()
     }
 
     /// Get a synthetic empty Node (no snapshot navigation).

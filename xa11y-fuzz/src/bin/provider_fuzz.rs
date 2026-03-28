@@ -593,9 +593,9 @@ mod provider_fuzz {
             None => return,
         };
 
-        state.log("tree.dump()");
-        let dump = tree.dump();
-        assert!(!dump.is_empty(), "dump() should produce output");
+        state.log("tree.to_string()");
+        let display = tree.to_string();
+        assert!(!display.is_empty(), "Display should produce output");
     }
 
     fn op_tree_subtree(state: &mut FuzzState) {
@@ -685,7 +685,7 @@ mod provider_fuzz {
         for _ in 0..inspection_count {
             match rng.random_range(0u8..4) {
                 0 => {
-                    let _ = tree.dump();
+                    let _ = tree.to_string();
                 }
                 1 => {
                     if !tree.is_empty() {
@@ -783,7 +783,7 @@ mod provider_fuzz {
             (20, "action_on_node", op_action_on_node),
             (3, "action_press", op_action_press),
             (15, "query_tree", op_query_tree),
-            (3, "tree_dump", op_tree_dump),
+            (3, "tree_display", op_tree_dump),
             (3, "tree_subtree", op_tree_subtree),
             (3, "tree_children", op_tree_children),
             (3, "tree_iterate", op_tree_iterate),

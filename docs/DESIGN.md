@@ -292,7 +292,6 @@ impl Node {
     pub fn children(&self) -> Vec<Node>;
     pub fn subtree(&self) -> Vec<Node>;
     pub fn query(&self, selector: &str) -> Result<Vec<Node>>;
-    pub fn dump(&self) -> String;
 }
 ```
 
@@ -343,7 +342,7 @@ Inspired by Playwright's Locator pattern.
 |-----------|-----------|
 | `app()` / `all_apps()` | Yes — captures fresh snapshot |
 | `node.parent()` / `node.children()` / `node.query()` | No — uses snapshot |
-| `node.role` / `node.name` / `node.dump()` | No — uses snapshot |
+| `node.role` / `node.name` / `node.to_string()` | No — uses snapshot |
 | `locator.press()` / `locator.set_value()` | Yes — refetches every time |
 | `locator.name()` / `locator.is_visible()` | Yes — refetches every time |
 | `locator.wait_*()` | Yes — polls with refetch |

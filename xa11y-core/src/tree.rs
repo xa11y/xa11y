@@ -1,3 +1,5 @@
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
@@ -100,45 +102,6 @@ impl Tree {
         Ok(selector.match_nodes(self))
     }
 
-    /// Render the tree as an indented text representation for debugging.
-    pub fn dump(&self) -> String {
-        // Compute depth from parent_index so NodeData doesn't need a depth field.
-        let mut depths = vec![0u32; self.nodes.len()];
-        for node in &self.nodes {
-            let d = depths[node.index as usize];
-            for &child_idx in &node.children_indices {
-                if let Some(cd) = depths.get_mut(child_idx as usize) {
-                    *cd = d + 1;
-                }
-            }
-        }
-
-        let mut output = String::new();
-        for node in &self.nodes {
-            let depth = depths.get(node.index as usize).copied().unwrap_or(0);
-            let indent = "  ".repeat(depth as usize);
-            let name_part = node
-                .name
-                .as_ref()
-                .map(|n| format!(" \"{}\"", n))
-                .unwrap_or_default();
-            let value_part = node
-                .value
-                .as_ref()
-                .map(|v| format!(" value=\"{}\"", v))
-                .unwrap_or_default();
-            output.push_str(&format!(
-                "{}[{}] {}{}{}\n",
-                indent,
-                node.index,
-                node.role.to_snake_case(),
-                name_part,
-                value_part,
-            ));
-        }
-        output
-    }
-
     /// Get the number of nodes in the tree.
     pub fn len(&self) -> usize {
         self.nodes.len()
@@ -154,5 +117,45 @@ impl Tree {
     #[doc(hidden)]
     pub fn node_index(&self, node: &NodeData) -> NodeIndex {
         node.index
+    }
+}
+
+impl fmt::Display for Tree {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Compute depth from parent_index so NodeData doesn't need a depth field.
+        let mut depths = vec![0u32; self.nodes.len()];
+        for node in &self.nodes {
+            let d = depths[node.index as usize];
+            for &child_idx in &node.children_indices {
+                if let Some(cd) = depths.get_mut(child_idx as usize) {
+                    *cd = d + 1;
+                }
+            }
+        }
+
+        for node in &self.nodes {
+            let depth = depths.get(node.index as usize).copied().unwrap_or(0);
+            let indent = "  ".repeat(depth as usize);
+            let name_part = node
+                .name
+                .as_ref()
+                .map(|n| format!(" \"{}\"", n))
+                .unwrap_or_default();
+            let value_part = node
+                .value
+                .as_ref()
+                .map(|v| format!(" value=\"{}\"", v))
+                .unwrap_or_default();
+            writeln!(
+                f,
+                "{}[{}] {}{}{}",
+                indent,
+                node.index,
+                node.role.to_snake_case(),
+                name_part,
+                value_part,
+            )?;
+        }
+        Ok(())
     }
 }

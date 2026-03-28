@@ -31,7 +31,7 @@ Last updated: 2026-03-19
 | `children()` | Covered | `tree_children_of_root` |
 | `subtree()` | Covered | `tree_subtree_from_root`, `tree_subtree_of_leaf` |
 | `query()` | Covered | 12 selector tests covering all features |
-| `dump()` | Covered | `tree_dump_readable` |
+| `Display` (to_string) | Covered | `tree_display_readable` |
 
 ## Tree Internal Methods (via `node.tree()`)
 

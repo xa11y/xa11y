@@ -125,11 +125,7 @@ mod tests {
     fn tree_has_window() {
         let root = h::app_tree();
         let windows = root.query("window").unwrap();
-        assert!(
-            !windows.is_empty(),
-            "No windows found. Tree:\n{}",
-            root.dump()
-        );
+        assert!(!windows.is_empty(), "No windows found. Tree:\n{}", root);
     }
 
     #[test]
@@ -141,7 +137,7 @@ mod tests {
             buttons.len() >= 2,
             "Expected >=2 buttons, found {}. Tree:\n{}",
             buttons.len(),
-            root.dump()
+            root
         );
     }
 
@@ -194,7 +190,7 @@ mod tests {
         assert!(
             !text_nodes.is_empty(),
             "Text entry not found. Tree:\n{}",
-            root.dump()
+            root
         );
     }
 
@@ -212,7 +208,7 @@ mod tests {
             assert!(
                 !labels.is_empty(),
                 "No StaticText/label nodes found. Tree:\n{}",
-                root.dump()
+                root
             );
         } else {
             assert!(
@@ -228,11 +224,7 @@ mod tests {
     fn tree_has_slider_at_50() {
         let root = h::app_tree();
         let sliders = root.query("slider").unwrap();
-        assert!(
-            !sliders.is_empty(),
-            "No sliders found. Tree:\n{}",
-            root.dump()
-        );
+        assert!(!sliders.is_empty(), "No sliders found. Tree:\n{}", root);
         // Slider value may have been changed by prior tests; just verify it has a numeric value
         assert!(sliders[0].value.is_some(), "Slider should have a value");
         let val: f64 = sliders[0].value.as_deref().unwrap().parse().unwrap_or(0.0);
@@ -251,7 +243,7 @@ mod tests {
         assert!(
             !progress.is_empty(),
             "No progress bars found. Tree:\n{}",
-            root.dump()
+            root
         );
     }
 
@@ -264,7 +256,7 @@ mod tests {
             radios.len() >= 2,
             "Expected >=2 radio buttons, found {}. Tree:\n{}",
             radios.len(),
-            root.dump()
+            root
         );
     }
 
@@ -273,11 +265,7 @@ mod tests {
     fn tree_has_combo_box() {
         let root = h::app_tree();
         let combos = root.query("combo_box").unwrap();
-        assert!(
-            !combos.is_empty(),
-            "ComboBox not found. Tree:\n{}",
-            root.dump()
-        );
+        assert!(!combos.is_empty(), "ComboBox not found. Tree:\n{}", root);
     }
 
     #[test]
@@ -289,7 +277,7 @@ mod tests {
         assert!(
             !lists.is_empty() || !items.is_empty(),
             "Neither List nor ListItem found. Tree:\n{}",
-            root.dump()
+            root
         );
     }
 
@@ -302,7 +290,7 @@ mod tests {
         assert!(
             !tables.is_empty() || !cells.is_empty(),
             "Neither Table nor TableCell found. Tree:\n{}",
-            root.dump()
+            root
         );
     }
 
@@ -315,11 +303,7 @@ mod tests {
     fn role_menu_bar() {
         let root = h::app_tree();
         let nodes = root.query("menu_bar").unwrap();
-        assert!(
-            !nodes.is_empty(),
-            "MenuBar not found. Tree:\n{}",
-            root.dump()
-        );
+        assert!(!nodes.is_empty(), "MenuBar not found. Tree:\n{}", root);
     }
 
     #[test]
@@ -327,11 +311,7 @@ mod tests {
     fn role_menu_item() {
         let root = h::app_tree();
         let nodes = root.query("menu_item").unwrap();
-        assert!(
-            !nodes.is_empty(),
-            "MenuItem not found. Tree:\n{}",
-            root.dump()
-        );
+        assert!(!nodes.is_empty(), "MenuItem not found. Tree:\n{}", root);
         let has_file = nodes.iter().any(|n| n.name.as_deref() == Some("File"));
         assert!(has_file, "File menu item not found");
     }
@@ -341,11 +321,7 @@ mod tests {
     fn role_toolbar() {
         let root = h::app_tree();
         let nodes = root.query("toolbar").unwrap();
-        assert!(
-            !nodes.is_empty(),
-            "Toolbar not found. Tree:\n{}",
-            root.dump()
-        );
+        assert!(!nodes.is_empty(), "Toolbar not found. Tree:\n{}", root);
     }
 
     #[test]
@@ -357,7 +333,7 @@ mod tests {
         assert!(
             !tab_groups.is_empty() || !tabs.is_empty(),
             "Neither TabGroup nor Tab found. Tree:\n{}",
-            root.dump()
+            root
         );
     }
 
@@ -366,11 +342,7 @@ mod tests {
     fn role_separator() {
         let root = h::app_tree();
         let seps = root.query("separator").unwrap();
-        assert!(
-            !seps.is_empty(),
-            "Separator not found. Tree:\n{}",
-            root.dump()
-        );
+        assert!(!seps.is_empty(), "Separator not found. Tree:\n{}", root);
     }
 
     #[test]
@@ -378,11 +350,7 @@ mod tests {
     fn role_image() {
         let root = h::app_tree();
         let images = root.query("image").unwrap();
-        assert!(
-            !images.is_empty(),
-            "Image not found. Tree:\n{}",
-            root.dump()
-        );
+        assert!(!images.is_empty(), "Image not found. Tree:\n{}", root);
     }
 
     #[test]
@@ -390,7 +358,7 @@ mod tests {
     fn role_link() {
         let root = h::app_tree();
         let links = root.query("link").unwrap();
-        assert!(!links.is_empty(), "Link not found. Tree:\n{}", root.dump());
+        assert!(!links.is_empty(), "Link not found. Tree:\n{}", root);
     }
 
     #[test]
@@ -398,11 +366,7 @@ mod tests {
     fn role_tree_item() {
         let root = h::app_tree();
         let items = root.query("tree_item").unwrap();
-        assert!(
-            !items.is_empty(),
-            "TreeItem not found. Tree:\n{}",
-            root.dump()
-        );
+        assert!(!items.is_empty(), "TreeItem not found. Tree:\n{}", root);
     }
 
     #[test]
@@ -410,11 +374,7 @@ mod tests {
     fn role_dialog() {
         let root = h::app_tree();
         let dialogs = root.query("dialog").unwrap();
-        assert!(
-            !dialogs.is_empty(),
-            "Dialog not found. Tree:\n{}",
-            root.dump()
-        );
+        assert!(!dialogs.is_empty(), "Dialog not found. Tree:\n{}", root);
     }
 
     #[test]
@@ -422,11 +382,7 @@ mod tests {
     fn role_alert() {
         let root = h::app_tree();
         let alerts = root.query("alert").unwrap();
-        assert!(
-            !alerts.is_empty(),
-            "Alert not found. Tree:\n{}",
-            root.dump()
-        );
+        assert!(!alerts.is_empty(), "Alert not found. Tree:\n{}", root);
     }
 
     #[test]
@@ -434,11 +390,7 @@ mod tests {
     fn role_heading() {
         let root = h::app_tree();
         let headings = root.query("heading").unwrap();
-        assert!(
-            !headings.is_empty(),
-            "Heading not found. Tree:\n{}",
-            root.dump()
-        );
+        assert!(!headings.is_empty(), "Heading not found. Tree:\n{}", root);
     }
 
     #[test]
@@ -449,7 +401,7 @@ mod tests {
         assert!(
             !scrollbars.is_empty(),
             "ScrollBar not found. Tree:\n{}",
-            root.dump()
+            root
         );
     }
 
@@ -462,7 +414,7 @@ mod tests {
         assert!(
             !node.is_empty(),
             "SplitGroup node not found. Tree:\n{}",
-            root.dump()
+            root
         );
     }
 
@@ -471,11 +423,7 @@ mod tests {
     fn role_static_text() {
         let root = h::app_tree();
         let labels = root.query("static_text").unwrap();
-        assert!(
-            !labels.is_empty(),
-            "StaticText not found. Tree:\n{}",
-            root.dump()
-        );
+        assert!(!labels.is_empty(), "StaticText not found. Tree:\n{}", root);
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -549,11 +497,11 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn tree_dump_readable() {
+    fn tree_display_readable() {
         let root = h::app_tree();
-        let dump = root.dump();
-        assert!(!dump.is_empty());
-        assert!(dump.contains("[0]"), "Dump should start with [0]");
+        let display = root.to_string();
+        assert!(!display.is_empty());
+        assert!(display.contains("[0]"), "Display should start with [0]");
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -760,11 +708,7 @@ mod tests {
                     && (n.value.is_some() || n.name.as_deref() == Some("Name"))
             })
             .collect();
-        assert!(
-            !text.is_empty(),
-            "Text entry not found. Tree:\n{}",
-            root.dump()
-        );
+        assert!(!text.is_empty(), "Text entry not found. Tree:\n{}", root);
         assert!(text[0].states.editable, "Text entry should be editable");
     }
 
@@ -1318,11 +1262,7 @@ mod tests {
         let root = h::app_tree();
         // Query inside table → row → cell
         let cells = root.query(r#"[name*="Alice"]"#).unwrap();
-        assert!(
-            !cells.is_empty(),
-            "Alice cell not found. Tree:\n{}",
-            root.dump()
-        );
+        assert!(!cells.is_empty(), "Alice cell not found. Tree:\n{}", root);
         // Verify nesting: cell's parent should be a row-like node
         let parent = cells[0].parent();
         assert!(parent.is_some());
