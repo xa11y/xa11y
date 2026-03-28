@@ -1,6 +1,6 @@
 //! Fuzz target for xa11y-core tree operations (NOT platform providers).
 //! Builds random trees and exercises Tree methods: get, root, iter, children,
-//! subtree, dump, query, len, is_empty.
+//! subtree, display, query, len, is_empty.
 #![no_main]
 
 use arbitrary::Arbitrary;
@@ -182,8 +182,8 @@ fuzz_target!(|input: FuzzInput| {
         }
     }
 
-    // Exercise dump
-    let _ = tree.dump();
+    // Exercise Display
+    let _ = tree.to_string();
 
     // Exercise query (selector may be invalid, that's fine)
     let _ = tree.query(&input.selector);

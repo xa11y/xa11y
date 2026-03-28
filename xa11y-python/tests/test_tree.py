@@ -108,16 +108,6 @@ def test_query_invalid_selector(tree):
         tree.query("[[[invalid")
 
 
-# ── Dump ─────────────────────────────────────────────────────────────────────
-
-
-def test_dump(tree):
-    s = tree.dump()
-    assert "[0] application" in s
-    assert "button" in s
-    assert "Back" in s
-
-
 # ── Node dunders ─────────────────────────────────────────────────────────────
 
 

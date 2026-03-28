@@ -224,7 +224,7 @@ impl AppInfo {
 /// A node in the accessibility tree snapshot.
 ///
 /// Nodes form a navigable graph — use `node.children` and `node.parent`
-/// to traverse. Use `node.query()` to search and `node.dump()` for debug output.
+/// to traverse. Use `node.query()` to search.
 #[pyclass]
 struct Node {
     #[pyo3(get)]
@@ -340,16 +340,6 @@ impl Node {
             .iter()
             .map(|n| list.get_item(n.index as usize).map(|item| item.unbind()))
             .collect()
-    }
-
-    /// Render the tree as an indented text representation for debugging.
-    fn dump(&self) -> PyResult<String> {
-        let ctx = self._ctx.as_ref().ok_or_else(|| {
-            PyValueError::new_err(
-                "dump() requires a snapshot context (node from app(), not locator.get())",
-            )
-        })?;
-        Ok(ctx.rust_tree.dump())
     }
 
     /// Create a Locator for lazy element resolution from this snapshot's app.

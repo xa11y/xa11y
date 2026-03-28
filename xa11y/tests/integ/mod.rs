@@ -23,20 +23,15 @@ pub fn app_tree_with(opts: &QueryOptions) -> Node {
 
 /// Find exactly one node by selector. Panics with tree dump on failure.
 pub fn one(root: &Node, selector: &str) -> Node {
-    let results = root.query(selector).unwrap_or_else(|e| {
-        panic!(
-            "Selector '{}' failed: {}. Tree:\n{}",
-            selector,
-            e,
-            root.dump()
-        )
-    });
+    let results = root
+        .query(selector)
+        .unwrap_or_else(|e| panic!("Selector '{}' failed: {}. Tree:\n{}", selector, e, root));
     assert!(
         results.len() == 1,
         "Selector '{}' matched {} nodes (expected 1). Tree:\n{}",
         selector,
         results.len(),
-        root.dump()
+        root
     );
     results[0].clone()
 }
@@ -44,19 +39,14 @@ pub fn one(root: &Node, selector: &str) -> Node {
 /// Find first node whose name contains `substring` (case-insensitive).
 pub fn named(root: &Node, substring: &str) -> Node {
     let selector = format!("[name*=\"{}\"]", substring);
-    let results = root.query(&selector).unwrap_or_else(|e| {
-        panic!(
-            "Selector '{}' failed: {}. Tree:\n{}",
-            selector,
-            e,
-            root.dump()
-        )
-    });
+    let results = root
+        .query(&selector)
+        .unwrap_or_else(|e| panic!("Selector '{}' failed: {}. Tree:\n{}", selector, e, root));
     assert!(
         !results.is_empty(),
         "No node with name containing '{}'. Tree:\n{}",
         substring,
-        root.dump()
+        root
     );
     results[0].clone()
 }

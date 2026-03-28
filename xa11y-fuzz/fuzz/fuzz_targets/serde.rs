@@ -59,7 +59,7 @@ fuzz_target!(|data: &[u8]| {
             }
 
             let _ = tree.subtree_indices(root.index);
-            let _ = tree.dump();
+            let _ = tree.to_string();
 
             // Try a query.
             let _ = tree.query("button");
@@ -76,7 +76,7 @@ fuzz_target!(|data: &[u8]| {
             let _ = tree.len();
             if !tree.is_empty() {
                 let _ = tree.root_data();
-                let _ = tree.dump();
+                let _ = tree.to_string();
             }
         }
     }

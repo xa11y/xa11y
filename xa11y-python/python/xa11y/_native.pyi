@@ -148,8 +148,6 @@ class Node:
         """Whether the element is in a busy/loading state."""
     def query(self, selector: str) -> list[Node]:
         """Find all nodes matching a CSS-like selector string within this snapshot."""
-    def dump(self) -> str:
-        """Render the tree as an indented text representation for debugging."""
     def locator(
         self,
         selector: str,
