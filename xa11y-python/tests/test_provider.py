@@ -5,13 +5,12 @@ from xa11y._native import _make_test_apps
 # ── app() (via _make_test_tree mock) ────────────────────────────────────────
 
 
-def test_app_tree_has_nodes(tree):
-    assert tree.app_name == "TestApp"
-    assert len(tree) == 13
+def test_app_root_has_name(tree):
+    assert tree.name == "TestApp"
 
 
-def test_app_tree_has_pid(tree):
-    assert tree.pid == 1234
+def test_app_root_has_children(tree):
+    assert len(tree.children) > 0
 
 
 # ── list_apps() ─────────────────────────────────────────────────────────────

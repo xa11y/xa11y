@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 
 # ── Exceptions ───────────────────────────────────────────────────────────────
 
@@ -67,10 +67,11 @@ class AppInfo:
 # ── Node ─────────────────────────────────────────────────────────────────────
 
 class Node:
-    """A single element in the accessibility tree.
+    """A single element in an accessibility tree snapshot.
 
     Nodes are immutable snapshots that form a navigable graph —
     use :attr:`children` and :attr:`parent` to traverse.
+    Use :meth:`query` to search and :meth:`dump` for debug output.
     """
 
     @property
@@ -97,6 +98,9 @@ class Node:
     @property
     def stable_id(self) -> str | None:
         """Platform-stable identifier that persists across tree snapshots."""
+    @property
+    def pid(self) -> int | None:
+        """Process ID of the application owning this node."""
     @property
     def actions(self) -> list[str]:
         """List of supported action names."""
@@ -142,82 +146,12 @@ class Node:
     @property
     def busy(self) -> bool:
         """Whether the element is in a busy/loading state."""
-    def __repr__(self) -> str: ...
-    def __str__(self) -> str: ...
-    def __len__(self) -> int: ...
-
-# ── Target type for action methods ───────────────────────────────────────────
-
-_Target = Node | str
-
-# ── Tree ─────────────────────────────────────────────────────────────────────
-
-class Tree:
-    """A snapshot of an application's accessibility tree.
-
-    Iterable over all nodes in depth-first order. Supports ``len(tree)``
-    to get the total node count.
-    """
-
-    @property
-    def app_name(self) -> str:
-        """Name of the application this tree belongs to."""
-    @property
-    def pid(self) -> int | None:
-        """Process ID of the application."""
-    @property
-    def screen_size(self) -> tuple[int, int]:
-        """Screen dimensions as ``(width, height)`` in pixels."""
-    @property
-    def root(self) -> Node:
-        """The root node of the tree."""
+    def subtree(self) -> list[Node]:
+        """Get all nodes in this node's subtree (including this node)."""
     def query(self, selector: str) -> list[Node]:
-        """Find all nodes matching a CSS-like selector string."""
-    def perform(
-        self,
-        target: _Target,
-        action: str,
-        *,
-        value: str | None = None,
-        numeric_value: float | None = None,
-        direction: str | None = None,
-        amount: float | None = None,
-        start: int | None = None,
-        end: int | None = None,
-    ) -> None:
-        """Perform a named action on a node or selector target."""
-    def press(self, target: _Target) -> None:
-        """Press / activate an element."""
-    def focus(self, target: _Target) -> None:
-        """Move keyboard focus to an element."""
-    def blur(self, target: _Target) -> None:
-        """Remove keyboard focus from an element."""
-    def toggle(self, target: _Target) -> None:
-        """Toggle a checkbox or switch."""
-    def expand(self, target: _Target) -> None:
-        """Expand a collapsible element."""
-    def collapse(self, target: _Target) -> None:
-        """Collapse an expanded element."""
-    def select(self, target: _Target) -> None:
-        """Select an item (e.g. in a list or tab bar)."""
-    def increment(self, target: _Target) -> None:
-        """Increment a slider or stepper."""
-    def decrement(self, target: _Target) -> None:
-        """Decrement a slider or stepper."""
-    def show_menu(self, target: _Target) -> None:
-        """Open the context menu for an element."""
-    def scroll_into_view(self, target: _Target) -> None:
-        """Scroll until the element is visible in its viewport."""
-    def set_value(self, target: _Target, value: str) -> None:
-        """Set the text value of an element."""
-    def set_numeric_value(self, target: _Target, value: float) -> None:
-        """Set the numeric value of an element (e.g. a slider)."""
-    def type_text(self, target: _Target, text: str) -> None:
-        """Type text into an element."""
-    def scroll(self, target: _Target, direction: str, amount: float = 1.0) -> None:
-        """Scroll an element. *direction* is ``"up"``, ``"down"``, ``"left"``, or ``"right"``."""
-    def select_text(self, target: _Target, start: int, end: int) -> None:
-        """Select a text range by character offsets."""
+        """Find all nodes matching a CSS-like selector string within this snapshot."""
+    def dump(self) -> str:
+        """Render the tree as an indented text representation for debugging."""
     def locator(
         self,
         selector: str,
@@ -228,10 +162,9 @@ class Tree:
         roles: list[str] | None = None,
     ) -> Locator:
         """Create a :class:`Locator` for resilient, lazy element interaction."""
-    def __len__(self) -> int: ...
-    def __iter__(self) -> Iterator[Node]: ...
     def __repr__(self) -> str: ...
     def __str__(self) -> str: ...
+    def __len__(self) -> int: ...
 
 # ── Locator ──────────────────────────────────────────────────────────────────
 
@@ -357,8 +290,8 @@ def app(
     max_elements: int | None = None,
     visible_only: bool = False,
     roles: list[str] | None = None,
-) -> Tree:
-    """Get the accessibility tree for the given app.
+) -> Node:
+    """Snapshot an app's accessibility tree and return the root Node.
 
     Identify the app by *name* (substring match) or *pid* (exact).
     """
@@ -369,8 +302,8 @@ def all_apps(
     max_elements: int | None = None,
     visible_only: bool = False,
     roles: list[str] | None = None,
-) -> Tree:
-    """Get a combined accessibility tree for all running applications."""
+) -> Node:
+    """Snapshot all running apps and return the root Node."""
 
 def locator(
     name: str | None = None,
@@ -395,5 +328,5 @@ def check_permissions() -> str:
 
 # ── Test helpers ─────────────────────────────────────────────────────────────
 
-def _make_test_tree() -> Tree: ...
+def _make_test_tree() -> Node: ...
 def _make_test_apps() -> list[AppInfo]: ...

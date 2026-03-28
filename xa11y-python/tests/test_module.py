@@ -6,7 +6,6 @@ import xa11y
 
 
 def test_all_classes_exported():
-    assert hasattr(xa11y, "Tree")
     assert hasattr(xa11y, "Node")
     assert hasattr(xa11y, "Locator")
     assert hasattr(xa11y, "Rect")
@@ -37,7 +36,6 @@ def test_all_functions_exported():
 
 def test_all_list():
     assert isinstance(xa11y.__all__, list)
-    assert "Tree" in xa11y.__all__
     assert "Node" in xa11y.__all__
     assert "app" in xa11y.__all__
     assert "all_apps" in xa11y.__all__
@@ -46,10 +44,6 @@ def test_all_list():
 
 
 # ── Types are correct classes ────────────────────────────────────────────────
-
-
-def test_tree_is_type():
-    assert isinstance(xa11y.Tree, type)
 
 
 def test_node_is_type():

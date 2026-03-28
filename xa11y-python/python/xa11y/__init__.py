@@ -2,13 +2,12 @@
 
 Quick start:
     >>> import xa11y
-    >>> tree = xa11y.app("Safari")
-    >>> for button in tree.query("button"):
+    >>> root = xa11y.app("Safari")
+    >>> for button in root.query("button"):
     ...     print(button.name)
-    >>> tree.press("button[name='OK']")
 
 Reuse a locator for lazy resolution:
-    >>> loc = xa11y.locator("Safari", selector="button[name='Submit']")
+    >>> loc = root.locator("button[name='Submit']")
     >>> loc.press()
 """
 
@@ -24,7 +23,6 @@ from xa11y._native import (
     Rect,
     SelectorNotMatchedError,
     TimeoutError,
-    Tree,
     # Exceptions
     XA11yError,
     all_apps,
@@ -47,7 +45,6 @@ __all__ = [
     "Rect",
     "SelectorNotMatchedError",
     "TimeoutError",
-    "Tree",
     "XA11yError",
     "all_apps",
     "app",

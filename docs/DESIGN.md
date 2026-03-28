@@ -163,34 +163,18 @@ pub enum Action {
 - **ShowMenu on Windows:** No direct pattern. Can be accomplished via keyboard simulation (Shift+F10) or by expanding a combo box. xa11y will attempt `ExpandCollapse.Expand()` as fallback.
 - **Action discovery:** macOS reports actions via `AXUIElementCopyActionNames()`. Windows uses UIA patterns (each pattern implies certain actions). Linux AT-SPI reports actions via the Action interface with indexed names. xa11y normalizes all these into the `Action` enum.
 
-### 3. `Node` — A single element in the tree
+### 3. `Node` — A snapshot handle for a single element
+
+A `Node` is a handle into an accessibility tree snapshot. It wraps an `Arc<Tree>` and an index, so cloning is cheap and navigation (parent/children/query) uses the shared snapshot without any platform refetch.
 
 ```rust
-pub struct Node {
-    /// Internal index within a snapshot (sequential, deterministic DFS order).
-    /// This is `#[doc(hidden)]` and not part of the public Rust API.
-    #[doc(hidden)]
-    pub(crate) index: NodeIndex,
-
-    /// Optional stable identifier for relocating elements across snapshots.
-    pub stable_id: Option<String>,
-
-    /// Element role
+/// The raw data for a single element (used by providers building trees).
+pub struct NodeData {
     pub role: Role,
-
-    /// Human-readable name (title, label)
     pub name: Option<String>,
-
-    /// Current value (text content, slider position, etc.)
     pub value: Option<String>,
-
-    /// Supplementary description (tooltip, help text)
     pub description: Option<String>,
-
-    /// Bounding rectangle in screen pixels
     pub bounds: Option<Rect>,
-
-    /// Available actions
     pub actions: Vec<Action>,
 
     /// Current state flags
@@ -288,73 +272,81 @@ Geometry uses accesskit-style `Rect` for pixel coordinates.
 - **High-DPI / Retina:** macOS reports bounds in points (not pixels). Windows reports in physical pixels. Linux depends on the toolkit. xa11y reports whatever the platform API returns and documents the coordinate space.
 - **Coordinate origin:** macOS accessibility uses top-left origin (unlike AppKit which uses bottom-left). Windows and Linux use top-left. xa11y uses top-left consistently.
 
-### 5. `Tree` — A snapshot of the accessibility tree
+### 5. `Node` handle — Snapshot navigation
+
+The `Node` handle wraps `Arc<Tree>` + index, giving cheap cloning and snapshot navigation:
 
 ```rust
-pub struct Tree {
-    /// Application name
-    pub app_name: String,
-
-    /// Process ID. `None` for multi-app queries.
-    pub pid: Option<u32>,
-
-    /// Screen dimensions at capture time
-    pub screen_size: (u32, u32),
-
-    /// All nodes in DFS order (private — access via methods)
-    nodes: Vec<Node>,
-
-    /// Query options used to produce this snapshot
-    /// (stored for deterministic re-traversal during action dispatch)
-    pub query: QueryOptions,
+pub struct Node {
+    snapshot: Arc<Tree>,
+    index: u32,
 }
-```
 
-The tree is a **flattened snapshot** — nodes reference each other by internal `NodeIndex` rather than holding direct pointers. The `nodes` field is private; consumers access nodes through tree methods. This is critical for:
-- Serialization (JSON, msgpack) for FFI
-- Deterministic re-traversal for action dispatch (same DFS order → same indices)
-- Thread safety without lifetimes
+impl Deref for Node {
+    type Target = NodeData;
+    // Access all NodeData fields directly: node.role, node.name, etc.
+}
 
-#### Tree Methods
-
-```rust
-impl Tree {
-    /// Get the root node
-    pub fn root(&self) -> &Node;
-
-    /// Iterate all nodes
-    pub fn iter(&self) -> impl Iterator<Item = &Node>;
-
-    /// Query nodes matching a CSS-like selector
-    pub fn query(&self, selector: &str) -> Result<Vec<&Node>>;
-
-    /// Get children of a node
-    pub fn children(&self, node: &Node) -> Vec<&Node>;
-
-    /// Get the parent of a node
-    pub fn parent(&self, node: &Node) -> Option<&Node>;
-
-    /// Get the subtree rooted at a node
-    pub fn subtree(&self, node: &Node) -> Vec<&Node>;
-
-    /// Render the tree as an indented text representation for debugging.
-    /// Format: one line per node, indented by depth, showing role, name, and states.
-    ///
-    /// Example output:
-    /// ```text
-    /// [0] Window "My App"
-    ///   [1] Toolbar
-    ///     [2] Button "Back"
-    ///     [3] TextField "Address" value="https://..."
-    ///   [4] WebArea
-    ///     [5] Heading "Welcome"
-    /// ```
+impl Node {
+    pub fn parent(&self) -> Option<Node>;
+    pub fn children(&self) -> Vec<Node>;
+    pub fn subtree(&self) -> Vec<Node>;
+    pub fn query(&self, selector: &str) -> Result<Vec<Node>>;
     pub fn dump(&self) -> String;
 }
 ```
 
-`Tree` implements `serde::Serialize` and `serde::Deserialize` for JSON/msgpack serialization.
-Deserialized trees are read-only data snapshots and cannot be used for action dispatch.
+All navigation uses the shared snapshot — no platform refetch occurs.
+
+`Tree` is an internal type (public in `xa11y-core` for provider implementors, but not part of the consumer-facing API). It stores nodes in DFS order as `Vec<NodeData>` and provides index-based access.
+
+### 5a. Node vs Locator
+
+xa11y has two main types: **Node** and **Locator**.
+
+#### Node — Snapshot (read-only)
+
+A Node is a point-in-time snapshot of a UI element. When you call `xa11y.app()`,
+the library captures the entire accessibility tree and returns the root Node.
+
+- **Navigation**: `node.parent()`, `node.children()` — traverse the snapshot
+- **Queries**: `node.query("button")` — search within the snapshot
+- **Properties**: `node.role`, `node.name`, `node.value`, `node.states` — read cached data
+- **No refetch**: All operations use cached snapshot data. Zero platform calls.
+- **Can go stale**: If the UI changes, the snapshot doesn't update. Call `app()` again.
+
+#### Locator — Lazy (actions + fresh reads)
+
+A Locator is a selector that re-evaluates against a fresh tree on every operation.
+Inspired by Playwright's Locator pattern.
+
+- **Actions**: `loc.press()`, `loc.set_value("text")` — refetches, finds element, acts
+- **Reads**: `loc.name()`, `loc.is_visible()` — refetches, finds element, reads
+- **Waits**: `loc.wait_visible(timeout=5)` — polls with fresh snapshots
+- **Never stale**: Every call gets the latest state from the platform.
+- **No navigation**: Locators don't have parent/children — use Node for that.
+
+#### When to use which
+
+| Need | Use |
+|------|-----|
+| Inspect UI structure | Node |
+| Navigate parent/children | Node |
+| Click a button | Locator |
+| Wait for element to appear | Locator |
+| Read a value that might change | Locator |
+| Dump tree for debugging | Node |
+
+#### Which operations refetch?
+
+| Operation | Refetches? |
+|-----------|-----------|
+| `app()` / `all_apps()` | Yes — captures fresh snapshot |
+| `node.parent()` / `node.children()` / `node.query()` | No — uses snapshot |
+| `node.role` / `node.name` / `node.dump()` | No — uses snapshot |
+| `locator.press()` / `locator.set_value()` | Yes — refetches every time |
+| `locator.name()` / `locator.is_visible()` | Yes — refetches every time |
+| `locator.wait_*()` | Yes — polls with refetch |
 
 ### 6. `Selector` — CSS-like Query Language
 
@@ -425,7 +417,7 @@ pub trait Provider: Send + Sync {
     fn perform_action(
         &self,
         tree: &Tree,
-        node: &Node,
+        node: &NodeData,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()>;

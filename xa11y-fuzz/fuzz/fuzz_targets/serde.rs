@@ -49,16 +49,16 @@ fuzz_target!(|data: &[u8]| {
         let _ = tree.is_empty();
 
         if !tree.is_empty() {
-            let root = tree.root();
-            let _ = root.id;
+            let root = tree.root_data();
+            let _ = root.role;
 
             // Exercise get on all nodes.
             for node in tree.iter() {
-                let _ = tree.get(node.id);
-                let _ = tree.children(node.id);
+                let _ = tree.get_data(node.index);
+                let _ = tree.children_data(node);
             }
 
-            let _ = tree.subtree(root.id);
+            let _ = tree.subtree_indices(root.index);
             let _ = tree.dump();
 
             // Try a query.
@@ -75,7 +75,7 @@ fuzz_target!(|data: &[u8]| {
         if let Ok(tree) = serde_json::from_str::<Tree>(s) {
             let _ = tree.len();
             if !tree.is_empty() {
-                let _ = tree.root();
+                let _ = tree.root_data();
                 let _ = tree.dump();
             }
         }

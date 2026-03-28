@@ -1,7 +1,13 @@
+use std::fmt;
+use std::ops::Deref;
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::action::Action;
+use crate::error::Result;
 use crate::role::Role;
+use crate::tree::Tree;
 
 /// Internal index for a node within a snapshot (sequential DFS order).
 /// This is an array index, not a stable identity — it changes between snapshots.
@@ -9,9 +15,13 @@ use crate::role::Role;
 #[doc(hidden)]
 pub type NodeIndex = u32;
 
-/// A single element in the accessibility tree snapshot.
+/// The raw data for a single element in an accessibility tree snapshot.
+///
+/// This is the underlying data struct. Most consumers should use [`Node`],
+/// which wraps `NodeData` with snapshot navigation (parent/children).
+/// `NodeData` is used directly by provider implementors building trees.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Node {
+pub struct NodeData {
     /// Element role
     pub role: Role,
 
@@ -50,6 +60,9 @@ pub struct Node {
     /// Not all elements have one.
     pub stable_id: Option<String>,
 
+    /// Process ID of the application that owns this node.
+    pub pid: Option<u32>,
+
     /// Platform-specific raw data
     pub raw: RawPlatformData,
 
@@ -71,7 +84,7 @@ pub struct Node {
     pub parent_index: Option<NodeIndex>,
 }
 
-impl Node {
+impl NodeData {
     /// Create a synthetic empty node, used as a placeholder when a wait
     /// condition is satisfied by the *absence* of a node (e.g. Detached/Hidden).
     pub fn synthetic_empty() -> Self {
@@ -87,11 +100,134 @@ impl Node {
             min_value: None,
             max_value: None,
             stable_id: None,
+            pid: None,
             raw: RawPlatformData::Synthetic,
             index: 0,
             children_indices: vec![],
             parent_index: None,
         }
+    }
+}
+
+/// A node in an accessibility tree snapshot, with navigation.
+///
+/// `Node` dereferences to [`NodeData`], so all properties (`role`, `name`,
+/// `value`, `states`, etc.) are accessible via field access. Navigation
+/// methods (`parent()`, `children()`, `query()`) use the shared snapshot
+/// — no platform refetch occurs.
+///
+/// Nodes are cheap to clone (they share the underlying snapshot via `Arc`).
+#[derive(Clone)]
+pub struct Node {
+    snapshot: Arc<Tree>,
+    index: u32,
+}
+
+impl Deref for Node {
+    type Target = NodeData;
+
+    fn deref(&self) -> &NodeData {
+        self.snapshot
+            .get_data(self.index)
+            .expect("Node index must be valid within its snapshot")
+    }
+}
+
+impl fmt::Debug for Node {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Delegate to the underlying NodeData's Debug
+        fmt::Debug::fmt(&**self, f)
+    }
+}
+
+impl Serialize for Node {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        // Serialize as the underlying NodeData
+        (**self).serialize(serializer)
+    }
+}
+
+impl Node {
+    /// Create a Node handle from a snapshot and an index into the snapshot.
+    pub fn new(snapshot: Arc<Tree>, index: u32) -> Self {
+        Self { snapshot, index }
+    }
+
+    /// Get the underlying snapshot (Tree) this node belongs to.
+    ///
+    /// Used by provider crates for action dispatch.
+    pub fn tree(&self) -> &Arc<Tree> {
+        &self.snapshot
+    }
+
+    /// Get the node's index within its snapshot.
+    ///
+    /// Used by provider crates for action dispatch.
+    pub fn node_index(&self) -> u32 {
+        self.index
+    }
+
+    /// Get the parent node, if any (root has no parent).
+    ///
+    /// Uses the snapshot — no platform refetch.
+    pub fn parent(&self) -> Option<Node> {
+        self.parent_index
+            .map(|idx| Node::new(Arc::clone(&self.snapshot), idx))
+    }
+
+    /// Get direct children of this node.
+    ///
+    /// Uses the snapshot — no platform refetch.
+    pub fn children(&self) -> Vec<Node> {
+        self.children_indices
+            .iter()
+            .map(|&idx| Node::new(Arc::clone(&self.snapshot), idx))
+            .collect()
+    }
+
+    /// Get the subtree rooted at this node (including this node).
+    ///
+    /// Uses the snapshot — no platform refetch.
+    pub fn subtree(&self) -> Vec<Node> {
+        self.snapshot
+            .subtree_indices(self.index)
+            .into_iter()
+            .map(|idx| Node::new(Arc::clone(&self.snapshot), idx))
+            .collect()
+    }
+
+    /// Query nodes matching a CSS-like selector string within this snapshot.
+    ///
+    /// Searches the *entire* snapshot (not just this node's subtree).
+    /// Uses the snapshot — no platform refetch.
+    pub fn query(&self, selector_str: &str) -> Result<Vec<Node>> {
+        let indices = self.snapshot.query_indices(selector_str)?;
+        Ok(indices
+            .into_iter()
+            .map(|idx| Node::new(Arc::clone(&self.snapshot), idx))
+            .collect())
+    }
+
+    /// Render the tree as an indented text representation for debugging.
+    ///
+    /// Uses the snapshot — no platform refetch.
+    pub fn dump(&self) -> String {
+        self.snapshot.dump()
+    }
+
+    /// Get a synthetic empty Node (no snapshot navigation).
+    /// Used as a placeholder when a wait condition is satisfied by absence.
+    pub fn synthetic_empty() -> Self {
+        let tree = Tree::new(
+            String::new(),
+            None,
+            (0, 0),
+            vec![NodeData::synthetic_empty()],
+        );
+        Node::new(Arc::new(tree), 0)
     }
 }
 

@@ -6,7 +6,7 @@ import xa11y
 # ── Construction ─────────────────────────────────────────────────────────────
 
 
-def test_locator_from_tree(tree):
+def test_locator_from_node(tree):
     loc = tree.locator("button")
     assert loc.selector == "button"
 

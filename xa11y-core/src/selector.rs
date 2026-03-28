@@ -16,7 +16,7 @@
 //! ```
 
 use crate::error::{Error, Result};
-use crate::node::Node;
+use crate::node::NodeData;
 use crate::role::Role;
 use crate::tree::Tree;
 
@@ -307,14 +307,14 @@ impl Selector {
     }
 
     /// Match nodes in the tree against this selector.
-    pub fn match_nodes<'a>(&self, tree: &'a Tree) -> Vec<&'a Node> {
+    pub fn match_nodes<'a>(&self, tree: &'a Tree) -> Vec<&'a NodeData> {
         if self.segments.is_empty() {
             return vec![];
         }
 
         // Start with all nodes matching the first simple selector
         let first = &self.segments[0].simple;
-        let mut candidates: Vec<&Node> = tree
+        let mut candidates: Vec<&NodeData> = tree
             .iter()
             .filter(|n| Self::matches_simple(n, first))
             .collect();
@@ -326,7 +326,7 @@ impl Selector {
                 match segment.combinator {
                     Combinator::Child => {
                         // Direct children of candidate that match
-                        for child in tree.children(candidate) {
+                        for child in tree.children_data(candidate) {
                             if Self::matches_simple(child, &segment.simple) {
                                 next_candidates.push(child);
                             }
@@ -334,7 +334,11 @@ impl Selector {
                     }
                     Combinator::Descendant => {
                         // All descendants of candidate that match
-                        let subtree = tree.subtree(candidate);
+                        let subtree = tree
+                            .subtree_indices(candidate.index)
+                            .into_iter()
+                            .filter_map(|idx| tree.get_data(idx))
+                            .collect::<Vec<_>>();
                         for node in subtree.into_iter().skip(1) {
                             if Self::matches_simple(node, &segment.simple) {
                                 next_candidates.push(node);
@@ -362,7 +366,7 @@ impl Selector {
         candidates
     }
 
-    fn matches_simple(node: &Node, simple: &SimpleSelector) -> bool {
+    fn matches_simple(node: &NodeData, simple: &SimpleSelector) -> bool {
         // Check role
         if let Some(role) = simple.role {
             if node.role != role {

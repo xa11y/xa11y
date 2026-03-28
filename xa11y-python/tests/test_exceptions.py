@@ -56,8 +56,9 @@ def test_catch_with_specific_class(tree):
 
 
 def test_selector_not_matched_message(tree):
+    loc = tree.locator("menu_item")
     try:
-        tree.press("menu_item")
+        loc.press()
     except xa11y.SelectorNotMatchedError as e:
         assert "menu_item" in str(e)
 

@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::action::{Action, ActionData, ScrollDirection};
 use crate::error::{Error, Result};
 use crate::event::ElementState;
-use crate::node::{Node, Rect, StateSet};
+use crate::node::{Node, NodeData, Rect, StateSet};
 use crate::provider::{AppTarget, Provider, QueryOptions};
 use crate::role::Role;
 use crate::tree::Tree;
@@ -126,12 +126,11 @@ impl Locator {
         })
     }
 
-    /// Resolve and return a clone of the matched node.
-    /// This is the safe way to get node data out without lifetime issues.
-    fn resolve_node(&self) -> Result<Node> {
+    /// Resolve and return a clone of the matched node data.
+    fn resolve_node_data(&self) -> Result<NodeData> {
         let r = self.resolve()?;
         Ok(r.tree
-            .get(r.node_index)
+            .get_data(r.node_index)
             .expect("node_index valid after resolve")
             .clone())
     }
@@ -140,52 +139,52 @@ impl Locator {
 
     /// Get the matched element's role.
     pub fn role(&self) -> Result<Role> {
-        Ok(self.resolve_node()?.role)
+        Ok(self.resolve_node_data()?.role)
     }
 
     /// Get the matched element's name.
     pub fn name(&self) -> Result<Option<String>> {
-        Ok(self.resolve_node()?.name)
+        Ok(self.resolve_node_data()?.name)
     }
 
     /// Get the matched element's value.
     pub fn value(&self) -> Result<Option<String>> {
-        Ok(self.resolve_node()?.value)
+        Ok(self.resolve_node_data()?.value)
     }
 
     /// Get the matched element's description.
     pub fn description(&self) -> Result<Option<String>> {
-        Ok(self.resolve_node()?.description)
+        Ok(self.resolve_node_data()?.description)
     }
 
     /// Get the matched element's bounding rectangle.
     pub fn bounds(&self) -> Result<Option<Rect>> {
-        Ok(self.resolve_node()?.bounds)
+        Ok(self.resolve_node_data()?.bounds)
     }
 
     /// Get the matched element's state flags.
     pub fn states(&self) -> Result<StateSet> {
-        Ok(self.resolve_node()?.states)
+        Ok(self.resolve_node_data()?.states)
     }
 
     /// Get the matched element's numeric value (for range controls).
     pub fn numeric_value(&self) -> Result<Option<f64>> {
-        Ok(self.resolve_node()?.numeric_value)
+        Ok(self.resolve_node_data()?.numeric_value)
     }
 
     /// Check if the matched element is visible.
     pub fn is_visible(&self) -> Result<bool> {
-        Ok(self.resolve_node()?.states.visible)
+        Ok(self.resolve_node_data()?.states.visible)
     }
 
     /// Check if the matched element is enabled.
     pub fn is_enabled(&self) -> Result<bool> {
-        Ok(self.resolve_node()?.states.enabled)
+        Ok(self.resolve_node_data()?.states.enabled)
     }
 
     /// Check if the matched element is focused.
     pub fn is_focused(&self) -> Result<bool> {
-        Ok(self.resolve_node()?.states.focused)
+        Ok(self.resolve_node_data()?.states.focused)
     }
 
     /// Check if a matching element exists in the current tree.
@@ -204,9 +203,11 @@ impl Locator {
         Ok(matches.len())
     }
 
-    /// Get a clone of the matched node from a fresh snapshot.
+    /// Get a [`Node`] handle from a fresh snapshot, with snapshot navigation.
     pub fn get(&self) -> Result<Node> {
-        self.resolve_node()
+        let r = self.resolve()?;
+        let tree = Arc::new(r.tree);
+        Ok(Node::new(tree, r.node_index))
     }
 
     // ── Actions (each takes a fresh snapshot) ───────────────────────
@@ -219,7 +220,7 @@ impl Locator {
         let r = self.resolve()?;
         let node = r
             .tree
-            .get(r.node_index)
+            .get_data(r.node_index)
             .expect("node_index valid after resolve");
         self.provider.perform_action(&r.tree, node, action, data)
     }
@@ -357,9 +358,6 @@ impl Locator {
     // ── Wait operations ─────────────────────────────────────────────
 
     /// Wait until the element is visible, polling with fresh snapshots.
-    ///
-    /// If the provider implements `EventProvider`, delegates to its
-    /// `wait_for` method. Otherwise, polls at ~100ms intervals.
     pub fn wait_visible(&self, timeout: Duration) -> Result<Node> {
         self.wait_for_state(ElementState::Visible, timeout)
     }
@@ -407,37 +405,20 @@ impl Locator {
     /// Wait until an arbitrary predicate is satisfied, polling with fresh
     /// snapshots at ~100 ms intervals.
     ///
-    /// The predicate receives `Some(&Node)` when the selector matches, or
+    /// The predicate receives `Some(&NodeData)` when the selector matches, or
     /// `None` when no element matches. Return `true` to stop waiting.
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use xa11y_core::*;
-    /// # use std::time::Duration;
-    /// # fn example(loc: &Locator) -> Result<()> {
-    /// // Wait until the element's value becomes "Done":
-    /// let node = loc.wait_until(
-    ///     |n| n.is_some_and(|n| n.value.as_deref() == Some("Done")),
-    ///     Duration::from_secs(5),
-    /// )?;
-    /// # Ok(())
-    /// # }
-    /// ```
     pub fn wait_until(
         &self,
-        predicate: impl Fn(Option<&Node>) -> bool,
+        predicate: impl Fn(Option<&NodeData>) -> bool,
         timeout: Duration,
     ) -> Result<Node> {
         self.poll_until(&predicate, false, timeout)
     }
 
     /// Core polling loop shared by `wait_for_state` and `wait_until`.
-    ///
-    /// `allow_absent`: when true, the condition can be satisfied even when no
-    /// node matches (used for Detached/Hidden states).
     fn poll_until(
         &self,
-        predicate: impl Fn(Option<&Node>) -> bool,
+        predicate: impl Fn(Option<&NodeData>) -> bool,
         allow_absent: bool,
         timeout: Duration,
     ) -> Result<Node> {
@@ -453,13 +434,17 @@ impl Locator {
             let tree = self.provider.get_app_tree(&self.target, &self.opts)?;
             let matches = tree.query(&self.selector).ok();
             let idx = self.nth.unwrap_or(0);
-            let node = matches.as_ref().and_then(|m| m.get(idx).copied());
+            let matched_index = matches.as_ref().and_then(|m| m.get(idx).map(|n| n.index));
+            let node_ref = matched_index.and_then(|i| tree.get_data(i));
 
-            if predicate(node) {
+            if predicate(node_ref) {
                 return if allow_absent {
-                    Ok(node.cloned().unwrap_or_else(Node::synthetic_empty))
+                    Ok(matched_index
+                        .map(|i| Node::new(Arc::new(tree), i))
+                        .unwrap_or_else(Node::synthetic_empty))
                 } else {
-                    Ok(node.expect("predicate requires node to exist").clone())
+                    let i = matched_index.expect("predicate requires node to exist");
+                    Ok(Node::new(Arc::new(tree), i))
                 };
             }
 
