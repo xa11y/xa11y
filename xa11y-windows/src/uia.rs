@@ -1309,7 +1309,7 @@ fn map_uia_control_type(control_type: UIA_CONTROLTYPE_ID) -> Role {
 // ── EventProvider (polling-based) ─────────────────────────────────────────────
 
 impl EventProvider for WindowsProvider {
-    fn subscribe(&self, target: &AppTarget, filter: EventFilter) -> Result<Subscription> {
+    fn subscribe(&self, target: &AppTarget, _filter: EventFilter) -> Result<Subscription> {
         let (tx, rx) = std::sync::mpsc::channel();
 
         let (app_name, app_pid) = match target {
@@ -1362,19 +1362,16 @@ impl EventProvider for WindowsProvider {
                     .and_then(|n| n.name.clone());
                 if focused_name != prev_focused {
                     if prev_focused.is_some() {
-                        let kind = EventKind::FocusChanged;
-                        if filter.kinds.is_empty() || filter.kinds.contains(&kind) {
-                            let _ = tx.send(Event {
-                                kind,
-                                app_name: app_name.clone(),
-                                app_pid,
-                                target: tree.iter().find(|n| n.states.focused).cloned(),
-                                state_flag: None,
-                                state_value: None,
-                                text_change: None,
-                                timestamp: std::time::Instant::now(),
-                            });
-                        }
+                        let _ = tx.send(Event {
+                            kind: EventKind::FocusChanged,
+                            app_name: app_name.clone(),
+                            app_pid,
+                            target: tree.iter().find(|n| n.states.focused).cloned(),
+                            state_flag: None,
+                            state_value: None,
+                            text_change: None,
+                            timestamp: std::time::Instant::now(),
+                        });
                     }
                     prev_focused = focused_name;
                 }
@@ -1382,19 +1379,16 @@ impl EventProvider for WindowsProvider {
                 // Detect structure changes
                 let node_count = tree.len();
                 if node_count != prev_node_count && prev_node_count > 0 {
-                    let kind = EventKind::StructureChanged;
-                    if filter.kinds.is_empty() || filter.kinds.contains(&kind) {
-                        let _ = tx.send(Event {
-                            kind,
-                            app_name: app_name.clone(),
-                            app_pid,
-                            target: None,
-                            state_flag: None,
-                            state_value: None,
-                            text_change: None,
-                            timestamp: std::time::Instant::now(),
-                        });
-                    }
+                    let _ = tx.send(Event {
+                        kind: EventKind::StructureChanged,
+                        app_name: app_name.clone(),
+                        app_pid,
+                        target: None,
+                        state_flag: None,
+                        state_value: None,
+                        text_change: None,
+                        timestamp: std::time::Instant::now(),
+                    });
                 }
                 prev_node_count = node_count;
             }

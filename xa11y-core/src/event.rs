@@ -104,42 +104,21 @@ pub enum StateFlag {
 /// Filter to narrow which events are delivered.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EventFilter {
-    /// Which event kinds to subscribe to. Empty = all events.
-    pub kinds: Vec<EventKind>,
     /// Only deliver events from elements matching this selector.
+    /// None = all elements in the target app.
     pub selector: Option<String>,
-    /// For StateChanged events: only these state flags.
-    pub state_flags: Vec<StateFlag>,
 }
 
 impl EventFilter {
-    /// Subscribe to all events from the target.
+    /// Subscribe to all events from the target (no selector filter).
     pub fn all() -> Self {
         Self::default()
-    }
-
-    /// Subscribe to specific event kinds.
-    pub fn kinds(kinds: &[EventKind]) -> Self {
-        Self {
-            kinds: kinds.to_vec(),
-            ..Default::default()
-        }
     }
 
     /// Subscribe to events on elements matching a selector.
     pub fn selector(selector: &str) -> Self {
         Self {
             selector: Some(selector.to_string()),
-            ..Default::default()
-        }
-    }
-
-    /// Combine kind filter with selector filter.
-    pub fn new(kinds: &[EventKind], selector: Option<&str>) -> Self {
-        Self {
-            kinds: kinds.to_vec(),
-            selector: selector.map(|s| s.to_string()),
-            ..Default::default()
         }
     }
 }

@@ -886,7 +886,7 @@ pub trait EventProvider: Provider {
     /// Returns the first matching event or a timeout error.
     ///
     /// Playwright mapping: `page.waitForEvent('popup')` becomes
-    ///   `provider.wait_for_event(target, EventFilter::kinds(&[EventKind::WindowOpened]), timeout)?`
+    ///   `provider.wait_for_event(target, EventFilter::all(), timeout)?`
     fn wait_for_event(
         &self,
         target: &AppTarget,
@@ -951,30 +951,17 @@ Filters are applied at subscription time so backends can minimize overhead by on
 ```rust
 /// Filter to narrow which events are delivered.
 pub struct EventFilter {
-    /// Which event kinds to subscribe to. Empty = all events.
-    pub kinds: Vec<EventKind>,
-
     /// Only deliver events from elements matching this selector.
     /// None = all elements in the target app.
     pub selector: Option<String>,
-
-    /// For StateChanged events: only these state flags.
-    /// Empty = all state changes.
-    pub state_flags: Vec<StateFlag>,
 }
 
 impl EventFilter {
-    /// Subscribe to all events from the target.
+    /// Subscribe to all events from the target (no selector filter).
     pub fn all() -> Self;
-
-    /// Subscribe to specific event kinds.
-    pub fn kinds(kinds: &[EventKind]) -> Self;
 
     /// Subscribe to events on elements matching a selector.
     pub fn selector(selector: &str) -> Self;
-
-    /// Combine kind filter with selector filter.
-    pub fn new(kinds: &[EventKind], selector: Option<&str>) -> Self;
 }
 ```
 
@@ -1071,10 +1058,10 @@ The event system is designed so a Playwright-compatible desktop adapter can map 
 
 | Playwright API | xa11y equivalent |
 |---|---|
-| `page.on('close', fn)` | `subscribe(app, EventFilter::kinds(&[WindowClosed]))` |
-| `page.on('popup', fn)` | `subscribe(app, EventFilter::kinds(&[WindowOpened]))` |
-| `page.on('dialog', fn)` | `subscribe(app, EventFilter::kinds(&[Alert]))` |
-| `page.waitForEvent('popup')` | `wait_for_event(app, EventFilter::kinds(&[WindowOpened]), timeout)` |
+| `page.on('close', fn)` | `subscribe(app, EventFilter::all())` |
+| `page.on('popup', fn)` | `subscribe(app, EventFilter::all())` |
+| `page.on('dialog', fn)` | `subscribe(app, EventFilter::all())` |
+| `page.waitForEvent('popup')` | `wait_for_event(app, EventFilter::all(), timeout)` |
 | `locator.waitFor({state: 'visible'})` | `wait_for(app, selector, ElementState::Visible, timeout)` |
 | `locator.waitFor({state: 'detached'})` | `wait_for(app, selector, ElementState::Detached, timeout)` |
 | `locator.waitFor({state: 'hidden'})` | `wait_for(app, selector, ElementState::Hidden, timeout)` |

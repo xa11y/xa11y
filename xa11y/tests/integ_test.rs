@@ -1573,10 +1573,7 @@ mod tests {
         let root = h::app_tree();
 
         let sub = ep
-            .subscribe(
-                &AppTarget::ByName("xa11y".to_string()),
-                EventFilter::kinds(&[EventKind::FocusChanged]),
-            )
+            .subscribe(&AppTarget::ByName("xa11y".to_string()), EventFilter::all())
             .unwrap();
 
         // Trigger a focus change
@@ -1606,7 +1603,7 @@ mod tests {
         // Wait for an event with a very short timeout — should timeout
         let result = ep.wait_for_event(
             &AppTarget::ByName("xa11y".to_string()),
-            EventFilter::kinds(&[EventKind::Alert]),
+            EventFilter::all(),
             Duration::from_millis(100),
         );
         assert!(

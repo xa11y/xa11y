@@ -753,28 +753,13 @@ fn raw_platform_data_serialization() {
 #[test]
 fn event_filter_all() {
     let filter = EventFilter::all();
-    assert!(filter.kinds.is_empty());
     assert!(filter.selector.is_none());
-    assert!(filter.state_flags.is_empty());
-}
-
-#[test]
-fn event_filter_kinds() {
-    let filter = EventFilter::kinds(&[EventKind::FocusChanged, EventKind::ValueChanged]);
-    assert_eq!(filter.kinds.len(), 2);
 }
 
 #[test]
 fn event_filter_selector() {
     let filter = EventFilter::selector("button[name=\"Submit\"]");
     assert_eq!(filter.selector.as_deref(), Some("button[name=\"Submit\"]"));
-}
-
-#[test]
-fn event_filter_combined() {
-    let filter = EventFilter::new(&[EventKind::StateChanged], Some("check_box"));
-    assert_eq!(filter.kinds.len(), 1);
-    assert_eq!(filter.selector.as_deref(), Some("check_box"));
 }
 
 // ── QueryOptions ──

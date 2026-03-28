@@ -1323,7 +1323,6 @@ impl Provider for MacOSProvider {
 /// Context passed to AXObserver callback via refcon pointer.
 struct ObserverContext {
     sender: std::sync::mpsc::Sender<Event>,
-    filter: EventFilter,
     app_name: String,
     app_pid: u32,
 }
@@ -1355,10 +1354,6 @@ unsafe extern "C" fn ax_observer_callback(
         "AXTitleChanged" => EventKind::NameChanged,
         _ => return,
     };
-
-    if !ctx.filter.kinds.is_empty() && !ctx.filter.kinds.contains(&kind) {
-        return;
-    }
 
     // Build minimal target node from the AX element
     let target = if !element.is_null() {
@@ -1401,7 +1396,7 @@ unsafe extern "C" fn ax_observer_callback(
 }
 
 impl EventProvider for MacOSProvider {
-    fn subscribe(&self, target: &AppTarget, filter: EventFilter) -> Result<Subscription> {
+    fn subscribe(&self, target: &AppTarget, _filter: EventFilter) -> Result<Subscription> {
         let (pid, app_name) = match target {
             AppTarget::ByName(name) => {
                 let apps = Self::list_gui_apps();
@@ -1430,7 +1425,6 @@ impl EventProvider for MacOSProvider {
 
         let ctx = Box::new(ObserverContext {
             sender: tx,
-            filter,
             app_name,
             app_pid: pid as u32,
         });
