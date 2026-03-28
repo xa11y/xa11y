@@ -59,27 +59,6 @@ fn to_py_err(e: xa11y::Error) -> PyErr {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-fn parse_action(s: &str) -> PyResult<xa11y::Action> {
-    match s {
-        "press" => Ok(xa11y::Action::Press),
-        "focus" => Ok(xa11y::Action::Focus),
-        "set_value" => Ok(xa11y::Action::SetValue),
-        "toggle" => Ok(xa11y::Action::Toggle),
-        "expand" => Ok(xa11y::Action::Expand),
-        "collapse" => Ok(xa11y::Action::Collapse),
-        "select" => Ok(xa11y::Action::Select),
-        "show_menu" => Ok(xa11y::Action::ShowMenu),
-        "scroll_into_view" => Ok(xa11y::Action::ScrollIntoView),
-        "scroll" => Ok(xa11y::Action::Scroll),
-        "increment" => Ok(xa11y::Action::Increment),
-        "decrement" => Ok(xa11y::Action::Decrement),
-        "blur" => Ok(xa11y::Action::Blur),
-        "set_text_selection" => Ok(xa11y::Action::SetTextSelection),
-        "type_text" => Ok(xa11y::Action::TypeText),
-        _ => Err(PyValueError::new_err(format!("Unknown action: {s}"))),
-    }
-}
-
 fn action_to_str(a: &xa11y::Action) -> &'static str {
     match a {
         xa11y::Action::Press => "press",
@@ -138,47 +117,8 @@ fn resolve_app_target(name: Option<&str>, pid: Option<u32>) -> PyResult<xa11y::A
     }
 }
 
-fn build_action_data(
-    action: xa11y::Action,
-    value: Option<String>,
-    numeric_value: Option<f64>,
-    direction: Option<String>,
-    amount: Option<f64>,
-    start: Option<u32>,
-    end: Option<u32>,
-) -> PyResult<Option<xa11y::ActionData>> {
-    let data = match action {
-        xa11y::Action::SetValue => match (value, numeric_value) {
-            (Some(v), _) => Some(xa11y::ActionData::Value(v)),
-            (_, Some(n)) => Some(xa11y::ActionData::NumericValue(n)),
-            _ => None,
-        },
-        xa11y::Action::TypeText => value.map(xa11y::ActionData::Value),
-        xa11y::Action::Scroll => {
-            let dir = direction
-                .as_deref()
-                .ok_or_else(|| PyValueError::new_err("scroll requires direction"))?;
-            Some(xa11y::ActionData::ScrollAmount {
-                direction: parse_scroll_direction(dir)?,
-                amount: amount.unwrap_or(1.0),
-            })
-        }
-        xa11y::Action::SetTextSelection => {
-            let s =
-                start.ok_or_else(|| PyValueError::new_err("set_text_selection requires start"))?;
-            let e = end.ok_or_else(|| PyValueError::new_err("set_text_selection requires end"))?;
-            Some(xa11y::ActionData::TextSelection { start: s, end: e })
-        }
-        _ => None,
-    };
-    if let Some(ref d) = data {
-        d.validate(action).map_err(to_py_err)?;
-    }
-    Ok(data)
-}
-
-/// Create a Python Node from a Rust Node. No tree back-reference.
-fn make_py_node(py: Python<'_>, n: &xa11y::Node) -> PyResult<Py<Node>> {
+/// Create a standalone Python Node from a Rust NodeData (no tree context).
+fn make_py_node(py: Python<'_>, n: &xa11y::NodeData) -> PyResult<Py<Node>> {
     let checked = n.states.checked.map(|t| match t {
         xa11y::Toggled::Off => "off".to_string(),
         xa11y::Toggled::On => "on".to_string(),
@@ -200,6 +140,7 @@ fn make_py_node(py: Python<'_>, n: &xa11y::Node) -> PyResult<Py<Node>> {
             min_value: n.min_value,
             max_value: n.max_value,
             stable_id: n.stable_id.clone(),
+            pid: n.pid,
             actions,
             bounds_data: n.bounds.as_ref().map(|r| (r.x, r.y, r.width, r.height)),
             enabled: n.states.enabled,
@@ -217,6 +158,9 @@ fn make_py_node(py: Python<'_>, n: &xa11y::Node) -> PyResult<Py<Node>> {
             parent_idx: n.parent_index,
             _index: n.index,
             _all_nodes: None,
+            _rust_tree: None,
+            _provider: None,
+            _target: None,
         },
     )
 }
@@ -279,8 +223,10 @@ impl AppInfo {
 
 // ── Node ────────────────────────────────────────────────────────────────────
 
-/// A node in the accessibility tree. Nodes form a navigable graph —
-/// use `node.children` and `node.parent` to traverse.
+/// A node in the accessibility tree snapshot.
+///
+/// Nodes form a navigable graph — use `node.children` and `node.parent`
+/// to traverse. Use `node.query()` to search and `node.dump()` for debug output.
 #[pyclass]
 struct Node {
     #[pyo3(get)]
@@ -299,6 +245,8 @@ struct Node {
     max_value: Option<f64>,
     #[pyo3(get)]
     stable_id: Option<String>,
+    #[pyo3(get)]
+    pid: Option<u32>,
     #[pyo3(get)]
     actions: Vec<String>,
 
@@ -332,6 +280,11 @@ struct Node {
 
     /// Shared reference to all nodes in the tree (for graph navigation).
     _all_nodes: Option<Py<PyList>>,
+    /// Rust tree for query/dump operations.
+    _rust_tree: Option<xa11y::Tree>,
+    /// Provider + target for locator factory.
+    _provider: Option<Arc<dyn xa11y::Provider>>,
+    _target: Option<xa11y::AppTarget>,
 }
 
 #[pymethods]
@@ -369,6 +322,80 @@ impl Node {
         })
     }
 
+    /// Get all nodes in this node's subtree (including this node).
+    fn subtree(&self, py: Python<'_>) -> PyResult<Vec<PyObject>> {
+        let Some(ref tree) = self._rust_tree else {
+            // No tree context — return just this node
+            return Ok(vec![]);
+        };
+        let Some(ref all) = self._all_nodes else {
+            return Ok(vec![]);
+        };
+        let list = all.bind(py);
+        let indices = tree.subtree_indices(self._index);
+        indices
+            .iter()
+            .map(|&idx| list.get_item(idx as usize).map(|item| item.unbind()))
+            .collect()
+    }
+
+    /// Query nodes matching a CSS-like selector string within this snapshot.
+    fn query(&self, py: Python<'_>, selector: &str) -> PyResult<Vec<PyObject>> {
+        let Some(ref tree) = self._rust_tree else {
+            return Err(PyValueError::new_err(
+                "query() requires a snapshot context (node from app(), not locator.get())",
+            ));
+        };
+        let Some(ref all) = self._all_nodes else {
+            return Err(PyValueError::new_err("No node list available"));
+        };
+        let matches = tree.query(selector).map_err(to_py_err)?;
+        let list = all.bind(py);
+        matches
+            .iter()
+            .map(|n| list.get_item(n.index as usize).map(|item| item.unbind()))
+            .collect()
+    }
+
+    /// Render the tree as an indented text representation for debugging.
+    fn dump(&self) -> PyResult<String> {
+        let Some(ref tree) = self._rust_tree else {
+            return Err(PyValueError::new_err(
+                "dump() requires a snapshot context (node from app(), not locator.get())",
+            ));
+        };
+        Ok(tree.dump())
+    }
+
+    /// Create a Locator for lazy element resolution from this snapshot's app.
+    #[pyo3(signature = (selector, *, max_depth=None, max_elements=None, visible_only=false, roles=None))]
+    fn locator(
+        &self,
+        selector: &str,
+        max_depth: Option<u32>,
+        max_elements: Option<u32>,
+        visible_only: bool,
+        roles: Option<Vec<String>>,
+    ) -> PyResult<Locator> {
+        let provider = self._provider.as_ref().ok_or_else(|| {
+            PyValueError::new_err(
+                "locator() requires a snapshot context (node from app(), not locator.get())",
+            )
+        })?;
+        let target = self
+            ._target
+            .as_ref()
+            .ok_or_else(|| PyValueError::new_err("No app target available"))?;
+        let opts = build_query_options(max_depth, max_elements, visible_only, roles);
+        Ok(Locator {
+            provider: provider.clone(),
+            target: target.clone(),
+            selector: selector.to_string(),
+            opts,
+            nth: None,
+        })
+    }
+
     fn __repr__(&self) -> String {
         let mut parts = vec![format!("role='{}'", self.role)];
         if let Some(ref n) = self.name {
@@ -398,310 +425,35 @@ impl Node {
     }
 }
 
-// ── Tree ────────────────────────────────────────────────────────────────────
+// ── Node construction ───────────────────────────────────────────────────────
 
-/// A snapshot of an application's accessibility tree.
+/// Convert a Rust Tree into a fully navigable Python root Node.
 ///
-/// Nodes are stored in DFS order. Navigation (children, parent) and
-/// queries use the internal Rust selector engine.
-#[pyclass]
-struct Tree {
-    #[pyo3(get)]
-    app_name: String,
-    #[pyo3(get)]
-    pid: Option<u32>,
-    #[pyo3(get)]
-    screen_size: (u32, u32),
-
-    /// All Python Node objects, indexed by Rust NodeIndex.
-    /// We store them to reuse objects across repeated queries.
-    py_nodes: Vec<Py<Node>>,
-
-    rust_tree: xa11y::Tree,
-    provider: Arc<dyn xa11y::Provider>,
-    target: xa11y::AppTarget,
-    _opts: xa11y::QueryOptions,
-}
-
-#[pymethods]
-impl Tree {
-    #[getter]
-    fn root(&self, py: Python<'_>) -> PyResult<Py<Node>> {
-        self.py_nodes
-            .first()
-            .map(|n| n.clone_ref(py))
-            .ok_or_else(|| PyValueError::new_err("Tree has no nodes"))
-    }
-
-    /// Query nodes matching a CSS-like selector string.
-    fn query(&self, py: Python<'_>, selector: &str) -> PyResult<Vec<Py<Node>>> {
-        let matches = self.rust_tree.query(selector).map_err(to_py_err)?;
-        Ok(matches
-            .iter()
-            .filter_map(|n| self.py_nodes.get(n.index as usize).map(|p| p.clone_ref(py)))
-            .collect())
-    }
-
-    /// Perform an action on a node or selector target.
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (target, action, *, value=None, numeric_value=None, direction=None, amount=None, start=None, end=None))]
-    fn perform(
-        &self,
-        target: &Bound<'_, PyAny>,
-        action: &str,
-        value: Option<String>,
-        numeric_value: Option<f64>,
-        direction: Option<String>,
-        amount: Option<f64>,
-        start: Option<u32>,
-        end: Option<u32>,
-    ) -> PyResult<()> {
-        let rust_action = parse_action(action)?;
-        let data = build_action_data(
-            rust_action,
-            value,
-            numeric_value,
-            direction,
-            amount,
-            start,
-            end,
-        )?;
-        let node_index = self.resolve_target_index(target)?;
-        let rust_node = self
-            .rust_tree
-            .get(node_index)
-            .ok_or_else(|| PyValueError::new_err("Invalid node reference"))?;
-        self.provider
-            .perform_action(&self.rust_tree, rust_node, rust_action, data)
-            .map_err(to_py_err)
-    }
-
-    // ── Action convenience methods ──
-
-    fn press(&self, target: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.perform_simple(target, xa11y::Action::Press)
-    }
-
-    fn focus(&self, target: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.perform_simple(target, xa11y::Action::Focus)
-    }
-
-    fn blur(&self, target: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.perform_simple(target, xa11y::Action::Blur)
-    }
-
-    fn toggle(&self, target: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.perform_simple(target, xa11y::Action::Toggle)
-    }
-
-    fn expand(&self, target: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.perform_simple(target, xa11y::Action::Expand)
-    }
-
-    fn collapse(&self, target: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.perform_simple(target, xa11y::Action::Collapse)
-    }
-
-    fn select(&self, target: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.perform_simple(target, xa11y::Action::Select)
-    }
-
-    fn increment(&self, target: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.perform_simple(target, xa11y::Action::Increment)
-    }
-
-    fn decrement(&self, target: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.perform_simple(target, xa11y::Action::Decrement)
-    }
-
-    fn show_menu(&self, target: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.perform_simple(target, xa11y::Action::ShowMenu)
-    }
-
-    fn scroll_into_view(&self, target: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.perform_simple(target, xa11y::Action::ScrollIntoView)
-    }
-
-    fn set_value(&self, target: &Bound<'_, PyAny>, value: &str) -> PyResult<()> {
-        let node_index = self.resolve_target_index(target)?;
-        let rust_node = self
-            .rust_tree
-            .get(node_index)
-            .ok_or_else(|| PyValueError::new_err("Invalid node reference"))?;
-        self.provider
-            .perform_action(
-                &self.rust_tree,
-                rust_node,
-                xa11y::Action::SetValue,
-                Some(xa11y::ActionData::Value(value.to_string())),
-            )
-            .map_err(to_py_err)
-    }
-
-    fn set_numeric_value(&self, target: &Bound<'_, PyAny>, value: f64) -> PyResult<()> {
-        let node_index = self.resolve_target_index(target)?;
-        let rust_node = self
-            .rust_tree
-            .get(node_index)
-            .ok_or_else(|| PyValueError::new_err("Invalid node reference"))?;
-        self.provider
-            .perform_action(
-                &self.rust_tree,
-                rust_node,
-                xa11y::Action::SetValue,
-                Some(xa11y::ActionData::NumericValue(value)),
-            )
-            .map_err(to_py_err)
-    }
-
-    fn type_text(&self, target: &Bound<'_, PyAny>, text: &str) -> PyResult<()> {
-        let node_index = self.resolve_target_index(target)?;
-        let rust_node = self
-            .rust_tree
-            .get(node_index)
-            .ok_or_else(|| PyValueError::new_err("Invalid node reference"))?;
-        self.provider
-            .perform_action(
-                &self.rust_tree,
-                rust_node,
-                xa11y::Action::TypeText,
-                Some(xa11y::ActionData::Value(text.to_string())),
-            )
-            .map_err(to_py_err)
-    }
-
-    #[pyo3(signature = (target, direction, amount=1.0))]
-    fn scroll(&self, target: &Bound<'_, PyAny>, direction: &str, amount: f64) -> PyResult<()> {
-        let dir = parse_scroll_direction(direction)?;
-        let node_index = self.resolve_target_index(target)?;
-        let rust_node = self
-            .rust_tree
-            .get(node_index)
-            .ok_or_else(|| PyValueError::new_err("Invalid node reference"))?;
-        self.provider
-            .perform_action(
-                &self.rust_tree,
-                rust_node,
-                xa11y::Action::Scroll,
-                Some(xa11y::ActionData::ScrollAmount {
-                    direction: dir,
-                    amount,
-                }),
-            )
-            .map_err(to_py_err)
-    }
-
-    fn select_text(&self, target: &Bound<'_, PyAny>, start: u32, end: u32) -> PyResult<()> {
-        let node_index = self.resolve_target_index(target)?;
-        let rust_node = self
-            .rust_tree
-            .get(node_index)
-            .ok_or_else(|| PyValueError::new_err("Invalid node reference"))?;
-        self.provider
-            .perform_action(
-                &self.rust_tree,
-                rust_node,
-                xa11y::Action::SetTextSelection,
-                Some(xa11y::ActionData::TextSelection { start, end }),
-            )
-            .map_err(to_py_err)
-    }
-
-    // ── Locator factory ──
-
-    #[pyo3(signature = (selector, *, max_depth=None, max_elements=None, visible_only=false, roles=None))]
-    fn locator(
-        &self,
-        selector: &str,
-        max_depth: Option<u32>,
-        max_elements: Option<u32>,
-        visible_only: bool,
-        roles: Option<Vec<String>>,
-    ) -> Locator {
-        let opts = build_query_options(max_depth, max_elements, visible_only, roles);
-        Locator {
-            provider: self.provider.clone(),
-            target: self.target.clone(),
-            selector: selector.to_string(),
-            opts,
-            nth: None,
-        }
-    }
-
-    fn __len__(&self) -> usize {
-        self.py_nodes.len()
-    }
-
-    fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<PyObject> {
-        let list = PyList::new(py, &self.py_nodes)?;
-        list.call_method0("__iter__").map(|i| i.unbind())
-    }
-
-    fn __repr__(&self) -> String {
-        match self.pid {
-            Some(pid) => format!(
-                "Tree(app='{}', pid={}, nodes={})",
-                self.app_name,
-                pid,
-                self.py_nodes.len()
-            ),
-            None => format!(
-                "Tree(app='{}', nodes={})",
-                self.app_name,
-                self.py_nodes.len()
-            ),
-        }
-    }
-
-    fn __str__(&self) -> String {
-        self.rust_tree.dump()
-    }
-}
-
-impl Tree {
-    fn perform_simple(&self, target: &Bound<'_, PyAny>, action: xa11y::Action) -> PyResult<()> {
-        let node_index = self.resolve_target_index(target)?;
-        let rust_node = self
-            .rust_tree
-            .get(node_index)
-            .ok_or_else(|| PyValueError::new_err("Invalid node reference"))?;
-        self.provider
-            .perform_action(&self.rust_tree, rust_node, action, None)
-            .map_err(to_py_err)
-    }
-
-    fn resolve_target_index(&self, target: &Bound<'_, PyAny>) -> PyResult<u32> {
-        if let Ok(node) = target.downcast::<Node>() {
-            return Ok(node.borrow()._index);
-        }
-        if let Ok(selector) = target.extract::<String>() {
-            let matches = self.rust_tree.query(&selector).map_err(to_py_err)?;
-            let node = matches
-                .first()
-                .ok_or_else(|| to_py_err(xa11y::Error::SelectorNotMatched { selector }))?;
-            return Ok(node.index);
-        }
-        Err(PyTypeError::new_err(
-            "target must be a Node or a selector string",
-        ))
-    }
-}
-
-// ── Tree construction ───────────────────────────────────────────────────────
-
-fn convert_tree(
+/// All nodes get shared references so parent/children/query/dump work.
+/// Returns the root node (index 0).
+fn convert_to_root_node(
     py: Python<'_>,
     rust_tree: xa11y::Tree,
     provider: Arc<dyn xa11y::Provider>,
     target: xa11y::AppTarget,
-    opts: xa11y::QueryOptions,
-) -> PyResult<Py<Tree>> {
+) -> PyResult<Py<Node>> {
+    convert_to_node_at(py, rust_tree, provider, target, 0)
+}
+
+/// Convert a Rust Tree into a fully navigable Python Node at the given index.
+fn convert_to_node_at(
+    py: Python<'_>,
+    rust_tree: xa11y::Tree,
+    provider: Arc<dyn xa11y::Provider>,
+    target: xa11y::AppTarget,
+    node_index: usize,
+) -> PyResult<Py<Node>> {
     let num_nodes = rust_tree.len();
     let mut py_nodes: Vec<Py<Node>> = Vec::with_capacity(num_nodes);
 
     for i in 0..num_nodes {
         let n = rust_tree
-            .get(i as u32)
+            .get_data(i as u32)
             .expect("index valid in range 0..len");
         py_nodes.push(make_py_node(py, n)?);
     }
@@ -709,22 +461,17 @@ fn convert_tree(
     // Build a shared PyList so every Node can navigate to children/parent directly.
     let all_nodes_list: Py<PyList> = PyList::new(py, &py_nodes)?.unbind();
     for py_node in &py_nodes {
-        py_node.borrow_mut(py)._all_nodes = Some(all_nodes_list.clone_ref(py));
+        let mut node = py_node.borrow_mut(py);
+        node._all_nodes = Some(all_nodes_list.clone_ref(py));
+        node._rust_tree = Some(rust_tree.clone());
+        node._provider = Some(provider.clone());
+        node._target = Some(target.clone());
     }
 
-    Py::new(
-        py,
-        Tree {
-            app_name: rust_tree.app_name.clone(),
-            pid: rust_tree.pid,
-            screen_size: rust_tree.screen_size,
-            py_nodes,
-            rust_tree,
-            provider,
-            target,
-            _opts: opts,
-        },
-    )
+    py_nodes
+        .get(node_index)
+        .map(|n| n.clone_ref(py))
+        .ok_or_else(|| PyValueError::new_err("Node index out of range"))
 }
 
 // ── Locator ─────────────────────────────────────────────────────────────────
@@ -769,23 +516,23 @@ impl Locator {
     // ── Queries ──
 
     fn role(&self) -> PyResult<String> {
-        Ok(self.resolve_node()?.role.to_snake_case().to_string())
+        Ok(self.resolve_node_data()?.role.to_snake_case().to_string())
     }
 
     fn name(&self) -> PyResult<Option<String>> {
-        Ok(self.resolve_node()?.name.clone())
+        Ok(self.resolve_node_data()?.name.clone())
     }
 
     fn value(&self) -> PyResult<Option<String>> {
-        Ok(self.resolve_node()?.value.clone())
+        Ok(self.resolve_node_data()?.value.clone())
     }
 
     fn description(&self) -> PyResult<Option<String>> {
-        Ok(self.resolve_node()?.description.clone())
+        Ok(self.resolve_node_data()?.description.clone())
     }
 
     fn bounds(&self) -> PyResult<Option<Rect>> {
-        Ok(self.resolve_node()?.bounds.as_ref().map(|r| Rect {
+        Ok(self.resolve_node_data()?.bounds.as_ref().map(|r| Rect {
             x: r.x,
             y: r.y,
             width: r.width,
@@ -794,27 +541,27 @@ impl Locator {
     }
 
     fn numeric_value(&self) -> PyResult<Option<f64>> {
-        Ok(self.resolve_node()?.numeric_value)
+        Ok(self.resolve_node_data()?.numeric_value)
     }
 
     fn is_visible(&self) -> PyResult<bool> {
-        Ok(self.resolve_node()?.states.visible)
+        Ok(self.resolve_node_data()?.states.visible)
     }
 
     fn is_enabled(&self) -> PyResult<bool> {
-        Ok(self.resolve_node()?.states.enabled)
+        Ok(self.resolve_node_data()?.states.enabled)
     }
 
     fn is_focused(&self) -> PyResult<bool> {
-        Ok(self.resolve_node()?.states.focused)
+        Ok(self.resolve_node_data()?.states.focused)
     }
 
     fn is_selected(&self) -> PyResult<bool> {
-        Ok(self.resolve_node()?.states.selected)
+        Ok(self.resolve_node_data()?.states.selected)
     }
 
     fn checked(&self) -> PyResult<Option<String>> {
-        Ok(self.resolve_node()?.states.checked.map(|t| match t {
+        Ok(self.resolve_node_data()?.states.checked.map(|t| match t {
             xa11y::Toggled::Off => "off".to_string(),
             xa11y::Toggled::On => "on".to_string(),
             xa11y::Toggled::Mixed => "mixed".to_string(),
@@ -822,27 +569,27 @@ impl Locator {
     }
 
     fn is_expanded(&self) -> PyResult<Option<bool>> {
-        Ok(self.resolve_node()?.states.expanded)
+        Ok(self.resolve_node_data()?.states.expanded)
     }
 
     fn is_editable(&self) -> PyResult<bool> {
-        Ok(self.resolve_node()?.states.editable)
+        Ok(self.resolve_node_data()?.states.editable)
     }
 
     fn is_focusable(&self) -> PyResult<bool> {
-        Ok(self.resolve_node()?.states.focusable)
+        Ok(self.resolve_node_data()?.states.focusable)
     }
 
     fn is_modal(&self) -> PyResult<bool> {
-        Ok(self.resolve_node()?.states.modal)
+        Ok(self.resolve_node_data()?.states.modal)
     }
 
     fn is_required(&self) -> PyResult<bool> {
-        Ok(self.resolve_node()?.states.required)
+        Ok(self.resolve_node_data()?.states.required)
     }
 
     fn is_busy(&self) -> PyResult<bool> {
-        Ok(self.resolve_node()?.states.busy)
+        Ok(self.resolve_node_data()?.states.busy)
     }
 
     fn exists(&self) -> PyResult<bool> {
@@ -861,11 +608,16 @@ impl Locator {
         Ok(matches.len())
     }
 
-    /// Get a snapshot of the matched node.
+    /// Get a snapshot of the matched node (with full tree context for navigation).
     fn get(&self, py: Python<'_>) -> PyResult<Py<Node>> {
         let (tree, node_index) = self.resolve()?;
-        let n = tree.get(node_index).expect("valid after resolve");
-        make_py_node(py, n)
+        convert_to_node_at(
+            py,
+            tree,
+            self.provider.clone(),
+            self.target.clone(),
+            node_index as usize,
+        )
     }
 
     // ── Actions ──
@@ -1043,9 +795,9 @@ impl Locator {
         Ok((tree, node_index))
     }
 
-    fn resolve_node(&self) -> PyResult<xa11y::Node> {
+    fn resolve_node_data(&self) -> PyResult<xa11y::NodeData> {
         let (tree, idx) = self.resolve()?;
-        Ok(tree.get(idx).expect("valid after resolve").clone())
+        Ok(tree.get_data(idx).expect("valid after resolve").clone())
     }
 
     fn perform_action(
@@ -1057,7 +809,7 @@ impl Locator {
             d.validate(action).map_err(to_py_err)?;
         }
         let (tree, node_index) = self.resolve()?;
-        let node = tree.get(node_index).expect("valid after resolve");
+        let node = tree.get_data(node_index).expect("valid after resolve");
         self.provider
             .perform_action(&tree, node, action, data)
             .map_err(to_py_err)
@@ -1073,7 +825,7 @@ impl Locator {
                 return Err(to_py_err(xa11y::Error::Timeout { elapsed }));
             }
 
-            let node: Option<xa11y::Node> = (|| {
+            let node: Option<xa11y::NodeData> = (|| {
                 let tree = self.provider.get_app_tree(&self.target, &self.opts).ok()?;
                 let matches = tree.query(&self.selector).ok()?;
                 let idx = self.nth.unwrap_or(0);
@@ -1139,7 +891,7 @@ impl Locator {
 
 // ── Module-level functions ──────────────────────────────────────────────────
 
-/// Get an app's accessibility tree.
+/// Snapshot an app's accessibility tree and return the root Node.
 #[pyfunction]
 #[pyo3(signature = (name=None, *, pid=None, max_depth=None, max_elements=None, visible_only=false, roles=None))]
 fn app(
@@ -1150,7 +902,7 @@ fn app(
     max_elements: Option<u32>,
     visible_only: bool,
     roles: Option<Vec<String>>,
-) -> PyResult<Py<Tree>> {
+) -> PyResult<Py<Node>> {
     let provider = get_provider()?;
     let target = resolve_app_target(name, pid)?;
     let opts = build_query_options(max_depth, max_elements, visible_only, roles);
@@ -1158,10 +910,10 @@ fn app(
     let rust_tree = py
         .allow_threads(|| p.get_app_tree(&target, &opts))
         .map_err(to_py_err)?;
-    convert_tree(py, rust_tree, provider, target, opts)
+    convert_to_root_node(py, rust_tree, provider, target)
 }
 
-/// Get accessibility trees for all running applications.
+/// Snapshot all running apps and return the root Node.
 #[pyfunction]
 #[pyo3(signature = (*, max_depth=None, max_elements=None, visible_only=false, roles=None))]
 fn all_apps(
@@ -1170,7 +922,7 @@ fn all_apps(
     max_elements: Option<u32>,
     visible_only: bool,
     roles: Option<Vec<String>>,
-) -> PyResult<Py<Tree>> {
+) -> PyResult<Py<Node>> {
     let provider = get_provider()?;
     let opts = build_query_options(max_depth, max_elements, visible_only, roles);
     let p = provider.clone();
@@ -1178,7 +930,7 @@ fn all_apps(
         .allow_threads(|| p.get_all_apps(&opts))
         .map_err(to_py_err)?;
     let target = xa11y::AppTarget::ByName(String::new());
-    convert_tree(py, rust_tree, provider, target, opts)
+    convert_to_root_node(py, rust_tree, provider, target)
 }
 
 /// Create a Locator for lazy element resolution.
@@ -1241,7 +993,6 @@ fn check_permissions(py: Python<'_>) -> PyResult<String> {
 
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<Tree>()?;
     m.add_class::<Node>()?;
     m.add_class::<Locator>()?;
     m.add_class::<Rect>()?;
@@ -1306,7 +1057,7 @@ impl xa11y::Provider for MockProvider {
     fn perform_action(
         &self,
         _tree: &xa11y::Tree,
-        node: &xa11y::Node,
+        node: &xa11y::NodeData,
         action: xa11y::Action,
         data: Option<xa11y::ActionData>,
     ) -> xa11y::Result<()> {
@@ -1361,7 +1112,7 @@ fn build_test_tree() -> xa11y::Tree {
 
     let nodes = vec![
         // [0] application "TestApp"
-        Node {
+        NodeData {
             role: Role::Application,
             name: Some("TestApp".to_string()),
             value: None,
@@ -1380,13 +1131,14 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: None,
             max_value: None,
             stable_id: Some("app-root".to_string()),
+            pid: None,
             raw: xa11y::RawPlatformData::Synthetic,
             index: 0,
             children_indices: vec![1],
             parent_index: None,
         },
         // [1] window "Main Window"
-        Node {
+        NodeData {
             role: Role::Window,
             name: Some("Main Window".to_string()),
             value: None,
@@ -1408,13 +1160,14 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: None,
             max_value: None,
             stable_id: None,
+            pid: None,
             raw: xa11y::RawPlatformData::Synthetic,
             index: 1,
             children_indices: vec![2, 5],
             parent_index: Some(0),
         },
         // [2] toolbar "Navigation"
-        Node {
+        NodeData {
             role: Role::Toolbar,
             name: Some("Navigation".to_string()),
             value: None,
@@ -1428,13 +1181,14 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: None,
             max_value: None,
             stable_id: None,
+            pid: None,
             raw: xa11y::RawPlatformData::Synthetic,
             index: 2,
             children_indices: vec![3, 4],
             parent_index: Some(1),
         },
         // [3] button "Back"
-        Node {
+        NodeData {
             role: Role::Button,
             name: Some("Back".to_string()),
             value: None,
@@ -1456,13 +1210,14 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: None,
             max_value: None,
             stable_id: Some("btn-back".to_string()),
+            pid: None,
             raw: xa11y::RawPlatformData::Synthetic,
             index: 3,
             children_indices: vec![],
             parent_index: Some(2),
         },
         // [4] button "Forward" (disabled)
-        Node {
+        NodeData {
             role: Role::Button,
             name: Some("Forward".to_string()),
             value: None,
@@ -1485,13 +1240,14 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: None,
             max_value: None,
             stable_id: None,
+            pid: None,
             raw: xa11y::RawPlatformData::Synthetic,
             index: 4,
             children_indices: vec![],
             parent_index: Some(2),
         },
         // [5] group "Content"
-        Node {
+        NodeData {
             role: Role::Group,
             name: Some("Content".to_string()),
             value: None,
@@ -1505,13 +1261,14 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: None,
             max_value: None,
             stable_id: None,
+            pid: None,
             raw: xa11y::RawPlatformData::Synthetic,
             index: 5,
             children_indices: vec![6, 7, 8, 9, 10],
             parent_index: Some(1),
         },
         // [6] text_field "Search"
-        Node {
+        NodeData {
             role: Role::TextField,
             name: Some("Search".to_string()),
             value: Some("hello".to_string()),
@@ -1538,13 +1295,14 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: None,
             max_value: None,
             stable_id: None,
+            pid: None,
             raw: xa11y::RawPlatformData::Synthetic,
             index: 6,
             children_indices: vec![],
             parent_index: Some(5),
         },
         // [7] check_box "Agree" (checked=on)
-        Node {
+        NodeData {
             role: Role::CheckBox,
             name: Some("Agree".to_string()),
             value: None,
@@ -1562,13 +1320,14 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: None,
             max_value: None,
             stable_id: None,
+            pid: None,
             raw: xa11y::RawPlatformData::Synthetic,
             index: 7,
             children_indices: vec![],
             parent_index: Some(5),
         },
         // [8] slider "Volume"
-        Node {
+        NodeData {
             role: Role::Slider,
             name: Some("Volume".to_string()),
             value: Some("75".to_string()),
@@ -1590,13 +1349,14 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: Some(0.0),
             max_value: Some(100.0),
             stable_id: None,
+            pid: None,
             raw: xa11y::RawPlatformData::Synthetic,
             index: 8,
             children_indices: vec![],
             parent_index: Some(5),
         },
         // [9] static_text "Status" (hidden)
-        Node {
+        NodeData {
             role: Role::StaticText,
             name: Some("Status".to_string()),
             value: Some("Loading...".to_string()),
@@ -1613,13 +1373,14 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: None,
             max_value: None,
             stable_id: None,
+            pid: None,
             raw: xa11y::RawPlatformData::Synthetic,
             index: 9,
             children_indices: vec![],
             parent_index: Some(5),
         },
         // [10] list "Items"
-        Node {
+        NodeData {
             role: Role::List,
             name: Some("Items".to_string()),
             value: None,
@@ -1636,13 +1397,14 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: None,
             max_value: None,
             stable_id: None,
+            pid: None,
             raw: xa11y::RawPlatformData::Synthetic,
             index: 10,
             children_indices: vec![11, 12],
             parent_index: Some(5),
         },
         // [11] list_item "Item 1" (selected)
-        Node {
+        NodeData {
             role: Role::ListItem,
             name: Some("Item 1".to_string()),
             value: None,
@@ -1660,13 +1422,14 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: None,
             max_value: None,
             stable_id: None,
+            pid: None,
             raw: xa11y::RawPlatformData::Synthetic,
             index: 11,
             children_indices: vec![],
             parent_index: Some(10),
         },
         // [12] list_item "Item 2"
-        Node {
+        NodeData {
             role: Role::ListItem,
             name: Some("Item 2".to_string()),
             value: None,
@@ -1683,6 +1446,7 @@ fn build_test_tree() -> xa11y::Tree {
             min_value: None,
             max_value: None,
             stable_id: None,
+            pid: None,
             raw: xa11y::RawPlatformData::Synthetic,
             index: 12,
             children_indices: vec![],
@@ -1693,17 +1457,16 @@ fn build_test_tree() -> xa11y::Tree {
     Tree::new("TestApp".to_string(), Some(1234), (1920, 1080), nodes)
 }
 
-/// Create a test tree (for Python unit tests). Returns a Tree backed by a mock provider.
+/// Create a test tree (for Python unit tests). Returns the root Node backed by a mock provider.
 #[pyfunction]
-fn _make_test_tree(py: Python<'_>) -> PyResult<Py<Tree>> {
+fn _make_test_tree(py: Python<'_>) -> PyResult<Py<Node>> {
     let tree = build_test_tree();
     let provider: Arc<dyn xa11y::Provider> = Arc::new(MockProvider {
         tree: tree.clone(),
         actions: std::sync::Mutex::new(Vec::new()),
     });
     let target = xa11y::AppTarget::ByName("TestApp".to_string());
-    let opts = xa11y::QueryOptions::default();
-    convert_tree(py, tree, provider, target, opts)
+    convert_to_root_node(py, tree, provider, target)
 }
 
 /// Create a mock-backed list of apps (for Python unit tests).

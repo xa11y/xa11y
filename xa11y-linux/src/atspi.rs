@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use xa11y_core::{
     Action, ActionData, AppInfo, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
-    EventKind, EventProvider, EventReceiver, Node, PermissionStatus, Provider, QueryOptions, Rect,
-    Result, Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
+    EventKind, EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, QueryOptions,
+    Rect, Result, Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
 };
 use zbus::blocking::{Connection, Proxy};
 
@@ -307,7 +307,7 @@ impl LinuxProvider {
         &self,
         aref: &AccessibleRef,
         opts: &QueryOptions,
-        nodes: &mut Vec<Node>,
+        nodes: &mut Vec<NodeData>,
         refs: &mut Vec<AccessibleRef>,
         parent_idx: Option<u32>,
         depth: u32,
@@ -423,7 +423,7 @@ impl LinuxProvider {
         };
 
         let node_idx = nodes.len() as u32;
-        nodes.push(Node {
+        nodes.push(NodeData {
             role,
             name,
             value,
@@ -434,6 +434,7 @@ impl LinuxProvider {
             numeric_value,
             min_value,
             max_value,
+            pid: None,
             stable_id: Some(aref.path.clone()),
             raw,
             index: node_idx,
@@ -743,7 +744,7 @@ impl Provider for LinuxProvider {
         let screen_size = Self::detect_screen_size();
         let mut nodes = Vec::new();
 
-        nodes.push(Node {
+        nodes.push(NodeData {
             role: Role::Application,
             name: Some("Desktop".to_string()),
             value: None,
@@ -759,6 +760,7 @@ impl Provider for LinuxProvider {
             numeric_value: None,
             min_value: None,
             max_value: None,
+            pid: None,
             stable_id: None,
             raw: xa11y_core::RawPlatformData::Synthetic,
             index: 0,
@@ -802,7 +804,7 @@ impl Provider for LinuxProvider {
     fn perform_action(
         &self,
         tree: &Tree,
-        node: &Node,
+        node: &NodeData,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()> {
@@ -1239,7 +1241,7 @@ impl EventProvider for LinuxProvider {
         selector: &str,
         state: ElementState,
         timeout: Duration,
-    ) -> Result<Node> {
+    ) -> Result<NodeData> {
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
 
@@ -1254,7 +1256,7 @@ impl EventProvider for LinuxProvider {
             let node = matches.as_ref().and_then(|m| m.first().copied());
 
             if state.is_met(node) {
-                return Ok(node.cloned().unwrap_or_else(Node::synthetic_empty));
+                return Ok(node.cloned().unwrap_or_else(NodeData::synthetic_empty));
             }
 
             std::thread::sleep(poll_interval);

@@ -12,13 +12,26 @@
 //!
 //! match status {
 //!     PermissionStatus::Granted => {
-//!         let tree = app(
+//!         let root = app(
 //!             &AppTarget::ByName("Safari".to_string()),
 //!             &QueryOptions::default(),
-//!         ).expect("Failed to get tree");
+//!         ).expect("Failed to get app");
 //!
-//!         let buttons = tree.query("button").expect("Query failed");
+//!         // Snapshot navigation — no refetch
+//!         let buttons = root.query("button").expect("Query failed");
 //!         println!("Found {} buttons", buttons.len());
+//!         for btn in &buttons {
+//!             if let Some(parent) = btn.parent() {
+//!                 println!("  {} (parent: {})", btn.name.as_deref().unwrap_or("?"), parent.role);
+//!             }
+//!         }
+//!
+//!         // Locator for actions — refetches every time
+//!         let loc = locator(
+//!             AppTarget::ByName("Safari".to_string()),
+//!             "button[name=\"OK\"]",
+//!         ).expect("Failed to create locator");
+//!         loc.press().expect("Failed to press");
 //!     }
 //!     PermissionStatus::Denied { instructions } => {
 //!         eprintln!("Accessibility not enabled: {}", instructions);
@@ -28,8 +41,13 @@
 
 use std::sync::{Arc, OnceLock};
 
-// Re-export all core types
-pub use xa11y_core::*;
+// Re-export public types explicitly — Tree is NOT exported (internal to providers).
+pub use xa11y_core::{
+    Action, ActionData, AppInfo, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
+    EventKind, EventProvider, EventReceiver, Locator, Node, NodeData, PermissionStatus, Provider,
+    QueryOptions, RawPlatformData, Rect, Result, Role, ScrollDirection, StateFlag, StateSet,
+    Subscription, TextChangeData, TextChangeType, Toggled, Tree, WindowHandle,
+};
 
 // ── Internal singleton ──────────────────────────────────────────────────────
 
@@ -57,16 +75,16 @@ fn get_provider_ref() -> Result<&'static dyn Provider> {
 struct StaticProviderRef(&'static dyn Provider);
 
 impl Provider for StaticProviderRef {
-    fn get_app_tree(&self, target: &AppTarget, opts: &QueryOptions) -> Result<Tree> {
+    fn get_app_tree(&self, target: &AppTarget, opts: &QueryOptions) -> Result<xa11y_core::Tree> {
         self.0.get_app_tree(target, opts)
     }
-    fn get_all_apps(&self, opts: &QueryOptions) -> Result<Tree> {
+    fn get_all_apps(&self, opts: &QueryOptions) -> Result<xa11y_core::Tree> {
         self.0.get_all_apps(opts)
     }
     fn perform_action(
         &self,
-        tree: &Tree,
-        node: &Node,
+        tree: &xa11y_core::Tree,
+        node: &NodeData,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()> {
@@ -91,24 +109,36 @@ pub fn provider() -> Result<Arc<dyn Provider>> {
 // ── Module-level API ────────────────────────────────────────────────────────
 
 /// Snapshot a specific application's accessibility tree.
-pub fn app(target: &AppTarget, opts: &QueryOptions) -> Result<Tree> {
-    get_provider_ref()?.get_app_tree(target, opts)
+///
+/// Returns the root [`Node`], which you can navigate via
+/// `parent()`, `children()`, and `query()` — all using the snapshot
+/// (no platform refetch).
+pub fn app(target: &AppTarget, opts: &QueryOptions) -> Result<Node> {
+    let tree = get_provider_ref()?.get_app_tree(target, opts)?;
+    let tree = Arc::new(tree);
+    Ok(Node::new(tree, 0))
 }
 
 /// Snapshot all running applications (shallow).
-pub fn all_apps(opts: &QueryOptions) -> Result<Tree> {
-    get_provider_ref()?.get_all_apps(opts)
+///
+/// Returns the root [`Node`] of a merged tree containing all apps.
+pub fn all_apps(opts: &QueryOptions) -> Result<Node> {
+    let tree = get_provider_ref()?.get_all_apps(opts)?;
+    let tree = Arc::new(tree);
+    Ok(Node::new(tree, 0))
 }
 
-/// Perform an action on an element from a specific snapshot.
+/// Perform an action on a node from a specific snapshot.
+///
+/// Uses the node's snapshot to identify the element — does NOT refetch.
+/// For actions that always use fresh data, use a [`Locator`] instead.
 #[cfg(feature = "testing")]
-pub fn perform_action(
-    tree: &Tree,
-    node: &Node,
-    action: Action,
-    data: Option<ActionData>,
-) -> Result<()> {
-    get_provider_ref()?.perform_action(tree, node, action, data)
+pub fn perform_action(node: &Node, action: Action, data: Option<ActionData>) -> Result<()> {
+    let tree = node.tree();
+    let node_data = tree
+        .get_data(node.node_index())
+        .expect("Node index must be valid within its snapshot");
+    get_provider_ref()?.perform_action(tree, node_data, action, data)
 }
 
 /// Check if accessibility permissions are granted.
@@ -122,6 +152,9 @@ pub fn list_apps() -> Result<Vec<AppInfo>> {
 }
 
 /// Create a Locator targeting a specific application.
+///
+/// Locators re-resolve against a fresh snapshot on every operation,
+/// making them immune to staleness.
 pub fn locator(target: AppTarget, selector: &str) -> Result<Locator> {
     Ok(Locator::new(provider()?, target, selector))
 }

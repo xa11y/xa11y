@@ -1,44 +1,32 @@
-"""Tests for Tree class: metadata, navigation, queries, iteration, dunders."""
+"""Tests for snapshot navigation: root, children, parent, query, dump."""
 
 import pytest
 import xa11y
 
-# ── Metadata ─────────────────────────────────────────────────────────────────
-
-
-def test_tree_app_name(tree):
-    assert tree.app_name == "TestApp"
-
-
-def test_tree_pid(tree):
-    assert tree.pid == 1234
-
-
-def test_tree_screen_size(tree):
-    assert tree.screen_size == (1920, 1080)
-
-
 # ── Root ─────────────────────────────────────────────────────────────────────
 
 
-def test_tree_root_is_application(tree):
-    root = tree.root
-    assert root.role == "application"
-    assert root.name == "TestApp"
+def test_root_is_application(tree):
+    assert tree.role == "application"
+    assert tree.name == "TestApp"
+
+
+def test_root_pid(tree):
+    assert tree.pid is None  # test tree nodes have pid=None
 
 
 # ── Navigation (via Node.children / Node.parent) ────────────────────────────
 
 
 def test_children_of_root(tree):
-    children = tree.root.children
+    children = tree.children
     assert len(children) == 1
     assert children[0].role == "window"
     assert children[0].name == "Main Window"
 
 
 def test_children_of_window(tree):
-    window = tree.root.children[0]
+    window = tree.children[0]
     children = window.children
     assert len(children) == 2
     assert children[0].role == "toolbar"
@@ -52,7 +40,7 @@ def test_children_of_leaf(tree):
 
 
 def test_parent_of_root_is_none(tree):
-    assert tree.root.parent is None
+    assert tree.parent is None
 
 
 def test_parent_of_button(tree):
@@ -65,15 +53,14 @@ def test_parent_of_button(tree):
 
 
 def test_parent_child_roundtrip(tree):
-    window = tree.root.children[0]
+    window = tree.children[0]
     toolbar = window.children[0]
     assert toolbar.parent.name == "Main Window"
 
 
 def test_deep_graph_traversal(tree):
     """Verify node.children[i].children[j] style navigation works."""
-    root = tree.root
-    toolbar = root.children[0].children[0]
+    toolbar = tree.children[0].children[0]
     assert toolbar.role == "toolbar"
     back = toolbar.children[0]
     assert back.name == "Back"
@@ -121,29 +108,22 @@ def test_query_invalid_selector(tree):
         tree.query("[[[invalid")
 
 
-# ── Dunder protocols ─────────────────────────────────────────────────────────
+# ── Dump ─────────────────────────────────────────────────────────────────────
 
 
-def test_tree_len(tree):
-    assert len(tree) == 13
-
-
-def test_tree_iter(tree):
-    nodes = list(tree)
-    assert len(nodes) == 13
-    assert nodes[0].role == "application"
-    assert nodes[-1].role == "list_item"
-
-
-def test_tree_repr(tree):
-    r = repr(tree)
-    assert "TestApp" in r
-    assert "1234" in r
-    assert "13" in r
-
-
-def test_tree_str(tree):
-    s = str(tree)
+def test_dump(tree):
+    s = tree.dump()
     assert "[0] application" in s
     assert "button" in s
     assert "Back" in s
+
+
+# ── Node dunders ─────────────────────────────────────────────────────────────
+
+
+def test_node_len_children_count(tree):
+    assert len(tree) == 1  # one child (window)
+    window = tree.children[0]
+    assert len(window) == 2  # toolbar + group
+    back = next(b for b in tree.query("button") if b.name == "Back")
+    assert len(back) == 0  # leaf

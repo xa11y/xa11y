@@ -23,17 +23,23 @@ Last updated: 2026-03-19
 | `ByPid` | Covered | `app_target_by_pid` |
 | `ByWindow` | Not tested | No platform-specific window handle test (Linux AT-SPI2 returns Platform error) |
 
-## Tree Methods
+## Node Navigation Methods
 
 | Method | Status | Tests |
 |--------|--------|-------|
-| `root()` | Covered | `tree_has_root_node` |
-| `get(id)` | Covered | `tree_get_by_id`, `tree_get_invalid_returns_none` |
-| `iter()` | Covered | `tree_iter_all_nodes` |
-| `children(id)` | Covered | `tree_children_of_root` |
-| `subtree(id)` | Covered | `tree_subtree_from_root`, `tree_subtree_of_leaf` |
-| `query` | Covered | 12 selector tests covering all features |
+| `parent()` | Covered | `node_parent_field` |
+| `children()` | Covered | `tree_children_of_root` |
+| `subtree()` | Covered | `tree_subtree_from_root`, `tree_subtree_of_leaf` |
+| `query()` | Covered | 12 selector tests covering all features |
 | `dump()` | Covered | `tree_dump_readable` |
+
+## Tree Internal Methods (via `node.tree()`)
+
+| Method | Status | Tests |
+|--------|--------|-------|
+| `root_data()` | Covered | `tree_has_root_node` |
+| `get_data(id)` | Covered | `tree_get_by_id`, `tree_get_invalid_returns_none` |
+| `iter()` | Covered | `tree_iter_all_nodes` |
 | `len()` | Covered | `opts_max_depth`, `opts_max_elements` |
 | `is_empty()` | Covered | `tree_is_not_empty` |
 
@@ -157,7 +163,7 @@ Covered via test app nodes: `Application`, `Window`, `Button`, `CheckBox`, `Radi
 - **~104 tests** covering the full public API surface
 - All Provider trait methods covered
 - All EventProvider trait methods covered
-- All Tree methods covered
+- All Node navigation and Tree internal methods covered
 - All Node fields covered
 - All QueryOptions fields covered
 - 13/15 Action variants covered (all except Toggle, ShowMenu)

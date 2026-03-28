@@ -5,19 +5,18 @@
 
 
 def test_node_role_as_string(tree):
-    assert tree.root.role == "application"
+    assert tree.role == "application"
     buttons = tree.query("button")
     assert buttons[0].role == "button"
 
 
 def test_node_name(tree):
-    root = tree.root
-    assert root.name == "TestApp"
+    assert tree.name == "TestApp"
 
 
 def test_node_name_none(tree):
     # All nodes in the test tree have names, but check type
-    assert isinstance(tree.root.name, str)
+    assert isinstance(tree.name, str)
 
 
 def test_node_value(tree):
@@ -26,12 +25,11 @@ def test_node_value(tree):
 
 
 def test_node_value_none(tree):
-    assert tree.root.value is None
+    assert tree.value is None
 
 
 def test_node_description(tree):
-    root = tree.root
-    assert root.description == "Test application"
+    assert tree.description == "Test application"
     back = next(b for b in tree.query("button") if b.name == "Back")
     assert back.description == "Go back"
 
@@ -42,7 +40,7 @@ def test_node_description_none(tree):
 
 
 def test_node_stable_id(tree):
-    assert tree.root.stable_id == "app-root"
+    assert tree.stable_id == "app-root"
     back = next(b for b in tree.query("button") if b.name == "Back")
     assert back.stable_id == "btn-back"
 
@@ -71,16 +69,16 @@ def test_max_value(tree):
 
 
 def test_numeric_value_none(tree):
-    assert tree.root.numeric_value is None
-    assert tree.root.min_value is None
-    assert tree.root.max_value is None
+    assert tree.numeric_value is None
+    assert tree.min_value is None
+    assert tree.max_value is None
 
 
 # ── Flattened state flags ────────────────────────────────────────────────────
 
 
 def test_enabled_default_true(tree):
-    assert tree.root.enabled is True
+    assert tree.enabled is True
 
 
 def test_enabled_false(tree):
@@ -89,7 +87,7 @@ def test_enabled_false(tree):
 
 
 def test_visible_default_true(tree):
-    assert tree.root.visible is True
+    assert tree.visible is True
 
 
 def test_visible_false(tree):
@@ -98,9 +96,9 @@ def test_visible_false(tree):
 
 
 def test_focused(tree):
-    window = tree.root.children[0]
+    window = tree.children[0]
     assert window.focused is True
-    assert tree.root.focused is False
+    assert tree.focused is False
 
 
 def test_checked_on(tree):
@@ -110,7 +108,7 @@ def test_checked_on(tree):
 
 def test_checked_none(tree):
     # Non-checkable elements have checked=None
-    assert tree.root.checked is None
+    assert tree.checked is None
     buttons = tree.query("button")
     assert all(b.checked is None for b in buttons)
 
@@ -130,31 +128,31 @@ def test_expanded(tree):
 
 def test_expanded_none(tree):
     # Non-expandable elements have expanded=None
-    assert tree.root.expanded is None
+    assert tree.expanded is None
 
 
 def test_editable(tree):
     search = tree.query("text_field")[0]
     assert search.editable is True
-    assert tree.root.editable is False
+    assert tree.editable is False
 
 
 def test_focusable(tree):
     back = next(b for b in tree.query("button") if b.name == "Back")
     assert back.focusable is True
-    assert tree.root.focusable is False
+    assert tree.focusable is False
 
 
 def test_modal(tree):
-    assert tree.root.modal is False
+    assert tree.modal is False
 
 
 def test_required(tree):
-    assert tree.root.required is False
+    assert tree.required is False
 
 
 def test_busy(tree):
-    assert tree.root.busy is False
+    assert tree.busy is False
 
 
 # ── Actions list ─────────────────────────────────────────────────────────────
@@ -181,15 +179,14 @@ def test_actions_checkbox(tree):
 
 
 def test_actions_empty(tree):
-    assert tree.root.actions == []
+    assert tree.actions == []
 
 
 # ── Bounds ───────────────────────────────────────────────────────────────────
 
 
 def test_bounds_present(tree):
-    root = tree.root
-    b = root.bounds
+    b = tree.bounds
     assert b is not None
     assert b.x == 0
     assert b.y == 0
@@ -215,7 +212,7 @@ def test_bounds_none(tree):
 
 
 def test_rect_repr(tree):
-    b = tree.root.bounds
+    b = tree.bounds
     r = repr(b)
     assert "Rect(" in r
     assert "x=0" in r
@@ -223,8 +220,8 @@ def test_rect_repr(tree):
 
 
 def test_rect_eq(tree):
-    b1 = tree.root.bounds
-    b2 = tree.root.bounds
+    b1 = tree.bounds
+    b2 = tree.bounds
     assert b1 == b2
 
 
@@ -232,7 +229,7 @@ def test_rect_eq(tree):
 
 
 def test_node_repr_basic(tree):
-    r = repr(tree.root)
+    r = repr(tree)
     assert "role='application'" in r
     assert "name='TestApp'" in r
 
@@ -256,19 +253,18 @@ def test_node_repr_hidden(tree):
 
 
 def test_node_repr_focused(tree):
-    window = tree.root.children[0]
+    window = tree.children[0]
     r = repr(window)
     assert "focused=True" in r
 
 
 def test_node_str_is_repr(tree):
-    assert str(tree.root) == repr(tree.root)
+    assert str(tree) == repr(tree)
 
 
 def test_node_len_children_count(tree):
-    root = tree.root
-    assert len(root) == 1  # one child (window)
-    window = root.children[0]
+    assert len(tree) == 1  # one child (window)
+    window = tree.children[0]
     assert len(window) == 2  # toolbar + group
     back = next(b for b in tree.query("button") if b.name == "Back")
     assert len(back) == 0  # leaf

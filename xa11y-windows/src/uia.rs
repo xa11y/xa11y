@@ -12,7 +12,7 @@ use windows::Win32::UI::Accessibility::*;
 
 use xa11y_core::{
     Action, ActionData, AppInfo, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
-    EventKind, EventProvider, EventReceiver, Node, PermissionStatus, Provider, QueryOptions,
+    EventKind, EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, QueryOptions,
     RawPlatformData, Rect, Result, Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
 };
 
@@ -236,7 +236,7 @@ impl WindowsProvider {
         &self,
         element: &IUIAutomationElement,
         opts: &QueryOptions,
-        nodes: &mut Vec<Node>,
+        nodes: &mut Vec<NodeData>,
         elements: &mut Vec<IUIAutomationElement>,
         parent_idx: Option<u32>,
         depth: u32,
@@ -421,7 +421,7 @@ impl WindowsProvider {
         };
 
         let node_idx = nodes.len() as u32;
-        nodes.push(Node {
+        nodes.push(NodeData {
             role,
             name,
             value,
@@ -433,6 +433,7 @@ impl WindowsProvider {
             numeric_value,
             min_value,
             max_value,
+            pid: None,
             raw,
             index: node_idx,
             children_indices: vec![],
@@ -515,7 +516,7 @@ impl WindowsProvider {
         &self,
         element: &IUIAutomationElement,
         opts: &QueryOptions,
-        nodes: &mut Vec<Node>,
+        nodes: &mut Vec<NodeData>,
         elements: &mut Vec<IUIAutomationElement>,
         parent_idx: Option<u32>,
         depth: u32,
@@ -593,7 +594,7 @@ impl Provider for WindowsProvider {
         let mut nodes = Vec::new();
         let mut elements = Vec::new();
 
-        nodes.push(Node {
+        nodes.push(NodeData {
             role: Role::Application,
             name: Some("Desktop".to_string()),
             value: None,
@@ -610,6 +611,7 @@ impl Provider for WindowsProvider {
             numeric_value: None,
             min_value: None,
             max_value: None,
+            pid: None,
             raw: RawPlatformData::Synthetic,
             index: 0,
             children_indices: vec![],
@@ -680,7 +682,7 @@ impl Provider for WindowsProvider {
     fn perform_action(
         &self,
         tree: &Tree,
-        node: &Node,
+        node: &NodeData,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()> {
@@ -1450,7 +1452,7 @@ impl EventProvider for WindowsProvider {
         selector: &str,
         state: ElementState,
         timeout: Duration,
-    ) -> Result<Node> {
+    ) -> Result<NodeData> {
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
 
@@ -1465,7 +1467,7 @@ impl EventProvider for WindowsProvider {
             let node = matches.as_ref().and_then(|m| m.first().copied());
 
             if state.is_met(node) {
-                return Ok(node.cloned().unwrap_or_else(Node::synthetic_empty));
+                return Ok(node.cloned().unwrap_or_else(NodeData::synthetic_empty));
             }
 
             std::thread::sleep(poll_interval);

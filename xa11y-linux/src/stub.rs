@@ -1,8 +1,8 @@
 //! Stub backend for non-Linux platforms (allows compilation on all targets).
 
 use xa11y_core::{
-    Action, ActionData, AppInfo, AppTarget, Error, Node, PermissionStatus, Provider, QueryOptions,
-    Result, Tree,
+    Action, ActionData, AppInfo, AppTarget, Error, NodeData, PermissionStatus, Provider,
+    QueryOptions, Result, Tree,
 };
 
 #[derive(Default)]
@@ -32,7 +32,7 @@ impl Provider for LinuxProvider {
     fn perform_action(
         &self,
         _tree: &Tree,
-        _node: &Node,
+        _node: &NodeData,
         _action: Action,
         _data: Option<ActionData>,
     ) -> Result<()> {

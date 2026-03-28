@@ -9,7 +9,7 @@ use xa11y::*;
 /// Helper to build a sample accessibility tree for testing.
 fn sample_tree() -> Tree {
     let nodes = vec![
-        Node {
+        NodeData {
             role: Role::Window,
             name: Some("My App".to_string()),
             value: None,
@@ -24,6 +24,7 @@ fn sample_tree() -> Tree {
             actions: vec![],
             states: StateSet::default(),
 
+            pid: None,
             stable_id: None,
             numeric_value: None,
             min_value: None,
@@ -33,7 +34,7 @@ fn sample_tree() -> Tree {
             children_indices: vec![1, 4],
             parent_index: None,
         },
-        Node {
+        NodeData {
             role: Role::Toolbar,
             name: Some("Main Toolbar".to_string()),
             value: None,
@@ -48,6 +49,7 @@ fn sample_tree() -> Tree {
             actions: vec![],
             states: StateSet::default(),
 
+            pid: None,
             stable_id: None,
             numeric_value: None,
             min_value: None,
@@ -57,7 +59,7 @@ fn sample_tree() -> Tree {
             children_indices: vec![2, 3],
             parent_index: Some(0),
         },
-        Node {
+        NodeData {
             role: Role::Button,
             name: Some("Back".to_string()),
             value: None,
@@ -76,6 +78,7 @@ fn sample_tree() -> Tree {
                 ..StateSet::default()
             },
 
+            pid: None,
             stable_id: None,
             numeric_value: None,
             min_value: None,
@@ -85,7 +88,7 @@ fn sample_tree() -> Tree {
             children_indices: vec![],
             parent_index: Some(1),
         },
-        Node {
+        NodeData {
             role: Role::TextField,
             name: Some("Address Bar".to_string()),
             value: Some("https://example.com".to_string()),
@@ -105,6 +108,7 @@ fn sample_tree() -> Tree {
                 ..StateSet::default()
             },
 
+            pid: None,
             stable_id: None,
             numeric_value: None,
             min_value: None,
@@ -114,7 +118,7 @@ fn sample_tree() -> Tree {
             children_indices: vec![],
             parent_index: Some(1),
         },
-        Node {
+        NodeData {
             role: Role::WebArea,
             name: None,
             value: None,
@@ -129,6 +133,7 @@ fn sample_tree() -> Tree {
             actions: vec![],
             states: StateSet::default(),
 
+            pid: None,
             stable_id: None,
             numeric_value: None,
             min_value: None,
@@ -138,7 +143,7 @@ fn sample_tree() -> Tree {
             children_indices: vec![5, 6, 7, 8],
             parent_index: Some(0),
         },
-        Node {
+        NodeData {
             role: Role::Heading,
             name: Some("Welcome".to_string()),
             value: None,
@@ -148,6 +153,7 @@ fn sample_tree() -> Tree {
             actions: vec![],
             states: StateSet::default(),
 
+            pid: None,
             stable_id: None,
             numeric_value: None,
             min_value: None,
@@ -157,7 +163,7 @@ fn sample_tree() -> Tree {
             children_indices: vec![],
             parent_index: Some(4),
         },
-        Node {
+        NodeData {
             role: Role::Button,
             name: Some("Submit".to_string()),
             value: None,
@@ -171,6 +177,7 @@ fn sample_tree() -> Tree {
                 ..StateSet::default()
             },
 
+            pid: None,
             stable_id: None,
             numeric_value: None,
             min_value: None,
@@ -180,7 +187,7 @@ fn sample_tree() -> Tree {
             children_indices: vec![],
             parent_index: Some(4),
         },
-        Node {
+        NodeData {
             role: Role::Button,
             name: Some("Cancel".to_string()),
             value: None,
@@ -194,6 +201,7 @@ fn sample_tree() -> Tree {
                 ..StateSet::default()
             },
 
+            pid: None,
             stable_id: None,
             numeric_value: None,
             min_value: None,
@@ -203,7 +211,7 @@ fn sample_tree() -> Tree {
             children_indices: vec![],
             parent_index: Some(4),
         },
-        Node {
+        NodeData {
             role: Role::CheckBox,
             name: Some("I agree to terms".to_string()),
             value: None,
@@ -218,6 +226,7 @@ fn sample_tree() -> Tree {
                 ..StateSet::default()
             },
 
+            pid: None,
             stable_id: None,
             numeric_value: None,
             min_value: None,
@@ -237,7 +246,7 @@ fn sample_tree() -> Tree {
 #[test]
 fn tree_root() {
     let tree = sample_tree();
-    let root = tree.root();
+    let root = tree.root_data();
     assert_eq!(root.role, Role::Window);
     assert_eq!(root.name.as_deref(), Some("My App"));
 }
@@ -245,7 +254,7 @@ fn tree_root() {
 #[test]
 fn tree_get_by_index() {
     let tree = sample_tree();
-    let button = tree.get(2).unwrap();
+    let button = tree.get_data(2).unwrap();
     assert_eq!(button.role, Role::Button);
     assert_eq!(button.name.as_deref(), Some("Back"));
 }
@@ -253,7 +262,7 @@ fn tree_get_by_index() {
 #[test]
 fn tree_get_nonexistent() {
     let tree = sample_tree();
-    assert!(tree.get(999).is_none());
+    assert!(tree.get_data(999).is_none());
 }
 
 #[test]
@@ -266,8 +275,8 @@ fn tree_len() {
 #[test]
 fn tree_children() {
     let tree = sample_tree();
-    let toolbar = tree.get(1).unwrap();
-    let children = tree.children(toolbar);
+    let toolbar = tree.get_data(1).unwrap();
+    let children = tree.children_data(toolbar);
     assert_eq!(children.len(), 2);
     assert_eq!(children[0].role, Role::Button);
     assert_eq!(children[1].role, Role::TextField);
@@ -276,17 +285,21 @@ fn tree_children() {
 #[test]
 fn tree_parent() {
     let tree = sample_tree();
-    let button = tree.get(2).unwrap();
-    let parent = tree.parent(button).unwrap();
+    let button = tree.get_data(2).unwrap();
+    let parent = tree.parent_data(button).unwrap();
     assert_eq!(parent.role, Role::Toolbar);
-    assert!(tree.parent(tree.root()).is_none());
+    assert!(tree.parent_data(tree.root_data()).is_none());
 }
 
 #[test]
 fn tree_subtree() {
     let tree = sample_tree();
-    let toolbar = tree.get(1).unwrap();
-    let subtree = tree.subtree(toolbar);
+    let toolbar = tree.get_data(1).unwrap();
+    let subtree: Vec<_> = tree
+        .subtree_indices(toolbar.index)
+        .into_iter()
+        .filter_map(|idx| tree.get_data(idx))
+        .collect();
     assert_eq!(subtree.len(), 3);
     assert_eq!(subtree[0].role, Role::Toolbar);
     assert_eq!(subtree[1].role, Role::Button);
@@ -651,7 +664,7 @@ fn tree_json_roundtrip() {
     assert_eq!(deserialized.screen_size, (1920, 1080));
     assert_eq!(deserialized.len(), 9);
 
-    let root = deserialized.root();
+    let root = deserialized.root_data();
     assert_eq!(root.role, Role::Window);
     assert_eq!(root.name.as_deref(), Some("My App"));
 
@@ -661,7 +674,7 @@ fn tree_json_roundtrip() {
 
 #[test]
 fn node_json_serialization() {
-    let node = Node {
+    let node = NodeData {
         role: Role::Button,
         name: Some("Submit".to_string()),
         value: None,
@@ -679,6 +692,7 @@ fn node_json_serialization() {
             focused: true,
             ..StateSet::default()
         },
+        pid: None,
         stable_id: None,
         numeric_value: None,
         min_value: None,
@@ -690,7 +704,7 @@ fn node_json_serialization() {
     };
 
     let json = serde_json::to_string_pretty(&node).unwrap();
-    let deserialized: Node = serde_json::from_str(&json).unwrap();
+    let deserialized: NodeData = serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized.role, Role::Button);
     assert_eq!(deserialized.name.as_deref(), Some("Submit"));
     assert!(deserialized.states.focused);
@@ -920,7 +934,7 @@ impl Provider for MockProvider {
     fn perform_action(
         &self,
         _tree: &Tree,
-        node: &Node,
+        node: &NodeData,
         action: Action,
         _data: Option<ActionData>,
     ) -> xa11y::Result<()> {

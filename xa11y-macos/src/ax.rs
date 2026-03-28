@@ -11,7 +11,7 @@ use core_foundation::string::CFString;
 
 use xa11y_core::{
     Action, ActionData, AppInfo, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
-    EventKind, EventProvider, EventReceiver, Node, PermissionStatus, Provider, QueryOptions,
+    EventKind, EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, QueryOptions,
     RawPlatformData, Rect, Result, Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
 };
 
@@ -732,7 +732,7 @@ impl MacOSProvider {
         &self,
         element: &AXElement,
         opts: &QueryOptions,
-        nodes: &mut Vec<Node>,
+        nodes: &mut Vec<NodeData>,
         elements: &mut Vec<AXElement>,
         parent_idx: Option<u32>,
         depth: u32,
@@ -887,7 +887,7 @@ impl MacOSProvider {
 
         let node_idx = nodes.len() as u32;
         let name_ref = name.clone(); // keep for window chrome filter below
-        nodes.push(Node {
+        nodes.push(NodeData {
             role,
             name,
             value,
@@ -903,6 +903,7 @@ impl MacOSProvider {
             index: node_idx,
             children_indices: vec![], // filled below
             parent_index: parent_idx,
+            pid: None,
         });
         elements.push(element.clone());
 
@@ -1017,7 +1018,7 @@ impl Provider for MacOSProvider {
         let mut elements = Vec::new();
 
         // Desktop root
-        nodes.push(Node {
+        nodes.push(NodeData {
             index: 0,
             role: Role::Application,
             name: Some("Desktop".to_string()),
@@ -1038,6 +1039,7 @@ impl Provider for MacOSProvider {
             min_value: None,
             max_value: None,
             raw: RawPlatformData::Synthetic,
+            pid: None,
         });
         elements.push(AXElement(std::ptr::null())); // placeholder
 
@@ -1074,7 +1076,7 @@ impl Provider for MacOSProvider {
     fn perform_action(
         &self,
         tree: &Tree,
-        node: &Node,
+        node: &NodeData,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()> {
@@ -1374,7 +1376,7 @@ unsafe extern "C" fn ax_observer_callback(
         let role_str = ax_string(element, "AXRole").unwrap_or_default();
         let subrole = ax_string(element, "AXSubrole");
         let role = map_ax_role(&role_str, subrole.as_deref());
-        Some(Node {
+        Some(NodeData {
             role,
             name: ax_string(element, "AXTitle"),
             value: ax_value_string(element),
@@ -1390,6 +1392,7 @@ unsafe extern "C" fn ax_observer_callback(
             index: 0,
             children_indices: vec![],
             parent_index: None,
+            pid: None,
         })
     } else {
         None
@@ -1565,7 +1568,7 @@ impl EventProvider for MacOSProvider {
         selector: &str,
         state: ElementState,
         timeout: Duration,
-    ) -> Result<Node> {
+    ) -> Result<NodeData> {
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
 
@@ -1580,7 +1583,7 @@ impl EventProvider for MacOSProvider {
             let node = matches.as_ref().and_then(|m| m.first().copied());
 
             if state.is_met(node) {
-                return Ok(node.cloned().unwrap_or_else(Node::synthetic_empty));
+                return Ok(node.cloned().unwrap_or_else(NodeData::synthetic_empty));
             }
 
             std::thread::sleep(poll_interval);

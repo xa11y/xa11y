@@ -5,7 +5,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use xa11y_core::{Node, RawPlatformData, Role, StateSet, Tree};
+use xa11y_core::{NodeData, RawPlatformData, Role, StateSet, Tree};
 
 /// Roles indexed by u8 for fuzzer-driven selection.
 const ROLES: [Role; 33] = [
@@ -82,11 +82,11 @@ fn build_tree(input: &FuzzInput) -> Tree {
         );
     }
 
-    let mut nodes: Vec<Node> = Vec::with_capacity(node_count);
+    let mut nodes: Vec<NodeData> = Vec::with_capacity(node_count);
     for i in 0..node_count {
         let fuzz = &input.fuzz_nodes[i];
         let role = ROLES[fuzz.role_idx as usize % ROLES.len()];
-        nodes.push(Node {
+        nodes.push(NodeData {
             role,
             name: fuzz.name.clone(),
             value: fuzz.value.clone(),
@@ -98,6 +98,7 @@ fn build_tree(input: &FuzzInput) -> Tree {
             numeric_value: None,
             min_value: None,
             max_value: None,
+            pid: None,
             raw: RawPlatformData::Synthetic,
             index: i as u32,
             children_indices: vec![],
@@ -156,12 +157,12 @@ fuzz_target!(|input: FuzzInput| {
     }
 
     // Exercise root (safe because tree is non-empty)
-    let root = tree.root();
+    let root = tree.root_data();
     let _ = root.role;
 
     // Exercise get with valid and invalid indices
     for i in 0..tree.len() as u32 + 2 {
-        let _ = tree.get(i);
+        let _ = tree.get_data(i);
     }
 
     // Exercise iter
@@ -170,14 +171,14 @@ fuzz_target!(|input: FuzzInput| {
 
     // Exercise children
     for node in tree.iter() {
-        let _ = tree.children(node);
+        let _ = tree.children_data(node);
     }
 
     // Exercise subtree on root and a few nodes
-    let _ = tree.subtree(root);
+    let _ = tree.subtree_indices(root.index).into_iter().filter_map(|idx| tree.get_data(idx)).collect::<Vec<_>>();
     if tree.len() > 1 {
-        if let Some(node) = tree.get(1) {
-            let _ = tree.subtree(node);
+        if let Some(node) = tree.get_data(1) {
+            let _ = tree.subtree_indices(node.index).into_iter().filter_map(|idx| tree.get_data(idx)).collect::<Vec<_>>();
         }
     }
 

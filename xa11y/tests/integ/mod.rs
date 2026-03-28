@@ -3,15 +3,15 @@
 use xa11y::*;
 
 /// Get the test app tree with default options, retrying briefly for registration.
-pub fn app_tree() -> Tree {
+pub fn app_tree() -> Node {
     app_tree_with(&QueryOptions::default())
 }
 
 /// Get the test app tree with custom QueryOptions, retrying for registration.
-pub fn app_tree_with(opts: &QueryOptions) -> Tree {
+pub fn app_tree_with(opts: &QueryOptions) -> Node {
     for attempt in 0..3 {
         match xa11y::app(&AppTarget::ByName("xa11y".to_string()), opts) {
-            Ok(tree) => return tree,
+            Ok(root) => return root,
             Err(_) if attempt < 2 => {
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
@@ -22,13 +22,13 @@ pub fn app_tree_with(opts: &QueryOptions) -> Tree {
 }
 
 /// Find exactly one node by selector. Panics with tree dump on failure.
-pub fn one<'a>(tree: &'a Tree, selector: &str) -> &'a Node {
-    let results = tree.query(selector).unwrap_or_else(|e| {
+pub fn one(root: &Node, selector: &str) -> Node {
+    let results = root.query(selector).unwrap_or_else(|e| {
         panic!(
             "Selector '{}' failed: {}. Tree:\n{}",
             selector,
             e,
-            tree.dump()
+            root.dump()
         )
     });
     assert!(
@@ -36,54 +36,49 @@ pub fn one<'a>(tree: &'a Tree, selector: &str) -> &'a Node {
         "Selector '{}' matched {} nodes (expected 1). Tree:\n{}",
         selector,
         results.len(),
-        tree.dump()
+        root.dump()
     );
-    results[0]
+    results[0].clone()
 }
 
 /// Find first node whose name contains `substring` (case-insensitive).
-pub fn named<'a>(tree: &'a Tree, substring: &str) -> &'a Node {
+pub fn named(root: &Node, substring: &str) -> Node {
     let selector = format!("[name*=\"{}\"]", substring);
-    let results = tree.query(&selector).unwrap_or_else(|e| {
+    let results = root.query(&selector).unwrap_or_else(|e| {
         panic!(
             "Selector '{}' failed: {}. Tree:\n{}",
             selector,
             e,
-            tree.dump()
+            root.dump()
         )
     });
     assert!(
         !results.is_empty(),
         "No node with name containing '{}'. Tree:\n{}",
         substring,
-        tree.dump()
+        root.dump()
     );
-    results[0]
+    results[0].clone()
 }
 
 /// Try to perform an action on a node. Returns the result without panicking.
-pub fn try_act(tree: &Tree, node: &Node, action: Action) -> Result<()> {
-    try_act_with(tree, node, action, None)
+pub fn try_act(node: &Node, action: Action) -> Result<()> {
+    try_act_with(node, action, None)
 }
 
 /// Try to perform an action with data on a node. Returns the result without panicking.
-pub fn try_act_with(
-    tree: &Tree,
-    node: &Node,
-    action: Action,
-    data: Option<ActionData>,
-) -> Result<()> {
-    xa11y::perform_action(tree, node, action, data)
+pub fn try_act_with(node: &Node, action: Action, data: Option<ActionData>) -> Result<()> {
+    xa11y::perform_action(node, action, data)
 }
 
 /// Perform an action on a node, wait briefly, then re-read the tree.
-pub fn act(tree: &Tree, node: &Node, action: Action) -> Tree {
-    act_with(tree, node, action, None)
+pub fn act(node: &Node, action: Action) -> Node {
+    act_with(node, action, None)
 }
 
 /// Perform an action with data on a node, wait, then re-read the tree.
-pub fn act_with(tree: &Tree, node: &Node, action: Action, data: Option<ActionData>) -> Tree {
-    try_act_with(tree, node, action, data)
+pub fn act_with(node: &Node, action: Action, data: Option<ActionData>) -> Node {
+    try_act_with(node, action, data)
         .unwrap_or_else(|e| panic!("Action {:?} failed: {}", action, e));
     std::thread::sleep(std::time::Duration::from_millis(100));
     app_tree()

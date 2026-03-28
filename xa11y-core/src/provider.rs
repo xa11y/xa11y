@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::action::{Action, ActionData};
 use crate::error::Result;
-use crate::node::Node;
+use crate::node::NodeData;
 use crate::role::Role;
 use crate::tree::Tree;
 
@@ -22,7 +22,7 @@ pub trait Provider: Send + Sync {
     fn perform_action(
         &self,
         tree: &Tree,
-        node: &Node,
+        node: &NodeData,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()>;

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::node::Node;
+use crate::node::NodeData;
 use crate::provider::AppInfo;
 
 /// Categories of accessibility events, normalized across platforms.
@@ -49,7 +49,7 @@ pub struct Event {
     /// The application that produced this event.
     pub app: AppInfo,
     /// A snapshot of the element that triggered the event, if available.
-    pub target: Option<Node>,
+    pub target: Option<NodeData>,
     /// For StateChanged events: which state flag changed.
     pub state_flag: Option<StateFlag>,
     /// For StateChanged events: the new value of the flag.
@@ -172,7 +172,7 @@ impl ElementState {
     /// Evaluate whether the condition is met for the given node.
     ///
     /// `node` is `None` when no element matched the selector.
-    pub fn is_met(self, node: Option<&Node>) -> bool {
+    pub fn is_met(self, node: Option<&NodeData>) -> bool {
         match self {
             Self::Attached => node.is_some(),
             Self::Detached => node.is_none(),
