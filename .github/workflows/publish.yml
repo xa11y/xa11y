@@ -239,3 +239,55 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
+
+  # ── GitHub Release ─────────────────────────────────────────────────
+  create-release:
+    name: Create GitHub Release
+    needs: [publish-crates, publish-pypi]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Get version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(sed -n '/\[workspace\.package\]/,/\[/{s/^version = "\(.*\)"/\1/p}' Cargo.toml)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          TAG="v${{ steps.version.outputs.version }}"
+          # Find the previous tag
+          PREV_TAG=$(git tag --sort=-v:refname | grep -A1 "^${TAG}$" | tail -1)
+          if [ "$PREV_TAG" = "$TAG" ] || [ -z "$PREV_TAG" ]; then
+            # First release or no previous tag
+            echo "body=Initial release of xa11y v${{ steps.version.outputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            # Generate changelog from commits between tags
+            {
+              echo 'body<<RELEASE_EOF'
+              echo "## What's Changed"
+              echo ""
+              git log "${PREV_TAG}..${TAG}" --pretty=format:"- %s" --no-merges
+              echo ""
+              echo ""
+              echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${TAG}"
+              echo 'RELEASE_EOF'
+            } >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --title "xa11y ${{ steps.version.outputs.tag }}" \
+            --notes "${{ steps.notes.outputs.body }}" \
+            --verify-tag
