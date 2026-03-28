@@ -11,11 +11,13 @@ def test_node_role_as_string(test_app):
     assert buttons[0].role == "button"
 
 
-def test_node_name(tree):
+def test_node_name(test_app):
+    tree = test_app.nodes()
     assert tree.name == "TestApp"
 
 
-def test_node_name_none(tree):
+def test_node_name_none(test_app):
+    tree = test_app.nodes()
     # All nodes in the test tree have names, but check type
     assert isinstance(tree.name, str)
 
@@ -25,7 +27,8 @@ def test_node_value(test_app):
     assert search.value == "hello"
 
 
-def test_node_value_none(tree):
+def test_node_value_none(test_app):
+    tree = test_app.nodes()
     assert tree.value is None
 
 
@@ -75,7 +78,8 @@ def test_max_value(test_app):
     assert slider.max_value == 100.0
 
 
-def test_numeric_value_none(tree):
+def test_numeric_value_none(test_app):
+    tree = test_app.nodes()
     assert tree.numeric_value is None
     assert tree.min_value is None
     assert tree.max_value is None
@@ -84,7 +88,8 @@ def test_numeric_value_none(tree):
 # ── Flattened state flags ────────────────────────────────────────────────────
 
 
-def test_enabled_default_true(tree):
+def test_enabled_default_true(test_app):
+    tree = test_app.nodes()
     assert tree.enabled is True
 
 
@@ -94,7 +99,8 @@ def test_enabled_false(test_app):
     assert fwd.enabled is False
 
 
-def test_visible_default_true(tree):
+def test_visible_default_true(test_app):
+    tree = test_app.nodes()
     assert tree.visible is True
 
 
@@ -103,7 +109,8 @@ def test_visible_false(test_app):
     assert status.visible is False
 
 
-def test_focused(tree):
+def test_focused(test_app):
+    tree = test_app.nodes()
     window = tree.children[0]
     assert window.focused is True
     assert tree.focused is False
@@ -134,7 +141,8 @@ def test_expanded(test_app):
     assert lst.expanded is True
 
 
-def test_expanded_none(tree):
+def test_expanded_none(test_app):
+    tree = test_app.nodes()
     # Non-expandable elements have expanded=None
     assert tree.expanded is None
 
@@ -154,15 +162,18 @@ def test_focusable(test_app):
     assert tree.focusable is False
 
 
-def test_modal(tree):
+def test_modal(test_app):
+    tree = test_app.nodes()
     assert tree.modal is False
 
 
-def test_required(tree):
+def test_required(test_app):
+    tree = test_app.nodes()
     assert tree.required is False
 
 
-def test_busy(tree):
+def test_busy(test_app):
+    tree = test_app.nodes()
     assert tree.busy is False
 
 
@@ -190,14 +201,16 @@ def test_actions_checkbox(test_app):
     assert set(cb.actions) == {"toggle", "focus"}
 
 
-def test_actions_empty(tree):
+def test_actions_empty(test_app):
+    tree = test_app.nodes()
     assert tree.actions == []
 
 
 # ── Bounds ───────────────────────────────────────────────────────────────────
 
 
-def test_bounds_present(tree):
+def test_bounds_present(test_app):
+    tree = test_app.nodes()
     b = tree.bounds
     assert b is not None
     assert b.x == 0
@@ -224,7 +237,8 @@ def test_bounds_none(test_app):
 # ── Rect repr ────────────────────────────────────────────────────────────────
 
 
-def test_rect_repr(tree):
+def test_rect_repr(test_app):
+    tree = test_app.nodes()
     b = tree.bounds
     r = repr(b)
     assert "Rect(" in r
@@ -232,7 +246,8 @@ def test_rect_repr(tree):
     assert "width=1920" in r
 
 
-def test_rect_eq(tree):
+def test_rect_eq(test_app):
+    tree = test_app.nodes()
     b1 = tree.bounds
     b2 = tree.bounds
     assert b1 == b2
@@ -241,7 +256,8 @@ def test_rect_eq(tree):
 # ── Node dunders ─────────────────────────────────────────────────────────────
 
 
-def test_node_repr_basic(tree):
+def test_node_repr_basic(test_app):
+    tree = test_app.nodes()
     r = repr(tree)
     assert "role='application'" in r
     assert "name='TestApp'" in r
@@ -266,13 +282,15 @@ def test_node_repr_hidden(test_app):
     assert "visible=False" in r
 
 
-def test_node_repr_focused(tree):
+def test_node_repr_focused(test_app):
+    tree = test_app.nodes()
     window = tree.children[0]
     r = repr(window)
     assert "focused=True" in r
 
 
-def test_node_str_is_repr(tree):
+def test_node_str_is_repr(test_app):
+    tree = test_app.nodes()
     assert str(tree) == repr(tree)
 
 

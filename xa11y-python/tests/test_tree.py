@@ -6,26 +6,30 @@ import xa11y
 # ── Root ─────────────────────────────────────────────────────────────────────
 
 
-def test_root_is_application(tree):
+def test_root_is_application(test_app):
+    tree = test_app.nodes()
     assert tree.role == "application"
     assert tree.name == "TestApp"
 
 
-def test_root_pid(tree):
+def test_root_pid(test_app):
+    tree = test_app.nodes()
     assert tree.pid is None  # test tree nodes have pid=None
 
 
 # ── Navigation (via Node.children / Node.parent) ────────────────────────────
 
 
-def test_children_of_root(tree):
+def test_children_of_root(test_app):
+    tree = test_app.nodes()
     children = tree.children
     assert len(children) == 1
     assert children[0].role == "window"
     assert children[0].name == "Main Window"
 
 
-def test_children_of_window(tree):
+def test_children_of_window(test_app):
+    tree = test_app.nodes()
     window = tree.children[0]
     children = window.children
     assert len(children) == 2
@@ -39,7 +43,8 @@ def test_children_of_leaf(test_app):
     assert back.children == []
 
 
-def test_parent_of_root_is_none(tree):
+def test_parent_of_root_is_none(test_app):
+    tree = test_app.nodes()
     assert tree.parent is None
 
 
@@ -52,14 +57,16 @@ def test_parent_of_button(test_app):
     assert parent.name == "Navigation"
 
 
-def test_parent_child_roundtrip(tree):
+def test_parent_child_roundtrip(test_app):
+    tree = test_app.nodes()
     window = tree.children[0]
     toolbar = window.children[0]
     assert toolbar.parent.name == "Main Window"
 
 
-def test_deep_graph_traversal(tree):
+def test_deep_graph_traversal(test_app):
     """Verify node.children[i].children[j] style navigation works."""
+    tree = test_app.nodes()
     toolbar = tree.children[0].children[0]
     assert toolbar.role == "toolbar"
     back = toolbar.children[0]
