@@ -41,7 +41,8 @@
 
 use std::sync::{Arc, OnceLock};
 
-// Re-export public types explicitly — Tree is NOT exported (internal to providers).
+// Re-export public types. Tree is exported because Provider trait methods reference it,
+// but end users should interact with Node (returned by app/all_apps), not Tree directly.
 pub use xa11y_core::{
     Action, ActionData, AppInfo, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
     EventKind, EventProvider, EventReceiver, Locator, Node, NodeData, PermissionStatus, Provider,

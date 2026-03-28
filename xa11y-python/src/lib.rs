@@ -158,9 +158,7 @@ fn make_py_node(py: Python<'_>, n: &xa11y::NodeData) -> PyResult<Py<Node>> {
             parent_idx: n.parent_index,
             _index: n.index,
             _all_nodes: None,
-            _rust_tree: None,
-            _provider: None,
-            _target: None,
+            _ctx: None,
         },
     )
 }
@@ -280,11 +278,15 @@ struct Node {
 
     /// Shared reference to all nodes in the tree (for graph navigation).
     _all_nodes: Option<Py<PyList>>,
-    /// Rust tree for query/dump operations.
-    _rust_tree: Option<xa11y::Tree>,
-    /// Provider + target for locator factory.
-    _provider: Option<Arc<dyn xa11y::Provider>>,
-    _target: Option<xa11y::AppTarget>,
+    /// Shared snapshot context for query/dump/locator (None for standalone nodes).
+    _ctx: Option<Arc<SnapshotContext>>,
+}
+
+/// Shared context for all nodes in a snapshot — avoids cloning Tree per node.
+struct SnapshotContext {
+    rust_tree: xa11y::Tree,
+    provider: Arc<dyn xa11y::Provider>,
+    target: xa11y::AppTarget,
 }
 
 #[pymethods]
@@ -324,15 +326,14 @@ impl Node {
 
     /// Get all nodes in this node's subtree (including this node).
     fn subtree(&self, py: Python<'_>) -> PyResult<Vec<PyObject>> {
-        let Some(ref tree) = self._rust_tree else {
-            // No tree context — return just this node
+        let Some(ref ctx) = self._ctx else {
             return Ok(vec![]);
         };
         let Some(ref all) = self._all_nodes else {
             return Ok(vec![]);
         };
         let list = all.bind(py);
-        let indices = tree.subtree_indices(self._index);
+        let indices = ctx.rust_tree.subtree_indices(self._index);
         indices
             .iter()
             .map(|&idx| list.get_item(idx as usize).map(|item| item.unbind()))
@@ -341,15 +342,15 @@ impl Node {
 
     /// Query nodes matching a CSS-like selector string within this snapshot.
     fn query(&self, py: Python<'_>, selector: &str) -> PyResult<Vec<PyObject>> {
-        let Some(ref tree) = self._rust_tree else {
-            return Err(PyValueError::new_err(
+        let ctx = self._ctx.as_ref().ok_or_else(|| {
+            PyValueError::new_err(
                 "query() requires a snapshot context (node from app(), not locator.get())",
-            ));
-        };
+            )
+        })?;
         let Some(ref all) = self._all_nodes else {
             return Err(PyValueError::new_err("No node list available"));
         };
-        let matches = tree.query(selector).map_err(to_py_err)?;
+        let matches = ctx.rust_tree.query(selector).map_err(to_py_err)?;
         let list = all.bind(py);
         matches
             .iter()
@@ -359,12 +360,12 @@ impl Node {
 
     /// Render the tree as an indented text representation for debugging.
     fn dump(&self) -> PyResult<String> {
-        let Some(ref tree) = self._rust_tree else {
-            return Err(PyValueError::new_err(
+        let ctx = self._ctx.as_ref().ok_or_else(|| {
+            PyValueError::new_err(
                 "dump() requires a snapshot context (node from app(), not locator.get())",
-            ));
-        };
-        Ok(tree.dump())
+            )
+        })?;
+        Ok(ctx.rust_tree.dump())
     }
 
     /// Create a Locator for lazy element resolution from this snapshot's app.
@@ -377,19 +378,15 @@ impl Node {
         visible_only: bool,
         roles: Option<Vec<String>>,
     ) -> PyResult<Locator> {
-        let provider = self._provider.as_ref().ok_or_else(|| {
+        let ctx = self._ctx.as_ref().ok_or_else(|| {
             PyValueError::new_err(
                 "locator() requires a snapshot context (node from app(), not locator.get())",
             )
         })?;
-        let target = self
-            ._target
-            .as_ref()
-            .ok_or_else(|| PyValueError::new_err("No app target available"))?;
         let opts = build_query_options(max_depth, max_elements, visible_only, roles);
         Ok(Locator {
-            provider: provider.clone(),
-            target: target.clone(),
+            provider: ctx.provider.clone(),
+            target: ctx.target.clone(),
             selector: selector.to_string(),
             opts,
             nth: None,
@@ -458,14 +455,17 @@ fn convert_to_node_at(
         py_nodes.push(make_py_node(py, n)?);
     }
 
-    // Build a shared PyList so every Node can navigate to children/parent directly.
+    // Build shared context and node list so every Node can navigate and query.
+    let ctx = Arc::new(SnapshotContext {
+        rust_tree,
+        provider,
+        target,
+    });
     let all_nodes_list: Py<PyList> = PyList::new(py, &py_nodes)?.unbind();
     for py_node in &py_nodes {
         let mut node = py_node.borrow_mut(py);
         node._all_nodes = Some(all_nodes_list.clone_ref(py));
-        node._rust_tree = Some(rust_tree.clone());
-        node._provider = Some(provider.clone());
-        node._target = Some(target.clone());
+        node._ctx = Some(ctx.clone());
     }
 
     py_nodes
