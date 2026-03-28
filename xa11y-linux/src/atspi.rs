@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use xa11y_core::{
-    Action, ActionData, AppInfo, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
+    Action, ActionData, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
     EventKind, EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, QueryOptions,
     Rect, Result, Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
 };
@@ -740,7 +740,7 @@ impl Provider for LinuxProvider {
         Ok(Tree::new(app_name, pid, screen_size, nodes))
     }
 
-    fn get_all_apps(&self, opts: &QueryOptions) -> Result<Tree> {
+    fn get_apps(&self, opts: &QueryOptions) -> Result<Tree> {
         let screen_size = Self::detect_screen_size();
         let mut nodes = Vec::new();
 
@@ -1083,33 +1083,6 @@ impl Provider for LinuxProvider {
             }),
         }
     }
-
-    fn list_apps(&self) -> Result<Vec<AppInfo>> {
-        let registry = AccessibleRef {
-            bus_name: "org.a11y.atspi.Registry".to_string(),
-            path: "/org/a11y/atspi/accessible/root".to_string(),
-        };
-        let children = self.get_children(&registry)?;
-        let mut apps = Vec::new();
-
-        for child in &children {
-            if child.path == "/org/a11y/atspi/null" {
-                continue;
-            }
-            let name = self.get_name(child).unwrap_or_default();
-            if name.is_empty() {
-                continue;
-            }
-            let pid = self.get_app_pid(child);
-            apps.push(AppInfo {
-                name,
-                pid: pid.unwrap_or(0),
-                bundle_id: None,
-            });
-        }
-
-        Ok(apps)
-    }
 }
 
 // ── EventProvider ────────────────────────────────────────────────────────────
@@ -1118,23 +1091,15 @@ impl EventProvider for LinuxProvider {
     fn subscribe(&self, target: &AppTarget, filter: EventFilter) -> Result<Subscription> {
         let (tx, rx) = std::sync::mpsc::channel();
 
-        let app_info = match target {
+        let (app_name, app_pid) = match target {
             AppTarget::ByName(name) => {
                 let app_ref = self.find_app_by_name(name)?;
                 let pid = self.get_app_pid(&app_ref).unwrap_or(0);
-                AppInfo {
-                    name: self.get_name(&app_ref).unwrap_or_default(),
-                    pid,
-                    bundle_id: None,
-                }
+                (self.get_name(&app_ref).unwrap_or_default(), pid)
             }
             AppTarget::ByPid(pid) => {
                 let app_ref = self.find_app_by_pid(*pid)?;
-                AppInfo {
-                    name: self.get_name(&app_ref).unwrap_or_default(),
-                    pid: *pid,
-                    bundle_id: None,
-                }
+                (self.get_name(&app_ref).unwrap_or_default(), *pid)
             }
             AppTarget::ByWindow(_) => {
                 return Err(Error::Platform {
@@ -1175,7 +1140,8 @@ impl EventProvider for LinuxProvider {
                         if filter.kinds.is_empty() || filter.kinds.contains(&kind) {
                             let _ = tx.send(Event {
                                 kind,
-                                app: app_info.clone(),
+                                app_name: app_name.clone(),
+                                app_pid,
                                 target: tree.iter().find(|n| n.states.focused).cloned(),
                                 state_flag: None,
                                 state_value: None,
@@ -1194,7 +1160,8 @@ impl EventProvider for LinuxProvider {
                     if filter.kinds.is_empty() || filter.kinds.contains(&kind) {
                         let _ = tx.send(Event {
                             kind,
-                            app: app_info.clone(),
+                            app_name: app_name.clone(),
+                            app_pid,
                             target: None,
                             state_flag: None,
                             state_value: None,

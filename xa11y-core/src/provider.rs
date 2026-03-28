@@ -12,7 +12,7 @@ pub trait Provider: Send + Sync {
     fn get_app_tree(&self, target: &AppTarget, opts: &QueryOptions) -> Result<Tree>;
 
     /// Snapshot all running applications (shallow).
-    fn get_all_apps(&self, opts: &QueryOptions) -> Result<Tree>;
+    fn get_apps(&self, opts: &QueryOptions) -> Result<Tree>;
 
     /// Perform an action on an element from a specific snapshot.
     ///
@@ -29,9 +29,6 @@ pub trait Provider: Send + Sync {
 
     /// Check if accessibility permissions are granted.
     fn check_permissions(&self) -> Result<PermissionStatus>;
-
-    /// List running applications with their PIDs.
-    fn list_apps(&self) -> Result<Vec<AppInfo>>;
 }
 
 /// Target for identifying an application.
@@ -76,13 +73,4 @@ pub enum PermissionStatus {
     Granted,
     /// Permissions denied, with platform-specific instructions.
     Denied { instructions: String },
-}
-
-/// Information about a running application.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppInfo {
-    pub name: String,
-    pub pid: u32,
-    /// macOS bundle identifier
-    pub bundle_id: Option<String>,
 }

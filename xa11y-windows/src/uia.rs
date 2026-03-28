@@ -11,7 +11,7 @@ use windows::Win32::System::Threading::*;
 use windows::Win32::UI::Accessibility::*;
 
 use xa11y_core::{
-    Action, ActionData, AppInfo, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
+    Action, ActionData, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
     EventKind, EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, QueryOptions,
     RawPlatformData, Rect, Result, Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
 };
@@ -589,7 +589,7 @@ impl Provider for WindowsProvider {
         Ok(Tree::new(app_name, Some(pid), screen_size, nodes))
     }
 
-    fn get_all_apps(&self, opts: &QueryOptions) -> Result<Tree> {
+    fn get_apps(&self, opts: &QueryOptions) -> Result<Tree> {
         let screen_size = Self::detect_screen_size();
         let mut nodes = Vec::new();
         let mut elements = Vec::new();
@@ -1025,18 +1025,6 @@ impl Provider for WindowsProvider {
     fn check_permissions(&self) -> Result<PermissionStatus> {
         Ok(PermissionStatus::Granted)
     }
-
-    fn list_apps(&self) -> Result<Vec<AppInfo>> {
-        let apps = self.list_gui_apps();
-        Ok(apps
-            .into_iter()
-            .map(|(pid, name)| AppInfo {
-                name,
-                pid,
-                bundle_id: None,
-            })
-            .collect())
-    }
 }
 
 // ── Helper Functions ─────────────────────────────────────────────────────────
@@ -1324,18 +1312,14 @@ impl EventProvider for WindowsProvider {
     fn subscribe(&self, target: &AppTarget, filter: EventFilter) -> Result<Subscription> {
         let (tx, rx) = std::sync::mpsc::channel();
 
-        let app_info = match target {
+        let (app_name, app_pid) = match target {
             AppTarget::ByName(name) => {
                 let apps = self.list_gui_apps();
                 let found = apps
                     .iter()
                     .find(|(_, n)| n.to_lowercase().contains(&name.to_lowercase()));
                 match found {
-                    Some((pid, name)) => AppInfo {
-                        name: name.clone(),
-                        pid: *pid,
-                        bundle_id: None,
-                    },
+                    Some((pid, name)) => (name.clone(), *pid),
                     None => {
                         return Err(Error::AppNotFound {
                             target: name.clone(),
@@ -1343,11 +1327,7 @@ impl EventProvider for WindowsProvider {
                     }
                 }
             }
-            AppTarget::ByPid(pid) => AppInfo {
-                name: String::new(),
-                pid: *pid,
-                bundle_id: None,
-            },
+            AppTarget::ByPid(pid) => (String::new(), *pid),
             AppTarget::ByWindow(_) => {
                 return Err(Error::Platform {
                     code: -1,
@@ -1386,7 +1366,8 @@ impl EventProvider for WindowsProvider {
                         if filter.kinds.is_empty() || filter.kinds.contains(&kind) {
                             let _ = tx.send(Event {
                                 kind,
-                                app: app_info.clone(),
+                                app_name: app_name.clone(),
+                                app_pid,
                                 target: tree.iter().find(|n| n.states.focused).cloned(),
                                 state_flag: None,
                                 state_value: None,
@@ -1405,7 +1386,8 @@ impl EventProvider for WindowsProvider {
                     if filter.kinds.is_empty() || filter.kinds.contains(&kind) {
                         let _ = tx.send(Event {
                             kind,
-                            app: app_info.clone(),
+                            app_name: app_name.clone(),
+                            app_pid,
                             target: None,
                             state_flag: None,
                             state_value: None,

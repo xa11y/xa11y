@@ -854,8 +854,6 @@ fn platform_provider_operations_return_errors() {
         &QueryOptions::default(),
     );
     assert!(result.is_err());
-
-    let _result = provider.list_apps();
 }
 
 // ── Selector edge cases ──
@@ -927,7 +925,7 @@ impl Provider for MockProvider {
         Ok(self.tree.clone())
     }
 
-    fn get_all_apps(&self, _opts: &QueryOptions) -> xa11y::Result<Tree> {
+    fn get_apps(&self, _opts: &QueryOptions) -> xa11y::Result<Tree> {
         Ok(self.tree.clone())
     }
 
@@ -944,10 +942,6 @@ impl Provider for MockProvider {
 
     fn check_permissions(&self) -> xa11y::Result<PermissionStatus> {
         Ok(PermissionStatus::Granted)
-    }
-
-    fn list_apps(&self) -> xa11y::Result<Vec<AppInfo>> {
-        Ok(vec![])
     }
 }
 

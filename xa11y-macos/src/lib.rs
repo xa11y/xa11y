@@ -28,7 +28,7 @@ mod stub {
         fn get_app_tree(&self, _: &AppTarget, _: &QueryOptions) -> Result<Tree> {
             unreachable!()
         }
-        fn get_all_apps(&self, _: &QueryOptions) -> Result<Tree> {
+        fn get_apps(&self, _: &QueryOptions) -> Result<Tree> {
             unreachable!()
         }
         fn perform_action(
@@ -41,9 +41,6 @@ mod stub {
             unreachable!()
         }
         fn check_permissions(&self) -> Result<PermissionStatus> {
-            unreachable!()
-        }
-        fn list_apps(&self) -> Result<Vec<AppInfo>> {
             unreachable!()
         }
     }

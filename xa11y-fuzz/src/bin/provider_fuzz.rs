@@ -435,12 +435,12 @@ mod provider_fuzz {
         state.errors += 1;
     }
 
-    fn op_get_all_apps(state: &mut FuzzState) {
+    fn op_get_apps(state: &mut FuzzState) {
         let mut opts = random_query_options(&mut state.rng);
         opts.max_depth = Some(opts.max_depth.map_or(3, |d| d.min(3)));
         opts.max_elements = Some(opts.max_elements.map_or(100, |n| n.min(100)));
-        state.log(&format!("get_all_apps({:?})", opts));
-        match state.provider.get_all_apps(&opts) {
+        state.log(&format!("get_apps({:?})", opts));
+        match state.provider.get_apps(&opts) {
             Ok(tree) => {
                 state.log(&format!("  -> {} nodes", tree.len()));
                 let _ = tree.root_data();
@@ -470,18 +470,6 @@ mod provider_fuzz {
                 );
             }
         }
-    }
-
-    fn op_list_apps(state: &mut FuzzState) {
-        state.log("list_apps()");
-        let apps = state.provider.list_apps().unwrap();
-        assert!(!apps.is_empty(), "list_apps returned empty");
-        let has_test_app = apps.iter().any(|a| a.name.contains("xa11y"));
-        state.log(&format!(
-            "  -> {} apps, test_app_present={}",
-            apps.len(),
-            has_test_app
-        ));
     }
 
     fn op_action_on_node(state: &mut FuzzState) {
@@ -737,10 +725,21 @@ mod provider_fuzz {
 
         let mut test_app_pid = 0u32;
         for attempt in 0..10 {
-            if let Ok(apps) = provider.list_apps() {
-                if let Some(app) = apps.iter().find(|a| a.name.contains("xa11y")) {
-                    test_app_pid = app.pid;
-                    eprintln!("Test app:   {} (PID {})", app.name, app.pid);
+            if let Ok(tree) = provider.get_apps(&QueryOptions {
+                max_depth: Some(1),
+                max_elements: Some(200),
+                ..QueryOptions::default()
+            }) {
+                if let Some(app) = tree
+                    .iter()
+                    .find(|n| n.name.as_deref().is_some_and(|name| name.contains("xa11y")))
+                {
+                    test_app_pid = app.pid.unwrap_or(0);
+                    eprintln!(
+                        "Test app:   {} (PID {})",
+                        app.name.as_deref().unwrap_or("?"),
+                        test_app_pid
+                    );
                     break;
                 }
             }
@@ -777,9 +776,8 @@ mod provider_fuzz {
             ),
             (1, "get_tree_by_pid_not_found", op_get_tree_by_pid_not_found),
             (1, "get_tree_by_window", op_get_tree_by_window),
-            (1, "get_all_apps", op_get_all_apps),
+            (1, "get_apps", op_get_apps),
             (1, "check_permissions", op_check_permissions),
-            (2, "list_apps", op_list_apps),
             (20, "action_on_node", op_action_on_node),
             (3, "action_press", op_action_press),
             (15, "query_tree", op_query_tree),

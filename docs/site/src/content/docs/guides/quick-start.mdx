@@ -194,11 +194,13 @@ xa11y supports CSS-like selectors to find elements in the tree.
     ```rust
     use xa11y::*;
 
-    let provider = create_provider()?;
-    let apps = provider.list_apps()?;
+    let root = apps(&QueryOptions {
+        max_depth: Some(1),
+        ..QueryOptions::default()
+    })?;
 
-    for app in &apps {
-        println!("{} (pid: {})", app.name, app.pid);
+    for child in root.children() {
+        println!("{} (pid: {:?})", child.name.as_deref().unwrap_or("?"), child.pid());
     }
     ```
   </TabItem>
@@ -206,9 +208,9 @@ xa11y supports CSS-like selectors to find elements in the tree.
     ```python
     import xa11y
 
-    apps = xa11y.list_apps()
-    for app in apps:
-        print(f"{app.name} (pid: {app.pid})")
+    root = xa11y.apps(max_depth=1)
+    for child in root.children:
+        print(f"{child.name} (pid: {child.pid})")
     ```
   </TabItem>
 </Tabs>
