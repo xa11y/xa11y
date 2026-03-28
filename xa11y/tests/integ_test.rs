@@ -58,14 +58,9 @@ mod tests {
     #[test]
     #[ignore]
     fn app_target_by_pid() {
-        // Find test app PID from the apps tree
-        let root = xa11y::apps().unwrap();
-        let subtree = root.subtree();
-        let test_app = subtree
-            .iter()
-            .find(|n| n.name.as_deref().is_some_and(|name| name.contains("xa11y")))
-            .expect("Test app not found in apps tree");
-        let pid = test_app.pid.expect("Test app should have a PID");
+        // Get the test app's PID via ByName, then verify ByPid works
+        let by_name = h::app_tree();
+        let pid = by_name.tree().pid.expect("app tree should have a PID");
         assert!(pid > 0);
         let root = xa11y::app(&AppTarget::ByPid(pid)).unwrap();
         assert!(!root.tree().is_empty());
