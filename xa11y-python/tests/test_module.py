@@ -9,7 +9,6 @@ def test_all_classes_exported():
     assert hasattr(xa11y, "Node")
     assert hasattr(xa11y, "Locator")
     assert hasattr(xa11y, "Rect")
-    assert hasattr(xa11y, "AppInfo")
 
 
 def test_all_exceptions_exported():
@@ -25,9 +24,8 @@ def test_all_exceptions_exported():
 
 def test_all_functions_exported():
     assert callable(xa11y.app)
-    assert callable(xa11y.all_apps)
+    assert callable(xa11y.apps)
     assert callable(xa11y.locator)
-    assert callable(xa11y.list_apps)
     assert callable(xa11y.check_permissions)
 
 
@@ -38,7 +36,7 @@ def test_all_list():
     assert isinstance(xa11y.__all__, list)
     assert "Node" in xa11y.__all__
     assert "app" in xa11y.__all__
-    assert "all_apps" in xa11y.__all__
+    assert "apps" in xa11y.__all__
     assert "locator" in xa11y.__all__
     assert "XA11yError" in xa11y.__all__
 
@@ -56,7 +54,3 @@ def test_locator_is_type():
 
 def test_rect_is_type():
     assert isinstance(xa11y.Rect, type)
-
-
-def test_app_info_is_type():
-    assert isinstance(xa11y.AppInfo, type)

@@ -10,7 +10,7 @@ use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
 
 use xa11y_core::{
-    Action, ActionData, AppInfo, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
+    Action, ActionData, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
     EventKind, EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, QueryOptions,
     RawPlatformData, Rect, Result, Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
 };
@@ -1012,7 +1012,7 @@ impl Provider for MacOSProvider {
         Ok(Tree::new(app_name, Some(pid as u32), screen_size, nodes))
     }
 
-    fn get_all_apps(&self, opts: &QueryOptions) -> Result<Tree> {
+    fn get_apps(&self, opts: &QueryOptions) -> Result<Tree> {
         let screen_size = Self::detect_screen_size();
         let mut nodes = Vec::new();
         let mut elements = Vec::new();
@@ -1316,18 +1316,6 @@ impl Provider for MacOSProvider {
             })
         }
     }
-
-    fn list_apps(&self) -> Result<Vec<AppInfo>> {
-        let apps = Self::list_gui_apps();
-        Ok(apps
-            .into_iter()
-            .map(|(pid, name)| AppInfo {
-                name,
-                pid: pid as u32,
-                bundle_id: None,
-            })
-            .collect())
-    }
 }
 
 // ── EventProvider ────────────────────────────────────────────────────────────
@@ -1336,7 +1324,8 @@ impl Provider for MacOSProvider {
 struct ObserverContext {
     sender: std::sync::mpsc::Sender<Event>,
     filter: EventFilter,
-    app_info: AppInfo,
+    app_name: String,
+    app_pid: u32,
 }
 
 /// AXObserver callback: maps AX notifications to xa11y events and sends them.
@@ -1400,7 +1389,8 @@ unsafe extern "C" fn ax_observer_callback(
 
     let event = Event {
         kind,
-        app: ctx.app_info.clone(),
+        app_name: ctx.app_name.clone(),
+        app_pid: ctx.app_pid,
         target,
         state_flag: None,
         state_value: None,
@@ -1441,11 +1431,8 @@ impl EventProvider for MacOSProvider {
         let ctx = Box::new(ObserverContext {
             sender: tx,
             filter,
-            app_info: AppInfo {
-                name: app_name,
-                pid: pid as u32,
-                bundle_id: None,
-            },
+            app_name,
+            app_pid: pid as u32,
         });
         let ctx_ptr = Box::into_raw(ctx) as *mut c_void;
 

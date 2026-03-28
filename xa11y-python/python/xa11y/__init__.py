@@ -13,7 +13,6 @@ Reuse a locator for lazy resolution:
 
 from xa11y._native import (
     ActionNotSupportedError,
-    AppInfo,
     AppNotFoundError,
     InvalidSelectorError,
     Locator,
@@ -25,17 +24,15 @@ from xa11y._native import (
     TimeoutError,
     # Exceptions
     XA11yError,
-    all_apps,
     app,
+    apps,
     check_permissions,
-    list_apps,
     # Functions
     locator,
 )
 
 __all__ = [
     "ActionNotSupportedError",
-    "AppInfo",
     "AppNotFoundError",
     "InvalidSelectorError",
     "Locator",
@@ -46,9 +43,8 @@ __all__ = [
     "SelectorNotMatchedError",
     "TimeoutError",
     "XA11yError",
-    "all_apps",
     "app",
+    "apps",
     "check_permissions",
-    "list_apps",
     "locator",
 ]

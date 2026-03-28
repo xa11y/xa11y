@@ -340,7 +340,7 @@ Inspired by Playwright's Locator pattern.
 
 | Operation | Refetches? |
 |-----------|-----------|
-| `app()` / `all_apps()` | Yes — captures fresh snapshot |
+| `app()` / `apps()` | Yes — captures fresh snapshot |
 | `node.parent()` / `node.children()` / `node.query()` | No — uses snapshot |
 | `node.role` / `node.name` / `node.to_string()` | No — uses snapshot |
 | `locator.press()` / `locator.set_value()` | Yes — refetches every time |
@@ -403,7 +403,7 @@ pub trait Provider: Send + Sync {
     fn get_app_tree(&self, target: &AppTarget, opts: &QueryOptions) -> Result<Tree>;
 
     /// Snapshot all running applications (shallow).
-    fn get_all_apps(&self, opts: &QueryOptions) -> Result<Tree>;
+    fn get_apps(&self, opts: &QueryOptions) -> Result<Tree>;
 
     /// Perform an action on an element from a specific snapshot.
     ///
@@ -423,9 +423,6 @@ pub trait Provider: Send + Sync {
 
     /// Check if accessibility permissions are granted.
     fn check_permissions(&self) -> Result<PermissionStatus>;
-
-    /// List running applications with their PIDs.
-    fn list_apps(&self) -> Result<Vec<AppInfo>>;
 }
 
 pub enum AppTarget {
@@ -467,11 +464,6 @@ pub enum PermissionStatus {
     Denied { instructions: String },
 }
 
-pub struct AppInfo {
-    pub name: String,
-    pub pid: u32,
-    pub bundle_id: Option<String>,  // macOS
-}
 ```
 
 ### 8. `Error` — Structured error type
@@ -833,7 +825,8 @@ pub struct Event {
     pub kind: EventKind,
 
     /// The application that produced this event.
-    pub app: AppInfo,
+    pub app_name: String,
+    pub app_pid: u32,
 
     /// A snapshot of the element that triggered the event, if available.
     /// None if the element was destroyed or is not capturable.

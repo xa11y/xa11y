@@ -1,8 +1,8 @@
 //! Stub backend for non-Linux platforms (allows compilation on all targets).
 
 use xa11y_core::{
-    Action, ActionData, AppInfo, AppTarget, Error, NodeData, PermissionStatus, Provider,
-    QueryOptions, Result, Tree,
+    Action, ActionData, AppTarget, Error, NodeData, PermissionStatus, Provider, QueryOptions,
+    Result, Tree,
 };
 
 #[derive(Default)]
@@ -22,7 +22,7 @@ impl Provider for LinuxProvider {
         })
     }
 
-    fn get_all_apps(&self, _opts: &QueryOptions) -> Result<Tree> {
+    fn get_apps(&self, _opts: &QueryOptions) -> Result<Tree> {
         Err(Error::Platform {
             code: -1,
             message: "Linux backend not available on this platform".to_string(),
@@ -45,13 +45,6 @@ impl Provider for LinuxProvider {
     fn check_permissions(&self) -> Result<PermissionStatus> {
         Ok(PermissionStatus::Denied {
             instructions: "Linux AT-SPI2 backend not available on this platform".to_string(),
-        })
-    }
-
-    fn list_apps(&self) -> Result<Vec<AppInfo>> {
-        Err(Error::Platform {
-            code: -1,
-            message: "Linux backend not available on this platform".to_string(),
         })
     }
 }

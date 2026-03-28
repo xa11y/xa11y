@@ -16,7 +16,7 @@ mod tests {
     use xa11y::*;
 
     // ════════════════════════════════════════════════════════════════
-    // Provider Operations (6 tests)
+    // Provider Operations (4 tests)
     // ════════════════════════════════════════════════════════════════
 
     #[test]
@@ -32,38 +32,15 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn list_apps_includes_test_app() {
-        let apps = xa11y::list_apps().unwrap();
-        assert!(
-            apps.iter().any(|a| a.name.contains("xa11y")),
-            "Test app not in app list: {:?}",
-            apps.iter().map(|a| &a.name).collect::<Vec<_>>()
-        );
-    }
-
-    #[test]
-    #[ignore]
-    fn list_apps_has_valid_pids() {
-        let apps = xa11y::list_apps().unwrap();
-        let test_app = apps.iter().find(|a| a.name.contains("xa11y"));
-        assert!(test_app.is_some());
-        assert!(
-            test_app.unwrap().pid > 0,
-            "Test app should have a valid PID"
-        );
-    }
-
-    #[test]
-    #[ignore]
-    fn get_all_apps_returns_nonempty() {
+    fn apps_returns_nonempty() {
         // Limit depth/elements to avoid traversing every app on the system
-        let root = xa11y::all_apps(&QueryOptions {
+        let root = xa11y::apps(&QueryOptions {
             max_depth: Some(2),
             max_elements: Some(200),
             ..QueryOptions::default()
         })
         .unwrap();
-        assert!(!root.tree().is_empty(), "get_all_apps should return nodes");
+        assert!(!root.tree().is_empty(), "apps should return nodes");
         assert_eq!(root.tree().app_name, "Desktop");
         assert!(
             root.tree().pid.is_none(),
@@ -76,7 +53,7 @@ mod tests {
             .any(|n| n.name.as_deref().is_some_and(|name| name.contains("xa11y")));
         assert!(
             has_test_app,
-            "get_all_apps should include the test app. Apps: {:?}",
+            "apps should include the test app. Apps: {:?}",
             root.subtree()
                 .iter()
                 .filter(|n| n.parent_index.is_none_or(|p| p == 0))
@@ -88,9 +65,19 @@ mod tests {
     #[test]
     #[ignore]
     fn app_target_by_pid() {
-        let apps = xa11y::list_apps().unwrap();
-        let test_app = apps.iter().find(|a| a.name.contains("xa11y")).unwrap();
-        let pid = test_app.pid;
+        // Find test app PID from the apps tree
+        let root = xa11y::apps(&QueryOptions {
+            max_depth: Some(1),
+            max_elements: Some(200),
+            ..QueryOptions::default()
+        })
+        .unwrap();
+        let subtree = root.subtree();
+        let test_app = subtree
+            .iter()
+            .find(|n| n.name.as_deref().is_some_and(|name| name.contains("xa11y")))
+            .expect("Test app not found in apps tree");
+        let pid = test_app.pid.expect("Test app should have a PID");
         assert!(pid > 0);
         let root = xa11y::app(&AppTarget::ByPid(pid), &QueryOptions::default()).unwrap();
         assert!(!root.tree().is_empty());

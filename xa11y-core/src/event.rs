@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
 use crate::node::NodeData;
-use crate::provider::AppInfo;
 
 /// Categories of accessibility events, normalized across platforms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -46,8 +45,10 @@ pub enum EventKind {
 pub struct Event {
     /// What kind of event occurred.
     pub kind: EventKind,
-    /// The application that produced this event.
-    pub app: AppInfo,
+    /// Name of the application that produced this event.
+    pub app_name: String,
+    /// PID of the application that produced this event.
+    pub app_pid: u32,
     /// A snapshot of the element that triggered the event, if available.
     pub target: Option<NodeData>,
     /// For StateChanged events: which state flag changed.

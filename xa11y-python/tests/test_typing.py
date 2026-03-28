@@ -9,7 +9,6 @@ def test_stub_types_are_accessible():
     assert xa11y.Node is not None
     assert xa11y.Locator is not None
     assert xa11y.Rect is not None
-    assert xa11y.AppInfo is not None
 
 
 def test_py_typed_marker_exists():

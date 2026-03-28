@@ -50,20 +50,6 @@ class Rect:
     def __repr__(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...
 
-class AppInfo:
-    """Information about a running application."""
-
-    @property
-    def name(self) -> str:
-        """Application name."""
-    @property
-    def pid(self) -> int:
-        """Process ID."""
-    @property
-    def bundle_id(self) -> str | None:
-        """Bundle identifier (macOS only, ``None`` on other platforms)."""
-    def __repr__(self) -> str: ...
-
 # ── Node ─────────────────────────────────────────────────────────────────────
 
 class Node:
@@ -292,7 +278,7 @@ def app(
     Identify the app by *name* (substring match) or *pid* (exact).
     """
 
-def all_apps(
+def apps(
     *,
     max_depth: int | None = None,
     max_elements: int | None = None,
@@ -313,9 +299,6 @@ def locator(
 ) -> Locator:
     """Create a :class:`Locator` for lazy element resolution."""
 
-def list_apps() -> list[AppInfo]:
-    """List all running applications that expose accessibility trees."""
-
 def check_permissions() -> str:
     """Check whether accessibility permissions are granted.
 
@@ -325,4 +308,3 @@ def check_permissions() -> str:
 # ── Test helpers ─────────────────────────────────────────────────────────────
 
 def _make_test_tree() -> Node: ...
-def _make_test_apps() -> list[AppInfo]: ...

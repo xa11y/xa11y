@@ -195,30 +195,6 @@ impl Rect {
     }
 }
 
-#[pyclass(frozen)]
-#[derive(Clone)]
-struct AppInfo {
-    #[pyo3(get)]
-    name: String,
-    #[pyo3(get)]
-    pid: u32,
-    #[pyo3(get)]
-    bundle_id: Option<String>,
-}
-
-#[pymethods]
-impl AppInfo {
-    fn __repr__(&self) -> String {
-        match &self.bundle_id {
-            Some(bid) => format!(
-                "AppInfo(name='{}', pid={}, bundle_id='{}')",
-                self.name, self.pid, bid
-            ),
-            None => format!("AppInfo(name='{}', pid={})", self.name, self.pid),
-        }
-    }
-}
-
 // ── Node ────────────────────────────────────────────────────────────────────
 
 /// A node in the accessibility tree snapshot.
@@ -890,7 +866,7 @@ fn app(
 /// Snapshot all running apps and return the root Node.
 #[pyfunction]
 #[pyo3(signature = (*, max_depth=None, max_elements=None, visible_only=false, roles=None))]
-fn all_apps(
+fn apps(
     py: Python<'_>,
     max_depth: Option<u32>,
     max_elements: Option<u32>,
@@ -900,9 +876,7 @@ fn all_apps(
     let provider = get_provider()?;
     let opts = build_query_options(max_depth, max_elements, visible_only, roles);
     let p = provider.clone();
-    let rust_tree = py
-        .allow_threads(|| p.get_all_apps(&opts))
-        .map_err(to_py_err)?;
+    let rust_tree = py.allow_threads(|| p.get_apps(&opts)).map_err(to_py_err)?;
     let target = xa11y::AppTarget::ByName(String::new());
     convert_to_root_node(py, rust_tree, provider, target)
 }
@@ -931,23 +905,6 @@ fn locator(
     })
 }
 
-/// List running applications.
-#[pyfunction]
-fn list_apps(py: Python<'_>) -> PyResult<Vec<AppInfo>> {
-    let provider = get_provider()?;
-    let apps = py
-        .allow_threads(|| provider.list_apps())
-        .map_err(to_py_err)?;
-    Ok(apps
-        .into_iter()
-        .map(|a| AppInfo {
-            name: a.name,
-            pid: a.pid,
-            bundle_id: a.bundle_id,
-        })
-        .collect())
-}
-
 /// Check accessibility permissions. Returns "granted" or raises PermissionDeniedError.
 #[pyfunction]
 fn check_permissions(py: Python<'_>) -> PyResult<String> {
@@ -970,7 +927,6 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Node>()?;
     m.add_class::<Locator>()?;
     m.add_class::<Rect>()?;
-    m.add_class::<AppInfo>()?;
 
     m.add("XA11yError", m.py().get_type::<XA11yError>())?;
     m.add(
@@ -994,14 +950,12 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("PlatformError", m.py().get_type::<PlatformError>())?;
 
     m.add_function(wrap_pyfunction!(app, m)?)?;
-    m.add_function(wrap_pyfunction!(all_apps, m)?)?;
+    m.add_function(wrap_pyfunction!(apps, m)?)?;
     m.add_function(wrap_pyfunction!(locator, m)?)?;
-    m.add_function(wrap_pyfunction!(list_apps, m)?)?;
     m.add_function(wrap_pyfunction!(check_permissions, m)?)?;
 
     // Test helpers
     m.add_function(wrap_pyfunction!(_make_test_tree, m)?)?;
-    m.add_function(wrap_pyfunction!(_make_test_apps, m)?)?;
 
     Ok(())
 }
@@ -1024,7 +978,7 @@ impl xa11y::Provider for MockProvider {
         Ok(self.tree.clone())
     }
 
-    fn get_all_apps(&self, _opts: &xa11y::QueryOptions) -> xa11y::Result<xa11y::Tree> {
+    fn get_apps(&self, _opts: &xa11y::QueryOptions) -> xa11y::Result<xa11y::Tree> {
         Ok(self.tree.clone())
     }
 
@@ -1045,21 +999,6 @@ impl xa11y::Provider for MockProvider {
 
     fn check_permissions(&self) -> xa11y::Result<xa11y::PermissionStatus> {
         Ok(xa11y::PermissionStatus::Granted)
-    }
-
-    fn list_apps(&self) -> xa11y::Result<Vec<xa11y::AppInfo>> {
-        Ok(vec![
-            xa11y::AppInfo {
-                name: "TestApp".to_string(),
-                pid: 1234,
-                bundle_id: Some("com.test.app".to_string()),
-            },
-            xa11y::AppInfo {
-                name: "OtherApp".to_string(),
-                pid: 5678,
-                bundle_id: None,
-            },
-        ])
     }
 }
 
@@ -1441,21 +1380,4 @@ fn _make_test_tree(py: Python<'_>) -> PyResult<Py<Node>> {
     });
     let target = xa11y::AppTarget::ByName("TestApp".to_string());
     convert_to_root_node(py, tree, provider, target)
-}
-
-/// Create a mock-backed list of apps (for Python unit tests).
-#[pyfunction]
-fn _make_test_apps() -> Vec<AppInfo> {
-    vec![
-        AppInfo {
-            name: "TestApp".to_string(),
-            pid: 1234,
-            bundle_id: Some("com.test.app".to_string()),
-        },
-        AppInfo {
-            name: "OtherApp".to_string(),
-            pid: 5678,
-            bundle_id: None,
-        },
-    ]
 }

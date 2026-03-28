@@ -42,9 +42,9 @@
 use std::sync::{Arc, OnceLock};
 
 // Re-export public types. Tree is exported because Provider trait methods reference it,
-// but end users should interact with Node (returned by app/all_apps), not Tree directly.
+// but end users should interact with Node (returned by app/apps), not Tree directly.
 pub use xa11y_core::{
-    Action, ActionData, AppInfo, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
+    Action, ActionData, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
     EventKind, EventProvider, EventReceiver, Locator, Node, NodeData, PermissionStatus, Provider,
     QueryOptions, RawPlatformData, Rect, Result, Role, ScrollDirection, StateFlag, StateSet,
     Subscription, TextChangeData, TextChangeType, Toggled, Tree, WindowHandle,
@@ -79,8 +79,8 @@ impl Provider for StaticProviderRef {
     fn get_app_tree(&self, target: &AppTarget, opts: &QueryOptions) -> Result<xa11y_core::Tree> {
         self.0.get_app_tree(target, opts)
     }
-    fn get_all_apps(&self, opts: &QueryOptions) -> Result<xa11y_core::Tree> {
-        self.0.get_all_apps(opts)
+    fn get_apps(&self, opts: &QueryOptions) -> Result<xa11y_core::Tree> {
+        self.0.get_apps(opts)
     }
     fn perform_action(
         &self,
@@ -94,14 +94,11 @@ impl Provider for StaticProviderRef {
     fn check_permissions(&self) -> Result<PermissionStatus> {
         self.0.check_permissions()
     }
-    fn list_apps(&self) -> Result<Vec<AppInfo>> {
-        self.0.list_apps()
-    }
 }
 
 /// Get the global provider as an `Arc<dyn Provider>`.
 ///
-/// Returns a handle to the same singleton used by `app()`, `all_apps()`, etc.
+/// Returns a handle to the same singleton used by `app()`, `apps()`, etc.
 /// Useful when you need to pass a provider to objects that store it (e.g. `Locator`).
 pub fn provider() -> Result<Arc<dyn Provider>> {
     Ok(Arc::new(StaticProviderRef(get_provider_ref()?)))
@@ -123,8 +120,8 @@ pub fn app(target: &AppTarget, opts: &QueryOptions) -> Result<Node> {
 /// Snapshot all running applications (shallow).
 ///
 /// Returns the root [`Node`] of a merged tree containing all apps.
-pub fn all_apps(opts: &QueryOptions) -> Result<Node> {
-    let tree = get_provider_ref()?.get_all_apps(opts)?;
+pub fn apps(opts: &QueryOptions) -> Result<Node> {
+    let tree = get_provider_ref()?.get_apps(opts)?;
     let tree = Arc::new(tree);
     Ok(Node::new(tree, 0))
 }
@@ -145,11 +142,6 @@ pub fn perform_action(node: &Node, action: Action, data: Option<ActionData>) -> 
 /// Check if accessibility permissions are granted.
 pub fn check_permissions() -> Result<PermissionStatus> {
     get_provider_ref()?.check_permissions()
-}
-
-/// List running applications with their PIDs.
-pub fn list_apps() -> Result<Vec<AppInfo>> {
-    get_provider_ref()?.list_apps()
 }
 
 /// Create a Locator targeting a specific application.

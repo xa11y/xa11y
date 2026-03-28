@@ -10,10 +10,9 @@ Last updated: 2026-03-19
 | Method | Status | Tests |
 |--------|--------|-------|
 | `get_app_tree` | Covered | All tree/selector/query tests |
-| `get_all_apps` | Covered | `get_all_apps_returns_nonempty` |
+| `get_apps` | Covered | `apps_returns_nonempty` |
 | `perform_action` | Covered | Multiple action tests (Press, Focus, SetValue, Increment, Decrement, Expand, Collapse) |
 | `check_permissions` | Covered | `check_permissions_granted` |
-| `list_apps` | Covered | `list_apps_includes_test_app`, `list_apps_has_valid_pids` |
 
 ## AppTarget Variants
 
