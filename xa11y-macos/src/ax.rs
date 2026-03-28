@@ -856,11 +856,6 @@ impl MacOSProvider {
         let mut child_ids = Vec::new();
 
         for child in &children {
-            if let Some(max_elements) = opts.max_elements {
-                if nodes.len() >= max_elements as usize {
-                    break;
-                }
-            }
             // Skip macOS system chrome (menu bar, window buttons, title bar text).
             // These are added by macOS, not by the app's accesskit tree.
             if role == Role::Application {
