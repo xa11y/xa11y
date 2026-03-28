@@ -400,10 +400,10 @@ integer       := [1-9][0-9]*
 pub trait Provider: Send + Sync {
     /// Snapshot a specific application's accessibility tree.
     /// Platform handles are cached internally for action dispatch.
-    fn get_app_tree(&self, target: &AppTarget, opts: &QueryOptions) -> Result<Tree>;
+    fn get_app_tree(&self, target: &AppTarget) -> Result<Tree>;
 
     /// Snapshot all running applications (shallow).
-    fn get_apps(&self, opts: &QueryOptions) -> Result<Tree>;
+    fn get_apps(&self) -> Result<Tree>;
 
     /// Perform an action on an element from a specific snapshot.
     ///
@@ -441,14 +441,6 @@ pub enum AppTarget {
     ByWindow(WindowHandle),
 }
 
-pub struct QueryOptions {
-    /// Maximum tree depth to traverse. `None` = unlimited.
-    pub max_depth: Option<u32>,
-    /// Maximum number of elements to collect. `None` = unlimited.
-    pub max_elements: Option<u32>,
-    pub visible_only: bool,
-    pub roles: Option<Vec<Role>>,   // filter to specific roles
-}
 // Note: RawPlatformData is always populated on nodes. Platform handles are
 // always cached internally for action dispatch.
 
@@ -542,7 +534,7 @@ xa11y/
 │   ├── node.rs          # Node, StateSet, Rect
 │   ├── tree.rs          # Tree snapshot
 │   ├── selector.rs      # CSS-like query parser + matcher
-│   ├── provider.rs      # Provider trait, QueryOptions, AppTarget
+│   ├── provider.rs      # Provider trait, AppTarget
 │   └── lib.rs
 │
 ├── xa11y-macos/         # macOS backend (AXUIElement via FFI)

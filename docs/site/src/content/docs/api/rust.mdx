@@ -12,13 +12,9 @@ cargo add xa11y
 ```rust
 use xa11y::*;
 
-let provider = create_provider()?;
-let tree = provider.get_app_tree(
-    &AppTarget::ByName("Safari".to_string()),
-    &QueryOptions::default(),
-)?;
+let root = app(&AppTarget::ByName("Safari".to_string()))?;
 
-for node in tree.query("button")? {
+for node in root.query("button")? {
     println!("{:?}", node.name);
 }
 ```

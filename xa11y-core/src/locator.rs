@@ -5,7 +5,7 @@ use crate::action::{Action, ActionData, ScrollDirection};
 use crate::error::{Error, Result};
 use crate::event::ElementState;
 use crate::node::{Node, NodeData, Rect, StateSet};
-use crate::provider::{AppTarget, Provider, QueryOptions};
+use crate::provider::{AppTarget, Provider};
 use crate::role::Role;
 use crate::tree::Tree;
 
@@ -34,7 +34,6 @@ pub struct Locator {
     provider: Arc<dyn Provider>,
     target: AppTarget,
     selector: String,
-    opts: QueryOptions,
     /// Which match to select (0-based). `None` means first match.
     nth: Option<usize>,
 }
@@ -48,29 +47,12 @@ struct Resolved {
 }
 
 impl Locator {
-    /// Create a new Locator with default query options.
+    /// Create a new Locator.
     pub fn new(provider: Arc<dyn Provider>, target: AppTarget, selector: &str) -> Self {
         Self {
             provider,
             target,
             selector: selector.to_string(),
-            opts: QueryOptions::default(),
-            nth: None,
-        }
-    }
-
-    /// Create a new Locator with custom query options.
-    pub fn with_opts(
-        provider: Arc<dyn Provider>,
-        target: AppTarget,
-        selector: &str,
-        opts: QueryOptions,
-    ) -> Self {
-        Self {
-            provider,
-            target,
-            selector: selector.to_string(),
-            opts,
             nth: None,
         }
     }
@@ -114,7 +96,7 @@ impl Locator {
 
     /// Snapshot the tree and resolve the selector to a single node.
     fn resolve(&self) -> Result<Resolved> {
-        let tree = self.provider.get_app_tree(&self.target, &self.opts)?;
+        let tree = self.provider.get_app_tree(&self.target)?;
         let matches = tree.query(&self.selector)?;
         let idx = self.nth.unwrap_or(0);
         let node = matches.get(idx).ok_or_else(|| Error::SelectorNotMatched {
@@ -198,7 +180,7 @@ impl Locator {
 
     /// Count matching elements in the current tree.
     pub fn count(&self) -> Result<usize> {
-        let tree = self.provider.get_app_tree(&self.target, &self.opts)?;
+        let tree = self.provider.get_app_tree(&self.target)?;
         let matches = tree.query(&self.selector)?;
         Ok(matches.len())
     }
@@ -438,7 +420,7 @@ impl Locator {
                 return Err(Error::Timeout { elapsed });
             }
 
-            let tree = self.provider.get_app_tree(&self.target, &self.opts)?;
+            let tree = self.provider.get_app_tree(&self.target)?;
             let matches = tree.query(&self.selector).ok();
             let idx = self.nth.unwrap_or(0);
             let matched_index = matches.as_ref().and_then(|m| m.get(idx).map(|n| n.index));

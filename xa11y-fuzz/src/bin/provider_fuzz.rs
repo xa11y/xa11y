@@ -230,46 +230,6 @@ mod provider_fuzz {
         }
     }
 
-    // ── QueryOptions Generation ──────────────────────────────────────────────
-
-    fn random_query_options(rng: &mut StdRng) -> QueryOptions {
-        let max_depth = match rng.random_range(0u8..10) {
-            0..=3 => None,
-            4 => Some(0),
-            5 => Some(1),
-            6..=7 => Some(rng.random_range(2..6)),
-            _ => Some(rng.random_range(10..100)),
-        };
-
-        let max_elements = match rng.random_range(0u8..10) {
-            0..=5 => None,
-            6 => Some(1),
-            7 => Some(rng.random_range(2..10)),
-            8 => Some(rng.random_range(10..50)),
-            _ => Some(rng.random_range(50..500)),
-        };
-
-        let visible_only = rng.random_bool(0.3);
-
-        let roles = if rng.random_bool(0.2) {
-            let count = rng.random_range(1..=5);
-            let mut r = Vec::with_capacity(count);
-            for _ in 0..count {
-                r.push(ALL_ROLES[rng.random_range(0..ALL_ROLES.len())]);
-            }
-            r
-        } else {
-            Vec::new()
-        };
-
-        QueryOptions {
-            max_depth,
-            max_elements,
-            visible_only,
-            roles,
-        }
-    }
-
     // ── ActionData Generation ────────────────────────────────────────────────
 
     fn random_action_data(
@@ -352,10 +312,10 @@ mod provider_fuzz {
 
         fn ensure_tree(&mut self) {
             if self.tree.is_none() {
-                match self.provider.get_app_tree(
-                    &AppTarget::ByName("xa11y".to_string()),
-                    &QueryOptions::default(),
-                ) {
+                match self
+                    .provider
+                    .get_app_tree(&AppTarget::ByName("xa11y".to_string()))
+                {
                     Ok(tree) => self.tree = Some(tree),
                     Err(e) => self.log(&format!("ensure_tree failed: {}", e)),
                 }
@@ -366,11 +326,10 @@ mod provider_fuzz {
     // ── Operations ───────────────────────────────────────────────────────────
 
     fn op_get_tree_by_name(state: &mut FuzzState) {
-        let opts = random_query_options(&mut state.rng);
-        state.log(&format!("get_app_tree(ByName, {:?})", opts));
+        state.log("get_app_tree(ByName)");
         match state
             .provider
-            .get_app_tree(&AppTarget::ByName("xa11y".to_string()), &opts)
+            .get_app_tree(&AppTarget::ByName("xa11y".to_string()))
         {
             Ok(tree) => {
                 inspect_tree(&tree, &mut state.rng);
@@ -384,14 +343,10 @@ mod provider_fuzz {
     }
 
     fn op_get_tree_by_pid(state: &mut FuzzState) {
-        let opts = random_query_options(&mut state.rng);
-        state.log(&format!(
-            "get_app_tree(ByPid({}), {:?})",
-            state.test_app_pid, opts
-        ));
+        state.log(&format!("get_app_tree(ByPid({}))", state.test_app_pid));
         match state
             .provider
-            .get_app_tree(&AppTarget::ByPid(state.test_app_pid), &opts)
+            .get_app_tree(&AppTarget::ByPid(state.test_app_pid))
         {
             Ok(tree) => {
                 inspect_tree(&tree, &mut state.rng);
@@ -406,19 +361,16 @@ mod provider_fuzz {
 
     fn op_get_tree_by_name_not_found(state: &mut FuzzState) {
         state.log("get_app_tree(ByName(\"nonexistent_app_XYZ\"))");
-        let result = state.provider.get_app_tree(
-            &AppTarget::ByName("nonexistent_app_XYZ_999".to_string()),
-            &QueryOptions::default(),
-        );
+        let result = state
+            .provider
+            .get_app_tree(&AppTarget::ByName("nonexistent_app_XYZ_999".to_string()));
         assert!(result.is_err(), "Expected AppNotFound for bogus app name");
         state.errors += 1;
     }
 
     fn op_get_tree_by_pid_not_found(state: &mut FuzzState) {
         state.log("get_app_tree(ByPid(99999))");
-        let result = state
-            .provider
-            .get_app_tree(&AppTarget::ByPid(99999), &QueryOptions::default());
+        let result = state.provider.get_app_tree(&AppTarget::ByPid(99999));
         match result {
             Ok(tree) => inspect_tree(&tree, &mut state.rng),
             Err(_) => state.errors += 1,
@@ -427,20 +379,16 @@ mod provider_fuzz {
 
     fn op_get_tree_by_window(state: &mut FuzzState) {
         state.log("get_app_tree(ByWindow) -> expected error");
-        let result = state.provider.get_app_tree(
-            &AppTarget::ByWindow(WindowHandle::MacOS(0)),
-            &QueryOptions::default(),
-        );
+        let result = state
+            .provider
+            .get_app_tree(&AppTarget::ByWindow(WindowHandle::MacOS(0)));
         assert!(result.is_err(), "Expected ByWindow to fail on macOS");
         state.errors += 1;
     }
 
     fn op_get_apps(state: &mut FuzzState) {
-        let mut opts = random_query_options(&mut state.rng);
-        opts.max_depth = Some(opts.max_depth.map_or(3, |d| d.min(3)));
-        opts.max_elements = Some(opts.max_elements.map_or(100, |n| n.min(100)));
-        state.log(&format!("get_apps({:?})", opts));
-        match state.provider.get_apps(&opts) {
+        state.log("get_apps()");
+        match state.provider.get_apps() {
             Ok(tree) => {
                 state.log(&format!("  -> {} nodes", tree.len()));
                 let _ = tree.root_data();
@@ -725,11 +673,7 @@ mod provider_fuzz {
 
         let mut test_app_pid = 0u32;
         for attempt in 0..10 {
-            if let Ok(tree) = provider.get_apps(&QueryOptions {
-                max_depth: Some(1),
-                max_elements: Some(200),
-                ..QueryOptions::default()
-            }) {
+            if let Ok(tree) = provider.get_apps() {
                 if let Some(app) = tree
                     .iter()
                     .find(|n| n.name.as_deref().is_some_and(|name| name.contains("xa11y")))

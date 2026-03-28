@@ -11,8 +11,8 @@ use core_foundation::string::CFString;
 
 use xa11y_core::{
     Action, ActionData, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
-    EventKind, EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, QueryOptions,
-    RawPlatformData, Rect, Result, Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
+    EventKind, EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, RawPlatformData,
+    Rect, Result, Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
 };
 
 // ── FFI Declarations ──────────────────────────────────────────────────────────
@@ -731,7 +731,6 @@ impl MacOSProvider {
     fn traverse(
         &self,
         element: &AXElement,
-        opts: &QueryOptions,
         nodes: &mut Vec<NodeData>,
         elements: &mut Vec<AXElement>,
         parent_idx: Option<u32>,
@@ -751,46 +750,9 @@ impl MacOSProvider {
             return;
         }
 
-        if let Some(max_depth) = opts.max_depth {
-            if depth > max_depth {
-                return;
-            }
-        }
-        if let Some(max_elements) = opts.max_elements {
-            if nodes.len() >= max_elements as usize {
-                return;
-            }
-        }
-
         let role_str = ax_string(element.as_ptr(), "AXRole").unwrap_or_default();
         let subrole_str = ax_string(element.as_ptr(), "AXSubrole");
         let role = map_ax_role(&role_str, subrole_str.as_deref());
-
-        let role_filtered = !opts.roles.is_empty() && !opts.roles.contains(&role);
-
-        // If role is filtered out, skip this node but still recurse into children.
-        // Still increment depth to respect the hard limit.
-        if role_filtered {
-            let children = ax_children(element.as_ptr());
-            for child in &children {
-                if let Some(max_elements) = opts.max_elements {
-                    if nodes.len() >= max_elements as usize {
-                        break;
-                    }
-                }
-                self.traverse(
-                    child,
-                    opts,
-                    nodes,
-                    elements,
-                    parent_idx,
-                    depth + 1,
-                    screen_size,
-                    visited,
-                );
-            }
-            return;
-        }
 
         let name = ax_string(element.as_ptr(), "AXTitle")
             .or_else(|| ax_string(element.as_ptr(), "AXDescription"))
@@ -812,25 +774,6 @@ impl MacOSProvider {
         };
 
         let states = parse_states(element.as_ptr(), role);
-
-        if opts.visible_only && !states.visible {
-            // Skip invisible node but still recurse children (they may be visible).
-            // Still increment depth to respect the hard limit.
-            let children = ax_children(element.as_ptr());
-            for child in &children {
-                self.traverse(
-                    child,
-                    opts,
-                    nodes,
-                    elements,
-                    parent_idx,
-                    depth + 1,
-                    screen_size,
-                    visited,
-                );
-            }
-            return;
-        }
 
         // Bounds
         let bounds = match (ax_position(element.as_ptr()), ax_size(element.as_ptr())) {
@@ -913,11 +856,6 @@ impl MacOSProvider {
         let mut child_ids = Vec::new();
 
         for child in &children {
-            if let Some(max_elements) = opts.max_elements {
-                if nodes.len() >= max_elements as usize {
-                    break;
-                }
-            }
             // Skip macOS system chrome (menu bar, window buttons, title bar text).
             // These are added by macOS, not by the app's accesskit tree.
             if role == Role::Application {
@@ -954,7 +892,6 @@ impl MacOSProvider {
             child_ids.push(child_idx);
             self.traverse(
                 child,
-                opts,
                 nodes,
                 elements,
                 Some(node_idx),
@@ -969,7 +906,7 @@ impl MacOSProvider {
 }
 
 impl Provider for MacOSProvider {
-    fn get_app_tree(&self, target: &AppTarget, opts: &QueryOptions) -> Result<Tree> {
+    fn get_app_tree(&self, target: &AppTarget) -> Result<Tree> {
         let (app_element, pid, app_name) = match target {
             AppTarget::ByName(name) => self.find_app_by_name(name)?,
             AppTarget::ByPid(pid) => {
@@ -991,7 +928,6 @@ impl Provider for MacOSProvider {
         let mut visited = HashSet::new();
         self.traverse(
             &app_element,
-            opts,
             &mut nodes,
             &mut elements,
             None,
@@ -1012,7 +948,7 @@ impl Provider for MacOSProvider {
         Ok(Tree::new(app_name, Some(pid as u32), screen_size, nodes))
     }
 
-    fn get_apps(&self, opts: &QueryOptions) -> Result<Tree> {
+    fn get_apps(&self) -> Result<Tree> {
         let screen_size = Self::detect_screen_size();
         let mut nodes = Vec::new();
         let mut elements = Vec::new();
@@ -1056,7 +992,6 @@ impl Provider for MacOSProvider {
             root_children.push(child_idx);
             self.traverse(
                 &app_element,
-                opts,
                 &mut nodes,
                 &mut elements,
                 Some(0),
@@ -1565,7 +1500,7 @@ impl EventProvider for MacOSProvider {
                 return Err(Error::Timeout { elapsed });
             }
 
-            let tree = self.get_app_tree(target, &QueryOptions::default())?;
+            let tree = self.get_app_tree(target)?;
             let matches = tree.query(selector).ok();
             let node = matches.as_ref().and_then(|m| m.first().copied());
 

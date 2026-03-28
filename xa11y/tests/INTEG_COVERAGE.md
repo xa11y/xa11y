@@ -73,15 +73,6 @@ Last updated: 2026-03-19
 | `required` | Not coverable | No standard widget sets this |
 | `busy` | Not coverable | No standard widget sets this |
 
-## QueryOptions Fields
-
-| Field | Status | Tests |
-|-------|--------|-------|
-| `max_depth` | Covered | `opts_max_depth` |
-| `max_elements` | Covered | `opts_max_elements` |
-| `visible_only` | Covered | `opts_visible_only` |
-| `roles` | Covered | `opts_roles_filter` |
-
 ## Action Variants
 
 | Action | Status | Tests |
@@ -164,7 +155,6 @@ Covered via test app nodes: `Application`, `Window`, `Button`, `CheckBox`, `Radi
 - All EventProvider trait methods covered
 - All Node navigation and Tree internal methods covered
 - All Node fields covered
-- All QueryOptions fields covered
 - 13/15 Action variants covered (all except Toggle, ShowMenu)
 - All selector features covered except description attribute
 - 14 role-specific tests covering 30+ Role variants

@@ -91,24 +91,6 @@ fn parse_scroll_direction(s: &str) -> PyResult<xa11y::ScrollDirection> {
     }
 }
 
-fn build_query_options(
-    max_depth: Option<u32>,
-    max_elements: Option<u32>,
-    visible_only: bool,
-    roles: Option<Vec<String>>,
-) -> xa11y::QueryOptions {
-    xa11y::QueryOptions {
-        max_depth,
-        max_elements,
-        visible_only,
-        roles: roles
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|s| xa11y::Role::from_snake_case(s))
-            .collect(),
-    }
-}
-
 fn resolve_app_target(name: Option<&str>, pid: Option<u32>) -> PyResult<xa11y::AppTarget> {
     match (name, pid) {
         (Some(n), _) => Ok(xa11y::AppTarget::ByName(n.to_string())),
@@ -319,26 +301,17 @@ impl Node {
     }
 
     /// Create a Locator for lazy element resolution from this snapshot's app.
-    #[pyo3(signature = (selector, *, max_depth=None, max_elements=None, visible_only=false, roles=None))]
-    fn locator(
-        &self,
-        selector: &str,
-        max_depth: Option<u32>,
-        max_elements: Option<u32>,
-        visible_only: bool,
-        roles: Option<Vec<String>>,
-    ) -> PyResult<Locator> {
+    #[pyo3(signature = (selector))]
+    fn locator(&self, selector: &str) -> PyResult<Locator> {
         let ctx = self._ctx.as_ref().ok_or_else(|| {
             PyValueError::new_err(
                 "locator() requires a snapshot context (node from app(), not locator.get())",
             )
         })?;
-        let opts = build_query_options(max_depth, max_elements, visible_only, roles);
         Ok(Locator {
             provider: ctx.provider.clone(),
             target: ctx.target.clone(),
             selector: selector.to_string(),
-            opts,
             nth: None,
         })
     }
@@ -433,7 +406,6 @@ struct Locator {
     target: xa11y::AppTarget,
     #[pyo3(get)]
     selector: String,
-    opts: xa11y::QueryOptions,
     nth: Option<usize>,
 }
 
@@ -552,7 +524,7 @@ impl Locator {
     fn count(&self) -> PyResult<usize> {
         let tree = self
             .provider
-            .get_app_tree(&self.target, &self.opts)
+            .get_app_tree(&self.target)
             .map_err(to_py_err)?;
         let matches = tree.query(&self.selector).map_err(to_py_err)?;
         Ok(matches.len())
@@ -732,7 +704,7 @@ impl Locator {
     fn resolve(&self) -> PyResult<(xa11y::Tree, u32)> {
         let tree = self
             .provider
-            .get_app_tree(&self.target, &self.opts)
+            .get_app_tree(&self.target)
             .map_err(to_py_err)?;
         let matches = tree.query(&self.selector).map_err(to_py_err)?;
         let idx = self.nth.unwrap_or(0);
@@ -776,7 +748,7 @@ impl Locator {
             }
 
             let node: Option<xa11y::NodeData> = (|| {
-                let tree = self.provider.get_app_tree(&self.target, &self.opts).ok()?;
+                let tree = self.provider.get_app_tree(&self.target).ok()?;
                 let matches = tree.query(&self.selector).ok()?;
                 let idx = self.nth.unwrap_or(0);
                 matches.get(idx).copied().cloned()
@@ -809,7 +781,7 @@ impl Locator {
                 return Err(to_py_err(xa11y::Error::Timeout { elapsed }));
             }
 
-            let tree_result = self.provider.get_app_tree(&self.target, &self.opts);
+            let tree_result = self.provider.get_app_tree(&self.target);
             let states = tree_result.ok().and_then(|tree| {
                 tree.query(&self.selector).ok().and_then(|matches| {
                     let idx = self.nth.unwrap_or(0);
@@ -843,64 +815,37 @@ impl Locator {
 
 /// Snapshot an app's accessibility tree and return the root Node.
 #[pyfunction]
-#[pyo3(signature = (name=None, *, pid=None, max_depth=None, max_elements=None, visible_only=false, roles=None))]
-fn app(
-    py: Python<'_>,
-    name: Option<&str>,
-    pid: Option<u32>,
-    max_depth: Option<u32>,
-    max_elements: Option<u32>,
-    visible_only: bool,
-    roles: Option<Vec<String>>,
-) -> PyResult<Py<Node>> {
+#[pyo3(signature = (name=None, *, pid=None))]
+fn app(py: Python<'_>, name: Option<&str>, pid: Option<u32>) -> PyResult<Py<Node>> {
     let provider = get_provider()?;
     let target = resolve_app_target(name, pid)?;
-    let opts = build_query_options(max_depth, max_elements, visible_only, roles);
     let p = provider.clone();
     let rust_tree = py
-        .allow_threads(|| p.get_app_tree(&target, &opts))
+        .allow_threads(|| p.get_app_tree(&target))
         .map_err(to_py_err)?;
     convert_to_root_node(py, rust_tree, provider, target)
 }
 
 /// Snapshot all running apps and return the root Node.
 #[pyfunction]
-#[pyo3(signature = (*, max_depth=None, max_elements=None, visible_only=false, roles=None))]
-fn apps(
-    py: Python<'_>,
-    max_depth: Option<u32>,
-    max_elements: Option<u32>,
-    visible_only: bool,
-    roles: Option<Vec<String>>,
-) -> PyResult<Py<Node>> {
+fn apps(py: Python<'_>) -> PyResult<Py<Node>> {
     let provider = get_provider()?;
-    let opts = build_query_options(max_depth, max_elements, visible_only, roles);
     let p = provider.clone();
-    let rust_tree = py.allow_threads(|| p.get_apps(&opts)).map_err(to_py_err)?;
+    let rust_tree = py.allow_threads(|| p.get_apps()).map_err(to_py_err)?;
     let target = xa11y::AppTarget::ByName(String::new());
     convert_to_root_node(py, rust_tree, provider, target)
 }
 
 /// Create a Locator for lazy element resolution.
 #[pyfunction]
-#[pyo3(signature = (name=None, *, pid=None, selector, max_depth=None, max_elements=None, visible_only=false, roles=None))]
-fn locator(
-    name: Option<&str>,
-    pid: Option<u32>,
-    selector: &str,
-    max_depth: Option<u32>,
-    max_elements: Option<u32>,
-    visible_only: bool,
-    roles: Option<Vec<String>>,
-) -> PyResult<Locator> {
+#[pyo3(signature = (name=None, *, pid=None, selector))]
+fn locator(name: Option<&str>, pid: Option<u32>, selector: &str) -> PyResult<Locator> {
     let provider = get_provider()?;
     let target = resolve_app_target(name, pid)?;
-    let opts = build_query_options(max_depth, max_elements, visible_only, roles);
     Ok(Locator {
         provider,
         target,
         selector: selector.to_string(),
-        opts,
         nth: None,
     })
 }
@@ -970,15 +915,11 @@ struct MockProvider {
 }
 
 impl xa11y::Provider for MockProvider {
-    fn get_app_tree(
-        &self,
-        _target: &xa11y::AppTarget,
-        _opts: &xa11y::QueryOptions,
-    ) -> xa11y::Result<xa11y::Tree> {
+    fn get_app_tree(&self, _target: &xa11y::AppTarget) -> xa11y::Result<xa11y::Tree> {
         Ok(self.tree.clone())
     }
 
-    fn get_apps(&self, _opts: &xa11y::QueryOptions) -> xa11y::Result<xa11y::Tree> {
+    fn get_apps(&self) -> xa11y::Result<xa11y::Tree> {
         Ok(self.tree.clone())
     }
 
