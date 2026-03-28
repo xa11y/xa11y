@@ -258,8 +258,11 @@ def test_node_repr_focused(tree):
     assert "focused=True" in r
 
 
-def test_node_str_is_repr(tree):
-    assert str(tree) == repr(tree)
+def test_node_str_is_tree_dump(tree):
+    s = str(tree)
+    # str() on a snapshot node renders the full tree dump
+    assert "[0] application" in s
+    assert "button" in s
 
 
 def test_node_len_children_count(tree):

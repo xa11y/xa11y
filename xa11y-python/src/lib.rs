@@ -324,22 +324,6 @@ impl Node {
         })
     }
 
-    /// Get all nodes in this node's subtree (including this node).
-    fn subtree(&self, py: Python<'_>) -> PyResult<Vec<PyObject>> {
-        let Some(ref ctx) = self._ctx else {
-            return Ok(vec![]);
-        };
-        let Some(ref all) = self._all_nodes else {
-            return Ok(vec![]);
-        };
-        let list = all.bind(py);
-        let indices = ctx.rust_tree.subtree_indices(self._index);
-        indices
-            .iter()
-            .map(|&idx| list.get_item(idx as usize).map(|item| item.unbind()))
-            .collect()
-    }
-
     /// Query nodes matching a CSS-like selector string within this snapshot.
     fn query(&self, py: Python<'_>, selector: &str) -> PyResult<Vec<PyObject>> {
         let ctx = self._ctx.as_ref().ok_or_else(|| {
@@ -356,16 +340,6 @@ impl Node {
             .iter()
             .map(|n| list.get_item(n.index as usize).map(|item| item.unbind()))
             .collect()
-    }
-
-    /// Render the tree as an indented text representation for debugging.
-    fn dump(&self) -> PyResult<String> {
-        let ctx = self._ctx.as_ref().ok_or_else(|| {
-            PyValueError::new_err(
-                "dump() requires a snapshot context (node from app(), not locator.get())",
-            )
-        })?;
-        Ok(ctx.rust_tree.dump())
     }
 
     /// Create a Locator for lazy element resolution from this snapshot's app.
@@ -414,7 +388,10 @@ impl Node {
     }
 
     fn __str__(&self) -> String {
-        self.__repr__()
+        match self._ctx {
+            Some(ref ctx) => ctx.rust_tree.dump(),
+            None => self.__repr__(),
+        }
     }
 
     fn __len__(&self) -> usize {
