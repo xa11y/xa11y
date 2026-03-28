@@ -1,84 +1,142 @@
 ---
 title: Overview
-description: Core concepts, API patterns, and platform support.
+description: What xa11y is, how it works, and how it compares to other tools.
 ---
 
-**xa11y** is a cross-platform accessibility client library. It reads accessibility trees exposed by other applications and lets you interact with UI elements — clicking buttons, reading text, filling fields — through a single, unified API.
+**xa11y** is a cross-platform library for reading accessibility trees, taking actions, and listening to accessibility event streams.
 
-| Platform | Underlying API                 |
-| -------- | ------------------------------ |
-| macOS    | AXUIElement (Core Accessibility) |
-| Linux    | AT-SPI2 via D-Bus              |
-| Windows  | UI Automation                  |
+## What is desktop accessibility?
 
-## Core Concepts
+Most desktop applications expose an **accessibility tree** — a structured representation of their UI intended for screen readers and other assistive technology. Each platform has its own API for this (macOS AXUIElement, Windows UI Automation, Linux AT-SPI2), but the underlying concepts are the same. xa11y provides a single API that works with all of them.
 
-### App Discovery
+### Trees
 
-Every interaction starts by finding an application and capturing its accessibility tree:
+An accessibility tree mirrors the visual hierarchy of an application. Here's what one looks like:
 
-```rust
-// Snapshot a specific app's tree
-let root = xa11y::app(&AppTarget::ByName("Safari"), &QueryOptions::default())?;
-
-// Snapshot all running apps
-let all = xa11y::all_apps(&QueryOptions::default())?;
-
-// Check accessibility permissions before use
-let status = xa11y::check_permissions()?;
+```
+[0] application "Calculator"
+  [1] window "Calculator"
+    [2] group "Display"
+      [3] static_text "Result" value="42"
+    [4] group "Keypad"
+      [5] button "7"
+      [6] button "8"
+      [7] button "9"
+      [8] button "+"
+      [9] button "4"
+      ...
 ```
 
-**`AppTarget`** identifies the application:
-- `AppTarget::ByName("Firefox")` — case-insensitive substring match
+Every node in the tree has properties. For example, here's the full data for `button "+"`:
+
+```
+role:    button
+name:    "+"
+value:   None
+states:  enabled, visible
+bounds:  (272, 200, 80, 40)
+actions: press, focus
+```
+
+### Actions
+
+Accessibility APIs let you interact with elements: press buttons, type into fields, toggle checkboxes, expand menus, scroll, and more. xa11y exposes all of these through a unified action API.
+
+### Events
+
+Accessibility APIs also emit events when the UI changes — elements appearing or disappearing, focus moving, names or values updating. For example, clicking a text field might emit:
+
+```
+FocusChanged  app="Calculator"  target=text_field "Display"
+```
+
+xa11y supports subscribing to these event streams with selectors.
+
+> Events are not yet implemented on any platform. This is planned for a future release.
+
+## How does xa11y compare to...
+
+- **[AccessKit](https://accesskit.dev/)** — AccessKit is for *adding* accessibility to an app. xa11y is for *reading* accessibility data from the outside.
+- **[Playwright](https://playwright.dev/)** — Similar concept, specific to web browsers. Major design inspiration for xa11y's Locator pattern and selector syntax.
+- **[pyatspi2](https://gitlab.gnome.org/GNOME/pyatspi2) / direct UIAutomation** — Single-platform libraries. xa11y wraps these underlying APIs into one cross-platform interface.
+- **[agent-desktop](https://github.com/crowecawcaw/agent-desktop)** — CLI tool built on xa11y for AI agents to read and interact with desktops via accessibility data.
+
+## Concepts
+
+<img src="/concepts.svg" alt="Diagram showing xa11y's three paths: Read (AppTarget → app() → Snapshot → Node → query()), Act (AppTarget + selector → locator() → Locator → Actions/Waits), and Listen (App → subscribe() → Event Stream)" style="width:100%;max-width:720px;margin:1rem auto;display:block" />
+
+- **Snapshot** — `app()` captures a frozen copy of an app's accessibility tree. All reads come from this snapshot with zero platform calls. Call `app()` again for a fresh one.
+- **Node** — read-only handle into a snapshot. Navigate with `children()`, `parent()`, `query()`. Read properties like `role`, `name`, `value`, `states`, `bounds`.
+- **Locator** — lazy selector that re-resolves against a fresh snapshot on every operation. Use for actions and waits. Inspired by [Playwright's Locator pattern](https://playwright.dev/docs/locators).
+- **Selector** — CSS-like query syntax used by both `Node.query()` and `Locator`. Supports role matching, attribute filters, combinators, and nth selection.
+
+## Reading accessibility data
+
+### Getting a snapshot
+
+```rust
+use xa11y::*;
+
+// Snapshot a specific app's tree
+let root = app(&AppTarget::ByName("Safari".to_string()))?;
+
+// Snapshot all running apps (shallow)
+let all = apps()?;
+
+// Check accessibility permissions
+let status = check_permissions()?;
+```
+
+`AppTarget` identifies which application to read:
+- `AppTarget::ByName("Firefox".to_string())` — case-insensitive substring match
 - `AppTarget::ByPid(1234)` — exact process ID
 - `AppTarget::ByWindow(handle)` — platform-specific window handle
 
-**`QueryOptions`** controls tree traversal:
-- `max_depth` — limit tree depth (default: unlimited)
-- `max_elements` — cap the number of nodes collected
-- `visible_only` — only include visible elements
-- `roles` — filter to specific roles (e.g., only buttons and text fields)
+### Navigating a snapshot
 
-### The Accessibility Tree
-
-Applications expose their UI as a tree of elements. Each element (node) has:
-
-- **Role** — what kind of element it is (button, text field, menu item, ...)
-- **Name** — human-readable label ("Submit", "Search...", ...)
-- **Value** — current content (text in a field, slider position, ...)
-- **States** — boolean flags (enabled, visible, focused, checked, ...)
-- **Bounds** — screen coordinates (x, y, width, height)
-- **Actions** — what you can do with it (press, focus, set value, ...)
-
-### Node (Snapshot Handle)
-
-A `Node` is a cheap, cloneable handle into a **point-in-time snapshot** of the tree. After calling `app()`, all node operations read from the captured snapshot with zero platform calls.
+A `Node` is a cheap, cloneable handle into the snapshot. All operations read from the captured data — no further platform calls.
 
 ```rust
-let root = xa11y::app(&AppTarget::ByName("Calculator"), &QueryOptions::default())?;
+let root = app(&AppTarget::ByName("Calculator".to_string()))?;
 
-// Navigate the snapshot
 let children = root.children();
 let parent = children[0].parent();
 
-// Query within the snapshot
+// Find nodes by selector
 let buttons = root.query("button")?;
 
 // Read properties (via Deref to NodeData)
 println!("{} — {}", buttons[0].role, buttons[0].name.as_deref().unwrap_or(""));
 
-// Debug the full subtree
-println!("{}", root.dump());
+// Print the full tree
+println!("{root}");
 ```
 
-Key properties available on every node: `role`, `name`, `value`, `description`, `bounds`, `states`, `actions`, `numeric_value`, `min_value`, `max_value`, `stable_id`, `pid`.
+Node properties: `role`, `name`, `value`, `description`, `bounds`, `states`, `actions`, `numeric_value`, `min_value`, `max_value`, `stable_id`, `pid`.
 
-### Locator (Lazy Selector)
+### Snapshots are frozen
 
-A `Locator` holds a selector string and **re-resolves against a fresh tree snapshot on every operation**. Inspired by [Playwright's Locator pattern](https://playwright.dev/docs/locators).
+`app()` captures the tree at a single point in time. The snapshot never updates implicitly.
 
 ```rust
-let btn = xa11y::locator(AppTarget::ByName("Calculator"), "button[name='=']")?;
+let root = app(&target)?;               // snapshot captured here
+let btn = root.query("button[name='OK']")?;    // reads from snapshot
+println!("{:?}", btn[0].name);                  // still the snapshot
+
+// UI changed? Get a fresh snapshot:
+let root = app(&target)?;               // new snapshot
+```
+
+If you're using Locators (below), you don't need to manage this — they always see the latest state.
+
+## Taking actions
+
+### Locators
+
+A `Locator` holds a selector and **re-resolves against a fresh tree snapshot on every operation**. This means actions always target the current state of the UI.
+
+```rust
+let btn = locator(AppTarget::ByName("Calculator".to_string()), "button[name='=']")?;
 
 // Each call refetches the tree, finds the element, then acts
 btn.press()?;
@@ -88,46 +146,19 @@ println!("{:?}", btn.name()?);
 btn.wait_enabled(Duration::from_secs(5))?;
 ```
 
-**Actions:** `press()`, `focus()`, `blur()`, `toggle()`, `select()`, `expand()`, `collapse()`, `set_value()`, `set_numeric_value()`, `type_text()`, `select_text()`, `increment()`, `decrement()`, `show_menu()`, `scroll_into_view()`, `scroll_up/down/left/right()`.
+**Best practice:** make selectors specific so they stay stable as the UI evolves. Don't select `button` — select `button[name='Cancel']` inside a specific group or window. The more specific the selector, the less likely it breaks when new elements are added.
+
+**Actions:** `press()`, `focus()`, `blur()`, `toggle()`, `select()`, `expand()`, `collapse()`, `set_value()`, `set_numeric_value()`, `type_text()`, `select_text()`, `increment()`, `decrement()`, `show_menu()`, `scroll_into_view()`, `scroll_up()`, `scroll_down()`, `scroll_left()`, `scroll_right()`.
 
 **Waits:** `wait_visible()`, `wait_hidden()`, `wait_attached()`, `wait_detached()`, `wait_enabled()`, `wait_disabled()`, `wait_focused()`, `wait_unfocused()`, `wait_for_state()`, `wait_until()`.
 
 **Chaining:** `nth(n)`, `first()`, `child(selector)`, `descendant(selector)`.
 
-### Node vs Locator
+Unlike Node, which reads from a frozen snapshot, Locator always works with the latest UI state.
 
-| | Node | Locator |
-| --- | --- | --- |
-| **Data freshness** | Point-in-time snapshot | Fresh on every call |
-| **Navigation** | `parent()`, `children()`, `subtree()`, `query()` | No navigation — selector-based only |
-| **Platform calls** | None after initial `app()` | Every operation refetches |
-| **Actions** | Read-only | Full action support |
-| **Waits** | N/A | Built-in `wait_*()` methods |
+## Selectors
 
-**Use Node when** you need to inspect tree structure, read many properties at once, or debug with `dump()`.
-
-**Use Locator when** you need to perform actions, assert on current state, or wait for UI changes.
-
-### Snapshot vs Refresh
-
-`app()` captures a **snapshot** — a frozen copy of the accessibility tree at that moment. All `Node` operations read from this snapshot. The tree is never refetched implicitly.
-
-```rust
-let root = xa11y::app(&target, &opts)?;      // snapshot captured here
-let btn = root.query("button[name='OK']")?;   // reads from snapshot
-println!("{:?}", btn[0].name);                 // still the snapshot
-
-// UI changed? Get a fresh snapshot:
-let root = xa11y::app(&target, &opts)?;        // new snapshot
-```
-
-`Locator` operations refetch automatically — every call to `press()`, `name()`, `wait_visible()`, etc. captures a new snapshot internally.
-
-**When to refresh:** Call `app()` again after performing actions that change the UI, or when enough time has passed that the snapshot may be stale. If you're using Locators, you don't need to think about this — they always see the latest state.
-
-### Selectors
-
-xa11y uses a CSS-like selector syntax to find elements in the tree:
+xa11y uses a CSS-like selector syntax to find elements. Selectors work with both `Node.query()` and `Locator`.
 
 ```
 button                           # by role
@@ -146,134 +177,15 @@ button:nth(2)                    # 2nd match (1-based)
 
 **Roles use `snake_case`:** `button`, `text_field`, `check_box`, `radio_button`, `menu_item`, `tab_group`, `static_text`, `combo_box`, `list_item`, `table_row`, `table_cell`, `scroll_bar`, `progress_bar`, `tree_item`, `web_area`, `split_group`, `spin_button`, etc.
 
-## Platform Support
+## Events
 
-### Role Mapping
+xa11y will support subscribing to accessibility event streams filtered by selector.
 
-xa11y normalizes platform-specific element types into a unified `Role` enum. The table below shows how each role maps to the underlying platform APIs.
+**Event kinds:** `FocusChanged`, `ValueChanged`, `NameChanged`, `StateChanged`, `StructureChanged`, `WindowOpened`, `WindowClosed`, `SelectionChanged`, `TextChanged`, `Alert`.
 
-| xa11y Role | macOS (AX) | Linux (AT-SPI) | Windows (UIA) |
-| --- | --- | --- | --- |
-| `Window` | AXWindow, AXDrawer | window, frame | WindowControlType |
-| `Application` | AXApplication | application | *(root element)* |
-| `Button` | AXButton | push button | ButtonControlType |
-| `CheckBox` | AXCheckBox | check box, check menu item | CheckBoxControlType |
-| `RadioButton` | AXRadioButton | radio button, radio menu item | RadioButtonControlType |
-| `TextField` | AXTextField, AXSecureTextField | entry, password text | EditControlType |
-| `TextArea` | AXTextArea | text | EditControlType |
-| `StaticText` | AXStaticText | label, static, caption | TextControlType |
-| `ComboBox` | AXComboBox, AXPopUpButton | combo box | ComboBoxControlType |
-| `List` | AXList, AXOutline | list, list box | ListControlType, TreeControlType |
-| `ListItem` | *(via AXRow)* | list item | ListItemControlType |
-| `Menu` | AXMenu | menu | MenuControlType |
-| `MenuItem` | AXMenuItem, AXMenuBarItem | menu item, tearoff menu item | MenuItemControlType |
-| `MenuBar` | AXMenuBar, AXMenuBarExtra | menu bar | MenuBarControlType |
-| `Tab` | *(subrole AXTabButton)* | page tab | TabItemControlType |
-| `TabGroup` | AXTabGroup | page tab list | TabControlType |
-| `Table` | AXTable | table, tree table | TableControlType, DataGridControlType |
-| `TableRow` | *(via AXRow)* | table row | DataItemControlType |
-| `TableCell` | AXCell | table cell, column/row header | HeaderItemControlType |
-| `Toolbar` | AXToolbar | tool bar | ToolBarControlType |
-| `ScrollBar` | AXScrollBar | scroll bar | ScrollBarControlType |
-| `Slider` | AXSlider | slider | SliderControlType |
-| `Image` | AXImage | image, icon | ImageControlType |
-| `Link` | AXLink | link | HyperlinkControlType |
-| `Group` | AXGroup, AXScrollArea, AXRadioGroup | panel, section, form, scroll pane | GroupControlType, PaneControlType |
-| `Dialog` | AXSheet *(or subrole AXDialog)* | dialog, file chooser | WindowControlType *(with IsDialog)* |
-| `Alert` | *(subrole AXApplicationAlert)* | alert, notification | *(alert pattern)* |
-| `ProgressBar` | AXProgressIndicator, AXBusyIndicator | progress bar | ProgressBarControlType |
-| `TreeItem` | AXDisclosureTriangle *(or subrole AXOutlineRow)* | tree item | TreeItemControlType |
-| `WebArea` | AXWebArea | document web, document frame | DocumentControlType |
-| `Heading` | AXHeading *(or subrole)* | heading | *(landmark pattern)* |
-| `Separator` | AXSplitter | separator | SeparatorControlType |
-| `SplitGroup` | AXSplitGroup | split pane | PaneControlType |
-| `Switch` | *(subrole AXSwitch)* | *(inferred)* | *(inferred)* |
-| `SpinButton` | AXIncrementor | spin button | SpinnerControlType |
-| `Tooltip` | AXToolTip | tooltip, tool tip | ToolTipControlType |
-| `Status` | AXStatusBar | status bar | StatusBarControlType |
-| `Navigation` | *(landmark)* | landmark, navigation | *(landmark)* |
+> This feature is not yet implemented on any platform. It is planned for a future release.
 
-Roles not recognized by a platform map to `Unknown`.
-
-### Action Mapping
-
-| xa11y Action | macOS | Linux (AT-SPI) | Windows (UIA) |
-| --- | --- | --- | --- |
-| `Press` | AXPress | click, activate, press, invoke | InvokePattern |
-| `Focus` | set AXFocused=true | Component.GrabFocus | SetFocus |
-| `Blur` | set AXFocused=false | *(not directly supported)* | *(not directly supported)* |
-| `Toggle` | AXPress *(on checkbox)* | toggle, check, uncheck | TogglePattern |
-| `Expand` | AXShowMenu / AXPress | expand, open | ExpandCollapsePattern.Expand |
-| `Collapse` | AXCancel / AXPress | collapse, close | ExpandCollapsePattern.Collapse |
-| `Select` | AXPress | select | SelectionItemPattern |
-| `SetValue` | set AXValue attribute | Value.SetCurrentValue (numeric) / EditableText.ReplaceText (text) | RangeValuePattern / ValuePattern |
-| `TypeText` | set AXSelectedText | EditableText.InsertText | ValuePattern *(splice)* |
-| `SetTextSelection` | set AXSelectedTextRange | Text.SetSelection | TextPattern range ops |
-| `Increment` | AXIncrement | increment *(or Value +step)* | RangeValuePattern *(+step)* |
-| `Decrement` | AXDecrement | decrement *(or Value -step)* | RangeValuePattern *(-step)* |
-| `ShowMenu` | AXShowMenu | menu, showmenu, popup | ExpandCollapsePattern |
-| `ScrollIntoView` | *(no-op — no AX equivalent)* | Component.ScrollTo | ScrollItemPattern |
-| `Scroll` | CGEvent pixel scroll | repeated scroll action | ScrollPattern SmallIncrement |
-
-### Platform Caveats
-
-#### Scroll units
-
-The `amount` parameter in `scroll_up()`, `scroll_down()`, etc. is in **logical scroll units** (roughly one mouse wheel notch), but the underlying mechanism differs:
-
-| Platform | Implementation | 1 unit equals |
-| --- | --- | --- |
-| macOS | `CGEventCreateScrollWheelEvent` | ~10 pixels |
-| Linux | Repeats AT-SPI scroll action N times | 1 discrete scroll step |
-| Windows | Repeats `ScrollPattern.Scroll(SmallIncrement)` N times | 1 SmallIncrement step |
-
-#### ScrollIntoView
-
-No direct equivalent on macOS — this action is a **no-op**. On Linux it uses `Component.ScrollTo` with top-edge alignment. On Windows it uses `ScrollItemPattern.ScrollIntoView`.
-
-#### SetValue: text vs numeric
-
-- **macOS:** Sets the `AXValue` attribute directly — works for both text and numeric values.
-- **Linux:** The `Value` D-Bus interface only supports `f64`. Text values require `EditableText.ReplaceText`. If neither interface is available, returns `TextValueNotSupported`.
-- **Windows:** Tries `RangeValuePattern` for numeric values, falls back to `ValuePattern.SetValue` for text.
-
-#### TypeText
-
-Inserts text via the accessibility API — never simulates keyboard events.
-
-- **macOS:** Sets `AXSelectedText` (replaces selection or inserts at cursor).
-- **Linux:** Calls `EditableText.InsertText` at the current caret offset.
-- **Windows:** Reads current value via `ValuePattern`, splices in the new text, then calls `SetValue`.
-
-#### Blur
-
-- **macOS:** Sets `AXFocused` to false on the element.
-- **Linux / Windows:** No direct API equivalent. The action is not supported.
-
-#### Coordinates
-
-All platforms report bounds as screen coordinates with origin at the top-left of the primary display. Note:
-
-- **macOS** reports in **points**, not pixels. On Retina displays, 1 point = 2 physical pixels.
-- **Windows / Linux** report in physical pixels. Multi-monitor setups can produce negative coordinates for displays to the left or above the primary.
-
-#### Name resolution
-
-Platforms use different attributes to determine an element's `name`:
-
-- **macOS:** AXTitle, then AXDescription, then AXValue (for text elements).
-- **Linux:** Accessible.Name, then Description. For `StaticText` with no name, the first portion of the value is used.
-- **Windows:** CurrentName property.
-
-#### Checked state
-
-The tri-state checked value (`Off` / `On` / `Mixed`) is derived differently:
-
-- **macOS:** Parses the `AXValue` attribute — `"0"` = Off, `"1"` = On, `"2"` = Mixed.
-- **Linux:** Uses AT-SPI state bits — `Checked` (0x10) and `Mixed` (0x2000).
-- **Windows:** Reads `TogglePattern.CurrentToggleState` — 0 = Off, 1 = On, 2 = Indeterminate.
-
-## Error Handling
+## Error handling
 
 All operations return `Result<T>` with a structured `Error` enum:
 

@@ -9,16 +9,12 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
 
 <Tabs syncKey="lang">
   <TabItem label="Rust">
-    Add `xa11y` to your `Cargo.toml`:
-
     ```toml
     [dependencies]
     xa11y = "0.1"
     ```
   </TabItem>
   <TabItem label="Python">
-    Install from PyPI:
-
     ```bash
     pip install xa11y
     ```
@@ -27,59 +23,69 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
   </TabItem>
 </Tabs>
 
-## Platform Setup
+## Platform setup
 
-<Tabs syncKey="platform">
-  <TabItem label="macOS">
-    Grant accessibility permissions to your terminal app (or IDE) in **System Settings → Privacy & Security → Accessibility**.
+**macOS** — Grant accessibility permissions to your terminal (or IDE) in **System Settings → Privacy & Security → Accessibility**.
 
-    xa11y can check this for you:
+**Linux** — Ensure AT-SPI2 is running (default on GNOME and most desktop environments). No special permissions needed.
 
-    <Tabs syncKey="lang">
-      <TabItem label="Rust">
-        ```rust
-        use xa11y::*;
+**Windows** — No special permissions needed.
 
-        let provider = create_provider()?;
-        match provider.check_permissions()? {
-            PermissionStatus::Granted => println!("Ready!"),
-            PermissionStatus::Denied { instructions } => {
-                eprintln!("{}", instructions);
-            }
-        }
-        ```
-      </TabItem>
-      <TabItem label="Python">
-        ```python
-        import xa11y
-
-        status = xa11y.check_permissions()
-        print(status)
-        ```
-      </TabItem>
-    </Tabs>
-  </TabItem>
-  <TabItem label="Linux">
-    Ensure AT-SPI2 is running (it is by default on GNOME and most desktop environments). No special permissions are needed.
-  </TabItem>
-  <TabItem label="Windows">
-    No special permissions needed — UI Automation is available to all processes.
-  </TabItem>
-</Tabs>
-
-## Reading an Accessibility Tree
+## Example
 
 <Tabs syncKey="lang">
   <TabItem label="Rust">
     ```rust
     use xa11y::*;
+    use std::time::Duration;
 
     fn main() -> Result<()> {
-        // Get the accessibility tree for an app by name
-        let root = app(&AppTarget::ByName("Safari".to_string()))?;
+        // Check that we have accessibility permissions
+        check_permissions()?;
 
-        println!("Root: {:?}", root.role);
-        println!("Children: {}", root.children().len());
+        // Snapshot the Calculator app's accessibility tree
+        let root = app(&AppTarget::ByName("Calculator".to_string()))?;
+
+        // Print the full tree for debugging
+        println!("{root}");
+
+        // Find all buttons in the snapshot
+        let buttons = root.query("button")?;
+        println!("Found {} buttons", buttons.len());
+
+        // Read properties from a specific node
+        let equals = root.query("button[name='=']")?;
+        let btn = &equals[0];
+        println!("role={} name={:?} bounds={:?}", btn.role, btn.name, btn.bounds);
+
+        // Create a locator for actions — it refetches the tree on every call,
+        // so it always targets the current UI state
+        let seven = locator(
+            AppTarget::ByName("Calculator".to_string()),
+            "button[name='7']",
+        )?;
+        seven.press()?;
+
+        // Type into a text field
+        let input = locator(
+            AppTarget::ByName("Calculator".to_string()),
+            "text_field[name='Input']",
+        )?;
+        input.type_text("42")?;
+
+        // Wait for UI changes before continuing
+        let result = locator(
+            AppTarget::ByName("Calculator".to_string()),
+            "static_text[name='Result']",
+        )?;
+        result.wait_visible(Duration::from_secs(5))?;
+        println!("Result: {:?}", result.value()?);
+
+        // List all running apps
+        let all = apps()?;
+        for child in all.children() {
+            println!("{} (pid: {:?})", child.name.as_deref().unwrap_or("?"), child.pid);
+        }
 
         Ok(())
     }
@@ -89,121 +95,46 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
     ```python
     import xa11y
 
-    # One-liner: get the tree for an app by name
-    tree = xa11y.app("Safari")
+    # Check that we have accessibility permissions
+    xa11y.check_permissions()
 
-    print(f"Root role: {tree.root.role}")
-    print(f"Children: {len(tree.root.children)}")
-    ```
-  </TabItem>
-</Tabs>
+    # Snapshot the Calculator app's accessibility tree
+    root = xa11y.app("Calculator")
 
-## Querying Elements
+    # Print the full tree for debugging
+    print(root)
 
-xa11y supports CSS-like selectors to find elements in the tree.
+    # Find all buttons in the snapshot
+    buttons = root.query("button")
+    print(f"Found {len(buttons)} buttons")
 
-<Tabs syncKey="lang">
-  <TabItem label="Rust">
-    ```rust
-    use xa11y::*;
+    # Read properties from a specific node
+    btn = root.query("button[name='=']")[0]
+    print(f"role={btn.role} name={btn.name} bounds={btn.bounds}")
 
-    let root = app(&AppTarget::ByName("Safari".to_string()))?;
+    # Create a locator for actions — it refetches the tree on every call,
+    # so it always targets the current UI state
+    seven = xa11y.locator("Calculator", selector="button[name='7']")
+    seven.press()
 
-    // Find all buttons
-    let buttons = root.query("button")?;
+    # Type into a text field
+    input = xa11y.locator("Calculator", selector="text_field[name='Input']")
+    input.type_text("42")
 
-    // Find a button by name
-    let submit = root.query("button[name='Submit']")?;
-    let first = &submit[0];
-    println!("Found: {}", first.name.as_deref().unwrap_or("unnamed"));
+    # Wait for UI changes before continuing
+    result = xa11y.locator("Calculator", selector="static_text[name='Result']")
+    result.wait_visible(timeout=5.0)
+    print(f"Result: {result.value()}")
 
-    // Find text fields
-    let fields = root.query("textfield")?;
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    import xa11y
-
-    tree = xa11y.app("Safari")
-
-    # Find all buttons
-    for button in tree.query("button"):
-        print(button.name)
-
-    # Find a specific button
-    submit = tree.query("button[name='Submit']")[0]
-    print(f"Found: {submit.name}")
-
-    # Find text fields
-    fields = tree.query("textfield")
-    ```
-  </TabItem>
-</Tabs>
-
-## Performing Actions
-
-<Tabs syncKey="lang">
-  <TabItem label="Rust">
-    ```rust
-    use xa11y::*;
-
-    let provider = create_provider()?;
-    let target = AppTarget::ByName("Safari".to_string());
-
-    // Use a Locator for resilient element interaction
-    let submit = Locator::new(&*provider, target.clone(), "button[name='Submit']");
-
-    // Press the button
-    submit.press()?;
-
-    // Type into a text field
-    let search = Locator::new(&*provider, target, "textfield[name^='Search']");
-    search.set_value("hello world")?;
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    import xa11y
-
-    tree = xa11y.app("Safari")
-
-    # Press a button (shorthand)
-    tree.press("button[name='Submit']")
-
-    # Use a Locator for multiple interactions
-    search = tree.locator("textfield[name^='Search']")
-    search.set_value("hello world")
-    ```
-  </TabItem>
-</Tabs>
-
-## Listing Applications
-
-<Tabs syncKey="lang">
-  <TabItem label="Rust">
-    ```rust
-    use xa11y::*;
-
-    let root = apps()?;
-
-    for child in root.children() {
-        println!("{} (pid: {:?})", child.name.as_deref().unwrap_or("?"), child.pid());
-    }
-    ```
-  </TabItem>
-  <TabItem label="Python">
-    ```python
-    import xa11y
-
-    root = xa11y.apps()
-    for child in root.children:
+    # List all running apps
+    all_apps = xa11y.apps()
+    for child in all_apps.children:
         print(f"{child.name} (pid: {child.pid})")
     ```
   </TabItem>
 </Tabs>
 
-## Selector Syntax Reference
+## Selector syntax
 
 | Pattern                        | Meaning                          |
 | ------------------------------ | -------------------------------- |
@@ -215,8 +146,8 @@ xa11y supports CSS-like selectors to find elements in the tree.
 | `window button[name='OK']`     | Button named "OK" anywhere inside a window |
 | `button:nth(2)`                | The 2nd button match             |
 
-## Next Steps
+## Next steps
 
-- [Overview](/guides/overview/) — architecture and design principles
+- [Overview](/guides/overview/) — concepts, architecture, and how xa11y compares to other tools
 - [Rust API Reference](/api/rust/) — full Rust API documentation
 - [Python API Reference](/api/python/) — full Python API documentation

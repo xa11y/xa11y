@@ -1,0 +1,100 @@
+---
+title: Desktop Testing
+description: Using xa11y to write integration tests for desktop applications.
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+xa11y's Locator pattern makes it natural to write integration tests for desktop apps — find elements, interact with them, wait for changes, and assert on the result. If you've used Playwright for web testing, the workflow is familiar.
+
+## Waits
+
+Desktop UIs update asynchronously. After pressing a button, the result might not appear for a few frames. Locator `wait_*()` methods poll with fresh tree snapshots until a condition is met or a timeout expires:
+
+- `wait_visible()` / `wait_hidden()` — element appears or disappears
+- `wait_enabled()` / `wait_disabled()` — element becomes interactive or not
+- `wait_attached()` / `wait_detached()` — element exists in the tree or not
+- `wait_focused()` / `wait_unfocused()` — element gains or loses focus
+- `wait_until(predicate)` — arbitrary condition on the resolved node
+
+Always use waits instead of sleeping — they're faster (resolve as soon as the condition is met) and more reliable (won't flake on slow machines).
+
+## Example: testing a calculator
+
+This test opens Calculator, performs `7 × 8`, and asserts the result is `56`.
+
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    ```rust
+    use xa11y::*;
+    use std::time::Duration;
+
+    #[test]
+    fn calculator_multiplication() -> Result<()> {
+        let target = AppTarget::ByName("Calculator".to_string());
+        let timeout = Duration::from_secs(5);
+
+        // Wait for the app to be ready
+        let window = locator(target.clone(), "window")?;
+        window.wait_visible(timeout)?;
+
+        // Press 7 × 8 =
+        locator(target.clone(), "button[name='7']")?.press()?;
+        locator(target.clone(), "button[name='×']")?.press()?;
+        locator(target.clone(), "button[name='8']")?.press()?;
+        locator(target.clone(), "button[name='=']")?.press()?;
+
+        // Wait for the result to update, then assert
+        let result = locator(target, "static_text[name='Result']")?;
+        result.wait_until(
+            |node| node.value.as_deref() == Some("56"),
+            timeout,
+        )?;
+        assert_eq!(result.value()?, Some("56".to_string()));
+
+        Ok(())
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import xa11y
+    import subprocess
+    import pytest
+
+
+    @pytest.fixture
+    def calculator():
+        """Launch Calculator and return its name for targeting."""
+        proc = subprocess.Popen(["open", "-a", "Calculator"])
+        yield "Calculator"
+        proc.terminate()
+
+
+    def test_calculator_multiplication(calculator):
+        target = calculator
+
+        # Wait for the app to be ready
+        window = xa11y.locator(target, selector="window")
+        window.wait_visible(timeout=5.0)
+
+        # Press 7 × 8 =
+        xa11y.locator(target, selector="button[name='7']").press()
+        xa11y.locator(target, selector="button[name='×']").press()
+        xa11y.locator(target, selector="button[name='8']").press()
+        xa11y.locator(target, selector="button[name='=']").press()
+
+        # Wait for the result to update, then assert
+        result = xa11y.locator(target, selector="static_text[name='Result']")
+        result.wait_until(lambda node: node.value == "56", timeout=5.0)
+        assert result.value() == "56"
+    ```
+  </TabItem>
+</Tabs>
+
+## Tips
+
+- **Be specific with selectors.** `button[name='7']` is better than `button` — it won't break when the UI adds more buttons.
+- **Use locators, not nodes, for interactions.** Nodes are snapshots and go stale. Locators refetch automatically.
+- **Prefer `wait_until` for complex assertions.** Instead of sleeping then asserting, combine the wait and the condition — the test passes as soon as the UI is ready.
+- **Keep timeouts generous in CI.** CI machines are slower. Use 5–10 seconds for waits even if your local machine resolves in milliseconds.

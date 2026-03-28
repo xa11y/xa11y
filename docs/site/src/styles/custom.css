@@ -1,0 +1,67 @@
+/* Ensure hero image never overflows */
+.hero > .hero-html img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Give the hero image more room on desktop */
+@media (min-width: 50rem) {
+  .hero > .hero-html {
+    width: 30rem;
+  }
+}
+
+/* Smaller content headings */
+.sl-markdown-content h2 {
+  font-size: var(--sl-text-2xl);
+  border-bottom: 2px solid var(--sl-color-gray-5);
+  padding-bottom: 0.4rem;
+}
+
+.sl-markdown-content h3 {
+  font-size: var(--sl-text-lg);
+}
+
+/* Clean table styling */
+.sl-markdown-content table {
+  border-collapse: collapse;
+}
+
+.sl-markdown-content table th,
+.sl-markdown-content table td {
+  border: none;
+}
+
+.sl-markdown-content table thead tr {
+  border-bottom: 2px solid var(--sl-color-gray-5);
+}
+
+.sl-markdown-content table tbody tr:nth-child(even) {
+  background: var(--sl-color-gray-7, rgba(128, 128, 128, 0.06));
+}
+
+/* Accent tint for inline code */
+.sl-markdown-content :not(pre) > code {
+  background: rgba(124, 110, 240, 0.08);
+}
+
+@media (prefers-color-scheme: light) {
+  .sl-markdown-content :not(pre) > code {
+    background: rgba(124, 110, 240, 0.1);
+  }
+}
+
+/* Prevent inline code from wrapping in tables */
+.sl-markdown-content table code {
+  white-space: nowrap;
+}
+
+/* Mobile: place hero image below title/tagline and center it */
+@media (max-width: 50rem) {
+  .hero > .hero-html {
+    order: 1;
+    width: min(30rem, 100%);
+    display: flex;
+    justify-content: center;
+  }
+}

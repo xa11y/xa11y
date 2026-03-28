@@ -1,0 +1,129 @@
+---
+title: Platform Details
+description: Role mappings, action mappings, and platform-specific caveats.
+---
+
+xa11y normalizes platform-specific APIs into a unified interface. This page documents how roles and actions map across platforms, and where behavior differs.
+
+## Role mapping
+
+| xa11y Role | macOS (AX) | Linux (AT-SPI) | Windows (UIA) |
+| --- | --- | --- | --- |
+| `Window` | AXWindow, AXDrawer | window, frame | WindowControlType |
+| `Application` | AXApplication | application | *(root element)* |
+| `Button` | AXButton | push button | ButtonControlType |
+| `CheckBox` | AXCheckBox | check box, check menu item | CheckBoxControlType |
+| `RadioButton` | AXRadioButton | radio button, radio menu item | RadioButtonControlType |
+| `TextField` | AXTextField, AXSecureTextField | entry, password text | EditControlType |
+| `TextArea` | AXTextArea | text | EditControlType |
+| `StaticText` | AXStaticText | label, static, caption | TextControlType |
+| `ComboBox` | AXComboBox, AXPopUpButton | combo box | ComboBoxControlType |
+| `List` | AXList, AXOutline | list, list box | ListControlType, TreeControlType |
+| `ListItem` | *(via AXRow)* | list item | ListItemControlType |
+| `Menu` | AXMenu | menu | MenuControlType |
+| `MenuItem` | AXMenuItem, AXMenuBarItem | menu item, tearoff menu item | MenuItemControlType |
+| `MenuBar` | AXMenuBar, AXMenuBarExtra | menu bar | MenuBarControlType |
+| `Tab` | *(subrole AXTabButton)* | page tab | TabItemControlType |
+| `TabGroup` | AXTabGroup | page tab list | TabControlType |
+| `Table` | AXTable | table, tree table | TableControlType, DataGridControlType |
+| `TableRow` | *(via AXRow)* | table row | DataItemControlType |
+| `TableCell` | AXCell | table cell, column/row header | HeaderItemControlType |
+| `Toolbar` | AXToolbar | tool bar | ToolBarControlType |
+| `ScrollBar` | AXScrollBar | scroll bar | ScrollBarControlType |
+| `Slider` | AXSlider | slider | SliderControlType |
+| `Image` | AXImage | image, icon | ImageControlType |
+| `Link` | AXLink | link | HyperlinkControlType |
+| `Group` | AXGroup, AXScrollArea, AXRadioGroup | panel, section, form, scroll pane | GroupControlType, PaneControlType |
+| `Dialog` | AXSheet *(or subrole AXDialog)* | dialog, file chooser | WindowControlType *(with IsDialog)* |
+| `Alert` | *(subrole AXApplicationAlert)* | alert, notification | *(alert pattern)* |
+| `ProgressBar` | AXProgressIndicator, AXBusyIndicator | progress bar | ProgressBarControlType |
+| `TreeItem` | AXDisclosureTriangle *(or subrole AXOutlineRow)* | tree item | TreeItemControlType |
+| `WebArea` | AXWebArea | document web, document frame | DocumentControlType |
+| `Heading` | AXHeading *(or subrole)* | heading | *(landmark pattern)* |
+| `Separator` | AXSplitter | separator | SeparatorControlType |
+| `SplitGroup` | AXSplitGroup | split pane | PaneControlType |
+| `Switch` | *(subrole AXSwitch)* | *(inferred)* | *(inferred)* |
+| `SpinButton` | AXIncrementor | spin button | SpinnerControlType |
+| `Tooltip` | AXToolTip | tooltip, tool tip | ToolTipControlType |
+| `Status` | AXStatusBar | status bar | StatusBarControlType |
+| `Navigation` | *(landmark)* | landmark, navigation | *(landmark)* |
+
+Roles not recognized by a platform map to `Unknown`.
+
+## Action mapping
+
+| xa11y Action | macOS | Linux (AT-SPI) | Windows (UIA) |
+| --- | --- | --- | --- |
+| `Press` | AXPress | click, activate, press, invoke | InvokePattern |
+| `Focus` | set AXFocused=true | Component.GrabFocus | SetFocus |
+| `Blur` | set AXFocused=false | *(not directly supported)* | *(not directly supported)* |
+| `Toggle` | AXPress *(on checkbox)* | toggle, check, uncheck | TogglePattern |
+| `Expand` | AXShowMenu / AXPress | expand, open | ExpandCollapsePattern.Expand |
+| `Collapse` | AXCancel / AXPress | collapse, close | ExpandCollapsePattern.Collapse |
+| `Select` | AXPress | select | SelectionItemPattern |
+| `SetValue` | set AXValue attribute | Value.SetCurrentValue (numeric) / EditableText.ReplaceText (text) | RangeValuePattern / ValuePattern |
+| `TypeText` | set AXSelectedText | EditableText.InsertText | ValuePattern *(splice)* |
+| `SetTextSelection` | set AXSelectedTextRange | Text.SetSelection | TextPattern range ops |
+| `Increment` | AXIncrement | increment *(or Value +step)* | RangeValuePattern *(+step)* |
+| `Decrement` | AXDecrement | decrement *(or Value -step)* | RangeValuePattern *(-step)* |
+| `ShowMenu` | AXShowMenu | menu, showmenu, popup | ExpandCollapsePattern |
+| `ScrollIntoView` | *(no-op — no AX equivalent)* | Component.ScrollTo | ScrollItemPattern |
+| `Scroll` | CGEvent pixel scroll | repeated scroll action | ScrollPattern SmallIncrement |
+
+## Platform caveats
+
+### Scroll units
+
+The `amount` parameter in `scroll_up()`, `scroll_down()`, etc. is in **logical scroll units** (roughly one mouse wheel notch), but the underlying mechanism differs:
+
+| Platform | Implementation | 1 unit equals |
+| --- | --- | --- |
+| macOS | `CGEventCreateScrollWheelEvent` | ~10 pixels |
+| Linux | Repeats AT-SPI scroll action N times | 1 discrete scroll step |
+| Windows | Repeats `ScrollPattern.Scroll(SmallIncrement)` N times | 1 SmallIncrement step |
+
+### ScrollIntoView
+
+No direct equivalent on macOS — this action is a **no-op**. On Linux it uses `Component.ScrollTo` with top-edge alignment. On Windows it uses `ScrollItemPattern.ScrollIntoView`.
+
+### SetValue: text vs numeric
+
+- **macOS:** Sets the `AXValue` attribute directly — works for both text and numeric values.
+- **Linux:** The `Value` D-Bus interface only supports `f64`. Text values require `EditableText.ReplaceText`. If neither interface is available, returns `TextValueNotSupported`.
+- **Windows:** Tries `RangeValuePattern` for numeric values, falls back to `ValuePattern.SetValue` for text.
+
+### TypeText
+
+Inserts text via the accessibility API — never simulates keyboard events.
+
+- **macOS:** Sets `AXSelectedText` (replaces selection or inserts at cursor).
+- **Linux:** Calls `EditableText.InsertText` at the current caret offset.
+- **Windows:** Reads current value via `ValuePattern`, splices in the new text, then calls `SetValue`.
+
+### Blur
+
+- **macOS:** Sets `AXFocused` to false on the element.
+- **Linux / Windows:** No direct API equivalent. The action is not supported.
+
+### Coordinates
+
+All platforms report bounds as screen coordinates with origin at the top-left of the primary display. Note:
+
+- **macOS** reports in **points**, not pixels. On Retina displays, 1 point = 2 physical pixels.
+- **Windows / Linux** report in physical pixels. Multi-monitor setups can produce negative coordinates for displays to the left or above the primary.
+
+### Name resolution
+
+Platforms use different attributes to determine an element's `name`:
+
+- **macOS:** AXTitle, then AXDescription, then AXValue (for text elements).
+- **Linux:** Accessible.Name, then Description. For `StaticText` with no name, the first portion of the value is used.
+- **Windows:** CurrentName property.
+
+### Checked state
+
+The tri-state checked value (`Off` / `On` / `Mixed`) is derived differently:
+
+- **macOS:** Parses the `AXValue` attribute — `"0"` = Off, `"1"` = On, `"2"` = Mixed.
+- **Linux:** Uses AT-SPI state bits — `Checked` (0x10) and `Mixed` (0x2000).
+- **Windows:** Reads `TogglePattern.CurrentToggleState` — 0 = Off, 1 = On, 2 = Indeterminate.

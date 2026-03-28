@@ -6,6 +6,7 @@ export default defineConfig({
   integrations: [
     starlight({
       title: "xa11y",
+      customCss: ["./src/styles/custom.css"],
       description:
         "Cross-platform accessibility library for reading and interacting with accessibility trees.",
       social: [
@@ -19,8 +20,10 @@ export default defineConfig({
         {
           label: "Getting Started",
           items: [
-            { label: "Overview", slug: "guides/overview" },
             { label: "Quick Start", slug: "guides/quick-start" },
+            { label: "Overview", slug: "guides/overview" },
+            { label: "Desktop Testing", slug: "guides/desktop-testing" },
+            { label: "Platform Details", slug: "guides/platform-details" },
           ],
         },
         {

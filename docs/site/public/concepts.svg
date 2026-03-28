@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 320" width="720" height="320">
+  <defs>
+    <style>
+      .bg { fill: #1a1a2e; }
+      .box { fill: #23234a; stroke: #444c7a; stroke-width: 1.5; rx: 8; }
+      .box-accent { fill: #2a2a5a; stroke: #7c6ef0; stroke-width: 1.5; rx: 8; }
+      .label { fill: #e0e0e0; font-family: system-ui, -apple-system, sans-serif; font-size: 13px; text-anchor: middle; }
+      .label-bold { fill: #ffffff; font-family: system-ui, -apple-system, sans-serif; font-size: 13px; font-weight: 600; text-anchor: middle; }
+      .label-sm { fill: #9090b0; font-family: system-ui, -apple-system, sans-serif; font-size: 11px; text-anchor: middle; }
+      .arrow { stroke: #666690; stroke-width: 1.5; fill: none; marker-end: url(#head); }
+      .arrow-accent { stroke: #7c6ef0; stroke-width: 1.5; fill: none; marker-end: url(#head-accent); }
+      .divider { stroke: #333360; stroke-width: 1; stroke-dasharray: 4 4; }
+      .lane-label { fill: #707090; font-family: system-ui, -apple-system, sans-serif; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+
+      @media (prefers-color-scheme: light) {
+        .bg { fill: #f8f8fc; }
+        .box { fill: #ffffff; stroke: #c0c0d0; }
+        .box-accent { fill: #f0eeff; stroke: #7c6ef0; }
+        .label { fill: #333344; }
+        .label-bold { fill: #111122; }
+        .label-sm { fill: #666680; }
+        .arrow { stroke: #9999b0; marker-end: url(#head-light); }
+        .arrow-accent { stroke: #7c6ef0; marker-end: url(#head-accent); }
+        .divider { stroke: #d0d0e0; }
+        .lane-label { fill: #888899; }
+      }
+    </style>
+    <marker id="head" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="none" stroke="#666690" stroke-width="1.2" />
+    </marker>
+    <marker id="head-light" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="none" stroke="#9999b0" stroke-width="1.2" />
+    </marker>
+    <marker id="head-accent" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <path d="M0,0 L8,3 L0,6" fill="none" stroke="#7c6ef0" stroke-width="1.2" />
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="720" height="320" class="bg" rx="12" />
+
+  <!-- Lane labels -->
+  <text x="24" y="80" class="lane-label">Read</text>
+  <text x="24" y="215" class="lane-label">Act</text>
+  <text x="24" y="295" class="lane-label">Listen</text>
+
+  <!-- Dividers -->
+  <line x1="20" y1="145" x2="700" y2="145" class="divider" />
+  <line x1="20" y1="255" x2="700" y2="255" class="divider" />
+
+  <!-- === READ LANE === -->
+
+  <!-- AppTarget -->
+  <rect x="70" y="42" width="130" height="50" class="box" />
+  <text x="135" y="60" class="label-bold">AppTarget</text>
+  <text x="135" y="80" class="label-sm">name / pid / window</text>
+
+  <!-- app() -->
+  <rect x="230" y="42" width="70" height="44" class="box-accent" />
+  <text x="265" y="69" class="label-bold">app()</text>
+
+  <!-- Snapshot -->
+  <rect x="330" y="42" width="100" height="44" class="box" />
+  <text x="380" y="60" class="label-bold">Snapshot</text>
+  <text x="380" y="76" class="label-sm">frozen tree</text>
+
+  <!-- Node -->
+  <rect x="478" y="42" width="100" height="44" class="box" />
+  <text x="528" y="60" class="label-bold">Node</text>
+  <text x="528" y="76" class="label-sm">read properties</text>
+
+  <!-- query() with Selector -->
+  <rect x="625" y="42" width="75" height="44" class="box-accent" />
+  <text x="662" y="60" class="label-bold">query()</text>
+  <text x="662" y="76" class="label-sm">selector</text>
+
+  <!-- Read arrows -->
+  <line x1="200" y1="64" x2="228" y2="64" class="arrow" />
+  <line x1="300" y1="64" x2="328" y2="64" class="arrow" />
+  <line x1="430" y1="64" x2="476" y2="64" class="arrow" />
+  <line x1="578" y1="64" x2="623" y2="64" class="arrow" />
+
+  <!-- query() loops back to Snapshot -->
+  <path d="M 662,86 L 662,110 Q 662,120 652,120 L 390,120 Q 380,120 380,110 L 380,88" class="arrow" />
+
+
+  <!-- === ACT LANE === -->
+
+  <!-- AppTarget + Selector -->
+  <rect x="70" y="175" width="130" height="44" class="box" />
+  <text x="135" y="193" class="label-bold">AppTarget</text>
+  <text x="135" y="209" class="label-sm">+ selector</text>
+
+  <!-- locator() -->
+  <rect x="230" y="175" width="85" height="44" class="box-accent" />
+  <text x="272" y="202" class="label-bold">locator()</text>
+
+  <!-- Locator -->
+  <rect x="345" y="175" width="100" height="44" class="box" />
+  <text x="395" y="193" class="label-bold">Locator</text>
+  <text x="395" y="209" class="label-sm">auto-refetches</text>
+
+  <!-- Actions -->
+  <rect x="495" y="168" width="100" height="26" class="box-accent" />
+  <text x="545" y="186" class="label-bold">Actions</text>
+
+  <!-- Waits -->
+  <rect x="495" y="200" width="100" height="26" class="box-accent" />
+  <text x="545" y="218" class="label-bold">Waits</text>
+
+  <!-- Act arrows -->
+  <line x1="200" y1="197" x2="228" y2="197" class="arrow-accent" />
+  <line x1="315" y1="197" x2="343" y2="197" class="arrow-accent" />
+  <line x1="445" y1="187" x2="493" y2="181" class="arrow-accent" />
+  <line x1="445" y1="207" x2="493" y2="213" class="arrow-accent" />
+
+  <!-- === EVENTS LANE === -->
+
+  <!-- App -->
+  <rect x="70" y="272" width="130" height="34" class="box" />
+  <text x="135" y="294" class="label-bold">App</text>
+
+  <!-- subscribe() -->
+  <rect x="230" y="272" width="100" height="34" class="box-accent" />
+  <text x="280" y="290" class="label-bold">subscribe()</text>
+
+  <!-- Event Stream -->
+  <rect x="360" y="272" width="120" height="34" class="box" />
+  <text x="420" y="290" class="label-bold">Event Stream</text>
+
+  <!-- Coming soon -->
+  <text x="540" y="294" class="label-sm">(coming soon)</text>
+
+  <!-- Event arrows -->
+  <line x1="200" y1="289" x2="228" y2="289" class="arrow" />
+  <line x1="330" y1="289" x2="358" y2="289" class="arrow" />
+</svg>
