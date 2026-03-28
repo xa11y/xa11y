@@ -324,22 +324,6 @@ impl Node {
         })
     }
 
-    /// Get all nodes in this node's subtree (including this node).
-    fn subtree(&self, py: Python<'_>) -> PyResult<Vec<PyObject>> {
-        let Some(ref ctx) = self._ctx else {
-            return Ok(vec![]);
-        };
-        let Some(ref all) = self._all_nodes else {
-            return Ok(vec![]);
-        };
-        let list = all.bind(py);
-        let indices = ctx.rust_tree.subtree_indices(self._index);
-        indices
-            .iter()
-            .map(|&idx| list.get_item(idx as usize).map(|item| item.unbind()))
-            .collect()
-    }
-
     /// Query nodes matching a CSS-like selector string within this snapshot.
     fn query(&self, py: Python<'_>, selector: &str) -> PyResult<Vec<PyObject>> {
         let ctx = self._ctx.as_ref().ok_or_else(|| {
