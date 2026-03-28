@@ -40,6 +40,9 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
+      - name: Generate READMEs for package validation
+        run: cargo xtask sync-readmes
+
       - name: Bump version
         run: cargo release ${{ inputs.level }} --execute --no-confirm
 
