@@ -48,6 +48,7 @@ struct Resolved {
 
 impl Locator {
     /// Create a new Locator.
+    #[doc(hidden)]
     pub fn new(provider: Arc<dyn Provider>, target: AppTarget, selector: &str) -> Self {
         Self {
             provider,

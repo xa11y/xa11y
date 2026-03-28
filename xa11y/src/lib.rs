@@ -44,10 +44,15 @@ use std::sync::{Arc, OnceLock};
 // but end users should interact with Node (returned by app/apps), not Tree directly.
 pub use xa11y_core::{
     Action, ActionData, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
-    EventKind, EventProvider, EventReceiver, Locator, Node, NodeData, PermissionStatus, Provider,
-    RawPlatformData, Rect, Result, Role, ScrollDirection, StateFlag, StateSet, Subscription,
-    TextChangeData, TextChangeType, Toggled, Tree, WindowHandle,
+    EventKind, EventReceiver, Locator, Node, NodeData, PermissionStatus, RawPlatformData, Rect,
+    Result, Role, ScrollDirection, StateFlag, StateSet, Subscription, TextChangeData,
+    TextChangeType, Toggled, Tree, WindowHandle,
 };
+
+// Provider traits are implementation details used by platform backends and Python bindings,
+// not part of the public API for end users.
+#[doc(hidden)]
+pub use xa11y_core::{EventProvider, Provider};
 
 // ── Internal singleton ──────────────────────────────────────────────────────
 
@@ -98,7 +103,7 @@ impl Provider for StaticProviderRef {
 /// Get the global provider as an `Arc<dyn Provider>`.
 ///
 /// Returns a handle to the same singleton used by `app()`, `apps()`, etc.
-/// Useful when you need to pass a provider to objects that store it (e.g. `Locator`).
+#[doc(hidden)]
 pub fn provider() -> Result<Arc<dyn Provider>> {
     Ok(Arc::new(StaticProviderRef(get_provider_ref()?)))
 }
@@ -156,6 +161,7 @@ pub fn locator(target: AppTarget, selector: &str) -> Result<Locator> {
 /// Create a new platform-appropriate accessibility provider.
 ///
 /// Returns a fresh provider instance (not the global singleton).
+#[doc(hidden)]
 #[cfg(feature = "testing")]
 pub fn create_provider() -> Result<Arc<dyn Provider>> {
     create_provider_boxed().map(Arc::from)
@@ -190,6 +196,7 @@ fn create_provider_boxed() -> Result<Box<dyn Provider>> {
 ///
 /// Returns a boxed `EventProvider` trait object for the current platform.
 /// EventProvider extends Provider with event subscription capabilities.
+#[doc(hidden)]
 #[cfg(feature = "testing")]
 pub fn create_event_provider() -> Result<Box<dyn EventProvider>> {
     #[cfg(target_os = "macos")]
