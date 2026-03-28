@@ -1263,6 +1263,7 @@ version = "0.2.1"
 dependencies = [
  "pyo3",
  "xa11y",
+ "xa11y-core",
 ]
 
 [[package]]

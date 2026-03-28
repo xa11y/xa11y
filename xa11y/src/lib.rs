@@ -45,8 +45,8 @@ use std::sync::{Arc, OnceLock};
 pub use xa11y_core::{
     Action, ActionData, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
     EventKind, EventProvider, EventReceiver, Locator, Node, NodeData, PermissionStatus, Provider,
-    RawPlatformData, Rect, Result, Role, ScrollDirection, StateFlag, StateSet, Subscription,
-    TextChangeData, TextChangeType, Toggled, Tree, WindowHandle,
+    RawPlatformData, Rect, Result, Role, StateFlag, StateSet, Subscription, TextChangeData,
+    TextChangeType, Toggled, Tree, WindowHandle,
 };
 
 // ── Internal singleton ──────────────────────────────────────────────────────

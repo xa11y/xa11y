@@ -16,6 +16,7 @@ mod provider_fuzz {
     use rand::prelude::*;
     use std::time::{SystemTime, UNIX_EPOCH};
     use xa11y::*;
+    use xa11y_core::ScrollDirection;
 
     // ── CLI ──────────────────────────────────────────────────────────────────
 

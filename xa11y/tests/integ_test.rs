@@ -14,6 +14,7 @@ mod integ;
 mod tests {
     use super::integ as h;
     use xa11y::*;
+    use xa11y_core::ScrollDirection;
 
     // ════════════════════════════════════════════════════════════════
     // Provider Operations (4 tests)

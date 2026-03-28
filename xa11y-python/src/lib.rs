@@ -79,18 +79,6 @@ fn action_to_str(a: &xa11y::Action) -> &'static str {
     }
 }
 
-fn parse_scroll_direction(s: &str) -> PyResult<xa11y::ScrollDirection> {
-    match s {
-        "up" => Ok(xa11y::ScrollDirection::Up),
-        "down" => Ok(xa11y::ScrollDirection::Down),
-        "left" => Ok(xa11y::ScrollDirection::Left),
-        "right" => Ok(xa11y::ScrollDirection::Right),
-        _ => Err(PyValueError::new_err(format!(
-            "Unknown scroll direction: {s} (expected up/down/left/right)"
-        ))),
-    }
-}
-
 fn resolve_app_target(name: Option<&str>, pid: Option<u32>) -> PyResult<xa11y::AppTarget> {
     match (name, pid) {
         (Some(n), _) => Ok(xa11y::AppTarget::ByName(n.to_string())),
@@ -616,13 +604,45 @@ impl Locator {
         )
     }
 
-    #[pyo3(signature = (direction, amount=1.0))]
-    fn scroll(&self, direction: &str, amount: f64) -> PyResult<()> {
-        let dir = parse_scroll_direction(direction)?;
+    #[pyo3(signature = (amount=1.0))]
+    fn scroll_up(&self, amount: f64) -> PyResult<()> {
         self.perform_action(
             xa11y::Action::Scroll,
             Some(xa11y::ActionData::ScrollAmount {
-                direction: dir,
+                direction: xa11y_core::ScrollDirection::Up,
+                amount,
+            }),
+        )
+    }
+
+    #[pyo3(signature = (amount=1.0))]
+    fn scroll_down(&self, amount: f64) -> PyResult<()> {
+        self.perform_action(
+            xa11y::Action::Scroll,
+            Some(xa11y::ActionData::ScrollAmount {
+                direction: xa11y_core::ScrollDirection::Down,
+                amount,
+            }),
+        )
+    }
+
+    #[pyo3(signature = (amount=1.0))]
+    fn scroll_left(&self, amount: f64) -> PyResult<()> {
+        self.perform_action(
+            xa11y::Action::Scroll,
+            Some(xa11y::ActionData::ScrollAmount {
+                direction: xa11y_core::ScrollDirection::Left,
+                amount,
+            }),
+        )
+    }
+
+    #[pyo3(signature = (amount=1.0))]
+    fn scroll_right(&self, amount: f64) -> PyResult<()> {
+        self.perform_action(
+            xa11y::Action::Scroll,
+            Some(xa11y::ActionData::ScrollAmount {
+                direction: xa11y_core::ScrollDirection::Right,
                 amount,
             }),
         )

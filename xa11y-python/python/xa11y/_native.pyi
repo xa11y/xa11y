@@ -237,11 +237,14 @@ class Locator:
         """Type text into the matched element."""
     def select_text(self, start: int, end: int) -> None:
         """Select a text range by character offsets."""
-    def scroll(self, direction: str, amount: float = 1.0) -> None:
-        """Scroll the matched element.
-
-        *direction*: ``"up"``, ``"down"``, ``"left"``, or ``"right"``.
-        """
+    def scroll_up(self, amount: float = 1.0) -> None:
+        """Scroll the matched element upward."""
+    def scroll_down(self, amount: float = 1.0) -> None:
+        """Scroll the matched element downward."""
+    def scroll_left(self, amount: float = 1.0) -> None:
+        """Scroll the matched element leftward."""
+    def scroll_right(self, amount: float = 1.0) -> None:
+        """Scroll the matched element rightward."""
     def wait_visible(self, timeout: float = 5.0) -> None:
         """Wait until the element is visible (default 5s timeout)."""
     def wait_attached(self, timeout: float = 5.0) -> None:

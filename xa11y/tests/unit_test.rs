@@ -5,6 +5,7 @@
 //! or running applications are needed.
 
 use xa11y::*;
+use xa11y_core::ScrollDirection;
 
 /// Helper to build a sample accessibility tree for testing.
 fn sample_tree() -> Tree {
