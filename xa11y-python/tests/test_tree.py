@@ -1,4 +1,4 @@
-"""Tests for snapshot navigation: root, children, parent, query, dump."""
+"""Tests for snapshot navigation: root, children, parent, query via locator."""
 
 import pytest
 import xa11y
@@ -33,8 +33,8 @@ def test_children_of_window(tree):
     assert children[1].role == "group"
 
 
-def test_children_of_leaf(tree):
-    buttons = tree.query("button")
+def test_children_of_leaf(test_app):
+    buttons = test_app.locator("button").nodes()
     back = next(b for b in buttons if b.name == "Back")
     assert back.children == []
 
@@ -43,8 +43,8 @@ def test_parent_of_root_is_none(tree):
     assert tree.parent is None
 
 
-def test_parent_of_button(tree):
-    buttons = tree.query("button")
+def test_parent_of_button(test_app):
+    buttons = test_app.locator("button").nodes()
     back = next(b for b in buttons if b.name == "Back")
     parent = back.parent
     assert parent is not None
@@ -67,53 +67,55 @@ def test_deep_graph_traversal(tree):
     assert back.parent.parent.role == "window"
 
 
-# ── Query ────────────────────────────────────────────────────────────────────
+# ── Query via locator ───────────────────────────────────────────────────────
 
 
-def test_query_by_role(tree):
-    buttons = tree.query("button")
+def test_query_by_role(test_app):
+    buttons = test_app.locator("button").nodes()
     assert len(buttons) == 2
     names = {b.name for b in buttons}
     assert names == {"Back", "Forward"}
 
 
-def test_query_by_name(tree):
-    results = tree.query('[name="Search"]')
+def test_query_by_name(test_app):
+    results = test_app.locator('[name="Search"]').nodes()
     assert len(results) == 1
     assert results[0].role == "text_field"
 
 
-def test_query_by_name_contains(tree):
-    results = tree.query('[name*="Item"]')
+def test_query_by_name_contains(test_app):
+    results = test_app.locator('[name*="Item"]').nodes()
     assert len(results) == 3  # "Items" list + "Item 1" + "Item 2"
 
 
-def test_query_descendant_combinator(tree):
-    results = tree.query("toolbar button")
+def test_query_descendant_combinator(test_app):
+    results = test_app.locator("toolbar button").nodes()
     assert len(results) == 2
 
 
-def test_query_child_combinator(tree):
-    results = tree.query("toolbar > button")
+def test_query_child_combinator(test_app):
+    results = test_app.locator("toolbar > button").nodes()
     assert len(results) == 2
 
 
-def test_query_no_match(tree):
-    results = tree.query("menu")
+def test_query_no_match(test_app):
+    results = test_app.locator("menu").nodes()
     assert results == []
 
 
-def test_query_invalid_selector(tree):
+def test_query_invalid_selector(test_app):
     with pytest.raises(xa11y.InvalidSelectorError):
-        tree.query("[[[invalid")
+        test_app.locator("[[[invalid").nodes()
 
 
 # ── Node dunders ─────────────────────────────────────────────────────────────
 
 
-def test_node_len_children_count(tree):
+def test_node_len_children_count(test_app):
+    tree = test_app.nodes()
     assert len(tree) == 1  # one child (window)
     window = tree.children[0]
     assert len(window) == 2  # toolbar + group
-    back = next(b for b in tree.query("button") if b.name == "Back")
+    buttons = test_app.locator("button").nodes()
+    back = next(b for b in buttons if b.name == "Back")
     assert len(back) == 0  # leaf

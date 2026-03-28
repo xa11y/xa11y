@@ -105,7 +105,12 @@ pub fn app(target: &AppTarget) -> Result<App> {
     let prov = provider()?;
     // Validate the app exists and cache its metadata
     let tree = get_provider_ref()?.get_app_tree(target)?;
-    Ok(App::new(prov, target.clone(), tree.app_name.clone(), tree.pid))
+    Ok(App::new(
+        prov,
+        target.clone(),
+        tree.app_name.clone(),
+        tree.pid,
+    ))
 }
 
 /// List all running applications.

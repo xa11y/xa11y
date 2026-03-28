@@ -928,8 +928,9 @@ fn locator_basic_query() {
     let p: Arc<dyn Provider> = Arc::new(MockProvider::new());
     let target = AppTarget::ByName("My App".into());
     let loc = Locator::new(Arc::clone(&p), target, "button[name=\"Submit\"]");
-    assert_eq!(loc.role().unwrap(), Role::Button);
-    assert_eq!(loc.name().unwrap().as_deref(), Some("Submit"));
+    let node = loc.node().unwrap();
+    assert_eq!(node.role, Role::Button);
+    assert_eq!(node.name.as_deref(), Some("Submit"));
     assert!(loc.exists().unwrap());
 }
 
@@ -967,7 +968,7 @@ fn locator_nth() {
     let target = AppTarget::ByName("My App".into());
     // There are 3 buttons: Back(2), Submit(6), Cancel(7)
     let loc = Locator::new(Arc::clone(&p), target, "button").nth(1);
-    assert_eq!(loc.name().unwrap().as_deref(), Some("Submit"));
+    assert_eq!(loc.node().unwrap().name.as_deref(), Some("Submit"));
 }
 
 #[test]
@@ -986,7 +987,7 @@ fn locator_child() {
     let target = AppTarget::ByName("My App".into());
     let loc = Locator::new(Arc::clone(&p), target, "toolbar").child("button");
     // Toolbar has one button child: "Back"
-    assert_eq!(loc.name().unwrap().as_deref(), Some("Back"));
+    assert_eq!(loc.node().unwrap().name.as_deref(), Some("Back"));
 }
 
 #[test]
@@ -996,8 +997,9 @@ fn locator_states() {
     let target = AppTarget::ByName("My App".into());
     // Cancel button is disabled
     let loc = Locator::new(Arc::clone(&p), target, "button[name=\"Cancel\"]");
-    assert!(!loc.is_enabled().unwrap());
-    assert!(loc.is_visible().unwrap());
+    let node = loc.node().unwrap();
+    assert!(!node.states.enabled);
+    assert!(node.states.visible);
 }
 
 #[test]

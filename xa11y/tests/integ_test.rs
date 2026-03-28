@@ -35,9 +35,7 @@ mod tests {
     fn apps_returns_nonempty() {
         let apps = xa11y::apps().unwrap();
         assert!(!apps.is_empty(), "apps should return at least one app");
-        let has_test_app = apps
-            .iter()
-            .any(|a| a.name().contains("xa11y"));
+        let has_test_app = apps.iter().any(|a| a.name().contains("xa11y"));
         assert!(
             has_test_app,
             "apps should include the test app. Apps: {:?}",
@@ -52,7 +50,8 @@ mod tests {
         let by_name = h::app_tree();
         let pid = by_name.tree().pid.expect("app tree should have a PID");
         assert!(pid > 0);
-        let root = xa11y::app(&AppTarget::ByPid(pid)).unwrap();
+        let app = xa11y::app(&AppTarget::ByPid(pid)).unwrap();
+        let root = app.nodes().unwrap();
         assert!(!root.tree().is_empty());
         assert_eq!(root.tree().pid, Some(pid));
     }
@@ -1177,12 +1176,12 @@ mod tests {
         assert!(!cbs.is_empty());
         let mut current_root = root;
         for _ in 0..5 {
-            let cbs = h::query(&current_root,"check_box").unwrap();
+            let cbs = h::query(&current_root, "check_box").unwrap();
             assert!(!cbs.is_empty());
             current_root = h::act(&cbs[0], Action::Press);
         }
         // After 5 toggles (odd), state should have flipped from initial
-        let final_cb = h::query(&current_root,"check_box").unwrap();
+        let final_cb = h::query(&current_root, "check_box").unwrap();
         if !final_cb.is_empty() {
             assert_eq!(
                 final_cb[0].states.checked,
@@ -1206,11 +1205,11 @@ mod tests {
             .unwrap_or(0.0);
         let mut current_root = root;
         for _ in 0..10 {
-            let sliders = h::query(&current_root,"slider").unwrap();
+            let sliders = h::query(&current_root, "slider").unwrap();
             let slider = sliders.first().expect("No slider");
             current_root = h::act(slider, Action::Increment);
         }
-        let s = h::query(&current_root,"slider").unwrap();
+        let s = h::query(&current_root, "slider").unwrap();
         if !s.is_empty() {
             if let Some(v) = &s[0].value {
                 let val: f64 = v.parse().unwrap_or(0.0);
@@ -1254,7 +1253,12 @@ mod tests {
                     .subtree()
                     .into_iter()
                     .find(|n| n.states.expanded.is_some())
-                    .or_else(|| h::query(&ct, r#"[name*="Expander"]"#).unwrap().first().cloned())
+                    .or_else(|| {
+                        h::query(&ct, r#"[name*="Expander"]"#)
+                            .unwrap()
+                            .first()
+                            .cloned()
+                    })
                     .expect("Expander node should exist");
                 ct = h::act(&node, action);
             }

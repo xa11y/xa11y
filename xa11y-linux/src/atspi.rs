@@ -924,13 +924,11 @@ impl Provider for LinuxProvider {
                             } else {
                                 2
                             } // BOTTOM_EDGE / TOP_EDGE
+                        } else if amount >= 0.0 {
+                            5
                         } else {
-                            if amount >= 0.0 {
-                                5
-                            } else {
-                                4
-                            } // RIGHT_EDGE / LEFT_EDGE
-                        };
+                            4
+                        }; // RIGHT_EDGE / LEFT_EDGE
                         proxy
                             .call_method("ScrollTo", &(scroll_type,))
                             .map_err(|e| Error::Platform {

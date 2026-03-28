@@ -4,9 +4,8 @@ use std::time::Duration;
 use crate::action::{Action, ActionData};
 use crate::error::{Error, Result};
 use crate::event::ElementState;
-use crate::node::{Node, NodeData, Rect, StateSet};
+use crate::node::{Node, NodeData};
 use crate::provider::{AppTarget, Provider};
-use crate::role::Role;
 use crate::tree::Tree;
 
 /// A lazy element descriptor that re-resolves against a fresh accessibility
@@ -109,66 +108,7 @@ impl Locator {
         })
     }
 
-    /// Resolve and return a clone of the matched node data.
-    fn resolve_node_data(&self) -> Result<NodeData> {
-        let r = self.resolve()?;
-        Ok(r.tree
-            .get_data(r.node_index)
-            .expect("node_index valid after resolve")
-            .clone())
-    }
-
     // ── Queries (each takes a fresh snapshot) ───────────────────────
-
-    /// Get the matched element's role.
-    pub fn role(&self) -> Result<Role> {
-        Ok(self.resolve_node_data()?.role)
-    }
-
-    /// Get the matched element's name.
-    pub fn name(&self) -> Result<Option<String>> {
-        Ok(self.resolve_node_data()?.name)
-    }
-
-    /// Get the matched element's value.
-    pub fn value(&self) -> Result<Option<String>> {
-        Ok(self.resolve_node_data()?.value)
-    }
-
-    /// Get the matched element's description.
-    pub fn description(&self) -> Result<Option<String>> {
-        Ok(self.resolve_node_data()?.description)
-    }
-
-    /// Get the matched element's bounding rectangle.
-    pub fn bounds(&self) -> Result<Option<Rect>> {
-        Ok(self.resolve_node_data()?.bounds)
-    }
-
-    /// Get the matched element's state flags.
-    pub fn states(&self) -> Result<StateSet> {
-        Ok(self.resolve_node_data()?.states)
-    }
-
-    /// Get the matched element's numeric value (for range controls).
-    pub fn numeric_value(&self) -> Result<Option<f64>> {
-        Ok(self.resolve_node_data()?.numeric_value)
-    }
-
-    /// Check if the matched element is visible.
-    pub fn is_visible(&self) -> Result<bool> {
-        Ok(self.resolve_node_data()?.states.visible)
-    }
-
-    /// Check if the matched element is enabled.
-    pub fn is_enabled(&self) -> Result<bool> {
-        Ok(self.resolve_node_data()?.states.enabled)
-    }
-
-    /// Check if the matched element is focused.
-    pub fn is_focused(&self) -> Result<bool> {
-        Ok(self.resolve_node_data()?.states.focused)
-    }
 
     /// Check if a matching element exists in the current tree.
     pub fn exists(&self) -> Result<bool> {

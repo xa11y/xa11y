@@ -42,29 +42,29 @@ def test_platform_error_inherits():
 # ── Catching with base class ────────────────────────────────────────────────
 
 
-def test_catch_with_base_class(tree):
+def test_catch_with_base_class(test_app):
     with contextlib.suppress(xa11y.XA11yError):
-        tree.query("[[[bad")
+        test_app.locator("[[[bad").nodes()
 
 
-def test_catch_with_specific_class(tree):
+def test_catch_with_specific_class(test_app):
     with contextlib.suppress(xa11y.InvalidSelectorError):
-        tree.query("[[[bad")
+        test_app.locator("[[[bad").nodes()
 
 
 # ── Error messages ───────────────────────────────────────────────────────────
 
 
-def test_selector_not_matched_message(tree):
-    loc = tree.locator("menu_item")
+def test_selector_not_matched_message(test_app):
+    loc = test_app.locator("menu_item")
     try:
         loc.press()
     except xa11y.SelectorNotMatchedError as e:
         assert "menu_item" in str(e)
 
 
-def test_invalid_selector_message(tree):
+def test_invalid_selector_message(test_app):
     try:
-        tree.query("[[[bad")
+        test_app.locator("[[[bad").nodes()
     except xa11y.InvalidSelectorError as e:
         assert "bad" in str(e) or "Invalid" in str(e)

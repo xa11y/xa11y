@@ -179,7 +179,6 @@ impl Node {
             .map(|idx| Node::new(Arc::clone(&self.snapshot), idx))
             .collect()
     }
-
 }
 
 /// Boolean state flags for a node.
