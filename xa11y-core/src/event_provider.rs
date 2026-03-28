@@ -28,7 +28,7 @@ pub trait EventProvider: Provider {
         selector: &str,
         state: ElementState,
         timeout: Duration,
-    ) -> Result<NodeData>;
+    ) -> Result<Option<NodeData>>;
 }
 
 /// A live event subscription. Drop to unsubscribe.

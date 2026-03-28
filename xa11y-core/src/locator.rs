@@ -360,46 +360,54 @@ impl Locator {
     /// Wait until the element is visible, polling with fresh snapshots.
     pub fn wait_visible(&self, timeout: Duration) -> Result<Node> {
         self.wait_for_state(ElementState::Visible, timeout)
+            .map(|opt| opt.expect("visible wait must return a node"))
     }
 
     /// Wait until the element exists in the tree.
     pub fn wait_attached(&self, timeout: Duration) -> Result<Node> {
         self.wait_for_state(ElementState::Attached, timeout)
+            .map(|opt| opt.expect("attached wait must return a node"))
     }
 
     /// Wait until the element is removed from the tree.
-    pub fn wait_detached(&self, timeout: Duration) -> Result<Node> {
+    pub fn wait_detached(&self, timeout: Duration) -> Result<()> {
         self.wait_for_state(ElementState::Detached, timeout)
+            .map(|_| ())
     }
 
     /// Wait until the element is enabled.
     pub fn wait_enabled(&self, timeout: Duration) -> Result<Node> {
         self.wait_for_state(ElementState::Enabled, timeout)
+            .map(|opt| opt.expect("enabled wait must return a node"))
     }
 
     /// Wait until the element is disabled (exists but not enabled).
     pub fn wait_disabled(&self, timeout: Duration) -> Result<Node> {
         self.wait_for_state(ElementState::Disabled, timeout)
+            .map(|opt| opt.expect("disabled wait must return a node"))
     }
 
     /// Wait until the element is hidden or removed.
-    pub fn wait_hidden(&self, timeout: Duration) -> Result<Node> {
+    pub fn wait_hidden(&self, timeout: Duration) -> Result<()> {
         self.wait_for_state(ElementState::Hidden, timeout)
+            .map(|_| ())
     }
 
     /// Wait until the element has keyboard focus.
     pub fn wait_focused(&self, timeout: Duration) -> Result<Node> {
         self.wait_for_state(ElementState::Focused, timeout)
+            .map(|opt| opt.expect("focused wait must return a node"))
     }
 
     /// Wait until the element does not have keyboard focus.
     pub fn wait_unfocused(&self, timeout: Duration) -> Result<Node> {
         self.wait_for_state(ElementState::Unfocused, timeout)
+            .map(|opt| opt.expect("unfocused wait must return a node"))
     }
 
     /// Wait for an [`ElementState`] condition to be met.
-    pub fn wait_for_state(&self, state: ElementState, timeout: Duration) -> Result<Node> {
-        self.poll_until(|node| state.is_met(node), state.is_absence_state(), timeout)
+    pub fn wait_for_state(&self, state: ElementState, timeout: Duration) -> Result<Option<Node>> {
+        self.poll_until(|node| state.is_met(node), timeout)
     }
 
     /// Wait until an arbitrary predicate is satisfied, polling with fresh
@@ -411,17 +419,16 @@ impl Locator {
         &self,
         predicate: impl Fn(Option<&NodeData>) -> bool,
         timeout: Duration,
-    ) -> Result<Node> {
-        self.poll_until(&predicate, false, timeout)
+    ) -> Result<Option<Node>> {
+        self.poll_until(&predicate, timeout)
     }
 
     /// Core polling loop shared by `wait_for_state` and `wait_until`.
     fn poll_until(
         &self,
         predicate: impl Fn(Option<&NodeData>) -> bool,
-        allow_absent: bool,
         timeout: Duration,
-    ) -> Result<Node> {
+    ) -> Result<Option<Node>> {
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
 
@@ -438,14 +445,7 @@ impl Locator {
             let node_ref = matched_index.and_then(|i| tree.get_data(i));
 
             if predicate(node_ref) {
-                return if allow_absent {
-                    Ok(matched_index
-                        .map(|i| Node::new(Arc::new(tree), i))
-                        .unwrap_or_else(Node::synthetic_empty))
-                } else {
-                    let i = matched_index.expect("predicate requires node to exist");
-                    Ok(Node::new(Arc::new(tree), i))
-                };
+                return Ok(matched_index.map(|i| Node::new(Arc::new(tree), i)));
             }
 
             std::thread::sleep(poll_interval);

@@ -84,31 +84,6 @@ pub struct NodeData {
     pub parent_index: Option<NodeIndex>,
 }
 
-impl NodeData {
-    /// Create a synthetic empty node, used as a placeholder when a wait
-    /// condition is satisfied by the *absence* of a node (e.g. Detached/Hidden).
-    pub fn synthetic_empty() -> Self {
-        Self {
-            role: Role::Unknown,
-            name: None,
-            value: None,
-            description: None,
-            bounds: None,
-            actions: vec![],
-            states: StateSet::default(),
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: None,
-            pid: None,
-            raw: RawPlatformData::Synthetic,
-            index: 0,
-            children_indices: vec![],
-            parent_index: None,
-        }
-    }
-}
-
 /// A node in an accessibility tree snapshot, with navigation.
 ///
 /// `Node` dereferences to [`NodeData`], so all properties (`role`, `name`,
@@ -215,18 +190,6 @@ impl Node {
             .into_iter()
             .map(|idx| Node::new(Arc::clone(&self.snapshot), idx))
             .collect())
-    }
-
-    /// Get a synthetic empty Node (no snapshot navigation).
-    /// Used as a placeholder when a wait condition is satisfied by absence.
-    pub fn synthetic_empty() -> Self {
-        let tree = Tree::new(
-            String::new(),
-            None,
-            (0, 0),
-            vec![NodeData::synthetic_empty()],
-        );
-        Node::new(Arc::new(tree), 0)
     }
 }
 
