@@ -2,15 +2,10 @@
 
 use xa11y::*;
 
-/// Get the test app tree with default options, retrying briefly for registration.
+/// Get the test app tree, retrying briefly for registration.
 pub fn app_tree() -> Node {
-    app_tree_with(&QueryOptions::default())
-}
-
-/// Get the test app tree with custom QueryOptions, retrying for registration.
-pub fn app_tree_with(opts: &QueryOptions) -> Node {
     for attempt in 0..3 {
-        match xa11y::app(&AppTarget::ByName("xa11y".to_string()), opts) {
+        match xa11y::app(&AppTarget::ByName("xa11y".to_string())) {
             Ok(root) => return root,
             Err(_) if attempt < 2 => {
                 std::thread::sleep(std::time::Duration::from_millis(200));

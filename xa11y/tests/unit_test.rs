@@ -777,17 +777,6 @@ fn event_filter_combined() {
     assert_eq!(filter.selector.as_deref(), Some("check_box"));
 }
 
-// ── QueryOptions ──
-
-#[test]
-fn query_options_default() {
-    let opts = QueryOptions::default();
-    assert!(opts.max_depth.is_none());
-    assert!(opts.max_elements.is_none());
-    assert!(!opts.visible_only);
-    assert!(opts.roles.is_empty());
-}
-
 // ── Provider trait / AppTarget ──
 
 #[test]
@@ -849,10 +838,7 @@ fn platform_provider_operations_return_errors() {
         Err(_) => return,
     };
 
-    let result = provider.get_app_tree(
-        &AppTarget::ByName("NonexistentApp12345".to_string()),
-        &QueryOptions::default(),
-    );
+    let result = provider.get_app_tree(&AppTarget::ByName("NonexistentApp12345".to_string()));
     assert!(result.is_err());
 }
 
@@ -921,11 +907,11 @@ impl MockProvider {
 }
 
 impl Provider for MockProvider {
-    fn get_app_tree(&self, _target: &AppTarget, _opts: &QueryOptions) -> xa11y::Result<Tree> {
+    fn get_app_tree(&self, _target: &AppTarget) -> xa11y::Result<Tree> {
         Ok(self.tree.clone())
     }
 
-    fn get_apps(&self, _opts: &QueryOptions) -> xa11y::Result<Tree> {
+    fn get_apps(&self) -> xa11y::Result<Tree> {
         Ok(self.tree.clone())
     }
 

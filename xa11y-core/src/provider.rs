@@ -3,16 +3,15 @@ use serde::{Deserialize, Serialize};
 use crate::action::{Action, ActionData};
 use crate::error::Result;
 use crate::node::NodeData;
-use crate::role::Role;
 use crate::tree::Tree;
 
 /// Platform backend trait for accessibility tree access.
 pub trait Provider: Send + Sync {
     /// Snapshot a specific application's accessibility tree.
-    fn get_app_tree(&self, target: &AppTarget, opts: &QueryOptions) -> Result<Tree>;
+    fn get_app_tree(&self, target: &AppTarget) -> Result<Tree>;
 
     /// Snapshot all running applications (shallow).
-    fn get_apps(&self, opts: &QueryOptions) -> Result<Tree>;
+    fn get_apps(&self) -> Result<Tree>;
 
     /// Perform an action on an element from a specific snapshot.
     ///
@@ -51,19 +50,6 @@ pub enum WindowHandle {
     Windows(usize),
     /// Linux X11 window ID
     X11(u64),
-}
-
-/// Options controlling tree traversal and content.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct QueryOptions {
-    /// Maximum tree depth to traverse. `None` = unlimited.
-    pub max_depth: Option<u32>,
-    /// Maximum number of elements to collect. `None` = unlimited.
-    pub max_elements: Option<u32>,
-    /// Only include visible elements.
-    pub visible_only: bool,
-    /// Filter to specific roles. Empty = no filter.
-    pub roles: Vec<Role>,
 }
 
 /// Result of a permission check.

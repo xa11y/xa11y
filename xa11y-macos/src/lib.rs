@@ -25,10 +25,10 @@ mod stub {
     }
 
     impl Provider for MacOSProvider {
-        fn get_app_tree(&self, _: &AppTarget, _: &QueryOptions) -> Result<Tree> {
+        fn get_app_tree(&self, _: &AppTarget) -> Result<Tree> {
             unreachable!()
         }
-        fn get_apps(&self, _: &QueryOptions) -> Result<Tree> {
+        fn get_apps(&self) -> Result<Tree> {
             unreachable!()
         }
         fn perform_action(

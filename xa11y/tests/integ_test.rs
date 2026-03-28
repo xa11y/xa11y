@@ -33,20 +33,13 @@ mod tests {
     #[test]
     #[ignore]
     fn apps_returns_nonempty() {
-        // Limit depth/elements to avoid traversing every app on the system
-        let root = xa11y::apps(&QueryOptions {
-            max_depth: Some(2),
-            max_elements: Some(200),
-            ..QueryOptions::default()
-        })
-        .unwrap();
+        let root = xa11y::apps().unwrap();
         assert!(!root.tree().is_empty(), "apps should return nodes");
         assert_eq!(root.tree().app_name, "Desktop");
         assert!(
             root.tree().pid.is_none(),
             "Multi-app tree should have no PID"
         );
-        // With limited traversal, test app should still appear at depth 1-2
         let has_test_app = root
             .subtree()
             .iter()
@@ -66,12 +59,7 @@ mod tests {
     #[ignore]
     fn app_target_by_pid() {
         // Find test app PID from the apps tree
-        let root = xa11y::apps(&QueryOptions {
-            max_depth: Some(1),
-            max_elements: Some(200),
-            ..QueryOptions::default()
-        })
-        .unwrap();
+        let root = xa11y::apps().unwrap();
         let subtree = root.subtree();
         let test_app = subtree
             .iter()
@@ -79,7 +67,7 @@ mod tests {
             .expect("Test app not found in apps tree");
         let pid = test_app.pid.expect("Test app should have a PID");
         assert!(pid > 0);
-        let root = xa11y::app(&AppTarget::ByPid(pid), &QueryOptions::default()).unwrap();
+        let root = xa11y::app(&AppTarget::ByPid(pid)).unwrap();
         assert!(!root.tree().is_empty());
         assert_eq!(root.tree().pid, Some(pid));
     }
@@ -871,40 +859,6 @@ mod tests {
         assert!(results[0].name.as_deref().unwrap().contains("Sub"));
     }
 
-    // ════════════════════════════════════════════════════════════════
-    // QueryOptions (5 tests)
-    // ════════════════════════════════════════════════════════════════
-
-    #[test]
-    #[ignore]
-    fn opts_max_depth() {
-        let shallow = h::app_tree_with(&QueryOptions {
-            max_depth: Some(1),
-            ..QueryOptions::default()
-        });
-        let deep = h::app_tree();
-        assert!(
-            shallow.tree().len() < deep.tree().len(),
-            "Shallow ({}) should be smaller than deep ({})",
-            shallow.tree().len(),
-            deep.tree().len()
-        );
-    }
-
-    #[test]
-    #[ignore]
-    fn opts_max_elements() {
-        let limited = h::app_tree_with(&QueryOptions {
-            max_elements: Some(5),
-            ..QueryOptions::default()
-        });
-        assert!(
-            limited.tree().len() <= 5,
-            "Got {} elements",
-            limited.tree().len()
-        );
-    }
-
     #[test]
     #[ignore]
     fn raw_data_always_present() {
@@ -923,45 +877,6 @@ mod tests {
             }
             _ => panic!("Expected macOS raw data"),
         }
-    }
-
-    #[test]
-    #[ignore]
-    fn opts_visible_only() {
-        let root = h::app_tree_with(&QueryOptions {
-            visible_only: true,
-            ..QueryOptions::default()
-        });
-        // The root node is always included even if not visible,
-        // so skip it when checking visibility.
-        for node in root.subtree() {
-            if node.parent_index.is_none() {
-                continue;
-            }
-            assert!(
-                node.states.visible,
-                "Node {:?} should be visible",
-                node.name
-            );
-        }
-        assert!(root.tree().len() > 1);
-    }
-
-    #[test]
-    #[ignore]
-    fn opts_roles_filter() {
-        let root = h::app_tree_with(&QueryOptions {
-            roles: vec![Role::Button],
-            ..QueryOptions::default()
-        });
-        // The root node is always included to anchor the tree.
-        for node in root.subtree() {
-            if node.parent_index.is_none() {
-                continue;
-            }
-            assert_eq!(node.role, Role::Button);
-        }
-        assert!(root.tree().len() >= 2);
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -1385,10 +1300,7 @@ mod tests {
     #[test]
     #[ignore]
     fn error_app_not_found() {
-        let result = xa11y::app(
-            &AppTarget::ByName("nonexistent_app_12345".to_string()),
-            &QueryOptions::default(),
-        );
+        let result = xa11y::app(&AppTarget::ByName("nonexistent_app_12345".to_string()));
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::AppNotFound { .. }));
     }

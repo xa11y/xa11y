@@ -19,21 +19,16 @@ Cross-platform accessibility library for reading and interacting with accessibil
 use xa11y::*;
 
 fn main() -> Result<()> {
-    let provider = create_provider()?;
-
     // Get the accessibility tree for an app
-    let tree = provider.get_app_tree(
-        &AppTarget::ByName("Safari".to_string()),
-        &QueryOptions::default(),
-    )?;
+    let root = app(&AppTarget::ByName("Safari".to_string()))?;
 
     // Find elements with CSS-like selectors
-    let buttons = tree.query("button[name='Submit']")?;
+    let buttons = root.query("button[name='Submit']")?;
     println!("Found {} buttons", buttons.len());
 
     // Interact with elements
-    let submit = Locator::new(&*provider, AppTarget::ByName("Safari".to_string()), "button[name='Submit']");
-    submit.press()?;
+    let loc = locator(AppTarget::ByName("Safari".to_string()), "button[name='Submit']")?;
+    loc.press()?;
 
     Ok(())
 }

@@ -75,16 +75,11 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
     use xa11y::*;
 
     fn main() -> Result<()> {
-        let provider = create_provider()?;
-
         // Get the accessibility tree for an app by name
-        let tree = provider.get_app_tree(
-            &AppTarget::ByName("Safari".to_string()),
-            &QueryOptions::default(),
-        )?;
+        let root = app(&AppTarget::ByName("Safari".to_string()))?;
 
-        println!("Root: {:?}", tree.root().role);
-        println!("Children: {}", tree.children(tree.root()).len());
+        println!("Root: {:?}", root.role);
+        println!("Children: {}", root.children().len());
 
         Ok(())
     }
@@ -112,22 +107,18 @@ xa11y supports CSS-like selectors to find elements in the tree.
     ```rust
     use xa11y::*;
 
-    let provider = create_provider()?;
-    let tree = provider.get_app_tree(
-        &AppTarget::ByName("Safari".to_string()),
-        &QueryOptions::default(),
-    )?;
+    let root = app(&AppTarget::ByName("Safari".to_string()))?;
 
     // Find all buttons
-    let buttons = tree.query("button")?;
+    let buttons = root.query("button")?;
 
     // Find a button by name
-    let submit = tree.query("button[name='Submit']")?;
+    let submit = root.query("button[name='Submit']")?;
     let first = &submit[0];
     println!("Found: {}", first.name.as_deref().unwrap_or("unnamed"));
 
     // Find text fields
-    let fields = tree.query("textfield")?;
+    let fields = root.query("textfield")?;
     ```
   </TabItem>
   <TabItem label="Python">
@@ -194,10 +185,7 @@ xa11y supports CSS-like selectors to find elements in the tree.
     ```rust
     use xa11y::*;
 
-    let root = apps(&QueryOptions {
-        max_depth: Some(1),
-        ..QueryOptions::default()
-    })?;
+    let root = apps()?;
 
     for child in root.children() {
         println!("{} (pid: {:?})", child.name.as_deref().unwrap_or("?"), child.pid());
@@ -208,7 +196,7 @@ xa11y supports CSS-like selectors to find elements in the tree.
     ```python
     import xa11y
 
-    root = xa11y.apps(max_depth=1)
+    root = xa11y.apps()
     for child in root.children:
         print(f"{child.name} (pid: {child.pid})")
     ```

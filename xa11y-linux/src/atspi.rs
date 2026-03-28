@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use xa11y_core::{
     Action, ActionData, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
-    EventKind, EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, QueryOptions,
-    Rect, Result, Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
+    EventKind, EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, Rect, Result,
+    Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
 };
 use zbus::blocking::{Connection, Proxy};
 
@@ -306,24 +306,12 @@ impl LinuxProvider {
     fn traverse(
         &self,
         aref: &AccessibleRef,
-        opts: &QueryOptions,
         nodes: &mut Vec<NodeData>,
         refs: &mut Vec<AccessibleRef>,
         parent_idx: Option<u32>,
         depth: u32,
         screen_size: (u32, u32),
     ) {
-        if let Some(max_depth) = opts.max_depth {
-            if depth > max_depth {
-                return;
-            }
-        }
-        if let Some(max_elements) = opts.max_elements {
-            if nodes.len() >= max_elements as usize {
-                return;
-            }
-        }
-
         let role_name = self.get_role_name(aref).unwrap_or_default();
         let role_num = self.get_role_number(aref).unwrap_or(0);
         let role = if !role_name.is_empty() {
@@ -331,47 +319,6 @@ impl LinuxProvider {
         } else {
             map_atspi_role_number(role_num)
         };
-
-        // Don't apply role/visibility filters to the root node (depth 0)
-        // so the tree always has at least the application node.
-        let is_root = depth == 0;
-
-        // For role filtering, skip adding this node but still traverse children
-        // so descendant nodes matching the filter can be found.
-        let skip_for_role = if !is_root {
-            !opts.roles.is_empty() && !opts.roles.contains(&role)
-        } else {
-            false
-        };
-
-        // If role-filtered, skip this node but still traverse children
-        // so that descendant nodes matching the filter can be found.
-        if skip_for_role {
-            let children = self.get_children(aref).unwrap_or_default();
-            for child_ref in &children {
-                if let Some(max_elements) = opts.max_elements {
-                    if nodes.len() >= max_elements as usize {
-                        break;
-                    }
-                }
-                if child_ref.path == "/org/a11y/atspi/null"
-                    || child_ref.bus_name.is_empty()
-                    || child_ref.path.is_empty()
-                {
-                    continue;
-                }
-                self.traverse(
-                    child_ref,
-                    opts,
-                    nodes,
-                    refs,
-                    parent_idx,
-                    depth + 1,
-                    screen_size,
-                );
-            }
-            return;
-        }
 
         let mut name = self.get_name(aref).ok().filter(|s| !s.is_empty());
         let description = self.get_description(aref).ok().filter(|s| !s.is_empty());
@@ -387,10 +334,6 @@ impl LinuxProvider {
         let bounds = self.get_extents(aref);
         let states = self.parse_states(aref, role);
         let actions = self.get_actions(aref);
-
-        if !is_root && opts.visible_only && !states.visible {
-            return;
-        }
 
         let raw = {
             let raw_role = if role_name.is_empty() {
@@ -448,11 +391,6 @@ impl LinuxProvider {
         let mut child_ids = Vec::new();
 
         for child_ref in &children {
-            if let Some(max_elements) = opts.max_elements {
-                if nodes.len() >= max_elements as usize {
-                    break;
-                }
-            }
             // Skip invalid refs
             if child_ref.path == "/org/a11y/atspi/null"
                 || child_ref.bus_name.is_empty()
@@ -464,7 +402,6 @@ impl LinuxProvider {
             child_ids.push(child_idx);
             self.traverse(
                 child_ref,
-                opts,
                 nodes,
                 refs,
                 Some(node_idx),
@@ -707,7 +644,7 @@ impl LinuxProvider {
 }
 
 impl Provider for LinuxProvider {
-    fn get_app_tree(&self, target: &AppTarget, opts: &QueryOptions) -> Result<Tree> {
+    fn get_app_tree(&self, target: &AppTarget) -> Result<Tree> {
         let app_ref = match target {
             AppTarget::ByName(name) => self.find_app_by_name(name)?,
             AppTarget::ByPid(pid) => self.find_app_by_pid(*pid)?,
@@ -724,7 +661,7 @@ impl Provider for LinuxProvider {
         let mut nodes = Vec::new();
         let mut refs = Vec::new();
 
-        self.traverse(&app_ref, opts, &mut nodes, &mut refs, None, 0, screen_size);
+        self.traverse(&app_ref, &mut nodes, &mut refs, None, 0, screen_size);
 
         if nodes.is_empty() {
             return Err(Error::AppNotFound {
@@ -740,7 +677,7 @@ impl Provider for LinuxProvider {
         Ok(Tree::new(app_name, pid, screen_size, nodes))
     }
 
-    fn get_apps(&self, opts: &QueryOptions) -> Result<Tree> {
+    fn get_apps(&self) -> Result<Tree> {
         let screen_size = Self::detect_screen_size();
         let mut nodes = Vec::new();
 
@@ -791,7 +728,7 @@ impl Provider for LinuxProvider {
             }
             let child_idx = nodes.len() as u32;
             root_children.push(child_idx);
-            self.traverse(child, opts, &mut nodes, &mut refs, Some(0), 1, screen_size);
+            self.traverse(child, &mut nodes, &mut refs, Some(0), 1, screen_size);
         }
 
         nodes[0].children_indices = root_children;
@@ -1123,8 +1060,7 @@ impl EventProvider for LinuxProvider {
             while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(100));
 
-                let tree = match poll_provider.get_app_tree(&target_clone, &QueryOptions::default())
-                {
+                let tree = match poll_provider.get_app_tree(&target_clone) {
                     Ok(t) => t,
                     Err(_) => continue,
                 };
@@ -1218,7 +1154,7 @@ impl EventProvider for LinuxProvider {
                 return Err(Error::Timeout { elapsed });
             }
 
-            let tree = self.get_app_tree(target, &QueryOptions::default())?;
+            let tree = self.get_app_tree(target)?;
             let matches = tree.query(selector).ok();
             let node = matches.as_ref().and_then(|m| m.first().copied());
 

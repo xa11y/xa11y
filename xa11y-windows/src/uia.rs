@@ -12,8 +12,8 @@ use windows::Win32::UI::Accessibility::*;
 
 use xa11y_core::{
     Action, ActionData, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
-    EventKind, EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, QueryOptions,
-    RawPlatformData, Rect, Result, Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
+    EventKind, EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, RawPlatformData,
+    Rect, Result, Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
 };
 
 /// Initialize COM for UIA. Called once per WindowsProvider creation.
@@ -235,7 +235,6 @@ impl WindowsProvider {
     fn traverse(
         &self,
         element: &IUIAutomationElement,
-        opts: &QueryOptions,
         nodes: &mut Vec<NodeData>,
         elements: &mut Vec<IUIAutomationElement>,
         parent_idx: Option<u32>,
@@ -250,17 +249,6 @@ impl WindowsProvider {
         // Depth limit is sufficient for cycle protection on UIA trees.
         // (COM pointer identity is unreliable for cycle detection because
         // UIA creates proxy objects with different addresses for the same element.)
-
-        if let Some(max_depth) = opts.max_depth {
-            if depth > max_depth {
-                return;
-            }
-        }
-        if let Some(max_elements) = opts.max_elements {
-            if nodes.len() >= max_elements as usize {
-                return;
-            }
-        }
 
         let control_type = unsafe { element.CurrentControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
         let mut role = map_uia_control_type(control_type);
@@ -285,26 +273,6 @@ impl WindowsProvider {
                     }
                 }
             }
-        }
-
-        // Role filter: skip node but still traverse children
-        let role_filtered = if depth > 0 {
-            !opts.roles.is_empty() && !opts.roles.contains(&role)
-        } else {
-            false
-        };
-
-        if role_filtered {
-            self.traverse_children(
-                element,
-                opts,
-                nodes,
-                elements,
-                parent_idx,
-                depth,
-                screen_size,
-            );
-            return;
         }
 
         let name = unsafe { element.CurrentName() }
@@ -342,19 +310,6 @@ impl WindowsProvider {
             });
 
         let states = parse_states(element, role);
-
-        if depth > 0 && opts.visible_only && !states.visible {
-            self.traverse_children(
-                element,
-                opts,
-                nodes,
-                elements,
-                parent_idx,
-                depth,
-                screen_size,
-            );
-            return;
-        }
 
         // Bounds
         let bounds = unsafe { element.CurrentBoundingRectangle() }
@@ -451,17 +406,11 @@ impl WindowsProvider {
                 let count = unsafe { children.Length() }.unwrap_or(0);
                 if count > 0 {
                     for i in 0..count {
-                        if let Some(max_elements) = opts.max_elements {
-                            if nodes.len() >= max_elements as usize {
-                                break;
-                            }
-                        }
                         if let Ok(child_el) = unsafe { children.GetElement(i) } {
                             let child_idx = nodes.len() as u32;
                             child_ids.push(child_idx);
                             self.traverse(
                                 &child_el,
-                                opts,
                                 nodes,
                                 elements,
                                 Some(node_idx),
@@ -486,16 +435,10 @@ impl WindowsProvider {
             if let Ok(walker) = unsafe { self.automation.RawViewWalker() } {
                 let mut child = unsafe { walker.GetFirstChildElement(element) }.ok();
                 while let Some(ref child_el) = child {
-                    if let Some(max_elements) = opts.max_elements {
-                        if nodes.len() >= max_elements as usize {
-                            break;
-                        }
-                    }
                     let child_idx = nodes.len() as u32;
                     child_ids.push(child_idx);
                     self.traverse(
                         child_el,
-                        opts,
                         nodes,
                         elements,
                         Some(node_idx),
@@ -509,47 +452,10 @@ impl WindowsProvider {
 
         nodes[node_idx as usize].children_indices = child_ids;
     }
-
-    /// Traverse children only (used when current node is filtered out).
-    #[allow(clippy::too_many_arguments)]
-    fn traverse_children(
-        &self,
-        element: &IUIAutomationElement,
-        opts: &QueryOptions,
-        nodes: &mut Vec<NodeData>,
-        elements: &mut Vec<IUIAutomationElement>,
-        parent_idx: Option<u32>,
-        depth: u32,
-        screen_size: (u32, u32),
-    ) {
-        let walker = match unsafe { self.automation.RawViewWalker() } {
-            Ok(w) => w,
-            Err(_) => return,
-        };
-
-        let mut child = unsafe { walker.GetFirstChildElement(element) }.ok();
-        while let Some(ref child_el) = child {
-            if let Some(max_elements) = opts.max_elements {
-                if nodes.len() >= max_elements as usize {
-                    break;
-                }
-            }
-            self.traverse(
-                child_el,
-                opts,
-                nodes,
-                elements,
-                parent_idx,
-                depth + 1,
-                screen_size,
-            );
-            child = unsafe { walker.GetNextSiblingElement(child_el) }.ok();
-        }
-    }
 }
 
 impl Provider for WindowsProvider {
-    fn get_app_tree(&self, target: &AppTarget, opts: &QueryOptions) -> Result<Tree> {
+    fn get_app_tree(&self, target: &AppTarget) -> Result<Tree> {
         let (app_element, pid, app_name) = match target {
             AppTarget::ByName(name) => self.find_app_by_name(name)?,
             AppTarget::ByPid(pid) => {
@@ -570,7 +476,6 @@ impl Provider for WindowsProvider {
 
         self.traverse(
             &app_element,
-            opts,
             &mut nodes,
             &mut elements,
             None,
@@ -589,7 +494,7 @@ impl Provider for WindowsProvider {
         Ok(Tree::new(app_name, Some(pid), screen_size, nodes))
     }
 
-    fn get_apps(&self, opts: &QueryOptions) -> Result<Tree> {
+    fn get_apps(&self) -> Result<Tree> {
         let screen_size = Self::detect_screen_size();
         let mut nodes = Vec::new();
         let mut elements = Vec::new();
@@ -661,15 +566,7 @@ impl Provider for WindowsProvider {
                 }
                 let child_idx = nodes.len() as u32;
                 root_children.push(child_idx);
-                self.traverse(
-                    &el,
-                    opts,
-                    &mut nodes,
-                    &mut elements,
-                    Some(0),
-                    1,
-                    screen_size,
-                );
+                self.traverse(&el, &mut nodes, &mut elements, Some(0), 1, screen_size);
             }
         }
 
@@ -1349,8 +1246,7 @@ impl EventProvider for WindowsProvider {
             while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(100));
 
-                let tree = match poll_provider.get_app_tree(&target_clone, &QueryOptions::default())
-                {
+                let tree = match poll_provider.get_app_tree(&target_clone) {
                     Ok(t) => t,
                     Err(_) => continue,
                 };
@@ -1444,7 +1340,7 @@ impl EventProvider for WindowsProvider {
                 return Err(Error::Timeout { elapsed });
             }
 
-            let tree = self.get_app_tree(target, &QueryOptions::default())?;
+            let tree = self.get_app_tree(target)?;
             let matches = tree.query(selector).ok();
             let node = matches.as_ref().and_then(|m| m.first().copied());
 

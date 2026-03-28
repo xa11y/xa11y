@@ -14,7 +14,6 @@
 //!     PermissionStatus::Granted => {
 //!         let root = app(
 //!             &AppTarget::ByName("Safari".to_string()),
-//!             &QueryOptions::default(),
 //!         ).expect("Failed to get app");
 //!
 //!         // Snapshot navigation — no refetch
@@ -46,8 +45,8 @@ use std::sync::{Arc, OnceLock};
 pub use xa11y_core::{
     Action, ActionData, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
     EventKind, EventProvider, EventReceiver, Locator, Node, NodeData, PermissionStatus, Provider,
-    QueryOptions, RawPlatformData, Rect, Result, Role, ScrollDirection, StateFlag, StateSet,
-    Subscription, TextChangeData, TextChangeType, Toggled, Tree, WindowHandle,
+    RawPlatformData, Rect, Result, Role, ScrollDirection, StateFlag, StateSet, Subscription,
+    TextChangeData, TextChangeType, Toggled, Tree, WindowHandle,
 };
 
 // ── Internal singleton ──────────────────────────────────────────────────────
@@ -76,11 +75,11 @@ fn get_provider_ref() -> Result<&'static dyn Provider> {
 struct StaticProviderRef(&'static dyn Provider);
 
 impl Provider for StaticProviderRef {
-    fn get_app_tree(&self, target: &AppTarget, opts: &QueryOptions) -> Result<xa11y_core::Tree> {
-        self.0.get_app_tree(target, opts)
+    fn get_app_tree(&self, target: &AppTarget) -> Result<xa11y_core::Tree> {
+        self.0.get_app_tree(target)
     }
-    fn get_apps(&self, opts: &QueryOptions) -> Result<xa11y_core::Tree> {
-        self.0.get_apps(opts)
+    fn get_apps(&self) -> Result<xa11y_core::Tree> {
+        self.0.get_apps()
     }
     fn perform_action(
         &self,
@@ -111,8 +110,8 @@ pub fn provider() -> Result<Arc<dyn Provider>> {
 /// Returns the root [`Node`], which you can navigate via
 /// `parent()`, `children()`, and `query()` — all using the snapshot
 /// (no platform refetch).
-pub fn app(target: &AppTarget, opts: &QueryOptions) -> Result<Node> {
-    let tree = get_provider_ref()?.get_app_tree(target, opts)?;
+pub fn app(target: &AppTarget) -> Result<Node> {
+    let tree = get_provider_ref()?.get_app_tree(target)?;
     let tree = Arc::new(tree);
     Ok(Node::new(tree, 0))
 }
@@ -120,8 +119,8 @@ pub fn app(target: &AppTarget, opts: &QueryOptions) -> Result<Node> {
 /// Snapshot all running applications (shallow).
 ///
 /// Returns the root [`Node`] of a merged tree containing all apps.
-pub fn apps(opts: &QueryOptions) -> Result<Node> {
-    let tree = get_provider_ref()?.get_apps(opts)?;
+pub fn apps() -> Result<Node> {
+    let tree = get_provider_ref()?.get_apps()?;
     let tree = Arc::new(tree);
     Ok(Node::new(tree, 0))
 }
@@ -150,11 +149,6 @@ pub fn check_permissions() -> Result<PermissionStatus> {
 /// making them immune to staleness.
 pub fn locator(target: AppTarget, selector: &str) -> Result<Locator> {
     Ok(Locator::new(provider()?, target, selector))
-}
-
-/// Create a Locator with custom query options.
-pub fn locator_with_opts(target: AppTarget, selector: &str, opts: QueryOptions) -> Result<Locator> {
-    Ok(Locator::with_opts(provider()?, target, selector, opts))
 }
 
 // ── Platform provider construction (internal) ───────────────────────────────
