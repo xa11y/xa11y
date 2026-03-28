@@ -144,4 +144,3 @@ impl std::fmt::Display for ActionData {
         }
     }
 }
-

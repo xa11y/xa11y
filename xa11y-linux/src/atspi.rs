@@ -919,9 +919,17 @@ impl Provider for LinuxProvider {
                             "org.a11y.atspi.Component",
                         )?;
                         let scroll_type: u32 = if is_vertical {
-                            if amount >= 0.0 { 3 } else { 2 } // BOTTOM_EDGE / TOP_EDGE
+                            if amount >= 0.0 {
+                                3
+                            } else {
+                                2
+                            } // BOTTOM_EDGE / TOP_EDGE
                         } else {
-                            if amount >= 0.0 { 5 } else { 4 } // RIGHT_EDGE / LEFT_EDGE
+                            if amount >= 0.0 {
+                                5
+                            } else {
+                                4
+                            } // RIGHT_EDGE / LEFT_EDGE
                         };
                         proxy
                             .call_method("ScrollTo", &(scroll_type,))
