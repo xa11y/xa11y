@@ -58,9 +58,7 @@ jobs:
         run: npm run build
 
       - name: Generate Rust API docs
-        run: cargo doc --workspace --no-deps
-        env:
-          RUSTDOCFLAGS: --default-theme ayu
+        run: cargo doc -p xa11y --no-deps
 
       - name: Build Python API docs (Sphinx)
         working-directory: docs/python
