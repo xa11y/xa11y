@@ -45,8 +45,8 @@ use std::sync::{Arc, OnceLock};
 pub use xa11y_core::{
     Action, ActionData, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
     EventKind, EventReceiver, Locator, Node, NodeData, PermissionStatus, RawPlatformData, Rect,
-    Result, Role, StateFlag, StateSet, Subscription, TextChangeData,
-    TextChangeType, Toggled, Tree, WindowHandle,
+    Result, Role, StateFlag, StateSet, Subscription, TextChangeData, TextChangeType, Toggled, Tree,
+    WindowHandle,
 };
 
 // Provider traits are implementation details used by platform backends and Python bindings,
