@@ -32,16 +32,16 @@ pub enum Action {
     ///
     /// **Platform note:** No-op on macOS (no direct AX equivalent).
     ScrollIntoView,
-    /// Scroll by a given amount and direction.
+    /// Scroll vertically by a given amount (positive = down, negative = up).
     ///
-    /// Accepts `ActionData::ScrollAmount { direction, amount }`.
+    /// Accepts `ActionData::ScrollAmount(f64)`.
     /// Amount is in logical scroll units (≈ one mouse wheel notch).
+    ScrollDown,
+    /// Scroll horizontally by a given amount (positive = right, negative = left).
     ///
-    /// **Platform mapping:**
-    /// - macOS: `CGEventCreateScrollWheelEvent` with pixel delta (1 unit ≈ 10px)
-    /// - Windows: `IUIAutomationScrollPattern.Scroll()` with `SmallIncrement` repeated
-    /// - Linux: AT-SPI `Component.ScrollTo` with edge alignment
-    Scroll,
+    /// Accepts `ActionData::ScrollAmount(f64)`.
+    /// Amount is in logical scroll units (≈ one mouse wheel notch).
+    ScrollRight,
     /// Increment a slider or spinner
     Increment,
     /// Decrement a slider or spinner
@@ -74,7 +74,8 @@ impl std::fmt::Display for Action {
             Action::Select => write!(f, "Select"),
             Action::ShowMenu => write!(f, "ShowMenu"),
             Action::ScrollIntoView => write!(f, "ScrollIntoView"),
-            Action::Scroll => write!(f, "Scroll"),
+            Action::ScrollDown => write!(f, "ScrollDown"),
+            Action::ScrollRight => write!(f, "ScrollRight"),
             Action::Increment => write!(f, "Increment"),
             Action::Decrement => write!(f, "Decrement"),
             Action::Blur => write!(f, "Blur"),
@@ -91,11 +92,8 @@ pub enum ActionData {
     Value(String),
     /// Numeric value for SetValue action
     NumericValue(f64),
-    /// Scroll amount and direction
-    ScrollAmount {
-        direction: ScrollDirection,
-        amount: f64,
-    },
+    /// Scroll amount in logical scroll units
+    ScrollAmount(f64),
     /// Text selection range (character offsets, 0-based)
     TextSelection { start: u32, end: u32 },
 }
@@ -139,9 +137,7 @@ impl std::fmt::Display for ActionData {
         match self {
             ActionData::Value(s) => write!(f, "Value({s:?})"),
             ActionData::NumericValue(n) => write!(f, "NumericValue({n})"),
-            ActionData::ScrollAmount { direction, amount } => {
-                write!(f, "ScrollAmount({direction:?}, {amount})")
-            }
+            ActionData::ScrollAmount(amount) => write!(f, "ScrollAmount({amount})"),
             ActionData::TextSelection { start, end } => {
                 write!(f, "TextSelection({start}..{end})")
             }
@@ -149,11 +145,3 @@ impl std::fmt::Display for ActionData {
     }
 }
 
-/// Direction for scroll actions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum ScrollDirection {
-    Up,
-    Down,
-    Left,
-    Right,
-}

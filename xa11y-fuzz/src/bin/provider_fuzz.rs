@@ -123,7 +123,8 @@ mod provider_fuzz {
         Action::Select,
         Action::ShowMenu,
         Action::ScrollIntoView,
-        Action::Scroll,
+        Action::ScrollDown,
+        Action::ScrollRight,
         Action::Increment,
         Action::Decrement,
         Action::Blur,
@@ -270,18 +271,11 @@ mod provider_fuzz {
                     texts[rng.random_range(0..texts.len())].to_string(),
                 ))
             }
-            Action::Scroll => {
-                let directions = [
-                    ScrollDirection::Up,
-                    ScrollDirection::Down,
-                    ScrollDirection::Left,
-                    ScrollDirection::Right,
-                ];
-                let amounts = [1.0, 3.0, 10.0, 0.5];
-                Some(ActionData::ScrollAmount {
-                    direction: directions[rng.random_range(0..directions.len())],
-                    amount: amounts[rng.random_range(0..amounts.len())],
-                })
+            Action::ScrollDown | Action::ScrollRight => {
+                let amounts = [1.0, 3.0, 10.0, 0.5, -1.0, -3.0];
+                Some(ActionData::ScrollAmount(
+                    amounts[rng.random_range(0..amounts.len())],
+                ))
             }
             Action::SetTextSelection => Some(ActionData::TextSelection {
                 start: rng.random_range(0..10),

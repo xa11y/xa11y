@@ -12,7 +12,7 @@ use core_foundation::string::CFString;
 use xa11y_core::{
     Action, ActionData, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
     EventKind, EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, RawPlatformData,
-    Rect, Result, Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
+    Rect, Result, Role, StateSet, Subscription, Toggled, Tree,
 };
 
 // ── FFI Declarations ──────────────────────────────────────────────────────────
@@ -503,7 +503,11 @@ fn xa11y_action_to_ax(action: Action) -> Option<&'static str> {
         Action::ShowMenu => Some("AXShowMenu"),
         Action::Increment => Some("AXIncrement"),
         Action::Decrement => Some("AXDecrement"),
-        Action::Scroll | Action::Blur | Action::SetTextSelection | Action::TypeText => None,
+        Action::ScrollDown
+        | Action::ScrollRight
+        | Action::Blur
+        | Action::SetTextSelection
+        | Action::TypeText => None,
         _ => None,
     }
 }
@@ -1160,25 +1164,33 @@ impl Provider for MacOSProvider {
                 Ok(())
             }
 
-            Action::Scroll => {
-                let (direction, amount) = match data {
-                    Some(ActionData::ScrollAmount { direction, amount }) => (direction, amount),
+            Action::ScrollDown => {
+                let amount = match data {
+                    Some(ActionData::ScrollAmount(amount)) => amount,
                     _ => {
                         return Err(Error::Platform {
                             code: -1,
-                            message: "Scroll requires ActionData::ScrollAmount".to_string(),
+                            message: "ScrollDown requires ActionData::ScrollAmount".to_string(),
                         })
                     }
                 };
-                // 1 logical scroll unit ≈ 10 pixels
-                let pixels = (amount * 10.0) as i32;
-                let (dy, dx) = match direction {
-                    ScrollDirection::Up => (pixels, 0),
-                    ScrollDirection::Down => (-pixels, 0),
-                    ScrollDirection::Left => (0, pixels),
-                    ScrollDirection::Right => (0, -pixels),
+                let dy = -(amount * 10.0) as i32;
+                unsafe { safe_cg_post_scroll_event(dy, 0) };
+                Ok(())
+            }
+
+            Action::ScrollRight => {
+                let amount = match data {
+                    Some(ActionData::ScrollAmount(amount)) => amount,
+                    _ => {
+                        return Err(Error::Platform {
+                            code: -1,
+                            message: "ScrollRight requires ActionData::ScrollAmount".to_string(),
+                        })
+                    }
                 };
-                unsafe { safe_cg_post_scroll_event(dy, dx) };
+                let dx = -(amount * 10.0) as i32;
+                unsafe { safe_cg_post_scroll_event(0, dx) };
                 Ok(())
             }
 

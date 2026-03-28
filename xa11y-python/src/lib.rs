@@ -70,7 +70,8 @@ fn action_to_str(a: &xa11y::Action) -> &'static str {
         xa11y::Action::Select => "select",
         xa11y::Action::ShowMenu => "show_menu",
         xa11y::Action::ScrollIntoView => "scroll_into_view",
-        xa11y::Action::Scroll => "scroll",
+        xa11y::Action::ScrollDown => "scroll_down",
+        xa11y::Action::ScrollRight => "scroll_right",
         xa11y::Action::Increment => "increment",
         xa11y::Action::Decrement => "decrement",
         xa11y::Action::Blur => "blur",
@@ -607,44 +608,32 @@ impl Locator {
     #[pyo3(signature = (amount=1.0))]
     fn scroll_up(&self, amount: f64) -> PyResult<()> {
         self.perform_action(
-            xa11y::Action::Scroll,
-            Some(xa11y::ActionData::ScrollAmount {
-                direction: xa11y::ScrollDirection::Up,
-                amount,
-            }),
+            xa11y::Action::ScrollDown,
+            Some(xa11y::ActionData::ScrollAmount(-amount)),
         )
     }
 
     #[pyo3(signature = (amount=1.0))]
     fn scroll_down(&self, amount: f64) -> PyResult<()> {
         self.perform_action(
-            xa11y::Action::Scroll,
-            Some(xa11y::ActionData::ScrollAmount {
-                direction: xa11y::ScrollDirection::Down,
-                amount,
-            }),
+            xa11y::Action::ScrollDown,
+            Some(xa11y::ActionData::ScrollAmount(amount)),
         )
     }
 
     #[pyo3(signature = (amount=1.0))]
     fn scroll_left(&self, amount: f64) -> PyResult<()> {
         self.perform_action(
-            xa11y::Action::Scroll,
-            Some(xa11y::ActionData::ScrollAmount {
-                direction: xa11y::ScrollDirection::Left,
-                amount,
-            }),
+            xa11y::Action::ScrollRight,
+            Some(xa11y::ActionData::ScrollAmount(-amount)),
         )
     }
 
     #[pyo3(signature = (amount=1.0))]
     fn scroll_right(&self, amount: f64) -> PyResult<()> {
         self.perform_action(
-            xa11y::Action::Scroll,
-            Some(xa11y::ActionData::ScrollAmount {
-                direction: xa11y::ScrollDirection::Right,
-                amount,
-            }),
+            xa11y::Action::ScrollRight,
+            Some(xa11y::ActionData::ScrollAmount(amount)),
         )
     }
 

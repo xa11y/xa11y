@@ -1396,11 +1396,8 @@ mod tests {
             .expect("No scrollable element found");
         let result = h::try_act_with(
             &target,
-            Action::Scroll,
-            Some(ActionData::ScrollAmount {
-                direction: ScrollDirection::Down,
-                amount: 3.0,
-            }),
+            Action::ScrollDown,
+            Some(ActionData::ScrollAmount(3.0)),
         );
         // Scroll may not be supported on all elements; verify no crash
         match result {

@@ -10,7 +10,7 @@ pub mod selector;
 pub mod tree;
 
 // Re-export primary types at the crate root for convenience.
-pub use action::{Action, ActionData, ScrollDirection};
+pub use action::{Action, ActionData};
 pub use error::{Error, Result};
 pub use event::{
     ElementState, Event, EventFilter, EventKind, StateFlag, TextChangeData, TextChangeType,

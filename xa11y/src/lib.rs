@@ -52,7 +52,7 @@ pub use xa11y_core::{
 // Provider traits are implementation details used by platform backends and Python bindings,
 // not part of the public API for end users.
 #[doc(hidden)]
-pub use xa11y_core::{EventProvider, Provider, ScrollDirection};
+pub use xa11y_core::{EventProvider, Provider};
 
 // ── Internal singleton ──────────────────────────────────────────────────────
 

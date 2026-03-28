@@ -13,7 +13,7 @@ use windows::Win32::UI::Accessibility::*;
 use xa11y_core::{
     Action, ActionData, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
     EventKind, EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, RawPlatformData,
-    Rect, Result, Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
+    Rect, Result, Role, StateSet, Subscription, Toggled, Tree,
 };
 
 /// Initialize COM for UIA. Called once per WindowsProvider creation.
@@ -793,9 +793,9 @@ impl Provider for WindowsProvider {
                 Ok(())
             }
 
-            Action::Scroll => {
-                let (direction, amount) = match data {
-                    Some(ActionData::ScrollAmount { direction, amount }) => (direction, amount),
+            Action::ScrollDown | Action::ScrollRight => {
+                let amount = match data {
+                    Some(ActionData::ScrollAmount(amount)) => amount,
                     _ => {
                         return Err(Error::Platform {
                             code: -1,
@@ -806,22 +806,23 @@ impl Provider for WindowsProvider {
                 if let Ok(pattern) = unsafe {
                     element.GetCurrentPatternAs::<IUIAutomationScrollPattern>(UIA_ScrollPatternId)
                 } {
-                    // 1 logical scroll unit = 1 SmallIncrement
                     let count = (amount.abs() as u32).max(1);
+                    let is_vertical = matches!(action, Action::ScrollDown);
                     for _ in 0..count {
-                        let (h, v) = match direction {
-                            ScrollDirection::Up => {
-                                (ScrollAmount_NoAmount, ScrollAmount_SmallDecrement)
-                            }
-                            ScrollDirection::Down => {
-                                (ScrollAmount_NoAmount, ScrollAmount_SmallIncrement)
-                            }
-                            ScrollDirection::Left => {
-                                (ScrollAmount_SmallDecrement, ScrollAmount_NoAmount)
-                            }
-                            ScrollDirection::Right => {
-                                (ScrollAmount_SmallIncrement, ScrollAmount_NoAmount)
-                            }
+                        let (h, v) = if is_vertical {
+                            let v = if amount >= 0.0 {
+                                ScrollAmount_SmallIncrement
+                            } else {
+                                ScrollAmount_SmallDecrement
+                            };
+                            (ScrollAmount_NoAmount, v)
+                        } else {
+                            let h = if amount >= 0.0 {
+                                ScrollAmount_SmallIncrement
+                            } else {
+                                ScrollAmount_SmallDecrement
+                            };
+                            (h, ScrollAmount_NoAmount)
                         };
                         let _ = unsafe { pattern.Scroll(h, v) };
                     }

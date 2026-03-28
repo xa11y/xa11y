@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::action::{Action, ActionData, ScrollDirection};
+use crate::action::{Action, ActionData};
 use crate::error::{Error, Result};
 use crate::event::ElementState;
 use crate::node::{Node, NodeData, Rect, StateSet};
@@ -290,52 +290,28 @@ impl Locator {
     ///
     /// `amount` is in logical scroll units (≈ one mouse wheel notch).
     pub fn scroll_up(&self, amount: f64) -> Result<()> {
-        self.perform(
-            Action::Scroll,
-            Some(ActionData::ScrollAmount {
-                direction: ScrollDirection::Up,
-                amount,
-            }),
-        )
+        self.perform(Action::ScrollDown, Some(ActionData::ScrollAmount(-amount)))
     }
 
     /// Scroll the matched element downward.
     ///
     /// `amount` is in logical scroll units (≈ one mouse wheel notch).
     pub fn scroll_down(&self, amount: f64) -> Result<()> {
-        self.perform(
-            Action::Scroll,
-            Some(ActionData::ScrollAmount {
-                direction: ScrollDirection::Down,
-                amount,
-            }),
-        )
+        self.perform(Action::ScrollDown, Some(ActionData::ScrollAmount(amount)))
     }
 
     /// Scroll the matched element leftward.
     ///
     /// `amount` is in logical scroll units (≈ one mouse wheel notch).
     pub fn scroll_left(&self, amount: f64) -> Result<()> {
-        self.perform(
-            Action::Scroll,
-            Some(ActionData::ScrollAmount {
-                direction: ScrollDirection::Left,
-                amount,
-            }),
-        )
+        self.perform(Action::ScrollRight, Some(ActionData::ScrollAmount(-amount)))
     }
 
     /// Scroll the matched element rightward.
     ///
     /// `amount` is in logical scroll units (≈ one mouse wheel notch).
     pub fn scroll_right(&self, amount: f64) -> Result<()> {
-        self.perform(
-            Action::Scroll,
-            Some(ActionData::ScrollAmount {
-                direction: ScrollDirection::Right,
-                amount,
-            }),
-        )
+        self.perform(Action::ScrollRight, Some(ActionData::ScrollAmount(amount)))
     }
 
     // ── Wait operations ─────────────────────────────────────────────

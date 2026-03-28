@@ -601,17 +601,11 @@ fn validate_other_action_data_always_ok() {
     let empty = ActionData::Value(String::new());
     assert!(empty.validate(Action::TypeText).is_ok());
 
-    let scroll = ActionData::ScrollAmount {
-        direction: ScrollDirection::Down,
-        amount: 0.0,
-    };
-    assert!(scroll.validate(Action::Scroll).is_ok());
+    let scroll = ActionData::ScrollAmount(0.0);
+    assert!(scroll.validate(Action::ScrollDown).is_ok());
 
-    let neg_scroll = ActionData::ScrollAmount {
-        direction: ScrollDirection::Up,
-        amount: -3.0,
-    };
-    assert!(neg_scroll.validate(Action::Scroll).is_ok());
+    let neg_scroll = ActionData::ScrollAmount(-3.0);
+    assert!(neg_scroll.validate(Action::ScrollDown).is_ok());
 }
 
 // ── Error ──
@@ -881,12 +875,9 @@ fn action_data_variants() {
     let json = serde_json::to_string(&numeric).unwrap();
     assert!(json.contains("42.5"));
 
-    let scroll = ActionData::ScrollAmount {
-        direction: ScrollDirection::Down,
-        amount: 100.0,
-    };
+    let scroll = ActionData::ScrollAmount(100.0);
     let json = serde_json::to_string(&scroll).unwrap();
-    assert!(json.contains("Down"));
+    assert!(json.contains("100"));
 }
 
 // ── Locator ──

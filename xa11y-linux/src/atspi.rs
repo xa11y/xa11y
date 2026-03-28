@@ -6,7 +6,7 @@ use std::time::Duration;
 use xa11y_core::{
     Action, ActionData, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
     EventKind, EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, Rect, Result,
-    Role, ScrollDirection, StateSet, Subscription, Toggled, Tree,
+    Role, StateSet, Subscription, Toggled, Tree,
 };
 use zbus::blocking::{Connection, Proxy};
 
@@ -891,9 +891,9 @@ impl Provider for LinuxProvider {
                 Ok(())
             }
 
-            Action::Scroll => {
-                let (direction, amount) = match data {
-                    Some(ActionData::ScrollAmount { direction, amount }) => (direction, amount),
+            Action::ScrollDown | Action::ScrollRight => {
+                let amount = match data {
+                    Some(ActionData::ScrollAmount(amount)) => amount,
                     _ => {
                         return Err(Error::Platform {
                             code: -1,
@@ -901,14 +901,15 @@ impl Provider for LinuxProvider {
                         })
                     }
                 };
+                let is_vertical = matches!(action, Action::ScrollDown);
+                let (pos_name, neg_name) = if is_vertical {
+                    ("scroll down", "scroll up")
+                } else {
+                    ("scroll right", "scroll left")
+                };
+                let action_name = if amount >= 0.0 { pos_name } else { neg_name };
                 // Repeat scroll action for each logical unit (AT-SPI has no scroll-by-amount)
                 let count = (amount.abs() as u32).max(1);
-                let action_name = match direction {
-                    ScrollDirection::Up => "scroll up",
-                    ScrollDirection::Down => "scroll down",
-                    ScrollDirection::Left => "scroll left",
-                    ScrollDirection::Right => "scroll right",
-                };
                 for _ in 0..count {
                     if self.do_atspi_action(&target, action_name).is_err() {
                         // Fall back to Component.ScrollTo (single call, not repeatable)
@@ -917,11 +918,10 @@ impl Provider for LinuxProvider {
                             &target.path,
                             "org.a11y.atspi.Component",
                         )?;
-                        let scroll_type: u32 = match direction {
-                            ScrollDirection::Up => 2,    // TOP_EDGE
-                            ScrollDirection::Down => 3,  // BOTTOM_EDGE
-                            ScrollDirection::Left => 4,  // LEFT_EDGE
-                            ScrollDirection::Right => 5, // RIGHT_EDGE
+                        let scroll_type: u32 = if is_vertical {
+                            if amount >= 0.0 { 3 } else { 2 } // BOTTOM_EDGE / TOP_EDGE
+                        } else {
+                            if amount >= 0.0 { 5 } else { 4 } // RIGHT_EDGE / LEFT_EDGE
                         };
                         proxy
                             .call_method("ScrollTo", &(scroll_type,))
