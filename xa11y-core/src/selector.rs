@@ -10,7 +10,9 @@
 //! attr_filter   := "[" attr_name op value "]"
 //! attr_name     := "name" | "value" | "description" | "role"
 //! op            := "=" | "*=" | "^=" | "$="
-//! value         := '"' [^"]* '"'
+//! value         := '"' (escaped | [^"\\])* '"'
+//!                | "'" (escaped | [^'\\])* "'"
+//! escaped       := "\\" | "\\'" | "\\\""
 //! pseudo        := ":nth(" integer ")"
 //! integer       := [1-9][0-9]*
 //! ```
@@ -273,16 +275,26 @@ impl Selector {
             });
         };
 
-        // Parse quoted value
-        if pos >= chars.len() || chars[pos] != '"' {
+        // Parse quoted value (double or single quotes, with backslash escaping)
+        if pos >= chars.len() || (chars[pos] != '"' && chars[pos] != '\'') {
             return Err(Error::InvalidSelector {
                 selector: input.to_string(),
-                message: "expected '\"' to start attribute value".to_string(),
+                message: "expected '\"' or \"'\" to start attribute value".to_string(),
             });
         }
+        let quote = chars[pos];
         pos += 1; // skip opening quote
-        let val_start = pos;
-        while pos < chars.len() && chars[pos] != '"' {
+        let mut value = String::new();
+        while pos < chars.len() && chars[pos] != quote {
+            if chars[pos] == '\\' && pos + 1 < chars.len() {
+                let next = chars[pos + 1];
+                if next == quote || next == '\\' {
+                    value.push(next);
+                    pos += 2;
+                    continue;
+                }
+            }
+            value.push(chars[pos]);
             pos += 1;
         }
         if pos >= chars.len() {
@@ -291,7 +303,6 @@ impl Selector {
                 message: "unterminated string in attribute value".to_string(),
             });
         }
-        let value: String = chars[val_start..pos].iter().collect();
         pos += 1; // skip closing quote
 
         // Skip ]
@@ -503,5 +514,76 @@ mod tests {
     #[test]
     fn parse_nth_zero_error() {
         assert!(Selector::parse("button:nth(0)").is_err());
+    }
+
+    // ── Single-quote support ──────────────────────────────────────────
+
+    #[test]
+    fn parse_single_quoted_value() {
+        let sel = Selector::parse("[name='Submit']").unwrap();
+        assert_eq!(sel.segments[0].simple.filters[0].value, "Submit");
+    }
+
+    #[test]
+    fn parse_single_quoted_with_role() {
+        let sel = Selector::parse("button[name='All Clear']").unwrap();
+        assert_eq!(sel.segments[0].simple.role, Some(Role::Button));
+        assert_eq!(sel.segments[0].simple.filters[0].value, "All Clear");
+    }
+
+    #[test]
+    fn parse_single_quoted_operators() {
+        let sel = Selector::parse("[name*='addr']").unwrap();
+        assert_eq!(sel.segments[0].simple.filters[0].op, MatchOp::Contains);
+        assert_eq!(sel.segments[0].simple.filters[0].value, "addr");
+
+        let sel = Selector::parse("[name^='Start']").unwrap();
+        assert_eq!(sel.segments[0].simple.filters[0].op, MatchOp::StartsWith);
+
+        let sel = Selector::parse("[name$='End']").unwrap();
+        assert_eq!(sel.segments[0].simple.filters[0].op, MatchOp::EndsWith);
+    }
+
+    #[test]
+    fn parse_double_quote_inside_single_quotes() {
+        let sel = Selector::parse(r#"[name='say "hello"']"#).unwrap();
+        assert_eq!(sel.segments[0].simple.filters[0].value, r#"say "hello""#);
+    }
+
+    #[test]
+    fn parse_single_quote_inside_double_quotes() {
+        let sel = Selector::parse(r#"[name="it's"]"#).unwrap();
+        assert_eq!(sel.segments[0].simple.filters[0].value, "it's");
+    }
+
+    // ── Escaped quotes ────────────────────────────────────────────────
+
+    #[test]
+    fn parse_escaped_double_quote_in_double_quotes() {
+        let sel = Selector::parse(r#"[name="say \"hi\""]"#).unwrap();
+        assert_eq!(sel.segments[0].simple.filters[0].value, r#"say "hi""#);
+    }
+
+    #[test]
+    fn parse_escaped_single_quote_in_single_quotes() {
+        let sel = Selector::parse(r"[name='it\'s']").unwrap();
+        assert_eq!(sel.segments[0].simple.filters[0].value, "it's");
+    }
+
+    #[test]
+    fn parse_escaped_backslash() {
+        let sel = Selector::parse(r#"[name="C:\\path"]"#).unwrap();
+        assert_eq!(sel.segments[0].simple.filters[0].value, r"C:\path");
+    }
+
+    #[test]
+    fn parse_unterminated_single_quote_error() {
+        assert!(Selector::parse("[name='oops]").is_err());
+    }
+
+    #[test]
+    fn parse_mismatched_quotes_error() {
+        // Opens with single, has no closing single before ]
+        assert!(Selector::parse(r#"[name='oops"]"#).is_err());
     }
 }
