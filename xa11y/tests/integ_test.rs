@@ -50,7 +50,7 @@ mod tests {
         let by_name = h::app_tree();
         let pid = by_name.tree().pid.expect("app tree should have a PID");
         assert!(pid > 0);
-        let app = xa11y::app(&AppTarget::ByPid(pid)).unwrap();
+        let app = xa11y::app_by_pid(pid).unwrap();
         let root = app.nodes().unwrap();
         assert!(!root.tree().is_empty());
         assert_eq!(root.tree().pid, Some(pid));
@@ -1286,7 +1286,7 @@ mod tests {
     #[test]
     #[ignore]
     fn error_app_not_found() {
-        let result = xa11y::app(&AppTarget::ByName("nonexistent_app_12345".to_string()));
+        let result = xa11y::app("nonexistent_app_12345");
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::AppNotFound { .. }));
     }

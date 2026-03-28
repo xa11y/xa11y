@@ -80,10 +80,24 @@ fn action_to_str(a: &xa11y::Action) -> &'static str {
     }
 }
 
-fn resolve_app_target(name: Option<&str>, pid: Option<u32>) -> PyResult<xa11y::AppTarget> {
+fn build_app(
+    py: Python<'_>,
+    provider: Arc<dyn xa11y::Provider>,
+    name: Option<&str>,
+    pid: Option<u32>,
+) -> PyResult<xa11y::App> {
     match (name, pid) {
-        (Some(n), _) => Ok(xa11y::AppTarget::ByName(n.to_string())),
-        (None, Some(p)) => Ok(xa11y::AppTarget::ByPid(p)),
+        (Some(n), _) => {
+            let p = provider.clone();
+            let n = n.to_string();
+            py.allow_threads(move || xa11y::App::from_name(p, &n))
+                .map_err(to_py_err)
+        }
+        (None, Some(p)) => {
+            let prov = provider.clone();
+            py.allow_threads(move || xa11y::App::from_pid(prov, p))
+                .map_err(to_py_err)
+        }
         (None, None) => Err(PyValueError::new_err("Either name or pid must be provided")),
     }
 }
@@ -367,6 +381,17 @@ struct Locator {
     #[pyo3(get)]
     selector: String,
     nth: Option<usize>,
+}
+
+impl Locator {
+    fn from_core(loc: xa11y::Locator) -> Self {
+        Self {
+            provider: loc.provider().clone(),
+            target: loc.target().clone(),
+            selector: loc.selector().to_string(),
+            nth: loc.nth_index(),
+        }
+    }
 }
 
 #[pymethods]
@@ -723,31 +748,40 @@ impl Locator {
 #[pyclass(frozen)]
 #[derive(Clone)]
 struct App {
-    provider: Arc<dyn xa11y::Provider>,
-    target: xa11y::AppTarget,
-    #[pyo3(get)]
-    name: String,
-    #[pyo3(get)]
-    pid: Option<u32>,
+    inner: xa11y::App,
+}
+
+impl App {
+    fn from_core(core_app: xa11y::App) -> Self {
+        Self { inner: core_app }
+    }
 }
 
 #[pymethods]
 impl App {
+    /// The application's display name.
+    #[getter]
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    /// The application's process ID.
+    #[getter]
+    fn pid(&self) -> Option<u32> {
+        self.inner.pid()
+    }
+
     /// Create a Locator for lazy element interaction.
     #[pyo3(signature = (selector))]
     fn locator(&self, selector: &str) -> Locator {
-        Locator {
-            provider: self.provider.clone(),
-            target: self.target.clone(),
-            selector: selector.to_string(),
-            nth: None,
-        }
+        let core_loc = self.inner.locator(selector);
+        Locator::from_core(core_loc)
     }
 
     /// Snapshot the app's accessibility tree. Returns the root Node.
     fn nodes(&self, py: Python<'_>) -> PyResult<Py<Node>> {
-        let p = self.provider.clone();
-        let target = self.target.clone();
+        let p = self.inner.provider().clone();
+        let target = self.inner.target().clone();
         let rust_tree = py
             .allow_threads(move || p.get_app_tree(&target))
             .map_err(to_py_err)?;
@@ -755,9 +789,9 @@ impl App {
     }
 
     fn __repr__(&self) -> String {
-        match self.pid {
-            Some(pid) => format!("App(name='{}', pid={})", self.name, pid),
-            None => format!("App(name='{}')", self.name),
+        match self.inner.pid() {
+            Some(pid) => format!("App(name='{}', pid={})", self.inner.name(), pid),
+            None => format!("App(name='{}')", self.inner.name()),
         }
     }
 }
@@ -769,18 +803,8 @@ impl App {
 #[pyo3(signature = (name=None, *, pid=None))]
 fn app(py: Python<'_>, name: Option<&str>, pid: Option<u32>) -> PyResult<App> {
     let provider = get_provider()?;
-    let target = resolve_app_target(name, pid)?;
-    let p = provider.clone();
-    let t = target.clone();
-    let rust_tree = py
-        .allow_threads(move || p.get_app_tree(&t))
-        .map_err(to_py_err)?;
-    Ok(App {
-        name: rust_tree.app_name.clone(),
-        pid: rust_tree.pid,
-        provider,
-        target,
-    })
+    let core_app = build_app(py, provider, name, pid)?;
+    Ok(App::from_core(core_app))
 }
 
 /// List all running applications.
@@ -788,27 +812,10 @@ fn app(py: Python<'_>, name: Option<&str>, pid: Option<u32>) -> PyResult<App> {
 fn apps(py: Python<'_>) -> PyResult<Vec<App>> {
     let provider = get_provider()?;
     let p = provider.clone();
-    let rust_tree = py.allow_threads(|| p.get_apps()).map_err(to_py_err)?;
-    let root = rust_tree.root_data();
-    let result = rust_tree
-        .children_data(root)
-        .into_iter()
-        .filter(|child| child.role == xa11y::Role::Application)
-        .filter_map(|child| {
-            let name = child.name.clone()?;
-            let target = match child.pid {
-                Some(pid) => xa11y::AppTarget::ByPid(pid),
-                None => xa11y::AppTarget::ByName(name.clone()),
-            };
-            Some(App {
-                provider: provider.clone(),
-                target,
-                name,
-                pid: child.pid,
-            })
-        })
-        .collect();
-    Ok(result)
+    let core_apps = py
+        .allow_threads(move || xa11y::App::all(p))
+        .map_err(to_py_err)?;
+    Ok(core_apps.into_iter().map(App::from_core).collect())
 }
 
 /// Check accessibility permissions. Returns "granted" or raises PermissionDeniedError.
@@ -1276,17 +1283,10 @@ fn build_test_tree() -> xa11y::Tree {
 #[pyfunction]
 fn _make_test_app() -> PyResult<App> {
     let tree = build_test_tree();
-    let name = tree.app_name.clone();
-    let pid = tree.pid;
     let provider: Arc<dyn xa11y::Provider> = Arc::new(MockProvider {
         tree,
         actions: std::sync::Mutex::new(Vec::new()),
     });
-    let target = xa11y::AppTarget::ByName("TestApp".to_string());
-    Ok(App {
-        provider,
-        target,
-        name,
-        pid,
-    })
+    let core_app = xa11y::App::from_name(provider, "TestApp").map_err(to_py_err)?;
+    Ok(App::from_core(core_app))
 }

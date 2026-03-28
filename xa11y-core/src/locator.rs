@@ -92,6 +92,24 @@ impl Locator {
         &self.selector
     }
 
+    /// Get the underlying provider.
+    #[doc(hidden)]
+    pub fn provider(&self) -> &Arc<dyn Provider> {
+        &self.provider
+    }
+
+    /// Get the target used by this locator.
+    #[doc(hidden)]
+    pub fn target(&self) -> &AppTarget {
+        &self.target
+    }
+
+    /// Get the nth index, if set.
+    #[doc(hidden)]
+    pub fn nth_index(&self) -> Option<usize> {
+        self.nth
+    }
+
     // ── Internal resolution ─────────────────────────────────────────
 
     /// Snapshot the tree and resolve the selector to a single node.

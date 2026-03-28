@@ -8,8 +8,7 @@
 //! ```no_run
 //! use xa11y::*;
 //!
-//! let safari = app(&AppTarget::ByName("Safari".to_string()))
-//!     .expect("Failed to get app");
+//! let safari = app("Safari").expect("Failed to get app");
 //!
 //! // Snapshot navigation — read-only tree
 //! let root = safari.nodes().expect("Failed to snapshot");
@@ -23,6 +22,12 @@
 //! // Locator to get matching nodes
 //! let buttons = safari.locator("button").nodes().expect("Query failed");
 //! println!("Found {} buttons", buttons.len());
+//!
+//! // By PID
+//! let app = app_by_pid(1234).expect("Failed to get app");
+//!
+//! // By window handle
+//! let app = app_by_window(WindowHandle::MacOS(42)).expect("Failed to get app");
 //! ```
 
 use std::sync::{Arc, OnceLock};
@@ -30,16 +35,14 @@ use std::sync::{Arc, OnceLock};
 // Re-export public types. Tree is exported because Provider trait methods reference it,
 // but end users should interact with App/Node/Locator, not Tree directly.
 pub use xa11y_core::{
-    Action, ActionData, App, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
-    EventKind, EventReceiver, Locator, Node, NodeData, PermissionStatus, RawPlatformData, Rect,
-    Result, Role, StateFlag, StateSet, Subscription, TextChangeData, TextChangeType, Toggled, Tree,
-    WindowHandle,
+    Action, ActionData, App, CancelHandle, ElementState, Error, Event, EventFilter, EventKind,
+    EventReceiver, Locator, Node, NodeData, PermissionStatus, RawPlatformData, Rect, Result, Role,
+    StateFlag, StateSet, Subscription, TextChangeData, TextChangeType, Toggled, Tree, WindowHandle,
 };
 
-// Provider traits are implementation details used by platform backends and Python bindings,
-// not part of the public API for end users.
+// Internal types used by platform backends, Python bindings, and tests.
 #[doc(hidden)]
-pub use xa11y_core::{EventProvider, Provider};
+pub use xa11y_core::{AppTarget, EventProvider, Provider};
 
 // ── Internal singleton ──────────────────────────────────────────────────────
 
@@ -97,20 +100,33 @@ pub fn provider() -> Result<Arc<dyn Provider>> {
 
 // ── Module-level API ────────────────────────────────────────────────────────
 
-/// Get a handle to a specific application.
+/// Find an application by display name.
 ///
-/// Returns an [`App`] that can create locators and take tree snapshots.
-/// Validates that the application exists at construction time.
-pub fn app(target: &AppTarget) -> Result<App> {
-    let prov = provider()?;
-    // Validate the app exists and cache its metadata
-    let tree = get_provider_ref()?.get_app_tree(target)?;
-    Ok(App::new(
-        prov,
-        target.clone(),
-        tree.app_name.clone(),
-        tree.pid,
-    ))
+/// Case-insensitive substring match. Returns an [`App`] for locators and snapshots.
+///
+/// ```no_run
+/// let slack = xa11y::app("Slack").unwrap();
+/// ```
+pub fn app(name: &str) -> Result<App> {
+    App::from_name(provider()?, name)
+}
+
+/// Find an application by process ID.
+///
+/// ```no_run
+/// let app = xa11y::app_by_pid(1234).unwrap();
+/// ```
+pub fn app_by_pid(pid: u32) -> Result<App> {
+    App::from_pid(provider()?, pid)
+}
+
+/// Find an application by platform-specific window handle.
+///
+/// ```no_run
+/// let app = xa11y::app_by_window(xa11y::WindowHandle::MacOS(42)).unwrap();
+/// ```
+pub fn app_by_window(handle: WindowHandle) -> Result<App> {
+    App::from_window(provider()?, handle)
 }
 
 /// List all running applications.

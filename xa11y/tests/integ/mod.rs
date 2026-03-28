@@ -7,7 +7,7 @@ use xa11y::*;
 /// Get the test app tree, retrying briefly for registration.
 pub fn app_tree() -> Node {
     for attempt in 0..3 {
-        match xa11y::app(&AppTarget::ByName("xa11y".to_string())) {
+        match xa11y::app("xa11y") {
             Ok(app) => return app.nodes().expect("Failed to snapshot app tree"),
             Err(_) if attempt < 2 => {
                 std::thread::sleep(std::time::Duration::from_millis(200));
