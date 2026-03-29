@@ -51,14 +51,14 @@ class Rect:
     def __repr__(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...
 
-# ── EventKind ────────────────────────────────────────────────────────────────
+# ── EventType ────────────────────────────────────────────────────────────────
 
-class EventKind:
-    """Accessibility event kind constants.
+class EventType:
+    """Accessibility event type constants.
 
-    Use these constants to compare against :attr:`Event.kind`::
+    Use these constants to compare against :attr:`Event.event_type`::
 
-        if event.kind == EventKind.FOCUS_CHANGED:
+        if event.event_type == EventType.FOCUS_CHANGED:
             ...
     """
 
@@ -87,8 +87,8 @@ class Event:
     """
 
     @property
-    def kind(self) -> str:
-        """Event kind (e.g. ``EventKind.FOCUS_CHANGED``)."""
+    def event_type(self) -> str:
+        """Event type (e.g. ``EventType.FOCUS_CHANGED``)."""
     @property
     def app_name(self) -> str:
         """Name of the application that produced this event."""
@@ -113,7 +113,7 @@ class Subscription:
 
         with app.subscribe() as sub:
             event = sub.wait_for(
-                lambda e: e.kind == EventKind.FOCUS_CHANGED,
+                lambda e: e.event_type == EventType.FOCUS_CHANGED,
                 timeout=5.0,
             )
     """

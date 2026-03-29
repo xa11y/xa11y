@@ -11,7 +11,7 @@ use windows::Win32::System::Threading::*;
 use windows::Win32::UI::Accessibility::*;
 
 use xa11y_core::{
-    Action, ActionData, CancelHandle, ElementData, Error, Event, EventKind, EventReceiver,
+    Action, ActionData, CancelHandle, ElementData, Error, Event, EventReceiver, EventType,
     PermissionStatus, Provider, RawPlatformData, Rect, Result, Role, StateSet, Subscription,
     Toggled, Tree,
 };
@@ -1223,7 +1223,7 @@ impl WindowsProvider {
                 if focused_name != prev_focused {
                     if prev_focused.is_some() {
                         let _ = tx.send(Event {
-                            kind: EventKind::FocusChanged,
+                            event_type: EventType::FocusChanged,
                             app_name: app_name.clone(),
                             app_pid,
                             target: tree.iter().find(|n| n.states.focused).cloned(),
@@ -1240,7 +1240,7 @@ impl WindowsProvider {
                 let element_count = tree.len();
                 if element_count != prev_element_count && prev_element_count > 0 {
                     let _ = tx.send(Event {
-                        kind: EventKind::StructureChanged,
+                        event_type: EventType::StructureChanged,
                         app_name: app_name.clone(),
                         app_pid,
                         target: None,

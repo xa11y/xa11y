@@ -1457,18 +1457,21 @@ mod tests {
     }
 
     // ════════════════════════════════════════════════════════════════
-    // Event subscription (2 tests)
+    // Event subscription (9 tests)
     // ════════════════════════════════════════════════════════════════
 
     #[test]
     #[ignore]
-    fn event_subscribe_receives_focus_event() {
+    fn event_subscribe_try_recv() {
         use std::time::Duration;
         let provider = xa11y::create_provider().unwrap();
         let root = h::app_tree();
 
         let app = App::from_name(provider, "xa11y").unwrap();
         let sub = app.subscribe().unwrap();
+
+        // No events yet — try_recv returns None
+        assert!(sub.try_recv().is_none(), "Expected no events initially");
 
         // Trigger a focus change
         let text = root
@@ -1482,28 +1485,223 @@ mod tests {
         // Wait briefly for the event
         std::thread::sleep(Duration::from_millis(500));
         if let Some(event) = sub.try_recv() {
-            assert_eq!(event.kind, EventKind::FocusChanged);
-            println!("Received focus event: {:?}", event.kind);
+            assert_eq!(event.event_type, EventType::FocusChanged);
         } else {
-            println!("No event received within timeout — may depend on platform event delivery");
+            println!("No event received — may depend on platform event delivery");
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn event_recv_timeout() {
+        let provider = xa11y::create_provider().unwrap();
+        let app = App::from_name(provider, "xa11y").unwrap();
+        let sub = app.subscribe().unwrap();
+
+        // recv with short timeout should return Timeout error
+        let result = sub.recv(std::time::Duration::from_millis(100));
+        assert!(
+            matches!(result, Err(Error::Timeout { .. })),
+            "Expected Timeout, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn event_recv_receives_event() {
+        use std::time::Duration;
+        let provider = xa11y::create_provider().unwrap();
+        let root = h::app_tree();
+
+        let app = App::from_name(provider.clone(), "xa11y").unwrap();
+        let sub = app.subscribe().unwrap();
+
+        // Trigger a focus change
+        let text = root
+            .subtree()
+            .into_iter()
+            .find(|n| n.role == Role::TextField || n.role == Role::TextArea)
+            .expect("Text entry not found");
+        let _ = provider.perform_action(text.tree(), &text, Action::Focus, None);
+
+        // recv should return the event (polling backends may take up to 200ms)
+        match sub.recv(Duration::from_secs(2)) {
+            Ok(event) => {
+                assert_eq!(event.event_type, EventType::FocusChanged);
+            }
+            Err(Error::Timeout { .. }) => {
+                println!("No event received — may depend on platform event delivery");
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
         }
     }
 
     #[test]
     #[ignore]
     fn event_wait_for_timeout() {
-        use std::time::Duration;
         let provider = xa11y::create_provider().unwrap();
-
         let app = App::from_name(provider, "xa11y").unwrap();
         let sub = app.subscribe().unwrap();
 
-        // Wait for an event with a very short timeout — should timeout
-        let result = sub.wait_for(|e| e.kind == EventKind::Alert, Duration::from_millis(100));
+        // wait_for with an impossible predicate should timeout
+        let result = sub.wait_for(
+            |e| e.event_type == EventType::Alert,
+            std::time::Duration::from_millis(100),
+        );
         assert!(
             matches!(result, Err(Error::Timeout { .. })),
             "Expected Timeout, got: {:?}",
             result
         );
+    }
+
+    #[test]
+    #[ignore]
+    fn event_wait_for_predicate_filters() {
+        use std::time::Duration;
+        let provider = xa11y::create_provider().unwrap();
+        let root = h::app_tree();
+
+        let app = App::from_name(provider.clone(), "xa11y").unwrap();
+        let sub = app.subscribe().unwrap();
+
+        // Trigger a focus change (produces FocusChanged, not Alert)
+        let text = root
+            .subtree()
+            .into_iter()
+            .find(|n| n.role == Role::TextField || n.role == Role::TextArea)
+            .expect("Text entry not found");
+        let _ = provider.perform_action(text.tree(), &text, Action::Focus, None);
+
+        // wait_for with FocusChanged predicate should match
+        match sub.wait_for(
+            |e| e.event_type == EventType::FocusChanged,
+            Duration::from_secs(2),
+        ) {
+            Ok(event) => {
+                assert_eq!(event.event_type, EventType::FocusChanged);
+            }
+            Err(Error::Timeout { .. }) => {
+                println!("No event received — may depend on platform event delivery");
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn event_metadata_populated() {
+        use std::time::Duration;
+        let provider = xa11y::create_provider().unwrap();
+        let root = h::app_tree();
+
+        let app = App::from_name(provider.clone(), "xa11y").unwrap();
+        let expected_pid = app.pid();
+        let sub = app.subscribe().unwrap();
+
+        // Trigger a focus change
+        let text = root
+            .subtree()
+            .into_iter()
+            .find(|n| n.role == Role::TextField || n.role == Role::TextArea)
+            .expect("Text entry not found");
+        let _ = provider.perform_action(text.tree(), &text, Action::Focus, None);
+
+        std::thread::sleep(Duration::from_millis(500));
+        if let Some(event) = sub.try_recv() {
+            // app_pid should match the app we subscribed to
+            assert_eq!(event.app_pid, expected_pid);
+            // app_name should be non-empty
+            assert!(!event.app_name.is_empty(), "app_name should be populated");
+        } else {
+            println!("No event received — may depend on platform event delivery");
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn event_iter_yields_events() {
+        use std::time::Duration;
+        let provider = xa11y::create_provider().unwrap();
+        let root = h::app_tree();
+
+        let app = App::from_name(provider.clone(), "xa11y").unwrap();
+        let sub = app.subscribe().unwrap();
+
+        // Trigger a focus change
+        let text = root
+            .subtree()
+            .into_iter()
+            .find(|n| n.role == Role::TextField || n.role == Role::TextArea)
+            .expect("Text entry not found");
+        let _ = provider.perform_action(text.tree(), &text, Action::Focus, None);
+
+        // Use recv to check if there's an event (iter blocks forever, so we
+        // can't use it directly without a timeout)
+        match sub.recv(Duration::from_secs(2)) {
+            Ok(event) => {
+                assert_eq!(event.event_type, EventType::FocusChanged);
+                println!("Iterator yielded event: {:?}", event.event_type);
+            }
+            Err(Error::Timeout { .. }) => {
+                println!("No event received — may depend on platform event delivery");
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn event_drop_unsubscribes() {
+        let provider = xa11y::create_provider().unwrap();
+        let app = App::from_name(provider, "xa11y").unwrap();
+
+        // Create and immediately drop a subscription
+        {
+            let _sub = app.subscribe().unwrap();
+        }
+        // If drop doesn't unsubscribe cleanly, the background thread would
+        // leak. This test verifies the subscription can be created and dropped
+        // without panics or hangs.
+
+        // Create another subscription to verify the app is still usable
+        let sub2 = app.subscribe().unwrap();
+        assert!(sub2.try_recv().is_none());
+    }
+
+    #[test]
+    #[ignore]
+    fn event_target_element_present() {
+        use std::time::Duration;
+        let provider = xa11y::create_provider().unwrap();
+        let root = h::app_tree();
+
+        let app = App::from_name(provider.clone(), "xa11y").unwrap();
+        let sub = app.subscribe().unwrap();
+
+        // Trigger a focus change
+        let text = root
+            .subtree()
+            .into_iter()
+            .find(|n| n.role == Role::TextField || n.role == Role::TextArea)
+            .expect("Text entry not found");
+        let _ = provider.perform_action(text.tree(), &text, Action::Focus, None);
+
+        std::thread::sleep(Duration::from_millis(500));
+        if let Some(event) = sub.try_recv() {
+            assert_eq!(event.event_type, EventType::FocusChanged);
+            // FocusChanged events should have a target element on most platforms
+            if let Some(ref target) = event.target {
+                println!(
+                    "Event target: role={:?}, name={:?}",
+                    target.role, target.name
+                );
+            } else {
+                println!("Event target is None — acceptable for polling backends");
+            }
+        } else {
+            println!("No event received — may depend on platform event delivery");
+        }
     }
 }

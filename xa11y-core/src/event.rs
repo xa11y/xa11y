@@ -5,7 +5,7 @@ use crate::element::ElementData;
 /// Categories of accessibility events, normalized across platforms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
-pub enum EventKind {
+pub enum EventType {
     /// An element gained keyboard focus.
     FocusChanged,
     /// An element's value changed.
@@ -43,8 +43,8 @@ pub enum EventKind {
 /// An accessibility event delivered to subscribers.
 #[derive(Debug, Clone)]
 pub struct Event {
-    /// What kind of event occurred.
-    pub kind: EventKind,
+    /// What type of event occurred.
+    pub event_type: EventType,
     /// Name of the application that produced this event.
     pub app_name: String,
     /// PID of the application that produced this event.

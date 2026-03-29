@@ -32,7 +32,7 @@ use std::sync::{Arc, OnceLock};
 
 // Re-export public types.
 pub use xa11y_core::{
-    Action, ActionData, App, Element, ElementData, ElementState, Error, Event, EventKind, Locator,
+    Action, ActionData, App, Element, ElementData, ElementState, Error, Event, EventType, Locator,
     PermissionStatus, RawPlatformData, Rect, Result, Role, StateFlag, StateSet, Subscription,
     SubscriptionIter, TextChangeData, TextChangeType, Toggled, Tree,
 };

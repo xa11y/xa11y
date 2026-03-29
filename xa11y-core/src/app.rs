@@ -108,7 +108,7 @@ impl App {
     /// # fn example(app: &App) -> Result<()> {
     /// let sub = app.subscribe()?;
     /// let event = sub.wait_for(
-    ///     |e| e.kind == EventKind::FocusChanged,
+    ///     |e| e.event_type == EventType::FocusChanged,
     ///     std::time::Duration::from_secs(5),
     /// )?;
     /// # Ok(())

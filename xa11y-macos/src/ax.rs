@@ -10,7 +10,7 @@ use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
 
 use xa11y_core::{
-    Action, ActionData, CancelHandle, ElementData, Error, Event, EventKind, EventReceiver,
+    Action, ActionData, CancelHandle, ElementData, Error, Event, EventReceiver, EventType,
     PermissionStatus, Provider, RawPlatformData, Rect, Result, Role, StateSet, Subscription,
     Toggled, Tree,
 };
@@ -1305,17 +1305,17 @@ unsafe extern "C" fn ax_observer_callback(
         cf.to_string()
     };
 
-    let kind = match notif_str.as_str() {
-        "AXValueChanged" => EventKind::ValueChanged,
-        "AXFocusedUIElementChanged" => EventKind::FocusChanged,
-        "AXWindowCreated" => EventKind::WindowOpened,
-        "AXWindowMiniaturized" => EventKind::WindowDeactivated,
-        "AXWindowDeminiaturized" => EventKind::WindowActivated,
-        "AXUIElementDestroyed" => EventKind::StructureChanged,
-        "AXSelectedTextChanged" => EventKind::SelectionChanged,
-        "AXMenuOpened" => EventKind::MenuOpened,
-        "AXMenuClosed" => EventKind::MenuClosed,
-        "AXTitleChanged" => EventKind::NameChanged,
+    let event_type = match notif_str.as_str() {
+        "AXValueChanged" => EventType::ValueChanged,
+        "AXFocusedUIElementChanged" => EventType::FocusChanged,
+        "AXWindowCreated" => EventType::WindowOpened,
+        "AXWindowMiniaturized" => EventType::WindowDeactivated,
+        "AXWindowDeminiaturized" => EventType::WindowActivated,
+        "AXUIElementDestroyed" => EventType::StructureChanged,
+        "AXSelectedTextChanged" => EventType::SelectionChanged,
+        "AXMenuOpened" => EventType::MenuOpened,
+        "AXMenuClosed" => EventType::MenuClosed,
+        "AXTitleChanged" => EventType::NameChanged,
         _ => return,
     };
 
@@ -1347,7 +1347,7 @@ unsafe extern "C" fn ax_observer_callback(
     };
 
     let event = Event {
-        kind,
+        event_type,
         app_name: ctx.app_name.clone(),
         app_pid: ctx.app_pid,
         target,

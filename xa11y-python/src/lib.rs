@@ -758,33 +758,33 @@ impl Locator {
     }
 }
 
-// ── EventKind ──────────────────────────────────────────────────────────────
+// ── EventType ──────────────────────────────────────────────────────────────
 
-fn event_kind_to_str(kind: xa11y::EventKind) -> &'static str {
-    match kind {
-        xa11y::EventKind::FocusChanged => "focus_changed",
-        xa11y::EventKind::ValueChanged => "value_changed",
-        xa11y::EventKind::NameChanged => "name_changed",
-        xa11y::EventKind::StateChanged => "state_changed",
-        xa11y::EventKind::StructureChanged => "structure_changed",
-        xa11y::EventKind::WindowOpened => "window_opened",
-        xa11y::EventKind::WindowClosed => "window_closed",
-        xa11y::EventKind::WindowActivated => "window_activated",
-        xa11y::EventKind::WindowDeactivated => "window_deactivated",
-        xa11y::EventKind::SelectionChanged => "selection_changed",
-        xa11y::EventKind::MenuOpened => "menu_opened",
-        xa11y::EventKind::MenuClosed => "menu_closed",
-        xa11y::EventKind::Alert => "alert",
-        xa11y::EventKind::TextChanged => "text_changed",
+fn event_type_to_str(event_type: xa11y::EventType) -> &'static str {
+    match event_type {
+        xa11y::EventType::FocusChanged => "focus_changed",
+        xa11y::EventType::ValueChanged => "value_changed",
+        xa11y::EventType::NameChanged => "name_changed",
+        xa11y::EventType::StateChanged => "state_changed",
+        xa11y::EventType::StructureChanged => "structure_changed",
+        xa11y::EventType::WindowOpened => "window_opened",
+        xa11y::EventType::WindowClosed => "window_closed",
+        xa11y::EventType::WindowActivated => "window_activated",
+        xa11y::EventType::WindowDeactivated => "window_deactivated",
+        xa11y::EventType::SelectionChanged => "selection_changed",
+        xa11y::EventType::MenuOpened => "menu_opened",
+        xa11y::EventType::MenuClosed => "menu_closed",
+        xa11y::EventType::Alert => "alert",
+        xa11y::EventType::TextChanged => "text_changed",
     }
 }
 
-/// Accessibility event kind constants.
+/// Accessibility event type constants.
 #[pyclass(frozen)]
-struct EventKind;
+struct EventType;
 
 #[pymethods]
-impl EventKind {
+impl EventType {
     #[classattr]
     const FOCUS_CHANGED: &'static str = "focus_changed";
     #[classattr]
@@ -822,7 +822,7 @@ impl EventKind {
 #[derive(Clone)]
 struct Event {
     #[pyo3(get)]
-    kind: String,
+    event_type: String,
     #[pyo3(get)]
     app_name: String,
     #[pyo3(get)]
@@ -833,7 +833,7 @@ struct Event {
 impl Event {
     fn from_core(event: xa11y::Event) -> Self {
         Self {
-            kind: event_kind_to_str(event.kind).to_string(),
+            event_type: event_type_to_str(event.event_type).to_string(),
             app_name: event.app_name,
             app_pid: event.app_pid,
             target_data: event.target,
@@ -853,8 +853,8 @@ impl Event {
 
     fn __repr__(&self) -> String {
         format!(
-            "Event(kind='{}', app_name='{}', app_pid={})",
-            self.kind, self.app_name, self.app_pid
+            "Event(event_type='{}', app_name='{}', app_pid={})",
+            self.event_type, self.app_name, self.app_pid
         )
     }
 }
@@ -1087,7 +1087,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<App>()?;
     m.add_class::<Element>()?;
     m.add_class::<Event>()?;
-    m.add_class::<EventKind>()?;
+    m.add_class::<EventType>()?;
     m.add_class::<Locator>()?;
     m.add_class::<Rect>()?;
     m.add_class::<Subscription>()?;
