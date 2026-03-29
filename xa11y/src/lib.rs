@@ -32,14 +32,14 @@ use std::sync::{Arc, OnceLock};
 
 // Re-export public types.
 pub use xa11y_core::{
-    Action, ActionData, App, CancelHandle, Element, ElementData, ElementState, Error, Event,
-    EventFilter, EventKind, EventReceiver, Locator, PermissionStatus, RawPlatformData, Rect,
-    Result, Role, StateFlag, StateSet, Subscription, TextChangeData, TextChangeType, Toggled, Tree,
+    Action, ActionData, App, Element, ElementData, ElementState, Error, Event, EventKind, Locator,
+    PermissionStatus, RawPlatformData, Rect, Result, Role, StateFlag, StateSet, Subscription,
+    SubscriptionIter, TextChangeData, TextChangeType, Toggled, Tree,
 };
 
-// Provider traits are implementation details used by platform backends and Python bindings.
+// Implementation details used by platform backends and Python bindings.
 #[doc(hidden)]
-pub use xa11y_core::{EventProvider, Provider};
+pub use xa11y_core::{CancelHandle, EventReceiver, Provider};
 
 // ── Internal singleton ──────────────────────────────────────────────────────
 
@@ -85,6 +85,9 @@ impl Provider for StaticProviderRef {
     fn check_permissions(&self) -> Result<PermissionStatus> {
         self.0.check_permissions()
     }
+    fn subscribe(&self, pid: u32) -> Result<Subscription> {
+        self.0.subscribe(pid)
+    }
 }
 
 /// Get the global provider as an `Arc<dyn Provider>`.
@@ -118,30 +121,6 @@ pub fn create_provider() -> Result<Arc<dyn Provider>> {
 }
 
 fn create_provider_boxed() -> Result<Box<dyn Provider>> {
-    #[cfg(target_os = "macos")]
-    {
-        Ok(Box::new(xa11y_macos::MacOSProvider::new()?))
-    }
-    #[cfg(target_os = "windows")]
-    {
-        Ok(Box::new(xa11y_windows::WindowsProvider::new()?))
-    }
-    #[cfg(target_os = "linux")]
-    {
-        Ok(Box::new(xa11y_linux::LinuxProvider::new()?))
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-    {
-        Err(Error::Platform {
-            code: -1,
-            message: format!("Unsupported platform: {}", std::env::consts::OS),
-        })
-    }
-}
-
-#[doc(hidden)]
-#[cfg(feature = "testing")]
-pub fn create_event_provider() -> Result<Box<dyn EventProvider>> {
     #[cfg(target_os = "macos")]
     {
         Ok(Box::new(xa11y_macos::MacOSProvider::new()?))

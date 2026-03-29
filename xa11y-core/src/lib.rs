@@ -15,10 +15,8 @@ pub use action::{Action, ActionData};
 pub use app::App;
 pub use element::{Element, ElementData, ElementIndex, RawPlatformData, Rect, StateSet, Toggled};
 pub use error::{Error, Result};
-pub use event::{
-    ElementState, Event, EventFilter, EventKind, StateFlag, TextChangeData, TextChangeType,
-};
-pub use event_provider::{CancelHandle, EventProvider, EventReceiver, Subscription};
+pub use event::{ElementState, Event, EventKind, StateFlag, TextChangeData, TextChangeType};
+pub use event_provider::{CancelHandle, EventReceiver, Subscription, SubscriptionIter};
 pub use locator::Locator;
 pub use provider::{PermissionStatus, Provider};
 pub use role::Role;

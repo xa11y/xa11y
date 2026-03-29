@@ -11,9 +11,9 @@ use windows::Win32::System::Threading::*;
 use windows::Win32::UI::Accessibility::*;
 
 use xa11y_core::{
-    Action, ActionData, CancelHandle, ElementData, ElementState, Error, Event, EventFilter,
-    EventKind, EventProvider, EventReceiver, PermissionStatus, Provider, RawPlatformData, Rect,
-    Result, Role, StateSet, Subscription, Toggled, Tree,
+    Action, ActionData, CancelHandle, ElementData, Error, Event, EventKind, EventReceiver,
+    PermissionStatus, Provider, RawPlatformData, Rect, Result, Role, StateSet, Subscription,
+    Toggled, Tree,
 };
 
 /// Initialize COM for UIA. Called once per WindowsProvider creation.
@@ -905,6 +905,10 @@ impl Provider for WindowsProvider {
     fn check_permissions(&self) -> Result<PermissionStatus> {
         Ok(PermissionStatus::Granted)
     }
+
+    fn subscribe(&self, pid: u32) -> Result<Subscription> {
+        self.subscribe_impl(String::new(), pid, move |p| p.get_tree(pid))
+    }
 }
 
 // ── Helper Functions ─────────────────────────────────────────────────────────
@@ -1186,18 +1190,11 @@ fn map_uia_control_type(control_type: UIA_CONTROLTYPE_ID) -> Role {
     }
 }
 
-// ── EventProvider (polling-based) ─────────────────────────────────────────────
+// ── Event subscription (polling-based) ───────────────────────────────────────
 
 impl WindowsProvider {
-    /// Shared subscribe implementation: spawns a polling thread that calls the
-    /// given `tree_fn` closure to fetch the tree on each tick.
-    fn subscribe_impl<F>(
-        &self,
-        app_name: String,
-        app_pid: u32,
-        filter: EventFilter,
-        tree_fn: F,
-    ) -> Result<Subscription>
+    /// Spawn a polling thread that detects focus and structure changes.
+    fn subscribe_impl<F>(&self, app_name: String, app_pid: u32, tree_fn: F) -> Result<Subscription>
     where
         F: Fn(&WindowsProvider) -> Result<Tree> + Send + 'static,
     {
@@ -1225,19 +1222,16 @@ impl WindowsProvider {
                     .and_then(|n| n.name.clone());
                 if focused_name != prev_focused {
                     if prev_focused.is_some() {
-                        let kind = EventKind::FocusChanged;
-                        if filter.kinds.is_empty() || filter.kinds.contains(&kind) {
-                            let _ = tx.send(Event {
-                                kind,
-                                app_name: app_name.clone(),
-                                app_pid,
-                                target: tree.iter().find(|n| n.states.focused).cloned(),
-                                state_flag: None,
-                                state_value: None,
-                                text_change: None,
-                                timestamp: std::time::Instant::now(),
-                            });
-                        }
+                        let _ = tx.send(Event {
+                            kind: EventKind::FocusChanged,
+                            app_name: app_name.clone(),
+                            app_pid,
+                            target: tree.iter().find(|n| n.states.focused).cloned(),
+                            state_flag: None,
+                            state_value: None,
+                            text_change: None,
+                            timestamp: std::time::Instant::now(),
+                        });
                     }
                     prev_focused = focused_name;
                 }
@@ -1245,19 +1239,16 @@ impl WindowsProvider {
                 // Detect structure changes
                 let element_count = tree.len();
                 if element_count != prev_element_count && prev_element_count > 0 {
-                    let kind = EventKind::StructureChanged;
-                    if filter.kinds.is_empty() || filter.kinds.contains(&kind) {
-                        let _ = tx.send(Event {
-                            kind,
-                            app_name: app_name.clone(),
-                            app_pid,
-                            target: None,
-                            state_flag: None,
-                            state_value: None,
-                            text_change: None,
-                            timestamp: std::time::Instant::now(),
-                        });
-                    }
+                    let _ = tx.send(Event {
+                        kind: EventKind::StructureChanged,
+                        app_name: app_name.clone(),
+                        app_pid,
+                        target: None,
+                        state_flag: None,
+                        state_value: None,
+                        text_change: None,
+                        timestamp: std::time::Instant::now(),
+                    });
                 }
                 prev_element_count = element_count;
             }
@@ -1269,74 +1260,6 @@ impl WindowsProvider {
         });
 
         Ok(Subscription::new(EventReceiver::new(rx), cancel))
-    }
-
-    /// Shared wait_for_event: subscribe then poll until an event arrives or timeout.
-    fn wait_for_event_impl(&self, sub: Subscription, timeout: Duration) -> Result<Event> {
-        let start = std::time::Instant::now();
-        loop {
-            if let Some(event) = sub.try_recv() {
-                return Ok(event);
-            }
-            let elapsed = start.elapsed();
-            if elapsed >= timeout {
-                return Err(Error::Timeout { elapsed });
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    /// Shared wait_for: poll tree until selector matches desired state or timeout.
-    fn wait_for_impl<F>(
-        &self,
-        selector: &str,
-        state: ElementState,
-        timeout: Duration,
-        tree_fn: F,
-    ) -> Result<Option<ElementData>>
-    where
-        F: Fn(&Self) -> Result<Tree>,
-    {
-        let start = std::time::Instant::now();
-        let poll_interval = Duration::from_millis(100);
-
-        loop {
-            let elapsed = start.elapsed();
-            if elapsed >= timeout {
-                return Err(Error::Timeout { elapsed });
-            }
-
-            let tree = tree_fn(self)?;
-            let matches = tree.query(selector).ok();
-            let element = matches.as_ref().and_then(|m| m.first().copied());
-
-            if state.is_met(element) {
-                return Ok(element.cloned());
-            }
-
-            std::thread::sleep(poll_interval);
-        }
-    }
-}
-
-impl EventProvider for WindowsProvider {
-    fn subscribe(&self, pid: u32, filter: EventFilter) -> Result<Subscription> {
-        self.subscribe_impl(String::new(), pid, filter, move |p| p.get_tree(pid))
-    }
-
-    fn wait_for_event(&self, pid: u32, filter: EventFilter, timeout: Duration) -> Result<Event> {
-        let sub = self.subscribe(pid, filter)?;
-        self.wait_for_event_impl(sub, timeout)
-    }
-
-    fn wait_for(
-        &self,
-        pid: u32,
-        selector: &str,
-        state: ElementState,
-        timeout: Duration,
-    ) -> Result<Option<ElementData>> {
-        self.wait_for_impl(selector, state, timeout, |p| p.get_tree(pid))
     }
 }
 

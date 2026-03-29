@@ -46,6 +46,9 @@ mod stub {
         fn check_permissions(&self) -> Result<PermissionStatus> {
             unreachable!()
         }
+        fn subscribe(&self, _: u32) -> Result<Subscription> {
+            unreachable!()
+        }
     }
 }
 

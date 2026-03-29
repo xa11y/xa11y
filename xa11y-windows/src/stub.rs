@@ -1,7 +1,7 @@
 //! Stub backend for non-Windows platforms (allows compilation on all targets).
 
 use xa11y_core::{
-    Action, ActionData, ElementData, Error, PermissionStatus, Provider, Result, Tree,
+    Action, ActionData, ElementData, Error, PermissionStatus, Provider, Result, Subscription, Tree,
 };
 
 #[derive(Default)]
@@ -36,6 +36,9 @@ impl Provider for WindowsProvider {
         unreachable!()
     }
     fn check_permissions(&self) -> Result<PermissionStatus> {
+        unreachable!()
+    }
+    fn subscribe(&self, _: u32) -> Result<Subscription> {
         unreachable!()
     }
 }

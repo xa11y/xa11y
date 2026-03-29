@@ -4,9 +4,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use xa11y_core::{
-    Action, ActionData, CancelHandle, ElementData, ElementState, Error, Event, EventFilter,
-    EventKind, EventProvider, EventReceiver, PermissionStatus, Provider, Rect, Result, Role,
-    StateSet, Subscription, Toggled, Tree,
+    Action, ActionData, CancelHandle, ElementData, Error, Event, EventKind, EventReceiver,
+    PermissionStatus, Provider, Rect, Result, Role, StateSet, Subscription, Toggled, Tree,
 };
 use zbus::blocking::{Connection, Proxy};
 
@@ -1037,19 +1036,19 @@ impl Provider for LinuxProvider {
             }),
         }
     }
+
+    fn subscribe(&self, pid: u32) -> Result<Subscription> {
+        let app_ref = self.find_app_by_pid(pid)?;
+        let app_name = self.get_name(&app_ref).unwrap_or_default();
+        self.subscribe_impl(app_name, pid, pid)
+    }
 }
 
-// ── EventProvider ────────────────────────────────────────────────────────────
+// ── Event subscription ──────────────────────────────────────────────────────
 
 impl LinuxProvider {
-    /// Shared subscribe implementation.
-    fn subscribe_impl(
-        &self,
-        app_name: String,
-        app_pid: u32,
-        pid: u32,
-        filter: EventFilter,
-    ) -> Result<Subscription> {
+    /// Spawn a polling thread that detects focus and structure changes.
+    fn subscribe_impl(&self, app_name: String, app_pid: u32, pid: u32) -> Result<Subscription> {
         let (tx, rx) = std::sync::mpsc::channel();
         let poll_provider = LinuxProvider::new()?;
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1073,38 +1072,32 @@ impl LinuxProvider {
                     .and_then(|n| n.name.clone());
                 if focused_name != prev_focused {
                     if prev_focused.is_some() {
-                        let kind = EventKind::FocusChanged;
-                        if filter.kinds.is_empty() || filter.kinds.contains(&kind) {
-                            let _ = tx.send(Event {
-                                kind,
-                                app_name: app_name.clone(),
-                                app_pid,
-                                target: tree.iter().find(|n| n.states.focused).cloned(),
-                                state_flag: None,
-                                state_value: None,
-                                text_change: None,
-                                timestamp: std::time::Instant::now(),
-                            });
-                        }
-                    }
-                    prev_focused = focused_name;
-                }
-
-                let element_count = tree.len();
-                if element_count != prev_element_count && prev_element_count > 0 {
-                    let kind = EventKind::StructureChanged;
-                    if filter.kinds.is_empty() || filter.kinds.contains(&kind) {
                         let _ = tx.send(Event {
-                            kind,
+                            kind: EventKind::FocusChanged,
                             app_name: app_name.clone(),
                             app_pid,
-                            target: None,
+                            target: tree.iter().find(|n| n.states.focused).cloned(),
                             state_flag: None,
                             state_value: None,
                             text_change: None,
                             timestamp: std::time::Instant::now(),
                         });
                     }
+                    prev_focused = focused_name;
+                }
+
+                let element_count = tree.len();
+                if element_count != prev_element_count && prev_element_count > 0 {
+                    let _ = tx.send(Event {
+                        kind: EventKind::StructureChanged,
+                        app_name: app_name.clone(),
+                        app_pid,
+                        target: None,
+                        state_flag: None,
+                        state_value: None,
+                        text_change: None,
+                        timestamp: std::time::Instant::now(),
+                    });
                 }
                 prev_element_count = element_count;
             }
@@ -1116,71 +1109,6 @@ impl LinuxProvider {
         });
 
         Ok(Subscription::new(EventReceiver::new(rx), cancel))
-    }
-
-    fn wait_for_event_impl(&self, sub: Subscription, timeout: Duration) -> Result<Event> {
-        let start = std::time::Instant::now();
-        loop {
-            if let Some(event) = sub.try_recv() {
-                return Ok(event);
-            }
-            let elapsed = start.elapsed();
-            if elapsed >= timeout {
-                return Err(Error::Timeout { elapsed });
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    fn wait_for_impl(
-        &self,
-        pid: u32,
-        selector: &str,
-        state: ElementState,
-        timeout: Duration,
-    ) -> Result<Option<ElementData>> {
-        let start = std::time::Instant::now();
-        let poll_interval = Duration::from_millis(100);
-
-        loop {
-            let elapsed = start.elapsed();
-            if elapsed >= timeout {
-                return Err(Error::Timeout { elapsed });
-            }
-
-            let tree = self.get_tree(pid)?;
-            let matches = tree.query(selector).ok();
-            let element = matches.as_ref().and_then(|m| m.first().copied());
-
-            if state.is_met(element) {
-                return Ok(element.cloned());
-            }
-
-            std::thread::sleep(poll_interval);
-        }
-    }
-}
-
-impl EventProvider for LinuxProvider {
-    fn subscribe(&self, pid: u32, filter: EventFilter) -> Result<Subscription> {
-        let app_ref = self.find_app_by_pid(pid)?;
-        let app_name = self.get_name(&app_ref).unwrap_or_default();
-        self.subscribe_impl(app_name, pid, pid, filter)
-    }
-
-    fn wait_for_event(&self, pid: u32, filter: EventFilter, timeout: Duration) -> Result<Event> {
-        let sub = self.subscribe(pid, filter)?;
-        self.wait_for_event_impl(sub, timeout)
-    }
-
-    fn wait_for(
-        &self,
-        pid: u32,
-        selector: &str,
-        state: ElementState,
-        timeout: Duration,
-    ) -> Result<Option<ElementData>> {
-        self.wait_for_impl(pid, selector, state, timeout)
     }
 }
 

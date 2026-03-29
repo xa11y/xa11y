@@ -742,35 +742,6 @@ fn raw_platform_data_serialization() {
     assert!(json.contains("push button"));
 }
 
-// ── Event types ──
-
-#[test]
-fn event_filter_all() {
-    let filter = EventFilter::all();
-    assert!(filter.kinds.is_empty());
-    assert!(filter.selector.is_none());
-    assert!(filter.state_flags.is_empty());
-}
-
-#[test]
-fn event_filter_kinds() {
-    let filter = EventFilter::kinds(&[EventKind::FocusChanged, EventKind::ValueChanged]);
-    assert_eq!(filter.kinds.len(), 2);
-}
-
-#[test]
-fn event_filter_selector() {
-    let filter = EventFilter::selector("button[name=\"Submit\"]");
-    assert_eq!(filter.selector.as_deref(), Some("button[name=\"Submit\"]"));
-}
-
-#[test]
-fn event_filter_combined() {
-    let filter = EventFilter::new(&[EventKind::StateChanged], Some("check_box"));
-    assert_eq!(filter.kinds.len(), 1);
-    assert_eq!(filter.selector.as_deref(), Some("check_box"));
-}
-
 // ── Provider trait ──
 
 #[test]
@@ -915,6 +886,13 @@ impl Provider for MockProvider {
 
     fn check_permissions(&self) -> xa11y::Result<PermissionStatus> {
         Ok(PermissionStatus::Granted)
+    }
+
+    fn subscribe(&self, _pid: u32) -> xa11y::Result<xa11y::Subscription> {
+        Err(xa11y::Error::Platform {
+            code: -1,
+            message: "MockProvider does not support subscribe".to_string(),
+        })
     }
 }
 

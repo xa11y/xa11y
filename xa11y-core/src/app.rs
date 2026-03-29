@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::element::Element;
 use crate::error::Result;
+use crate::event_provider::Subscription;
 use crate::locator::Locator;
 use crate::provider::Provider;
 use crate::role::Role;
@@ -96,6 +97,25 @@ impl App {
         let tree = self.provider.get_tree(self.pid)?;
         let tree = Arc::new(tree);
         Ok(Element::new(tree, 0))
+    }
+
+    /// Subscribe to all accessibility events for this application.
+    ///
+    /// Returns a [`Subscription`] that receives events until dropped.
+    ///
+    /// ```no_run
+    /// # use xa11y_core::*;
+    /// # fn example(app: &App) -> Result<()> {
+    /// let sub = app.subscribe()?;
+    /// let event = sub.wait_for(
+    ///     |e| e.kind == EventKind::FocusChanged,
+    ///     std::time::Duration::from_secs(5),
+    /// )?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn subscribe(&self) -> Result<Subscription> {
+        self.provider.subscribe(self.pid)
     }
 
     /// List all running applications.

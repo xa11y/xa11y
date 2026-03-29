@@ -1457,20 +1457,18 @@ mod tests {
     }
 
     // ════════════════════════════════════════════════════════════════
-    // EventProvider (3 tests)
+    // Event subscription (2 tests)
     // ════════════════════════════════════════════════════════════════
 
     #[test]
     #[ignore]
     fn event_subscribe_receives_focus_event() {
         use std::time::Duration;
-        let ep = xa11y::create_event_provider().expect("EventProvider unavailable");
+        let provider = xa11y::create_provider().unwrap();
         let root = h::app_tree();
 
-        let pid = ep.resolve_pid_by_name("xa11y").unwrap();
-        let sub = ep
-            .subscribe(pid, EventFilter::kinds(&[EventKind::FocusChanged]))
-            .unwrap();
+        let app = App::from_name(provider, "xa11y").unwrap();
+        let sub = app.subscribe().unwrap();
 
         // Trigger a focus change
         let text = root
@@ -1478,7 +1476,8 @@ mod tests {
             .into_iter()
             .find(|n| n.role == Role::TextField || n.role == Role::TextArea)
             .expect("Text entry not found");
-        let _ = ep.perform_action(text.tree(), &text, Action::Focus, None);
+        let prov = xa11y::create_provider().unwrap();
+        let _ = prov.perform_action(text.tree(), &text, Action::Focus, None);
 
         // Wait briefly for the event
         std::thread::sleep(Duration::from_millis(500));
@@ -1492,46 +1491,19 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn event_wait_for_event_timeout() {
+    fn event_wait_for_timeout() {
         use std::time::Duration;
-        let ep = xa11y::create_event_provider().expect("EventProvider unavailable");
+        let provider = xa11y::create_provider().unwrap();
 
-        let pid = ep.resolve_pid_by_name("xa11y").unwrap();
+        let app = App::from_name(provider, "xa11y").unwrap();
+        let sub = app.subscribe().unwrap();
 
         // Wait for an event with a very short timeout — should timeout
-        let result = ep.wait_for_event(
-            pid,
-            EventFilter::kinds(&[EventKind::Alert]),
-            Duration::from_millis(100),
-        );
+        let result = sub.wait_for(|e| e.kind == EventKind::Alert, Duration::from_millis(100));
         assert!(
             matches!(result, Err(Error::Timeout { .. })),
             "Expected Timeout, got: {:?}",
             result
         );
-    }
-
-    #[test]
-    #[ignore]
-    fn event_wait_for_attached() {
-        use std::time::Duration;
-        let ep = xa11y::create_event_provider().expect("EventProvider unavailable");
-
-        let pid = ep.resolve_pid_by_name("xa11y").unwrap();
-
-        // Wait for Submit button to be attached (it already exists)
-        let result = ep.wait_for(
-            pid,
-            "button[name=\"Submit\"]",
-            ElementState::Attached,
-            Duration::from_secs(2),
-        );
-        assert!(
-            result.is_ok(),
-            "wait_for attached should succeed: {:?}",
-            result.err()
-        );
-        let node = result.unwrap().expect("attached node should exist");
-        assert_eq!(node.role, Role::Button);
     }
 }

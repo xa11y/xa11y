@@ -758,6 +758,222 @@ impl Locator {
     }
 }
 
+// ── EventKind ──────────────────────────────────────────────────────────────
+
+fn event_kind_to_str(kind: xa11y::EventKind) -> &'static str {
+    match kind {
+        xa11y::EventKind::FocusChanged => "focus_changed",
+        xa11y::EventKind::ValueChanged => "value_changed",
+        xa11y::EventKind::NameChanged => "name_changed",
+        xa11y::EventKind::StateChanged => "state_changed",
+        xa11y::EventKind::StructureChanged => "structure_changed",
+        xa11y::EventKind::WindowOpened => "window_opened",
+        xa11y::EventKind::WindowClosed => "window_closed",
+        xa11y::EventKind::WindowActivated => "window_activated",
+        xa11y::EventKind::WindowDeactivated => "window_deactivated",
+        xa11y::EventKind::SelectionChanged => "selection_changed",
+        xa11y::EventKind::MenuOpened => "menu_opened",
+        xa11y::EventKind::MenuClosed => "menu_closed",
+        xa11y::EventKind::Alert => "alert",
+        xa11y::EventKind::TextChanged => "text_changed",
+    }
+}
+
+/// Accessibility event kind constants.
+#[pyclass(frozen)]
+struct EventKind;
+
+#[pymethods]
+impl EventKind {
+    #[classattr]
+    const FOCUS_CHANGED: &'static str = "focus_changed";
+    #[classattr]
+    const VALUE_CHANGED: &'static str = "value_changed";
+    #[classattr]
+    const NAME_CHANGED: &'static str = "name_changed";
+    #[classattr]
+    const STATE_CHANGED: &'static str = "state_changed";
+    #[classattr]
+    const STRUCTURE_CHANGED: &'static str = "structure_changed";
+    #[classattr]
+    const WINDOW_OPENED: &'static str = "window_opened";
+    #[classattr]
+    const WINDOW_CLOSED: &'static str = "window_closed";
+    #[classattr]
+    const WINDOW_ACTIVATED: &'static str = "window_activated";
+    #[classattr]
+    const WINDOW_DEACTIVATED: &'static str = "window_deactivated";
+    #[classattr]
+    const SELECTION_CHANGED: &'static str = "selection_changed";
+    #[classattr]
+    const MENU_OPENED: &'static str = "menu_opened";
+    #[classattr]
+    const MENU_CLOSED: &'static str = "menu_closed";
+    #[classattr]
+    const ALERT: &'static str = "alert";
+    #[classattr]
+    const TEXT_CHANGED: &'static str = "text_changed";
+}
+
+// ── Event ──────────────────────────────────────────────────────────────────
+
+/// An accessibility event delivered to subscribers.
+#[pyclass(frozen)]
+#[derive(Clone)]
+struct Event {
+    #[pyo3(get)]
+    kind: String,
+    #[pyo3(get)]
+    app_name: String,
+    #[pyo3(get)]
+    app_pid: u32,
+    target_data: Option<xa11y::ElementData>,
+}
+
+impl Event {
+    fn from_core(event: xa11y::Event) -> Self {
+        Self {
+            kind: event_kind_to_str(event.kind).to_string(),
+            app_name: event.app_name,
+            app_pid: event.app_pid,
+            target_data: event.target,
+        }
+    }
+}
+
+#[pymethods]
+impl Event {
+    #[getter]
+    fn target(&self, py: Python<'_>) -> PyResult<Option<Py<Element>>> {
+        match self.target_data.as_ref() {
+            Some(data) => Ok(Some(make_py_element(py, data)?)),
+            None => Ok(None),
+        }
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "Event(kind='{}', app_name='{}', app_pid={})",
+            self.kind, self.app_name, self.app_pid
+        )
+    }
+}
+
+// ── Subscription ───────────────────────────────────────────────────────────
+
+/// A live event subscription. Drop to unsubscribe.
+///
+/// Supports ``try_recv()``, ``recv()``, ``wait_for()``, iteration, and
+/// context manager protocol.
+#[pyclass]
+struct Subscription {
+    inner: std::sync::Mutex<Option<xa11y::Subscription>>,
+}
+
+impl Subscription {
+    fn with_sub<T>(&self, f: impl FnOnce(&xa11y::Subscription) -> T) -> PyResult<T> {
+        let guard = self.inner.lock().unwrap();
+        let sub = guard
+            .as_ref()
+            .ok_or_else(|| PlatformError::new_err("Subscription is closed"))?;
+        Ok(f(sub))
+    }
+}
+
+#[pymethods]
+impl Subscription {
+    /// Try to receive an event without blocking. Returns ``None`` if no event is ready.
+    fn try_recv(&self) -> PyResult<Option<Event>> {
+        self.with_sub(|sub| sub.try_recv().map(Event::from_core))
+    }
+
+    /// Block until an event arrives or the timeout expires.
+    #[pyo3(signature = (timeout=5.0))]
+    fn recv(&self, py: Python<'_>, timeout: f64) -> PyResult<Event> {
+        let dur = Duration::from_secs_f64(timeout);
+        // Release the GIL while blocking so other Python threads can run.
+        py.allow_threads(|| self.with_sub(|sub| sub.recv(dur).map(Event::from_core)))
+            .and_then(|r| r.map_err(to_py_err))
+    }
+
+    /// Block until an event matching *predicate* arrives or the timeout expires.
+    #[pyo3(signature = (predicate, timeout=5.0))]
+    fn wait_for(&self, predicate: PyObject, timeout: f64) -> PyResult<Event> {
+        let dur = Duration::from_secs_f64(timeout);
+        let start = std::time::Instant::now();
+
+        loop {
+            let remaining = dur.saturating_sub(start.elapsed());
+            if remaining.is_zero() {
+                return Err(to_py_err(xa11y::Error::Timeout {
+                    elapsed: start.elapsed(),
+                }));
+            }
+            let poll = remaining.min(Duration::from_millis(50));
+            let maybe_event = self.with_sub(|sub| sub.try_recv().map(Event::from_core))?;
+            if let Some(py_event) = maybe_event {
+                let matched = Python::with_gil(|py| -> PyResult<bool> {
+                    let py_ref = Py::new(py, py_event.clone())?;
+                    let result = predicate.call1(py, (py_ref,))?;
+                    result.extract::<bool>(py)
+                })?;
+                if matched {
+                    return Ok(py_event);
+                }
+            } else {
+                std::thread::sleep(poll);
+            }
+        }
+    }
+
+    /// Close the subscription (stop receiving events).
+    fn close(&self) {
+        self.inner.lock().unwrap().take();
+    }
+
+    fn __enter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    #[pyo3(signature = (_exc_type=None, _exc_val=None, _exc_tb=None))]
+    fn __exit__(
+        &self,
+        _exc_type: Option<&Bound<'_, pyo3::types::PyAny>>,
+        _exc_val: Option<&Bound<'_, pyo3::types::PyAny>>,
+        _exc_tb: Option<&Bound<'_, pyo3::types::PyAny>>,
+    ) -> bool {
+        self.close();
+        false
+    }
+
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&self) -> PyResult<Option<Event>> {
+        let maybe_event = self.with_sub(|sub| {
+            // Block with a short timeout so Python can handle signals.
+            sub.recv(Duration::from_millis(100))
+                .ok()
+                .map(Event::from_core)
+        })?;
+        if maybe_event.is_some() {
+            return Ok(maybe_event);
+        }
+        // Check for KeyboardInterrupt
+        Python::with_gil(|py| py.check_signals())?;
+        Ok(None)
+    }
+
+    fn __repr__(&self) -> String {
+        if self.inner.lock().unwrap().is_some() {
+            "Subscription(active)".to_string()
+        } else {
+            "Subscription(closed)".to_string()
+        }
+    }
+}
+
 // ── App ────────────────────────────────────────────────────────────────────
 
 /// A handle to a running application.
@@ -795,6 +1011,17 @@ impl App {
     fn locator(&self, selector: &str) -> Locator {
         let core_loc = self.inner.locator(selector);
         Locator::from_core(core_loc)
+    }
+
+    /// Subscribe to all accessibility events for this application.
+    fn subscribe(&self, py: Python<'_>) -> PyResult<Subscription> {
+        let inner = self.inner.clone();
+        let sub = py
+            .allow_threads(move || inner.subscribe())
+            .map_err(to_py_err)?;
+        Ok(Subscription {
+            inner: std::sync::Mutex::new(Some(sub)),
+        })
     }
 
     /// Snapshot the app's accessibility tree. Returns the root Element.
@@ -859,8 +1086,11 @@ fn check_permissions(py: Python<'_>) -> PyResult<String> {
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<App>()?;
     m.add_class::<Element>()?;
+    m.add_class::<Event>()?;
+    m.add_class::<EventKind>()?;
     m.add_class::<Locator>()?;
     m.add_class::<Rect>()?;
+    m.add_class::<Subscription>()?;
 
     m.add("XA11yError", m.py().get_type::<XA11yError>())?;
     m.add(
@@ -932,6 +1162,13 @@ impl xa11y::Provider for MockProvider {
 
     fn check_permissions(&self) -> xa11y::Result<xa11y::PermissionStatus> {
         Ok(xa11y::PermissionStatus::Granted)
+    }
+
+    fn subscribe(&self, _pid: u32) -> xa11y::Result<xa11y::Subscription> {
+        Err(xa11y::Error::Platform {
+            code: -1,
+            message: "MockProvider does not support subscribe".to_string(),
+        })
     }
 }
 
