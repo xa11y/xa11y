@@ -1,14 +1,20 @@
-use serde::{Deserialize, Serialize};
-
 use crate::action::{Action, ActionData};
 use crate::error::Result;
 use crate::node::NodeData;
 use crate::tree::Tree;
 
+use serde::{Deserialize, Serialize};
+
 /// Platform backend trait for accessibility tree access.
 pub trait Provider: Send + Sync {
-    /// Snapshot a specific application's accessibility tree.
-    fn get_app_tree(&self, target: &AppTarget) -> Result<Tree>;
+    /// Resolve an application name to a PID.
+    ///
+    /// Name matching is case-insensitive substring. Returns the PID of the
+    /// first matching application.
+    fn resolve_pid_by_name(&self, name: &str) -> Result<u32>;
+
+    /// Snapshot a specific application's accessibility tree by PID.
+    fn get_tree(&self, pid: u32) -> Result<Tree>;
 
     /// Snapshot all running applications (shallow).
     fn get_apps(&self) -> Result<Tree>;
@@ -28,28 +34,6 @@ pub trait Provider: Send + Sync {
 
     /// Check if accessibility permissions are granted.
     fn check_permissions(&self) -> Result<PermissionStatus>;
-}
-
-/// Target for identifying an application.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum AppTarget {
-    /// Match by human-readable display name (case-insensitive, substring match).
-    ByName(String),
-    /// Match by process ID.
-    ByPid(u32),
-    /// Target a specific window by platform-specific handle.
-    ByWindow(WindowHandle),
-}
-
-/// Platform-specific window handle.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum WindowHandle {
-    /// macOS CGWindowID
-    MacOS(u32),
-    /// Windows HWND (as usize for pointer-sized value)
-    Windows(usize),
-    /// Linux X11 window ID
-    X11(u64),
 }
 
 /// Result of a permission check.

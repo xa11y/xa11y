@@ -8,56 +8,41 @@
 //! ```no_run
 //! use xa11y::*;
 //!
-//! let status = check_permissions().expect("Permission check failed");
+//! let safari = App::from_name(provider().unwrap(), "Safari")
+//!     .expect("Failed to get app");
 //!
-//! match status {
-//!     PermissionStatus::Granted => {
-//!         let root = app(
-//!             &AppTarget::ByName("Safari".to_string()),
-//!         ).expect("Failed to get app");
-//!
-//!         // Snapshot navigation — no refetch
-//!         let buttons = root.query("button").expect("Query failed");
-//!         println!("Found {} buttons", buttons.len());
-//!         for btn in &buttons {
-//!             if let Some(parent) = btn.parent() {
-//!                 println!("  {} (parent: {})", btn.name.as_deref().unwrap_or("?"), parent.role);
-//!             }
-//!         }
-//!
-//!         // Locator for actions — refetches every time
-//!         let loc = locator(
-//!             AppTarget::ByName("Safari".to_string()),
-//!             "button[name=\"OK\"]",
-//!         ).expect("Failed to create locator");
-//!         loc.press().expect("Failed to press");
-//!     }
-//!     PermissionStatus::Denied { instructions } => {
-//!         eprintln!("Accessibility not enabled: {}", instructions);
-//!     }
+//! // Snapshot navigation — read-only tree
+//! let root = safari.nodes().expect("Failed to snapshot");
+//! for child in root.children() {
+//!     println!("{}: {:?}", child.role, child.name);
 //! }
+//!
+//! // Locator for actions — refetches every time
+//! safari.locator("button[name=\"OK\"]").press().expect("Failed to press");
+//!
+//! // Locator to get matching nodes
+//! let buttons = safari.locator("button").nodes().expect("Query failed");
+//! println!("Found {} buttons", buttons.len());
+//!
+//! // By PID
+//! let app = App::from_pid(provider().unwrap(), 1234).expect("Failed to get app");
 //! ```
 
 use std::sync::{Arc, OnceLock};
 
-// Re-export public types. Tree is exported because Provider trait methods reference it,
-// but end users should interact with Node (returned by app/apps), not Tree directly.
+// Re-export public types.
 pub use xa11y_core::{
-    Action, ActionData, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
-    EventKind, EventReceiver, Locator, Node, NodeData, PermissionStatus, RawPlatformData, Rect,
-    Result, Role, StateFlag, StateSet, Subscription, TextChangeData, TextChangeType, Toggled, Tree,
-    WindowHandle,
+    Action, ActionData, App, CancelHandle, ElementState, Error, Event, EventFilter, EventKind,
+    EventReceiver, Locator, Node, NodeData, PermissionStatus, RawPlatformData, Rect, Result, Role,
+    StateFlag, StateSet, Subscription, TextChangeData, TextChangeType, Toggled, Tree,
 };
 
-// Provider traits are implementation details used by platform backends and Python bindings,
-// not part of the public API for end users.
+// Provider traits are implementation details used by platform backends and Python bindings.
 #[doc(hidden)]
 pub use xa11y_core::{EventProvider, Provider};
 
 // ── Internal singleton ──────────────────────────────────────────────────────
 
-// Use Box::leak so the provider is never dropped — avoids Windows COM
-// teardown crashes (STATUS_ACCESS_VIOLATION at process exit).
 static PROVIDER: OnceLock<std::result::Result<&'static dyn Provider, String>> = OnceLock::new();
 
 fn get_provider_ref() -> Result<&'static dyn Provider> {
@@ -75,13 +60,15 @@ fn get_provider_ref() -> Result<&'static dyn Provider> {
         })
 }
 
-/// Wrapper that lets a `&'static dyn Provider` be shared as `Arc<dyn Provider>`
-/// for use with `Locator`.
+/// Wrapper that lets a `&'static dyn Provider` be shared as `Arc<dyn Provider>`.
 struct StaticProviderRef(&'static dyn Provider);
 
 impl Provider for StaticProviderRef {
-    fn get_app_tree(&self, target: &AppTarget) -> Result<xa11y_core::Tree> {
-        self.0.get_app_tree(target)
+    fn resolve_pid_by_name(&self, name: &str) -> Result<u32> {
+        self.0.resolve_pid_by_name(name)
+    }
+    fn get_tree(&self, pid: u32) -> Result<xa11y_core::Tree> {
+        self.0.get_tree(pid)
     }
     fn get_apps(&self) -> Result<xa11y_core::Tree> {
         self.0.get_apps()
@@ -102,38 +89,12 @@ impl Provider for StaticProviderRef {
 
 /// Get the global provider as an `Arc<dyn Provider>`.
 ///
-/// Returns a handle to the same singleton used by `app()`, `apps()`, etc.
-#[doc(hidden)]
+/// Pass this to `App::from_name()`, `App::from_pid()`, etc.
 pub fn provider() -> Result<Arc<dyn Provider>> {
     Ok(Arc::new(StaticProviderRef(get_provider_ref()?)))
 }
 
-// ── Module-level API ────────────────────────────────────────────────────────
-
-/// Snapshot a specific application's accessibility tree.
-///
-/// Returns the root [`Node`], which you can navigate via
-/// `parent()`, `children()`, and `query()` — all using the snapshot
-/// (no platform refetch).
-pub fn app(target: &AppTarget) -> Result<Node> {
-    let tree = get_provider_ref()?.get_app_tree(target)?;
-    let tree = Arc::new(tree);
-    Ok(Node::new(tree, 0))
-}
-
-/// Snapshot all running applications (shallow).
-///
-/// Returns the root [`Node`] of a merged tree containing all apps.
-pub fn apps() -> Result<Node> {
-    let tree = get_provider_ref()?.get_apps()?;
-    let tree = Arc::new(tree);
-    Ok(Node::new(tree, 0))
-}
-
 /// Perform an action on a node from a specific snapshot.
-///
-/// Uses the node's snapshot to identify the element — does NOT refetch.
-/// For actions that always use fresh data, use a [`Locator`] instead.
 #[cfg(feature = "testing")]
 pub fn perform_action(node: &Node, action: Action, data: Option<ActionData>) -> Result<()> {
     let tree = node.tree();
@@ -148,19 +109,8 @@ pub fn check_permissions() -> Result<PermissionStatus> {
     get_provider_ref()?.check_permissions()
 }
 
-/// Create a Locator targeting a specific application.
-///
-/// Locators re-resolve against a fresh snapshot on every operation,
-/// making them immune to staleness.
-pub fn locator(target: AppTarget, selector: &str) -> Result<Locator> {
-    Ok(Locator::new(provider()?, target, selector))
-}
-
 // ── Platform provider construction (internal) ───────────────────────────────
 
-/// Create a new platform-appropriate accessibility provider.
-///
-/// Returns a fresh provider instance (not the global singleton).
 #[doc(hidden)]
 #[cfg(feature = "testing")]
 pub fn create_provider() -> Result<Arc<dyn Provider>> {
@@ -172,17 +122,14 @@ fn create_provider_boxed() -> Result<Box<dyn Provider>> {
     {
         Ok(Box::new(xa11y_macos::MacOSProvider::new()?))
     }
-
     #[cfg(target_os = "windows")]
     {
         Ok(Box::new(xa11y_windows::WindowsProvider::new()?))
     }
-
     #[cfg(target_os = "linux")]
     {
         Ok(Box::new(xa11y_linux::LinuxProvider::new()?))
     }
-
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         Err(Error::Platform {
@@ -192,10 +139,6 @@ fn create_provider_boxed() -> Result<Box<dyn Provider>> {
     }
 }
 
-/// Create a platform-appropriate event provider (supports subscribe/wait).
-///
-/// Returns a boxed `EventProvider` trait object for the current platform.
-/// EventProvider extends Provider with event subscription capabilities.
 #[doc(hidden)]
 #[cfg(feature = "testing")]
 pub fn create_event_provider() -> Result<Box<dyn EventProvider>> {
@@ -203,17 +146,14 @@ pub fn create_event_provider() -> Result<Box<dyn EventProvider>> {
     {
         Ok(Box::new(xa11y_macos::MacOSProvider::new()?))
     }
-
     #[cfg(target_os = "windows")]
     {
         Ok(Box::new(xa11y_windows::WindowsProvider::new()?))
     }
-
     #[cfg(target_os = "linux")]
     {
         Ok(Box::new(xa11y_linux::LinuxProvider::new()?))
     }
-
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         Err(Error::Platform {

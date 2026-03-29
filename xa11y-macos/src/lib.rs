@@ -25,7 +25,10 @@ mod stub {
     }
 
     impl Provider for MacOSProvider {
-        fn get_app_tree(&self, _: &AppTarget) -> Result<Tree> {
+        fn resolve_pid_by_name(&self, _: &str) -> Result<u32> {
+            unreachable!()
+        }
+        fn get_tree(&self, _: u32) -> Result<Tree> {
             unreachable!()
         }
         fn get_apps(&self) -> Result<Tree> {

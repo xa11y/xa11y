@@ -5,7 +5,6 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::action::Action;
-use crate::error::Result;
 use crate::role::Role;
 use crate::tree::Tree;
 
@@ -84,14 +83,15 @@ pub struct NodeData {
     pub parent_index: Option<NodeIndex>,
 }
 
-/// A node in an accessibility tree snapshot, with navigation.
+/// A read-only node in an accessibility tree snapshot, with navigation.
 ///
 /// `Node` dereferences to [`NodeData`], so all properties (`role`, `name`,
 /// `value`, `states`, etc.) are accessible via field access. Navigation
-/// methods (`parent()`, `children()`, `query()`) use the shared snapshot
-/// — no platform refetch occurs.
+/// methods (`parent()`, `children()`) use the shared snapshot — no
+/// platform refetch occurs.
 ///
 /// Nodes are cheap to clone (they share the underlying snapshot via `Arc`).
+/// To perform actions, use a [`Locator`](crate::Locator) instead.
 #[derive(Clone)]
 pub struct Node {
     snapshot: Arc<Tree>,
@@ -178,18 +178,6 @@ impl Node {
             .into_iter()
             .map(|idx| Node::new(Arc::clone(&self.snapshot), idx))
             .collect()
-    }
-
-    /// Query nodes matching a CSS-like selector string within this snapshot.
-    ///
-    /// Searches the *entire* snapshot (not just this node's subtree).
-    /// Uses the snapshot — no platform refetch.
-    pub fn query(&self, selector_str: &str) -> Result<Vec<Node>> {
-        let indices = self.snapshot.query_indices(selector_str)?;
-        Ok(indices
-            .into_iter()
-            .map(|idx| Node::new(Arc::clone(&self.snapshot), idx))
-            .collect())
     }
 }
 

@@ -1,8 +1,6 @@
 //! Stub backend for non-Linux platforms (allows compilation on all targets).
 
-use xa11y_core::{
-    Action, ActionData, AppTarget, Error, NodeData, PermissionStatus, Provider, Result, Tree,
-};
+use xa11y_core::{Action, ActionData, Error, NodeData, PermissionStatus, Provider, Result, Tree};
 
 #[derive(Default)]
 pub struct LinuxProvider;
@@ -14,7 +12,14 @@ impl LinuxProvider {
 }
 
 impl Provider for LinuxProvider {
-    fn get_app_tree(&self, _target: &AppTarget) -> Result<Tree> {
+    fn resolve_pid_by_name(&self, _name: &str) -> Result<u32> {
+        Err(Error::Platform {
+            code: -1,
+            message: "Linux backend not available on this platform".to_string(),
+        })
+    }
+
+    fn get_tree(&self, _pid: u32) -> Result<Tree> {
         Err(Error::Platform {
             code: -1,
             message: "Linux backend not available on this platform".to_string(),

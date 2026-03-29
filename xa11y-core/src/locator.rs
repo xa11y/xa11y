@@ -4,9 +4,8 @@ use std::time::Duration;
 use crate::action::{Action, ActionData};
 use crate::error::{Error, Result};
 use crate::event::ElementState;
-use crate::node::{Node, NodeData, Rect, StateSet};
-use crate::provider::{AppTarget, Provider};
-use crate::role::Role;
+use crate::node::{Node, NodeData};
+use crate::provider::Provider;
 use crate::tree::Tree;
 
 /// A lazy element descriptor that re-resolves against a fresh accessibility
@@ -22,8 +21,8 @@ use crate::tree::Tree;
 /// # use std::sync::Arc;
 /// # use std::time::Duration;
 /// # fn example(provider: Arc<dyn Provider>) -> Result<()> {
-/// let target = AppTarget::ByName("MyApp".into());
-/// let save_btn = Locator::new(provider, target, "button[name=\"Save\"]");
+/// let app = App::from_name(provider, "MyApp")?;
+/// let save_btn = app.locator("button[name=\"Save\"]");
 /// save_btn.press()?;           // snapshot → query → press
 /// save_btn.wait_visible(Duration::from_secs(5))?; // poll until visible
 /// save_btn.press()?;           // re-resolves against fresh snapshot
@@ -32,7 +31,7 @@ use crate::tree::Tree;
 /// ```
 pub struct Locator {
     provider: Arc<dyn Provider>,
-    target: AppTarget,
+    pid: u32,
     selector: String,
     /// Which match to select (0-based). `None` means first match.
     nth: Option<usize>,
@@ -49,10 +48,10 @@ struct Resolved {
 impl Locator {
     /// Create a new Locator.
     #[doc(hidden)]
-    pub fn new(provider: Arc<dyn Provider>, target: AppTarget, selector: &str) -> Self {
+    pub fn new(provider: Arc<dyn Provider>, pid: u32, selector: &str) -> Self {
         Self {
             provider,
-            target,
+            pid,
             selector: selector.to_string(),
             nth: None,
         }
@@ -93,11 +92,29 @@ impl Locator {
         &self.selector
     }
 
+    /// Get the underlying provider.
+    #[doc(hidden)]
+    pub fn provider(&self) -> &Arc<dyn Provider> {
+        &self.provider
+    }
+
+    /// Get the PID used by this locator.
+    #[doc(hidden)]
+    pub fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    /// Get the nth index, if set.
+    #[doc(hidden)]
+    pub fn nth_index(&self) -> Option<usize> {
+        self.nth
+    }
+
     // ── Internal resolution ─────────────────────────────────────────
 
     /// Snapshot the tree and resolve the selector to a single node.
     fn resolve(&self) -> Result<Resolved> {
-        let tree = self.provider.get_app_tree(&self.target)?;
+        let tree = self.provider.get_tree(self.pid)?;
         let matches = tree.query(&self.selector)?;
         let idx = self.nth.unwrap_or(0);
         let node = matches.get(idx).ok_or_else(|| Error::SelectorNotMatched {
@@ -109,66 +126,7 @@ impl Locator {
         })
     }
 
-    /// Resolve and return a clone of the matched node data.
-    fn resolve_node_data(&self) -> Result<NodeData> {
-        let r = self.resolve()?;
-        Ok(r.tree
-            .get_data(r.node_index)
-            .expect("node_index valid after resolve")
-            .clone())
-    }
-
     // ── Queries (each takes a fresh snapshot) ───────────────────────
-
-    /// Get the matched element's role.
-    pub fn role(&self) -> Result<Role> {
-        Ok(self.resolve_node_data()?.role)
-    }
-
-    /// Get the matched element's name.
-    pub fn name(&self) -> Result<Option<String>> {
-        Ok(self.resolve_node_data()?.name)
-    }
-
-    /// Get the matched element's value.
-    pub fn value(&self) -> Result<Option<String>> {
-        Ok(self.resolve_node_data()?.value)
-    }
-
-    /// Get the matched element's description.
-    pub fn description(&self) -> Result<Option<String>> {
-        Ok(self.resolve_node_data()?.description)
-    }
-
-    /// Get the matched element's bounding rectangle.
-    pub fn bounds(&self) -> Result<Option<Rect>> {
-        Ok(self.resolve_node_data()?.bounds)
-    }
-
-    /// Get the matched element's state flags.
-    pub fn states(&self) -> Result<StateSet> {
-        Ok(self.resolve_node_data()?.states)
-    }
-
-    /// Get the matched element's numeric value (for range controls).
-    pub fn numeric_value(&self) -> Result<Option<f64>> {
-        Ok(self.resolve_node_data()?.numeric_value)
-    }
-
-    /// Check if the matched element is visible.
-    pub fn is_visible(&self) -> Result<bool> {
-        Ok(self.resolve_node_data()?.states.visible)
-    }
-
-    /// Check if the matched element is enabled.
-    pub fn is_enabled(&self) -> Result<bool> {
-        Ok(self.resolve_node_data()?.states.enabled)
-    }
-
-    /// Check if the matched element is focused.
-    pub fn is_focused(&self) -> Result<bool> {
-        Ok(self.resolve_node_data()?.states.focused)
-    }
 
     /// Check if a matching element exists in the current tree.
     pub fn exists(&self) -> Result<bool> {
@@ -181,16 +139,34 @@ impl Locator {
 
     /// Count matching elements in the current tree.
     pub fn count(&self) -> Result<usize> {
-        let tree = self.provider.get_app_tree(&self.target)?;
+        let tree = self.provider.get_tree(self.pid)?;
         let matches = tree.query(&self.selector)?;
         Ok(matches.len())
     }
 
-    /// Get a [`Node`] handle from a fresh snapshot, with snapshot navigation.
-    pub fn get(&self) -> Result<Node> {
+    /// Get a single [`Node`] handle from a fresh snapshot, with snapshot navigation.
+    pub fn node(&self) -> Result<Node> {
         let r = self.resolve()?;
         let tree = Arc::new(r.tree);
         Ok(Node::new(tree, r.node_index))
+    }
+
+    /// Get all matching nodes from a fresh snapshot.
+    ///
+    /// All returned nodes share the same snapshot, so parent/children
+    /// navigation is consistent across the result set.
+    pub fn nodes(&self) -> Result<Vec<Node>> {
+        let tree = self.provider.get_tree(self.pid)?;
+        let indices: Vec<u32> = tree
+            .query(&self.selector)?
+            .iter()
+            .map(|n| n.index)
+            .collect();
+        let tree = Arc::new(tree);
+        Ok(indices
+            .into_iter()
+            .map(|idx| Node::new(Arc::clone(&tree), idx))
+            .collect())
     }
 
     // ── Actions (each takes a fresh snapshot) ───────────────────────
@@ -397,7 +373,7 @@ impl Locator {
                 return Err(Error::Timeout { elapsed });
             }
 
-            let tree = self.provider.get_app_tree(&self.target)?;
+            let tree = self.provider.get_tree(self.pid)?;
             let matches = tree.query(&self.selector).ok();
             let idx = self.nth.unwrap_or(0);
             let matched_index = matches.as_ref().and_then(|m| m.get(idx).map(|n| n.index));

@@ -50,14 +50,35 @@ class Rect:
     def __repr__(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...
 
+# ── App ──────────────────────────────────────────────────────────────────────
+
+class App:
+    """A handle to a running application.
+
+    Use :meth:`locator` to create action-capable element references,
+    or :meth:`nodes` to snapshot the tree for inspection.
+    """
+
+    @property
+    def name(self) -> str:
+        """The application's display name."""
+    @property
+    def pid(self) -> int:
+        """The application's process ID."""
+    def locator(self, selector: str) -> Locator:
+        """Create a :class:`Locator` for lazy element interaction."""
+    def nodes(self) -> Node:
+        """Snapshot the app's accessibility tree. Returns the root :class:`Node`."""
+    def __repr__(self) -> str: ...
+
 # ── Node ─────────────────────────────────────────────────────────────────────
 
 class Node:
-    """A single element in an accessibility tree snapshot.
+    """A read-only element in an accessibility tree snapshot.
 
     Nodes are immutable snapshots that form a navigable graph —
     use :attr:`children` and :attr:`parent` to traverse.
-    Use :meth:`query` to search and :meth:`dump` for debug output.
+    To perform actions, use a :class:`Locator` via :meth:`App.locator`.
     """
 
     @property
@@ -132,18 +153,6 @@ class Node:
     @property
     def busy(self) -> bool:
         """Whether the element is in a busy/loading state."""
-    def query(self, selector: str) -> list[Node]:
-        """Find all nodes matching a CSS-like selector string within this snapshot."""
-    def locator(
-        self,
-        selector: str,
-        *,
-        max_depth: int | None = None,
-        max_elements: int | None = None,
-        visible_only: bool = False,
-        roles: list[str] | None = None,
-    ) -> Locator:
-        """Create a :class:`Locator` for resilient, lazy element interaction."""
     def __repr__(self) -> str: ...
     def __str__(self) -> str: ...
     def __len__(self) -> int: ...
@@ -167,46 +176,14 @@ class Locator:
         """Narrow to direct children matching *selector*."""
     def descendant(self, selector: str) -> Locator:
         """Narrow to descendants matching *selector*."""
-    def role(self) -> str:
-        """Get the role of the matched element."""
-    def name(self) -> str | None:
-        """Get the accessible name of the matched element."""
-    def value(self) -> str | None:
-        """Get the current value of the matched element."""
-    def description(self) -> str | None:
-        """Get the accessible description of the matched element."""
-    def bounds(self) -> Rect | None:
-        """Get the bounding rectangle of the matched element."""
-    def numeric_value(self) -> float | None:
-        """Get the numeric value of the matched element (e.g. slider position)."""
-    def is_visible(self) -> bool:
-        """Check whether the matched element is visible."""
-    def is_enabled(self) -> bool:
-        """Check whether the matched element is enabled."""
-    def is_focused(self) -> bool:
-        """Check whether the matched element has keyboard focus."""
-    def is_selected(self) -> bool:
-        """Check whether the matched element is selected."""
-    def checked(self) -> str | None:
-        """Check state: ``"on"``, ``"off"``, ``"mixed"``, or ``None``."""
-    def is_expanded(self) -> bool | None:
-        """Expansion state (``None`` if not expandable)."""
-    def is_editable(self) -> bool:
-        """Check whether the matched element supports text editing."""
-    def is_focusable(self) -> bool:
-        """Check whether the matched element can receive focus."""
-    def is_modal(self) -> bool:
-        """Check whether the matched element is a modal dialog."""
-    def is_required(self) -> bool:
-        """Check whether the matched element is a required form field."""
-    def is_busy(self) -> bool:
-        """Check whether the matched element is in a busy/loading state."""
     def exists(self) -> bool:
         """Check whether the selector matches any element."""
     def count(self) -> int:
         """Count the number of elements matching the selector."""
-    def get(self) -> Node:
-        """Resolve the locator to a :class:`Node` snapshot."""
+    def node(self) -> Node:
+        """Resolve the locator to a single :class:`Node` snapshot."""
+    def nodes(self) -> list[Node]:
+        """Resolve the locator to all matching :class:`Node` snapshots."""
     def press(self) -> None:
         """Press / activate the matched element."""
     def focus(self) -> None:
@@ -219,7 +196,7 @@ class Locator:
         """Expand a collapsible element."""
     def collapse(self) -> None:
         """Collapse an expanded element."""
-    def select_item(self) -> None:
+    def select(self) -> None:
         """Select an item (e.g. in a list or tab bar)."""
     def show_menu(self) -> None:
         """Open the context menu for the matched element."""
@@ -245,23 +222,23 @@ class Locator:
         """Scroll the matched element leftward."""
     def scroll_right(self, amount: float = 1.0) -> None:
         """Scroll the matched element rightward."""
-    def wait_visible(self, timeout: float = 5.0) -> None:
-        """Wait until the element is visible (default 5s timeout)."""
-    def wait_attached(self, timeout: float = 5.0) -> None:
-        """Wait until the selector matches an element (default 5s timeout)."""
+    def wait_visible(self, timeout: float = 5.0) -> Node:
+        """Wait until the element is visible (default 5s timeout). Returns the node."""
+    def wait_attached(self, timeout: float = 5.0) -> Node:
+        """Wait until the selector matches an element (default 5s timeout). Returns the node."""
     def wait_detached(self, timeout: float = 5.0) -> None:
         """Wait until the selector no longer matches (default 5s timeout)."""
-    def wait_enabled(self, timeout: float = 5.0) -> None:
-        """Wait until the element is enabled (default 5s timeout)."""
+    def wait_enabled(self, timeout: float = 5.0) -> Node:
+        """Wait until the element is enabled (default 5s timeout). Returns the node."""
     def wait_hidden(self, timeout: float = 5.0) -> None:
         """Wait until the element is hidden (default 5s timeout)."""
-    def wait_disabled(self, timeout: float = 5.0) -> None:
-        """Wait until the element is disabled (default 5s timeout)."""
-    def wait_focused(self, timeout: float = 5.0) -> None:
-        """Wait until the element is focused (default 5s timeout)."""
-    def wait_unfocused(self, timeout: float = 5.0) -> None:
-        """Wait until the element loses focus (default 5s timeout)."""
-    def wait_until(self, predicate: Callable[[Node], bool], timeout: float = 5.0) -> None:
+    def wait_disabled(self, timeout: float = 5.0) -> Node:
+        """Wait until the element is disabled (default 5s timeout). Returns the node."""
+    def wait_focused(self, timeout: float = 5.0) -> Node:
+        """Wait until the element is focused (default 5s timeout). Returns the node."""
+    def wait_unfocused(self, timeout: float = 5.0) -> Node:
+        """Wait until the element loses focus (default 5s timeout). Returns the node."""
+    def wait_until(self, predicate: Callable[[Node | None], bool], timeout: float = 5.0) -> None:
         """Wait until *predicate(node)* returns ``True`` (default 5s timeout)."""
     def __repr__(self) -> str: ...
 
@@ -271,36 +248,14 @@ def app(
     name: str | None = None,
     *,
     pid: int | None = None,
-    max_depth: int | None = None,
-    max_elements: int | None = None,
-    visible_only: bool = False,
-    roles: list[str] | None = None,
-) -> Node:
-    """Snapshot an app's accessibility tree and return the root Node.
+) -> App:
+    """Get a handle to a specific application.
 
     Identify the app by *name* (substring match) or *pid* (exact).
     """
 
-def apps(
-    *,
-    max_depth: int | None = None,
-    max_elements: int | None = None,
-    visible_only: bool = False,
-    roles: list[str] | None = None,
-) -> Node:
-    """Snapshot all running apps and return the root Node."""
-
-def locator(
-    name: str | None = None,
-    *,
-    pid: int | None = None,
-    selector: str,
-    max_depth: int | None = None,
-    max_elements: int | None = None,
-    visible_only: bool = False,
-    roles: list[str] | None = None,
-) -> Locator:
-    """Create a :class:`Locator` for lazy element resolution."""
+def apps() -> list[App]:
+    """List all running applications."""
 
 def check_permissions() -> str:
     """Check whether accessibility permissions are granted.
@@ -310,4 +265,4 @@ def check_permissions() -> str:
 
 # ── Test helpers ─────────────────────────────────────────────────────────────
 
-def _make_test_tree() -> Node: ...
+def _make_test_app() -> App: ...

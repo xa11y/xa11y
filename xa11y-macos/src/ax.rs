@@ -10,9 +10,9 @@ use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
 
 use xa11y_core::{
-    Action, ActionData, AppTarget, CancelHandle, ElementState, Error, Event, EventFilter,
-    EventKind, EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, RawPlatformData,
-    Rect, Result, Role, StateSet, Subscription, Toggled, Tree,
+    Action, ActionData, CancelHandle, ElementState, Error, Event, EventFilter, EventKind,
+    EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, RawPlatformData, Rect,
+    Result, Role, StateSet, Subscription, Toggled, Tree,
 };
 
 // ── FFI Declarations ──────────────────────────────────────────────────────────
@@ -28,6 +28,7 @@ const AX_VALUE_CGPOINT: i32 = 1;
 const AX_VALUE_CGSIZE: i32 = 2;
 const CF_NUMBER_FLOAT64: i32 = 13;
 const CF_NUMBER_SINT32: i32 = 3;
+// Used by ax_number_i64 helper; kept for completeness alongside other CF_NUMBER constants.
 #[allow(dead_code)]
 const CF_NUMBER_SINT64: i32 = 4;
 
@@ -231,6 +232,7 @@ fn ax_number_f64(element: AXUIElementRef, attribute: &str) -> Option<f64> {
     }
 }
 
+// Symmetric with ax_number_f64; not currently called but kept for future AX attribute reads.
 #[allow(dead_code)]
 fn ax_number_i32(element: AXUIElementRef, attribute: &str) -> Option<i32> {
     let value = ax_attr(element, attribute)?;
@@ -255,6 +257,7 @@ fn ax_number_i32(element: AXUIElementRef, attribute: &str) -> Option<i32> {
     }
 }
 
+// Symmetric with ax_number_f64; not currently called but kept for future AX attribute reads.
 #[allow(dead_code)]
 fn ax_number_i64(element: AXUIElementRef, attribute: &str) -> Option<i64> {
     let value = ax_attr(element, attribute)?;
@@ -496,6 +499,7 @@ fn map_ax_action(name: &str) -> Option<Action> {
     }
 }
 
+// Used only in unit tests; perform_action inlines the mapping for richer error handling.
 #[allow(dead_code)]
 fn xa11y_action_to_ax(action: Action) -> Option<&'static str> {
     match action {
@@ -686,6 +690,40 @@ impl MacOSProvider {
         }
 
         apps
+    }
+
+    /// Build a tree from an app element (shared by resolve_pid_by_name and get_tree).
+    fn build_tree(&self, app_element: AXElement, pid: i32, app_name: &str) -> Result<Tree> {
+        let screen_size = Self::detect_screen_size();
+        let mut nodes = Vec::new();
+        let mut elements = Vec::new();
+
+        let mut visited = HashSet::new();
+        self.traverse(
+            &app_element,
+            &mut nodes,
+            &mut elements,
+            None,
+            0,
+            screen_size,
+            &mut visited,
+        );
+
+        if nodes.is_empty() {
+            return Err(Error::AppNotFound {
+                target: app_name.to_string(),
+            });
+        }
+
+        // Cache elements for action dispatch
+        *self.cached_elements.lock().unwrap() = elements;
+
+        Ok(Tree::new(
+            app_name.to_string(),
+            Some(pid as u32),
+            screen_size,
+            nodes,
+        ))
     }
 
     fn find_app_by_name(&self, name: &str) -> Result<(AXElement, i32, String)> {
@@ -910,46 +948,14 @@ impl MacOSProvider {
 }
 
 impl Provider for MacOSProvider {
-    fn get_app_tree(&self, target: &AppTarget) -> Result<Tree> {
-        let (app_element, pid, app_name) = match target {
-            AppTarget::ByName(name) => self.find_app_by_name(name)?,
-            AppTarget::ByPid(pid) => {
-                let (el, name) = self.find_app_by_pid(*pid)?;
-                (el, *pid as i32, name)
-            }
-            AppTarget::ByWindow(handle) => {
-                return Err(Error::Platform {
-                    code: -1,
-                    message: format!("ByWindow not yet supported: {:?}", handle),
-                });
-            }
-        };
+    fn resolve_pid_by_name(&self, name: &str) -> Result<u32> {
+        let (_app_element, pid, _app_name) = self.find_app_by_name(name)?;
+        Ok(pid as u32)
+    }
 
-        let screen_size = Self::detect_screen_size();
-        let mut nodes = Vec::new();
-        let mut elements = Vec::new();
-
-        let mut visited = HashSet::new();
-        self.traverse(
-            &app_element,
-            &mut nodes,
-            &mut elements,
-            None,
-            0,
-            screen_size,
-            &mut visited,
-        );
-
-        if nodes.is_empty() {
-            return Err(Error::AppNotFound {
-                target: format!("{:?}", target),
-            });
-        }
-
-        // Cache elements for action dispatch
-        *self.cached_elements.lock().unwrap() = elements;
-
-        Ok(Tree::new(app_name, Some(pid as u32), screen_size, nodes))
+    fn get_tree(&self, pid: u32) -> Result<Tree> {
+        let (app_element, app_name) = self.find_app_by_pid(pid)?;
+        self.build_tree(app_element, pid as i32, &app_name)
     }
 
     fn get_apps(&self) -> Result<Tree> {
@@ -1003,6 +1009,8 @@ impl Provider for MacOSProvider {
                 screen_size,
                 &mut visited,
             );
+            // Set PID on the app node so App::all() can use it
+            nodes[child_idx as usize].pid = Some(*pid as u32);
         }
 
         nodes[0].children_indices = root_children;
@@ -1347,32 +1355,14 @@ unsafe extern "C" fn ax_observer_callback(
     let _ = ctx.sender.send(event);
 }
 
-impl EventProvider for MacOSProvider {
-    fn subscribe(&self, target: &AppTarget, filter: EventFilter) -> Result<Subscription> {
-        let (pid, app_name) = match target {
-            AppTarget::ByName(name) => {
-                let apps = Self::list_gui_apps();
-                let found = apps
-                    .iter()
-                    .find(|(_, n)| n.to_lowercase().contains(&name.to_lowercase()));
-                match found {
-                    Some((pid, name)) => (*pid, name.clone()),
-                    None => {
-                        return Err(Error::AppNotFound {
-                            target: name.clone(),
-                        })
-                    }
-                }
-            }
-            AppTarget::ByPid(pid) => (*pid as i32, String::new()),
-            AppTarget::ByWindow(_) => {
-                return Err(Error::Platform {
-                    code: -1,
-                    message: "ByWindow not supported for event subscription".to_string(),
-                })
-            }
-        };
-
+impl MacOSProvider {
+    /// Shared subscribe implementation used by subscribe.
+    fn subscribe_impl(
+        &self,
+        pid: i32,
+        app_name: String,
+        filter: EventFilter,
+    ) -> Result<Subscription> {
         let (tx, rx) = std::sync::mpsc::channel();
 
         let ctx = Box::new(ObserverContext {
@@ -1476,13 +1466,15 @@ impl EventProvider for MacOSProvider {
         Ok(Subscription::new(EventReceiver::new(rx), cancel))
     }
 
-    fn wait_for_event(
+    /// Shared wait_for_event implementation.
+    fn wait_for_event_impl(
         &self,
-        target: &AppTarget,
+        pid: i32,
+        app_name: String,
         filter: EventFilter,
         timeout: Duration,
     ) -> Result<Event> {
-        let sub = self.subscribe(target, filter)?;
+        let sub = self.subscribe_impl(pid, app_name, filter)?;
         let start = std::time::Instant::now();
         loop {
             if let Some(event) = sub.try_recv() {
@@ -1496,13 +1488,17 @@ impl EventProvider for MacOSProvider {
         }
     }
 
-    fn wait_for(
+    /// Shared wait_for implementation.
+    fn wait_for_impl<F>(
         &self,
-        target: &AppTarget,
+        fetch_tree: F,
         selector: &str,
         state: ElementState,
         timeout: Duration,
-    ) -> Result<Option<NodeData>> {
+    ) -> Result<Option<NodeData>>
+    where
+        F: Fn(&Self) -> Result<Tree>,
+    {
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
 
@@ -1512,7 +1508,7 @@ impl EventProvider for MacOSProvider {
                 return Err(Error::Timeout { elapsed });
             }
 
-            let tree = self.get_app_tree(target)?;
+            let tree = fetch_tree(self)?;
             let matches = tree.query(selector).ok();
             let node = matches.as_ref().and_then(|m| m.first().copied());
 
@@ -1522,6 +1518,26 @@ impl EventProvider for MacOSProvider {
 
             std::thread::sleep(poll_interval);
         }
+    }
+}
+
+impl EventProvider for MacOSProvider {
+    fn subscribe(&self, pid: u32, filter: EventFilter) -> Result<Subscription> {
+        self.subscribe_impl(pid as i32, String::new(), filter)
+    }
+
+    fn wait_for_event(&self, pid: u32, filter: EventFilter, timeout: Duration) -> Result<Event> {
+        self.wait_for_event_impl(pid as i32, String::new(), filter, timeout)
+    }
+
+    fn wait_for(
+        &self,
+        pid: u32,
+        selector: &str,
+        state: ElementState,
+        timeout: Duration,
+    ) -> Result<Option<NodeData>> {
+        self.wait_for_impl(|s| s.get_tree(pid), selector, state, timeout)
     }
 }
 

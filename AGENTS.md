@@ -2,15 +2,13 @@
 
 ## Integration Test Coverage
 
-Before adding or modifying integration tests, read [`xa11y/tests/INTEG_COVERAGE.md`](xa11y/tests/INTEG_COVERAGE.md) for the current coverage analysis. The goal is **full coverage** of the public API surface through real integration tests.
+The goal is **full coverage** of the public API surface through real integration tests.
 
 When adding new tests:
 
-1. Check the coverage file to identify gaps — prioritize uncovered areas.
-2. If the test app (`xa11y-test-app`) lacks a widget needed for a test, add it to the test app first. The test app uses AccessKit + winit and is defined in `xa11y-test-app/src/main.rs`.
-3. All integration tests must be `#[ignore]` and run via `cargo xtask test-integ`.
-4. After adding tests, update `INTEG_COVERAGE.md` to reflect the new coverage.
-5. Run `cargo xtask test-integ` to verify tests pass before committing.
+1. If the test app (`xa11y-test-app`) lacks a widget needed for a test, add it to the test app first. The test app uses AccessKit + winit and is defined in `xa11y-test-app/src/main.rs`.
+2. All integration tests must be `#[ignore]` and run via `cargo xtask test-integ`.
+3. Run `cargo xtask test-integ` to verify tests pass before committing.
 
 ### Test helpers
 

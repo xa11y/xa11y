@@ -2,17 +2,16 @@
 
 Quick start:
     >>> import xa11y
-    >>> root = xa11y.app("Safari")
-    >>> for button in root.query("button"):
-    ...     print(button.name)
-
-Reuse a locator for lazy resolution:
-    >>> loc = root.locator("button[name='Submit']")
-    >>> loc.press()
+    >>> app = xa11y.app("Safari")
+    >>> app.locator("button[name='Submit']").press()
+    >>> for node in app.locator("button").nodes():
+    ...     print(node.name)
 """
 
 from xa11y._native import (
     ActionNotSupportedError,
+    # Types
+    App,
     AppNotFoundError,
     InvalidSelectorError,
     Locator,
@@ -24,15 +23,15 @@ from xa11y._native import (
     TimeoutError,
     # Exceptions
     XA11yError,
+    # Functions
     app,
     apps,
     check_permissions,
-    # Functions
-    locator,
 )
 
 __all__ = [
     "ActionNotSupportedError",
+    "App",
     "AppNotFoundError",
     "InvalidSelectorError",
     "Locator",
@@ -46,5 +45,4 @@ __all__ = [
     "app",
     "apps",
     "check_permissions",
-    "locator",
 ]

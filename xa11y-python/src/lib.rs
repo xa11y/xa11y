@@ -80,10 +80,24 @@ fn action_to_str(a: &xa11y::Action) -> &'static str {
     }
 }
 
-fn resolve_app_target(name: Option<&str>, pid: Option<u32>) -> PyResult<xa11y::AppTarget> {
+fn build_app(
+    py: Python<'_>,
+    provider: Arc<dyn xa11y::Provider>,
+    name: Option<&str>,
+    pid: Option<u32>,
+) -> PyResult<xa11y::App> {
     match (name, pid) {
-        (Some(n), _) => Ok(xa11y::AppTarget::ByName(n.to_string())),
-        (None, Some(p)) => Ok(xa11y::AppTarget::ByPid(p)),
+        (Some(n), _) => {
+            let p = provider.clone();
+            let n = n.to_string();
+            py.allow_threads(move || xa11y::App::from_name(p, &n))
+                .map_err(to_py_err)
+        }
+        (None, Some(p)) => {
+            let prov = provider.clone();
+            py.allow_threads(move || xa11y::App::from_pid(prov, p))
+                .map_err(to_py_err)
+        }
         (None, None) => Err(PyValueError::new_err("Either name or pid must be provided")),
     }
 }
@@ -129,7 +143,6 @@ fn make_py_node(py: Python<'_>, n: &xa11y::NodeData) -> PyResult<Py<Node>> {
             parent_idx: n.parent_index,
             _index: n.index,
             _all_nodes: None,
-            _ctx: None,
         },
     )
 }
@@ -168,10 +181,10 @@ impl Rect {
 
 // ── Node ────────────────────────────────────────────────────────────────────
 
-/// A node in the accessibility tree snapshot.
+/// A read-only node in the accessibility tree snapshot.
 ///
 /// Nodes form a navigable graph — use `node.children` and `node.parent`
-/// to traverse. Use `node.query()` to search.
+/// to traverse. To perform actions, use a Locator via `app.locator()`.
 #[pyclass]
 struct Node {
     #[pyo3(get)]
@@ -225,15 +238,6 @@ struct Node {
 
     /// Shared reference to all nodes in the tree (for graph navigation).
     _all_nodes: Option<Py<PyList>>,
-    /// Shared snapshot context for query/dump/locator (None for standalone nodes).
-    _ctx: Option<Arc<SnapshotContext>>,
-}
-
-/// Shared context for all nodes in a snapshot — avoids cloning Tree per node.
-struct SnapshotContext {
-    rust_tree: xa11y::Tree,
-    provider: Arc<dyn xa11y::Provider>,
-    target: xa11y::AppTarget,
 }
 
 #[pymethods]
@@ -271,40 +275,6 @@ impl Node {
         })
     }
 
-    /// Query nodes matching a CSS-like selector string within this snapshot.
-    fn query(&self, py: Python<'_>, selector: &str) -> PyResult<Vec<PyObject>> {
-        let ctx = self._ctx.as_ref().ok_or_else(|| {
-            PyValueError::new_err(
-                "query() requires a snapshot context (node from app(), not locator.get())",
-            )
-        })?;
-        let Some(ref all) = self._all_nodes else {
-            return Err(PyValueError::new_err("No node list available"));
-        };
-        let matches = ctx.rust_tree.query(selector).map_err(to_py_err)?;
-        let list = all.bind(py);
-        matches
-            .iter()
-            .map(|n| list.get_item(n.index as usize).map(|item| item.unbind()))
-            .collect()
-    }
-
-    /// Create a Locator for lazy element resolution from this snapshot's app.
-    #[pyo3(signature = (selector))]
-    fn locator(&self, selector: &str) -> PyResult<Locator> {
-        let ctx = self._ctx.as_ref().ok_or_else(|| {
-            PyValueError::new_err(
-                "locator() requires a snapshot context (node from app(), not locator.get())",
-            )
-        })?;
-        Ok(Locator {
-            provider: ctx.provider.clone(),
-            target: ctx.target.clone(),
-            selector: selector.to_string(),
-            nth: None,
-        })
-    }
-
     fn __repr__(&self) -> String {
         let mut parts = vec![format!("role='{}'", self.role)];
         if let Some(ref n) = self.name {
@@ -338,23 +308,16 @@ impl Node {
 
 /// Convert a Rust Tree into a fully navigable Python root Node.
 ///
-/// All nodes get shared references so parent/children/query/dump work.
+/// All nodes get shared references so parent/children navigation works.
 /// Returns the root node (index 0).
-fn convert_to_root_node(
-    py: Python<'_>,
-    rust_tree: xa11y::Tree,
-    provider: Arc<dyn xa11y::Provider>,
-    target: xa11y::AppTarget,
-) -> PyResult<Py<Node>> {
-    convert_to_node_at(py, rust_tree, provider, target, 0)
+fn convert_to_root_node(py: Python<'_>, rust_tree: &xa11y::Tree) -> PyResult<Py<Node>> {
+    convert_to_node_at(py, rust_tree, 0)
 }
 
 /// Convert a Rust Tree into a fully navigable Python Node at the given index.
 fn convert_to_node_at(
     py: Python<'_>,
-    rust_tree: xa11y::Tree,
-    provider: Arc<dyn xa11y::Provider>,
-    target: xa11y::AppTarget,
+    rust_tree: &xa11y::Tree,
     node_index: usize,
 ) -> PyResult<Py<Node>> {
     let num_nodes = rust_tree.len();
@@ -367,17 +330,11 @@ fn convert_to_node_at(
         py_nodes.push(make_py_node(py, n)?);
     }
 
-    // Build shared context and node list so every Node can navigate and query.
-    let ctx = Arc::new(SnapshotContext {
-        rust_tree,
-        provider,
-        target,
-    });
+    // Build shared node list so every Node can navigate.
     let all_nodes_list: Py<PyList> = PyList::new(py, &py_nodes)?.unbind();
     for py_node in &py_nodes {
         let mut node = py_node.borrow_mut(py);
         node._all_nodes = Some(all_nodes_list.clone_ref(py));
-        node._ctx = Some(ctx.clone());
     }
 
     py_nodes
@@ -386,16 +343,55 @@ fn convert_to_node_at(
         .ok_or_else(|| PyValueError::new_err("Node index out of range"))
 }
 
+/// Convert a Rust Tree into a list of Python Nodes at the given indices.
+fn convert_to_nodes_at(
+    py: Python<'_>,
+    rust_tree: &xa11y::Tree,
+    indices: &[u32],
+) -> PyResult<Vec<Py<Node>>> {
+    let num_nodes = rust_tree.len();
+    let mut py_nodes: Vec<Py<Node>> = Vec::with_capacity(num_nodes);
+
+    for i in 0..num_nodes {
+        let n = rust_tree
+            .get_data(i as u32)
+            .expect("index valid in range 0..len");
+        py_nodes.push(make_py_node(py, n)?);
+    }
+
+    let all_nodes_list: Py<PyList> = PyList::new(py, &py_nodes)?.unbind();
+    for py_node in &py_nodes {
+        let mut node = py_node.borrow_mut(py);
+        node._all_nodes = Some(all_nodes_list.clone_ref(py));
+    }
+
+    Ok(indices
+        .iter()
+        .filter_map(|&idx| py_nodes.get(idx as usize).map(|n| n.clone_ref(py)))
+        .collect())
+}
+
 // ── Locator ─────────────────────────────────────────────────────────────────
 
 #[pyclass]
 #[derive(Clone)]
 struct Locator {
     provider: Arc<dyn xa11y::Provider>,
-    target: xa11y::AppTarget,
+    pid: u32,
     #[pyo3(get)]
     selector: String,
     nth: Option<usize>,
+}
+
+impl Locator {
+    fn from_core(loc: xa11y::Locator) -> Self {
+        Self {
+            provider: loc.provider().clone(),
+            pid: loc.pid(),
+            selector: loc.selector().to_string(),
+            nth: loc.nth_index(),
+        }
+    }
 }
 
 #[pymethods]
@@ -426,109 +422,37 @@ impl Locator {
 
     // ── Queries ──
 
-    fn role(&self) -> PyResult<String> {
-        Ok(self.resolve_node_data()?.role.to_snake_case().to_string())
-    }
-
-    fn name(&self) -> PyResult<Option<String>> {
-        Ok(self.resolve_node_data()?.name.clone())
-    }
-
-    fn value(&self) -> PyResult<Option<String>> {
-        Ok(self.resolve_node_data()?.value.clone())
-    }
-
-    fn description(&self) -> PyResult<Option<String>> {
-        Ok(self.resolve_node_data()?.description.clone())
-    }
-
-    fn bounds(&self) -> PyResult<Option<Rect>> {
-        Ok(self.resolve_node_data()?.bounds.as_ref().map(|r| Rect {
-            x: r.x,
-            y: r.y,
-            width: r.width,
-            height: r.height,
-        }))
-    }
-
-    fn numeric_value(&self) -> PyResult<Option<f64>> {
-        Ok(self.resolve_node_data()?.numeric_value)
-    }
-
-    fn is_visible(&self) -> PyResult<bool> {
-        Ok(self.resolve_node_data()?.states.visible)
-    }
-
-    fn is_enabled(&self) -> PyResult<bool> {
-        Ok(self.resolve_node_data()?.states.enabled)
-    }
-
-    fn is_focused(&self) -> PyResult<bool> {
-        Ok(self.resolve_node_data()?.states.focused)
-    }
-
-    fn is_selected(&self) -> PyResult<bool> {
-        Ok(self.resolve_node_data()?.states.selected)
-    }
-
-    fn checked(&self) -> PyResult<Option<String>> {
-        Ok(self.resolve_node_data()?.states.checked.map(|t| match t {
-            xa11y::Toggled::Off => "off".to_string(),
-            xa11y::Toggled::On => "on".to_string(),
-            xa11y::Toggled::Mixed => "mixed".to_string(),
-        }))
-    }
-
-    fn is_expanded(&self) -> PyResult<Option<bool>> {
-        Ok(self.resolve_node_data()?.states.expanded)
-    }
-
-    fn is_editable(&self) -> PyResult<bool> {
-        Ok(self.resolve_node_data()?.states.editable)
-    }
-
-    fn is_focusable(&self) -> PyResult<bool> {
-        Ok(self.resolve_node_data()?.states.focusable)
-    }
-
-    fn is_modal(&self) -> PyResult<bool> {
-        Ok(self.resolve_node_data()?.states.modal)
-    }
-
-    fn is_required(&self) -> PyResult<bool> {
-        Ok(self.resolve_node_data()?.states.required)
-    }
-
-    fn is_busy(&self) -> PyResult<bool> {
-        Ok(self.resolve_node_data()?.states.busy)
-    }
-
     fn exists(&self) -> PyResult<bool> {
         match self.resolve() {
             Ok(_) => Ok(true),
-            Err(_) => Ok(false),
+            Err(e) => Python::with_gil(|py| {
+                if e.is_instance_of::<SelectorNotMatchedError>(py) {
+                    Ok(false)
+                } else {
+                    Err(e)
+                }
+            }),
         }
     }
 
     fn count(&self) -> PyResult<usize> {
-        let tree = self
-            .provider
-            .get_app_tree(&self.target)
-            .map_err(to_py_err)?;
+        let tree = self.provider.get_tree(self.pid).map_err(to_py_err)?;
         let matches = tree.query(&self.selector).map_err(to_py_err)?;
         Ok(matches.len())
     }
 
     /// Get a snapshot of the matched node (with full tree context for navigation).
-    fn get(&self, py: Python<'_>) -> PyResult<Py<Node>> {
+    fn node(&self, py: Python<'_>) -> PyResult<Py<Node>> {
         let (tree, node_index) = self.resolve()?;
-        convert_to_node_at(
-            py,
-            tree,
-            self.provider.clone(),
-            self.target.clone(),
-            node_index as usize,
-        )
+        convert_to_node_at(py, &tree, node_index as usize)
+    }
+
+    /// Get all matching nodes as a snapshot (with full tree context for navigation).
+    fn nodes(&self, py: Python<'_>) -> PyResult<Vec<Py<Node>>> {
+        let tree = self.provider.get_tree(self.pid).map_err(to_py_err)?;
+        let matches = tree.query(&self.selector).map_err(to_py_err)?;
+        let indices: Vec<u32> = matches.iter().map(|n| n.index).collect();
+        convert_to_nodes_at(py, &tree, &indices)
     }
 
     // ── Actions ──
@@ -557,7 +481,7 @@ impl Locator {
         self.perform_action(xa11y::Action::Collapse, None)
     }
 
-    fn select_item(&self) -> PyResult<()> {
+    fn select(&self) -> PyResult<()> {
         self.perform_action(xa11y::Action::Select, None)
     }
 
@@ -640,50 +564,93 @@ impl Locator {
     // ── Wait operations ──
 
     #[pyo3(signature = (timeout=5.0))]
-    fn wait_visible(&self, timeout: f64) -> PyResult<()> {
-        self.poll_state(WaitState::Visible, Duration::from_secs_f64(timeout))
+    fn wait_visible(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Node>> {
+        let nd = self
+            .poll_state(
+                xa11y::ElementState::Visible,
+                Duration::from_secs_f64(timeout),
+            )?
+            .expect("visible wait must return a node");
+        make_py_node(py, &nd)
     }
 
     #[pyo3(signature = (timeout=5.0))]
-    fn wait_attached(&self, timeout: f64) -> PyResult<()> {
-        self.poll_state(WaitState::Attached, Duration::from_secs_f64(timeout))
+    fn wait_attached(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Node>> {
+        let nd = self
+            .poll_state(
+                xa11y::ElementState::Attached,
+                Duration::from_secs_f64(timeout),
+            )?
+            .expect("attached wait must return a node");
+        make_py_node(py, &nd)
     }
 
     #[pyo3(signature = (timeout=5.0))]
     fn wait_detached(&self, timeout: f64) -> PyResult<()> {
-        self.poll_state(WaitState::Detached, Duration::from_secs_f64(timeout))
+        self.poll_state(
+            xa11y::ElementState::Detached,
+            Duration::from_secs_f64(timeout),
+        )?;
+        Ok(())
     }
 
     #[pyo3(signature = (timeout=5.0))]
-    fn wait_enabled(&self, timeout: f64) -> PyResult<()> {
-        self.poll_state(WaitState::Enabled, Duration::from_secs_f64(timeout))
+    fn wait_enabled(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Node>> {
+        let nd = self
+            .poll_state(
+                xa11y::ElementState::Enabled,
+                Duration::from_secs_f64(timeout),
+            )?
+            .expect("enabled wait must return a node");
+        make_py_node(py, &nd)
     }
 
     #[pyo3(signature = (timeout=5.0))]
     fn wait_hidden(&self, timeout: f64) -> PyResult<()> {
-        self.poll_state(WaitState::Hidden, Duration::from_secs_f64(timeout))
+        self.poll_state(
+            xa11y::ElementState::Hidden,
+            Duration::from_secs_f64(timeout),
+        )?;
+        Ok(())
     }
 
     #[pyo3(signature = (timeout=5.0))]
-    fn wait_disabled(&self, timeout: f64) -> PyResult<()> {
-        self.poll_state(WaitState::Disabled, Duration::from_secs_f64(timeout))
+    fn wait_disabled(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Node>> {
+        let nd = self
+            .poll_state(
+                xa11y::ElementState::Disabled,
+                Duration::from_secs_f64(timeout),
+            )?
+            .expect("disabled wait must return a node");
+        make_py_node(py, &nd)
     }
 
     #[pyo3(signature = (timeout=5.0))]
-    fn wait_focused(&self, timeout: f64) -> PyResult<()> {
-        self.poll_state(WaitState::Focused, Duration::from_secs_f64(timeout))
+    fn wait_focused(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Node>> {
+        let nd = self
+            .poll_state(
+                xa11y::ElementState::Focused,
+                Duration::from_secs_f64(timeout),
+            )?
+            .expect("focused wait must return a node");
+        make_py_node(py, &nd)
     }
 
     #[pyo3(signature = (timeout=5.0))]
-    fn wait_unfocused(&self, timeout: f64) -> PyResult<()> {
-        self.poll_state(WaitState::Unfocused, Duration::from_secs_f64(timeout))
+    fn wait_unfocused(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Node>> {
+        let nd = self
+            .poll_state(
+                xa11y::ElementState::Unfocused,
+                Duration::from_secs_f64(timeout),
+            )?
+            .expect("unfocused wait must return a node");
+        make_py_node(py, &nd)
     }
 
     /// Wait until an arbitrary predicate is satisfied.
     ///
-    /// The callback receives a dict with the node's properties when the element
-    /// exists, or ``None`` when no element matches the selector. Return ``True``
-    /// to stop waiting.
+    /// The callback receives a ``Node`` when the element exists, or ``None``
+    /// when no element matches the selector. Return ``True`` to stop waiting.
     ///
     /// Example::
     ///
@@ -698,23 +665,9 @@ impl Locator {
     }
 }
 
-enum WaitState {
-    Attached,
-    Detached,
-    Visible,
-    Hidden,
-    Enabled,
-    Disabled,
-    Focused,
-    Unfocused,
-}
-
 impl Locator {
     fn resolve(&self) -> PyResult<(xa11y::Tree, u32)> {
-        let tree = self
-            .provider
-            .get_app_tree(&self.target)
-            .map_err(to_py_err)?;
+        let tree = self.provider.get_tree(self.pid).map_err(to_py_err)?;
         let matches = tree.query(&self.selector).map_err(to_py_err)?;
         let idx = self.nth.unwrap_or(0);
         let node = matches.get(idx).ok_or_else(|| {
@@ -724,11 +677,6 @@ impl Locator {
         })?;
         let node_index = node.index;
         Ok((tree, node_index))
-    }
-
-    fn resolve_node_data(&self) -> PyResult<xa11y::NodeData> {
-        let (tree, idx) = self.resolve()?;
-        Ok(tree.get_data(idx).expect("valid after resolve").clone())
     }
 
     fn perform_action(
@@ -757,7 +705,7 @@ impl Locator {
             }
 
             let node: Option<xa11y::NodeData> = (|| {
-                let tree = self.provider.get_app_tree(&self.target).ok()?;
+                let tree = self.provider.get_tree(self.pid).ok()?;
                 let matches = tree.query(&self.selector).ok()?;
                 let idx = self.nth.unwrap_or(0);
                 matches.get(idx).copied().cloned()
@@ -780,7 +728,11 @@ impl Locator {
         }
     }
 
-    fn poll_state(&self, state: WaitState, timeout: Duration) -> PyResult<()> {
+    fn poll_state(
+        &self,
+        state: xa11y::ElementState,
+        timeout: Duration,
+    ) -> PyResult<Option<xa11y::NodeData>> {
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
 
@@ -790,29 +742,15 @@ impl Locator {
                 return Err(to_py_err(xa11y::Error::Timeout { elapsed }));
             }
 
-            let tree_result = self.provider.get_app_tree(&self.target);
-            let states = tree_result.ok().and_then(|tree| {
-                tree.query(&self.selector).ok().and_then(|matches| {
-                    let idx = self.nth.unwrap_or(0);
-                    matches.get(idx).map(|n| n.states.clone())
-                })
-            });
+            let node: Option<xa11y::NodeData> = (|| {
+                let tree = self.provider.get_tree(self.pid).ok()?;
+                let matches = tree.query(&self.selector).ok()?;
+                let idx = self.nth.unwrap_or(0);
+                matches.get(idx).copied().cloned()
+            })();
 
-            let met = match state {
-                WaitState::Attached => states.is_some(),
-                WaitState::Detached => states.is_none(),
-                WaitState::Visible => states.as_ref().is_some_and(|s| s.visible),
-                WaitState::Hidden => {
-                    states.is_none() || states.as_ref().is_some_and(|s| !s.visible)
-                }
-                WaitState::Enabled => states.as_ref().is_some_and(|s| s.enabled),
-                WaitState::Disabled => states.as_ref().is_some_and(|s| !s.enabled),
-                WaitState::Focused => states.as_ref().is_some_and(|s| s.focused),
-                WaitState::Unfocused => states.as_ref().is_some_and(|s| !s.focused),
-            };
-
-            if met {
-                return Ok(());
+            if state.is_met(node.as_ref()) {
+                return Ok(node);
             }
 
             std::thread::sleep(poll_interval);
@@ -820,43 +758,84 @@ impl Locator {
     }
 }
 
+// ── App ────────────────────────────────────────────────────────────────────
+
+/// A handle to a running application.
+///
+/// Use ``app.locator()`` to create action-capable element references,
+/// or ``app.nodes()`` to snapshot the tree for inspection.
+#[pyclass(frozen)]
+#[derive(Clone)]
+struct App {
+    inner: xa11y::App,
+}
+
+impl App {
+    fn from_core(core_app: xa11y::App) -> Self {
+        Self { inner: core_app }
+    }
+}
+
+#[pymethods]
+impl App {
+    /// The application's display name.
+    #[getter]
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    /// The application's process ID.
+    #[getter]
+    fn pid(&self) -> u32 {
+        self.inner.pid()
+    }
+
+    /// Create a Locator for lazy element interaction.
+    #[pyo3(signature = (selector))]
+    fn locator(&self, selector: &str) -> Locator {
+        let core_loc = self.inner.locator(selector);
+        Locator::from_core(core_loc)
+    }
+
+    /// Snapshot the app's accessibility tree. Returns the root Node.
+    fn nodes(&self, py: Python<'_>) -> PyResult<Py<Node>> {
+        let p = self.inner.provider().clone();
+        let pid = self.inner.pid();
+        let rust_tree = py
+            .allow_threads(move || p.get_tree(pid))
+            .map_err(to_py_err)?;
+        convert_to_root_node(py, &rust_tree)
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "App(name='{}', pid={})",
+            self.inner.name(),
+            self.inner.pid()
+        )
+    }
+}
+
 // ── Module-level functions ──────────────────────────────────────────────────
 
-/// Snapshot an app's accessibility tree and return the root Node.
+/// Get a handle to a specific application.
 #[pyfunction]
 #[pyo3(signature = (name=None, *, pid=None))]
-fn app(py: Python<'_>, name: Option<&str>, pid: Option<u32>) -> PyResult<Py<Node>> {
+fn app(py: Python<'_>, name: Option<&str>, pid: Option<u32>) -> PyResult<App> {
     let provider = get_provider()?;
-    let target = resolve_app_target(name, pid)?;
+    let core_app = build_app(py, provider, name, pid)?;
+    Ok(App::from_core(core_app))
+}
+
+/// List all running applications.
+#[pyfunction]
+fn apps(py: Python<'_>) -> PyResult<Vec<App>> {
+    let provider = get_provider()?;
     let p = provider.clone();
-    let rust_tree = py
-        .allow_threads(|| p.get_app_tree(&target))
+    let core_apps = py
+        .allow_threads(move || xa11y::App::all(p))
         .map_err(to_py_err)?;
-    convert_to_root_node(py, rust_tree, provider, target)
-}
-
-/// Snapshot all running apps and return the root Node.
-#[pyfunction]
-fn apps(py: Python<'_>) -> PyResult<Py<Node>> {
-    let provider = get_provider()?;
-    let p = provider.clone();
-    let rust_tree = py.allow_threads(|| p.get_apps()).map_err(to_py_err)?;
-    let target = xa11y::AppTarget::ByName(String::new());
-    convert_to_root_node(py, rust_tree, provider, target)
-}
-
-/// Create a Locator for lazy element resolution.
-#[pyfunction]
-#[pyo3(signature = (name=None, *, pid=None, selector))]
-fn locator(name: Option<&str>, pid: Option<u32>, selector: &str) -> PyResult<Locator> {
-    let provider = get_provider()?;
-    let target = resolve_app_target(name, pid)?;
-    Ok(Locator {
-        provider,
-        target,
-        selector: selector.to_string(),
-        nth: None,
-    })
+    Ok(core_apps.into_iter().map(App::from_core).collect())
 }
 
 /// Check accessibility permissions. Returns "granted" or raises PermissionDeniedError.
@@ -878,6 +857,7 @@ fn check_permissions(py: Python<'_>) -> PyResult<String> {
 
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<App>()?;
     m.add_class::<Node>()?;
     m.add_class::<Locator>()?;
     m.add_class::<Rect>()?;
@@ -905,11 +885,10 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_function(wrap_pyfunction!(app, m)?)?;
     m.add_function(wrap_pyfunction!(apps, m)?)?;
-    m.add_function(wrap_pyfunction!(locator, m)?)?;
     m.add_function(wrap_pyfunction!(check_permissions, m)?)?;
 
     // Test helpers
-    m.add_function(wrap_pyfunction!(_make_test_tree, m)?)?;
+    m.add_function(wrap_pyfunction!(_make_test_app, m)?)?;
 
     Ok(())
 }
@@ -924,7 +903,11 @@ struct MockProvider {
 }
 
 impl xa11y::Provider for MockProvider {
-    fn get_app_tree(&self, _target: &xa11y::AppTarget) -> xa11y::Result<xa11y::Tree> {
+    fn resolve_pid_by_name(&self, _name: &str) -> xa11y::Result<u32> {
+        Ok(1234)
+    }
+
+    fn get_tree(&self, _pid: u32) -> xa11y::Result<xa11y::Tree> {
         Ok(self.tree.clone())
     }
 
@@ -1320,14 +1303,14 @@ fn build_test_tree() -> xa11y::Tree {
     Tree::new("TestApp".to_string(), Some(1234), (1920, 1080), nodes)
 }
 
-/// Create a test tree (for Python unit tests). Returns the root Node backed by a mock provider.
+/// Create a test App (for Python unit tests). Returns an App backed by a mock provider.
 #[pyfunction]
-fn _make_test_tree(py: Python<'_>) -> PyResult<Py<Node>> {
+fn _make_test_app() -> PyResult<App> {
     let tree = build_test_tree();
     let provider: Arc<dyn xa11y::Provider> = Arc::new(MockProvider {
-        tree: tree.clone(),
+        tree,
         actions: std::sync::Mutex::new(Vec::new()),
     });
-    let target = xa11y::AppTarget::ByName("TestApp".to_string());
-    convert_to_root_node(py, tree, provider, target)
+    let core_app = xa11y::App::from_name(provider, "TestApp").map_err(to_py_err)?;
+    Ok(App::from_core(core_app))
 }

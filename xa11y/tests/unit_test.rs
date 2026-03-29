@@ -771,23 +771,7 @@ fn event_filter_combined() {
     assert_eq!(filter.selector.as_deref(), Some("check_box"));
 }
 
-// ── Provider trait / AppTarget ──
-
-#[test]
-fn app_target_variants() {
-    let by_name = AppTarget::ByName("Safari".to_string());
-    let by_pid = AppTarget::ByPid(1234);
-    let by_window = AppTarget::ByWindow(WindowHandle::MacOS(42));
-
-    let json = serde_json::to_string(&by_name).unwrap();
-    assert!(json.contains("Safari"));
-
-    let json = serde_json::to_string(&by_pid).unwrap();
-    assert!(json.contains("1234"));
-
-    let json = serde_json::to_string(&by_window).unwrap();
-    assert!(json.contains("42"));
-}
+// ── Provider trait ──
 
 #[test]
 fn permission_status_variants() {
@@ -832,7 +816,7 @@ fn platform_provider_operations_return_errors() {
         Err(_) => return,
     };
 
-    let result = provider.get_app_tree(&AppTarget::ByName("NonexistentApp12345".to_string()));
+    let result = provider.resolve_pid_by_name("NonexistentApp12345");
     assert!(result.is_err());
 }
 
@@ -897,8 +881,20 @@ impl MockProvider {
     }
 }
 
+fn mock_app() -> (Arc<MockProvider>, App) {
+    let p = Arc::new(MockProvider::new());
+    let app = App::from_name(Arc::clone(&p) as Arc<dyn Provider>, "My App").unwrap();
+    (p, app)
+}
+
+use std::sync::Arc;
+
 impl Provider for MockProvider {
-    fn get_app_tree(&self, _target: &AppTarget) -> xa11y::Result<Tree> {
+    fn resolve_pid_by_name(&self, _name: &str) -> xa11y::Result<u32> {
+        Ok(1)
+    }
+
+    fn get_tree(&self, _pid: u32) -> xa11y::Result<Tree> {
         Ok(self.tree.clone())
     }
 
@@ -924,25 +920,18 @@ impl Provider for MockProvider {
 
 #[test]
 fn locator_basic_query() {
-    use std::sync::Arc;
-    let p: Arc<dyn Provider> = Arc::new(MockProvider::new());
-    let target = AppTarget::ByName("My App".into());
-    let loc = Locator::new(Arc::clone(&p), target, "button[name=\"Submit\"]");
-    assert_eq!(loc.role().unwrap(), Role::Button);
-    assert_eq!(loc.name().unwrap().as_deref(), Some("Submit"));
+    let (_, app) = mock_app();
+    let loc = app.locator("button[name=\"Submit\"]");
+    let node = loc.node().unwrap();
+    assert_eq!(node.role, Role::Button);
+    assert_eq!(node.name.as_deref(), Some("Submit"));
     assert!(loc.exists().unwrap());
 }
 
 #[test]
 fn locator_press_dispatches_action() {
-    use std::sync::Arc;
-    let p = Arc::new(MockProvider::new());
-    let target = AppTarget::ByName("My App".into());
-    let loc = Locator::new(
-        Arc::clone(&p) as Arc<dyn Provider>,
-        target,
-        "button[name=\"Submit\"]",
-    );
+    let (p, app) = mock_app();
+    let loc = app.locator("button[name=\"Submit\"]");
     loc.press().unwrap();
     let (idx, action) = p.last_action.lock().unwrap().unwrap();
     assert_eq!(action, Action::Press);
@@ -952,59 +941,48 @@ fn locator_press_dispatches_action() {
 
 #[test]
 fn locator_not_found() {
-    use std::sync::Arc;
-    let p: Arc<dyn Provider> = Arc::new(MockProvider::new());
-    let target = AppTarget::ByName("My App".into());
-    let loc = Locator::new(Arc::clone(&p), target, "button[name=\"NonExistent\"]");
+    let (_, app) = mock_app();
+    let loc = app.locator("button[name=\"NonExistent\"]");
     assert!(!loc.exists().unwrap());
     assert!(loc.press().is_err());
 }
 
 #[test]
 fn locator_nth() {
-    use std::sync::Arc;
-    let p: Arc<dyn Provider> = Arc::new(MockProvider::new());
-    let target = AppTarget::ByName("My App".into());
+    let (_, app) = mock_app();
     // There are 3 buttons: Back(2), Submit(6), Cancel(7)
-    let loc = Locator::new(Arc::clone(&p), target, "button").nth(1);
-    assert_eq!(loc.name().unwrap().as_deref(), Some("Submit"));
+    let loc = app.locator("button").nth(1);
+    assert_eq!(loc.node().unwrap().name.as_deref(), Some("Submit"));
 }
 
 #[test]
 fn locator_count() {
-    use std::sync::Arc;
-    let p: Arc<dyn Provider> = Arc::new(MockProvider::new());
-    let target = AppTarget::ByName("My App".into());
-    let loc = Locator::new(Arc::clone(&p), target, "button");
+    let (_, app) = mock_app();
+    let loc = app.locator("button");
     assert_eq!(loc.count().unwrap(), 3);
 }
 
 #[test]
 fn locator_child() {
-    use std::sync::Arc;
-    let p: Arc<dyn Provider> = Arc::new(MockProvider::new());
-    let target = AppTarget::ByName("My App".into());
-    let loc = Locator::new(Arc::clone(&p), target, "toolbar").child("button");
+    let (_, app) = mock_app();
+    let loc = app.locator("toolbar").child("button");
     // Toolbar has one button child: "Back"
-    assert_eq!(loc.name().unwrap().as_deref(), Some("Back"));
+    assert_eq!(loc.node().unwrap().name.as_deref(), Some("Back"));
 }
 
 #[test]
 fn locator_states() {
-    use std::sync::Arc;
-    let p: Arc<dyn Provider> = Arc::new(MockProvider::new());
-    let target = AppTarget::ByName("My App".into());
+    let (_, app) = mock_app();
     // Cancel button is disabled
-    let loc = Locator::new(Arc::clone(&p), target, "button[name=\"Cancel\"]");
-    assert!(!loc.is_enabled().unwrap());
-    assert!(loc.is_visible().unwrap());
+    let loc = app.locator("button[name=\"Cancel\"]");
+    let node = loc.node().unwrap();
+    assert!(!node.states.enabled);
+    assert!(node.states.visible);
 }
 
 #[test]
 fn locator_selector_getter() {
-    use std::sync::Arc;
-    let p: Arc<dyn Provider> = Arc::new(MockProvider::new());
-    let target = AppTarget::ByName("My App".into());
-    let loc = Locator::new(Arc::clone(&p), target, "button").child("text_field");
+    let (_, app) = mock_app();
+    let loc = app.locator("button").child("text_field");
     assert_eq!(loc.selector(), "button > text_field");
 }

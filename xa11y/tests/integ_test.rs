@@ -33,36 +33,25 @@ mod tests {
     #[test]
     #[ignore]
     fn apps_returns_nonempty() {
-        let root = xa11y::apps().unwrap();
-        assert!(!root.tree().is_empty(), "apps should return nodes");
-        assert_eq!(root.tree().app_name, "Desktop");
-        assert!(
-            root.tree().pid.is_none(),
-            "Multi-app tree should have no PID"
-        );
-        let has_test_app = root
-            .subtree()
-            .iter()
-            .any(|n| n.name.as_deref().is_some_and(|name| name.contains("xa11y")));
+        let apps = App::all(xa11y::provider().unwrap()).unwrap();
+        assert!(!apps.is_empty(), "apps should return at least one app");
+        let has_test_app = apps.iter().any(|a| a.name().contains("xa11y"));
         assert!(
             has_test_app,
             "apps should include the test app. Apps: {:?}",
-            root.subtree()
-                .iter()
-                .filter(|n| n.parent_index.is_none_or(|p| p == 0))
-                .map(|n| &n.name)
-                .collect::<Vec<_>>()
+            apps.iter().map(|a| a.name()).collect::<Vec<_>>()
         );
     }
 
     #[test]
     #[ignore]
-    fn app_target_by_pid() {
-        // Get the test app's PID via ByName, then verify ByPid works
+    fn app_from_pid() {
+        // Get the test app's PID via from_name, then verify from_pid works
         let by_name = h::app_tree();
         let pid = by_name.tree().pid.expect("app tree should have a PID");
         assert!(pid > 0);
-        let root = xa11y::app(&AppTarget::ByPid(pid)).unwrap();
+        let app = App::from_pid(xa11y::provider().unwrap(), pid).unwrap();
+        let root = app.nodes().unwrap();
         assert!(!root.tree().is_empty());
         assert_eq!(root.tree().pid, Some(pid));
     }
@@ -94,7 +83,7 @@ mod tests {
     #[ignore]
     fn tree_has_window() {
         let root = h::app_tree();
-        let windows = root.query("window").unwrap();
+        let windows = h::query(&root, "window").unwrap();
         assert!(!windows.is_empty(), "No windows found. Tree:\n{}", root);
     }
 
@@ -102,7 +91,7 @@ mod tests {
     #[ignore]
     fn tree_has_buttons() {
         let root = h::app_tree();
-        let buttons = root.query("button").unwrap();
+        let buttons = h::query(&root, "button").unwrap();
         assert!(
             buttons.len() >= 2,
             "Expected >=2 buttons, found {}. Tree:\n{}",
@@ -171,10 +160,10 @@ mod tests {
         // On Linux/AT-SPI with AccessKit, Label nodes may not expose their text
         // through the Name property or Text interface. Look for the node by name
         // first, then fall back to checking that StaticText nodes exist.
-        let welcome = root.query(r#"[name*="Welcome"]"#).unwrap();
+        let welcome = h::query(&root, r#"[name*="Welcome"]"#).unwrap();
         if welcome.is_empty() {
             // Fall back: verify that static text nodes exist (labels are present even if unnamed)
-            let labels = root.query("static_text").unwrap();
+            let labels = h::query(&root, "static_text").unwrap();
             assert!(
                 !labels.is_empty(),
                 "No StaticText/label nodes found. Tree:\n{}",
@@ -193,7 +182,7 @@ mod tests {
     #[ignore]
     fn tree_has_slider_at_50() {
         let root = h::app_tree();
-        let sliders = root.query("slider").unwrap();
+        let sliders = h::query(&root, "slider").unwrap();
         assert!(!sliders.is_empty(), "No sliders found. Tree:\n{}", root);
         // Slider value may have been changed by prior tests; just verify it has a numeric value
         assert!(sliders[0].value.is_some(), "Slider should have a value");
@@ -209,7 +198,7 @@ mod tests {
     #[ignore]
     fn tree_has_progress_bar() {
         let root = h::app_tree();
-        let progress = root.query("progress_bar").unwrap();
+        let progress = h::query(&root, "progress_bar").unwrap();
         assert!(
             !progress.is_empty(),
             "No progress bars found. Tree:\n{}",
@@ -221,7 +210,7 @@ mod tests {
     #[ignore]
     fn tree_has_radio_buttons() {
         let root = h::app_tree();
-        let radios = root.query("radio_button").unwrap();
+        let radios = h::query(&root, "radio_button").unwrap();
         assert!(
             radios.len() >= 2,
             "Expected >=2 radio buttons, found {}. Tree:\n{}",
@@ -234,7 +223,7 @@ mod tests {
     #[ignore]
     fn tree_has_combo_box() {
         let root = h::app_tree();
-        let combos = root.query("combo_box").unwrap();
+        let combos = h::query(&root, "combo_box").unwrap();
         assert!(!combos.is_empty(), "ComboBox not found. Tree:\n{}", root);
     }
 
@@ -242,8 +231,8 @@ mod tests {
     #[ignore]
     fn tree_has_list_with_items() {
         let root = h::app_tree();
-        let lists = root.query("list").unwrap();
-        let items = root.query("list_item").unwrap();
+        let lists = h::query(&root, "list").unwrap();
+        let items = h::query(&root, "list_item").unwrap();
         assert!(
             !lists.is_empty() || !items.is_empty(),
             "Neither List nor ListItem found. Tree:\n{}",
@@ -255,8 +244,8 @@ mod tests {
     #[ignore]
     fn tree_has_table_with_cells() {
         let root = h::app_tree();
-        let tables = root.query("table").unwrap();
-        let cells = root.query("table_cell").unwrap();
+        let tables = h::query(&root, "table").unwrap();
+        let cells = h::query(&root, "table_cell").unwrap();
         assert!(
             !tables.is_empty() || !cells.is_empty(),
             "Neither Table nor TableCell found. Tree:\n{}",
@@ -272,7 +261,7 @@ mod tests {
     #[ignore]
     fn role_menu_bar() {
         let root = h::app_tree();
-        let nodes = root.query("menu_bar").unwrap();
+        let nodes = h::query(&root, "menu_bar").unwrap();
         assert!(!nodes.is_empty(), "MenuBar not found. Tree:\n{}", root);
     }
 
@@ -280,7 +269,7 @@ mod tests {
     #[ignore]
     fn role_menu_item() {
         let root = h::app_tree();
-        let nodes = root.query("menu_item").unwrap();
+        let nodes = h::query(&root, "menu_item").unwrap();
         assert!(!nodes.is_empty(), "MenuItem not found. Tree:\n{}", root);
         let has_file = nodes.iter().any(|n| n.name.as_deref() == Some("File"));
         assert!(has_file, "File menu item not found");
@@ -290,7 +279,7 @@ mod tests {
     #[ignore]
     fn role_toolbar() {
         let root = h::app_tree();
-        let nodes = root.query("toolbar").unwrap();
+        let nodes = h::query(&root, "toolbar").unwrap();
         assert!(!nodes.is_empty(), "Toolbar not found. Tree:\n{}", root);
     }
 
@@ -298,8 +287,8 @@ mod tests {
     #[ignore]
     fn role_tab_and_tab_group() {
         let root = h::app_tree();
-        let tab_groups = root.query("tab_group").unwrap();
-        let tabs = root.query("tab").unwrap();
+        let tab_groups = h::query(&root, "tab_group").unwrap();
+        let tabs = h::query(&root, "tab").unwrap();
         assert!(
             !tab_groups.is_empty() || !tabs.is_empty(),
             "Neither TabGroup nor Tab found. Tree:\n{}",
@@ -311,7 +300,7 @@ mod tests {
     #[ignore]
     fn role_separator() {
         let root = h::app_tree();
-        let seps = root.query("separator").unwrap();
+        let seps = h::query(&root, "separator").unwrap();
         assert!(!seps.is_empty(), "Separator not found. Tree:\n{}", root);
     }
 
@@ -319,7 +308,7 @@ mod tests {
     #[ignore]
     fn role_image() {
         let root = h::app_tree();
-        let images = root.query("image").unwrap();
+        let images = h::query(&root, "image").unwrap();
         assert!(!images.is_empty(), "Image not found. Tree:\n{}", root);
     }
 
@@ -327,7 +316,7 @@ mod tests {
     #[ignore]
     fn role_link() {
         let root = h::app_tree();
-        let links = root.query("link").unwrap();
+        let links = h::query(&root, "link").unwrap();
         assert!(!links.is_empty(), "Link not found. Tree:\n{}", root);
     }
 
@@ -335,7 +324,7 @@ mod tests {
     #[ignore]
     fn role_tree_item() {
         let root = h::app_tree();
-        let items = root.query("tree_item").unwrap();
+        let items = h::query(&root, "tree_item").unwrap();
         assert!(!items.is_empty(), "TreeItem not found. Tree:\n{}", root);
     }
 
@@ -343,7 +332,7 @@ mod tests {
     #[ignore]
     fn role_dialog() {
         let root = h::app_tree();
-        let dialogs = root.query("dialog").unwrap();
+        let dialogs = h::query(&root, "dialog").unwrap();
         assert!(!dialogs.is_empty(), "Dialog not found. Tree:\n{}", root);
     }
 
@@ -351,7 +340,7 @@ mod tests {
     #[ignore]
     fn role_alert() {
         let root = h::app_tree();
-        let alerts = root.query("alert").unwrap();
+        let alerts = h::query(&root, "alert").unwrap();
         assert!(!alerts.is_empty(), "Alert not found. Tree:\n{}", root);
     }
 
@@ -359,7 +348,7 @@ mod tests {
     #[ignore]
     fn role_heading() {
         let root = h::app_tree();
-        let headings = root.query("heading").unwrap();
+        let headings = h::query(&root, "heading").unwrap();
         assert!(!headings.is_empty(), "Heading not found. Tree:\n{}", root);
     }
 
@@ -367,7 +356,7 @@ mod tests {
     #[ignore]
     fn role_scroll_bar() {
         let root = h::app_tree();
-        let scrollbars = root.query("scroll_bar").unwrap();
+        let scrollbars = h::query(&root, "scroll_bar").unwrap();
         assert!(
             !scrollbars.is_empty(),
             "ScrollBar not found. Tree:\n{}",
@@ -380,7 +369,7 @@ mod tests {
     fn role_split_group() {
         let root = h::app_tree();
         // SplitGroup may map through AT-SPI as Group due to accesskit's Pane role
-        let node = root.query(r#"[name*="SplitGroup"]"#).unwrap();
+        let node = h::query(&root, r#"[name*="SplitGroup"]"#).unwrap();
         assert!(
             !node.is_empty(),
             "SplitGroup node not found. Tree:\n{}",
@@ -392,7 +381,7 @@ mod tests {
     #[ignore]
     fn role_static_text() {
         let root = h::app_tree();
-        let labels = root.query("static_text").unwrap();
+        let labels = h::query(&root, "static_text").unwrap();
         assert!(!labels.is_empty(), "StaticText not found. Tree:\n{}", root);
     }
 
@@ -482,7 +471,7 @@ mod tests {
     #[ignore]
     fn node_description_on_image() {
         let root = h::app_tree();
-        let images = root.query("image").unwrap();
+        let images = h::query(&root, "image").unwrap();
         if !images.is_empty() {
             let img = images.iter().find(|n| {
                 n.name.as_deref() == Some("Info Icon")
@@ -633,7 +622,7 @@ mod tests {
     #[ignore]
     fn state_checked_on_radio() {
         let root = h::app_tree();
-        let radios = root.query("radio_button").unwrap();
+        let radios = h::query(&root, "radio_button").unwrap();
         let opt_a = radios
             .iter()
             .find(|n| n.name.as_deref() == Some("Option A"));
@@ -651,7 +640,7 @@ mod tests {
             .into_iter()
             .filter(|n| n.states.expanded.is_some())
             .collect();
-        let expander_by_name = root.query(r#"[name*="Expander"]"#).unwrap();
+        let expander_by_name = h::query(&root, r#"[name*="Expander"]"#).unwrap();
         // On macOS, GenericContainer with expanded state may not expose AXExpanded.
         // The expand/collapse actions still work (tested by action_expand_collapse).
         if expandable.is_empty() && expander_by_name.is_empty() {
@@ -706,7 +695,7 @@ mod tests {
     #[ignore]
     fn sel_by_role() {
         let root = h::app_tree();
-        let buttons = root.query("button").unwrap();
+        let buttons = h::query(&root, "button").unwrap();
         assert!(buttons.len() >= 2);
         for b in &buttons {
             assert_eq!(b.role, Role::Button);
@@ -725,7 +714,7 @@ mod tests {
     #[ignore]
     fn sel_by_role_and_name() {
         let root = h::app_tree();
-        let results = root.query(r#"button[name="Cancel"]"#).unwrap();
+        let results = h::query(&root, r#"button[name="Cancel"]"#).unwrap();
         assert_eq!(results.len(), 1);
     }
 
@@ -733,7 +722,7 @@ mod tests {
     #[ignore]
     fn sel_name_contains() {
         let root = h::app_tree();
-        let results = root.query(r#"[name*="agree"]"#).unwrap();
+        let results = h::query(&root, r#"[name*="agree"]"#).unwrap();
         assert!(
             !results.is_empty(),
             "Should find element with 'agree' in name"
@@ -745,10 +734,10 @@ mod tests {
     fn sel_name_starts_with() {
         let root = h::app_tree();
         // Try "Welc" first (Welcome label), fall back to "Sub" (Submit button)
-        let results = root.query(r#"[name^="Welc"]"#).unwrap();
+        let results = h::query(&root, r#"[name^="Welc"]"#).unwrap();
         if results.is_empty() {
             // Welcome label may not be named on some AT-SPI adapters; use Submit instead
-            let results = root.query(r#"[name^="Sub"]"#).unwrap();
+            let results = h::query(&root, r#"[name^="Sub"]"#).unwrap();
             assert!(!results.is_empty());
             assert!(results[0]
                 .name
@@ -771,10 +760,10 @@ mod tests {
     fn sel_name_ends_with() {
         let root = h::app_tree();
         // "xa11y" suffix may be in the window title or app name
-        let results = root.query(r#"[name$="xa11y"]"#).unwrap();
+        let results = h::query(&root, r#"[name$="xa11y"]"#).unwrap();
         if results.is_empty() {
             // Fall back to a known name suffix
-            let results = root.query(r#"[name$="App"]"#).unwrap();
+            let results = h::query(&root, r#"[name$="App"]"#).unwrap();
             assert!(
                 !results.is_empty(),
                 "Should find at least one element with name ending in 'App'"
@@ -788,14 +777,14 @@ mod tests {
         let root = h::app_tree();
         // Try "Red" (ComboBox value), then fall back to any value attribute match.
         // The slider value may have been changed by prior tests, so use a flexible match.
-        let results = root.query(r#"[value*="Red"]"#).unwrap();
+        let results = h::query(&root, r#"[value*="Red"]"#).unwrap();
         if results.is_empty() {
             // ComboBox value may not be exposed on some AT-SPI adapters.
             // Verify value selector works with any node that has a value.
             let has_value = root.subtree().iter().any(|n| n.value.is_some());
             assert!(has_value, "At least one node should have a value");
             // Try matching against progress bar value "0.75"
-            let results = root.query(r#"[value*="0.75"]"#).unwrap();
+            let results = h::query(&root, r#"[value*="0.75"]"#).unwrap();
             assert!(
                 !results.is_empty(),
                 "Should find element with value containing '0.75' (ProgressBar)"
@@ -807,7 +796,7 @@ mod tests {
     #[ignore]
     fn sel_descendant_combinator() {
         let root = h::app_tree();
-        let results = root.query("window button").unwrap();
+        let results = h::query(&root, "window button").unwrap();
         assert!(!results.is_empty());
         for r in &results {
             assert_eq!(r.role, Role::Button);
@@ -818,7 +807,7 @@ mod tests {
     #[ignore]
     fn sel_child_combinator() {
         let root = h::app_tree();
-        let results = root.query("application > window").unwrap();
+        let results = h::query(&root, "application > window").unwrap();
         // May or may not match depending on tree structure, but should not error
         for r in &results {
             assert_eq!(r.role, Role::Window);
@@ -829,7 +818,7 @@ mod tests {
     #[ignore]
     fn sel_nth_pseudo() {
         let root = h::app_tree();
-        let first = root.query("button:nth(1)").unwrap();
+        let first = h::query(&root, "button:nth(1)").unwrap();
         assert_eq!(first.len(), 1);
     }
 
@@ -837,7 +826,7 @@ mod tests {
     #[ignore]
     fn sel_role_attribute() {
         let root = h::app_tree();
-        let results = root.query(r#"[role="button"]"#).unwrap();
+        let results = h::query(&root, r#"[role="button"]"#).unwrap();
         assert!(!results.is_empty());
         for r in &results {
             assert_eq!(r.role, Role::Button);
@@ -848,7 +837,7 @@ mod tests {
     #[ignore]
     fn sel_complex_chain() {
         let root = h::app_tree();
-        let results = root.query(r#"window button[name*="Sub"]"#).unwrap();
+        let results = h::query(&root, r#"window button[name*="Sub"]"#).unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0].role, Role::Button);
         assert!(results[0].name.as_deref().unwrap().contains("Sub"));
@@ -894,11 +883,11 @@ mod tests {
     #[ignore]
     fn action_toggle_checkbox() {
         let root = h::app_tree();
-        let cbs = root.query("check_box").unwrap();
+        let cbs = h::query(&root, "check_box").unwrap();
         assert!(!cbs.is_empty(), "No checkbox");
         let initial = cbs[0].states.checked;
         let root2 = h::act(&cbs[0], Action::Press);
-        let cb2 = root2.query("check_box").unwrap();
+        let cb2 = h::query(&root2, "check_box").unwrap();
         if !cb2.is_empty() {
             assert_ne!(
                 cb2[0].states.checked, initial,
@@ -913,7 +902,7 @@ mod tests {
     fn action_toggle_enables_cancel() {
         let root = h::app_tree();
         let was_enabled = h::named(&root, "Cancel").states.enabled;
-        let cbs = root.query("check_box").unwrap();
+        let cbs = h::query(&root, "check_box").unwrap();
         assert!(!cbs.is_empty(), "No checkbox");
         let root2 = h::act(&cbs[0], Action::Press);
         let cancel2 = h::named(&root2, "Cancel");
@@ -983,7 +972,7 @@ mod tests {
     #[ignore]
     fn action_set_value_numeric() {
         let root = h::app_tree();
-        let sliders = root.query("slider").unwrap();
+        let sliders = h::query(&root, "slider").unwrap();
         assert!(!sliders.is_empty());
         let result = h::try_act_with(
             &sliders[0],
@@ -993,7 +982,7 @@ mod tests {
         assert!(result.is_ok(), "SetValue numeric: {:?}", result.err());
         std::thread::sleep(std::time::Duration::from_millis(300));
         let root2 = h::app_tree();
-        let s2 = root2.query("slider").unwrap();
+        let s2 = h::query(&root2, "slider").unwrap();
         if !s2.is_empty() {
             if let Some(v) = &s2[0].value {
                 let val: f64 = v.parse().unwrap_or(0.0);
@@ -1019,14 +1008,14 @@ mod tests {
                     && n.value.is_some()
                     && n.value.as_deref().unwrap_or("").parse::<f64>().is_ok()
             })
-            .or_else(|| root.query("slider").unwrap().first().cloned());
+            .or_else(|| h::query(&root, "slider").unwrap().first().cloned());
         if let Some(spin) = spin {
             let initial: f64 = spin.value.as_deref().unwrap_or("0").parse().unwrap_or(0.0);
             let result = h::try_act(&spin, Action::Increment);
             if result.is_ok() {
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 let root2 = h::app_tree();
-                if let Some(s2) = root2.query("slider").unwrap().first() {
+                if let Some(s2) = h::query(&root2, "slider").unwrap().first() {
                     if let Some(v) = &s2.value {
                         let new_val: f64 = v.parse().unwrap_or(initial);
                         assert!(
@@ -1053,14 +1042,14 @@ mod tests {
                     && n.value.is_some()
                     && n.value.as_deref().unwrap_or("").parse::<f64>().is_ok()
             })
-            .or_else(|| root.query("slider").unwrap().first().cloned());
+            .or_else(|| h::query(&root, "slider").unwrap().first().cloned());
         if let Some(spin) = spin {
             let before: f64 = spin.value.as_deref().unwrap_or("0").parse().unwrap_or(0.0);
             let result = h::try_act(&spin, Action::Decrement);
             if result.is_ok() {
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 let root2 = h::app_tree();
-                if let Some(s2) = root2.query("slider").unwrap().first() {
+                if let Some(s2) = h::query(&root2, "slider").unwrap().first() {
                     if let Some(v) = &s2.value {
                         let after: f64 = v.parse().unwrap_or(before);
                         assert!(
@@ -1084,13 +1073,13 @@ mod tests {
             .into_iter()
             .find(|n| n.states.expanded.is_some())
             .or_else(|| {
-                root.query(r#"[name*="Expander"]"#)
+                h::query(&root, r#"[name*="Expander"]"#)
                     .unwrap()
                     .first()
                     .cloned()
             })
             .or_else(|| {
-                root.query(r#"[name*="More Details"]"#)
+                h::query(&root, r#"[name*="More Details"]"#)
                     .unwrap()
                     .first()
                     .cloned()
@@ -1100,8 +1089,7 @@ mod tests {
             if let Ok(()) = h::try_act(&node, Action::Expand) {
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 let root2 = h::app_tree();
-                let n2 = root2
-                    .query(r#"[name*="Expander"]"#)
+                let n2 = h::query(&root2, r#"[name*="Expander"]"#)
                     .unwrap()
                     .first()
                     .cloned()
@@ -1117,8 +1105,7 @@ mod tests {
                         if let Ok(()) = h::try_act(&n, Action::Collapse) {
                             std::thread::sleep(std::time::Duration::from_millis(300));
                             let root3 = h::app_tree();
-                            let n3 = root3
-                                .query(r#"[name*="Expander"]"#)
+                            let n3 = h::query(&root3, r#"[name*="Expander"]"#)
                                 .unwrap()
                                 .first()
                                 .cloned()
@@ -1142,7 +1129,7 @@ mod tests {
     #[ignore]
     fn action_select_list_item() {
         let root = h::app_tree();
-        let apple = root.query(r#"[name*="Apple"]"#).unwrap();
+        let apple = h::query(&root, r#"[name*="Apple"]"#).unwrap();
         if !apple.is_empty() {
             let _ = h::try_act(&apple[0], Action::Press);
             // Selection verified by not crashing; state_selected_on_list_item tests the state
@@ -1158,7 +1145,7 @@ mod tests {
     fn nesting_deep_tree_traversal() {
         let root = h::app_tree();
         // Query inside table → row → cell
-        let cells = root.query(r#"[name*="Alice"]"#).unwrap();
+        let cells = h::query(&root, r#"[name*="Alice"]"#).unwrap();
         assert!(!cells.is_empty(), "Alice cell not found. Tree:\n{}", root);
         // Verify nesting: cell's parent should be a row-like node
         let parent = cells[0].parent();
@@ -1169,7 +1156,7 @@ mod tests {
     #[ignore]
     fn nesting_subtree_of_table() {
         let root = h::app_tree();
-        let tables = root.query("table").unwrap();
+        let tables = h::query(&root, "table").unwrap();
         if !tables.is_empty() {
             let subtree = tables[0].subtree();
             // Table should contain rows and cells
@@ -1185,16 +1172,16 @@ mod tests {
     #[ignore]
     fn thrash_toggle_checkbox_5_times() {
         let root = h::app_tree();
-        let cbs = root.query("check_box").unwrap();
+        let cbs = h::query(&root, "check_box").unwrap();
         assert!(!cbs.is_empty());
         let mut current_root = root;
         for _ in 0..5 {
-            let cbs = current_root.query("check_box").unwrap();
+            let cbs = h::query(&current_root, "check_box").unwrap();
             assert!(!cbs.is_empty());
             current_root = h::act(&cbs[0], Action::Press);
         }
         // After 5 toggles (odd), state should have flipped from initial
-        let final_cb = current_root.query("check_box").unwrap();
+        let final_cb = h::query(&current_root, "check_box").unwrap();
         if !final_cb.is_empty() {
             assert_eq!(
                 final_cb[0].states.checked,
@@ -1208,7 +1195,7 @@ mod tests {
     #[ignore]
     fn thrash_slider_increment_10_times() {
         let root = h::app_tree();
-        let sliders = root.query("slider").unwrap();
+        let sliders = h::query(&root, "slider").unwrap();
         let slider = sliders.first().expect("No slider");
         let start_val: f64 = slider
             .value
@@ -1218,11 +1205,11 @@ mod tests {
             .unwrap_or(0.0);
         let mut current_root = root;
         for _ in 0..10 {
-            let sliders = current_root.query("slider").unwrap();
+            let sliders = h::query(&current_root, "slider").unwrap();
             let slider = sliders.first().expect("No slider");
             current_root = h::act(slider, Action::Increment);
         }
-        let s = current_root.query("slider").unwrap();
+        let s = h::query(&current_root, "slider").unwrap();
         if !s.is_empty() {
             if let Some(v) = &s[0].value {
                 let val: f64 = v.parse().unwrap_or(0.0);
@@ -1247,7 +1234,7 @@ mod tests {
             .into_iter()
             .find(|n| n.states.expanded.is_some())
             .or_else(|| {
-                root.query(r#"[name*="Expander"]"#)
+                h::query(&root, r#"[name*="Expander"]"#)
                     .unwrap()
                     .first()
                     .cloned()
@@ -1266,12 +1253,16 @@ mod tests {
                     .subtree()
                     .into_iter()
                     .find(|n| n.states.expanded.is_some())
-                    .or_else(|| ct.query(r#"[name*="Expander"]"#).unwrap().first().cloned())
+                    .or_else(|| {
+                        h::query(&ct, r#"[name*="Expander"]"#)
+                            .unwrap()
+                            .first()
+                            .cloned()
+                    })
                     .expect("Expander node should exist");
                 ct = h::act(&node, action);
             }
-            let final_node = ct
-                .query(r#"[name*="Expander"]"#)
+            let final_node = h::query(&ct, r#"[name*="Expander"]"#)
                 .unwrap()
                 .first()
                 .cloned()
@@ -1295,7 +1286,7 @@ mod tests {
     #[test]
     #[ignore]
     fn error_app_not_found() {
-        let result = xa11y::app(&AppTarget::ByName("nonexistent_app_12345".to_string()));
+        let result = App::from_name(xa11y::provider().unwrap(), "nonexistent_app_12345");
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::AppNotFound { .. }));
     }
@@ -1304,7 +1295,7 @@ mod tests {
     #[ignore]
     fn error_selector_not_matched() {
         let root = h::app_tree();
-        let result = root.query(r#"button[name="nonexistent_element_12345"]"#);
+        let result = h::query(&root, r#"button[name="nonexistent_element_12345"]"#);
         assert!(result.unwrap().is_empty());
     }
 
@@ -1312,7 +1303,7 @@ mod tests {
     #[ignore]
     fn error_invalid_selector() {
         let root = h::app_tree();
-        let result = root.query("$$$invalid!!!");
+        let result = h::query(&root, "$$$invalid!!!");
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::InvalidSelector { .. }));
     }
@@ -1321,7 +1312,7 @@ mod tests {
     #[ignore]
     fn action_on_default_tree() {
         let root = h::app_tree();
-        let buttons = root.query(r#"[name*="Submit"]"#).unwrap();
+        let buttons = h::query(&root, r#"[name*="Submit"]"#).unwrap();
         assert!(!buttons.is_empty());
         let result = h::try_act(&buttons[0], Action::Press);
         match result {
@@ -1392,7 +1383,7 @@ mod tests {
             .subtree()
             .into_iter()
             .find(|n| n.role == Role::ScrollBar)
-            .or_else(|| root.query("window").unwrap().first().cloned())
+            .or_else(|| h::query(&root, "window").unwrap().first().cloned())
             .expect("No scrollable element found");
         let result = h::try_act_with(
             &target,
@@ -1476,11 +1467,9 @@ mod tests {
         let ep = xa11y::create_event_provider().expect("EventProvider unavailable");
         let root = h::app_tree();
 
+        let pid = ep.resolve_pid_by_name("xa11y").unwrap();
         let sub = ep
-            .subscribe(
-                &AppTarget::ByName("xa11y".to_string()),
-                EventFilter::kinds(&[EventKind::FocusChanged]),
-            )
+            .subscribe(pid, EventFilter::kinds(&[EventKind::FocusChanged]))
             .unwrap();
 
         // Trigger a focus change
@@ -1507,9 +1496,11 @@ mod tests {
         use std::time::Duration;
         let ep = xa11y::create_event_provider().expect("EventProvider unavailable");
 
+        let pid = ep.resolve_pid_by_name("xa11y").unwrap();
+
         // Wait for an event with a very short timeout — should timeout
         let result = ep.wait_for_event(
-            &AppTarget::ByName("xa11y".to_string()),
+            pid,
             EventFilter::kinds(&[EventKind::Alert]),
             Duration::from_millis(100),
         );
@@ -1526,9 +1517,11 @@ mod tests {
         use std::time::Duration;
         let ep = xa11y::create_event_provider().expect("EventProvider unavailable");
 
+        let pid = ep.resolve_pid_by_name("xa11y").unwrap();
+
         // Wait for Submit button to be attached (it already exists)
         let result = ep.wait_for(
-            &AppTarget::ByName("xa11y".to_string()),
+            pid,
             "button[name=\"Submit\"]",
             ElementState::Attached,
             Duration::from_secs(2),
