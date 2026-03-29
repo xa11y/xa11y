@@ -5,7 +5,7 @@ use crate::element::ElementData;
 /// Categories of accessibility events, normalized across platforms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
-pub enum EventKind {
+pub enum EventType {
     /// An element gained keyboard focus.
     FocusChanged,
     /// An element's value changed.
@@ -43,8 +43,8 @@ pub enum EventKind {
 /// An accessibility event delivered to subscribers.
 #[derive(Debug, Clone)]
 pub struct Event {
-    /// What kind of event occurred.
-    pub kind: EventKind,
+    /// What type of event occurred.
+    pub event_type: EventType,
     /// Name of the application that produced this event.
     pub app_name: String,
     /// PID of the application that produced this event.
@@ -99,49 +99,6 @@ pub enum StateFlag {
     Modal,
     Required,
     Busy,
-}
-
-/// Filter to narrow which events are delivered.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct EventFilter {
-    /// Which event kinds to subscribe to. Empty = all events.
-    pub kinds: Vec<EventKind>,
-    /// Only deliver events from elements matching this selector.
-    pub selector: Option<String>,
-    /// For StateChanged events: only these state flags.
-    pub state_flags: Vec<StateFlag>,
-}
-
-impl EventFilter {
-    /// Subscribe to all events from the target.
-    pub fn all() -> Self {
-        Self::default()
-    }
-
-    /// Subscribe to specific event kinds.
-    pub fn kinds(kinds: &[EventKind]) -> Self {
-        Self {
-            kinds: kinds.to_vec(),
-            ..Default::default()
-        }
-    }
-
-    /// Subscribe to events on elements matching a selector.
-    pub fn selector(selector: &str) -> Self {
-        Self {
-            selector: Some(selector.to_string()),
-            ..Default::default()
-        }
-    }
-
-    /// Combine kind filter with selector filter.
-    pub fn new(kinds: &[EventKind], selector: Option<&str>) -> Self {
-        Self {
-            kinds: kinds.to_vec(),
-            selector: selector.map(|s| s.to_string()),
-            ..Default::default()
-        }
-    }
 }
 
 /// Desired element state for wait_for operations.

@@ -1,7 +1,7 @@
 //! Stub backend for non-Linux platforms (allows compilation on all targets).
 
 use xa11y_core::{
-    Action, ActionData, ElementData, Error, PermissionStatus, Provider, Result, Tree,
+    Action, ActionData, ElementData, Error, PermissionStatus, Provider, Result, Subscription, Tree,
 };
 
 #[derive(Default)]
@@ -51,6 +51,13 @@ impl Provider for LinuxProvider {
     fn check_permissions(&self) -> Result<PermissionStatus> {
         Ok(PermissionStatus::Denied {
             instructions: "Linux AT-SPI2 backend not available on this platform".to_string(),
+        })
+    }
+
+    fn subscribe(&self, _pid: u32) -> Result<Subscription> {
+        Err(Error::Platform {
+            code: -1,
+            message: "Linux backend not available on this platform".to_string(),
         })
     }
 }

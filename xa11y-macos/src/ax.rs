@@ -10,9 +10,9 @@ use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
 
 use xa11y_core::{
-    Action, ActionData, CancelHandle, ElementData, ElementState, Error, Event, EventFilter,
-    EventKind, EventProvider, EventReceiver, PermissionStatus, Provider, RawPlatformData, Rect,
-    Result, Role, StateSet, Subscription, Toggled, Tree,
+    Action, ActionData, CancelHandle, ElementData, Error, Event, EventReceiver, EventType,
+    PermissionStatus, Provider, RawPlatformData, Rect, Result, Role, StateSet, Subscription,
+    Toggled, Tree,
 };
 
 // ── FFI Declarations ──────────────────────────────────────────────────────────
@@ -96,7 +96,7 @@ extern "C" {
     fn safe_ax_create_application(pid: i32) -> AXUIElementRef;
     fn safe_ax_value_get_value(value: CFTypeRef, the_type: i32, value_ptr: *mut c_void) -> bool;
     fn safe_cg_window_list_copy(option: u32, relative_to: u32) -> CFArrayRef;
-    // AXObserver wrappers for EventProvider
+    // AXObserver wrappers for event subscription
     fn safe_ax_observer_create(
         pid: i32,
         callback: unsafe extern "C" fn(CFTypeRef, AXUIElementRef, CFTypeRef, *mut c_void),
@@ -1276,14 +1276,17 @@ impl Provider for MacOSProvider {
             })
         }
     }
+
+    fn subscribe(&self, pid: u32) -> Result<Subscription> {
+        self.subscribe_impl(pid as i32, String::new())
+    }
 }
 
-// ── EventProvider ────────────────────────────────────────────────────────────
+// ── Event subscription ──────────────────────────────────────────────────────
 
 /// Context passed to AXObserver callback via refcon pointer.
 struct ObserverContext {
     sender: std::sync::mpsc::Sender<Event>,
-    filter: EventFilter,
     app_name: String,
     app_pid: u32,
 }
@@ -1302,23 +1305,19 @@ unsafe extern "C" fn ax_observer_callback(
         cf.to_string()
     };
 
-    let kind = match notif_str.as_str() {
-        "AXValueChanged" => EventKind::ValueChanged,
-        "AXFocusedUIElementChanged" => EventKind::FocusChanged,
-        "AXWindowCreated" => EventKind::WindowOpened,
-        "AXWindowMiniaturized" => EventKind::WindowDeactivated,
-        "AXWindowDeminiaturized" => EventKind::WindowActivated,
-        "AXUIElementDestroyed" => EventKind::StructureChanged,
-        "AXSelectedTextChanged" => EventKind::SelectionChanged,
-        "AXMenuOpened" => EventKind::MenuOpened,
-        "AXMenuClosed" => EventKind::MenuClosed,
-        "AXTitleChanged" => EventKind::NameChanged,
+    let event_type = match notif_str.as_str() {
+        "AXValueChanged" => EventType::ValueChanged,
+        "AXFocusedUIElementChanged" => EventType::FocusChanged,
+        "AXWindowCreated" => EventType::WindowOpened,
+        "AXWindowMiniaturized" => EventType::WindowDeactivated,
+        "AXWindowDeminiaturized" => EventType::WindowActivated,
+        "AXUIElementDestroyed" => EventType::StructureChanged,
+        "AXSelectedTextChanged" => EventType::SelectionChanged,
+        "AXMenuOpened" => EventType::MenuOpened,
+        "AXMenuClosed" => EventType::MenuClosed,
+        "AXTitleChanged" => EventType::NameChanged,
         _ => return,
     };
-
-    if !ctx.filter.kinds.is_empty() && !ctx.filter.kinds.contains(&kind) {
-        return;
-    }
 
     // Build minimal target element from the AX element
     let target = if !element.is_null() {
@@ -1348,7 +1347,7 @@ unsafe extern "C" fn ax_observer_callback(
     };
 
     let event = Event {
-        kind,
+        event_type,
         app_name: ctx.app_name.clone(),
         app_pid: ctx.app_pid,
         target,
@@ -1362,17 +1361,11 @@ unsafe extern "C" fn ax_observer_callback(
 
 impl MacOSProvider {
     /// Shared subscribe implementation used by subscribe.
-    fn subscribe_impl(
-        &self,
-        pid: i32,
-        app_name: String,
-        filter: EventFilter,
-    ) -> Result<Subscription> {
+    fn subscribe_impl(&self, pid: i32, app_name: String) -> Result<Subscription> {
         let (tx, rx) = std::sync::mpsc::channel();
 
         let ctx = Box::new(ObserverContext {
             sender: tx,
-            filter,
             app_name,
             app_pid: pid as u32,
         });
@@ -1469,80 +1462,6 @@ impl MacOSProvider {
         });
 
         Ok(Subscription::new(EventReceiver::new(rx), cancel))
-    }
-
-    /// Shared wait_for_event implementation.
-    fn wait_for_event_impl(
-        &self,
-        pid: i32,
-        app_name: String,
-        filter: EventFilter,
-        timeout: Duration,
-    ) -> Result<Event> {
-        let sub = self.subscribe_impl(pid, app_name, filter)?;
-        let start = std::time::Instant::now();
-        loop {
-            if let Some(event) = sub.try_recv() {
-                return Ok(event);
-            }
-            let elapsed = start.elapsed();
-            if elapsed >= timeout {
-                return Err(Error::Timeout { elapsed });
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    /// Shared wait_for implementation.
-    fn wait_for_impl<F>(
-        &self,
-        fetch_tree: F,
-        selector: &str,
-        state: ElementState,
-        timeout: Duration,
-    ) -> Result<Option<ElementData>>
-    where
-        F: Fn(&Self) -> Result<Tree>,
-    {
-        let start = std::time::Instant::now();
-        let poll_interval = Duration::from_millis(100);
-
-        loop {
-            let elapsed = start.elapsed();
-            if elapsed >= timeout {
-                return Err(Error::Timeout { elapsed });
-            }
-
-            let tree = fetch_tree(self)?;
-            let matches = tree.query(selector).ok();
-            let element = matches.as_ref().and_then(|m| m.first().copied());
-
-            if state.is_met(element) {
-                return Ok(element.cloned());
-            }
-
-            std::thread::sleep(poll_interval);
-        }
-    }
-}
-
-impl EventProvider for MacOSProvider {
-    fn subscribe(&self, pid: u32, filter: EventFilter) -> Result<Subscription> {
-        self.subscribe_impl(pid as i32, String::new(), filter)
-    }
-
-    fn wait_for_event(&self, pid: u32, filter: EventFilter, timeout: Duration) -> Result<Event> {
-        self.wait_for_event_impl(pid as i32, String::new(), filter, timeout)
-    }
-
-    fn wait_for(
-        &self,
-        pid: u32,
-        selector: &str,
-        state: ElementState,
-        timeout: Duration,
-    ) -> Result<Option<ElementData>> {
-        self.wait_for_impl(|s| s.get_tree(pid), selector, state, timeout)
     }
 }
 

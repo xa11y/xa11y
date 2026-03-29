@@ -1,6 +1,7 @@
 use crate::action::{Action, ActionData};
 use crate::element::ElementData;
 use crate::error::Result;
+use crate::event_provider::Subscription;
 use crate::tree::Tree;
 
 use serde::{Deserialize, Serialize};
@@ -34,6 +35,13 @@ pub trait Provider: Send + Sync {
 
     /// Check if accessibility permissions are granted.
     fn check_permissions(&self) -> Result<PermissionStatus>;
+
+    /// Subscribe to all accessibility events for an application by PID.
+    ///
+    /// Returns a [`Subscription`] that receives events until dropped.
+    /// Use [`Subscription::try_recv`], [`Subscription::recv`], or
+    /// [`Subscription::wait_for`] to consume events.
+    fn subscribe(&self, pid: u32) -> Result<Subscription>;
 }
 
 /// Result of a permission check.

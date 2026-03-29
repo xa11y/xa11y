@@ -50,9 +50,7 @@ Accessibility APIs also emit events when the UI changes — elements appearing o
 FocusChanged  app="Calculator"  target=text_field "Display"
 ```
 
-xa11y supports subscribing to these event streams with selectors.
-
-> Events are not yet implemented on any platform. This is planned for a future release.
+xa11y supports subscribing to these event streams per-app via `app.subscribe()`.
 
 ## How does xa11y compare to...
 
@@ -63,13 +61,14 @@ xa11y supports subscribing to these event streams with selectors.
 
 ## Concepts
 
-<img src="/concepts.svg" alt="Diagram showing xa11y's three concepts: Read (App → .elements() → Element → .children()/.parent()), Act (App → .locator() → Locator → Actions/Waits/.element()/.elements()), and Listen (App → subscribe() → Event Stream)" style="width:100%;max-width:720px;margin:1rem auto;display:block" />
+<img src="/concepts.svg" alt="Diagram showing xa11y's three concepts: Read (App → .elements() → Element → .children()/.parent()), Act (App → .locator() → Locator → Actions/Waits/.element()/.elements()), and Listen (App → .subscribe() → Subscription → recv()/wait_for()/iter())" style="width:100%;max-width:720px;margin:1rem auto;display:block" />
 
 xa11y is built around three core types:
 
-- **App** — entry point for interacting with an application. Construct via `App::from_name()`, `App::from_pid()`, or `App::all()`. An App provides two paths: `app.elements()` for read-only snapshots, and `app.locator(selector)` for actions and waits.
+- **App** — entry point for interacting with an application. Construct via `App::from_name()`, `App::from_pid()`, or `App::all()`. An App provides three paths: `app.elements()` for read-only snapshots, `app.locator(selector)` for actions and waits, and `app.subscribe()` for event streams.
 - **Element** — read-only handle into a frozen tree snapshot. Navigate with `children()` and `parent()`. Read properties like `role`, `name`, `value`, `states`, `bounds`. Elements never refetch from the platform.
 - **Locator** — lazy selector that re-resolves against a fresh snapshot on every operation. Use for actions (`press()`, `set_value()`, ...), waits (`wait_visible()`, ...), and querying (`element()`, `elements()`). Inspired by [Playwright's Locator pattern](https://playwright.dev/docs/locators).
+- **Subscription** — live event stream from an app. Created via `app.subscribe()`. Pull events with `try_recv()`, `recv(timeout)`, `wait_for(predicate, timeout)`, or iterate with `iter()`. Drop to unsubscribe.
 - **Selector** — CSS-like query syntax used by Locator. Supports role matching, attribute filters, combinators, and nth selection.
 
 ## Connecting to an app
@@ -188,11 +187,33 @@ button:nth(2)                    # 2nd match (1-based)
 
 ## Events
 
-xa11y will support subscribing to accessibility event streams filtered by selector.
+Subscribe to accessibility events from an app with `app.subscribe()`. The returned `Subscription` is a pull-based event stream — no filters or selectors, just all events for the app.
 
-**Event kinds:** `FocusChanged`, `ValueChanged`, `NameChanged`, `StateChanged`, `StructureChanged`, `WindowOpened`, `WindowClosed`, `SelectionChanged`, `TextChanged`, `Alert`.
+```rust
+let calc = App::from_name(provider()?, "Calculator")?;
+let sub = calc.subscribe()?;
 
-> This feature is not yet implemented on any platform. It is planned for a future release.
+// Block until a specific event arrives
+let event = sub.wait_for(
+    |e| e.event_type == EventType::FocusChanged,
+    Duration::from_secs(5),
+)?;
+println!("Focus moved to: {:?}", event.target);
+
+// Or poll without blocking
+if let Some(event) = sub.try_recv() {
+    println!("{:?}", event.event_type);
+}
+
+// Or iterate (blocks until next event)
+for event in sub.iter() {
+    println!("{:?}: {}", event.event_type, event.app_name);
+}
+```
+
+Drop the `Subscription` to stop listening. The subscription is `Send` but not `Clone` — move it to another thread if needed.
+
+**Event types:** `FocusChanged`, `ValueChanged`, `NameChanged`, `StateChanged`, `StructureChanged`, `WindowOpened`, `WindowClosed`, `WindowActivated`, `WindowDeactivated`, `SelectionChanged`, `MenuOpened`, `MenuClosed`, `TextChanged`, `Alert`.
 
 ## Error handling
 

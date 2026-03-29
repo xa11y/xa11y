@@ -89,6 +89,14 @@ const SECTION_HEADING: NodeId = NodeId(65);
 const SCROLL_BAR_NODE: NodeId = NodeId(66);
 const SPLIT_GROUP_NODE: NodeId = NodeId(67);
 
+// Dynamic list items — added/removed via "Add Item" / "Remove Item" buttons
+const DYNAMIC_LIST_LABEL: NodeId = NodeId(68);
+const DYNAMIC_LIST: NodeId = NodeId(69);
+const ADD_ITEM_BTN: NodeId = NodeId(70);
+const REMOVE_ITEM_BTN: NodeId = NodeId(71);
+// Dynamic items start at NodeId(100) to leave room for future static nodes
+const DYNAMIC_ITEM_BASE: u64 = 100;
+
 // ── Application State ─────────────────────────────────────────────────────────
 
 struct AppState {
@@ -102,6 +110,7 @@ struct AppState {
     focused_id: NodeId,
     selected_radio: usize,
     selected_list_item: Option<usize>,
+    dynamic_item_count: usize,
 }
 
 impl AppState {
@@ -117,6 +126,7 @@ impl AppState {
             focused_id: SUBMIT_BTN,
             selected_radio: 0,
             selected_list_item: None,
+            dynamic_item_count: 0,
         }
     }
 }
@@ -124,7 +134,7 @@ impl AppState {
 // ── Tree Builder ──────────────────────────────────────────────────────────────
 
 fn build_tree(state: &AppState) -> TreeUpdate {
-    let mut nodes = Vec::with_capacity(68);
+    let mut nodes = Vec::with_capacity(72 + state.dynamic_item_count);
 
     // Window (root)
     let mut window = Node::new(Role::Window);
@@ -498,7 +508,16 @@ fn build_main_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
 fn build_lists_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
     let mut lists_panel = Node::new(Role::GenericContainer);
     lists_panel.set_label("Lists Panel");
-    lists_panel.set_children(vec![FRUITS_LABEL, FRUIT_LIST, TABLE_LABEL, USERS_TABLE]);
+    lists_panel.set_children(vec![
+        FRUITS_LABEL,
+        FRUIT_LIST,
+        TABLE_LABEL,
+        USERS_TABLE,
+        DYNAMIC_LIST_LABEL,
+        ADD_ITEM_BTN,
+        REMOVE_ITEM_BTN,
+        DYNAMIC_LIST,
+    ]);
     nodes.push((LISTS_PANEL, lists_panel));
 
     let mut fruits_label = Node::new(Role::Label);
@@ -563,6 +582,39 @@ fn build_lists_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
         let mut cell = Node::new(Role::Cell);
         cell.set_label(label);
         nodes.push((id, cell));
+    }
+
+    // ── Dynamic list (items added/removed at runtime) ──
+    let mut dynamic_label = Node::new(Role::Label);
+    dynamic_label.set_label("Dynamic Items:");
+    nodes.push((DYNAMIC_LIST_LABEL, dynamic_label));
+
+    let mut add_btn = Node::new(Role::Button);
+    add_btn.set_label("Add Item");
+    add_btn.add_action(Action::Click);
+    add_btn.add_action(Action::Focus);
+    nodes.push((ADD_ITEM_BTN, add_btn));
+
+    let mut remove_btn = Node::new(Role::Button);
+    remove_btn.set_label("Remove Item");
+    remove_btn.add_action(Action::Click);
+    remove_btn.add_action(Action::Focus);
+    nodes.push((REMOVE_ITEM_BTN, remove_btn));
+
+    let dynamic_children: Vec<NodeId> = (0..state.dynamic_item_count)
+        .map(|i| NodeId(DYNAMIC_ITEM_BASE + i as u64))
+        .collect();
+
+    let mut dynamic_list = Node::new(Role::List);
+    dynamic_list.set_label("Dynamic List");
+    dynamic_list.set_children(dynamic_children.clone());
+    nodes.push((DYNAMIC_LIST, dynamic_list));
+
+    for (i, id) in dynamic_children.into_iter().enumerate() {
+        let mut item = Node::new(Role::ListItem);
+        let label: Box<str> = format!("Item {}", i + 1).into();
+        item.set_label(label);
+        nodes.push((id, item));
     }
 }
 
@@ -733,6 +785,20 @@ fn handle_action(request: &ActionRequest, state: &mut AppState) -> bool {
         }
         (id, Action::Click) if id == CHERRY_ITEM => {
             state.selected_list_item = Some(2);
+            true
+        }
+
+        // Add Item button — adds a dynamic list item (triggers StructureChanged)
+        (id, Action::Click) if id == ADD_ITEM_BTN => {
+            state.dynamic_item_count += 1;
+            true
+        }
+
+        // Remove Item button — removes a dynamic list item (triggers StructureChanged)
+        (id, Action::Click) if id == REMOVE_ITEM_BTN => {
+            if state.dynamic_item_count > 0 {
+                state.dynamic_item_count -= 1;
+            }
             true
         }
 

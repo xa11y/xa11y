@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from types import TracebackType
 
 # ── Exceptions ───────────────────────────────────────────────────────────────
 
@@ -50,6 +51,96 @@ class Rect:
     def __repr__(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...
 
+# ── EventType ────────────────────────────────────────────────────────────────
+
+class EventType:
+    """Accessibility event type constants.
+
+    Use these constants to compare against :attr:`Event.event_type`::
+
+        if event.event_type == EventType.FOCUS_CHANGED:
+            ...
+    """
+
+    FOCUS_CHANGED: str
+    VALUE_CHANGED: str
+    NAME_CHANGED: str
+    STATE_CHANGED: str
+    STRUCTURE_CHANGED: str
+    WINDOW_OPENED: str
+    WINDOW_CLOSED: str
+    WINDOW_ACTIVATED: str
+    WINDOW_DEACTIVATED: str
+    SELECTION_CHANGED: str
+    MENU_OPENED: str
+    MENU_CLOSED: str
+    ALERT: str
+    TEXT_CHANGED: str
+
+# ── Event ────────────────────────────────────────────────────────────────────
+
+class Event:
+    """An accessibility event delivered to subscribers.
+
+    Events are immutable snapshots of something that happened in an
+    application's accessibility tree.
+    """
+
+    @property
+    def event_type(self) -> str:
+        """Event type (e.g. ``EventType.FOCUS_CHANGED``)."""
+    @property
+    def app_name(self) -> str:
+        """Name of the application that produced this event."""
+    @property
+    def app_pid(self) -> int:
+        """PID of the application that produced this event."""
+    @property
+    def target(self) -> Element | None:
+        """A snapshot of the element that triggered the event, if available."""
+    def __repr__(self) -> str: ...
+
+# ── Subscription ─────────────────────────────────────────────────────────────
+
+class Subscription:
+    """A live event subscription.
+
+    Supports pull-based consumption via :meth:`try_recv`, :meth:`recv`,
+    :meth:`wait_for`, and iteration. Use as a context manager or call
+    :meth:`close` to unsubscribe.
+
+    Example::
+
+        with app.subscribe() as sub:
+            event = sub.wait_for(
+                lambda e: e.event_type == EventType.FOCUS_CHANGED,
+                timeout=5.0,
+            )
+    """
+
+    def try_recv(self) -> Event | None:
+        """Non-blocking receive. Returns ``None`` if no event is ready."""
+    def recv(self, timeout: float = 5.0) -> Event:
+        """Block until an event arrives or *timeout* seconds elapse."""
+    def wait_for(
+        self,
+        predicate: Callable[[Event], bool],
+        timeout: float = 5.0,
+    ) -> Event:
+        """Block until an event matching *predicate* arrives or *timeout* elapses."""
+    def close(self) -> None:
+        """Close the subscription and stop receiving events."""
+    def __enter__(self) -> Subscription: ...
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> bool: ...
+    def __iter__(self) -> Iterator[Event]: ...
+    def __next__(self) -> Event: ...
+    def __repr__(self) -> str: ...
+
 # ── App ──────────────────────────────────────────────────────────────────────
 
 class App:
@@ -67,6 +158,8 @@ class App:
         """The application's process ID."""
     def locator(self, selector: str) -> Locator:
         """Create a :class:`Locator` for lazy element interaction."""
+    def subscribe(self) -> Subscription:
+        """Subscribe to all accessibility events for this application."""
     def elements(self) -> Element:
         """Snapshot the app's accessibility tree. Returns the root :class:`Element`."""
     def __repr__(self) -> str: ...
