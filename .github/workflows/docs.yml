@@ -71,7 +71,7 @@ jobs:
         run: cp -r docs/python/_build/html docs/site/dist/api/python/reference
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v4
         with:
           path: docs/site/dist
 
