@@ -19,6 +19,7 @@ COMMANDS:
     coverage            Generate code coverage report
     fuzz [ARGS..]       Run provider fuzzer (pass-through args)
     sync-readmes        Generate crates.io/PyPI READMEs from root README.md
+    sync-doc-versions   Update version in docs from Cargo.toml
     check               Run ALL pre-PR checks (fmt, lint, test, test-python, docs)
     help                Show this help
 ";
@@ -39,6 +40,7 @@ fn main() -> ExitCode {
         "coverage" => do_coverage(),
         "fuzz" => do_fuzz(rest),
         "sync-readmes" => do_sync_readmes(),
+        "sync-doc-versions" => sync_doc_versions(),
         "check" => do_check(),
         "help" | "--help" | "-h" => {
             print!("{HELP}");
@@ -203,6 +205,11 @@ fn do_docs() -> bool {
         return false;
     }
 
+    heading("Sync doc versions");
+    if !sync_doc_versions() {
+        return false;
+    }
+
     heading("Generate Python API docs");
     let gen_ok = run_in("python", &["docs/generate_python_api.py"], &root);
     if !gen_ok {
@@ -296,6 +303,96 @@ fn strip_lang_blocks(source: &str, keep: &str, remove: &str) -> String {
     }
 
     result
+}
+
+/// Read the workspace version from Cargo.toml and update the Rust install
+/// snippet in the quick-start guide so it always shows the latest major.minor.
+fn sync_doc_versions() -> bool {
+    let root = project_root();
+
+    let cargo_toml = match fs::read_to_string(root.join("Cargo.toml")) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to read Cargo.toml: {e}");
+            return false;
+        }
+    };
+
+    let version = match workspace_major_minor(&cargo_toml) {
+        Some(v) => v,
+        None => {
+            eprintln!("Failed to parse workspace version from Cargo.toml");
+            return false;
+        }
+    };
+
+    let quick_start = root.join("docs/site/src/content/docs/guides/quick-start.mdx");
+    let content = match fs::read_to_string(&quick_start) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to read quick-start.mdx: {e}");
+            return false;
+        }
+    };
+
+    // Replace `xa11y = "X.Y"` with the current version.
+    // The snippet appears inside a ```toml block as the only xa11y dependency line.
+    let needle = find_xa11y_dep_line(&content);
+    let target = format!(r#"xa11y = "{version}""#);
+
+    match needle {
+        Some(old) if old != target => {
+            let updated = content.replace(&old, &target);
+            if let Err(e) = fs::write(&quick_start, &updated) {
+                eprintln!("Failed to write quick-start.mdx: {e}");
+                return false;
+            }
+            eprintln!("Updated quick-start.mdx: {old} -> {target}");
+        }
+        Some(_) => {
+            eprintln!("quick-start.mdx already up to date ({target})");
+        }
+        None => {
+            eprintln!("Warning: could not find xa11y dependency line in quick-start.mdx");
+        }
+    }
+
+    true
+}
+
+/// Find the `xa11y = "X.Y"` dependency line in the content.
+fn find_xa11y_dep_line(content: &str) -> Option<String> {
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("xa11y = \"") && trimmed.ends_with('"') {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+/// Extract "X.Y" from the `[workspace.package]` version in Cargo.toml.
+fn workspace_major_minor(cargo_toml: &str) -> Option<String> {
+    let mut in_workspace_pkg = false;
+    for line in cargo_toml.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[workspace.package]" {
+            in_workspace_pkg = true;
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            in_workspace_pkg = false;
+            continue;
+        }
+        if in_workspace_pkg && trimmed.starts_with("version") {
+            let full = trimmed.split('"').nth(1)?;
+            let parts: Vec<&str> = full.split('.').collect();
+            if parts.len() >= 2 {
+                return Some(format!("{}.{}", parts[0], parts[1]));
+            }
+        }
+    }
+    None
 }
 
 fn do_check() -> bool {
