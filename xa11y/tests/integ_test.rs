@@ -51,7 +51,7 @@ mod tests {
         let pid = by_name.tree().pid.expect("app tree should have a PID");
         assert!(pid > 0);
         let app = App::from_pid(xa11y::provider().unwrap(), pid).unwrap();
-        let root = app.nodes().unwrap();
+        let root = app.elements().unwrap();
         assert!(!root.tree().is_empty());
         assert_eq!(root.tree().pid, Some(pid));
     }
@@ -138,7 +138,7 @@ mod tests {
         let root = h::app_tree();
         // Prior action tests (TypeText, SetValue) may have changed or cleared the value.
         // Just verify a text field exists (by role + name), value may or may not be present.
-        let text_nodes: Vec<Node> = root
+        let text_elements: Vec<Element> = root
             .subtree()
             .into_iter()
             .filter(|n| {
@@ -147,7 +147,7 @@ mod tests {
             })
             .collect();
         assert!(
-            !text_nodes.is_empty(),
+            !text_elements.is_empty(),
             "Text entry not found. Tree:\n{}",
             root
         );
@@ -464,12 +464,12 @@ mod tests {
     }
 
     // ════════════════════════════════════════════════════════════════
-    // Node Fields (7 tests)
+    // Element Fields (7 tests)
     // ════════════════════════════════════════════════════════════════
 
     #[test]
     #[ignore]
-    fn node_description_on_image() {
+    fn element_description_on_image() {
         let root = h::app_tree();
         let images = h::query(&root, "image").unwrap();
         if !images.is_empty() {
@@ -486,7 +486,7 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn node_bounds_present() {
+    fn element_bounds_present() {
         let root = h::app_tree();
         let submit = h::named(&root, "Submit");
         assert!(submit.bounds.is_some(), "Submit should have bounds");
@@ -499,9 +499,9 @@ mod tests {
     /// have `bounds: None` without triggering GTK CRITICAL warnings.
     #[test]
     #[ignore]
-    fn node_bounds_none_for_non_component_nodes() {
+    fn element_bounds_none_for_non_component_elements() {
         let root = h::app_tree();
-        // Application node never implements Component
+        // Application element never implements Component
         assert!(
             root.bounds.is_none(),
             "Application root should not have bounds (no Component interface)"
@@ -513,7 +513,7 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn node_actions_list_on_button() {
+    fn element_actions_list_on_button() {
         let root = h::app_tree();
         let submit = h::named(&root, "Submit");
         assert!(!submit.actions.is_empty());
@@ -526,12 +526,12 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn node_children_ids_valid() {
+    fn element_children_ids_valid() {
         let root = h::app_tree();
         let children = root.children();
         assert!(!children.is_empty());
         for child in &children {
-            // Verify child is a valid node (role may be Unknown for unrecognized elements)
+            // Verify child is a valid element (role may be Unknown for unrecognized elements)
             let _ = child.role;
         }
     }
@@ -634,8 +634,8 @@ mod tests {
     #[ignore]
     fn state_expanded_collapsed_on_expander() {
         let root = h::app_tree();
-        // Look for expandable nodes or expander by name
-        let expandable: Vec<Node> = root
+        // Look for expandable elements or expander by name
+        let expandable: Vec<Element> = root
             .subtree()
             .into_iter()
             .filter(|n| n.states.expanded.is_some())
@@ -646,7 +646,7 @@ mod tests {
         if expandable.is_empty() && expander_by_name.is_empty() {
             // Verify expand/collapse actions work even if state isn't reported
             println!(
-                "No expandable nodes found (tree has {} nodes). \
+                "No expandable elements found (tree has {} elements). \
                  Expand/collapse actions tested separately.",
                 root.tree().len()
             );
@@ -659,7 +659,7 @@ mod tests {
         let root = h::app_tree();
         // Prior action tests (TypeText, SetValue) may have changed or cleared the value.
         // Find text field by role + name, not by value presence.
-        let text: Vec<Node> = root
+        let text: Vec<Element> = root
             .subtree()
             .into_iter()
             .filter(|n| {

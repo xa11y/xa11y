@@ -11,8 +11,8 @@ use windows::Win32::System::Threading::*;
 use windows::Win32::UI::Accessibility::*;
 
 use xa11y_core::{
-    Action, ActionData, CancelHandle, ElementState, Error, Event, EventFilter, EventKind,
-    EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, RawPlatformData, Rect,
+    Action, ActionData, CancelHandle, ElementData, ElementState, Error, Event, EventFilter,
+    EventKind, EventProvider, EventReceiver, PermissionStatus, Provider, RawPlatformData, Rect,
     Result, Role, StateSet, Subscription, Toggled, Tree,
 };
 
@@ -32,7 +32,7 @@ fn ensure_com_initialized() -> windows::core::Result<()> {
 /// Windows accessibility provider using UI Automation.
 pub struct WindowsProvider {
     automation: IUIAutomation,
-    /// Cached UIA elements for action dispatch (keyed by node index).
+    /// Cached UIA elements for action dispatch (keyed by element index).
     cached_elements: Mutex<Vec<IUIAutomationElement>>,
 }
 
@@ -65,7 +65,7 @@ impl WindowsProvider {
 
     /// Re-acquire a UIA element via its native window handle.
     /// This triggers WM_GETOBJECT which activates AccessKit's UIA provider,
-    /// ensuring the element's children include virtual accessibility nodes.
+    /// ensuring the element's children include virtual accessibility elements.
     fn reacquire_via_hwnd(
         &self,
         element: &IUIAutomationElement,
@@ -185,13 +185,13 @@ impl WindowsProvider {
         Ok((el, name))
     }
 
-    /// Recursively traverse the UIA tree, building xa11y nodes.
+    /// Recursively traverse the UIA tree, building xa11y elements.
     #[allow(clippy::too_many_arguments)]
     fn traverse(
         &self,
         element: &IUIAutomationElement,
-        nodes: &mut Vec<NodeData>,
-        elements: &mut Vec<IUIAutomationElement>,
+        elements: &mut Vec<ElementData>,
+        uia_elements: &mut Vec<IUIAutomationElement>,
         parent_idx: Option<u32>,
         depth: u32,
         screen_size: (u32, u32),
@@ -330,8 +330,8 @@ impl WindowsProvider {
             (None, None, None)
         };
 
-        let node_idx = nodes.len() as u32;
-        nodes.push(NodeData {
+        let element_idx = elements.len() as u32;
+        elements.push(ElementData {
             role,
             name,
             value,
@@ -345,11 +345,11 @@ impl WindowsProvider {
             max_value,
             pid: None,
             raw,
-            index: node_idx,
+            index: element_idx,
             children_indices: vec![],
             parent_index: parent_idx,
         });
-        elements.push(element.clone());
+        uia_elements.push(element.clone());
 
         // Recurse children. Try FindAll first (works with AccessKit fragment roots),
         // fall back to RawViewWalker for native elements.
@@ -362,13 +362,13 @@ impl WindowsProvider {
                 if count > 0 {
                     for i in 0..count {
                         if let Ok(child_el) = unsafe { children.GetElement(i) } {
-                            let child_idx = nodes.len() as u32;
+                            let child_idx = elements.len() as u32;
                             child_ids.push(child_idx);
                             self.traverse(
                                 &child_el,
-                                nodes,
                                 elements,
-                                Some(node_idx),
+                                uia_elements,
+                                Some(element_idx),
                                 depth + 1,
                                 screen_size,
                             );
@@ -390,13 +390,13 @@ impl WindowsProvider {
             if let Ok(walker) = unsafe { self.automation.RawViewWalker() } {
                 let mut child = unsafe { walker.GetFirstChildElement(element) }.ok();
                 while let Some(ref child_el) = child {
-                    let child_idx = nodes.len() as u32;
+                    let child_idx = elements.len() as u32;
                     child_ids.push(child_idx);
                     self.traverse(
                         child_el,
-                        nodes,
                         elements,
-                        Some(node_idx),
+                        uia_elements,
+                        Some(element_idx),
                         depth + 1,
                         screen_size,
                     );
@@ -405,7 +405,7 @@ impl WindowsProvider {
             }
         }
 
-        nodes[node_idx as usize].children_indices = child_ids;
+        elements[element_idx as usize].children_indices = child_ids;
     }
 }
 
@@ -419,20 +419,27 @@ impl WindowsProvider {
         target_label: &str,
     ) -> Result<Tree> {
         let screen_size = Self::detect_screen_size();
-        let mut nodes = Vec::new();
         let mut elements = Vec::new();
+        let mut uia_elements = Vec::new();
 
-        self.traverse(app_element, &mut nodes, &mut elements, None, 0, screen_size);
+        self.traverse(
+            app_element,
+            &mut elements,
+            &mut uia_elements,
+            None,
+            0,
+            screen_size,
+        );
 
-        if nodes.is_empty() {
+        if elements.is_empty() {
             return Err(Error::AppNotFound {
                 target: target_label.to_string(),
             });
         }
 
-        *self.cached_elements.lock().unwrap() = elements;
+        *self.cached_elements.lock().unwrap() = uia_elements;
 
-        Ok(Tree::new(app_name, Some(pid), screen_size, nodes))
+        Ok(Tree::new(app_name, Some(pid), screen_size, elements))
     }
 }
 
@@ -449,10 +456,10 @@ impl Provider for WindowsProvider {
 
     fn get_apps(&self) -> Result<Tree> {
         let screen_size = Self::detect_screen_size();
-        let mut nodes = Vec::new();
         let mut elements = Vec::new();
+        let mut uia_elements = Vec::new();
 
-        nodes.push(NodeData {
+        elements.push(ElementData {
             role: Role::Application,
             name: Some("Desktop".to_string()),
             value: None,
@@ -481,7 +488,7 @@ impl Provider for WindowsProvider {
             message: format!("GetRootElement failed: {}", e),
         })?;
         // Use a dummy element for the Desktop root
-        elements.push(root.clone());
+        uia_elements.push(root.clone());
 
         let condition = unsafe {
             self.automation.CreatePropertyCondition(
@@ -517,39 +524,52 @@ impl Provider for WindowsProvider {
                 if name.is_empty() {
                     continue;
                 }
-                let child_idx = nodes.len() as u32;
+                let child_idx = elements.len() as u32;
                 root_children.push(child_idx);
-                self.traverse(&el, &mut nodes, &mut elements, Some(0), 1, screen_size);
-                // Set PID on the app node so App::all() can use it
-                nodes[child_idx as usize].pid = Some(pid);
+                self.traverse(
+                    &el,
+                    &mut elements,
+                    &mut uia_elements,
+                    Some(0),
+                    1,
+                    screen_size,
+                );
+                // Set PID on the app element so App::all() can use it
+                elements[child_idx as usize].pid = Some(pid);
             }
         }
 
-        nodes[0].children_indices = root_children;
-        *self.cached_elements.lock().unwrap() = elements;
+        elements[0].children_indices = root_children;
+        *self.cached_elements.lock().unwrap() = uia_elements;
 
-        Ok(Tree::new("Desktop".to_string(), None, screen_size, nodes))
+        Ok(Tree::new(
+            "Desktop".to_string(),
+            None,
+            screen_size,
+            elements,
+        ))
     }
 
     fn perform_action(
         &self,
         tree: &Tree,
-        node: &NodeData,
+        element: &ElementData,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()> {
-        let node_idx = tree.node_index(node);
+        let element_idx = tree.element_index(element);
 
         let cache = self.cached_elements.lock().unwrap();
-        let element = cache.get(node_idx as usize).ok_or(Error::ElementStale {
-            selector: format!("index:{}", node_idx),
+        let uia_element = cache.get(element_idx as usize).ok_or(Error::ElementStale {
+            selector: format!("index:{}", element_idx),
         })?;
 
         match action {
             Action::Press | Action::Toggle | Action::Select => {
                 // Try InvokePattern first, then TogglePattern, then SelectionItemPattern
                 if let Ok(pattern) = unsafe {
-                    element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+                    uia_element
+                        .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
                 } {
                     unsafe { pattern.Invoke() }.map_err(|e| Error::Platform {
                         code: e.code().0 as i64,
@@ -558,7 +578,8 @@ impl Provider for WindowsProvider {
                     return Ok(());
                 }
                 if let Ok(pattern) = unsafe {
-                    element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
+                    uia_element
+                        .GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
                 } {
                     unsafe { pattern.Toggle() }.map_err(|e| Error::Platform {
                         code: e.code().0 as i64,
@@ -567,7 +588,7 @@ impl Provider for WindowsProvider {
                     return Ok(());
                 }
                 if let Ok(pattern) = unsafe {
-                    element.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                    uia_element.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
                         UIA_SelectionItemPatternId,
                     )
                 } {
@@ -579,12 +600,12 @@ impl Provider for WindowsProvider {
                 }
                 Err(Error::ActionNotSupported {
                     action,
-                    role: node.role,
+                    role: element.role,
                 })
             }
 
             Action::Focus => {
-                unsafe { element.SetFocus() }.map_err(|e| Error::Platform {
+                unsafe { uia_element.SetFocus() }.map_err(|e| Error::Platform {
                     code: e.code().0 as i64,
                     message: "SetFocus failed".to_string(),
                 })?;
@@ -594,7 +615,7 @@ impl Provider for WindowsProvider {
             Action::SetValue => match data {
                 Some(ActionData::NumericValue(v)) => {
                     if let Ok(pattern) = unsafe {
-                        element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(
+                        uia_element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(
                             UIA_RangeValuePatternId,
                         )
                     } {
@@ -606,7 +627,8 @@ impl Provider for WindowsProvider {
                     }
                     // Fall back to ValuePattern with string
                     if let Ok(pattern) = unsafe {
-                        element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+                        uia_element
+                            .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
                     } {
                         let s: windows::core::BSTR = v.to_string().into();
                         unsafe { pattern.SetValue(&s) }.map_err(|e| Error::Platform {
@@ -622,7 +644,8 @@ impl Provider for WindowsProvider {
                 }
                 Some(ActionData::Value(text)) => {
                     if let Ok(pattern) = unsafe {
-                        element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+                        uia_element
+                            .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
                     } {
                         let s: windows::core::BSTR = text.into();
                         unsafe { pattern.SetValue(&s) }
@@ -639,7 +662,7 @@ impl Provider for WindowsProvider {
 
             Action::Expand => {
                 if let Ok(pattern) = unsafe {
-                    element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
+                    uia_element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
                         UIA_ExpandCollapsePatternId,
                     )
                 } {
@@ -648,7 +671,8 @@ impl Provider for WindowsProvider {
                     return Ok(());
                 }
                 if let Ok(pattern) = unsafe {
-                    element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+                    uia_element
+                        .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
                 } {
                     let _ = unsafe { pattern.Invoke() };
                 }
@@ -657,7 +681,7 @@ impl Provider for WindowsProvider {
 
             Action::Collapse => {
                 if let Ok(pattern) = unsafe {
-                    element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
+                    uia_element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
                         UIA_ExpandCollapsePatternId,
                     )
                 } {
@@ -666,7 +690,8 @@ impl Provider for WindowsProvider {
                     return Ok(());
                 }
                 if let Ok(pattern) = unsafe {
-                    element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+                    uia_element
+                        .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
                 } {
                     let _ = unsafe { pattern.Invoke() };
                 }
@@ -675,7 +700,7 @@ impl Provider for WindowsProvider {
 
             Action::Increment => {
                 if let Ok(pattern) = unsafe {
-                    element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(
+                    uia_element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(
                         UIA_RangeValuePatternId,
                     )
                 } {
@@ -690,13 +715,13 @@ impl Provider for WindowsProvider {
                 }
                 Err(Error::ActionNotSupported {
                     action,
-                    role: node.role,
+                    role: element.role,
                 })
             }
 
             Action::Decrement => {
                 if let Ok(pattern) = unsafe {
-                    element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(
+                    uia_element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(
                         UIA_RangeValuePatternId,
                     )
                 } {
@@ -711,7 +736,7 @@ impl Provider for WindowsProvider {
                 }
                 Err(Error::ActionNotSupported {
                     action,
-                    role: node.role,
+                    role: element.role,
                 })
             }
 
@@ -719,13 +744,13 @@ impl Provider for WindowsProvider {
                 // No direct UIA equivalent; try context menu via legacy
                 Err(Error::ActionNotSupported {
                     action,
-                    role: node.role,
+                    role: element.role,
                 })
             }
 
             Action::ScrollIntoView => {
                 if let Ok(pattern) = unsafe {
-                    element.GetCurrentPatternAs::<IUIAutomationScrollItemPattern>(
+                    uia_element.GetCurrentPatternAs::<IUIAutomationScrollItemPattern>(
                         UIA_ScrollItemPatternId,
                     )
                 } {
@@ -759,7 +784,8 @@ impl Provider for WindowsProvider {
                     }
                 };
                 if let Ok(pattern) = unsafe {
-                    element.GetCurrentPatternAs::<IUIAutomationScrollPattern>(UIA_ScrollPatternId)
+                    uia_element
+                        .GetCurrentPatternAs::<IUIAutomationScrollPattern>(UIA_ScrollPatternId)
                 } {
                     let count = (amount.abs() as u32).max(1);
                     let is_vertical = matches!(action, Action::ScrollDown);
@@ -785,7 +811,7 @@ impl Provider for WindowsProvider {
                 }
                 Err(Error::ActionNotSupported {
                     action,
-                    role: node.role,
+                    role: element.role,
                 })
             }
 
@@ -801,7 +827,7 @@ impl Provider for WindowsProvider {
                     }
                 };
                 if let Ok(pattern) = unsafe {
-                    element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
+                    uia_element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
                 } {
                     let range =
                         unsafe { pattern.DocumentRange() }.map_err(|e| Error::Platform {
@@ -826,7 +852,7 @@ impl Provider for WindowsProvider {
                 }
                 Err(Error::ActionNotSupported {
                     action,
-                    role: node.role,
+                    role: element.role,
                 })
             }
 
@@ -843,7 +869,7 @@ impl Provider for WindowsProvider {
                 // Insert text via ValuePattern (accessibility API, not input simulation).
                 // Get current value, get insertion point from TextPattern, splice, set new value.
                 if let Ok(value_pattern) = unsafe {
-                    element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+                    uia_element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
                 } {
                     let current = unsafe { value_pattern.CurrentValue() }
                         .map(|s| s.to_string())
@@ -851,7 +877,8 @@ impl Provider for WindowsProvider {
 
                     // Try to get cursor position from TextPattern
                     let insert_pos = if let Ok(text_pattern) = unsafe {
-                        element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
+                        uia_element
+                            .GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
                     } {
                         // Get the selection/caret range — its start offset is the cursor
                         unsafe { text_pattern.GetSelection() }
@@ -1181,7 +1208,7 @@ impl WindowsProvider {
 
         let handle = std::thread::spawn(move || {
             let mut prev_focused: Option<String> = None;
-            let mut prev_node_count: usize = 0;
+            let mut prev_element_count: usize = 0;
 
             while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(100));
@@ -1216,8 +1243,8 @@ impl WindowsProvider {
                 }
 
                 // Detect structure changes
-                let node_count = tree.len();
-                if node_count != prev_node_count && prev_node_count > 0 {
+                let element_count = tree.len();
+                if element_count != prev_element_count && prev_element_count > 0 {
                     let kind = EventKind::StructureChanged;
                     if filter.kinds.is_empty() || filter.kinds.contains(&kind) {
                         let _ = tx.send(Event {
@@ -1232,7 +1259,7 @@ impl WindowsProvider {
                         });
                     }
                 }
-                prev_node_count = node_count;
+                prev_element_count = element_count;
             }
         });
 
@@ -1266,7 +1293,7 @@ impl WindowsProvider {
         state: ElementState,
         timeout: Duration,
         tree_fn: F,
-    ) -> Result<Option<NodeData>>
+    ) -> Result<Option<ElementData>>
     where
         F: Fn(&Self) -> Result<Tree>,
     {
@@ -1281,10 +1308,10 @@ impl WindowsProvider {
 
             let tree = tree_fn(self)?;
             let matches = tree.query(selector).ok();
-            let node = matches.as_ref().and_then(|m| m.first().copied());
+            let element = matches.as_ref().and_then(|m| m.first().copied());
 
-            if state.is_met(node) {
-                return Ok(node.cloned());
+            if state.is_met(element) {
+                return Ok(element.cloned());
             }
 
             std::thread::sleep(poll_interval);
@@ -1308,7 +1335,7 @@ impl EventProvider for WindowsProvider {
         selector: &str,
         state: ElementState,
         timeout: Duration,
-    ) -> Result<Option<NodeData>> {
+    ) -> Result<Option<ElementData>> {
         self.wait_for_impl(selector, state, timeout, |p| p.get_tree(pid))
     }
 }

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
+use crate::element::Element;
 use crate::error::Result;
 use crate::locator::Locator;
-use crate::node::Node;
 use crate::provider::Provider;
 use crate::role::Role;
 
@@ -19,7 +19,7 @@ use crate::role::Role;
 /// - [`App::all`] — list all running applications
 ///
 /// Use [`locator()`](App::locator) to create action-capable element references,
-/// or [`nodes()`](App::nodes) to take a snapshot of the tree for inspection.
+/// or [`elements()`](App::elements) to take a snapshot of the tree for inspection.
 #[derive(Clone)]
 pub struct App {
     provider: Arc<dyn Provider>,
@@ -90,12 +90,12 @@ impl App {
 
     /// Snapshot the application's accessibility tree.
     ///
-    /// Returns the root [`Node`] of the snapshot. Navigate with
+    /// Returns the root [`Element`] of the snapshot. Navigate with
     /// `children()` and `parent()` — all within the same consistent snapshot.
-    pub fn nodes(&self) -> Result<Node> {
+    pub fn elements(&self) -> Result<Element> {
         let tree = self.provider.get_tree(self.pid)?;
         let tree = Arc::new(tree);
-        Ok(Node::new(tree, 0))
+        Ok(Element::new(tree, 0))
     }
 
     /// List all running applications.

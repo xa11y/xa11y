@@ -7,7 +7,7 @@ import xa11y
 
 def test_all_classes_exported():
     assert hasattr(xa11y, "App")
-    assert hasattr(xa11y, "Node")
+    assert hasattr(xa11y, "Element")
     assert hasattr(xa11y, "Locator")
     assert hasattr(xa11y, "Rect")
 
@@ -35,7 +35,7 @@ def test_all_functions_exported():
 def test_all_list():
     assert isinstance(xa11y.__all__, list)
     assert "App" in xa11y.__all__
-    assert "Node" in xa11y.__all__
+    assert "Element" in xa11y.__all__
     assert "app" in xa11y.__all__
     assert "apps" in xa11y.__all__
     assert "XA11yError" in xa11y.__all__
@@ -48,8 +48,8 @@ def test_app_is_type():
     assert isinstance(xa11y.App, type)
 
 
-def test_node_is_type():
-    assert isinstance(xa11y.Node, type)
+def test_element_is_type():
+    assert isinstance(xa11y.Element, type)
 
 
 def test_locator_is_type():

@@ -4,8 +4,8 @@ Quick start:
     >>> import xa11y
     >>> app = xa11y.app("Safari")
     >>> app.locator("button[name='Submit']").press()
-    >>> for node in app.locator("button").nodes():
-    ...     print(node.name)
+    >>> for element in app.locator("button").elements():
+    ...     print(element.name)
 """
 
 from xa11y._native import (
@@ -13,9 +13,9 @@ from xa11y._native import (
     # Types
     App,
     AppNotFoundError,
+    Element,
     InvalidSelectorError,
     Locator,
-    Node,
     PermissionDeniedError,
     PlatformError,
     Rect,
@@ -33,9 +33,9 @@ __all__ = [
     "ActionNotSupportedError",
     "App",
     "AppNotFoundError",
+    "Element",
     "InvalidSelectorError",
     "Locator",
-    "Node",
     "PermissionDeniedError",
     "PlatformError",
     "Rect",

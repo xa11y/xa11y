@@ -22,12 +22,12 @@ def test_locator_repr(test_app):
 
 def test_nth(test_app):
     loc = test_app.locator("button").nth(1)
-    assert loc.node().name == "Forward"
+    assert loc.element().name == "Forward"
 
 
 def test_first(test_app):
     loc = test_app.locator("button").first()
-    assert loc.node().name == "Back"
+    assert loc.element().name == "Back"
 
 
 def test_child(test_app):
@@ -59,28 +59,28 @@ def test_count(test_app):
     assert test_app.locator("menu_item").count() == 0
 
 
-def test_node_returns_node(test_app):
-    node = test_app.locator('button[name="Back"]').node()
-    assert isinstance(node, xa11y.Node)
-    assert node.role == "button"
-    assert node.name == "Back"
+def test_element_returns_element(test_app):
+    element = test_app.locator('button[name="Back"]').element()
+    assert isinstance(element, xa11y.Element)
+    assert element.role == "button"
+    assert element.name == "Back"
 
 
-def test_nodes_returns_list(test_app):
-    nodes = test_app.locator("button").nodes()
-    assert isinstance(nodes, list)
-    assert len(nodes) == 2
-    assert all(isinstance(n, xa11y.Node) for n in nodes)
+def test_elements_returns_list(test_app):
+    elements = test_app.locator("button").elements()
+    assert isinstance(elements, list)
+    assert len(elements) == 2
+    assert all(isinstance(n, xa11y.Element) for n in elements)
 
 
-def test_nodes_empty_for_no_match(test_app):
-    nodes = test_app.locator("menu_item").nodes()
-    assert nodes == []
+def test_elements_empty_for_no_match(test_app):
+    elements = test_app.locator("menu_item").elements()
+    assert elements == []
 
 
 def test_not_matched_raises(test_app):
     with pytest.raises(xa11y.SelectorNotMatchedError):
-        test_app.locator("menu_item").node()
+        test_app.locator("menu_item").element()
 
 
 # ── Actions ──────────────────────────────────────────────────────────────────

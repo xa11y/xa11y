@@ -15,7 +15,7 @@ Desktop UIs update asynchronously. After pressing a button, the result might not
 - `wait_enabled()` / `wait_disabled()` — element becomes interactive or not
 - `wait_attached()` / `wait_detached()` — element exists in the tree or not
 - `wait_focused()` / `wait_unfocused()` — element gains or loses focus
-- `wait_until(predicate)` — arbitrary condition on the resolved node
+- `wait_until(predicate)` — arbitrary condition on the resolved element
 
 Always use waits instead of sleeping — they're faster (resolve as soon as the condition is met) and more reliable (won't flake on slow machines).
 
@@ -46,10 +46,10 @@ This test opens Calculator, performs `7 × 8`, and asserts the result is `56`.
         // Wait for the result to update, then assert
         let result = calc.locator("static_text[name='Result']");
         result.wait_until(
-            |node| node.and_then(|n| n.value.as_deref()) == Some("56"),
+            |element| element.and_then(|e| e.value.as_deref()) == Some("56"),
             timeout,
         )?;
-        assert_eq!(result.node()?.value.as_deref(), Some("56"));
+        assert_eq!(result.element()?.value.as_deref(), Some("56"));
 
         Ok(())
     }
@@ -84,8 +84,8 @@ This test opens Calculator, performs `7 × 8`, and asserts the result is `56`.
 
         # Wait for the result to update, then assert
         result = calc.locator("static_text[name='Result']")
-        result.wait_until(lambda node: node and node.value == "56", timeout=5.0)
-        assert result.node().value == "56"
+        result.wait_until(lambda element: element and element.value == "56", timeout=5.0)
+        assert result.element().value == "56"
     ```
   </TabItem>
 </Tabs>
@@ -93,6 +93,6 @@ This test opens Calculator, performs `7 × 8`, and asserts the result is `56`.
 ## Tips
 
 - **Be specific with selectors.** `button[name='7']` is better than `button` — it won't break when the UI adds more buttons.
-- **Use locators, not nodes, for interactions.** Nodes are snapshots and go stale. Locators refetch automatically.
+- **Use locators, not elements, for interactions.** Elements are snapshots and go stale. Locators refetch automatically.
 - **Prefer `wait_until` for complex assertions.** Instead of sleeping then asserting, combine the wait and the condition — the test passes as soon as the UI is ready.
 - **Keep timeouts generous in CI.** CI machines are slower. Use 5–10 seconds for waits even if your local machine resolves in milliseconds.

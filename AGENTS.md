@@ -13,10 +13,10 @@ When adding new tests:
 ### Test helpers
 
 Integration tests use shared helpers from `xa11y/tests/integ/mod.rs`:
-- `h::app_tree()` — get test app root Node with retries
-- `h::one(root, "selector")` — find exactly one node by selector
-- `h::named(root, "Submit")` — find node by name substring
-- `h::act(node, action)` — perform action, wait, re-read tree, return new root
+- `h::app_tree()` — get test app root Element with retries
+- `h::one(root, "selector")` — find exactly one element by selector
+- `h::named(root, "Submit")` — find element by name substring
+- `h::act(element, action)` — perform action, wait, re-read tree, return new root
 
 ### Key coverage gaps to address
 

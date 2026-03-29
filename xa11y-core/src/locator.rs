@@ -2,9 +2,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::action::{Action, ActionData};
+use crate::element::{Element, ElementData};
 use crate::error::{Error, Result};
 use crate::event::ElementState;
-use crate::node::{Node, NodeData};
 use crate::provider::Provider;
 use crate::tree::Tree;
 
@@ -38,11 +38,11 @@ pub struct Locator {
 }
 
 /// Snapshot produced by a single resolve call.
-/// Bundles the tree and the index of the matched node so that callers
+/// Bundles the tree and the index of the matched element so that callers
 /// can use both without lifetime issues.
 struct Resolved {
     tree: Tree,
-    node_index: u32,
+    element_index: u32,
 }
 
 impl Locator {
@@ -112,16 +112,16 @@ impl Locator {
 
     // ── Internal resolution ─────────────────────────────────────────
 
-    /// Snapshot the tree and resolve the selector to a single node.
+    /// Snapshot the tree and resolve the selector to a single element.
     fn resolve(&self) -> Result<Resolved> {
         let tree = self.provider.get_tree(self.pid)?;
         let matches = tree.query(&self.selector)?;
         let idx = self.nth.unwrap_or(0);
-        let node = matches.get(idx).ok_or_else(|| Error::SelectorNotMatched {
+        let element = matches.get(idx).ok_or_else(|| Error::SelectorNotMatched {
             selector: self.selector.clone(),
         })?;
         Ok(Resolved {
-            node_index: node.index,
+            element_index: element.index,
             tree,
         })
     }
@@ -144,28 +144,28 @@ impl Locator {
         Ok(matches.len())
     }
 
-    /// Get a single [`Node`] handle from a fresh snapshot, with snapshot navigation.
-    pub fn node(&self) -> Result<Node> {
+    /// Get a single [`Element`] handle from a fresh snapshot, with snapshot navigation.
+    pub fn element(&self) -> Result<Element> {
         let r = self.resolve()?;
         let tree = Arc::new(r.tree);
-        Ok(Node::new(tree, r.node_index))
+        Ok(Element::new(tree, r.element_index))
     }
 
-    /// Get all matching nodes from a fresh snapshot.
+    /// Get all matching elements from a fresh snapshot.
     ///
-    /// All returned nodes share the same snapshot, so parent/children
+    /// All returned elements share the same snapshot, so parent/children
     /// navigation is consistent across the result set.
-    pub fn nodes(&self) -> Result<Vec<Node>> {
+    pub fn elements(&self) -> Result<Vec<Element>> {
         let tree = self.provider.get_tree(self.pid)?;
         let indices: Vec<u32> = tree
             .query(&self.selector)?
             .iter()
-            .map(|n| n.index)
+            .map(|e| e.index)
             .collect();
         let tree = Arc::new(tree);
         Ok(indices
             .into_iter()
-            .map(|idx| Node::new(Arc::clone(&tree), idx))
+            .map(|idx| Element::new(Arc::clone(&tree), idx))
             .collect())
     }
 
@@ -177,11 +177,11 @@ impl Locator {
             d.validate(action)?;
         }
         let r = self.resolve()?;
-        let node = r
+        let element = r
             .tree
-            .get_data(r.node_index)
-            .expect("node_index valid after resolve");
-        self.provider.perform_action(&r.tree, node, action, data)
+            .get_data(r.element_index)
+            .expect("element_index valid after resolve");
+        self.provider.perform_action(&r.tree, element, action, data)
     }
 
     /// Click / invoke the matched element.
@@ -293,15 +293,15 @@ impl Locator {
     // ── Wait operations ─────────────────────────────────────────────
 
     /// Wait until the element is visible, polling with fresh snapshots.
-    pub fn wait_visible(&self, timeout: Duration) -> Result<Node> {
+    pub fn wait_visible(&self, timeout: Duration) -> Result<Element> {
         self.wait_for_state(ElementState::Visible, timeout)
-            .map(|opt| opt.expect("visible wait must return a node"))
+            .map(|opt| opt.expect("visible wait must return an element"))
     }
 
     /// Wait until the element exists in the tree.
-    pub fn wait_attached(&self, timeout: Duration) -> Result<Node> {
+    pub fn wait_attached(&self, timeout: Duration) -> Result<Element> {
         self.wait_for_state(ElementState::Attached, timeout)
-            .map(|opt| opt.expect("attached wait must return a node"))
+            .map(|opt| opt.expect("attached wait must return an element"))
     }
 
     /// Wait until the element is removed from the tree.
@@ -311,15 +311,15 @@ impl Locator {
     }
 
     /// Wait until the element is enabled.
-    pub fn wait_enabled(&self, timeout: Duration) -> Result<Node> {
+    pub fn wait_enabled(&self, timeout: Duration) -> Result<Element> {
         self.wait_for_state(ElementState::Enabled, timeout)
-            .map(|opt| opt.expect("enabled wait must return a node"))
+            .map(|opt| opt.expect("enabled wait must return an element"))
     }
 
     /// Wait until the element is disabled (exists but not enabled).
-    pub fn wait_disabled(&self, timeout: Duration) -> Result<Node> {
+    pub fn wait_disabled(&self, timeout: Duration) -> Result<Element> {
         self.wait_for_state(ElementState::Disabled, timeout)
-            .map(|opt| opt.expect("disabled wait must return a node"))
+            .map(|opt| opt.expect("disabled wait must return an element"))
     }
 
     /// Wait until the element is hidden or removed.
@@ -329,41 +329,45 @@ impl Locator {
     }
 
     /// Wait until the element has keyboard focus.
-    pub fn wait_focused(&self, timeout: Duration) -> Result<Node> {
+    pub fn wait_focused(&self, timeout: Duration) -> Result<Element> {
         self.wait_for_state(ElementState::Focused, timeout)
-            .map(|opt| opt.expect("focused wait must return a node"))
+            .map(|opt| opt.expect("focused wait must return an element"))
     }
 
     /// Wait until the element does not have keyboard focus.
-    pub fn wait_unfocused(&self, timeout: Duration) -> Result<Node> {
+    pub fn wait_unfocused(&self, timeout: Duration) -> Result<Element> {
         self.wait_for_state(ElementState::Unfocused, timeout)
-            .map(|opt| opt.expect("unfocused wait must return a node"))
+            .map(|opt| opt.expect("unfocused wait must return an element"))
     }
 
     /// Wait for an [`ElementState`] condition to be met.
-    pub fn wait_for_state(&self, state: ElementState, timeout: Duration) -> Result<Option<Node>> {
-        self.poll_until(|node| state.is_met(node), timeout)
+    pub fn wait_for_state(
+        &self,
+        state: ElementState,
+        timeout: Duration,
+    ) -> Result<Option<Element>> {
+        self.poll_until(|element| state.is_met(element), timeout)
     }
 
     /// Wait until an arbitrary predicate is satisfied, polling with fresh
     /// snapshots at ~100 ms intervals.
     ///
-    /// The predicate receives `Some(&NodeData)` when the selector matches, or
+    /// The predicate receives `Some(&ElementData)` when the selector matches, or
     /// `None` when no element matches. Return `true` to stop waiting.
     pub fn wait_until(
         &self,
-        predicate: impl Fn(Option<&NodeData>) -> bool,
+        predicate: impl Fn(Option<&ElementData>) -> bool,
         timeout: Duration,
-    ) -> Result<Option<Node>> {
+    ) -> Result<Option<Element>> {
         self.poll_until(&predicate, timeout)
     }
 
     /// Core polling loop shared by `wait_for_state` and `wait_until`.
     fn poll_until(
         &self,
-        predicate: impl Fn(Option<&NodeData>) -> bool,
+        predicate: impl Fn(Option<&ElementData>) -> bool,
         timeout: Duration,
-    ) -> Result<Option<Node>> {
+    ) -> Result<Option<Element>> {
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
 
@@ -376,11 +380,11 @@ impl Locator {
             let tree = self.provider.get_tree(self.pid)?;
             let matches = tree.query(&self.selector).ok();
             let idx = self.nth.unwrap_or(0);
-            let matched_index = matches.as_ref().and_then(|m| m.get(idx).map(|n| n.index));
-            let node_ref = matched_index.and_then(|i| tree.get_data(i));
+            let matched_index = matches.as_ref().and_then(|m| m.get(idx).map(|e| e.index));
+            let element_ref = matched_index.and_then(|i| tree.get_data(i));
 
-            if predicate(node_ref) {
-                return Ok(matched_index.map(|i| Node::new(Arc::new(tree), i)));
+            if predicate(element_ref) {
+                return Ok(matched_index.map(|i| Element::new(Arc::new(tree), i)));
             }
 
             std::thread::sleep(poll_interval);

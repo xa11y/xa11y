@@ -10,8 +10,8 @@ use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
 
 use xa11y_core::{
-    Action, ActionData, CancelHandle, ElementState, Error, Event, EventFilter, EventKind,
-    EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, RawPlatformData, Rect,
+    Action, ActionData, CancelHandle, ElementData, ElementState, Error, Event, EventFilter,
+    EventKind, EventProvider, EventReceiver, PermissionStatus, Provider, RawPlatformData, Rect,
     Result, Role, StateSet, Subscription, Toggled, Tree,
 };
 
@@ -615,7 +615,7 @@ fn parse_states(element: AXUIElementRef, role: Role) -> StateSet {
 
 pub struct MacOSProvider {
     /// Cached AXElement refs from the most recent tree build.
-    /// Index corresponds to the node's DFS index.
+    /// Index corresponds to the element's DFS index.
     cached_elements: Mutex<Vec<AXElement>>,
 }
 
@@ -695,34 +695,34 @@ impl MacOSProvider {
     /// Build a tree from an app element (shared by resolve_pid_by_name and get_tree).
     fn build_tree(&self, app_element: AXElement, pid: i32, app_name: &str) -> Result<Tree> {
         let screen_size = Self::detect_screen_size();
-        let mut nodes = Vec::new();
         let mut elements = Vec::new();
+        let mut ax_elements = Vec::new();
 
         let mut visited = HashSet::new();
         self.traverse(
             &app_element,
-            &mut nodes,
             &mut elements,
+            &mut ax_elements,
             None,
             0,
             screen_size,
             &mut visited,
         );
 
-        if nodes.is_empty() {
+        if elements.is_empty() {
             return Err(Error::AppNotFound {
                 target: app_name.to_string(),
             });
         }
 
-        // Cache elements for action dispatch
-        *self.cached_elements.lock().unwrap() = elements;
+        // Cache AX element handles for action dispatch
+        *self.cached_elements.lock().unwrap() = ax_elements;
 
         Ok(Tree::new(
             app_name.to_string(),
             Some(pid as u32),
             screen_size,
-            nodes,
+            elements,
         ))
     }
 
@@ -767,14 +767,14 @@ impl MacOSProvider {
         Ok((element, name))
     }
 
-    /// Recursively traverse the AX tree, building xa11y nodes.
+    /// Recursively traverse the AX tree, building xa11y elements.
     /// Hard depth limit of 50 to prevent stack overflow from circular AX trees.
     #[allow(clippy::too_many_arguments)]
     fn traverse(
         &self,
         element: &AXElement,
-        nodes: &mut Vec<NodeData>,
-        elements: &mut Vec<AXElement>,
+        elements: &mut Vec<ElementData>,
+        ax_elements: &mut Vec<AXElement>,
         parent_idx: Option<u32>,
         depth: u32,
         screen_size: (u32, u32),
@@ -870,9 +870,9 @@ impl MacOSProvider {
             _ => (None, None),
         };
 
-        let node_idx = nodes.len() as u32;
+        let element_idx = elements.len() as u32;
         let name_ref = name.clone(); // keep for window chrome filter below
-        nodes.push(NodeData {
+        elements.push(ElementData {
             role,
             name,
             value,
@@ -885,12 +885,12 @@ impl MacOSProvider {
             min_value,
             max_value,
             raw,
-            index: node_idx,
+            index: element_idx,
             children_indices: vec![], // filled below
             parent_index: parent_idx,
             pid: None,
         });
-        elements.push(element.clone());
+        ax_elements.push(element.clone());
 
         // Recurse children (skip macOS system menu bar at app level —
         // it adds 100+ nodes that aren't part of the app's accessibility tree)
@@ -930,20 +930,20 @@ impl MacOSProvider {
                     }
                 }
             }
-            let child_idx = nodes.len() as u32;
+            let child_idx = elements.len() as u32;
             child_ids.push(child_idx);
             self.traverse(
                 child,
-                nodes,
                 elements,
-                Some(node_idx),
+                ax_elements,
+                Some(element_idx),
                 depth + 1,
                 screen_size,
                 visited,
             );
         }
 
-        nodes[node_idx as usize].children_indices = child_ids;
+        elements[element_idx as usize].children_indices = child_ids;
     }
 }
 
@@ -960,11 +960,11 @@ impl Provider for MacOSProvider {
 
     fn get_apps(&self) -> Result<Tree> {
         let screen_size = Self::detect_screen_size();
-        let mut nodes = Vec::new();
         let mut elements = Vec::new();
+        let mut ax_elements = Vec::new();
 
         // Desktop root
-        nodes.push(NodeData {
+        elements.push(ElementData {
             index: 0,
             role: Role::Application,
             name: Some("Desktop".to_string()),
@@ -987,7 +987,7 @@ impl Provider for MacOSProvider {
             raw: RawPlatformData::Synthetic,
             pid: None,
         });
-        elements.push(AXElement(std::ptr::null())); // placeholder
+        ax_elements.push(AXElement(std::ptr::null())); // placeholder
 
         let apps = Self::list_gui_apps();
         let mut root_children = Vec::new();
@@ -998,48 +998,53 @@ impl Provider for MacOSProvider {
             if app_element.is_null() {
                 continue;
             }
-            let child_idx = nodes.len() as u32;
+            let child_idx = elements.len() as u32;
             root_children.push(child_idx);
             self.traverse(
                 &app_element,
-                &mut nodes,
                 &mut elements,
+                &mut ax_elements,
                 Some(0),
                 1,
                 screen_size,
                 &mut visited,
             );
-            // Set PID on the app node so App::all() can use it
-            nodes[child_idx as usize].pid = Some(*pid as u32);
+            // Set PID on the app element so App::all() can use it
+            elements[child_idx as usize].pid = Some(*pid as u32);
         }
 
-        nodes[0].children_indices = root_children;
+        elements[0].children_indices = root_children;
 
-        *self.cached_elements.lock().unwrap() = elements;
+        *self.cached_elements.lock().unwrap() = ax_elements;
 
-        Ok(Tree::new("Desktop".to_string(), None, screen_size, nodes))
+        Ok(Tree::new(
+            "Desktop".to_string(),
+            None,
+            screen_size,
+            elements,
+        ))
     }
 
     fn perform_action(
         &self,
         tree: &Tree,
-        node: &NodeData,
+        element: &ElementData,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()> {
-        let node_idx = tree.node_index(node);
+        let element_idx = tree.element_index(element);
 
-        // Look up cached element
+        // Look up cached AX element handle
         let cache = self.cached_elements.lock().unwrap();
-        let element = cache.get(node_idx as usize).ok_or(Error::ElementStale {
-            selector: format!("index:{}", node_idx),
+        let ax_element = cache.get(element_idx as usize).ok_or(Error::ElementStale {
+            selector: format!("index:{}", element_idx),
         })?;
-        if element.is_null() {
+        if ax_element.is_null() {
             return Err(Error::ElementStale {
-                selector: format!("index:{}", node_idx),
+                selector: format!("index:{}", element_idx),
             });
         }
-        let el_ptr = element.as_ptr();
+        let el_ptr = ax_element.as_ptr();
 
         match action {
             Action::Press | Action::Toggle | Action::Select => {
@@ -1315,12 +1320,12 @@ unsafe extern "C" fn ax_observer_callback(
         return;
     }
 
-    // Build minimal target node from the AX element
+    // Build minimal target element from the AX element
     let target = if !element.is_null() {
         let role_str = ax_string(element, "AXRole").unwrap_or_default();
         let subrole = ax_string(element, "AXSubrole");
         let role = map_ax_role(&role_str, subrole.as_deref());
-        Some(NodeData {
+        Some(ElementData {
             role,
             name: ax_string(element, "AXTitle"),
             value: ax_value_string(element),
@@ -1495,7 +1500,7 @@ impl MacOSProvider {
         selector: &str,
         state: ElementState,
         timeout: Duration,
-    ) -> Result<Option<NodeData>>
+    ) -> Result<Option<ElementData>>
     where
         F: Fn(&Self) -> Result<Tree>,
     {
@@ -1510,10 +1515,10 @@ impl MacOSProvider {
 
             let tree = fetch_tree(self)?;
             let matches = tree.query(selector).ok();
-            let node = matches.as_ref().and_then(|m| m.first().copied());
+            let element = matches.as_ref().and_then(|m| m.first().copied());
 
-            if state.is_met(node) {
-                return Ok(node.cloned());
+            if state.is_met(element) {
+                return Ok(element.cloned());
             }
 
             std::thread::sleep(poll_interval);
@@ -1536,7 +1541,7 @@ impl EventProvider for MacOSProvider {
         selector: &str,
         state: ElementState,
         timeout: Duration,
-    ) -> Result<Option<NodeData>> {
+    ) -> Result<Option<ElementData>> {
         self.wait_for_impl(|s| s.get_tree(pid), selector, state, timeout)
     }
 }

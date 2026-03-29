@@ -4,8 +4,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use xa11y_core::{
-    Action, ActionData, CancelHandle, ElementState, Error, Event, EventFilter, EventKind,
-    EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, Rect, Result, Role,
+    Action, ActionData, CancelHandle, ElementData, ElementState, Error, Event, EventFilter,
+    EventKind, EventProvider, EventReceiver, PermissionStatus, Provider, Rect, Result, Role,
     StateSet, Subscription, Toggled, Tree,
 };
 use zbus::blocking::{Connection, Proxy};
@@ -13,7 +13,7 @@ use zbus::blocking::{Connection, Proxy};
 /// Linux accessibility provider using AT-SPI2 over D-Bus.
 pub struct LinuxProvider {
     a11y_bus: Connection,
-    /// Cached AT-SPI accessible refs for action dispatch (keyed by node index).
+    /// Cached AT-SPI accessible refs for action dispatch (keyed by element index).
     cached_refs: Mutex<Vec<AccessibleRef>>,
 }
 
@@ -270,7 +270,7 @@ impl LinuxProvider {
     fn get_value(&self, aref: &AccessibleRef) -> Option<String> {
         // Try Text interface first for text content (text fields, labels, combo boxes).
         // This must come before Value because some AT-SPI adapters (e.g. AccessKit)
-        // may expose both interfaces, and Value.CurrentValue returns 0.0 for text nodes.
+        // may expose both interfaces, and Value.CurrentValue returns 0.0 for text elements.
         let text_value = self.get_text_content(aref);
         if text_value.is_some() {
             return text_value;
@@ -300,13 +300,13 @@ impl LinuxProvider {
         None
     }
 
-    /// Traverse the accessibility tree rooted at `aref`, building nodes.
+    /// Traverse the accessibility tree rooted at `aref`, building elements.
     #[allow(clippy::too_many_arguments)]
     #[allow(clippy::only_used_in_recursion)]
     fn traverse(
         &self,
         aref: &AccessibleRef,
-        nodes: &mut Vec<NodeData>,
+        elements: &mut Vec<ElementData>,
         refs: &mut Vec<AccessibleRef>,
         parent_idx: Option<u32>,
         depth: u32,
@@ -324,7 +324,7 @@ impl LinuxProvider {
         let description = self.get_description(aref).ok().filter(|s| !s.is_empty());
         let value = self.get_value(aref);
 
-        // For label/static text nodes, AT-SPI may put content in the Text interface
+        // For label/static text elements, AT-SPI may put content in the Text interface
         // (returned as value) rather than the Name property. Use it as the name.
         if name.is_none() && role == Role::StaticText {
             if let Some(ref v) = value {
@@ -365,8 +365,8 @@ impl LinuxProvider {
             (None, None, None)
         };
 
-        let node_idx = nodes.len() as u32;
-        nodes.push(NodeData {
+        let element_idx = elements.len() as u32;
+        elements.push(ElementData {
             role,
             name,
             value,
@@ -380,7 +380,7 @@ impl LinuxProvider {
             pid: None,
             stable_id: Some(aref.path.clone()),
             raw,
-            index: node_idx,
+            index: element_idx,
             children_indices: vec![], // filled in below
             parent_index: parent_idx,
         });
@@ -398,20 +398,20 @@ impl LinuxProvider {
             {
                 continue;
             }
-            let child_idx = nodes.len() as u32;
+            let child_idx = elements.len() as u32;
             child_ids.push(child_idx);
             self.traverse(
                 child_ref,
-                nodes,
+                elements,
                 refs,
-                Some(node_idx),
+                Some(element_idx),
                 depth + 1,
                 screen_size,
             );
         }
 
         // Update children list
-        nodes[node_idx as usize].children_indices = child_ids;
+        elements[element_idx as usize].children_indices = child_ids;
     }
 
     /// Parse AT-SPI2 state bitfield into xa11y StateSet.
@@ -647,12 +647,12 @@ impl LinuxProvider {
     fn build_tree(&self, app_ref: &AccessibleRef, label: &str) -> Result<Tree> {
         let app_name = self.get_name(app_ref).unwrap_or_default();
         let screen_size = Self::detect_screen_size();
-        let mut nodes = Vec::new();
+        let mut elements = Vec::new();
         let mut refs = Vec::new();
 
-        self.traverse(app_ref, &mut nodes, &mut refs, None, 0, screen_size);
+        self.traverse(app_ref, &mut elements, &mut refs, None, 0, screen_size);
 
-        if nodes.is_empty() {
+        if elements.is_empty() {
             return Err(Error::AppNotFound {
                 target: label.to_string(),
             });
@@ -663,7 +663,7 @@ impl LinuxProvider {
 
         let pid = self.get_app_pid(app_ref);
 
-        Ok(Tree::new(app_name, pid, screen_size, nodes))
+        Ok(Tree::new(app_name, pid, screen_size, elements))
     }
 }
 
@@ -683,9 +683,9 @@ impl Provider for LinuxProvider {
 
     fn get_apps(&self) -> Result<Tree> {
         let screen_size = Self::detect_screen_size();
-        let mut nodes = Vec::new();
+        let mut elements = Vec::new();
 
-        nodes.push(NodeData {
+        elements.push(ElementData {
             role: Role::Application,
             name: Some("Desktop".to_string()),
             value: None,
@@ -730,35 +730,40 @@ impl Provider for LinuxProvider {
             if app_name.is_empty() {
                 continue;
             }
-            let child_idx = nodes.len() as u32;
+            let child_idx = elements.len() as u32;
             root_children.push(child_idx);
-            self.traverse(child, &mut nodes, &mut refs, Some(0), 1, screen_size);
-            // Set PID on the app node so App::all() can use it
-            nodes[child_idx as usize].pid = self.get_app_pid(child);
+            self.traverse(child, &mut elements, &mut refs, Some(0), 1, screen_size);
+            // Set PID on the app element so App::all() can use it
+            elements[child_idx as usize].pid = self.get_app_pid(child);
         }
 
-        nodes[0].children_indices = root_children;
+        elements[0].children_indices = root_children;
 
         *self.cached_refs.lock().unwrap() = refs;
 
-        Ok(Tree::new("Desktop".to_string(), None, screen_size, nodes))
+        Ok(Tree::new(
+            "Desktop".to_string(),
+            None,
+            screen_size,
+            elements,
+        ))
     }
 
     fn perform_action(
         &self,
         tree: &Tree,
-        node: &NodeData,
+        element: &ElementData,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()> {
-        let node_idx = tree.node_index(node);
+        let element_idx = tree.element_index(element);
 
         // Look up cached accessible ref for action dispatch
         let cache = self.cached_refs.lock().unwrap();
         let target = cache
-            .get(node_idx as usize)
+            .get(element_idx as usize)
             .ok_or(Error::ElementStale {
-                selector: format!("index:{}", node_idx),
+                selector: format!("index:{}", element_idx),
             })?
             .clone();
         drop(cache);
@@ -1052,7 +1057,7 @@ impl LinuxProvider {
 
         let handle = std::thread::spawn(move || {
             let mut prev_focused: Option<String> = None;
-            let mut prev_node_count: usize = 0;
+            let mut prev_element_count: usize = 0;
 
             while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(100));
@@ -1085,8 +1090,8 @@ impl LinuxProvider {
                     prev_focused = focused_name;
                 }
 
-                let node_count = tree.len();
-                if node_count != prev_node_count && prev_node_count > 0 {
+                let element_count = tree.len();
+                if element_count != prev_element_count && prev_element_count > 0 {
                     let kind = EventKind::StructureChanged;
                     if filter.kinds.is_empty() || filter.kinds.contains(&kind) {
                         let _ = tx.send(Event {
@@ -1101,7 +1106,7 @@ impl LinuxProvider {
                         });
                     }
                 }
-                prev_node_count = node_count;
+                prev_element_count = element_count;
             }
         });
 
@@ -1133,7 +1138,7 @@ impl LinuxProvider {
         selector: &str,
         state: ElementState,
         timeout: Duration,
-    ) -> Result<Option<NodeData>> {
+    ) -> Result<Option<ElementData>> {
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
 
@@ -1145,10 +1150,10 @@ impl LinuxProvider {
 
             let tree = self.get_tree(pid)?;
             let matches = tree.query(selector).ok();
-            let node = matches.as_ref().and_then(|m| m.first().copied());
+            let element = matches.as_ref().and_then(|m| m.first().copied());
 
-            if state.is_met(node) {
-                return Ok(node.cloned());
+            if state.is_met(element) {
+                return Ok(element.cloned());
             }
 
             std::thread::sleep(poll_interval);
@@ -1174,7 +1179,7 @@ impl EventProvider for LinuxProvider {
         selector: &str,
         state: ElementState,
         timeout: Duration,
-    ) -> Result<Option<NodeData>> {
+    ) -> Result<Option<ElementData>> {
         self.wait_for_impl(pid, selector, state, timeout)
     }
 }

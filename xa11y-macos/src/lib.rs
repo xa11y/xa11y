@@ -37,7 +37,7 @@ mod stub {
         fn perform_action(
             &self,
             _: &Tree,
-            _: &NodeData,
+            _: &ElementData,
             _: Action,
             _: Option<ActionData>,
         ) -> Result<()> {

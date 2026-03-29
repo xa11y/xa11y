@@ -236,7 +236,7 @@ mod provider_fuzz {
     fn random_action_data(
         rng: &mut StdRng,
         action: Action,
-        _node: &NodeData,
+        _element: &ElementData,
     ) -> Option<ActionData> {
         match action {
             Action::SetValue => {
@@ -352,7 +352,7 @@ mod provider_fuzz {
         state.log("get_apps()");
         match state.provider.get_apps() {
             Ok(tree) => {
-                state.log(&format!("  -> {} nodes", tree.len()));
+                state.log(&format!("  -> {} elements", tree.len()));
                 let _ = tree.root_data();
                 let _ = tree.len();
                 let _ = tree.is_empty();
@@ -382,39 +382,39 @@ mod provider_fuzz {
         }
     }
 
-    fn op_action_on_node(state: &mut FuzzState) {
+    fn op_action_on_element(state: &mut FuzzState) {
         state.ensure_tree();
         let tree = match &state.tree {
             Some(t) => t,
             None => return,
         };
 
-        let node_count = tree.len();
-        if node_count == 0 {
+        let element_count = tree.len();
+        if element_count == 0 {
             return;
         }
 
-        // Pick a random node
-        let node_idx = state.rng.random_range(0..node_count) as u32;
-        let node = match tree.get_data(node_idx) {
+        // Pick a random element
+        let element_idx = state.rng.random_range(0..element_count) as u32;
+        let element = match tree.get_data(element_idx) {
             Some(n) => n,
             None => return,
         };
 
-        // Pick action: 80% from node's supported actions, 20% random
-        let action = if !node.actions.is_empty() && state.rng.random_bool(0.8) {
-            node.actions[state.rng.random_range(0..node.actions.len())]
+        // Pick action: 80% from element's supported actions, 20% random
+        let action = if !element.actions.is_empty() && state.rng.random_bool(0.8) {
+            element.actions[state.rng.random_range(0..element.actions.len())]
         } else {
             ALL_ACTIONS[state.rng.random_range(0..ALL_ACTIONS.len())]
         };
 
-        let data = random_action_data(&mut state.rng, action, node);
+        let data = random_action_data(&mut state.rng, action, element);
         state.log(&format!(
-            "perform_action(node={}, role={:?}, action={:?}, data={:?})",
-            node_idx, node.role, action, data
+            "perform_action(element={}, role={:?}, action={:?}, data={:?})",
+            element_idx, element.role, action, data
         ));
 
-        match state.provider.perform_action(tree, node, action, data) {
+        match state.provider.perform_action(tree, element, action, data) {
             Ok(()) => {
                 std::thread::sleep(std::time::Duration::from_millis(20));
                 state.tree = None;
@@ -437,16 +437,16 @@ mod provider_fuzz {
             return;
         }
 
-        let node_idx = state.rng.random_range(0..tree.len()) as u32;
-        let node = match tree.get_data(node_idx) {
+        let element_idx = state.rng.random_range(0..tree.len()) as u32;
+        let element = match tree.get_data(element_idx) {
             Some(n) => n,
             None => return,
         };
-        state.log(&format!("perform_action press, node={}", node_idx));
+        state.log(&format!("perform_action press, element={}", element_idx));
 
         let result = state
             .provider
-            .perform_action(tree, node, Action::Press, None);
+            .perform_action(tree, element, Action::Press, None);
         match result {
             Err(_) => state.errors += 1,
             Ok(()) => {
@@ -467,14 +467,14 @@ mod provider_fuzz {
         match tree.query(&selector) {
             Ok(results) => {
                 state.log(&format!("  -> {} matches", results.len()));
-                for node in &results {
-                    let _ = &node.name;
-                    let _ = &node.value;
-                    let _ = &node.role;
-                    let _ = &node.states;
-                    let _ = &node.bounds;
-                    let _ = &node.actions;
-                    let _ = &node.raw;
+                for element in &results {
+                    let _ = &element.name;
+                    let _ = &element.value;
+                    let _ = &element.role;
+                    let _ = &element.states;
+                    let _ = &element.bounds;
+                    let _ = &element.actions;
+                    let _ = &element.raw;
                 }
             }
             Err(e) => {
@@ -507,20 +507,20 @@ mod provider_fuzz {
             return;
         }
 
-        let node_idx = state.rng.random_range(0..tree.len()) as u32;
-        let node = match tree.get_data(node_idx) {
+        let element_idx = state.rng.random_range(0..tree.len()) as u32;
+        let element = match tree.get_data(element_idx) {
             Some(n) => n,
             None => return,
         };
-        state.log(&format!("tree.subtree({})", node_idx));
+        state.log(&format!("tree.subtree({})", element_idx));
         let sub = tree
-            .subtree_indices(node.index)
+            .subtree_indices(element.index)
             .into_iter()
             .filter_map(|idx| tree.get_data(idx))
             .collect::<Vec<_>>();
         assert!(
             !sub.is_empty(),
-            "subtree should not be empty for valid node"
+            "subtree should not be empty for valid element"
         );
     }
 
@@ -535,13 +535,13 @@ mod provider_fuzz {
             return;
         }
 
-        let node_idx = state.rng.random_range(0..tree.len()) as u32;
-        let node = match tree.get_data(node_idx) {
+        let element_idx = state.rng.random_range(0..tree.len()) as u32;
+        let element = match tree.get_data(element_idx) {
             Some(n) => n,
             None => return,
         };
-        state.log(&format!("tree.children_data({})", node_idx));
-        let children = tree.children_data(node);
+        state.log(&format!("tree.children_data({})", element_idx));
+        let children = tree.children_data(element);
         let _ = children.len();
     }
 
@@ -556,19 +556,19 @@ mod provider_fuzz {
         let count = tree.iter().count();
         assert_eq!(count, tree.len(), "iter count should match len");
 
-        for node in tree.iter() {
-            let _ = &node.role;
-            let _ = &node.name;
-            let _ = &node.value;
-            let _ = &node.description;
-            let _ = &node.bounds;
-            let _ = &node.actions;
-            let _ = &node.states;
-            let _ = &node.numeric_value;
-            let _ = &node.min_value;
-            let _ = &node.max_value;
-            let _ = &node.raw;
-            let _ = &node.stable_id;
+        for element in tree.iter() {
+            let _ = &element.role;
+            let _ = &element.name;
+            let _ = &element.value;
+            let _ = &element.description;
+            let _ = &element.bounds;
+            let _ = &element.actions;
+            let _ = &element.states;
+            let _ = &element.numeric_value;
+            let _ = &element.min_value;
+            let _ = &element.max_value;
+            let _ = &element.raw;
+            let _ = &element.stable_id;
         }
     }
 
@@ -588,8 +588,8 @@ mod provider_fuzz {
                 1 => {
                     if !tree.is_empty() {
                         let idx = rng.random_range(0..tree.len()) as u32;
-                        if let Some(node) = tree.get_data(idx) {
-                            let _ = tree.children_data(node);
+                        if let Some(element) = tree.get_data(idx) {
+                            let _ = tree.children_data(element);
                         }
                     }
                 }
@@ -599,9 +599,9 @@ mod provider_fuzz {
                 3 => {
                     if !tree.is_empty() {
                         let idx = rng.random_range(0..tree.len()) as u32;
-                        if let Some(node) = tree.get_data(idx) {
+                        if let Some(element) = tree.get_data(idx) {
                             let _ = tree
-                                .subtree_indices(node.index)
+                                .subtree_indices(element.index)
                                 .into_iter()
                                 .filter_map(|idx| tree.get_data(idx))
                                 .collect::<Vec<_>>();
@@ -678,7 +678,7 @@ mod provider_fuzz {
             (1, "get_tree_not_found", op_get_tree_not_found),
             (1, "get_apps", op_get_apps),
             (1, "check_permissions", op_check_permissions),
-            (20, "action_on_node", op_action_on_node),
+            (20, "action_on_element", op_action_on_element),
             (3, "action_press", op_action_press),
             (15, "query_tree", op_query_tree),
             (3, "tree_display", op_tree_dump),

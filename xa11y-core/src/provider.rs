@@ -1,6 +1,6 @@
 use crate::action::{Action, ActionData};
+use crate::element::ElementData;
 use crate::error::Result;
-use crate::node::NodeData;
 use crate::tree::Tree;
 
 use serde::{Deserialize, Serialize};
@@ -27,7 +27,7 @@ pub trait Provider: Send + Sync {
     fn perform_action(
         &self,
         tree: &Tree,
-        node: &NodeData,
+        element: &ElementData,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()>;

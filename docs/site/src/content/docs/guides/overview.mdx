@@ -27,7 +27,7 @@ An accessibility tree mirrors the visual hierarchy of an application. Here's wha
       ...
 ```
 
-Every node in the tree has properties. For example, here's the full data for `button "+"`:
+Every element in the tree has properties. For example, here's the full data for `button "+"`:
 
 ```
 role:    button
@@ -63,13 +63,13 @@ xa11y supports subscribing to these event streams with selectors.
 
 ## Concepts
 
-<img src="/concepts.svg" alt="Diagram showing xa11y's three concepts: Read (App → .nodes() → Node → .children()/.parent()), Act (App → .locator() → Locator → Actions/Waits/.node()/.nodes()), and Listen (App → subscribe() → Event Stream)" style="width:100%;max-width:720px;margin:1rem auto;display:block" />
+<img src="/concepts.svg" alt="Diagram showing xa11y's three concepts: Read (App → .elements() → Element → .children()/.parent()), Act (App → .locator() → Locator → Actions/Waits/.element()/.elements()), and Listen (App → subscribe() → Event Stream)" style="width:100%;max-width:720px;margin:1rem auto;display:block" />
 
 xa11y is built around three core types:
 
-- **App** — entry point for interacting with an application. Construct via `App::from_name()`, `App::from_pid()`, or `App::all()`. An App provides two paths: `app.nodes()` for read-only snapshots, and `app.locator(selector)` for actions and waits.
-- **Node** — read-only handle into a frozen tree snapshot. Navigate with `children()` and `parent()`. Read properties like `role`, `name`, `value`, `states`, `bounds`. Nodes never refetch from the platform.
-- **Locator** — lazy selector that re-resolves against a fresh snapshot on every operation. Use for actions (`press()`, `set_value()`, ...), waits (`wait_visible()`, ...), and querying (`node()`, `nodes()`). Inspired by [Playwright's Locator pattern](https://playwright.dev/docs/locators).
+- **App** — entry point for interacting with an application. Construct via `App::from_name()`, `App::from_pid()`, or `App::all()`. An App provides two paths: `app.elements()` for read-only snapshots, and `app.locator(selector)` for actions and waits.
+- **Element** — read-only handle into a frozen tree snapshot. Navigate with `children()` and `parent()`. Read properties like `role`, `name`, `value`, `states`, `bounds`. Elements never refetch from the platform.
+- **Locator** — lazy selector that re-resolves against a fresh snapshot on every operation. Use for actions (`press()`, `set_value()`, ...), waits (`wait_visible()`, ...), and querying (`element()`, `elements()`). Inspired by [Playwright's Locator pattern](https://playwright.dev/docs/locators).
 - **Selector** — CSS-like query syntax used by Locator. Supports role matching, attribute filters, combinators, and nth selection.
 
 ## Connecting to an app
@@ -94,36 +94,36 @@ let status = check_permissions()?;
 
 ### Snapshots
 
-`app.nodes()` captures a frozen copy of the accessibility tree and returns the root `Node`. All reads come from this snapshot with zero platform calls. Call `nodes()` again for a fresh one.
+`app.elements()` captures a frozen copy of the accessibility tree and returns the root `Element`. All reads come from this snapshot with zero platform calls. Call `elements()` again for a fresh one.
 
-A `Node` is a cheap, cloneable handle into the snapshot. Navigate with `children()` and `parent()`.
+An `Element` is a cheap, cloneable handle into the snapshot. Navigate with `children()` and `parent()`.
 
 ```rust
 let calc = App::from_name(provider()?, "Calculator")?;
-let root = calc.nodes()?;
+let root = calc.elements()?;
 
 let children = root.children();
 let parent = children[0].parent();
 
-// Read properties (via Deref to NodeData)
+// Read properties (via Deref to ElementData)
 println!("{} — {}", children[0].role, children[0].name.as_deref().unwrap_or(""));
 
 // Print the full tree
 println!("{root}");
 ```
 
-Node properties: `role`, `name`, `value`, `description`, `bounds`, `states`, `actions`, `numeric_value`, `min_value`, `max_value`, `stable_id`, `pid`.
+Element properties: `role`, `name`, `value`, `description`, `bounds`, `states`, `actions`, `numeric_value`, `min_value`, `max_value`, `stable_id`, `pid`.
 
 ### Snapshots are frozen
 
-`nodes()` captures the tree at a single point in time. The snapshot never updates implicitly.
+`elements()` captures the tree at a single point in time. The snapshot never updates implicitly.
 
 ```rust
-let root = calc.nodes()?;       // snapshot captured here
+let root = calc.elements()?;       // snapshot captured here
 println!("{:?}", root.children()[0].name);  // reads from snapshot
 
 // UI changed? Get a fresh snapshot:
-let root = calc.nodes()?;       // new snapshot
+let root = calc.elements()?;       // new snapshot
 ```
 
 To find specific elements, use a Locator (below) — it re-resolves against a fresh snapshot on every operation.
@@ -141,15 +141,15 @@ let btn = calc.locator("button[name='=']");
 // Each call refetches the tree, finds the element, then acts
 btn.press()?;
 
-// Read properties via .node() snapshot
-let node = btn.node()?;
-println!("{:?}", node.name);
+// Read properties via .element() snapshot
+let element = btn.element()?;
+println!("{:?}", element.name);
 
 // Wait for state changes (polls with fresh snapshots)
 btn.wait_enabled(Duration::from_secs(5))?;
 
-// Get all matching nodes
-let buttons = calc.locator("button").nodes()?;
+// Get all matching elements
+let buttons = calc.locator("button").elements()?;
 println!("Found {} buttons", buttons.len());
 ```
 
@@ -159,11 +159,11 @@ println!("Found {} buttons", buttons.len());
 
 **Waits:** `wait_visible()`, `wait_hidden()`, `wait_attached()`, `wait_detached()`, `wait_enabled()`, `wait_disabled()`, `wait_focused()`, `wait_unfocused()`, `wait_for_state()`, `wait_until()`.
 
-**Queries:** `node()` (single match), `nodes()` (all matches), `exists()`, `count()`.
+**Queries:** `element()` (single match), `elements()` (all matches), `exists()`, `count()`.
 
 **Chaining:** `nth(n)`, `first()`, `child(selector)`, `descendant(selector)`.
 
-Unlike Node, which reads from a frozen snapshot, Locator always works with the latest UI state.
+Unlike Element, which reads from a frozen snapshot, Locator always works with the latest UI state.
 
 ## Selectors
 

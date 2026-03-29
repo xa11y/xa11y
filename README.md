@@ -22,7 +22,7 @@ fn main() -> Result<()> {
     let safari = App::from_name(provider()?, "Safari")?;
 
     // Snapshot the tree and find elements with CSS-like selectors
-    let buttons = safari.locator("button[name='Submit']").nodes()?;
+    let buttons = safari.locator("button[name='Submit']").elements()?;
     println!("Found {} buttons", buttons.len());
 
     // Interact with elements via locator (re-resolves every call)
@@ -40,7 +40,7 @@ import xa11y
 safari = xa11y.app("Safari")
 
 # Find elements with CSS-like selectors
-for button in safari.locator("button").nodes():
+for button in safari.locator("button").elements():
     print(button.name)
 
 # Interact with elements via locator (re-resolves every call)

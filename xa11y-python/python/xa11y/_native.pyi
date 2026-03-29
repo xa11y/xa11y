@@ -56,7 +56,7 @@ class App:
     """A handle to a running application.
 
     Use :meth:`locator` to create action-capable element references,
-    or :meth:`nodes` to snapshot the tree for inspection.
+    or :meth:`elements` to snapshot the tree for inspection.
     """
 
     @property
@@ -67,16 +67,16 @@ class App:
         """The application's process ID."""
     def locator(self, selector: str) -> Locator:
         """Create a :class:`Locator` for lazy element interaction."""
-    def nodes(self) -> Node:
-        """Snapshot the app's accessibility tree. Returns the root :class:`Node`."""
+    def elements(self) -> Element:
+        """Snapshot the app's accessibility tree. Returns the root :class:`Element`."""
     def __repr__(self) -> str: ...
 
-# ── Node ─────────────────────────────────────────────────────────────────────
+# ── Element ───────────────────────────────────────────────────────────────────
 
-class Node:
+class Element:
     """A read-only element in an accessibility tree snapshot.
 
-    Nodes are immutable snapshots that form a navigable graph —
+    Elements are immutable snapshots that form a navigable graph —
     use :attr:`children` and :attr:`parent` to traverse.
     To perform actions, use a :class:`Locator` via :meth:`App.locator`.
     """
@@ -107,16 +107,16 @@ class Node:
         """Platform-stable identifier that persists across tree snapshots."""
     @property
     def pid(self) -> int | None:
-        """Process ID of the application owning this node."""
+        """Process ID of the application owning this element."""
     @property
     def actions(self) -> list[str]:
         """List of supported action names."""
     @property
-    def children(self) -> list[Node]:
-        """Direct children of this node."""
+    def children(self) -> list[Element]:
+        """Direct children of this element."""
     @property
-    def parent(self) -> Node | None:
-        """Parent node, or ``None`` for the root."""
+    def parent(self) -> Element | None:
+        """Parent element, or ``None`` for the root."""
     @property
     def bounds(self) -> Rect | None:
         """Bounding rectangle in screen coordinates."""
@@ -180,10 +180,10 @@ class Locator:
         """Check whether the selector matches any element."""
     def count(self) -> int:
         """Count the number of elements matching the selector."""
-    def node(self) -> Node:
-        """Resolve the locator to a single :class:`Node` snapshot."""
-    def nodes(self) -> list[Node]:
-        """Resolve the locator to all matching :class:`Node` snapshots."""
+    def element(self) -> Element:
+        """Resolve the locator to a single :class:`Element` snapshot."""
+    def elements(self) -> list[Element]:
+        """Resolve the locator to all matching :class:`Element` snapshots."""
     def press(self) -> None:
         """Press / activate the matched element."""
     def focus(self) -> None:
@@ -222,24 +222,24 @@ class Locator:
         """Scroll the matched element leftward."""
     def scroll_right(self, amount: float = 1.0) -> None:
         """Scroll the matched element rightward."""
-    def wait_visible(self, timeout: float = 5.0) -> Node:
-        """Wait until the element is visible (default 5s timeout). Returns the node."""
-    def wait_attached(self, timeout: float = 5.0) -> Node:
-        """Wait until the selector matches an element (default 5s timeout). Returns the node."""
+    def wait_visible(self, timeout: float = 5.0) -> Element:
+        """Wait until the element is visible (default 5s timeout). Returns the element."""
+    def wait_attached(self, timeout: float = 5.0) -> Element:
+        """Wait until the selector matches an element (default 5s timeout). Returns the element."""
     def wait_detached(self, timeout: float = 5.0) -> None:
         """Wait until the selector no longer matches (default 5s timeout)."""
-    def wait_enabled(self, timeout: float = 5.0) -> Node:
-        """Wait until the element is enabled (default 5s timeout). Returns the node."""
+    def wait_enabled(self, timeout: float = 5.0) -> Element:
+        """Wait until the element is enabled (default 5s timeout). Returns the element."""
     def wait_hidden(self, timeout: float = 5.0) -> None:
         """Wait until the element is hidden (default 5s timeout)."""
-    def wait_disabled(self, timeout: float = 5.0) -> Node:
-        """Wait until the element is disabled (default 5s timeout). Returns the node."""
-    def wait_focused(self, timeout: float = 5.0) -> Node:
-        """Wait until the element is focused (default 5s timeout). Returns the node."""
-    def wait_unfocused(self, timeout: float = 5.0) -> Node:
-        """Wait until the element loses focus (default 5s timeout). Returns the node."""
-    def wait_until(self, predicate: Callable[[Node | None], bool], timeout: float = 5.0) -> None:
-        """Wait until *predicate(node)* returns ``True`` (default 5s timeout)."""
+    def wait_disabled(self, timeout: float = 5.0) -> Element:
+        """Wait until the element is disabled (default 5s timeout). Returns the element."""
+    def wait_focused(self, timeout: float = 5.0) -> Element:
+        """Wait until the element is focused (default 5s timeout). Returns the element."""
+    def wait_unfocused(self, timeout: float = 5.0) -> Element:
+        """Wait until the element loses focus (default 5s timeout). Returns the element."""
+    def wait_until(self, predicate: Callable[[Element | None], bool], timeout: float = 5.0) -> None:
+        """Wait until *predicate(element)* returns ``True`` (default 5s timeout)."""
     def __repr__(self) -> str: ...
 
 # ── Module-level functions ───────────────────────────────────────────────────

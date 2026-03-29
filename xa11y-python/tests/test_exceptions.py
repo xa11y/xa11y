@@ -44,12 +44,12 @@ def test_platform_error_inherits():
 
 def test_catch_with_base_class(test_app):
     with contextlib.suppress(xa11y.XA11yError):
-        test_app.locator("[[[bad").nodes()
+        test_app.locator("[[[bad").elements()
 
 
 def test_catch_with_specific_class(test_app):
     with contextlib.suppress(xa11y.InvalidSelectorError):
-        test_app.locator("[[[bad").nodes()
+        test_app.locator("[[[bad").elements()
 
 
 # ── Error messages ───────────────────────────────────────────────────────────
@@ -65,6 +65,6 @@ def test_selector_not_matched_message(test_app):
 
 def test_invalid_selector_message(test_app):
     try:
-        test_app.locator("[[[bad").nodes()
+        test_app.locator("[[[bad").elements()
     except xa11y.InvalidSelectorError as e:
         assert "bad" in str(e) or "Invalid" in str(e)

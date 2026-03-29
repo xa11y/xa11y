@@ -15,12 +15,12 @@
 //! integer       := [1-9][0-9]*
 //! ```
 
+use crate::element::ElementData;
 use crate::error::{Error, Result};
-use crate::node::NodeData;
 use crate::role::Role;
 use crate::tree::Tree;
 
-/// A parsed CSS-like selector for matching accessibility tree nodes.
+/// A parsed CSS-like selector for matching accessibility tree elements.
 #[derive(Debug, Clone)]
 pub struct Selector {
     /// Chain of simple selectors with combinators.
@@ -306,17 +306,17 @@ impl Selector {
         Ok((AttrFilter { attr, op, value }, pos))
     }
 
-    /// Match nodes in the tree against this selector.
-    pub fn match_nodes<'a>(&self, tree: &'a Tree) -> Vec<&'a NodeData> {
+    /// Match elements in the tree against this selector.
+    pub fn match_elements<'a>(&self, tree: &'a Tree) -> Vec<&'a ElementData> {
         if self.segments.is_empty() {
             return vec![];
         }
 
-        // Start with all nodes matching the first simple selector
+        // Start with all elements matching the first simple selector
         let first = &self.segments[0].simple;
-        let mut candidates: Vec<&NodeData> = tree
+        let mut candidates: Vec<&ElementData> = tree
             .iter()
-            .filter(|n| Self::matches_simple(n, first))
+            .filter(|e| Self::matches_simple(e, first))
             .collect();
 
         // Apply subsequent segments with combinators
@@ -339,9 +339,9 @@ impl Selector {
                             .into_iter()
                             .filter_map(|idx| tree.get_data(idx))
                             .collect::<Vec<_>>();
-                        for node in subtree.into_iter().skip(1) {
-                            if Self::matches_simple(node, &segment.simple) {
-                                next_candidates.push(node);
+                        for element in subtree.into_iter().skip(1) {
+                            if Self::matches_simple(element, &segment.simple) {
+                                next_candidates.push(element);
                             }
                         }
                     }
@@ -350,7 +350,7 @@ impl Selector {
             }
             // Deduplicate while preserving order
             let mut seen = std::collections::HashSet::new();
-            next_candidates.retain(|n| seen.insert(n.index));
+            next_candidates.retain(|e| seen.insert(e.index));
             candidates = next_candidates;
         }
 
@@ -366,10 +366,10 @@ impl Selector {
         candidates
     }
 
-    fn matches_simple(node: &NodeData, simple: &SimpleSelector) -> bool {
+    fn matches_simple(element: &ElementData, simple: &SimpleSelector) -> bool {
         // Check role
         if let Some(role) = simple.role {
-            if node.role != role {
+            if element.role != role {
                 return false;
             }
         }
@@ -377,10 +377,10 @@ impl Selector {
         // Check attribute filters
         for filter in &simple.filters {
             let attr_value = match filter.attr {
-                AttrName::Name => node.name.as_deref(),
-                AttrName::Value => node.value.as_deref(),
-                AttrName::Description => node.description.as_deref(),
-                AttrName::Role => Some(node.role.to_snake_case()),
+                AttrName::Name => element.name.as_deref(),
+                AttrName::Value => element.value.as_deref(),
+                AttrName::Description => element.description.as_deref(),
+                AttrName::Role => Some(element.role.to_snake_case()),
             };
 
             let matches = match &filter.op {
