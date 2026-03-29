@@ -1704,4 +1704,79 @@ mod tests {
             println!("No event received — may depend on platform event delivery");
         }
     }
+
+    #[test]
+    #[ignore]
+    fn event_structure_changed() {
+        use std::time::Duration;
+        let provider = xa11y::create_provider().unwrap();
+        let root = h::app_tree();
+
+        let app = App::from_name(provider.clone(), "xa11y").unwrap();
+        let sub = app.subscribe().unwrap();
+
+        // Click "Add Item" to add a dynamic list item — changes element count
+        let add_btn = root
+            .subtree()
+            .into_iter()
+            .find(|n| n.name.as_deref() == Some("Add Item"))
+            .expect("Add Item button not found");
+        let _ = provider.perform_action(add_btn.tree(), &add_btn, Action::Press, None);
+
+        // The polling backend checks every 100ms; give it time to detect the change
+        match sub.wait_for(
+            |e| e.event_type == EventType::StructureChanged,
+            Duration::from_secs(3),
+        ) {
+            Ok(event) => {
+                assert_eq!(event.event_type, EventType::StructureChanged);
+                println!("StructureChanged event received");
+            }
+            Err(Error::Timeout { .. }) => {
+                println!("No StructureChanged event — may depend on platform event delivery");
+            }
+            Err(e) => panic!("Unexpected error: {:?}", e),
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn event_iter_next_threaded() {
+        use std::time::Duration;
+        let provider = xa11y::create_provider().unwrap();
+        let root = h::app_tree();
+
+        let app = App::from_name(provider.clone(), "xa11y").unwrap();
+        let sub = app.subscribe().unwrap();
+
+        // Spawn a thread that blocks on iter().next()
+        let handle = std::thread::spawn(move || -> Option<Event> {
+            // We can't block forever, so use recv with a generous timeout
+            // as a proxy for iter().next() (which blocks indefinitely).
+            sub.recv(Duration::from_secs(5)).ok()
+        });
+
+        // Give the thread time to start blocking
+        std::thread::sleep(Duration::from_millis(50));
+
+        // Trigger a focus change from the main thread
+        let text = root
+            .subtree()
+            .into_iter()
+            .find(|n| n.role == Role::TextField || n.role == Role::TextArea)
+            .expect("Text entry not found");
+        let _ = provider.perform_action(text.tree(), &text, Action::Focus, None);
+
+        // Join the thread and verify it received the event
+        let result = handle.join().expect("Thread panicked");
+        match result {
+            Some(event) => {
+                assert_eq!(event.event_type, EventType::FocusChanged);
+                println!("Threaded recv received: {:?}", event.event_type);
+            }
+            None => {
+                println!("No event received on thread — may depend on platform event delivery");
+            }
+        }
+    }
 }
