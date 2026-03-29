@@ -149,12 +149,16 @@ class Step:
 
 STEPS = [
     Step("select",
-         'loc = xa11y.locator("Slack", selector=\'button[name="general"]\')',
+         'app = xa11y.app("Slack")',
+         target="n-window"),
+
+    Step("select",
+         'loc = app.locator(\'button[name="general"]\')',
          target="n-general"),
     Step("action", "loc.press()", target="n-general", label="press"),
 
     Step("select",
-         'loc = xa11y.locator("Slack", selector=\'text_field[name="Message"]\')',
+         'loc = app.locator(\'text_field[name="Message"]\')',
          target="n-msgfield"),
     Step("type_text",
          'loc.type_text("Looks good, shipping it!")',
@@ -162,16 +166,16 @@ STEPS = [
          value_text="Looks good, shipping it!"),
 
     Step("select",
-         'loc = xa11y.locator("Slack", selector=\'button[name="Send"]\')',
+         'loc = app.locator(\'button[name="Send"]\')',
          target="n-send"),
-    Step("assert_pass", "assert loc.is_enabled()", target="n-send",
-         label="is_enabled() \u2713"),
+    Step("assert_pass", "assert loc.element().enabled", target="n-send",
+         label="enabled \u2713"),
 
     Step("select",
-         'loc = xa11y.locator("Slack", selector=\'text[name*="PR"]\')',
+         'loc = app.locator(\'text[name*="PR"]\')',
          target="n-pr"),
-    Step("assert_fail", 'assert loc.value() == "wrong text"', target="n-pr",
-         label='value() \u2717'),
+    Step("assert_fail", 'assert loc.element().value == "wrong text"', target="n-pr",
+         label='value \u2717'),
 ]
 
 PAUSE_AFTER_STEP = 0.8
