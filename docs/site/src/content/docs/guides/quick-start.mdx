@@ -11,7 +11,7 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
   <TabItem label="Rust">
     ```toml
     [dependencies]
-    xa11y = "0.1"
+    xa11y = "0.2"
     ```
   </TabItem>
   <TabItem label="Python">
@@ -43,48 +43,36 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
         // Check that we have accessibility permissions
         check_permissions()?;
 
-        // Snapshot the Calculator app's accessibility tree
-        let root = app(&AppTarget::ByName("Calculator".to_string()))?;
+        // Connect to the Calculator app
+        let calc = App::from_name(provider()?, "Calculator")?;
 
-        // Print the full tree for debugging
+        // Snapshot the tree for debugging
+        let root = calc.nodes()?;
         println!("{root}");
 
-        // Find all buttons in the snapshot
-        let buttons = root.query("button")?;
+        // Find all buttons via locator
+        let buttons = calc.locator("button").nodes()?;
         println!("Found {} buttons", buttons.len());
 
         // Read properties from a specific node
-        let equals = root.query("button[name='=']")?;
-        let btn = &equals[0];
+        let btn = calc.locator("button[name='=']").node()?;
         println!("role={} name={:?} bounds={:?}", btn.role, btn.name, btn.bounds);
 
-        // Create a locator for actions — it refetches the tree on every call,
-        // so it always targets the current UI state
-        let seven = locator(
-            AppTarget::ByName("Calculator".to_string()),
-            "button[name='7']",
-        )?;
-        seven.press()?;
+        // Locators refetch the tree on every call,
+        // so they always target the current UI state
+        calc.locator("button[name='7']").press()?;
 
         // Type into a text field
-        let input = locator(
-            AppTarget::ByName("Calculator".to_string()),
-            "text_field[name='Input']",
-        )?;
-        input.type_text("42")?;
+        calc.locator("text_field[name='Input']").type_text("42")?;
 
         // Wait for UI changes before continuing
-        let result = locator(
-            AppTarget::ByName("Calculator".to_string()),
-            "static_text[name='Result']",
-        )?;
+        let result = calc.locator("static_text[name='Result']");
         result.wait_visible(Duration::from_secs(5))?;
-        println!("Result: {:?}", result.value()?);
+        println!("Result: {:?}", result.node()?.value);
 
         // List all running apps
-        let all = apps()?;
-        for child in all.children() {
-            println!("{} (pid: {:?})", child.name.as_deref().unwrap_or("?"), child.pid);
+        for app in App::all(provider()?)? {
+            println!("{} (pid: {})", app.name(), app.pid());
         }
 
         Ok(())
@@ -98,38 +86,36 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
     # Check that we have accessibility permissions
     xa11y.check_permissions()
 
-    # Snapshot the Calculator app's accessibility tree
-    root = xa11y.app("Calculator")
+    # Connect to the Calculator app
+    calc = xa11y.app("Calculator")
 
-    # Print the full tree for debugging
+    # Snapshot the tree for debugging
+    root = calc.nodes()
     print(root)
 
-    # Find all buttons in the snapshot
-    buttons = root.query("button")
+    # Find all buttons via locator
+    buttons = calc.locator("button").nodes()
     print(f"Found {len(buttons)} buttons")
 
     # Read properties from a specific node
-    btn = root.query("button[name='=']")[0]
+    btn = calc.locator("button[name='=']").node()
     print(f"role={btn.role} name={btn.name} bounds={btn.bounds}")
 
-    # Create a locator for actions — it refetches the tree on every call,
-    # so it always targets the current UI state
-    seven = xa11y.locator("Calculator", selector="button[name='7']")
-    seven.press()
+    # Locators refetch the tree on every call,
+    # so they always target the current UI state
+    calc.locator("button[name='7']").press()
 
     # Type into a text field
-    input = xa11y.locator("Calculator", selector="text_field[name='Input']")
-    input.type_text("42")
+    calc.locator("text_field[name='Input']").type_text("42")
 
     # Wait for UI changes before continuing
-    result = xa11y.locator("Calculator", selector="static_text[name='Result']")
+    result = calc.locator("static_text[name='Result']")
     result.wait_visible(timeout=5.0)
-    print(f"Result: {result.value()}")
+    print(f"Result: {result.node().value}")
 
     # List all running apps
-    all_apps = xa11y.apps()
-    for child in all_apps.children:
-        print(f"{child.name} (pid: {child.pid})")
+    for app in xa11y.apps():
+        print(f"{app.name} (pid: {app.pid})")
     ```
   </TabItem>
 </Tabs>

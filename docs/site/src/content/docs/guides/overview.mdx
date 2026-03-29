@@ -63,50 +63,50 @@ xa11y supports subscribing to these event streams with selectors.
 
 ## Concepts
 
-<img src="/concepts.svg" alt="Diagram showing xa11y's three paths: Read (AppTarget → app() → Snapshot → Node → query()), Act (AppTarget + selector → locator() → Locator → Actions/Waits), and Listen (App → subscribe() → Event Stream)" style="width:100%;max-width:720px;margin:1rem auto;display:block" />
+<img src="/concepts.svg" alt="Diagram showing xa11y's three concepts: Read (App → .nodes() → Node → .children()/.parent()), Act (App → .locator() → Locator → Actions/Waits/.node()/.nodes()), and Listen (App → subscribe() → Event Stream)" style="width:100%;max-width:720px;margin:1rem auto;display:block" />
 
-- **Snapshot** — `app()` captures a frozen copy of an app's accessibility tree. All reads come from this snapshot with zero platform calls. Call `app()` again for a fresh one.
-- **Node** — read-only handle into a snapshot. Navigate with `children()`, `parent()`, `query()`. Read properties like `role`, `name`, `value`, `states`, `bounds`.
-- **Locator** — lazy selector that re-resolves against a fresh snapshot on every operation. Use for actions and waits. Inspired by [Playwright's Locator pattern](https://playwright.dev/docs/locators).
-- **Selector** — CSS-like query syntax used by both `Node.query()` and `Locator`. Supports role matching, attribute filters, combinators, and nth selection.
+xa11y is built around three core types:
 
-## Reading accessibility data
+- **App** — entry point for interacting with an application. Construct via `App::from_name()`, `App::from_pid()`, or `App::all()`. An App provides two paths: `app.nodes()` for read-only snapshots, and `app.locator(selector)` for actions and waits.
+- **Node** — read-only handle into a frozen tree snapshot. Navigate with `children()` and `parent()`. Read properties like `role`, `name`, `value`, `states`, `bounds`. Nodes never refetch from the platform.
+- **Locator** — lazy selector that re-resolves against a fresh snapshot on every operation. Use for actions (`press()`, `set_value()`, ...), waits (`wait_visible()`, ...), and querying (`node()`, `nodes()`). Inspired by [Playwright's Locator pattern](https://playwright.dev/docs/locators).
+- **Selector** — CSS-like query syntax used by Locator. Supports role matching, attribute filters, combinators, and nth selection.
 
-### Getting a snapshot
+## Connecting to an app
 
 ```rust
 use xa11y::*;
 
-// Snapshot a specific app's tree
-let root = app(&AppTarget::ByName("Safari".to_string()))?;
+// Connect by name (case-insensitive substring match)
+let safari = App::from_name(provider()?, "Safari")?;
 
-// Snapshot all running apps (shallow)
-let all = apps()?;
+// Connect by PID
+let app = App::from_pid(provider()?, 1234)?;
+
+// List all running apps
+let all = App::all(provider()?)?;
 
 // Check accessibility permissions
 let status = check_permissions()?;
 ```
 
-`AppTarget` identifies which application to read:
-- `AppTarget::ByName("Firefox".to_string())` — case-insensitive substring match
-- `AppTarget::ByPid(1234)` — exact process ID
-- `AppTarget::ByWindow(handle)` — platform-specific window handle
+## Reading accessibility data
 
-### Navigating a snapshot
+### Snapshots
 
-A `Node` is a cheap, cloneable handle into the snapshot. All operations read from the captured data — no further platform calls.
+`app.nodes()` captures a frozen copy of the accessibility tree and returns the root `Node`. All reads come from this snapshot with zero platform calls. Call `nodes()` again for a fresh one.
+
+A `Node` is a cheap, cloneable handle into the snapshot. Navigate with `children()` and `parent()`.
 
 ```rust
-let root = app(&AppTarget::ByName("Calculator".to_string()))?;
+let calc = App::from_name(provider()?, "Calculator")?;
+let root = calc.nodes()?;
 
 let children = root.children();
 let parent = children[0].parent();
 
-// Find nodes by selector
-let buttons = root.query("button")?;
-
 // Read properties (via Deref to NodeData)
-println!("{} — {}", buttons[0].role, buttons[0].name.as_deref().unwrap_or(""));
+println!("{} — {}", children[0].role, children[0].name.as_deref().unwrap_or(""));
 
 // Print the full tree
 println!("{root}");
@@ -116,34 +116,41 @@ Node properties: `role`, `name`, `value`, `description`, `bounds`, `states`, `ac
 
 ### Snapshots are frozen
 
-`app()` captures the tree at a single point in time. The snapshot never updates implicitly.
+`nodes()` captures the tree at a single point in time. The snapshot never updates implicitly.
 
 ```rust
-let root = app(&target)?;               // snapshot captured here
-let btn = root.query("button[name='OK']")?;    // reads from snapshot
-println!("{:?}", btn[0].name);                  // still the snapshot
+let root = calc.nodes()?;       // snapshot captured here
+println!("{:?}", root.children()[0].name);  // reads from snapshot
 
 // UI changed? Get a fresh snapshot:
-let root = app(&target)?;               // new snapshot
+let root = calc.nodes()?;       // new snapshot
 ```
 
-If you're using Locators (below), you don't need to manage this — they always see the latest state.
+To find specific elements, use a Locator (below) — it re-resolves against a fresh snapshot on every operation.
 
 ## Taking actions
 
 ### Locators
 
-A `Locator` holds a selector and **re-resolves against a fresh tree snapshot on every operation**. This means actions always target the current state of the UI.
+A `Locator` holds a selector and **re-resolves against a fresh tree snapshot on every operation**. Create one via `app.locator(selector)`. Actions always target the current state of the UI.
 
 ```rust
-let btn = locator(AppTarget::ByName("Calculator".to_string()), "button[name='=']")?;
+let calc = App::from_name(provider()?, "Calculator")?;
+let btn = calc.locator("button[name='=']");
 
 // Each call refetches the tree, finds the element, then acts
 btn.press()?;
-println!("{:?}", btn.name()?);
+
+// Read properties via .node() snapshot
+let node = btn.node()?;
+println!("{:?}", node.name);
 
 // Wait for state changes (polls with fresh snapshots)
 btn.wait_enabled(Duration::from_secs(5))?;
+
+// Get all matching nodes
+let buttons = calc.locator("button").nodes()?;
+println!("Found {} buttons", buttons.len());
 ```
 
 **Best practice:** make selectors specific so they stay stable as the UI evolves. Don't select `button` — select `button[name='Cancel']` inside a specific group or window. The more specific the selector, the less likely it breaks when new elements are added.
@@ -152,13 +159,15 @@ btn.wait_enabled(Duration::from_secs(5))?;
 
 **Waits:** `wait_visible()`, `wait_hidden()`, `wait_attached()`, `wait_detached()`, `wait_enabled()`, `wait_disabled()`, `wait_focused()`, `wait_unfocused()`, `wait_for_state()`, `wait_until()`.
 
+**Queries:** `node()` (single match), `nodes()` (all matches), `exists()`, `count()`.
+
 **Chaining:** `nth(n)`, `first()`, `child(selector)`, `descendant(selector)`.
 
 Unlike Node, which reads from a frozen snapshot, Locator always works with the latest UI state.
 
 ## Selectors
 
-xa11y uses a CSS-like selector syntax to find elements. Selectors work with both `Node.query()` and `Locator`.
+xa11y uses a CSS-like selector syntax to find elements. Selectors are used by `app.locator(selector)` to target elements for actions, waits, and queries.
 
 ```
 button                           # by role
@@ -192,7 +201,7 @@ All operations return `Result<T>` with a structured `Error` enum:
 | Error | When |
 | --- | --- |
 | `PermissionDenied` | Accessibility permissions not granted (includes setup instructions) |
-| `AppNotFound` | No app matches the given `AppTarget` |
+| `AppNotFound` | No app matches the given name or PID |
 | `SelectorNotMatched` | Selector matched zero elements |
 | `ActionNotSupported` | Action not available for the element's role |
 | `TextValueNotSupported` | Platform can't set text values on this element |
