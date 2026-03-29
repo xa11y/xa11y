@@ -56,14 +56,14 @@
   <text x="120" y="62" class="label-bold">App</text>
   <text x="120" y="78" class="label-sm">from_name / pid</text>
 
-  <!-- .nodes() -->
-  <rect x="210" y="42" width="90" height="44" class="box-accent" />
-  <text x="255" y="69" class="label-bold">.nodes()</text>
+  <!-- .elements() -->
+  <rect x="210" y="42" width="100" height="44" class="box-accent" />
+  <text x="260" y="69" class="label-bold">.elements()</text>
 
-  <!-- Node (snapshot root) -->
-  <rect x="340" y="42" width="120" height="44" class="box" />
-  <text x="400" y="60" class="label-bold">Node</text>
-  <text x="400" y="76" class="label-sm">frozen snapshot</text>
+  <!-- Element (snapshot root) -->
+  <rect x="345" y="42" width="120" height="44" class="box" />
+  <text x="405" y="60" class="label-bold">Element</text>
+  <text x="405" y="76" class="label-sm">frozen snapshot</text>
 
   <!-- children() / parent() -->
   <rect x="500" y="42" width="180" height="44" class="box" />
@@ -72,11 +72,11 @@
 
   <!-- Read arrows -->
   <line x1="170" y1="64" x2="208" y2="64" class="arrow" />
-  <line x1="300" y1="64" x2="338" y2="64" class="arrow" />
-  <line x1="460" y1="64" x2="498" y2="64" class="arrow" />
+  <line x1="310" y1="64" x2="343" y2="64" class="arrow" />
+  <line x1="465" y1="64" x2="498" y2="64" class="arrow" />
 
-  <!-- children()/parent() loops back to Node -->
-  <path d="M 590,86 L 590,110 Q 590,120 580,120 L 410,120 Q 400,120 400,110 L 400,88" class="arrow" />
+  <!-- children()/parent() loops back to Element -->
+  <path d="M 590,86 L 590,110 Q 590,120 580,120 L 415,120 Q 405,120 405,110 L 405,88" class="arrow" />
 
 
   <!-- === ACT LANE === -->
@@ -103,10 +103,10 @@
   <rect x="490" y="200" width="100" height="26" class="box-accent" />
   <text x="540" y="218" class="label-bold">Waits</text>
 
-  <!-- .node() / .nodes() -->
-  <rect x="620" y="175" width="75" height="44" class="box" />
-  <text x="657" y="193" class="label-bold">.node()</text>
-  <text x="657" y="209" class="label-sm">.nodes()</text>
+  <!-- .element() / .elements() -->
+  <rect x="620" y="175" width="80" height="44" class="box" />
+  <text x="660" y="193" class="label-bold">.element()</text>
+  <text x="660" y="209" class="label-sm">.elements()</text>
 
   <!-- Act arrows -->
   <line x1="170" y1="197" x2="208" y2="197" class="arrow-accent" />
@@ -121,18 +121,21 @@
   <rect x="70" y="272" width="100" height="34" class="box-accent" />
   <text x="120" y="294" class="label-bold">App</text>
 
-  <!-- subscribe() -->
+  <!-- .subscribe() -->
   <rect x="210" y="272" width="100" height="34" class="box-accent" />
-  <text x="260" y="290" class="label-bold">subscribe()</text>
+  <text x="260" y="294" class="label-bold">.subscribe()</text>
 
-  <!-- Event Stream -->
+  <!-- Subscription -->
   <rect x="345" y="272" width="120" height="34" class="box" />
-  <text x="405" y="290" class="label-bold">Event Stream</text>
+  <text x="405" y="294" class="label-bold">Subscription</text>
 
-  <!-- Coming soon -->
-  <text x="525" y="294" class="label-sm">(coming soon)</text>
+  <!-- recv / wait_for / iter -->
+  <rect x="500" y="265" width="185" height="48" class="box" />
+  <text x="592" y="284" class="label-bold">recv() / wait_for()</text>
+  <text x="592" y="300" class="label-sm">try_recv() / iter()</text>
 
   <!-- Event arrows -->
-  <line x1="170" y1="289" x2="208" y2="289" class="arrow" />
-  <line x1="310" y1="289" x2="343" y2="289" class="arrow" />
+  <line x1="170" y1="289" x2="208" y2="289" class="arrow-accent" />
+  <line x1="310" y1="289" x2="343" y2="289" class="arrow-accent" />
+  <line x1="465" y1="289" x2="498" y2="289" class="arrow" />
 </svg>

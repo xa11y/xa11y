@@ -20,7 +20,6 @@ Integration tests use shared helpers from `xa11y/tests/integ/mod.rs`:
 
 ### Key coverage gaps to address
 
-- **EventProvider** — no tests at all (not yet implemented for any provider)
 - **macOS integration tests** — blocked on `xa11y-macos` provider implementation
 
 ## Design Tenets
