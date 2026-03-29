@@ -8,8 +8,8 @@ use xa11y::*;
 
 /// Helper to build a sample accessibility tree for testing.
 fn sample_tree() -> Tree {
-    let nodes = vec![
-        NodeData {
+    let elements = vec![
+        ElementData {
             role: Role::Window,
             name: Some("My App".to_string()),
             value: None,
@@ -34,7 +34,7 @@ fn sample_tree() -> Tree {
             children_indices: vec![1, 4],
             parent_index: None,
         },
-        NodeData {
+        ElementData {
             role: Role::Toolbar,
             name: Some("Main Toolbar".to_string()),
             value: None,
@@ -59,7 +59,7 @@ fn sample_tree() -> Tree {
             children_indices: vec![2, 3],
             parent_index: Some(0),
         },
-        NodeData {
+        ElementData {
             role: Role::Button,
             name: Some("Back".to_string()),
             value: None,
@@ -88,7 +88,7 @@ fn sample_tree() -> Tree {
             children_indices: vec![],
             parent_index: Some(1),
         },
-        NodeData {
+        ElementData {
             role: Role::TextField,
             name: Some("Address Bar".to_string()),
             value: Some("https://example.com".to_string()),
@@ -118,7 +118,7 @@ fn sample_tree() -> Tree {
             children_indices: vec![],
             parent_index: Some(1),
         },
-        NodeData {
+        ElementData {
             role: Role::WebArea,
             name: None,
             value: None,
@@ -143,7 +143,7 @@ fn sample_tree() -> Tree {
             children_indices: vec![5, 6, 7, 8],
             parent_index: Some(0),
         },
-        NodeData {
+        ElementData {
             role: Role::Heading,
             name: Some("Welcome".to_string()),
             value: None,
@@ -163,7 +163,7 @@ fn sample_tree() -> Tree {
             children_indices: vec![],
             parent_index: Some(4),
         },
-        NodeData {
+        ElementData {
             role: Role::Button,
             name: Some("Submit".to_string()),
             value: None,
@@ -187,7 +187,7 @@ fn sample_tree() -> Tree {
             children_indices: vec![],
             parent_index: Some(4),
         },
-        NodeData {
+        ElementData {
             role: Role::Button,
             name: Some("Cancel".to_string()),
             value: None,
@@ -211,7 +211,7 @@ fn sample_tree() -> Tree {
             children_indices: vec![],
             parent_index: Some(4),
         },
-        NodeData {
+        ElementData {
             role: Role::CheckBox,
             name: Some("I agree to terms".to_string()),
             value: None,
@@ -238,7 +238,7 @@ fn sample_tree() -> Tree {
         },
     ];
 
-    Tree::new("My App".to_string(), Some(1234), (1920, 1080), nodes)
+    Tree::new("My App".to_string(), Some(1234), (1920, 1080), elements)
 }
 
 // ── Tree basic operations ──
@@ -667,8 +667,8 @@ fn tree_json_roundtrip() {
 }
 
 #[test]
-fn node_json_serialization() {
-    let node = NodeData {
+fn element_json_serialization() {
+    let element = ElementData {
         role: Role::Button,
         name: Some("Submit".to_string()),
         value: None,
@@ -697,8 +697,8 @@ fn node_json_serialization() {
         parent_index: None,
     };
 
-    let json = serde_json::to_string_pretty(&node).unwrap();
-    let deserialized: NodeData = serde_json::from_str(&json).unwrap();
+    let json = serde_json::to_string_pretty(&element).unwrap();
+    let deserialized: ElementData = serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized.role, Role::Button);
     assert_eq!(deserialized.name.as_deref(), Some("Submit"));
     assert!(deserialized.states.focused);
@@ -905,11 +905,11 @@ impl Provider for MockProvider {
     fn perform_action(
         &self,
         _tree: &Tree,
-        node: &NodeData,
+        element: &ElementData,
         action: Action,
         _data: Option<ActionData>,
     ) -> xa11y::Result<()> {
-        *self.last_action.lock().unwrap() = Some((node.index, action));
+        *self.last_action.lock().unwrap() = Some((element.index, action));
         Ok(())
     }
 
@@ -922,9 +922,9 @@ impl Provider for MockProvider {
 fn locator_basic_query() {
     let (_, app) = mock_app();
     let loc = app.locator("button[name=\"Submit\"]");
-    let node = loc.node().unwrap();
-    assert_eq!(node.role, Role::Button);
-    assert_eq!(node.name.as_deref(), Some("Submit"));
+    let element = loc.element().unwrap();
+    assert_eq!(element.role, Role::Button);
+    assert_eq!(element.name.as_deref(), Some("Submit"));
     assert!(loc.exists().unwrap());
 }
 
@@ -952,7 +952,7 @@ fn locator_nth() {
     let (_, app) = mock_app();
     // There are 3 buttons: Back(2), Submit(6), Cancel(7)
     let loc = app.locator("button").nth(1);
-    assert_eq!(loc.node().unwrap().name.as_deref(), Some("Submit"));
+    assert_eq!(loc.element().unwrap().name.as_deref(), Some("Submit"));
 }
 
 #[test]
@@ -967,7 +967,7 @@ fn locator_child() {
     let (_, app) = mock_app();
     let loc = app.locator("toolbar").child("button");
     // Toolbar has one button child: "Back"
-    assert_eq!(loc.node().unwrap().name.as_deref(), Some("Back"));
+    assert_eq!(loc.element().unwrap().name.as_deref(), Some("Back"));
 }
 
 #[test]
@@ -975,9 +975,9 @@ fn locator_states() {
     let (_, app) = mock_app();
     // Cancel button is disabled
     let loc = app.locator("button[name=\"Cancel\"]");
-    let node = loc.node().unwrap();
-    assert!(!node.states.enabled);
-    assert!(node.states.visible);
+    let element = loc.element().unwrap();
+    assert!(!element.states.enabled);
+    assert!(element.states.visible);
 }
 
 #[test]

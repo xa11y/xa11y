@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::node::NodeData;
+use crate::element::ElementData;
 
 /// Categories of accessibility events, normalized across platforms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -50,7 +50,7 @@ pub struct Event {
     /// PID of the application that produced this event.
     pub app_pid: u32,
     /// A snapshot of the element that triggered the event, if available.
-    pub target: Option<NodeData>,
+    pub target: Option<ElementData>,
     /// For StateChanged events: which state flag changed.
     pub state_flag: Option<StateFlag>,
     /// For StateChanged events: the new value of the flag.
@@ -170,19 +170,19 @@ pub enum ElementState {
 }
 
 impl ElementState {
-    /// Evaluate whether the condition is met for the given node.
+    /// Evaluate whether the condition is met for the given element.
     ///
-    /// `node` is `None` when no element matched the selector.
-    pub fn is_met(self, node: Option<&NodeData>) -> bool {
+    /// `element` is `None` when no element matched the selector.
+    pub fn is_met(self, element: Option<&ElementData>) -> bool {
         match self {
-            Self::Attached => node.is_some(),
-            Self::Detached => node.is_none(),
-            Self::Visible => node.is_some_and(|n| n.states.visible),
-            Self::Hidden => node.is_none() || node.is_some_and(|n| !n.states.visible),
-            Self::Enabled => node.is_some_and(|n| n.states.enabled),
-            Self::Disabled => node.is_some_and(|n| !n.states.enabled),
-            Self::Focused => node.is_some_and(|n| n.states.focused),
-            Self::Unfocused => node.is_some_and(|n| !n.states.focused),
+            Self::Attached => element.is_some(),
+            Self::Detached => element.is_none(),
+            Self::Visible => element.is_some_and(|e| e.states.visible),
+            Self::Hidden => element.is_none() || element.is_some_and(|e| !e.states.visible),
+            Self::Enabled => element.is_some_and(|e| e.states.enabled),
+            Self::Disabled => element.is_some_and(|e| !e.states.enabled),
+            Self::Focused => element.is_some_and(|e| e.states.focused),
+            Self::Unfocused => element.is_some_and(|e| !e.states.focused),
         }
     }
 

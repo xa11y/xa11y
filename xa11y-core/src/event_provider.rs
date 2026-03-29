@@ -1,8 +1,8 @@
 use std::time::Duration;
 
+use crate::element::ElementData;
 use crate::error::Result;
 use crate::event::{ElementState, Event, EventFilter};
-use crate::node::NodeData;
 use crate::provider::Provider;
 
 /// Optional trait for backends that support event subscriptions.
@@ -21,7 +21,7 @@ pub trait EventProvider: Provider {
         selector: &str,
         state: ElementState,
         timeout: Duration,
-    ) -> Result<Option<NodeData>>;
+    ) -> Result<Option<ElementData>>;
 }
 
 /// A live event subscription. Drop to unsubscribe.

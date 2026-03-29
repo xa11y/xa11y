@@ -4,7 +4,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use xa11y_core::{NodeData, RawPlatformData, Role, StateSet, Tree};
+use xa11y_core::{ElementData, RawPlatformData, Role, StateSet, Tree};
 
 const ROLES: [Role; 33] = [
     Role::Unknown,
@@ -43,7 +43,7 @@ const ROLES: [Role; 33] = [
 ];
 
 #[derive(Arbitrary, Debug)]
-struct FuzzNode {
+struct FuzzElement {
     role_idx: u8,
     name: Option<String>,
     value: Option<String>,
@@ -52,23 +52,23 @@ struct FuzzNode {
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
-    nodes: Vec<FuzzNode>,
+    elements: Vec<FuzzElement>,
     selector: String,
 }
 
-fn build_tree(fuzz_nodes: &[FuzzNode]) -> Tree {
-    let max_nodes = 128usize;
-    let node_count = fuzz_nodes.len().min(max_nodes);
+fn build_tree(fuzz_elements: &[FuzzElement]) -> Tree {
+    let max_elements = 128usize;
+    let element_count = fuzz_elements.len().min(max_elements);
 
-    if node_count == 0 {
+    if element_count == 0 {
         return Tree::new("fuzz-app".to_string(), None, (1920, 1080), vec![]);
     }
 
-    let mut nodes: Vec<NodeData> = Vec::with_capacity(node_count);
-    for i in 0..node_count {
-        let fuzz = &fuzz_nodes[i];
+    let mut elements: Vec<ElementData> = Vec::with_capacity(element_count);
+    for i in 0..element_count {
+        let fuzz = &fuzz_elements[i];
         let role = ROLES[fuzz.role_idx as usize % ROLES.len()];
-        nodes.push(NodeData {
+        elements.push(ElementData {
             role,
             name: fuzz.name.clone(),
             value: fuzz.value.clone(),
@@ -94,27 +94,27 @@ fn build_tree(fuzz_nodes: &[FuzzNode]) -> Tree {
 
     while let Some(parent_idx) = queue.first().copied() {
         queue.remove(0);
-        if next_child >= node_count {
+        if next_child >= element_count {
             break;
         }
-        let desired = (fuzz_nodes[parent_idx].child_count as usize).min(8);
-        let actual = desired.min(node_count - next_child);
+        let desired = (fuzz_elements[parent_idx].child_count as usize).min(8);
+        let actual = desired.min(element_count - next_child);
         for _ in 0..actual {
             let child_idx = next_child;
             next_child += 1;
-            nodes[child_idx].parent_index = Some(parent_idx as u32);
-            nodes[parent_idx].children_indices.push(child_idx as u32);
+            elements[child_idx].parent_index = Some(parent_idx as u32);
+            elements[parent_idx].children_indices.push(child_idx as u32);
             queue.push(child_idx);
         }
-        if next_child >= node_count {
+        if next_child >= element_count {
             break;
         }
     }
 
-    // Remaining unassigned nodes become children of root.
-    while next_child < node_count {
-        nodes[next_child].parent_index = Some(0);
-        nodes[0].children_indices.push(next_child as u32);
+    // Remaining unassigned elements become children of root.
+    while next_child < element_count {
+        elements[next_child].parent_index = Some(0);
+        elements[0].children_indices.push(next_child as u32);
         next_child += 1;
     }
 
@@ -122,12 +122,12 @@ fn build_tree(fuzz_nodes: &[FuzzNode]) -> Tree {
         "fuzz-app".to_string(),
         None,
         (1920, 1080),
-        nodes,
+        elements,
     )
 }
 
 fuzz_target!(|input: FuzzInput| {
-    let tree = build_tree(&input.nodes);
+    let tree = build_tree(&input.elements);
 
     // Query with the fuzz-generated selector. Both parse errors and
     // successful matches are valid outcomes; only panics are bugs.

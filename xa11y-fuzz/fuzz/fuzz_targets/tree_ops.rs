@@ -5,7 +5,7 @@
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use xa11y_core::{NodeData, RawPlatformData, Role, StateSet, Tree};
+use xa11y_core::{ElementData, RawPlatformData, Role, StateSet, Tree};
 
 /// Roles indexed by u8 for fuzzer-driven selection.
 const ROLES: [Role; 33] = [
@@ -45,11 +45,11 @@ const ROLES: [Role; 33] = [
 ];
 
 #[derive(Arbitrary, Debug)]
-struct FuzzNode {
+struct FuzzElement {
     role_idx: u8,
     name: Option<String>,
     value: Option<String>,
-    /// How many children this node should have (clamped later).
+    /// How many children this element should have (clamped later).
     child_count: u8,
 }
 
@@ -59,7 +59,7 @@ struct FuzzInput {
     pid: Option<u32>,
     screen_w: u32,
     screen_h: u32,
-    fuzz_nodes: Vec<FuzzNode>,
+    fuzz_elements: Vec<FuzzElement>,
     /// A selector string to try querying with.
     selector: String,
     /// A name pattern to search for.
@@ -68,12 +68,12 @@ struct FuzzInput {
     role_idx: u8,
 }
 
-/// Build a valid tree from fuzzer-supplied nodes.
+/// Build a valid tree from fuzzer-supplied elements.
 fn build_tree(input: &FuzzInput) -> Tree {
-    let max_nodes = 256usize;
-    let node_count = input.fuzz_nodes.len().min(max_nodes);
+    let max_elements = 256usize;
+    let element_count = input.fuzz_elements.len().min(max_elements);
 
-    if node_count == 0 {
+    if element_count == 0 {
         return Tree::new(
             input.app_name.clone(),
             input.pid,
@@ -82,11 +82,11 @@ fn build_tree(input: &FuzzInput) -> Tree {
         );
     }
 
-    let mut nodes: Vec<NodeData> = Vec::with_capacity(node_count);
-    for i in 0..node_count {
-        let fuzz = &input.fuzz_nodes[i];
+    let mut elements: Vec<ElementData> = Vec::with_capacity(element_count);
+    for i in 0..element_count {
+        let fuzz = &input.fuzz_elements[i];
         let role = ROLES[fuzz.role_idx as usize % ROLES.len()];
-        nodes.push(NodeData {
+        elements.push(ElementData {
             role,
             name: fuzz.name.clone(),
             value: fuzz.value.clone(),
@@ -112,28 +112,28 @@ fn build_tree(input: &FuzzInput) -> Tree {
 
     while let Some(parent_idx) = queue.first().copied() {
         queue.remove(0);
-        if next_child >= node_count {
+        if next_child >= element_count {
             break;
         }
-        let desired = (input.fuzz_nodes[parent_idx].child_count as usize).min(8);
-        let actual = desired.min(node_count - next_child);
+        let desired = (input.fuzz_elements[parent_idx].child_count as usize).min(8);
+        let actual = desired.min(element_count - next_child);
         for _ in 0..actual {
             let child_idx = next_child;
             next_child += 1;
-            nodes[child_idx].parent_index = Some(parent_idx as u32);
-            nodes[parent_idx].children_indices.push(child_idx as u32);
+            elements[child_idx].parent_index = Some(parent_idx as u32);
+            elements[parent_idx].children_indices.push(child_idx as u32);
             queue.push(child_idx);
         }
 
-        if next_child >= node_count {
+        if next_child >= element_count {
             break;
         }
     }
 
-    // Any remaining unassigned nodes become children of the root.
-    while next_child < node_count {
-        nodes[next_child].parent_index = Some(0);
-        nodes[0].children_indices.push(next_child as u32);
+    // Any remaining unassigned elements become children of the root.
+    while next_child < element_count {
+        elements[next_child].parent_index = Some(0);
+        elements[0].children_indices.push(next_child as u32);
         next_child += 1;
     }
 
@@ -141,7 +141,7 @@ fn build_tree(input: &FuzzInput) -> Tree {
         input.app_name.clone(),
         input.pid,
         (input.screen_w.max(1), input.screen_h.max(1)),
-        nodes,
+        elements,
     )
 }
 
@@ -170,15 +170,15 @@ fuzz_target!(|input: FuzzInput| {
     assert_eq!(count, tree.len());
 
     // Exercise children
-    for node in tree.iter() {
-        let _ = tree.children_data(node);
+    for element in tree.iter() {
+        let _ = tree.children_data(element);
     }
 
-    // Exercise subtree on root and a few nodes
+    // Exercise subtree on root and a few elements
     let _ = tree.subtree_indices(root.index).into_iter().filter_map(|idx| tree.get_data(idx)).collect::<Vec<_>>();
     if tree.len() > 1 {
-        if let Some(node) = tree.get_data(1) {
-            let _ = tree.subtree_indices(node.index).into_iter().filter_map(|idx| tree.get_data(idx)).collect::<Vec<_>>();
+        if let Some(element) = tree.get_data(1) {
+            let _ = tree.subtree_indices(element.index).into_iter().filter_map(|idx| tree.get_data(idx)).collect::<Vec<_>>();
         }
     }
 

@@ -5,10 +5,10 @@ use std::sync::Arc;
 use xa11y::*;
 
 /// Get the test app tree, retrying briefly for registration.
-pub fn app_tree() -> Node {
+pub fn app_tree() -> Element {
     for attempt in 0..3 {
         match App::from_name(xa11y::provider().unwrap(), "xa11y") {
-            Ok(app) => return app.nodes().expect("Failed to snapshot app tree"),
+            Ok(app) => return app.elements().expect("Failed to snapshot app tree"),
             Err(_) if attempt < 2 => {
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
@@ -18,24 +18,24 @@ pub fn app_tree() -> Node {
     unreachable!()
 }
 
-/// Query nodes matching a CSS-like selector within a snapshot.
+/// Query elements matching a CSS-like selector within a snapshot.
 ///
-/// Replacement for the old `Node::query()` method — uses the tree directly.
-pub fn query(root: &Node, selector: &str) -> Result<Vec<Node>> {
+/// Replacement for the old `Element::query()` method — uses the tree directly.
+pub fn query(root: &Element, selector: &str) -> Result<Vec<Element>> {
     let indices = root.tree().query_indices(selector)?;
     Ok(indices
         .into_iter()
-        .map(|idx| Node::new(Arc::clone(root.tree()), idx))
+        .map(|idx| Element::new(Arc::clone(root.tree()), idx))
         .collect())
 }
 
-/// Find exactly one node by selector. Panics with tree dump on failure.
-pub fn one(root: &Node, selector: &str) -> Node {
+/// Find exactly one element by selector. Panics with tree dump on failure.
+pub fn one(root: &Element, selector: &str) -> Element {
     let results = query(root, selector)
         .unwrap_or_else(|e| panic!("Selector '{}' failed: {}. Tree:\n{}", selector, e, root));
     assert!(
         results.len() == 1,
-        "Selector '{}' matched {} nodes (expected 1). Tree:\n{}",
+        "Selector '{}' matched {} elements (expected 1). Tree:\n{}",
         selector,
         results.len(),
         root
@@ -43,38 +43,38 @@ pub fn one(root: &Node, selector: &str) -> Node {
     results[0].clone()
 }
 
-/// Find first node whose name contains `substring` (case-insensitive).
-pub fn named(root: &Node, substring: &str) -> Node {
+/// Find first element whose name contains `substring` (case-insensitive).
+pub fn named(root: &Element, substring: &str) -> Element {
     let selector = format!("[name*=\"{}\"]", substring);
     let results = query(root, &selector)
         .unwrap_or_else(|e| panic!("Selector '{}' failed: {}. Tree:\n{}", selector, e, root));
     assert!(
         !results.is_empty(),
-        "No node with name containing '{}'. Tree:\n{}",
+        "No element with name containing '{}'. Tree:\n{}",
         substring,
         root
     );
     results[0].clone()
 }
 
-/// Try to perform an action on a node. Returns the result without panicking.
-pub fn try_act(node: &Node, action: Action) -> Result<()> {
-    try_act_with(node, action, None)
+/// Try to perform an action on an element. Returns the result without panicking.
+pub fn try_act(element: &Element, action: Action) -> Result<()> {
+    try_act_with(element, action, None)
 }
 
-/// Try to perform an action with data on a node. Returns the result without panicking.
-pub fn try_act_with(node: &Node, action: Action, data: Option<ActionData>) -> Result<()> {
-    xa11y::perform_action(node, action, data)
+/// Try to perform an action with data on an element. Returns the result without panicking.
+pub fn try_act_with(element: &Element, action: Action, data: Option<ActionData>) -> Result<()> {
+    xa11y::perform_action(element, action, data)
 }
 
-/// Perform an action on a node, wait briefly, then re-read the tree.
-pub fn act(node: &Node, action: Action) -> Node {
-    act_with(node, action, None)
+/// Perform an action on an element, wait briefly, then re-read the tree.
+pub fn act(element: &Element, action: Action) -> Element {
+    act_with(element, action, None)
 }
 
-/// Perform an action with data on a node, wait, then re-read the tree.
-pub fn act_with(node: &Node, action: Action, data: Option<ActionData>) -> Node {
-    try_act_with(node, action, data)
+/// Perform an action with data on an element, wait, then re-read the tree.
+pub fn act_with(element: &Element, action: Action, data: Option<ActionData>) -> Element {
+    try_act_with(element, action, data)
         .unwrap_or_else(|e| panic!("Action {:?} failed: {}", action, e));
     std::thread::sleep(std::time::Duration::from_millis(100));
     app_tree()

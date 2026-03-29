@@ -1,6 +1,8 @@
 //! Stub backend for non-Windows platforms (allows compilation on all targets).
 
-use xa11y_core::{Action, ActionData, Error, NodeData, PermissionStatus, Provider, Result, Tree};
+use xa11y_core::{
+    Action, ActionData, ElementData, Error, PermissionStatus, Provider, Result, Tree,
+};
 
 #[derive(Default)]
 pub struct WindowsProvider;
@@ -27,7 +29,7 @@ impl Provider for WindowsProvider {
     fn perform_action(
         &self,
         _: &Tree,
-        _: &NodeData,
+        _: &ElementData,
         _: Action,
         _: Option<ActionData>,
     ) -> Result<()> {

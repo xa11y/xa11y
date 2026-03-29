@@ -52,10 +52,10 @@ fuzz_target!(|data: &[u8]| {
             let root = tree.root_data();
             let _ = root.role;
 
-            // Exercise get on all nodes.
-            for node in tree.iter() {
-                let _ = tree.get_data(node.index);
-                let _ = tree.children_data(node);
+            // Exercise get on all elements.
+            for element in tree.iter() {
+                let _ = tree.get_data(element.index);
+                let _ = tree.children_data(element);
             }
 
             let _ = tree.subtree_indices(root.index);

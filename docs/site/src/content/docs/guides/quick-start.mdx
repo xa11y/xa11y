@@ -47,15 +47,15 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
         let calc = App::from_name(provider()?, "Calculator")?;
 
         // Snapshot the tree for debugging
-        let root = calc.nodes()?;
+        let root = calc.elements()?;
         println!("{root}");
 
         // Find all buttons via locator
-        let buttons = calc.locator("button").nodes()?;
+        let buttons = calc.locator("button").elements()?;
         println!("Found {} buttons", buttons.len());
 
-        // Read properties from a specific node
-        let btn = calc.locator("button[name='=']").node()?;
+        // Read properties from a specific element
+        let btn = calc.locator("button[name='=']").element()?;
         println!("role={} name={:?} bounds={:?}", btn.role, btn.name, btn.bounds);
 
         // Locators refetch the tree on every call,
@@ -68,7 +68,7 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
         // Wait for UI changes before continuing
         let result = calc.locator("static_text[name='Result']");
         result.wait_visible(Duration::from_secs(5))?;
-        println!("Result: {:?}", result.node()?.value);
+        println!("Result: {:?}", result.element()?.value);
 
         // List all running apps
         for app in App::all(provider()?)? {
@@ -90,15 +90,15 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
     calc = xa11y.app("Calculator")
 
     # Snapshot the tree for debugging
-    root = calc.nodes()
+    root = calc.elements()
     print(root)
 
     # Find all buttons via locator
-    buttons = calc.locator("button").nodes()
+    buttons = calc.locator("button").elements()
     print(f"Found {len(buttons)} buttons")
 
-    # Read properties from a specific node
-    btn = calc.locator("button[name='=']").node()
+    # Read properties from a specific element
+    btn = calc.locator("button[name='=']").element()
     print(f"role={btn.role} name={btn.name} bounds={btn.bounds}")
 
     # Locators refetch the tree on every call,
@@ -111,7 +111,7 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
     # Wait for UI changes before continuing
     result = calc.locator("static_text[name='Result']")
     result.wait_visible(timeout=5.0)
-    print(f"Result: {result.node().value}")
+    print(f"Result: {result.element().value}")
 
     # List all running apps
     for app in xa11y.apps():

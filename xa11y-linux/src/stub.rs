@@ -1,6 +1,8 @@
 //! Stub backend for non-Linux platforms (allows compilation on all targets).
 
-use xa11y_core::{Action, ActionData, Error, NodeData, PermissionStatus, Provider, Result, Tree};
+use xa11y_core::{
+    Action, ActionData, ElementData, Error, PermissionStatus, Provider, Result, Tree,
+};
 
 #[derive(Default)]
 pub struct LinuxProvider;
@@ -36,7 +38,7 @@ impl Provider for LinuxProvider {
     fn perform_action(
         &self,
         _tree: &Tree,
-        _node: &NodeData,
+        _element: &ElementData,
         _action: Action,
         _data: Option<ActionData>,
     ) -> Result<()> {
