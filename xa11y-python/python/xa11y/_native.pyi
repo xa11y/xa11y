@@ -196,7 +196,7 @@ class Locator:
         """Expand a collapsible element."""
     def collapse(self) -> None:
         """Collapse an expanded element."""
-    def select_item(self) -> None:
+    def select(self) -> None:
         """Select an item (e.g. in a list or tab bar)."""
     def show_menu(self) -> None:
         """Open the context menu for the matched element."""
@@ -222,23 +222,23 @@ class Locator:
         """Scroll the matched element leftward."""
     def scroll_right(self, amount: float = 1.0) -> None:
         """Scroll the matched element rightward."""
-    def wait_visible(self, timeout: float = 5.0) -> None:
-        """Wait until the element is visible (default 5s timeout)."""
-    def wait_attached(self, timeout: float = 5.0) -> None:
-        """Wait until the selector matches an element (default 5s timeout)."""
+    def wait_visible(self, timeout: float = 5.0) -> Node:
+        """Wait until the element is visible (default 5s timeout). Returns the node."""
+    def wait_attached(self, timeout: float = 5.0) -> Node:
+        """Wait until the selector matches an element (default 5s timeout). Returns the node."""
     def wait_detached(self, timeout: float = 5.0) -> None:
         """Wait until the selector no longer matches (default 5s timeout)."""
-    def wait_enabled(self, timeout: float = 5.0) -> None:
-        """Wait until the element is enabled (default 5s timeout)."""
+    def wait_enabled(self, timeout: float = 5.0) -> Node:
+        """Wait until the element is enabled (default 5s timeout). Returns the node."""
     def wait_hidden(self, timeout: float = 5.0) -> None:
         """Wait until the element is hidden (default 5s timeout)."""
-    def wait_disabled(self, timeout: float = 5.0) -> None:
-        """Wait until the element is disabled (default 5s timeout)."""
-    def wait_focused(self, timeout: float = 5.0) -> None:
-        """Wait until the element is focused (default 5s timeout)."""
-    def wait_unfocused(self, timeout: float = 5.0) -> None:
-        """Wait until the element loses focus (default 5s timeout)."""
-    def wait_until(self, predicate: Callable[[Node], bool], timeout: float = 5.0) -> None:
+    def wait_disabled(self, timeout: float = 5.0) -> Node:
+        """Wait until the element is disabled (default 5s timeout). Returns the node."""
+    def wait_focused(self, timeout: float = 5.0) -> Node:
+        """Wait until the element is focused (default 5s timeout). Returns the node."""
+    def wait_unfocused(self, timeout: float = 5.0) -> Node:
+        """Wait until the element loses focus (default 5s timeout). Returns the node."""
+    def wait_until(self, predicate: Callable[[Node | None], bool], timeout: float = 5.0) -> None:
         """Wait until *predicate(node)* returns ``True`` (default 5s timeout)."""
     def __repr__(self) -> str: ...
 

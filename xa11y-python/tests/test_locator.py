@@ -110,8 +110,8 @@ def test_locator_collapse(test_app):
     test_app.locator("list").collapse()
 
 
-def test_locator_select_item(test_app):
-    test_app.locator('list_item[name="Item 1"]').select_item()
+def test_locator_select(test_app):
+    test_app.locator('list_item[name="Item 1"]').select()
 
 
 def test_locator_show_menu(test_app):

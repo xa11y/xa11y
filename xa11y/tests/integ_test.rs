@@ -45,8 +45,8 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn app_target_by_pid() {
-        // Get the test app's PID via ByName, then verify ByPid works
+    fn app_from_pid() {
+        // Get the test app's PID via from_name, then verify from_pid works
         let by_name = h::app_tree();
         let pid = by_name.tree().pid.expect("app tree should have a PID");
         assert!(pid > 0);

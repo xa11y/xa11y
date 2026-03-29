@@ -28,6 +28,7 @@ const AX_VALUE_CGPOINT: i32 = 1;
 const AX_VALUE_CGSIZE: i32 = 2;
 const CF_NUMBER_FLOAT64: i32 = 13;
 const CF_NUMBER_SINT32: i32 = 3;
+// Used by ax_number_i64 helper; kept for completeness alongside other CF_NUMBER constants.
 #[allow(dead_code)]
 const CF_NUMBER_SINT64: i32 = 4;
 
@@ -231,6 +232,7 @@ fn ax_number_f64(element: AXUIElementRef, attribute: &str) -> Option<f64> {
     }
 }
 
+// Symmetric with ax_number_f64; not currently called but kept for future AX attribute reads.
 #[allow(dead_code)]
 fn ax_number_i32(element: AXUIElementRef, attribute: &str) -> Option<i32> {
     let value = ax_attr(element, attribute)?;
@@ -255,6 +257,7 @@ fn ax_number_i32(element: AXUIElementRef, attribute: &str) -> Option<i32> {
     }
 }
 
+// Symmetric with ax_number_f64; not currently called but kept for future AX attribute reads.
 #[allow(dead_code)]
 fn ax_number_i64(element: AXUIElementRef, attribute: &str) -> Option<i64> {
     let value = ax_attr(element, attribute)?;
@@ -496,6 +499,7 @@ fn map_ax_action(name: &str) -> Option<Action> {
     }
 }
 
+// Used only in unit tests; perform_action inlines the mapping for richer error handling.
 #[allow(dead_code)]
 fn xa11y_action_to_ax(action: Action) -> Option<&'static str> {
     match action {
@@ -688,7 +692,7 @@ impl MacOSProvider {
         apps
     }
 
-    /// Build a tree from an app element (shared by get_tree_by_name/pid).
+    /// Build a tree from an app element (shared by resolve_pid_by_name and get_tree).
     fn build_tree(&self, app_element: AXElement, pid: i32, app_name: &str) -> Result<Tree> {
         let screen_size = Self::detect_screen_size();
         let mut nodes = Vec::new();
@@ -1352,7 +1356,7 @@ unsafe extern "C" fn ax_observer_callback(
 }
 
 impl MacOSProvider {
-    /// Shared subscribe implementation used by subscribe_by_name/subscribe_by_pid.
+    /// Shared subscribe implementation used by subscribe.
     fn subscribe_impl(
         &self,
         pid: i32,

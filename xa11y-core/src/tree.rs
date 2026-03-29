@@ -11,9 +11,10 @@ use crate::selector::Selector;
 /// The tree is a flattened snapshot — nodes are stored in DFS order and
 /// reference each other by internal indices.
 ///
-/// **This type is internal to provider implementations.** End users should
-/// use [`Node`](crate::Node) (returned by `xa11y::app()`, etc.) which wraps
-/// a `Tree` with navigation methods.
+/// This is a public type representing an accessibility tree snapshot.
+/// End users typically interact with it through [`Node`](crate::Node)
+/// (returned by `xa11y::app()`, etc.) which wraps a `Tree` with
+/// navigation methods.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tree {
     /// Application name

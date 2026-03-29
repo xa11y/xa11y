@@ -425,7 +425,13 @@ impl Locator {
     fn exists(&self) -> PyResult<bool> {
         match self.resolve() {
             Ok(_) => Ok(true),
-            Err(_) => Ok(false),
+            Err(e) => Python::with_gil(|py| {
+                if e.is_instance_of::<SelectorNotMatchedError>(py) {
+                    Ok(false)
+                } else {
+                    Err(e)
+                }
+            }),
         }
     }
 
@@ -475,7 +481,7 @@ impl Locator {
         self.perform_action(xa11y::Action::Collapse, None)
     }
 
-    fn select_item(&self) -> PyResult<()> {
+    fn select(&self) -> PyResult<()> {
         self.perform_action(xa11y::Action::Select, None)
     }
 
@@ -558,50 +564,93 @@ impl Locator {
     // ── Wait operations ──
 
     #[pyo3(signature = (timeout=5.0))]
-    fn wait_visible(&self, timeout: f64) -> PyResult<()> {
-        self.poll_state(WaitState::Visible, Duration::from_secs_f64(timeout))
+    fn wait_visible(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Node>> {
+        let nd = self
+            .poll_state(
+                xa11y::ElementState::Visible,
+                Duration::from_secs_f64(timeout),
+            )?
+            .expect("visible wait must return a node");
+        make_py_node(py, &nd)
     }
 
     #[pyo3(signature = (timeout=5.0))]
-    fn wait_attached(&self, timeout: f64) -> PyResult<()> {
-        self.poll_state(WaitState::Attached, Duration::from_secs_f64(timeout))
+    fn wait_attached(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Node>> {
+        let nd = self
+            .poll_state(
+                xa11y::ElementState::Attached,
+                Duration::from_secs_f64(timeout),
+            )?
+            .expect("attached wait must return a node");
+        make_py_node(py, &nd)
     }
 
     #[pyo3(signature = (timeout=5.0))]
     fn wait_detached(&self, timeout: f64) -> PyResult<()> {
-        self.poll_state(WaitState::Detached, Duration::from_secs_f64(timeout))
+        self.poll_state(
+            xa11y::ElementState::Detached,
+            Duration::from_secs_f64(timeout),
+        )?;
+        Ok(())
     }
 
     #[pyo3(signature = (timeout=5.0))]
-    fn wait_enabled(&self, timeout: f64) -> PyResult<()> {
-        self.poll_state(WaitState::Enabled, Duration::from_secs_f64(timeout))
+    fn wait_enabled(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Node>> {
+        let nd = self
+            .poll_state(
+                xa11y::ElementState::Enabled,
+                Duration::from_secs_f64(timeout),
+            )?
+            .expect("enabled wait must return a node");
+        make_py_node(py, &nd)
     }
 
     #[pyo3(signature = (timeout=5.0))]
     fn wait_hidden(&self, timeout: f64) -> PyResult<()> {
-        self.poll_state(WaitState::Hidden, Duration::from_secs_f64(timeout))
+        self.poll_state(
+            xa11y::ElementState::Hidden,
+            Duration::from_secs_f64(timeout),
+        )?;
+        Ok(())
     }
 
     #[pyo3(signature = (timeout=5.0))]
-    fn wait_disabled(&self, timeout: f64) -> PyResult<()> {
-        self.poll_state(WaitState::Disabled, Duration::from_secs_f64(timeout))
+    fn wait_disabled(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Node>> {
+        let nd = self
+            .poll_state(
+                xa11y::ElementState::Disabled,
+                Duration::from_secs_f64(timeout),
+            )?
+            .expect("disabled wait must return a node");
+        make_py_node(py, &nd)
     }
 
     #[pyo3(signature = (timeout=5.0))]
-    fn wait_focused(&self, timeout: f64) -> PyResult<()> {
-        self.poll_state(WaitState::Focused, Duration::from_secs_f64(timeout))
+    fn wait_focused(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Node>> {
+        let nd = self
+            .poll_state(
+                xa11y::ElementState::Focused,
+                Duration::from_secs_f64(timeout),
+            )?
+            .expect("focused wait must return a node");
+        make_py_node(py, &nd)
     }
 
     #[pyo3(signature = (timeout=5.0))]
-    fn wait_unfocused(&self, timeout: f64) -> PyResult<()> {
-        self.poll_state(WaitState::Unfocused, Duration::from_secs_f64(timeout))
+    fn wait_unfocused(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Node>> {
+        let nd = self
+            .poll_state(
+                xa11y::ElementState::Unfocused,
+                Duration::from_secs_f64(timeout),
+            )?
+            .expect("unfocused wait must return a node");
+        make_py_node(py, &nd)
     }
 
     /// Wait until an arbitrary predicate is satisfied.
     ///
-    /// The callback receives a dict with the node's properties when the element
-    /// exists, or ``None`` when no element matches the selector. Return ``True``
-    /// to stop waiting.
+    /// The callback receives a ``Node`` when the element exists, or ``None``
+    /// when no element matches the selector. Return ``True`` to stop waiting.
     ///
     /// Example::
     ///
@@ -614,17 +663,6 @@ impl Locator {
     fn __repr__(&self) -> String {
         format!("Locator(selector='{}')", self.selector)
     }
-}
-
-enum WaitState {
-    Attached,
-    Detached,
-    Visible,
-    Hidden,
-    Enabled,
-    Disabled,
-    Focused,
-    Unfocused,
 }
 
 impl Locator {
@@ -690,7 +728,11 @@ impl Locator {
         }
     }
 
-    fn poll_state(&self, state: WaitState, timeout: Duration) -> PyResult<()> {
+    fn poll_state(
+        &self,
+        state: xa11y::ElementState,
+        timeout: Duration,
+    ) -> PyResult<Option<xa11y::NodeData>> {
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
 
@@ -700,29 +742,15 @@ impl Locator {
                 return Err(to_py_err(xa11y::Error::Timeout { elapsed }));
             }
 
-            let tree_result = self.provider.get_tree(self.pid);
-            let states = tree_result.ok().and_then(|tree| {
-                tree.query(&self.selector).ok().and_then(|matches| {
-                    let idx = self.nth.unwrap_or(0);
-                    matches.get(idx).map(|n| n.states.clone())
-                })
-            });
+            let node: Option<xa11y::NodeData> = (|| {
+                let tree = self.provider.get_tree(self.pid).ok()?;
+                let matches = tree.query(&self.selector).ok()?;
+                let idx = self.nth.unwrap_or(0);
+                matches.get(idx).copied().cloned()
+            })();
 
-            let met = match state {
-                WaitState::Attached => states.is_some(),
-                WaitState::Detached => states.is_none(),
-                WaitState::Visible => states.as_ref().is_some_and(|s| s.visible),
-                WaitState::Hidden => {
-                    states.is_none() || states.as_ref().is_some_and(|s| !s.visible)
-                }
-                WaitState::Enabled => states.as_ref().is_some_and(|s| s.enabled),
-                WaitState::Disabled => states.as_ref().is_some_and(|s| !s.enabled),
-                WaitState::Focused => states.as_ref().is_some_and(|s| s.focused),
-                WaitState::Unfocused => states.as_ref().is_some_and(|s| !s.focused),
-            };
-
-            if met {
-                return Ok(());
+            if state.is_met(node.as_ref()) {
+                return Ok(node);
             }
 
             std::thread::sleep(poll_interval);
