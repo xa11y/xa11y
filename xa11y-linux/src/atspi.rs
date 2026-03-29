@@ -733,6 +733,8 @@ impl Provider for LinuxProvider {
             let child_idx = nodes.len() as u32;
             root_children.push(child_idx);
             self.traverse(child, &mut nodes, &mut refs, Some(0), 1, screen_size);
+            // Set PID on the app node so App::all() can use it
+            nodes[child_idx as usize].pid = self.get_app_pid(child);
         }
 
         nodes[0].children_indices = root_children;

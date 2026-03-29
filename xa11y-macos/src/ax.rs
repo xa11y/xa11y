@@ -1005,6 +1005,8 @@ impl Provider for MacOSProvider {
                 screen_size,
                 &mut visited,
             );
+            // Set PID on the app node so App::all() can use it
+            nodes[child_idx as usize].pid = Some(*pid as u32);
         }
 
         nodes[0].children_indices = root_children;

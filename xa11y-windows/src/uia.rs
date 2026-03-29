@@ -94,51 +94,6 @@ impl WindowsProvider {
         }
     }
 
-    /// List running GUI applications by enumerating top-level windows.
-    fn list_gui_apps(&self) -> Vec<(u32, String)> {
-        let root = match unsafe { self.automation.GetRootElement() } {
-            Ok(r) => r,
-            Err(_) => return vec![],
-        };
-
-        let condition = match unsafe {
-            self.automation.CreatePropertyCondition(
-                UIA_ControlTypePropertyId,
-                &windows::core::VARIANT::from(UIA_WindowControlTypeId.0),
-            )
-        } {
-            Ok(c) => c,
-            Err(_) => return vec![],
-        };
-
-        let elements = match unsafe { root.FindAll(TreeScope_Children, &condition) } {
-            Ok(e) => e,
-            Err(_) => return vec![],
-        };
-
-        let count = unsafe { elements.Length() }.unwrap_or(0);
-        let mut seen = HashSet::new();
-        let mut apps = Vec::new();
-
-        for i in 0..count {
-            if let Ok(el) = unsafe { elements.GetElement(i) } {
-                let pid = unsafe { el.CurrentProcessId() }.unwrap_or(0) as u32;
-                if pid == 0 || !seen.insert(pid) {
-                    continue;
-                }
-                let name = unsafe { el.CurrentName() }
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
-                if name.is_empty() {
-                    continue;
-                }
-                apps.push((pid, name));
-            }
-        }
-
-        apps
-    }
-
     fn find_app_by_name(&self, name: &str) -> Result<(IUIAutomationElement, u32, String)> {
         let name_lower = name.to_lowercase();
         let root = unsafe { self.automation.GetRootElement() }.map_err(|e| Error::Platform {
@@ -565,6 +520,8 @@ impl Provider for WindowsProvider {
                 let child_idx = nodes.len() as u32;
                 root_children.push(child_idx);
                 self.traverse(&el, &mut nodes, &mut elements, Some(0), 1, screen_size);
+                // Set PID on the app node so App::all() can use it
+                nodes[child_idx as usize].pid = Some(pid);
             }
         }
 
