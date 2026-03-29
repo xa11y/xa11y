@@ -6,7 +6,7 @@ use std::time::Duration;
 use xa11y_core::{
     Action, ActionData, CancelHandle, ElementState, Error, Event, EventFilter, EventKind,
     EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, Rect, Result, Role,
-    StateSet, Subscription, Toggled, Tree, WindowHandle,
+    StateSet, Subscription, Toggled, Tree,
 };
 use zbus::blocking::{Connection, Proxy};
 
@@ -668,21 +668,17 @@ impl LinuxProvider {
 }
 
 impl Provider for LinuxProvider {
-    fn get_tree_by_name(&self, name: &str) -> Result<Tree> {
+    fn resolve_pid_by_name(&self, name: &str) -> Result<u32> {
         let app_ref = self.find_app_by_name(name)?;
-        self.build_tree(&app_ref, name)
+        self.get_app_pid(&app_ref)
+            .ok_or_else(|| Error::AppNotFound {
+                target: name.to_string(),
+            })
     }
 
-    fn get_tree_by_pid(&self, pid: u32) -> Result<Tree> {
+    fn get_tree(&self, pid: u32) -> Result<Tree> {
         let app_ref = self.find_app_by_pid(pid)?;
         self.build_tree(&app_ref, &format!("pid:{pid}"))
-    }
-
-    fn get_tree_by_window(&self, _handle: &WindowHandle) -> Result<Tree> {
-        Err(Error::Platform {
-            code: -1,
-            message: "ByWindow not supported on Linux AT-SPI2".to_string(),
-        })
     }
 
     fn get_apps(&self) -> Result<Tree> {
@@ -1039,13 +1035,12 @@ impl Provider for LinuxProvider {
 // ── EventProvider ────────────────────────────────────────────────────────────
 
 impl LinuxProvider {
-    /// Shared subscribe implementation. `fetch_tree` is a closure that
-    /// fetches the tree on the background polling thread.
+    /// Shared subscribe implementation.
     fn subscribe_impl(
         &self,
         app_name: String,
         app_pid: u32,
-        fetch_tree: impl Fn(&LinuxProvider) -> Result<Tree> + Send + 'static,
+        pid: u32,
         filter: EventFilter,
     ) -> Result<Subscription> {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -1060,7 +1055,7 @@ impl LinuxProvider {
             while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(100));
 
-                let tree = match fetch_tree(&poll_provider) {
+                let tree = match poll_provider.get_tree(pid) {
                     Ok(t) => t,
                     Err(_) => continue,
                 };
@@ -1132,7 +1127,7 @@ impl LinuxProvider {
 
     fn wait_for_impl(
         &self,
-        fetch_tree: impl Fn(&LinuxProvider) -> Result<Tree>,
+        pid: u32,
         selector: &str,
         state: ElementState,
         timeout: Duration,
@@ -1146,7 +1141,7 @@ impl LinuxProvider {
                 return Err(Error::Timeout { elapsed });
             }
 
-            let tree = fetch_tree(self)?;
+            let tree = self.get_tree(pid)?;
             let matches = tree.query(selector).ok();
             let node = matches.as_ref().and_then(|m| m.first().copied());
 
@@ -1160,69 +1155,25 @@ impl LinuxProvider {
 }
 
 impl EventProvider for LinuxProvider {
-    fn subscribe_by_name(&self, name: &str, filter: EventFilter) -> Result<Subscription> {
-        let app_ref = self.find_app_by_name(name)?;
-        let app_pid = self.get_app_pid(&app_ref).unwrap_or(0);
-        let app_name = self.get_name(&app_ref).unwrap_or_default();
-        let name_owned = name.to_string();
-        self.subscribe_impl(
-            app_name,
-            app_pid,
-            move |p| p.get_tree_by_name(&name_owned),
-            filter,
-        )
-    }
-
-    fn subscribe_by_pid(&self, pid: u32, filter: EventFilter) -> Result<Subscription> {
+    fn subscribe(&self, pid: u32, filter: EventFilter) -> Result<Subscription> {
         let app_ref = self.find_app_by_pid(pid)?;
         let app_name = self.get_name(&app_ref).unwrap_or_default();
-        self.subscribe_impl(app_name, pid, move |p| p.get_tree_by_pid(pid), filter)
+        self.subscribe_impl(app_name, pid, pid, filter)
     }
 
-    fn wait_for_event_by_name(
-        &self,
-        name: &str,
-        filter: EventFilter,
-        timeout: Duration,
-    ) -> Result<Event> {
-        let sub = self.subscribe_by_name(name, filter)?;
+    fn wait_for_event(&self, pid: u32, filter: EventFilter, timeout: Duration) -> Result<Event> {
+        let sub = self.subscribe(pid, filter)?;
         self.wait_for_event_impl(sub, timeout)
     }
 
-    fn wait_for_event_by_pid(
-        &self,
-        pid: u32,
-        filter: EventFilter,
-        timeout: Duration,
-    ) -> Result<Event> {
-        let sub = self.subscribe_by_pid(pid, filter)?;
-        self.wait_for_event_impl(sub, timeout)
-    }
-
-    fn wait_for_by_name(
-        &self,
-        name: &str,
-        selector: &str,
-        state: ElementState,
-        timeout: Duration,
-    ) -> Result<Option<NodeData>> {
-        let name_owned = name.to_string();
-        self.wait_for_impl(
-            |p| p.get_tree_by_name(&name_owned),
-            selector,
-            state,
-            timeout,
-        )
-    }
-
-    fn wait_for_by_pid(
+    fn wait_for(
         &self,
         pid: u32,
         selector: &str,
         state: ElementState,
         timeout: Duration,
     ) -> Result<Option<NodeData>> {
-        self.wait_for_impl(|p| p.get_tree_by_pid(pid), selector, state, timeout)
+        self.wait_for_impl(pid, selector, state, timeout)
     }
 }
 

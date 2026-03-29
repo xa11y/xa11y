@@ -5,7 +5,7 @@ use crate::action::{Action, ActionData};
 use crate::error::{Error, Result};
 use crate::event::ElementState;
 use crate::node::{Node, NodeData};
-use crate::provider::{AppLookup, Provider};
+use crate::provider::Provider;
 use crate::tree::Tree;
 
 /// A lazy element descriptor that re-resolves against a fresh accessibility
@@ -31,7 +31,7 @@ use crate::tree::Tree;
 /// ```
 pub struct Locator {
     provider: Arc<dyn Provider>,
-    lookup: AppLookup,
+    pid: u32,
     selector: String,
     /// Which match to select (0-based). `None` means first match.
     nth: Option<usize>,
@@ -48,10 +48,10 @@ struct Resolved {
 impl Locator {
     /// Create a new Locator.
     #[doc(hidden)]
-    pub fn new(provider: Arc<dyn Provider>, lookup: AppLookup, selector: &str) -> Self {
+    pub fn new(provider: Arc<dyn Provider>, pid: u32, selector: &str) -> Self {
         Self {
             provider,
-            lookup,
+            pid,
             selector: selector.to_string(),
             nth: None,
         }
@@ -98,10 +98,10 @@ impl Locator {
         &self.provider
     }
 
-    /// Get the lookup key used by this locator.
+    /// Get the PID used by this locator.
     #[doc(hidden)]
-    pub fn lookup(&self) -> &AppLookup {
-        &self.lookup
+    pub fn pid(&self) -> u32 {
+        self.pid
     }
 
     /// Get the nth index, if set.
@@ -114,7 +114,7 @@ impl Locator {
 
     /// Snapshot the tree and resolve the selector to a single node.
     fn resolve(&self) -> Result<Resolved> {
-        let tree = self.lookup.fetch_tree(&*self.provider)?;
+        let tree = self.provider.get_tree(self.pid)?;
         let matches = tree.query(&self.selector)?;
         let idx = self.nth.unwrap_or(0);
         let node = matches.get(idx).ok_or_else(|| Error::SelectorNotMatched {
@@ -139,7 +139,7 @@ impl Locator {
 
     /// Count matching elements in the current tree.
     pub fn count(&self) -> Result<usize> {
-        let tree = self.lookup.fetch_tree(&*self.provider)?;
+        let tree = self.provider.get_tree(self.pid)?;
         let matches = tree.query(&self.selector)?;
         Ok(matches.len())
     }
@@ -156,7 +156,7 @@ impl Locator {
     /// All returned nodes share the same snapshot, so parent/children
     /// navigation is consistent across the result set.
     pub fn nodes(&self) -> Result<Vec<Node>> {
-        let tree = self.lookup.fetch_tree(&*self.provider)?;
+        let tree = self.provider.get_tree(self.pid)?;
         let indices: Vec<u32> = tree
             .query(&self.selector)?
             .iter()
@@ -373,7 +373,7 @@ impl Locator {
                 return Err(Error::Timeout { elapsed });
             }
 
-            let tree = self.lookup.fetch_tree(&*self.provider)?;
+            let tree = self.provider.get_tree(self.pid)?;
             let matches = tree.query(&self.selector).ok();
             let idx = self.nth.unwrap_or(0);
             let matched_index = matches.as_ref().and_then(|m| m.get(idx).map(|n| n.index));

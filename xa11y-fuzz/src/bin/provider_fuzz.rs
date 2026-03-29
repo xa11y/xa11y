@@ -306,7 +306,7 @@ mod provider_fuzz {
 
         fn ensure_tree(&mut self) {
             if self.tree.is_none() {
-                match self.provider.get_tree_by_name("xa11y") {
+                match self.provider.get_tree(self.test_app_pid) {
                     Ok(tree) => self.tree = Some(tree),
                     Err(e) => self.log(&format!("ensure_tree failed: {}", e)),
                 }
@@ -316,9 +316,9 @@ mod provider_fuzz {
 
     // ── Operations ───────────────────────────────────────────────────────────
 
-    fn op_get_tree_by_name(state: &mut FuzzState) {
-        state.log("get_tree_by_name(\"xa11y\")");
-        match state.provider.get_tree_by_name("xa11y") {
+    fn op_get_tree(state: &mut FuzzState) {
+        state.log(&format!("get_tree({})", state.test_app_pid));
+        match state.provider.get_tree(state.test_app_pid) {
             Ok(tree) => {
                 inspect_tree(&tree, &mut state.rng);
                 state.tree = Some(tree);
@@ -330,41 +330,22 @@ mod provider_fuzz {
         }
     }
 
-    fn op_get_tree_by_pid(state: &mut FuzzState) {
-        state.log(&format!("get_tree_by_pid({})", state.test_app_pid));
-        match state.provider.get_tree_by_pid(state.test_app_pid) {
-            Ok(tree) => {
-                inspect_tree(&tree, &mut state.rng);
-                state.tree = Some(tree);
-            }
-            Err(e) => {
-                state.log(&format!("  -> error (expected): {}", e));
-                state.errors += 1;
-            }
-        }
-    }
-
-    fn op_get_tree_by_name_not_found(state: &mut FuzzState) {
-        state.log("get_tree_by_name(\"nonexistent_app_XYZ\")");
-        let result = state.provider.get_tree_by_name("nonexistent_app_XYZ_999");
+    fn op_resolve_pid_not_found(state: &mut FuzzState) {
+        state.log("resolve_pid_by_name(\"nonexistent_app_XYZ_999\")");
+        let result = state
+            .provider
+            .resolve_pid_by_name("nonexistent_app_XYZ_999");
         assert!(result.is_err(), "Expected AppNotFound for bogus app name");
         state.errors += 1;
     }
 
-    fn op_get_tree_by_pid_not_found(state: &mut FuzzState) {
-        state.log("get_tree_by_pid(99999)");
-        let result = state.provider.get_tree_by_pid(99999);
+    fn op_get_tree_not_found(state: &mut FuzzState) {
+        state.log("get_tree(99999)");
+        let result = state.provider.get_tree(99999);
         match result {
             Ok(tree) => inspect_tree(&tree, &mut state.rng),
             Err(_) => state.errors += 1,
         }
-    }
-
-    fn op_get_tree_by_window(state: &mut FuzzState) {
-        state.log("get_tree_by_window -> expected error");
-        let result = state.provider.get_tree_by_window(&WindowHandle::MacOS(0));
-        assert!(result.is_err(), "Expected ByWindow to fail");
-        state.errors += 1;
     }
 
     fn op_get_apps(state: &mut FuzzState) {
@@ -692,15 +673,9 @@ mod provider_fuzz {
 
         type OpFn = fn(&mut FuzzState);
         let ops: Vec<(u32, &str, OpFn)> = vec![
-            (15, "get_tree_by_name", op_get_tree_by_name as OpFn),
-            (8, "get_tree_by_pid", op_get_tree_by_pid),
-            (
-                2,
-                "get_tree_by_name_not_found",
-                op_get_tree_by_name_not_found,
-            ),
-            (1, "get_tree_by_pid_not_found", op_get_tree_by_pid_not_found),
-            (1, "get_tree_by_window", op_get_tree_by_window),
+            (20, "get_tree", op_get_tree as OpFn),
+            (2, "resolve_pid_not_found", op_resolve_pid_not_found),
+            (1, "get_tree_not_found", op_get_tree_not_found),
             (1, "get_apps", op_get_apps),
             (1, "check_permissions", op_check_permissions),
             (20, "action_on_node", op_action_on_node),

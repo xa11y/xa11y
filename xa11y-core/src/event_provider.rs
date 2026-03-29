@@ -8,39 +8,14 @@ use crate::provider::Provider;
 /// Optional trait for backends that support event subscriptions.
 /// Extends Provider with reactive capabilities.
 pub trait EventProvider: Provider {
-    /// Subscribe to events for an app identified by name.
-    fn subscribe_by_name(&self, name: &str, filter: EventFilter) -> Result<Subscription>;
+    /// Subscribe to events for an application by PID.
+    fn subscribe(&self, pid: u32, filter: EventFilter) -> Result<Subscription>;
 
-    /// Subscribe to events for an app identified by PID.
-    fn subscribe_by_pid(&self, pid: u32, filter: EventFilter) -> Result<Subscription>;
+    /// Wait for a single event matching the filter, with timeout.
+    fn wait_for_event(&self, pid: u32, filter: EventFilter, timeout: Duration) -> Result<Event>;
 
-    /// Wait for a single event matching the filter, with timeout (by name).
-    fn wait_for_event_by_name(
-        &self,
-        name: &str,
-        filter: EventFilter,
-        timeout: Duration,
-    ) -> Result<Event>;
-
-    /// Wait for a single event matching the filter, with timeout (by PID).
-    fn wait_for_event_by_pid(
-        &self,
-        pid: u32,
-        filter: EventFilter,
-        timeout: Duration,
-    ) -> Result<Event>;
-
-    /// Wait for an element to reach a state (by name).
-    fn wait_for_by_name(
-        &self,
-        name: &str,
-        selector: &str,
-        state: ElementState,
-        timeout: Duration,
-    ) -> Result<Option<NodeData>>;
-
-    /// Wait for an element to reach a state (by PID).
-    fn wait_for_by_pid(
+    /// Wait for an element matching the selector to reach the desired state.
+    fn wait_for(
         &self,
         pid: u32,
         selector: &str,

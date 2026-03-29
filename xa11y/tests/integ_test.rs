@@ -1467,8 +1467,9 @@ mod tests {
         let ep = xa11y::create_event_provider().expect("EventProvider unavailable");
         let root = h::app_tree();
 
+        let pid = ep.resolve_pid_by_name("xa11y").unwrap();
         let sub = ep
-            .subscribe_by_name("xa11y", EventFilter::kinds(&[EventKind::FocusChanged]))
+            .subscribe(pid, EventFilter::kinds(&[EventKind::FocusChanged]))
             .unwrap();
 
         // Trigger a focus change
@@ -1495,9 +1496,11 @@ mod tests {
         use std::time::Duration;
         let ep = xa11y::create_event_provider().expect("EventProvider unavailable");
 
+        let pid = ep.resolve_pid_by_name("xa11y").unwrap();
+
         // Wait for an event with a very short timeout — should timeout
-        let result = ep.wait_for_event_by_name(
-            "xa11y",
+        let result = ep.wait_for_event(
+            pid,
             EventFilter::kinds(&[EventKind::Alert]),
             Duration::from_millis(100),
         );
@@ -1514,9 +1517,11 @@ mod tests {
         use std::time::Duration;
         let ep = xa11y::create_event_provider().expect("EventProvider unavailable");
 
+        let pid = ep.resolve_pid_by_name("xa11y").unwrap();
+
         // Wait for Submit button to be attached (it already exists)
-        let result = ep.wait_for_by_name(
-            "xa11y",
+        let result = ep.wait_for(
+            pid,
             "button[name=\"Submit\"]",
             ElementState::Attached,
             Duration::from_secs(2),

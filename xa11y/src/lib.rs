@@ -30,22 +30,19 @@
 
 use std::sync::{Arc, OnceLock};
 
-// Re-export public types. Tree is exported because Provider trait methods reference it,
-// but end users should interact with App/Node/Locator, not Tree directly.
+// Re-export public types.
 pub use xa11y_core::{
     Action, ActionData, App, CancelHandle, ElementState, Error, Event, EventFilter, EventKind,
     EventReceiver, Locator, Node, NodeData, PermissionStatus, RawPlatformData, Rect, Result, Role,
-    StateFlag, StateSet, Subscription, TextChangeData, TextChangeType, Toggled, Tree, WindowHandle,
+    StateFlag, StateSet, Subscription, TextChangeData, TextChangeType, Toggled, Tree,
 };
 
 // Provider traits are implementation details used by platform backends and Python bindings.
 #[doc(hidden)]
-pub use xa11y_core::{AppLookup, EventProvider, Provider};
+pub use xa11y_core::{EventProvider, Provider};
 
 // ── Internal singleton ──────────────────────────────────────────────────────
 
-// Use Box::leak so the provider is never dropped — avoids Windows COM
-// teardown crashes (STATUS_ACCESS_VIOLATION at process exit).
 static PROVIDER: OnceLock<std::result::Result<&'static dyn Provider, String>> = OnceLock::new();
 
 fn get_provider_ref() -> Result<&'static dyn Provider> {
@@ -63,19 +60,15 @@ fn get_provider_ref() -> Result<&'static dyn Provider> {
         })
 }
 
-/// Wrapper that lets a `&'static dyn Provider` be shared as `Arc<dyn Provider>`
-/// for use with `App` and `Locator`.
+/// Wrapper that lets a `&'static dyn Provider` be shared as `Arc<dyn Provider>`.
 struct StaticProviderRef(&'static dyn Provider);
 
 impl Provider for StaticProviderRef {
-    fn get_tree_by_name(&self, name: &str) -> Result<xa11y_core::Tree> {
-        self.0.get_tree_by_name(name)
+    fn resolve_pid_by_name(&self, name: &str) -> Result<u32> {
+        self.0.resolve_pid_by_name(name)
     }
-    fn get_tree_by_pid(&self, pid: u32) -> Result<xa11y_core::Tree> {
-        self.0.get_tree_by_pid(pid)
-    }
-    fn get_tree_by_window(&self, handle: &WindowHandle) -> Result<xa11y_core::Tree> {
-        self.0.get_tree_by_window(handle)
+    fn get_tree(&self, pid: u32) -> Result<xa11y_core::Tree> {
+        self.0.get_tree(pid)
     }
     fn get_apps(&self) -> Result<xa11y_core::Tree> {
         self.0.get_apps()
@@ -102,9 +95,6 @@ pub fn provider() -> Result<Arc<dyn Provider>> {
 }
 
 /// Perform an action on a node from a specific snapshot.
-///
-/// Uses the node's snapshot to identify the element — does NOT refetch.
-/// For actions that always use fresh data, use a [`Locator`] instead.
 #[cfg(feature = "testing")]
 pub fn perform_action(node: &Node, action: Action, data: Option<ActionData>) -> Result<()> {
     let tree = node.tree();
@@ -121,9 +111,6 @@ pub fn check_permissions() -> Result<PermissionStatus> {
 
 // ── Platform provider construction (internal) ───────────────────────────────
 
-/// Create a new platform-appropriate accessibility provider.
-///
-/// Returns a fresh provider instance (not the global singleton).
 #[doc(hidden)]
 #[cfg(feature = "testing")]
 pub fn create_provider() -> Result<Arc<dyn Provider>> {
@@ -135,17 +122,14 @@ fn create_provider_boxed() -> Result<Box<dyn Provider>> {
     {
         Ok(Box::new(xa11y_macos::MacOSProvider::new()?))
     }
-
     #[cfg(target_os = "windows")]
     {
         Ok(Box::new(xa11y_windows::WindowsProvider::new()?))
     }
-
     #[cfg(target_os = "linux")]
     {
         Ok(Box::new(xa11y_linux::LinuxProvider::new()?))
     }
-
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         Err(Error::Platform {
@@ -155,10 +139,6 @@ fn create_provider_boxed() -> Result<Box<dyn Provider>> {
     }
 }
 
-/// Create a platform-appropriate event provider (supports subscribe/wait).
-///
-/// Returns a boxed `EventProvider` trait object for the current platform.
-/// EventProvider extends Provider with event subscription capabilities.
 #[doc(hidden)]
 #[cfg(feature = "testing")]
 pub fn create_event_provider() -> Result<Box<dyn EventProvider>> {
@@ -166,17 +146,14 @@ pub fn create_event_provider() -> Result<Box<dyn EventProvider>> {
     {
         Ok(Box::new(xa11y_macos::MacOSProvider::new()?))
     }
-
     #[cfg(target_os = "windows")]
     {
         Ok(Box::new(xa11y_windows::WindowsProvider::new()?))
     }
-
     #[cfg(target_os = "linux")]
     {
         Ok(Box::new(xa11y_linux::LinuxProvider::new()?))
     }
-
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         Err(Error::Platform {

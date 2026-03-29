@@ -20,8 +20,6 @@ pub use event::{
 pub use event_provider::{CancelHandle, EventProvider, EventReceiver, Subscription};
 pub use locator::Locator;
 pub use node::{Node, NodeData, RawPlatformData, Rect, StateSet, Toggled};
-#[doc(hidden)]
-pub use provider::AppLookup;
-pub use provider::{PermissionStatus, Provider, WindowHandle};
+pub use provider::{PermissionStatus, Provider};
 pub use role::Role;
 pub use tree::Tree;

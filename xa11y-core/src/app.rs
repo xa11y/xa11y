@@ -3,22 +3,19 @@ use std::sync::Arc;
 use crate::error::Result;
 use crate::locator::Locator;
 use crate::node::Node;
-use crate::provider::{AppLookup, Provider, WindowHandle};
+use crate::provider::Provider;
 use crate::role::Role;
 
 /// A handle to a running application.
 ///
 /// `App` is the primary entry point for interacting with an application's
-/// accessibility tree. It holds a reference to the platform provider and
-/// the target application identity.
+/// accessibility tree. Internally identified by PID — even when constructed
+/// by name, the name is resolved to a PID at construction time.
 ///
 /// # Construction
 ///
-/// Use the named constructors to get an `App` handle:
-///
 /// - [`App::from_name`] — find by display name (case-insensitive substring match)
 /// - [`App::from_pid`] — find by process ID
-/// - [`App::from_window`] — find by platform-specific window handle
 /// - [`App::all`] — list all running applications
 ///
 /// Use [`locator()`](App::locator) to create action-capable element references,
@@ -26,24 +23,22 @@ use crate::role::Role;
 #[derive(Clone)]
 pub struct App {
     provider: Arc<dyn Provider>,
-    lookup: AppLookup,
+    pid: u32,
     app_name: String,
-    pid: Option<u32>,
 }
 
 impl App {
     /// Find an application by display name.
     ///
     /// Performs a case-insensitive substring match against running applications.
-    /// Validates the app exists and caches its metadata.
+    /// Resolves to a PID at construction time.
     pub fn from_name(provider: Arc<dyn Provider>, name: &str) -> Result<Self> {
-        let lookup = AppLookup::ByName(name.to_string());
-        let tree = lookup.fetch_tree(&*provider)?;
+        let pid = provider.resolve_pid_by_name(name)?;
+        let tree = provider.get_tree(pid)?;
         Ok(Self {
             provider,
-            lookup,
+            pid,
             app_name: tree.app_name.clone(),
-            pid: tree.pid,
         })
     }
 
@@ -51,43 +46,21 @@ impl App {
     ///
     /// Validates the app exists and caches its metadata.
     pub fn from_pid(provider: Arc<dyn Provider>, pid: u32) -> Result<Self> {
-        let lookup = AppLookup::ByPid(pid);
-        let tree = lookup.fetch_tree(&*provider)?;
+        let tree = provider.get_tree(pid)?;
         Ok(Self {
             provider,
-            lookup,
+            pid,
             app_name: tree.app_name.clone(),
-            pid: tree.pid,
-        })
-    }
-
-    /// Find an application by platform-specific window handle.
-    ///
-    /// Validates the app exists and caches its metadata.
-    pub fn from_window(provider: Arc<dyn Provider>, handle: WindowHandle) -> Result<Self> {
-        let lookup = AppLookup::ByWindow(handle);
-        let tree = lookup.fetch_tree(&*provider)?;
-        Ok(Self {
-            provider,
-            lookup,
-            app_name: tree.app_name.clone(),
-            pid: tree.pid,
         })
     }
 
     /// Internal constructor for pre-validated apps (e.g. from `all()`).
     #[doc(hidden)]
-    pub fn new(
-        provider: Arc<dyn Provider>,
-        lookup: AppLookup,
-        app_name: String,
-        pid: Option<u32>,
-    ) -> Self {
+    pub fn new(provider: Arc<dyn Provider>, pid: u32, app_name: String) -> Self {
         Self {
             provider,
-            lookup,
-            app_name,
             pid,
+            app_name,
         }
     }
 
@@ -96,8 +69,8 @@ impl App {
         &self.app_name
     }
 
-    /// The application's process ID (cached from initial discovery).
-    pub fn pid(&self) -> Option<u32> {
+    /// The application's process ID.
+    pub fn pid(&self) -> u32 {
         self.pid
     }
 
@@ -107,18 +80,12 @@ impl App {
         &self.provider
     }
 
-    /// Get the internal lookup key (for Python bindings and internal use).
-    #[doc(hidden)]
-    pub fn lookup(&self) -> &AppLookup {
-        &self.lookup
-    }
-
     /// Create a [`Locator`] for lazy element interaction.
     ///
     /// The locator re-resolves against a fresh tree snapshot on every
     /// operation, making it immune to staleness.
     pub fn locator(&self, selector: &str) -> Locator {
-        Locator::new(Arc::clone(&self.provider), self.lookup.clone(), selector)
+        Locator::new(Arc::clone(&self.provider), self.pid, selector)
     }
 
     /// Snapshot the application's accessibility tree.
@@ -126,7 +93,7 @@ impl App {
     /// Returns the root [`Node`] of the snapshot. Navigate with
     /// `children()` and `parent()` — all within the same consistent snapshot.
     pub fn nodes(&self) -> Result<Node> {
-        let tree = self.lookup.fetch_tree(&*self.provider)?;
+        let tree = self.provider.get_tree(self.pid)?;
         let tree = Arc::new(tree);
         Ok(Node::new(tree, 0))
     }
@@ -144,11 +111,8 @@ impl App {
             .filter(|child| child.role == Role::Application)
             .filter_map(|child| {
                 let name = child.name.clone()?;
-                let lookup = match child.pid {
-                    Some(pid) => AppLookup::ByPid(pid),
-                    None => AppLookup::ByName(name.clone()),
-                };
-                Some(App::new(Arc::clone(&provider), lookup, name, child.pid))
+                let pid = child.pid?;
+                Some(App::new(Arc::clone(&provider), pid, name))
             })
             .collect();
         Ok(apps)
@@ -160,7 +124,6 @@ impl std::fmt::Debug for App {
         f.debug_struct("App")
             .field("name", &self.app_name)
             .field("pid", &self.pid)
-            .field("lookup", &self.lookup)
             .finish()
     }
 }

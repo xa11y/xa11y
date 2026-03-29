@@ -1,22 +1,20 @@
-use serde::{Deserialize, Serialize};
-
 use crate::action::{Action, ActionData};
 use crate::error::Result;
 use crate::node::NodeData;
 use crate::tree::Tree;
 
+use serde::{Deserialize, Serialize};
+
 /// Platform backend trait for accessibility tree access.
 pub trait Provider: Send + Sync {
-    /// Snapshot a specific application's tree by display name.
+    /// Resolve an application name to a PID.
     ///
-    /// Name matching is case-insensitive substring.
-    fn get_tree_by_name(&self, name: &str) -> Result<Tree>;
+    /// Name matching is case-insensitive substring. Returns the PID of the
+    /// first matching application.
+    fn resolve_pid_by_name(&self, name: &str) -> Result<u32>;
 
-    /// Snapshot a specific application's tree by process ID.
-    fn get_tree_by_pid(&self, pid: u32) -> Result<Tree>;
-
-    /// Snapshot a specific application's tree by platform window handle.
-    fn get_tree_by_window(&self, handle: &WindowHandle) -> Result<Tree>;
+    /// Snapshot a specific application's accessibility tree by PID.
+    fn get_tree(&self, pid: u32) -> Result<Tree>;
 
     /// Snapshot all running applications (shallow).
     fn get_apps(&self) -> Result<Tree>;
@@ -38,17 +36,6 @@ pub trait Provider: Send + Sync {
     fn check_permissions(&self) -> Result<PermissionStatus>;
 }
 
-/// Platform-specific window handle.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum WindowHandle {
-    /// macOS CGWindowID
-    MacOS(u32),
-    /// Windows HWND (as usize for pointer-sized value)
-    Windows(usize),
-    /// Linux X11 window ID
-    X11(u64),
-}
-
 /// Result of a permission check.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum PermissionStatus {
@@ -56,28 +43,4 @@ pub enum PermissionStatus {
     Granted,
     /// Permissions denied, with platform-specific instructions.
     Denied { instructions: String },
-}
-
-/// Internal lookup key for identifying an application across snapshots.
-///
-/// Used by `App` and `Locator` to dispatch to the correct `Provider` method.
-/// Not part of the public API.
-#[doc(hidden)]
-#[derive(Debug, Clone)]
-pub enum AppLookup {
-    ByName(String),
-    ByPid(u32),
-    ByWindow(WindowHandle),
-}
-
-impl AppLookup {
-    /// Fetch the tree for this lookup target.
-    #[doc(hidden)]
-    pub fn fetch_tree(&self, provider: &dyn Provider) -> Result<Tree> {
-        match self {
-            Self::ByName(name) => provider.get_tree_by_name(name),
-            Self::ByPid(pid) => provider.get_tree_by_pid(*pid),
-            Self::ByWindow(handle) => provider.get_tree_by_window(handle),
-        }
-    }
 }

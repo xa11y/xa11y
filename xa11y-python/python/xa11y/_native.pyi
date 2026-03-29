@@ -63,7 +63,7 @@ class App:
     def name(self) -> str:
         """The application's display name."""
     @property
-    def pid(self) -> int | None:
+    def pid(self) -> int:
         """The application's process ID."""
     def locator(self, selector: str) -> Locator:
         """Create a :class:`Locator` for lazy element interaction."""

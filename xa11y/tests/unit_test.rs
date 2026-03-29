@@ -816,7 +816,7 @@ fn platform_provider_operations_return_errors() {
         Err(_) => return,
     };
 
-    let result = provider.get_tree_by_name("NonexistentApp12345");
+    let result = provider.resolve_pid_by_name("NonexistentApp12345");
     assert!(result.is_err());
 }
 
@@ -890,15 +890,11 @@ fn mock_app() -> (Arc<MockProvider>, App) {
 use std::sync::Arc;
 
 impl Provider for MockProvider {
-    fn get_tree_by_name(&self, _name: &str) -> xa11y::Result<Tree> {
-        Ok(self.tree.clone())
+    fn resolve_pid_by_name(&self, _name: &str) -> xa11y::Result<u32> {
+        Ok(1)
     }
 
-    fn get_tree_by_pid(&self, _pid: u32) -> xa11y::Result<Tree> {
-        Ok(self.tree.clone())
-    }
-
-    fn get_tree_by_window(&self, _handle: &WindowHandle) -> xa11y::Result<Tree> {
+    fn get_tree(&self, _pid: u32) -> xa11y::Result<Tree> {
         Ok(self.tree.clone())
     }
 

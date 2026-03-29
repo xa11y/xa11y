@@ -12,7 +12,7 @@ use core_foundation::string::CFString;
 use xa11y_core::{
     Action, ActionData, CancelHandle, ElementState, Error, Event, EventFilter, EventKind,
     EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, RawPlatformData, Rect,
-    Result, Role, StateSet, Subscription, Toggled, Tree, WindowHandle,
+    Result, Role, StateSet, Subscription, Toggled, Tree,
 };
 
 // ── FFI Declarations ──────────────────────────────────────────────────────────
@@ -944,21 +944,14 @@ impl MacOSProvider {
 }
 
 impl Provider for MacOSProvider {
-    fn get_tree_by_name(&self, name: &str) -> Result<Tree> {
-        let (app_element, pid, app_name) = self.find_app_by_name(name)?;
-        self.build_tree(app_element, pid, &app_name)
+    fn resolve_pid_by_name(&self, name: &str) -> Result<u32> {
+        let (_app_element, pid, _app_name) = self.find_app_by_name(name)?;
+        Ok(pid as u32)
     }
 
-    fn get_tree_by_pid(&self, pid: u32) -> Result<Tree> {
+    fn get_tree(&self, pid: u32) -> Result<Tree> {
         let (app_element, app_name) = self.find_app_by_pid(pid)?;
         self.build_tree(app_element, pid as i32, &app_name)
-    }
-
-    fn get_tree_by_window(&self, handle: &WindowHandle) -> Result<Tree> {
-        Err(Error::Platform {
-            code: -1,
-            message: format!("get_tree_by_window not yet supported: {:?}", handle),
-        })
     }
 
     fn get_apps(&self) -> Result<Tree> {
@@ -1520,70 +1513,25 @@ impl MacOSProvider {
             std::thread::sleep(poll_interval);
         }
     }
-
-    /// Resolve name to (pid, app_name) for event methods.
-    fn resolve_name_for_events(name: &str) -> Result<(i32, String)> {
-        let apps = Self::list_gui_apps();
-        let found = apps
-            .iter()
-            .find(|(_, n)| n.to_lowercase().contains(&name.to_lowercase()));
-        match found {
-            Some((pid, app_name)) => Ok((*pid, app_name.clone())),
-            None => Err(Error::AppNotFound {
-                target: name.to_string(),
-            }),
-        }
-    }
 }
 
 impl EventProvider for MacOSProvider {
-    fn subscribe_by_name(&self, name: &str, filter: EventFilter) -> Result<Subscription> {
-        let (pid, app_name) = Self::resolve_name_for_events(name)?;
-        self.subscribe_impl(pid, app_name, filter)
-    }
-
-    fn subscribe_by_pid(&self, pid: u32, filter: EventFilter) -> Result<Subscription> {
+    fn subscribe(&self, pid: u32, filter: EventFilter) -> Result<Subscription> {
         self.subscribe_impl(pid as i32, String::new(), filter)
     }
 
-    fn wait_for_event_by_name(
-        &self,
-        name: &str,
-        filter: EventFilter,
-        timeout: Duration,
-    ) -> Result<Event> {
-        let (pid, app_name) = Self::resolve_name_for_events(name)?;
-        self.wait_for_event_impl(pid, app_name, filter, timeout)
-    }
-
-    fn wait_for_event_by_pid(
-        &self,
-        pid: u32,
-        filter: EventFilter,
-        timeout: Duration,
-    ) -> Result<Event> {
+    fn wait_for_event(&self, pid: u32, filter: EventFilter, timeout: Duration) -> Result<Event> {
         self.wait_for_event_impl(pid as i32, String::new(), filter, timeout)
     }
 
-    fn wait_for_by_name(
-        &self,
-        name: &str,
-        selector: &str,
-        state: ElementState,
-        timeout: Duration,
-    ) -> Result<Option<NodeData>> {
-        let name = name.to_string();
-        self.wait_for_impl(|s| s.get_tree_by_name(&name), selector, state, timeout)
-    }
-
-    fn wait_for_by_pid(
+    fn wait_for(
         &self,
         pid: u32,
         selector: &str,
         state: ElementState,
         timeout: Duration,
     ) -> Result<Option<NodeData>> {
-        self.wait_for_impl(|s| s.get_tree_by_pid(pid), selector, state, timeout)
+        self.wait_for_impl(|s| s.get_tree(pid), selector, state, timeout)
     }
 }
 

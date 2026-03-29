@@ -13,7 +13,7 @@ use windows::Win32::UI::Accessibility::*;
 use xa11y_core::{
     Action, ActionData, CancelHandle, ElementState, Error, Event, EventFilter, EventKind,
     EventProvider, EventReceiver, NodeData, PermissionStatus, Provider, RawPlatformData, Rect,
-    Result, Role, StateSet, Subscription, Toggled, Tree, WindowHandle,
+    Result, Role, StateSet, Subscription, Toggled, Tree,
 };
 
 /// Initialize COM for UIA. Called once per WindowsProvider creation.
@@ -482,21 +482,14 @@ impl WindowsProvider {
 }
 
 impl Provider for WindowsProvider {
-    fn get_tree_by_name(&self, name: &str) -> Result<Tree> {
-        let (app_element, pid, app_name) = self.find_app_by_name(name)?;
-        self.build_tree(&app_element, pid, app_name, name)
+    fn resolve_pid_by_name(&self, name: &str) -> Result<u32> {
+        let (_app_element, pid, _app_name) = self.find_app_by_name(name)?;
+        Ok(pid)
     }
 
-    fn get_tree_by_pid(&self, pid: u32) -> Result<Tree> {
+    fn get_tree(&self, pid: u32) -> Result<Tree> {
         let (app_element, app_name) = self.find_app_by_pid(pid)?;
         self.build_tree(&app_element, pid, app_name, &format!("PID {}", pid))
-    }
-
-    fn get_tree_by_window(&self, handle: &WindowHandle) -> Result<Tree> {
-        Err(Error::Platform {
-            code: -1,
-            message: format!("get_tree_by_window not yet supported: {:?}", handle),
-        })
     }
 
     fn get_apps(&self) -> Result<Tree> {
@@ -1343,70 +1336,23 @@ impl WindowsProvider {
 }
 
 impl EventProvider for WindowsProvider {
-    fn subscribe_by_name(&self, name: &str, filter: EventFilter) -> Result<Subscription> {
-        let apps = self.list_gui_apps();
-        let found = apps
-            .iter()
-            .find(|(_, n)| n.to_lowercase().contains(&name.to_lowercase()));
-        let (app_pid, app_name) = match found {
-            Some((pid, n)) => (*pid, n.clone()),
-            None => {
-                return Err(Error::AppNotFound {
-                    target: name.to_string(),
-                })
-            }
-        };
-        let name_owned = name.to_string();
-        self.subscribe_impl(app_name, app_pid, filter, move |p| {
-            p.get_tree_by_name(&name_owned)
-        })
+    fn subscribe(&self, pid: u32, filter: EventFilter) -> Result<Subscription> {
+        self.subscribe_impl(String::new(), pid, filter, move |p| p.get_tree(pid))
     }
 
-    fn subscribe_by_pid(&self, pid: u32, filter: EventFilter) -> Result<Subscription> {
-        self.subscribe_impl(String::new(), pid, filter, move |p| p.get_tree_by_pid(pid))
-    }
-
-    fn wait_for_event_by_name(
-        &self,
-        name: &str,
-        filter: EventFilter,
-        timeout: Duration,
-    ) -> Result<Event> {
-        let sub = self.subscribe_by_name(name, filter)?;
+    fn wait_for_event(&self, pid: u32, filter: EventFilter, timeout: Duration) -> Result<Event> {
+        let sub = self.subscribe(pid, filter)?;
         self.wait_for_event_impl(sub, timeout)
     }
 
-    fn wait_for_event_by_pid(
-        &self,
-        pid: u32,
-        filter: EventFilter,
-        timeout: Duration,
-    ) -> Result<Event> {
-        let sub = self.subscribe_by_pid(pid, filter)?;
-        self.wait_for_event_impl(sub, timeout)
-    }
-
-    fn wait_for_by_name(
-        &self,
-        name: &str,
-        selector: &str,
-        state: ElementState,
-        timeout: Duration,
-    ) -> Result<Option<NodeData>> {
-        let name_owned = name.to_string();
-        self.wait_for_impl(selector, state, timeout, |p| {
-            p.get_tree_by_name(&name_owned)
-        })
-    }
-
-    fn wait_for_by_pid(
+    fn wait_for(
         &self,
         pid: u32,
         selector: &str,
         state: ElementState,
         timeout: Duration,
     ) -> Result<Option<NodeData>> {
-        self.wait_for_impl(selector, state, timeout, |p| p.get_tree_by_pid(pid))
+        self.wait_for_impl(selector, state, timeout, |p| p.get_tree(pid))
     }
 }
 
