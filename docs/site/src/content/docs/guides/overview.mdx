@@ -24,7 +24,6 @@ An accessibility tree mirrors the visual hierarchy of an application. Here's wha
       [7] button "9"
       [8] button "+"
       [9] button "4"
-      ...
 ```
 
 Every element in the tree has properties. For example, here's the full data for `button "+"`:
@@ -52,7 +51,7 @@ FocusChanged  app="Calculator"  target=text_field "Display"
 
 xa11y supports subscribing to these event streams per-app via `app.subscribe()`.
 
-## How does xa11y compare to...
+## How does xa11y compare to
 
 - **[AccessKit](https://accesskit.dev/)** — AccessKit is for *adding* accessibility to an app. xa11y is for *reading* accessibility data from the outside.
 - **[Playwright](https://playwright.dev/)** — Similar concept, specific to web browsers. Major design inspiration for xa11y's Locator pattern and selector syntax.
@@ -67,7 +66,7 @@ xa11y is built around three core types:
 
 - **App** — entry point for interacting with an application. Construct via `App::from_name()`, `App::from_pid()`, or `App::all()`. An App provides three paths: `app.elements()` for read-only snapshots, `app.locator(selector)` for actions and waits, and `app.subscribe()` for event streams.
 - **Element** — read-only handle into a frozen tree snapshot. Navigate with `children()` and `parent()`. Read properties like `role`, `name`, `value`, `states`, `bounds`. Elements never refetch from the platform.
-- **Locator** — lazy selector that re-resolves against a fresh snapshot on every operation. Use for actions (`press()`, `set_value()`, ...), waits (`wait_visible()`, ...), and querying (`element()`, `elements()`). Inspired by [Playwright's Locator pattern](https://playwright.dev/docs/locators).
+- **Locator** — lazy selector that re-resolves against a fresh snapshot on every operation. Use for actions (`press()`, `set_value()`, and others), waits (`wait_visible()`, and others), and querying (`element()`, `elements()`). Inspired by [Playwright's Locator pattern](https://playwright.dev/docs/locators).
 - **Subscription** — live event stream from an app. Created via `app.subscribe()`. Pull events with `try_recv()`, `recv(timeout)`, `wait_for(predicate, timeout)`, or iterate with `iter()`. Drop to unsubscribe.
 - **Selector** — CSS-like query syntax used by Locator. Supports role matching, attribute filters, combinators, and nth selection.
 
@@ -152,7 +151,7 @@ let buttons = calc.locator("button").elements()?;
 println!("Found {} buttons", buttons.len());
 ```
 
-**Best practice:** make selectors specific so they stay stable as the UI evolves. Don't select `button` — select `button[name='Cancel']` inside a specific group or window. The more specific the selector, the less likely it breaks when new elements are added.
+**Best practice:** make selectors specific so they stay stable as the UI evolves. Don't select `button` — select `button[name='Cancel']` inside a specific group or window. A vague selector like `button` can become unreliable when new elements are added — it may match the wrong element or start returning multiple matches unexpectedly.
 
 **Actions:** `press()`, `focus()`, `blur()`, `toggle()`, `select()`, `expand()`, `collapse()`, `set_value()`, `set_numeric_value()`, `type_text()`, `select_text()`, `increment()`, `decrement()`, `show_menu()`, `scroll_into_view()`, `scroll_up()`, `scroll_down()`, `scroll_left()`, `scroll_right()`.
 
