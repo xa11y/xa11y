@@ -19,16 +19,14 @@ Cross-platform accessibility library for reading and interacting with accessibil
 use xa11y::*;
 
 fn main() -> Result<()> {
-    // Get the accessibility tree for an app
-    let root = app(&AppTarget::ByName("Safari".to_string()))?;
+    let safari = App::from_name(provider()?, "Safari")?;
 
-    // Find elements with CSS-like selectors
-    let buttons = root.query("button[name='Submit']")?;
+    // Snapshot the tree and find elements with CSS-like selectors
+    let buttons = safari.locator("button[name='Submit']").nodes()?;
     println!("Found {} buttons", buttons.len());
 
-    // Interact with elements
-    let loc = locator(AppTarget::ByName("Safari".to_string()), "button[name='Submit']")?;
-    loc.press()?;
+    // Interact with elements via locator (re-resolves every call)
+    safari.locator("button[name='Submit']").press()?;
 
     Ok(())
 }
@@ -39,18 +37,16 @@ fn main() -> Result<()> {
 ```python
 import xa11y
 
-# Get the accessibility tree for an app
-tree = xa11y.app("Safari")
+safari = xa11y.app("Safari")
 
 # Find elements with CSS-like selectors
-for button in tree.query("button"):
+for button in safari.locator("button").nodes():
     print(button.name)
 
-# Interact with elements
-tree.press("button[name='Submit']")
+# Interact with elements via locator (re-resolves every call)
+safari.locator("button[name='Submit']").press()
 
-search = tree.locator("textfield[name^='Search']")
-search.set_value("hello world")
+safari.locator("textfield[name^='Search']").set_value("hello world")
 ```
 <!-- /python-only -->
 

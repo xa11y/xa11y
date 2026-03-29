@@ -31,26 +31,25 @@ This test opens Calculator, performs `7 × 8`, and asserts the result is `56`.
 
     #[test]
     fn calculator_multiplication() -> Result<()> {
-        let target = AppTarget::ByName("Calculator".to_string());
+        let calc = App::from_name(provider()?, "Calculator")?;
         let timeout = Duration::from_secs(5);
 
         // Wait for the app to be ready
-        let window = locator(target.clone(), "window")?;
-        window.wait_visible(timeout)?;
+        calc.locator("window").wait_visible(timeout)?;
 
         // Press 7 × 8 =
-        locator(target.clone(), "button[name='7']")?.press()?;
-        locator(target.clone(), "button[name='×']")?.press()?;
-        locator(target.clone(), "button[name='8']")?.press()?;
-        locator(target.clone(), "button[name='=']")?.press()?;
+        calc.locator("button[name='7']").press()?;
+        calc.locator("button[name='×']").press()?;
+        calc.locator("button[name='8']").press()?;
+        calc.locator("button[name='=']").press()?;
 
         // Wait for the result to update, then assert
-        let result = locator(target, "static_text[name='Result']")?;
+        let result = calc.locator("static_text[name='Result']");
         result.wait_until(
-            |node| node.value.as_deref() == Some("56"),
+            |node| node.and_then(|n| n.value.as_deref()) == Some("56"),
             timeout,
         )?;
-        assert_eq!(result.value()?, Some("56".to_string()));
+        assert_eq!(result.node()?.value.as_deref(), Some("56"));
 
         Ok(())
     }
@@ -65,29 +64,28 @@ This test opens Calculator, performs `7 × 8`, and asserts the result is `56`.
 
     @pytest.fixture
     def calculator():
-        """Launch Calculator and return its name for targeting."""
+        """Launch Calculator and return an App handle."""
         proc = subprocess.Popen(["open", "-a", "Calculator"])
-        yield "Calculator"
+        yield xa11y.app("Calculator")
         proc.terminate()
 
 
     def test_calculator_multiplication(calculator):
-        target = calculator
+        calc = calculator
 
         # Wait for the app to be ready
-        window = xa11y.locator(target, selector="window")
-        window.wait_visible(timeout=5.0)
+        calc.locator("window").wait_visible(timeout=5.0)
 
         # Press 7 × 8 =
-        xa11y.locator(target, selector="button[name='7']").press()
-        xa11y.locator(target, selector="button[name='×']").press()
-        xa11y.locator(target, selector="button[name='8']").press()
-        xa11y.locator(target, selector="button[name='=']").press()
+        calc.locator("button[name='7']").press()
+        calc.locator("button[name='×']").press()
+        calc.locator("button[name='8']").press()
+        calc.locator("button[name='=']").press()
 
         # Wait for the result to update, then assert
-        result = xa11y.locator(target, selector="static_text[name='Result']")
-        result.wait_until(lambda node: node.value == "56", timeout=5.0)
-        assert result.value() == "56"
+        result = calc.locator("static_text[name='Result']")
+        result.wait_until(lambda node: node and node.value == "56", timeout=5.0)
+        assert result.node().value == "56"
     ```
   </TabItem>
 </Tabs>

@@ -84,4 +84,4 @@ cd xa11y-fuzz/fuzz && cargo +nightly fuzz run tree_ops -- -max_total_time=60
 - `xa11y-fuzz/` — Fuzz targets for xa11y-core (tree, selector, serde) and macOS platform fuzzer
 - `xtask/` — Development workflow commands (`cargo xtask <command>`)
 - `scripts/` — Shell scripts for integration tests, fuzzing, coverage
-- `docs/DESIGN.md` — Full design specification
+- `docs/` — Documentation site and generation scripts
