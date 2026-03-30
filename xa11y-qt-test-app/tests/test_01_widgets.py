@@ -26,8 +26,16 @@ def test_tree_dump(qt_app):
     """Dump the full accessibility tree for CI debugging."""
     root = qt_app.elements()
     lines = []
+    seen: set = set()
 
     def dump(el, indent=0):
+        # Guard against infinite recursion (provider bug: node is its own child)
+        key = el.stable_id if el.stable_id else id(el)
+        if key in seen or indent > 30:
+            lines.append(" " * indent + "... (cycle or depth limit)")
+            return
+        seen.add(key)
+
         info = f"{el.role}"
         if el.name:
             info += f'  name="{el.name}"'
