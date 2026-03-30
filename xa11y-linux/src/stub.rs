@@ -1,7 +1,7 @@
 //! Stub backend for non-Linux platforms (allows compilation on all targets).
 
 use xa11y_core::{
-    Action, ActionData, ElementData, Error, PermissionStatus, Provider, Result, Subscription, Tree,
+    Action, ActionData, Element, Error, PermissionStatus, Provider, Result, Subscription,
 };
 
 #[derive(Default)]
@@ -21,14 +21,14 @@ impl Provider for LinuxProvider {
         })
     }
 
-    fn get_tree(&self, _pid: u32) -> Result<Tree> {
+    fn get_elements(&self, _pid: u32) -> Result<Element> {
         Err(Error::Platform {
             code: -1,
             message: "Linux backend not available on this platform".to_string(),
         })
     }
 
-    fn get_apps(&self) -> Result<Tree> {
+    fn get_apps(&self) -> Result<Element> {
         Err(Error::Platform {
             code: -1,
             message: "Linux backend not available on this platform".to_string(),
@@ -37,8 +37,7 @@ impl Provider for LinuxProvider {
 
     fn perform_action(
         &self,
-        _tree: &Tree,
-        _element: &ElementData,
+        _element: &Element,
         _action: Action,
         _data: Option<ActionData>,
     ) -> Result<()> {

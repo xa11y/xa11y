@@ -10,9 +10,9 @@ use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
 
 use xa11y_core::{
-    Action, ActionData, CancelHandle, ElementData, Error, Event, EventReceiver, EventType,
-    PermissionStatus, Provider, RawPlatformData, Rect, Result, Role, StateSet, Subscription,
-    Toggled, Tree,
+    root_element, Action, ActionData, CancelHandle, Element, ElementData, Error, Event,
+    EventReceiver, EventType, PermissionStatus, Provider, RawPlatformData, Rect, Result, Role,
+    StateSet, Subscription, Toggled,
 };
 
 // ── FFI Declarations ──────────────────────────────────────────────────────────
@@ -692,8 +692,8 @@ impl MacOSProvider {
         apps
     }
 
-    /// Build a tree from an app element (shared by resolve_pid_by_name and get_tree).
-    fn build_tree(&self, app_element: AXElement, pid: i32, app_name: &str) -> Result<Tree> {
+    /// Build a tree from an app element (shared by resolve_pid_by_name and get_elements).
+    fn build_tree(&self, app_element: AXElement, pid: i32, app_name: &str) -> Result<Element> {
         let screen_size = Self::detect_screen_size();
         let mut elements = Vec::new();
         let mut ax_elements = Vec::new();
@@ -718,7 +718,7 @@ impl MacOSProvider {
         // Cache AX element handles for action dispatch
         *self.cached_elements.lock().unwrap() = ax_elements;
 
-        Ok(Tree::new(
+        Ok(root_element(
             app_name.to_string(),
             Some(pid as u32),
             screen_size,
@@ -953,12 +953,12 @@ impl Provider for MacOSProvider {
         Ok(pid as u32)
     }
 
-    fn get_tree(&self, pid: u32) -> Result<Tree> {
+    fn get_elements(&self, pid: u32) -> Result<Element> {
         let (app_element, app_name) = self.find_app_by_pid(pid)?;
         self.build_tree(app_element, pid as i32, &app_name)
     }
 
-    fn get_apps(&self) -> Result<Tree> {
+    fn get_apps(&self) -> Result<Element> {
         let screen_size = Self::detect_screen_size();
         let mut elements = Vec::new();
         let mut ax_elements = Vec::new();
@@ -1017,7 +1017,7 @@ impl Provider for MacOSProvider {
 
         *self.cached_elements.lock().unwrap() = ax_elements;
 
-        Ok(Tree::new(
+        Ok(root_element(
             "Desktop".to_string(),
             None,
             screen_size,
@@ -1027,12 +1027,11 @@ impl Provider for MacOSProvider {
 
     fn perform_action(
         &self,
-        tree: &Tree,
-        element: &ElementData,
+        element: &Element,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()> {
-        let element_idx = tree.element_index(element);
+        let element_idx = element.index;
 
         // Look up cached AX element handle
         let cache = self.cached_elements.lock().unwrap();

@@ -1,8 +1,7 @@
 use crate::action::{Action, ActionData};
-use crate::element::ElementData;
+use crate::element::Element;
 use crate::error::Result;
 use crate::event_provider::Subscription;
-use crate::tree::Tree;
 
 use serde::{Deserialize, Serialize};
 
@@ -15,20 +14,23 @@ pub trait Provider: Send + Sync {
     fn resolve_pid_by_name(&self, name: &str) -> Result<u32>;
 
     /// Snapshot a specific application's accessibility tree by PID.
-    fn get_tree(&self, pid: u32) -> Result<Tree>;
+    ///
+    /// Returns the root [`Element`] of the snapshot.
+    fn get_elements(&self, pid: u32) -> Result<Element>;
 
     /// Snapshot all running applications (shallow).
-    fn get_apps(&self) -> Result<Tree>;
+    ///
+    /// Returns the root [`Element`] of the apps tree.
+    fn get_apps(&self) -> Result<Element>;
 
     /// Perform an action on an element from a specific snapshot.
     ///
     /// `Ok(())` means the platform API accepted the request without error.
     /// It does **not** guarantee the action had an observable effect — use
-    /// tree queries or `Locator::wait_*` methods to verify state changes.
+    /// `Locator::wait_*` methods to verify state changes.
     fn perform_action(
         &self,
-        tree: &Tree,
-        element: &ElementData,
+        element: &Element,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()>;

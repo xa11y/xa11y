@@ -14,7 +14,7 @@ def test_root_is_application(test_app):
 
 def test_root_pid(test_app):
     tree = test_app.elements()
-    assert tree.pid is None  # test tree elements have pid=None
+    assert tree.pid == 1234  # root_element propagates PID to root
 
 
 # ── Navigation (via Element.children / Element.parent) ────────────────────────

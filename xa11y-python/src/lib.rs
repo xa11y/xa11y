@@ -306,28 +306,25 @@ impl Element {
 
 // ── Element construction ─────────────────────────────────────────────────────
 
-/// Convert a Rust Tree into a fully navigable Python root Element.
+/// Convert a Rust Element (root) into a fully navigable Python root Element.
 ///
 /// All elements get shared references so parent/children navigation works.
 /// Returns the root element (index 0).
-fn convert_to_root_element(py: Python<'_>, rust_tree: &xa11y::Tree) -> PyResult<Py<Element>> {
-    convert_to_element_at(py, rust_tree, 0)
+fn convert_to_root_element(py: Python<'_>, root: &xa11y::Element) -> PyResult<Py<Element>> {
+    convert_to_element_at(py, root, 0)
 }
 
-/// Convert a Rust Tree into a fully navigable Python Element at the given index.
+/// Convert a Rust Element (root) into a fully navigable Python Element at the given index.
 fn convert_to_element_at(
     py: Python<'_>,
-    rust_tree: &xa11y::Tree,
+    root: &xa11y::Element,
     element_index: usize,
 ) -> PyResult<Py<Element>> {
-    let num_elements = rust_tree.len();
-    let mut py_elements: Vec<Py<Element>> = Vec::with_capacity(num_elements);
+    let subtree = root.subtree();
+    let mut py_elements: Vec<Py<Element>> = Vec::with_capacity(subtree.len());
 
-    for i in 0..num_elements {
-        let n = rust_tree
-            .get_data(i as u32)
-            .expect("index valid in range 0..len");
-        py_elements.push(make_py_element(py, n)?);
+    for elem in &subtree {
+        py_elements.push(make_py_element(py, elem)?);
     }
 
     // Build shared element list so every Element can navigate.
@@ -343,20 +340,17 @@ fn convert_to_element_at(
         .ok_or_else(|| PyValueError::new_err("Element index out of range"))
 }
 
-/// Convert a Rust Tree into a list of Python Elements at the given indices.
+/// Convert a Rust Element (root) into a list of Python Elements at the given indices.
 fn convert_to_elements_at(
     py: Python<'_>,
-    rust_tree: &xa11y::Tree,
+    root: &xa11y::Element,
     indices: &[u32],
 ) -> PyResult<Vec<Py<Element>>> {
-    let num_elements = rust_tree.len();
-    let mut py_elements: Vec<Py<Element>> = Vec::with_capacity(num_elements);
+    let subtree = root.subtree();
+    let mut py_elements: Vec<Py<Element>> = Vec::with_capacity(subtree.len());
 
-    for i in 0..num_elements {
-        let n = rust_tree
-            .get_data(i as u32)
-            .expect("index valid in range 0..len");
-        py_elements.push(make_py_element(py, n)?);
+    for elem in &subtree {
+        py_elements.push(make_py_element(py, elem)?);
     }
 
     let all_elements_list: Py<PyList> = PyList::new(py, &py_elements)?.unbind();
@@ -436,23 +430,30 @@ impl Locator {
     }
 
     fn count(&self) -> PyResult<usize> {
-        let tree = self.provider.get_tree(self.pid).map_err(to_py_err)?;
-        let matches = tree.query(&self.selector).map_err(to_py_err)?;
+        let root = self.provider.get_elements(self.pid).map_err(to_py_err)?;
+        let matches = root.query_selector(&self.selector).map_err(to_py_err)?;
         Ok(matches.len())
     }
 
     /// Get a snapshot of the matched element (with full tree context for navigation).
     fn element(&self, py: Python<'_>) -> PyResult<Py<Element>> {
-        let (tree, element_index) = self.resolve()?;
-        convert_to_element_at(py, &tree, element_index as usize)
+        let root = self.provider.get_elements(self.pid).map_err(to_py_err)?;
+        let matches = root.query_selector(&self.selector).map_err(to_py_err)?;
+        let idx = self.nth.unwrap_or(0);
+        let matched = matches.get(idx).ok_or_else(|| {
+            to_py_err(xa11y::Error::SelectorNotMatched {
+                selector: self.selector.clone(),
+            })
+        })?;
+        convert_to_element_at(py, &root, matched.index as usize)
     }
 
     /// Get all matching elements as a snapshot (with full tree context for navigation).
     fn elements(&self, py: Python<'_>) -> PyResult<Vec<Py<Element>>> {
-        let tree = self.provider.get_tree(self.pid).map_err(to_py_err)?;
-        let matches = tree.query(&self.selector).map_err(to_py_err)?;
+        let root = self.provider.get_elements(self.pid).map_err(to_py_err)?;
+        let matches = root.query_selector(&self.selector).map_err(to_py_err)?;
         let indices: Vec<u32> = matches.iter().map(|n| n.index).collect();
-        convert_to_elements_at(py, &tree, &indices)
+        convert_to_elements_at(py, &root, &indices)
     }
 
     // ── Actions ──
@@ -666,17 +667,16 @@ impl Locator {
 }
 
 impl Locator {
-    fn resolve(&self) -> PyResult<(xa11y::Tree, u32)> {
-        let tree = self.provider.get_tree(self.pid).map_err(to_py_err)?;
-        let matches = tree.query(&self.selector).map_err(to_py_err)?;
+    fn resolve(&self) -> PyResult<xa11y::Element> {
+        let root = self.provider.get_elements(self.pid).map_err(to_py_err)?;
+        let matches = root.query_selector(&self.selector).map_err(to_py_err)?;
         let idx = self.nth.unwrap_or(0);
-        let element = matches.get(idx).ok_or_else(|| {
+        let element = matches.into_iter().nth(idx).ok_or_else(|| {
             to_py_err(xa11y::Error::SelectorNotMatched {
                 selector: self.selector.clone(),
             })
         })?;
-        let element_index = element.index;
-        Ok((tree, element_index))
+        Ok(element)
     }
 
     fn perform_action(
@@ -687,10 +687,9 @@ impl Locator {
         if let Some(ref d) = data {
             d.validate(action).map_err(to_py_err)?;
         }
-        let (tree, element_index) = self.resolve()?;
-        let element = tree.get_data(element_index).expect("valid after resolve");
+        let element = self.resolve()?;
         self.provider
-            .perform_action(&tree, element, action, data)
+            .perform_action(&element, action, data)
             .map_err(to_py_err)
     }
 
@@ -705,10 +704,10 @@ impl Locator {
             }
 
             let element: Option<xa11y::ElementData> = (|| {
-                let tree = self.provider.get_tree(self.pid).ok()?;
-                let matches = tree.query(&self.selector).ok()?;
+                let root = self.provider.get_elements(self.pid).ok()?;
+                let matches = root.query_selector(&self.selector).ok()?;
                 let idx = self.nth.unwrap_or(0);
-                matches.get(idx).copied().cloned()
+                matches.into_iter().nth(idx).map(|e| (*e).clone())
             })();
 
             let met = Python::with_gil(|py| -> PyResult<bool> {
@@ -743,10 +742,10 @@ impl Locator {
             }
 
             let element: Option<xa11y::ElementData> = (|| {
-                let tree = self.provider.get_tree(self.pid).ok()?;
-                let matches = tree.query(&self.selector).ok()?;
+                let root = self.provider.get_elements(self.pid).ok()?;
+                let matches = root.query_selector(&self.selector).ok()?;
                 let idx = self.nth.unwrap_or(0);
-                matches.get(idx).copied().cloned()
+                matches.into_iter().nth(idx).map(|e| (*e).clone())
             })();
 
             if state.is_met(element.as_ref()) {
@@ -1028,10 +1027,10 @@ impl App {
     fn elements(&self, py: Python<'_>) -> PyResult<Py<Element>> {
         let p = self.inner.provider().clone();
         let pid = self.inner.pid();
-        let rust_tree = py
-            .allow_threads(move || p.get_tree(pid))
+        let root = py
+            .allow_threads(move || p.get_elements(pid))
             .map_err(to_py_err)?;
-        convert_to_root_element(py, &rust_tree)
+        convert_to_root_element(py, &root)
     }
 
     fn __repr__(&self) -> String {
@@ -1127,7 +1126,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 /// A mock provider that returns canned trees and records performed actions.
 struct MockProvider {
-    tree: xa11y::Tree,
+    root: xa11y::Element,
     /// Records (element_index, action, data_debug) for each perform_action call
     actions: std::sync::Mutex<Vec<(u32, String, Option<String>)>>,
 }
@@ -1137,18 +1136,17 @@ impl xa11y::Provider for MockProvider {
         Ok(1234)
     }
 
-    fn get_tree(&self, _pid: u32) -> xa11y::Result<xa11y::Tree> {
-        Ok(self.tree.clone())
+    fn get_elements(&self, _pid: u32) -> xa11y::Result<xa11y::Element> {
+        Ok(self.root.clone())
     }
 
-    fn get_apps(&self) -> xa11y::Result<xa11y::Tree> {
-        Ok(self.tree.clone())
+    fn get_apps(&self) -> xa11y::Result<xa11y::Element> {
+        Ok(self.root.clone())
     }
 
     fn perform_action(
         &self,
-        _tree: &xa11y::Tree,
-        element: &xa11y::ElementData,
+        element: &xa11y::Element,
         action: xa11y::Action,
         data: Option<xa11y::ActionData>,
     ) -> xa11y::Result<()> {
@@ -1190,7 +1188,7 @@ impl xa11y::Provider for MockProvider {
 ///         [11] list_item "Item 1"   (selected)
 ///         [12] list_item "Item 2"
 /// ```
-fn build_test_tree() -> xa11y::Tree {
+fn build_test_tree() -> xa11y::Element {
     use xa11y::*;
 
     let elements = vec![
@@ -1537,15 +1535,15 @@ fn build_test_tree() -> xa11y::Tree {
         },
     ];
 
-    Tree::new("TestApp".to_string(), Some(1234), (1920, 1080), elements)
+    xa11y::root_element("TestApp".to_string(), Some(1234), (1920, 1080), elements)
 }
 
 /// Create a test App (for Python unit tests). Returns an App backed by a mock provider.
 #[pyfunction]
 fn _make_test_app() -> PyResult<App> {
-    let tree = build_test_tree();
+    let root = build_test_tree();
     let provider: Arc<dyn xa11y::Provider> = Arc::new(MockProvider {
-        tree,
+        root,
         actions: std::sync::Mutex::new(Vec::new()),
     });
     let core_app = xa11y::App::from_name(provider, "TestApp").map_err(to_py_err)?;

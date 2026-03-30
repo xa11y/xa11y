@@ -7,7 +7,7 @@
 use xa11y::*;
 
 /// Helper to build a sample accessibility tree for testing.
-fn sample_tree() -> Tree {
+fn sample_tree() -> Element {
     let elements = vec![
         ElementData {
             role: Role::Window,
@@ -238,45 +238,48 @@ fn sample_tree() -> Tree {
         },
     ];
 
-    Tree::new("My App".to_string(), Some(1234), (1920, 1080), elements)
+    root_element("My App".to_string(), Some(1234), (1920, 1080), elements)
 }
 
 // ── Tree basic operations ──
 
 #[test]
 fn tree_root() {
-    let tree = sample_tree();
-    let root = tree.root_data();
+    let root = sample_tree();
     assert_eq!(root.role, Role::Window);
     assert_eq!(root.name.as_deref(), Some("My App"));
 }
 
 #[test]
 fn tree_get_by_index() {
-    let tree = sample_tree();
-    let button = tree.get_data(2).unwrap();
+    let root = sample_tree();
+    let button = root.subtree().into_iter().find(|e| e.index == 2).unwrap();
     assert_eq!(button.role, Role::Button);
     assert_eq!(button.name.as_deref(), Some("Back"));
 }
 
 #[test]
 fn tree_get_nonexistent() {
-    let tree = sample_tree();
-    assert!(tree.get_data(999).is_none());
+    let root = sample_tree();
+    assert!(root
+        .subtree()
+        .into_iter()
+        .find(|e| e.index == 999)
+        .is_none());
 }
 
 #[test]
 fn tree_len() {
-    let tree = sample_tree();
-    assert_eq!(tree.len(), 9);
-    assert!(!tree.is_empty());
+    let root = sample_tree();
+    assert_eq!(root.subtree().len(), 9);
+    assert!(!root.subtree().is_empty());
 }
 
 #[test]
 fn tree_children() {
-    let tree = sample_tree();
-    let toolbar = tree.get_data(1).unwrap();
-    let children = tree.children_data(toolbar);
+    let root = sample_tree();
+    let toolbar = root.subtree().into_iter().find(|e| e.index == 1).unwrap();
+    let children = toolbar.children();
     assert_eq!(children.len(), 2);
     assert_eq!(children[0].role, Role::Button);
     assert_eq!(children[1].role, Role::TextField);
@@ -284,22 +287,18 @@ fn tree_children() {
 
 #[test]
 fn tree_parent() {
-    let tree = sample_tree();
-    let button = tree.get_data(2).unwrap();
-    let parent = tree.parent_data(button).unwrap();
+    let root = sample_tree();
+    let button = root.subtree().into_iter().find(|e| e.index == 2).unwrap();
+    let parent = button.parent().unwrap();
     assert_eq!(parent.role, Role::Toolbar);
-    assert!(tree.parent_data(tree.root_data()).is_none());
+    assert!(root.parent().is_none());
 }
 
 #[test]
 fn tree_subtree() {
-    let tree = sample_tree();
-    let toolbar = tree.get_data(1).unwrap();
-    let subtree: Vec<_> = tree
-        .subtree_indices(toolbar.index)
-        .into_iter()
-        .filter_map(|idx| tree.get_data(idx))
-        .collect();
+    let root = sample_tree();
+    let toolbar = root.subtree().into_iter().find(|e| e.index == 1).unwrap();
+    let subtree = toolbar.subtree();
     assert_eq!(subtree.len(), 3);
     assert_eq!(subtree[0].role, Role::Toolbar);
     assert_eq!(subtree[1].role, Role::Button);
@@ -308,8 +307,8 @@ fn tree_subtree() {
 
 #[test]
 fn tree_display() {
-    let tree = sample_tree();
-    let display = tree.to_string();
+    let root = sample_tree();
+    let display = root.to_string();
     assert!(display.contains("[0] window \"My App\""));
     assert!(display.contains("  [1] toolbar \"Main Toolbar\""));
     assert!(display.contains("    [2] button \"Back\""));
@@ -319,8 +318,8 @@ fn tree_display() {
 
 #[test]
 fn tree_iter() {
-    let tree = sample_tree();
-    let count = tree.iter().count();
+    let root = sample_tree();
+    let count = root.subtree().len();
     assert_eq!(count, 9);
 }
 
@@ -328,85 +327,85 @@ fn tree_iter() {
 
 #[test]
 fn query_by_role() {
-    let tree = sample_tree();
-    let buttons = tree.query("button").unwrap();
+    let root = sample_tree();
+    let buttons = root.query_selector("button").unwrap();
     assert_eq!(buttons.len(), 3);
 }
 
 #[test]
 fn query_by_exact_name() {
-    let tree = sample_tree();
-    let results = tree.query(r#"[name="Submit"]"#).unwrap();
+    let root = sample_tree();
+    let results = root.query_selector(r#"[name="Submit"]"#).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].role, Role::Button);
 }
 
 #[test]
 fn query_role_and_name() {
-    let tree = sample_tree();
-    let results = tree.query(r#"button[name="Submit"]"#).unwrap();
+    let root = sample_tree();
+    let results = root.query_selector(r#"button[name="Submit"]"#).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].name.as_deref(), Some("Submit"));
 }
 
 #[test]
 fn query_name_contains() {
-    let tree = sample_tree();
-    let results = tree.query(r#"[name*="addr"]"#).unwrap();
+    let root = sample_tree();
+    let results = root.query_selector(r#"[name*="addr"]"#).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].name.as_deref(), Some("Address Bar"));
 }
 
 #[test]
 fn query_name_starts_with() {
-    let tree = sample_tree();
-    let results = tree.query(r#"[name^="addr"]"#).unwrap();
+    let root = sample_tree();
+    let results = root.query_selector(r#"[name^="addr"]"#).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].name.as_deref(), Some("Address Bar"));
 }
 
 #[test]
 fn query_name_ends_with() {
-    let tree = sample_tree();
-    let results = tree.query(r#"[name$="bar"]"#).unwrap();
+    let root = sample_tree();
+    let results = root.query_selector(r#"[name$="bar"]"#).unwrap();
     assert_eq!(results.len(), 2); // "Main Toolbar" and "Address Bar"
 }
 
 #[test]
 fn query_direct_child() {
-    let tree = sample_tree();
-    let results = tree.query("toolbar > button").unwrap();
+    let root = sample_tree();
+    let results = root.query_selector("toolbar > button").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].name.as_deref(), Some("Back"));
 }
 
 #[test]
 fn query_descendant() {
-    let tree = sample_tree();
-    let results = tree.query("window button").unwrap();
+    let root = sample_tree();
+    let results = root.query_selector("window button").unwrap();
     assert_eq!(results.len(), 3);
 }
 
 #[test]
 fn query_nth() {
-    let tree = sample_tree();
-    let results = tree.query("button:nth(2)").unwrap();
+    let root = sample_tree();
+    let results = root.query_selector("button:nth(2)").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].name.as_deref(), Some("Submit"));
 }
 
 #[test]
 fn query_nth_out_of_range() {
-    let tree = sample_tree();
-    let results = tree.query("button:nth(99)").unwrap();
+    let root = sample_tree();
+    let results = root.query_selector("button:nth(99)").unwrap();
     assert_eq!(results.len(), 0);
 }
 
 #[test]
 fn query_complex() {
-    let tree = sample_tree();
-    let results = tree
-        .query(r#"toolbar > text_field[name*="Address"]"#)
+    let root = sample_tree();
+    let results = root
+        .query_selector(r#"toolbar > text_field[name*="Address"]"#)
         .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].value.as_deref(), Some("https://example.com"));
@@ -414,23 +413,23 @@ fn query_complex() {
 
 #[test]
 fn query_by_value() {
-    let tree = sample_tree();
-    let results = tree.query(r#"[value*="example"]"#).unwrap();
+    let root = sample_tree();
+    let results = root.query_selector(r#"[value*="example"]"#).unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].role, Role::TextField);
 }
 
 #[test]
 fn query_no_match() {
-    let tree = sample_tree();
-    let results = tree.query("slider").unwrap();
+    let root = sample_tree();
+    let results = root.query_selector("slider").unwrap();
     assert_eq!(results.len(), 0);
 }
 
 #[test]
 fn query_invalid_selector() {
-    let tree = sample_tree();
-    let result = tree.query("foobar");
+    let root = sample_tree();
+    let result = root.query_selector("foobar");
     assert!(result.is_err());
     match result.unwrap_err() {
         Error::InvalidSelector { selector, message } => {
@@ -443,22 +442,22 @@ fn query_invalid_selector() {
 
 #[test]
 fn query_empty_selector() {
-    let tree = sample_tree();
-    assert!(tree.query("").is_err());
+    let root = sample_tree();
+    assert!(root.query_selector("").is_err());
 }
 
 #[test]
 fn query_check_box() {
-    let tree = sample_tree();
-    let results = tree.query("check_box").unwrap();
+    let root = sample_tree();
+    let results = root.query_selector("check_box").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].states.checked, Some(Toggled::Off));
 }
 
 #[test]
 fn query_web_area_children() {
-    let tree = sample_tree();
-    let results = tree.query("web_area > button").unwrap();
+    let root = sample_tree();
+    let results = root.query_selector("web_area > button").unwrap();
     assert_eq!(results.len(), 2);
 }
 
@@ -648,25 +647,6 @@ fn error_display() {
 // ── Serialization ──
 
 #[test]
-fn tree_json_roundtrip() {
-    let tree = sample_tree();
-    let json = serde_json::to_string(&tree).unwrap();
-    let deserialized: Tree = serde_json::from_str(&json).unwrap();
-
-    assert_eq!(deserialized.app_name, "My App");
-    assert_eq!(deserialized.pid, Some(1234));
-    assert_eq!(deserialized.screen_size, (1920, 1080));
-    assert_eq!(deserialized.len(), 9);
-
-    let root = deserialized.root_data();
-    assert_eq!(root.role, Role::Window);
-    assert_eq!(root.name.as_deref(), Some("My App"));
-
-    let buttons = deserialized.query("button").unwrap();
-    assert_eq!(buttons.len(), 3);
-}
-
-#[test]
 fn element_json_serialization() {
     let element = ElementData {
         role: Role::Button,
@@ -795,9 +775,9 @@ fn platform_provider_operations_return_errors() {
 
 #[test]
 fn selector_multiple_attr_filters() {
-    let tree = sample_tree();
-    let results = tree
-        .query(r#"[name*="address"][role="text_field"]"#)
+    let root = sample_tree();
+    let results = root
+        .query_selector(r#"[name*="address"][role="text_field"]"#)
         .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].role, Role::TextField);
@@ -805,16 +785,16 @@ fn selector_multiple_attr_filters() {
 
 #[test]
 fn selector_descendant_chain() {
-    let tree = sample_tree();
-    let results = tree.query("window toolbar button").unwrap();
+    let root = sample_tree();
+    let results = root.query_selector("window toolbar button").unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].name.as_deref(), Some("Back"));
 }
 
 #[test]
 fn selector_mixed_combinators() {
-    let tree = sample_tree();
-    let results = tree.query("window > web_area button").unwrap();
+    let root = sample_tree();
+    let results = root.query_selector("window > web_area button").unwrap();
     assert_eq!(results.len(), 2);
 }
 
@@ -839,14 +819,14 @@ fn action_data_variants() {
 
 /// Mock provider that returns a fixed tree for Locator tests.
 struct MockProvider {
-    tree: Tree,
+    root: Element,
     last_action: std::sync::Mutex<Option<(u32, Action)>>,
 }
 
 impl MockProvider {
     fn new() -> Self {
         Self {
-            tree: sample_tree(),
+            root: sample_tree(),
             last_action: std::sync::Mutex::new(None),
         }
     }
@@ -865,18 +845,17 @@ impl Provider for MockProvider {
         Ok(1)
     }
 
-    fn get_tree(&self, _pid: u32) -> xa11y::Result<Tree> {
-        Ok(self.tree.clone())
+    fn get_elements(&self, _pid: u32) -> xa11y::Result<Element> {
+        Ok(self.root.clone())
     }
 
-    fn get_apps(&self) -> xa11y::Result<Tree> {
-        Ok(self.tree.clone())
+    fn get_apps(&self) -> xa11y::Result<Element> {
+        Ok(self.root.clone())
     }
 
     fn perform_action(
         &self,
-        _tree: &Tree,
-        element: &ElementData,
+        element: &Element,
         action: Action,
         _data: Option<ActionData>,
     ) -> xa11y::Result<()> {

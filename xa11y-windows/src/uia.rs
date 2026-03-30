@@ -11,9 +11,9 @@ use windows::Win32::System::Threading::*;
 use windows::Win32::UI::Accessibility::*;
 
 use xa11y_core::{
-    Action, ActionData, CancelHandle, ElementData, Error, Event, EventReceiver, EventType,
-    PermissionStatus, Provider, RawPlatformData, Rect, Result, Role, StateSet, Subscription,
-    Toggled, Tree,
+    root_element, Action, ActionData, CancelHandle, Element, ElementData, Error, Event,
+    EventReceiver, EventType, PermissionStatus, Provider, RawPlatformData, Rect, Result, Role,
+    StateSet, Subscription, Toggled,
 };
 
 /// Initialize COM for UIA. Called once per WindowsProvider creation.
@@ -417,7 +417,7 @@ impl WindowsProvider {
         pid: u32,
         app_name: String,
         target_label: &str,
-    ) -> Result<Tree> {
+    ) -> Result<Element> {
         let screen_size = Self::detect_screen_size();
         let mut elements = Vec::new();
         let mut uia_elements = Vec::new();
@@ -439,7 +439,7 @@ impl WindowsProvider {
 
         *self.cached_elements.lock().unwrap() = uia_elements;
 
-        Ok(Tree::new(app_name, Some(pid), screen_size, elements))
+        Ok(root_element(app_name, Some(pid), screen_size, elements))
     }
 }
 
@@ -449,12 +449,12 @@ impl Provider for WindowsProvider {
         Ok(pid)
     }
 
-    fn get_tree(&self, pid: u32) -> Result<Tree> {
+    fn get_elements(&self, pid: u32) -> Result<Element> {
         let (app_element, app_name) = self.find_app_by_pid(pid)?;
         self.build_tree(&app_element, pid, app_name, &format!("PID {}", pid))
     }
 
-    fn get_apps(&self) -> Result<Tree> {
+    fn get_apps(&self) -> Result<Element> {
         let screen_size = Self::detect_screen_size();
         let mut elements = Vec::new();
         let mut uia_elements = Vec::new();
@@ -542,7 +542,7 @@ impl Provider for WindowsProvider {
         elements[0].children_indices = root_children;
         *self.cached_elements.lock().unwrap() = uia_elements;
 
-        Ok(Tree::new(
+        Ok(root_element(
             "Desktop".to_string(),
             None,
             screen_size,
@@ -552,12 +552,11 @@ impl Provider for WindowsProvider {
 
     fn perform_action(
         &self,
-        tree: &Tree,
-        element: &ElementData,
+        element: &Element,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()> {
-        let element_idx = tree.element_index(element);
+        let element_idx = element.index;
 
         let cache = self.cached_elements.lock().unwrap();
         let uia_element = cache.get(element_idx as usize).ok_or(Error::ElementStale {
@@ -907,7 +906,7 @@ impl Provider for WindowsProvider {
     }
 
     fn subscribe(&self, pid: u32) -> Result<Subscription> {
-        self.subscribe_impl(String::new(), pid, move |p| p.get_tree(pid))
+        self.subscribe_impl(String::new(), pid, move |p| p.get_elements(pid))
     }
 }
 
@@ -1196,7 +1195,7 @@ impl WindowsProvider {
     /// Spawn a polling thread that detects focus and structure changes.
     fn subscribe_impl<F>(&self, app_name: String, app_pid: u32, tree_fn: F) -> Result<Subscription>
     where
-        F: Fn(&WindowsProvider) -> Result<Tree> + Send + 'static,
+        F: Fn(&WindowsProvider) -> Result<Element> + Send + 'static,
     {
         let (tx, rx) = std::sync::mpsc::channel();
         let poll_provider = WindowsProvider::new()?;
@@ -1210,13 +1209,15 @@ impl WindowsProvider {
             while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(100));
 
-                let tree = match tree_fn(&poll_provider) {
-                    Ok(t) => t,
+                let root = match tree_fn(&poll_provider) {
+                    Ok(r) => r,
                     Err(_) => continue,
                 };
 
+                let subtree = root.subtree();
+
                 // Detect focus changes
-                let focused_name = tree
+                let focused_name = subtree
                     .iter()
                     .find(|n| n.states.focused)
                     .and_then(|n| n.name.clone());
@@ -1226,7 +1227,10 @@ impl WindowsProvider {
                             event_type: EventType::FocusChanged,
                             app_name: app_name.clone(),
                             app_pid,
-                            target: tree.iter().find(|n| n.states.focused).cloned(),
+                            target: subtree
+                                .iter()
+                                .find(|n| n.states.focused)
+                                .map(|e| (**e).clone()),
                             state_flag: None,
                             state_value: None,
                             text_change: None,
@@ -1237,7 +1241,7 @@ impl WindowsProvider {
                 }
 
                 // Detect structure changes
-                let element_count = tree.len();
+                let element_count = subtree.len();
                 if element_count != prev_element_count && prev_element_count > 0 {
                     let _ = tx.send(Event {
                         event_type: EventType::StructureChanged,

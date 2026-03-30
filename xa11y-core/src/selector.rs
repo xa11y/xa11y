@@ -79,7 +79,7 @@ pub(crate) enum MatchOp {
 
 impl Selector {
     /// Parse a selector string into a Selector.
-    pub fn parse(input: &str) -> Result<Self> {
+    pub(crate) fn parse(input: &str) -> Result<Self> {
         let input = input.trim();
         if input.is_empty() {
             return Err(Error::InvalidSelector {
@@ -307,7 +307,7 @@ impl Selector {
     }
 
     /// Match elements in the tree against this selector.
-    pub fn match_elements<'a>(&self, tree: &'a Tree) -> Vec<&'a ElementData> {
+    pub(crate) fn match_elements<'a>(&self, tree: &'a Tree) -> Vec<&'a ElementData> {
         if self.segments.is_empty() {
             return vec![];
         }

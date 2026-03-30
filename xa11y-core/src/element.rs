@@ -83,6 +83,30 @@ pub struct ElementData {
     pub parent_index: Option<ElementIndex>,
 }
 
+/// Create a root [`Element`] from raw element data.
+///
+/// This is the primary way for provider implementations to construct
+/// an accessibility tree snapshot. The returned Element is the root
+/// (index 0) and can be navigated with `children()`, `parent()`, etc.
+///
+/// `app_name` and `pid` are stored as snapshot metadata, accessible
+/// internally for app discovery and action dispatch.
+pub fn root_element(
+    app_name: String,
+    pid: Option<u32>,
+    screen_size: (u32, u32),
+    mut elements: Vec<ElementData>,
+) -> Element {
+    // Ensure the root element carries the PID so it's accessible via ElementData.
+    if let (Some(pid_val), Some(root)) = (pid, elements.first_mut()) {
+        if root.pid.is_none() {
+            root.pid = Some(pid_val);
+        }
+    }
+    let tree = Tree::new(app_name, pid, screen_size, elements);
+    Element::new(Arc::new(tree), 0)
+}
+
 /// A read-only element in an accessibility tree snapshot, with navigation.
 ///
 /// `Element` dereferences to [`ElementData`], so all properties (`role`, `name`,
@@ -133,22 +157,30 @@ impl Serialize for Element {
 
 impl Element {
     /// Create an Element handle from a snapshot and an index into the snapshot.
-    pub fn new(snapshot: Arc<Tree>, index: u32) -> Self {
+    pub(crate) fn new(snapshot: Arc<Tree>, index: u32) -> Self {
         Self { snapshot, index }
     }
 
-    /// Get the underlying snapshot (Tree) this element belongs to.
-    ///
-    /// Used by provider crates for action dispatch.
-    pub fn tree(&self) -> &Arc<Tree> {
+    /// Get the underlying snapshot this element belongs to (crate-internal).
+    pub(crate) fn snapshot(&self) -> &Arc<Tree> {
         &self.snapshot
     }
 
-    /// Get the element's index within its snapshot.
+    /// Get the application name from the snapshot metadata (crate-internal).
+    pub(crate) fn snapshot_app_name(&self) -> &str {
+        &self.snapshot.app_name
+    }
+
+    /// Query elements matching a CSS-like selector within this snapshot.
     ///
-    /// Used by provider crates for action dispatch.
-    pub fn element_index(&self) -> u32 {
-        self.index
+    /// Internal — used by test infrastructure and FFI bindings.
+    #[doc(hidden)]
+    pub fn query_selector(&self, selector: &str) -> crate::error::Result<Vec<Element>> {
+        let indices = self.snapshot.query_indices(selector)?;
+        Ok(indices
+            .into_iter()
+            .map(|idx| Element::new(Arc::clone(&self.snapshot), idx))
+            .collect())
     }
 
     /// Get the parent element, if any (root has no parent).

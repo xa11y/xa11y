@@ -1,11 +1,11 @@
 //! Fuzz target for xa11y-core tree operations (NOT platform providers).
-//! Builds random trees and exercises Tree methods: get, root, iter, children,
-//! subtree, display, query, len, is_empty.
+//! Builds random trees via root_element and exercises Element methods:
+//! children, parent, subtree, display.
 #![no_main]
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use xa11y_core::{ElementData, RawPlatformData, Role, StateSet, Tree};
+use xa11y_core::{root_element, ElementData, RawPlatformData, Role, StateSet};
 
 /// Roles indexed by u8 for fuzzer-driven selection.
 const ROLES: [Role; 33] = [
@@ -60,26 +60,15 @@ struct FuzzInput {
     screen_w: u32,
     screen_h: u32,
     fuzz_elements: Vec<FuzzElement>,
-    /// A selector string to try querying with.
-    selector: String,
-    /// A name pattern to search for.
-    name_pattern: String,
-    /// Role index for find_by_role.
-    role_idx: u8,
 }
 
-/// Build a valid tree from fuzzer-supplied elements.
-fn build_tree(input: &FuzzInput) -> Tree {
+/// Build a valid tree from fuzzer-supplied elements, returning the root Element.
+fn build_root(input: &FuzzInput) -> Option<xa11y_core::Element> {
     let max_elements = 256usize;
     let element_count = input.fuzz_elements.len().min(max_elements);
 
     if element_count == 0 {
-        return Tree::new(
-            input.app_name.clone(),
-            input.pid,
-            (input.screen_w.max(1), input.screen_h.max(1)),
-            vec![],
-        );
+        return None;
     }
 
     let mut elements: Vec<ElementData> = Vec::with_capacity(element_count);
@@ -137,54 +126,40 @@ fn build_tree(input: &FuzzInput) -> Tree {
         next_child += 1;
     }
 
-    Tree::new(
+    Some(root_element(
         input.app_name.clone(),
         input.pid,
         (input.screen_w.max(1), input.screen_h.max(1)),
         elements,
-    )
+    ))
 }
 
 fuzz_target!(|input: FuzzInput| {
-    let tree = build_tree(&input);
+    let root = match build_root(&input) {
+        Some(r) => r,
+        None => return,
+    };
 
-    // Exercise len / is_empty
-    let _ = tree.len();
-    let _ = tree.is_empty();
+    // Exercise subtree
+    let subtree = root.subtree();
+    assert!(!subtree.is_empty());
 
-    if tree.is_empty() {
-        return;
+    // Exercise children on root
+    let children = root.children();
+    for child in &children {
+        // Exercise parent
+        let parent = child.parent();
+        assert!(parent.is_some());
     }
 
-    // Exercise root (safe because tree is non-empty)
-    let root = tree.root_data();
-    let _ = root.role;
-
-    // Exercise get with valid and invalid indices
-    for i in 0..tree.len() as u32 + 2 {
-        let _ = tree.get_data(i);
-    }
-
-    // Exercise iter
-    let count = tree.iter().count();
-    assert_eq!(count, tree.len());
-
-    // Exercise children
-    for element in tree.iter() {
-        let _ = tree.children_data(element);
-    }
-
-    // Exercise subtree on root and a few elements
-    let _ = tree.subtree_indices(root.index).into_iter().filter_map(|idx| tree.get_data(idx)).collect::<Vec<_>>();
-    if tree.len() > 1 {
-        if let Some(element) = tree.get_data(1) {
-            let _ = tree.subtree_indices(element.index).into_iter().filter_map(|idx| tree.get_data(idx)).collect::<Vec<_>>();
-        }
+    // Exercise subtree on a non-root element
+    if subtree.len() > 1 {
+        let second = &subtree[1];
+        let _ = second.subtree();
+        let _ = second.children();
+        let _ = second.parent();
     }
 
     // Exercise Display
-    let _ = tree.to_string();
-
-    // Exercise query (selector may be invalid, that's fine)
-    let _ = tree.query(&input.selector);
+    let _ = root.to_string();
 });
