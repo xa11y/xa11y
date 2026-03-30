@@ -319,7 +319,7 @@ fn tree_display() {
 #[test]
 fn tree_iter() {
     let root = sample_tree();
-    let count = root.subtree().into_iter().count();
+    let count = root.subtree().len();
     assert_eq!(count, 9);
 }
 

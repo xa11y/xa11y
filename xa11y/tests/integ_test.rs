@@ -406,7 +406,7 @@ mod tests {
         let root = h::app_tree();
         // Subtree length is bounded; there's no element beyond it
         let subtree = root.subtree();
-        assert!(subtree.len() > 0);
+        assert!(!subtree.is_empty());
     }
 
     #[test]

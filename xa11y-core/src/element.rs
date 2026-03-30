@@ -95,8 +95,14 @@ pub fn root_element(
     app_name: String,
     pid: Option<u32>,
     screen_size: (u32, u32),
-    elements: Vec<ElementData>,
+    mut elements: Vec<ElementData>,
 ) -> Element {
+    // Ensure the root element carries the PID so it's accessible via ElementData.
+    if let (Some(pid_val), Some(root)) = (pid, elements.first_mut()) {
+        if root.pid.is_none() {
+            root.pid = Some(pid_val);
+        }
+    }
     let tree = Tree::new(app_name, pid, screen_size, elements);
     Element::new(Arc::new(tree), 0)
 }
