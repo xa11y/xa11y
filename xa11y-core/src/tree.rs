@@ -48,20 +48,6 @@ impl Tree {
         self.elements.get(index as usize)
     }
 
-    /// Get the root element data.
-    #[cfg(test)]
-    pub(crate) fn root_data(&self) -> &ElementData {
-        &self.elements[0]
-    }
-
-    /// Get the parent of an element.
-    #[allow(dead_code)] // available for internal use but currently unused
-    pub(crate) fn parent_data(&self, element: &ElementData) -> Option<&ElementData> {
-        element
-            .parent_index
-            .and_then(|idx| self.elements.get(idx as usize))
-    }
-
     /// Get direct children of an element.
     pub(crate) fn children_data(&self, element: &ElementData) -> Vec<&ElementData> {
         element
@@ -108,23 +94,6 @@ impl Tree {
         Ok(selector.match_elements(self))
     }
 
-    /// Get the number of elements in the tree.
-    #[cfg(test)]
-    pub(crate) fn len(&self) -> usize {
-        self.elements.len()
-    }
-
-    /// Check if the tree is empty.
-    #[allow(dead_code)] // available for internal use but currently unused
-    pub(crate) fn is_empty(&self) -> bool {
-        self.elements.is_empty()
-    }
-
-    /// Get the internal element index for an element.
-    #[allow(dead_code)] // available for internal use but currently unused
-    pub(crate) fn element_index(&self, element: &ElementData) -> ElementIndex {
-        element.index
-    }
 }
 
 impl fmt::Display for Tree {
@@ -229,9 +198,9 @@ mod tests {
         assert_eq!(deserialized.app_name, "My App");
         assert_eq!(deserialized.pid, Some(1234));
         assert_eq!(deserialized.screen_size, (1920, 1080));
-        assert_eq!(deserialized.len(), 2);
+        assert_eq!(deserialized.elements.len(), 2);
 
-        let root = deserialized.root_data();
+        let root = deserialized.get_data(0).unwrap();
         assert_eq!(root.role, Role::Window);
 
         let buttons = deserialized.query("button").unwrap();
