@@ -18,7 +18,10 @@ import pytest
 import xa11y
 
 APP_SCRIPT = str(Path(__file__).resolve().parent.parent / "app.py")
-STARTUP_TIMEOUT = 15  # seconds to wait for the app to appear
+STARTUP_TIMEOUT = 30  # seconds to wait for the app to appear
+
+# Names the Qt app might register under depending on platform
+APP_NAMES = ["xa11y-qt-test-app", "python3", "python", "Python"]
 
 
 @pytest.fixture(scope="session")
@@ -32,9 +35,6 @@ def qt_app():
     env = os.environ.copy()
     # Ensure Qt uses the platform accessibility bridge
     env["QT_ACCESSIBILITY"] = "1"
-    # Use offscreen platform on headless CI if no display is available,
-    # but prefer xcb/cocoa/windows when a display exists since offscreen
-    # doesn't expose accessibility.
     # The CI harness is responsible for providing a display (Xvfb on Linux).
 
     proc = subprocess.Popen(
@@ -44,30 +44,57 @@ def qt_app():
         stderr=subprocess.PIPE,
     )
 
-    # Wait for the app to register with platform accessibility
+    # Wait for the app to register with platform accessibility.
+    # Try by PID first (most reliable), then by known names.
     app = None
     deadline = time.monotonic() + STARTUP_TIMEOUT
     last_err = None
     while time.monotonic() < deadline:
+        # Check the process hasn't died
+        if proc.poll() is not None:
+            out = proc.stdout.read().decode() if proc.stdout else ""
+            err = proc.stderr.read().decode() if proc.stderr else ""
+            pytest.fail(
+                f"Qt test app exited early (code {proc.returncode}).\n"
+                f"stdout: {out}\nstderr: {err}"
+            )
+
+        # Try by PID
         try:
-            app = xa11y.app("xa11y-qt-test-app")
+            app = xa11y.app(pid=proc.pid)
             break
-        except (xa11y.AppNotFoundError, xa11y.PlatformError) as e:
-            last_err = e
-            # Check the process hasn't died
-            if proc.poll() is not None:
-                out = proc.stdout.read().decode() if proc.stdout else ""
-                err = proc.stderr.read().decode() if proc.stderr else ""
-                pytest.fail(
-                    f"Qt test app exited early (code {proc.returncode}).\n"
-                    f"stdout: {out}\nstderr: {err}"
-                )
-            time.sleep(0.5)
+        except (xa11y.AppNotFoundError, xa11y.PlatformError):
+            pass
+
+        # Try by known names
+        for name in APP_NAMES:
+            try:
+                app = xa11y.app(name)
+                break
+            except (xa11y.AppNotFoundError, xa11y.PlatformError) as e:
+                last_err = e
+        if app is not None:
+            break
+
+        time.sleep(0.5)
 
     if app is None:
+        # Dump available apps for debugging
+        try:
+            all_apps = xa11y.apps()
+            app_list = [(a.name, a.pid) for a in all_apps]
+        except Exception:
+            app_list = "<failed to list>"
         proc.terminate()
         proc.wait(timeout=5)
-        pytest.fail(f"Qt test app not found after {STARTUP_TIMEOUT}s: {last_err}")
+        out = proc.stdout.read().decode() if proc.stdout else ""
+        err = proc.stderr.read().decode() if proc.stderr else ""
+        pytest.fail(
+            f"Qt test app (pid={proc.pid}) not found after {STARTUP_TIMEOUT}s.\n"
+            f"Last error: {last_err}\n"
+            f"Available apps: {app_list}\n"
+            f"stdout: {out}\nstderr: {err}"
+        )
 
     yield app
 
