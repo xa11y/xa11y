@@ -10,15 +10,6 @@ import pytest
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 
-def _find(qt_app, role, name=None):
-    """Find element by role, optionally filtering by name substring."""
-    if name:
-        loc = qt_app.locator(f'{role}[name*="{name}"]')
-        if loc.exists():
-            return loc
-    return qt_app.locator(role)
-
-
 def _find_any(qt_app, *selectors):
     """Return the first locator that exists from the given selectors."""
     for sel in selectors:
@@ -54,7 +45,6 @@ def test_tree_dump(qt_app):
 
     dump(root)
     tree_text = "\n".join(lines)
-    # Use warnings so pytest always shows this regardless of capture mode
     import warnings
 
     warnings.warn(
@@ -71,13 +61,11 @@ def test_tree_dump(qt_app):
 
 
 def test_app_found(qt_app):
-    # App name may vary by platform (could be empty on macOS)
     assert qt_app.pid > 0
 
 
 def test_window_exists(qt_app):
-    loc = qt_app.locator("window")
-    assert loc.exists()
+    assert qt_app.locator("window").exists()
 
 
 # ── Buttons ─────────────────────────────────────────────────────────────────
@@ -88,7 +76,6 @@ def test_button_found(qt_app):
 
 
 def test_button_count(qt_app):
-    # At least OK and Cancel, plus toolbar buttons
     assert qt_app.locator("button").count() >= 2
 
 
@@ -136,7 +123,6 @@ def test_combobox_found(qt_app):
 
 
 def test_combobox_count(qt_app):
-    # Fruit combo + editable Color combo
     assert qt_app.locator("combo_box").count() >= 1
 
 
@@ -199,7 +185,6 @@ def test_textfield_found(qt_app):
 
 def test_textfield_value(qt_app):
     el = qt_app.locator("text_field").first().element()
-    # Should have a value (the initial text)
     assert el.value is not None
 
 
@@ -215,21 +200,18 @@ def test_textfield_focus(qt_app):
 
 
 def test_textarea_found(qt_app):
-    assert qt_app.locator("text_area").exists()
+    # QTextEdit maps to text_area on Linux/AT-SPI but may map differently
+    # on Windows (shows as group or text_field).
+    loc = _find_any(qt_app, "text_area", '[name="Notes"]')
+    assert loc is not None and loc.exists()
 
 
 # ── Static Text / Labels ───────────────────────────────────────────────────
 
 
-def test_statictext_found(qt_app):
-    assert qt_app.locator("static_text").exists()
-
-
-# ── Tab Group ───────────────────────────────────────────────────────────────
-
-
-def test_tabgroup_found(qt_app):
-    loc = _find_any(qt_app, "tab_group", "tab")
+def test_label_found(qt_app):
+    # QLabel maps to static_text on Linux but may map to other roles on Windows.
+    loc = _find_any(qt_app, "static_text", '[name="Heading Text"]')
     assert loc is not None and loc.exists()
 
 
@@ -248,8 +230,7 @@ def test_list_items(qt_app):
 
 
 def test_tree_items(qt_app):
-    # Tree widget items may show as tree_item, list_item, or table_row
-    # depending on platform
+    # Tree widget items may show as tree_item or table_row depending on platform
     found = qt_app.locator("tree_item").exists() or qt_app.locator("table_row").exists()
     assert found
 
@@ -280,7 +261,5 @@ def test_group_found(qt_app):
 
 
 def test_scrollbar_found(qt_app):
-    # Scroll bars may not be visible if content fits
     loc = qt_app.locator("scroll_bar")
-    # Just verify the selector is valid (doesn't crash)
     assert isinstance(loc.exists(), bool)

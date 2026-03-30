@@ -1,8 +1,7 @@
 """PySide6 test application for xa11y integration tests.
 
-Exposes every common Qt widget type so xa11y can exercise its
-accessibility support on real platform APIs (AT-SPI on Linux,
-AXUIElement on macOS, UIA on Windows).
+Exposes every common Qt widget type on a single scrollable page so that
+all widgets are visible to accessibility APIs regardless of tab state.
 
 Launch:  python app.py [--pid-file PATH]
 The optional --pid-file writes the PID so the test harness can kill it.
@@ -18,7 +17,6 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
-    QDial,
     QDoubleSpinBox,
     QGroupBox,
     QHBoxLayout,
@@ -34,7 +32,6 @@ from PySide6.QtWidgets import (
     QSlider,
     QSpinBox,
     QStatusBar,
-    QTabWidget,
     QTextEdit,
     QToolBar,
     QTreeWidget,
@@ -56,13 +53,25 @@ class TestWindow(QMainWindow):
         self._build_toolbar()
         self._build_status_bar()
 
-        # Central widget with tabs
-        tabs = QTabWidget()
-        tabs.setAccessibleName("Main Tabs")
-        tabs.addTab(self._build_basic_tab(), "Basic")
-        tabs.addTab(self._build_list_tab(), "Lists")
-        tabs.addTab(self._build_text_tab(), "Text")
-        self.setCentralWidget(tabs)
+        # Single scrollable page with all widgets
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        content = QWidget()
+        layout = QVBoxLayout(content)
+
+        self._add_buttons(layout)
+        self._add_checkboxes(layout)
+        self._add_radio_buttons(layout)
+        self._add_comboboxes(layout)
+        self._add_range_controls(layout)
+        self._add_input(layout)
+        self._add_text(layout)
+        self._add_list(layout)
+        self._add_tree(layout)
+
+        layout.addStretch()
+        scroll.setWidget(content)
+        self.setCentralWidget(scroll)
 
     # ── Menu bar ────────────────────────────────────────────────────
 
@@ -78,10 +87,6 @@ class TestWindow(QMainWindow):
         edit_menu = mb.addMenu("&Edit")
         edit_menu.addAction("&Undo")
         edit_menu.addAction("&Redo")
-        edit_menu.addSeparator()
-        edit_menu.addAction("Cu&t")
-        edit_menu.addAction("&Copy")
-        edit_menu.addAction("&Paste")
 
         help_menu = mb.addMenu("&Help")
         help_menu.addAction("&About")
@@ -91,9 +96,9 @@ class TestWindow(QMainWindow):
     def _build_toolbar(self) -> None:
         tb: QToolBar = self.addToolBar("Main Toolbar")
         tb.setAccessibleName("Main Toolbar")
-        self.new_btn = tb.addAction("New")
-        self.open_btn = tb.addAction("Open")
-        self.save_btn = tb.addAction("Save")
+        tb.addAction("New")
+        tb.addAction("Open")
+        tb.addAction("Save")
 
     # ── Status bar ──────────────────────────────────────────────────
 
@@ -101,174 +106,171 @@ class TestWindow(QMainWindow):
         sb: QStatusBar = self.statusBar()
         sb.showMessage("Ready")
 
-    # ── Basic tab ───────────────────────────────────────────────────
+    # ── Widget sections ─────────────────────────────────────────────
 
-    def _build_basic_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-
-        # Buttons
-        btn_group = QGroupBox("Buttons")
-        btn_group.setAccessibleName("Buttons")
-        btn_layout = QHBoxLayout(btn_group)
+    def _add_buttons(self, parent_layout: QVBoxLayout) -> None:
+        grp = QGroupBox("Buttons")
+        grp.setAccessibleName("Buttons")
+        lay = QHBoxLayout(grp)
 
         self.ok_btn = QPushButton("OK")
         self.ok_btn.setAccessibleName("OK")
         self.ok_btn.setAccessibleDescription("Confirm the dialog")
-        btn_layout.addWidget(self.ok_btn)
+        lay.addWidget(self.ok_btn)
 
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setAccessibleName("Cancel")
         self.cancel_btn.setEnabled(False)
-        btn_layout.addWidget(self.cancel_btn)
+        lay.addWidget(self.cancel_btn)
 
-        layout.addWidget(btn_group)
+        self.ok_btn.clicked.connect(self._on_ok_clicked)
+        parent_layout.addWidget(grp)
 
-        # Checkboxes
-        chk_group = QGroupBox("Checkboxes")
-        chk_group.setAccessibleName("Checkboxes")
-        chk_layout = QVBoxLayout(chk_group)
+    def _on_ok_clicked(self) -> None:
+        self.cancel_btn.setEnabled(not self.cancel_btn.isEnabled())
+        self.statusBar().showMessage("OK clicked")
+
+    def _add_checkboxes(self, parent_layout: QVBoxLayout) -> None:
+        grp = QGroupBox("Checkboxes")
+        grp.setAccessibleName("Checkboxes")
+        lay = QVBoxLayout(grp)
 
         self.agree_chk = QCheckBox("Agree to terms")
         self.agree_chk.setAccessibleName("Agree to terms")
-        chk_layout.addWidget(self.agree_chk)
+        lay.addWidget(self.agree_chk)
 
         self.subscribe_chk = QCheckBox("Subscribe")
         self.subscribe_chk.setAccessibleName("Subscribe")
         self.subscribe_chk.setChecked(True)
-        chk_layout.addWidget(self.subscribe_chk)
+        lay.addWidget(self.subscribe_chk)
 
-        layout.addWidget(chk_group)
+        self.agree_chk.toggled.connect(
+            lambda checked: self.statusBar().showMessage(f"Agree: {checked}")
+        )
+        parent_layout.addWidget(grp)
 
-        # Radio buttons
-        radio_group = QGroupBox("Options")
-        radio_group.setAccessibleName("Options")
-        radio_layout = QVBoxLayout(radio_group)
+    def _add_radio_buttons(self, parent_layout: QVBoxLayout) -> None:
+        grp = QGroupBox("Options")
+        grp.setAccessibleName("Options")
+        lay = QVBoxLayout(grp)
 
         self.radio_a = QRadioButton("Option A")
         self.radio_a.setAccessibleName("Option A")
         self.radio_a.setChecked(True)
-        radio_layout.addWidget(self.radio_a)
+        lay.addWidget(self.radio_a)
 
         self.radio_b = QRadioButton("Option B")
         self.radio_b.setAccessibleName("Option B")
-        radio_layout.addWidget(self.radio_b)
+        lay.addWidget(self.radio_b)
 
         self.radio_c = QRadioButton("Option C")
         self.radio_c.setAccessibleName("Option C")
-        radio_layout.addWidget(self.radio_c)
+        lay.addWidget(self.radio_c)
 
-        layout.addWidget(radio_group)
+        parent_layout.addWidget(grp)
 
-        # ComboBox
-        combo_group = QGroupBox("ComboBox")
-        combo_group.setAccessibleName("ComboBox")
-        combo_layout = QVBoxLayout(combo_group)
+    def _add_comboboxes(self, parent_layout: QVBoxLayout) -> None:
+        grp = QGroupBox("ComboBox")
+        grp.setAccessibleName("ComboBox")
+        lay = QVBoxLayout(grp)
 
         self.combo = QComboBox()
         self.combo.setAccessibleName("Fruit")
         self.combo.addItems(["Apple", "Banana", "Cherry", "Date", "Elderberry"])
-        combo_layout.addWidget(self.combo)
+        lay.addWidget(self.combo)
 
         self.editable_combo = QComboBox()
         self.editable_combo.setAccessibleName("Color")
         self.editable_combo.setEditable(True)
         self.editable_combo.addItems(["Red", "Green", "Blue"])
-        combo_layout.addWidget(self.editable_combo)
+        lay.addWidget(self.editable_combo)
 
-        layout.addWidget(combo_group)
+        parent_layout.addWidget(grp)
 
-        # Sliders / Spinners
-        range_group = QGroupBox("Range Controls")
-        range_group.setAccessibleName("Range Controls")
-        range_layout = QVBoxLayout(range_group)
+    def _add_range_controls(self, parent_layout: QVBoxLayout) -> None:
+        grp = QGroupBox("Range Controls")
+        grp.setAccessibleName("Range Controls")
+        lay = QVBoxLayout(grp)
 
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setAccessibleName("Volume")
         self.slider.setRange(0, 100)
         self.slider.setValue(50)
-        range_layout.addWidget(self.slider)
+        lay.addWidget(self.slider)
 
         self.spinner = QSpinBox()
         self.spinner.setAccessibleName("Quantity")
         self.spinner.setRange(0, 999)
         self.spinner.setValue(42)
-        range_layout.addWidget(self.spinner)
+        lay.addWidget(self.spinner)
 
         self.double_spinner = QDoubleSpinBox()
         self.double_spinner.setAccessibleName("Price")
         self.double_spinner.setRange(0.0, 9999.99)
         self.double_spinner.setValue(19.99)
         self.double_spinner.setDecimals(2)
-        range_layout.addWidget(self.double_spinner)
-
-        self.dial = QDial()
-        self.dial.setAccessibleName("Dial")
-        self.dial.setRange(0, 360)
-        self.dial.setValue(180)
-        range_layout.addWidget(self.dial)
+        lay.addWidget(self.double_spinner)
 
         self.progress = QProgressBar()
         self.progress.setAccessibleName("Progress")
         self.progress.setRange(0, 100)
         self.progress.setValue(75)
-        range_layout.addWidget(self.progress)
+        lay.addWidget(self.progress)
 
-        layout.addWidget(range_group)
+        parent_layout.addWidget(grp)
 
-        # Line edit
-        input_group = QGroupBox("Input")
-        input_group.setAccessibleName("Input")
-        input_layout = QVBoxLayout(input_group)
+    def _add_input(self, parent_layout: QVBoxLayout) -> None:
+        grp = QGroupBox("Input")
+        grp.setAccessibleName("Input")
+        lay = QVBoxLayout(grp)
 
         self.line_edit = QLineEdit("hello world")
         self.line_edit.setAccessibleName("Search")
         self.line_edit.setPlaceholderText("Type here...")
-        input_layout.addWidget(self.line_edit)
+        lay.addWidget(self.line_edit)
 
-        layout.addWidget(input_group)
+        parent_layout.addWidget(grp)
 
-        # Wire up OK button to toggle Cancel enabled state
-        self.ok_btn.clicked.connect(self._on_ok_clicked)
-        self.agree_chk.toggled.connect(self._on_agree_toggled)
+    def _add_text(self, parent_layout: QVBoxLayout) -> None:
+        grp = QGroupBox("Text")
+        grp.setAccessibleName("Text")
+        lay = QVBoxLayout(grp)
 
-        layout.addStretch()
-        return page
+        self.heading_label = QLabel("Heading Text")
+        self.heading_label.setAccessibleName("Heading Text")
+        lay.addWidget(self.heading_label)
 
-    def _on_ok_clicked(self) -> None:
-        self.cancel_btn.setEnabled(not self.cancel_btn.isEnabled())
-        self.statusBar().showMessage("OK clicked")
+        self.text_edit = QTextEdit()
+        self.text_edit.setAccessibleName("Notes")
+        self.text_edit.setPlainText("Line 1\nLine 2\nLine 3")
+        self.text_edit.setMaximumHeight(100)
+        lay.addWidget(self.text_edit)
 
-    def _on_agree_toggled(self, checked: bool) -> None:
-        self.statusBar().showMessage(f"Agree: {checked}")
+        parent_layout.addWidget(grp)
 
-    # ── List tab ────────────────────────────────────────────────────
-
-    def _build_list_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-
-        # List widget
-        list_group = QGroupBox("List")
-        list_group.setAccessibleName("List")
-        list_layout = QVBoxLayout(list_group)
+    def _add_list(self, parent_layout: QVBoxLayout) -> None:
+        grp = QGroupBox("List")
+        grp.setAccessibleName("List")
+        lay = QVBoxLayout(grp)
 
         self.list_widget = QListWidget()
         self.list_widget.setAccessibleName("Items")
+        self.list_widget.setMaximumHeight(120)
         for i in range(5):
             self.list_widget.addItem(f"Item {i + 1}")
-        list_layout.addWidget(self.list_widget)
+        lay.addWidget(self.list_widget)
 
-        layout.addWidget(list_group)
+        parent_layout.addWidget(grp)
 
-        # Tree widget
-        tree_group = QGroupBox("Tree")
-        tree_group.setAccessibleName("Tree")
-        tree_layout = QVBoxLayout(tree_group)
+    def _add_tree(self, parent_layout: QVBoxLayout) -> None:
+        grp = QGroupBox("Tree")
+        grp.setAccessibleName("Tree")
+        lay = QVBoxLayout(grp)
 
         self.tree_widget = QTreeWidget()
         self.tree_widget.setAccessibleName("File Browser")
         self.tree_widget.setHeaderLabels(["Name", "Size"])
+        self.tree_widget.setMaximumHeight(150)
         root_item = QTreeWidgetItem(["Documents", ""])
         root_item.addChild(QTreeWidgetItem(["report.pdf", "2.1 MB"]))
         root_item.addChild(QTreeWidgetItem(["notes.txt", "12 KB"]))
@@ -277,46 +279,9 @@ class TestWindow(QMainWindow):
         photos_item.addChild(QTreeWidgetItem(["vacation.jpg", "4.5 MB"]))
         self.tree_widget.addTopLevelItem(photos_item)
         self.tree_widget.expandAll()
-        tree_layout.addWidget(self.tree_widget)
+        lay.addWidget(self.tree_widget)
 
-        layout.addWidget(tree_group)
-        layout.addStretch()
-        return page
-
-    # ── Text tab ────────────────────────────────────────────────────
-
-    def _build_text_tab(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-
-        # Labels
-        self.heading_label = QLabel("Heading Text")
-        self.heading_label.setAccessibleName("Heading Text")
-        layout.addWidget(self.heading_label)
-
-        self.info_label = QLabel("This is informational text.")
-        self.info_label.setAccessibleName("Info")
-        layout.addWidget(self.info_label)
-
-        # Multi-line text editor
-        self.text_edit = QTextEdit()
-        self.text_edit.setAccessibleName("Notes")
-        self.text_edit.setPlainText("Line 1\nLine 2\nLine 3")
-        layout.addWidget(self.text_edit)
-
-        # Scroll area with content
-        scroll = QScrollArea()
-        scroll.setAccessibleName("Scroll Area")
-        scroll_content = QWidget()
-        scroll_layout = QVBoxLayout(scroll_content)
-        for i in range(20):
-            lbl = QLabel(f"Scroll item {i + 1}")
-            scroll_layout.addWidget(lbl)
-        scroll.setWidget(scroll_content)
-        scroll.setWidgetResizable(True)
-        layout.addWidget(scroll)
-
-        return page
+        parent_layout.addWidget(grp)
 
 
 def main() -> None:
