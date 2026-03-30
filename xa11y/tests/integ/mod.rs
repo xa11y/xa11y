@@ -1,7 +1,5 @@
 //! Integration test helpers — minimize boilerplate for cross-platform tests.
 
-use std::sync::Arc;
-
 use xa11y::*;
 
 /// Get the test app tree, retrying briefly for registration.
@@ -19,14 +17,8 @@ pub fn app_tree() -> Element {
 }
 
 /// Query elements matching a CSS-like selector within a snapshot.
-///
-/// Replacement for the old `Element::query()` method — uses the tree directly.
 pub fn query(root: &Element, selector: &str) -> Result<Vec<Element>> {
-    let indices = root.tree().query_indices(selector)?;
-    Ok(indices
-        .into_iter()
-        .map(|idx| Element::new(Arc::clone(root.tree()), idx))
-        .collect())
+    root.query_selector(selector)
 }
 
 /// Find exactly one element by selector. Panics with tree dump on failure.

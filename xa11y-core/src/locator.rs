@@ -6,7 +6,6 @@ use crate::element::{Element, ElementData};
 use crate::error::{Error, Result};
 use crate::event::ElementState;
 use crate::provider::Provider;
-use crate::tree::Tree;
 
 /// A lazy element descriptor that re-resolves against a fresh accessibility
 /// tree snapshot on every operation.
@@ -37,12 +36,9 @@ pub struct Locator {
     nth: Option<usize>,
 }
 
-/// Snapshot produced by a single resolve call.
-/// Bundles the tree and the index of the matched element so that callers
-/// can use both without lifetime issues.
+/// Result of a single resolve call — the matched element with its snapshot.
 struct Resolved {
-    tree: Tree,
-    element_index: u32,
+    element: Element,
 }
 
 impl Locator {
@@ -114,16 +110,15 @@ impl Locator {
 
     /// Snapshot the tree and resolve the selector to a single element.
     fn resolve(&self) -> Result<Resolved> {
-        let tree = self.provider.get_tree(self.pid)?;
-        let matches = tree.query(&self.selector)?;
+        let root = self.provider.get_elements(self.pid)?;
+        let snapshot = root.snapshot();
+        let matches = snapshot.query(&self.selector)?;
         let idx = self.nth.unwrap_or(0);
-        let element = matches.get(idx).ok_or_else(|| Error::SelectorNotMatched {
+        let matched = matches.get(idx).ok_or_else(|| Error::SelectorNotMatched {
             selector: self.selector.clone(),
         })?;
-        Ok(Resolved {
-            element_index: element.index,
-            tree,
-        })
+        let element = Element::new(Arc::clone(snapshot), matched.index);
+        Ok(Resolved { element })
     }
 
     // ── Queries (each takes a fresh snapshot) ───────────────────────
@@ -139,16 +134,14 @@ impl Locator {
 
     /// Count matching elements in the current tree.
     pub fn count(&self) -> Result<usize> {
-        let tree = self.provider.get_tree(self.pid)?;
-        let matches = tree.query(&self.selector)?;
+        let root = self.provider.get_elements(self.pid)?;
+        let matches = root.snapshot().query(&self.selector)?;
         Ok(matches.len())
     }
 
     /// Get a single [`Element`] handle from a fresh snapshot, with snapshot navigation.
     pub fn element(&self) -> Result<Element> {
-        let r = self.resolve()?;
-        let tree = Arc::new(r.tree);
-        Ok(Element::new(tree, r.element_index))
+        Ok(self.resolve()?.element)
     }
 
     /// Get all matching elements from a fresh snapshot.
@@ -156,16 +149,16 @@ impl Locator {
     /// All returned elements share the same snapshot, so parent/children
     /// navigation is consistent across the result set.
     pub fn elements(&self) -> Result<Vec<Element>> {
-        let tree = self.provider.get_tree(self.pid)?;
-        let indices: Vec<u32> = tree
+        let root = self.provider.get_elements(self.pid)?;
+        let snapshot = root.snapshot();
+        let indices: Vec<u32> = snapshot
             .query(&self.selector)?
             .iter()
             .map(|e| e.index)
             .collect();
-        let tree = Arc::new(tree);
         Ok(indices
             .into_iter()
-            .map(|idx| Element::new(Arc::clone(&tree), idx))
+            .map(|idx| Element::new(Arc::clone(snapshot), idx))
             .collect())
     }
 
@@ -177,11 +170,7 @@ impl Locator {
             d.validate(action)?;
         }
         let r = self.resolve()?;
-        let element = r
-            .tree
-            .get_data(r.element_index)
-            .expect("element_index valid after resolve");
-        self.provider.perform_action(&r.tree, element, action, data)
+        self.provider.perform_action(&r.element, action, data)
     }
 
     /// Click / invoke the matched element.
@@ -377,14 +366,15 @@ impl Locator {
                 return Err(Error::Timeout { elapsed });
             }
 
-            let tree = self.provider.get_tree(self.pid)?;
-            let matches = tree.query(&self.selector).ok();
+            let root = self.provider.get_elements(self.pid)?;
+            let snapshot = root.snapshot();
+            let matches = snapshot.query(&self.selector).ok();
             let idx = self.nth.unwrap_or(0);
             let matched_index = matches.as_ref().and_then(|m| m.get(idx).map(|e| e.index));
-            let element_ref = matched_index.and_then(|i| tree.get_data(i));
+            let element_ref = matched_index.and_then(|i| snapshot.get_data(i));
 
             if predicate(element_ref) {
-                return Ok(matched_index.map(|i| Element::new(Arc::new(tree), i)));
+                return Ok(matched_index.map(|i| Element::new(Arc::clone(snapshot), i)));
             }
 
             std::thread::sleep(poll_interval);

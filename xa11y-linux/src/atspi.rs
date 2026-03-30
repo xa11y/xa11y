@@ -4,8 +4,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use xa11y_core::{
-    Action, ActionData, CancelHandle, ElementData, Error, Event, EventReceiver, EventType,
-    PermissionStatus, Provider, Rect, Result, Role, StateSet, Subscription, Toggled, Tree,
+    root_element, Action, ActionData, CancelHandle, Element, ElementData, Error, Event,
+    EventReceiver, EventType, PermissionStatus, Provider, Rect, Result, Role, StateSet,
+    Subscription, Toggled,
 };
 use zbus::blocking::{Connection, Proxy};
 
@@ -643,7 +644,7 @@ impl LinuxProvider {
 }
 
 impl LinuxProvider {
-    fn build_tree(&self, app_ref: &AccessibleRef, label: &str) -> Result<Tree> {
+    fn build_tree(&self, app_ref: &AccessibleRef, label: &str) -> Result<Element> {
         let app_name = self.get_name(app_ref).unwrap_or_default();
         let screen_size = Self::detect_screen_size();
         let mut elements = Vec::new();
@@ -662,7 +663,7 @@ impl LinuxProvider {
 
         let pid = self.get_app_pid(app_ref);
 
-        Ok(Tree::new(app_name, pid, screen_size, elements))
+        Ok(root_element(app_name, pid, screen_size, elements))
     }
 }
 
@@ -675,12 +676,12 @@ impl Provider for LinuxProvider {
             })
     }
 
-    fn get_tree(&self, pid: u32) -> Result<Tree> {
+    fn get_elements(&self, pid: u32) -> Result<Element> {
         let app_ref = self.find_app_by_pid(pid)?;
         self.build_tree(&app_ref, &format!("pid:{pid}"))
     }
 
-    fn get_apps(&self) -> Result<Tree> {
+    fn get_apps(&self) -> Result<Element> {
         let screen_size = Self::detect_screen_size();
         let mut elements = Vec::new();
 
@@ -740,7 +741,7 @@ impl Provider for LinuxProvider {
 
         *self.cached_refs.lock().unwrap() = refs;
 
-        Ok(Tree::new(
+        Ok(root_element(
             "Desktop".to_string(),
             None,
             screen_size,
@@ -750,12 +751,11 @@ impl Provider for LinuxProvider {
 
     fn perform_action(
         &self,
-        tree: &Tree,
-        element: &ElementData,
+        element: &Element,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()> {
-        let element_idx = tree.element_index(element);
+        let element_idx = element.index;
 
         // Look up cached accessible ref for action dispatch
         let cache = self.cached_refs.lock().unwrap();

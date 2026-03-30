@@ -35,11 +35,11 @@ impl App {
     /// Resolves to a PID at construction time.
     pub fn from_name(provider: Arc<dyn Provider>, name: &str) -> Result<Self> {
         let pid = provider.resolve_pid_by_name(name)?;
-        let tree = provider.get_tree(pid)?;
+        let root = provider.get_elements(pid)?;
         Ok(Self {
             provider,
             pid,
-            app_name: tree.app_name.clone(),
+            app_name: root.snapshot_app_name().to_string(),
         })
     }
 
@@ -47,11 +47,11 @@ impl App {
     ///
     /// Validates the app exists and caches its metadata.
     pub fn from_pid(provider: Arc<dyn Provider>, pid: u32) -> Result<Self> {
-        let tree = provider.get_tree(pid)?;
+        let root = provider.get_elements(pid)?;
         Ok(Self {
             provider,
             pid,
-            app_name: tree.app_name.clone(),
+            app_name: root.snapshot_app_name().to_string(),
         })
     }
 
@@ -94,9 +94,7 @@ impl App {
     /// Returns the root [`Element`] of the snapshot. Navigate with
     /// `children()` and `parent()` — all within the same consistent snapshot.
     pub fn elements(&self) -> Result<Element> {
-        let tree = self.provider.get_tree(self.pid)?;
-        let tree = Arc::new(tree);
-        Ok(Element::new(tree, 0))
+        self.provider.get_elements(self.pid)
     }
 
     /// Subscribe to all accessibility events for this application.
@@ -123,10 +121,9 @@ impl App {
     /// Returns one `App` per discovered application. Each can then be used
     /// for locators and snapshots.
     pub fn all(provider: Arc<dyn Provider>) -> Result<Vec<App>> {
-        let tree = provider.get_apps()?;
-        let root = tree.root_data();
-        let apps = tree
-            .children_data(root)
+        let root = provider.get_apps()?;
+        let apps = root
+            .children()
             .into_iter()
             .filter(|child| child.role == Role::Application)
             .filter_map(|child| {

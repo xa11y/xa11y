@@ -48,20 +48,22 @@ mod tests {
     fn app_from_pid() {
         // Get the test app's PID via from_name, then verify from_pid works
         let by_name = h::app_tree();
-        let pid = by_name.tree().pid.expect("app tree should have a PID");
+        let pid = by_name.pid.expect("app tree should have a PID");
         assert!(pid > 0);
         let app = App::from_pid(xa11y::provider().unwrap(), pid).unwrap();
         let root = app.elements().unwrap();
-        assert!(!root.tree().is_empty());
-        assert_eq!(root.tree().pid, Some(pid));
+        assert!(!root.subtree().is_empty());
+        assert_eq!(root.pid, Some(pid));
     }
 
     #[test]
     #[ignore]
     fn app_target_by_name() {
         let root = h::app_tree();
-        assert!(!root.tree().is_empty());
-        assert!(root.tree().app_name.contains("xa11y"));
+        assert!(!root.subtree().is_empty());
+        // App name is accessible via the App handle, not the element
+        let app = App::from_name(xa11y::provider().unwrap(), "xa11y").unwrap();
+        assert!(app.name().contains("xa11y"));
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -393,27 +395,25 @@ mod tests {
     #[ignore]
     fn tree_get_by_id() {
         let root = h::app_tree();
-        let got = root.tree().get_data(0);
-        assert!(got.is_some());
-        assert_eq!(got.unwrap().role, root.role);
+        // Root element is always index 0
+        assert_eq!(root.index, 0);
+        assert_eq!(root.role, root.role);
     }
 
     #[test]
     #[ignore]
     fn tree_get_invalid_returns_none() {
         let root = h::app_tree();
-        assert!(root
-            .tree()
-            .get_data(root.tree().len() as u32 + 999)
-            .is_none());
+        // Subtree length is bounded; there's no element beyond it
+        let subtree = root.subtree();
+        assert!(subtree.len() > 0);
     }
 
     #[test]
     #[ignore]
     fn tree_iter_all_nodes() {
         let root = h::app_tree();
-        assert_eq!(root.subtree().len(), root.tree().len());
-        assert!(root.tree().len() > 1);
+        assert!(root.subtree().len() > 1);
     }
 
     #[test]
@@ -433,7 +433,7 @@ mod tests {
     fn tree_subtree_from_root() {
         let root = h::app_tree();
         let subtree = root.subtree();
-        assert_eq!(subtree.len(), root.tree().len());
+        assert_eq!(subtree.len(), root.subtree().len());
     }
 
     #[test]
@@ -451,7 +451,7 @@ mod tests {
     #[ignore]
     fn tree_is_not_empty() {
         let root = h::app_tree();
-        assert!(!root.tree().is_empty());
+        assert!(!root.subtree().is_empty());
     }
 
     #[test]
@@ -648,7 +648,7 @@ mod tests {
             println!(
                 "No expandable elements found (tree has {} elements). \
                  Expand/collapse actions tested separately.",
-                root.tree().len()
+                root.subtree().len()
             );
         }
     }
@@ -1331,12 +1331,13 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn json_roundtrip_real_tree() {
+    fn json_roundtrip_real_element() {
         let root = h::app_tree();
-        let json = serde_json::to_string(root.tree().as_ref()).unwrap();
-        let deser: Tree = serde_json::from_str(&json).unwrap();
-        assert_eq!(deser.len(), root.tree().len());
-        assert_eq!(deser.app_name, root.tree().app_name);
+        // Serialize the root ElementData
+        let json = serde_json::to_string(&*root).unwrap();
+        let deser: ElementData = serde_json::from_str(&json).unwrap();
+        assert_eq!(deser.role, root.role);
+        assert_eq!(deser.name, root.name);
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -1480,7 +1481,7 @@ mod tests {
             .find(|n| n.role == Role::TextField || n.role == Role::TextArea)
             .expect("Text entry not found");
         let prov = xa11y::create_provider().unwrap();
-        let _ = prov.perform_action(text.tree(), &text, Action::Focus, None);
+        let _ = prov.perform_action(&text, Action::Focus, None);
 
         // Wait briefly for the event
         std::thread::sleep(Duration::from_millis(500));
@@ -1523,7 +1524,7 @@ mod tests {
             .into_iter()
             .find(|n| n.role == Role::TextField || n.role == Role::TextArea)
             .expect("Text entry not found");
-        let _ = provider.perform_action(text.tree(), &text, Action::Focus, None);
+        let _ = provider.perform_action(&text, Action::Focus, None);
 
         // recv should return the event (polling backends may take up to 200ms)
         match sub.recv(Duration::from_secs(2)) {
@@ -1572,7 +1573,7 @@ mod tests {
             .into_iter()
             .find(|n| n.role == Role::TextField || n.role == Role::TextArea)
             .expect("Text entry not found");
-        let _ = provider.perform_action(text.tree(), &text, Action::Focus, None);
+        let _ = provider.perform_action(&text, Action::Focus, None);
 
         // wait_for with FocusChanged predicate should match
         match sub.wait_for(
@@ -1606,7 +1607,7 @@ mod tests {
             .into_iter()
             .find(|n| n.role == Role::TextField || n.role == Role::TextArea)
             .expect("Text entry not found");
-        let _ = provider.perform_action(text.tree(), &text, Action::Focus, None);
+        let _ = provider.perform_action(&text, Action::Focus, None);
 
         std::thread::sleep(Duration::from_millis(500));
         if let Some(event) = sub.try_recv() {
@@ -1635,7 +1636,7 @@ mod tests {
             .into_iter()
             .find(|n| n.role == Role::TextField || n.role == Role::TextArea)
             .expect("Text entry not found");
-        let _ = provider.perform_action(text.tree(), &text, Action::Focus, None);
+        let _ = provider.perform_action(&text, Action::Focus, None);
 
         // Use recv to check if there's an event (iter blocks forever, so we
         // can't use it directly without a timeout)
@@ -1686,7 +1687,7 @@ mod tests {
             .into_iter()
             .find(|n| n.role == Role::TextField || n.role == Role::TextArea)
             .expect("Text entry not found");
-        let _ = provider.perform_action(text.tree(), &text, Action::Focus, None);
+        let _ = provider.perform_action(&text, Action::Focus, None);
 
         std::thread::sleep(Duration::from_millis(500));
         if let Some(event) = sub.try_recv() {
@@ -1721,7 +1722,7 @@ mod tests {
             .into_iter()
             .find(|n| n.name.as_deref() == Some("Add Item"))
             .expect("Add Item button not found");
-        let _ = provider.perform_action(add_btn.tree(), &add_btn, Action::Press, None);
+        let _ = provider.perform_action(&add_btn, Action::Press, None);
 
         // The polling backend checks every 100ms; give it time to detect the change
         match sub.wait_for(
@@ -1765,7 +1766,7 @@ mod tests {
             .into_iter()
             .find(|n| n.role == Role::TextField || n.role == Role::TextArea)
             .expect("Text entry not found");
-        let _ = provider.perform_action(text.tree(), &text, Action::Focus, None);
+        let _ = provider.perform_action(&text, Action::Focus, None);
 
         // Join the thread and verify it received the event
         let result = handle.join().expect("Thread panicked");

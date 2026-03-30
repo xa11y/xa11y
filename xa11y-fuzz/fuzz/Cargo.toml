@@ -18,20 +18,5 @@ name = "tree_ops"
 path = "fuzz_targets/tree_ops.rs"
 doc = false
 
-[[bin]]
-name = "selector"
-path = "fuzz_targets/selector.rs"
-doc = false
-
-[[bin]]
-name = "query"
-path = "fuzz_targets/query.rs"
-doc = false
-
-[[bin]]
-name = "serde"
-path = "fuzz_targets/serde.rs"
-doc = false
-
 [workspace]
 members = ["."]

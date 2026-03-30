@@ -291,7 +291,7 @@ mod provider_fuzz {
         provider: std::sync::Arc<dyn Provider>,
         rng: StdRng,
         verbose: bool,
-        tree: Option<Tree>,
+        root: Option<Element>,
         test_app_pid: u32,
         ops: u64,
         errors: u64,
@@ -304,11 +304,11 @@ mod provider_fuzz {
             }
         }
 
-        fn ensure_tree(&mut self) {
-            if self.tree.is_none() {
-                match self.provider.get_tree(self.test_app_pid) {
-                    Ok(tree) => self.tree = Some(tree),
-                    Err(e) => self.log(&format!("ensure_tree failed: {}", e)),
+        fn ensure_root(&mut self) {
+            if self.root.is_none() {
+                match self.provider.get_elements(self.test_app_pid) {
+                    Ok(root) => self.root = Some(root),
+                    Err(e) => self.log(&format!("ensure_root failed: {}", e)),
                 }
             }
         }
@@ -316,12 +316,12 @@ mod provider_fuzz {
 
     // ── Operations ───────────────────────────────────────────────────────────
 
-    fn op_get_tree(state: &mut FuzzState) {
-        state.log(&format!("get_tree({})", state.test_app_pid));
-        match state.provider.get_tree(state.test_app_pid) {
-            Ok(tree) => {
-                inspect_tree(&tree, &mut state.rng);
-                state.tree = Some(tree);
+    fn op_get_elements(state: &mut FuzzState) {
+        state.log(&format!("get_elements({})", state.test_app_pid));
+        match state.provider.get_elements(state.test_app_pid) {
+            Ok(root) => {
+                inspect_root(&root, &mut state.rng);
+                state.root = Some(root);
             }
             Err(e) => {
                 state.log(&format!("  -> error (expected): {}", e));
@@ -339,11 +339,11 @@ mod provider_fuzz {
         state.errors += 1;
     }
 
-    fn op_get_tree_not_found(state: &mut FuzzState) {
-        state.log("get_tree(99999)");
-        let result = state.provider.get_tree(99999);
+    fn op_get_elements_not_found(state: &mut FuzzState) {
+        state.log("get_elements(99999)");
+        let result = state.provider.get_elements(99999);
         match result {
-            Ok(tree) => inspect_tree(&tree, &mut state.rng),
+            Ok(root) => inspect_root(&root, &mut state.rng),
             Err(_) => state.errors += 1,
         }
     }
@@ -351,14 +351,14 @@ mod provider_fuzz {
     fn op_get_apps(state: &mut FuzzState) {
         state.log("get_apps()");
         match state.provider.get_apps() {
-            Ok(tree) => {
-                state.log(&format!("  -> {} elements", tree.len()));
-                let _ = tree.root_data();
-                let _ = tree.len();
-                let _ = tree.is_empty();
+            Ok(root) => {
+                let subtree = root.subtree();
+                state.log(&format!("  -> {} elements", subtree.len()));
+                let _ = &root.role;
+                let _ = &root.name;
                 let selectors = ["button", "window", "application"];
                 for sel in &selectors {
-                    let _ = tree.query(sel);
+                    let _ = root.query_selector(sel);
                 }
             }
             Err(e) => {
@@ -383,41 +383,38 @@ mod provider_fuzz {
     }
 
     fn op_action_on_element(state: &mut FuzzState) {
-        state.ensure_tree();
-        let tree = match &state.tree {
-            Some(t) => t,
+        state.ensure_root();
+        let root = match &state.root {
+            Some(r) => r,
             None => return,
         };
 
-        let element_count = tree.len();
-        if element_count == 0 {
+        let elements = root.subtree();
+        if elements.is_empty() {
             return;
         }
 
         // Pick a random element
-        let element_idx = state.rng.random_range(0..element_count) as u32;
-        let element = match tree.get_data(element_idx) {
-            Some(n) => n,
-            None => return,
-        };
+        let element_idx = state.rng.random_range(0..elements.len());
+        let target = &elements[element_idx];
 
         // Pick action: 80% from element's supported actions, 20% random
-        let action = if !element.actions.is_empty() && state.rng.random_bool(0.8) {
-            element.actions[state.rng.random_range(0..element.actions.len())]
+        let action = if !target.actions.is_empty() && state.rng.random_bool(0.8) {
+            target.actions[state.rng.random_range(0..target.actions.len())]
         } else {
             ALL_ACTIONS[state.rng.random_range(0..ALL_ACTIONS.len())]
         };
 
-        let data = random_action_data(&mut state.rng, action, element);
+        let data = random_action_data(&mut state.rng, action, target);
         state.log(&format!(
             "perform_action(element={}, role={:?}, action={:?}, data={:?})",
-            element_idx, element.role, action, data
+            element_idx, target.role, action, data
         ));
 
-        match state.provider.perform_action(tree, element, action, data) {
+        match state.provider.perform_action(target, action, data) {
             Ok(()) => {
                 std::thread::sleep(std::time::Duration::from_millis(20));
-                state.tree = None;
+                state.root = None;
             }
             Err(e) => {
                 state.log(&format!("  -> error (expected): {}", e));
@@ -427,44 +424,40 @@ mod provider_fuzz {
     }
 
     fn op_action_press(state: &mut FuzzState) {
-        state.ensure_tree();
-        let tree = match &state.tree {
-            Some(t) => t,
+        state.ensure_root();
+        let root = match &state.root {
+            Some(r) => r,
             None => return,
         };
 
-        if tree.is_empty() {
+        let elements = root.subtree();
+        if elements.is_empty() {
             return;
         }
 
-        let element_idx = state.rng.random_range(0..tree.len()) as u32;
-        let element = match tree.get_data(element_idx) {
-            Some(n) => n,
-            None => return,
-        };
+        let element_idx = state.rng.random_range(0..elements.len());
+        let target = &elements[element_idx];
         state.log(&format!("perform_action press, element={}", element_idx));
 
-        let result = state
-            .provider
-            .perform_action(tree, element, Action::Press, None);
+        let result = state.provider.perform_action(target, Action::Press, None);
         match result {
             Err(_) => state.errors += 1,
             Ok(()) => {
-                state.tree = None;
+                state.root = None;
             }
         }
     }
 
     fn op_query_tree(state: &mut FuzzState) {
-        state.ensure_tree();
-        let tree = match &state.tree {
-            Some(t) => t,
+        state.ensure_root();
+        let root = match &state.root {
+            Some(r) => r,
             None => return,
         };
 
         let selector = random_selector(&mut state.rng);
-        state.log(&format!("tree.query(\"{}\")", selector));
-        match tree.query(&selector) {
+        state.log(&format!("root.query_selector(\"{}\")", selector));
+        match root.query_selector(&selector) {
             Ok(results) => {
                 state.log(&format!("  -> {} matches", results.len()));
                 for element in &results {
@@ -485,39 +478,33 @@ mod provider_fuzz {
     }
 
     fn op_tree_dump(state: &mut FuzzState) {
-        state.ensure_tree();
-        let tree = match &state.tree {
-            Some(t) => t,
+        state.ensure_root();
+        let root = match &state.root {
+            Some(r) => r,
             None => return,
         };
 
-        state.log("tree.to_string()");
-        let display = tree.to_string();
+        state.log("root.to_string()");
+        let display = root.to_string();
         assert!(!display.is_empty(), "Display should produce output");
     }
 
     fn op_tree_subtree(state: &mut FuzzState) {
-        state.ensure_tree();
-        let tree = match &state.tree {
-            Some(t) => t,
+        state.ensure_root();
+        let root = match &state.root {
+            Some(r) => r,
             None => return,
         };
 
-        if tree.is_empty() {
+        let elements = root.subtree();
+        if elements.is_empty() {
             return;
         }
 
-        let element_idx = state.rng.random_range(0..tree.len()) as u32;
-        let element = match tree.get_data(element_idx) {
-            Some(n) => n,
-            None => return,
-        };
-        state.log(&format!("tree.subtree({})", element_idx));
-        let sub = tree
-            .subtree_indices(element.index)
-            .into_iter()
-            .filter_map(|idx| tree.get_data(idx))
-            .collect::<Vec<_>>();
+        let element_idx = state.rng.random_range(0..elements.len());
+        let target = &elements[element_idx];
+        state.log(&format!("element.subtree({})", element_idx));
+        let sub = target.subtree();
         assert!(
             !sub.is_empty(),
             "subtree should not be empty for valid element"
@@ -525,38 +512,35 @@ mod provider_fuzz {
     }
 
     fn op_tree_children(state: &mut FuzzState) {
-        state.ensure_tree();
-        let tree = match &state.tree {
-            Some(t) => t,
+        state.ensure_root();
+        let root = match &state.root {
+            Some(r) => r,
             None => return,
         };
 
-        if tree.is_empty() {
+        let elements = root.subtree();
+        if elements.is_empty() {
             return;
         }
 
-        let element_idx = state.rng.random_range(0..tree.len()) as u32;
-        let element = match tree.get_data(element_idx) {
-            Some(n) => n,
-            None => return,
-        };
-        state.log(&format!("tree.children_data({})", element_idx));
-        let children = tree.children_data(element);
+        let element_idx = state.rng.random_range(0..elements.len());
+        let target = &elements[element_idx];
+        state.log(&format!("element.children({})", element_idx));
+        let children = target.children();
         let _ = children.len();
     }
 
     fn op_tree_iterate(state: &mut FuzzState) {
-        state.ensure_tree();
-        let tree = match &state.tree {
-            Some(t) => t,
+        state.ensure_root();
+        let root = match &state.root {
+            Some(r) => r,
             None => return,
         };
 
-        state.log("tree.iter() — full traversal");
-        let count = tree.iter().count();
-        assert_eq!(count, tree.len(), "iter count should match len");
+        state.log("root.subtree() — full traversal");
+        let elements = root.subtree();
 
-        for element in tree.iter() {
+        for element in &elements {
             let _ = &element.role;
             let _ = &element.name;
             let _ = &element.value;
@@ -574,38 +558,31 @@ mod provider_fuzz {
 
     // ── Tree Inspection Helper ───────────────────────────────────────────────
 
-    fn inspect_tree(tree: &Tree, rng: &mut StdRng) {
-        let _ = tree.len();
-        let _ = tree.is_empty();
-        let _ = tree.root_data();
+    fn inspect_root(root: &Element, rng: &mut StdRng) {
+        let subtree = root.subtree();
+        let _ = subtree.len();
+        let _ = &root.role;
+        let _ = &root.name;
 
         let inspection_count = rng.random_range(1..=5);
         for _ in 0..inspection_count {
             match rng.random_range(0u8..4) {
                 0 => {
-                    let _ = tree.to_string();
+                    let _ = root.to_string();
                 }
                 1 => {
-                    if !tree.is_empty() {
-                        let idx = rng.random_range(0..tree.len()) as u32;
-                        if let Some(element) = tree.get_data(idx) {
-                            let _ = tree.children_data(element);
-                        }
+                    if !subtree.is_empty() {
+                        let idx = rng.random_range(0..subtree.len());
+                        let _ = subtree[idx].children();
                     }
                 }
                 2 => {
-                    let _ = tree.query("button");
+                    let _ = root.query_selector("button");
                 }
                 3 => {
-                    if !tree.is_empty() {
-                        let idx = rng.random_range(0..tree.len()) as u32;
-                        if let Some(element) = tree.get_data(idx) {
-                            let _ = tree
-                                .subtree_indices(element.index)
-                                .into_iter()
-                                .filter_map(|idx| tree.get_data(idx))
-                                .collect::<Vec<_>>();
-                        }
+                    if !subtree.is_empty() {
+                        let idx = rng.random_range(0..subtree.len());
+                        let _ = subtree[idx].subtree();
                     }
                 }
                 _ => unreachable!(),
@@ -635,9 +612,10 @@ mod provider_fuzz {
 
         let mut test_app_pid = 0u32;
         for attempt in 0..10 {
-            if let Ok(tree) = provider.get_apps() {
-                if let Some(app) = tree
-                    .iter()
+            if let Ok(root) = provider.get_apps() {
+                if let Some(app) = root
+                    .subtree()
+                    .into_iter()
                     .find(|n| n.name.as_deref().is_some_and(|name| name.contains("xa11y")))
                 {
                     test_app_pid = app.pid.unwrap_or(0);
@@ -665,7 +643,7 @@ mod provider_fuzz {
             provider,
             rng: StdRng::seed_from_u64(args.seed),
             verbose: args.verbose,
-            tree: None,
+            root: None,
             test_app_pid,
             ops: 0,
             errors: 0,
@@ -673,9 +651,9 @@ mod provider_fuzz {
 
         type OpFn = fn(&mut FuzzState);
         let ops: Vec<(u32, &str, OpFn)> = vec![
-            (20, "get_tree", op_get_tree as OpFn),
+            (20, "get_elements", op_get_elements as OpFn),
             (2, "resolve_pid_not_found", op_resolve_pid_not_found),
-            (1, "get_tree_not_found", op_get_tree_not_found),
+            (1, "get_elements_not_found", op_get_elements_not_found),
             (1, "get_apps", op_get_apps),
             (1, "check_permissions", op_check_permissions),
             (20, "action_on_element", op_action_on_element),

@@ -32,9 +32,9 @@ use std::sync::{Arc, OnceLock};
 
 // Re-export public types.
 pub use xa11y_core::{
-    Action, ActionData, App, Element, ElementData, ElementState, Error, Event, EventType, Locator,
-    PermissionStatus, RawPlatformData, Rect, Result, Role, StateFlag, StateSet, Subscription,
-    SubscriptionIter, TextChangeData, TextChangeType, Toggled, Tree,
+    root_element, Action, ActionData, App, Element, ElementData, ElementState, Error, Event,
+    EventType, Locator, PermissionStatus, RawPlatformData, Rect, Result, Role, StateFlag, StateSet,
+    Subscription, SubscriptionIter, TextChangeData, TextChangeType, Toggled,
 };
 
 // Implementation details used by platform backends and Python bindings.
@@ -67,20 +67,19 @@ impl Provider for StaticProviderRef {
     fn resolve_pid_by_name(&self, name: &str) -> Result<u32> {
         self.0.resolve_pid_by_name(name)
     }
-    fn get_tree(&self, pid: u32) -> Result<xa11y_core::Tree> {
-        self.0.get_tree(pid)
+    fn get_elements(&self, pid: u32) -> Result<Element> {
+        self.0.get_elements(pid)
     }
-    fn get_apps(&self) -> Result<xa11y_core::Tree> {
+    fn get_apps(&self) -> Result<Element> {
         self.0.get_apps()
     }
     fn perform_action(
         &self,
-        tree: &xa11y_core::Tree,
-        element: &ElementData,
+        element: &Element,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()> {
-        self.0.perform_action(tree, element, action, data)
+        self.0.perform_action(element, action, data)
     }
     fn check_permissions(&self) -> Result<PermissionStatus> {
         self.0.check_permissions()
@@ -100,11 +99,7 @@ pub fn provider() -> Result<Arc<dyn Provider>> {
 /// Perform an action on an element from a specific snapshot.
 #[cfg(feature = "testing")]
 pub fn perform_action(element: &Element, action: Action, data: Option<ActionData>) -> Result<()> {
-    let tree = element.tree();
-    let element_data = tree
-        .get_data(element.element_index())
-        .expect("Element index must be valid within its snapshot");
-    get_provider_ref()?.perform_action(tree, element_data, action, data)
+    get_provider_ref()?.perform_action(element, action, data)
 }
 
 /// Check if accessibility permissions are granted.

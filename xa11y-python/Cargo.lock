@@ -1223,7 +1223,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "xa11y-core",
  "xa11y-linux",
@@ -1233,7 +1233,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1242,7 +1242,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-linux"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "xa11y-core",
  "zbus",
@@ -1250,7 +1250,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-macos"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "cc",
  "core-foundation",
@@ -1259,7 +1259,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-python"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "pyo3",
  "xa11y",
@@ -1267,7 +1267,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-windows"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "windows",
  "xa11y-core",

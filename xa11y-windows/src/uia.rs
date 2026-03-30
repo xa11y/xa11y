@@ -11,9 +11,9 @@ use windows::Win32::System::Threading::*;
 use windows::Win32::UI::Accessibility::*;
 
 use xa11y_core::{
-    Action, ActionData, CancelHandle, ElementData, Error, Event, EventReceiver, EventType,
-    PermissionStatus, Provider, RawPlatformData, Rect, Result, Role, StateSet, Subscription,
-    Toggled, Tree,
+    root_element, Action, ActionData, CancelHandle, Element, ElementData, Error, Event,
+    EventReceiver, EventType, PermissionStatus, Provider, RawPlatformData, Rect, Result, Role,
+    StateSet, Subscription, Toggled,
 };
 
 /// Initialize COM for UIA. Called once per WindowsProvider creation.
@@ -417,7 +417,7 @@ impl WindowsProvider {
         pid: u32,
         app_name: String,
         target_label: &str,
-    ) -> Result<Tree> {
+    ) -> Result<Element> {
         let screen_size = Self::detect_screen_size();
         let mut elements = Vec::new();
         let mut uia_elements = Vec::new();
@@ -439,7 +439,7 @@ impl WindowsProvider {
 
         *self.cached_elements.lock().unwrap() = uia_elements;
 
-        Ok(Tree::new(app_name, Some(pid), screen_size, elements))
+        Ok(root_element(app_name, Some(pid), screen_size, elements))
     }
 }
 
@@ -449,12 +449,12 @@ impl Provider for WindowsProvider {
         Ok(pid)
     }
 
-    fn get_tree(&self, pid: u32) -> Result<Tree> {
+    fn get_elements(&self, pid: u32) -> Result<Element> {
         let (app_element, app_name) = self.find_app_by_pid(pid)?;
         self.build_tree(&app_element, pid, app_name, &format!("PID {}", pid))
     }
 
-    fn get_apps(&self) -> Result<Tree> {
+    fn get_apps(&self) -> Result<Element> {
         let screen_size = Self::detect_screen_size();
         let mut elements = Vec::new();
         let mut uia_elements = Vec::new();
@@ -542,7 +542,7 @@ impl Provider for WindowsProvider {
         elements[0].children_indices = root_children;
         *self.cached_elements.lock().unwrap() = uia_elements;
 
-        Ok(Tree::new(
+        Ok(root_element(
             "Desktop".to_string(),
             None,
             screen_size,
@@ -552,12 +552,11 @@ impl Provider for WindowsProvider {
 
     fn perform_action(
         &self,
-        tree: &Tree,
-        element: &ElementData,
+        element: &Element,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()> {
-        let element_idx = tree.element_index(element);
+        let element_idx = element.index;
 
         let cache = self.cached_elements.lock().unwrap();
         let uia_element = cache.get(element_idx as usize).ok_or(Error::ElementStale {
