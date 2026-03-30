@@ -362,7 +362,7 @@ jobs:
         shell: bash
         env:
           QT_ACCESSIBILITY: "1"
-        run: .venv-qt-test/Scripts/pytest.exe xa11y-qt-test-app/tests/ -v -s --timeout=60
+        run: .venv-qt-test/Scripts/pytest.exe xa11y-qt-test-app/tests/ -v -s --timeout=15
 
   # ── Fuzz testing ───────────────────────────────────────────────────
   fuzz:
