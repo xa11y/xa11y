@@ -28,19 +28,13 @@ mod stub {
         fn resolve_pid_by_name(&self, _: &str) -> Result<u32> {
             unreachable!()
         }
-        fn get_tree(&self, _: u32) -> Result<Tree> {
+        fn get_elements(&self, _: u32) -> Result<Element> {
             unreachable!()
         }
-        fn get_apps(&self) -> Result<Tree> {
+        fn get_apps(&self) -> Result<Element> {
             unreachable!()
         }
-        fn perform_action(
-            &self,
-            _: &Tree,
-            _: &ElementData,
-            _: Action,
-            _: Option<ActionData>,
-        ) -> Result<()> {
+        fn perform_action(&self, _: &Element, _: Action, _: Option<ActionData>) -> Result<()> {
             unreachable!()
         }
         fn check_permissions(&self) -> Result<PermissionStatus> {

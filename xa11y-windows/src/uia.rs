@@ -906,7 +906,7 @@ impl Provider for WindowsProvider {
     }
 
     fn subscribe(&self, pid: u32) -> Result<Subscription> {
-        self.subscribe_impl(String::new(), pid, move |p| p.get_tree(pid))
+        self.subscribe_impl(String::new(), pid, move |p| p.get_elements(pid))
     }
 }
 
@@ -1195,7 +1195,7 @@ impl WindowsProvider {
     /// Spawn a polling thread that detects focus and structure changes.
     fn subscribe_impl<F>(&self, app_name: String, app_pid: u32, tree_fn: F) -> Result<Subscription>
     where
-        F: Fn(&WindowsProvider) -> Result<Tree> + Send + 'static,
+        F: Fn(&WindowsProvider) -> Result<Element> + Send + 'static,
     {
         let (tx, rx) = std::sync::mpsc::channel();
         let poll_provider = WindowsProvider::new()?;
@@ -1209,13 +1209,15 @@ impl WindowsProvider {
             while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(100));
 
-                let tree = match tree_fn(&poll_provider) {
-                    Ok(t) => t,
+                let root = match tree_fn(&poll_provider) {
+                    Ok(r) => r,
                     Err(_) => continue,
                 };
 
+                let subtree = root.subtree();
+
                 // Detect focus changes
-                let focused_name = tree
+                let focused_name = subtree
                     .iter()
                     .find(|n| n.states.focused)
                     .and_then(|n| n.name.clone());
@@ -1225,7 +1227,10 @@ impl WindowsProvider {
                             event_type: EventType::FocusChanged,
                             app_name: app_name.clone(),
                             app_pid,
-                            target: tree.iter().find(|n| n.states.focused).cloned(),
+                            target: subtree
+                                .iter()
+                                .find(|n| n.states.focused)
+                                .map(|e| (**e).clone()),
                             state_flag: None,
                             state_value: None,
                             text_change: None,
@@ -1236,7 +1241,7 @@ impl WindowsProvider {
                 }
 
                 // Detect structure changes
-                let element_count = tree.len();
+                let element_count = subtree.len();
                 if element_count != prev_element_count && prev_element_count > 0 {
                     let _ = tx.send(Event {
                         event_type: EventType::StructureChanged,

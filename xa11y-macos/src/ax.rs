@@ -692,7 +692,7 @@ impl MacOSProvider {
         apps
     }
 
-    /// Build a tree from an app element (shared by resolve_pid_by_name and get_tree).
+    /// Build a tree from an app element (shared by resolve_pid_by_name and get_elements).
     fn build_tree(&self, app_element: AXElement, pid: i32, app_name: &str) -> Result<Element> {
         let screen_size = Self::detect_screen_size();
         let mut elements = Vec::new();

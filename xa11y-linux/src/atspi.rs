@@ -1061,12 +1061,13 @@ impl LinuxProvider {
             while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(100));
 
-                let tree = match poll_provider.get_tree(pid) {
-                    Ok(t) => t,
+                let root = match poll_provider.get_elements(pid) {
+                    Ok(r) => r,
                     Err(_) => continue,
                 };
 
-                let focused_name = tree
+                let subtree = root.subtree();
+                let focused_name = subtree
                     .iter()
                     .find(|n| n.states.focused)
                     .and_then(|n| n.name.clone());
@@ -1076,7 +1077,10 @@ impl LinuxProvider {
                             event_type: EventType::FocusChanged,
                             app_name: app_name.clone(),
                             app_pid,
-                            target: tree.iter().find(|n| n.states.focused).cloned(),
+                            target: subtree
+                                .iter()
+                                .find(|n| n.states.focused)
+                                .map(|e| (**e).clone()),
                             state_flag: None,
                             state_value: None,
                             text_change: None,
@@ -1086,7 +1090,7 @@ impl LinuxProvider {
                     prev_focused = focused_name;
                 }
 
-                let element_count = tree.len();
+                let element_count = subtree.len();
                 if element_count != prev_element_count && prev_element_count > 0 {
                     let _ = tx.send(Event {
                         event_type: EventType::StructureChanged,
