@@ -131,7 +131,7 @@ cd "$PROJECT_ROOT"
 
 echo "Running Qt integration tests..."
 set +e
-"$PYTEST" "$QT_APP_DIR/tests/" -v --timeout=60 2>&1
+"$PYTEST" "$QT_APP_DIR/tests/" -v -s --timeout=60 2>&1
 TEST_EXIT=$?
 set -e
 

@@ -54,10 +54,17 @@ def test_tree_dump(qt_app):
 
     dump(root)
     tree_text = "\n".join(lines)
-    print(f"\n=== Accessibility Tree ({sys.platform}) ===")
-    print(tree_text)
-    print("=== End Tree ===")
+    # Use warnings so pytest always shows this regardless of capture mode
+    import warnings
+
+    warnings.warn(
+        f"\n=== Accessibility Tree ({sys.platform}) ===\n{tree_text}\n=== End Tree ===",
+        stacklevel=1,
+    )
     assert root is not None
+    assert len(root.children) > 0, (
+        f"Tree is empty! Root: role={root.role}, name={root.name}"
+    )
 
 
 # ── Window & App ────────────────────────────────────────────────────────────
