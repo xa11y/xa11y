@@ -93,7 +93,6 @@ impl Tree {
         let selector = Selector::parse(selector_str)?;
         Ok(selector.match_elements(self))
     }
-
 }
 
 impl fmt::Display for Tree {
