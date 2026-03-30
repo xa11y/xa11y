@@ -115,6 +115,11 @@ echo "Installing dependencies..."
 "$PIP" install --quiet maturin pytest pytest-timeout
 "$PIP" install --quiet -r "$QT_APP_DIR/requirements.txt"
 
+# Generate README for xa11y-python (it's in .gitignore, maturin needs it)
+echo "Generating xa11y-python README..."
+cd "$PROJECT_ROOT"
+cargo xtask sync-readmes 2>&1
+
 # Build and install xa11y Python bindings
 echo "Building xa11y Python bindings..."
 cd "$PROJECT_ROOT/xa11y-python"

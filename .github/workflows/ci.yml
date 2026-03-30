@@ -373,6 +373,9 @@ jobs:
           .venv-qt-test/Scripts/pip.exe install maturin pytest pytest-timeout
           .venv-qt-test/Scripts/pip.exe install -r xa11y-qt-test-app/requirements.txt
 
+      - name: Generate READMEs
+        run: cargo xtask sync-readmes
+
       - name: Build & install xa11y
         shell: bash
         working-directory: xa11y-python
