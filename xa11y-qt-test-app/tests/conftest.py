@@ -11,6 +11,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -19,6 +20,42 @@ import xa11y
 
 APP_SCRIPT = str(Path(__file__).resolve().parent.parent / "app.py")
 STARTUP_TIMEOUT = 30  # seconds to wait for the app to appear
+CALL_TIMEOUT = 5  # seconds per individual xa11y call
+
+
+def _try_app_call(result_holder, **kwargs):
+    """Run xa11y.app() in a thread so we can timeout if it blocks."""
+    try:
+        result_holder["app"] = xa11y.app(**kwargs)
+    except Exception as e:
+        result_holder["error"] = e
+
+
+def _find_app_with_timeout(pid, names, timeout=CALL_TIMEOUT):
+    """Try finding the app by PID then by name, with a timeout on each call."""
+    # Try by PID
+    holder: dict = {}
+    t = threading.Thread(
+        target=_try_app_call, kwargs={"result_holder": holder, "pid": pid}
+    )
+    t.start()
+    t.join(timeout=timeout)
+    if "app" in holder:
+        return holder["app"]
+
+    # Try by known names
+    for name in names:
+        holder = {}
+        t = threading.Thread(
+            target=_try_app_call, kwargs={"result_holder": holder, "name": name}
+        )
+        t.start()
+        t.join(timeout=timeout)
+        if "app" in holder:
+            return holder["app"]
+
+    return None
+
 
 # Names the Qt app might register under depending on platform
 APP_NAMES = ["xa11y-qt-test-app", "python3", "python", "Python"]
@@ -45,10 +82,8 @@ def qt_app():
     )
 
     # Wait for the app to register with platform accessibility.
-    # Try by PID first (most reliable), then by known names.
     app = None
     deadline = time.monotonic() + STARTUP_TIMEOUT
-    last_err = None
     while time.monotonic() < deadline:
         # Check the process hasn't died
         if proc.poll() is not None:
@@ -59,40 +94,19 @@ def qt_app():
                 f"stdout: {out}\nstderr: {err}"
             )
 
-        # Try by PID
-        try:
-            app = xa11y.app(pid=proc.pid)
-            break
-        except (xa11y.AppNotFoundError, xa11y.PlatformError):
-            pass
-
-        # Try by known names
-        for name in APP_NAMES:
-            try:
-                app = xa11y.app(name)
-                break
-            except (xa11y.AppNotFoundError, xa11y.PlatformError) as e:
-                last_err = e
+        app = _find_app_with_timeout(proc.pid, APP_NAMES)
         if app is not None:
             break
 
         time.sleep(0.5)
 
     if app is None:
-        # Dump available apps for debugging
-        try:
-            all_apps = xa11y.apps()
-            app_list = [(a.name, a.pid) for a in all_apps]
-        except Exception:
-            app_list = "<failed to list>"
         proc.terminate()
         proc.wait(timeout=5)
         out = proc.stdout.read().decode() if proc.stdout else ""
         err = proc.stderr.read().decode() if proc.stderr else ""
         pytest.fail(
             f"Qt test app (pid={proc.pid}) not found after {STARTUP_TIMEOUT}s.\n"
-            f"Last error: {last_err}\n"
-            f"Available apps: {app_list}\n"
             f"stdout: {out}\nstderr: {err}"
         )
 
