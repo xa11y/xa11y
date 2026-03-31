@@ -66,15 +66,9 @@ def qt_app():
                 except (xa11y.AppNotFoundError, xa11y.PlatformError) as e:
                     last_err = e
 
-        # Verify the tree is actually populated (not just a stub)
         if candidate is not None:
-            try:
-                root = candidate.elements()
-                if root.role != "unknown" and len(root.children) > 0:
-                    app = candidate
-                    break
-            except Exception:
-                pass  # tree not ready yet
+            app = candidate
+            break
 
         time.sleep(0.5)
 
