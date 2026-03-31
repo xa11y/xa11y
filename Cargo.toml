@@ -5,7 +5,8 @@ members = [
     "xa11y-windows",
     "xa11y-linux",
     "xa11y",
-    "xa11y-test-app",
+    "test-apps/accesskit",
+    "test-apps/tauri",
     "xa11y-fuzz",
     "xtask",
 ]

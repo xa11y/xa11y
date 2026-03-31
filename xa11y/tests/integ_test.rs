@@ -30,8 +30,7 @@ mod tests {
     #[test]
     #[ignore]
     fn apps_returns_nonempty() {
-        let provider = xa11y::provider().unwrap();
-        let apps = App::list(provider).unwrap();
+        let apps = App::list().unwrap();
         assert!(!apps.is_empty(), "should find at least one application");
         let has_test_app = apps.iter().any(|a| a.name.contains("xa11y"));
         assert!(
@@ -1191,8 +1190,7 @@ mod tests {
     #[test]
     #[ignore]
     fn error_app_not_found() {
-        let provider = xa11y::provider().unwrap();
-        let result = App::by_name(provider, "nonexistent_app_12345");
+        let result = App::by_name("nonexistent_app_12345");
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),

@@ -4,9 +4,8 @@ use xa11y::*;
 
 /// Get the test app as an `App`, retrying briefly for registration.
 pub fn app_root() -> App {
-    let provider = xa11y::provider().unwrap();
     for attempt in 0..3 {
-        match App::by_name(provider.clone(), "xa11y-test-app") {
+        match App::by_name("xa11y-test-app") {
             Ok(app) => return app,
             Err(_) if attempt < 2 => {
                 std::thread::sleep(std::time::Duration::from_millis(200));

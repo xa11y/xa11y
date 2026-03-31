@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# Integration test harness for xa11y Qt (PySide6) tests.
+# Integration test harness for xa11y GTK4 tests.
 #
-# On Linux: sets up Xvfb, D-Bus, AT-SPI2 (like run_integ_tests.sh).
-# On macOS/Windows: assumes a display is available.
+# On Linux: sets up Xvfb, D-Bus, AT-SPI2.
+# On macOS: assumes a display is available (requires gtk4 + pygobject via Homebrew).
 #
-# Usage: ./scripts/run_qt_tests.sh
+# Usage: ./scripts/run_gtk_tests.sh
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-QT_APP_DIR="$PROJECT_ROOT/test-apps/qt"
+GTK_APP_DIR="$PROJECT_ROOT/test-apps/gtk"
 
 CLEANUP_PIDS=()
 
@@ -23,7 +23,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "=== xa11y Qt integration test harness ==="
+echo "=== xa11y GTK4 integration test harness ==="
 
 # ── Platform-specific display setup ──────────────────────────────────
 
@@ -88,13 +88,9 @@ if [[ "$(uname)" == "Linux" ]]; then
         2>/dev/null || true
 fi
 
-# ── Ensure Qt accessibility is enabled ───────────────────────────────
-
-export QT_ACCESSIBILITY=1
-
 # ── Set up Python venv ───────────────────────────────────────────────
 
-VENV_DIR="$PROJECT_ROOT/.venv-qt-test"
+VENV_DIR="$PROJECT_ROOT/.venv-gtk-test"
 
 if [ ! -d "$VENV_DIR" ]; then
     echo "Creating virtualenv at $VENV_DIR..."
@@ -102,19 +98,12 @@ if [ ! -d "$VENV_DIR" ]; then
 fi
 
 PIP="$VENV_DIR/bin/pip"
-PYTHON="$VENV_DIR/bin/python"
 PYTEST="$VENV_DIR/bin/pytest"
-
-if [[ "$(uname)" == MINGW* ]] || [[ "$(uname)" == MSYS* ]] || [[ "$OSTYPE" == "msys" ]]; then
-    PIP="$VENV_DIR/Scripts/pip.exe"
-    PYTHON="$VENV_DIR/Scripts/python.exe"
-    PYTEST="$VENV_DIR/Scripts/pytest.exe"
-fi
 
 echo "Installing dependencies..."
 "$PIP" install --quiet maturin
 "$PIP" install --quiet -r "$PROJECT_ROOT/tests/requirements.txt"
-"$PIP" install --quiet -r "$QT_APP_DIR/requirements.txt"
+"$PIP" install --quiet -r "$GTK_APP_DIR/requirements.txt"
 
 # Generate README for xa11y-python (it's in .gitignore, maturin needs it)
 echo "Generating xa11y-python README..."
@@ -130,14 +119,11 @@ cd "$PROJECT_ROOT"
 
 # ── Run tests ────────────────────────────────────────────────────────
 
-echo "Running Qt integration tests..."
+echo "Running GTK4 integration tests..."
 set +e
-# timeout prevents CI hangs if xa11y calls block (e.g. broken AT-SPI)
-# Per-test timeout of 60s (lazy API does per-element IPC, slower than snapshots);
-# overall timeout of 300s
-timeout 300 "$PYTEST" "$PROJECT_ROOT/tests/qt/" -v -s --timeout=60 --rootdir="$PROJECT_ROOT" 2>&1
+timeout 300 "$PYTEST" "$PROJECT_ROOT/tests/gtk/" -v -s --timeout=60 --rootdir="$PROJECT_ROOT" 2>&1
 TEST_EXIT=$?
 set -e
 
-echo "=== Qt integration tests finished (exit code: $TEST_EXIT) ==="
+echo "=== GTK4 integration tests finished (exit code: $TEST_EXIT) ==="
 exit $TEST_EXIT

@@ -316,7 +316,7 @@ fn sample_provider() -> Arc<MockProvider> {
 
 fn sample_app() -> App {
     let p = sample_provider();
-    App::by_name(p as Arc<dyn Provider>, "Test App").unwrap()
+    App::by_name_with(p as Arc<dyn Provider>, "Test App").unwrap()
 }
 
 fn sample_root() -> Element {
@@ -786,7 +786,7 @@ fn locator_basic_query() {
 #[test]
 fn locator_press_dispatches_action() {
     let p = sample_provider();
-    let app = App::by_name(Arc::clone(&p) as Arc<dyn Provider>, "Test App").unwrap();
+    let app = App::by_name_with(Arc::clone(&p) as Arc<dyn Provider>, "Test App").unwrap();
     let loc = app.locator(r#"window button[name="Submit"]"#);
     loc.press().unwrap();
     let (handle, action) = p.last_action.lock().unwrap().unwrap();
@@ -984,7 +984,7 @@ impl Provider for MultiAppMockProvider {
 #[test]
 fn find_application_by_name_from_root() {
     let p = multi_app_provider();
-    let app = App::by_name(p as Arc<dyn Provider>, "App2").unwrap();
+    let app = App::by_name_with(p as Arc<dyn Provider>, "App2").unwrap();
     assert_eq!(app.data.role, Role::Application);
     assert_eq!(app.name, "App2");
     assert_eq!(app.pid, Some(200));
@@ -993,7 +993,7 @@ fn find_application_by_name_from_root() {
 #[test]
 fn find_all_applications() {
     let p = multi_app_provider();
-    let apps = App::list(p as Arc<dyn Provider>).unwrap();
+    let apps = App::list_with(p as Arc<dyn Provider>).unwrap();
     assert_eq!(apps.len(), 2);
     assert_eq!(apps[0].name, "App1");
     assert_eq!(apps[1].name, "App2");
@@ -1003,7 +1003,7 @@ fn find_all_applications() {
 fn find_application_only_checks_top_level() {
     // application search from root should NOT recurse into app subtrees
     let p = multi_app_provider();
-    let apps = App::list(p as Arc<dyn Provider>).unwrap();
+    let apps = App::list_with(p as Arc<dyn Provider>).unwrap();
     // Should find exactly 2, not more (no nested apps)
     assert_eq!(apps.len(), 2);
 }
@@ -1012,7 +1012,7 @@ fn find_application_only_checks_top_level() {
 fn find_button_across_apps() {
     // Searching for buttons within each app
     let p = multi_app_provider();
-    let apps = App::list(p as Arc<dyn Provider>).unwrap();
+    let apps = App::list_with(p as Arc<dyn Provider>).unwrap();
     let mut total_buttons = 0;
     for app in &apps {
         total_buttons += app.locator("button").count().unwrap();
@@ -1023,7 +1023,7 @@ fn find_button_across_apps() {
 #[test]
 fn find_with_limit_stops_early() {
     let p = multi_app_provider();
-    let app1 = App::by_name(p as Arc<dyn Provider>, "App1").unwrap();
+    let app1 = App::by_name_with(p as Arc<dyn Provider>, "App1").unwrap();
     let first = app1.locator("button").first().element().unwrap();
     assert_eq!(first.name.as_deref(), Some("Btn1"));
 }
@@ -1032,7 +1032,7 @@ fn find_with_limit_stops_early() {
 fn find_multi_segment_across_apps() {
     // "window > button" — find buttons that are direct children of windows in App2
     let p = multi_app_provider();
-    let app2 = App::by_name(p as Arc<dyn Provider>, "App2").unwrap();
+    let app2 = App::by_name_with(p as Arc<dyn Provider>, "App2").unwrap();
     let results = app2.locator("window > button").elements().unwrap();
     assert_eq!(results.len(), 2); // Btn2, Btn3
 }
@@ -1040,7 +1040,7 @@ fn find_multi_segment_across_apps() {
 #[test]
 fn app_locator_scopes_search() {
     let p = multi_app_provider();
-    let app2 = App::by_name(p as Arc<dyn Provider>, "App2").unwrap();
+    let app2 = App::by_name_with(p as Arc<dyn Provider>, "App2").unwrap();
     // Scoped locator should only find buttons within App2
     let buttons = app2.locator("button").elements().unwrap();
     assert_eq!(buttons.len(), 2); // Btn2, Btn3
@@ -1050,7 +1050,7 @@ fn app_locator_scopes_search() {
 #[test]
 fn app_locator_does_not_find_sibling_app_elements() {
     let p = multi_app_provider();
-    let app1 = App::by_name(p as Arc<dyn Provider>, "App1").unwrap();
+    let app1 = App::by_name_with(p as Arc<dyn Provider>, "App1").unwrap();
     // App1 only has Btn1
     let buttons = app1.locator("button").elements().unwrap();
     assert_eq!(buttons.len(), 1);
@@ -1060,7 +1060,7 @@ fn app_locator_does_not_find_sibling_app_elements() {
 #[test]
 fn locator_count_matches_elements_len() {
     let p = multi_app_provider();
-    let app1 = App::by_name(p as Arc<dyn Provider>, "App1").unwrap();
+    let app1 = App::by_name_with(p as Arc<dyn Provider>, "App1").unwrap();
     let loc = app1.locator("button");
     assert_eq!(loc.count().unwrap(), loc.elements().unwrap().len());
 }
@@ -1068,14 +1068,14 @@ fn locator_count_matches_elements_len() {
 #[test]
 fn app_by_name_not_found() {
     let p = multi_app_provider();
-    let result = App::by_name(p as Arc<dyn Provider>, "NoSuchApp");
+    let result = App::by_name_with(p as Arc<dyn Provider>, "NoSuchApp");
     assert!(result.is_err());
 }
 
 #[test]
 fn locator_nth_out_of_range() {
     let p = multi_app_provider();
-    let apps = App::list(p as Arc<dyn Provider>).unwrap();
+    let apps = App::list_with(p as Arc<dyn Provider>).unwrap();
     // Use first app and request an out-of-range nth button
     let loc = apps[0].locator("button").nth(99);
     assert!(loc.element().is_err());
@@ -1084,7 +1084,7 @@ fn locator_nth_out_of_range() {
 #[test]
 fn element_children_of_leaf_is_empty() {
     let p = multi_app_provider();
-    let app1 = App::by_name(p as Arc<dyn Provider>, "App1").unwrap();
+    let app1 = App::by_name_with(p as Arc<dyn Provider>, "App1").unwrap();
     let btn = app1.locator("button").first().element().unwrap();
     assert!(btn.children().unwrap().is_empty());
 }
@@ -1092,7 +1092,7 @@ fn element_children_of_leaf_is_empty() {
 #[test]
 fn element_parent_of_top_level_is_none() {
     let p = multi_app_provider();
-    let app = App::list(Arc::clone(&p) as Arc<dyn Provider>)
+    let app = App::list_with(Arc::clone(&p) as Arc<dyn Provider>)
         .unwrap()
         .into_iter()
         .next()
@@ -1105,7 +1105,7 @@ fn element_parent_of_top_level_is_none() {
 #[test]
 fn element_parent_navigates_up() {
     let p = multi_app_provider();
-    let app2 = App::by_name(p as Arc<dyn Provider>, "App2").unwrap();
+    let app2 = App::by_name_with(p as Arc<dyn Provider>, "App2").unwrap();
     let btn = app2.locator(r#"button[name="Btn2"]"#).element().unwrap();
     let parent = btn.parent().unwrap().unwrap();
     assert_eq!(parent.role, Role::Window);
@@ -1116,10 +1116,10 @@ fn element_parent_navigates_up() {
 fn handle_preserved_through_find() {
     // Verify that handle IDs survive the find_elements pipeline
     let p = multi_app_provider();
-    let app1 = App::by_name(Arc::clone(&p) as Arc<dyn Provider>, "App1").unwrap();
+    let app1 = App::by_name_with(Arc::clone(&p) as Arc<dyn Provider>, "App1").unwrap();
     // handle should be non-default (we set it to the node index)
     assert_eq!(app1.data.handle, 0); // App1 is node index 0
-    let app2 = App::by_name(Arc::clone(&p) as Arc<dyn Provider>, "App2").unwrap();
+    let app2 = App::by_name_with(Arc::clone(&p) as Arc<dyn Provider>, "App2").unwrap();
     let btn = app2.locator(r#"button[name="Btn2"]"#).element().unwrap();
     assert_eq!(btn.handle, 5); // Btn2 is node index 5
 }

@@ -11,17 +11,6 @@ use crate::selector::Selector;
 ///
 /// `App` is **not** an [`Element`] — it represents the application as a whole
 /// and provides a [`locator`](App::locator) to search its accessibility tree.
-///
-/// # Example
-/// ```no_run
-/// # use xa11y_core::*;
-/// # use std::sync::Arc;
-/// # fn example(provider: Arc<dyn Provider>) -> Result<()> {
-/// let app = App::by_name(provider, "Safari")?;
-/// app.locator(r#"button[name="OK"]"#).press()?;
-/// # Ok(())
-/// # }
-/// ```
 pub struct App {
     /// Application name.
     pub name: String,
@@ -33,11 +22,15 @@ pub struct App {
 }
 
 impl App {
-    /// Find an application by exact name.
+    /// Find an application by exact name, using an explicit provider.
+    ///
+    /// Prefer `App::by_name` from the `xa11y` crate which uses the global
+    /// singleton provider. Use this variant when you need to supply a specific
+    /// provider (e.g. a mock in unit tests).
     ///
     /// Returns [`Error::PermissionDenied`] if the platform provider was created
     /// without required permissions.
-    pub fn by_name(provider: Arc<dyn Provider>, name: &str) -> Result<Self> {
+    pub fn by_name_with(provider: Arc<dyn Provider>, name: &str) -> Result<Self> {
         let selector_str = format!(r#"application[name="{}"]"#, name);
         let selector = Selector::parse(&selector_str)?;
         let results = provider.find_elements(None, &selector, Some(1), Some(0))?;
@@ -50,8 +43,11 @@ impl App {
         Ok(Self::from_data(provider, data))
     }
 
-    /// Find an application by process ID.
-    pub fn by_pid(provider: Arc<dyn Provider>, pid: u32) -> Result<Self> {
+    /// Find an application by process ID, using an explicit provider.
+    ///
+    /// Prefer `App::by_pid` from the `xa11y` crate which uses the global
+    /// singleton provider.
+    pub fn by_pid_with(provider: Arc<dyn Provider>, pid: u32) -> Result<Self> {
         let selector_str = "application";
         let selector = Selector::parse(selector_str)?;
         let results = provider.find_elements(None, &selector, None, Some(0))?;
@@ -65,8 +61,11 @@ impl App {
         Ok(Self::from_data(provider, data))
     }
 
-    /// List all running applications.
-    pub fn list(provider: Arc<dyn Provider>) -> Result<Vec<Self>> {
+    /// List all running applications, using an explicit provider.
+    ///
+    /// Prefer `App::list` from the `xa11y` crate which uses the global
+    /// singleton provider.
+    pub fn list_with(provider: Arc<dyn Provider>) -> Result<Vec<Self>> {
         let selector = Selector::parse("application")?;
         let results = provider.find_elements(None, &selector, None, Some(0))?;
         Ok(results

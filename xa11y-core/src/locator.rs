@@ -17,10 +17,9 @@ use crate::selector::Selector;
 ///
 /// # Example
 /// ```no_run
-/// # use xa11y_core::*;
-/// # use std::sync::Arc;
-/// # fn example(provider: Arc<dyn Provider>) -> Result<()> {
-/// let app = App::by_name(provider, "MyApp")?;
+/// # use xa11y::*;
+/// # fn example() -> Result<()> {
+/// let app = App::by_name("MyApp")?;
 /// let save_btn = app.locator(r#"button[name="Save"]"#);
 /// save_btn.press()?;
 /// # Ok(())

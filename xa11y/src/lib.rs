@@ -8,7 +8,7 @@
 //! ```no_run
 //! use xa11y::*;
 //!
-//! let app = App::by_name(provider().unwrap(), "Safari").expect("App not found");
+//! let app = App::by_name("Safari").expect("App not found");
 //!
 //! for child in app.children().unwrap() {
 //!     println!("{}: {:?}", child.role, child.name);
@@ -29,6 +29,9 @@ pub use xa11y_core::{
 // Implementation details used by platform backends and Python bindings.
 #[doc(hidden)]
 pub use xa11y_core::{CancelHandle, EventReceiver, Provider, Selector};
+
+// Re-export the extension trait so `use xa11y::*` enables `App::by_name("Safari")`.
+pub use app_ext::AppExt;
 
 // ── Internal singleton ──────────────────────────────────────────────────────
 
@@ -72,7 +75,7 @@ impl Provider for StaticProviderRef {
     }
 }
 
-/// Get the global provider as an `Arc<dyn Provider>`.
+#[doc(hidden)]
 pub fn provider() -> Result<Arc<dyn Provider>> {
     Ok(Arc::new(StaticProviderRef(get_provider_ref()?)))
 }
@@ -104,5 +107,45 @@ fn create_provider_boxed() -> Result<Box<dyn Provider>> {
             code: -1,
             message: format!("Unsupported platform: {}", std::env::consts::OS),
         })
+    }
+}
+
+// ── AppExt extension trait ───────────────────────────────────────────────────
+
+mod app_ext {
+    use super::{provider, App, Result};
+
+    /// Extension trait that adds singleton-based constructors to [`App`].
+    ///
+    /// Imported automatically via `use xa11y::*`.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use xa11y::*;
+    ///
+    /// let app = App::by_name("Safari")?;
+    /// # Ok::<(), xa11y::Error>(())
+    /// ```
+    pub trait AppExt: Sized {
+        /// Find an application by exact name using the global singleton provider.
+        fn by_name(name: &str) -> Result<Self>;
+        /// Find an application by process ID using the global singleton provider.
+        fn by_pid(pid: u32) -> Result<Self>;
+        /// List all running applications using the global singleton provider.
+        fn list() -> Result<Vec<Self>>;
+    }
+
+    impl AppExt for App {
+        fn by_name(name: &str) -> Result<Self> {
+            App::by_name_with(provider()?, name)
+        }
+
+        fn by_pid(pid: u32) -> Result<Self> {
+            App::by_pid_with(provider()?, pid)
+        }
+
+        fn list() -> Result<Vec<Self>> {
+            App::list_with(provider()?)
+        }
     }
 }

@@ -1,7 +1,10 @@
-"""Fixtures for xa11y Qt integration tests.
+"""Shared fixtures for xa11y integration test suites.
 
-Launches the PySide6 test app as a subprocess, waits for it to register
-with the platform accessibility API, then yields an xa11y Element handle.
+Provides launch_test_app(), a reusable generator that:
+  - Launches a test app subprocess
+  - Polls the accessibility API until the app appears
+  - Yields an xa11y Element handle
+  - Kills the process on teardown
 """
 
 from __future__ import annotations
@@ -10,52 +13,58 @@ import os
 import signal
 import subprocess
 import sys
-import tempfile
 import time
-from pathlib import Path
+from typing import Generator
 
 import pytest
 import xa11y
 
-APP_SCRIPT = str(Path(__file__).resolve().parent.parent / "app.py")
-STARTUP_TIMEOUT = 30  # seconds to wait for the app to appear
-
-# Names the Qt app might register under depending on platform
-APP_NAMES = ["xa11y-qt-test-app", "xa11y", "python3", "python", "Python", "app.py"]
+STARTUP_TIMEOUT = 30  # seconds
 
 
-@pytest.fixture(scope="session")
-def qt_app():
-    """Launch the Qt test app and return an xa11y Element handle."""
-    pid_file = tempfile.mktemp(suffix=".pid")
+def launch_test_app(
+    command: list[str],
+    app_names: list[str],
+    env_overrides: dict[str, str] | None = None,
+    startup_timeout: int = STARTUP_TIMEOUT,
+) -> Generator[xa11y.Element, None, None]:
+    """Launch a test app and yield its xa11y Element handle.
 
+    Args:
+        command: The subprocess command to launch the app.
+        app_names: Names to search for via accessibility API (tried in order).
+        env_overrides: Extra environment variables to set for the subprocess.
+        startup_timeout: Seconds to wait for the app to appear.
+
+    Yields:
+        The xa11y Element for the app's root application node.
+    """
     env = os.environ.copy()
-    env["QT_ACCESSIBILITY"] = "1"
+    if env_overrides:
+        env.update(env_overrides)
 
     proc = subprocess.Popen(
-        [sys.executable, APP_SCRIPT, "--pid-file", pid_file],
+        command,
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
 
     app = None
-    deadline = time.monotonic() + STARTUP_TIMEOUT
+    deadline = time.monotonic() + startup_timeout
     last_err = None
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             out = proc.stdout.read().decode() if proc.stdout else ""
             err = proc.stderr.read().decode() if proc.stderr else ""
             pytest.fail(
-                f"Qt test app exited early (code {proc.returncode}).\n"
+                f"Test app (pid={proc.pid}) exited early (code {proc.returncode}).\n"
                 f"stdout: {out}\nstderr: {err}"
             )
 
-        # Try each known app name
-        for name in APP_NAMES:
+        for name in app_names:
             try:
-                loc = xa11y.locator(f'application[name*="{name}"]')
-                candidate = loc.element()
+                candidate = xa11y.locator(f'application[name*="{name}"]').element()
                 app = candidate
                 break
             except (xa11y.SelectorNotMatchedError, xa11y.PlatformError) as e:
@@ -67,7 +76,6 @@ def qt_app():
         time.sleep(0.5)
 
     if app is None:
-        # Dump available apps for debugging
         try:
             all_apps = xa11y.locator("application").elements()
             app_list = [(a.name, a.pid) for a in all_apps]
@@ -78,7 +86,7 @@ def qt_app():
         out = proc.stdout.read().decode() if proc.stdout else ""
         err = proc.stderr.read().decode() if proc.stderr else ""
         pytest.fail(
-            f"Qt test app (pid={proc.pid}) not found after {STARTUP_TIMEOUT}s.\n"
+            f"Test app (pid={proc.pid}) not found after {startup_timeout}s.\n"
             f"Last error: {last_err}\n"
             f"Available apps: {app_list}\n"
             f"stdout: {out}\nstderr: {err}"
@@ -86,7 +94,6 @@ def qt_app():
 
     yield app
 
-    # Teardown
     try:
         if sys.platform == "win32":
             proc.terminate()
@@ -95,8 +102,3 @@ def qt_app():
         proc.wait(timeout=5)
     except (ProcessLookupError, subprocess.TimeoutExpired):
         proc.kill()
-    finally:
-        try:
-            os.unlink(pid_file)
-        except FileNotFoundError:
-            pass
