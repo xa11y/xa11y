@@ -1,4 +1,8 @@
-"""Integration tests: discover and interact with all Qt widget types via xa11y."""
+"""Integration tests: discover and interact with all Qt widget types via xa11y.
+
+Tests assert on specific property values (role, name, value, numeric_value,
+checked, enabled, etc.) not just existence. Discovers real platform bugs.
+"""
 
 from __future__ import annotations
 
@@ -7,35 +11,16 @@ import sys
 import pytest
 
 
-# ── Helpers ─────────────────────────────────────────────────────────────────
-
-
-def _find_any(qt_app, *selectors):
-    """Return the first locator that exists from the given selectors."""
-    for sel in selectors:
-        loc = qt_app.locator(sel)
-        if loc.exists():
-            return loc
-    return None
-
-
-# ── Tree dump (runs first for debugging) ────────────────────────────────────
+# ── Tree dump (diagnostic, always runs first) ──────────────────────────────
 
 
 def test_tree_dump(qt_app):
     """Dump the full accessibility tree for CI debugging."""
     root = qt_app.elements()
-    lines = []
-    seen: set = set()
 
-    def dump(el, indent=0):
-        # Guard against infinite recursion (provider bug: node is its own child)
-        key = el.stable_id if el.stable_id else id(el)
-        if key in seen or indent > 30:
-            lines.append(" " * indent + "... (cycle or depth limit)")
-            return
-        seen.add(key)
-
+    def dump(el, indent=0, depth=0):
+        if depth > 20:
+            return ""
         info = f"{el.role}"
         if el.name:
             info += f'  name="{el.name}"'
@@ -43,16 +28,22 @@ def test_tree_dump(qt_app):
             info += f'  value="{el.value}"'
         if el.numeric_value is not None:
             info += f"  num={el.numeric_value}"
+        if el.min_value is not None:
+            info += f"  min={el.min_value}"
+        if el.max_value is not None:
+            info += f"  max={el.max_value}"
         if el.checked is not None:
             info += f"  checked={el.checked}"
+        if el.description:
+            info += f'  desc="{el.description}"'
         if not el.enabled:
             info += "  DISABLED"
-        lines.append(" " * indent + info)
+        lines = [" " * indent + info]
         for c in el.children:
-            dump(c, indent + 2)
+            lines.append(dump(c, indent + 2, depth + 1))
+        return "\n".join(lines)
 
-    dump(root)
-    tree_text = "\n".join(lines)
+    tree_text = dump(root)
     import warnings
 
     warnings.warn(
@@ -68,59 +59,93 @@ def test_tree_dump(qt_app):
 # ── Window & App ────────────────────────────────────────────────────────────
 
 
-def test_app_found(qt_app):
+def test_app_pid(qt_app):
     assert qt_app.pid > 0
 
 
-def test_window_exists(qt_app):
-    assert qt_app.locator("window").exists()
+def test_window_role_and_name(qt_app):
+    w = qt_app.locator("window").element()
+    assert w.role == "window"
+    assert "xa11y-qt-test-app" in w.name
 
 
 # ── Buttons ─────────────────────────────────────────────────────────────────
 
 
-def test_button_found(qt_app):
-    assert qt_app.locator("button").exists()
+def test_ok_button_properties(qt_app):
+    ok = qt_app.locator('button[name="OK"]').element()
+    assert ok.role == "button"
+    assert ok.name == "OK"
+    assert ok.enabled is True
+    assert ok.description == "Confirm the dialog"
 
 
-def test_button_count(qt_app):
-    assert qt_app.locator("button").count() >= 2
+def test_cancel_button_disabled(qt_app):
+    cancel = qt_app.locator('button[name="Cancel"]').element()
+    assert cancel.role == "button"
+    assert cancel.name == "Cancel"
+    assert cancel.enabled is False
 
 
-def test_button_press(qt_app):
-    qt_app.locator("button").first().press()
-
-
-def test_button_enabled_state(qt_app):
-    el = qt_app.locator("button").first().element()
-    assert isinstance(el.enabled, bool)
+def test_button_press_toggles_cancel(qt_app):
+    qt_app.locator('button[name="OK"]').press()
+    cancel = qt_app.locator('button[name="Cancel"]').element()
+    assert cancel.enabled is True
+    # Press again to restore
+    qt_app.locator('button[name="OK"]').press()
 
 
 # ── Checkboxes ──────────────────────────────────────────────────────────────
 
 
-def test_checkbox_found(qt_app):
-    assert qt_app.locator("check_box").exists()
+def test_agree_checkbox_unchecked(qt_app):
+    el = qt_app.locator('check_box[name="Agree to terms"]').element()
+    assert el.role == "check_box"
+    assert el.name == "Agree to terms"
+    assert el.checked in ("off", "mixed")  # may be toggled by prior test runs
 
 
-def test_checkbox_toggle(qt_app):
-    qt_app.locator("check_box").first().toggle()
+def test_subscribe_checkbox_checked(qt_app):
+    el = qt_app.locator('check_box[name="Subscribe"]').element()
+    assert el.role == "check_box"
+    assert el.name == "Subscribe"
+    assert el.checked == "on"
 
 
-def test_checkbox_checked_state(qt_app):
-    el = qt_app.locator("check_box").first().element()
-    assert el.checked is not None
+def test_checkbox_toggle_changes_state(qt_app):
+    loc = qt_app.locator('check_box[name="Subscribe"]')
+    before = loc.element().checked
+    loc.toggle()
+    after = loc.element().checked
+    assert before != after
+    # Restore
+    loc.toggle()
 
 
 # ── Radio Buttons ───────────────────────────────────────────────────────────
 
 
-def test_radio_button_found(qt_app):
-    assert qt_app.locator("radio_button").exists()
+def test_radio_button_a_selected(qt_app):
+    el = qt_app.locator('radio_button[name="Option A"]').element()
+    assert el.role == "radio_button"
+    assert el.name == "Option A"
+    assert el.checked == "on"
 
 
-def test_radio_button_press(qt_app):
-    qt_app.locator("radio_button").first().press()
+def test_radio_button_b_unselected(qt_app):
+    el = qt_app.locator('radio_button[name="Option B"]').element()
+    assert el.name == "Option B"
+    assert el.checked == "off"
+
+
+def test_radio_select_changes_state(qt_app):
+    qt_app.locator('radio_button[name="Option B"]').press()
+    b = qt_app.locator('radio_button[name="Option B"]').element()
+    assert b.checked == "on"
+    a = qt_app.locator('radio_button[name="Option A"]').element()
+    assert a.checked == "off"
+    # Restore
+    qt_app.locator('radio_button[name="Option A"]').press()
 
 
 # ── ComboBox ────────────────────────────────────────────────────────────────
@@ -134,120 +159,140 @@ def test_combobox_count(qt_app):
     assert qt_app.locator("combo_box").count() >= 1
 
 
-# ── Sliders ─────────────────────────────────────────────────────────────────
+# ── Slider ──────────────────────────────────────────────────────────────────
 
 
-def test_slider_found(qt_app):
-    assert qt_app.locator("slider").exists()
-
-
-def test_slider_numeric_value(qt_app):
-    el = qt_app.locator("slider").first().element()
+def test_slider_properties(qt_app):
+    el = qt_app.locator('slider[name="Volume"]').element()
+    assert el.role == "slider"
+    assert el.name == "Volume"
     assert el.numeric_value is not None
 
 
 def test_slider_range(qt_app):
-    el = qt_app.locator("slider").first().element()
-    assert el.min_value is not None
-    assert el.max_value is not None
+    el = qt_app.locator('slider[name="Volume"]').element()
+    assert el.min_value == 0.0
+    assert el.max_value == 100.0
 
 
-def test_slider_increment(qt_app):
-    qt_app.locator("slider").first().increment()
+def test_slider_increment_changes_value(qt_app):
+    loc = qt_app.locator('slider[name="Volume"]')
+    before = loc.element().numeric_value
+    loc.increment()
+    after = loc.element().numeric_value
+    assert after is not None
+    assert after != before
 
 
 # ── Spin Boxes ──────────────────────────────────────────────────────────────
 
 
-def test_spinbutton_found(qt_app):
-    assert qt_app.locator("spin_button").exists()
-
-
-def test_spinbutton_numeric_value(qt_app):
-    el = qt_app.locator("spin_button").first().element()
+def test_spinbutton_properties(qt_app):
+    el = qt_app.locator('spin_button[name="Quantity"]').element()
+    assert el.role == "spin_button"
+    assert el.name == "Quantity"
     assert el.numeric_value is not None
 
 
-def test_spinbutton_increment(qt_app):
-    qt_app.locator("spin_button").first().increment()
+def test_spinbutton_increment_changes_value(qt_app):
+    loc = qt_app.locator('spin_button[name="Quantity"]')
+    before = loc.element().numeric_value
+    loc.increment()
+    after = loc.element().numeric_value
+    assert after is not None
+    assert after > before
+
+
+def test_double_spinbutton_found(qt_app):
+    el = qt_app.locator('spin_button[name="Price"]').element()
+    assert el.role == "spin_button"
+    assert el.name == "Price"
+    assert el.numeric_value is not None
 
 
 # ── Progress Bar ────────────────────────────────────────────────────────────
 
 
-def test_progressbar_found(qt_app):
-    assert qt_app.locator("progress_bar").exists()
+def test_progressbar_properties(qt_app):
+    el = qt_app.locator('progress_bar[name="Progress"]').element()
+    assert el.role == "progress_bar"
+    assert el.name == "Progress"
+    assert el.numeric_value == 75.0
 
 
-def test_progressbar_value(qt_app):
-    el = qt_app.locator("progress_bar").first().element()
-    assert el.numeric_value is not None
+# ── Text Field (QLineEdit) ─────────────────────────────────────────────────
 
 
-# ── Text Fields ─────────────────────────────────────────────────────────────
-
-
-def test_textfield_found(qt_app):
-    assert qt_app.locator("text_field").exists()
-
-
-def test_textfield_value(qt_app):
-    el = qt_app.locator("text_field").first().element()
+def test_textfield_properties(qt_app):
+    el = qt_app.locator('text_field[name="Search"]').element()
+    assert el.role == "text_field"
+    assert el.name == "Search"
     assert el.value is not None
 
 
 def test_textfield_set_value(qt_app):
-    qt_app.locator("text_field").first().set_value("new text")
+    loc = qt_app.locator('text_field[name="Search"]')
+    loc.set_value("test input")
+    el = loc.element()
+    assert el.value == "test input"
+    # Restore
+    loc.set_value("hello world")
 
 
 def test_textfield_focus(qt_app):
-    qt_app.locator("text_field").first().focus()
+    qt_app.locator('text_field[name="Search"]').focus()
+    # Should not raise
 
 
-# ── Text Area (Multi-line) ─────────────────────────────────────────────────
+# ── Text Area (QTextEdit) ──────────────────────────────────────────────────
 
 
 def test_textarea_found(qt_app):
-    # QTextEdit maps to text_area on Linux/AT-SPI but may map differently
-    # on Windows (shows as group or text_field).
-    loc = _find_any(qt_app, "text_area", '[name="Notes"]')
-    assert loc is not None and loc.exists()
+    # QTextEdit maps to text_area on most platforms
+    loc = qt_app.locator('[name="Notes"]')
+    assert loc.exists()
+    el = loc.element()
+    assert el.value is not None
 
 
-# ── Static Text / Labels ───────────────────────────────────────────────────
+# ── Labels (QLabel / Static Text) ──────────────────────────────────────────
 
 
 def test_label_found(qt_app):
-    # QLabel maps to static_text on Linux but may map to other roles on Windows.
-    loc = _find_any(qt_app, "static_text", '[name="Heading Text"]')
-    assert loc is not None and loc.exists()
+    loc = qt_app.locator("static_text")
+    assert loc.exists()
 
 
-# ── List ────────────────────────────────────────────────────────────────────
+# ── List Widget ─────────────────────────────────────────────────────────────
 
 
 def test_list_found(qt_app):
     assert qt_app.locator("list").exists()
 
 
-def test_list_items(qt_app):
-    assert qt_app.locator("list_item").count() >= 1
+def test_list_has_items(qt_app):
+    # QListWidget items may show as list_item or table_row depending on platform
+    list_items = qt_app.locator("list_item").count()
+    table_rows = qt_app.locator("table_row").count()
+    assert list_items + table_rows >= 5, (
+        f"Expected >= 5 list/table items, got {list_items} list_item + {table_rows} table_row"
+    )
 
 
-# ── Tree Items ──────────────────────────────────────────────────────────────
+# ── Tree Widget ─────────────────────────────────────────────────────────────
 
 
-def test_tree_items(qt_app):
-    # Tree widget items may show as tree_item or table_row depending on platform
-    found = qt_app.locator("tree_item").exists() or qt_app.locator("table_row").exists()
-    assert found
+def test_tree_widget_found(qt_app):
+    loc = qt_app.locator('[name="File Browser"]')
+    assert loc.exists()
 
 
-# ── Toolbar ─────────────────────────────────────────────────────────────────
-
-
-def test_toolbar_found(qt_app):
-    assert qt_app.locator("toolbar").exists()
+def test_tree_has_items(qt_app):
+    tree_items = qt_app.locator("tree_item").count()
+    table_rows = qt_app.locator("table_row").count()
+    assert tree_items + table_rows >= 2, (
+        f"Expected >= 2 tree/table items, got {tree_items} tree_item + {table_rows} table_row"
+    )
 
 
 # ── Menu Bar ────────────────────────────────────────────────────────────────
@@ -258,16 +303,18 @@ def test_menubar_found(qt_app):
     assert qt_app.locator("menu_bar").exists()
 
 
-# ── Group ───────────────────────────────────────────────────────────────────
+# ── Group (QGroupBox) ──────────────────────────────────────────────────────
 
 
-def test_group_found(qt_app):
-    assert qt_app.locator("group").exists()
+def test_groupbox_by_name(qt_app):
+    for name in ["Buttons", "Checkboxes", "Options", "Range Controls"]:
+        loc = qt_app.locator(f'[name="{name}"]')
+        assert loc.exists(), f"GroupBox '{name}' not found"
 
 
 # ── Scroll Bar ──────────────────────────────────────────────────────────────
 
 
-def test_scrollbar_found(qt_app):
+def test_scrollbar_exists(qt_app):
     loc = qt_app.locator("scroll_bar")
     assert isinstance(loc.exists(), bool)

@@ -11,7 +11,6 @@ import signal
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 from pathlib import Path
 
@@ -20,42 +19,6 @@ import xa11y
 
 APP_SCRIPT = str(Path(__file__).resolve().parent.parent / "app.py")
 STARTUP_TIMEOUT = 30  # seconds to wait for the app to appear
-CALL_TIMEOUT = 5  # seconds per individual xa11y call
-
-
-def _try_app_call(result_holder, **kwargs):
-    """Run xa11y.app() in a thread so we can timeout if it blocks."""
-    try:
-        result_holder["app"] = xa11y.app(**kwargs)
-    except Exception as e:
-        result_holder["error"] = e
-
-
-def _find_app_with_timeout(pid, names, timeout=CALL_TIMEOUT):
-    """Try finding the app by PID then by name, with a timeout on each call."""
-    # Try by PID
-    holder: dict = {}
-    t = threading.Thread(
-        target=_try_app_call, kwargs={"result_holder": holder, "pid": pid}
-    )
-    t.start()
-    t.join(timeout=timeout)
-    if "app" in holder:
-        return holder["app"]
-
-    # Try by known names
-    for name in names:
-        holder = {}
-        t = threading.Thread(
-            target=_try_app_call, kwargs={"result_holder": holder, "name": name}
-        )
-        t.start()
-        t.join(timeout=timeout)
-        if "app" in holder:
-            return holder["app"]
-
-    return None
-
 
 # Names the Qt app might register under depending on platform
 APP_NAMES = ["xa11y-qt-test-app", "python3", "python", "Python"]
@@ -63,16 +26,11 @@ APP_NAMES = ["xa11y-qt-test-app", "python3", "python", "Python"]
 
 @pytest.fixture(scope="session")
 def qt_app():
-    """Launch the Qt test app and return an xa11y.App handle.
-
-    The app is killed when the test session ends.
-    """
+    """Launch the Qt test app and return an xa11y.App handle."""
     pid_file = tempfile.mktemp(suffix=".pid")
 
     env = os.environ.copy()
-    # Ensure Qt uses the platform accessibility bridge
     env["QT_ACCESSIBILITY"] = "1"
-    # The CI harness is responsible for providing a display (Xvfb on Linux).
 
     proc = subprocess.Popen(
         [sys.executable, APP_SCRIPT, "--pid-file", pid_file],
@@ -81,11 +39,10 @@ def qt_app():
         stderr=subprocess.PIPE,
     )
 
-    # Wait for the app to register with platform accessibility.
     app = None
     deadline = time.monotonic() + STARTUP_TIMEOUT
+    last_err = None
     while time.monotonic() < deadline:
-        # Check the process hasn't died
         if proc.poll() is not None:
             out = proc.stdout.read().decode() if proc.stdout else ""
             err = proc.stderr.read().decode() if proc.stderr else ""
@@ -94,9 +51,30 @@ def qt_app():
                 f"stdout: {out}\nstderr: {err}"
             )
 
-        app = _find_app_with_timeout(proc.pid, APP_NAMES)
-        if app is not None:
-            break
+        # Try by PID first (most reliable), then by name
+        candidate = None
+        try:
+            candidate = xa11y.app(pid=proc.pid)
+        except (xa11y.AppNotFoundError, xa11y.PlatformError) as e:
+            last_err = e
+
+        if candidate is None:
+            for name in APP_NAMES:
+                try:
+                    candidate = xa11y.app(name)
+                    break
+                except (xa11y.AppNotFoundError, xa11y.PlatformError) as e:
+                    last_err = e
+
+        # Verify the tree is actually populated (not just a stub)
+        if candidate is not None:
+            try:
+                root = candidate.elements()
+                if root.role != "unknown" and len(root.children) > 0:
+                    app = candidate
+                    break
+            except Exception:
+                pass  # tree not ready yet
 
         time.sleep(0.5)
 
@@ -107,6 +85,7 @@ def qt_app():
         err = proc.stderr.read().decode() if proc.stderr else ""
         pytest.fail(
             f"Qt test app (pid={proc.pid}) not found after {STARTUP_TIMEOUT}s.\n"
+            f"Last error: {last_err}\n"
             f"stdout: {out}\nstderr: {err}"
         )
 

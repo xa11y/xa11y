@@ -221,14 +221,16 @@ fn ax_number_f64(element: AXUIElementRef, attribute: &str) -> Option<f64> {
             );
             CFRelease(value);
             if ok {
-                Some(result)
-            } else {
-                None
+                return Some(result);
             }
-        } else {
-            CFRelease(value);
-            None
         }
+        // Fallback: parse string value (Qt exposes numeric attributes as strings)
+        if CFGetTypeID(value) == CFStringGetTypeID() {
+            let s = CFString::wrap_under_create_rule(value as *const _);
+            return s.to_string().trim().parse::<f64>().ok();
+        }
+        CFRelease(value);
+        None
     }
 }
 
@@ -376,6 +378,9 @@ fn ax_value_string(element: AXUIElementRef) -> Option<String> {
 }
 
 /// Get numeric value from AXValue attribute.
+///
+/// Handles both CFNumber (native Cocoa/AccessKit) and CFString (Qt/PySide6)
+/// representations — Qt exposes slider/spinner values as string attributes.
 fn ax_value_number(element: AXUIElementRef) -> Option<f64> {
     let value = ax_attr(element, "AXValue")?;
     unsafe {
@@ -386,6 +391,11 @@ fn ax_value_number(element: AXUIElementRef) -> Option<f64> {
             if ok {
                 return Some(f);
             }
+        }
+        // Fallback: parse string value as number (Qt exposes values this way)
+        if CFGetTypeID(value) == CFStringGetTypeID() {
+            let s = CFString::wrap_under_create_rule(value as *const _);
+            return s.to_string().trim().parse::<f64>().ok();
         }
         CFRelease(value);
         None
@@ -698,7 +708,6 @@ impl MacOSProvider {
         let mut elements = Vec::new();
         let mut ax_elements = Vec::new();
 
-        let mut visited = HashSet::new();
         self.traverse(
             &app_element,
             &mut elements,
@@ -706,7 +715,6 @@ impl MacOSProvider {
             None,
             0,
             screen_size,
-            &mut visited,
         );
 
         if elements.is_empty() {
@@ -768,7 +776,6 @@ impl MacOSProvider {
     }
 
     /// Recursively traverse the AX tree, building xa11y elements.
-    /// Hard depth limit of 50 to prevent stack overflow from circular AX trees.
     #[allow(clippy::too_many_arguments)]
     fn traverse(
         &self,
@@ -778,17 +785,8 @@ impl MacOSProvider {
         parent_idx: Option<u32>,
         depth: u32,
         screen_size: (u32, u32),
-        visited: &mut HashSet<usize>,
     ) {
-        // Hard depth limit to prevent stack overflow
-        const MAX_DEPTH: u32 = 50;
-        if depth > MAX_DEPTH {
-            return;
-        }
-
-        // Cycle detection using element pointer as identity
-        let ptr_key = element.as_ptr() as usize;
-        if !visited.insert(ptr_key) {
+        if depth > xa11y_core::MAX_TREE_DEPTH {
             return;
         }
 
@@ -892,8 +890,7 @@ impl MacOSProvider {
         });
         ax_elements.push(element.clone());
 
-        // Recurse children (skip macOS system menu bar at app level —
-        // it adds 100+ nodes that aren't part of the app's accessibility tree)
+        // Recurse children. Filter out macOS system chrome.
         let children = ax_children(element.as_ptr());
         let mut child_ids = Vec::new();
 
@@ -930,6 +927,14 @@ impl MacOSProvider {
                     }
                 }
             }
+            // Skip nested AXApplication children — prevents infinite recursion from
+            // Qt/PySide6 apps that list themselves as their own child.
+            {
+                let child_role = ax_string(child.as_ptr(), "AXRole").unwrap_or_default();
+                if child_role == "AXApplication" {
+                    continue;
+                }
+            }
             let child_idx = elements.len() as u32;
             child_ids.push(child_idx);
             self.traverse(
@@ -939,7 +944,6 @@ impl MacOSProvider {
                 Some(element_idx),
                 depth + 1,
                 screen_size,
-                visited,
             );
         }
 
@@ -992,7 +996,6 @@ impl Provider for MacOSProvider {
         let apps = Self::list_gui_apps();
         let mut root_children = Vec::new();
 
-        let mut visited = HashSet::new();
         for (pid, _app_name) in &apps {
             let app_element = AXElement::from_owned(unsafe { safe_ax_create_application(*pid) });
             if app_element.is_null() {
@@ -1007,7 +1010,6 @@ impl Provider for MacOSProvider {
                 Some(0),
                 1,
                 screen_size,
-                &mut visited,
             );
             // Set PID on the app element so App::all() can use it
             elements[child_idx as usize].pid = Some(*pid as u32);

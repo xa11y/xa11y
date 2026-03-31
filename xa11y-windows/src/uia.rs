@@ -196,8 +196,7 @@ impl WindowsProvider {
         depth: u32,
         screen_size: (u32, u32),
     ) {
-        const MAX_DEPTH: u32 = 50;
-        if depth > MAX_DEPTH {
+        if depth > xa11y_core::MAX_TREE_DEPTH {
             return;
         }
 

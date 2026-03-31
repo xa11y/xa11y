@@ -275,12 +275,49 @@ jobs:
   # ── Qt integration tests (PySide6) ─────────────────────────────────
   # Launches a real PySide6 app and tests it with the xa11y Python library
   # on every platform.
-  # Qt Integration (Linux) — skipped: AT-SPI provider hits infinite recursion
-  # on Qt/PySide6 apps (application node has itself as child). Tracked as a
-  # separate bug. Re-enable once the provider handles cycles.
+  qt-integ-linux:
+    name: Qt Integration (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
 
-  # Qt Integration (macOS) — skipped: same infinite recursion bug as Linux.
-  # Re-enable once the macOS provider handles this.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-qt-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-qt-
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            xvfb dbus dbus-x11 \
+            at-spi2-core \
+            libxkbcommon-x11-0 libxkbcommon-x11-dev \
+            libxcursor1 libxrandr2 libxi6 \
+            libx11-xcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0 \
+            libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 \
+            libxcb-image0 libxcb-render-util0 libxcb-xkb1
+
+      - name: Run Qt integration tests
+        run: ./scripts/run_qt_tests.sh
+
+  # Qt Integration (macOS) — skipped: macOS AX tree for Qt apps requires
+  # flattening nested AXApplication nodes. The depth limit prevents hangs
+  # but the tree structure is incomplete. Re-enable after fixing tree building.
 
   qt-integ-windows:
     name: Qt Integration (Windows)

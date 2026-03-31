@@ -1,5 +1,6 @@
 //! Real AT-SPI2 backend implementation using zbus D-Bus bindings.
 
+use std::collections::HashSet;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -302,7 +303,6 @@ impl LinuxProvider {
 
     /// Traverse the accessibility tree rooted at `aref`, building elements.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::only_used_in_recursion)]
     fn traverse(
         &self,
         aref: &AccessibleRef,
@@ -311,7 +311,18 @@ impl LinuxProvider {
         parent_idx: Option<u32>,
         depth: u32,
         screen_size: (u32, u32),
+        visited: &mut HashSet<String>,
     ) {
+        if depth > xa11y_core::MAX_TREE_DEPTH {
+            return;
+        }
+
+        // Cycle detection using AT-SPI object path as identity
+        let path_key = format!("{}:{}", aref.bus_name, aref.path);
+        if !visited.insert(path_key) {
+            return;
+        }
+
         let role_name = self.get_role_name(aref).unwrap_or_default();
         let role_num = self.get_role_number(aref).unwrap_or(0);
         let role = if !role_name.is_empty() {
@@ -398,6 +409,34 @@ impl LinuxProvider {
             {
                 continue;
             }
+            // Flatten nested application children — application nodes should only
+            // appear at the top level. Qt/PySide6 apps erroneously list themselves
+            // as their own child; we skip the duplicate but adopt its real children.
+            {
+                let child_role = self.get_role_name(child_ref).unwrap_or_default();
+                if child_role == "application" {
+                    let grandchildren = self.get_children(child_ref).unwrap_or_default();
+                    for gc_ref in &grandchildren {
+                        if gc_ref.path == "/org/a11y/atspi/null"
+                            || gc_ref.bus_name.is_empty()
+                            || gc_ref.path.is_empty()
+                        {
+                            continue;
+                        }
+                        let gc_role = self.get_role_name(gc_ref).unwrap_or_default();
+                        if gc_role == "application" {
+                            continue;
+                        }
+                        let gc_idx = elements.len() as u32;
+                        child_ids.push(gc_idx);
+                        self.traverse(
+                            gc_ref, elements, refs, Some(element_idx), depth + 1, screen_size,
+                            visited,
+                        );
+                    }
+                    continue;
+                }
+            }
             let child_idx = elements.len() as u32;
             child_ids.push(child_idx);
             self.traverse(
@@ -407,6 +446,7 @@ impl LinuxProvider {
                 Some(element_idx),
                 depth + 1,
                 screen_size,
+                visited,
             );
         }
 
@@ -649,8 +689,17 @@ impl LinuxProvider {
         let screen_size = Self::detect_screen_size();
         let mut elements = Vec::new();
         let mut refs = Vec::new();
+        let mut visited = HashSet::new();
 
-        self.traverse(app_ref, &mut elements, &mut refs, None, 0, screen_size);
+        self.traverse(
+            app_ref,
+            &mut elements,
+            &mut refs,
+            None,
+            0,
+            screen_size,
+            &mut visited,
+        );
 
         if elements.is_empty() {
             return Err(Error::AppNotFound {
