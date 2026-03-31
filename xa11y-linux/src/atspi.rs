@@ -221,10 +221,12 @@ impl LinuxProvider {
             })
     }
 
-    /// Return true if the element reports the AT-SPI SINGLE_LINE state.
-    /// Used to distinguish single-line text inputs (TextField) from multi-line
-    /// text areas (TextArea), since both use the AT-SPI "text" role name.
-    fn is_single_line(&self, aref: &AccessibleRef) -> bool {
+    /// Return true if the element reports the AT-SPI MULTI_LINE state.
+    /// Used to distinguish multi-line text areas (TextArea) from single-line
+    /// text inputs (TextField), since both use the AT-SPI "text" role name.
+    /// Note: Qt's AT-SPI bridge does not reliably set SINGLE_LINE, so we
+    /// check MULTI_LINE and default to TextField when neither is set.
+    fn is_multi_line(&self, aref: &AccessibleRef) -> bool {
         let state_bits = self.get_state(aref).unwrap_or_default();
         let bits: u64 = if state_bits.len() >= 2 {
             (state_bits[0] as u64) | ((state_bits[1] as u64) << 32)
@@ -233,9 +235,9 @@ impl LinuxProvider {
         } else {
             0
         };
-        // ATSPI_STATE_SINGLE_LINE = 26 in AtspiStateType enum
-        const SINGLE_LINE: u64 = 1 << 26;
-        (bits & SINGLE_LINE) != 0
+        // ATSPI_STATE_MULTI_LINE = 17 in AtspiStateType enum
+        const MULTI_LINE: u64 = 1 << 17;
+        (bits & MULTI_LINE) != 0
     }
 
     /// Get bounds via Component interface.
@@ -379,8 +381,11 @@ impl LinuxProvider {
             };
             // Refine TextArea → TextField for single-line text widgets.
             // Both QLineEdit and QTextEdit use the "text" AT-SPI role; the
-            // SINGLE_LINE state distinguishes them.
-            if coarse == Role::TextArea && self.is_single_line(aref) {
+            // MULTI_LINE state marks genuinely multi-line widgets. Elements
+            // without MULTI_LINE (including QLineEdit) are mapped to TextField.
+            // Qt's AT-SPI bridge does not reliably set SINGLE_LINE, so we
+            // invert the check: no MULTI_LINE → TextField.
+            if coarse == Role::TextArea && !self.is_multi_line(aref) {
                 Role::TextField
             } else {
                 coarse
@@ -1117,7 +1122,11 @@ impl Provider for LinuxProvider {
             Action::Press => self
                 .do_atspi_action(&target, "click")
                 .or_else(|_| self.do_atspi_action(&target, "activate"))
-                .or_else(|_| self.do_atspi_action(&target, "press")),
+                .or_else(|_| self.do_atspi_action(&target, "press"))
+                // Qt radio buttons expose "toggle" or "check" rather than
+                // "press" as their primary action name.
+                .or_else(|_| self.do_atspi_action(&target, "toggle"))
+                .or_else(|_| self.do_atspi_action(&target, "check")),
             Action::Focus => {
                 // Try Component.GrabFocus first, then fall back to Action interface
                 if let Ok(proxy) =
