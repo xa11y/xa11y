@@ -781,7 +781,8 @@ impl Provider for LinuxProvider {
             }
             let child_idx = elements.len() as u32;
             root_children.push(child_idx);
-            self.traverse(child, &mut elements, &mut refs, Some(0), 1, screen_size);
+            let mut visited = HashSet::new();
+            self.traverse(child, &mut elements, &mut refs, Some(0), 1, screen_size, &mut visited);
             // Set PID on the app element so App::all() can use it
             elements[child_idx as usize].pid = self.get_app_pid(child);
         }
