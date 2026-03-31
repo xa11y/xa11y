@@ -80,8 +80,7 @@ def test_ok_button_properties(qt_app):
     assert ok.role == "button"
     assert ok.name == "OK"
     assert ok.enabled is True
-    if sys.platform != "darwin":
-        assert ok.description == "Confirm the dialog"
+    assert ok.description == "Confirm the dialog"
 
 
 def test_cancel_button_disabled(qt_app):
