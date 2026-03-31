@@ -37,14 +37,11 @@ pub struct Locator {
 }
 
 impl Locator {
-    /// Create a new Locator scoped to a root element.
+    /// Create a new Locator.
     ///
-    /// Use [`App::locator`](crate::App::locator) to create locators.
-    pub(crate) fn new(
-        provider: Arc<dyn Provider>,
-        root: Option<ElementData>,
-        selector: &str,
-    ) -> Self {
+    /// Pass `root: None` to search the entire accessibility tree, or
+    /// `Some(element)` to scope the search to that element's subtree.
+    pub fn new(provider: Arc<dyn Provider>, root: Option<ElementData>, selector: &str) -> Self {
         Self {
             provider,
             root,

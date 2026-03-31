@@ -215,9 +215,6 @@ class Locator:
 def locator(selector: str) -> Locator:
     """Create a top-level Locator searching from the system root."""
 
-def check_permissions() -> str:
-    """Check whether accessibility permissions are granted."""
-
 # ── Test helpers ─────────────────────────────────────────────────────────────
 
 def _make_test_locator() -> Locator: ...

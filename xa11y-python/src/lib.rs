@@ -750,21 +750,6 @@ fn locator_fn(selector: &str) -> PyResult<Locator> {
     })
 }
 
-/// Check accessibility permissions. Returns "granted" or raises PermissionDeniedError.
-#[pyfunction]
-fn check_permissions(py: Python<'_>) -> PyResult<String> {
-    let provider = get_provider()?;
-    let status = py
-        .allow_threads(|| provider.check_permissions())
-        .map_err(to_py_err)?;
-    match status {
-        xa11y::PermissionStatus::Granted => Ok("granted".to_string()),
-        xa11y::PermissionStatus::Denied { instructions } => {
-            Err(PermissionDeniedError::new_err(instructions))
-        }
-    }
-}
-
 // ── Module definition ───────────────────────────────────────────────────────
 
 #[pymodule]
@@ -801,8 +786,6 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Re-export as "locator" in Python
     let locator_fn_obj = m.getattr("locator_fn")?;
     m.setattr("locator", &locator_fn_obj)?;
-
-    m.add_function(wrap_pyfunction!(check_permissions, m)?)?;
 
     // Test helpers
     m.add_function(wrap_pyfunction!(_make_test_locator, m)?)?;
@@ -873,10 +856,6 @@ impl xa11y::Provider for MockProvider {
             .unwrap()
             .push((element.handle, format!("{action}"), data_debug));
         Ok(())
-    }
-
-    fn check_permissions(&self) -> xa11y::Result<xa11y::PermissionStatus> {
-        Ok(xa11y::PermissionStatus::Granted)
     }
 
     fn subscribe(&self, _element: &xa11y::ElementData) -> xa11y::Result<xa11y::Subscription> {

@@ -23,7 +23,6 @@ def test_all_exceptions_exported():
 
 def test_all_functions_exported():
     assert callable(xa11y.locator)
-    assert callable(xa11y.check_permissions)
 
 
 # ── __all__ ──────────────────────────────────────────────────────────────────

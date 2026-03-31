@@ -22,7 +22,6 @@ from xa11y._native import (
     Subscription,
     TimeoutError,
     XA11yError,
-    check_permissions,
     locator,
 )
 
@@ -40,6 +39,5 @@ __all__ = [
     "Subscription",
     "TimeoutError",
     "XA11yError",
-    "check_permissions",
     "locator",
 ]

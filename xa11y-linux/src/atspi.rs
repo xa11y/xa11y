@@ -78,7 +78,7 @@ impl LinuxProvider {
     fn make_proxy(&self, bus_name: &str, path: &str, interface: &str) -> Result<Proxy<'_>> {
         // Use uncached proxy to avoid GetAll calls — Qt's AT-SPI adaptor
         // doesn't support GetAll on all objects, causing spurious errors.
-        Proxy::builder(&self.a11y_bus)
+        zbus::blocking::proxy::Builder::<Proxy>::new(&self.a11y_bus)
             .destination(bus_name.to_owned())
             .map_err(|e| Error::Platform {
                 code: -1,

@@ -1,4 +1,4 @@
-"""Tests for module-level functions: locator(), check_permissions()."""
+"""Tests for module-level functions: locator()."""
 
 
 def test_app_has_name(test_app):
