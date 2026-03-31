@@ -15,6 +15,7 @@ COMMANDS:
     test-python         Build and test Python bindings
     test-integ          Run integration tests (delegates to scripts/)
     test-integ-container  Run Linux integration tests in container
+    test-qt             Run Qt (PySide6) integration tests
     docs                Build documentation
     coverage            Generate code coverage report
     fuzz [ARGS..]       Run provider fuzzer (pass-through args)
@@ -35,6 +36,7 @@ fn main() -> ExitCode {
         "test-python" => do_test_python(),
         "test-integ" => do_test_integ(rest),
         "test-integ-container" => do_test_integ_container(rest),
+        "test-qt" => do_test_qt(),
         "docs" => do_docs(),
         "coverage" => do_coverage(),
         "fuzz" => do_fuzz(rest),
@@ -193,6 +195,12 @@ fn do_test_integ_container(args: &[String]) -> bool {
     let mut cmd_args = vec!["scripts/run_integ_container.sh"];
     cmd_args.extend(&str_args);
     run_in("bash", &cmd_args, &root)
+}
+
+fn do_test_qt() -> bool {
+    heading("Qt integration tests (PySide6)");
+    let root = project_root();
+    run_in("bash", &["scripts/run_qt_tests.sh"], &root)
 }
 
 fn do_docs() -> bool {

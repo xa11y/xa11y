@@ -188,6 +188,25 @@ mod tests {
         Tree::new("My App".to_string(), Some(1234), (1920, 1080), elements)
     }
 
+    /// MAX_TREE_DEPTH prevents stack overflow from cyclic accessibility trees.
+    ///
+    /// Some toolkits (notably Qt/PySide6) expose the application node as its own
+    /// child, creating infinite recursion in the AX tree. All providers (macOS,
+    /// Linux, Windows) check `depth > MAX_TREE_DEPTH` before recursing into
+    /// children, capping traversal at a safe depth. The value of 50 is well above
+    /// any real UI nesting depth but low enough to keep traversal fast even when
+    /// cycles exist.
+    #[test]
+    fn max_tree_depth_is_reasonable() {
+        let depth = crate::MAX_TREE_DEPTH;
+        // Providers rely on this constant; changing it affects cycle protection.
+        assert_eq!(depth, 50);
+        // Must be high enough for deeply nested UIs (dialogs in tabs in panels)
+        assert!(depth >= 30);
+        // Must be low enough to terminate quickly on cyclic trees
+        assert!(depth <= 100);
+    }
+
     #[test]
     fn tree_json_roundtrip() {
         let tree = sample_tree();

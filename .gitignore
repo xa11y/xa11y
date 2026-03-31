@@ -1,8 +1,10 @@
 **/target
 **/corpus
 **/artifacts
-.venv/
+.venv*/
 
 # Generated READMEs for crates.io and PyPI (built from root README.md)
 xa11y/README.md
 xa11y-python/README.md
+__pycache__/
+*.pyc

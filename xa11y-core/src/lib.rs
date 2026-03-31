@@ -22,3 +22,8 @@ pub use event_provider::{CancelHandle, EventReceiver, Subscription, Subscription
 pub use locator::Locator;
 pub use provider::{PermissionStatus, Provider};
 pub use role::Role;
+
+/// Maximum tree traversal depth for providers. Prevents stack overflow from
+/// circular accessibility trees (e.g. Qt/PySide6 apps where the application
+/// node lists itself as its own child).
+pub const MAX_TREE_DEPTH: u32 = 50;
