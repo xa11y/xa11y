@@ -598,7 +598,6 @@ mod tests {
         // Focus action may succeed or fail depending on AT-SPI adapter support
         let result = h::try_act(&submit, Action::Focus);
         if result.is_ok() {
-            std::thread::sleep(std::time::Duration::from_millis(100));
             let root2 = h::app_tree();
             let submit2 = h::named(&root2, "Submit");
             // Some adapters may not reflect focused state change
@@ -952,7 +951,6 @@ mod tests {
             Some(ActionData::Value("Jane Smith".to_string())),
         ) {
             Ok(()) => {
-                std::thread::sleep(std::time::Duration::from_millis(300));
                 let root2 = h::app_tree();
                 // Value may or may not be reflected via AT-SPI depending on adapter
                 let updated = root2
@@ -980,7 +978,6 @@ mod tests {
             Some(ActionData::NumericValue(75.0)),
         );
         assert!(result.is_ok(), "SetValue numeric: {:?}", result.err());
-        std::thread::sleep(std::time::Duration::from_millis(300));
         let root2 = h::app_tree();
         let s2 = h::query(&root2, "slider").unwrap();
         if !s2.is_empty() {
@@ -1013,7 +1010,6 @@ mod tests {
             let initial: f64 = spin.value.as_deref().unwrap_or("0").parse().unwrap_or(0.0);
             let result = h::try_act(&spin, Action::Increment);
             if result.is_ok() {
-                std::thread::sleep(std::time::Duration::from_millis(300));
                 let root2 = h::app_tree();
                 if let Some(s2) = h::query(&root2, "slider").unwrap().first() {
                     if let Some(v) = &s2.value {
@@ -1047,7 +1043,6 @@ mod tests {
             let before: f64 = spin.value.as_deref().unwrap_or("0").parse().unwrap_or(0.0);
             let result = h::try_act(&spin, Action::Decrement);
             if result.is_ok() {
-                std::thread::sleep(std::time::Duration::from_millis(300));
                 let root2 = h::app_tree();
                 if let Some(s2) = h::query(&root2, "slider").unwrap().first() {
                     if let Some(v) = &s2.value {
@@ -1087,7 +1082,6 @@ mod tests {
         if let Some(node) = expander {
             // Expand
             if let Ok(()) = h::try_act(&node, Action::Expand) {
-                std::thread::sleep(std::time::Duration::from_millis(300));
                 let root2 = h::app_tree();
                 let n2 = h::query(&root2, r#"[name*="Expander"]"#)
                     .unwrap()
@@ -1103,7 +1097,6 @@ mod tests {
                     if n.states.expanded == Some(true) {
                         // Collapse
                         if let Ok(()) = h::try_act(&n, Action::Collapse) {
-                            std::thread::sleep(std::time::Duration::from_millis(300));
                             let root3 = h::app_tree();
                             let n3 = h::query(&root3, r#"[name*="Expander"]"#)
                                 .unwrap()

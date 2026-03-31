@@ -733,7 +733,7 @@ impl MacOSProvider {
                     let count = seen.entry(id.clone()).or_insert(0);
                     *count += 1;
                     if *count > 1 {
-                        elem.stable_id = Some(format!("{}#{}", id, count - 1));
+                        elem.stable_id = Some(format!("{}#{}", id, *count - 1));
                     }
                 }
             }

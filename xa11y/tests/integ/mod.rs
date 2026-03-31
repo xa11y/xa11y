@@ -4,11 +4,11 @@ use xa11y::*;
 
 /// Get the test app tree, retrying briefly for registration.
 pub fn app_tree() -> Element {
-    for attempt in 0..3 {
+    for attempt in 0..6 {
         match App::from_name(xa11y::provider().unwrap(), "xa11y") {
             Ok(app) => return app.elements().expect("Failed to snapshot app tree"),
-            Err(_) if attempt < 2 => {
-                std::thread::sleep(std::time::Duration::from_millis(200));
+            Err(_) if attempt < 5 => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
             }
             Err(e) => panic!("Could not find test app after retries: {}", e),
         }
@@ -64,10 +64,10 @@ pub fn act(element: &Element, action: Action) -> Element {
     act_with(element, action, None)
 }
 
-/// Perform an action with data on an element, wait, then re-read the tree.
+/// Perform an action with data on an element, then re-read the tree.
+/// The provider already pauses briefly after each action for state to settle.
 pub fn act_with(element: &Element, action: Action, data: Option<ActionData>) -> Element {
     try_act_with(element, action, data)
         .unwrap_or_else(|e| panic!("Action {:?} failed: {}", action, e));
-    std::thread::sleep(std::time::Duration::from_millis(100));
     app_tree()
 }
