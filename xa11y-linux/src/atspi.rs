@@ -221,6 +221,23 @@ impl LinuxProvider {
             })
     }
 
+    /// Return true if the element reports the AT-SPI SINGLE_LINE state.
+    /// Used to distinguish single-line text inputs (TextField) from multi-line
+    /// text areas (TextArea), since both use the AT-SPI "text" role name.
+    fn is_single_line(&self, aref: &AccessibleRef) -> bool {
+        let state_bits = self.get_state(aref).unwrap_or_default();
+        let bits: u64 = if state_bits.len() >= 2 {
+            (state_bits[0] as u64) | ((state_bits[1] as u64) << 32)
+        } else if state_bits.len() == 1 {
+            state_bits[0] as u64
+        } else {
+            0
+        };
+        // ATSPI_STATE_SINGLE_LINE = 26 in AtspiStateType enum
+        const SINGLE_LINE: u64 = 1 << 26;
+        (bits & SINGLE_LINE) != 0
+    }
+
     /// Get bounds via Component interface.
     /// Checks for Component support first to avoid GTK CRITICAL warnings
     /// on objects (e.g. TreeView cell renderers) that don't implement it.
@@ -254,14 +271,17 @@ impl LinuxProvider {
 
         // Try Action interface directly
         if let Ok(proxy) = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Action") {
-            if let Ok(n_actions) = proxy.get_property::<i32>("NActions") {
-                for i in 0..n_actions {
-                    if let Ok(reply) = proxy.call_method("GetName", &(i,)) {
-                        if let Ok(name) = reply.body().deserialize::<String>() {
-                            if let Some(action) = map_atspi_action(&name) {
-                                if !actions.contains(&action) {
-                                    actions.push(action);
-                                }
+            // NActions may be returned as i32 or u32 depending on AT-SPI implementation.
+            let n_actions = proxy
+                .get_property::<i32>("NActions")
+                .or_else(|_| proxy.get_property::<u32>("NActions").map(|n| n as i32))
+                .unwrap_or(0);
+            for i in 0..n_actions {
+                if let Ok(reply) = proxy.call_method("GetName", &(i,)) {
+                    if let Ok(name) = reply.body().deserialize::<String>() {
+                        if let Some(action) = map_atspi_action(&name) {
+                            if !actions.contains(&action) {
+                                actions.push(action);
                             }
                         }
                     }
@@ -342,10 +362,29 @@ impl LinuxProvider {
     fn build_element_data(&self, aref: &AccessibleRef, pid: Option<u32>) -> ElementData {
         let role_name = self.get_role_name(aref).unwrap_or_default();
         let role_num = self.get_role_number(aref).unwrap_or(0);
-        let role = if !role_name.is_empty() {
-            map_atspi_role(&role_name)
-        } else {
-            map_atspi_role_number(role_num)
+        let role = {
+            let by_name = if !role_name.is_empty() {
+                map_atspi_role(&role_name)
+            } else {
+                Role::Unknown
+            };
+            let coarse = if by_name != Role::Unknown {
+                by_name
+            } else {
+                // role_name is missing or unmapped — try numeric role.
+                // Handles cases where a widget returns a role name string that
+                // our table doesn't recognise (e.g. Qt returning "spinbox"
+                // instead of the canonical "spin button").
+                map_atspi_role_number(role_num)
+            };
+            // Refine TextArea → TextField for single-line text widgets.
+            // Both QLineEdit and QTextEdit use the "text" AT-SPI role; the
+            // SINGLE_LINE state distinguishes them.
+            if coarse == Role::TextArea && self.is_single_line(aref) {
+                Role::TextField
+            } else {
+                coarse
+            }
         };
 
         let mut name = self.get_name(aref).ok().filter(|s| !s.is_empty());
@@ -597,12 +636,18 @@ impl LinuxProvider {
     /// Perform an AT-SPI action by name.
     fn do_atspi_action(&self, aref: &AccessibleRef, action_name: &str) -> Result<()> {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Action")?;
-        let n_actions: i32 = proxy.get_property("NActions").unwrap_or(0);
+        // NActions may be returned as i32 or u32 depending on AT-SPI implementation.
+        let n_actions = proxy
+            .get_property::<i32>("NActions")
+            .or_else(|_| proxy.get_property::<u32>("NActions").map(|n| n as i32))
+            .unwrap_or(0);
 
         for i in 0..n_actions {
             if let Ok(reply) = proxy.call_method("GetName", &(i,)) {
                 if let Ok(name) = reply.body().deserialize::<String>() {
-                    if name == action_name {
+                    // Case-insensitive match to handle implementations that
+                    // capitalise action names (e.g. "Press" instead of "press").
+                    if name.eq_ignore_ascii_case(action_name) {
                         let _ =
                             proxy
                                 .call_method("DoAction", &(i,))
@@ -654,14 +699,26 @@ impl LinuxProvider {
         None
     }
 
-    /// Resolve the mapped Role for an accessible ref (1-2 D-Bus calls).
+    /// Resolve the mapped Role for an accessible ref (1-3 D-Bus calls).
     fn resolve_role(&self, aref: &AccessibleRef) -> Role {
         let role_name = self.get_role_name(aref).unwrap_or_default();
-        if !role_name.is_empty() {
+        let by_name = if !role_name.is_empty() {
             map_atspi_role(&role_name)
         } else {
+            Role::Unknown
+        };
+        let coarse = if by_name != Role::Unknown {
+            by_name
+        } else {
+            // Unmapped or missing role name — fall back to numeric role.
             let role_num = self.get_role_number(aref).unwrap_or(0);
             map_atspi_role_number(role_num)
+        };
+        // Refine TextArea → TextField for single-line text widgets.
+        if coarse == Role::TextArea && self.is_single_line(aref) {
+            Role::TextField
+        } else {
+            coarse
         }
     }
 
