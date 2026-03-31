@@ -67,9 +67,14 @@ def test_app_pid(qt_app):
 
 
 def test_window_role_and_name(qt_app):
-    w = qt_app.locator("window").element()
-    assert w.role == "window"
-    assert "xa11y-qt-test-app" in w.name
+    # On Windows, the top-level element IS the window (UIA has no Application node).
+    # On Linux/macOS, the top-level element is the application, which has a window child.
+    if qt_app.role == "window":
+        assert "xa11y-qt-test-app" in qt_app.name
+    else:
+        w = qt_app.locator("window").element()
+        assert w.role == "window"
+        assert "xa11y-qt-test-app" in w.name
 
 
 # ── Buttons ─────────────────────────────────────────────────────────────────

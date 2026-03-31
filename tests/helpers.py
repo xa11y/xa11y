@@ -63,12 +63,17 @@ def launch_test_app(
             )
 
         for name in app_names:
-            try:
-                candidate = xa11y.locator(f'application[name*="{name}"]').element()
-                app = candidate
+            # Try application role first (Linux/macOS), then window role (Windows —
+            # UIA exposes top-level apps as Window elements, not Application elements).
+            for role in ("application", "window"):
+                try:
+                    candidate = xa11y.locator(f'{role}[name*="{name}"]').element()
+                    app = candidate
+                    break
+                except (xa11y.SelectorNotMatchedError, xa11y.PlatformError) as e:
+                    last_err = e
+            if app is not None:
                 break
-            except (xa11y.SelectorNotMatchedError, xa11y.PlatformError) as e:
-                last_err = e
 
         if app is not None:
             break
@@ -77,7 +82,7 @@ def launch_test_app(
 
     if app is None:
         try:
-            all_apps = xa11y.locator("application").elements()
+            all_apps = xa11y.locator("application").elements() + xa11y.locator("window").elements()
             app_list = [(a.name, a.pid) for a in all_apps]
         except Exception:
             app_list = "<failed to list>"
