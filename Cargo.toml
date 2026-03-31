@@ -6,11 +6,13 @@ members = [
     "xa11y-linux",
     "xa11y",
     "test-apps/accesskit",
-    "test-apps/tauri",
     "xa11y-fuzz",
     "xtask",
 ]
-exclude = ["xa11y-python"]
+exclude = [
+    "xa11y-python",
+    "test-apps/tauri",  # Tauri requires platform-specific system deps (WebKit2GTK etc.)
+]
 resolver = "2"
 
 [workspace.package]

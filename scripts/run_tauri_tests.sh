@@ -91,7 +91,7 @@ fi
 
 echo "Building Tauri test app..."
 cd "$PROJECT_ROOT"
-cargo build -p xa11y-tauri-test-app
+cargo build --manifest-path test-apps/tauri/Cargo.toml
 
 # ── Set up Python venv ───────────────────────────────────────────────
 

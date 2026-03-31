@@ -19,7 +19,7 @@ def _ensure_built() -> None:
     """Build the Tauri test app if the binary doesn't exist."""
     if not Path(BINARY).exists():
         result = subprocess.run(
-            ["cargo", "build", "-p", "xa11y-tauri-test-app"],
+            ["cargo", "build", "--manifest-path", str(PROJECT_ROOT / "test-apps" / "tauri" / "Cargo.toml")],
             cwd=PROJECT_ROOT,
             capture_output=True,
             text=True,

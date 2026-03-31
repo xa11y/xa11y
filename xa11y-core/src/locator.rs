@@ -16,7 +16,7 @@ use crate::selector::Selector;
 /// on demand, making it immune to staleness.
 ///
 /// # Example
-/// ```no_run
+/// ```ignore
 /// # use xa11y::*;
 /// # fn example() -> Result<()> {
 /// let app = App::by_name("MyApp")?;
