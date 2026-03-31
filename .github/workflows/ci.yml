@@ -129,9 +129,6 @@ jobs:
           .venv-qt-test/Scripts/pip.exe install maturin pytest pytest-timeout
           .venv-qt-test/Scripts/pip.exe install -r xa11y-qt-test-app/requirements.txt
 
-      - name: Generate READMEs
-        run: cargo xtask sync-readmes
-
       - name: Build & install xa11y Python bindings
         shell: bash
         working-directory: xa11y-python
@@ -168,6 +165,9 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+      - name: Check READMEs are in sync
+        run: cargo xtask sync-readmes --check
 
       - name: Run clippy
         run: cargo clippy --workspace --all-targets
@@ -260,9 +260,6 @@ jobs:
       - name: Ruff format
         working-directory: xa11y-python
         run: ../.venv/bin/ruff format --check python/ tests/
-
-      - name: Generate READMEs
-        run: cargo xtask sync-readmes
 
       - name: Build & install
         working-directory: xa11y-python

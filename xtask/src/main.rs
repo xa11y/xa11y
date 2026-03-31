@@ -19,7 +19,7 @@ COMMANDS:
     docs                Build documentation
     coverage            Generate code coverage report
     fuzz [ARGS..]       Run provider fuzzer (pass-through args)
-    sync-readmes        Generate crates.io/PyPI READMEs from root README.md
+    sync-readmes [--check]  Generate crates.io/PyPI READMEs from root README.md
     check               Run ALL pre-PR checks (fmt, lint, test, test-python, docs)
     help                Show this help
 ";
@@ -40,7 +40,7 @@ fn main() -> ExitCode {
         "docs" => do_docs(),
         "coverage" => do_coverage(),
         "fuzz" => do_fuzz(rest),
-        "sync-readmes" => do_sync_readmes(),
+        "sync-readmes" => do_sync_readmes(rest),
         "check" => do_check(),
         "help" | "--help" | "-h" => {
             print!("{HELP}");
@@ -239,8 +239,13 @@ fn do_fuzz(args: &[String]) -> bool {
     run("bash", &cmd_args)
 }
 
-fn do_sync_readmes() -> bool {
-    heading("Sync READMEs");
+fn do_sync_readmes(args: &[String]) -> bool {
+    let check = args.iter().any(|a| a == "--check");
+    heading(if check {
+        "Check READMEs are in sync"
+    } else {
+        "Sync READMEs"
+    });
     let root = project_root();
     let source = match fs::read_to_string(root.join("README.md")) {
         Ok(s) => s,
@@ -258,10 +263,18 @@ fn do_sync_readmes() -> bool {
     let mut ok = true;
     for &(keep, dest) in targets {
         let remove = if keep == "rust" { "python" } else { "rust" };
-        let text = strip_lang_blocks(&source, keep, remove);
-
+        let expected = strip_lang_blocks(&source, keep, remove);
         let path = root.join(dest);
-        if let Err(e) = fs::write(&path, &text) {
+
+        if check {
+            let actual = fs::read_to_string(&path).unwrap_or_default();
+            if actual != expected {
+                eprintln!("{dest} is out of date. Run `cargo xtask sync-readmes` to fix.");
+                ok = false;
+            } else {
+                eprintln!("{dest} is up to date.");
+            }
+        } else if let Err(e) = fs::write(&path, &expected) {
             eprintln!("Failed to write {dest}: {e}");
             ok = false;
         } else {
@@ -308,6 +321,12 @@ fn strip_lang_blocks(source: &str, keep: &str, remove: &str) -> String {
 
 fn do_check() -> bool {
     let mut ok = true;
+
+    heading("PRE-PR CHECK: sync-readmes");
+    if !do_sync_readmes(&["--check".to_string()]) {
+        eprintln!("!! READMEs out of date. Run `cargo xtask sync-readmes` to fix.");
+        ok = false;
+    }
 
     heading("PRE-PR CHECK: format");
     if !do_fmt(&["--check".to_string()]) {
