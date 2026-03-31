@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use pyo3::exceptions::*;
 use pyo3::prelude::*;
-use pyo3::types::PyList;
 
 // ── Singleton provider ─────────────────────────────────────────────────────
 
@@ -15,7 +14,6 @@ fn get_provider() -> PyResult<Arc<dyn xa11y::Provider>> {
 
 pyo3::create_exception!(_native, XA11yError, PyException);
 pyo3::create_exception!(_native, PermissionDeniedError, XA11yError);
-pyo3::create_exception!(_native, AppNotFoundError, XA11yError);
 pyo3::create_exception!(_native, SelectorNotMatchedError, XA11yError);
 pyo3::create_exception!(_native, ActionNotSupportedError, XA11yError);
 pyo3::create_exception!(_native, XA11yTimeoutError, XA11yError);
@@ -26,9 +24,6 @@ fn to_py_err(e: xa11y::Error) -> PyErr {
     match e {
         xa11y::Error::PermissionDenied { instructions } => {
             PermissionDeniedError::new_err(instructions)
-        }
-        xa11y::Error::AppNotFound { target } => {
-            AppNotFoundError::new_err(format!("Application not found: {target}"))
         }
         xa11y::Error::SelectorNotMatched { selector } => {
             SelectorNotMatchedError::new_err(format!("No element matched: {selector}"))
@@ -80,36 +75,18 @@ fn action_to_str(a: &xa11y::Action) -> &'static str {
     }
 }
 
-fn build_app(
+/// Create a Python Element from Rust ElementData.
+fn make_py_element(
     py: Python<'_>,
+    data: &xa11y::ElementData,
     provider: Arc<dyn xa11y::Provider>,
-    name: Option<&str>,
-    pid: Option<u32>,
-) -> PyResult<xa11y::App> {
-    match (name, pid) {
-        (Some(n), _) => {
-            let p = provider.clone();
-            let n = n.to_string();
-            py.allow_threads(move || xa11y::App::from_name(p, &n))
-                .map_err(to_py_err)
-        }
-        (None, Some(p)) => {
-            let prov = provider.clone();
-            py.allow_threads(move || xa11y::App::from_pid(prov, p))
-                .map_err(to_py_err)
-        }
-        (None, None) => Err(PyValueError::new_err("Either name or pid must be provided")),
-    }
-}
-
-/// Create a standalone Python Element from a Rust ElementData (no tree context).
-fn make_py_element(py: Python<'_>, n: &xa11y::ElementData) -> PyResult<Py<Element>> {
-    let checked = n.states.checked.map(|t| match t {
+) -> PyResult<Py<Element>> {
+    let checked = data.states.checked.map(|t| match t {
         xa11y::Toggled::Off => "off".to_string(),
         xa11y::Toggled::On => "on".to_string(),
         xa11y::Toggled::Mixed => "mixed".to_string(),
     });
-    let actions: Vec<String> = n
+    let actions: Vec<String> = data
         .actions
         .iter()
         .map(|a| action_to_str(a).to_string())
@@ -117,32 +94,30 @@ fn make_py_element(py: Python<'_>, n: &xa11y::ElementData) -> PyResult<Py<Elemen
     Py::new(
         py,
         Element {
-            role: n.role.to_snake_case().to_string(),
-            name: n.name.clone(),
-            value: n.value.clone(),
-            description: n.description.clone(),
-            numeric_value: n.numeric_value,
-            min_value: n.min_value,
-            max_value: n.max_value,
-            stable_id: n.stable_id.clone(),
-            pid: n.pid,
+            role: data.role.to_snake_case().to_string(),
+            name: data.name.clone(),
+            value: data.value.clone(),
+            description: data.description.clone(),
+            numeric_value: data.numeric_value,
+            min_value: data.min_value,
+            max_value: data.max_value,
+            stable_id: data.stable_id.clone(),
+            pid: data.pid,
             actions,
-            bounds_data: n.bounds.as_ref().map(|r| (r.x, r.y, r.width, r.height)),
-            enabled: n.states.enabled,
-            visible: n.states.visible,
-            focused: n.states.focused,
+            bounds_data: data.bounds.as_ref().map(|r| (r.x, r.y, r.width, r.height)),
+            enabled: data.states.enabled,
+            visible: data.states.visible,
+            focused: data.states.focused,
             checked,
-            selected: n.states.selected,
-            expanded: n.states.expanded,
-            editable: n.states.editable,
-            focusable: n.states.focusable,
-            modal: n.states.modal,
-            required: n.states.required,
-            busy: n.states.busy,
-            children_indices: n.children_indices.clone(),
-            parent_idx: n.parent_index,
-            _index: n.index,
-            _all_elements: None,
+            selected: data.states.selected,
+            expanded: data.states.expanded,
+            editable: data.states.editable,
+            focusable: data.states.focusable,
+            modal: data.states.modal,
+            required: data.states.required,
+            busy: data.states.busy,
+            inner_data: data.clone(),
+            provider,
         },
     )
 }
@@ -181,10 +156,7 @@ impl Rect {
 
 // ── Element ──────────────────────────────────────────────────────────────────
 
-/// A read-only element in the accessibility tree snapshot.
-///
-/// Elements form a navigable graph — use `element.children` and `element.parent`
-/// to traverse. To perform actions, use a Locator via `app.locator()`.
+/// A live element with lazy navigation.
 #[pyclass]
 struct Element {
     #[pyo3(get)]
@@ -232,37 +204,62 @@ struct Element {
     #[pyo3(get)]
     busy: bool,
 
-    children_indices: Vec<u32>,
-    parent_idx: Option<u32>,
-    _index: u32,
-
-    /// Shared reference to all elements in the tree (for graph navigation).
-    _all_elements: Option<Py<PyList>>,
+    /// The underlying Rust ElementData (for provider calls).
+    inner_data: xa11y::ElementData,
+    /// Provider reference for lazy navigation.
+    provider: Arc<dyn xa11y::Provider>,
 }
 
 #[pymethods]
 impl Element {
-    #[getter]
-    fn children(&self, py: Python<'_>) -> PyResult<Vec<PyObject>> {
-        let Some(ref all) = self._all_elements else {
-            return Ok(vec![]);
-        };
-        let list = all.bind(py);
-        self.children_indices
+    /// Get direct children (lazy — each call queries the provider).
+    fn children(&self, py: Python<'_>) -> PyResult<Vec<Py<Element>>> {
+        let provider = self.provider.clone();
+        let data = self.inner_data.clone();
+        let children = py
+            .allow_threads(move || provider.get_children(Some(&data)))
+            .map_err(to_py_err)?;
+        children
             .iter()
-            .map(|&idx| list.get_item(idx as usize).map(|item| item.unbind()))
+            .map(|c| make_py_element(py, c, self.provider.clone()))
             .collect()
     }
 
-    #[getter]
-    fn parent(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
-        let Some(ref all) = self._all_elements else {
-            return Ok(None);
-        };
-        match self.parent_idx {
-            Some(idx) => Ok(Some(all.bind(py).get_item(idx as usize)?.unbind())),
+    /// Get parent element (lazy — each call queries the provider).
+    fn parent(&self, py: Python<'_>) -> PyResult<Option<Py<Element>>> {
+        let provider = self.provider.clone();
+        let data = self.inner_data.clone();
+        let parent = py
+            .allow_threads(move || provider.get_parent(&data))
+            .map_err(to_py_err)?;
+        match parent {
+            Some(p) => Ok(Some(make_py_element(py, &p, self.provider.clone())?)),
             None => Ok(None),
         }
+    }
+
+    /// Create a Locator scoped to this element's subtree.
+    fn locator(&self, selector: &str) -> Locator {
+        Locator {
+            inner: xa11y::Locator::new(
+                self.provider.clone(),
+                Some(self.inner_data.clone()),
+                selector,
+            ),
+        }
+    }
+
+    /// Subscribe to accessibility events for this element (typically an app).
+    fn subscribe(&self, py: Python<'_>) -> PyResult<Subscription> {
+        let provider = self.provider.clone();
+        let data = self.inner_data.clone();
+        let sub = py
+            .allow_threads(move || provider.subscribe(&data))
+            .map_err(to_py_err)?;
+        Ok(Subscription {
+            inner: std::sync::Mutex::new(Some(sub)),
+            provider: self.provider.clone(),
+        })
     }
 
     #[getter]
@@ -298,462 +295,233 @@ impl Element {
     fn __str__(&self) -> String {
         self.__repr__()
     }
-
-    fn __len__(&self) -> usize {
-        self.children_indices.len()
-    }
-}
-
-// ── Element construction ─────────────────────────────────────────────────────
-
-/// Convert a Rust Element (root) into a fully navigable Python root Element.
-///
-/// All elements get shared references so parent/children navigation works.
-/// Returns the root element (index 0).
-fn convert_to_root_element(py: Python<'_>, root: &xa11y::Element) -> PyResult<Py<Element>> {
-    convert_to_element_at(py, root, 0)
-}
-
-/// Convert a Rust Element (root) into a fully navigable Python Element at the given index.
-fn convert_to_element_at(
-    py: Python<'_>,
-    root: &xa11y::Element,
-    element_index: usize,
-) -> PyResult<Py<Element>> {
-    let subtree = root.subtree();
-    let mut py_elements: Vec<Py<Element>> = Vec::with_capacity(subtree.len());
-
-    for elem in &subtree {
-        py_elements.push(make_py_element(py, elem)?);
-    }
-
-    // Build shared element list so every Element can navigate.
-    let all_elements_list: Py<PyList> = PyList::new(py, &py_elements)?.unbind();
-    for py_element in &py_elements {
-        let mut element = py_element.borrow_mut(py);
-        element._all_elements = Some(all_elements_list.clone_ref(py));
-    }
-
-    py_elements
-        .get(element_index)
-        .map(|n| n.clone_ref(py))
-        .ok_or_else(|| PyValueError::new_err("Element index out of range"))
-}
-
-/// Convert a Rust Element (root) into a list of Python Elements at the given indices.
-fn convert_to_elements_at(
-    py: Python<'_>,
-    root: &xa11y::Element,
-    indices: &[u32],
-) -> PyResult<Vec<Py<Element>>> {
-    let subtree = root.subtree();
-    let mut py_elements: Vec<Py<Element>> = Vec::with_capacity(subtree.len());
-
-    for elem in &subtree {
-        py_elements.push(make_py_element(py, elem)?);
-    }
-
-    let all_elements_list: Py<PyList> = PyList::new(py, &py_elements)?.unbind();
-    for py_element in &py_elements {
-        let mut element = py_element.borrow_mut(py);
-        element._all_elements = Some(all_elements_list.clone_ref(py));
-    }
-
-    Ok(indices
-        .iter()
-        .filter_map(|&idx| py_elements.get(idx as usize).map(|n| n.clone_ref(py)))
-        .collect())
 }
 
 // ── Locator ─────────────────────────────────────────────────────────────────
 
 #[pyclass]
-#[derive(Clone)]
 struct Locator {
-    provider: Arc<dyn xa11y::Provider>,
-    pid: u32,
-    #[pyo3(get)]
-    selector: String,
-    nth: Option<usize>,
-}
-
-impl Locator {
-    fn from_core(loc: xa11y::Locator) -> Self {
-        Self {
-            provider: loc.provider().clone(),
-            pid: loc.pid(),
-            selector: loc.selector().to_string(),
-            nth: loc.nth_index(),
-        }
-    }
+    inner: xa11y::Locator,
 }
 
 #[pymethods]
 impl Locator {
+    #[getter]
+    fn selector(&self) -> &str {
+        self.inner.selector()
+    }
+
     fn nth(&self, n: usize) -> Self {
-        let mut loc = self.clone();
-        loc.nth = Some(n);
-        loc
+        Self {
+            inner: self.inner.clone().nth(n),
+        }
     }
 
     fn first(&self) -> Self {
-        self.nth(0)
+        Self {
+            inner: self.inner.clone().first(),
+        }
     }
 
     fn child(&self, selector: &str) -> Self {
-        let mut loc = self.clone();
-        loc.selector = format!("{} > {}", self.selector, selector);
-        loc.nth = None;
-        loc
+        Self {
+            inner: self.inner.clone().child(selector),
+        }
     }
 
     fn descendant(&self, selector: &str) -> Self {
-        let mut loc = self.clone();
-        loc.selector = format!("{} {}", self.selector, selector);
-        loc.nth = None;
-        loc
+        Self {
+            inner: self.inner.clone().descendant(selector),
+        }
     }
 
     // ── Queries ──
 
     fn exists(&self) -> PyResult<bool> {
-        match self.resolve() {
-            Ok(_) => Ok(true),
-            Err(e) => Python::with_gil(|py| {
-                if e.is_instance_of::<SelectorNotMatchedError>(py) {
-                    Ok(false)
-                } else {
-                    Err(e)
-                }
-            }),
-        }
+        self.inner.exists().map_err(to_py_err)
     }
 
     fn count(&self) -> PyResult<usize> {
-        let root = self.provider.get_elements(self.pid).map_err(to_py_err)?;
-        let matches = root.query_selector(&self.selector).map_err(to_py_err)?;
-        Ok(matches.len())
+        self.inner.count().map_err(to_py_err)
     }
 
-    /// Get a snapshot of the matched element (with full tree context for navigation).
     fn element(&self, py: Python<'_>) -> PyResult<Py<Element>> {
-        let root = self.provider.get_elements(self.pid).map_err(to_py_err)?;
-        let matches = root.query_selector(&self.selector).map_err(to_py_err)?;
-        let idx = self.nth.unwrap_or(0);
-        let matched = matches.get(idx).ok_or_else(|| {
-            to_py_err(xa11y::Error::SelectorNotMatched {
-                selector: self.selector.clone(),
-            })
-        })?;
-        convert_to_element_at(py, &root, matched.index as usize)
+        let el = self.inner.element().map_err(to_py_err)?;
+        make_py_element(py, el.data(), el.provider().clone())
     }
 
-    /// Get all matching elements as a snapshot (with full tree context for navigation).
     fn elements(&self, py: Python<'_>) -> PyResult<Vec<Py<Element>>> {
-        let root = self.provider.get_elements(self.pid).map_err(to_py_err)?;
-        let matches = root.query_selector(&self.selector).map_err(to_py_err)?;
-        let indices: Vec<u32> = matches.iter().map(|n| n.index).collect();
-        convert_to_elements_at(py, &root, &indices)
+        let els = self.inner.elements().map_err(to_py_err)?;
+        els.iter()
+            .map(|el| make_py_element(py, el.data(), el.provider().clone()))
+            .collect()
     }
 
     // ── Actions ──
 
     fn press(&self) -> PyResult<()> {
-        self.perform_action(xa11y::Action::Press, None)
+        self.inner.press().map_err(to_py_err)
     }
-
     fn focus(&self) -> PyResult<()> {
-        self.perform_action(xa11y::Action::Focus, None)
+        self.inner.focus().map_err(to_py_err)
     }
-
     fn blur(&self) -> PyResult<()> {
-        self.perform_action(xa11y::Action::Blur, None)
+        self.inner.blur().map_err(to_py_err)
     }
-
     fn toggle(&self) -> PyResult<()> {
-        self.perform_action(xa11y::Action::Toggle, None)
+        self.inner.toggle().map_err(to_py_err)
     }
-
     fn expand(&self) -> PyResult<()> {
-        self.perform_action(xa11y::Action::Expand, None)
+        self.inner.expand().map_err(to_py_err)
     }
-
     fn collapse(&self) -> PyResult<()> {
-        self.perform_action(xa11y::Action::Collapse, None)
+        self.inner.collapse().map_err(to_py_err)
     }
-
     fn select(&self) -> PyResult<()> {
-        self.perform_action(xa11y::Action::Select, None)
+        self.inner.select().map_err(to_py_err)
     }
-
     fn show_menu(&self) -> PyResult<()> {
-        self.perform_action(xa11y::Action::ShowMenu, None)
+        self.inner.show_menu().map_err(to_py_err)
     }
-
     fn scroll_into_view(&self) -> PyResult<()> {
-        self.perform_action(xa11y::Action::ScrollIntoView, None)
+        self.inner.scroll_into_view().map_err(to_py_err)
     }
-
     fn increment(&self) -> PyResult<()> {
-        self.perform_action(xa11y::Action::Increment, None)
+        self.inner.increment().map_err(to_py_err)
     }
-
     fn decrement(&self) -> PyResult<()> {
-        self.perform_action(xa11y::Action::Decrement, None)
+        self.inner.decrement().map_err(to_py_err)
     }
-
     fn set_value(&self, value: &str) -> PyResult<()> {
-        self.perform_action(
-            xa11y::Action::SetValue,
-            Some(xa11y::ActionData::Value(value.to_string())),
-        )
+        self.inner.set_value(value).map_err(to_py_err)
     }
-
     fn set_numeric_value(&self, value: f64) -> PyResult<()> {
-        self.perform_action(
-            xa11y::Action::SetValue,
-            Some(xa11y::ActionData::NumericValue(value)),
-        )
+        self.inner.set_numeric_value(value).map_err(to_py_err)
     }
-
     fn type_text(&self, text: &str) -> PyResult<()> {
-        self.perform_action(
-            xa11y::Action::TypeText,
-            Some(xa11y::ActionData::Value(text.to_string())),
-        )
+        self.inner.type_text(text).map_err(to_py_err)
     }
-
     fn select_text(&self, start: u32, end: u32) -> PyResult<()> {
-        self.perform_action(
-            xa11y::Action::SetTextSelection,
-            Some(xa11y::ActionData::TextSelection { start, end }),
-        )
+        self.inner.select_text(start, end).map_err(to_py_err)
     }
-
     #[pyo3(signature = (amount=1.0))]
     fn scroll_up(&self, amount: f64) -> PyResult<()> {
-        self.perform_action(
-            xa11y::Action::ScrollDown,
-            Some(xa11y::ActionData::ScrollAmount(-amount)),
-        )
+        self.inner.scroll_up(amount).map_err(to_py_err)
     }
-
     #[pyo3(signature = (amount=1.0))]
     fn scroll_down(&self, amount: f64) -> PyResult<()> {
-        self.perform_action(
-            xa11y::Action::ScrollDown,
-            Some(xa11y::ActionData::ScrollAmount(amount)),
-        )
+        self.inner.scroll_down(amount).map_err(to_py_err)
     }
-
     #[pyo3(signature = (amount=1.0))]
     fn scroll_left(&self, amount: f64) -> PyResult<()> {
-        self.perform_action(
-            xa11y::Action::ScrollRight,
-            Some(xa11y::ActionData::ScrollAmount(-amount)),
-        )
+        self.inner.scroll_left(amount).map_err(to_py_err)
     }
-
     #[pyo3(signature = (amount=1.0))]
     fn scroll_right(&self, amount: f64) -> PyResult<()> {
-        self.perform_action(
-            xa11y::Action::ScrollRight,
-            Some(xa11y::ActionData::ScrollAmount(amount)),
-        )
+        self.inner.scroll_right(amount).map_err(to_py_err)
     }
+
+    // ── Wait operations ──
 
     // ── Wait operations ──
 
     #[pyo3(signature = (timeout=5.0))]
     fn wait_visible(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Element>> {
-        let nd = self
-            .poll_state(
-                xa11y::ElementState::Visible,
-                Duration::from_secs_f64(timeout),
-            )?
-            .expect("visible wait must return an element");
-        make_py_element(py, &nd)
+        let el = self
+            .inner
+            .wait_visible(Duration::from_secs_f64(timeout))
+            .map_err(to_py_err)?;
+        make_py_element(py, el.data(), el.provider().clone())
     }
 
     #[pyo3(signature = (timeout=5.0))]
     fn wait_attached(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Element>> {
-        let nd = self
-            .poll_state(
-                xa11y::ElementState::Attached,
-                Duration::from_secs_f64(timeout),
-            )?
-            .expect("attached wait must return an element");
-        make_py_element(py, &nd)
+        let el = self
+            .inner
+            .wait_attached(Duration::from_secs_f64(timeout))
+            .map_err(to_py_err)?;
+        make_py_element(py, el.data(), el.provider().clone())
     }
 
     #[pyo3(signature = (timeout=5.0))]
     fn wait_detached(&self, timeout: f64) -> PyResult<()> {
-        self.poll_state(
-            xa11y::ElementState::Detached,
-            Duration::from_secs_f64(timeout),
-        )?;
-        Ok(())
+        self.inner
+            .wait_detached(Duration::from_secs_f64(timeout))
+            .map_err(to_py_err)
     }
 
     #[pyo3(signature = (timeout=5.0))]
     fn wait_enabled(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Element>> {
-        let nd = self
-            .poll_state(
-                xa11y::ElementState::Enabled,
-                Duration::from_secs_f64(timeout),
-            )?
-            .expect("enabled wait must return an element");
-        make_py_element(py, &nd)
+        let el = self
+            .inner
+            .wait_enabled(Duration::from_secs_f64(timeout))
+            .map_err(to_py_err)?;
+        make_py_element(py, el.data(), el.provider().clone())
     }
 
     #[pyo3(signature = (timeout=5.0))]
     fn wait_hidden(&self, timeout: f64) -> PyResult<()> {
-        self.poll_state(
-            xa11y::ElementState::Hidden,
-            Duration::from_secs_f64(timeout),
-        )?;
-        Ok(())
+        self.inner
+            .wait_hidden(Duration::from_secs_f64(timeout))
+            .map_err(to_py_err)
     }
 
     #[pyo3(signature = (timeout=5.0))]
     fn wait_disabled(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Element>> {
-        let nd = self
-            .poll_state(
-                xa11y::ElementState::Disabled,
-                Duration::from_secs_f64(timeout),
-            )?
-            .expect("disabled wait must return an element");
-        make_py_element(py, &nd)
+        let el = self
+            .inner
+            .wait_disabled(Duration::from_secs_f64(timeout))
+            .map_err(to_py_err)?;
+        make_py_element(py, el.data(), el.provider().clone())
     }
 
     #[pyo3(signature = (timeout=5.0))]
     fn wait_focused(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Element>> {
-        let nd = self
-            .poll_state(
-                xa11y::ElementState::Focused,
-                Duration::from_secs_f64(timeout),
-            )?
-            .expect("focused wait must return an element");
-        make_py_element(py, &nd)
+        let el = self
+            .inner
+            .wait_focused(Duration::from_secs_f64(timeout))
+            .map_err(to_py_err)?;
+        make_py_element(py, el.data(), el.provider().clone())
     }
 
     #[pyo3(signature = (timeout=5.0))]
     fn wait_unfocused(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Element>> {
-        let nd = self
-            .poll_state(
-                xa11y::ElementState::Unfocused,
-                Duration::from_secs_f64(timeout),
-            )?
-            .expect("unfocused wait must return an element");
-        make_py_element(py, &nd)
+        let el = self
+            .inner
+            .wait_unfocused(Duration::from_secs_f64(timeout))
+            .map_err(to_py_err)?;
+        make_py_element(py, el.data(), el.provider().clone())
     }
 
-    /// Wait until an arbitrary predicate is satisfied.
-    ///
-    /// The callback receives an ``Element`` when the element exists, or ``None``
-    /// when no element matches the selector. Return ``True`` to stop waiting.
-    ///
-    /// Example::
-    ///
-    ///     locator.wait_until(lambda n: n is not None and n["value"] == "Done")
+    /// Wait until an arbitrary Python predicate is satisfied.
     #[pyo3(signature = (predicate, timeout=5.0))]
     fn wait_until(&self, predicate: PyObject, timeout: f64) -> PyResult<()> {
-        self.poll_predicate(predicate, Duration::from_secs_f64(timeout))
+        let provider = self.inner.provider().clone();
+        self.inner
+            .wait_until(
+                |element_data: Option<&xa11y::ElementData>| {
+                    Python::with_gil(|py| -> bool {
+                        let arg: PyObject = match element_data {
+                            Some(data) => match make_py_element(py, data, provider.clone()) {
+                                Ok(el) => el.into_any(),
+                                Err(_) => py.None(),
+                            },
+                            None => py.None(),
+                        };
+                        predicate
+                            .call1(py, (arg,))
+                            .and_then(|r| r.extract::<bool>(py))
+                            .unwrap_or(false)
+                    })
+                },
+                Duration::from_secs_f64(timeout),
+            )
+            .map_err(to_py_err)?;
+        Ok(())
     }
 
     fn __repr__(&self) -> String {
-        format!("Locator(selector='{}')", self.selector)
-    }
-}
-
-impl Locator {
-    fn resolve(&self) -> PyResult<xa11y::Element> {
-        let root = self.provider.get_elements(self.pid).map_err(to_py_err)?;
-        let matches = root.query_selector(&self.selector).map_err(to_py_err)?;
-        let idx = self.nth.unwrap_or(0);
-        let element = matches.into_iter().nth(idx).ok_or_else(|| {
-            to_py_err(xa11y::Error::SelectorNotMatched {
-                selector: self.selector.clone(),
-            })
-        })?;
-        Ok(element)
-    }
-
-    fn perform_action(
-        &self,
-        action: xa11y::Action,
-        data: Option<xa11y::ActionData>,
-    ) -> PyResult<()> {
-        if let Some(ref d) = data {
-            d.validate(action).map_err(to_py_err)?;
-        }
-        let element = self.resolve()?;
-        self.provider
-            .perform_action(&element, action, data)
-            .map_err(to_py_err)
-    }
-
-    fn poll_predicate(&self, predicate: PyObject, timeout: Duration) -> PyResult<()> {
-        let start = std::time::Instant::now();
-        let poll_interval = Duration::from_millis(100);
-
-        loop {
-            let elapsed = start.elapsed();
-            if elapsed >= timeout {
-                return Err(to_py_err(xa11y::Error::Timeout { elapsed }));
-            }
-
-            let element: Option<xa11y::ElementData> = (|| {
-                let root = self.provider.get_elements(self.pid).ok()?;
-                let matches = root.query_selector(&self.selector).ok()?;
-                let idx = self.nth.unwrap_or(0);
-                matches.into_iter().nth(idx).map(|e| (*e).clone())
-            })();
-
-            let met = Python::with_gil(|py| -> PyResult<bool> {
-                let arg: PyObject = match element.as_ref() {
-                    Some(n) => make_py_element(py, n)?.into_any(),
-                    None => py.None(),
-                };
-                let result = predicate.call1(py, (arg,))?;
-                result.extract::<bool>(py)
-            })?;
-
-            if met {
-                return Ok(());
-            }
-
-            std::thread::sleep(poll_interval);
-        }
-    }
-
-    fn poll_state(
-        &self,
-        state: xa11y::ElementState,
-        timeout: Duration,
-    ) -> PyResult<Option<xa11y::ElementData>> {
-        let start = std::time::Instant::now();
-        let poll_interval = Duration::from_millis(100);
-
-        loop {
-            let elapsed = start.elapsed();
-            if elapsed >= timeout {
-                return Err(to_py_err(xa11y::Error::Timeout { elapsed }));
-            }
-
-            let element: Option<xa11y::ElementData> = (|| {
-                let root = self.provider.get_elements(self.pid).ok()?;
-                let matches = root.query_selector(&self.selector).ok()?;
-                let idx = self.nth.unwrap_or(0);
-                matches.into_iter().nth(idx).map(|e| (*e).clone())
-            })();
-
-            if state.is_met(element.as_ref()) {
-                return Ok(element);
-            }
-
-            std::thread::sleep(poll_interval);
-        }
+        format!("Locator(selector='{}')", self.inner.selector())
     }
 }
 
@@ -778,7 +546,6 @@ fn event_type_to_str(event_type: xa11y::EventType) -> &'static str {
     }
 }
 
-/// Accessibility event type constants.
 #[pyclass(frozen)]
 struct EventType;
 
@@ -816,7 +583,6 @@ impl EventType {
 
 // ── Event ──────────────────────────────────────────────────────────────────
 
-/// An accessibility event delivered to subscribers.
 #[pyclass(frozen)]
 #[derive(Clone)]
 struct Event {
@@ -827,15 +593,17 @@ struct Event {
     #[pyo3(get)]
     app_pid: u32,
     target_data: Option<xa11y::ElementData>,
+    provider: Arc<dyn xa11y::Provider>,
 }
 
 impl Event {
-    fn from_core(event: xa11y::Event) -> Self {
+    fn from_core(event: xa11y::Event, provider: Arc<dyn xa11y::Provider>) -> Self {
         Self {
             event_type: event_type_to_str(event.event_type).to_string(),
             app_name: event.app_name,
             app_pid: event.app_pid,
             target_data: event.target,
+            provider,
         }
     }
 }
@@ -845,7 +613,7 @@ impl Event {
     #[getter]
     fn target(&self, py: Python<'_>) -> PyResult<Option<Py<Element>>> {
         match self.target_data.as_ref() {
-            Some(data) => Ok(Some(make_py_element(py, data)?)),
+            Some(data) => Ok(Some(make_py_element(py, data, self.provider.clone())?)),
             None => Ok(None),
         }
     }
@@ -860,13 +628,10 @@ impl Event {
 
 // ── Subscription ───────────────────────────────────────────────────────────
 
-/// A live event subscription. Drop to unsubscribe.
-///
-/// Supports ``try_recv()``, ``recv()``, ``wait_for()``, iteration, and
-/// context manager protocol.
 #[pyclass]
 struct Subscription {
     inner: std::sync::Mutex<Option<xa11y::Subscription>>,
+    provider: Arc<dyn xa11y::Provider>,
 }
 
 impl Subscription {
@@ -881,21 +646,21 @@ impl Subscription {
 
 #[pymethods]
 impl Subscription {
-    /// Try to receive an event without blocking. Returns ``None`` if no event is ready.
     fn try_recv(&self) -> PyResult<Option<Event>> {
-        self.with_sub(|sub| sub.try_recv().map(Event::from_core))
+        let provider = self.provider.clone();
+        self.with_sub(|sub| sub.try_recv().map(|e| Event::from_core(e, provider)))
     }
 
-    /// Block until an event arrives or the timeout expires.
     #[pyo3(signature = (timeout=5.0))]
     fn recv(&self, py: Python<'_>, timeout: f64) -> PyResult<Event> {
         let dur = Duration::from_secs_f64(timeout);
-        // Release the GIL while blocking so other Python threads can run.
-        py.allow_threads(|| self.with_sub(|sub| sub.recv(dur).map(Event::from_core)))
-            .and_then(|r| r.map_err(to_py_err))
+        let provider = self.provider.clone();
+        py.allow_threads(|| {
+            self.with_sub(|sub| sub.recv(dur).map(|e| Event::from_core(e, provider)))
+        })
+        .and_then(|r| r.map_err(to_py_err))
     }
 
-    /// Block until an event matching *predicate* arrives or the timeout expires.
     #[pyo3(signature = (predicate, timeout=5.0))]
     fn wait_for(&self, predicate: PyObject, timeout: f64) -> PyResult<Event> {
         let dur = Duration::from_secs_f64(timeout);
@@ -909,7 +674,9 @@ impl Subscription {
                 }));
             }
             let poll = remaining.min(Duration::from_millis(50));
-            let maybe_event = self.with_sub(|sub| sub.try_recv().map(Event::from_core))?;
+            let provider = self.provider.clone();
+            let maybe_event =
+                self.with_sub(|sub| sub.try_recv().map(|e| Event::from_core(e, provider)))?;
             if let Some(py_event) = maybe_event {
                 let matched = Python::with_gil(|py| -> PyResult<bool> {
                     let py_ref = Py::new(py, py_event.clone())?;
@@ -925,7 +692,6 @@ impl Subscription {
         }
     }
 
-    /// Close the subscription (stop receiving events).
     fn close(&self) {
         self.inner.lock().unwrap().take();
     }
@@ -950,16 +716,15 @@ impl Subscription {
     }
 
     fn __next__(&self) -> PyResult<Option<Event>> {
+        let provider = self.provider.clone();
         let maybe_event = self.with_sub(|sub| {
-            // Block with a short timeout so Python can handle signals.
             sub.recv(Duration::from_millis(100))
                 .ok()
-                .map(Event::from_core)
+                .map(|e| Event::from_core(e, provider))
         })?;
         if maybe_event.is_some() {
             return Ok(maybe_event);
         }
-        // Check for KeyboardInterrupt
         Python::with_gil(|py| py.check_signals())?;
         Ok(None)
     }
@@ -973,117 +738,22 @@ impl Subscription {
     }
 }
 
-// ── App ────────────────────────────────────────────────────────────────────
-
-/// A handle to a running application.
-///
-/// Use ``app.locator()`` to create action-capable element references,
-/// or ``app.elements()`` to snapshot the tree for inspection.
-#[pyclass(frozen)]
-#[derive(Clone)]
-struct App {
-    inner: xa11y::App,
-}
-
-impl App {
-    fn from_core(core_app: xa11y::App) -> Self {
-        Self { inner: core_app }
-    }
-}
-
-#[pymethods]
-impl App {
-    /// The application's display name.
-    #[getter]
-    fn name(&self) -> &str {
-        self.inner.name()
-    }
-
-    /// The application's process ID.
-    #[getter]
-    fn pid(&self) -> u32 {
-        self.inner.pid()
-    }
-
-    /// Create a Locator for lazy element interaction.
-    #[pyo3(signature = (selector))]
-    fn locator(&self, selector: &str) -> Locator {
-        let core_loc = self.inner.locator(selector);
-        Locator::from_core(core_loc)
-    }
-
-    /// Subscribe to all accessibility events for this application.
-    fn subscribe(&self, py: Python<'_>) -> PyResult<Subscription> {
-        let inner = self.inner.clone();
-        let sub = py
-            .allow_threads(move || inner.subscribe())
-            .map_err(to_py_err)?;
-        Ok(Subscription {
-            inner: std::sync::Mutex::new(Some(sub)),
-        })
-    }
-
-    /// Snapshot the app's accessibility tree. Returns the root Element.
-    fn elements(&self, py: Python<'_>) -> PyResult<Py<Element>> {
-        let p = self.inner.provider().clone();
-        let pid = self.inner.pid();
-        let root = py
-            .allow_threads(move || p.get_elements(pid))
-            .map_err(to_py_err)?;
-        convert_to_root_element(py, &root)
-    }
-
-    fn __repr__(&self) -> String {
-        format!(
-            "App(name='{}', pid={})",
-            self.inner.name(),
-            self.inner.pid()
-        )
-    }
-}
-
 // ── Module-level functions ──────────────────────────────────────────────────
 
-/// Get a handle to a specific application.
+/// Create a top-level Locator.
 #[pyfunction]
-#[pyo3(signature = (name=None, *, pid=None))]
-fn app(py: Python<'_>, name: Option<&str>, pid: Option<u32>) -> PyResult<App> {
+#[pyo3(signature = (selector))]
+fn locator_fn(selector: &str) -> PyResult<Locator> {
     let provider = get_provider()?;
-    let core_app = build_app(py, provider, name, pid)?;
-    Ok(App::from_core(core_app))
-}
-
-/// List all running applications.
-#[pyfunction]
-fn apps(py: Python<'_>) -> PyResult<Vec<App>> {
-    let provider = get_provider()?;
-    let p = provider.clone();
-    let core_apps = py
-        .allow_threads(move || xa11y::App::all(p))
-        .map_err(to_py_err)?;
-    Ok(core_apps.into_iter().map(App::from_core).collect())
-}
-
-/// Check accessibility permissions. Returns "granted" or raises PermissionDeniedError.
-#[pyfunction]
-fn check_permissions(py: Python<'_>) -> PyResult<String> {
-    let provider = get_provider()?;
-    let status = py
-        .allow_threads(|| provider.check_permissions())
-        .map_err(to_py_err)?;
-    match status {
-        xa11y::PermissionStatus::Granted => Ok("granted".to_string()),
-        xa11y::PermissionStatus::Denied { instructions } => {
-            Err(PermissionDeniedError::new_err(instructions))
-        }
-    }
+    Ok(Locator {
+        inner: xa11y::Locator::new(provider, None, selector),
+    })
 }
 
 // ── Module definition ───────────────────────────────────────────────────────
 
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<App>()?;
     m.add_class::<Element>()?;
     m.add_class::<Event>()?;
     m.add_class::<EventType>()?;
@@ -1096,7 +766,6 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "PermissionDeniedError",
         m.py().get_type::<PermissionDeniedError>(),
     )?;
-    m.add("AppNotFoundError", m.py().get_type::<AppNotFoundError>())?;
     m.add(
         "SelectorNotMatchedError",
         m.py().get_type::<SelectorNotMatchedError>(),
@@ -1112,41 +781,72 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add("PlatformError", m.py().get_type::<PlatformError>())?;
 
-    m.add_function(wrap_pyfunction!(app, m)?)?;
-    m.add_function(wrap_pyfunction!(apps, m)?)?;
-    m.add_function(wrap_pyfunction!(check_permissions, m)?)?;
+    // Module-level locator function (renamed from "locator" to avoid Rust naming conflict)
+    m.add_function(wrap_pyfunction!(locator_fn, m)?)?;
+    // Re-export as "locator" in Python
+    let locator_fn_obj = m.getattr("locator_fn")?;
+    m.setattr("locator", &locator_fn_obj)?;
 
     // Test helpers
-    m.add_function(wrap_pyfunction!(_make_test_app, m)?)?;
+    m.add_function(wrap_pyfunction!(_make_test_locator, m)?)?;
 
     Ok(())
 }
 
-// ── Test helpers (exposed to Python for unit testing) ────────────────────────
+// ── Test helpers ────────────────────────────────────────────────────────────
 
-/// A mock provider that returns canned trees and records performed actions.
+/// Mock provider for Python unit tests.
 struct MockProvider {
-    root: xa11y::Element,
-    /// Records (element_index, action, data_debug) for each perform_action call
-    actions: std::sync::Mutex<Vec<(u32, String, Option<String>)>>,
+    nodes: Vec<MockNode>,
+    actions: std::sync::Mutex<Vec<(u64, String, Option<String>)>>,
+}
+
+struct MockNode {
+    data: xa11y::ElementData,
+    children: Vec<usize>,
+    parent: Option<usize>,
 }
 
 impl xa11y::Provider for MockProvider {
-    fn resolve_pid_by_name(&self, _name: &str) -> xa11y::Result<u32> {
-        Ok(1234)
+    fn get_children(
+        &self,
+        element: Option<&xa11y::ElementData>,
+    ) -> xa11y::Result<Vec<xa11y::ElementData>> {
+        match element {
+            None => {
+                if self.nodes.is_empty() {
+                    return Ok(vec![]);
+                }
+                Ok(vec![self.nodes[0].data.clone()])
+            }
+            Some(el) => {
+                let idx = el.handle as usize;
+                if idx >= self.nodes.len() {
+                    return Ok(vec![]);
+                }
+                Ok(self.nodes[idx]
+                    .children
+                    .iter()
+                    .map(|&i| self.nodes[i].data.clone())
+                    .collect())
+            }
+        }
     }
 
-    fn get_elements(&self, _pid: u32) -> xa11y::Result<xa11y::Element> {
-        Ok(self.root.clone())
-    }
-
-    fn get_apps(&self) -> xa11y::Result<xa11y::Element> {
-        Ok(self.root.clone())
+    fn get_parent(
+        &self,
+        element: &xa11y::ElementData,
+    ) -> xa11y::Result<Option<xa11y::ElementData>> {
+        let idx = element.handle as usize;
+        if idx >= self.nodes.len() {
+            return Ok(None);
+        }
+        Ok(self.nodes[idx].parent.map(|i| self.nodes[i].data.clone()))
     }
 
     fn perform_action(
         &self,
-        element: &xa11y::Element,
+        element: &xa11y::ElementData,
         action: xa11y::Action,
         data: Option<xa11y::ActionData>,
     ) -> xa11y::Result<()> {
@@ -1154,15 +854,11 @@ impl xa11y::Provider for MockProvider {
         self.actions
             .lock()
             .unwrap()
-            .push((element.index, format!("{action}"), data_debug));
+            .push((element.handle, format!("{action}"), data_debug));
         Ok(())
     }
 
-    fn check_permissions(&self) -> xa11y::Result<xa11y::PermissionStatus> {
-        Ok(xa11y::PermissionStatus::Granted)
-    }
-
-    fn subscribe(&self, _pid: u32) -> xa11y::Result<xa11y::Subscription> {
+    fn subscribe(&self, _element: &xa11y::ElementData) -> xa11y::Result<xa11y::Subscription> {
         Err(xa11y::Error::Platform {
             code: -1,
             message: "MockProvider does not support subscribe".to_string(),
@@ -1170,382 +866,326 @@ impl xa11y::Provider for MockProvider {
     }
 }
 
-/// Build the canonical test tree used by all Python unit tests.
-///
-/// Structure:
-/// ```text
-/// [0] application "TestApp"
-///   [1] window "Main Window"
-///     [2] toolbar "Navigation"
-///       [3] button "Back"           (enabled, visible, actions=[press,focus])
-///       [4] button "Forward"        (enabled=false, visible, actions=[press,focus])
-///     [5] group "Content"
-///       [6] text_field "Search"     (editable, focusable, value="hello", actions=[focus,set_value,type_text])
-///       [7] check_box "Agree"       (checked=on, actions=[toggle,focus])
-///       [8] slider "Volume"         (numeric_value=75, min=0, max=100, actions=[increment,decrement,set_value,focus])
-///       [9] static_text "Status"    (visible=false)
-///       [10] list "Items"
-///         [11] list_item "Item 1"   (selected)
-///         [12] list_item "Item 2"
-/// ```
-fn build_test_tree() -> xa11y::Element {
+fn build_test_tree() -> Arc<MockProvider> {
     use xa11y::*;
 
-    let elements = vec![
-        // [0] application "TestApp"
-        ElementData {
-            role: Role::Application,
-            name: Some("TestApp".to_string()),
-            value: None,
-            description: Some("Test application".to_string()),
-            bounds: Some(Rect {
+    let element_defs: Vec<(
+        Role,
+        Option<&str>,
+        Option<&str>,
+        Option<&str>,
+        Option<Rect>,
+        Vec<Action>,
+        StateSet,
+        Option<f64>,
+        Option<f64>,
+        Option<f64>,
+        Option<&str>,
+    )> = vec![
+        (
+            Role::Application,
+            Some("TestApp"),
+            None,
+            Some("Test application"),
+            Some(Rect {
                 x: 0,
                 y: 0,
                 width: 1920,
                 height: 1080,
             }),
-
-            actions: vec![],
-            states: StateSet::default(),
-
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: Some("app-root".to_string()),
-            pid: None,
-            raw: xa11y::RawPlatformData::Synthetic,
-            index: 0,
-            children_indices: vec![1],
-            parent_index: None,
-        },
-        // [1] window "Main Window"
-        ElementData {
-            role: Role::Window,
-            name: Some("Main Window".to_string()),
-            value: None,
-            description: None,
-            bounds: Some(Rect {
+            vec![],
+            StateSet::default(),
+            None,
+            None,
+            None,
+            Some("app-root"),
+        ),
+        (
+            Role::Window,
+            Some("Main Window"),
+            None,
+            None,
+            Some(Rect {
                 x: 100,
                 y: 50,
                 width: 800,
                 height: 600,
             }),
-
-            actions: vec![],
-            states: StateSet {
+            vec![],
+            StateSet {
                 focused: true,
                 ..StateSet::default()
             },
-
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: None,
-            pid: None,
-            raw: xa11y::RawPlatformData::Synthetic,
-            index: 1,
-            children_indices: vec![2, 5],
-            parent_index: Some(0),
-        },
-        // [2] toolbar "Navigation"
-        ElementData {
-            role: Role::Toolbar,
-            name: Some("Navigation".to_string()),
-            value: None,
-            description: None,
-            bounds: None,
-
-            actions: vec![],
-            states: StateSet::default(),
-
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: None,
-            pid: None,
-            raw: xa11y::RawPlatformData::Synthetic,
-            index: 2,
-            children_indices: vec![3, 4],
-            parent_index: Some(1),
-        },
-        // [3] button "Back"
-        ElementData {
-            role: Role::Button,
-            name: Some("Back".to_string()),
-            value: None,
-            description: Some("Go back".to_string()),
-            bounds: Some(Rect {
+            None,
+            None,
+            None,
+            None,
+        ),
+        (
+            Role::Toolbar,
+            Some("Navigation"),
+            None,
+            None,
+            None,
+            vec![],
+            StateSet::default(),
+            None,
+            None,
+            None,
+            None,
+        ),
+        (
+            Role::Button,
+            Some("Back"),
+            None,
+            Some("Go back"),
+            Some(Rect {
                 x: 110,
                 y: 60,
                 width: 50,
                 height: 30,
             }),
-
-            actions: vec![xa11y::Action::Press, xa11y::Action::Focus],
-            states: StateSet {
+            vec![Action::Press, Action::Focus],
+            StateSet {
                 focusable: true,
                 ..StateSet::default()
             },
-
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: Some("btn-back".to_string()),
-            pid: None,
-            raw: xa11y::RawPlatformData::Synthetic,
-            index: 3,
-            children_indices: vec![],
-            parent_index: Some(2),
-        },
-        // [4] button "Forward" (disabled)
-        ElementData {
-            role: Role::Button,
-            name: Some("Forward".to_string()),
-            value: None,
-            description: None,
-            bounds: Some(Rect {
+            None,
+            None,
+            None,
+            Some("btn-back"),
+        ),
+        (
+            Role::Button,
+            Some("Forward"),
+            None,
+            None,
+            Some(Rect {
                 x: 170,
                 y: 60,
                 width: 50,
                 height: 30,
             }),
-
-            actions: vec![xa11y::Action::Press, xa11y::Action::Focus],
-            states: StateSet {
+            vec![Action::Press, Action::Focus],
+            StateSet {
                 enabled: false,
                 focusable: true,
                 ..StateSet::default()
             },
-
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: None,
-            pid: None,
-            raw: xa11y::RawPlatformData::Synthetic,
-            index: 4,
-            children_indices: vec![],
-            parent_index: Some(2),
-        },
-        // [5] group "Content"
-        ElementData {
-            role: Role::Group,
-            name: Some("Content".to_string()),
-            value: None,
-            description: None,
-            bounds: None,
-
-            actions: vec![],
-            states: StateSet::default(),
-
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: None,
-            pid: None,
-            raw: xa11y::RawPlatformData::Synthetic,
-            index: 5,
-            children_indices: vec![6, 7, 8, 9, 10],
-            parent_index: Some(1),
-        },
-        // [6] text_field "Search"
-        ElementData {
-            role: Role::TextField,
-            name: Some("Search".to_string()),
-            value: Some("hello".to_string()),
-            description: Some("Search field".to_string()),
-            bounds: Some(Rect {
+            None,
+            None,
+            None,
+            None,
+        ),
+        (
+            Role::Group,
+            Some("Content"),
+            None,
+            None,
+            None,
+            vec![],
+            StateSet::default(),
+            None,
+            None,
+            None,
+            None,
+        ),
+        (
+            Role::TextField,
+            Some("Search"),
+            Some("hello"),
+            Some("Search field"),
+            Some(Rect {
                 x: 200,
                 y: 120,
                 width: 300,
                 height: 25,
             }),
-
-            actions: vec![
-                xa11y::Action::Focus,
-                xa11y::Action::SetValue,
-                xa11y::Action::TypeText,
-            ],
-            states: StateSet {
+            vec![Action::Focus, Action::SetValue, Action::TypeText],
+            StateSet {
                 editable: true,
                 focusable: true,
                 ..StateSet::default()
             },
-
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: None,
-            pid: None,
-            raw: xa11y::RawPlatformData::Synthetic,
-            index: 6,
-            children_indices: vec![],
-            parent_index: Some(5),
-        },
-        // [7] check_box "Agree" (checked=on)
-        ElementData {
-            role: Role::CheckBox,
-            name: Some("Agree".to_string()),
-            value: None,
-            description: None,
-            bounds: None,
-
-            actions: vec![xa11y::Action::Toggle, xa11y::Action::Focus],
-            states: StateSet {
+            None,
+            None,
+            None,
+            None,
+        ),
+        (
+            Role::CheckBox,
+            Some("Agree"),
+            None,
+            None,
+            None,
+            vec![Action::Toggle, Action::Focus],
+            StateSet {
                 checked: Some(Toggled::On),
                 focusable: true,
                 ..StateSet::default()
             },
-
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: None,
-            pid: None,
-            raw: xa11y::RawPlatformData::Synthetic,
-            index: 7,
-            children_indices: vec![],
-            parent_index: Some(5),
-        },
-        // [8] slider "Volume"
-        ElementData {
-            role: Role::Slider,
-            name: Some("Volume".to_string()),
-            value: Some("75".to_string()),
-            description: None,
-            bounds: None,
-
-            actions: vec![
-                xa11y::Action::Increment,
-                xa11y::Action::Decrement,
-                xa11y::Action::SetValue,
-                xa11y::Action::Focus,
+            None,
+            None,
+            None,
+            None,
+        ),
+        (
+            Role::Slider,
+            Some("Volume"),
+            Some("75"),
+            None,
+            None,
+            vec![
+                Action::Increment,
+                Action::Decrement,
+                Action::SetValue,
+                Action::Focus,
             ],
-            states: StateSet {
+            StateSet {
                 focusable: true,
                 ..StateSet::default()
             },
-
-            numeric_value: Some(75.0),
-            min_value: Some(0.0),
-            max_value: Some(100.0),
-            stable_id: None,
-            pid: None,
-            raw: xa11y::RawPlatformData::Synthetic,
-            index: 8,
-            children_indices: vec![],
-            parent_index: Some(5),
-        },
-        // [9] static_text "Status" (hidden)
-        ElementData {
-            role: Role::StaticText,
-            name: Some("Status".to_string()),
-            value: Some("Loading...".to_string()),
-            description: None,
-            bounds: None,
-
-            actions: vec![],
-            states: StateSet {
+            Some(75.0),
+            Some(0.0),
+            Some(100.0),
+            None,
+        ),
+        (
+            Role::StaticText,
+            Some("Status"),
+            Some("Loading..."),
+            None,
+            None,
+            vec![],
+            StateSet {
                 visible: false,
                 ..StateSet::default()
             },
-
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: None,
-            pid: None,
-            raw: xa11y::RawPlatformData::Synthetic,
-            index: 9,
-            children_indices: vec![],
-            parent_index: Some(5),
-        },
-        // [10] list "Items"
-        ElementData {
-            role: Role::List,
-            name: Some("Items".to_string()),
-            value: None,
-            description: None,
-            bounds: None,
-
-            actions: vec![],
-            states: StateSet {
+            None,
+            None,
+            None,
+            None,
+        ),
+        (
+            Role::List,
+            Some("Items"),
+            None,
+            None,
+            None,
+            vec![],
+            StateSet {
                 expanded: Some(true),
                 ..StateSet::default()
             },
-
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: None,
-            pid: None,
-            raw: xa11y::RawPlatformData::Synthetic,
-            index: 10,
-            children_indices: vec![11, 12],
-            parent_index: Some(5),
-        },
-        // [11] list_item "Item 1" (selected)
-        ElementData {
-            role: Role::ListItem,
-            name: Some("Item 1".to_string()),
-            value: None,
-            description: None,
-            bounds: None,
-
-            actions: vec![xa11y::Action::Select, xa11y::Action::Focus],
-            states: StateSet {
+            None,
+            None,
+            None,
+            None,
+        ),
+        (
+            Role::ListItem,
+            Some("Item 1"),
+            None,
+            None,
+            None,
+            vec![Action::Select, Action::Focus],
+            StateSet {
                 selected: true,
                 focusable: true,
                 ..StateSet::default()
             },
-
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: None,
-            pid: None,
-            raw: xa11y::RawPlatformData::Synthetic,
-            index: 11,
-            children_indices: vec![],
-            parent_index: Some(10),
-        },
-        // [12] list_item "Item 2"
-        ElementData {
-            role: Role::ListItem,
-            name: Some("Item 2".to_string()),
-            value: None,
-            description: None,
-            bounds: None,
-
-            actions: vec![xa11y::Action::Select, xa11y::Action::Focus],
-            states: StateSet {
+            None,
+            None,
+            None,
+            None,
+        ),
+        (
+            Role::ListItem,
+            Some("Item 2"),
+            None,
+            None,
+            None,
+            vec![Action::Select, Action::Focus],
+            StateSet {
                 focusable: true,
                 ..StateSet::default()
             },
-
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: None,
-            pid: None,
-            raw: xa11y::RawPlatformData::Synthetic,
-            index: 12,
-            children_indices: vec![],
-            parent_index: Some(10),
-        },
+            None,
+            None,
+            None,
+            None,
+        ),
     ];
 
-    xa11y::root_element("TestApp".to_string(), Some(1234), (1920, 1080), elements)
+    let children_map: Vec<Vec<usize>> = vec![
+        vec![1],    // 0: application
+        vec![2, 5], // 1: window
+        vec![3, 4], // 2: toolbar
+        vec![],
+        vec![],               // 3, 4: buttons
+        vec![6, 7, 8, 9, 10], // 5: group
+        vec![],
+        vec![],
+        vec![],
+        vec![],       // 6-9: leaf nodes
+        vec![11, 12], // 10: list
+        vec![],
+        vec![], // 11, 12: list items
+    ];
+
+    let parent_map: Vec<Option<usize>> = vec![
+        None,
+        Some(0),
+        Some(1),
+        Some(2),
+        Some(2),
+        Some(1),
+        Some(5),
+        Some(5),
+        Some(5),
+        Some(5),
+        Some(5),
+        Some(10),
+        Some(10),
+    ];
+
+    let mut nodes = Vec::new();
+    for (i, (role, name, value, desc, bounds, actions, states, nv, minv, maxv, sid)) in
+        element_defs.into_iter().enumerate()
+    {
+        nodes.push(MockNode {
+            data: ElementData {
+                role,
+                name: name.map(String::from),
+                value: value.map(String::from),
+                description: desc.map(String::from),
+                bounds,
+                actions,
+                states,
+                numeric_value: nv,
+                min_value: minv,
+                max_value: maxv,
+                stable_id: sid.map(String::from),
+                pid: Some(1234),
+                raw: RawPlatformData::Synthetic,
+                handle: i as u64,
+            },
+            children: children_map[i].clone(),
+            parent: parent_map[i],
+        });
+    }
+
+    Arc::new(MockProvider {
+        nodes,
+        actions: std::sync::Mutex::new(Vec::new()),
+    })
 }
 
-/// Create a test App (for Python unit tests). Returns an App backed by a mock provider.
+/// Create a test Locator backed by a mock provider.
 #[pyfunction]
-fn _make_test_app() -> PyResult<App> {
-    let root = build_test_tree();
-    let provider: Arc<dyn xa11y::Provider> = Arc::new(MockProvider {
-        root,
-        actions: std::sync::Mutex::new(Vec::new()),
-    });
-    let core_app = xa11y::App::from_name(provider, "TestApp").map_err(to_py_err)?;
-    Ok(App::from_core(core_app))
+fn _make_test_locator() -> PyResult<Locator> {
+    let provider = build_test_tree();
+    Ok(Locator {
+        inner: xa11y::Locator::new(provider as Arc<dyn xa11y::Provider>, None, "application"),
+    })
 }

@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>xa11y-tauri-test-app</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 16px; }
+    fieldset { margin-bottom: 16px; padding: 12px; }
+    legend { font-weight: bold; }
+    .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+    label { display: flex; align-items: center; gap: 6px; }
+    input[type="range"] { width: 200px; }
+    textarea { width: 300px; height: 60px; }
+    select { width: 160px; }
+    ul[role="listbox"] { list-style: none; padding: 0; margin: 0; border: 1px solid #ccc; width: 200px; }
+    ul[role="listbox"] li { padding: 4px 8px; cursor: default; }
+    ul[role="listbox"] li[aria-selected="true"] { background: #0078d7; color: white; }
+  </style>
+</head>
+<body>
+
+  <!-- Buttons -->
+  <fieldset>
+    <legend>Buttons</legend>
+    <div class="row">
+      <button id="ok-button" aria-label="OK" title="Confirm the dialog">OK</button>
+      <button id="cancel-button" aria-label="Cancel" disabled>Cancel</button>
+    </div>
+  </fieldset>
+
+  <!-- Checkboxes -->
+  <fieldset>
+    <legend>Checkboxes</legend>
+    <div class="row">
+      <label>
+        <input type="checkbox" id="agree-check" aria-label="Agree to terms" />
+        Agree to terms
+      </label>
+      <label>
+        <input type="checkbox" id="subscribe-check" aria-label="Subscribe" checked />
+        Subscribe
+      </label>
+    </div>
+  </fieldset>
+
+  <!-- Radio buttons -->
+  <fieldset>
+    <legend>Options</legend>
+    <div class="row">
+      <label>
+        <input type="radio" name="options" id="radio-a" aria-label="Option A" checked />
+        Option A
+      </label>
+      <label>
+        <input type="radio" name="options" id="radio-b" aria-label="Option B" />
+        Option B
+      </label>
+      <label>
+        <input type="radio" name="options" id="radio-c" aria-label="Option C" />
+        Option C
+      </label>
+    </div>
+  </fieldset>
+
+  <!-- ComboBox -->
+  <fieldset>
+    <legend>ComboBox</legend>
+    <div class="row">
+      <label for="fruit-select">Fruit</label>
+      <select id="fruit-select" aria-label="Fruit">
+        <option value="apple">Apple</option>
+        <option value="banana">Banana</option>
+        <option value="cherry">Cherry</option>
+        <option value="date">Date</option>
+        <option value="elderberry">Elderberry</option>
+      </select>
+    </div>
+  </fieldset>
+
+  <!-- Range controls -->
+  <fieldset>
+    <legend>Range Controls</legend>
+    <div class="row">
+      <label for="volume-slider">Volume</label>
+      <input
+        type="range"
+        id="volume-slider"
+        aria-label="Volume"
+        min="0" max="100" value="50"
+        aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"
+      />
+      <output id="volume-output" for="volume-slider">50</output>
+    </div>
+    <div class="row">
+      <label for="quantity-spin">Quantity</label>
+      <input
+        type="number"
+        id="quantity-spin"
+        aria-label="Quantity"
+        role="spinbutton"
+        min="0" max="999" value="42"
+        aria-valuemin="0" aria-valuemax="999" aria-valuenow="42"
+      />
+    </div>
+    <div class="row">
+      <label>Progress</label>
+      <progress id="progress-bar" aria-label="Progress" value="75" max="100">75%</progress>
+    </div>
+  </fieldset>
+
+  <!-- Text input -->
+  <fieldset>
+    <legend>Input</legend>
+    <div class="row">
+      <label for="search-field">Search</label>
+      <input
+        type="text"
+        id="search-field"
+        aria-label="Search"
+        placeholder="Type here..."
+        value="hello world"
+      />
+    </div>
+  </fieldset>
+
+  <!-- Text area -->
+  <fieldset>
+    <legend>Text</legend>
+    <div class="row">
+      <p id="heading-text" aria-label="Heading Text"><strong>Heading Text</strong></p>
+    </div>
+    <div class="row">
+      <label for="notes-area">Notes</label>
+      <textarea id="notes-area" aria-label="Notes">Line 1
+Line 2
+Line 3</textarea>
+    </div>
+  </fieldset>
+
+  <!-- List -->
+  <fieldset>
+    <legend>List</legend>
+    <ul role="listbox" id="items-list" aria-label="Items">
+      <li role="option" aria-selected="false">Item 1</li>
+      <li role="option" aria-selected="false">Item 2</li>
+      <li role="option" aria-selected="false">Item 3</li>
+      <li role="option" aria-selected="false">Item 4</li>
+      <li role="option" aria-selected="false">Item 5</li>
+    </ul>
+  </fieldset>
+
+  <script>
+    // OK button enables Cancel
+    document.getElementById('ok-button').addEventListener('click', () => {
+      document.getElementById('cancel-button').disabled = false;
+    });
+
+    // Slider syncs aria-valuenow and output
+    const slider = document.getElementById('volume-slider');
+    const output = document.getElementById('volume-output');
+    slider.addEventListener('input', () => {
+      slider.setAttribute('aria-valuenow', slider.value);
+      output.textContent = slider.value;
+    });
+
+    // Spin syncs aria-valuenow
+    const spin = document.getElementById('quantity-spin');
+    spin.addEventListener('input', () => {
+      spin.setAttribute('aria-valuenow', spin.value);
+    });
+  </script>
+</body>
+</html>

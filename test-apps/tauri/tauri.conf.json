@@ -1,0 +1,21 @@
+{
+  "productName": "xa11y-tauri-test-app",
+  "version": "0.4.0",
+  "identifier": "com.xa11y.tauri-test-app",
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "title": "xa11y-tauri-test-app",
+        "width": 800,
+        "height": 700,
+        "resizable": true,
+        "fullscreen": false,
+        "url": "frontend/index.html"
+      }
+    ]
+  },
+  "bundle": {
+    "active": false
+  }
+}

@@ -1,56 +1,72 @@
 use crate::action::{Action, ActionData};
-use crate::element::Element;
+use crate::element::ElementData;
 use crate::error::Result;
 use crate::event_provider::Subscription;
-
-use serde::{Deserialize, Serialize};
+use crate::selector::Selector;
 
 /// Platform backend trait for accessibility tree access.
+///
+/// Providers implement lazy, on-demand tree navigation. Elements are identified
+/// by their [`ElementData`] (which contains a provider-specific `handle` for
+/// looking up the underlying platform object).
+///
+/// Providers should check platform permissions in their constructor (`new()`)
+/// and return [`Error::PermissionDenied`](crate::Error::PermissionDenied) if
+/// required permissions are not granted.
 pub trait Provider: Send + Sync {
-    /// Resolve an application name to a PID.
+    /// Get direct children of an element.
     ///
-    /// Name matching is case-insensitive substring. Returns the PID of the
-    /// first matching application.
-    fn resolve_pid_by_name(&self, name: &str) -> Result<u32>;
+    /// If `element` is `None`, returns top-level application elements.
+    fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>>;
 
-    /// Snapshot a specific application's accessibility tree by PID.
+    /// Get the parent of an element.
     ///
-    /// Returns the root [`Element`] of the snapshot.
-    fn get_elements(&self, pid: u32) -> Result<Element>;
+    /// Returns `None` for top-level (application) elements.
+    fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>>;
 
-    /// Snapshot all running applications (shallow).
+    /// Search for elements matching a selector.
     ///
-    /// Returns the root [`Element`] of the apps tree.
-    fn get_apps(&self) -> Result<Element>;
+    /// The selector is already parsed by the core — providers match against it
+    /// during traversal and can prune subtrees that can't match.
+    ///
+    /// If `root` is `None`, searches from the system root (all applications).
+    /// If `limit` is `Some(n)`, stops after finding `n` matches.
+    /// If `max_depth` is `Some(d)`, does not descend deeper than `d` levels.
+    ///
+    /// The default implementation traverses via [`get_children`](Self::get_children).
+    fn find_elements(
+        &self,
+        root: Option<&ElementData>,
+        selector: &Selector,
+        limit: Option<usize>,
+        max_depth: Option<u32>,
+    ) -> Result<Vec<ElementData>> {
+        crate::selector::find_elements_in_tree(
+            |el| self.get_children(el),
+            root,
+            selector,
+            limit,
+            max_depth,
+        )
+    }
 
-    /// Perform an action on an element from a specific snapshot.
+    /// Perform an action on an element.
     ///
     /// `Ok(())` means the platform API accepted the request without error.
     /// It does **not** guarantee the action had an observable effect — use
     /// `Locator::wait_*` methods to verify state changes.
     fn perform_action(
         &self,
-        element: &Element,
+        element: &ElementData,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()>;
 
-    /// Check if accessibility permissions are granted.
-    fn check_permissions(&self) -> Result<PermissionStatus>;
-
-    /// Subscribe to all accessibility events for an application by PID.
+    /// Subscribe to all accessibility events for an application.
+    ///
+    /// The element should be an application-level element (role=Application).
+    /// The provider extracts the PID from `element.pid`.
     ///
     /// Returns a [`Subscription`] that receives events until dropped.
-    /// Use [`Subscription::try_recv`], [`Subscription::recv`], or
-    /// [`Subscription::wait_for`] to consume events.
-    fn subscribe(&self, pid: u32) -> Result<Subscription>;
-}
-
-/// Result of a permission check.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum PermissionStatus {
-    /// Accessibility permissions are granted.
-    Granted,
-    /// Permissions denied, with platform-specific instructions.
-    Denied { instructions: String },
+    fn subscribe(&self, element: &ElementData) -> Result<Subscription>;
 }

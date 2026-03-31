@@ -6,48 +6,44 @@ use crate::element::{Element, ElementData};
 use crate::error::{Error, Result};
 use crate::event::ElementState;
 use crate::provider::Provider;
+use crate::selector::Selector;
 
 /// A lazy element descriptor that re-resolves against a fresh accessibility
-/// tree snapshot on every operation.
+/// tree on every operation.
 ///
 /// Inspired by Playwright's `Locator` pattern: a Locator never holds a live
 /// reference to a UI element. Instead, it stores a selector and resolves it
 /// on demand, making it immune to staleness.
 ///
 /// # Example
-/// ```no_run
-/// # use xa11y_core::*;
-/// # use std::sync::Arc;
-/// # use std::time::Duration;
-/// # fn example(provider: Arc<dyn Provider>) -> Result<()> {
-/// let app = App::from_name(provider, "MyApp")?;
-/// let save_btn = app.locator("button[name=\"Save\"]");
-/// save_btn.press()?;           // snapshot → query → press
-/// save_btn.wait_visible(Duration::from_secs(5))?; // poll until visible
-/// save_btn.press()?;           // re-resolves against fresh snapshot
+/// ```ignore
+/// # use xa11y::*;
+/// # fn example() -> Result<()> {
+/// let app = App::by_name("MyApp")?;
+/// let save_btn = app.locator(r#"button[name="Save"]"#);
+/// save_btn.press()?;
 /// # Ok(())
 /// # }
 /// ```
+#[derive(Clone)]
 pub struct Locator {
     provider: Arc<dyn Provider>,
-    pid: u32,
+    /// Root element for scoped searches. `None` = system root (all apps).
+    root: Option<ElementData>,
     selector: String,
     /// Which match to select (0-based). `None` means first match.
     nth: Option<usize>,
 }
 
-/// Result of a single resolve call — the matched element with its snapshot.
-struct Resolved {
-    element: Element,
-}
-
 impl Locator {
     /// Create a new Locator.
-    #[doc(hidden)]
-    pub fn new(provider: Arc<dyn Provider>, pid: u32, selector: &str) -> Self {
+    ///
+    /// Pass `root: None` to search the entire accessibility tree, or
+    /// `Some(element)` to scope the search to that element's subtree.
+    pub fn new(provider: Arc<dyn Provider>, root: Option<ElementData>, selector: &str) -> Self {
         Self {
             provider,
-            pid,
+            root,
             selector: selector.to_string(),
             nth: None,
         }
@@ -94,10 +90,10 @@ impl Locator {
         &self.provider
     }
 
-    /// Get the PID used by this locator.
+    /// Get the root element data, if scoped.
     #[doc(hidden)]
-    pub fn pid(&self) -> u32 {
-        self.pid
+    pub fn root(&self) -> Option<&ElementData> {
+        self.root.as_ref()
     }
 
     /// Get the nth index, if set.
@@ -108,69 +104,72 @@ impl Locator {
 
     // ── Internal resolution ─────────────────────────────────────────
 
-    /// Snapshot the tree and resolve the selector to a single element.
-    fn resolve(&self) -> Result<Resolved> {
-        let root = self.provider.get_elements(self.pid)?;
-        let snapshot = root.snapshot();
-        let matches = snapshot.query(&self.selector)?;
+    /// Resolve the selector to a single ElementData.
+    fn resolve_data(&self) -> Result<ElementData> {
+        let selector = Selector::parse(&self.selector)?;
+        let matches = self.provider.find_elements(
+            self.root.as_ref(),
+            &selector,
+            // Fetch enough to satisfy nth
+            Some(self.nth.unwrap_or(0) + 1),
+            None,
+        )?;
         let idx = self.nth.unwrap_or(0);
-        let matched = matches.get(idx).ok_or_else(|| Error::SelectorNotMatched {
-            selector: self.selector.clone(),
-        })?;
-        let element = Element::new(Arc::clone(snapshot), matched.index);
-        Ok(Resolved { element })
+        matches
+            .into_iter()
+            .nth(idx)
+            .ok_or_else(|| Error::SelectorNotMatched {
+                selector: self.selector.clone(),
+            })
     }
 
-    // ── Queries (each takes a fresh snapshot) ───────────────────────
+    // ── Queries (each re-queries the provider) ─────────────────────
 
-    /// Check if a matching element exists in the current tree.
+    /// Check if a matching element exists.
     pub fn exists(&self) -> Result<bool> {
-        match self.resolve() {
+        match self.resolve_data() {
             Ok(_) => Ok(true),
             Err(Error::SelectorNotMatched { .. }) => Ok(false),
             Err(e) => Err(e),
         }
     }
 
-    /// Count matching elements in the current tree.
+    /// Count matching elements.
     pub fn count(&self) -> Result<usize> {
-        let root = self.provider.get_elements(self.pid)?;
-        let matches = root.snapshot().query(&self.selector)?;
+        let selector = Selector::parse(&self.selector)?;
+        let matches = self
+            .provider
+            .find_elements(self.root.as_ref(), &selector, None, None)?;
         Ok(matches.len())
     }
 
-    /// Get a single [`Element`] handle from a fresh snapshot, with snapshot navigation.
+    /// Get a single [`Element`] handle.
     pub fn element(&self) -> Result<Element> {
-        Ok(self.resolve()?.element)
+        let data = self.resolve_data()?;
+        Ok(Element::new(data, Arc::clone(&self.provider)))
     }
 
-    /// Get all matching elements from a fresh snapshot.
-    ///
-    /// All returned elements share the same snapshot, so parent/children
-    /// navigation is consistent across the result set.
+    /// Get all matching elements.
     pub fn elements(&self) -> Result<Vec<Element>> {
-        let root = self.provider.get_elements(self.pid)?;
-        let snapshot = root.snapshot();
-        let indices: Vec<u32> = snapshot
-            .query(&self.selector)?
-            .iter()
-            .map(|e| e.index)
-            .collect();
-        Ok(indices
+        let selector = Selector::parse(&self.selector)?;
+        let matches = self
+            .provider
+            .find_elements(self.root.as_ref(), &selector, None, None)?;
+        Ok(matches
             .into_iter()
-            .map(|idx| Element::new(Arc::clone(snapshot), idx))
+            .map(|d| Element::new(d, Arc::clone(&self.provider)))
             .collect())
     }
 
-    // ── Actions (each takes a fresh snapshot) ───────────────────────
+    // ── Actions (each re-queries the provider) ─────────────────────
 
     /// Perform an action on the matched element (internal dispatch).
     fn perform(&self, action: Action, data: Option<ActionData>) -> Result<()> {
         if let Some(ref d) = data {
             d.validate(action)?;
         }
-        let r = self.resolve()?;
-        self.provider.perform_action(&r.element, action, data)
+        let element = self.resolve_data()?;
+        self.provider.perform_action(&element, action, data)
     }
 
     /// Click / invoke the matched element.
@@ -252,48 +251,40 @@ impl Locator {
     }
 
     /// Scroll the matched element upward.
-    ///
-    /// `amount` is in logical scroll units (≈ one mouse wheel notch).
     pub fn scroll_up(&self, amount: f64) -> Result<()> {
         self.perform(Action::ScrollDown, Some(ActionData::ScrollAmount(-amount)))
     }
 
     /// Scroll the matched element downward.
-    ///
-    /// `amount` is in logical scroll units (≈ one mouse wheel notch).
     pub fn scroll_down(&self, amount: f64) -> Result<()> {
         self.perform(Action::ScrollDown, Some(ActionData::ScrollAmount(amount)))
     }
 
     /// Scroll the matched element leftward.
-    ///
-    /// `amount` is in logical scroll units (≈ one mouse wheel notch).
     pub fn scroll_left(&self, amount: f64) -> Result<()> {
         self.perform(Action::ScrollRight, Some(ActionData::ScrollAmount(-amount)))
     }
 
     /// Scroll the matched element rightward.
-    ///
-    /// `amount` is in logical scroll units (≈ one mouse wheel notch).
     pub fn scroll_right(&self, amount: f64) -> Result<()> {
         self.perform(Action::ScrollRight, Some(ActionData::ScrollAmount(amount)))
     }
 
     // ── Wait operations ─────────────────────────────────────────────
 
-    /// Wait until the element is visible, polling with fresh snapshots.
+    /// Wait until the element is visible, polling the provider.
     pub fn wait_visible(&self, timeout: Duration) -> Result<Element> {
         self.wait_for_state(ElementState::Visible, timeout)
             .map(|opt| opt.expect("visible wait must return an element"))
     }
 
-    /// Wait until the element exists in the tree.
+    /// Wait until the element exists.
     pub fn wait_attached(&self, timeout: Duration) -> Result<Element> {
         self.wait_for_state(ElementState::Attached, timeout)
             .map(|opt| opt.expect("attached wait must return an element"))
     }
 
-    /// Wait until the element is removed from the tree.
+    /// Wait until the element is removed.
     pub fn wait_detached(&self, timeout: Duration) -> Result<()> {
         self.wait_for_state(ElementState::Detached, timeout)
             .map(|_| ())
@@ -338,11 +329,7 @@ impl Locator {
         self.poll_until(|element| state.is_met(element), timeout)
     }
 
-    /// Wait until an arbitrary predicate is satisfied, polling with fresh
-    /// snapshots at ~100 ms intervals.
-    ///
-    /// The predicate receives `Some(&ElementData)` when the selector matches, or
-    /// `None` when no element matches. Return `true` to stop waiting.
+    /// Wait until an arbitrary predicate is satisfied, polling at ~100 ms intervals.
     pub fn wait_until(
         &self,
         predicate: impl Fn(Option<&ElementData>) -> bool,
@@ -366,15 +353,14 @@ impl Locator {
                 return Err(Error::Timeout { elapsed });
             }
 
-            let root = self.provider.get_elements(self.pid)?;
-            let snapshot = root.snapshot();
-            let matches = snapshot.query(&self.selector).ok();
-            let idx = self.nth.unwrap_or(0);
-            let matched_index = matches.as_ref().and_then(|m| m.get(idx).map(|e| e.index));
-            let element_ref = matched_index.and_then(|i| snapshot.get_data(i));
+            let matched = match self.resolve_data() {
+                Ok(data) => Some(data),
+                Err(Error::SelectorNotMatched { .. }) => None,
+                Err(e) => return Err(e),
+            };
 
-            if predicate(element_ref) {
-                return Ok(matched_index.map(|i| Element::new(Arc::clone(snapshot), i)));
+            if predicate(matched.as_ref()) {
+                return Ok(matched.map(|data| Element::new(data, Arc::clone(&self.provider))));
             }
 
             std::thread::sleep(poll_interval);

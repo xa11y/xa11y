@@ -1,0 +1,17 @@
+[package]
+name = "xa11y-tauri-test-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tauri test application for xa11y integration tests"
+publish = false
+
+[[bin]]
+name = "xa11y-tauri-test-app"
+path = "src/main.rs"
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

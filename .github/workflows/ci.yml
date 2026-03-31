@@ -126,8 +126,9 @@ jobs:
         shell: bash
         run: |
           python -m venv .venv-qt-test
-          .venv-qt-test/Scripts/pip.exe install maturin pytest pytest-timeout
-          .venv-qt-test/Scripts/pip.exe install -r xa11y-qt-test-app/requirements.txt
+          .venv-qt-test/Scripts/pip.exe install maturin
+          .venv-qt-test/Scripts/pip.exe install -r tests/requirements.txt
+          .venv-qt-test/Scripts/pip.exe install -r test-apps/qt/requirements.txt
 
       - name: Build & install xa11y Python bindings
         shell: bash
@@ -138,7 +139,7 @@ jobs:
         shell: bash
         env:
           QT_ACCESSIBILITY: "1"
-        run: .venv-qt-test/Scripts/pytest.exe xa11y-qt-test-app/tests/ -v -s --timeout=15
+        run: .venv-qt-test/Scripts/pytest.exe tests/qt/ -v -s --timeout=15 --rootdir=.
 
   # ── Lint & format ──────────────────────────────────────────────────
   lint:

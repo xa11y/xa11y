@@ -6,7 +6,7 @@ The goal is **full coverage** of the public API surface through real integration
 
 When adding new tests:
 
-1. If the test app (`xa11y-test-app`) lacks a widget needed for a test, add it to the test app first. The test app uses AccessKit + winit and is defined in `xa11y-test-app/src/main.rs`.
+1. If the AccessKit test app lacks a widget needed for a test, add it to the test app first. The test app uses AccessKit + winit and is defined in `test-apps/accesskit/src/main.rs`.
 2. All integration tests must be `#[ignore]` and run via `cargo xtask test-integ`.
 3. Run `cargo xtask test-integ` to verify tests pass before committing.
 
@@ -62,6 +62,11 @@ cargo xtask test-python                       # build + test Python bindings
 cargo xtask test-integ                        # integration tests (auto-detects OS)
 cargo xtask test-integ-container              # Linux integration tests via Finch
 cargo xtask test-integ-container tree_has_buttons  # single test in container
+cargo xtask test-qt                           # Qt (PySide6) integration tests
+cargo xtask test-gtk                          # GTK4 integration tests
+cargo xtask test-cocoa                        # Cocoa/AppKit integration tests (macOS only)
+cargo xtask test-tauri                        # Tauri integration tests
+cargo xtask test-apps                         # all Python integration test suites
 cargo xtask fuzz                              # provider fuzzer
 cargo xtask fuzz --seed 42 -n 5000            # reproducible fuzz run
 cargo xtask coverage                          # code coverage report
@@ -78,7 +83,12 @@ cd xa11y-fuzz/fuzz && cargo +nightly fuzz run tree_ops -- -max_total_time=60
 - `xa11y-macos/` — macOS backend (AXUIElement, with ObjC exception safety)
 - `xa11y-windows/` — Windows backend (stub)
 - `xa11y/` — Umbrella crate, unit tests, integration tests
-- `xa11y-test-app/` — AccessKit + winit app used as target for integration tests
+- `test-apps/accesskit/` — AccessKit + winit app used as target for Rust integration tests
+- `test-apps/qt/` — PySide6 Qt test app
+- `test-apps/gtk/` — GTK4 test app (Python, PyGObject)
+- `test-apps/cocoa/` — Cocoa/AppKit test app (Swift, macOS-only)
+- `test-apps/tauri/` — Tauri test app (Rust + HTML)
+- `tests/` — Python integration test suites (pytest + xa11y-python)
 - `xa11y-python/` — Python bindings via PyO3/maturin (excluded from Cargo workspace)
 - `xa11y-fuzz/` — Fuzz targets for xa11y-core (tree, selector, serde) and macOS platform fuzzer
 - `xtask/` — Development workflow commands (`cargo xtask <command>`)

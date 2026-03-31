@@ -1,0 +1,2 @@
+pytest>=7
+pytest-timeout>=2

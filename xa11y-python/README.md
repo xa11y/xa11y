@@ -37,7 +37,11 @@ pip install xa11y
 
 Requires Python 3.9+. Pre-built wheels available for Linux, macOS, and Windows.
 
-> **macOS:** Grant accessibility permissions to your terminal in **System Settings > Privacy & Security > Accessibility**.
+> **macOS:** Grant your terminal **two** permissions in **System Settings > Privacy & Security**:
+> 1. **Accessibility** — required for all accessibility API access.
+> 2. **Screen & System Audio Recording** (macOS 26+) — required to read window content. Without this, only menu bars are visible.
+>
+> Restart your terminal after changing permissions.
 >
 > **Linux:** AT-SPI2 must be running (default on GNOME/most DEs). No special permissions needed.
 >

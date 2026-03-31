@@ -2,11 +2,11 @@
 
 use xa11y::*;
 
-/// Get the test app tree, retrying briefly for registration.
-pub fn app_tree() -> Element {
+/// Get the test app as an `App`, retrying briefly for registration.
+pub fn app_root() -> App {
     for attempt in 0..3 {
-        match App::from_name(xa11y::provider().unwrap(), "xa11y") {
-            Ok(app) => return app.elements().expect("Failed to snapshot app tree"),
+        match App::by_name("xa11y-test-app") {
+            Ok(app) => return app,
             Err(_) if attempt < 2 => {
                 std::thread::sleep(std::time::Duration::from_millis(200));
             }
@@ -16,37 +16,36 @@ pub fn app_tree() -> Element {
     unreachable!()
 }
 
-/// Query elements matching a CSS-like selector within a snapshot.
-pub fn query(root: &Element, selector: &str) -> Result<Vec<Element>> {
-    root.query_selector(selector)
-}
-
-/// Find exactly one element by selector. Panics with tree dump on failure.
-pub fn one(root: &Element, selector: &str) -> Element {
-    let results = query(root, selector)
-        .unwrap_or_else(|e| panic!("Selector '{}' failed: {}. Tree:\n{}", selector, e, root));
+/// Find exactly one element by selector within the app. Panics on failure.
+pub fn one(app: &App, selector: &str) -> Element {
+    let results = app
+        .locator(selector)
+        .elements()
+        .unwrap_or_else(|e| panic!("Selector '{}' failed: {}. App: {}", selector, e, app));
     assert!(
         results.len() == 1,
-        "Selector '{}' matched {} elements (expected 1). Tree:\n{}",
+        "Selector '{}' matched {} elements (expected 1). App: {}",
         selector,
         results.len(),
-        root
+        app
     );
-    results[0].clone()
+    results.into_iter().next().unwrap()
 }
 
 /// Find first element whose name contains `substring` (case-insensitive).
-pub fn named(root: &Element, substring: &str) -> Element {
+pub fn named(app: &App, substring: &str) -> Element {
     let selector = format!("[name*=\"{}\"]", substring);
-    let results = query(root, &selector)
-        .unwrap_or_else(|e| panic!("Selector '{}' failed: {}. Tree:\n{}", selector, e, root));
+    let results = app
+        .locator(&selector)
+        .elements()
+        .unwrap_or_else(|e| panic!("Selector '{}' failed: {}. App: {}", selector, e, app));
     assert!(
         !results.is_empty(),
-        "No element with name containing '{}'. Tree:\n{}",
+        "No element with name containing '{}'. App: {}",
         substring,
-        root
+        app
     );
-    results[0].clone()
+    results.into_iter().next().unwrap()
 }
 
 /// Try to perform an action on an element. Returns the result without panicking.
@@ -54,20 +53,20 @@ pub fn try_act(element: &Element, action: Action) -> Result<()> {
     try_act_with(element, action, None)
 }
 
-/// Try to perform an action with data on an element. Returns the result without panicking.
+/// Try to perform an action with data on an element.
 pub fn try_act_with(element: &Element, action: Action, data: Option<ActionData>) -> Result<()> {
-    xa11y::perform_action(element, action, data)
+    element.provider().perform_action(element, action, data)
 }
 
-/// Perform an action on an element, wait briefly, then re-read the tree.
-pub fn act(element: &Element, action: Action) -> Element {
+/// Perform an action on an element, wait briefly, then re-read the app root.
+pub fn act(element: &Element, action: Action) -> App {
     act_with(element, action, None)
 }
 
-/// Perform an action with data on an element, wait, then re-read the tree.
-pub fn act_with(element: &Element, action: Action, data: Option<ActionData>) -> Element {
+/// Perform an action with data on an element, wait, then re-read the app root.
+pub fn act_with(element: &Element, action: Action, data: Option<ActionData>) -> App {
     try_act_with(element, action, data)
         .unwrap_or_else(|e| panic!("Action {:?} failed: {}", action, e));
     std::thread::sleep(std::time::Duration::from_millis(100));
-    app_tree()
+    app_root()
 }

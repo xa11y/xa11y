@@ -5,20 +5,14 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::action::Action;
+use crate::provider::Provider;
 use crate::role::Role;
-use crate::tree::Tree;
 
-/// Internal index for an element within a snapshot (sequential DFS order).
-/// This is an array index, not a stable identity — it changes between snapshots.
-/// Internal index type for element positions within a snapshot.
-#[doc(hidden)]
-pub type ElementIndex = u32;
-
-/// The raw data for a single element in an accessibility tree snapshot.
+/// The raw data for a single element in an accessibility tree.
 ///
 /// This is the underlying data struct. Most consumers should use [`Element`],
-/// which wraps `ElementData` with snapshot navigation (parent/children).
-/// `ElementData` is used directly by provider implementors building trees.
+/// which wraps `ElementData` with a provider reference for lazy navigation.
+/// `ElementData` is used directly by provider implementors.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElementData {
     /// Element role
@@ -65,83 +59,60 @@ pub struct ElementData {
     /// Platform-specific raw data
     pub raw: RawPlatformData,
 
-    // ── Internal fields ──────────────────────────────────────────────────────
-    // Present in serialized output for FFI consumers (Python, JS, LLMs),
-    // but not part of the Rust public API.
-    /// Sequential DFS index within the snapshot.
-    /// Internal — present in serialized output for FFI consumers,
-    /// but not intended as part of the primary Rust API.
-    #[doc(hidden)]
-    pub index: ElementIndex,
-
-    /// Child element indices (direct children only).
-    #[doc(hidden)]
-    pub children_indices: Vec<ElementIndex>,
-
-    /// Parent element index (None for root).
-    #[doc(hidden)]
-    pub parent_index: Option<ElementIndex>,
+    /// Opaque handle for the provider to look up the platform object.
+    /// Not serialized — only valid within the provider that created it.
+    #[serde(skip, default)]
+    pub handle: u64,
 }
 
-/// Create a root [`Element`] from raw element data.
-///
-/// This is the primary way for provider implementations to construct
-/// an accessibility tree snapshot. The returned Element is the root
-/// (index 0) and can be navigated with `children()`, `parent()`, etc.
-///
-/// `app_name` and `pid` are stored as snapshot metadata, accessible
-/// internally for app discovery and action dispatch.
-pub fn root_element(
-    app_name: String,
-    pid: Option<u32>,
-    screen_size: (u32, u32),
-    mut elements: Vec<ElementData>,
-) -> Element {
-    // Ensure the root element carries the PID so it's accessible via ElementData.
-    if let (Some(pid_val), Some(root)) = (pid, elements.first_mut()) {
-        if root.pid.is_none() {
-            root.pid = Some(pid_val);
-        }
-    }
-    let tree = Tree::new(app_name, pid, screen_size, elements);
-    Element::new(Arc::new(tree), 0)
-}
-
-/// A read-only element in an accessibility tree snapshot, with navigation.
+/// A live element with lazy navigation via a provider reference.
 ///
 /// `Element` dereferences to [`ElementData`], so all properties (`role`, `name`,
 /// `value`, `states`, etc.) are accessible via field access. Navigation
-/// methods (`parent()`, `children()`) use the shared snapshot — no
-/// platform refetch occurs.
+/// methods (`parent()`, `children()`) call the provider on demand.
 ///
-/// Elements are cheap to clone (they share the underlying snapshot via `Arc`).
-/// To perform actions, use a [`Locator`](crate::Locator) instead.
+/// Elements are cheap to clone (they share the provider via `Arc`).
 #[derive(Clone)]
 pub struct Element {
-    snapshot: Arc<Tree>,
-    index: u32,
+    data: ElementData,
+    provider: Arc<dyn Provider>,
 }
 
 impl Deref for Element {
     type Target = ElementData;
 
     fn deref(&self) -> &ElementData {
-        self.snapshot
-            .get_data(self.index)
-            .expect("Element index must be valid within its snapshot")
+        &self.data
     }
 }
 
 impl fmt::Debug for Element {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Delegate to the underlying ElementData's Debug
-        fmt::Debug::fmt(&**self, f)
+        fmt::Debug::fmt(&self.data, f)
     }
 }
 
 impl fmt::Display for Element {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&self.snapshot, f)
+        let name_part = self
+            .data
+            .name
+            .as_ref()
+            .map(|n| format!(" \"{}\"", n))
+            .unwrap_or_default();
+        let value_part = self
+            .data
+            .value
+            .as_ref()
+            .map(|v| format!(" value=\"{}\"", v))
+            .unwrap_or_default();
+        write!(
+            f,
+            "{}{}{}",
+            self.data.role.to_snake_case(),
+            name_part,
+            value_part,
+        )
     }
 }
 
@@ -150,66 +121,48 @@ impl Serialize for Element {
         &self,
         serializer: S,
     ) -> std::result::Result<S::Ok, S::Error> {
-        // Serialize as the underlying ElementData
-        (**self).serialize(serializer)
+        self.data.serialize(serializer)
     }
 }
 
 impl Element {
-    /// Create an Element handle from a snapshot and an index into the snapshot.
-    pub(crate) fn new(snapshot: Arc<Tree>, index: u32) -> Self {
-        Self { snapshot, index }
+    /// Create an Element from raw data and a provider reference.
+    pub fn new(data: ElementData, provider: Arc<dyn Provider>) -> Self {
+        Self { data, provider }
     }
 
-    /// Get the underlying snapshot this element belongs to (crate-internal).
-    pub(crate) fn snapshot(&self) -> &Arc<Tree> {
-        &self.snapshot
+    /// Get the underlying ElementData.
+    pub fn data(&self) -> &ElementData {
+        &self.data
     }
 
-    /// Get the application name from the snapshot metadata (crate-internal).
-    pub(crate) fn snapshot_app_name(&self) -> &str {
-        &self.snapshot.app_name
-    }
-
-    /// Query elements matching a CSS-like selector within this snapshot.
-    ///
-    /// Internal — used by test infrastructure and FFI bindings.
-    #[doc(hidden)]
-    pub fn query_selector(&self, selector: &str) -> crate::error::Result<Vec<Element>> {
-        let indices = self.snapshot.query_indices(selector)?;
-        Ok(indices
-            .into_iter()
-            .map(|idx| Element::new(Arc::clone(&self.snapshot), idx))
-            .collect())
-    }
-
-    /// Get the parent element, if any (root has no parent).
-    ///
-    /// Uses the snapshot — no platform refetch.
-    pub fn parent(&self) -> Option<Element> {
-        self.parent_index
-            .map(|idx| Element::new(Arc::clone(&self.snapshot), idx))
+    /// Get the provider reference.
+    pub fn provider(&self) -> &Arc<dyn Provider> {
+        &self.provider
     }
 
     /// Get direct children of this element.
     ///
-    /// Uses the snapshot — no platform refetch.
-    pub fn children(&self) -> Vec<Element> {
-        self.children_indices
-            .iter()
-            .map(|&idx| Element::new(Arc::clone(&self.snapshot), idx))
-            .collect()
+    /// Each call queries the provider — results are not cached.
+    pub fn children(&self) -> crate::error::Result<Vec<Element>> {
+        let children = self.provider.get_children(Some(&self.data))?;
+        Ok(children
+            .into_iter()
+            .map(|d| Element::new(d, Arc::clone(&self.provider)))
+            .collect())
     }
 
-    /// Get the subtree rooted at this element (including this element).
+    /// Get the parent element, if any (root-level elements have no parent).
     ///
-    /// Uses the snapshot — no platform refetch.
-    pub fn subtree(&self) -> Vec<Element> {
-        self.snapshot
-            .subtree_indices(self.index)
-            .into_iter()
-            .map(|idx| Element::new(Arc::clone(&self.snapshot), idx))
-            .collect()
+    /// Each call queries the provider — results are not cached.
+    pub fn parent(&self) -> crate::error::Result<Option<Element>> {
+        let parent = self.provider.get_parent(&self.data)?;
+        Ok(parent.map(|d| Element::new(d, Arc::clone(&self.provider))))
+    }
+
+    /// Get the process ID from the element data.
+    pub fn pid(&self) -> Option<u32> {
+        self.data.pid
     }
 }
 

@@ -16,6 +16,10 @@ COMMANDS:
     test-integ          Run integration tests (delegates to scripts/)
     test-integ-container  Run Linux integration tests in container
     test-qt             Run Qt (PySide6) integration tests
+    test-gtk            Run GTK4 integration tests
+    test-cocoa          Run Cocoa/AppKit integration tests (macOS only)
+    test-tauri          Run Tauri integration tests
+    test-apps           Run all app integration test suites (qt, gtk, cocoa, tauri)
     docs                Build documentation
     coverage            Generate code coverage report
     fuzz [ARGS..]       Run provider fuzzer (pass-through args)
@@ -37,6 +41,10 @@ fn main() -> ExitCode {
         "test-integ" => do_test_integ(rest),
         "test-integ-container" => do_test_integ_container(rest),
         "test-qt" => do_test_qt(),
+        "test-gtk" => do_test_gtk(),
+        "test-cocoa" => do_test_cocoa(),
+        "test-tauri" => do_test_tauri(),
+        "test-apps" => do_test_apps(),
         "docs" => do_docs(),
         "coverage" => do_coverage(),
         "fuzz" => do_fuzz(rest),
@@ -201,6 +209,42 @@ fn do_test_qt() -> bool {
     heading("Qt integration tests (PySide6)");
     let root = project_root();
     run_in("bash", &["scripts/run_qt_tests.sh"], &root)
+}
+
+fn do_test_gtk() -> bool {
+    heading("GTK4 integration tests");
+    let root = project_root();
+    run_in("bash", &["scripts/run_gtk_tests.sh"], &root)
+}
+
+fn do_test_cocoa() -> bool {
+    heading("Cocoa/AppKit integration tests");
+    let root = project_root();
+    run_in("bash", &["scripts/run_cocoa_tests.sh"], &root)
+}
+
+fn do_test_tauri() -> bool {
+    heading("Tauri integration tests");
+    let root = project_root();
+    run_in("bash", &["scripts/run_tauri_tests.sh"], &root)
+}
+
+fn do_test_apps() -> bool {
+    heading("All app integration tests");
+    let mut ok = true;
+    if !do_test_qt() {
+        ok = false;
+    }
+    if !do_test_gtk() {
+        ok = false;
+    }
+    if env::consts::OS == "macos" && !do_test_cocoa() {
+        ok = false;
+    }
+    if !do_test_tauri() {
+        ok = false;
+    }
+    ok
 }
 
 fn do_docs() -> bool {

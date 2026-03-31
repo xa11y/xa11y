@@ -13,9 +13,6 @@ class XA11yError(Exception):
 class PermissionDeniedError(XA11yError):
     """Accessibility permissions have not been granted."""
 
-class AppNotFoundError(XA11yError):
-    """The target application is not running or not exposing an accessibility tree."""
-
 class SelectorNotMatchedError(XA11yError):
     """No element in the tree matched the given selector."""
 
@@ -37,30 +34,20 @@ class Rect:
     """A bounding rectangle in screen coordinates (pixels)."""
 
     @property
-    def x(self) -> int:
-        """X coordinate of the top-left corner."""
+    def x(self) -> int: ...
     @property
-    def y(self) -> int:
-        """Y coordinate of the top-left corner."""
+    def y(self) -> int: ...
     @property
-    def width(self) -> int:
-        """Width in pixels."""
+    def width(self) -> int: ...
     @property
-    def height(self) -> int:
-        """Height in pixels."""
+    def height(self) -> int: ...
     def __repr__(self) -> str: ...
     def __eq__(self, other: object) -> bool: ...
 
 # ── EventType ────────────────────────────────────────────────────────────────
 
 class EventType:
-    """Accessibility event type constants.
-
-    Use these constants to compare against :attr:`Event.event_type`::
-
-        if event.event_type == EventType.FOCUS_CHANGED:
-            ...
-    """
+    """Accessibility event type constants."""
 
     FOCUS_CHANGED: str
     VALUE_CHANGED: str
@@ -80,56 +67,31 @@ class EventType:
 # ── Event ────────────────────────────────────────────────────────────────────
 
 class Event:
-    """An accessibility event delivered to subscribers.
-
-    Events are immutable snapshots of something that happened in an
-    application's accessibility tree.
-    """
+    """An accessibility event delivered to subscribers."""
 
     @property
-    def event_type(self) -> str:
-        """Event type (e.g. ``EventType.FOCUS_CHANGED``)."""
+    def event_type(self) -> str: ...
     @property
-    def app_name(self) -> str:
-        """Name of the application that produced this event."""
+    def app_name(self) -> str: ...
     @property
-    def app_pid(self) -> int:
-        """PID of the application that produced this event."""
+    def app_pid(self) -> int: ...
     @property
-    def target(self) -> Element | None:
-        """A snapshot of the element that triggered the event, if available."""
+    def target(self) -> Element | None: ...
     def __repr__(self) -> str: ...
 
 # ── Subscription ─────────────────────────────────────────────────────────────
 
 class Subscription:
-    """A live event subscription.
+    """A live event subscription."""
 
-    Supports pull-based consumption via :meth:`try_recv`, :meth:`recv`,
-    :meth:`wait_for`, and iteration. Use as a context manager or call
-    :meth:`close` to unsubscribe.
-
-    Example::
-
-        with app.subscribe() as sub:
-            event = sub.wait_for(
-                lambda e: e.event_type == EventType.FOCUS_CHANGED,
-                timeout=5.0,
-            )
-    """
-
-    def try_recv(self) -> Event | None:
-        """Non-blocking receive. Returns ``None`` if no event is ready."""
-    def recv(self, timeout: float = 5.0) -> Event:
-        """Block until an event arrives or *timeout* seconds elapse."""
+    def try_recv(self) -> Event | None: ...
+    def recv(self, timeout: float = 5.0) -> Event: ...
     def wait_for(
         self,
         predicate: Callable[[Event], bool],
         timeout: float = 5.0,
-    ) -> Event:
-        """Block until an event matching *predicate* arrives or *timeout* elapses."""
-    def close(self) -> None:
-        """Close the subscription and stop receiving events."""
+    ) -> Event: ...
+    def close(self) -> None: ...
     def __enter__(self) -> Subscription: ...
     def __exit__(
         self,
@@ -141,221 +103,118 @@ class Subscription:
     def __next__(self) -> Event: ...
     def __repr__(self) -> str: ...
 
-# ── App ──────────────────────────────────────────────────────────────────────
-
-class App:
-    """A handle to a running application.
-
-    Use :meth:`locator` to create action-capable element references,
-    or :meth:`elements` to snapshot the tree for inspection.
-    """
-
-    @property
-    def name(self) -> str:
-        """The application's display name."""
-    @property
-    def pid(self) -> int:
-        """The application's process ID."""
-    def locator(self, selector: str) -> Locator:
-        """Create a :class:`Locator` for lazy element interaction."""
-    def subscribe(self) -> Subscription:
-        """Subscribe to all accessibility events for this application."""
-    def elements(self) -> Element:
-        """Snapshot the app's accessibility tree. Returns the root :class:`Element`."""
-    def __repr__(self) -> str: ...
-
 # ── Element ───────────────────────────────────────────────────────────────────
 
 class Element:
-    """A read-only element in an accessibility tree snapshot.
-
-    Elements are immutable snapshots that form a navigable graph —
-    use :attr:`children` and :attr:`parent` to traverse.
-    To perform actions, use a :class:`Locator` via :meth:`App.locator`.
-    """
+    """A live element with lazy navigation."""
 
     @property
-    def role(self) -> str:
-        """Role name (e.g. ``"button"``, ``"text_field"``)."""
+    def role(self) -> str: ...
     @property
-    def name(self) -> str | None:
-        """Accessible name."""
+    def name(self) -> str | None: ...
     @property
-    def value(self) -> str | None:
-        """Current value (e.g. text content, slider position)."""
+    def value(self) -> str | None: ...
     @property
-    def description(self) -> str | None:
-        """Accessible description."""
+    def description(self) -> str | None: ...
     @property
-    def numeric_value(self) -> float | None:
-        """Numeric value (for sliders, progress bars, etc.)."""
+    def numeric_value(self) -> float | None: ...
     @property
-    def min_value(self) -> float | None:
-        """Minimum numeric value."""
+    def min_value(self) -> float | None: ...
     @property
-    def max_value(self) -> float | None:
-        """Maximum numeric value."""
+    def max_value(self) -> float | None: ...
     @property
-    def stable_id(self) -> str | None:
-        """Platform-stable identifier that persists across tree snapshots."""
+    def stable_id(self) -> str | None: ...
     @property
-    def pid(self) -> int | None:
-        """Process ID of the application owning this element."""
+    def pid(self) -> int | None: ...
     @property
-    def actions(self) -> list[str]:
-        """List of supported action names."""
+    def actions(self) -> list[str]: ...
     @property
+    def bounds(self) -> Rect | None: ...
+    @property
+    def enabled(self) -> bool: ...
+    @property
+    def visible(self) -> bool: ...
+    @property
+    def focused(self) -> bool: ...
+    @property
+    def checked(self) -> str | None: ...
+    @property
+    def selected(self) -> bool: ...
+    @property
+    def expanded(self) -> bool | None: ...
+    @property
+    def editable(self) -> bool: ...
+    @property
+    def focusable(self) -> bool: ...
+    @property
+    def modal(self) -> bool: ...
+    @property
+    def required(self) -> bool: ...
+    @property
+    def busy(self) -> bool: ...
     def children(self) -> list[Element]:
-        """Direct children of this element."""
-    @property
+        """Get direct children (lazy — each call queries the provider)."""
     def parent(self) -> Element | None:
-        """Parent element, or ``None`` for the root."""
-    @property
-    def bounds(self) -> Rect | None:
-        """Bounding rectangle in screen coordinates."""
-    @property
-    def enabled(self) -> bool:
-        """Whether the element is interactive."""
-    @property
-    def visible(self) -> bool:
-        """Whether the element is visible."""
-    @property
-    def focused(self) -> bool:
-        """Whether the element has keyboard focus."""
-    @property
-    def checked(self) -> str | None:
-        """Check state: ``"on"``, ``"off"``, ``"mixed"``, or ``None``."""
-    @property
-    def selected(self) -> bool:
-        """Whether the element is selected."""
-    @property
-    def expanded(self) -> bool | None:
-        """Expansion state (``None`` if not expandable)."""
-    @property
-    def editable(self) -> bool:
-        """Whether the element supports text editing."""
-    @property
-    def focusable(self) -> bool:
-        """Whether the element can receive focus."""
-    @property
-    def modal(self) -> bool:
-        """Whether the element is a modal dialog."""
-    @property
-    def required(self) -> bool:
-        """Whether the element is a required form field."""
-    @property
-    def busy(self) -> bool:
-        """Whether the element is in a busy/loading state."""
+        """Get parent element (lazy — each call queries the provider)."""
+    def locator(self, selector: str) -> Locator:
+        """Create a Locator scoped to this element's subtree."""
+    def subscribe(self) -> Subscription:
+        """Subscribe to accessibility events for this element (typically an app)."""
     def __repr__(self) -> str: ...
     def __str__(self) -> str: ...
-    def __len__(self) -> int: ...
 
-# ── Locator ──────────────────────────────────────────────────────────────────
+# ── Locator ──────────────────────────────────────────────────────────────
 
 class Locator:
-    """A resilient element reference that re-queries the tree on each interaction.
-
-    Locators are chainable and support waiting for element state changes.
-    """
+    """A resilient element reference that re-queries on each interaction."""
 
     @property
-    def selector(self) -> str:
-        """The CSS-like selector string for this locator."""
-    def nth(self, n: int) -> Locator:
-        """Select the *n*-th match (0-indexed)."""
-    def first(self) -> Locator:
-        """Select the first match (shorthand for ``nth(0)``)."""
-    def child(self, selector: str) -> Locator:
-        """Narrow to direct children matching *selector*."""
-    def descendant(self, selector: str) -> Locator:
-        """Narrow to descendants matching *selector*."""
-    def exists(self) -> bool:
-        """Check whether the selector matches any element."""
-    def count(self) -> int:
-        """Count the number of elements matching the selector."""
-    def element(self) -> Element:
-        """Resolve the locator to a single :class:`Element` snapshot."""
-    def elements(self) -> list[Element]:
-        """Resolve the locator to all matching :class:`Element` snapshots."""
-    def press(self) -> None:
-        """Press / activate the matched element."""
-    def focus(self) -> None:
-        """Move keyboard focus to the matched element."""
-    def blur(self) -> None:
-        """Remove keyboard focus from the matched element."""
-    def toggle(self) -> None:
-        """Toggle a checkbox or switch."""
-    def expand(self) -> None:
-        """Expand a collapsible element."""
-    def collapse(self) -> None:
-        """Collapse an expanded element."""
-    def select(self) -> None:
-        """Select an item (e.g. in a list or tab bar)."""
-    def show_menu(self) -> None:
-        """Open the context menu for the matched element."""
-    def scroll_into_view(self) -> None:
-        """Scroll until the matched element is visible."""
-    def increment(self) -> None:
-        """Increment a slider or stepper."""
-    def decrement(self) -> None:
-        """Decrement a slider or stepper."""
-    def set_value(self, value: str) -> None:
-        """Set the text value of the matched element."""
-    def set_numeric_value(self, value: float) -> None:
-        """Set the numeric value of the matched element."""
-    def type_text(self, text: str) -> None:
-        """Type text into the matched element."""
-    def select_text(self, start: int, end: int) -> None:
-        """Select a text range by character offsets."""
-    def scroll_up(self, amount: float = 1.0) -> None:
-        """Scroll the matched element upward."""
-    def scroll_down(self, amount: float = 1.0) -> None:
-        """Scroll the matched element downward."""
-    def scroll_left(self, amount: float = 1.0) -> None:
-        """Scroll the matched element leftward."""
-    def scroll_right(self, amount: float = 1.0) -> None:
-        """Scroll the matched element rightward."""
-    def wait_visible(self, timeout: float = 5.0) -> Element:
-        """Wait until the element is visible (default 5s timeout). Returns the element."""
-    def wait_attached(self, timeout: float = 5.0) -> Element:
-        """Wait until the selector matches an element (default 5s timeout). Returns the element."""
-    def wait_detached(self, timeout: float = 5.0) -> None:
-        """Wait until the selector no longer matches (default 5s timeout)."""
-    def wait_enabled(self, timeout: float = 5.0) -> Element:
-        """Wait until the element is enabled (default 5s timeout). Returns the element."""
-    def wait_hidden(self, timeout: float = 5.0) -> None:
-        """Wait until the element is hidden (default 5s timeout)."""
-    def wait_disabled(self, timeout: float = 5.0) -> Element:
-        """Wait until the element is disabled (default 5s timeout). Returns the element."""
-    def wait_focused(self, timeout: float = 5.0) -> Element:
-        """Wait until the element is focused (default 5s timeout). Returns the element."""
-    def wait_unfocused(self, timeout: float = 5.0) -> Element:
-        """Wait until the element loses focus (default 5s timeout). Returns the element."""
-    def wait_until(self, predicate: Callable[[Element | None], bool], timeout: float = 5.0) -> None:
-        """Wait until *predicate(element)* returns ``True`` (default 5s timeout)."""
+    def selector(self) -> str: ...
+    def nth(self, n: int) -> Locator: ...
+    def first(self) -> Locator: ...
+    def child(self, selector: str) -> Locator: ...
+    def descendant(self, selector: str) -> Locator: ...
+    def exists(self) -> bool: ...
+    def count(self) -> int: ...
+    def element(self) -> Element: ...
+    def elements(self) -> list[Element]: ...
+    def press(self) -> None: ...
+    def focus(self) -> None: ...
+    def blur(self) -> None: ...
+    def toggle(self) -> None: ...
+    def expand(self) -> None: ...
+    def collapse(self) -> None: ...
+    def select(self) -> None: ...
+    def show_menu(self) -> None: ...
+    def scroll_into_view(self) -> None: ...
+    def increment(self) -> None: ...
+    def decrement(self) -> None: ...
+    def set_value(self, value: str) -> None: ...
+    def set_numeric_value(self, value: float) -> None: ...
+    def type_text(self, text: str) -> None: ...
+    def select_text(self, start: int, end: int) -> None: ...
+    def scroll_up(self, amount: float = 1.0) -> None: ...
+    def scroll_down(self, amount: float = 1.0) -> None: ...
+    def scroll_left(self, amount: float = 1.0) -> None: ...
+    def scroll_right(self, amount: float = 1.0) -> None: ...
+    def wait_visible(self, timeout: float = 5.0) -> Element: ...
+    def wait_attached(self, timeout: float = 5.0) -> Element: ...
+    def wait_detached(self, timeout: float = 5.0) -> None: ...
+    def wait_enabled(self, timeout: float = 5.0) -> Element: ...
+    def wait_hidden(self, timeout: float = 5.0) -> None: ...
+    def wait_disabled(self, timeout: float = 5.0) -> Element: ...
+    def wait_focused(self, timeout: float = 5.0) -> Element: ...
+    def wait_unfocused(self, timeout: float = 5.0) -> Element: ...
+    def wait_until(
+        self, predicate: Callable[[Element | None], bool], timeout: float = 5.0
+    ) -> None: ...
     def __repr__(self) -> str: ...
 
 # ── Module-level functions ───────────────────────────────────────────────────
 
-def app(
-    name: str | None = None,
-    *,
-    pid: int | None = None,
-) -> App:
-    """Get a handle to a specific application.
-
-    Identify the app by *name* (substring match) or *pid* (exact).
-    """
-
-def apps() -> list[App]:
-    """List all running applications."""
-
-def check_permissions() -> str:
-    """Check whether accessibility permissions are granted.
-
-    Returns ``"granted"`` or raises :exc:`PermissionDeniedError`.
-    """
+def locator(selector: str) -> Locator:
+    """Create a top-level Locator searching from the system root."""
 
 # ── Test helpers ─────────────────────────────────────────────────────────────
 
-def _make_test_app() -> App: ...
+def _make_test_locator() -> Locator: ...

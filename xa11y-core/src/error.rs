@@ -12,10 +12,6 @@ pub enum Error {
     #[error("Permission denied: {instructions}")]
     PermissionDenied { instructions: String },
 
-    /// The target application was not found or is no longer running.
-    #[error("Application not found: {target}")]
-    AppNotFound { target: String },
-
     /// No element matched the selector.
     #[error("No element matched selector: {selector}")]
     SelectorNotMatched { selector: String },

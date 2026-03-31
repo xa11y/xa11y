@@ -3,8 +3,7 @@
 //! These tests require a running test application (xa11y-test-app) with an
 //! accessibility provider. On Linux, this means Xvfb + D-Bus + AT-SPI2.
 //!
-//! Run with: ./run_integ_tests.sh  (Linux)
-//!           ./run_integ_tests_macos.sh  (macOS, when provider is implemented)
+//! Run with: cargo xtask test-integ
 //!
 //! All tests are `#[ignore]` — the harness script runs them with `--ignored`.
 
@@ -16,54 +15,29 @@ mod tests {
     use xa11y::*;
 
     // ════════════════════════════════════════════════════════════════
-    // Provider Operations (4 tests)
+    // Provider Operations (2 tests)
     // ════════════════════════════════════════════════════════════════
 
     #[test]
     #[ignore]
     fn check_permissions_granted() {
-        let status = xa11y::check_permissions().unwrap();
-        assert!(
-            matches!(status, PermissionStatus::Granted),
-            "Expected Granted, got: {:?}",
-            status
-        );
+        // Permissions are checked automatically by App constructors.
+        // If this fails with PermissionDenied, accessibility or screen
+        // recording permissions are not granted.
+        let _app = h::app_root();
     }
 
     #[test]
     #[ignore]
     fn apps_returns_nonempty() {
-        let apps = App::all(xa11y::provider().unwrap()).unwrap();
-        assert!(!apps.is_empty(), "apps should return at least one app");
-        let has_test_app = apps.iter().any(|a| a.name().contains("xa11y"));
+        let apps = App::list().unwrap();
+        assert!(!apps.is_empty(), "should find at least one application");
+        let has_test_app = apps.iter().any(|a| a.name.contains("xa11y"));
         assert!(
             has_test_app,
             "apps should include the test app. Apps: {:?}",
-            apps.iter().map(|a| a.name()).collect::<Vec<_>>()
+            apps.iter().map(|a| &a.name).collect::<Vec<_>>()
         );
-    }
-
-    #[test]
-    #[ignore]
-    fn app_from_pid() {
-        // Get the test app's PID via from_name, then verify from_pid works
-        let by_name = h::app_tree();
-        let pid = by_name.pid.expect("app tree should have a PID");
-        assert!(pid > 0);
-        let app = App::from_pid(xa11y::provider().unwrap(), pid).unwrap();
-        let root = app.elements().unwrap();
-        assert!(!root.subtree().is_empty());
-        assert_eq!(root.pid, Some(pid));
-    }
-
-    #[test]
-    #[ignore]
-    fn app_target_by_name() {
-        let root = h::app_tree();
-        assert!(!root.subtree().is_empty());
-        // App name is accessible via the App handle, not the element
-        let app = App::from_name(xa11y::provider().unwrap(), "xa11y").unwrap();
-        assert!(app.name().contains("xa11y"));
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -73,48 +47,48 @@ mod tests {
     #[test]
     #[ignore]
     fn tree_has_root_node() {
-        let root = h::app_tree();
+        let app = h::app_root();
         assert!(
-            root.role == Role::Application || root.role == Role::Window,
+            app.data.role == Role::Application || app.data.role == Role::Window,
             "Root role: {:?}",
-            root.role
+            app.data.role
         );
     }
 
     #[test]
     #[ignore]
     fn tree_has_window() {
-        let root = h::app_tree();
-        let windows = h::query(&root, "window").unwrap();
-        assert!(!windows.is_empty(), "No windows found. Tree:\n{}", root);
+        let app = h::app_root();
+        let windows = app.locator("window").elements().unwrap();
+        assert!(!windows.is_empty(), "No windows found. App: {}", app);
     }
 
     #[test]
     #[ignore]
     fn tree_has_buttons() {
-        let root = h::app_tree();
-        let buttons = h::query(&root, "button").unwrap();
+        let app = h::app_root();
+        let buttons = app.locator("button").elements().unwrap();
         assert!(
             buttons.len() >= 2,
-            "Expected >=2 buttons, found {}. Tree:\n{}",
+            "Expected >=2 buttons, found {}. App: {}",
             buttons.len(),
-            root
+            app
         );
     }
 
     #[test]
     #[ignore]
     fn tree_has_submit_button() {
-        let root = h::app_tree();
-        let submit = h::named(&root, "Submit");
+        let app = h::app_root();
+        let submit = h::named(&app, "Submit");
         assert_eq!(submit.role, Role::Button);
     }
 
     #[test]
     #[ignore]
     fn tree_has_cancel_button_disabled() {
-        let root = h::app_tree();
-        let cancel = h::named(&root, "Cancel");
+        let app = h::app_root();
+        let cancel = h::named(&app, "Cancel");
         // Cancel may have been enabled by a prior toggle test; just verify it exists as a button
         assert_eq!(cancel.role, Role::Button);
         // Check that the enabled state is a valid boolean (not that it's a specific value)
@@ -124,8 +98,8 @@ mod tests {
     #[test]
     #[ignore]
     fn tree_has_checkbox_unchecked() {
-        let root = h::app_tree();
-        let cb = h::named(&root, "I agree to terms");
+        let app = h::app_root();
+        let cb = h::named(&app, "I agree to terms");
         assert_eq!(cb.role, Role::CheckBox);
         // Checkbox may have been toggled by prior tests; just verify it has a checked state
         assert!(
@@ -137,39 +111,39 @@ mod tests {
     #[test]
     #[ignore]
     fn tree_has_text_entry_with_value() {
-        let root = h::app_tree();
+        let app = h::app_root();
         // Prior action tests (TypeText, SetValue) may have changed or cleared the value.
         // Just verify a text field exists (by role + name), value may or may not be present.
-        let text_elements: Vec<Element> = root
-            .subtree()
-            .into_iter()
-            .filter(|n| {
-                (n.role == Role::TextField || n.role == Role::TextArea)
-                    && (n.value.is_some() || n.name.as_deref() == Some("Name"))
-            })
-            .collect();
-        assert!(
-            !text_elements.is_empty(),
-            "Text entry not found. Tree:\n{}",
-            root
-        );
+        let text_elements = app
+            .locator(r#"[role="text_field"]"#)
+            .elements()
+            .unwrap_or_default();
+        let textarea_elements = app
+            .locator(r#"[role="text_area"]"#)
+            .elements()
+            .unwrap_or_default();
+        let has_text = text_elements
+            .iter()
+            .chain(textarea_elements.iter())
+            .any(|n| n.value.is_some() || n.name.as_deref() == Some("Name"));
+        assert!(has_text, "Text entry not found. App: {}", app);
     }
 
     #[test]
     #[ignore]
     fn tree_has_welcome_label() {
-        let root = h::app_tree();
+        let app = h::app_root();
         // On Linux/AT-SPI with AccessKit, Label nodes may not expose their text
         // through the Name property or Text interface. Look for the node by name
         // first, then fall back to checking that StaticText nodes exist.
-        let welcome = h::query(&root, r#"[name*="Welcome"]"#).unwrap();
+        let welcome = app.locator(r#"[name*="Welcome"]"#).elements().unwrap();
         if welcome.is_empty() {
             // Fall back: verify that static text nodes exist (labels are present even if unnamed)
-            let labels = h::query(&root, "static_text").unwrap();
+            let labels = app.locator("static_text").elements().unwrap();
             assert!(
                 !labels.is_empty(),
-                "No StaticText/label nodes found. Tree:\n{}",
-                root
+                "No StaticText/label nodes found. App: {}",
+                app
             );
         } else {
             assert!(
@@ -183,9 +157,9 @@ mod tests {
     #[test]
     #[ignore]
     fn tree_has_slider_at_50() {
-        let root = h::app_tree();
-        let sliders = h::query(&root, "slider").unwrap();
-        assert!(!sliders.is_empty(), "No sliders found. Tree:\n{}", root);
+        let app = h::app_root();
+        let sliders = app.locator("slider").elements().unwrap();
+        assert!(!sliders.is_empty(), "No sliders found. App: {}", app);
         // Slider value may have been changed by prior tests; just verify it has a numeric value
         assert!(sliders[0].value.is_some(), "Slider should have a value");
         let val: f64 = sliders[0].value.as_deref().unwrap().parse().unwrap_or(0.0);
@@ -199,59 +173,55 @@ mod tests {
     #[test]
     #[ignore]
     fn tree_has_progress_bar() {
-        let root = h::app_tree();
-        let progress = h::query(&root, "progress_bar").unwrap();
-        assert!(
-            !progress.is_empty(),
-            "No progress bars found. Tree:\n{}",
-            root
-        );
+        let app = h::app_root();
+        let progress = app.locator("progress_bar").elements().unwrap();
+        assert!(!progress.is_empty(), "No progress bars found. App: {}", app);
     }
 
     #[test]
     #[ignore]
     fn tree_has_radio_buttons() {
-        let root = h::app_tree();
-        let radios = h::query(&root, "radio_button").unwrap();
+        let app = h::app_root();
+        let radios = app.locator("radio_button").elements().unwrap();
         assert!(
             radios.len() >= 2,
-            "Expected >=2 radio buttons, found {}. Tree:\n{}",
+            "Expected >=2 radio buttons, found {}. App: {}",
             radios.len(),
-            root
+            app
         );
     }
 
     #[test]
     #[ignore]
     fn tree_has_combo_box() {
-        let root = h::app_tree();
-        let combos = h::query(&root, "combo_box").unwrap();
-        assert!(!combos.is_empty(), "ComboBox not found. Tree:\n{}", root);
+        let app = h::app_root();
+        let combos = app.locator("combo_box").elements().unwrap();
+        assert!(!combos.is_empty(), "ComboBox not found. App: {}", app);
     }
 
     #[test]
     #[ignore]
     fn tree_has_list_with_items() {
-        let root = h::app_tree();
-        let lists = h::query(&root, "list").unwrap();
-        let items = h::query(&root, "list_item").unwrap();
+        let app = h::app_root();
+        let lists = app.locator("list").elements().unwrap();
+        let items = app.locator("list_item").elements().unwrap();
         assert!(
             !lists.is_empty() || !items.is_empty(),
-            "Neither List nor ListItem found. Tree:\n{}",
-            root
+            "Neither List nor ListItem found. App: {}",
+            app
         );
     }
 
     #[test]
     #[ignore]
     fn tree_has_table_with_cells() {
-        let root = h::app_tree();
-        let tables = h::query(&root, "table").unwrap();
-        let cells = h::query(&root, "table_cell").unwrap();
+        let app = h::app_root();
+        let tables = app.locator("table").elements().unwrap();
+        let cells = app.locator("table_cell").elements().unwrap();
         assert!(
             !tables.is_empty() || !cells.is_empty(),
-            "Neither Table nor TableCell found. Tree:\n{}",
-            root
+            "Neither Table nor TableCell found. App: {}",
+            app
         );
     }
 
@@ -262,17 +232,17 @@ mod tests {
     #[test]
     #[ignore]
     fn role_menu_bar() {
-        let root = h::app_tree();
-        let nodes = h::query(&root, "menu_bar").unwrap();
-        assert!(!nodes.is_empty(), "MenuBar not found. Tree:\n{}", root);
+        let app = h::app_root();
+        let nodes = app.locator("menu_bar").elements().unwrap();
+        assert!(!nodes.is_empty(), "MenuBar not found. App: {}", app);
     }
 
     #[test]
     #[ignore]
     fn role_menu_item() {
-        let root = h::app_tree();
-        let nodes = h::query(&root, "menu_item").unwrap();
-        assert!(!nodes.is_empty(), "MenuItem not found. Tree:\n{}", root);
+        let app = h::app_root();
+        let nodes = app.locator("menu_item").elements().unwrap();
+        assert!(!nodes.is_empty(), "MenuItem not found. App: {}", app);
         let has_file = nodes.iter().any(|n| n.name.as_deref() == Some("File"));
         assert!(has_file, "File menu item not found");
     }
@@ -280,187 +250,173 @@ mod tests {
     #[test]
     #[ignore]
     fn role_toolbar() {
-        let root = h::app_tree();
-        let nodes = h::query(&root, "toolbar").unwrap();
-        assert!(!nodes.is_empty(), "Toolbar not found. Tree:\n{}", root);
+        let app = h::app_root();
+        let nodes = app.locator("toolbar").elements().unwrap();
+        assert!(!nodes.is_empty(), "Toolbar not found. App: {}", app);
     }
 
     #[test]
     #[ignore]
     fn role_tab_and_tab_group() {
-        let root = h::app_tree();
-        let tab_groups = h::query(&root, "tab_group").unwrap();
-        let tabs = h::query(&root, "tab").unwrap();
+        let app = h::app_root();
+        let tab_groups = app.locator("tab_group").elements().unwrap();
+        let tabs = app.locator("tab").elements().unwrap();
         assert!(
             !tab_groups.is_empty() || !tabs.is_empty(),
-            "Neither TabGroup nor Tab found. Tree:\n{}",
-            root
+            "Neither TabGroup nor Tab found. App: {}",
+            app
         );
     }
 
     #[test]
     #[ignore]
     fn role_separator() {
-        let root = h::app_tree();
-        let seps = h::query(&root, "separator").unwrap();
-        assert!(!seps.is_empty(), "Separator not found. Tree:\n{}", root);
+        let app = h::app_root();
+        let seps = app.locator("separator").elements().unwrap();
+        assert!(!seps.is_empty(), "Separator not found. App: {}", app);
     }
 
     #[test]
     #[ignore]
     fn role_image() {
-        let root = h::app_tree();
-        let images = h::query(&root, "image").unwrap();
-        assert!(!images.is_empty(), "Image not found. Tree:\n{}", root);
+        let app = h::app_root();
+        let images = app.locator("image").elements().unwrap();
+        assert!(!images.is_empty(), "Image not found. App: {}", app);
     }
 
     #[test]
     #[ignore]
     fn role_link() {
-        let root = h::app_tree();
-        let links = h::query(&root, "link").unwrap();
-        assert!(!links.is_empty(), "Link not found. Tree:\n{}", root);
+        let app = h::app_root();
+        let links = app.locator("link").elements().unwrap();
+        assert!(!links.is_empty(), "Link not found. App: {}", app);
     }
 
     #[test]
     #[ignore]
     fn role_tree_item() {
-        let root = h::app_tree();
-        let items = h::query(&root, "tree_item").unwrap();
-        assert!(!items.is_empty(), "TreeItem not found. Tree:\n{}", root);
+        let app = h::app_root();
+        let items = app.locator("tree_item").elements().unwrap();
+        assert!(!items.is_empty(), "TreeItem not found. App: {}", app);
     }
 
     #[test]
     #[ignore]
     fn role_dialog() {
-        let root = h::app_tree();
-        let dialogs = h::query(&root, "dialog").unwrap();
-        assert!(!dialogs.is_empty(), "Dialog not found. Tree:\n{}", root);
+        let app = h::app_root();
+        let dialogs = app.locator("dialog").elements().unwrap();
+        assert!(!dialogs.is_empty(), "Dialog not found. App: {}", app);
     }
 
     #[test]
     #[ignore]
     fn role_alert() {
-        let root = h::app_tree();
-        let alerts = h::query(&root, "alert").unwrap();
-        assert!(!alerts.is_empty(), "Alert not found. Tree:\n{}", root);
+        let app = h::app_root();
+        let alerts = app.locator("alert").elements().unwrap();
+        assert!(!alerts.is_empty(), "Alert not found. App: {}", app);
     }
 
     #[test]
     #[ignore]
     fn role_heading() {
-        let root = h::app_tree();
-        let headings = h::query(&root, "heading").unwrap();
-        assert!(!headings.is_empty(), "Heading not found. Tree:\n{}", root);
+        let app = h::app_root();
+        let headings = app.locator("heading").elements().unwrap();
+        assert!(!headings.is_empty(), "Heading not found. App: {}", app);
     }
 
     #[test]
     #[ignore]
     fn role_scroll_bar() {
-        let root = h::app_tree();
-        let scrollbars = h::query(&root, "scroll_bar").unwrap();
-        assert!(
-            !scrollbars.is_empty(),
-            "ScrollBar not found. Tree:\n{}",
-            root
-        );
+        let app = h::app_root();
+        let scrollbars = app.locator("scroll_bar").elements().unwrap();
+        assert!(!scrollbars.is_empty(), "ScrollBar not found. App: {}", app);
     }
 
     #[test]
     #[ignore]
     fn role_split_group() {
-        let root = h::app_tree();
+        let app = h::app_root();
         // SplitGroup may map through AT-SPI as Group due to accesskit's Pane role
-        let node = h::query(&root, r#"[name*="SplitGroup"]"#).unwrap();
-        assert!(
-            !node.is_empty(),
-            "SplitGroup node not found. Tree:\n{}",
-            root
-        );
+        let node = app.locator(r#"[name*="SplitGroup"]"#).elements().unwrap();
+        assert!(!node.is_empty(), "SplitGroup node not found. App: {}", app);
     }
 
     #[test]
     #[ignore]
     fn role_static_text() {
-        let root = h::app_tree();
-        let labels = h::query(&root, "static_text").unwrap();
-        assert!(!labels.is_empty(), "StaticText not found. Tree:\n{}", root);
+        let app = h::app_root();
+        let labels = app.locator("static_text").elements().unwrap();
+        assert!(!labels.is_empty(), "StaticText not found. App: {}", app);
     }
 
     // ════════════════════════════════════════════════════════════════
-    // Tree Methods (8 tests)
+    // Tree Methods (5 tests)
     // ════════════════════════════════════════════════════════════════
-
-    #[test]
-    #[ignore]
-    fn tree_get_by_id() {
-        let root = h::app_tree();
-        // Root element is always index 0
-        assert_eq!(root.index, 0);
-        assert_eq!(root.role, root.role);
-    }
-
-    #[test]
-    #[ignore]
-    fn tree_get_invalid_returns_none() {
-        let root = h::app_tree();
-        // Subtree length is bounded; there's no element beyond it
-        let subtree = root.subtree();
-        assert!(!subtree.is_empty());
-    }
-
-    #[test]
-    #[ignore]
-    fn tree_iter_all_nodes() {
-        let root = h::app_tree();
-        assert!(root.subtree().len() > 1);
-    }
 
     #[test]
     #[ignore]
     fn tree_children_of_root() {
-        let root = h::app_tree();
-        let children = root.children();
+        let app = h::app_root();
+        let children = app.children().unwrap();
         assert!(!children.is_empty(), "Root should have children");
-        for child in &children {
-            let parent = child.parent();
-            assert!(parent.is_some(), "Child should have a parent");
+        // Verify grandchildren have parents (direct children of app root
+        // may report None parent on AT-SPI where the parent is the registry root).
+        if !children.is_empty() {
+            let grandchildren = children[0].children().unwrap();
+            for gc in &grandchildren {
+                let parent = gc.parent().unwrap();
+                assert!(parent.is_some(), "Grandchild should have parent");
+            }
         }
     }
 
     #[test]
     #[ignore]
-    fn tree_subtree_from_root() {
-        let root = h::app_tree();
-        let subtree = root.subtree();
-        assert_eq!(subtree.len(), root.subtree().len());
-    }
-
-    #[test]
-    #[ignore]
-    fn tree_subtree_of_leaf() {
-        let root = h::app_tree();
-        let leaf = root.subtree().into_iter().find(|n| n.children().is_empty());
-        if let Some(leaf) = leaf {
-            let st = leaf.subtree();
-            assert_eq!(st.len(), 1);
+    fn tree_children_of_leaf() {
+        let app = h::app_root();
+        // Find a leaf node (e.g. a static text or button that has no children)
+        let buttons = app.locator("button").elements().unwrap();
+        for btn in &buttons {
+            let children = btn.children().unwrap();
+            if children.is_empty() {
+                // Found a leaf — verify children returns empty vec, not error
+                assert!(btn.children().unwrap().is_empty());
+                return;
+            }
         }
+        // If all buttons have children, that's fine too — just verify children() works
     }
 
     #[test]
     #[ignore]
     fn tree_is_not_empty() {
-        let root = h::app_tree();
-        assert!(!root.subtree().is_empty());
+        let app = h::app_root();
+        let children = app.children().unwrap();
+        assert!(!children.is_empty(), "Root should have at least one child");
     }
 
     #[test]
     #[ignore]
     fn tree_display_readable() {
-        let root = h::app_tree();
-        let display = root.to_string();
+        let app = h::app_root();
+        let display = app.to_string();
         assert!(!display.is_empty());
-        assert!(display.contains("[0]"), "Display should start with [0]");
+        // Display should include the app name
+        assert!(
+            display.contains(&app.name),
+            "Display should include app name: {}",
+            display
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn tree_locator_finds_elements() {
+        let app = h::app_root();
+        let buttons = app.locator("button").elements().unwrap();
+        assert!(buttons.len() >= 2, "Expected >=2 buttons via locator");
+        let count = app.locator("button").count().unwrap();
+        assert_eq!(count, buttons.len());
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -470,8 +426,8 @@ mod tests {
     #[test]
     #[ignore]
     fn element_description_on_image() {
-        let root = h::app_tree();
-        let images = h::query(&root, "image").unwrap();
+        let app = h::app_root();
+        let images = app.locator("image").elements().unwrap();
         if !images.is_empty() {
             let img = images.iter().find(|n| {
                 n.name.as_deref() == Some("Info Icon")
@@ -487,8 +443,8 @@ mod tests {
     #[test]
     #[ignore]
     fn element_bounds_present() {
-        let root = h::app_tree();
-        let submit = h::named(&root, "Submit");
+        let app = h::app_root();
+        let submit = h::named(&app, "Submit");
         assert!(submit.bounds.is_some(), "Submit should have bounds");
         let b = submit.bounds.unwrap();
         assert!(b.width > 0, "width > 0");
@@ -500,22 +456,22 @@ mod tests {
     #[test]
     #[ignore]
     fn element_bounds_none_for_non_component_elements() {
-        let root = h::app_tree();
+        let app = h::app_root();
         // Application element never implements Component
         assert!(
-            root.bounds.is_none(),
+            app.data.bounds.is_none(),
             "Application root should not have bounds (no Component interface)"
         );
         // But a visible widget like a button should still have bounds
-        let submit = h::named(&root, "Submit");
+        let submit = h::named(&app, "Submit");
         assert!(submit.bounds.is_some(), "Submit button should have bounds");
     }
 
     #[test]
     #[ignore]
     fn element_actions_list_on_button() {
-        let root = h::app_tree();
-        let submit = h::named(&root, "Submit");
+        let app = h::app_root();
+        let submit = h::named(&app, "Submit");
         assert!(!submit.actions.is_empty());
         assert!(
             submit.actions.contains(&Action::Press),
@@ -527,8 +483,8 @@ mod tests {
     #[test]
     #[ignore]
     fn element_children_ids_valid() {
-        let root = h::app_tree();
-        let children = root.children();
+        let app = h::app_root();
+        let children = app.children().unwrap();
         assert!(!children.is_empty());
         for child in &children {
             // Verify child is a valid element (role may be Unknown for unrecognized elements)
@@ -538,16 +494,27 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn node_parent_field() {
-        let root = h::app_tree();
-        assert!(root.parent().is_none(), "Root should have no parent");
-        let non_root = root
-            .subtree()
-            .into_iter()
-            .find(|n| n.parent_index.is_some());
-        if let Some(n) = non_root {
-            assert!(n.parent().is_some(), "Non-root should have parent");
+    fn element_parent_field() {
+        let app = h::app_root();
+        // Direct children of app root may report parent as None on some platforms
+        // (AT-SPI maps parent to registry root which we treat as None).
+        // Test parent on a deeper element instead.
+        let children = app.children().unwrap();
+        if !children.is_empty() {
+            let grandchildren = children[0].children().unwrap();
+            if !grandchildren.is_empty() {
+                let parent = grandchildren[0].parent().unwrap();
+                assert!(parent.is_some(), "Grandchild should have parent");
+            }
         }
+    }
+
+    #[test]
+    #[ignore]
+    fn element_handle_nonzero() {
+        let app = h::app_root();
+        // The opaque handle should be non-zero for a valid element
+        assert!(app.data.handle != 0, "Root handle should be nonzero");
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -557,16 +524,16 @@ mod tests {
     #[test]
     #[ignore]
     fn state_enabled_default() {
-        let root = h::app_tree();
-        let submit = h::named(&root, "Submit");
+        let app = h::app_root();
+        let submit = h::named(&app, "Submit");
         assert!(submit.states.enabled, "Submit should be enabled");
     }
 
     #[test]
     #[ignore]
     fn state_disabled_on_cancel() {
-        let root = h::app_tree();
-        let cancel = h::named(&root, "Cancel");
+        let app = h::app_root();
+        let cancel = h::named(&app, "Cancel");
         // Some AT-SPI adapters (AccessKit) may not expose disabled state properly;
         // in that case, the toggle test (action_toggle_enables_cancel) verifies
         // the enabled state can change. Here we just verify the node exists and
@@ -585,22 +552,22 @@ mod tests {
     #[test]
     #[ignore]
     fn state_visible_on_shown_widget() {
-        let root = h::app_tree();
-        let submit = h::named(&root, "Submit");
+        let app = h::app_root();
+        let submit = h::named(&app, "Submit");
         assert!(submit.states.visible, "Submit should be visible");
     }
 
     #[test]
     #[ignore]
     fn state_focused_after_focus_action() {
-        let root = h::app_tree();
-        let submit = h::named(&root, "Submit");
+        let app = h::app_root();
+        let submit = h::named(&app, "Submit");
         // Focus action may succeed or fail depending on AT-SPI adapter support
         let result = h::try_act(&submit, Action::Focus);
         if result.is_ok() {
             std::thread::sleep(std::time::Duration::from_millis(100));
-            let root2 = h::app_tree();
-            let submit2 = h::named(&root2, "Submit");
+            let app2 = h::app_root();
+            let submit2 = h::named(&app2, "Submit");
             // Some adapters may not reflect focused state change
             if !submit2.states.focused {
                 println!("Focus action succeeded but focused state not reflected (AT-SPI adapter limitation)");
@@ -613,16 +580,16 @@ mod tests {
     #[test]
     #[ignore]
     fn state_checked_off_on_checkbox() {
-        let root = h::app_tree();
-        let cb = h::named(&root, "I agree to terms");
+        let app = h::app_root();
+        let cb = h::named(&app, "I agree to terms");
         assert_eq!(cb.states.checked, Some(Toggled::Off));
     }
 
     #[test]
     #[ignore]
     fn state_checked_on_radio() {
-        let root = h::app_tree();
-        let radios = h::query(&root, "radio_button").unwrap();
+        let app = h::app_root();
+        let radios = app.locator("radio_button").elements().unwrap();
         let opt_a = radios
             .iter()
             .find(|n| n.name.as_deref() == Some("Option A"));
@@ -633,22 +600,16 @@ mod tests {
     #[test]
     #[ignore]
     fn state_expanded_collapsed_on_expander() {
-        let root = h::app_tree();
-        // Look for expandable elements or expander by name
-        let expandable: Vec<Element> = root
-            .subtree()
-            .into_iter()
-            .filter(|n| n.states.expanded.is_some())
-            .collect();
-        let expander_by_name = h::query(&root, r#"[name*="Expander"]"#).unwrap();
+        let app = h::app_root();
+        // Look for expandable elements by name
+        let expander_by_name = app.locator(r#"[name*="Expander"]"#).elements().unwrap();
         // On macOS, GenericContainer with expanded state may not expose AXExpanded.
         // The expand/collapse actions still work (tested by action_expand_collapse).
-        if expandable.is_empty() && expander_by_name.is_empty() {
+        if expander_by_name.is_empty() {
             // Verify expand/collapse actions work even if state isn't reported
             println!(
-                "No expandable elements found (tree has {} elements). \
-                 Expand/collapse actions tested separately.",
-                root.subtree().len()
+                "No expandable elements found by name. \
+                 Expand/collapse actions tested separately."
             );
         }
     }
@@ -656,30 +617,34 @@ mod tests {
     #[test]
     #[ignore]
     fn state_editable_on_text_field() {
-        let root = h::app_tree();
+        let app = h::app_root();
         // Prior action tests (TypeText, SetValue) may have changed or cleared the value.
-        // Find text field by role + name, not by value presence.
-        let text: Vec<Element> = root
-            .subtree()
-            .into_iter()
-            .filter(|n| {
-                (n.role == Role::TextField || n.role == Role::TextArea)
-                    && (n.value.is_some() || n.name.as_deref() == Some("Name"))
-            })
-            .collect();
-        assert!(!text.is_empty(), "Text entry not found. Tree:\n{}", root);
-        assert!(text[0].states.editable, "Text entry should be editable");
+        // Find text field by name.
+        let text_fields = app.locator(r#"[name="Name"]"#).elements().unwrap();
+        if text_fields.is_empty() {
+            // Fall back to finding any text field
+            let fields = app.locator("text_field").elements().unwrap();
+            let areas = app.locator("text_area").elements().unwrap();
+            let all_text: Vec<&Element> = fields.iter().chain(areas.iter()).collect();
+            assert!(!all_text.is_empty(), "Text entry not found. App: {}", app);
+            assert!(all_text[0].states.editable, "Text entry should be editable");
+        } else {
+            assert!(
+                text_fields[0].states.editable,
+                "Text entry should be editable"
+            );
+        }
     }
 
     #[test]
     #[ignore]
     fn state_selected_on_list_item() {
-        let root = h::app_tree();
+        let app = h::app_root();
         // Click Apple to select it
-        let apple = h::named(&root, "Apple");
-        let root2 = h::act(&apple, Action::Press);
-        // Verify selection (may come through as Click → Select depending on AT-SPI mapping)
-        let apple2 = h::named(&root2, "Apple");
+        let apple = h::named(&app, "Apple");
+        let app2 = h::act(&apple, Action::Press);
+        // Verify selection (may come through as Click -> Select depending on AT-SPI mapping)
+        let apple2 = h::named(&app2, "Apple");
         // Selection might be reported differently; at least verify the action didn't crash
         println!(
             "Apple selected state after Click: {:?}",
@@ -694,8 +659,8 @@ mod tests {
     #[test]
     #[ignore]
     fn sel_by_role() {
-        let root = h::app_tree();
-        let buttons = h::query(&root, "button").unwrap();
+        let app = h::app_root();
+        let buttons = app.locator("button").elements().unwrap();
         assert!(buttons.len() >= 2);
         for b in &buttons {
             assert_eq!(b.role, Role::Button);
@@ -705,24 +670,24 @@ mod tests {
     #[test]
     #[ignore]
     fn sel_by_exact_name() {
-        let root = h::app_tree();
-        let submit = h::one(&root, r#"button[name="Submit"]"#);
+        let app = h::app_root();
+        let submit = h::one(&app, r#"button[name="Submit"]"#);
         assert_eq!(submit.role, Role::Button);
     }
 
     #[test]
     #[ignore]
     fn sel_by_role_and_name() {
-        let root = h::app_tree();
-        let results = h::query(&root, r#"button[name="Cancel"]"#).unwrap();
+        let app = h::app_root();
+        let results = app.locator(r#"button[name="Cancel"]"#).elements().unwrap();
         assert_eq!(results.len(), 1);
     }
 
     #[test]
     #[ignore]
     fn sel_name_contains() {
-        let root = h::app_tree();
-        let results = h::query(&root, r#"[name*="agree"]"#).unwrap();
+        let app = h::app_root();
+        let results = app.locator(r#"[name*="agree"]"#).elements().unwrap();
         assert!(
             !results.is_empty(),
             "Should find element with 'agree' in name"
@@ -732,12 +697,12 @@ mod tests {
     #[test]
     #[ignore]
     fn sel_name_starts_with() {
-        let root = h::app_tree();
+        let app = h::app_root();
         // Try "Welc" first (Welcome label), fall back to "Sub" (Submit button)
-        let results = h::query(&root, r#"[name^="Welc"]"#).unwrap();
+        let results = app.locator(r#"[name^="Welc"]"#).elements().unwrap();
         if results.is_empty() {
             // Welcome label may not be named on some AT-SPI adapters; use Submit instead
-            let results = h::query(&root, r#"[name^="Sub"]"#).unwrap();
+            let results = app.locator(r#"[name^="Sub"]"#).elements().unwrap();
             assert!(!results.is_empty());
             assert!(results[0]
                 .name
@@ -758,12 +723,12 @@ mod tests {
     #[test]
     #[ignore]
     fn sel_name_ends_with() {
-        let root = h::app_tree();
+        let app = h::app_root();
         // "xa11y" suffix may be in the window title or app name
-        let results = h::query(&root, r#"[name$="xa11y"]"#).unwrap();
+        let results = app.locator(r#"[name$="xa11y"]"#).elements().unwrap();
         if results.is_empty() {
             // Fall back to a known name suffix
-            let results = h::query(&root, r#"[name$="App"]"#).unwrap();
+            let results = app.locator(r#"[name$="App"]"#).elements().unwrap();
             assert!(
                 !results.is_empty(),
                 "Should find at least one element with name ending in 'App'"
@@ -774,17 +739,13 @@ mod tests {
     #[test]
     #[ignore]
     fn sel_value_attribute() {
-        let root = h::app_tree();
+        let app = h::app_root();
         // Try "Red" (ComboBox value), then fall back to any value attribute match.
-        // The slider value may have been changed by prior tests, so use a flexible match.
-        let results = h::query(&root, r#"[value*="Red"]"#).unwrap();
+        let results = app.locator(r#"[value*="Red"]"#).elements().unwrap();
         if results.is_empty() {
             // ComboBox value may not be exposed on some AT-SPI adapters.
-            // Verify value selector works with any node that has a value.
-            let has_value = root.subtree().iter().any(|n| n.value.is_some());
-            assert!(has_value, "At least one node should have a value");
             // Try matching against progress bar value "0.75"
-            let results = h::query(&root, r#"[value*="0.75"]"#).unwrap();
+            let results = app.locator(r#"[value*="0.75"]"#).elements().unwrap();
             assert!(
                 !results.is_empty(),
                 "Should find element with value containing '0.75' (ProgressBar)"
@@ -795,8 +756,8 @@ mod tests {
     #[test]
     #[ignore]
     fn sel_descendant_combinator() {
-        let root = h::app_tree();
-        let results = h::query(&root, "window button").unwrap();
+        let app = h::app_root();
+        let results = app.locator("window button").elements().unwrap();
         assert!(!results.is_empty());
         for r in &results {
             assert_eq!(r.role, Role::Button);
@@ -806,8 +767,8 @@ mod tests {
     #[test]
     #[ignore]
     fn sel_child_combinator() {
-        let root = h::app_tree();
-        let results = h::query(&root, "application > window").unwrap();
+        let app = h::app_root();
+        let results = app.locator("application > window").elements().unwrap();
         // May or may not match depending on tree structure, but should not error
         for r in &results {
             assert_eq!(r.role, Role::Window);
@@ -817,16 +778,16 @@ mod tests {
     #[test]
     #[ignore]
     fn sel_nth_pseudo() {
-        let root = h::app_tree();
-        let first = h::query(&root, "button:nth(1)").unwrap();
+        let app = h::app_root();
+        let first = app.locator("button:nth(1)").elements().unwrap();
         assert_eq!(first.len(), 1);
     }
 
     #[test]
     #[ignore]
     fn sel_role_attribute() {
-        let root = h::app_tree();
-        let results = h::query(&root, r#"[role="button"]"#).unwrap();
+        let app = h::app_root();
+        let results = app.locator(r#"[role="button"]"#).elements().unwrap();
         assert!(!results.is_empty());
         for r in &results {
             assert_eq!(r.role, Role::Button);
@@ -836,8 +797,11 @@ mod tests {
     #[test]
     #[ignore]
     fn sel_complex_chain() {
-        let root = h::app_tree();
-        let results = h::query(&root, r#"window button[name*="Sub"]"#).unwrap();
+        let app = h::app_root();
+        let results = app
+            .locator(r#"window button[name*="Sub"]"#)
+            .elements()
+            .unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0].role, Role::Button);
         assert!(results[0].name.as_deref().unwrap().contains("Sub"));
@@ -846,16 +810,16 @@ mod tests {
     #[test]
     #[ignore]
     fn raw_data_always_present() {
-        let _root = h::app_tree();
+        let _app = h::app_root();
         #[cfg(target_os = "linux")]
-        match &_root.raw {
+        match &_app.data.raw {
             RawPlatformData::Linux { atspi_role, .. } => {
                 assert!(!atspi_role.is_empty());
             }
             _ => panic!("Expected Linux raw data"),
         }
         #[cfg(target_os = "macos")]
-        match &_root.raw {
+        match &_app.data.raw {
             RawPlatformData::MacOS { ax_role, .. } => {
                 assert!(!ax_role.is_empty());
             }
@@ -870,8 +834,8 @@ mod tests {
     #[test]
     #[ignore]
     fn action_press_button() {
-        let root = h::app_tree();
-        let submit = h::named(&root, "Submit");
+        let app = h::app_root();
+        let submit = h::named(&app, "Submit");
         let result = h::try_act(&submit, Action::Press);
         match result {
             Ok(()) => println!("Submit pressed"),
@@ -882,12 +846,12 @@ mod tests {
     #[test]
     #[ignore]
     fn action_toggle_checkbox() {
-        let root = h::app_tree();
-        let cbs = h::query(&root, "check_box").unwrap();
+        let app = h::app_root();
+        let cbs = app.locator("check_box").elements().unwrap();
         assert!(!cbs.is_empty(), "No checkbox");
         let initial = cbs[0].states.checked;
-        let root2 = h::act(&cbs[0], Action::Press);
-        let cb2 = h::query(&root2, "check_box").unwrap();
+        let app2 = h::act(&cbs[0], Action::Press);
+        let cb2 = app2.locator("check_box").elements().unwrap();
         if !cb2.is_empty() {
             assert_ne!(
                 cb2[0].states.checked, initial,
@@ -900,12 +864,12 @@ mod tests {
     #[test]
     #[ignore]
     fn action_toggle_enables_cancel() {
-        let root = h::app_tree();
-        let was_enabled = h::named(&root, "Cancel").states.enabled;
-        let cbs = h::query(&root, "check_box").unwrap();
+        let app = h::app_root();
+        let was_enabled = h::named(&app, "Cancel").states.enabled;
+        let cbs = app.locator("check_box").elements().unwrap();
         assert!(!cbs.is_empty(), "No checkbox");
-        let root2 = h::act(&cbs[0], Action::Press);
-        let cancel2 = h::named(&root2, "Cancel");
+        let app2 = h::act(&cbs[0], Action::Press);
+        let cancel2 = h::named(&app2, "Cancel");
         // Some AT-SPI adapters may not reflect enabled state changes.
         // If was_enabled is already true (adapter doesn't report disabled), skip the assertion.
         if !was_enabled {
@@ -919,16 +883,9 @@ mod tests {
     #[test]
     #[ignore]
     fn action_focus_text_entry() {
-        let root = h::app_tree();
-        // Find text entry by name "Name" (AT-SPI may not expose the string value)
-        let text = root
-            .subtree()
-            .into_iter()
-            .find(|n| {
-                (n.role == Role::TextField || n.role == Role::TextArea)
-                    && (n.value.as_deref() == Some("John Doe") || n.name.as_deref() == Some("Name"))
-            })
-            .expect("Text entry not found");
+        let app = h::app_root();
+        // Find text entry by name "Name"
+        let text = find_text_entry(&app);
         let result = h::try_act(&text, Action::Focus);
         assert!(result.is_ok(), "Focus should succeed: {:?}", result.err());
     }
@@ -936,16 +893,8 @@ mod tests {
     #[test]
     #[ignore]
     fn action_set_value_text() {
-        let root = h::app_tree();
-        // Find text entry by name "Name" (AT-SPI may not expose the string value)
-        let text = root
-            .subtree()
-            .into_iter()
-            .find(|n| {
-                (n.role == Role::TextField || n.role == Role::TextArea)
-                    && (n.value.as_deref() == Some("John Doe") || n.name.as_deref() == Some("Name"))
-            })
-            .expect("Text entry not found");
+        let app = h::app_root();
+        let text = find_text_entry(&app);
         match h::try_act_with(
             &text,
             Action::SetValue,
@@ -953,13 +902,13 @@ mod tests {
         ) {
             Ok(()) => {
                 std::thread::sleep(std::time::Duration::from_millis(300));
-                let root2 = h::app_tree();
+                let app2 = h::app_root();
                 // Value may or may not be reflected via AT-SPI depending on adapter
-                let updated = root2
-                    .subtree()
-                    .into_iter()
-                    .find(|n| n.value.as_deref() == Some("Jane Smith"));
-                if updated.is_none() {
+                let updated = app2
+                    .locator(r#"[value="Jane Smith"]"#)
+                    .elements()
+                    .unwrap_or_default();
+                if updated.is_empty() {
                     println!("SetValue succeeded but value not reflected in tree (AT-SPI adapter limitation)");
                 }
             }
@@ -971,8 +920,8 @@ mod tests {
     #[test]
     #[ignore]
     fn action_set_value_numeric() {
-        let root = h::app_tree();
-        let sliders = h::query(&root, "slider").unwrap();
+        let app = h::app_root();
+        let sliders = app.locator("slider").elements().unwrap();
         assert!(!sliders.is_empty());
         let result = h::try_act_with(
             &sliders[0],
@@ -981,8 +930,8 @@ mod tests {
         );
         assert!(result.is_ok(), "SetValue numeric: {:?}", result.err());
         std::thread::sleep(std::time::Duration::from_millis(300));
-        let root2 = h::app_tree();
-        let s2 = h::query(&root2, "slider").unwrap();
+        let app2 = h::app_root();
+        let s2 = app2.locator("slider").elements().unwrap();
         if !s2.is_empty() {
             if let Some(v) = &s2[0].value {
                 let val: f64 = v.parse().unwrap_or(0.0);
@@ -998,24 +947,17 @@ mod tests {
     #[test]
     #[ignore]
     fn action_increment_spinner() {
-        let root = h::app_tree();
-        // Find spin button (maps to TextField on AT-SPI)
-        let spin = root
-            .subtree()
-            .into_iter()
-            .find(|n| {
-                n.role == Role::TextField
-                    && n.value.is_some()
-                    && n.value.as_deref().unwrap_or("").parse::<f64>().is_ok()
-            })
-            .or_else(|| h::query(&root, "slider").unwrap().first().cloned());
+        let app = h::app_root();
+        // Find spin button or slider with a numeric value
+        let sliders = app.locator("slider").elements().unwrap();
+        let spin = sliders.first();
         if let Some(spin) = spin {
             let initial: f64 = spin.value.as_deref().unwrap_or("0").parse().unwrap_or(0.0);
-            let result = h::try_act(&spin, Action::Increment);
+            let result = h::try_act(spin, Action::Increment);
             if result.is_ok() {
                 std::thread::sleep(std::time::Duration::from_millis(300));
-                let root2 = h::app_tree();
-                if let Some(s2) = h::query(&root2, "slider").unwrap().first() {
+                let app2 = h::app_root();
+                if let Some(s2) = app2.locator("slider").elements().unwrap().first() {
                     if let Some(v) = &s2.value {
                         let new_val: f64 = v.parse().unwrap_or(initial);
                         assert!(
@@ -1033,23 +975,16 @@ mod tests {
     #[test]
     #[ignore]
     fn action_decrement_spinner() {
-        let root = h::app_tree();
-        let spin = root
-            .subtree()
-            .into_iter()
-            .find(|n| {
-                n.role == Role::TextField
-                    && n.value.is_some()
-                    && n.value.as_deref().unwrap_or("").parse::<f64>().is_ok()
-            })
-            .or_else(|| h::query(&root, "slider").unwrap().first().cloned());
+        let app = h::app_root();
+        let sliders = app.locator("slider").elements().unwrap();
+        let spin = sliders.first();
         if let Some(spin) = spin {
             let before: f64 = spin.value.as_deref().unwrap_or("0").parse().unwrap_or(0.0);
-            let result = h::try_act(&spin, Action::Decrement);
+            let result = h::try_act(spin, Action::Decrement);
             if result.is_ok() {
                 std::thread::sleep(std::time::Duration::from_millis(300));
-                let root2 = h::app_tree();
-                if let Some(s2) = h::query(&root2, "slider").unwrap().first() {
+                let app2 = h::app_root();
+                if let Some(s2) = app2.locator("slider").elements().unwrap().first() {
                     if let Some(v) = &s2.value {
                         let after: f64 = v.parse().unwrap_or(before);
                         assert!(
@@ -1067,54 +1002,36 @@ mod tests {
     #[test]
     #[ignore]
     fn action_expand_collapse() {
-        let root = h::app_tree();
-        let expander = root
-            .subtree()
+        let app = h::app_root();
+        let expander = app
+            .locator(r#"[name*="Expander"]"#)
+            .elements()
+            .unwrap()
             .into_iter()
-            .find(|n| n.states.expanded.is_some())
-            .or_else(|| {
-                h::query(&root, r#"[name*="Expander"]"#)
-                    .unwrap()
-                    .first()
-                    .cloned()
-            })
-            .or_else(|| {
-                h::query(&root, r#"[name*="More Details"]"#)
-                    .unwrap()
-                    .first()
-                    .cloned()
-            });
+            .next();
         if let Some(node) = expander {
             // Expand
-            if let Ok(()) = h::try_act(&node, Action::Expand) {
+            if h::try_act(&node, Action::Expand).is_ok() {
                 std::thread::sleep(std::time::Duration::from_millis(300));
-                let root2 = h::app_tree();
-                let n2 = h::query(&root2, r#"[name*="Expander"]"#)
+                let app2 = h::app_root();
+                let n2 = app2
+                    .locator(r#"[name*="Expander"]"#)
+                    .elements()
                     .unwrap()
-                    .first()
-                    .cloned()
-                    .or_else(|| {
-                        root2
-                            .subtree()
-                            .into_iter()
-                            .find(|n| n.states.expanded.is_some())
-                    });
+                    .into_iter()
+                    .next();
                 if let Some(n) = n2 {
                     if n.states.expanded == Some(true) {
                         // Collapse
-                        if let Ok(()) = h::try_act(&n, Action::Collapse) {
+                        if h::try_act(&n, Action::Collapse).is_ok() {
                             std::thread::sleep(std::time::Duration::from_millis(300));
-                            let root3 = h::app_tree();
-                            let n3 = h::query(&root3, r#"[name*="Expander"]"#)
+                            let app3 = h::app_root();
+                            let n3 = app3
+                                .locator(r#"[name*="Expander"]"#)
+                                .elements()
                                 .unwrap()
-                                .first()
-                                .cloned()
-                                .or_else(|| {
-                                    root3
-                                        .subtree()
-                                        .into_iter()
-                                        .find(|n| n.states.expanded.is_some())
-                                });
+                                .into_iter()
+                                .next();
                             if let Some(n) = n3 {
                                 assert_eq!(n.states.expanded, Some(false));
                             }
@@ -1128,8 +1045,8 @@ mod tests {
     #[test]
     #[ignore]
     fn action_select_list_item() {
-        let root = h::app_tree();
-        let apple = h::query(&root, r#"[name*="Apple"]"#).unwrap();
+        let app = h::app_root();
+        let apple = app.locator(r#"[name*="Apple"]"#).elements().unwrap();
         if !apple.is_empty() {
             let _ = h::try_act(&apple[0], Action::Press);
             // Selection verified by not crashing; state_selected_on_list_item tests the state
@@ -1143,27 +1060,27 @@ mod tests {
     #[test]
     #[ignore]
     fn nesting_deep_tree_traversal() {
-        let root = h::app_tree();
-        // Query inside table → row → cell
-        let cells = h::query(&root, r#"[name*="Alice"]"#).unwrap();
-        assert!(!cells.is_empty(), "Alice cell not found. Tree:\n{}", root);
-        // Verify nesting: cell's parent should be a row-like node
-        let parent = cells[0].parent();
+        let app = h::app_root();
+        // Query inside table -> row -> cell
+        let cells = app.locator(r#"[name*="Alice"]"#).elements().unwrap();
+        assert!(!cells.is_empty(), "Alice cell not found. App: {}", app);
+        // Verify nesting: cell's parent should exist
+        let parent = cells[0].parent().unwrap();
         assert!(parent.is_some());
     }
 
     #[test]
     #[ignore]
     fn nesting_subtree_of_table() {
-        let root = h::app_tree();
-        let tables = h::query(&root, "table").unwrap();
+        let app = h::app_root();
+        let tables = app.locator("table").elements().unwrap();
         if !tables.is_empty() {
-            let subtree = tables[0].subtree();
-            // Table should contain rows and cells
+            // Table should contain rows and cells — use descendant combinator from app root
+            let cells = app.locator("table table_cell").elements().unwrap();
             assert!(
-                subtree.len() >= 3,
-                "Table subtree too small: {}",
-                subtree.len()
+                cells.len() >= 2,
+                "Table should have at least 2 cells, found {}",
+                cells.len()
             );
         }
     }
@@ -1171,17 +1088,17 @@ mod tests {
     #[test]
     #[ignore]
     fn thrash_toggle_checkbox_5_times() {
-        let root = h::app_tree();
-        let cbs = h::query(&root, "check_box").unwrap();
+        let app = h::app_root();
+        let cbs = app.locator("check_box").elements().unwrap();
         assert!(!cbs.is_empty());
-        let mut current_root = root;
+        let mut current_app = app;
         for _ in 0..5 {
-            let cbs = h::query(&current_root, "check_box").unwrap();
+            let cbs = current_app.locator("check_box").elements().unwrap();
             assert!(!cbs.is_empty());
-            current_root = h::act(&cbs[0], Action::Press);
+            current_app = h::act(&cbs[0], Action::Press);
         }
         // After 5 toggles (odd), state should have flipped from initial
-        let final_cb = h::query(&current_root, "check_box").unwrap();
+        let final_cb = current_app.locator("check_box").elements().unwrap();
         if !final_cb.is_empty() {
             assert_eq!(
                 final_cb[0].states.checked,
@@ -1194,8 +1111,8 @@ mod tests {
     #[test]
     #[ignore]
     fn thrash_slider_increment_10_times() {
-        let root = h::app_tree();
-        let sliders = h::query(&root, "slider").unwrap();
+        let app = h::app_root();
+        let sliders = app.locator("slider").elements().unwrap();
         let slider = sliders.first().expect("No slider");
         let start_val: f64 = slider
             .value
@@ -1203,13 +1120,13 @@ mod tests {
             .unwrap_or("0")
             .parse()
             .unwrap_or(0.0);
-        let mut current_root = root;
+        let mut current_app = app;
         for _ in 0..10 {
-            let sliders = h::query(&current_root, "slider").unwrap();
+            let sliders = current_app.locator("slider").elements().unwrap();
             let slider = sliders.first().expect("No slider");
-            current_root = h::act(slider, Action::Increment);
+            current_app = h::act(slider, Action::Increment);
         }
-        let s = h::query(&current_root, "slider").unwrap();
+        let s = current_app.locator("slider").elements().unwrap();
         if !s.is_empty() {
             if let Some(v) = &s[0].value {
                 let val: f64 = v.parse().unwrap_or(0.0);
@@ -1228,20 +1145,14 @@ mod tests {
     #[test]
     #[ignore]
     fn thrash_expand_collapse_cycle() {
-        let root = h::app_tree();
-        let has_expander = root
-            .subtree()
-            .into_iter()
-            .find(|n| n.states.expanded.is_some())
-            .or_else(|| {
-                h::query(&root, r#"[name*="Expander"]"#)
-                    .unwrap()
-                    .first()
-                    .cloned()
-            })
-            .is_some();
+        let app = h::app_root();
+        let has_expander = !app
+            .locator(r#"[name*="Expander"]"#)
+            .elements()
+            .unwrap()
+            .is_empty();
         if has_expander {
-            let mut ct = root;
+            let mut ct = app;
             // expand, collapse, expand, collapse
             for action in [
                 Action::Expand,
@@ -1250,27 +1161,20 @@ mod tests {
                 Action::Collapse,
             ] {
                 let node = ct
-                    .subtree()
+                    .locator(r#"[name*="Expander"]"#)
+                    .elements()
+                    .unwrap()
                     .into_iter()
-                    .find(|n| n.states.expanded.is_some())
-                    .or_else(|| {
-                        h::query(&ct, r#"[name*="Expander"]"#)
-                            .unwrap()
-                            .first()
-                            .cloned()
-                    })
+                    .next()
                     .expect("Expander node should exist");
                 ct = h::act(&node, action);
             }
-            let final_node = h::query(&ct, r#"[name*="Expander"]"#)
+            let final_node = ct
+                .locator(r#"[name*="Expander"]"#)
+                .elements()
                 .unwrap()
-                .first()
-                .cloned()
-                .or_else(|| {
-                    ct.subtree()
-                        .into_iter()
-                        .find(|n| n.states.expanded.is_some())
-                });
+                .into_iter()
+                .next();
             if let Some(n) = final_node {
                 if n.states.expanded.is_some() {
                     assert_eq!(n.states.expanded, Some(false), "Should end collapsed");
@@ -1286,24 +1190,29 @@ mod tests {
     #[test]
     #[ignore]
     fn error_app_not_found() {
-        let result = App::from_name(xa11y::provider().unwrap(), "nonexistent_app_12345");
+        let result = App::by_name("nonexistent_app_12345");
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::AppNotFound { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            Error::SelectorNotMatched { .. }
+        ));
     }
 
     #[test]
     #[ignore]
     fn error_selector_not_matched() {
-        let root = h::app_tree();
-        let result = h::query(&root, r#"button[name="nonexistent_element_12345"]"#);
+        let app = h::app_root();
+        let result = app
+            .locator(r#"button[name="nonexistent_element_12345"]"#)
+            .elements();
         assert!(result.unwrap().is_empty());
     }
 
     #[test]
     #[ignore]
     fn error_invalid_selector() {
-        let root = h::app_tree();
-        let result = h::query(&root, "$$$invalid!!!");
+        let app = h::app_root();
+        let result = app.locator("$$$invalid!!!").elements();
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), Error::InvalidSelector { .. }));
     }
@@ -1311,8 +1220,8 @@ mod tests {
     #[test]
     #[ignore]
     fn action_on_default_tree() {
-        let root = h::app_tree();
-        let buttons = h::query(&root, r#"[name*="Submit"]"#).unwrap();
+        let app = h::app_root();
+        let buttons = app.locator(r#"[name*="Submit"]"#).elements().unwrap();
         assert!(!buttons.is_empty());
         let result = h::try_act(&buttons[0], Action::Press);
         match result {
@@ -1326,18 +1235,18 @@ mod tests {
     }
 
     // ════════════════════════════════════════════════════════════════
-    // Serialization (2 tests)
+    // Serialization (1 test)
     // ════════════════════════════════════════════════════════════════
 
     #[test]
     #[ignore]
     fn json_roundtrip_real_element() {
-        let root = h::app_tree();
+        let app = h::app_root();
         // Serialize the root ElementData
-        let json = serde_json::to_string(&*root).unwrap();
+        let json = serde_json::to_string(&app.data).unwrap();
         let deser: ElementData = serde_json::from_str(&json).unwrap();
-        assert_eq!(deser.role, root.role);
-        assert_eq!(deser.name, root.name);
+        assert_eq!(deser.role, app.data.role);
+        assert_eq!(deser.name, app.data.name);
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -1347,30 +1256,16 @@ mod tests {
     #[test]
     #[ignore]
     fn action_blur_text_entry() {
-        let root = h::app_tree();
-        let text = root
-            .subtree()
-            .into_iter()
-            .find(|n| {
-                (n.role == Role::TextField || n.role == Role::TextArea)
-                    && (n.value.as_deref() == Some("John Doe") || n.name.as_deref() == Some("Name"))
-            })
-            .expect("Text entry not found");
+        let app = h::app_root();
+        let text = find_text_entry(&app);
 
         // Focus first
         let result = h::try_act(&text, Action::Focus);
         assert!(result.is_ok(), "Focus should succeed: {:?}", result.err());
 
-        // Then blur
-        let root2 = h::app_tree();
-        let text2 = root2
-            .subtree()
-            .into_iter()
-            .find(|n| {
-                (n.role == Role::TextField || n.role == Role::TextArea)
-                    && (n.value.as_deref() == Some("John Doe") || n.name.as_deref() == Some("Name"))
-            })
-            .expect("Text entry not found after focus");
+        // Then blur — re-find the text entry from a fresh root
+        let app2 = h::app_root();
+        let text2 = find_text_entry(&app2);
         let result = h::try_act(&text2, Action::Blur);
         assert!(result.is_ok(), "Blur should succeed: {:?}", result.err());
     }
@@ -1378,13 +1273,14 @@ mod tests {
     #[test]
     #[ignore]
     fn action_scroll_direction() {
-        let root = h::app_tree();
-        // Try scroll on the window or any scrollable element
-        let target = root
-            .subtree()
+        let app = h::app_root();
+        // Try scroll on a scrollbar or window
+        let scrollbars = app.locator("scroll_bar").elements().unwrap();
+        let windows = app.locator("window").elements().unwrap();
+        let target = scrollbars
             .into_iter()
-            .find(|n| n.role == Role::ScrollBar)
-            .or_else(|| h::query(&root, "window").unwrap().first().cloned())
+            .next()
+            .or_else(|| windows.into_iter().next())
             .expect("No scrollable element found");
         let result = h::try_act_with(
             &target,
@@ -1404,15 +1300,8 @@ mod tests {
     #[test]
     #[ignore]
     fn action_set_text_selection() {
-        let root = h::app_tree();
-        let text = root
-            .subtree()
-            .into_iter()
-            .find(|n| {
-                (n.role == Role::TextField || n.role == Role::TextArea)
-                    && (n.value.as_deref() == Some("John Doe") || n.name.as_deref() == Some("Name"))
-            })
-            .expect("Text entry not found");
+        let app = h::app_root();
+        let text = find_text_entry(&app);
 
         // Focus first
         let _ = h::try_act(&text, Action::Focus);
@@ -1432,15 +1321,8 @@ mod tests {
     #[test]
     #[ignore]
     fn action_type_text() {
-        let root = h::app_tree();
-        let text = root
-            .subtree()
-            .into_iter()
-            .find(|n| {
-                (n.role == Role::TextField || n.role == Role::TextArea)
-                    && (n.value.as_deref() == Some("John Doe") || n.name.as_deref() == Some("Name"))
-            })
-            .expect("Text entry not found");
+        let app = h::app_root();
+        let text = find_text_entry(&app);
 
         // Focus first
         let _ = h::try_act(&text, Action::Focus);
@@ -1465,23 +1347,15 @@ mod tests {
     #[ignore]
     fn event_subscribe_try_recv() {
         use std::time::Duration;
-        let provider = xa11y::create_provider().unwrap();
-        let root = h::app_tree();
-
-        let app = App::from_name(provider, "xa11y").unwrap();
+        let app = h::app_root();
         let sub = app.subscribe().unwrap();
 
         // No events yet — try_recv returns None
         assert!(sub.try_recv().is_none(), "Expected no events initially");
 
         // Trigger a focus change
-        let text = root
-            .subtree()
-            .into_iter()
-            .find(|n| n.role == Role::TextField || n.role == Role::TextArea)
-            .expect("Text entry not found");
-        let prov = xa11y::create_provider().unwrap();
-        let _ = prov.perform_action(&text, Action::Focus, None);
+        let text = find_text_entry(&app);
+        let _ = text.provider().perform_action(&text, Action::Focus, None);
 
         // Wait briefly for the event
         std::thread::sleep(Duration::from_millis(500));
@@ -1495,8 +1369,7 @@ mod tests {
     #[test]
     #[ignore]
     fn event_recv_timeout() {
-        let provider = xa11y::create_provider().unwrap();
-        let app = App::from_name(provider, "xa11y").unwrap();
+        let app = h::app_root();
         let sub = app.subscribe().unwrap();
 
         // recv with short timeout should return Timeout error
@@ -1512,19 +1385,12 @@ mod tests {
     #[ignore]
     fn event_recv_receives_event() {
         use std::time::Duration;
-        let provider = xa11y::create_provider().unwrap();
-        let root = h::app_tree();
-
-        let app = App::from_name(provider.clone(), "xa11y").unwrap();
+        let app = h::app_root();
         let sub = app.subscribe().unwrap();
 
         // Trigger a focus change
-        let text = root
-            .subtree()
-            .into_iter()
-            .find(|n| n.role == Role::TextField || n.role == Role::TextArea)
-            .expect("Text entry not found");
-        let _ = provider.perform_action(&text, Action::Focus, None);
+        let text = find_text_entry(&app);
+        let _ = text.provider().perform_action(&text, Action::Focus, None);
 
         // recv should return the event (polling backends may take up to 200ms)
         match sub.recv(Duration::from_secs(2)) {
@@ -1541,8 +1407,7 @@ mod tests {
     #[test]
     #[ignore]
     fn event_wait_for_timeout() {
-        let provider = xa11y::create_provider().unwrap();
-        let app = App::from_name(provider, "xa11y").unwrap();
+        let app = h::app_root();
         let sub = app.subscribe().unwrap();
 
         // wait_for with an impossible predicate should timeout
@@ -1561,19 +1426,12 @@ mod tests {
     #[ignore]
     fn event_wait_for_predicate_filters() {
         use std::time::Duration;
-        let provider = xa11y::create_provider().unwrap();
-        let root = h::app_tree();
-
-        let app = App::from_name(provider.clone(), "xa11y").unwrap();
+        let app = h::app_root();
         let sub = app.subscribe().unwrap();
 
         // Trigger a focus change (produces FocusChanged, not Alert)
-        let text = root
-            .subtree()
-            .into_iter()
-            .find(|n| n.role == Role::TextField || n.role == Role::TextArea)
-            .expect("Text entry not found");
-        let _ = provider.perform_action(&text, Action::Focus, None);
+        let text = find_text_entry(&app);
+        let _ = text.provider().perform_action(&text, Action::Focus, None);
 
         // wait_for with FocusChanged predicate should match
         match sub.wait_for(
@@ -1594,25 +1452,20 @@ mod tests {
     #[ignore]
     fn event_metadata_populated() {
         use std::time::Duration;
-        let provider = xa11y::create_provider().unwrap();
-        let root = h::app_tree();
-
-        let app = App::from_name(provider.clone(), "xa11y").unwrap();
-        let expected_pid = app.pid();
+        let app = h::app_root();
+        let expected_pid = app.pid;
         let sub = app.subscribe().unwrap();
 
         // Trigger a focus change
-        let text = root
-            .subtree()
-            .into_iter()
-            .find(|n| n.role == Role::TextField || n.role == Role::TextArea)
-            .expect("Text entry not found");
-        let _ = provider.perform_action(&text, Action::Focus, None);
+        let text = find_text_entry(&app);
+        let _ = text.provider().perform_action(&text, Action::Focus, None);
 
         std::thread::sleep(Duration::from_millis(500));
         if let Some(event) = sub.try_recv() {
             // app_pid should match the app we subscribed to
-            assert_eq!(event.app_pid, expected_pid);
+            if let Some(pid) = expected_pid {
+                assert_eq!(event.app_pid, pid);
+            }
             // app_name should be non-empty
             assert!(!event.app_name.is_empty(), "app_name should be populated");
         } else {
@@ -1624,19 +1477,12 @@ mod tests {
     #[ignore]
     fn event_iter_yields_events() {
         use std::time::Duration;
-        let provider = xa11y::create_provider().unwrap();
-        let root = h::app_tree();
-
-        let app = App::from_name(provider.clone(), "xa11y").unwrap();
+        let app = h::app_root();
         let sub = app.subscribe().unwrap();
 
         // Trigger a focus change
-        let text = root
-            .subtree()
-            .into_iter()
-            .find(|n| n.role == Role::TextField || n.role == Role::TextArea)
-            .expect("Text entry not found");
-        let _ = provider.perform_action(&text, Action::Focus, None);
+        let text = find_text_entry(&app);
+        let _ = text.provider().perform_action(&text, Action::Focus, None);
 
         // Use recv to check if there's an event (iter blocks forever, so we
         // can't use it directly without a timeout)
@@ -1655,8 +1501,7 @@ mod tests {
     #[test]
     #[ignore]
     fn event_drop_unsubscribes() {
-        let provider = xa11y::create_provider().unwrap();
-        let app = App::from_name(provider, "xa11y").unwrap();
+        let app = h::app_root();
 
         // Create and immediately drop a subscription
         {
@@ -1666,7 +1511,7 @@ mod tests {
         // leak. This test verifies the subscription can be created and dropped
         // without panics or hangs.
 
-        // Create another subscription to verify the app is still usable
+        // Create another subscription to verify the provider is still usable
         let sub2 = app.subscribe().unwrap();
         assert!(sub2.try_recv().is_none());
     }
@@ -1675,19 +1520,12 @@ mod tests {
     #[ignore]
     fn event_target_element_present() {
         use std::time::Duration;
-        let provider = xa11y::create_provider().unwrap();
-        let root = h::app_tree();
-
-        let app = App::from_name(provider.clone(), "xa11y").unwrap();
+        let app = h::app_root();
         let sub = app.subscribe().unwrap();
 
         // Trigger a focus change
-        let text = root
-            .subtree()
-            .into_iter()
-            .find(|n| n.role == Role::TextField || n.role == Role::TextArea)
-            .expect("Text entry not found");
-        let _ = provider.perform_action(&text, Action::Focus, None);
+        let text = find_text_entry(&app);
+        let _ = text.provider().perform_action(&text, Action::Focus, None);
 
         std::thread::sleep(Duration::from_millis(500));
         if let Some(event) = sub.try_recv() {
@@ -1710,19 +1548,17 @@ mod tests {
     #[ignore]
     fn event_structure_changed() {
         use std::time::Duration;
-        let provider = xa11y::create_provider().unwrap();
-        let root = h::app_tree();
-
-        let app = App::from_name(provider.clone(), "xa11y").unwrap();
+        let app = h::app_root();
         let sub = app.subscribe().unwrap();
 
         // Click "Add Item" to add a dynamic list item — changes element count
-        let add_btn = root
-            .subtree()
-            .into_iter()
-            .find(|n| n.name.as_deref() == Some("Add Item"))
+        let add_btn = app
+            .locator(r#"[name="Add Item"]"#)
+            .element()
             .expect("Add Item button not found");
-        let _ = provider.perform_action(&add_btn, Action::Press, None);
+        let _ = add_btn
+            .provider()
+            .perform_action(&add_btn, Action::Press, None);
 
         // The polling backend checks every 100ms; give it time to detect the change
         match sub.wait_for(
@@ -1744,13 +1580,10 @@ mod tests {
     #[ignore]
     fn event_iter_next_threaded() {
         use std::time::Duration;
-        let provider = xa11y::create_provider().unwrap();
-        let root = h::app_tree();
-
-        let app = App::from_name(provider.clone(), "xa11y").unwrap();
+        let app = h::app_root();
         let sub = app.subscribe().unwrap();
 
-        // Spawn a thread that blocks on iter().next()
+        // Spawn a thread that blocks on recv
         let handle = std::thread::spawn(move || -> Option<Event> {
             // We can't block forever, so use recv with a generous timeout
             // as a proxy for iter().next() (which blocks indefinitely).
@@ -1761,12 +1594,8 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
 
         // Trigger a focus change from the main thread
-        let text = root
-            .subtree()
-            .into_iter()
-            .find(|n| n.role == Role::TextField || n.role == Role::TextArea)
-            .expect("Text entry not found");
-        let _ = provider.perform_action(&text, Action::Focus, None);
+        let text = find_text_entry(&app);
+        let _ = text.provider().perform_action(&text, Action::Focus, None);
 
         // Join the thread and verify it received the event
         let result = handle.join().expect("Thread panicked");
@@ -1779,5 +1608,32 @@ mod tests {
                 println!("No event received on thread — may depend on platform event delivery");
             }
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // Helper: find text entry element
+    // ════════════════════════════════════════════════════════════════
+
+    /// Find the text entry in the app by name "Name" or by role text_field/text_area.
+    fn find_text_entry(app: &App) -> Element {
+        // Try by name first
+        let by_name = app
+            .locator(r#"[name="Name"]"#)
+            .elements()
+            .unwrap_or_default();
+        if let Some(el) = by_name.into_iter().next() {
+            return el;
+        }
+        // Fall back to text_field role
+        let fields = app.locator("text_field").elements().unwrap_or_default();
+        if let Some(el) = fields.into_iter().next() {
+            return el;
+        }
+        // Fall back to text_area role
+        let areas = app.locator("text_area").elements().unwrap_or_default();
+        areas
+            .into_iter()
+            .next()
+            .expect("Text entry not found in app")
     }
 }

@@ -10,7 +10,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-QT_APP_DIR="$PROJECT_ROOT/xa11y-qt-test-app"
+QT_APP_DIR="$PROJECT_ROOT/test-apps/qt"
 
 CLEANUP_PIDS=()
 
@@ -112,7 +112,8 @@ if [[ "$(uname)" == MINGW* ]] || [[ "$(uname)" == MSYS* ]] || [[ "$OSTYPE" == "m
 fi
 
 echo "Installing dependencies..."
-"$PIP" install --quiet maturin pytest pytest-timeout
+"$PIP" install --quiet maturin
+"$PIP" install --quiet -r "$PROJECT_ROOT/tests/requirements.txt"
 "$PIP" install --quiet -r "$QT_APP_DIR/requirements.txt"
 
 # Generate README for xa11y-python (it's in .gitignore, maturin needs it)
@@ -132,8 +133,9 @@ cd "$PROJECT_ROOT"
 echo "Running Qt integration tests..."
 set +e
 # timeout prevents CI hangs if xa11y calls block (e.g. broken AT-SPI)
-# Per-test timeout of 15s; overall timeout of 180s
-timeout 180 "$PYTEST" "$QT_APP_DIR/tests/" -v -s --timeout=15 2>&1
+# Per-test timeout of 60s (lazy API does per-element IPC, slower than snapshots);
+# overall timeout of 300s
+timeout 300 "$PYTEST" "$PROJECT_ROOT/tests/qt/" -v -s --timeout=60 --rootdir="$PROJECT_ROOT" 2>&1
 TEST_EXIT=$?
 set -e
 

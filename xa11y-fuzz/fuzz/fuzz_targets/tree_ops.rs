@@ -1,11 +1,16 @@
-//! Fuzz target for xa11y-core tree operations (NOT platform providers).
-//! Builds random trees via root_element and exercises Element methods:
-//! children, parent, subtree, display.
+//! Fuzz target for xa11y-core element operations (NOT platform providers).
+//! Builds random elements via a mock provider and exercises Element methods:
+//! children, parent, display, locator.
 #![no_main]
+
+use std::sync::Arc;
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use xa11y_core::{root_element, ElementData, RawPlatformData, Role, StateSet};
+use xa11y_core::{
+    Action, ActionData, ElementData, Error, Provider, RawPlatformData, Result, Role, StateSet,
+    Subscription,
+};
 
 /// Roles indexed by u8 for fuzzer-driven selection.
 const ROLES: [Role; 33] = [
@@ -49,21 +54,74 @@ struct FuzzElement {
     role_idx: u8,
     name: Option<String>,
     value: Option<String>,
-    /// How many children this element should have (clamped later).
     child_count: u8,
 }
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
-    app_name: String,
-    pid: Option<u32>,
-    screen_w: u32,
-    screen_h: u32,
     fuzz_elements: Vec<FuzzElement>,
 }
 
-/// Build a valid tree from fuzzer-supplied elements, returning the root Element.
-fn build_root(input: &FuzzInput) -> Option<xa11y_core::Element> {
+struct FuzzNode {
+    data: ElementData,
+    children: Vec<usize>,
+    parent: Option<usize>,
+}
+
+struct FuzzProvider {
+    nodes: Vec<FuzzNode>,
+}
+
+impl Provider for FuzzProvider {
+    fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
+        match element {
+            None => {
+                if self.nodes.is_empty() {
+                    return Ok(vec![]);
+                }
+                Ok(vec![self.nodes[0].data.clone()])
+            }
+            Some(el) => {
+                let idx = el.handle as usize;
+                if idx >= self.nodes.len() {
+                    return Ok(vec![]);
+                }
+                Ok(self.nodes[idx]
+                    .children
+                    .iter()
+                    .map(|&i| self.nodes[i].data.clone())
+                    .collect())
+            }
+        }
+    }
+
+    fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
+        let idx = element.handle as usize;
+        if idx >= self.nodes.len() {
+            return Ok(None);
+        }
+        Ok(self.nodes[idx].parent.map(|i| self.nodes[i].data.clone()))
+    }
+
+    fn perform_action(
+        &self,
+        _: &ElementData,
+        _: Action,
+        _: Option<ActionData>,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+
+    fn subscribe(&self, _: &ElementData) -> Result<Subscription> {
+        Err(Error::Platform {
+            code: -1,
+            message: "not supported".to_string(),
+        })
+    }
+}
+
+fn build_provider(input: &FuzzInput) -> Option<Arc<FuzzProvider>> {
     let max_elements = 256usize;
     let element_count = input.fuzz_elements.len().min(max_elements);
 
@@ -71,27 +129,29 @@ fn build_root(input: &FuzzInput) -> Option<xa11y_core::Element> {
         return None;
     }
 
-    let mut elements: Vec<ElementData> = Vec::with_capacity(element_count);
+    let mut nodes: Vec<FuzzNode> = Vec::with_capacity(element_count);
     for i in 0..element_count {
         let fuzz = &input.fuzz_elements[i];
         let role = ROLES[fuzz.role_idx as usize % ROLES.len()];
-        elements.push(ElementData {
-            role,
-            name: fuzz.name.clone(),
-            value: fuzz.value.clone(),
-            description: None,
-            bounds: None,
-            actions: vec![],
-            states: StateSet::default(),
-            stable_id: None,
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            pid: None,
-            raw: RawPlatformData::Synthetic,
-            index: i as u32,
-            children_indices: vec![],
-            parent_index: None,
+        nodes.push(FuzzNode {
+            data: ElementData {
+                role,
+                name: fuzz.name.clone(),
+                value: fuzz.value.clone(),
+                description: None,
+                bounds: None,
+                actions: vec![],
+                states: StateSet::default(),
+                stable_id: None,
+                numeric_value: None,
+                min_value: None,
+                max_value: None,
+                pid: None,
+                raw: RawPlatformData::Synthetic,
+                handle: i as u64,
+            },
+            children: vec![],
+            parent: None,
         });
     }
 
@@ -109,57 +169,58 @@ fn build_root(input: &FuzzInput) -> Option<xa11y_core::Element> {
         for _ in 0..actual {
             let child_idx = next_child;
             next_child += 1;
-            elements[child_idx].parent_index = Some(parent_idx as u32);
-            elements[parent_idx].children_indices.push(child_idx as u32);
+            nodes[child_idx].parent = Some(parent_idx);
+            nodes[parent_idx].children.push(child_idx);
             queue.push(child_idx);
         }
-
         if next_child >= element_count {
             break;
         }
     }
 
-    // Any remaining unassigned elements become children of the root.
+    // Remaining unassigned elements become children of root.
     while next_child < element_count {
-        elements[next_child].parent_index = Some(0);
-        elements[0].children_indices.push(next_child as u32);
+        nodes[next_child].parent = Some(0);
+        nodes[0].children.push(next_child);
         next_child += 1;
     }
 
-    Some(root_element(
-        input.app_name.clone(),
-        input.pid,
-        (input.screen_w.max(1), input.screen_h.max(1)),
-        elements,
-    ))
+    Some(Arc::new(FuzzProvider { nodes }))
 }
 
 fuzz_target!(|input: FuzzInput| {
-    let root = match build_root(&input) {
-        Some(r) => r,
+    let provider = match build_provider(&input) {
+        Some(p) => p,
         None => return,
     };
 
-    // Exercise subtree
-    let subtree = root.subtree();
-    assert!(!subtree.is_empty());
+    // Get root element
+    let children = match provider.get_children(None) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let root_data = match children.into_iter().next() {
+        Some(d) => d,
+        None => return,
+    };
+    let root =
+        xa11y_core::Element::new(root_data, Arc::clone(&provider) as Arc<dyn Provider>);
 
     // Exercise children on root
-    let children = root.children();
-    for child in &children {
-        // Exercise parent
-        let parent = child.parent();
-        assert!(parent.is_some());
-    }
-
-    // Exercise subtree on a non-root element
-    if subtree.len() > 1 {
-        let second = &subtree[1];
-        let _ = second.subtree();
-        let _ = second.children();
-        let _ = second.parent();
+    if let Ok(children) = root.children() {
+        for child in &children {
+            // Exercise parent
+            if let Ok(Some(_parent)) = child.parent() {
+                // parent exists
+            }
+        }
     }
 
     // Exercise Display
     let _ = root.to_string();
+
+    // Exercise locator
+    let loc = root.locator("button");
+    let _ = loc.exists();
+    let _ = loc.elements();
 });

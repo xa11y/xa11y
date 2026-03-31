@@ -77,16 +77,14 @@ xa11y is built around three core types:
 use xa11y::*;
 
 // Connect by name (case-insensitive substring match)
-let safari = App::from_name(provider()?, "Safari")?;
+// Connect by name (returns PermissionDenied if accessibility is not enabled)
+let safari = App::by_name(provider()?, "Safari")?;
 
 // Connect by PID
-let app = App::from_pid(provider()?, 1234)?;
+let app = App::by_pid(provider()?, 1234)?;
 
 // List all running apps
-let all = App::all(provider()?)?;
-
-// Check accessibility permissions
-let status = check_permissions()?;
+let all = App::list(provider()?)?;
 ```
 
 ## Reading accessibility data
@@ -221,7 +219,7 @@ All operations return `Result<T>` with a structured `Error` enum:
 
 | Error | When |
 | --- | --- |
-| `PermissionDenied` | Accessibility permissions not granted (includes setup instructions) |
+| `PermissionDenied` | Accessibility or Screen Recording permissions not granted (includes setup instructions). On macOS 26+, both are required. |
 | `AppNotFound` | No app matches the given name or PID |
 | `SelectorNotMatched` | Selector matched zero elements |
 | `ActionNotSupported` | Action not available for the element's role |

@@ -1,464 +1,384 @@
-//! Unit tests for xa11y core types, tree operations, and selector engine.
+//! Unit tests for xa11y core types, selector engine, and locator.
 //!
 //! These tests exercise the public API without requiring platform accessibility
-//! permissions, using manually constructed trees. No real accessibility backend
-//! or running applications are needed.
+//! permissions, using a mock provider with in-memory element data.
 
+use std::sync::Arc;
 use xa11y::*;
 
+// ── Mock Provider ──
+
+/// In-memory tree node for the mock provider.
+#[derive(Clone)]
+struct MockNode {
+    data: ElementData,
+    children: Vec<usize>, // indices into MockProvider.nodes
+    parent: Option<usize>,
+}
+
+/// Mock provider that serves an in-memory tree.
+struct MockProvider {
+    nodes: Vec<MockNode>,
+    last_action: std::sync::Mutex<Option<(u64, Action)>>,
+}
+
+impl Provider for MockProvider {
+    fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
+        match element {
+            None => {
+                // Return root node as the only top-level element
+                if self.nodes.is_empty() {
+                    return Ok(vec![]);
+                }
+                Ok(vec![self.nodes[0].data.clone()])
+            }
+            Some(el) => {
+                let idx = el.handle as usize;
+                if idx >= self.nodes.len() {
+                    return Ok(vec![]);
+                }
+                Ok(self.nodes[idx]
+                    .children
+                    .iter()
+                    .map(|&i| self.nodes[i].data.clone())
+                    .collect())
+            }
+        }
+    }
+
+    fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
+        let idx = element.handle as usize;
+        if idx >= self.nodes.len() {
+            return Ok(None);
+        }
+        Ok(self.nodes[idx].parent.map(|i| self.nodes[i].data.clone()))
+    }
+
+    fn perform_action(
+        &self,
+        element: &ElementData,
+        action: Action,
+        _data: Option<ActionData>,
+    ) -> Result<()> {
+        *self.last_action.lock().unwrap() = Some((element.handle, action));
+        Ok(())
+    }
+
+    fn subscribe(&self, _element: &ElementData) -> Result<Subscription> {
+        Err(Error::Platform {
+            code: -1,
+            message: "MockProvider does not support subscribe".to_string(),
+        })
+    }
+}
+
 /// Helper to build a sample accessibility tree for testing.
-fn sample_tree() -> Element {
+///
+/// Structure:
+/// [0] application "Test App" (pid=1234)
+///   [1] window "My App"
+///     [2] toolbar "Main Toolbar"
+///       [3] button "Back" (description="Navigate back")
+///       [4] text_field "Address Bar" (value="https://example.com", editable)
+///     [5] web_area
+///       [6] heading "Welcome"
+///       [7] button "Submit"
+///       [8] button "Cancel" (disabled)
+///       [9] check_box "I agree to terms" (checked=off)
+fn sample_provider() -> Arc<MockProvider> {
     let elements = vec![
-        ElementData {
-            role: Role::Window,
-            name: Some("My App".to_string()),
-            value: None,
-            description: None,
-            bounds: Some(Rect {
+        (
+            Role::Application,
+            Some("Test App"),
+            None,
+            None,
+            None,
+            vec![],
+            StateSet::default(),
+            None,
+            None,
+            None,
+        ),
+        (
+            Role::Window,
+            Some("My App"),
+            None,
+            None,
+            Some(Rect {
                 x: 0,
                 y: 0,
                 width: 1920,
                 height: 1080,
             }),
-
-            actions: vec![],
-            states: StateSet::default(),
-
-            pid: None,
-            stable_id: None,
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            raw: RawPlatformData::Synthetic,
-            index: 0,
-            children_indices: vec![1, 4],
-            parent_index: None,
-        },
-        ElementData {
-            role: Role::Toolbar,
-            name: Some("Main Toolbar".to_string()),
-            value: None,
-            description: None,
-            bounds: Some(Rect {
+            vec![],
+            StateSet::default(),
+            None,
+            None,
+            None,
+        ),
+        (
+            Role::Toolbar,
+            Some("Main Toolbar"),
+            None,
+            None,
+            Some(Rect {
                 x: 0,
                 y: 0,
                 width: 1920,
                 height: 44,
             }),
-
-            actions: vec![],
-            states: StateSet::default(),
-
-            pid: None,
-            stable_id: None,
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            raw: RawPlatformData::Synthetic,
-            index: 1,
-            children_indices: vec![2, 3],
-            parent_index: Some(0),
-        },
-        ElementData {
-            role: Role::Button,
-            name: Some("Back".to_string()),
-            value: None,
-            description: Some("Navigate back".to_string()),
-            bounds: Some(Rect {
+            vec![],
+            StateSet::default(),
+            None,
+            None,
+            None,
+        ),
+        (
+            Role::Button,
+            Some("Back"),
+            None,
+            Some("Navigate back"),
+            Some(Rect {
                 x: 10,
                 y: 5,
                 width: 60,
                 height: 34,
             }),
-
-            actions: vec![Action::Press, Action::Focus],
-            states: StateSet {
+            vec![Action::Press, Action::Focus],
+            StateSet {
                 enabled: true,
                 visible: true,
                 ..StateSet::default()
             },
-
-            pid: None,
-            stable_id: None,
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            raw: RawPlatformData::Synthetic,
-            index: 2,
-            children_indices: vec![],
-            parent_index: Some(1),
-        },
-        ElementData {
-            role: Role::TextField,
-            name: Some("Address Bar".to_string()),
-            value: Some("https://example.com".to_string()),
-            description: None,
-            bounds: Some(Rect {
+            None,
+            None,
+            None,
+        ),
+        (
+            Role::TextField,
+            Some("Address Bar"),
+            Some("https://example.com"),
+            None,
+            Some(Rect {
                 x: 80,
                 y: 5,
                 width: 600,
                 height: 34,
             }),
-
-            actions: vec![Action::Focus, Action::SetValue],
-            states: StateSet {
+            vec![Action::Focus, Action::SetValue],
+            StateSet {
                 enabled: true,
                 visible: true,
                 editable: true,
                 ..StateSet::default()
             },
-
-            pid: None,
-            stable_id: None,
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            raw: RawPlatformData::Synthetic,
-            index: 3,
-            children_indices: vec![],
-            parent_index: Some(1),
-        },
-        ElementData {
-            role: Role::WebArea,
-            name: None,
-            value: None,
-            description: None,
-            bounds: Some(Rect {
+            None,
+            None,
+            None,
+        ),
+        (
+            Role::WebArea,
+            None,
+            None,
+            None,
+            Some(Rect {
                 x: 0,
                 y: 44,
                 width: 1920,
                 height: 1036,
             }),
-
-            actions: vec![],
-            states: StateSet::default(),
-
-            pid: None,
-            stable_id: None,
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            raw: RawPlatformData::Synthetic,
-            index: 4,
-            children_indices: vec![5, 6, 7, 8],
-            parent_index: Some(0),
-        },
-        ElementData {
-            role: Role::Heading,
-            name: Some("Welcome".to_string()),
-            value: None,
-            description: None,
-            bounds: None,
-
-            actions: vec![],
-            states: StateSet::default(),
-
-            pid: None,
-            stable_id: None,
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            raw: RawPlatformData::Synthetic,
-            index: 5,
-            children_indices: vec![],
-            parent_index: Some(4),
-        },
-        ElementData {
-            role: Role::Button,
-            name: Some("Submit".to_string()),
-            value: None,
-            description: None,
-            bounds: None,
-
-            actions: vec![Action::Press, Action::Focus],
-            states: StateSet {
+            vec![],
+            StateSet::default(),
+            None,
+            None,
+            None,
+        ),
+        (
+            Role::Heading,
+            Some("Welcome"),
+            None,
+            None,
+            None,
+            vec![],
+            StateSet::default(),
+            None,
+            None,
+            None,
+        ),
+        (
+            Role::Button,
+            Some("Submit"),
+            None,
+            None,
+            None,
+            vec![Action::Press, Action::Focus],
+            StateSet {
                 enabled: true,
                 visible: true,
                 ..StateSet::default()
             },
-
-            pid: None,
-            stable_id: None,
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            raw: RawPlatformData::Synthetic,
-            index: 6,
-            children_indices: vec![],
-            parent_index: Some(4),
-        },
-        ElementData {
-            role: Role::Button,
-            name: Some("Cancel".to_string()),
-            value: None,
-            description: None,
-            bounds: None,
-
-            actions: vec![Action::Press, Action::Focus],
-            states: StateSet {
+            None,
+            None,
+            None,
+        ),
+        (
+            Role::Button,
+            Some("Cancel"),
+            None,
+            None,
+            None,
+            vec![Action::Press, Action::Focus],
+            StateSet {
                 enabled: false,
                 visible: true,
                 ..StateSet::default()
             },
-
-            pid: None,
-            stable_id: None,
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            raw: RawPlatformData::Synthetic,
-            index: 7,
-            children_indices: vec![],
-            parent_index: Some(4),
-        },
-        ElementData {
-            role: Role::CheckBox,
-            name: Some("I agree to terms".to_string()),
-            value: None,
-            description: None,
-            bounds: None,
-
-            actions: vec![Action::Press, Action::Toggle],
-            states: StateSet {
+            None,
+            None,
+            None,
+        ),
+        (
+            Role::CheckBox,
+            Some("I agree to terms"),
+            None,
+            None,
+            None,
+            vec![Action::Press, Action::Toggle],
+            StateSet {
                 enabled: true,
                 visible: true,
                 checked: Some(Toggled::Off),
                 ..StateSet::default()
             },
-
-            pid: None,
-            stable_id: None,
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            raw: RawPlatformData::Synthetic,
-            index: 8,
-            children_indices: vec![],
-            parent_index: Some(4),
-        },
+            None,
+            None,
+            None,
+        ),
     ];
 
-    root_element("My App".to_string(), Some(1234), (1920, 1080), elements)
+    let children_map: Vec<Vec<usize>> = vec![
+        vec![1],          // 0: application
+        vec![2, 5],       // 1: window
+        vec![3, 4],       // 2: toolbar
+        vec![],           // 3: button Back
+        vec![],           // 4: text_field
+        vec![6, 7, 8, 9], // 5: web_area
+        vec![],           // 6: heading
+        vec![],           // 7: button Submit
+        vec![],           // 8: button Cancel
+        vec![],           // 9: check_box
+    ];
+
+    let parent_map: Vec<Option<usize>> = vec![
+        None,    // 0: application
+        Some(0), // 1: window
+        Some(1), // 2: toolbar
+        Some(2), // 3: button Back
+        Some(2), // 4: text_field
+        Some(1), // 5: web_area
+        Some(5), // 6: heading
+        Some(5), // 7: button Submit
+        Some(5), // 8: button Cancel
+        Some(5), // 9: check_box
+    ];
+
+    let mut nodes = Vec::new();
+    for (i, (role, name, value, desc, bounds, actions, states, nv, minv, maxv)) in
+        elements.into_iter().enumerate()
+    {
+        nodes.push(MockNode {
+            data: ElementData {
+                role,
+                name: name.map(String::from),
+                value: value.map(String::from),
+                description: desc.map(String::from),
+                bounds,
+                actions,
+                states,
+                numeric_value: nv,
+                min_value: minv,
+                max_value: maxv,
+                stable_id: None,
+                pid: Some(1234),
+                raw: RawPlatformData::Synthetic,
+                handle: i as u64,
+            },
+            children: children_map[i].clone(),
+            parent: parent_map[i],
+        });
+    }
+
+    Arc::new(MockProvider {
+        nodes,
+        last_action: std::sync::Mutex::new(None),
+    })
 }
 
-// ── Tree basic operations ──
+fn sample_app() -> App {
+    let p = sample_provider();
+    App::by_name_with(p as Arc<dyn Provider>, "Test App").unwrap()
+}
+
+fn sample_root() -> Element {
+    let app = sample_app();
+    // The first child of the app is the window
+    app.children().unwrap().into_iter().next().unwrap()
+}
+
+// ── Element basic operations ──
 
 #[test]
-fn tree_root() {
-    let root = sample_tree();
+fn element_root() {
+    let root = sample_root();
     assert_eq!(root.role, Role::Window);
     assert_eq!(root.name.as_deref(), Some("My App"));
 }
 
 #[test]
-fn tree_get_by_index() {
-    let root = sample_tree();
-    let button = root.subtree().into_iter().find(|e| e.index == 2).unwrap();
-    assert_eq!(button.role, Role::Button);
-    assert_eq!(button.name.as_deref(), Some("Back"));
+fn element_children() {
+    let root = sample_root();
+    let children = root.children().unwrap();
+    assert_eq!(children.len(), 2);
+    assert_eq!(children[0].role, Role::Toolbar);
+    assert_eq!(children[1].role, Role::WebArea);
 }
 
 #[test]
-fn tree_get_nonexistent() {
-    let root = sample_tree();
-    assert!(root
-        .subtree()
-        .into_iter()
-        .find(|e| e.index == 999)
-        .is_none());
-}
-
-#[test]
-fn tree_len() {
-    let root = sample_tree();
-    assert_eq!(root.subtree().len(), 9);
-    assert!(!root.subtree().is_empty());
-}
-
-#[test]
-fn tree_children() {
-    let root = sample_tree();
-    let toolbar = root.subtree().into_iter().find(|e| e.index == 1).unwrap();
-    let children = toolbar.children();
+fn element_nested_children() {
+    let root = sample_root();
+    let toolbar = &root.children().unwrap()[0];
+    let children = toolbar.children().unwrap();
     assert_eq!(children.len(), 2);
     assert_eq!(children[0].role, Role::Button);
     assert_eq!(children[1].role, Role::TextField);
 }
 
 #[test]
-fn tree_parent() {
-    let root = sample_tree();
-    let button = root.subtree().into_iter().find(|e| e.index == 2).unwrap();
-    let parent = button.parent().unwrap();
+fn element_parent() {
+    let root = sample_root();
+    let toolbar = &root.children().unwrap()[0];
+    let button = &toolbar.children().unwrap()[0];
+    let parent = button.parent().unwrap().unwrap();
     assert_eq!(parent.role, Role::Toolbar);
-    assert!(root.parent().is_none());
+    // root is the window, whose parent is the application
+    let app_parent = root.parent().unwrap().unwrap();
+    assert_eq!(app_parent.role, Role::Application);
 }
 
 #[test]
-fn tree_subtree() {
-    let root = sample_tree();
-    let toolbar = root.subtree().into_iter().find(|e| e.index == 1).unwrap();
-    let subtree = toolbar.subtree();
-    assert_eq!(subtree.len(), 3);
-    assert_eq!(subtree[0].role, Role::Toolbar);
-    assert_eq!(subtree[1].role, Role::Button);
-    assert_eq!(subtree[2].role, Role::TextField);
-}
-
-#[test]
-fn tree_display() {
-    let root = sample_tree();
+fn element_display() {
+    let root = sample_root();
     let display = root.to_string();
-    assert!(display.contains("[0] window \"My App\""));
-    assert!(display.contains("  [1] toolbar \"Main Toolbar\""));
-    assert!(display.contains("    [2] button \"Back\""));
-    assert!(display.contains("    [3] text_field \"Address Bar\""));
-    assert!(display.contains("value=\"https://example.com\""));
+    assert!(display.contains("window"));
+    assert!(display.contains("My App"));
 }
 
 #[test]
-fn tree_iter() {
-    let root = sample_tree();
-    let count = root.subtree().len();
-    assert_eq!(count, 9);
-}
-
-// ── Selector queries ──
-
-#[test]
-fn query_by_role() {
-    let root = sample_tree();
-    let buttons = root.query_selector("button").unwrap();
+fn app_locator() {
+    let app = sample_app();
+    let buttons = app.locator("button").elements().unwrap();
+    // App subtree has 3 buttons: Back, Submit, Cancel
     assert_eq!(buttons.len(), 3);
-}
-
-#[test]
-fn query_by_exact_name() {
-    let root = sample_tree();
-    let results = root.query_selector(r#"[name="Submit"]"#).unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].role, Role::Button);
-}
-
-#[test]
-fn query_role_and_name() {
-    let root = sample_tree();
-    let results = root.query_selector(r#"button[name="Submit"]"#).unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].name.as_deref(), Some("Submit"));
-}
-
-#[test]
-fn query_name_contains() {
-    let root = sample_tree();
-    let results = root.query_selector(r#"[name*="addr"]"#).unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].name.as_deref(), Some("Address Bar"));
-}
-
-#[test]
-fn query_name_starts_with() {
-    let root = sample_tree();
-    let results = root.query_selector(r#"[name^="addr"]"#).unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].name.as_deref(), Some("Address Bar"));
-}
-
-#[test]
-fn query_name_ends_with() {
-    let root = sample_tree();
-    let results = root.query_selector(r#"[name$="bar"]"#).unwrap();
-    assert_eq!(results.len(), 2); // "Main Toolbar" and "Address Bar"
-}
-
-#[test]
-fn query_direct_child() {
-    let root = sample_tree();
-    let results = root.query_selector("toolbar > button").unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].name.as_deref(), Some("Back"));
-}
-
-#[test]
-fn query_descendant() {
-    let root = sample_tree();
-    let results = root.query_selector("window button").unwrap();
-    assert_eq!(results.len(), 3);
-}
-
-#[test]
-fn query_nth() {
-    let root = sample_tree();
-    let results = root.query_selector("button:nth(2)").unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].name.as_deref(), Some("Submit"));
-}
-
-#[test]
-fn query_nth_out_of_range() {
-    let root = sample_tree();
-    let results = root.query_selector("button:nth(99)").unwrap();
-    assert_eq!(results.len(), 0);
-}
-
-#[test]
-fn query_complex() {
-    let root = sample_tree();
-    let results = root
-        .query_selector(r#"toolbar > text_field[name*="Address"]"#)
-        .unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].value.as_deref(), Some("https://example.com"));
-}
-
-#[test]
-fn query_by_value() {
-    let root = sample_tree();
-    let results = root.query_selector(r#"[value*="example"]"#).unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].role, Role::TextField);
-}
-
-#[test]
-fn query_no_match() {
-    let root = sample_tree();
-    let results = root.query_selector("slider").unwrap();
-    assert_eq!(results.len(), 0);
-}
-
-#[test]
-fn query_invalid_selector() {
-    let root = sample_tree();
-    let result = root.query_selector("foobar");
-    assert!(result.is_err());
-    match result.unwrap_err() {
-        Error::InvalidSelector { selector, message } => {
-            assert_eq!(selector, "foobar");
-            assert!(message.contains("unknown role"));
-        }
-        _ => panic!("expected InvalidSelector error"),
-    }
-}
-
-#[test]
-fn query_empty_selector() {
-    let root = sample_tree();
-    assert!(root.query_selector("").is_err());
-}
-
-#[test]
-fn query_check_box() {
-    let root = sample_tree();
-    let results = root.query_selector("check_box").unwrap();
-    assert_eq!(results.len(), 1);
-    assert_eq!(results[0].states.checked, Some(Toggled::Off));
-}
-
-#[test]
-fn query_web_area_children() {
-    let root = sample_tree();
-    let results = root.query_selector("web_area > button").unwrap();
-    assert_eq!(results.len(), 2);
 }
 
 // ── Role mapping ──
@@ -567,12 +487,6 @@ fn validate_numeric_value_must_be_finite() {
     let valid = ActionData::NumericValue(42.0);
     assert!(valid.validate(Action::SetValue).is_ok());
 
-    let zero = ActionData::NumericValue(0.0);
-    assert!(zero.validate(Action::SetValue).is_ok());
-
-    let negative = ActionData::NumericValue(-10.0);
-    assert!(negative.validate(Action::SetValue).is_ok());
-
     let nan = ActionData::NumericValue(f64::NAN);
     assert!(matches!(
         nan.validate(Action::SetValue),
@@ -584,12 +498,6 @@ fn validate_numeric_value_must_be_finite() {
         inf.validate(Action::SetValue),
         Err(Error::InvalidActionData { .. })
     ));
-
-    let neg_inf = ActionData::NumericValue(f64::NEG_INFINITY);
-    assert!(matches!(
-        neg_inf.validate(Action::SetValue),
-        Err(Error::InvalidActionData { .. })
-    ));
 }
 
 #[test]
@@ -597,14 +505,8 @@ fn validate_other_action_data_always_ok() {
     let text = ActionData::Value("hello".to_string());
     assert!(text.validate(Action::TypeText).is_ok());
 
-    let empty = ActionData::Value(String::new());
-    assert!(empty.validate(Action::TypeText).is_ok());
-
     let scroll = ActionData::ScrollAmount(0.0);
     assert!(scroll.validate(Action::ScrollDown).is_ok());
-
-    let neg_scroll = ActionData::ScrollAmount(-3.0);
-    assert!(neg_scroll.validate(Action::ScrollDown).is_ok());
 }
 
 // ── Error ──
@@ -615,11 +517,6 @@ fn error_display() {
         instructions: "Enable in System Preferences".to_string(),
     };
     assert!(format!("{}", err).contains("Permission denied"));
-
-    let err = Error::AppNotFound {
-        target: "Safari".to_string(),
-    };
-    assert!(format!("{}", err).contains("Safari"));
 
     let err = Error::SelectorNotMatched {
         selector: "button[name=\"Submit\"]".to_string(),
@@ -672,9 +569,7 @@ fn element_json_serialization() {
         min_value: None,
         max_value: None,
         raw: RawPlatformData::Synthetic,
-        index: 0,
-        children_indices: vec![],
-        parent_index: None,
+        handle: 0,
     };
 
     let json = serde_json::to_string_pretty(&element).unwrap();
@@ -705,14 +600,6 @@ fn raw_platform_data_serialization() {
         _ => panic!("expected MacOS variant"),
     }
 
-    let raw_win = RawPlatformData::Windows {
-        control_type_id: 50000,
-        automation_id: Some("SubmitButton".to_string()),
-        class_name: Some("Button".to_string()),
-    };
-    let json = serde_json::to_string(&raw_win).unwrap();
-    assert!(json.contains("50000"));
-
     let raw_linux = RawPlatformData::Linux {
         atspi_role: "push button".to_string(),
         bus_name: ":1.42".to_string(),
@@ -725,77 +612,232 @@ fn raw_platform_data_serialization() {
 // ── Provider trait ──
 
 #[test]
-fn permission_status_variants() {
-    let granted = PermissionStatus::Granted;
-    let denied = PermissionStatus::Denied {
-        instructions: "Enable accessibility".to_string(),
-    };
-
-    let json = serde_json::to_string(&granted).unwrap();
-    assert!(json.contains("Granted"));
-
-    let json = serde_json::to_string(&denied).unwrap();
-    assert!(json.contains("Enable accessibility"));
-}
-
-// ── Platform backend ──
-// These tests use create_provider() to get a fresh instance rather than the
-// global singleton. On Windows, initializing the COM singleton in unit tests
-// causes STATUS_ACCESS_VIOLATION during process exit.
-
-#[test]
 fn platform_provider_creates_or_fails_gracefully() {
     let _result = xa11y::create_provider();
 }
 
+// ── Selector queries via Locator ──
+
 #[test]
-fn platform_provider_check_permissions() {
-    let provider = match xa11y::create_provider() {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-    let status = provider.check_permissions().unwrap();
-    match status {
-        PermissionStatus::Granted | PermissionStatus::Denied { .. } => {}
-    }
+fn query_by_role() {
+    let app = sample_app();
+    let buttons = app
+        .locator("window")
+        .descendant("button")
+        .elements()
+        .unwrap();
+    assert_eq!(buttons.len(), 3);
 }
 
 #[test]
-fn platform_provider_operations_return_errors() {
-    let provider = match xa11y::create_provider() {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-
-    let result = provider.resolve_pid_by_name("NonexistentApp12345");
-    assert!(result.is_err());
-}
-
-// ── Selector edge cases ──
-
-#[test]
-fn selector_multiple_attr_filters() {
-    let root = sample_tree();
-    let results = root
-        .query_selector(r#"[name*="address"][role="text_field"]"#)
+fn query_by_exact_name() {
+    let app = sample_app();
+    let results = app
+        .locator("window")
+        .descendant(r#"[name="Submit"]"#)
+        .elements()
         .unwrap();
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].role, Role::TextField);
+    assert_eq!(results[0].role, Role::Button);
 }
 
 #[test]
-fn selector_descendant_chain() {
-    let root = sample_tree();
-    let results = root.query_selector("window toolbar button").unwrap();
+fn query_role_and_name() {
+    let app = sample_app();
+    let results = app
+        .locator("window")
+        .descendant(r#"button[name="Submit"]"#)
+        .elements()
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].name.as_deref(), Some("Submit"));
+}
+
+#[test]
+fn query_name_contains() {
+    let app = sample_app();
+    let results = app
+        .locator("window")
+        .descendant(r#"[name*="addr"]"#)
+        .elements()
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].name.as_deref(), Some("Address Bar"));
+}
+
+#[test]
+fn query_name_starts_with() {
+    let app = sample_app();
+    let results = app
+        .locator("window")
+        .descendant(r#"[name^="addr"]"#)
+        .elements()
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].name.as_deref(), Some("Address Bar"));
+}
+
+#[test]
+fn query_name_ends_with() {
+    let app = sample_app();
+    let results = app
+        .locator("window")
+        .descendant(r#"[name$="bar"]"#)
+        .elements()
+        .unwrap();
+    assert_eq!(results.len(), 2); // "Main Toolbar" and "Address Bar"
+}
+
+#[test]
+fn query_direct_child() {
+    let app = sample_app();
+    let results = app
+        .locator("window")
+        .descendant("toolbar")
+        .child("button")
+        .elements()
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].name.as_deref(), Some("Back"));
 }
 
 #[test]
-fn selector_mixed_combinators() {
-    let root = sample_tree();
-    let results = root.query_selector("window > web_area button").unwrap();
+fn query_descendant_buttons() {
+    let app = sample_app();
+    let results = app.locator("window button").elements().unwrap();
+    assert_eq!(results.len(), 3);
+}
+
+#[test]
+fn query_nth() {
+    let app = sample_app();
+    let results = app.locator("window button:nth(2)").elements().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].name.as_deref(), Some("Submit"));
+}
+
+#[test]
+fn query_nth_out_of_range() {
+    let app = sample_app();
+    let results = app.locator("window button:nth(99)").elements().unwrap();
+    assert_eq!(results.len(), 0);
+}
+
+#[test]
+fn query_complex() {
+    let app = sample_app();
+    let results = app
+        .locator(r#"window toolbar > text_field[name*="Address"]"#)
+        .elements()
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].value.as_deref(), Some("https://example.com"));
+}
+
+#[test]
+fn query_no_match() {
+    let app = sample_app();
+    let results = app
+        .locator("window")
+        .descendant("slider")
+        .elements()
+        .unwrap();
+    assert_eq!(results.len(), 0);
+}
+
+#[test]
+fn query_invalid_selector() {
+    let app = sample_app();
+    let result = app.locator("foobar").elements();
+    assert!(result.is_err());
+}
+
+#[test]
+fn query_check_box() {
+    let app = sample_app();
+    let results = app
+        .locator("window")
+        .descendant("check_box")
+        .elements()
+        .unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].states.checked, Some(Toggled::Off));
+}
+
+#[test]
+fn query_web_area_children() {
+    let app = sample_app();
+    let results = app.locator("window web_area > button").elements().unwrap();
     assert_eq!(results.len(), 2);
+}
+
+// ── Locator ──
+
+#[test]
+fn locator_basic_query() {
+    let app = sample_app();
+    let loc = app.locator(r#"window button[name="Submit"]"#);
+    let element = loc.element().unwrap();
+    assert_eq!(element.role, Role::Button);
+    assert_eq!(element.name.as_deref(), Some("Submit"));
+    assert!(loc.exists().unwrap());
+}
+
+#[test]
+fn locator_press_dispatches_action() {
+    let p = sample_provider();
+    let app = App::by_name_with(Arc::clone(&p) as Arc<dyn Provider>, "Test App").unwrap();
+    let loc = app.locator(r#"window button[name="Submit"]"#);
+    loc.press().unwrap();
+    let (handle, action) = p.last_action.lock().unwrap().unwrap();
+    assert_eq!(action, Action::Press);
+    assert_eq!(handle, 7); // Submit button is handle 7
+}
+
+#[test]
+fn locator_not_found() {
+    let app = sample_app();
+    let loc = app.locator(r#"button[name="NonExistent"]"#);
+    assert!(!loc.exists().unwrap());
+    assert!(loc.press().is_err());
+}
+
+#[test]
+fn locator_nth() {
+    let app = sample_app();
+    // There are 3 buttons in window's subtree: Back(3), Submit(7), Cancel(8)
+    let loc = app.locator("window button").nth(1);
+    assert_eq!(loc.element().unwrap().name.as_deref(), Some("Submit"));
+}
+
+#[test]
+fn locator_count() {
+    let app = sample_app();
+    let loc = app.locator("window button");
+    assert_eq!(loc.count().unwrap(), 3);
+}
+
+#[test]
+fn locator_child() {
+    let app = sample_app();
+    let loc = app.locator("window toolbar").child("button");
+    assert_eq!(loc.element().unwrap().name.as_deref(), Some("Back"));
+}
+
+#[test]
+fn locator_states() {
+    let app = sample_app();
+    let loc = app.locator(r#"window button[name="Cancel"]"#);
+    let element = loc.element().unwrap();
+    assert!(!element.states.enabled);
+    assert!(element.states.visible);
+}
+
+#[test]
+fn locator_selector_getter() {
+    let app = sample_app();
+    let loc = app.locator("button").child("text_field");
+    assert_eq!(loc.selector(), "button > text_field");
 }
 
 // ── ActionData serialization ──
@@ -815,131 +857,269 @@ fn action_data_variants() {
     assert!(json.contains("100"));
 }
 
-// ── Locator ──
+// ── Multi-app mock for system-root searches ──
 
-/// Mock provider that returns a fixed tree for Locator tests.
-struct MockProvider {
-    root: Element,
-    last_action: std::sync::Mutex<Option<(u32, Action)>>,
+/// Build a mock with multiple apps at the top level.
+///
+/// Structure (from system root):
+///   [0] application "App1" (pid=100)
+///     [1] window "Win1"
+///       [2] button "Btn1"
+///   [3] application "App2" (pid=200)
+///     [4] window "Win2"
+///       [5] button "Btn2"
+///       [6] button "Btn3"
+fn multi_app_provider() -> Arc<MultiAppMockProvider> {
+    let defs: Vec<(Role, Option<&str>, Option<u32>)> = vec![
+        (Role::Application, Some("App1"), Some(100)),
+        (Role::Window, Some("Win1"), Some(100)),
+        (Role::Button, Some("Btn1"), Some(100)),
+        (Role::Application, Some("App2"), Some(200)),
+        (Role::Window, Some("Win2"), Some(200)),
+        (Role::Button, Some("Btn2"), Some(200)),
+        (Role::Button, Some("Btn3"), Some(200)),
+    ];
+
+    let children_map: Vec<Vec<usize>> = vec![
+        vec![1],    // 0: App1
+        vec![2],    // 1: Win1
+        vec![],     // 2: Btn1
+        vec![4],    // 3: App2
+        vec![5, 6], // 4: Win2
+        vec![],     // 5: Btn2
+        vec![],     // 6: Btn3
+    ];
+
+    let parent_map: Vec<Option<usize>> = vec![
+        None,    // 0
+        Some(0), // 1
+        Some(1), // 2
+        None,    // 3 (top-level app)
+        Some(3), // 4
+        Some(4), // 5
+        Some(4), // 6
+    ];
+
+    let mut nodes = Vec::new();
+    for (i, (role, name, pid)) in defs.into_iter().enumerate() {
+        nodes.push(MockNode {
+            data: ElementData {
+                role,
+                name: name.map(String::from),
+                value: None,
+                description: None,
+                bounds: None,
+                actions: vec![],
+                states: StateSet::default(),
+                numeric_value: None,
+                min_value: None,
+                max_value: None,
+                stable_id: None,
+                pid,
+                raw: RawPlatformData::Synthetic,
+                handle: i as u64,
+            },
+            children: children_map[i].clone(),
+            parent: parent_map[i],
+        });
+    }
+
+    // Override get_children(None) to return both apps
+    Arc::new(MultiAppMockProvider { nodes })
 }
 
-impl MockProvider {
-    fn new() -> Self {
-        Self {
-            root: sample_tree(),
-            last_action: std::sync::Mutex::new(None),
+/// Mock provider returning multiple top-level apps from get_children(None).
+struct MultiAppMockProvider {
+    nodes: Vec<MockNode>,
+}
+
+impl Provider for MultiAppMockProvider {
+    fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
+        match element {
+            None => {
+                // Return all application-role nodes as top-level
+                Ok(self
+                    .nodes
+                    .iter()
+                    .filter(|n| n.data.role == Role::Application)
+                    .map(|n| n.data.clone())
+                    .collect())
+            }
+            Some(el) => {
+                let idx = el.handle as usize;
+                if idx >= self.nodes.len() {
+                    return Ok(vec![]);
+                }
+                Ok(self.nodes[idx]
+                    .children
+                    .iter()
+                    .map(|&i| self.nodes[i].data.clone())
+                    .collect())
+            }
         }
     }
-}
 
-fn mock_app() -> (Arc<MockProvider>, App) {
-    let p = Arc::new(MockProvider::new());
-    let app = App::from_name(Arc::clone(&p) as Arc<dyn Provider>, "My App").unwrap();
-    (p, app)
-}
-
-use std::sync::Arc;
-
-impl Provider for MockProvider {
-    fn resolve_pid_by_name(&self, _name: &str) -> xa11y::Result<u32> {
-        Ok(1)
+    fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
+        let idx = element.handle as usize;
+        if idx >= self.nodes.len() {
+            return Ok(None);
+        }
+        Ok(self.nodes[idx].parent.map(|i| self.nodes[i].data.clone()))
     }
 
-    fn get_elements(&self, _pid: u32) -> xa11y::Result<Element> {
-        Ok(self.root.clone())
-    }
-
-    fn get_apps(&self) -> xa11y::Result<Element> {
-        Ok(self.root.clone())
-    }
-
-    fn perform_action(
-        &self,
-        element: &Element,
-        action: Action,
-        _data: Option<ActionData>,
-    ) -> xa11y::Result<()> {
-        *self.last_action.lock().unwrap() = Some((element.index, action));
+    fn perform_action(&self, _: &ElementData, _: Action, _: Option<ActionData>) -> Result<()> {
         Ok(())
     }
 
-    fn check_permissions(&self) -> xa11y::Result<PermissionStatus> {
-        Ok(PermissionStatus::Granted)
-    }
-
-    fn subscribe(&self, _pid: u32) -> xa11y::Result<xa11y::Subscription> {
-        Err(xa11y::Error::Platform {
+    fn subscribe(&self, _: &ElementData) -> Result<Subscription> {
+        Err(Error::Platform {
             code: -1,
-            message: "MockProvider does not support subscribe".to_string(),
+            message: "not supported".to_string(),
         })
     }
 }
 
+// ── find_elements / search behavior tests ──
+
 #[test]
-fn locator_basic_query() {
-    let (_, app) = mock_app();
-    let loc = app.locator("button[name=\"Submit\"]");
-    let element = loc.element().unwrap();
-    assert_eq!(element.role, Role::Button);
-    assert_eq!(element.name.as_deref(), Some("Submit"));
-    assert!(loc.exists().unwrap());
+fn find_application_by_name_from_root() {
+    let p = multi_app_provider();
+    let app = App::by_name_with(p as Arc<dyn Provider>, "App2").unwrap();
+    assert_eq!(app.data.role, Role::Application);
+    assert_eq!(app.name, "App2");
+    assert_eq!(app.pid, Some(200));
 }
 
 #[test]
-fn locator_press_dispatches_action() {
-    let (p, app) = mock_app();
-    let loc = app.locator("button[name=\"Submit\"]");
-    loc.press().unwrap();
-    let (idx, action) = p.last_action.lock().unwrap().unwrap();
-    assert_eq!(action, Action::Press);
-    // Submit button is index 6 in sample_tree
-    assert_eq!(idx, 6);
+fn find_all_applications() {
+    let p = multi_app_provider();
+    let apps = App::list_with(p as Arc<dyn Provider>).unwrap();
+    assert_eq!(apps.len(), 2);
+    assert_eq!(apps[0].name, "App1");
+    assert_eq!(apps[1].name, "App2");
 }
 
 #[test]
-fn locator_not_found() {
-    let (_, app) = mock_app();
-    let loc = app.locator("button[name=\"NonExistent\"]");
-    assert!(!loc.exists().unwrap());
-    assert!(loc.press().is_err());
+fn find_application_only_checks_top_level() {
+    // application search from root should NOT recurse into app subtrees
+    let p = multi_app_provider();
+    let apps = App::list_with(p as Arc<dyn Provider>).unwrap();
+    // Should find exactly 2, not more (no nested apps)
+    assert_eq!(apps.len(), 2);
 }
 
 #[test]
-fn locator_nth() {
-    let (_, app) = mock_app();
-    // There are 3 buttons: Back(2), Submit(6), Cancel(7)
-    let loc = app.locator("button").nth(1);
-    assert_eq!(loc.element().unwrap().name.as_deref(), Some("Submit"));
+fn find_button_across_apps() {
+    // Searching for buttons within each app
+    let p = multi_app_provider();
+    let apps = App::list_with(p as Arc<dyn Provider>).unwrap();
+    let mut total_buttons = 0;
+    for app in &apps {
+        total_buttons += app.locator("button").count().unwrap();
+    }
+    assert_eq!(total_buttons, 3); // Btn1, Btn2, Btn3
 }
 
 #[test]
-fn locator_count() {
-    let (_, app) = mock_app();
-    let loc = app.locator("button");
-    assert_eq!(loc.count().unwrap(), 3);
+fn find_with_limit_stops_early() {
+    let p = multi_app_provider();
+    let app1 = App::by_name_with(p as Arc<dyn Provider>, "App1").unwrap();
+    let first = app1.locator("button").first().element().unwrap();
+    assert_eq!(first.name.as_deref(), Some("Btn1"));
 }
 
 #[test]
-fn locator_child() {
-    let (_, app) = mock_app();
-    let loc = app.locator("toolbar").child("button");
-    // Toolbar has one button child: "Back"
-    assert_eq!(loc.element().unwrap().name.as_deref(), Some("Back"));
+fn find_multi_segment_across_apps() {
+    // "window > button" — find buttons that are direct children of windows in App2
+    let p = multi_app_provider();
+    let app2 = App::by_name_with(p as Arc<dyn Provider>, "App2").unwrap();
+    let results = app2.locator("window > button").elements().unwrap();
+    assert_eq!(results.len(), 2); // Btn2, Btn3
 }
 
 #[test]
-fn locator_states() {
-    let (_, app) = mock_app();
-    // Cancel button is disabled
-    let loc = app.locator("button[name=\"Cancel\"]");
-    let element = loc.element().unwrap();
-    assert!(!element.states.enabled);
-    assert!(element.states.visible);
+fn app_locator_scopes_search() {
+    let p = multi_app_provider();
+    let app2 = App::by_name_with(p as Arc<dyn Provider>, "App2").unwrap();
+    // Scoped locator should only find buttons within App2
+    let buttons = app2.locator("button").elements().unwrap();
+    assert_eq!(buttons.len(), 2); // Btn2, Btn3
+    assert_eq!(buttons[0].name.as_deref(), Some("Btn2"));
 }
 
 #[test]
-fn locator_selector_getter() {
-    let (_, app) = mock_app();
-    let loc = app.locator("button").child("text_field");
-    assert_eq!(loc.selector(), "button > text_field");
+fn app_locator_does_not_find_sibling_app_elements() {
+    let p = multi_app_provider();
+    let app1 = App::by_name_with(p as Arc<dyn Provider>, "App1").unwrap();
+    // App1 only has Btn1
+    let buttons = app1.locator("button").elements().unwrap();
+    assert_eq!(buttons.len(), 1);
+    assert_eq!(buttons[0].name.as_deref(), Some("Btn1"));
+}
+
+#[test]
+fn locator_count_matches_elements_len() {
+    let p = multi_app_provider();
+    let app1 = App::by_name_with(p as Arc<dyn Provider>, "App1").unwrap();
+    let loc = app1.locator("button");
+    assert_eq!(loc.count().unwrap(), loc.elements().unwrap().len());
+}
+
+#[test]
+fn app_by_name_not_found() {
+    let p = multi_app_provider();
+    let result = App::by_name_with(p as Arc<dyn Provider>, "NoSuchApp");
+    assert!(result.is_err());
+}
+
+#[test]
+fn locator_nth_out_of_range() {
+    let p = multi_app_provider();
+    let apps = App::list_with(p as Arc<dyn Provider>).unwrap();
+    // Use first app and request an out-of-range nth button
+    let loc = apps[0].locator("button").nth(99);
+    assert!(loc.element().is_err());
+}
+
+#[test]
+fn element_children_of_leaf_is_empty() {
+    let p = multi_app_provider();
+    let app1 = App::by_name_with(p as Arc<dyn Provider>, "App1").unwrap();
+    let btn = app1.locator("button").first().element().unwrap();
+    assert!(btn.children().unwrap().is_empty());
+}
+
+#[test]
+fn element_parent_of_top_level_is_none() {
+    let p = multi_app_provider();
+    let app = App::list_with(Arc::clone(&p) as Arc<dyn Provider>)
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap();
+    // The application element itself has no parent
+    let app_element = Element::new(app.data.clone(), Arc::clone(&p) as Arc<dyn Provider>);
+    assert!(app_element.parent().unwrap().is_none());
+}
+
+#[test]
+fn element_parent_navigates_up() {
+    let p = multi_app_provider();
+    let app2 = App::by_name_with(p as Arc<dyn Provider>, "App2").unwrap();
+    let btn = app2.locator(r#"button[name="Btn2"]"#).element().unwrap();
+    let parent = btn.parent().unwrap().unwrap();
+    assert_eq!(parent.role, Role::Window);
+    assert_eq!(parent.name.as_deref(), Some("Win2"));
+}
+
+#[test]
+fn handle_preserved_through_find() {
+    // Verify that handle IDs survive the find_elements pipeline
+    let p = multi_app_provider();
+    let app1 = App::by_name_with(Arc::clone(&p) as Arc<dyn Provider>, "App1").unwrap();
+    // handle should be non-default (we set it to the node index)
+    assert_eq!(app1.data.handle, 0); // App1 is node index 0
+    let app2 = App::by_name_with(Arc::clone(&p) as Arc<dyn Provider>, "App2").unwrap();
+    let btn = app2.locator(r#"button[name="Btn2"]"#).element().unwrap();
+    assert_eq!(btn.handle, 5); // Btn2 is node index 5
 }

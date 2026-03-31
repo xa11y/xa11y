@@ -20,7 +20,6 @@ ACTION_SETTLE = 0.3
 
 def test_tree_dump(qt_app):
     """Dump the full accessibility tree for CI debugging."""
-    root = qt_app.elements()
 
     def dump(el, indent=0, depth=0):
         if depth > 20:
@@ -43,20 +42,20 @@ def test_tree_dump(qt_app):
         if not el.enabled:
             info += "  DISABLED"
         lines = [" " * indent + info]
-        for c in el.children:
+        for c in el.children():
             lines.append(dump(c, indent + 2, depth + 1))
         return "\n".join(lines)
 
-    tree_text = dump(root)
+    tree_text = dump(qt_app)
     import warnings
 
     warnings.warn(
         f"\n=== Accessibility Tree ({sys.platform}) ===\n{tree_text}\n=== End Tree ===",
         stacklevel=1,
     )
-    assert root is not None
-    assert len(root.children) > 0, (
-        f"Tree is empty! Root: role={root.role}, name={root.name}"
+    assert qt_app is not None
+    assert len(qt_app.children()) > 0, (
+        f"Tree is empty! Root: role={qt_app.role}, name={qt_app.name}"
     )
 
 
@@ -68,9 +67,14 @@ def test_app_pid(qt_app):
 
 
 def test_window_role_and_name(qt_app):
-    w = qt_app.locator("window").element()
-    assert w.role == "window"
-    assert "xa11y-qt-test-app" in w.name
+    # On Windows, the top-level element IS the window (UIA has no Application node).
+    # On Linux/macOS, the top-level element is the application, which has a window child.
+    if qt_app.role == "window":
+        assert "xa11y-qt-test-app" in qt_app.name
+    else:
+        w = qt_app.locator("window").element()
+        assert w.role == "window"
+        assert "xa11y-qt-test-app" in w.name
 
 
 # ── Buttons ─────────────────────────────────────────────────────────────────
