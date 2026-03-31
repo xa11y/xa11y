@@ -763,6 +763,36 @@ impl LinuxProvider {
                 continue;
             }
 
+            // Flatten nested application nodes — Qt/PySide6 apps erroneously list
+            // themselves as their own child. Skip the nested application node and
+            // recurse directly into its children instead.
+            let child_role = self.get_role_name(&child).unwrap_or_default();
+            if child_role == "application" {
+                let grandchildren = self.get_atspi_children(&child).unwrap_or_default();
+                for gc in grandchildren {
+                    if gc.path == "/org/a11y/atspi/null"
+                        || gc.bus_name.is_empty()
+                        || gc.path.is_empty()
+                    {
+                        continue;
+                    }
+                    let gc_role = self.get_role_name(&gc).unwrap_or_default();
+                    if gc_role == "application" {
+                        continue;
+                    }
+                    if self.matches_ref(&gc, simple) {
+                        results.push(gc.clone());
+                        if let Some(limit) = limit {
+                            if results.len() >= limit {
+                                return Ok(());
+                            }
+                        }
+                    }
+                    self.collect_matching_refs(&gc, simple, depth + 1, max_depth, results, limit)?;
+                }
+                continue;
+            }
+
             if self.matches_ref(&child, simple) {
                 results.push(child.clone());
                 if let Some(limit) = limit {
