@@ -1,7 +1,8 @@
 //! macOS AXUIElement-based accessibility provider.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -10,9 +11,9 @@ use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
 
 use xa11y_core::{
-    root_element, Action, ActionData, CancelHandle, Element, ElementData, Error, Event,
-    EventReceiver, EventType, PermissionStatus, Provider, RawPlatformData, Rect, Result, Role,
-    StateSet, Subscription, Toggled,
+    Action, ActionData, CancelHandle, ElementData, Error, Event, EventReceiver, EventType,
+    PermissionStatus, Provider, RawPlatformData, Rect, Result, Role, StateSet, Subscription,
+    Toggled,
 };
 
 // ── FFI Declarations ──────────────────────────────────────────────────────────
@@ -28,7 +29,6 @@ const AX_VALUE_CGPOINT: i32 = 1;
 const AX_VALUE_CGSIZE: i32 = 2;
 const CF_NUMBER_FLOAT64: i32 = 13;
 const CF_NUMBER_SINT32: i32 = 3;
-// Used by ax_number_i64 helper; kept for completeness alongside other CF_NUMBER constants.
 #[allow(dead_code)]
 const CF_NUMBER_SINT64: i32 = 4;
 
@@ -66,21 +66,7 @@ extern "C" {
     fn AXIsProcessTrusted() -> bool;
 }
 
-#[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
-    fn CGMainDisplayID() -> u32;
-    fn CGDisplayPixelsWide(display: u32) -> usize;
-    fn CGDisplayPixelsHigh(display: u32) -> usize;
-}
-
-// ── ObjC Exception-Safe Wrappers (from exception_safe.m) ─────────────────────
-//
-// ALL CF/AX operations that touch accessibility objects go through these
-// C wrappers which use @try/@catch to prevent ObjC exceptions from unwinding
-// through Rust frames.
-
-extern "C" {
-    // AX API wrappers
     fn safe_ax_copy_attribute_value(
         element: AXUIElementRef,
         attribute: CFStringRef,
@@ -96,7 +82,6 @@ extern "C" {
     fn safe_ax_create_application(pid: i32) -> AXUIElementRef;
     fn safe_ax_value_get_value(value: CFTypeRef, the_type: i32, value_ptr: *mut c_void) -> bool;
     fn safe_cg_window_list_copy(option: u32, relative_to: u32) -> CFArrayRef;
-    // AXObserver wrappers for event subscription
     fn safe_ax_observer_create(
         pid: i32,
         callback: unsafe extern "C" fn(CFTypeRef, AXUIElementRef, CFTypeRef, *mut c_void),
@@ -113,12 +98,9 @@ extern "C" {
     fn safe_cf_run_loop_get_current() -> CFTypeRef;
     fn safe_cf_run_loop_run();
     fn safe_cf_run_loop_stop(run_loop: CFTypeRef);
-
-    // CGEvent wrappers for input simulation
     fn safe_cg_post_scroll_event(dy: i32, dx: i32);
     fn safe_ax_value_create_cf_range(location: isize, length: isize) -> CFTypeRef;
 
-    // Test helpers
     #[cfg(test)]
     fn test_throw_and_catch_nsexception() -> i32;
 }
@@ -131,12 +113,10 @@ unsafe impl Send for AXElement {}
 unsafe impl Sync for AXElement {}
 
 impl AXElement {
-    /// Takes ownership of an already-retained ref (e.g. from Create functions).
     fn from_owned(ptr: AXUIElementRef) -> Self {
         Self(ptr)
     }
 
-    /// Retains the ref (e.g. from array element access).
     fn from_borrowed(ptr: AXUIElementRef) -> Self {
         if !ptr.is_null() {
             unsafe { CFRetain(ptr) };
@@ -224,7 +204,6 @@ fn ax_number_f64(element: AXUIElementRef, attribute: &str) -> Option<f64> {
                 return Some(result);
             }
         }
-        // Fallback: parse string value (Qt exposes numeric attributes as strings)
         if CFGetTypeID(value) == CFStringGetTypeID() {
             let s = CFString::wrap_under_create_rule(value as *const _);
             return s.to_string().trim().parse::<f64>().ok();
@@ -234,7 +213,6 @@ fn ax_number_f64(element: AXUIElementRef, attribute: &str) -> Option<f64> {
     }
 }
 
-// Symmetric with ax_number_f64; not currently called but kept for future AX attribute reads.
 #[allow(dead_code)]
 fn ax_number_i32(element: AXUIElementRef, attribute: &str) -> Option<i32> {
     let value = ax_attr(element, attribute)?;
@@ -259,7 +237,6 @@ fn ax_number_i32(element: AXUIElementRef, attribute: &str) -> Option<i32> {
     }
 }
 
-// Symmetric with ax_number_f64; not currently called but kept for future AX attribute reads.
 #[allow(dead_code)]
 fn ax_number_i64(element: AXUIElementRef, attribute: &str) -> Option<i64> {
     let value = ax_attr(element, attribute)?;
@@ -305,6 +282,12 @@ fn ax_children(element: AXUIElementRef) -> Vec<AXElement> {
         CFRelease(value);
         children
     }
+}
+
+fn ax_parent(element: AXUIElementRef) -> Option<AXElement> {
+    let value = ax_attr(element, "AXParent")?;
+    // AXParent returns an AXUIElement, which we own via copy attribute
+    Some(AXElement::from_owned(value as AXUIElementRef))
 }
 
 fn ax_action_names(element: AXUIElementRef) -> Vec<String> {
@@ -356,7 +339,6 @@ fn ax_size(element: AXUIElementRef) -> Option<(f64, f64)> {
     }
 }
 
-/// Get value as string, handling both string and numeric AXValue.
 fn ax_value_string(element: AXUIElementRef) -> Option<String> {
     let value = ax_attr(element, "AXValue")?;
     unsafe {
@@ -377,10 +359,6 @@ fn ax_value_string(element: AXUIElementRef) -> Option<String> {
     }
 }
 
-/// Get numeric value from AXValue attribute.
-///
-/// Handles both CFNumber (native Cocoa/AccessKit) and CFString (Qt/PySide6)
-/// representations — Qt exposes slider/spinner values as string attributes.
 fn ax_value_number(element: AXUIElementRef) -> Option<f64> {
     let value = ax_attr(element, "AXValue")?;
     unsafe {
@@ -392,7 +370,6 @@ fn ax_value_number(element: AXUIElementRef) -> Option<f64> {
                 return Some(f);
             }
         }
-        // Fallback: parse string value as number (Qt exposes values this way)
         if CFGetTypeID(value) == CFStringGetTypeID() {
             let s = CFString::wrap_under_create_rule(value as *const _);
             return s.to_string().trim().parse::<f64>().ok();
@@ -402,7 +379,6 @@ fn ax_value_number(element: AXUIElementRef) -> Option<f64> {
     }
 }
 
-/// Get integer value from AXValue attribute (for checkbox state).
 fn ax_value_int(element: AXUIElementRef) -> Option<i32> {
     let value = ax_attr(element, "AXValue")?;
     unsafe {
@@ -421,12 +397,10 @@ fn ax_value_int(element: AXUIElementRef) -> Option<i32> {
 
 // ── Safe FFI Wrappers ────────────────────────────────────────────────────────
 
-/// Perform an AX action, catching ObjC exceptions via the C wrapper.
 fn do_perform_action(element: AXUIElementRef, action: &CFString) -> i32 {
     unsafe { safe_ax_perform_action(element, action.as_concrete_TypeRef() as CFTypeRef) }
 }
 
-/// Set an AX attribute value, catching ObjC exceptions via the C wrapper.
 fn do_set_attribute(element: AXUIElementRef, attribute: &CFString, value: CFTypeRef) -> i32 {
     unsafe {
         safe_ax_set_attribute_value(element, attribute.as_concrete_TypeRef() as CFTypeRef, value)
@@ -436,7 +410,6 @@ fn do_set_attribute(element: AXUIElementRef, attribute: &CFString, value: CFType
 // ── Role Mapping ──────────────────────────────────────────────────────────────
 
 fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
-    // Check subrole first for more specific mappings
     match subrole {
         Some("AXDialog") => return Role::Dialog,
         Some("AXApplicationAlert") | Some("AXSystemAlert") => return Role::Alert,
@@ -509,7 +482,6 @@ fn map_ax_action(name: &str) -> Option<Action> {
     }
 }
 
-// Used only in unit tests; perform_action inlines the mapping for richer error handling.
 #[allow(dead_code)]
 fn xa11y_action_to_ax(action: Action) -> Option<&'static str> {
     match action {
@@ -533,12 +505,9 @@ fn parse_states(element: AXUIElementRef, role: Role) -> StateSet {
     let focused = ax_bool(element, "AXFocused").unwrap_or(false);
     let selected = ax_bool(element, "AXSelected").unwrap_or(false);
 
-    // Visibility: element is visible unless explicitly hidden
     let hidden = ax_bool(element, "AXHidden").unwrap_or(false);
     let visible = !hidden;
 
-    // Checked state: for checkboxes and radio buttons, AXValue is 0/1/2
-    // AccessKit may expose as integer or boolean
     let checked = match role {
         Role::CheckBox | Role::RadioButton => {
             if let Some(i) = ax_value_int(element) {
@@ -551,7 +520,6 @@ fn parse_states(element: AXUIElementRef, role: Role) -> StateSet {
             } else if let Some(b) = ax_bool(element, "AXValue") {
                 Some(if b { Toggled::On } else { Toggled::Off })
             } else {
-                // Also try reading AXValue as float (accesskit sometimes uses CFNumber)
                 let value = ax_attr(element, "AXValue");
                 if let Some(v) = value {
                     let mut f: f64 = 0.0;
@@ -572,20 +540,10 @@ fn parse_states(element: AXUIElementRef, role: Role) -> StateSet {
         _ => None,
     };
 
-    // Expanded: only present on expandable elements
     let expanded = ax_bool(element, "AXExpanded");
 
-    // Editable: text fields without read-only are editable
-    let editable = match role {
-        Role::TextField | Role::TextArea => {
-            // If the element has an AXValue that's settable, it's editable
-            // Approximation: text fields are editable unless in a read-only context
-            true
-        }
-        _ => false,
-    };
+    let editable = matches!(role, Role::TextField | Role::TextArea);
 
-    // Focusable: interactive roles that can receive keyboard focus
     let focusable = matches!(
         role,
         Role::Button
@@ -623,33 +581,24 @@ fn parse_states(element: AXUIElementRef, role: Role) -> StateSet {
 
 // ── MacOS Provider ────────────────────────────────────────────────────────────
 
+/// Global handle counter for mapping ElementData back to AXElements.
+static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
+
 pub struct MacOSProvider {
-    /// Cached AXElement refs from the most recent tree build.
-    /// Index corresponds to the element's DFS index.
-    cached_elements: Mutex<Vec<AXElement>>,
+    /// Cached AXElement refs keyed by handle ID.
+    handle_cache: Mutex<HashMap<u64, AXElement>>,
 }
 
 impl MacOSProvider {
     pub fn new() -> Result<Self> {
         Ok(Self {
-            cached_elements: Mutex::new(Vec::new()),
+            handle_cache: Mutex::new(HashMap::new()),
         })
-    }
-
-    fn detect_screen_size() -> (u32, u32) {
-        let display = unsafe { CGMainDisplayID() };
-        let w = unsafe { CGDisplayPixelsWide(display) } as u32;
-        let h = unsafe { CGDisplayPixelsHigh(display) } as u32;
-        if w == 0 || h == 0 {
-            (1920, 1080)
-        } else {
-            (w, h)
-        }
     }
 
     /// List running GUI apps using CGWindowListCopyWindowInfo.
     fn list_gui_apps() -> Vec<(i32, String)> {
-        let info = unsafe { safe_cg_window_list_copy(0, 0) }; // kCGWindowListOptionAll
+        let info = unsafe { safe_cg_window_list_copy(0, 0) };
         if info.is_null() {
             return vec![];
         }
@@ -702,122 +651,61 @@ impl MacOSProvider {
         apps
     }
 
-    /// Build a tree from an app element (shared by resolve_pid_by_name and get_elements).
-    fn build_tree(&self, app_element: AXElement, pid: i32, app_name: &str) -> Result<Element> {
-        let screen_size = Self::detect_screen_size();
-        let mut elements = Vec::new();
-        let mut ax_elements = Vec::new();
-
-        self.traverse(
-            &app_element,
-            &mut elements,
-            &mut ax_elements,
-            None,
-            0,
-            screen_size,
-        );
-
-        if elements.is_empty() {
-            return Err(Error::AppNotFound {
-                target: app_name.to_string(),
-            });
-        }
-
-        // Cache AX element handles for action dispatch
-        *self.cached_elements.lock().unwrap() = ax_elements;
-
-        Ok(root_element(
-            app_name.to_string(),
-            Some(pid as u32),
-            screen_size,
-            elements,
-        ))
+    /// Cache an AXElement and return a new handle ID.
+    fn cache_element(&self, ax: AXElement) -> u64 {
+        let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+        self.handle_cache.lock().unwrap().insert(handle, ax);
+        handle
     }
 
-    fn find_app_by_name(&self, name: &str) -> Result<(AXElement, i32, String)> {
-        let name_lower = name.to_lowercase();
-        let apps = Self::list_gui_apps();
-
-        for (pid, app_name) in &apps {
-            if app_name.to_lowercase().contains(&name_lower) {
-                let element = AXElement::from_owned(unsafe { safe_ax_create_application(*pid) });
-                if element.is_null() {
-                    continue;
-                }
-                return Ok((element, *pid, app_name.clone()));
-            }
-        }
-
-        Err(Error::AppNotFound {
-            target: name.to_string(),
-        })
-    }
-
-    fn find_app_by_pid(&self, pid: u32) -> Result<(AXElement, String)> {
-        let element = AXElement::from_owned(unsafe { safe_ax_create_application(pid as i32) });
-        if element.is_null() {
-            return Err(Error::AppNotFound {
-                target: format!("PID {}", pid),
-            });
-        }
-
-        // Try to get app name
-        let name = ax_string(element.as_ptr(), "AXTitle")
-            .or_else(|| {
-                // Fall back to window list name
-                let apps = Self::list_gui_apps();
-                apps.into_iter()
-                    .find(|(p, _)| *p == pid as i32)
-                    .map(|(_, n)| n)
+    /// Look up a cached AXElement by handle.
+    fn get_cached(&self, handle: u64) -> Result<AXElement> {
+        self.handle_cache
+            .lock()
+            .unwrap()
+            .get(&handle)
+            .cloned()
+            .ok_or(Error::ElementStale {
+                selector: format!("handle:{}", handle),
             })
-            .unwrap_or_default();
-
-        Ok((element, name))
     }
 
-    /// Recursively traverse the AX tree, building xa11y elements.
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::only_used_in_recursion)]
-    fn traverse(
-        &self,
-        element: &AXElement,
-        elements: &mut Vec<ElementData>,
-        ax_elements: &mut Vec<AXElement>,
-        parent_idx: Option<u32>,
-        depth: u32,
-        screen_size: (u32, u32),
-    ) {
-        if depth > xa11y_core::MAX_TREE_DEPTH {
-            return;
-        }
-
-        let role_str = ax_string(element.as_ptr(), "AXRole").unwrap_or_default();
-        let subrole_str = ax_string(element.as_ptr(), "AXSubrole");
+    /// Build an ElementData from an AXElement, caching the AX handle.
+    fn build_element_data(&self, ax: &AXElement, pid: Option<u32>) -> ElementData {
+        let role_str = ax_string(ax.as_ptr(), "AXRole").unwrap_or_default();
+        let subrole_str = ax_string(ax.as_ptr(), "AXSubrole");
         let role = map_ax_role(&role_str, subrole_str.as_deref());
 
-        let name = ax_string(element.as_ptr(), "AXTitle")
-            .or_else(|| ax_string(element.as_ptr(), "AXDescription"))
-            .or_else(|| {
-                // For static text, the "value" IS the name
-                if role == Role::StaticText {
-                    ax_string(element.as_ptr(), "AXValue")
-                } else {
-                    None
-                }
-            });
+        let ax_title = ax_string(ax.as_ptr(), "AXTitle");
+        let ax_description = ax_string(ax.as_ptr(), "AXDescription");
 
-        let description = ax_string(element.as_ptr(), "AXHelp");
+        // Name: prefer AXTitle, fall back to AXDescription only if no title
+        let name = ax_title.or_else(|| {
+            if role == Role::StaticText {
+                ax_string(ax.as_ptr(), "AXValue")
+            } else {
+                ax_description.clone()
+            }
+        });
 
-        // Value depends on role
+        // Description: AXHelp first, then AXDescription (if not already used as name)
+        let description = ax_string(ax.as_ptr(), "AXHelp").or_else(|| {
+            // Only use AXDescription for description if name didn't consume it
+            if name.as_ref() != ax_description.as_ref() {
+                ax_description
+            } else {
+                None
+            }
+        });
+
         let value = match role {
-            Role::CheckBox | Role::RadioButton => None, // checked state handled separately
-            _ => ax_value_string(element.as_ptr()),
+            Role::CheckBox | Role::RadioButton => None,
+            _ => ax_value_string(ax.as_ptr()),
         };
 
-        let states = parse_states(element.as_ptr(), role);
+        let states = parse_states(ax.as_ptr(), role);
 
-        // Bounds
-        let bounds = match (ax_position(element.as_ptr()), ax_size(element.as_ptr())) {
+        let bounds = match (ax_position(ax.as_ptr()), ax_size(ax.as_ptr())) {
             (Some((x, y)), Some((w, h))) if w > 0.0 || h > 0.0 => Some(Rect {
                 x: x as i32,
                 y: y as i32,
@@ -827,24 +715,20 @@ impl MacOSProvider {
             _ => None,
         };
 
-        // Actions
-        let ax_actions = ax_action_names(element.as_ptr());
+        let ax_actions = ax_action_names(ax.as_ptr());
         let mut actions: Vec<Action> = ax_actions.iter().filter_map(|a| map_ax_action(a)).collect();
 
-        // Add Focus if the element can be focused
-        if ax_bool(element.as_ptr(), "AXFocused").is_some() && !actions.contains(&Action::Focus) {
+        if ax_bool(ax.as_ptr(), "AXFocused").is_some() && !actions.contains(&Action::Focus) {
             actions.push(Action::Focus);
         }
 
-        // Add SetValue for text fields and sliders
         if matches!(role, Role::TextField | Role::TextArea | Role::Slider)
             && !actions.contains(&Action::SetValue)
         {
             actions.push(Action::SetValue);
         }
 
-        // Stable ID: AXIdentifier (always captured for cross-snapshot correlation)
-        let ax_identifier = ax_string(element.as_ptr(), "AXIdentifier");
+        let ax_identifier = ax_string(ax.as_ptr(), "AXIdentifier");
 
         let raw = RawPlatformData::MacOS {
             ax_role: role_str,
@@ -852,26 +736,22 @@ impl MacOSProvider {
             ax_identifier: ax_identifier.clone(),
         };
 
-        // Numeric value for range controls
         let numeric_value = match role {
-            Role::Slider | Role::ProgressBar | Role::SpinButton => {
-                ax_value_number(element.as_ptr())
-            }
+            Role::Slider | Role::ProgressBar | Role::SpinButton => ax_value_number(ax.as_ptr()),
             _ => None,
         };
 
-        // Min/Max values for sliders
         let (min_value, max_value) = match role {
             Role::Slider => (
-                ax_number_f64(element.as_ptr(), "AXMinValue"),
-                ax_number_f64(element.as_ptr(), "AXMaxValue"),
+                ax_number_f64(ax.as_ptr(), "AXMinValue"),
+                ax_number_f64(ax.as_ptr(), "AXMaxValue"),
             ),
             _ => (None, None),
         };
 
-        let element_idx = elements.len() as u32;
-        let name_ref = name.clone(); // keep for window chrome filter below
-        elements.push(ElementData {
+        let handle = self.cache_element(ax.clone());
+
+        ElementData {
             role,
             name,
             value,
@@ -884,169 +764,156 @@ impl MacOSProvider {
             min_value,
             max_value,
             raw,
-            index: element_idx,
-            children_indices: vec![], // filled below
-            parent_index: parent_idx,
-            pid: None,
-        });
-        ax_elements.push(element.clone());
+            pid,
+            handle,
+        }
+    }
 
-        // Recurse children. Filter out macOS system chrome.
-        let children = ax_children(element.as_ptr());
-        let mut child_ids = Vec::new();
-
-        for child in &children {
-            // Skip macOS system chrome (menu bar, window buttons, title bar text).
-            // These are added by macOS, not by the app's accesskit tree.
-            if role == Role::Application {
-                let child_role = ax_string(child.as_ptr(), "AXRole").unwrap_or_default();
-                if child_role == "AXMenuBar" {
-                    continue;
-                }
+    /// On macOS 15+, `safe_ax_create_application(pid)` returns a wrapper
+    /// element whose AXChildren are `[AXApplication_self, AXMenuBar]`.
+    /// The real app element (with windows as children) is the nested
+    /// AXApplication child. This method follows AXApplication children
+    /// until it finds one with non-AXApplication, non-AXMenuBar children
+    /// (i.e., the real app element), or gives up after a few levels.
+    fn unwrap_ax_application(ax: &AXElement) -> AXElement {
+        let mut current = ax.clone();
+        for _ in 0..5 {
+            let children = ax_children(current.as_ptr());
+            // Find the AXApplication child (the "real" app element)
+            let nested_app = children
+                .iter()
+                .find(|c| ax_string(c.as_ptr(), "AXRole").as_deref() == Some("AXApplication"));
+            let nested = match nested_app {
+                Some(n) => n.clone(),
+                None => return current, // no nested AXApplication, use current
+            };
+            // Check if the nested app has non-trivial children
+            // (i.e., something other than AXApplication + AXMenuBar)
+            let nested_children = ax_children(nested.as_ptr());
+            let has_real_children = nested_children.iter().any(|c| {
+                let r = ax_string(c.as_ptr(), "AXRole").unwrap_or_default();
+                r != "AXApplication" && r != "AXMenuBar"
+            });
+            if has_real_children {
+                return nested;
             }
-            if role == Role::Window {
-                let child_subrole = ax_string(child.as_ptr(), "AXSubrole").unwrap_or_default();
-                if matches!(
-                    child_subrole.as_str(),
-                    "AXCloseButton" | "AXMinimizeButton" | "AXFullScreenButton" | "AXZoomButton"
-                ) {
-                    continue;
-                }
-                // Skip the title bar static text added by macOS
-                let child_role = ax_string(child.as_ptr(), "AXRole").unwrap_or_default();
-                if child_role == "AXStaticText" {
-                    let child_sr = ax_string(child.as_ptr(), "AXSubrole").unwrap_or_default();
-                    if child_sr.is_empty() || child_sr == "AXUnknown" {
-                        // Check if it has the window title as value — that's the title bar text
-                        if let Some(v) = ax_string(child.as_ptr(), "AXValue") {
-                            if let Some(ref win_name) = name_ref {
-                                if v == *win_name {
-                                    continue;
-                                }
+            // Keep unwrapping
+            current = nested;
+        }
+        current
+    }
+
+    /// Should this child be filtered out (macOS system chrome)?
+    fn should_filter_child(
+        parent_role: Role,
+        parent_name: Option<&str>,
+        child: &AXElement,
+    ) -> bool {
+        let child_role = ax_string(child.as_ptr(), "AXRole").unwrap_or_default();
+
+        if parent_role == Role::Application && child_role == "AXMenuBar" {
+            return true;
+        }
+
+        if parent_role == Role::Window {
+            let child_subrole = ax_string(child.as_ptr(), "AXSubrole").unwrap_or_default();
+            if matches!(
+                child_subrole.as_str(),
+                "AXCloseButton" | "AXMinimizeButton" | "AXFullScreenButton" | "AXZoomButton"
+            ) {
+                return true;
+            }
+            if child_role == "AXStaticText" {
+                let child_sr = ax_string(child.as_ptr(), "AXSubrole").unwrap_or_default();
+                if child_sr.is_empty() || child_sr == "AXUnknown" {
+                    if let Some(v) = ax_string(child.as_ptr(), "AXValue") {
+                        if let Some(win_name) = parent_name {
+                            if v == win_name {
+                                return true;
                             }
                         }
                     }
                 }
             }
-            // Skip nested AXApplication children — prevents infinite recursion from
-            // Qt/PySide6 apps that list themselves as their own child.
-            {
-                let child_role = ax_string(child.as_ptr(), "AXRole").unwrap_or_default();
-                if child_role == "AXApplication" {
-                    continue;
-                }
-            }
-            let child_idx = elements.len() as u32;
-            child_ids.push(child_idx);
-            self.traverse(
-                child,
-                elements,
-                ax_elements,
-                Some(element_idx),
-                depth + 1,
-                screen_size,
-            );
         }
 
-        elements[element_idx as usize].children_indices = child_ids;
+        false
     }
 }
 
 impl Provider for MacOSProvider {
-    fn resolve_pid_by_name(&self, name: &str) -> Result<u32> {
-        let (_app_element, pid, _app_name) = self.find_app_by_name(name)?;
-        Ok(pid as u32)
-    }
-
-    fn get_elements(&self, pid: u32) -> Result<Element> {
-        let (app_element, app_name) = self.find_app_by_pid(pid)?;
-        self.build_tree(app_element, pid as i32, &app_name)
-    }
-
-    fn get_apps(&self) -> Result<Element> {
-        let screen_size = Self::detect_screen_size();
-        let mut elements = Vec::new();
-        let mut ax_elements = Vec::new();
-
-        // Desktop root
-        elements.push(ElementData {
-            index: 0,
-            role: Role::Application,
-            name: Some("Desktop".to_string()),
-            value: None,
-            description: None,
-            bounds: Some(Rect {
-                x: 0,
-                y: 0,
-                width: screen_size.0,
-                height: screen_size.1,
-            }),
-            actions: vec![],
-            states: StateSet::default(),
-            children_indices: vec![],
-            parent_index: None,
-            stable_id: None,
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            raw: RawPlatformData::Synthetic,
-            pid: None,
-        });
-        ax_elements.push(AXElement(std::ptr::null())); // placeholder
-
-        let apps = Self::list_gui_apps();
-        let mut root_children = Vec::new();
-
-        for (pid, _app_name) in &apps {
-            let app_element = AXElement::from_owned(unsafe { safe_ax_create_application(*pid) });
-            if app_element.is_null() {
-                continue;
+    fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
+        match element {
+            None => {
+                // Top-level: list all GUI apps as application elements
+                let apps = Self::list_gui_apps();
+                let mut results = Vec::new();
+                for (pid, app_name) in &apps {
+                    let app_element =
+                        AXElement::from_owned(unsafe { safe_ax_create_application(*pid) });
+                    if app_element.is_null() {
+                        continue;
+                    }
+                    let mut data = self.build_element_data(&app_element, Some(*pid as u32));
+                    // Override name with the CGWindowList name (more reliable)
+                    data.name = Some(app_name.clone());
+                    results.push(data);
+                }
+                Ok(results)
             }
-            let child_idx = elements.len() as u32;
-            root_children.push(child_idx);
-            self.traverse(
-                &app_element,
-                &mut elements,
-                &mut ax_elements,
-                Some(0),
-                1,
-                screen_size,
-            );
-            // Set PID on the app element so App::all() can use it
-            elements[child_idx as usize].pid = Some(*pid as u32);
+            Some(element_data) => {
+                let ax = self.get_cached(element_data.handle)?;
+                let role = element_data.role;
+                let name = element_data.name.as_deref();
+
+                // For Application elements, unwrap the self-referencing
+                // AXApplication wrapper that macOS 15+ puts around apps.
+                // The real children (windows) are inside the nested
+                // AXApplication child.
+                let effective_ax = if role == Role::Application {
+                    Self::unwrap_ax_application(&ax)
+                } else {
+                    ax.clone()
+                };
+
+                let ax_children_list = ax_children(effective_ax.as_ptr());
+
+                let mut results = Vec::new();
+                for child in &ax_children_list {
+                    if Self::should_filter_child(role, name, child) {
+                        continue;
+                    }
+                    let data = self.build_element_data(child, element_data.pid);
+                    results.push(data);
+                }
+                Ok(results)
+            }
         }
+    }
 
-        elements[0].children_indices = root_children;
-
-        *self.cached_elements.lock().unwrap() = ax_elements;
-
-        Ok(root_element(
-            "Desktop".to_string(),
-            None,
-            screen_size,
-            elements,
-        ))
+    fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
+        let ax = self.get_cached(element.handle)?;
+        match ax_parent(ax.as_ptr()) {
+            Some(parent_ax) => {
+                if parent_ax.is_null() {
+                    return Ok(None);
+                }
+                // Check if parent is an application — if so, still return it
+                let data = self.build_element_data(&parent_ax, element.pid);
+                Ok(Some(data))
+            }
+            None => Ok(None),
+        }
     }
 
     fn perform_action(
         &self,
-        element: &Element,
+        element: &ElementData,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()> {
-        let element_idx = element.index;
-
-        // Look up cached AX element handle
-        let cache = self.cached_elements.lock().unwrap();
-        let ax_element = cache.get(element_idx as usize).ok_or(Error::ElementStale {
-            selector: format!("index:{}", element_idx),
-        })?;
-        if ax_element.is_null() {
-            return Err(Error::ElementStale {
-                selector: format!("index:{}", element_idx),
-            });
-        }
-        let el_ptr = ax_element.as_ptr();
+        let ax = self.get_cached(element.handle)?;
+        let el_ptr = ax.as_ptr();
 
         match action {
             Action::Press | Action::Toggle | Action::Select => {
@@ -1161,10 +1028,7 @@ impl Provider for MacOSProvider {
                 Ok(())
             }
 
-            Action::ScrollIntoView => {
-                // No direct AX equivalent; no-op
-                Ok(())
-            }
+            Action::ScrollIntoView => Ok(()),
 
             Action::Blur => {
                 let attr = CFString::new("AXFocused");
@@ -1251,8 +1115,6 @@ impl Provider for MacOSProvider {
                         })
                     }
                 };
-                // Insert text via AXSelectedText — replaces current selection
-                // (or inserts at cursor if selection is zero-length).
                 let attr = CFString::new("AXSelectedText");
                 let val = CFString::new(&text);
                 let err = do_set_attribute(el_ptr, &attr, val.as_concrete_TypeRef() as CFTypeRef);
@@ -1279,25 +1141,28 @@ impl Provider for MacOSProvider {
         }
     }
 
-    fn subscribe(&self, pid: u32) -> Result<Subscription> {
-        self.subscribe_impl(pid as i32, String::new())
+    fn subscribe(&self, element: &ElementData) -> Result<Subscription> {
+        let pid = element.pid.ok_or(Error::Platform {
+            code: -1,
+            message: "Element has no PID for subscribe".to_string(),
+        })?;
+        let app_name = element.name.clone().unwrap_or_default();
+        self.subscribe_impl(pid as i32, app_name)
     }
 }
 
 // ── Event subscription ──────────────────────────────────────────────────────
 
-/// Context passed to AXObserver callback via refcon pointer.
 struct ObserverContext {
     sender: std::sync::mpsc::Sender<Event>,
     app_name: String,
     app_pid: u32,
 }
 
-/// AXObserver callback: maps AX notifications to xa11y events and sends them.
 unsafe extern "C" fn ax_observer_callback(
     _observer: CFTypeRef,
     element: AXUIElementRef,
-    notification: CFTypeRef, // CFStringRef
+    notification: CFTypeRef,
     refcon: *mut c_void,
 ) {
     let ctx = &*(refcon as *const ObserverContext);
@@ -1321,7 +1186,6 @@ unsafe extern "C" fn ax_observer_callback(
         _ => return,
     };
 
-    // Build minimal target element from the AX element
     let target = if !element.is_null() {
         let role_str = ax_string(element, "AXRole").unwrap_or_default();
         let subrole = ax_string(element, "AXSubrole");
@@ -1339,10 +1203,8 @@ unsafe extern "C" fn ax_observer_callback(
             max_value: None,
             stable_id: None,
             raw: RawPlatformData::Synthetic,
-            index: 0,
-            children_indices: vec![],
-            parent_index: None,
             pid: None,
+            handle: 0,
         })
     } else {
         None
@@ -1362,7 +1224,6 @@ unsafe extern "C" fn ax_observer_callback(
 }
 
 impl MacOSProvider {
-    /// Shared subscribe implementation used by subscribe.
     fn subscribe_impl(&self, pid: i32, app_name: String) -> Result<Subscription> {
         let (tx, rx) = std::sync::mpsc::channel();
 
@@ -1373,7 +1234,6 @@ impl MacOSProvider {
         });
         let ctx_ptr = Box::into_raw(ctx) as *mut c_void;
 
-        // Create AXObserver
         let mut observer: CFTypeRef = std::ptr::null();
         let err = unsafe { safe_ax_observer_create(pid, ax_observer_callback, &mut observer) };
         if err != AX_ERROR_SUCCESS || observer.is_null() {
@@ -1384,15 +1244,14 @@ impl MacOSProvider {
             });
         }
 
-        // Create app element and add notifications
         let app_element = unsafe { safe_ax_create_application(pid) };
         if app_element.is_null() {
             unsafe {
                 CFRelease(observer);
                 drop(Box::from_raw(ctx_ptr as *mut ObserverContext));
             }
-            return Err(Error::AppNotFound {
-                target: format!("pid:{}", pid),
+            return Err(Error::SelectorNotMatched {
+                selector: format!("application with pid:{}", pid),
             });
         }
 
@@ -1423,8 +1282,6 @@ impl MacOSProvider {
 
         unsafe { CFRelease(app_element) };
 
-        // Spawn background RunLoop thread — communicates RunLoop ref via channel.
-        // Use usize casts to make raw pointers Send-safe across threads.
         let (rl_tx, rl_rx) = std::sync::mpsc::sync_channel::<usize>(1);
         let observer_usize = observer as usize;
 
@@ -1438,7 +1295,7 @@ impl MacOSProvider {
                 safe_cf_run_loop_add_source(source);
                 let rl = safe_cf_run_loop_get_current();
                 let _ = rl_tx.send(rl as usize);
-                safe_cf_run_loop_run(); // blocks until CFRunLoopStop
+                safe_cf_run_loop_run();
             }
         });
 
@@ -1473,15 +1330,12 @@ mod tests {
 
     #[test]
     fn objc_exception_is_caught_by_c_wrapper() {
-        // The C test helper throws an NSException inside @try/@catch.
-        // Verifies the ObjC exception safety mechanism works end-to-end.
         let result = unsafe { test_throw_and_catch_nsexception() };
         assert_eq!(result, 1, "C wrapper should have caught the NSException");
     }
 
     #[test]
     fn safe_ax_copy_attribute_returns_error_on_null_element() {
-        // Calling the safe wrapper with null element should return error, not crash.
         let attr = CFString::new("AXRole");
         let mut value: CFTypeRef = std::ptr::null();
         let err = unsafe {
@@ -1491,13 +1345,11 @@ mod tests {
                 &mut value,
             )
         };
-        // Should return an error code (not 0/success) and not crash
         assert_ne!(err, AX_ERROR_SUCCESS);
     }
 
     #[test]
     fn ax_attr_returns_none_for_null_element() {
-        // A null element should not crash — should return None gracefully
         let result = ax_attr(std::ptr::null(), "AXRole");
         assert!(result.is_none());
     }
@@ -1555,7 +1407,6 @@ mod tests {
 
     #[test]
     fn map_ax_role_covers_all_known_roles() {
-        // Verify subrole precedence
         assert_eq!(map_ax_role("AXWindow", Some("AXDialog")), Role::Dialog);
         assert_eq!(
             map_ax_role("AXGroup", Some("AXApplicationAlert")),
@@ -1568,8 +1419,6 @@ mod tests {
             map_ax_role("AXStaticText", Some("AXHeading")),
             Role::Heading
         );
-
-        // Verify main role mappings
         assert_eq!(map_ax_role("AXApplication", None), Role::Application);
         assert_eq!(map_ax_role("AXWindow", None), Role::Window);
         assert_eq!(map_ax_role("AXSheet", None), Role::Dialog);
@@ -1654,12 +1503,5 @@ mod tests {
     fn provider_new_succeeds() {
         let provider = MacOSProvider::new();
         assert!(provider.is_ok());
-    }
-
-    #[test]
-    fn detect_screen_size_returns_nonzero() {
-        let (w, h) = MacOSProvider::detect_screen_size();
-        assert!(w > 0);
-        assert!(h > 0);
     }
 }

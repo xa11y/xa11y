@@ -1,7 +1,4 @@
 //! macOS accessibility backend using AXUIElement API.
-//!
-//! Implements the `Provider` trait by reading the macOS accessibility tree
-//! via the Accessibility framework (ApplicationServices/HIServices).
 
 #[cfg(target_os = "macos")]
 mod ax;
@@ -25,22 +22,19 @@ mod stub {
     }
 
     impl Provider for MacOSProvider {
-        fn resolve_pid_by_name(&self, _: &str) -> Result<u32> {
+        fn get_children(&self, _: Option<&ElementData>) -> Result<Vec<ElementData>> {
             unreachable!()
         }
-        fn get_elements(&self, _: u32) -> Result<Element> {
+        fn get_parent(&self, _: &ElementData) -> Result<Option<ElementData>> {
             unreachable!()
         }
-        fn get_apps(&self) -> Result<Element> {
-            unreachable!()
-        }
-        fn perform_action(&self, _: &Element, _: Action, _: Option<ActionData>) -> Result<()> {
+        fn perform_action(&self, _: &ElementData, _: Action, _: Option<ActionData>) -> Result<()> {
             unreachable!()
         }
         fn check_permissions(&self) -> Result<PermissionStatus> {
             unreachable!()
         }
-        fn subscribe(&self, _: u32) -> Result<Subscription> {
+        fn subscribe(&self, _: &ElementData) -> Result<Subscription> {
             unreachable!()
         }
     }
@@ -58,8 +52,6 @@ mod tests {
     #[test]
     fn create_provider() {
         let result = MacOSProvider::new();
-        // On macOS: should succeed (may or may not have permissions)
-        // On other platforms: should fail
         #[cfg(target_os = "macos")]
         assert!(result.is_ok());
         #[cfg(not(target_os = "macos"))]

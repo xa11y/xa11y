@@ -15,10 +15,6 @@ def test_permission_denied_inherits():
     assert issubclass(xa11y.PermissionDeniedError, xa11y.XA11yError)
 
 
-def test_app_not_found_inherits():
-    assert issubclass(xa11y.AppNotFoundError, xa11y.XA11yError)
-
-
 def test_selector_not_matched_inherits():
     assert issubclass(xa11y.SelectorNotMatchedError, xa11y.XA11yError)
 
@@ -44,19 +40,19 @@ def test_platform_error_inherits():
 
 def test_catch_with_base_class(test_app):
     with contextlib.suppress(xa11y.XA11yError):
-        test_app.locator("[[[bad").elements()
+        test_app.descendant("[[[bad").elements()
 
 
 def test_catch_with_specific_class(test_app):
     with contextlib.suppress(xa11y.InvalidSelectorError):
-        test_app.locator("[[[bad").elements()
+        test_app.descendant("[[[bad").elements()
 
 
 # ── Error messages ───────────────────────────────────────────────────────────
 
 
 def test_selector_not_matched_message(test_app):
-    loc = test_app.locator("menu_item")
+    loc = test_app.descendant("menu_item")
     try:
         loc.press()
     except xa11y.SelectorNotMatchedError as e:
@@ -65,6 +61,6 @@ def test_selector_not_matched_message(test_app):
 
 def test_invalid_selector_message(test_app):
     try:
-        test_app.locator("[[[bad").elements()
+        test_app.descendant("[[[bad").elements()
     except xa11y.InvalidSelectorError as e:
         assert "bad" in str(e) or "Invalid" in str(e)

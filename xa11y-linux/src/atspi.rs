@@ -1,21 +1,24 @@
 //! Real AT-SPI2 backend implementation using zbus D-Bus bindings.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use xa11y_core::{
-    root_element, Action, ActionData, CancelHandle, Element, ElementData, Error, Event,
-    EventReceiver, EventType, PermissionStatus, Provider, Rect, Result, Role, StateSet,
-    Subscription, Toggled,
+    Action, ActionData, CancelHandle, ElementData, Error, Event, EventReceiver, EventType,
+    PermissionStatus, Provider, Rect, Result, Role, StateSet, Subscription, Toggled,
 };
 use zbus::blocking::{Connection, Proxy};
+
+/// Global handle counter for mapping ElementData back to AccessibleRefs.
+static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
 
 /// Linux accessibility provider using AT-SPI2 over D-Bus.
 pub struct LinuxProvider {
     a11y_bus: Connection,
-    /// Cached AT-SPI accessible refs for action dispatch (keyed by element index).
-    cached_refs: Mutex<Vec<AccessibleRef>>,
+    /// Cached AT-SPI accessible refs keyed by handle ID.
+    handle_cache: Mutex<HashMap<u64, AccessibleRef>>,
 }
 
 /// AT-SPI2 accessible reference: (bus_name, object_path).
@@ -34,7 +37,7 @@ impl LinuxProvider {
         let a11y_bus = Self::connect_a11y_bus()?;
         Ok(Self {
             a11y_bus,
-            cached_refs: Mutex::new(Vec::new()),
+            handle_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -72,16 +75,30 @@ impl LinuxProvider {
     }
 
     fn make_proxy(&self, bus_name: &str, path: &str, interface: &str) -> Result<Proxy<'_>> {
-        Proxy::new(
-            &self.a11y_bus,
-            bus_name.to_owned(),
-            path.to_owned(),
-            interface.to_owned(),
-        )
-        .map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("Failed to create proxy: {}", e),
-        })
+        // Use uncached proxy to avoid GetAll calls — Qt's AT-SPI adaptor
+        // doesn't support GetAll on all objects, causing spurious errors.
+        Proxy::builder(&self.a11y_bus)
+            .destination(bus_name.to_owned())
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("Failed to set proxy destination: {}", e),
+            })?
+            .path(path.to_owned())
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("Failed to set proxy path: {}", e),
+            })?
+            .interface(interface.to_owned())
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("Failed to set proxy interface: {}", e),
+            })?
+            .cache_properties(zbus::proxy::CacheProperties::No)
+            .build()
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("Failed to create proxy: {}", e),
+            })
     }
 
     /// Check whether an accessible object implements a given interface.
@@ -163,7 +180,7 @@ impl LinuxProvider {
     /// Get children via the GetChildren method.
     /// AT-SPI registryd doesn't always implement standard D-Bus Properties,
     /// so we use GetChildren which is more reliable.
-    fn get_children(&self, aref: &AccessibleRef) -> Result<Vec<AccessibleRef>> {
+    fn get_atspi_children(&self, aref: &AccessibleRef) -> Result<Vec<AccessibleRef>> {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
         let reply = proxy
             .call_method("GetChildren", &())
@@ -301,29 +318,27 @@ impl LinuxProvider {
         None
     }
 
-    /// Traverse the accessibility tree rooted at `aref`, building elements.
-    #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::only_used_in_recursion)]
-    fn traverse(
-        &self,
-        aref: &AccessibleRef,
-        elements: &mut Vec<ElementData>,
-        refs: &mut Vec<AccessibleRef>,
-        parent_idx: Option<u32>,
-        depth: u32,
-        screen_size: (u32, u32),
-        visited: &mut HashSet<String>,
-    ) {
-        if depth > xa11y_core::MAX_TREE_DEPTH {
-            return;
-        }
+    /// Cache an AccessibleRef and return a new handle ID.
+    fn cache_element(&self, aref: AccessibleRef) -> u64 {
+        let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+        self.handle_cache.lock().unwrap().insert(handle, aref);
+        handle
+    }
 
-        // Cycle detection using AT-SPI object path as identity
-        let path_key = format!("{}:{}", aref.bus_name, aref.path);
-        if !visited.insert(path_key) {
-            return;
-        }
+    /// Look up a cached AccessibleRef by handle.
+    fn get_cached(&self, handle: u64) -> Result<AccessibleRef> {
+        self.handle_cache
+            .lock()
+            .unwrap()
+            .get(&handle)
+            .cloned()
+            .ok_or(Error::ElementStale {
+                selector: format!("handle:{}", handle),
+            })
+    }
 
+    /// Build an ElementData from an AccessibleRef, caching the ref for later lookup.
+    fn build_element_data(&self, aref: &AccessibleRef, pid: Option<u32>) -> ElementData {
         let role_name = self.get_role_name(aref).unwrap_or_default();
         let role_num = self.get_role_number(aref).unwrap_or(0);
         let role = if !role_name.is_empty() {
@@ -377,8 +392,9 @@ impl LinuxProvider {
             (None, None, None)
         };
 
-        let element_idx = elements.len() as u32;
-        elements.push(ElementData {
+        let handle = self.cache_element(aref.clone());
+
+        ElementData {
             role,
             name,
             value,
@@ -389,75 +405,52 @@ impl LinuxProvider {
             numeric_value,
             min_value,
             max_value,
-            pid: None,
+            pid,
             stable_id: Some(aref.path.clone()),
             raw,
-            index: element_idx,
-            children_indices: vec![], // filled in below
-            parent_index: parent_idx,
-        });
-        refs.push(aref.clone());
-
-        // Get children
-        let children = self.get_children(aref).unwrap_or_default();
-        let mut child_ids = Vec::new();
-
-        for child_ref in &children {
-            // Skip invalid refs
-            if child_ref.path == "/org/a11y/atspi/null"
-                || child_ref.bus_name.is_empty()
-                || child_ref.path.is_empty()
-            {
-                continue;
-            }
-            // Flatten nested application children — application nodes should only
-            // appear at the top level. Qt/PySide6 apps erroneously list themselves
-            // as their own child; we skip the duplicate but adopt its real children.
-            {
-                let child_role = self.get_role_name(child_ref).unwrap_or_default();
-                if child_role == "application" {
-                    let grandchildren = self.get_children(child_ref).unwrap_or_default();
-                    for gc_ref in &grandchildren {
-                        if gc_ref.path == "/org/a11y/atspi/null"
-                            || gc_ref.bus_name.is_empty()
-                            || gc_ref.path.is_empty()
-                        {
-                            continue;
-                        }
-                        let gc_role = self.get_role_name(gc_ref).unwrap_or_default();
-                        if gc_role == "application" {
-                            continue;
-                        }
-                        let gc_idx = elements.len() as u32;
-                        child_ids.push(gc_idx);
-                        self.traverse(
-                            gc_ref,
-                            elements,
-                            refs,
-                            Some(element_idx),
-                            depth + 1,
-                            screen_size,
-                            visited,
-                        );
-                    }
-                    continue;
-                }
-            }
-            let child_idx = elements.len() as u32;
-            child_ids.push(child_idx);
-            self.traverse(
-                child_ref,
-                elements,
-                refs,
-                Some(element_idx),
-                depth + 1,
-                screen_size,
-                visited,
-            );
+            handle,
         }
+    }
 
-        // Update children list
-        elements[element_idx as usize].children_indices = child_ids;
+    /// Get the AT-SPI parent of an accessible ref.
+    fn get_atspi_parent(&self, aref: &AccessibleRef) -> Result<Option<AccessibleRef>> {
+        // Read the Parent property via the D-Bus Properties interface.
+        let proxy = self.make_proxy(
+            &aref.bus_name,
+            &aref.path,
+            "org.freedesktop.DBus.Properties",
+        )?;
+        let reply = proxy
+            .call_method("Get", &("org.a11y.atspi.Accessible", "Parent"))
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("Get Parent property failed: {}", e),
+            })?;
+        // The reply is a Variant containing (so) — a struct of (bus_name, object_path)
+        let variant: zbus::zvariant::OwnedValue =
+            reply.body().deserialize().map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("Parent deserialize variant failed: {}", e),
+            })?;
+        let (bus, path): (String, zbus::zvariant::OwnedObjectPath) =
+            zbus::zvariant::Value::from(variant).try_into().map_err(
+                |e: zbus::zvariant::Error| Error::Platform {
+                    code: -1,
+                    message: format!("Parent deserialize struct failed: {}", e),
+                },
+            )?;
+        let path_str = path.as_str();
+        if path_str == "/org/a11y/atspi/null" || bus.is_empty() || path_str.is_empty() {
+            return Ok(None);
+        }
+        // If the parent is the registry root, this is a top-level app — no parent
+        if path_str == "/org/a11y/atspi/accessible/root" {
+            return Ok(None);
+        }
+        Ok(Some(AccessibleRef {
+            bus_name: bus,
+            path: path_str.to_string(),
+        }))
     }
 
     /// Parse AT-SPI2 state bitfield into xa11y StateSet.
@@ -527,59 +520,13 @@ impl LinuxProvider {
         }
     }
 
-    /// Get screen size.
-    fn detect_screen_size() -> (u32, u32) {
-        if let Ok(output) = std::process::Command::new("xdpyinfo").output() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            for line in stdout.lines() {
-                let trimmed = line.trim();
-                if trimmed.starts_with("dimensions:") {
-                    if let Some(dims) = trimmed.split_whitespace().nth(1) {
-                        let parts: Vec<&str> = dims.split('x').collect();
-                        if parts.len() == 2 {
-                            if let (Ok(w), Ok(h)) = (parts[0].parse(), parts[1].parse()) {
-                                return (w, h);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        (1920, 1080)
-    }
-
-    /// Find an application by name.
-    fn find_app_by_name(&self, name: &str) -> Result<AccessibleRef> {
-        let registry = AccessibleRef {
-            bus_name: "org.a11y.atspi.Registry".to_string(),
-            path: "/org/a11y/atspi/accessible/root".to_string(),
-        };
-        let children = self.get_children(&registry)?;
-        let name_lower = name.to_lowercase();
-
-        for child in &children {
-            if child.path == "/org/a11y/atspi/null" {
-                continue;
-            }
-            if let Ok(app_name) = self.get_name(child) {
-                if app_name.to_lowercase().contains(&name_lower) {
-                    return Ok(child.clone());
-                }
-            }
-        }
-
-        Err(Error::AppNotFound {
-            target: name.to_string(),
-        })
-    }
-
     /// Find an application by PID.
     fn find_app_by_pid(&self, pid: u32) -> Result<AccessibleRef> {
         let registry = AccessibleRef {
             bus_name: "org.a11y.atspi.Registry".to_string(),
             path: "/org/a11y/atspi/accessible/root".to_string(),
         };
-        let children = self.get_children(&registry)?;
+        let children = self.get_atspi_children(&registry)?;
 
         for child in &children {
             if child.path == "/org/a11y/atspi/null" {
@@ -603,8 +550,9 @@ impl LinuxProvider {
             }
         }
 
-        Err(Error::AppNotFound {
-            target: format!("PID {}", pid),
+        Err(Error::Platform {
+            code: -1,
+            message: format!("No application found with PID {}", pid),
         })
     }
 
@@ -689,147 +637,96 @@ impl LinuxProvider {
     }
 }
 
-impl LinuxProvider {
-    fn build_tree(&self, app_ref: &AccessibleRef, label: &str) -> Result<Element> {
-        let app_name = self.get_name(app_ref).unwrap_or_default();
-        let screen_size = Self::detect_screen_size();
-        let mut elements = Vec::new();
-        let mut refs = Vec::new();
-        let mut visited = HashSet::new();
-
-        self.traverse(
-            app_ref,
-            &mut elements,
-            &mut refs,
-            None,
-            0,
-            screen_size,
-            &mut visited,
-        );
-
-        if elements.is_empty() {
-            return Err(Error::AppNotFound {
-                target: label.to_string(),
-            });
-        }
-
-        // Cache refs for action dispatch
-        *self.cached_refs.lock().unwrap() = refs;
-
-        let pid = self.get_app_pid(app_ref);
-
-        Ok(root_element(app_name, pid, screen_size, elements))
-    }
-}
-
 impl Provider for LinuxProvider {
-    fn resolve_pid_by_name(&self, name: &str) -> Result<u32> {
-        let app_ref = self.find_app_by_name(name)?;
-        self.get_app_pid(&app_ref)
-            .ok_or_else(|| Error::AppNotFound {
-                target: name.to_string(),
-            })
-    }
+    fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
+        match element {
+            None => {
+                // Top-level: list all AT-SPI application elements
+                let registry = AccessibleRef {
+                    bus_name: "org.a11y.atspi.Registry".to_string(),
+                    path: "/org/a11y/atspi/accessible/root".to_string(),
+                };
+                let children = self.get_atspi_children(&registry)?;
+                let mut results = Vec::new();
 
-    fn get_elements(&self, pid: u32) -> Result<Element> {
-        let app_ref = self.find_app_by_pid(pid)?;
-        self.build_tree(&app_ref, &format!("pid:{pid}"))
-    }
+                for child in &children {
+                    if child.path == "/org/a11y/atspi/null" {
+                        continue;
+                    }
+                    let app_name = self.get_name(child).unwrap_or_default();
+                    if app_name.is_empty() {
+                        continue;
+                    }
+                    let pid = self.get_app_pid(child);
+                    let mut data = self.build_element_data(child, pid);
+                    // Override name with the app name (more reliable than AT-SPI Name)
+                    data.name = Some(app_name);
+                    results.push(data);
+                }
 
-    fn get_apps(&self) -> Result<Element> {
-        let screen_size = Self::detect_screen_size();
-        let mut elements = Vec::new();
-
-        elements.push(ElementData {
-            role: Role::Application,
-            name: Some("Desktop".to_string()),
-            value: None,
-            description: None,
-            bounds: Some(Rect {
-                x: 0,
-                y: 0,
-                width: screen_size.0,
-                height: screen_size.1,
-            }),
-            actions: vec![],
-            states: StateSet::default(),
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            pid: None,
-            stable_id: None,
-            raw: xa11y_core::RawPlatformData::Synthetic,
-            index: 0,
-            children_indices: vec![],
-            parent_index: None,
-        });
-
-        let mut refs = Vec::new();
-        refs.push(AccessibleRef {
-            bus_name: String::new(),
-            path: String::new(),
-        }); // placeholder for desktop root
-
-        let registry = AccessibleRef {
-            bus_name: "org.a11y.atspi.Registry".to_string(),
-            path: "/org/a11y/atspi/accessible/root".to_string(),
-        };
-        let children = self.get_children(&registry).unwrap_or_default();
-        let mut root_children = Vec::new();
-
-        for child in &children {
-            if child.path == "/org/a11y/atspi/null" {
-                continue;
+                Ok(results)
             }
-            let app_name = self.get_name(child).unwrap_or_default();
-            if app_name.is_empty() {
-                continue;
+            Some(element_data) => {
+                let aref = self.get_cached(element_data.handle)?;
+                let children = self.get_atspi_children(&aref).unwrap_or_default();
+                let mut results = Vec::new();
+
+                for child_ref in &children {
+                    // Skip invalid refs
+                    if child_ref.path == "/org/a11y/atspi/null"
+                        || child_ref.bus_name.is_empty()
+                        || child_ref.path.is_empty()
+                    {
+                        continue;
+                    }
+                    // Flatten nested application children — application nodes should only
+                    // appear at the top level. Qt/PySide6 apps erroneously list themselves
+                    // as their own child; we skip the duplicate but adopt its real children.
+                    let child_role = self.get_role_name(child_ref).unwrap_or_default();
+                    if child_role == "application" {
+                        let grandchildren = self.get_atspi_children(child_ref).unwrap_or_default();
+                        for gc_ref in &grandchildren {
+                            if gc_ref.path == "/org/a11y/atspi/null"
+                                || gc_ref.bus_name.is_empty()
+                                || gc_ref.path.is_empty()
+                            {
+                                continue;
+                            }
+                            let gc_role = self.get_role_name(gc_ref).unwrap_or_default();
+                            if gc_role == "application" {
+                                continue;
+                            }
+                            results.push(self.build_element_data(gc_ref, element_data.pid));
+                        }
+                        continue;
+                    }
+
+                    results.push(self.build_element_data(child_ref, element_data.pid));
+                }
+
+                Ok(results)
             }
-            let child_idx = elements.len() as u32;
-            root_children.push(child_idx);
-            let mut visited = HashSet::new();
-            self.traverse(
-                child,
-                &mut elements,
-                &mut refs,
-                Some(0),
-                1,
-                screen_size,
-                &mut visited,
-            );
-            // Set PID on the app element so App::all() can use it
-            elements[child_idx as usize].pid = self.get_app_pid(child);
         }
+    }
 
-        elements[0].children_indices = root_children;
-
-        *self.cached_refs.lock().unwrap() = refs;
-
-        Ok(root_element(
-            "Desktop".to_string(),
-            None,
-            screen_size,
-            elements,
-        ))
+    fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
+        let aref = self.get_cached(element.handle)?;
+        match self.get_atspi_parent(&aref)? {
+            Some(parent_ref) => {
+                let data = self.build_element_data(&parent_ref, element.pid);
+                Ok(Some(data))
+            }
+            None => Ok(None),
+        }
     }
 
     fn perform_action(
         &self,
-        element: &Element,
+        element: &ElementData,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()> {
-        let element_idx = element.index;
-
-        // Look up cached accessible ref for action dispatch
-        let cache = self.cached_refs.lock().unwrap();
-        let target = cache
-            .get(element_idx as usize)
-            .ok_or(Error::ElementStale {
-                selector: format!("index:{}", element_idx),
-            })?
-            .clone();
-        drop(cache);
+        let target = self.get_cached(element.handle)?;
 
         match action {
             Action::Press => self
@@ -944,21 +841,15 @@ impl Provider for LinuxProvider {
             }),
             Action::Blur => {
                 // Grab focus on parent element to blur the current one
-                let proxy =
-                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Accessible")?;
-                if let Ok(reply) = proxy.call_method("GetParent", &()) {
-                    if let Ok((bus, path)) = reply
-                        .body()
-                        .deserialize::<(String, zbus::zvariant::OwnedObjectPath)>()
-                    {
-                        let path_str = path.as_str();
-                        if path_str != "/org/a11y/atspi/null" {
-                            if let Ok(p) =
-                                self.make_proxy(&bus, path_str, "org.a11y.atspi.Component")
-                            {
-                                let _ = p.call_method("GrabFocus", &());
-                                return Ok(());
-                            }
+                if let Ok(Some(parent_ref)) = self.get_atspi_parent(&target) {
+                    if parent_ref.path != "/org/a11y/atspi/null" {
+                        if let Ok(p) = self.make_proxy(
+                            &parent_ref.bus_name,
+                            &parent_ref.path,
+                            "org.a11y.atspi.Component",
+                        ) {
+                            let _ = p.call_method("GrabFocus", &());
+                            return Ok(());
                         }
                     }
                 }
@@ -1091,7 +982,7 @@ impl Provider for LinuxProvider {
             bus_name: "org.a11y.atspi.Registry".to_string(),
             path: "/org/a11y/atspi/accessible/root".to_string(),
         };
-        match self.get_children(&registry) {
+        match self.get_atspi_children(&registry) {
             Ok(_) => Ok(PermissionStatus::Granted),
             Err(_) => Ok(PermissionStatus::Denied {
                 instructions:
@@ -1101,9 +992,12 @@ impl Provider for LinuxProvider {
         }
     }
 
-    fn subscribe(&self, pid: u32) -> Result<Subscription> {
-        let app_ref = self.find_app_by_pid(pid)?;
-        let app_name = self.get_name(&app_ref).unwrap_or_default();
+    fn subscribe(&self, element: &ElementData) -> Result<Subscription> {
+        let pid = element.pid.ok_or(Error::Platform {
+            code: -1,
+            message: "Element has no PID for subscribe".to_string(),
+        })?;
+        let app_name = element.name.clone().unwrap_or_default();
         self.subscribe_impl(app_name, pid, pid)
     }
 }
@@ -1125,26 +1019,41 @@ impl LinuxProvider {
             while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(100));
 
-                let root = match poll_provider.get_elements(pid) {
+                // Find the app element by PID
+                let app_ref = match poll_provider.find_app_by_pid(pid) {
                     Ok(r) => r,
                     Err(_) => continue,
                 };
+                let app_data = poll_provider.build_element_data(&app_ref, Some(pid));
 
-                let subtree = root.subtree();
-                let focused_name = subtree
-                    .iter()
-                    .find(|n| n.states.focused)
-                    .and_then(|n| n.name.clone());
+                // Walk the tree lazily to find focused element and count
+                let mut stack = vec![app_data];
+                let mut element_count: usize = 0;
+                let mut focused_element: Option<ElementData> = None;
+                let mut visited = HashSet::new();
+
+                while let Some(el) = stack.pop() {
+                    let path_key = format!("{:?}:{}", el.raw, el.handle);
+                    if !visited.insert(path_key) {
+                        continue;
+                    }
+                    element_count += 1;
+                    if el.states.focused && focused_element.is_none() {
+                        focused_element = Some(el.clone());
+                    }
+                    if let Ok(children) = poll_provider.get_children(Some(&el)) {
+                        stack.extend(children);
+                    }
+                }
+
+                let focused_name = focused_element.as_ref().and_then(|e| e.name.clone());
                 if focused_name != prev_focused {
                     if prev_focused.is_some() {
                         let _ = tx.send(Event {
                             event_type: EventType::FocusChanged,
                             app_name: app_name.clone(),
                             app_pid,
-                            target: subtree
-                                .iter()
-                                .find(|n| n.states.focused)
-                                .map(|e| (**e).clone()),
+                            target: focused_element,
                             state_flag: None,
                             state_value: None,
                             text_change: None,
@@ -1154,7 +1063,6 @@ impl LinuxProvider {
                     prev_focused = focused_name;
                 }
 
-                let element_count = subtree.len();
                 if element_count != prev_element_count && prev_element_count > 0 {
                     let _ = tx.send(Event {
                         event_type: EventType::StructureChanged,

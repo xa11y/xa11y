@@ -1,20 +1,22 @@
 //! Windows UI Automation accessibility provider.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, ReleaseDC, HORZRES, VERTRES};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT};
-use windows::Win32::System::Threading::*;
+
 use windows::Win32::UI::Accessibility::*;
 
 use xa11y_core::{
-    root_element, Action, ActionData, CancelHandle, Element, ElementData, Error, Event,
-    EventReceiver, EventType, PermissionStatus, Provider, RawPlatformData, Rect, Result, Role,
-    StateSet, Subscription, Toggled,
+    Action, ActionData, CancelHandle, ElementData, Error, Event, EventReceiver, EventType,
+    PermissionStatus, Provider, RawPlatformData, Rect, Result, Role, StateSet, Subscription,
+    Toggled,
 };
+
+static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
 
 /// Initialize COM for UIA. Called once per WindowsProvider creation.
 /// Does not uninitialize on drop — COM lifetime is managed by the process.
@@ -32,8 +34,8 @@ fn ensure_com_initialized() -> windows::core::Result<()> {
 /// Windows accessibility provider using UI Automation.
 pub struct WindowsProvider {
     automation: IUIAutomation,
-    /// Cached UIA elements for action dispatch (keyed by element index).
-    cached_elements: Mutex<Vec<IUIAutomationElement>>,
+    /// Cached UIA elements for action dispatch (keyed by handle ID).
+    handle_cache: Mutex<HashMap<u64, IUIAutomationElement>>,
 }
 
 // IUIAutomation is COM and thread-safe via proxy
@@ -59,7 +61,7 @@ impl WindowsProvider {
         })?;
         Ok(Self {
             automation,
-            cached_elements: Mutex::new(Vec::new()),
+            handle_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -75,81 +77,6 @@ impl WindowsProvider {
             return Err(());
         }
         unsafe { self.automation.ElementFromHandle(hwnd) }.map_err(|_| ())
-    }
-
-    fn detect_screen_size() -> (u32, u32) {
-        unsafe {
-            let hdc = GetDC(HWND::default());
-            if hdc.is_invalid() {
-                return (1920, 1080);
-            }
-            let w = GetDeviceCaps(hdc, HORZRES) as u32;
-            let h = GetDeviceCaps(hdc, VERTRES) as u32;
-            let _ = ReleaseDC(HWND::default(), hdc);
-            if w == 0 || h == 0 {
-                (1920, 1080)
-            } else {
-                (w, h)
-            }
-        }
-    }
-
-    fn find_app_by_name(&self, name: &str) -> Result<(IUIAutomationElement, u32, String)> {
-        let name_lower = name.to_lowercase();
-        let root = unsafe { self.automation.GetRootElement() }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("GetRootElement failed: {}", e),
-        })?;
-
-        // Find all top-level windows
-        let condition = unsafe {
-            self.automation.CreatePropertyCondition(
-                UIA_ControlTypePropertyId,
-                &windows::core::VARIANT::from(UIA_WindowControlTypeId.0),
-            )
-        }
-        .map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("CreatePropertyCondition failed: {}", e),
-        })?;
-
-        let elements = unsafe { root.FindAll(TreeScope_Children, &condition) }.map_err(|e| {
-            Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("FindAll failed: {}", e),
-            }
-        })?;
-
-        let count = unsafe { elements.Length() }.unwrap_or(0);
-        let mut seen_pids = HashSet::new();
-
-        for i in 0..count {
-            if let Ok(el) = unsafe { elements.GetElement(i) } {
-                let pid = unsafe { el.CurrentProcessId() }.unwrap_or(0) as u32;
-                let el_name = unsafe { el.CurrentName() }
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
-
-                if el_name.to_lowercase().contains(&name_lower) {
-                    let el = self.reacquire_via_hwnd(&el).unwrap_or(el);
-                    return Ok((el, pid, el_name));
-                }
-
-                // Also check the process name if window title doesn't match
-                if pid > 0 && seen_pids.insert(pid) {
-                    if let Some(proc_name) = get_process_name(pid) {
-                        if proc_name.to_lowercase().contains(&name_lower) {
-                            let el = self.reacquire_via_hwnd(&el).unwrap_or(el);
-                            return Ok((el, pid, proc_name));
-                        }
-                    }
-                }
-            }
-        }
-
-        Err(Error::AppNotFound {
-            target: name.to_string(),
-        })
     }
 
     fn find_app_by_pid(&self, pid: u32) -> Result<(IUIAutomationElement, String)> {
@@ -170,8 +97,9 @@ impl WindowsProvider {
         })?;
 
         let el = unsafe { root.FindFirst(TreeScope_Children, &condition) }.map_err(|_| {
-            Error::AppNotFound {
-                target: format!("PID {}", pid),
+            Error::Platform {
+                code: -1,
+                message: format!("No window found for PID {}", pid),
             }
         })?;
 
@@ -185,25 +113,27 @@ impl WindowsProvider {
         Ok((el, name))
     }
 
-    /// Recursively traverse the UIA tree, building xa11y elements.
-    #[allow(clippy::too_many_arguments)]
-    fn traverse(
-        &self,
-        element: &IUIAutomationElement,
-        elements: &mut Vec<ElementData>,
-        uia_elements: &mut Vec<IUIAutomationElement>,
-        parent_idx: Option<u32>,
-        depth: u32,
-        screen_size: (u32, u32),
-    ) {
-        if depth > xa11y_core::MAX_TREE_DEPTH {
-            return;
-        }
+    /// Cache a UIA element and return its handle ID.
+    fn cache_element(&self, uia: IUIAutomationElement) -> u64 {
+        let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
+        self.handle_cache.lock().unwrap().insert(handle, uia);
+        handle
+    }
 
-        // Depth limit is sufficient for cycle protection on UIA trees.
-        // (COM pointer identity is unreliable for cycle detection because
-        // UIA creates proxy objects with different addresses for the same element.)
+    /// Look up a cached UIA element by handle.
+    fn get_cached(&self, handle: u64) -> Result<IUIAutomationElement> {
+        self.handle_cache
+            .lock()
+            .unwrap()
+            .get(&handle)
+            .cloned()
+            .ok_or(Error::ElementStale {
+                selector: format!("handle:{}", handle),
+            })
+    }
 
+    /// Build an ElementData from a UIA element, caching the native handle.
+    fn build_element_data(&self, element: &IUIAutomationElement, pid: Option<u32>) -> ElementData {
         let control_type = unsafe { element.CurrentControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
         let mut role = map_uia_control_type(control_type);
 
@@ -329,8 +259,9 @@ impl WindowsProvider {
             (None, None, None)
         };
 
-        let element_idx = elements.len() as u32;
-        elements.push(ElementData {
+        let handle = self.cache_element(element.clone());
+
+        ElementData {
             role,
             name,
             value,
@@ -342,225 +273,148 @@ impl WindowsProvider {
             numeric_value,
             min_value,
             max_value,
-            pid: None,
+            pid,
             raw,
-            index: element_idx,
-            children_indices: vec![],
-            parent_index: parent_idx,
-        });
-        uia_elements.push(element.clone());
+            handle,
+        }
+    }
 
-        // Recurse children. Try FindAll first (works with AccessKit fragment roots),
-        // fall back to RawViewWalker for native elements.
-        let mut child_ids = Vec::new();
+    /// Get direct UIA children of an element. Tries FindAll first (works with
+    /// AccessKit fragment roots), falls back to RawViewWalker for native elements.
+    fn uia_children(&self, element: &IUIAutomationElement) -> Vec<IUIAutomationElement> {
+        let mut children = Vec::new();
 
-        let children_found = if let Ok(true_cond) = unsafe { self.automation.CreateTrueCondition() }
-        {
-            if let Ok(children) = unsafe { element.FindAll(TreeScope_Children, &true_cond) } {
-                let count = unsafe { children.Length() }.unwrap_or(0);
-                if count > 0 {
-                    for i in 0..count {
-                        if let Ok(child_el) = unsafe { children.GetElement(i) } {
-                            let child_idx = elements.len() as u32;
-                            child_ids.push(child_idx);
-                            self.traverse(
-                                &child_el,
-                                elements,
-                                uia_elements,
-                                Some(element_idx),
-                                depth + 1,
-                                screen_size,
-                            );
+        let found_via_find_all =
+            if let Ok(true_cond) = unsafe { self.automation.CreateTrueCondition() } {
+                if let Ok(child_arr) = unsafe { element.FindAll(TreeScope_Children, &true_cond) } {
+                    let count = unsafe { child_arr.Length() }.unwrap_or(0);
+                    if count > 0 {
+                        for i in 0..count {
+                            if let Ok(child_el) = unsafe { child_arr.GetElement(i) } {
+                                children.push(child_el);
+                            }
                         }
+                        true
+                    } else {
+                        false
                     }
-                    true
                 } else {
                     false
                 }
             } else {
                 false
-            }
-        } else {
-            false
-        };
+            };
 
         // Fall back to RawViewWalker if FindAll found nothing
-        if !children_found {
+        if !found_via_find_all {
             if let Ok(walker) = unsafe { self.automation.RawViewWalker() } {
                 let mut child = unsafe { walker.GetFirstChildElement(element) }.ok();
                 while let Some(ref child_el) = child {
-                    let child_idx = elements.len() as u32;
-                    child_ids.push(child_idx);
-                    self.traverse(
-                        child_el,
-                        elements,
-                        uia_elements,
-                        Some(element_idx),
-                        depth + 1,
-                        screen_size,
-                    );
+                    children.push(child_el.clone());
                     child = unsafe { walker.GetNextSiblingElement(child_el) }.ok();
                 }
             }
         }
 
-        elements[element_idx as usize].children_indices = child_ids;
-    }
-}
-
-impl WindowsProvider {
-    /// Shared helper: build a Tree from a resolved UIA element.
-    fn build_tree(
-        &self,
-        app_element: &IUIAutomationElement,
-        pid: u32,
-        app_name: String,
-        target_label: &str,
-    ) -> Result<Element> {
-        let screen_size = Self::detect_screen_size();
-        let mut elements = Vec::new();
-        let mut uia_elements = Vec::new();
-
-        self.traverse(
-            app_element,
-            &mut elements,
-            &mut uia_elements,
-            None,
-            0,
-            screen_size,
-        );
-
-        if elements.is_empty() {
-            return Err(Error::AppNotFound {
-                target: target_label.to_string(),
-            });
-        }
-
-        *self.cached_elements.lock().unwrap() = uia_elements;
-
-        Ok(root_element(app_name, Some(pid), screen_size, elements))
+        children
     }
 }
 
 impl Provider for WindowsProvider {
-    fn resolve_pid_by_name(&self, name: &str) -> Result<u32> {
-        let (_app_element, pid, _app_name) = self.find_app_by_name(name)?;
-        Ok(pid)
-    }
+    fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
+        match element {
+            None => {
+                // Top-level: list all GUI application windows
+                let root =
+                    unsafe { self.automation.GetRootElement() }.map_err(|e| Error::Platform {
+                        code: e.code().0 as i64,
+                        message: format!("GetRootElement failed: {}", e),
+                    })?;
 
-    fn get_elements(&self, pid: u32) -> Result<Element> {
-        let (app_element, app_name) = self.find_app_by_pid(pid)?;
-        self.build_tree(&app_element, pid, app_name, &format!("PID {}", pid))
-    }
+                let condition = unsafe {
+                    self.automation.CreatePropertyCondition(
+                        UIA_ControlTypePropertyId,
+                        &windows::core::VARIANT::from(UIA_WindowControlTypeId.0),
+                    )
+                }
+                .map_err(|e| Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("CreatePropertyCondition failed: {}", e),
+                })?;
 
-    fn get_apps(&self) -> Result<Element> {
-        let screen_size = Self::detect_screen_size();
-        let mut elements = Vec::new();
-        let mut uia_elements = Vec::new();
+                let windows =
+                    unsafe { root.FindAll(TreeScope_Children, &condition) }.map_err(|e| {
+                        Error::Platform {
+                            code: e.code().0 as i64,
+                            message: format!("FindAll failed: {}", e),
+                        }
+                    })?;
 
-        elements.push(ElementData {
-            role: Role::Application,
-            name: Some("Desktop".to_string()),
-            value: None,
-            description: None,
-            bounds: Some(Rect {
-                x: 0,
-                y: 0,
-                width: screen_size.0,
-                height: screen_size.1,
-            }),
-            actions: vec![],
-            states: StateSet::default(),
-            stable_id: None,
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            pid: None,
-            raw: RawPlatformData::Synthetic,
-            index: 0,
-            children_indices: vec![],
-            parent_index: None,
-        });
+                let count = unsafe { windows.Length() }.unwrap_or(0);
+                let mut results = Vec::new();
+                let mut seen_pids = HashSet::new();
 
-        let root = unsafe { self.automation.GetRootElement() }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("GetRootElement failed: {}", e),
-        })?;
-        // Use a dummy element for the Desktop root
-        uia_elements.push(root.clone());
+                for i in 0..count {
+                    if let Ok(el) = unsafe { windows.GetElement(i) } {
+                        let pid = unsafe { el.CurrentProcessId() }.unwrap_or(0) as u32;
+                        if pid == 0 || !seen_pids.insert(pid) {
+                            continue;
+                        }
+                        let name = unsafe { el.CurrentName() }
+                            .map(|s| s.to_string())
+                            .unwrap_or_default();
+                        if name.is_empty() {
+                            continue;
+                        }
+                        // Re-acquire via HWND to activate AccessKit provider
+                        let el = self.reacquire_via_hwnd(&el).unwrap_or(el);
+                        let mut data = self.build_element_data(&el, Some(pid));
+                        // Ensure the name is set from the window title
+                        if data.name.is_none() {
+                            data.name = Some(name);
+                        }
+                        results.push(data);
+                    }
+                }
 
-        let condition = unsafe {
-            self.automation.CreatePropertyCondition(
-                UIA_ControlTypePropertyId,
-                &windows::core::VARIANT::from(UIA_WindowControlTypeId.0),
-            )
-        }
-        .map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("CreatePropertyCondition failed: {}", e),
-        })?;
-
-        let windows = unsafe { root.FindAll(TreeScope_Children, &condition) }.map_err(|e| {
-            Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("FindAll failed: {}", e),
+                Ok(results)
             }
-        })?;
-
-        let count = unsafe { windows.Length() }.unwrap_or(0);
-        let mut root_children = Vec::new();
-        let mut seen_pids = HashSet::new();
-
-        for i in 0..count {
-            if let Ok(el) = unsafe { windows.GetElement(i) } {
-                let pid = unsafe { el.CurrentProcessId() }.unwrap_or(0) as u32;
-                if pid == 0 || !seen_pids.insert(pid) {
-                    continue;
-                }
-                let name = unsafe { el.CurrentName() }
-                    .map(|s| s.to_string())
-                    .unwrap_or_default();
-                if name.is_empty() {
-                    continue;
-                }
-                let child_idx = elements.len() as u32;
-                root_children.push(child_idx);
-                self.traverse(
-                    &el,
-                    &mut elements,
-                    &mut uia_elements,
-                    Some(0),
-                    1,
-                    screen_size,
-                );
-                // Set PID on the app element so App::all() can use it
-                elements[child_idx as usize].pid = Some(pid);
+            Some(element_data) => {
+                let uia = self.get_cached(element_data.handle)?;
+                let children = self.uia_children(&uia);
+                let pid = element_data.pid;
+                Ok(children
+                    .iter()
+                    .map(|child| self.build_element_data(child, pid))
+                    .collect())
             }
         }
+    }
 
-        elements[0].children_indices = root_children;
-        *self.cached_elements.lock().unwrap() = uia_elements;
-
-        Ok(root_element(
-            "Desktop".to_string(),
-            None,
-            screen_size,
-            elements,
-        ))
+    fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
+        let uia = self.get_cached(element.handle)?;
+        if let Ok(walker) = unsafe { self.automation.RawViewWalker() } {
+            if let Ok(parent) = unsafe { walker.GetParentElement(&uia) } {
+                // Check if the parent is the desktop root (no further parent)
+                let parent_parent = unsafe { walker.GetParentElement(&parent) };
+                if parent_parent.is_err() {
+                    // Parent is the desktop root — this element is top-level
+                    return Ok(None);
+                }
+                let data = self.build_element_data(&parent, element.pid);
+                return Ok(Some(data));
+            }
+        }
+        Ok(None)
     }
 
     fn perform_action(
         &self,
-        element: &Element,
+        element: &ElementData,
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()> {
-        let element_idx = element.index;
-
-        let cache = self.cached_elements.lock().unwrap();
-        let uia_element = cache.get(element_idx as usize).ok_or(Error::ElementStale {
-            selector: format!("index:{}", element_idx),
-        })?;
+        let uia_element = self.get_cached(element.handle)?;
 
         match action {
             Action::Press | Action::Toggle | Action::Select => {
@@ -904,33 +758,20 @@ impl Provider for WindowsProvider {
         Ok(PermissionStatus::Granted)
     }
 
-    fn subscribe(&self, pid: u32) -> Result<Subscription> {
-        self.subscribe_impl(String::new(), pid, move |p| p.get_elements(pid))
+    fn subscribe(&self, element: &ElementData) -> Result<Subscription> {
+        let pid = element.pid.ok_or(Error::Platform {
+            code: -1,
+            message: "Element has no PID for subscribe".to_string(),
+        })?;
+        let app_name = element.name.clone().unwrap_or_default();
+        self.subscribe_impl(app_name, pid, move |p| {
+            let (el, _name) = p.find_app_by_pid(pid)?;
+            Ok(el)
+        })
     }
 }
 
 // ── Helper Functions ─────────────────────────────────────────────────────────
-
-fn get_process_name(pid: u32) -> Option<String> {
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
-        let mut buf = [0u16; 260];
-        let mut size = buf.len() as u32;
-        let ok = QueryFullProcessImageNameW(
-            handle,
-            PROCESS_NAME_WIN32,
-            windows::core::PWSTR(buf.as_mut_ptr()),
-            &mut size,
-        );
-        let _ = CloseHandle(handle);
-        if ok.is_ok() && size > 0 {
-            let path = String::from_utf16_lossy(&buf[..size as usize]);
-            path.rsplit('\\').next().map(|s| s.to_string())
-        } else {
-            None
-        }
-    }
-}
 
 /// Get the value of an element using UIA patterns.
 fn get_value(element: &IUIAutomationElement, role: Role) -> Option<String> {
@@ -1192,9 +1033,9 @@ fn map_uia_control_type(control_type: UIA_CONTROLTYPE_ID) -> Role {
 
 impl WindowsProvider {
     /// Spawn a polling thread that detects focus and structure changes.
-    fn subscribe_impl<F>(&self, app_name: String, app_pid: u32, tree_fn: F) -> Result<Subscription>
+    fn subscribe_impl<F>(&self, app_name: String, app_pid: u32, root_fn: F) -> Result<Subscription>
     where
-        F: Fn(&WindowsProvider) -> Result<Element> + Send + 'static,
+        F: Fn(&WindowsProvider) -> Result<IUIAutomationElement> + Send + 'static,
     {
         let (tx, rx) = std::sync::mpsc::channel();
         let poll_provider = WindowsProvider::new()?;
@@ -1208,15 +1049,29 @@ impl WindowsProvider {
             while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
                 std::thread::sleep(Duration::from_millis(100));
 
-                let root = match tree_fn(&poll_provider) {
+                let root_uia = match root_fn(&poll_provider) {
                     Ok(r) => r,
                     Err(_) => continue,
                 };
 
-                let subtree = root.subtree();
+                // Collect all elements by walking children lazily
+                let mut all_elements = Vec::new();
+                let root_data = poll_provider.build_element_data(&root_uia, Some(app_pid));
+                all_elements.push(root_data);
+
+                // BFS to collect subtree
+                let mut queue = vec![root_uia];
+                while let Some(uia) = queue.pop() {
+                    let children = poll_provider.uia_children(&uia);
+                    for child in &children {
+                        let data = poll_provider.build_element_data(child, Some(app_pid));
+                        all_elements.push(data);
+                    }
+                    queue.extend(children);
+                }
 
                 // Detect focus changes
-                let focused_name = subtree
+                let focused_name = all_elements
                     .iter()
                     .find(|n| n.states.focused)
                     .and_then(|n| n.name.clone());
@@ -1226,10 +1081,7 @@ impl WindowsProvider {
                             event_type: EventType::FocusChanged,
                             app_name: app_name.clone(),
                             app_pid,
-                            target: subtree
-                                .iter()
-                                .find(|n| n.states.focused)
-                                .map(|e| (**e).clone()),
+                            target: all_elements.iter().find(|n| n.states.focused).cloned(),
                             state_flag: None,
                             state_value: None,
                             text_change: None,
@@ -1240,7 +1092,7 @@ impl WindowsProvider {
                 }
 
                 // Detect structure changes
-                let element_count = subtree.len();
+                let element_count = all_elements.len();
                 if element_count != prev_element_count && prev_element_count > 0 {
                     let _ = tx.send(Event {
                         event_type: EventType::StructureChanged,
@@ -1330,12 +1182,5 @@ mod tests {
     fn provider_new_succeeds() {
         let provider = WindowsProvider::new();
         assert!(provider.is_ok());
-    }
-
-    #[test]
-    fn detect_screen_size_returns_nonzero() {
-        let (w, h) = WindowsProvider::detect_screen_size();
-        assert!(w > 0);
-        assert!(h > 0);
     }
 }

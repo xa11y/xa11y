@@ -1,16 +1,16 @@
-"""Tests for module-level functions: app(), apps(), check_permissions()."""
-
-# ── app() (via _make_test_app mock) ───────────────────────────────────────
+"""Tests for module-level functions: locator(), check_permissions()."""
 
 
 def test_app_has_name(test_app):
-    assert test_app.name == "TestApp"
+    app = test_app.element()
+    assert app.name == "TestApp"
 
 
 def test_app_has_pid(test_app):
-    assert test_app.pid == 1234
+    app = test_app.element()
+    assert app.pid == 1234
 
 
-def test_app_elements_has_children(test_app):
-    tree = test_app.elements()
-    assert len(tree.children) > 0
+def test_app_has_children(test_app):
+    app = test_app.element()
+    assert len(app.children()) > 0

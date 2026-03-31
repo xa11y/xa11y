@@ -15,26 +15,27 @@
 //! integer       := [1-9][0-9]*
 //! ```
 
+use std::collections::HashSet;
+
 use crate::element::ElementData;
 use crate::error::{Error, Result};
 use crate::role::Role;
-use crate::tree::Tree;
 
 /// A parsed CSS-like selector for matching accessibility tree elements.
 #[derive(Debug, Clone)]
 pub struct Selector {
     /// Chain of simple selectors with combinators.
-    pub(crate) segments: Vec<SelectorSegment>,
+    pub segments: Vec<SelectorSegment>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SelectorSegment {
+pub struct SelectorSegment {
     pub combinator: Combinator,
     pub simple: SimpleSelector,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum Combinator {
+pub enum Combinator {
     /// Root (first segment, no combinator)
     Root,
     /// Descendant (space) — any depth
@@ -44,21 +45,21 @@ pub(crate) enum Combinator {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SimpleSelector {
+pub struct SimpleSelector {
     pub role: Option<Role>,
     pub filters: Vec<AttrFilter>,
     pub nth: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct AttrFilter {
+pub struct AttrFilter {
     pub attr: AttrName,
     pub op: MatchOp,
     pub value: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum AttrName {
+pub enum AttrName {
     Name,
     Value,
     Description,
@@ -66,7 +67,7 @@ pub(crate) enum AttrName {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum MatchOp {
+pub enum MatchOp {
     /// Exact match (case-sensitive)
     Exact,
     /// Substring match (case-insensitive)
@@ -79,7 +80,7 @@ pub(crate) enum MatchOp {
 
 impl Selector {
     /// Parse a selector string into a Selector.
-    pub(crate) fn parse(input: &str) -> Result<Self> {
+    pub fn parse(input: &str) -> Result<Self> {
         let input = input.trim();
         if input.is_empty() {
             return Err(Error::InvalidSelector {
@@ -305,109 +306,200 @@ impl Selector {
 
         Ok((AttrFilter { attr, op, value }, pos))
     }
+}
 
-    /// Match elements in the tree against this selector.
-    pub(crate) fn match_elements<'a>(&self, tree: &'a Tree) -> Vec<&'a ElementData> {
-        if self.segments.is_empty() {
-            return vec![];
+/// Check if an element matches a simple selector (no combinators).
+pub fn matches_simple(element: &ElementData, simple: &SimpleSelector) -> bool {
+    // Check role
+    if let Some(role) = simple.role {
+        if element.role != role {
+            return false;
         }
-
-        // Start with all elements matching the first simple selector
-        let first = &self.segments[0].simple;
-        let mut candidates: Vec<&ElementData> = tree
-            .iter()
-            .filter(|e| Self::matches_simple(e, first))
-            .collect();
-
-        // Apply subsequent segments with combinators
-        for segment in &self.segments[1..] {
-            let mut next_candidates = Vec::new();
-            for candidate in &candidates {
-                match segment.combinator {
-                    Combinator::Child => {
-                        // Direct children of candidate that match
-                        for child in tree.children_data(candidate) {
-                            if Self::matches_simple(child, &segment.simple) {
-                                next_candidates.push(child);
-                            }
-                        }
-                    }
-                    Combinator::Descendant => {
-                        // All descendants of candidate that match
-                        let subtree = tree
-                            .subtree_indices(candidate.index)
-                            .into_iter()
-                            .filter_map(|idx| tree.get_data(idx))
-                            .collect::<Vec<_>>();
-                        for element in subtree.into_iter().skip(1) {
-                            if Self::matches_simple(element, &segment.simple) {
-                                next_candidates.push(element);
-                            }
-                        }
-                    }
-                    Combinator::Root => unreachable!(),
-                }
-            }
-            // Deduplicate while preserving order
-            let mut seen = std::collections::HashSet::new();
-            next_candidates.retain(|e| seen.insert(e.index));
-            candidates = next_candidates;
-        }
-
-        // Apply :nth on the last segment if present
-        if let Some(nth) = self.segments.last().and_then(|s| s.simple.nth) {
-            if nth <= candidates.len() {
-                candidates = vec![candidates[nth - 1]];
-            } else {
-                candidates = vec![];
-            }
-        }
-
-        candidates
     }
 
-    fn matches_simple(element: &ElementData, simple: &SimpleSelector) -> bool {
-        // Check role
-        if let Some(role) = simple.role {
-            if element.role != role {
-                return false;
+    // Check attribute filters
+    for filter in &simple.filters {
+        let attr_value = match filter.attr {
+            AttrName::Name => element.name.as_deref(),
+            AttrName::Value => element.value.as_deref(),
+            AttrName::Description => element.description.as_deref(),
+            AttrName::Role => Some(element.role.to_snake_case()),
+        };
+
+        let matches = match &filter.op {
+            MatchOp::Exact => attr_value == Some(&filter.value),
+            MatchOp::Contains => {
+                let filter_lower = filter.value.to_lowercase();
+                attr_value.is_some_and(|v| v.to_lowercase().contains(&filter_lower))
             }
-        }
-
-        // Check attribute filters
-        for filter in &simple.filters {
-            let attr_value = match filter.attr {
-                AttrName::Name => element.name.as_deref(),
-                AttrName::Value => element.value.as_deref(),
-                AttrName::Description => element.description.as_deref(),
-                AttrName::Role => Some(element.role.to_snake_case()),
-            };
-
-            let matches = match &filter.op {
-                MatchOp::Exact => attr_value == Some(&filter.value),
-                MatchOp::Contains => {
-                    let filter_lower = filter.value.to_lowercase();
-                    attr_value.is_some_and(|v| v.to_lowercase().contains(&filter_lower))
-                }
-                MatchOp::StartsWith => {
-                    let filter_lower = filter.value.to_lowercase();
-                    attr_value.is_some_and(|v| v.to_lowercase().starts_with(&filter_lower))
-                }
-                MatchOp::EndsWith => {
-                    let filter_lower = filter.value.to_lowercase();
-                    attr_value.is_some_and(|v| v.to_lowercase().ends_with(&filter_lower))
-                }
-            };
-
-            // For Role attr, the value is always Some (from to_snake_case)
-            // but for other attrs it might be None — which means no match
-            if !matches {
-                return false;
+            MatchOp::StartsWith => {
+                let filter_lower = filter.value.to_lowercase();
+                attr_value.is_some_and(|v| v.to_lowercase().starts_with(&filter_lower))
             }
-        }
+            MatchOp::EndsWith => {
+                let filter_lower = filter.value.to_lowercase();
+                attr_value.is_some_and(|v| v.to_lowercase().ends_with(&filter_lower))
+            }
+        };
 
-        true
+        if !matches {
+            return false;
+        }
     }
+
+    true
+}
+
+// ── find_elements_in_tree ───────────────────────────────────────────────────
+
+/// Default implementation of `find_elements` using `get_children` traversal.
+///
+/// This walks the tree via the provider's `get_children` method, applies
+/// selector matching at each node, and collects results. Providers may
+/// override `find_elements` with an optimized implementation that prunes
+/// subtrees during traversal.
+/// Default implementation of `find_elements` using `get_children` traversal.
+///
+/// `get_children_fn` is a closure that fetches direct children of an element
+/// (or top-level apps if `None`). This avoids the need to pass `&dyn Provider`
+/// directly, sidestepping `Sized` constraints in trait default methods.
+pub fn find_elements_in_tree(
+    get_children_fn: impl Fn(Option<&ElementData>) -> Result<Vec<ElementData>>,
+    root: Option<&ElementData>,
+    selector: &Selector,
+    limit: Option<usize>,
+    max_depth: Option<u32>,
+) -> Result<Vec<ElementData>> {
+    if selector.segments.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let max_depth = max_depth.unwrap_or(crate::MAX_TREE_DEPTH);
+
+    // Phase 1: Find all matches for the first segment (DFS from root)
+    let first = &selector.segments[0].simple;
+    let mut candidates = Vec::new();
+    // Pass limit to enable early termination when possible
+    let phase1_limit = if selector.segments.len() == 1 {
+        limit
+    } else {
+        None
+    };
+    // Account for :nth — need enough candidates to satisfy it
+    let phase1_limit = match (phase1_limit, first.nth) {
+        (Some(l), Some(n)) => Some(l.max(n)),
+        (_, Some(n)) => Some(n),
+        (l, None) => l,
+    };
+
+    // Optimization: when searching from system root for applications,
+    // only check direct children (apps are always at depth 0 from root).
+    let phase1_depth = if root.is_none() && first.role == Some(crate::role::Role::Application) {
+        0
+    } else {
+        max_depth
+    };
+
+    collect_matching(
+        &get_children_fn,
+        root,
+        first,
+        0,
+        phase1_depth,
+        &mut candidates,
+        phase1_limit,
+    )?;
+
+    // Phase 2: For each subsequent segment, narrow candidates
+    for segment in &selector.segments[1..] {
+        let mut next_candidates = Vec::new();
+        for candidate in &candidates {
+            match segment.combinator {
+                Combinator::Child => {
+                    let children = get_children_fn(Some(candidate))?;
+                    for child in children {
+                        if matches_simple(&child, &segment.simple) {
+                            next_candidates.push(child);
+                        }
+                    }
+                }
+                Combinator::Descendant => {
+                    collect_matching(
+                        &get_children_fn,
+                        Some(candidate),
+                        &segment.simple,
+                        0,
+                        max_depth,
+                        &mut next_candidates,
+                        None,
+                    )?;
+                }
+                Combinator::Root => unreachable!(),
+            }
+        }
+        // Deduplicate by handle, preserving order
+        let mut seen = HashSet::new();
+        next_candidates.retain(|e| seen.insert(e.handle));
+        candidates = next_candidates;
+    }
+
+    // Apply :nth on the last segment
+    if let Some(nth) = selector.segments.last().and_then(|s| s.simple.nth) {
+        if nth <= candidates.len() {
+            candidates = vec![candidates.remove(nth - 1)];
+        } else {
+            candidates.clear();
+        }
+    }
+
+    // Apply limit
+    if let Some(limit) = limit {
+        candidates.truncate(limit);
+    }
+
+    Ok(candidates)
+}
+
+/// DFS collect all elements matching a simple selector under `root`.
+fn collect_matching(
+    get_children_fn: &impl Fn(Option<&ElementData>) -> Result<Vec<ElementData>>,
+    root: Option<&ElementData>,
+    simple: &SimpleSelector,
+    depth: u32,
+    max_depth: u32,
+    results: &mut Vec<ElementData>,
+    limit: Option<usize>,
+) -> Result<()> {
+    if depth > max_depth {
+        return Ok(());
+    }
+    if let Some(limit) = limit {
+        if results.len() >= limit {
+            return Ok(());
+        }
+    }
+
+    let children = get_children_fn(root)?;
+    for child in children {
+        if matches_simple(&child, simple) {
+            results.push(child.clone());
+            if let Some(limit) = limit {
+                if results.len() >= limit {
+                    return Ok(());
+                }
+            }
+        }
+        collect_matching(
+            get_children_fn,
+            Some(&child),
+            simple,
+            depth + 1,
+            max_depth,
+            results,
+            limit,
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

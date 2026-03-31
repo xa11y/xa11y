@@ -132,8 +132,9 @@ cd "$PROJECT_ROOT"
 echo "Running Qt integration tests..."
 set +e
 # timeout prevents CI hangs if xa11y calls block (e.g. broken AT-SPI)
-# Per-test timeout of 15s; overall timeout of 180s
-timeout 180 "$PYTEST" "$QT_APP_DIR/tests/" -v -s --timeout=15 2>&1
+# Per-test timeout of 60s (lazy API does per-element IPC, slower than snapshots);
+# overall timeout of 300s
+timeout 300 "$PYTEST" "$QT_APP_DIR/tests/" -v -s --timeout=60 2>&1
 TEST_EXIT=$?
 set -e
 

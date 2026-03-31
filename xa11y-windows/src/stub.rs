@@ -1,7 +1,7 @@
 //! Stub backend for non-Windows platforms (allows compilation on all targets).
 
 use xa11y_core::{
-    Action, ActionData, Element, Error, PermissionStatus, Provider, Result, Subscription,
+    Action, ActionData, ElementData, Error, PermissionStatus, Provider, Result, Subscription,
 };
 
 #[derive(Default)]
@@ -17,22 +17,19 @@ impl WindowsProvider {
 }
 
 impl Provider for WindowsProvider {
-    fn resolve_pid_by_name(&self, _: &str) -> Result<u32> {
+    fn get_children(&self, _: Option<&ElementData>) -> Result<Vec<ElementData>> {
         unreachable!()
     }
-    fn get_elements(&self, _: u32) -> Result<Element> {
+    fn get_parent(&self, _: &ElementData) -> Result<Option<ElementData>> {
         unreachable!()
     }
-    fn get_apps(&self) -> Result<Element> {
-        unreachable!()
-    }
-    fn perform_action(&self, _: &Element, _: Action, _: Option<ActionData>) -> Result<()> {
+    fn perform_action(&self, _: &ElementData, _: Action, _: Option<ActionData>) -> Result<()> {
         unreachable!()
     }
     fn check_permissions(&self) -> Result<PermissionStatus> {
         unreachable!()
     }
-    fn subscribe(&self, _: u32) -> Result<Subscription> {
+    fn subscribe(&self, _: &ElementData) -> Result<Subscription> {
         unreachable!()
     }
 }
