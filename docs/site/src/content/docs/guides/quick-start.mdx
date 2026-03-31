@@ -25,7 +25,12 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
 
 ## Platform setup
 
-**macOS** — Grant accessibility permissions to your terminal (or IDE) in **System Settings → Privacy & Security → Accessibility**.
+**macOS** — Two permissions are required:
+
+1. **Accessibility** — System Settings → Privacy & Security → Accessibility. Grant permission to your terminal (or IDE).
+2. **Screen & System Audio Recording** (macOS 26+) — System Settings → Privacy & Security → Screen & System Audio Recording. Grant permission to your terminal. Without this, the accessibility API only exposes menu bars — window content (buttons, text fields, etc.) is invisible.
+
+After changing permissions, restart your terminal for them to take effect. `App::by_name()` will return a `PermissionDenied` error with setup instructions if either permission is missing.
 
 **Linux** — Ensure AT-SPI2 is running (default on GNOME and most desktop environments). No special permissions needed.
 
@@ -40,11 +45,9 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
     use std::time::Duration;
 
     fn main() -> Result<()> {
-        // Check that we have accessibility permissions
-        check_permissions()?;
-
         // Connect to the Calculator app
-        let calc = App::from_name(provider()?, "Calculator")?;
+        // (returns PermissionDenied if accessibility is not enabled)
+        let calc = App::by_name(provider()?, "Calculator")?;
 
         // Snapshot the tree for debugging
         let root = calc.elements()?;
@@ -71,8 +74,8 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
         println!("Result: {:?}", result.element()?.value);
 
         // List all running apps
-        for app in App::all(provider()?)? {
-            println!("{} (pid: {})", app.name(), app.pid());
+        for app in App::list(provider()?)? {
+            println!("{} (pid: {:?})", app.name, app.pid);
         }
 
         Ok(())
@@ -83,11 +86,9 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
     ```python
     import xa11y
 
-    # Check that we have accessibility permissions
-    xa11y.check_permissions()
-
     # Connect to the Calculator app
-    calc = xa11y.app("Calculator")
+    # (raises PermissionDeniedError if accessibility is not enabled)
+    calc = xa11y.App.by_name("Calculator")
 
     # Snapshot the tree for debugging
     root = calc.elements()
@@ -114,7 +115,7 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
     print(f"Result: {result.element().value}")
 
     # List all running apps
-    for app in xa11y.apps():
+    for app in xa11y.App.list():
         print(f"{app.name} (pid: {app.pid})")
     ```
   </TabItem>

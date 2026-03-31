@@ -5,9 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use xa11y_core::selector::{AttrName, Combinator, MatchOp, SelectorSegment};
 use xa11y_core::{
     Action, ActionData, CancelHandle, ElementData, Error, Event, EventReceiver, EventType,
-    PermissionStatus, Provider, Rect, Result, Role, StateSet, Subscription, Toggled,
+    Provider, Rect, Result, Role, Selector, StateSet, Subscription, Toggled,
 };
 use zbus::blocking::{Connection, Proxy};
 
@@ -349,18 +350,35 @@ impl LinuxProvider {
 
         let mut name = self.get_name(aref).ok().filter(|s| !s.is_empty());
         let description = self.get_description(aref).ok().filter(|s| !s.is_empty());
-        let value = self.get_value(aref);
 
-        // For label/static text elements, AT-SPI may put content in the Text interface
-        // (returned as value) rather than the Name property. Use it as the name.
-        if name.is_none() && role == Role::StaticText {
-            if let Some(ref v) = value {
-                name = Some(v.clone());
+        // Only fetch value/text for roles that have textual content
+        let value = if role_has_value(role) {
+            let v = self.get_value(aref);
+            // For label/static text elements, AT-SPI may put content in the Text
+            // interface (returned as value) rather than the Name property.
+            if name.is_none() && role == Role::StaticText {
+                if let Some(ref v) = v {
+                    name = Some(v.clone());
+                }
             }
-        }
-        let bounds = self.get_extents(aref);
+            v
+        } else {
+            None
+        };
+
+        // Application nodes don't have visual bounds
+        let bounds = if role != Role::Application {
+            self.get_extents(aref)
+        } else {
+            None
+        };
         let states = self.parse_states(aref, role);
-        let actions = self.get_actions(aref);
+        // Only probe action interfaces for interactive roles
+        let actions = if role_has_actions(role) {
+            self.get_actions(aref)
+        } else {
+            vec![]
+        };
 
         let raw = {
             let raw_role = if role_name.is_empty() {
@@ -635,6 +653,129 @@ impl LinuxProvider {
 
         None
     }
+
+    /// Resolve the mapped Role for an accessible ref (1-2 D-Bus calls).
+    fn resolve_role(&self, aref: &AccessibleRef) -> Role {
+        let role_name = self.get_role_name(aref).unwrap_or_default();
+        if !role_name.is_empty() {
+            map_atspi_role(&role_name)
+        } else {
+            let role_num = self.get_role_number(aref).unwrap_or(0);
+            map_atspi_role_number(role_num)
+        }
+    }
+
+    /// Check if an accessible ref matches a simple selector, fetching only the
+    /// attributes the selector actually requires.
+    fn matches_ref(
+        &self,
+        aref: &AccessibleRef,
+        simple: &xa11y_core::selector::SimpleSelector,
+    ) -> bool {
+        // Resolve role only if the selector needs it
+        let needs_role =
+            simple.role.is_some() || simple.filters.iter().any(|f| f.attr == AttrName::Role);
+        let role = if needs_role {
+            Some(self.resolve_role(aref))
+        } else {
+            None
+        };
+
+        if let Some(expected) = simple.role {
+            if role != Some(expected) {
+                return false;
+            }
+        }
+
+        for filter in &simple.filters {
+            let attr_value: Option<String> = match filter.attr {
+                AttrName::Role => role.map(|r| r.to_snake_case().to_string()),
+                AttrName::Name => {
+                    let name = self.get_name(aref).ok().filter(|s| !s.is_empty());
+                    // Mirror build_element_data: StaticText may have name in Text interface
+                    if name.is_none() && role == Some(Role::StaticText) {
+                        self.get_value(aref)
+                    } else {
+                        name
+                    }
+                }
+                AttrName::Value => self.get_value(aref),
+                AttrName::Description => self.get_description(aref).ok().filter(|s| !s.is_empty()),
+            };
+
+            let matches = match &filter.op {
+                MatchOp::Exact => attr_value.as_deref() == Some(filter.value.as_str()),
+                MatchOp::Contains => {
+                    let fl = filter.value.to_lowercase();
+                    attr_value
+                        .as_deref()
+                        .is_some_and(|v| v.to_lowercase().contains(&fl))
+                }
+                MatchOp::StartsWith => {
+                    let fl = filter.value.to_lowercase();
+                    attr_value
+                        .as_deref()
+                        .is_some_and(|v| v.to_lowercase().starts_with(&fl))
+                }
+                MatchOp::EndsWith => {
+                    let fl = filter.value.to_lowercase();
+                    attr_value
+                        .as_deref()
+                        .is_some_and(|v| v.to_lowercase().ends_with(&fl))
+                }
+            };
+
+            if !matches {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    /// DFS collect AccessibleRefs matching a SimpleSelector without building
+    /// full ElementData. Only the attributes required by the selector are
+    /// fetched for each candidate.
+    fn collect_matching_refs(
+        &self,
+        parent: &AccessibleRef,
+        simple: &xa11y_core::selector::SimpleSelector,
+        depth: u32,
+        max_depth: u32,
+        results: &mut Vec<AccessibleRef>,
+        limit: Option<usize>,
+    ) -> Result<()> {
+        if depth > max_depth {
+            return Ok(());
+        }
+        if let Some(limit) = limit {
+            if results.len() >= limit {
+                return Ok(());
+            }
+        }
+
+        let children = self.get_atspi_children(parent)?;
+        for child in children {
+            if child.path == "/org/a11y/atspi/null"
+                || child.bus_name.is_empty()
+                || child.path.is_empty()
+            {
+                continue;
+            }
+
+            if self.matches_ref(&child, simple) {
+                results.push(child.clone());
+                if let Some(limit) = limit {
+                    if results.len() >= limit {
+                        return Ok(());
+                    }
+                }
+            }
+
+            self.collect_matching_refs(&child, simple, depth + 1, max_depth, results, limit)?;
+        }
+        Ok(())
+    }
 }
 
 impl Provider for LinuxProvider {
@@ -707,6 +848,163 @@ impl Provider for LinuxProvider {
                 Ok(results)
             }
         }
+    }
+
+    fn find_elements(
+        &self,
+        root: Option<&ElementData>,
+        selector: &Selector,
+        limit: Option<usize>,
+        max_depth: Option<u32>,
+    ) -> Result<Vec<ElementData>> {
+        if selector.segments.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let max_depth_val = max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH);
+
+        // Phase 1: lightweight ref-based search for first segment.
+        // Only the attributes the selector needs are fetched per candidate.
+        let first = &selector.segments[0].simple;
+
+        let phase1_limit = if selector.segments.len() == 1 {
+            limit
+        } else {
+            None
+        };
+        let phase1_limit = match (phase1_limit, first.nth) {
+            (Some(l), Some(n)) => Some(l.max(n)),
+            (_, Some(n)) => Some(n),
+            (l, None) => l,
+        };
+
+        // Applications are always direct children of the registry root
+        let phase1_depth = if root.is_none() && first.role == Some(Role::Application) {
+            0
+        } else {
+            max_depth_val
+        };
+
+        let start_ref = match root {
+            None => AccessibleRef {
+                bus_name: "org.a11y.atspi.Registry".to_string(),
+                path: "/org/a11y/atspi/accessible/root".to_string(),
+            },
+            Some(el) => self.get_cached(el.handle)?,
+        };
+
+        let mut matching_refs = Vec::new();
+        self.collect_matching_refs(
+            &start_ref,
+            first,
+            0,
+            phase1_depth,
+            &mut matching_refs,
+            phase1_limit,
+        )?;
+
+        let pid_from_root = root.and_then(|r| r.pid);
+
+        // Single-segment: build ElementData only for matches, apply nth/limit
+        if selector.segments.len() == 1 {
+            if let Some(nth) = first.nth {
+                if nth <= matching_refs.len() {
+                    let aref = &matching_refs[nth - 1];
+                    let pid = if root.is_none() {
+                        self.get_app_pid(aref)
+                            .or_else(|| self.get_dbus_pid(&aref.bus_name))
+                    } else {
+                        pid_from_root
+                    };
+                    return Ok(vec![self.build_element_data(aref, pid)]);
+                } else {
+                    return Ok(vec![]);
+                }
+            }
+
+            if let Some(limit) = limit {
+                matching_refs.truncate(limit);
+            }
+
+            return Ok(matching_refs
+                .iter()
+                .map(|aref| {
+                    let pid = if root.is_none() {
+                        self.get_app_pid(aref)
+                            .or_else(|| self.get_dbus_pid(&aref.bus_name))
+                    } else {
+                        pid_from_root
+                    };
+                    self.build_element_data(aref, pid)
+                })
+                .collect());
+        }
+
+        // Multi-segment: build ElementData for phase 1 matches, then narrow
+        // using standard matching on the (small) candidate set.
+        let mut candidates: Vec<ElementData> = matching_refs
+            .iter()
+            .map(|aref| {
+                let pid = if root.is_none() {
+                    self.get_app_pid(aref)
+                        .or_else(|| self.get_dbus_pid(&aref.bus_name))
+                } else {
+                    pid_from_root
+                };
+                self.build_element_data(aref, pid)
+            })
+            .collect();
+
+        for segment in &selector.segments[1..] {
+            let mut next_candidates = Vec::new();
+            for candidate in &candidates {
+                match segment.combinator {
+                    Combinator::Child => {
+                        let children = self.get_children(Some(candidate))?;
+                        for child in children {
+                            if xa11y_core::selector::matches_simple(&child, &segment.simple) {
+                                next_candidates.push(child);
+                            }
+                        }
+                    }
+                    Combinator::Descendant => {
+                        let sub_selector = Selector {
+                            segments: vec![SelectorSegment {
+                                combinator: Combinator::Root,
+                                simple: segment.simple.clone(),
+                            }],
+                        };
+                        let mut sub_results = xa11y_core::selector::find_elements_in_tree(
+                            |el| self.get_children(el),
+                            Some(candidate),
+                            &sub_selector,
+                            None,
+                            Some(max_depth_val),
+                        )?;
+                        next_candidates.append(&mut sub_results);
+                    }
+                    Combinator::Root => unreachable!(),
+                }
+            }
+            let mut seen = HashSet::new();
+            next_candidates.retain(|e| seen.insert(e.handle));
+            candidates = next_candidates;
+        }
+
+        // Apply :nth on last segment
+        if let Some(nth) = selector.segments.last().and_then(|s| s.simple.nth) {
+            if nth <= candidates.len() {
+                candidates = vec![candidates.remove(nth - 1)];
+            } else {
+                candidates.clear();
+            }
+        }
+
+        if let Some(limit) = limit {
+            candidates.truncate(limit);
+        }
+
+        Ok(candidates)
     }
 
     fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
@@ -977,21 +1275,6 @@ impl Provider for LinuxProvider {
         }
     }
 
-    fn check_permissions(&self) -> Result<PermissionStatus> {
-        let registry = AccessibleRef {
-            bus_name: "org.a11y.atspi.Registry".to_string(),
-            path: "/org/a11y/atspi/accessible/root".to_string(),
-        };
-        match self.get_atspi_children(&registry) {
-            Ok(_) => Ok(PermissionStatus::Granted),
-            Err(_) => Ok(PermissionStatus::Denied {
-                instructions:
-                    "Enable accessibility: gsettings set org.gnome.desktop.interface toolkit-accessibility true\nEnsure at-spi2-core is installed."
-                        .to_string(),
-            }),
-        }
-    }
-
     fn subscribe(&self, element: &ElementData) -> Result<Subscription> {
         let pid = element.pid.ok_or(Error::Platform {
             code: -1,
@@ -1086,6 +1369,50 @@ impl LinuxProvider {
 
         Ok(Subscription::new(EventReceiver::new(rx), cancel))
     }
+}
+
+/// Whether a role typically has text or Value interface content.
+/// Container/structural roles are skipped to save D-Bus round-trips.
+fn role_has_value(role: Role) -> bool {
+    !matches!(
+        role,
+        Role::Application
+            | Role::Window
+            | Role::Dialog
+            | Role::Group
+            | Role::MenuBar
+            | Role::Toolbar
+            | Role::TabGroup
+            | Role::SplitGroup
+            | Role::Table
+            | Role::TableRow
+            | Role::Separator
+    )
+}
+
+/// Whether a role typically supports actions via the Action interface.
+/// Container and display-only roles are skipped to save D-Bus round-trips.
+fn role_has_actions(role: Role) -> bool {
+    matches!(
+        role,
+        Role::Button
+            | Role::CheckBox
+            | Role::RadioButton
+            | Role::MenuItem
+            | Role::Link
+            | Role::ComboBox
+            | Role::TextField
+            | Role::TextArea
+            | Role::SpinButton
+            | Role::Tab
+            | Role::TreeItem
+            | Role::ListItem
+            | Role::ScrollBar
+            | Role::Slider
+            | Role::Menu
+            | Role::Image
+            | Role::Unknown
+    )
 }
 
 /// Map AT-SPI2 role name to xa11y Role.

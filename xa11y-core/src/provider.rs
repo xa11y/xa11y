@@ -4,13 +4,15 @@ use crate::error::Result;
 use crate::event_provider::Subscription;
 use crate::selector::Selector;
 
-use serde::{Deserialize, Serialize};
-
 /// Platform backend trait for accessibility tree access.
 ///
 /// Providers implement lazy, on-demand tree navigation. Elements are identified
 /// by their [`ElementData`] (which contains a provider-specific `handle` for
 /// looking up the underlying platform object).
+///
+/// Providers should check platform permissions in their constructor (`new()`)
+/// and return [`Error::PermissionDenied`](crate::Error::PermissionDenied) if
+/// required permissions are not granted.
 pub trait Provider: Send + Sync {
     /// Get direct children of an element.
     ///
@@ -60,9 +62,6 @@ pub trait Provider: Send + Sync {
         data: Option<ActionData>,
     ) -> Result<()>;
 
-    /// Check if accessibility permissions are granted.
-    fn check_permissions(&self) -> Result<PermissionStatus>;
-
     /// Subscribe to all accessibility events for an application.
     ///
     /// The element should be an application-level element (role=Application).
@@ -70,13 +69,4 @@ pub trait Provider: Send + Sync {
     ///
     /// Returns a [`Subscription`] that receives events until dropped.
     fn subscribe(&self, element: &ElementData) -> Result<Subscription>;
-}
-
-/// Result of a permission check.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum PermissionStatus {
-    /// Accessibility permissions are granted.
-    Granted,
-    /// Permissions denied, with platform-specific instructions.
-    Denied { instructions: String },
 }

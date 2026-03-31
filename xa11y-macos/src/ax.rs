@@ -12,8 +12,7 @@ use core_foundation::string::CFString;
 
 use xa11y_core::{
     Action, ActionData, CancelHandle, ElementData, Error, Event, EventReceiver, EventType,
-    PermissionStatus, Provider, RawPlatformData, Rect, Result, Role, StateSet, Subscription,
-    Toggled,
+    Provider, RawPlatformData, Rect, Result, Role, StateSet, Subscription, Toggled,
 };
 
 // ── FFI Declarations ──────────────────────────────────────────────────────────
@@ -591,6 +590,27 @@ pub struct MacOSProvider {
 
 impl MacOSProvider {
     pub fn new() -> Result<Self> {
+        if !unsafe { AXIsProcessTrusted() } {
+            return Err(Error::PermissionDenied {
+                instructions:
+                    "Enable Accessibility in System Settings → Privacy & Security → Accessibility"
+                        .to_string(),
+            });
+        }
+
+        // On macOS 26+, Screen Recording permission is required to read
+        // window content via the accessibility API. Without it, AXChildren
+        // returns only self-referencing AXApplication wrappers and menu bars.
+        if !Self::has_screen_recording_permission() {
+            return Err(Error::PermissionDenied {
+                instructions:
+                    "Enable Screen Recording in System Settings → Privacy & Security → \
+                     Screen & System Audio Recording.\n\
+                     On macOS 26+, this is required to read window content via the accessibility API."
+                        .to_string(),
+            });
+        }
+
         Ok(Self {
             handle_cache: Mutex::new(HashMap::new()),
         })
@@ -649,6 +669,44 @@ impl MacOSProvider {
         }
 
         apps
+    }
+
+    /// Check if Screen Recording permission is granted by inspecting
+    /// CGWindowListCopyWindowInfo. Without this permission, the list
+    /// contains only system chrome (layer != 0). With it, app windows
+    /// (layer 0) are included.
+    fn has_screen_recording_permission() -> bool {
+        let info = unsafe { safe_cg_window_list_copy(0, 0) };
+        if info.is_null() {
+            return false;
+        }
+        let layer_key = CFString::new("kCGWindowLayer");
+        let mut has_app_window = false;
+        unsafe {
+            let count = CFArrayGetCount(info);
+            for i in 0..count {
+                let dict = CFArrayGetValueAtIndex(info, i);
+                if dict.is_null() {
+                    continue;
+                }
+                let layer_val =
+                    CFDictionaryGetValue(dict, layer_key.as_concrete_TypeRef() as CFTypeRef);
+                if !layer_val.is_null() && CFGetTypeID(layer_val) == CFNumberGetTypeID() {
+                    let mut layer: i32 = -1;
+                    CFNumberGetValue(
+                        layer_val,
+                        CF_NUMBER_SINT32,
+                        &mut layer as *mut _ as *mut c_void,
+                    );
+                    if layer == 0 {
+                        has_app_window = true;
+                        break;
+                    }
+                }
+            }
+            CFRelease(info);
+        }
+        has_app_window
     }
 
     /// Cache an AXElement and return a new handle ID.
@@ -769,40 +827,6 @@ impl MacOSProvider {
         }
     }
 
-    /// On macOS 15+, `safe_ax_create_application(pid)` returns a wrapper
-    /// element whose AXChildren are `[AXApplication_self, AXMenuBar]`.
-    /// The real app element (with windows as children) is the nested
-    /// AXApplication child. This method follows AXApplication children
-    /// until it finds one with non-AXApplication, non-AXMenuBar children
-    /// (i.e., the real app element), or gives up after a few levels.
-    fn unwrap_ax_application(ax: &AXElement) -> AXElement {
-        let mut current = ax.clone();
-        for _ in 0..5 {
-            let children = ax_children(current.as_ptr());
-            // Find the AXApplication child (the "real" app element)
-            let nested_app = children
-                .iter()
-                .find(|c| ax_string(c.as_ptr(), "AXRole").as_deref() == Some("AXApplication"));
-            let nested = match nested_app {
-                Some(n) => n.clone(),
-                None => return current, // no nested AXApplication, use current
-            };
-            // Check if the nested app has non-trivial children
-            // (i.e., something other than AXApplication + AXMenuBar)
-            let nested_children = ax_children(nested.as_ptr());
-            let has_real_children = nested_children.iter().any(|c| {
-                let r = ax_string(c.as_ptr(), "AXRole").unwrap_or_default();
-                r != "AXApplication" && r != "AXMenuBar"
-            });
-            if has_real_children {
-                return nested;
-            }
-            // Keep unwrapping
-            current = nested;
-        }
-        current
-    }
-
     /// Should this child be filtered out (macOS system chrome)?
     fn should_filter_child(
         parent_role: Role,
@@ -866,17 +890,7 @@ impl Provider for MacOSProvider {
                 let role = element_data.role;
                 let name = element_data.name.as_deref();
 
-                // For Application elements, unwrap the self-referencing
-                // AXApplication wrapper that macOS 15+ puts around apps.
-                // The real children (windows) are inside the nested
-                // AXApplication child.
-                let effective_ax = if role == Role::Application {
-                    Self::unwrap_ax_application(&ax)
-                } else {
-                    ax.clone()
-                };
-
-                let ax_children_list = ax_children(effective_ax.as_ptr());
+                let ax_children_list = ax_children(ax.as_ptr());
 
                 let mut results = Vec::new();
                 for child in &ax_children_list {
@@ -1126,18 +1140,6 @@ impl Provider for MacOSProvider {
                 }
                 Ok(())
             }
-        }
-    }
-
-    fn check_permissions(&self) -> Result<PermissionStatus> {
-        if unsafe { AXIsProcessTrusted() } {
-            Ok(PermissionStatus::Granted)
-        } else {
-            Ok(PermissionStatus::Denied {
-                instructions:
-                    "Enable Accessibility in System Settings → Privacy & Security → Accessibility"
-                        .to_string(),
-            })
         }
     }
 

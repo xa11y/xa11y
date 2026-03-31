@@ -20,8 +20,8 @@ use crate::selector::Selector;
 /// # use xa11y_core::*;
 /// # use std::sync::Arc;
 /// # fn example(provider: Arc<dyn Provider>) -> Result<()> {
-/// let app = locator(provider, r#"application[name="MyApp"]"#);
-/// let save_btn = app.child(r#"button[name="Save"]"#);
+/// let app = App::by_name(provider, "MyApp")?;
+/// let save_btn = app.locator(r#"button[name="Save"]"#);
 /// save_btn.press()?;
 /// # Ok(())
 /// # }
@@ -36,30 +36,15 @@ pub struct Locator {
     nth: Option<usize>,
 }
 
-/// Create a top-level Locator searching from the system root.
-///
-/// This is the primary entry point for the xa11y API.
-///
-/// ```no_run
-/// # use xa11y_core::*;
-/// # use std::sync::Arc;
-/// # fn example(provider: Arc<dyn Provider>) -> Result<()> {
-/// // Find a specific app
-/// let app = locator(provider.clone(), r#"application[name="Firefox"]"#);
-///
-/// // Find a button across all apps
-/// let btn = locator(provider, r#"button[name="Submit"]"#);
-/// # Ok(())
-/// # }
-/// ```
-pub fn locator(provider: Arc<dyn Provider>, selector: &str) -> Locator {
-    Locator::new(provider, None, selector)
-}
-
 impl Locator {
-    /// Create a new Locator.
-    #[doc(hidden)]
-    pub fn new(provider: Arc<dyn Provider>, root: Option<ElementData>, selector: &str) -> Self {
+    /// Create a new Locator scoped to a root element.
+    ///
+    /// Use [`App::locator`](crate::App::locator) to create locators.
+    pub(crate) fn new(
+        provider: Arc<dyn Provider>,
+        root: Option<ElementData>,
+        selector: &str,
+    ) -> Self {
         Self {
             provider,
             root,

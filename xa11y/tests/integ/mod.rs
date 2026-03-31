@@ -2,12 +2,11 @@
 
 use xa11y::*;
 
-/// Get the test app root element, retrying briefly for registration.
-pub fn app_root() -> Element {
+/// Get the test app as an `App`, retrying briefly for registration.
+pub fn app_root() -> App {
     let provider = xa11y::provider().unwrap();
     for attempt in 0..3 {
-        let loc = locator(provider.clone(), r#"application[name*="xa11y"]"#);
-        match loc.element() {
+        match App::by_name(provider.clone(), "xa11y-test-app") {
             Ok(app) => return app,
             Err(_) if attempt < 2 => {
                 std::thread::sleep(std::time::Duration::from_millis(200));
@@ -19,33 +18,33 @@ pub fn app_root() -> Element {
 }
 
 /// Find exactly one element by selector within the app. Panics on failure.
-pub fn one(root: &Element, selector: &str) -> Element {
-    let results = root
+pub fn one(app: &App, selector: &str) -> Element {
+    let results = app
         .locator(selector)
         .elements()
-        .unwrap_or_else(|e| panic!("Selector '{}' failed: {}. Element: {}", selector, e, root));
+        .unwrap_or_else(|e| panic!("Selector '{}' failed: {}. App: {}", selector, e, app));
     assert!(
         results.len() == 1,
-        "Selector '{}' matched {} elements (expected 1). Element: {}",
+        "Selector '{}' matched {} elements (expected 1). App: {}",
         selector,
         results.len(),
-        root
+        app
     );
     results.into_iter().next().unwrap()
 }
 
 /// Find first element whose name contains `substring` (case-insensitive).
-pub fn named(root: &Element, substring: &str) -> Element {
+pub fn named(app: &App, substring: &str) -> Element {
     let selector = format!("[name*=\"{}\"]", substring);
-    let results = root
+    let results = app
         .locator(&selector)
         .elements()
-        .unwrap_or_else(|e| panic!("Selector '{}' failed: {}. Element: {}", selector, e, root));
+        .unwrap_or_else(|e| panic!("Selector '{}' failed: {}. App: {}", selector, e, app));
     assert!(
         !results.is_empty(),
-        "No element with name containing '{}'. Element: {}",
+        "No element with name containing '{}'. App: {}",
         substring,
-        root
+        app
     );
     results.into_iter().next().unwrap()
 }
@@ -61,12 +60,12 @@ pub fn try_act_with(element: &Element, action: Action, data: Option<ActionData>)
 }
 
 /// Perform an action on an element, wait briefly, then re-read the app root.
-pub fn act(element: &Element, action: Action) -> Element {
+pub fn act(element: &Element, action: Action) -> App {
     act_with(element, action, None)
 }
 
 /// Perform an action with data on an element, wait, then re-read the app root.
-pub fn act_with(element: &Element, action: Action, data: Option<ActionData>) -> Element {
+pub fn act_with(element: &Element, action: Action, data: Option<ActionData>) -> App {
     try_act_with(element, action, data)
         .unwrap_or_else(|e| panic!("Action {:?} failed: {}", action, e));
     std::thread::sleep(std::time::Duration::from_millis(100));

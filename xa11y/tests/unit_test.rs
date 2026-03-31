@@ -64,10 +64,6 @@ impl Provider for MockProvider {
         Ok(())
     }
 
-    fn check_permissions(&self) -> Result<PermissionStatus> {
-        Ok(PermissionStatus::Granted)
-    }
-
     fn subscribe(&self, _element: &ElementData) -> Result<Subscription> {
         Err(Error::Platform {
             code: -1,
@@ -79,17 +75,30 @@ impl Provider for MockProvider {
 /// Helper to build a sample accessibility tree for testing.
 ///
 /// Structure:
-/// [0] window "My App"
-///   [1] toolbar "Main Toolbar"
-///     [2] button "Back" (description="Navigate back")
-///     [3] text_field "Address Bar" (value="https://example.com", editable)
-///   [4] web_area
-///     [5] heading "Welcome"
-///     [6] button "Submit"
-///     [7] button "Cancel" (disabled)
-///     [8] check_box "I agree to terms" (checked=off)
+/// [0] application "Test App" (pid=1234)
+///   [1] window "My App"
+///     [2] toolbar "Main Toolbar"
+///       [3] button "Back" (description="Navigate back")
+///       [4] text_field "Address Bar" (value="https://example.com", editable)
+///     [5] web_area
+///       [6] heading "Welcome"
+///       [7] button "Submit"
+///       [8] button "Cancel" (disabled)
+///       [9] check_box "I agree to terms" (checked=off)
 fn sample_provider() -> Arc<MockProvider> {
     let elements = vec![
+        (
+            Role::Application,
+            Some("Test App"),
+            None,
+            None,
+            None,
+            vec![],
+            StateSet::default(),
+            None,
+            None,
+            None,
+        ),
         (
             Role::Window,
             Some("My App"),
@@ -248,27 +257,29 @@ fn sample_provider() -> Arc<MockProvider> {
     ];
 
     let children_map: Vec<Vec<usize>> = vec![
-        vec![1, 4],       // 0: window
-        vec![2, 3],       // 1: toolbar
-        vec![],           // 2: button Back
-        vec![],           // 3: text_field
-        vec![5, 6, 7, 8], // 4: web_area
-        vec![],           // 5: heading
-        vec![],           // 6: button Submit
-        vec![],           // 7: button Cancel
-        vec![],           // 8: check_box
+        vec![1],          // 0: application
+        vec![2, 5],       // 1: window
+        vec![3, 4],       // 2: toolbar
+        vec![],           // 3: button Back
+        vec![],           // 4: text_field
+        vec![6, 7, 8, 9], // 5: web_area
+        vec![],           // 6: heading
+        vec![],           // 7: button Submit
+        vec![],           // 8: button Cancel
+        vec![],           // 9: check_box
     ];
 
     let parent_map: Vec<Option<usize>> = vec![
-        None,    // 0
-        Some(0), // 1
-        Some(1), // 2
-        Some(1), // 3
-        Some(0), // 4
-        Some(4), // 5
-        Some(4), // 6
-        Some(4), // 7
-        Some(4), // 8
+        None,    // 0: application
+        Some(0), // 1: window
+        Some(1), // 2: toolbar
+        Some(2), // 3: button Back
+        Some(2), // 4: text_field
+        Some(1), // 5: web_area
+        Some(5), // 6: heading
+        Some(5), // 7: button Submit
+        Some(5), // 8: button Cancel
+        Some(5), // 9: check_box
     ];
 
     let mut nodes = Vec::new();
@@ -303,16 +314,15 @@ fn sample_provider() -> Arc<MockProvider> {
     })
 }
 
-fn sample_root() -> Element {
+fn sample_app() -> App {
     let p = sample_provider();
-    let children = p.get_children(None).unwrap();
-    Element::new(children.into_iter().next().unwrap(), p as Arc<dyn Provider>)
+    App::by_name(p as Arc<dyn Provider>, "Test App").unwrap()
 }
 
-fn sample_locator() -> (Arc<MockProvider>, Locator) {
-    let p = sample_provider();
-    let loc = locator(Arc::clone(&p) as Arc<dyn Provider>, "window");
-    (p, loc)
+fn sample_root() -> Element {
+    let app = sample_app();
+    // The first child of the app is the window
+    app.children().unwrap().into_iter().next().unwrap()
 }
 
 // ── Element basic operations ──
@@ -350,7 +360,9 @@ fn element_parent() {
     let button = &toolbar.children().unwrap()[0];
     let parent = button.parent().unwrap().unwrap();
     assert_eq!(parent.role, Role::Toolbar);
-    assert!(root.parent().unwrap().is_none());
+    // root is the window, whose parent is the application
+    let app_parent = root.parent().unwrap().unwrap();
+    assert_eq!(app_parent.role, Role::Application);
 }
 
 #[test]
@@ -362,11 +374,10 @@ fn element_display() {
 }
 
 #[test]
-fn element_locator() {
-    let root = sample_root();
-    let loc = root.locator("button");
-    let buttons = loc.elements().unwrap();
-    // Root is the window — its subtree has 3 buttons: Back, Submit, Cancel
+fn app_locator() {
+    let app = sample_app();
+    let buttons = app.locator("button").elements().unwrap();
+    // App subtree has 3 buttons: Back, Submit, Cancel
     assert_eq!(buttons.len(), 3);
 }
 
@@ -601,57 +612,40 @@ fn raw_platform_data_serialization() {
 // ── Provider trait ──
 
 #[test]
-fn permission_status_variants() {
-    let granted = PermissionStatus::Granted;
-    let denied = PermissionStatus::Denied {
-        instructions: "Enable accessibility".to_string(),
-    };
-
-    let json = serde_json::to_string(&granted).unwrap();
-    assert!(json.contains("Granted"));
-
-    let json = serde_json::to_string(&denied).unwrap();
-    assert!(json.contains("Enable accessibility"));
-}
-
-#[test]
 fn platform_provider_creates_or_fails_gracefully() {
     let _result = xa11y::create_provider();
-}
-
-#[test]
-fn platform_provider_check_permissions() {
-    let provider = match xa11y::create_provider() {
-        Ok(p) => p,
-        Err(_) => return,
-    };
-    let status = provider.check_permissions().unwrap();
-    match status {
-        PermissionStatus::Granted | PermissionStatus::Denied { .. } => {}
-    }
 }
 
 // ── Selector queries via Locator ──
 
 #[test]
 fn query_by_role() {
-    let (_, loc) = sample_locator();
-    let buttons = loc.descendant("button").elements().unwrap();
+    let app = sample_app();
+    let buttons = app
+        .locator("window")
+        .descendant("button")
+        .elements()
+        .unwrap();
     assert_eq!(buttons.len(), 3);
 }
 
 #[test]
 fn query_by_exact_name() {
-    let (_, loc) = sample_locator();
-    let results = loc.descendant(r#"[name="Submit"]"#).elements().unwrap();
+    let app = sample_app();
+    let results = app
+        .locator("window")
+        .descendant(r#"[name="Submit"]"#)
+        .elements()
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].role, Role::Button);
 }
 
 #[test]
 fn query_role_and_name() {
-    let (_, loc) = sample_locator();
-    let results = loc
+    let app = sample_app();
+    let results = app
+        .locator("window")
         .descendant(r#"button[name="Submit"]"#)
         .elements()
         .unwrap();
@@ -661,31 +655,44 @@ fn query_role_and_name() {
 
 #[test]
 fn query_name_contains() {
-    let (_, loc) = sample_locator();
-    let results = loc.descendant(r#"[name*="addr"]"#).elements().unwrap();
+    let app = sample_app();
+    let results = app
+        .locator("window")
+        .descendant(r#"[name*="addr"]"#)
+        .elements()
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].name.as_deref(), Some("Address Bar"));
 }
 
 #[test]
 fn query_name_starts_with() {
-    let (_, loc) = sample_locator();
-    let results = loc.descendant(r#"[name^="addr"]"#).elements().unwrap();
+    let app = sample_app();
+    let results = app
+        .locator("window")
+        .descendant(r#"[name^="addr"]"#)
+        .elements()
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].name.as_deref(), Some("Address Bar"));
 }
 
 #[test]
 fn query_name_ends_with() {
-    let (_, loc) = sample_locator();
-    let results = loc.descendant(r#"[name$="bar"]"#).elements().unwrap();
+    let app = sample_app();
+    let results = app
+        .locator("window")
+        .descendant(r#"[name$="bar"]"#)
+        .elements()
+        .unwrap();
     assert_eq!(results.len(), 2); // "Main Toolbar" and "Address Bar"
 }
 
 #[test]
 fn query_direct_child() {
-    let (_, loc) = sample_locator();
-    let results = loc
+    let app = sample_app();
+    let results = app
+        .locator("window")
         .descendant("toolbar")
         .child("button")
         .elements()
@@ -696,69 +703,71 @@ fn query_direct_child() {
 
 #[test]
 fn query_descendant_buttons() {
-    let p = sample_provider();
-    let loc = locator(p as Arc<dyn Provider>, "window button");
-    let results = loc.elements().unwrap();
+    let app = sample_app();
+    let results = app.locator("window button").elements().unwrap();
     assert_eq!(results.len(), 3);
 }
 
 #[test]
 fn query_nth() {
-    let p = sample_provider();
-    let loc = locator(p as Arc<dyn Provider>, "window button:nth(2)");
-    let results = loc.elements().unwrap();
+    let app = sample_app();
+    let results = app.locator("window button:nth(2)").elements().unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].name.as_deref(), Some("Submit"));
 }
 
 #[test]
 fn query_nth_out_of_range() {
-    let p = sample_provider();
-    let loc = locator(p as Arc<dyn Provider>, "window button:nth(99)");
-    let results = loc.elements().unwrap();
+    let app = sample_app();
+    let results = app.locator("window button:nth(99)").elements().unwrap();
     assert_eq!(results.len(), 0);
 }
 
 #[test]
 fn query_complex() {
-    let p = sample_provider();
-    let loc = locator(
-        p as Arc<dyn Provider>,
-        r#"window toolbar > text_field[name*="Address"]"#,
-    );
-    let results = loc.elements().unwrap();
+    let app = sample_app();
+    let results = app
+        .locator(r#"window toolbar > text_field[name*="Address"]"#)
+        .elements()
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].value.as_deref(), Some("https://example.com"));
 }
 
 #[test]
 fn query_no_match() {
-    let (_, loc) = sample_locator();
-    let results = loc.descendant("slider").elements().unwrap();
+    let app = sample_app();
+    let results = app
+        .locator("window")
+        .descendant("slider")
+        .elements()
+        .unwrap();
     assert_eq!(results.len(), 0);
 }
 
 #[test]
 fn query_invalid_selector() {
-    let p = sample_provider();
-    let loc = locator(p as Arc<dyn Provider>, "foobar");
-    let result = loc.elements();
+    let app = sample_app();
+    let result = app.locator("foobar").elements();
     assert!(result.is_err());
 }
 
 #[test]
 fn query_check_box() {
-    let (_, loc) = sample_locator();
-    let results = loc.descendant("check_box").elements().unwrap();
+    let app = sample_app();
+    let results = app
+        .locator("window")
+        .descendant("check_box")
+        .elements()
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].states.checked, Some(Toggled::Off));
 }
 
 #[test]
 fn query_web_area_children() {
-    let p = sample_provider();
-    let loc = locator(p as Arc<dyn Provider>, "window web_area > button");
-    let results = loc.elements().unwrap();
+    let app = sample_app();
+    let results = app.locator("window web_area > button").elements().unwrap();
     assert_eq!(results.len(), 2);
 }
 
@@ -766,8 +775,8 @@ fn query_web_area_children() {
 
 #[test]
 fn locator_basic_query() {
-    let p = sample_provider();
-    let loc = locator(p as Arc<dyn Provider>, r#"window button[name="Submit"]"#);
+    let app = sample_app();
+    let loc = app.locator(r#"window button[name="Submit"]"#);
     let element = loc.element().unwrap();
     assert_eq!(element.role, Role::Button);
     assert_eq!(element.name.as_deref(), Some("Submit"));
@@ -777,50 +786,48 @@ fn locator_basic_query() {
 #[test]
 fn locator_press_dispatches_action() {
     let p = sample_provider();
-    let loc = locator(
-        Arc::clone(&p) as Arc<dyn Provider>,
-        r#"window button[name="Submit"]"#,
-    );
+    let app = App::by_name(Arc::clone(&p) as Arc<dyn Provider>, "Test App").unwrap();
+    let loc = app.locator(r#"window button[name="Submit"]"#);
     loc.press().unwrap();
     let (handle, action) = p.last_action.lock().unwrap().unwrap();
     assert_eq!(action, Action::Press);
-    assert_eq!(handle, 6); // Submit button is handle 6
+    assert_eq!(handle, 7); // Submit button is handle 7
 }
 
 #[test]
 fn locator_not_found() {
-    let p = sample_provider();
-    let loc = locator(p as Arc<dyn Provider>, r#"button[name="NonExistent"]"#);
+    let app = sample_app();
+    let loc = app.locator(r#"button[name="NonExistent"]"#);
     assert!(!loc.exists().unwrap());
     assert!(loc.press().is_err());
 }
 
 #[test]
 fn locator_nth() {
-    let p = sample_provider();
-    // There are 3 buttons in window's subtree: Back(2), Submit(6), Cancel(7)
-    let loc = locator(p as Arc<dyn Provider>, "window button").nth(1);
+    let app = sample_app();
+    // There are 3 buttons in window's subtree: Back(3), Submit(7), Cancel(8)
+    let loc = app.locator("window button").nth(1);
     assert_eq!(loc.element().unwrap().name.as_deref(), Some("Submit"));
 }
 
 #[test]
 fn locator_count() {
-    let p = sample_provider();
-    let loc = locator(p as Arc<dyn Provider>, "window button");
+    let app = sample_app();
+    let loc = app.locator("window button");
     assert_eq!(loc.count().unwrap(), 3);
 }
 
 #[test]
 fn locator_child() {
-    let p = sample_provider();
-    let loc = locator(p as Arc<dyn Provider>, "window toolbar").child("button");
+    let app = sample_app();
+    let loc = app.locator("window toolbar").child("button");
     assert_eq!(loc.element().unwrap().name.as_deref(), Some("Back"));
 }
 
 #[test]
 fn locator_states() {
-    let p = sample_provider();
-    let loc = locator(p as Arc<dyn Provider>, r#"window button[name="Cancel"]"#);
+    let app = sample_app();
+    let loc = app.locator(r#"window button[name="Cancel"]"#);
     let element = loc.element().unwrap();
     assert!(!element.states.enabled);
     assert!(element.states.visible);
@@ -828,8 +835,8 @@ fn locator_states() {
 
 #[test]
 fn locator_selector_getter() {
-    let p = sample_provider();
-    let loc = locator(p as Arc<dyn Provider>, "button").child("text_field");
+    let app = sample_app();
+    let loc = app.locator("button").child("text_field");
     assert_eq!(loc.selector(), "button > text_field");
 }
 
@@ -964,10 +971,6 @@ impl Provider for MultiAppMockProvider {
         Ok(())
     }
 
-    fn check_permissions(&self) -> Result<PermissionStatus> {
-        Ok(PermissionStatus::Granted)
-    }
-
     fn subscribe(&self, _: &ElementData) -> Result<Subscription> {
         Err(Error::Platform {
             code: -1,
@@ -981,72 +984,63 @@ impl Provider for MultiAppMockProvider {
 #[test]
 fn find_application_by_name_from_root() {
     let p = multi_app_provider();
-    let loc = locator(p as Arc<dyn Provider>, r#"application[name="App2"]"#);
-    let app = loc.element().unwrap();
-    assert_eq!(app.role, Role::Application);
-    assert_eq!(app.name.as_deref(), Some("App2"));
+    let app = App::by_name(p as Arc<dyn Provider>, "App2").unwrap();
+    assert_eq!(app.data.role, Role::Application);
+    assert_eq!(app.name, "App2");
     assert_eq!(app.pid, Some(200));
 }
 
 #[test]
 fn find_all_applications() {
     let p = multi_app_provider();
-    let loc = locator(p as Arc<dyn Provider>, "application");
-    let apps = loc.elements().unwrap();
+    let apps = App::list(p as Arc<dyn Provider>).unwrap();
     assert_eq!(apps.len(), 2);
-    assert_eq!(apps[0].name.as_deref(), Some("App1"));
-    assert_eq!(apps[1].name.as_deref(), Some("App2"));
+    assert_eq!(apps[0].name, "App1");
+    assert_eq!(apps[1].name, "App2");
 }
 
 #[test]
 fn find_application_only_checks_top_level() {
     // application search from root should NOT recurse into app subtrees
     let p = multi_app_provider();
-    let loc = locator(p as Arc<dyn Provider>, "application");
-    let apps = loc.elements().unwrap();
+    let apps = App::list(p as Arc<dyn Provider>).unwrap();
     // Should find exactly 2, not more (no nested apps)
     assert_eq!(apps.len(), 2);
 }
 
 #[test]
 fn find_button_across_apps() {
-    // Searching for buttons from root traverses all apps
+    // Searching for buttons within each app
     let p = multi_app_provider();
-    let loc = locator(p as Arc<dyn Provider>, "button");
-    let buttons = loc.elements().unwrap();
-    assert_eq!(buttons.len(), 3); // Btn1, Btn2, Btn3
+    let apps = App::list(p as Arc<dyn Provider>).unwrap();
+    let mut total_buttons = 0;
+    for app in &apps {
+        total_buttons += app.locator("button").count().unwrap();
+    }
+    assert_eq!(total_buttons, 3); // Btn1, Btn2, Btn3
 }
 
 #[test]
 fn find_with_limit_stops_early() {
     let p = multi_app_provider();
-    let loc = locator(p as Arc<dyn Provider>, "button");
-    // nth(0) means "first match" — internally uses limit=1
-    let first = loc.first().element().unwrap();
+    let app1 = App::by_name(p as Arc<dyn Provider>, "App1").unwrap();
+    let first = app1.locator("button").first().element().unwrap();
     assert_eq!(first.name.as_deref(), Some("Btn1"));
 }
 
 #[test]
 fn find_multi_segment_across_apps() {
-    // "application window > button" — find buttons that are direct children of windows
+    // "window > button" — find buttons that are direct children of windows in App2
     let p = multi_app_provider();
-    let loc = locator(
-        p as Arc<dyn Provider>,
-        r#"application[name="App2"] window > button"#,
-    );
-    let results = loc.elements().unwrap();
+    let app2 = App::by_name(p as Arc<dyn Provider>, "App2").unwrap();
+    let results = app2.locator("window > button").elements().unwrap();
     assert_eq!(results.len(), 2); // Btn2, Btn3
 }
 
 #[test]
-fn element_locator_scopes_search() {
+fn app_locator_scopes_search() {
     let p = multi_app_provider();
-    let app2 = locator(
-        Arc::clone(&p) as Arc<dyn Provider>,
-        r#"application[name="App2"]"#,
-    )
-    .element()
-    .unwrap();
+    let app2 = App::by_name(p as Arc<dyn Provider>, "App2").unwrap();
     // Scoped locator should only find buttons within App2
     let buttons = app2.locator("button").elements().unwrap();
     assert_eq!(buttons.len(), 2); // Btn2, Btn3
@@ -1054,14 +1048,9 @@ fn element_locator_scopes_search() {
 }
 
 #[test]
-fn element_locator_does_not_find_sibling_app_elements() {
+fn app_locator_does_not_find_sibling_app_elements() {
     let p = multi_app_provider();
-    let app1 = locator(
-        Arc::clone(&p) as Arc<dyn Provider>,
-        r#"application[name="App1"]"#,
-    )
-    .element()
-    .unwrap();
+    let app1 = App::by_name(p as Arc<dyn Provider>, "App1").unwrap();
     // App1 only has Btn1
     let buttons = app1.locator("button").elements().unwrap();
     assert_eq!(buttons.len(), 1);
@@ -1071,53 +1060,53 @@ fn element_locator_does_not_find_sibling_app_elements() {
 #[test]
 fn locator_count_matches_elements_len() {
     let p = multi_app_provider();
-    let loc = locator(p as Arc<dyn Provider>, "button");
+    let app1 = App::by_name(p as Arc<dyn Provider>, "App1").unwrap();
+    let loc = app1.locator("button");
     assert_eq!(loc.count().unwrap(), loc.elements().unwrap().len());
 }
 
 #[test]
-fn locator_exists_false_for_no_match() {
+fn app_by_name_not_found() {
     let p = multi_app_provider();
-    let loc = locator(p as Arc<dyn Provider>, r#"application[name="NoSuchApp"]"#);
-    assert!(!loc.exists().unwrap());
+    let result = App::by_name(p as Arc<dyn Provider>, "NoSuchApp");
+    assert!(result.is_err());
 }
 
 #[test]
 fn locator_nth_out_of_range() {
     let p = multi_app_provider();
-    let loc = locator(p as Arc<dyn Provider>, "application").nth(99);
+    let apps = App::list(p as Arc<dyn Provider>).unwrap();
+    // Use first app and request an out-of-range nth button
+    let loc = apps[0].locator("button").nth(99);
     assert!(loc.element().is_err());
 }
 
 #[test]
 fn element_children_of_leaf_is_empty() {
     let p = multi_app_provider();
-    let btn = locator(Arc::clone(&p) as Arc<dyn Provider>, "button")
-        .first()
-        .element()
-        .unwrap();
+    let app1 = App::by_name(p as Arc<dyn Provider>, "App1").unwrap();
+    let btn = app1.locator("button").first().element().unwrap();
     assert!(btn.children().unwrap().is_empty());
 }
 
 #[test]
 fn element_parent_of_top_level_is_none() {
     let p = multi_app_provider();
-    let app = locator(Arc::clone(&p) as Arc<dyn Provider>, "application")
-        .first()
-        .element()
+    let app = App::list(Arc::clone(&p) as Arc<dyn Provider>)
+        .unwrap()
+        .into_iter()
+        .next()
         .unwrap();
-    assert!(app.parent().unwrap().is_none());
+    // The application element itself has no parent
+    let app_element = Element::new(app.data.clone(), Arc::clone(&p) as Arc<dyn Provider>);
+    assert!(app_element.parent().unwrap().is_none());
 }
 
 #[test]
 fn element_parent_navigates_up() {
     let p = multi_app_provider();
-    let btn = locator(
-        Arc::clone(&p) as Arc<dyn Provider>,
-        r#"button[name="Btn2"]"#,
-    )
-    .element()
-    .unwrap();
+    let app2 = App::by_name(p as Arc<dyn Provider>, "App2").unwrap();
+    let btn = app2.locator(r#"button[name="Btn2"]"#).element().unwrap();
     let parent = btn.parent().unwrap().unwrap();
     assert_eq!(parent.role, Role::Window);
     assert_eq!(parent.name.as_deref(), Some("Win2"));
@@ -1127,19 +1116,10 @@ fn element_parent_navigates_up() {
 fn handle_preserved_through_find() {
     // Verify that handle IDs survive the find_elements pipeline
     let p = multi_app_provider();
-    let app = locator(
-        Arc::clone(&p) as Arc<dyn Provider>,
-        r#"application[name="App1"]"#,
-    )
-    .element()
-    .unwrap();
+    let app1 = App::by_name(Arc::clone(&p) as Arc<dyn Provider>, "App1").unwrap();
     // handle should be non-default (we set it to the node index)
-    assert_eq!(app.handle, 0); // App1 is node index 0
-    let btn = locator(
-        Arc::clone(&p) as Arc<dyn Provider>,
-        r#"button[name="Btn2"]"#,
-    )
-    .element()
-    .unwrap();
+    assert_eq!(app1.data.handle, 0); // App1 is node index 0
+    let app2 = App::by_name(Arc::clone(&p) as Arc<dyn Provider>, "App2").unwrap();
+    let btn = app2.locator(r#"button[name="Btn2"]"#).element().unwrap();
     assert_eq!(btn.handle, 5); // Btn2 is node index 5
 }

@@ -1,4 +1,5 @@
 pub mod action;
+pub mod app;
 pub mod element;
 pub mod error;
 pub mod event;
@@ -10,12 +11,13 @@ pub mod selector;
 
 // Re-export primary types at the crate root for convenience.
 pub use action::{Action, ActionData};
+pub use app::App;
 pub use element::{Element, ElementData, RawPlatformData, Rect, StateSet, Toggled};
 pub use error::{Error, Result};
 pub use event::{ElementState, Event, EventType, StateFlag, TextChangeData, TextChangeType};
 pub use event_provider::{CancelHandle, EventReceiver, Subscription, SubscriptionIter};
-pub use locator::{locator, Locator};
-pub use provider::{PermissionStatus, Provider};
+pub use locator::Locator;
+pub use provider::Provider;
 pub use role::Role;
 pub use selector::Selector;
 

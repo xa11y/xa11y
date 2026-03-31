@@ -8,30 +8,22 @@
 //! ```no_run
 //! use xa11y::*;
 //!
-//! // Find an app by name
-//! let safari = locator(provider().unwrap(), r#"application[name="Safari"]"#);
+//! let app = App::by_name(provider().unwrap(), "Safari").expect("App not found");
 //!
-//! // Lazy navigation
-//! let app = safari.element().expect("App not found");
 //! for child in app.children().unwrap() {
 //!     println!("{}: {:?}", child.role, child.name);
 //! }
 //!
-//! // Actions via locator
-//! safari.child(r#"button[name="OK"]"#).press().expect("Failed to press");
-//!
-//! // Scoped locator from an element
-//! let toolbar = app.children().unwrap().into_iter().next().unwrap();
-//! toolbar.locator("button").elements().expect("Query failed");
+//! app.locator(r#"button[name="OK"]"#).press().expect("Failed to press");
 //! ```
 
 use std::sync::{Arc, OnceLock};
 
 // Re-export public types.
 pub use xa11y_core::{
-    locator, Action, ActionData, Element, ElementData, ElementState, Error, Event, EventType,
-    Locator, PermissionStatus, RawPlatformData, Rect, Result, Role, StateFlag, StateSet,
-    Subscription, SubscriptionIter, TextChangeData, TextChangeType, Toggled,
+    Action, ActionData, App, Element, ElementData, ElementState, Error, Event, EventType, Locator,
+    RawPlatformData, Rect, Result, Role, StateFlag, StateSet, Subscription, SubscriptionIter,
+    TextChangeData, TextChangeType, Toggled,
 };
 
 // Implementation details used by platform backends and Python bindings.
@@ -75,9 +67,6 @@ impl Provider for StaticProviderRef {
     ) -> Result<()> {
         self.0.perform_action(element, action, data)
     }
-    fn check_permissions(&self) -> Result<PermissionStatus> {
-        self.0.check_permissions()
-    }
     fn subscribe(&self, element: &ElementData) -> Result<Subscription> {
         self.0.subscribe(element)
     }
@@ -86,11 +75,6 @@ impl Provider for StaticProviderRef {
 /// Get the global provider as an `Arc<dyn Provider>`.
 pub fn provider() -> Result<Arc<dyn Provider>> {
     Ok(Arc::new(StaticProviderRef(get_provider_ref()?)))
-}
-
-/// Check if accessibility permissions are granted.
-pub fn check_permissions() -> Result<PermissionStatus> {
-    get_provider_ref()?.check_permissions()
 }
 
 // ── Platform provider construction (internal) ───────────────────────────────

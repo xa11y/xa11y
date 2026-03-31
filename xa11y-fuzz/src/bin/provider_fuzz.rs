@@ -265,20 +265,6 @@ mod provider_fuzz {
         }
     }
 
-    fn op_check_permissions(state: &mut FuzzState) {
-        state.log("check_permissions()");
-        let status = state.provider.check_permissions().unwrap();
-        match status {
-            PermissionStatus::Granted => {}
-            PermissionStatus::Denied { instructions } => {
-                panic!(
-                    "Fuzzer requires accessibility permissions: {}",
-                    instructions
-                );
-            }
-        }
-    }
-
     fn op_action_on_element(state: &mut FuzzState) {
         state.ensure_app();
         let app = match &state.app_element {
@@ -357,15 +343,8 @@ mod provider_fuzz {
         eprintln!("Iterations: {}", args.iterations);
         eprintln!();
 
+        // Provider creation checks permissions (fails early if denied).
         let provider = create_provider().expect("Failed to create provider");
-
-        match provider.check_permissions().unwrap() {
-            PermissionStatus::Granted => eprintln!("Permissions: granted"),
-            PermissionStatus::Denied { instructions } => {
-                eprintln!("ERROR: {}", instructions);
-                std::process::exit(1);
-            }
-        }
 
         // Find the test app
         let sel = Selector::parse(r#"application[name*="xa11y"]"#).unwrap();
@@ -408,7 +387,6 @@ mod provider_fuzz {
             (20, "get_children", op_get_children as OpFn),
             (5, "get_parent", op_get_parent),
             (15, "find_elements", op_find_elements),
-            (1, "check_permissions", op_check_permissions),
             (20, "action_on_element", op_action_on_element),
             (5, "tree_children", op_tree_children),
         ];
@@ -418,7 +396,7 @@ mod provider_fuzz {
         for i in 0..args.iterations {
             let mut roll = state.rng.random_range(0..total_weight);
             let mut chosen_name = "";
-            let mut chosen_fn: OpFn = op_check_permissions;
+            let mut chosen_fn: OpFn = op_get_children;
             for (weight, name, f) in &ops {
                 if roll < *weight {
                     chosen_name = name;

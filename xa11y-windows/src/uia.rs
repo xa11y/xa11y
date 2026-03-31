@@ -12,8 +12,7 @@ use windows::Win32::UI::Accessibility::*;
 
 use xa11y_core::{
     Action, ActionData, CancelHandle, ElementData, Error, Event, EventReceiver, EventType,
-    PermissionStatus, Provider, RawPlatformData, Rect, Result, Role, StateSet, Subscription,
-    Toggled,
+    Provider, RawPlatformData, Rect, Result, Role, StateSet, Subscription, Toggled,
 };
 
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
@@ -752,10 +751,6 @@ impl Provider for WindowsProvider {
                 Err(Error::TextValueNotSupported)
             }
         }
-    }
-
-    fn check_permissions(&self) -> Result<PermissionStatus> {
-        Ok(PermissionStatus::Granted)
     }
 
     fn subscribe(&self, element: &ElementData) -> Result<Subscription> {

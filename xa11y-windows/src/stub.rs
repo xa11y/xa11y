@@ -1,8 +1,6 @@
 //! Stub backend for non-Windows platforms (allows compilation on all targets).
 
-use xa11y_core::{
-    Action, ActionData, ElementData, Error, PermissionStatus, Provider, Result, Subscription,
-};
+use xa11y_core::{Action, ActionData, ElementData, Error, Provider, Result, Subscription};
 
 #[derive(Default)]
 pub struct WindowsProvider;
@@ -24,9 +22,6 @@ impl Provider for WindowsProvider {
         unreachable!()
     }
     fn perform_action(&self, _: &ElementData, _: Action, _: Option<ActionData>) -> Result<()> {
-        unreachable!()
-    }
-    fn check_permissions(&self) -> Result<PermissionStatus> {
         unreachable!()
     }
     fn subscribe(&self, _: &ElementData) -> Result<Subscription> {

@@ -8,8 +8,8 @@ use std::sync::Arc;
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use xa11y_core::{
-    Action, ActionData, ElementData, Error, PermissionStatus, Provider, RawPlatformData, Result,
-    Role, StateSet, Subscription,
+    Action, ActionData, ElementData, Error, Provider, RawPlatformData, Result, Role, StateSet,
+    Subscription,
 };
 
 /// Roles indexed by u8 for fuzzer-driven selection.
@@ -112,9 +112,6 @@ impl Provider for FuzzProvider {
         Ok(())
     }
 
-    fn check_permissions(&self) -> Result<PermissionStatus> {
-        Ok(PermissionStatus::Granted)
-    }
 
     fn subscribe(&self, _: &ElementData) -> Result<Subscription> {
         Err(Error::Platform {

@@ -5,7 +5,6 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::action::Action;
-use crate::locator::Locator;
 use crate::provider::Provider;
 use crate::role::Role;
 
@@ -159,15 +158,6 @@ impl Element {
     pub fn parent(&self) -> crate::error::Result<Option<Element>> {
         let parent = self.provider.get_parent(&self.data)?;
         Ok(parent.map(|d| Element::new(d, Arc::clone(&self.provider))))
-    }
-
-    /// Create a [`Locator`] scoped to this element's subtree.
-    pub fn locator(&self, selector: &str) -> Locator {
-        Locator::new(
-            Arc::clone(&self.provider),
-            Some(self.data.clone()),
-            selector,
-        )
     }
 
     /// Get the process ID from the element data.
