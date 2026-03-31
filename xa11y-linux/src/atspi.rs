@@ -720,7 +720,7 @@ impl LinuxProvider {
             map_atspi_role_number(role_num)
         };
         // Refine TextArea → TextField for single-line text widgets.
-        if coarse == Role::TextArea && self.is_single_line(aref) {
+        if coarse == Role::TextArea && !self.is_multi_line(aref) {
             Role::TextField
         } else {
             coarse
