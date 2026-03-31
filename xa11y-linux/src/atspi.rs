@@ -228,16 +228,7 @@ impl LinuxProvider {
     /// check MULTI_LINE and default to TextField when neither is set.
     fn is_multi_line(&self, aref: &AccessibleRef) -> bool {
         let state_bits = self.get_state(aref).unwrap_or_default();
-        let bits: u64 = if state_bits.len() >= 2 {
-            (state_bits[0] as u64) | ((state_bits[1] as u64) << 32)
-        } else if state_bits.len() == 1 {
-            state_bits[0] as u64
-        } else {
-            0
-        };
-        // ATSPI_STATE_MULTI_LINE = 17 in AtspiStateType enum
-        const MULTI_LINE: u64 = 1 << 17;
-        (bits & MULTI_LINE) != 0
+        atspi_state_has_multi_line(&state_bits)
     }
 
     /// Get bounds via Component interface.
@@ -1512,6 +1503,24 @@ fn role_has_actions(role: Role) -> bool {
 }
 
 /// Map AT-SPI2 role name to xa11y Role.
+/// Pack AT-SPI state bitfield (two u32 words) into a single u64.
+/// AT-SPI GetState returns a `[u32; 2]` where word[0] holds bits 0–31
+/// and word[1] holds bits 32–63.
+fn atspi_state_bits(state: &[u32]) -> u64 {
+    match state.len() {
+        0 => 0,
+        1 => state[0] as u64,
+        _ => (state[0] as u64) | ((state[1] as u64) << 32),
+    }
+}
+
+/// Return true if the AT-SPI MULTI_LINE state bit (bit 17) is set.
+fn atspi_state_has_multi_line(state: &[u32]) -> bool {
+    // ATSPI_STATE_MULTI_LINE = 17 in AtspiStateType enum
+    const MULTI_LINE: u64 = 1 << 17;
+    (atspi_state_bits(state) & MULTI_LINE) != 0
+}
+
 fn map_atspi_role(role_name: &str) -> Role {
     match role_name.to_lowercase().as_str() {
         "application" => Role::Application,
@@ -1641,10 +1650,14 @@ fn map_atspi_action(action_name: &str) -> Option<Action> {
 mod tests {
     use super::*;
 
+    // ── Role name mapping ────────────────────────────────────────────────────
+
     #[test]
-    fn test_role_mapping() {
+    fn test_role_mapping_by_name() {
+        // Basic widgets
         assert_eq!(map_atspi_role("push button"), Role::Button);
         assert_eq!(map_atspi_role("check box"), Role::CheckBox);
+        assert_eq!(map_atspi_role("radio button"), Role::RadioButton);
         assert_eq!(map_atspi_role("entry"), Role::TextField);
         assert_eq!(map_atspi_role("label"), Role::StaticText);
         assert_eq!(map_atspi_role("window"), Role::Window);
@@ -1653,18 +1666,143 @@ mod tests {
         assert_eq!(map_atspi_role("combo box"), Role::ComboBox);
         assert_eq!(map_atspi_role("slider"), Role::Slider);
         assert_eq!(map_atspi_role("panel"), Role::Group);
+        assert_eq!(map_atspi_role("spin button"), Role::SpinButton);
+        assert_eq!(map_atspi_role("progress bar"), Role::ProgressBar);
+        assert_eq!(map_atspi_role("tree item"), Role::TreeItem);
+        assert_eq!(map_atspi_role("scroll bar"), Role::ScrollBar);
+        assert_eq!(map_atspi_role("menu bar"), Role::MenuBar);
+        // "text" maps to TextArea; single-line disambiguation happens in resolve_role
+        assert_eq!(map_atspi_role("text"), Role::TextArea);
+        // Case-insensitive
+        assert_eq!(map_atspi_role("Push Button"), Role::Button);
+        assert_eq!(map_atspi_role("SPIN BUTTON"), Role::SpinButton);
+        // Unknown
         assert_eq!(map_atspi_role("unknown_thing"), Role::Unknown);
+        assert_eq!(map_atspi_role(""), Role::Unknown);
+    }
+
+    // ── Numeric role mapping ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_role_mapping_by_number() {
+        // Key mappings used by Qt's AT-SPI bridge
+        assert_eq!(map_atspi_role_number(43), Role::Button); // PushButton
+        assert_eq!(map_atspi_role_number(7), Role::CheckBox); // CheckBox
+        assert_eq!(map_atspi_role_number(44), Role::RadioButton); // RadioButton
+        assert_eq!(map_atspi_role_number(52), Role::SpinButton); // SpinButton — was returning Unknown via name
+        assert_eq!(map_atspi_role_number(61), Role::TextArea); // Text
+        assert_eq!(map_atspi_role_number(79), Role::TextField); // Entry
+        assert_eq!(map_atspi_role_number(51), Role::Slider); // Slider
+        assert_eq!(map_atspi_role_number(42), Role::ProgressBar); // ProgressBar
+        assert_eq!(map_atspi_role_number(75), Role::Application); // Application
+        assert_eq!(map_atspi_role_number(69), Role::Window); // Window
+        assert_eq!(map_atspi_role_number(23), Role::Window); // Frame
+        assert_eq!(map_atspi_role_number(91), Role::TreeItem); // TreeItem
+        assert_eq!(map_atspi_role_number(48), Role::ScrollBar); // ScrollBar
+        assert_eq!(map_atspi_role_number(34), Role::MenuBar); // MenuBar
+                                                              // Unknown values
+        assert_eq!(map_atspi_role_number(0), Role::Unknown);
+        assert_eq!(map_atspi_role_number(9999), Role::Unknown);
+    }
+
+    /// Numeric fallback is needed when name lookup returns Unknown (e.g. "spin button"
+    /// was previously absent from the name map, causing QSpinBox to appear as Unknown).
+    #[test]
+    fn test_numeric_role_fallback_covers_name_map_gaps() {
+        // Any role that map_atspi_role returns Unknown for should still resolve
+        // correctly via map_atspi_role_number.
+        let spin_by_name = map_atspi_role("spin button");
+        // "spin button" is now in the name map, but if it weren't the numeric
+        // fallback (52 → SpinButton) must cover it.
+        assert_eq!(map_atspi_role_number(52), Role::SpinButton);
+        // Verify the name map also handles it for belt-and-suspenders coverage.
+        assert_eq!(spin_by_name, Role::SpinButton);
+    }
+
+    // ── State bit packing ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_atspi_state_bits_empty() {
+        assert_eq!(atspi_state_bits(&[]), 0u64);
     }
 
     #[test]
+    fn test_atspi_state_bits_single_word() {
+        assert_eq!(atspi_state_bits(&[0b101]), 0b101u64);
+        assert_eq!(atspi_state_bits(&[u32::MAX]), u32::MAX as u64);
+    }
+
+    #[test]
+    fn test_atspi_state_bits_two_words() {
+        // Low word in bits 0-31, high word in bits 32-63
+        assert_eq!(atspi_state_bits(&[1, 1]), (1u64) | (1u64 << 32));
+        assert_eq!(atspi_state_bits(&[0, 1]), 1u64 << 32);
+        assert_eq!(atspi_state_bits(&[u32::MAX, u32::MAX]), u64::MAX);
+    }
+
+    // ── MULTI_LINE state detection ───────────────────────────────────────────
+
+    #[test]
+    fn test_multi_line_bit_not_set_means_text_field() {
+        // No state bits → not multi-line → QLineEdit should resolve to TextField
+        assert!(!atspi_state_has_multi_line(&[]));
+        assert!(!atspi_state_has_multi_line(&[0]));
+        assert!(!atspi_state_has_multi_line(&[0, 0]));
+    }
+
+    #[test]
+    fn test_multi_line_bit_17_set() {
+        // ATSPI_STATE_MULTI_LINE = bit 17 → QTextEdit should resolve to TextArea
+        let multi_line_state: u32 = 1 << 17;
+        assert!(atspi_state_has_multi_line(&[multi_line_state]));
+        assert!(atspi_state_has_multi_line(&[multi_line_state, 0]));
+    }
+
+    #[test]
+    fn test_multi_line_other_bits_dont_trigger() {
+        // Adjacent bits (16, 18) must not be confused with MULTI_LINE (17)
+        assert!(!atspi_state_has_multi_line(&[1 << 16]));
+        assert!(!atspi_state_has_multi_line(&[1 << 18]));
+        // Bit 17 in the *high* word is bit 49 overall — not MULTI_LINE
+        assert!(!atspi_state_has_multi_line(&[0, 1 << 17]));
+    }
+
+    // ── Action mapping ───────────────────────────────────────────────────────
+
+    #[test]
     fn test_action_mapping() {
+        // Press variants — all must map to Action::Press
         assert_eq!(map_atspi_action("click"), Some(Action::Press));
         assert_eq!(map_atspi_action("activate"), Some(Action::Press));
+        assert_eq!(map_atspi_action("press"), Some(Action::Press)); // Qt radio button
+        assert_eq!(map_atspi_action("invoke"), Some(Action::Press));
+
+        // Toggle variants — "check" added for Qt radio/checkbox fallback
         assert_eq!(map_atspi_action("toggle"), Some(Action::Toggle));
+        assert_eq!(map_atspi_action("check"), Some(Action::Toggle));
+        assert_eq!(map_atspi_action("uncheck"), Some(Action::Toggle));
+
+        // Navigation actions
         assert_eq!(map_atspi_action("expand"), Some(Action::Expand));
+        assert_eq!(map_atspi_action("open"), Some(Action::Expand));
         assert_eq!(map_atspi_action("collapse"), Some(Action::Collapse));
+        assert_eq!(map_atspi_action("close"), Some(Action::Collapse));
         assert_eq!(map_atspi_action("select"), Some(Action::Select));
+
+        // Range actions
         assert_eq!(map_atspi_action("increment"), Some(Action::Increment));
+        assert_eq!(map_atspi_action("decrement"), Some(Action::Decrement));
+
+        // Unknown
         assert_eq!(map_atspi_action("foobar"), None);
+        assert_eq!(map_atspi_action(""), None);
+    }
+
+    #[test]
+    fn test_action_mapping_case_insensitive() {
+        // map_atspi_action lowercases before matching
+        assert_eq!(map_atspi_action("Click"), Some(Action::Press));
+        assert_eq!(map_atspi_action("TOGGLE"), Some(Action::Toggle));
+        assert_eq!(map_atspi_action("Increment"), Some(Action::Increment));
     }
 }
