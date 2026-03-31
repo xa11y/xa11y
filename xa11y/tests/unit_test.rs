@@ -261,11 +261,7 @@ fn tree_get_by_index() {
 #[test]
 fn tree_get_nonexistent() {
     let root = sample_tree();
-    assert!(root
-        .subtree()
-        .into_iter()
-        .find(|e| e.index == 999)
-        .is_none());
+    assert!(!root.subtree().into_iter().any(|e| e.index == 999));
 }
 
 #[test]

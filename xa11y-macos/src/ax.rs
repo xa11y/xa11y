@@ -723,6 +723,22 @@ impl MacOSProvider {
             });
         }
 
+        // Deduplicate stable_ids — Qt QListWidget children can share the same
+        // AXIdentifier, which breaks cross-snapshot correlation. Append a
+        // disambiguation suffix to duplicates.
+        {
+            let mut seen: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+            for elem in &mut elements {
+                if let Some(ref id) = elem.stable_id {
+                    let count = seen.entry(id.clone()).or_insert(0);
+                    *count += 1;
+                    if *count > 1 {
+                        elem.stable_id = Some(format!("{}#{}", id, count - 1));
+                    }
+                }
+            }
+        }
+
         // Cache AX element handles for action dispatch
         *self.cached_elements.lock().unwrap() = ax_elements;
 
@@ -795,8 +811,11 @@ impl MacOSProvider {
         let subrole_str = ax_string(element.as_ptr(), "AXSubrole");
         let role = map_ax_role(&role_str, subrole_str.as_deref());
 
-        let name = ax_string(element.as_ptr(), "AXTitle")
-            .or_else(|| ax_string(element.as_ptr(), "AXDescription"))
+        let ax_title = ax_string(element.as_ptr(), "AXTitle");
+        let ax_description = ax_string(element.as_ptr(), "AXDescription");
+        let name = ax_title
+            .clone()
+            .or_else(|| ax_description.clone())
             .or_else(|| {
                 // For static text, the "value" IS the name
                 if role == Role::StaticText {
@@ -806,7 +825,17 @@ impl MacOSProvider {
                 }
             });
 
-        let description = ax_string(element.as_ptr(), "AXHelp");
+        // Qt's setAccessibleDescription maps to AXHelp, not AXDescription.
+        // Try AXHelp first; fall back to AXDescription only when it wasn't
+        // already consumed as the name.
+        let description = ax_string(element.as_ptr(), "AXHelp").or_else(|| {
+            if ax_title.is_some() {
+                // AXDescription wasn't used for the name — safe to use as description
+                ax_description
+            } else {
+                None
+            }
+        });
 
         // Value depends on role
         let value = match role {
@@ -928,11 +957,29 @@ impl MacOSProvider {
                     }
                 }
             }
-            // Skip nested AXApplication children — prevents infinite recursion from
-            // Qt/PySide6 apps that list themselves as their own child.
+            // Flatten nested application children — application nodes should only
+            // appear at the top level. Qt/PySide6 apps erroneously list themselves
+            // as their own child; we skip the duplicate but adopt its real children.
             {
                 let child_role = ax_string(child.as_ptr(), "AXRole").unwrap_or_default();
                 if child_role == "AXApplication" {
+                    let grandchildren = ax_children(child.as_ptr());
+                    for gc in &grandchildren {
+                        let gc_role = ax_string(gc.as_ptr(), "AXRole").unwrap_or_default();
+                        if gc_role == "AXApplication" {
+                            continue;
+                        }
+                        let gc_idx = elements.len() as u32;
+                        child_ids.push(gc_idx);
+                        self.traverse(
+                            gc,
+                            elements,
+                            ax_elements,
+                            Some(element_idx),
+                            depth + 1,
+                            screen_size,
+                        );
+                    }
                     continue;
                 }
             }
@@ -1264,7 +1311,12 @@ impl Provider for MacOSProvider {
                 }
                 Ok(())
             }
-        }
+        }?;
+
+        // Brief pause so the app can process the action and update its AX tree
+        // before the caller re-reads state.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        Ok(())
     }
 
     fn check_permissions(&self) -> Result<PermissionStatus> {
@@ -1330,7 +1382,8 @@ unsafe extern "C" fn ax_observer_callback(
             role,
             name: ax_string(element, "AXTitle"),
             value: ax_value_string(element),
-            description: ax_string(element, "AXDescription"),
+            description: ax_string(element, "AXHelp")
+                .or_else(|| ax_string(element, "AXDescription")),
             bounds: None,
             actions: vec![],
             states: StateSet::default(),

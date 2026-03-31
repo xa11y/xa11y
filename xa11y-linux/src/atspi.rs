@@ -1083,7 +1083,12 @@ impl Provider for LinuxProvider {
                     })?;
                 Ok(())
             }
-        }
+        }?;
+
+        // Brief pause so the app can process the action and update its AT-SPI tree
+        // before the caller re-reads state.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        Ok(())
     }
 
     fn check_permissions(&self) -> Result<PermissionStatus> {
