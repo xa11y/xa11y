@@ -777,6 +777,7 @@ impl MacOSProvider {
 
     /// Recursively traverse the AX tree, building xa11y elements.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::only_used_in_recursion)]
     fn traverse(
         &self,
         element: &AXElement,

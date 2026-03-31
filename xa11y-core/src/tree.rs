@@ -198,12 +198,13 @@ mod tests {
     /// cycles exist.
     #[test]
     fn max_tree_depth_is_reasonable() {
+        let depth = crate::MAX_TREE_DEPTH;
         // Providers rely on this constant; changing it affects cycle protection.
-        assert_eq!(crate::MAX_TREE_DEPTH, 50);
+        assert_eq!(depth, 50);
         // Must be high enough for deeply nested UIs (dialogs in tabs in panels)
-        assert!(crate::MAX_TREE_DEPTH >= 30);
+        assert!(depth >= 30);
         // Must be low enough to terminate quickly on cyclic trees
-        assert!(crate::MAX_TREE_DEPTH <= 100);
+        assert!(depth <= 100);
     }
 
     #[test]
