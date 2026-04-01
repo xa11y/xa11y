@@ -164,7 +164,8 @@ def test_spinbutton_found(cocoa_app: xa11y.Element) -> None:
 def test_progress_bar(cocoa_app: xa11y.Element) -> None:
     pb = find(cocoa_app, 'progress_bar[name="Progress"]')
     assert pb.role == "progress_bar"
-    assert pb.numeric_value == pytest.approx(75.0)
+    # NSProgressIndicator exposes AXValue as a fraction in [0.0, 1.0]
+    assert pb.numeric_value == pytest.approx(0.75)
 
 
 # ── Text field ────────────────────────────────────────────────────────────────
@@ -204,5 +205,6 @@ def test_label_found(cocoa_app: xa11y.Element) -> None:
 
 
 def test_list_has_items(cocoa_app: xa11y.Element) -> None:
-    lst = find(cocoa_app, 'list[name="Items"]')
+    # NSTableView (used for list views) is exposed as AXTable, not AXList
+    lst = find(cocoa_app, 'table[name="Items"]')
     assert len(lst.children()) >= 1
