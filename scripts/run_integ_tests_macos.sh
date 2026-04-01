@@ -40,7 +40,18 @@ echo "Running integration tests..."
 set +e
 cargo test -p xa11y --test integ_test -- --ignored --test-threads=1 2>&1
 TEST_EXIT=$?
+
+# 4. Run macOS provider AX call count regression tests
+echo "Running AX call count regression tests..."
+cargo test -p xa11y-macos -- --ignored --test-threads=1 2>&1
+MACOS_EXIT=$?
 set -e
 
-echo "=== Integration tests finished (exit code: $TEST_EXIT) ==="
-exit $TEST_EXIT
+if [ $TEST_EXIT -ne 0 ] || [ $MACOS_EXIT -ne 0 ]; then
+    FINAL_EXIT=1
+else
+    FINAL_EXIT=0
+fi
+
+echo "=== Integration tests finished (exit code: $FINAL_EXIT) ==="
+exit $FINAL_EXIT

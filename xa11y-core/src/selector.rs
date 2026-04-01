@@ -341,28 +341,31 @@ pub fn matches_simple(element: &ElementData, simple: &SimpleSelector) -> bool {
             AttrName::Role => Some(element.role.to_snake_case()),
         };
 
-        let matches = match &filter.op {
-            MatchOp::Exact => attr_value == Some(&filter.value),
-            MatchOp::Contains => {
-                let filter_lower = filter.value.to_lowercase();
-                attr_value.is_some_and(|v| v.to_lowercase().contains(&filter_lower))
-            }
-            MatchOp::StartsWith => {
-                let filter_lower = filter.value.to_lowercase();
-                attr_value.is_some_and(|v| v.to_lowercase().starts_with(&filter_lower))
-            }
-            MatchOp::EndsWith => {
-                let filter_lower = filter.value.to_lowercase();
-                attr_value.is_some_and(|v| v.to_lowercase().ends_with(&filter_lower))
-            }
-        };
-
-        if !matches {
+        if !match_op(&filter.op, &filter.value, attr_value) {
             return false;
         }
     }
 
     true
+}
+
+/// Test whether `actual` matches `expected` according to the given `MatchOp`.
+pub fn match_op(op: &MatchOp, expected: &str, actual: Option<&str>) -> bool {
+    match op {
+        MatchOp::Exact => actual == Some(expected),
+        MatchOp::Contains => {
+            let fl = expected.to_lowercase();
+            actual.is_some_and(|v| v.to_lowercase().contains(&fl))
+        }
+        MatchOp::StartsWith => {
+            let fl = expected.to_lowercase();
+            actual.is_some_and(|v| v.to_lowercase().starts_with(&fl))
+        }
+        MatchOp::EndsWith => {
+            let fl = expected.to_lowercase();
+            actual.is_some_and(|v| v.to_lowercase().ends_with(&fl))
+        }
+    }
 }
 
 // ── find_elements_in_tree ───────────────────────────────────────────────────
