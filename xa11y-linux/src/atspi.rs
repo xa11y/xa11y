@@ -1608,6 +1608,8 @@ fn map_atspi_role_number(role: u32) -> Role {
         68 => Role::Group,       // Viewport
         69 => Role::Window,      // Window
         75 => Role::Application, // Application
+        78 => Role::TextArea,    // Embedded — WebKit2GTK uses this for <input type="text"> and <textarea>;
+        // multi-line refinement below downgrades single-line ones to TextField
         79 => Role::TextField,   // Entry
         82 => Role::WebArea,     // DocumentFrame
         83 => Role::Heading,     // Heading
@@ -1618,9 +1620,9 @@ fn map_atspi_role_number(role: u32) -> Role {
         90 => Role::TableRow,    // TableRow
         91 => Role::TreeItem,    // TreeItem
         95 => Role::WebArea,     // DocumentWeb
+        97 => Role::List,        // WebKit2GTK uses this for <ul role="listbox">
         98 => Role::List,        // ListBox
         93 => Role::Tooltip,     // Tooltip
-        97 => Role::Status,      // StatusBar
         101 => Role::Alert,      // Notification
         116 => Role::StaticText, // Static
         129 => Role::Button,     // PushButtonMenu
