@@ -98,6 +98,14 @@ def test_subscribe_checkbox_checked(gtk_app: xa11y.Element) -> None:
     assert cb.checked == "on"
 
 
+@pytest.mark.skip(
+    reason=(
+        "GTK4 Gtk.CheckButton does not expose any AT-SPI2 Action interface actions "
+        "(NActions=0 on Ubuntu 24.04 with GTK 4.14). toggle() requires an AT-SPI2 "
+        "action such as 'toggle', 'click', 'activate', or 'check', none of which "
+        "GTK4 checkboxes expose. This is a GTK4/AT-SPI2 platform limitation."
+    )
+)
 def test_checkbox_toggle(gtk_app: xa11y.Element) -> None:
     cb_loc = gtk_app.locator('check_box[name="Agree to terms"]')
     before = cb_loc.element().checked
