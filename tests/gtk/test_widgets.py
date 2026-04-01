@@ -172,13 +172,16 @@ def test_progress_bar(gtk_app: xa11y.Element) -> None:
 
 
 def test_textfield_properties(gtk_app: xa11y.Element) -> None:
-    tf = find(gtk_app, 'text_field[value="hello world"]')
+    # Only one text_field (Gtk.Entry) in the app.
+    tf = find(gtk_app, "text_field")
     assert tf.role == "text_field"
     assert tf.value == "hello world"
 
 
 def test_textfield_set_value(gtk_app: xa11y.Element) -> None:
-    tf_loc = gtk_app.locator('text_field[value="hello world"]')
+    # Use a stable role-only locator — value changes after set_value so a
+    # value-based selector would fail to re-find the element.
+    tf_loc = gtk_app.locator("text_field")
     tf_loc.set_value("new value")
     assert tf_loc.element().value == "new value"
     # Restore
