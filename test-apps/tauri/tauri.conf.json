@@ -2,6 +2,9 @@
   "productName": "xa11y-tauri-test-app",
   "version": "0.4.0",
   "identifier": "com.xa11y.tauri-test-app",
+  "build": {
+    "frontendDist": "./frontend"
+  },
   "app": {
     "withGlobalTauri": false,
     "windows": [
@@ -11,7 +14,7 @@
         "height": 700,
         "resizable": true,
         "fullscreen": false,
-        "url": "frontend/index.html"
+        "url": "index.html"
       }
     ]
   },
