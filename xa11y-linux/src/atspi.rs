@@ -1524,11 +1524,15 @@ fn map_atspi_role(role_name: &str) -> Role {
         "check box" | "check menu item" => Role::CheckBox,
         "radio button" | "radio menu item" => Role::RadioButton,
         "entry" | "password text" => Role::TextField,
-        "spin button" => Role::SpinButton,
-        "text" => Role::TextArea,
+        "spin button" | "spinbutton" => Role::SpinButton,
+        // "textbox" is the ARIA role name returned by WebKit2GTK for both
+        // <input type="text"> and <textarea>.  Map to TextArea here so the
+        // multi-line refinement below can downgrade single-line ones to TextField.
+        "text" | "textbox" => Role::TextArea,
         "label" | "static" | "caption" => Role::StaticText,
-        "combo box" => Role::ComboBox,
-        "list" | "list box" => Role::List,
+        "combo box" | "combobox" => Role::ComboBox,
+        // "listbox" is the ARIA role name returned by WebKit2GTK for role="listbox".
+        "list" | "list box" | "listbox" => Role::List,
         "list item" => Role::ListItem,
         "menu" => Role::Menu,
         "menu item" | "tearoff menu item" => Role::MenuItem,
