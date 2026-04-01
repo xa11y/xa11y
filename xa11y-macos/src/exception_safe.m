@@ -25,6 +25,25 @@ int safe_ax_copy_attribute_value(
     }
 }
 
+// ── Batch Attribute Access ───────────────────────────────────────────────────
+
+// Safe wrapper for AXUIElementCopyMultipleAttributeValues.
+// Fetches multiple attributes in a single Mach IPC round-trip.
+// Returns the AX error code, or -9999 if an ObjC exception was thrown.
+int safe_ax_copy_multiple_attribute_values(
+    AXUIElementRef element,
+    CFArrayRef attributes,
+    CFArrayRef *values
+) {
+    @try {
+        // 0 = kAXCopyMultipleAttributeOptionStopOnError — don't stop on error
+        return AXUIElementCopyMultipleAttributeValues(element, attributes, 0, values);
+    } @catch (NSException *e) {
+        *values = NULL;
+        return -9999;
+    }
+}
+
 // ── Action Names ─────────────────────────────────────────────────────────────
 
 // Safe wrapper for AXUIElementCopyActionNames.

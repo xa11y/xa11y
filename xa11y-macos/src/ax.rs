@@ -9,6 +9,7 @@ use std::time::Duration;
 use core_foundation::base::TCFType;
 use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
+use rayon::prelude::*;
 
 use xa11y_core::{
     Action, ActionData, CancelHandle, ElementData, Error, Event, EventReceiver, EventType,
@@ -58,6 +59,13 @@ extern "C" {
     fn CFBooleanGetValue(b: CFTypeRef) -> bool;
     fn CFNumberGetValue(num: CFTypeRef, the_type: i32, value_ptr: *mut c_void) -> bool;
     fn CFDictionaryGetValue(dict: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
+    fn CFArrayCreate(
+        allocator: CFTypeRef,
+        values: *const CFTypeRef,
+        num_values: CFIndex,
+        callbacks: *const c_void,
+    ) -> CFArrayRef;
+    static kCFTypeArrayCallBacks: c_void;
 }
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -70,6 +78,11 @@ extern "C" {
         element: AXUIElementRef,
         attribute: CFStringRef,
         value: *mut CFTypeRef,
+    ) -> i32;
+    fn safe_ax_copy_multiple_attribute_values(
+        element: AXUIElementRef,
+        attributes: CFArrayRef,
+        values: *mut CFArrayRef,
     ) -> i32;
     fn safe_ax_copy_action_names(element: AXUIElementRef, names: *mut CFArrayRef) -> i32;
     fn safe_ax_perform_action(element: AXUIElementRef, action: CFStringRef) -> i32;
@@ -394,6 +407,232 @@ fn ax_value_int(element: AXUIElementRef) -> Option<i32> {
     }
 }
 
+// ── Batch Attribute Fetch ────────────────────────────────────────────────────
+
+/// Attribute indices into the batch fetch result array.
+/// Order must match `BATCH_ATTRS` below.
+mod attr_idx {
+    pub const ROLE: usize = 0;
+    pub const SUBROLE: usize = 1;
+    pub const TITLE: usize = 2;
+    pub const DESCRIPTION: usize = 3;
+    pub const HELP: usize = 4;
+    pub const VALUE: usize = 5;
+    pub const ENABLED: usize = 6;
+    pub const FOCUSED: usize = 7;
+    pub const SELECTED: usize = 8;
+    pub const HIDDEN: usize = 9;
+    pub const EXPANDED: usize = 10;
+    pub const MODAL: usize = 11;
+    pub const POSITION: usize = 12;
+    pub const SIZE: usize = 13;
+    pub const IDENTIFIER: usize = 14;
+    pub const COUNT: usize = 15;
+}
+
+/// Raw values returned by a single batch AX fetch. Values are borrowed
+/// CFTypeRefs (owned by the CFArray) — valid only while `_values_array`
+/// is alive.
+struct BatchAttrs {
+    /// Owning CFArray — values are only valid while this is alive.
+    _values_array: CFArrayRef,
+    /// Borrowed pointers into the array (may be null or AXValueIllegalType).
+    vals: [CFTypeRef; attr_idx::COUNT],
+}
+
+impl BatchAttrs {
+    /// Fetch all element attributes in a single Mach IPC round-trip.
+    fn fetch(element: AXUIElementRef) -> Option<Self> {
+        // Build CFArray of attribute name CFStrings.
+        let attr_names: [CFString; attr_idx::COUNT] = [
+            CFString::new("AXRole"),
+            CFString::new("AXSubrole"),
+            CFString::new("AXTitle"),
+            CFString::new("AXDescription"),
+            CFString::new("AXHelp"),
+            CFString::new("AXValue"),
+            CFString::new("AXEnabled"),
+            CFString::new("AXFocused"),
+            CFString::new("AXSelected"),
+            CFString::new("AXHidden"),
+            CFString::new("AXExpanded"),
+            CFString::new("AXModal"),
+            CFString::new("AXPosition"),
+            CFString::new("AXSize"),
+            CFString::new("AXIdentifier"),
+        ];
+        let ptrs: Vec<CFTypeRef> = attr_names
+            .iter()
+            .map(|s| s.as_concrete_TypeRef() as CFTypeRef)
+            .collect();
+
+        let cf_attrs = unsafe {
+            CFArrayCreate(
+                std::ptr::null(),
+                ptrs.as_ptr(),
+                ptrs.len() as CFIndex,
+                &kCFTypeArrayCallBacks,
+            )
+        };
+        if cf_attrs.is_null() {
+            return None;
+        }
+
+        let mut values: CFArrayRef = std::ptr::null();
+        let err = unsafe { safe_ax_copy_multiple_attribute_values(element, cf_attrs, &mut values) };
+        unsafe { CFRelease(cf_attrs) };
+
+        if err != AX_ERROR_SUCCESS || values.is_null() {
+            return None;
+        }
+
+        let count = unsafe { CFArrayGetCount(values) } as usize;
+        let mut vals = [std::ptr::null(); attr_idx::COUNT];
+        for (i, slot) in vals.iter_mut().enumerate().take(count.min(attr_idx::COUNT)) {
+            let v = unsafe { CFArrayGetValueAtIndex(values, i as CFIndex) };
+            *slot = v;
+        }
+
+        Some(BatchAttrs {
+            _values_array: values,
+            vals,
+        })
+    }
+
+    /// Read a value as a String (CFString).
+    fn string(&self, idx: usize) -> Option<String> {
+        let v = self.vals[idx];
+        if v.is_null() {
+            return None;
+        }
+        unsafe {
+            if CFGetTypeID(v) == CFStringGetTypeID() {
+                let s = CFString::wrap_under_get_rule(v as *const _);
+                Some(s.to_string())
+            } else {
+                None
+            }
+        }
+    }
+
+    /// Read a value as a bool (CFBoolean).
+    fn boolean(&self, idx: usize) -> Option<bool> {
+        let v = self.vals[idx];
+        if v.is_null() {
+            return None;
+        }
+        unsafe {
+            if CFGetTypeID(v) == CFBooleanGetTypeID() {
+                Some(CFBooleanGetValue(v))
+            } else {
+                None
+            }
+        }
+    }
+
+    /// Read AXValue as a string (handles CFString and CFNumber).
+    fn value_string(&self) -> Option<String> {
+        let v = self.vals[attr_idx::VALUE];
+        if v.is_null() {
+            return None;
+        }
+        unsafe {
+            let tid = CFGetTypeID(v);
+            if tid == CFStringGetTypeID() {
+                let s = CFString::wrap_under_get_rule(v as *const _);
+                return Some(s.to_string());
+            }
+            if tid == CFNumberGetTypeID() {
+                let mut f: f64 = 0.0;
+                if CFNumberGetValue(v, CF_NUMBER_FLOAT64, &mut f as *mut _ as *mut c_void) {
+                    return Some(f.to_string());
+                }
+            }
+            None
+        }
+    }
+
+    /// Read AXValue as an f64 number.
+    fn value_number(&self) -> Option<f64> {
+        let v = self.vals[attr_idx::VALUE];
+        if v.is_null() {
+            return None;
+        }
+        unsafe {
+            if CFGetTypeID(v) == CFNumberGetTypeID() {
+                let mut f: f64 = 0.0;
+                if CFNumberGetValue(v, CF_NUMBER_FLOAT64, &mut f as *mut _ as *mut c_void) {
+                    return Some(f);
+                }
+            }
+            if CFGetTypeID(v) == CFStringGetTypeID() {
+                let s = CFString::wrap_under_get_rule(v as *const _);
+                return s.to_string().trim().parse::<f64>().ok();
+            }
+            None
+        }
+    }
+
+    /// Read AXValue as an i32 integer.
+    fn value_int(&self) -> Option<i32> {
+        let v = self.vals[attr_idx::VALUE];
+        if v.is_null() {
+            return None;
+        }
+        unsafe {
+            if CFGetTypeID(v) == CFNumberGetTypeID() {
+                let mut i: i32 = 0;
+                if CFNumberGetValue(v, CF_NUMBER_SINT32, &mut i as *mut _ as *mut c_void) {
+                    return Some(i);
+                }
+            }
+            None
+        }
+    }
+
+    /// Read AXPosition as (x, y).
+    fn position(&self) -> Option<(f64, f64)> {
+        let v = self.vals[attr_idx::POSITION];
+        if v.is_null() {
+            return None;
+        }
+        let mut point = CGPoint::default();
+        let ok = unsafe {
+            safe_ax_value_get_value(v, AX_VALUE_CGPOINT, &mut point as *mut _ as *mut c_void)
+        };
+        if ok {
+            Some((point.x, point.y))
+        } else {
+            None
+        }
+    }
+
+    /// Read AXSize as (width, height).
+    fn size(&self) -> Option<(f64, f64)> {
+        let v = self.vals[attr_idx::SIZE];
+        if v.is_null() {
+            return None;
+        }
+        let mut size = CGSize::default();
+        let ok = unsafe {
+            safe_ax_value_get_value(v, AX_VALUE_CGSIZE, &mut size as *mut _ as *mut c_void)
+        };
+        if ok {
+            Some((size.width, size.height))
+        } else {
+            None
+        }
+    }
+}
+
+impl Drop for BatchAttrs {
+    fn drop(&mut self) {
+        if !self._values_array.is_null() {
+            unsafe { CFRelease(self._values_array) };
+        }
+    }
+}
+
 // ── Safe FFI Wrappers ────────────────────────────────────────────────────────
 
 fn do_perform_action(element: AXUIElementRef, action: &CFString) -> i32 {
@@ -578,6 +817,118 @@ fn parse_states(element: AXUIElementRef, role: Role) -> StateSet {
     }
 }
 
+// ── Lightweight selector matching (no ElementData) ───────────────────────────
+
+use xa11y_core::selector::{AttrName, Combinator, MatchOp, SimpleSelector};
+use xa11y_core::Selector;
+
+/// Test whether a raw AXElement matches a SimpleSelector, fetching only the
+/// attributes the selector actually inspects. This avoids building a full
+/// ElementData (15-20 AX API calls) for elements that will be discarded.
+#[cfg(test)]
+fn matches_ax(ax: AXUIElementRef, simple: &SimpleSelector) -> bool {
+    matches_ax_with_role(ax, simple, None)
+}
+
+/// Like `matches_ax` but accepts a pre-resolved role to avoid redundant
+/// AX API calls when the caller already fetched the role.
+fn matches_ax_with_role(
+    ax: AXUIElementRef,
+    simple: &SimpleSelector,
+    precomputed_role: Option<Role>,
+) -> bool {
+    // Resolve role only if the selector cares about it and it wasn't pre-computed.
+    let needs_role =
+        simple.role.is_some() || simple.filters.iter().any(|f| f.attr == AttrName::Role);
+
+    let role = if needs_role {
+        match precomputed_role {
+            Some(r) => Some(r),
+            None => {
+                let role_str = match ax_string(ax, "AXRole") {
+                    Some(s) => s,
+                    None => return false,
+                };
+                let subrole_str = ax_string(ax, "AXSubrole");
+                Some(map_ax_role(&role_str, subrole_str.as_deref()))
+            }
+        }
+    } else {
+        precomputed_role
+    };
+
+    if let Some(expected) = simple.role {
+        if role != Some(expected) {
+            return false;
+        }
+    }
+
+    for filter in &simple.filters {
+        let attr_value: Option<String> = match filter.attr {
+            AttrName::Role => role.map(|r| r.to_snake_case().to_string()),
+            AttrName::Name => {
+                // Mirror build_element_data name logic.
+                let ax_title = ax_string(ax, "AXTitle");
+                ax_title.or_else(|| {
+                    if role == Some(Role::StaticText) {
+                        ax_value_string(ax)
+                    } else {
+                        ax_string(ax, "AXDescription")
+                    }
+                })
+            }
+            AttrName::Value => ax_value_string(ax),
+            AttrName::Description => {
+                // Mirror build_element_data description logic.
+                let ax_title = ax_string(ax, "AXTitle");
+                let ax_description = ax_string(ax, "AXDescription");
+                let name = ax_title.or_else(|| {
+                    if role == Some(Role::StaticText) {
+                        ax_value_string(ax)
+                    } else {
+                        ax_description.clone()
+                    }
+                });
+                ax_string(ax, "AXHelp").or_else(|| {
+                    if name.as_ref() != ax_description.as_ref() {
+                        ax_description
+                    } else {
+                        None
+                    }
+                })
+            }
+        };
+
+        let matches = match &filter.op {
+            MatchOp::Exact => attr_value.as_deref() == Some(filter.value.as_str()),
+            MatchOp::Contains => {
+                let fl = filter.value.to_lowercase();
+                attr_value
+                    .as_deref()
+                    .is_some_and(|v| v.to_lowercase().contains(&fl))
+            }
+            MatchOp::StartsWith => {
+                let fl = filter.value.to_lowercase();
+                attr_value
+                    .as_deref()
+                    .is_some_and(|v| v.to_lowercase().starts_with(&fl))
+            }
+            MatchOp::EndsWith => {
+                let fl = filter.value.to_lowercase();
+                attr_value
+                    .as_deref()
+                    .is_some_and(|v| v.to_lowercase().ends_with(&fl))
+            }
+        };
+
+        if !matches {
+            return false;
+        }
+    }
+
+    true
+}
+
 // ── MacOS Provider ────────────────────────────────────────────────────────────
 
 /// Global handle counter for mapping ElementData back to AXElements.
@@ -730,6 +1081,187 @@ impl MacOSProvider {
 
     /// Build an ElementData from an AXElement, caching the AX handle.
     fn build_element_data(&self, ax: &AXElement, pid: Option<u32>) -> ElementData {
+        // Try batch fetch first (1 IPC call for 15 attributes).
+        // Fall back to individual calls if the batch API fails.
+        if let Some(batch) = BatchAttrs::fetch(ax.as_ptr()) {
+            return self.build_element_data_from_batch(ax, pid, &batch);
+        }
+        self.build_element_data_individual(ax, pid)
+    }
+
+    /// Build ElementData from a pre-fetched BatchAttrs (1 IPC call path).
+    /// Actions and min/max values still require separate calls.
+    fn build_element_data_from_batch(
+        &self,
+        ax: &AXElement,
+        pid: Option<u32>,
+        batch: &BatchAttrs,
+    ) -> ElementData {
+        let role_str = batch.string(attr_idx::ROLE).unwrap_or_default();
+        let subrole_str = batch.string(attr_idx::SUBROLE);
+        let role = map_ax_role(&role_str, subrole_str.as_deref());
+
+        let ax_title = batch.string(attr_idx::TITLE);
+        let ax_description = batch.string(attr_idx::DESCRIPTION);
+
+        // Name: prefer AXTitle, fall back to AXDescription only if no title
+        let name = ax_title.or_else(|| {
+            if role == Role::StaticText {
+                batch.value_string()
+            } else {
+                ax_description.clone()
+            }
+        });
+
+        // Description: AXHelp first, then AXDescription (if not already used as name)
+        let ax_help = batch.string(attr_idx::HELP);
+        let description = ax_help.or_else(|| {
+            if name.as_ref() != ax_description.as_ref() {
+                ax_description
+            } else {
+                None
+            }
+        });
+
+        let value = match role {
+            Role::CheckBox | Role::RadioButton => None,
+            _ => batch.value_string(),
+        };
+
+        // Parse states from batch values (no extra IPC).
+        let enabled = batch.boolean(attr_idx::ENABLED).unwrap_or(true);
+        let focused = batch.boolean(attr_idx::FOCUSED).unwrap_or(false);
+        let selected = batch.boolean(attr_idx::SELECTED).unwrap_or(false);
+        let hidden = batch.boolean(attr_idx::HIDDEN).unwrap_or(false);
+        let expanded = batch.boolean(attr_idx::EXPANDED);
+        let modal = batch.boolean(attr_idx::MODAL).unwrap_or(false);
+
+        let checked = match role {
+            Role::CheckBox | Role::RadioButton => {
+                if let Some(i) = batch.value_int() {
+                    match i {
+                        0 => Some(Toggled::Off),
+                        1 => Some(Toggled::On),
+                        2 => Some(Toggled::Mixed),
+                        _ => Some(Toggled::Off),
+                    }
+                } else {
+                    // Try boolean interpretation of AXValue
+                    let v = batch.vals[attr_idx::VALUE];
+                    if !v.is_null() && unsafe { CFGetTypeID(v) == CFBooleanGetTypeID() } {
+                        let b = unsafe { CFBooleanGetValue(v) };
+                        Some(if b { Toggled::On } else { Toggled::Off })
+                    } else if let Some(f) = batch.value_number() {
+                        Some(if f > 0.5 { Toggled::On } else { Toggled::Off })
+                    } else {
+                        Some(Toggled::Off)
+                    }
+                }
+            }
+            _ => None,
+        };
+
+        let editable = matches!(role, Role::TextField | Role::TextArea);
+        let focusable = matches!(
+            role,
+            Role::Button
+                | Role::TextField
+                | Role::TextArea
+                | Role::CheckBox
+                | Role::RadioButton
+                | Role::ComboBox
+                | Role::Slider
+                | Role::Link
+                | Role::Tab
+                | Role::MenuItem
+                | Role::ListItem
+                | Role::TreeItem
+                | Role::SpinButton
+                | Role::Switch
+        ) || batch.boolean(attr_idx::FOCUSED).is_some();
+
+        let states = StateSet {
+            enabled,
+            visible: !hidden,
+            focused,
+            focusable,
+            modal,
+            checked,
+            selected,
+            expanded,
+            editable,
+            required: false,
+            busy: false,
+        };
+
+        let bounds = match (batch.position(), batch.size()) {
+            (Some((x, y)), Some((w, h))) if w > 0.0 || h > 0.0 => Some(Rect {
+                x: x as i32,
+                y: y as i32,
+                width: w.max(0.0) as u32,
+                height: h.max(0.0) as u32,
+            }),
+            _ => None,
+        };
+
+        // Actions still require a separate IPC call (different API).
+        let ax_actions = ax_action_names(ax.as_ptr());
+        let mut actions: Vec<Action> = ax_actions.iter().filter_map(|a| map_ax_action(a)).collect();
+
+        if batch.boolean(attr_idx::FOCUSED).is_some() && !actions.contains(&Action::Focus) {
+            actions.push(Action::Focus);
+        }
+
+        if matches!(role, Role::TextField | Role::TextArea | Role::Slider)
+            && !actions.contains(&Action::SetValue)
+        {
+            actions.push(Action::SetValue);
+        }
+
+        let ax_identifier = batch.string(attr_idx::IDENTIFIER);
+
+        let raw = RawPlatformData::MacOS {
+            ax_role: role_str,
+            ax_subrole: subrole_str,
+            ax_identifier: ax_identifier.clone(),
+        };
+
+        let numeric_value = match role {
+            Role::Slider | Role::ProgressBar | Role::SpinButton => batch.value_number(),
+            _ => None,
+        };
+
+        // Min/max still require individual calls (not in the batch set).
+        let (min_value, max_value) = match role {
+            Role::Slider => (
+                ax_number_f64(ax.as_ptr(), "AXMinValue"),
+                ax_number_f64(ax.as_ptr(), "AXMaxValue"),
+            ),
+            _ => (None, None),
+        };
+
+        let handle = self.cache_element(ax.clone());
+
+        ElementData {
+            role,
+            name,
+            value,
+            description,
+            bounds,
+            actions,
+            states,
+            stable_id: ax_identifier,
+            numeric_value,
+            min_value,
+            max_value,
+            raw,
+            pid,
+            handle,
+        }
+    }
+
+    /// Fallback: build ElementData with individual AX API calls.
+    fn build_element_data_individual(&self, ax: &AXElement, pid: Option<u32>) -> ElementData {
         let role_str = ax_string(ax.as_ptr(), "AXRole").unwrap_or_default();
         let subrole_str = ax_string(ax.as_ptr(), "AXSubrole");
         let role = map_ax_role(&role_str, subrole_str.as_deref());
@@ -737,7 +1269,6 @@ impl MacOSProvider {
         let ax_title = ax_string(ax.as_ptr(), "AXTitle");
         let ax_description = ax_string(ax.as_ptr(), "AXDescription");
 
-        // Name: prefer AXTitle, fall back to AXDescription only if no title
         let name = ax_title.or_else(|| {
             if role == Role::StaticText {
                 ax_string(ax.as_ptr(), "AXValue")
@@ -746,9 +1277,7 @@ impl MacOSProvider {
             }
         });
 
-        // Description: AXHelp first, then AXDescription (if not already used as name)
         let description = ax_string(ax.as_ptr(), "AXHelp").or_else(|| {
-            // Only use AXDescription for description if name didn't consume it
             if name.as_ref() != ax_description.as_ref() {
                 ax_description
             } else {
@@ -863,6 +1392,103 @@ impl MacOSProvider {
 
         false
     }
+
+    /// Parallel DFS collecting AXElements matching a SimpleSelector without
+    /// building full ElementData. At each level, children are processed in
+    /// parallel using rayon — each child's role check and recursive subtree
+    /// search happen concurrently across threads.
+    #[allow(clippy::too_many_arguments)] // recursive DFS with parent context
+    fn collect_matching_ax(
+        &self,
+        parent: &AXElement,
+        parent_role: Role,
+        parent_name: Option<&str>,
+        simple: &SimpleSelector,
+        depth: u32,
+        max_depth: u32,
+        limit: Option<usize>,
+    ) -> Vec<AXElement> {
+        if depth > max_depth {
+            return vec![];
+        }
+
+        let children = ax_children(parent.as_ptr());
+
+        // Process children in parallel: check match + recurse.
+        let per_child_results: Vec<Vec<AXElement>> = children
+            .par_iter()
+            .map(|child| {
+                let mut child_results = Vec::new();
+
+                // Fetch role+subrole once — used for filter, match, and recursion.
+                let role_str = ax_string(child.as_ptr(), "AXRole").unwrap_or_default();
+                let subrole_str = ax_string(child.as_ptr(), "AXSubrole");
+
+                // Inline should_filter_child using pre-fetched role/subrole.
+                if parent_role == Role::Application && role_str == "AXMenuBar" {
+                    return child_results;
+                }
+                if parent_role == Role::Window {
+                    if let Some(ref sr) = subrole_str {
+                        if matches!(
+                            sr.as_str(),
+                            "AXCloseButton"
+                                | "AXMinimizeButton"
+                                | "AXFullScreenButton"
+                                | "AXZoomButton"
+                        ) {
+                            return child_results;
+                        }
+                    }
+                    if role_str == "AXStaticText" {
+                        let sr = subrole_str.as_deref().unwrap_or("");
+                        if sr.is_empty() || sr == "AXUnknown" {
+                            if let Some(v) = ax_string(child.as_ptr(), "AXValue") {
+                                if parent_name == Some(v.as_str()) {
+                                    return child_results;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                let child_role = map_ax_role(&role_str, subrole_str.as_deref());
+
+                if matches_ax_with_role(child.as_ptr(), simple, Some(child_role)) {
+                    child_results.push(child.clone());
+                }
+
+                // Recurse into subtree.
+                let child_name = ax_string(child.as_ptr(), "AXTitle");
+                let sub = self.collect_matching_ax(
+                    child,
+                    child_role,
+                    child_name.as_deref(),
+                    simple,
+                    depth + 1,
+                    max_depth,
+                    limit,
+                );
+                child_results.extend(sub);
+
+                child_results
+            })
+            .collect();
+
+        // Merge results, respecting limit.
+        let mut results = Vec::new();
+        for batch in per_child_results {
+            for elem in batch {
+                results.push(elem);
+                if let Some(limit) = limit {
+                    if results.len() >= limit {
+                        return results;
+                    }
+                }
+            }
+        }
+        results
+    }
 }
 
 impl Provider for MacOSProvider {
@@ -892,17 +1518,272 @@ impl Provider for MacOSProvider {
 
                 let ax_children_list = ax_children(ax.as_ptr());
 
-                let mut results = Vec::new();
-                for child in &ax_children_list {
-                    if Self::should_filter_child(role, name, child) {
-                        continue;
-                    }
-                    let data = self.build_element_data(child, element_data.pid);
-                    results.push(data);
-                }
+                // Filter first (cheap string checks), then build ElementData
+                // in parallel (each build_element_data is an IPC round-trip).
+                let filtered: Vec<&AXElement> = ax_children_list
+                    .iter()
+                    .filter(|child| !Self::should_filter_child(role, name, child))
+                    .collect();
+
+                let results: Vec<ElementData> = filtered
+                    .par_iter()
+                    .map(|child| self.build_element_data(child, element_data.pid))
+                    .collect();
+
                 Ok(results)
             }
         }
+    }
+
+    fn find_elements(
+        &self,
+        root: Option<&ElementData>,
+        selector: &Selector,
+        limit: Option<usize>,
+        max_depth: Option<u32>,
+    ) -> Result<Vec<ElementData>> {
+        if selector.segments.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let max_depth_val = max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH);
+
+        // Phase 1: lightweight AXElement-based search for first segment.
+        // Only the attributes the selector needs are fetched per candidate.
+        let first = &selector.segments[0].simple;
+
+        let phase1_limit = if selector.segments.len() == 1 {
+            limit
+        } else {
+            None
+        };
+        let phase1_limit = match (phase1_limit, first.nth) {
+            (Some(l), Some(n)) => Some(l.max(n)),
+            (_, Some(n)) => Some(n),
+            (l, None) => l,
+        };
+
+        let root_data = match root {
+            Some(el) => el,
+            None => {
+                // Searching from system root for applications. Use
+                // CGWindowList (no AX calls) to filter apps by name, then
+                // only build full ElementData for matches.
+                if first.role == Some(Role::Application) {
+                    let apps = Self::list_gui_apps();
+                    let mut matching: Vec<ElementData> = Vec::new();
+                    for (pid, app_name) in &apps {
+                        // Check name filters against CGWindowList name
+                        let name_matches = first.filters.iter().all(|f| {
+                            if f.attr != AttrName::Name {
+                                return true; // non-name filters checked after build
+                            }
+                            let val = Some(app_name.as_str());
+                            match &f.op {
+                                MatchOp::Exact => val == Some(f.value.as_str()),
+                                MatchOp::Contains => {
+                                    let fl = f.value.to_lowercase();
+                                    val.is_some_and(|v| v.to_lowercase().contains(&fl))
+                                }
+                                MatchOp::StartsWith => {
+                                    let fl = f.value.to_lowercase();
+                                    val.is_some_and(|v| v.to_lowercase().starts_with(&fl))
+                                }
+                                MatchOp::EndsWith => {
+                                    let fl = f.value.to_lowercase();
+                                    val.is_some_and(|v| v.to_lowercase().ends_with(&fl))
+                                }
+                            }
+                        });
+                        if !name_matches {
+                            continue;
+                        }
+
+                        let app_element =
+                            AXElement::from_owned(unsafe { safe_ax_create_application(*pid) });
+                        if app_element.is_null() {
+                            continue;
+                        }
+                        let mut data = self.build_element_data(&app_element, Some(*pid as u32));
+                        data.name = Some(app_name.clone());
+                        matching.push(data);
+
+                        if let Some(limit) = phase1_limit {
+                            if matching.len() >= limit {
+                                break;
+                            }
+                        }
+                    }
+
+                    // Apply :nth
+                    if let Some(nth) = first.nth {
+                        if nth <= matching.len() {
+                            matching = vec![matching.remove(nth - 1)];
+                        } else {
+                            matching.clear();
+                        }
+                    }
+
+                    if selector.segments.len() == 1 {
+                        if let Some(limit) = limit {
+                            matching.truncate(limit);
+                        }
+                        return Ok(matching);
+                    }
+
+                    // Multi-segment: continue narrowing from matched apps
+                    let mut candidates = matching;
+                    for segment in &selector.segments[1..] {
+                        let mut next_candidates = Vec::new();
+                        for candidate in &candidates {
+                            match segment.combinator {
+                                Combinator::Child => {
+                                    let children = self.get_children(Some(candidate))?;
+                                    for child in children {
+                                        if xa11y_core::selector::matches_simple(
+                                            &child,
+                                            &segment.simple,
+                                        ) {
+                                            next_candidates.push(child);
+                                        }
+                                    }
+                                }
+                                Combinator::Descendant => {
+                                    let sub_selector = Selector {
+                                        segments: vec![xa11y_core::selector::SelectorSegment {
+                                            combinator: Combinator::Root,
+                                            simple: segment.simple.clone(),
+                                        }],
+                                    };
+                                    let mut sub_results = self.find_elements(
+                                        Some(candidate),
+                                        &sub_selector,
+                                        None,
+                                        Some(max_depth_val),
+                                    )?;
+                                    next_candidates.append(&mut sub_results);
+                                }
+                                Combinator::Root => unreachable!(),
+                            }
+                        }
+                        let mut seen = HashSet::new();
+                        next_candidates.retain(|e| seen.insert(e.handle));
+                        candidates = next_candidates;
+                    }
+
+                    if let Some(nth) = selector.segments.last().and_then(|s| s.simple.nth) {
+                        if nth <= candidates.len() {
+                            candidates = vec![candidates.remove(nth - 1)];
+                        } else {
+                            candidates.clear();
+                        }
+                    }
+                    if let Some(limit) = limit {
+                        candidates.truncate(limit);
+                    }
+                    return Ok(candidates);
+                }
+
+                // Non-application root search — fall back to default impl.
+                return xa11y_core::selector::find_elements_in_tree(
+                    |el| self.get_children(el),
+                    root,
+                    selector,
+                    limit,
+                    max_depth,
+                );
+            }
+        };
+
+        let root_ax = self.get_cached(root_data.handle)?;
+
+        let mut matching_ax = self.collect_matching_ax(
+            &root_ax,
+            root_data.role,
+            root_data.name.as_deref(),
+            first,
+            0,
+            max_depth_val,
+            phase1_limit,
+        );
+
+        // Single-segment: build ElementData only for matches, apply nth/limit
+        if selector.segments.len() == 1 {
+            if let Some(nth) = first.nth {
+                if nth <= matching_ax.len() {
+                    let ax = &matching_ax[nth - 1];
+                    return Ok(vec![self.build_element_data(ax, root_data.pid)]);
+                } else {
+                    return Ok(vec![]);
+                }
+            }
+
+            if let Some(limit) = limit {
+                matching_ax.truncate(limit);
+            }
+
+            return Ok(matching_ax
+                .iter()
+                .map(|ax| self.build_element_data(ax, root_data.pid))
+                .collect());
+        }
+
+        // Multi-segment: build ElementData for phase 1 matches, then narrow
+        // using standard matching on the (small) candidate set.
+        let mut candidates: Vec<ElementData> = matching_ax
+            .iter()
+            .map(|ax| self.build_element_data(ax, root_data.pid))
+            .collect();
+
+        for segment in &selector.segments[1..] {
+            let mut next_candidates = Vec::new();
+            for candidate in &candidates {
+                match segment.combinator {
+                    Combinator::Child => {
+                        let children = self.get_children(Some(candidate))?;
+                        for child in children {
+                            if xa11y_core::selector::matches_simple(&child, &segment.simple) {
+                                next_candidates.push(child);
+                            }
+                        }
+                    }
+                    Combinator::Descendant => {
+                        let sub_selector = Selector {
+                            segments: vec![xa11y_core::selector::SelectorSegment {
+                                combinator: Combinator::Root,
+                                simple: segment.simple.clone(),
+                            }],
+                        };
+                        let mut sub_results = self.find_elements(
+                            Some(candidate),
+                            &sub_selector,
+                            None,
+                            Some(max_depth_val),
+                        )?;
+                        next_candidates.append(&mut sub_results);
+                    }
+                    Combinator::Root => unreachable!(),
+                }
+            }
+            let mut seen = HashSet::new();
+            next_candidates.retain(|e| seen.insert(e.handle));
+            candidates = next_candidates;
+        }
+
+        // Apply :nth on last segment
+        if let Some(nth) = selector.segments.last().and_then(|s| s.simple.nth) {
+            if nth <= candidates.len() {
+                candidates = vec![candidates.remove(nth - 1)];
+            } else {
+                candidates.clear();
+            }
+        }
+
+        if let Some(limit) = limit {
+            candidates.truncate(limit);
+        }
+
+        Ok(candidates)
     }
 
     fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
@@ -1505,5 +2386,84 @@ mod tests {
     fn provider_new_succeeds() {
         let provider = MacOSProvider::new();
         assert!(provider.is_ok());
+    }
+
+    #[test]
+    fn batch_attrs_returns_none_for_null_element() {
+        let result = BatchAttrs::fetch(std::ptr::null());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn batch_attrs_string_returns_none_for_empty() {
+        // Construct a BatchAttrs with all-null values to test accessors.
+        let batch = BatchAttrs {
+            _values_array: std::ptr::null(),
+            vals: [std::ptr::null(); attr_idx::COUNT],
+        };
+        assert!(batch.string(attr_idx::ROLE).is_none());
+        assert!(batch.string(attr_idx::TITLE).is_none());
+        assert!(batch.boolean(attr_idx::ENABLED).is_none());
+        assert!(batch.value_string().is_none());
+        assert!(batch.value_number().is_none());
+        assert!(batch.value_int().is_none());
+        assert!(batch.position().is_none());
+        assert!(batch.size().is_none());
+        // Don't drop — _values_array is null so Drop is a no-op.
+    }
+
+    #[test]
+    fn matches_ax_returns_false_for_null_element() {
+        use xa11y_core::selector::SimpleSelector;
+        // Role-only selector should not match a null element
+        let simple = SimpleSelector {
+            role: Some(Role::Button),
+            filters: vec![],
+            nth: None,
+        };
+        assert!(!matches_ax(std::ptr::null(), &simple));
+    }
+
+    #[test]
+    fn matches_ax_matches_role_only() {
+        use xa11y_core::selector::SimpleSelector;
+        // No role constraint — should match anything (even null, since no
+        // attribute to check). But null has no role, so no-role selector matches.
+        let simple = SimpleSelector {
+            role: None,
+            filters: vec![],
+            nth: None,
+        };
+        // A null element can't report a role, but the selector has no role
+        // constraint, so it should match.
+        assert!(matches_ax(std::ptr::null(), &simple));
+    }
+
+    #[test]
+    fn matches_ax_rejects_wrong_role() {
+        use xa11y_core::selector::SimpleSelector;
+        let simple = SimpleSelector {
+            role: Some(Role::CheckBox),
+            filters: vec![],
+            nth: None,
+        };
+        // Null element has no role — should not match CheckBox
+        assert!(!matches_ax(std::ptr::null(), &simple));
+    }
+
+    #[test]
+    fn matches_ax_with_name_filter_rejects_null() {
+        use xa11y_core::selector::{AttrFilter, AttrName, MatchOp, SimpleSelector};
+        let simple = SimpleSelector {
+            role: None,
+            filters: vec![AttrFilter {
+                attr: AttrName::Name,
+                op: MatchOp::Exact,
+                value: "Submit".to_string(),
+            }],
+            nth: None,
+        };
+        // Null element has no name — filter should fail
+        assert!(!matches_ax(std::ptr::null(), &simple));
     }
 }

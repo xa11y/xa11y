@@ -163,6 +163,15 @@ def test_textfield_properties(tauri_app: xa11y.Element) -> None:
     assert tf.value == "hello world"
 
 
+@pytest.mark.skip(
+    reason=(
+        "WebKit2GTK exposes HTML <input type='text'> as AT-SPI2 role 78 (Embedded). "
+        "This role does not expose a functional EditableText interface — neither "
+        "SetTextContents nor InsertText succeeds. Setting text in WebKit-embedded "
+        "text fields requires keyboard simulation, which xa11y does not support "
+        "(design tenet: only use accessibility APIs, not input simulation)."
+    )
+)
 def test_textfield_set_value(tauri_app: xa11y.Element) -> None:
     tf_loc = tauri_app.locator('text_field[name="Search"]')
     tf_loc.set_value("new value")

@@ -1158,6 +1158,11 @@ impl Provider for LinuxProvider {
                             "org.a11y.atspi.EditableText",
                         )
                         .map_err(|_| Error::TextValueNotSupported)?;
+                    // Try SetTextContents first (WebKit2GTK exposes this but not InsertText).
+                    if proxy.call_method("SetTextContents", &(&*text)).is_ok() {
+                        return Ok(());
+                    }
+                    // Fall back to delete-then-insert for other AT-SPI2 implementations.
                     let _ = proxy.call_method("DeleteText", &(0i32, i32::MAX));
                     proxy
                         .call_method("InsertText", &(0i32, &*text, text.len() as i32))
@@ -1524,11 +1529,15 @@ fn map_atspi_role(role_name: &str) -> Role {
         "check box" | "check menu item" => Role::CheckBox,
         "radio button" | "radio menu item" => Role::RadioButton,
         "entry" | "password text" => Role::TextField,
-        "spin button" => Role::SpinButton,
-        "text" => Role::TextArea,
+        "spin button" | "spinbutton" => Role::SpinButton,
+        // "textbox" is the ARIA role name returned by WebKit2GTK for both
+        // <input type="text"> and <textarea>.  Map to TextArea here so the
+        // multi-line refinement below can downgrade single-line ones to TextField.
+        "text" | "textbox" => Role::TextArea,
         "label" | "static" | "caption" => Role::StaticText,
-        "combo box" => Role::ComboBox,
-        "list" | "list box" => Role::List,
+        "combo box" | "combobox" => Role::ComboBox,
+        // "listbox" is the ARIA role name returned by WebKit2GTK for role="listbox".
+        "list" | "list box" | "listbox" => Role::List,
         "list item" => Role::ListItem,
         "menu" => Role::Menu,
         "menu item" | "tearoff menu item" => Role::MenuItem,
@@ -1604,6 +1613,8 @@ fn map_atspi_role_number(role: u32) -> Role {
         68 => Role::Group,       // Viewport
         69 => Role::Window,      // Window
         75 => Role::Application, // Application
+        78 => Role::TextArea, // Embedded — WebKit2GTK uses this for <input type="text"> and <textarea>;
+        // multi-line refinement below downgrades single-line ones to TextField
         79 => Role::TextField,   // Entry
         82 => Role::WebArea,     // DocumentFrame
         83 => Role::Heading,     // Heading
@@ -1614,9 +1625,9 @@ fn map_atspi_role_number(role: u32) -> Role {
         90 => Role::TableRow,    // TableRow
         91 => Role::TreeItem,    // TreeItem
         95 => Role::WebArea,     // DocumentWeb
+        97 => Role::List,        // WebKit2GTK uses this for <ul role="listbox">
         98 => Role::List,        // ListBox
         93 => Role::Tooltip,     // Tooltip
-        97 => Role::Status,      // StatusBar
         101 => Role::Alert,      // Notification
         116 => Role::StaticText, // Static
         129 => Role::Button,     // PushButtonMenu
