@@ -11,7 +11,9 @@ import pytest
 from tests.helpers import launch_test_app
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-BINARY = str(PROJECT_ROOT / "target" / "debug" / "xa11y-tauri-test-app")
+# The Tauri app is not part of the Cargo workspace, so cargo builds it
+# into its own target directory rather than the workspace target dir.
+BINARY = str(PROJECT_ROOT / "test-apps" / "tauri" / "target" / "debug" / "xa11y-tauri-test-app")
 APP_NAMES = ["xa11y-tauri-test-app"]
 
 
