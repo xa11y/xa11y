@@ -39,9 +39,9 @@ class TestWindow(Gtk.ApplicationWindow):
         btn_group = self._make_group("Buttons")
         box.append(btn_group)
 
+        # Gtk.Button's label text is automatically its accessible name.
         self.ok_button = Gtk.Button(label="OK")
         self.ok_button.set_tooltip_text("Confirm the dialog")
-        self.ok_button.get_accessible().set_description("Confirm the dialog")
         self.cancel_button = Gtk.Button(label="Cancel")
         self.cancel_button.set_sensitive(False)
         self.ok_button.connect("clicked", self._on_ok_clicked)
@@ -52,6 +52,7 @@ class TestWindow(Gtk.ApplicationWindow):
         chk_group = self._make_group("Checkboxes")
         box.append(chk_group)
 
+        # Gtk.CheckButton's label text is automatically its accessible name.
         self.agree_check = Gtk.CheckButton(label="Agree to terms")
         self.subscribe_check = Gtk.CheckButton(label="Subscribe")
         self.subscribe_check.set_active(True)
@@ -77,7 +78,6 @@ class TestWindow(Gtk.ApplicationWindow):
         box.append(combo_group)
 
         self.combo = Gtk.ComboBoxText()
-        self.combo.set_accessible_description("Fruit selector")
         for fruit in ["Apple", "Banana", "Cherry", "Date", "Elderberry"]:
             self.combo.append_text(fruit)
         self.combo.set_active(0)
@@ -87,51 +87,50 @@ class TestWindow(Gtk.ApplicationWindow):
         range_group = self._make_group("Range Controls")
         box.append(range_group)
 
+        # Only one slider in the app — identified by role in tests.
         self.slider = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
         self.slider.set_value(50)
-        self.slider.set_accessible_description("Volume")
-        self.slider.get_accessible().set_name("Volume")
         range_group.append(self.slider)
 
+        # Only one spin_button in the app — identified by role + value in tests.
         spin_adj = Gtk.Adjustment(value=42, lower=0, upper=999, step_increment=1)
         self.spin = Gtk.SpinButton(adjustment=spin_adj)
-        self.spin.get_accessible().set_name("Quantity")
         range_group.append(self.spin)
 
+        # Only one progress_bar in the app — identified by role in tests.
         self.progress = Gtk.ProgressBar()
         self.progress.set_fraction(0.75)
-        self.progress.get_accessible().set_name("Progress")
         range_group.append(self.progress)
 
         # ── Text input ───────────────────────────────────────────────
         input_group = self._make_group("Input")
         box.append(input_group)
 
+        # Only one text_field in the app — identified by value "hello world".
         self.text_entry = Gtk.Entry()
         self.text_entry.set_text("hello world")
         self.text_entry.set_placeholder_text("Type here...")
-        self.text_entry.get_accessible().set_name("Search")
         input_group.append(self.text_entry)
 
         # ── Text area ────────────────────────────────────────────────
         text_group = self._make_group("Text")
         box.append(text_group)
 
-        label = Gtk.Label(label="Heading Text")
-        label.get_accessible().set_name("Heading Text")
-        text_group.append(label)
+        # Gtk.Label's accessible name comes from its text automatically.
+        heading = Gtk.Label(label="Heading Text")
+        text_group.append(heading)
 
+        # Only one text_area in the app — identified by role in tests.
         self.text_view = Gtk.TextView()
         self.text_view.get_buffer().set_text("Line 1\nLine 2\nLine 3")
-        self.text_view.get_accessible().set_name("Notes")
         text_group.append(self.text_view)
 
         # ── List ─────────────────────────────────────────────────────
         list_group = self._make_group("List")
         box.append(list_group)
 
+        # Only one list in the app — identified by role in tests.
         self.list_box = Gtk.ListBox()
-        self.list_box.get_accessible().set_name("Items")
         for i in range(1, 6):
             row = Gtk.ListBoxRow()
             row_label = Gtk.Label(label=f"Item {i}")
@@ -140,14 +139,12 @@ class TestWindow(Gtk.ApplicationWindow):
         list_group.append(self.list_box)
 
     def _make_group(self, name: str) -> Gtk.Box:
-        frame = Gtk.Frame(label=name)
         inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         inner.set_margin_top(8)
         inner.set_margin_bottom(8)
         inner.set_margin_start(8)
         inner.set_margin_end(8)
-        frame.set_child(inner)
-        return frame
+        return inner
 
     def _on_ok_clicked(self, _btn: Gtk.Button) -> None:
         self.cancel_button.set_sensitive(True)
