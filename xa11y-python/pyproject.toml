@@ -25,6 +25,9 @@ classifiers = [
     "Topic :: Software Development :: Testing",
 ]
 
+[project.scripts]
+xa11y = "xa11y._cli:main"
+
 [project.urls]
 Homepage = "https://github.com/xa11y/xa11y"
 Repository = "https://github.com/xa11y/xa11y"

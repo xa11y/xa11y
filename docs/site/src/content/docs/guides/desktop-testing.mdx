@@ -90,6 +90,26 @@ This test opens Calculator, performs `7 × 8`, and asserts the result is `56`.
   </TabItem>
 </Tabs>
 
+## Debugging with the CLI
+
+The `xa11y` CLI is helpful when writing and debugging tests. Use it to explore the accessibility tree of your app and find the right selectors before putting them in test code:
+
+```bash
+# See what's in the tree
+xa11y tree --app MyApp
+
+# Test a selector interactively
+xa11y find "button[name='Submit']" --app MyApp
+
+# Try an action manually
+xa11y action press "button[name='Submit']" --app MyApp
+
+# Watch events while interacting with the app
+xa11y events --app MyApp
+```
+
+See the [Overview](/guides/overview/#cli) for the full CLI reference.
+
 ## Tips
 
 - **Be specific with selectors.** `button[name='7']` is better than `button` — it won't break when the UI adds more buttons.
