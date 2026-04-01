@@ -149,14 +149,14 @@ class Step:
 
 STEPS = [
     Step("select",
-         "slack = xa11y.locator('application[name=\"Slack\"]')",
+         "slack = xa11y.App.by_name(\"Slack\")",
          target="n-window"),
     Step("action",
-         "slack.descendant('button[name=\"general\"]').press()",
+         "slack.locator('button[name=\"general\"]').press()",
          target="n-general", label="press"),
 
     Step("select",
-         "msg = slack.descendant('text_field[name=\"Message\"]')",
+         "msg = slack.locator('text_field[name=\"Message\"]')",
          target="n-msgfield"),
     Step("type_text",
          'msg.type_text("Looks good, shipping it!")',
@@ -164,13 +164,13 @@ STEPS = [
          value_text="Looks good, shipping it!"),
 
     Step("select",
-         "send = slack.descendant('button[name=\"Send\"]')",
+         "send = slack.locator('button[name=\"Send\"]')",
          target="n-send"),
     Step("assert_pass", "assert send.exists()", target="n-send",
          label="exists() \u2713"),
 
     Step("select",
-         "pr = slack.descendant('static_text[name*=\"PR\"]')",
+         "pr = slack.locator('static_text[name*=\"PR\"]')",
          target="n-pr"),
     Step("assert_fail", 'assert pr.element().value == "no"', target="n-pr",
          label='value \u2717'),

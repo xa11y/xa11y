@@ -64,9 +64,9 @@ This test opens Calculator, performs `7 × 8`, and asserts the result is `56`.
 
     @pytest.fixture
     def calculator():
-        """Launch Calculator and return a Locator for the app."""
+        """Launch Calculator and return an App handle."""
         proc = subprocess.Popen(["open", "-a", "Calculator"])
-        yield xa11y.locator('application[name="Calculator"]')
+        yield xa11y.App.by_name("Calculator")
         proc.terminate()
 
 
@@ -74,16 +74,16 @@ This test opens Calculator, performs `7 × 8`, and asserts the result is `56`.
         calc = calculator
 
         # Wait for the app to be ready
-        calc.descendant("window").wait_visible(timeout=5.0)
+        calc.locator("window").wait_visible(timeout=5.0)
 
         # Press 7 × 8 =
-        calc.descendant("button[name='7']").press()
-        calc.descendant("button[name='×']").press()
-        calc.descendant("button[name='8']").press()
-        calc.descendant("button[name='=']").press()
+        calc.locator("button[name='7']").press()
+        calc.locator("button[name='×']").press()
+        calc.locator("button[name='8']").press()
+        calc.locator("button[name='=']").press()
 
         # Wait for the result to update, then assert
-        result = calc.descendant("static_text[name='Result']")
+        result = calc.locator("static_text[name='Result']")
         result.wait_until(lambda element: element and element.value == "56", timeout=5.0)
         assert result.element().value == "56"
     ```

@@ -30,7 +30,7 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
 1. **Accessibility** — System Settings → Privacy & Security → Accessibility. Grant permission to your terminal (or IDE).
 2. **Screen & System Audio Recording** (macOS 26+) — System Settings → Privacy & Security → Screen & System Audio Recording. Grant permission to your terminal. Without this, the accessibility API only exposes menu bars — window content (buttons, text fields, etc.) is invisible.
 
-After changing permissions, restart your terminal for them to take effect. `App::by_name()` (Rust) or `xa11y.locator()` (Python) will return a `PermissionDenied` error with setup instructions if either permission is missing.
+After changing permissions, restart your terminal for them to take effect. `App::by_name()` (Rust) or `xa11y.App.by_name()` (Python) will return a `PermissionDenied` error with setup instructions if either permission is missing.
 
 **Linux** — Ensure AT-SPI2 is running (default on GNOME and most desktop environments). No special permissions needed.
 
@@ -87,37 +87,36 @@ After changing permissions, restart your terminal for them to take effect. `App:
     ```python
     import xa11y
 
-    # Connect to the Calculator app via locator
+    # Connect to the Calculator app
     # (raises PermissionDeniedError if accessibility is not enabled)
-    calc = xa11y.locator('application[name="Calculator"]')
+    calc = xa11y.App.by_name("Calculator")
 
     # Navigate the tree
-    app_element = calc.element()
-    for window in app_element.children():
+    for window in calc.children():
         print(f"{window.role}: {window.name}")
 
     # Find all buttons via locator
-    buttons = calc.descendant("button").elements()
+    buttons = calc.locator("button").elements()
     print(f"Found {len(buttons)} buttons")
 
     # Read properties from a specific element
-    btn = calc.descendant("button[name='=']").element()
+    btn = calc.locator("button[name='=']").element()
     print(f"role={btn.role} name={btn.name} bounds={btn.bounds}")
 
     # Locators re-resolve on every call,
     # so they always target the current UI state
-    calc.descendant("button[name='7']").press()
+    calc.locator("button[name='7']").press()
 
     # Type into a text field
-    calc.descendant("text_field[name='Input']").type_text("42")
+    calc.locator("text_field[name='Input']").type_text("42")
 
     # Wait for UI changes before continuing
-    result = calc.descendant("static_text[name='Result']")
+    result = calc.locator("static_text[name='Result']")
     result.wait_visible(timeout=5.0)
     print(f"Result: {result.element().value}")
 
     # List all running apps
-    for app in xa11y.locator("application").elements():
+    for app in xa11y.App.list():
         print(f"{app.name} (pid: {app.pid})")
     ```
   </TabItem>

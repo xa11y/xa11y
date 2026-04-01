@@ -10,6 +10,7 @@ Quick start:
 
 from xa11y._native import (
     ActionNotSupportedError,
+    App,
     Element,
     Event,
     EventType,
@@ -27,6 +28,7 @@ from xa11y._native import (
 
 __all__ = [
     "ActionNotSupportedError",
+    "App",
     "Element",
     "Event",
     "EventType",

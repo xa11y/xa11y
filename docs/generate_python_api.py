@@ -197,15 +197,12 @@ Quick start:
 ```python
 import xa11y
 
-# One-liner
-tree = xa11y.app("Safari")
+safari = xa11y.App.by_name("Safari")
 
-# With explicit provider (recommended)
-with xa11y.connect() as provider:
-    tree = provider.app("Safari")
-    for button in tree.query("button"):
-        print(button.name)
-    tree.press("button[name='OK']")
+for button in safari.locator("button").elements():
+    print(button.name)
+
+safari.locator("button[name='OK']").press()
 ```"""
 
 

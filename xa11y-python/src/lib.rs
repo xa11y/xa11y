@@ -738,6 +738,114 @@ impl Subscription {
     }
 }
 
+// ── App ─────────────────────────────────────────────────────────────────────
+
+/// A running application — the entry point for accessibility queries.
+///
+/// `App` is **not** an `Element`. It represents the application as a whole
+/// and provides a `locator()` to search its accessibility tree.
+#[pyclass(frozen)]
+struct App {
+    #[pyo3(get)]
+    name: String,
+    #[pyo3(get)]
+    pid: Option<u32>,
+    inner_data: xa11y::ElementData,
+    provider: Arc<dyn xa11y::Provider>,
+}
+
+#[pymethods]
+impl App {
+    /// Find an application by exact name.
+    #[staticmethod]
+    fn by_name(py: Python<'_>, name: &str) -> PyResult<Self> {
+        let provider = get_provider()?;
+        let app = py
+            .allow_threads(move || xa11y::App::by_name_with(provider, name))
+            .map_err(to_py_err)?;
+        Ok(Self::from_core(app))
+    }
+
+    /// Find an application by process ID.
+    #[staticmethod]
+    fn by_pid(py: Python<'_>, pid: u32) -> PyResult<Self> {
+        let provider = get_provider()?;
+        let app = py
+            .allow_threads(move || xa11y::App::by_pid_with(provider, pid))
+            .map_err(to_py_err)?;
+        Ok(Self::from_core(app))
+    }
+
+    /// List all running applications.
+    #[staticmethod]
+    fn list(py: Python<'_>) -> PyResult<Vec<Self>> {
+        let provider = get_provider()?;
+        let apps = py
+            .allow_threads(move || xa11y::App::list_with(provider))
+            .map_err(to_py_err)?;
+        Ok(apps.into_iter().map(Self::from_core).collect())
+    }
+
+    /// Create a Locator scoped to this application's accessibility tree.
+    fn locator(&self, selector: &str) -> Locator {
+        Locator {
+            inner: xa11y::Locator::new(
+                self.provider.clone(),
+                Some(self.inner_data.clone()),
+                selector,
+            ),
+        }
+    }
+
+    /// Subscribe to accessibility events from this application.
+    fn subscribe(&self, py: Python<'_>) -> PyResult<Subscription> {
+        let provider = self.provider.clone();
+        let data = self.inner_data.clone();
+        let sub = py
+            .allow_threads(move || provider.subscribe(&data))
+            .map_err(to_py_err)?;
+        Ok(Subscription {
+            inner: std::sync::Mutex::new(Some(sub)),
+            provider: self.provider.clone(),
+        })
+    }
+
+    /// Get direct children (typically windows) of this application.
+    fn children(&self, py: Python<'_>) -> PyResult<Vec<Py<Element>>> {
+        let provider = self.provider.clone();
+        let data = self.inner_data.clone();
+        let children = py
+            .allow_threads(move || provider.get_children(Some(&data)))
+            .map_err(to_py_err)?;
+        children
+            .iter()
+            .map(|c| make_py_element(py, c, self.provider.clone()))
+            .collect()
+    }
+
+    fn __repr__(&self) -> String {
+        match self.pid {
+            Some(pid) => format!("App(name='{}', pid={})", self.name, pid),
+            None => format!("App(name='{}')", self.name),
+        }
+    }
+
+    fn __str__(&self) -> String {
+        self.__repr__()
+    }
+}
+
+impl App {
+    fn from_core(app: xa11y::App) -> Self {
+        Self {
+            name: app.name.clone(),
+            pid: app.pid,
+            provider: app.provider().clone(),
+            inner_data: app.data.clone(),
+        }
+    }
+}
+
 // ── Module-level functions ──────────────────────────────────────────────────
 
 /// Create a top-level Locator.
@@ -754,6 +862,7 @@ fn locator_fn(selector: &str) -> PyResult<Locator> {
 
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<App>()?;
     m.add_class::<Element>()?;
     m.add_class::<Event>()?;
     m.add_class::<EventType>()?;

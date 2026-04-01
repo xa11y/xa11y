@@ -37,15 +37,16 @@ fn main() -> Result<()> {
 ```python
 import xa11y
 
+safari = xa11y.App.by_name("Safari")
+
 # Find elements with CSS-like selectors via locator
-app = xa11y.locator('application[name="Safari"]')
-for button in app.descendant("button").elements():
+for button in safari.locator("button").elements():
     print(button.name)
 
 # Interact with elements via locator (re-resolves every call)
-app.descendant("button[name='Submit']").press()
+safari.locator("button[name='Submit']").press()
 
-app.descendant("text_field[name^='Search']").set_value("hello world")
+safari.locator("text_field[name^='Search']").set_value("hello world")
 ```
 <!-- /python-only -->
 

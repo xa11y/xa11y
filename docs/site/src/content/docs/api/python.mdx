@@ -12,12 +12,12 @@ pip install xa11y
 ```python
 import xa11y
 
-safari = xa11y.locator('application[name="Safari"]')
+safari = xa11y.App.by_name("Safari")
 
-for button in safari.descendant("button").elements():
+for button in safari.locator("button").elements():
     print(button.name)
 
-safari.descendant("button[name='OK']").press()
+safari.locator("button[name='OK']").press()
 ```
 
 <a href="/api/python/reference/api/xa11y/" class="sl-flex" style="display:inline-flex;align-items:center;gap:0.5rem;padding:0.5rem 1rem;background:var(--sl-color-accent);color:var(--sl-color-black);border-radius:0.5rem;text-decoration:none;font-weight:600;">
