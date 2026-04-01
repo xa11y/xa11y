@@ -454,7 +454,7 @@ class SvgBuilder:
             for ci, ct in enumerate(char_times):
                 frac = ct / t_dur if t_dur > 0 else 1.0
                 frac = min(frac, 1.0)
-                w = text_w(code[:ci + 1]) + 2
+                w = text_w(code[:ci + 1]) + CHAR_W
                 key_times.append(f"{frac:.4f}")
                 values.append(f"{w:.1f}")
 
