@@ -79,11 +79,6 @@ def test_cancel_button_disabled(gtk_app: xa11y.Element) -> None:
 
 
 def test_button_press_enables_cancel(gtk_app: xa11y.Element) -> None:
-    ok = find(gtk_app, 'button[name="OK"]')
-    ok.locator('button[name="OK"]')
-    app_loc = gtk_app.locator('button[name="Cancel"]')
-    ok.locator('button[name="OK"]')
-
     # Press OK — Cancel should become enabled
     gtk_app.locator('button[name="OK"]').press()
     cancel = find(gtk_app, 'button[name="Cancel"]')
@@ -134,22 +129,25 @@ def test_combobox_found(gtk_app: xa11y.Element) -> None:
 
 
 # ── Range controls ────────────────────────────────────────────────────────────
+# GTK4's accessibility property APIs (set_accessible_label etc.) are not
+# exposed via PyGObject GIR on all distributions, so slider, spin_button,
+# and progress_bar are found by role alone (each appears exactly once).
 
 
 def test_slider_properties(gtk_app: xa11y.Element) -> None:
-    slider = find(gtk_app, 'slider[name="Volume"]')
+    slider = find(gtk_app, "slider")
     assert slider.role == "slider"
     assert slider.numeric_value == pytest.approx(50.0)
 
 
 def test_slider_range(gtk_app: xa11y.Element) -> None:
-    slider = find(gtk_app, 'slider[name="Volume"]')
+    slider = find(gtk_app, "slider")
     assert slider.min_value == pytest.approx(0.0)
     assert slider.max_value == pytest.approx(100.0)
 
 
 def test_slider_increment(gtk_app: xa11y.Element) -> None:
-    slider_loc = gtk_app.locator('slider[name="Volume"]')
+    slider_loc = gtk_app.locator("slider")
     before = slider_loc.element().numeric_value
     slider_loc.increment()
     after = slider_loc.element().numeric_value
@@ -157,29 +155,30 @@ def test_slider_increment(gtk_app: xa11y.Element) -> None:
 
 
 def test_spinbutton_found(gtk_app: xa11y.Element) -> None:
-    spin = find(gtk_app, 'spin_button[name="Quantity"]')
+    spin = find(gtk_app, "spin_button")
     assert spin.role == "spin_button"
     assert spin.numeric_value == pytest.approx(42.0)
 
 
 def test_progress_bar(gtk_app: xa11y.Element) -> None:
-    pb = find(gtk_app, 'progress_bar[name="Progress"]')
+    pb = find(gtk_app, "progress_bar")
     assert pb.role == "progress_bar"
     assert pb.numeric_value is not None
     assert pb.numeric_value > 0
 
 
 # ── Text field ────────────────────────────────────────────────────────────────
+# The Entry widget is the only text_field in the app; identified by its value.
 
 
 def test_textfield_properties(gtk_app: xa11y.Element) -> None:
-    tf = find(gtk_app, 'text_field[name="Search"]')
+    tf = find(gtk_app, 'text_field[value="hello world"]')
     assert tf.role == "text_field"
     assert tf.value == "hello world"
 
 
 def test_textfield_set_value(gtk_app: xa11y.Element) -> None:
-    tf_loc = gtk_app.locator('text_field[name="Search"]')
+    tf_loc = gtk_app.locator('text_field[value="hello world"]')
     tf_loc.set_value("new value")
     assert tf_loc.element().value == "new value"
     # Restore
@@ -190,7 +189,7 @@ def test_textfield_set_value(gtk_app: xa11y.Element) -> None:
 
 
 def test_textarea_found(gtk_app: xa11y.Element) -> None:
-    ta = find(gtk_app, 'text_area[name="Notes"]')
+    ta = find(gtk_app, "text_area")
     assert ta.role == "text_area"
     assert "Line 1" in (ta.value or "")
 
@@ -207,11 +206,11 @@ def test_label_found(gtk_app: xa11y.Element) -> None:
 
 
 def test_list_found(gtk_app: xa11y.Element) -> None:
-    lst = find(gtk_app, 'list[name="Items"]')
+    lst = find(gtk_app, "list")
     assert lst.role == "list"
 
 
 def test_list_has_items(gtk_app: xa11y.Element) -> None:
-    lst = find(gtk_app, 'list[name="Items"]')
+    lst = find(gtk_app, "list")
     children = lst.children()
     assert len(children) >= 1
