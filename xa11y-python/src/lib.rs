@@ -91,14 +91,6 @@ fn make_py_element(
         .iter()
         .map(|a| action_to_str(a).to_string())
         .collect();
-    let platform_role = match &data.raw {
-        xa11y::RawPlatformData::Linux { atspi_role, .. } => atspi_role.clone(),
-        xa11y::RawPlatformData::MacOS { ax_role, .. } => ax_role.clone(),
-        xa11y::RawPlatformData::Windows { control_type_id, .. } => {
-            format!("ctltype:{control_type_id}")
-        }
-        xa11y::RawPlatformData::Synthetic => "synthetic".to_string(),
-    };
     Py::new(
         py,
         Element {
@@ -126,7 +118,6 @@ fn make_py_element(
             busy: data.states.busy,
             inner_data: data.clone(),
             provider,
-            platform_role,
         },
     )
 }
@@ -217,9 +208,6 @@ struct Element {
     inner_data: xa11y::ElementData,
     /// Provider reference for lazy navigation.
     provider: Arc<dyn xa11y::Provider>,
-    /// Raw platform role string (for diagnostics).
-    #[pyo3(get)]
-    platform_role: String,
 }
 
 #[pymethods]
