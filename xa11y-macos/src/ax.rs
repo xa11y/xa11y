@@ -9,6 +9,7 @@ use std::time::Duration;
 use core_foundation::base::TCFType;
 use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
+use rayon::prelude::*;
 
 use xa11y_core::{
     Action, ActionData, CancelHandle, ElementData, Error, Event, EventReceiver, EventType,
@@ -1392,11 +1393,11 @@ impl MacOSProvider {
         false
     }
 
-    /// DFS collect AXElements matching a SimpleSelector without building
-    /// full ElementData. Only the attributes required by the selector are
-    /// fetched for each candidate. Role and subrole are fetched once per
-    /// child and reused for filtering, matching, and recursion.
-    #[allow(clippy::too_many_arguments)] // mirrors recursive DFS pattern from Linux provider
+    /// Parallel DFS collecting AXElements matching a SimpleSelector without
+    /// building full ElementData. At each level, children are processed in
+    /// parallel using rayon — each child's role check and recursive subtree
+    /// search happen concurrently across threads.
+    #[allow(clippy::too_many_arguments)] // recursive DFS with parent context
     fn collect_matching_ax(
         &self,
         parent: &AXElement,
@@ -1405,76 +1406,88 @@ impl MacOSProvider {
         simple: &SimpleSelector,
         depth: u32,
         max_depth: u32,
-        results: &mut Vec<AXElement>,
         limit: Option<usize>,
-    ) {
+    ) -> Vec<AXElement> {
         if depth > max_depth {
-            return;
-        }
-        if let Some(limit) = limit {
-            if results.len() >= limit {
-                return;
-            }
+            return vec![];
         }
 
         let children = ax_children(parent.as_ptr());
-        for child in &children {
-            // Fetch role+subrole once — used for filter, match, and recursion.
-            let role_str = ax_string(child.as_ptr(), "AXRole").unwrap_or_default();
-            let subrole_str = ax_string(child.as_ptr(), "AXSubrole");
 
-            // Inline should_filter_child using pre-fetched role/subrole.
-            if parent_role == Role::Application && role_str == "AXMenuBar" {
-                continue;
-            }
-            if parent_role == Role::Window {
-                if let Some(ref sr) = subrole_str {
-                    if matches!(
-                        sr.as_str(),
-                        "AXCloseButton"
-                            | "AXMinimizeButton"
-                            | "AXFullScreenButton"
-                            | "AXZoomButton"
-                    ) {
-                        continue;
-                    }
+        // Process children in parallel: check match + recurse.
+        let per_child_results: Vec<Vec<AXElement>> = children
+            .par_iter()
+            .map(|child| {
+                let mut child_results = Vec::new();
+
+                // Fetch role+subrole once — used for filter, match, and recursion.
+                let role_str = ax_string(child.as_ptr(), "AXRole").unwrap_or_default();
+                let subrole_str = ax_string(child.as_ptr(), "AXSubrole");
+
+                // Inline should_filter_child using pre-fetched role/subrole.
+                if parent_role == Role::Application && role_str == "AXMenuBar" {
+                    return child_results;
                 }
-                if role_str == "AXStaticText" {
-                    let sr = subrole_str.as_deref().unwrap_or("");
-                    if sr.is_empty() || sr == "AXUnknown" {
-                        if let Some(v) = ax_string(child.as_ptr(), "AXValue") {
-                            if parent_name == Some(v.as_str()) {
-                                continue;
+                if parent_role == Role::Window {
+                    if let Some(ref sr) = subrole_str {
+                        if matches!(
+                            sr.as_str(),
+                            "AXCloseButton"
+                                | "AXMinimizeButton"
+                                | "AXFullScreenButton"
+                                | "AXZoomButton"
+                        ) {
+                            return child_results;
+                        }
+                    }
+                    if role_str == "AXStaticText" {
+                        let sr = subrole_str.as_deref().unwrap_or("");
+                        if sr.is_empty() || sr == "AXUnknown" {
+                            if let Some(v) = ax_string(child.as_ptr(), "AXValue") {
+                                if parent_name == Some(v.as_str()) {
+                                    return child_results;
+                                }
                             }
                         }
                     }
                 }
-            }
 
-            let child_role = map_ax_role(&role_str, subrole_str.as_deref());
+                let child_role = map_ax_role(&role_str, subrole_str.as_deref());
 
-            if matches_ax_with_role(child.as_ptr(), simple, Some(child_role)) {
-                results.push(child.clone());
+                if matches_ax_with_role(child.as_ptr(), simple, Some(child_role)) {
+                    child_results.push(child.clone());
+                }
+
+                // Recurse into subtree.
+                let child_name = ax_string(child.as_ptr(), "AXTitle");
+                let sub = self.collect_matching_ax(
+                    child,
+                    child_role,
+                    child_name.as_deref(),
+                    simple,
+                    depth + 1,
+                    max_depth,
+                    limit,
+                );
+                child_results.extend(sub);
+
+                child_results
+            })
+            .collect();
+
+        // Merge results, respecting limit.
+        let mut results = Vec::new();
+        for batch in per_child_results {
+            for elem in batch {
+                results.push(elem);
                 if let Some(limit) = limit {
                     if results.len() >= limit {
-                        return;
+                        return results;
                     }
                 }
             }
-
-            let child_name = ax_string(child.as_ptr(), "AXTitle");
-
-            self.collect_matching_ax(
-                child,
-                child_role,
-                child_name.as_deref(),
-                simple,
-                depth + 1,
-                max_depth,
-                results,
-                limit,
-            );
         }
+        results
     }
 }
 
@@ -1505,14 +1518,18 @@ impl Provider for MacOSProvider {
 
                 let ax_children_list = ax_children(ax.as_ptr());
 
-                let mut results = Vec::new();
-                for child in &ax_children_list {
-                    if Self::should_filter_child(role, name, child) {
-                        continue;
-                    }
-                    let data = self.build_element_data(child, element_data.pid);
-                    results.push(data);
-                }
+                // Filter first (cheap string checks), then build ElementData
+                // in parallel (each build_element_data is an IPC round-trip).
+                let filtered: Vec<&AXElement> = ax_children_list
+                    .iter()
+                    .filter(|child| !Self::should_filter_child(role, name, child))
+                    .collect();
+
+                let results: Vec<ElementData> = filtered
+                    .par_iter()
+                    .map(|child| self.build_element_data(child, element_data.pid))
+                    .collect();
+
                 Ok(results)
             }
         }
@@ -1680,15 +1697,13 @@ impl Provider for MacOSProvider {
 
         let root_ax = self.get_cached(root_data.handle)?;
 
-        let mut matching_ax: Vec<AXElement> = Vec::new();
-        self.collect_matching_ax(
+        let mut matching_ax = self.collect_matching_ax(
             &root_ax,
             root_data.role,
             root_data.name.as_deref(),
             first,
             0,
             max_depth_val,
-            &mut matching_ax,
             phase1_limit,
         );
 
