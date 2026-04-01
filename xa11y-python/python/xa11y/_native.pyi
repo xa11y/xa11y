@@ -103,6 +103,33 @@ class Subscription:
     def __next__(self) -> Event: ...
     def __repr__(self) -> str: ...
 
+# ── App ───────────────────────────────────────────────────────────────────────
+
+class App:
+    """A running application — the entry point for accessibility queries."""
+
+    @property
+    def name(self) -> str: ...
+    @property
+    def pid(self) -> int | None: ...
+    @staticmethod
+    def by_name(name: str) -> App:
+        """Find an application by exact name."""
+    @staticmethod
+    def by_pid(pid: int) -> App:
+        """Find an application by process ID."""
+    @staticmethod
+    def list() -> list[App]:
+        """List all running applications."""
+    def locator(self, selector: str) -> Locator:
+        """Create a Locator scoped to this application's accessibility tree."""
+    def subscribe(self) -> Subscription:
+        """Subscribe to accessibility events from this application."""
+    def children(self) -> list[Element]:
+        """Get direct children (typically windows) of this application."""
+    def __repr__(self) -> str: ...
+    def __str__(self) -> str: ...
+
 # ── Element ───────────────────────────────────────────────────────────────────
 
 class Element:
