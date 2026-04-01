@@ -96,15 +96,14 @@ jobs:
 
       - name: Grant accessibility TCC permission
         run: |
-          # GitHub Actions macOS VMs have passwordless sudo and SIP only
-          # covers /System/*. The system TCC database is writable with sudo,
-          # letting us pre-authorise the Python binary used by the test harness.
-          # venvs on macOS use symlinks by default, so the venv Python inherits
-          # the same code identity and the grant applies there too.
+          # GitHub Actions macOS runners allow sudo writes to the system TCC
+          # database (SIP only covers /System/*). We use named columns so the
+          # INSERT works across macOS versions regardless of how many extra
+          # columns (e.g. boots_count, is_deleted on macOS 14+) the table has.
           PYTHON_PATH=$(python3 -c "import sys; print(sys.executable)")
           echo "Granting TCC kTCCServiceAccessibility to: $PYTHON_PATH"
           sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
-            "INSERT OR REPLACE INTO access \
+            "INSERT OR REPLACE INTO access(service,client,client_type,auth_value,auth_reason,auth_version,csreq,policy_id,indirect_object_identifier_type,indirect_object_identifier,indirect_object_code_identity,flags,last_modified) \
              VALUES('kTCCServiceAccessibility','${PYTHON_PATH}',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));"
 
       - name: Run Cocoa integration tests
