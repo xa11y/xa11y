@@ -1172,7 +1172,9 @@ impl Provider for LinuxProvider {
             Action::Toggle => self
                 .do_atspi_action(&target, "toggle")
                 .or_else(|_| self.do_atspi_action(&target, "click"))
-                .or_else(|_| self.do_atspi_action(&target, "activate")),
+                .or_else(|_| self.do_atspi_action(&target, "activate"))
+                // GTK4 check buttons expose "check" as their AT-SPI2 action name.
+                .or_else(|_| self.do_atspi_action(&target, "check")),
             Action::Expand => self
                 .do_atspi_action(&target, "expand")
                 .or_else(|_| self.do_atspi_action(&target, "open")),
