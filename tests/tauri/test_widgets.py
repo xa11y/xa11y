@@ -36,6 +36,8 @@ def dump_tree(el: xa11y.Element, depth: int = 0, max_depth: int = 20) -> str:
         info += f"  checked={el.checked}"
     if el.enabled is False:
         info += "  DISABLED"
+    if hasattr(el, "platform_role"):
+        info += f"  [{el.platform_role}]"
     lines = [indent + info]
     for child in el.children():
         lines.append(dump_tree(child, depth + 1, max_depth))
