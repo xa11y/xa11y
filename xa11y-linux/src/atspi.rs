@@ -1158,6 +1158,11 @@ impl Provider for LinuxProvider {
                             "org.a11y.atspi.EditableText",
                         )
                         .map_err(|_| Error::TextValueNotSupported)?;
+                    // Try SetTextContents first (WebKit2GTK exposes this but not InsertText).
+                    if proxy.call_method("SetTextContents", &(&*text)).is_ok() {
+                        return Ok(());
+                    }
+                    // Fall back to delete-then-insert for other AT-SPI2 implementations.
                     let _ = proxy.call_method("DeleteText", &(0i32, i32::MAX));
                     proxy
                         .call_method("InsertText", &(0i32, &*text, text.len() as i32))
@@ -1608,7 +1613,7 @@ fn map_atspi_role_number(role: u32) -> Role {
         68 => Role::Group,       // Viewport
         69 => Role::Window,      // Window
         75 => Role::Application, // Application
-        78 => Role::TextArea,    // Embedded — WebKit2GTK uses this for <input type="text"> and <textarea>;
+        78 => Role::TextArea, // Embedded — WebKit2GTK uses this for <input type="text"> and <textarea>;
         // multi-line refinement below downgrades single-line ones to TextField
         79 => Role::TextField,   // Entry
         82 => Role::WebArea,     // DocumentFrame
