@@ -87,28 +87,20 @@ class TestWindow(Gtk.ApplicationWindow):
         range_group = self._make_group("Range Controls")
         box.append(range_group)
 
-        # Label linked via set_mnemonic_widget establishes the GTK4
-        # LABELLED_BY accessibility relation, giving the widget its name.
         self.slider = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 100, 1)
         self.slider.set_value(50)
+        self.slider.set_accessible_label("Volume")
         self.slider.set_accessible_description("Volume")
-        vol_label = Gtk.Label(label="Volume")
-        vol_label.set_mnemonic_widget(self.slider)
-        range_group.append(vol_label)
         range_group.append(self.slider)
 
         spin_adj = Gtk.Adjustment(value=42, lower=0, upper=999, step_increment=1)
         self.spin = Gtk.SpinButton(adjustment=spin_adj)
-        qty_label = Gtk.Label(label="Quantity")
-        qty_label.set_mnemonic_widget(self.spin)
-        range_group.append(qty_label)
+        self.spin.set_accessible_label("Quantity")
         range_group.append(self.spin)
 
         self.progress = Gtk.ProgressBar()
         self.progress.set_fraction(0.75)
-        prog_label = Gtk.Label(label="Progress")
-        prog_label.set_mnemonic_widget(self.progress)
-        range_group.append(prog_label)
+        self.progress.set_accessible_label("Progress")
         range_group.append(self.progress)
 
         # ── Text input ───────────────────────────────────────────────
@@ -118,9 +110,7 @@ class TestWindow(Gtk.ApplicationWindow):
         self.text_entry = Gtk.Entry()
         self.text_entry.set_text("hello world")
         self.text_entry.set_placeholder_text("Type here...")
-        search_label = Gtk.Label(label="Search")
-        search_label.set_mnemonic_widget(self.text_entry)
-        input_group.append(search_label)
+        self.text_entry.set_accessible_label("Search")
         input_group.append(self.text_entry)
 
         # ── Text area ────────────────────────────────────────────────
@@ -133,9 +123,7 @@ class TestWindow(Gtk.ApplicationWindow):
 
         self.text_view = Gtk.TextView()
         self.text_view.get_buffer().set_text("Line 1\nLine 2\nLine 3")
-        notes_label = Gtk.Label(label="Notes")
-        notes_label.set_mnemonic_widget(self.text_view)
-        text_group.append(notes_label)
+        self.text_view.set_accessible_label("Notes")
         text_group.append(self.text_view)
 
         # ── List ─────────────────────────────────────────────────────
@@ -143,9 +131,7 @@ class TestWindow(Gtk.ApplicationWindow):
         box.append(list_group)
 
         self.list_box = Gtk.ListBox()
-        items_label = Gtk.Label(label="Items")
-        items_label.set_mnemonic_widget(self.list_box)
-        list_group.append(items_label)
+        self.list_box.set_accessible_label("Items")
         for i in range(1, 6):
             row = Gtk.ListBoxRow()
             row_label = Gtk.Label(label=f"Item {i}")
