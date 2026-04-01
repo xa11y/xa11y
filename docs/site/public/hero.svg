@@ -185,35 +185,35 @@
     </g>
     <g>
       <text x="40" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#6366f1">&gt;&gt;&gt;</text>
-      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#22d3ee" clip-path="url(#clip-cmd-dark-0)" visibility="hidden">loc = xa11y.locator("Slack", selector='button[name="general"]')<set attributeName="visibility" to="visible" begin="m.begin+1.500s" />
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#22d3ee" clip-path="url(#clip-cmd-dark-0)" visibility="hidden">slack = xa11y.locator('application[name="Slack"]')<set attributeName="visibility" to="visible" begin="m.begin+1.500s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+4.594s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
       </text>
-      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#e2e8f0" clip-path="url(#clip-cmd-dark-1)" visibility="hidden">loc.press()<set attributeName="visibility" to="visible" begin="m.begin+4.594s" />
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#e2e8f0" clip-path="url(#clip-cmd-dark-1)" visibility="hidden">slack.descendant('button[name="general"]').press()<set attributeName="visibility" to="visible" begin="m.begin+4.594s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+7.109s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
       </text>
-      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#22d3ee" clip-path="url(#clip-cmd-dark-2)" visibility="hidden">loc = xa11y.locator("Slack", selector='text_field[name="Message"]')<set attributeName="visibility" to="visible" begin="m.begin+7.109s" />
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#22d3ee" clip-path="url(#clip-cmd-dark-2)" visibility="hidden">msg = slack.descendant('text_field[name="Message"]')<set attributeName="visibility" to="visible" begin="m.begin+7.109s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+10.508s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
       </text>
-      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#e2e8f0" clip-path="url(#clip-cmd-dark-3)" visibility="hidden">loc.type_text("Looks good, shipping it!")<set attributeName="visibility" to="visible" begin="m.begin+10.508s" />
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#e2e8f0" clip-path="url(#clip-cmd-dark-3)" visibility="hidden">msg.type_text("Looks good, shipping it!")<set attributeName="visibility" to="visible" begin="m.begin+10.508s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+13.773s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
       </text>
-      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#22d3ee" clip-path="url(#clip-cmd-dark-4)" visibility="hidden">loc = xa11y.locator("Slack", selector='button[name="Send"]')<set attributeName="visibility" to="visible" begin="m.begin+13.773s" />
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#22d3ee" clip-path="url(#clip-cmd-dark-4)" visibility="hidden">send = slack.descendant('button[name="Send"]')<set attributeName="visibility" to="visible" begin="m.begin+13.773s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+16.994s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
       </text>
-      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#4ade80" clip-path="url(#clip-cmd-dark-5)" visibility="hidden">assert loc.is_enabled()<set attributeName="visibility" to="visible" begin="m.begin+16.994s" />
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#4ade80" clip-path="url(#clip-cmd-dark-5)" visibility="hidden">assert send.exists()<set attributeName="visibility" to="visible" begin="m.begin+16.994s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+19.901s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
       </text>
-      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#22d3ee" clip-path="url(#clip-cmd-dark-6)" visibility="hidden">loc = xa11y.locator("Slack", selector='text[name*="PR"]')<set attributeName="visibility" to="visible" begin="m.begin+19.901s" />
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#22d3ee" clip-path="url(#clip-cmd-dark-6)" visibility="hidden">pr = slack.descendant('static_text[name*="PR"]')<set attributeName="visibility" to="visible" begin="m.begin+19.901s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+23.079s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
       </text>
-      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#f87171" clip-path="url(#clip-cmd-dark-7)" visibility="hidden">assert loc.value() == "wrong text"<set attributeName="visibility" to="visible" begin="m.begin+23.079s" />
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#f87171" clip-path="url(#clip-cmd-dark-7)" visibility="hidden">assert pr.element().value == "no"<set attributeName="visibility" to="visible" begin="m.begin+23.079s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
       </text>
       <rect x="76" y="57" width="2" height="17" fill="#e2e8f0">
@@ -372,35 +372,35 @@
     </g>
     <g>
       <text x="40" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#6366f1">&gt;&gt;&gt;</text>
-      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#0891b2" clip-path="url(#clip-cmd-light-0)" visibility="hidden">loc = xa11y.locator("Slack", selector='button[name="general"]')<set attributeName="visibility" to="visible" begin="m.begin+1.500s" />
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#0891b2" clip-path="url(#clip-cmd-light-0)" visibility="hidden">slack = xa11y.locator('application[name="Slack"]')<set attributeName="visibility" to="visible" begin="m.begin+1.500s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+4.594s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
       </text>
-      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#1f2328" clip-path="url(#clip-cmd-light-1)" visibility="hidden">loc.press()<set attributeName="visibility" to="visible" begin="m.begin+4.594s" />
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#1f2328" clip-path="url(#clip-cmd-light-1)" visibility="hidden">slack.descendant('button[name="general"]').press()<set attributeName="visibility" to="visible" begin="m.begin+4.594s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+7.109s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
       </text>
-      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#0891b2" clip-path="url(#clip-cmd-light-2)" visibility="hidden">loc = xa11y.locator("Slack", selector='text_field[name="Message"]')<set attributeName="visibility" to="visible" begin="m.begin+7.109s" />
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#0891b2" clip-path="url(#clip-cmd-light-2)" visibility="hidden">msg = slack.descendant('text_field[name="Message"]')<set attributeName="visibility" to="visible" begin="m.begin+7.109s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+10.508s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
       </text>
-      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#1f2328" clip-path="url(#clip-cmd-light-3)" visibility="hidden">loc.type_text("Looks good, shipping it!")<set attributeName="visibility" to="visible" begin="m.begin+10.508s" />
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#1f2328" clip-path="url(#clip-cmd-light-3)" visibility="hidden">msg.type_text("Looks good, shipping it!")<set attributeName="visibility" to="visible" begin="m.begin+10.508s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+13.773s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
       </text>
-      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#0891b2" clip-path="url(#clip-cmd-light-4)" visibility="hidden">loc = xa11y.locator("Slack", selector='button[name="Send"]')<set attributeName="visibility" to="visible" begin="m.begin+13.773s" />
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#0891b2" clip-path="url(#clip-cmd-light-4)" visibility="hidden">send = slack.descendant('button[name="Send"]')<set attributeName="visibility" to="visible" begin="m.begin+13.773s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+16.994s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
       </text>
-      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#16a34a" clip-path="url(#clip-cmd-light-5)" visibility="hidden">assert loc.is_enabled()<set attributeName="visibility" to="visible" begin="m.begin+16.994s" />
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#16a34a" clip-path="url(#clip-cmd-light-5)" visibility="hidden">assert send.exists()<set attributeName="visibility" to="visible" begin="m.begin+16.994s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+19.901s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
       </text>
-      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#0891b2" clip-path="url(#clip-cmd-light-6)" visibility="hidden">loc = xa11y.locator("Slack", selector='text[name*="PR"]')<set attributeName="visibility" to="visible" begin="m.begin+19.901s" />
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#0891b2" clip-path="url(#clip-cmd-light-6)" visibility="hidden">pr = slack.descendant('static_text[name*="PR"]')<set attributeName="visibility" to="visible" begin="m.begin+19.901s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+23.079s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
       </text>
-      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#dc2626" clip-path="url(#clip-cmd-light-7)" visibility="hidden">assert loc.value() == "wrong text"<set attributeName="visibility" to="visible" begin="m.begin+23.079s" />
+      <text x="76" y="70" font-family="ui-monospace, 'Cascadia Code', 'Fira Code', monospace" font-size="13" fill="#dc2626" clip-path="url(#clip-cmd-light-7)" visibility="hidden">assert pr.element().value == "no"<set attributeName="visibility" to="visible" begin="m.begin+23.079s" />
         <set attributeName="visibility" to="hidden" begin="m.begin+0.000s" />
       </text>
       <rect x="76" y="57" width="2" height="17" fill="#1f2328">

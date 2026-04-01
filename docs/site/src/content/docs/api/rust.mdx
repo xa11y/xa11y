@@ -12,9 +12,9 @@ cargo add xa11y
 ```rust
 use xa11y::*;
 
-let safari = App::from_name(provider()?, "Safari")?;
+let safari = App::by_name("Safari")?;
 
-for button in safari.locator("button").nodes()? {
+for button in safari.locator("button").elements()? {
     println!("{:?}", button.name);
 }
 ```

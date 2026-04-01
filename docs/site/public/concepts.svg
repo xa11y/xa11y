@@ -54,21 +54,21 @@
   <!-- App -->
   <rect x="70" y="42" width="100" height="50" class="box-accent" />
   <text x="120" y="62" class="label-bold">App</text>
-  <text x="120" y="78" class="label-sm">from_name / pid</text>
+  <text x="120" y="78" class="label-sm">by_name / by_pid</text>
 
-  <!-- .elements() -->
+  <!-- .children() -->
   <rect x="210" y="42" width="100" height="44" class="box-accent" />
-  <text x="260" y="69" class="label-bold">.elements()</text>
+  <text x="260" y="69" class="label-bold">.children()</text>
 
   <!-- Element (snapshot root) -->
   <rect x="345" y="42" width="120" height="44" class="box" />
   <text x="405" y="60" class="label-bold">Element</text>
-  <text x="405" y="76" class="label-sm">frozen snapshot</text>
+  <text x="405" y="76" class="label-sm">live handle</text>
 
   <!-- children() / parent() -->
   <rect x="500" y="42" width="180" height="44" class="box" />
   <text x="590" y="60" class="label-bold">.children() / .parent()</text>
-  <text x="590" y="76" class="label-sm">navigate snapshot</text>
+  <text x="590" y="76" class="label-sm">lazy navigation</text>
 
   <!-- Read arrows -->
   <line x1="170" y1="64" x2="208" y2="64" class="arrow" />

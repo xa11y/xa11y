@@ -18,9 +18,9 @@ Cross-platform accessibility library for reading and interacting with accessibil
 use xa11y::*;
 
 fn main() -> Result<()> {
-    let safari = App::from_name(provider()?, "Safari")?;
+    let safari = App::by_name("Safari")?;
 
-    // Snapshot the tree and find elements with CSS-like selectors
+    // Find elements with CSS-like selectors
     let buttons = safari.locator("button[name='Submit']").elements()?;
     println!("Found {} buttons", buttons.len());
 
@@ -35,7 +35,7 @@ fn main() -> Result<()> {
 
 ```toml
 [dependencies]
-xa11y = "0.2"
+xa11y = "0.4"
 ```
 
 > **macOS:** Grant your terminal **two** permissions in **System Settings > Privacy & Security**:

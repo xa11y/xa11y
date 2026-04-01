@@ -19,9 +19,9 @@ Cross-platform accessibility library for reading and interacting with accessibil
 use xa11y::*;
 
 fn main() -> Result<()> {
-    let safari = App::from_name(provider()?, "Safari")?;
+    let safari = App::by_name("Safari")?;
 
-    // Snapshot the tree and find elements with CSS-like selectors
+    // Find elements with CSS-like selectors
     let buttons = safari.locator("button[name='Submit']").elements()?;
     println!("Found {} buttons", buttons.len());
 
@@ -37,16 +37,15 @@ fn main() -> Result<()> {
 ```python
 import xa11y
 
-safari = xa11y.app("Safari")
-
-# Find elements with CSS-like selectors
-for button in safari.locator("button").elements():
+# Find elements with CSS-like selectors via locator
+app = xa11y.locator('application[name="Safari"]')
+for button in app.descendant("button").elements():
     print(button.name)
 
 # Interact with elements via locator (re-resolves every call)
-safari.locator("button[name='Submit']").press()
+app.descendant("button[name='Submit']").press()
 
-safari.locator("textfield[name^='Search']").set_value("hello world")
+app.descendant("text_field[name^='Search']").set_value("hello world")
 ```
 <!-- /python-only -->
 
@@ -55,7 +54,7 @@ safari.locator("textfield[name^='Search']").set_value("hello world")
 <!-- rust-only -->
 ```toml
 [dependencies]
-xa11y = "0.2"
+xa11y = "0.4"
 ```
 <!-- /rust-only -->
 

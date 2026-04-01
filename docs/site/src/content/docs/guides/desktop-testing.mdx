@@ -9,7 +9,7 @@ xa11y's Locator pattern makes it natural to write integration tests for desktop 
 
 ## Waits
 
-Desktop UIs update asynchronously. After pressing a button, the result might not appear for a few frames. Locator `wait_*()` methods poll with fresh tree snapshots until a condition is met or a timeout expires:
+Desktop UIs update asynchronously. After pressing a button, the result might not appear for a few frames. Locator `wait_*()` methods poll until a condition is met or a timeout expires:
 
 - `wait_visible()` / `wait_hidden()` — element appears or disappears
 - `wait_enabled()` / `wait_disabled()` — element becomes interactive or not
@@ -31,7 +31,7 @@ This test opens Calculator, performs `7 × 8`, and asserts the result is `56`.
 
     #[test]
     fn calculator_multiplication() -> Result<()> {
-        let calc = App::from_name(provider()?, "Calculator")?;
+        let calc = App::by_name("Calculator")?;
         let timeout = Duration::from_secs(5);
 
         // Wait for the app to be ready
@@ -64,9 +64,9 @@ This test opens Calculator, performs `7 × 8`, and asserts the result is `56`.
 
     @pytest.fixture
     def calculator():
-        """Launch Calculator and return an App handle."""
+        """Launch Calculator and return a Locator for the app."""
         proc = subprocess.Popen(["open", "-a", "Calculator"])
-        yield xa11y.app("Calculator")
+        yield xa11y.locator('application[name="Calculator"]')
         proc.terminate()
 
 
@@ -74,16 +74,16 @@ This test opens Calculator, performs `7 × 8`, and asserts the result is `56`.
         calc = calculator
 
         # Wait for the app to be ready
-        calc.locator("window").wait_visible(timeout=5.0)
+        calc.descendant("window").wait_visible(timeout=5.0)
 
         # Press 7 × 8 =
-        calc.locator("button[name='7']").press()
-        calc.locator("button[name='×']").press()
-        calc.locator("button[name='8']").press()
-        calc.locator("button[name='=']").press()
+        calc.descendant("button[name='7']").press()
+        calc.descendant("button[name='×']").press()
+        calc.descendant("button[name='8']").press()
+        calc.descendant("button[name='=']").press()
 
         # Wait for the result to update, then assert
-        result = calc.locator("static_text[name='Result']")
+        result = calc.descendant("static_text[name='Result']")
         result.wait_until(lambda element: element and element.value == "56", timeout=5.0)
         assert result.element().value == "56"
     ```
@@ -93,6 +93,6 @@ This test opens Calculator, performs `7 × 8`, and asserts the result is `56`.
 ## Tips
 
 - **Be specific with selectors.** `button[name='7']` is better than `button` — it won't break when the UI adds more buttons.
-- **Use locators, not elements, for interactions.** Elements are snapshots and go stale. Locators refetch automatically.
+- **Use locators, not elements, for interactions.** Locators re-resolve their selector on every operation, making them resilient to UI changes.
 - **Prefer `wait_until` for complex assertions.** Instead of sleeping then asserting, combine the wait and the condition — the test passes as soon as the UI is ready.
 - **Keep timeouts generous in CI.** CI machines are slower. Use 5–10 seconds for waits even if your local machine resolves in milliseconds.
