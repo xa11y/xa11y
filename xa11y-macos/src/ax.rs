@@ -578,6 +578,118 @@ fn parse_states(element: AXUIElementRef, role: Role) -> StateSet {
     }
 }
 
+// ── Lightweight selector matching (no ElementData) ───────────────────────────
+
+use xa11y_core::selector::{AttrName, Combinator, MatchOp, SimpleSelector};
+use xa11y_core::Selector;
+
+/// Test whether a raw AXElement matches a SimpleSelector, fetching only the
+/// attributes the selector actually inspects. This avoids building a full
+/// ElementData (15-20 AX API calls) for elements that will be discarded.
+#[cfg(test)]
+fn matches_ax(ax: AXUIElementRef, simple: &SimpleSelector) -> bool {
+    matches_ax_with_role(ax, simple, None)
+}
+
+/// Like `matches_ax` but accepts a pre-resolved role to avoid redundant
+/// AX API calls when the caller already fetched the role.
+fn matches_ax_with_role(
+    ax: AXUIElementRef,
+    simple: &SimpleSelector,
+    precomputed_role: Option<Role>,
+) -> bool {
+    // Resolve role only if the selector cares about it and it wasn't pre-computed.
+    let needs_role =
+        simple.role.is_some() || simple.filters.iter().any(|f| f.attr == AttrName::Role);
+
+    let role = if needs_role {
+        match precomputed_role {
+            Some(r) => Some(r),
+            None => {
+                let role_str = match ax_string(ax, "AXRole") {
+                    Some(s) => s,
+                    None => return false,
+                };
+                let subrole_str = ax_string(ax, "AXSubrole");
+                Some(map_ax_role(&role_str, subrole_str.as_deref()))
+            }
+        }
+    } else {
+        precomputed_role
+    };
+
+    if let Some(expected) = simple.role {
+        if role != Some(expected) {
+            return false;
+        }
+    }
+
+    for filter in &simple.filters {
+        let attr_value: Option<String> = match filter.attr {
+            AttrName::Role => role.map(|r| r.to_snake_case().to_string()),
+            AttrName::Name => {
+                // Mirror build_element_data name logic.
+                let ax_title = ax_string(ax, "AXTitle");
+                ax_title.or_else(|| {
+                    if role == Some(Role::StaticText) {
+                        ax_value_string(ax)
+                    } else {
+                        ax_string(ax, "AXDescription")
+                    }
+                })
+            }
+            AttrName::Value => ax_value_string(ax),
+            AttrName::Description => {
+                // Mirror build_element_data description logic.
+                let ax_title = ax_string(ax, "AXTitle");
+                let ax_description = ax_string(ax, "AXDescription");
+                let name = ax_title.or_else(|| {
+                    if role == Some(Role::StaticText) {
+                        ax_value_string(ax)
+                    } else {
+                        ax_description.clone()
+                    }
+                });
+                ax_string(ax, "AXHelp").or_else(|| {
+                    if name.as_ref() != ax_description.as_ref() {
+                        ax_description
+                    } else {
+                        None
+                    }
+                })
+            }
+        };
+
+        let matches = match &filter.op {
+            MatchOp::Exact => attr_value.as_deref() == Some(filter.value.as_str()),
+            MatchOp::Contains => {
+                let fl = filter.value.to_lowercase();
+                attr_value
+                    .as_deref()
+                    .is_some_and(|v| v.to_lowercase().contains(&fl))
+            }
+            MatchOp::StartsWith => {
+                let fl = filter.value.to_lowercase();
+                attr_value
+                    .as_deref()
+                    .is_some_and(|v| v.to_lowercase().starts_with(&fl))
+            }
+            MatchOp::EndsWith => {
+                let fl = filter.value.to_lowercase();
+                attr_value
+                    .as_deref()
+                    .is_some_and(|v| v.to_lowercase().ends_with(&fl))
+            }
+        };
+
+        if !matches {
+            return false;
+        }
+    }
+
+    true
+}
+
 // ── MacOS Provider ────────────────────────────────────────────────────────────
 
 /// Global handle counter for mapping ElementData back to AXElements.
@@ -863,6 +975,91 @@ impl MacOSProvider {
 
         false
     }
+
+    /// DFS collect AXElements matching a SimpleSelector without building
+    /// full ElementData. Only the attributes required by the selector are
+    /// fetched for each candidate. Role and subrole are fetched once per
+    /// child and reused for filtering, matching, and recursion.
+    #[allow(clippy::too_many_arguments)] // mirrors recursive DFS pattern from Linux provider
+    fn collect_matching_ax(
+        &self,
+        parent: &AXElement,
+        parent_role: Role,
+        parent_name: Option<&str>,
+        simple: &SimpleSelector,
+        depth: u32,
+        max_depth: u32,
+        results: &mut Vec<AXElement>,
+        limit: Option<usize>,
+    ) {
+        if depth > max_depth {
+            return;
+        }
+        if let Some(limit) = limit {
+            if results.len() >= limit {
+                return;
+            }
+        }
+
+        let children = ax_children(parent.as_ptr());
+        for child in &children {
+            // Fetch role+subrole once — used for filter, match, and recursion.
+            let role_str = ax_string(child.as_ptr(), "AXRole").unwrap_or_default();
+            let subrole_str = ax_string(child.as_ptr(), "AXSubrole");
+
+            // Inline should_filter_child using pre-fetched role/subrole.
+            if parent_role == Role::Application && role_str == "AXMenuBar" {
+                continue;
+            }
+            if parent_role == Role::Window {
+                if let Some(ref sr) = subrole_str {
+                    if matches!(
+                        sr.as_str(),
+                        "AXCloseButton"
+                            | "AXMinimizeButton"
+                            | "AXFullScreenButton"
+                            | "AXZoomButton"
+                    ) {
+                        continue;
+                    }
+                }
+                if role_str == "AXStaticText" {
+                    let sr = subrole_str.as_deref().unwrap_or("");
+                    if sr.is_empty() || sr == "AXUnknown" {
+                        if let Some(v) = ax_string(child.as_ptr(), "AXValue") {
+                            if parent_name == Some(v.as_str()) {
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+
+            let child_role = map_ax_role(&role_str, subrole_str.as_deref());
+
+            if matches_ax_with_role(child.as_ptr(), simple, Some(child_role)) {
+                results.push(child.clone());
+                if let Some(limit) = limit {
+                    if results.len() >= limit {
+                        return;
+                    }
+                }
+            }
+
+            let child_name = ax_string(child.as_ptr(), "AXTitle");
+
+            self.collect_matching_ax(
+                child,
+                child_role,
+                child_name.as_deref(),
+                simple,
+                depth + 1,
+                max_depth,
+                results,
+                limit,
+            );
+        }
+    }
 }
 
 impl Provider for MacOSProvider {
@@ -903,6 +1100,259 @@ impl Provider for MacOSProvider {
                 Ok(results)
             }
         }
+    }
+
+    fn find_elements(
+        &self,
+        root: Option<&ElementData>,
+        selector: &Selector,
+        limit: Option<usize>,
+        max_depth: Option<u32>,
+    ) -> Result<Vec<ElementData>> {
+        if selector.segments.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let max_depth_val = max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH);
+
+        // Phase 1: lightweight AXElement-based search for first segment.
+        // Only the attributes the selector needs are fetched per candidate.
+        let first = &selector.segments[0].simple;
+
+        let phase1_limit = if selector.segments.len() == 1 {
+            limit
+        } else {
+            None
+        };
+        let phase1_limit = match (phase1_limit, first.nth) {
+            (Some(l), Some(n)) => Some(l.max(n)),
+            (_, Some(n)) => Some(n),
+            (l, None) => l,
+        };
+
+        let root_data = match root {
+            Some(el) => el,
+            None => {
+                // Searching from system root for applications. Use
+                // CGWindowList (no AX calls) to filter apps by name, then
+                // only build full ElementData for matches.
+                if first.role == Some(Role::Application) {
+                    let apps = Self::list_gui_apps();
+                    let mut matching: Vec<ElementData> = Vec::new();
+                    for (pid, app_name) in &apps {
+                        // Check name filters against CGWindowList name
+                        let name_matches = first.filters.iter().all(|f| {
+                            if f.attr != AttrName::Name {
+                                return true; // non-name filters checked after build
+                            }
+                            let val = Some(app_name.as_str());
+                            match &f.op {
+                                MatchOp::Exact => val == Some(f.value.as_str()),
+                                MatchOp::Contains => {
+                                    let fl = f.value.to_lowercase();
+                                    val.is_some_and(|v| v.to_lowercase().contains(&fl))
+                                }
+                                MatchOp::StartsWith => {
+                                    let fl = f.value.to_lowercase();
+                                    val.is_some_and(|v| v.to_lowercase().starts_with(&fl))
+                                }
+                                MatchOp::EndsWith => {
+                                    let fl = f.value.to_lowercase();
+                                    val.is_some_and(|v| v.to_lowercase().ends_with(&fl))
+                                }
+                            }
+                        });
+                        if !name_matches {
+                            continue;
+                        }
+
+                        let app_element =
+                            AXElement::from_owned(unsafe { safe_ax_create_application(*pid) });
+                        if app_element.is_null() {
+                            continue;
+                        }
+                        let mut data = self.build_element_data(&app_element, Some(*pid as u32));
+                        data.name = Some(app_name.clone());
+                        matching.push(data);
+
+                        if let Some(limit) = phase1_limit {
+                            if matching.len() >= limit {
+                                break;
+                            }
+                        }
+                    }
+
+                    // Apply :nth
+                    if let Some(nth) = first.nth {
+                        if nth <= matching.len() {
+                            matching = vec![matching.remove(nth - 1)];
+                        } else {
+                            matching.clear();
+                        }
+                    }
+
+                    if selector.segments.len() == 1 {
+                        if let Some(limit) = limit {
+                            matching.truncate(limit);
+                        }
+                        return Ok(matching);
+                    }
+
+                    // Multi-segment: continue narrowing from matched apps
+                    let mut candidates = matching;
+                    for segment in &selector.segments[1..] {
+                        let mut next_candidates = Vec::new();
+                        for candidate in &candidates {
+                            match segment.combinator {
+                                Combinator::Child => {
+                                    let children = self.get_children(Some(candidate))?;
+                                    for child in children {
+                                        if xa11y_core::selector::matches_simple(
+                                            &child,
+                                            &segment.simple,
+                                        ) {
+                                            next_candidates.push(child);
+                                        }
+                                    }
+                                }
+                                Combinator::Descendant => {
+                                    let sub_selector = Selector {
+                                        segments: vec![xa11y_core::selector::SelectorSegment {
+                                            combinator: Combinator::Root,
+                                            simple: segment.simple.clone(),
+                                        }],
+                                    };
+                                    let mut sub_results = self.find_elements(
+                                        Some(candidate),
+                                        &sub_selector,
+                                        None,
+                                        Some(max_depth_val),
+                                    )?;
+                                    next_candidates.append(&mut sub_results);
+                                }
+                                Combinator::Root => unreachable!(),
+                            }
+                        }
+                        let mut seen = HashSet::new();
+                        next_candidates.retain(|e| seen.insert(e.handle));
+                        candidates = next_candidates;
+                    }
+
+                    if let Some(nth) = selector.segments.last().and_then(|s| s.simple.nth) {
+                        if nth <= candidates.len() {
+                            candidates = vec![candidates.remove(nth - 1)];
+                        } else {
+                            candidates.clear();
+                        }
+                    }
+                    if let Some(limit) = limit {
+                        candidates.truncate(limit);
+                    }
+                    return Ok(candidates);
+                }
+
+                // Non-application root search — fall back to default impl.
+                return xa11y_core::selector::find_elements_in_tree(
+                    |el| self.get_children(el),
+                    root,
+                    selector,
+                    limit,
+                    max_depth,
+                );
+            }
+        };
+
+        let root_ax = self.get_cached(root_data.handle)?;
+
+        let mut matching_ax: Vec<AXElement> = Vec::new();
+        self.collect_matching_ax(
+            &root_ax,
+            root_data.role,
+            root_data.name.as_deref(),
+            first,
+            0,
+            max_depth_val,
+            &mut matching_ax,
+            phase1_limit,
+        );
+
+        // Single-segment: build ElementData only for matches, apply nth/limit
+        if selector.segments.len() == 1 {
+            if let Some(nth) = first.nth {
+                if nth <= matching_ax.len() {
+                    let ax = &matching_ax[nth - 1];
+                    return Ok(vec![self.build_element_data(ax, root_data.pid)]);
+                } else {
+                    return Ok(vec![]);
+                }
+            }
+
+            if let Some(limit) = limit {
+                matching_ax.truncate(limit);
+            }
+
+            return Ok(matching_ax
+                .iter()
+                .map(|ax| self.build_element_data(ax, root_data.pid))
+                .collect());
+        }
+
+        // Multi-segment: build ElementData for phase 1 matches, then narrow
+        // using standard matching on the (small) candidate set.
+        let mut candidates: Vec<ElementData> = matching_ax
+            .iter()
+            .map(|ax| self.build_element_data(ax, root_data.pid))
+            .collect();
+
+        for segment in &selector.segments[1..] {
+            let mut next_candidates = Vec::new();
+            for candidate in &candidates {
+                match segment.combinator {
+                    Combinator::Child => {
+                        let children = self.get_children(Some(candidate))?;
+                        for child in children {
+                            if xa11y_core::selector::matches_simple(&child, &segment.simple) {
+                                next_candidates.push(child);
+                            }
+                        }
+                    }
+                    Combinator::Descendant => {
+                        let sub_selector = Selector {
+                            segments: vec![xa11y_core::selector::SelectorSegment {
+                                combinator: Combinator::Root,
+                                simple: segment.simple.clone(),
+                            }],
+                        };
+                        let mut sub_results = self.find_elements(
+                            Some(candidate),
+                            &sub_selector,
+                            None,
+                            Some(max_depth_val),
+                        )?;
+                        next_candidates.append(&mut sub_results);
+                    }
+                    Combinator::Root => unreachable!(),
+                }
+            }
+            let mut seen = HashSet::new();
+            next_candidates.retain(|e| seen.insert(e.handle));
+            candidates = next_candidates;
+        }
+
+        // Apply :nth on last segment
+        if let Some(nth) = selector.segments.last().and_then(|s| s.simple.nth) {
+            if nth <= candidates.len() {
+                candidates = vec![candidates.remove(nth - 1)];
+            } else {
+                candidates.clear();
+            }
+        }
+
+        if let Some(limit) = limit {
+            candidates.truncate(limit);
+        }
+
+        Ok(candidates)
     }
 
     fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
@@ -1505,5 +1955,60 @@ mod tests {
     fn provider_new_succeeds() {
         let provider = MacOSProvider::new();
         assert!(provider.is_ok());
+    }
+
+    #[test]
+    fn matches_ax_returns_false_for_null_element() {
+        use xa11y_core::selector::SimpleSelector;
+        // Role-only selector should not match a null element
+        let simple = SimpleSelector {
+            role: Some(Role::Button),
+            filters: vec![],
+            nth: None,
+        };
+        assert!(!matches_ax(std::ptr::null(), &simple));
+    }
+
+    #[test]
+    fn matches_ax_matches_role_only() {
+        use xa11y_core::selector::SimpleSelector;
+        // No role constraint — should match anything (even null, since no
+        // attribute to check). But null has no role, so no-role selector matches.
+        let simple = SimpleSelector {
+            role: None,
+            filters: vec![],
+            nth: None,
+        };
+        // A null element can't report a role, but the selector has no role
+        // constraint, so it should match.
+        assert!(matches_ax(std::ptr::null(), &simple));
+    }
+
+    #[test]
+    fn matches_ax_rejects_wrong_role() {
+        use xa11y_core::selector::SimpleSelector;
+        let simple = SimpleSelector {
+            role: Some(Role::CheckBox),
+            filters: vec![],
+            nth: None,
+        };
+        // Null element has no role — should not match CheckBox
+        assert!(!matches_ax(std::ptr::null(), &simple));
+    }
+
+    #[test]
+    fn matches_ax_with_name_filter_rejects_null() {
+        use xa11y_core::selector::{AttrFilter, AttrName, MatchOp, SimpleSelector};
+        let simple = SimpleSelector {
+            role: None,
+            filters: vec![AttrFilter {
+                attr: AttrName::Name,
+                op: MatchOp::Exact,
+                value: "Submit".to_string(),
+            }],
+            nth: None,
+        };
+        // Null element has no name — filter should fail
+        assert!(!matches_ax(std::ptr::null(), &simple));
     }
 }
