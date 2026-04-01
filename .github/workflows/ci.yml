@@ -91,6 +91,12 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Cache Cocoa test app binary
+        uses: actions/cache@v5
+        with:
+          path: test-apps/cocoa/xa11y-cocoa-test-app
+          key: ${{ runner.os }}-cocoa-app-${{ hashFiles('test-apps/cocoa/main.swift', 'test-apps/cocoa/Makefile') }}
+
       - name: Run unit tests
         run: cargo test --workspace
 
@@ -105,6 +111,10 @@ jobs:
           sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
             "INSERT OR REPLACE INTO access(service,client,client_type,auth_value,auth_reason,auth_version,csreq,policy_id,indirect_object_identifier_type,indirect_object_identifier,indirect_object_code_identity,flags,last_modified) \
              VALUES('kTCCServiceAccessibility','${PYTHON_PATH}',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));"
+          # Restart tccd so the new grant is picked up without waiting for the
+          # next natural reload cycle. launchctl stop triggers an auto-restart.
+          sudo launchctl stop com.apple.tccd 2>/dev/null || true
+          sleep 2
 
       - name: Run Cocoa integration tests
         run: ./scripts/run_cocoa_tests.sh
