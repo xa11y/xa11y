@@ -10,7 +10,7 @@
 //! attr_filter   := "[" attr_name op value "]"
 //! attr_name     := "name" | "value" | "description" | "role"
 //! op            := "=" | "*=" | "^=" | "$="
-//! value         := '"' [^"]* '"'
+//! value         := '"' [^"]* '"' | "'" [^']* "'"
 //! pseudo        := ":nth(" integer ")"
 //! integer       := [1-9][0-9]*
 //! ```
@@ -286,16 +286,19 @@ impl Selector {
             });
         };
 
-        // Parse quoted value
-        if pos >= chars.len() || chars[pos] != '"' {
-            return Err(Error::InvalidSelector {
-                selector: input.to_string(),
-                message: "expected '\"' to start attribute value".to_string(),
-            });
-        }
+        // Parse quoted value (single or double quotes)
+        let quote = match chars.get(pos) {
+            Some(&'"') | Some(&'\'') => chars[pos],
+            _ => {
+                return Err(Error::InvalidSelector {
+                    selector: input.to_string(),
+                    message: "expected '\"' or \"'\" to start attribute value".to_string(),
+                });
+            }
+        };
         pos += 1; // skip opening quote
         let val_start = pos;
-        while pos < chars.len() && chars[pos] != '"' {
+        while pos < chars.len() && chars[pos] != quote {
             pos += 1;
         }
         if pos >= chars.len() {
@@ -607,6 +610,27 @@ mod tests {
     #[test]
     fn parse_nth_zero_error() {
         assert!(Selector::parse("button:nth(0)").is_err());
+    }
+
+    #[test]
+    fn parse_attr_single_quote() {
+        let sel = Selector::parse("[name='Submit']").unwrap();
+        assert_eq!(sel.segments[0].simple.filters[0].value, "Submit");
+        assert_eq!(sel.segments[0].simple.filters[0].op, MatchOp::Exact);
+    }
+
+    #[test]
+    fn parse_role_and_attr_single_quote() {
+        let sel = Selector::parse("button[name='Submit']").unwrap();
+        assert_eq!(sel.segments[0].simple.role, Some(Role::Button));
+        assert_eq!(sel.segments[0].simple.filters[0].value, "Submit");
+    }
+
+    #[test]
+    fn parse_contains_single_quote() {
+        let sel = Selector::parse("[name*='addr']").unwrap();
+        assert_eq!(sel.segments[0].simple.filters[0].op, MatchOp::Contains);
+        assert_eq!(sel.segments[0].simple.filters[0].value, "addr");
     }
 
     #[test]
