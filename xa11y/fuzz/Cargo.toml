@@ -10,12 +10,17 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 arbitrary = { version = "1", features = ["derive"] }
-xa11y-core = { path = "../../xa11y-core" }
+xa11y = { path = ".." }
 serde_json = "1"
 
 [[bin]]
 name = "tree_ops"
 path = "fuzz_targets/tree_ops.rs"
+doc = false
+
+[[bin]]
+name = "selector"
+path = "fuzz_targets/selector.rs"
 doc = false
 
 [workspace]

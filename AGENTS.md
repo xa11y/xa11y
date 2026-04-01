@@ -73,7 +73,7 @@ cargo xtask coverage                          # code coverage report
 cargo xtask docs                              # build documentation
 
 # Core fuzz tests (requires nightly)
-cd xa11y-fuzz/fuzz && cargo +nightly fuzz run tree_ops -- -max_total_time=60
+cd xa11y/fuzz && cargo +nightly fuzz run tree_ops -- -max_total_time=60
 ```
 
 ## Project Structure
@@ -90,7 +90,8 @@ cd xa11y-fuzz/fuzz && cargo +nightly fuzz run tree_ops -- -max_total_time=60
 - `test-apps/tauri/` — Tauri test app (Rust + HTML)
 - `tests/` — Python integration test suites (pytest + xa11y-python)
 - `xa11y-python/` — Python bindings via PyO3/maturin (excluded from Cargo workspace)
-- `xa11y-fuzz/` — Fuzz targets for xa11y-core (tree, selector, serde) and macOS platform fuzzer
+- `xa11y/fuzz/` — libFuzzer fuzz targets for the xa11y public API (requires nightly)
+- `xa11y-fuzz/` — Live provider fuzzer (randomised stress test against a running test app)
 - `xtask/` — Development workflow commands (`cargo xtask <command>`)
 - `scripts/` — Shell scripts for integration tests, fuzzing, coverage
 - `docs/` — Documentation site and generation scripts

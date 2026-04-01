@@ -112,6 +112,18 @@ impl Selector {
                 break;
             }
 
+            // parse_combinator returns Root when it finds neither a space nor
+            // '>'. A Root combinator is only valid for the very first segment;
+            // anywhere else it means two selectors are concatenated with no
+            // combinator between them (e.g. "button:nth(1):nth(2)"), which
+            // would produce a segment that panics in find_elements_in_tree.
+            if combinator == Combinator::Root {
+                return Err(Error::InvalidSelector {
+                    selector: input.to_string(),
+                    message: "expected combinator (space or '>') between selectors".to_string(),
+                });
+            }
+
             let (simple, new_pos) = Self::parse_simple(&chars, pos, input)?;
             segments.push(SelectorSegment { combinator, simple });
             pos = new_pos;
@@ -595,5 +607,13 @@ mod tests {
     #[test]
     fn parse_nth_zero_error() {
         assert!(Selector::parse("button:nth(0)").is_err());
+    }
+
+    #[test]
+    fn parse_adjacent_nth_is_error() {
+        // A second :nth() with no combinator between them would previously
+        // parse as Ok but produce a Root-combinator segment in a non-first
+        // position, causing an unreachable!() panic in find_elements_in_tree.
+        assert!(Selector::parse("button:nth(1):nth(2)").is_err());
     }
 }
