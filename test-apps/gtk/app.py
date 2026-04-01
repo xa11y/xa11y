@@ -142,14 +142,12 @@ class TestWindow(Gtk.ApplicationWindow):
         list_group.append(self.list_box)
 
     def _make_group(self, name: str) -> Gtk.Box:
-        frame = Gtk.Frame(label=name)
         inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         inner.set_margin_top(8)
         inner.set_margin_bottom(8)
         inner.set_margin_start(8)
         inner.set_margin_end(8)
-        frame.set_child(inner)
-        return frame
+        return inner
 
     def _on_ok_clicked(self, _btn: Gtk.Button) -> None:
         self.cancel_button.set_sensitive(True)
