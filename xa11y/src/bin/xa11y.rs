@@ -432,3 +432,274 @@ fn extract_flag_value(args: &[String], flag: &str) -> Option<String> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn s(v: &str) -> String {
+        v.to_string()
+    }
+
+    fn strs(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    // ── Argument parsing ────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_opts_app_flag() {
+        let args = strs(&["--app", "Safari"]);
+        let (opts, pos) = parse_opts(&args);
+        assert_eq!(opts.app.as_deref(), Some("Safari"));
+        assert!(opts.pid.is_none());
+        assert!(pos.is_empty());
+    }
+
+    #[test]
+    fn parse_opts_pid_flag() {
+        let args = strs(&["--pid", "1234"]);
+        let (opts, pos) = parse_opts(&args);
+        assert_eq!(opts.pid, Some(1234));
+        assert!(opts.app.is_none());
+        assert!(pos.is_empty());
+    }
+
+    #[test]
+    fn parse_opts_positional_and_flags() {
+        let args = strs(&["button[name='OK']", "--app", "MyApp"]);
+        let (opts, pos) = parse_opts(&args);
+        assert_eq!(opts.app.as_deref(), Some("MyApp"));
+        assert_eq!(pos, vec![s("button[name='OK']")]);
+    }
+
+    #[test]
+    fn parse_opts_multiple_positional() {
+        let args = strs(&["press", "button", "--app", "Test"]);
+        let (opts, pos) = parse_opts(&args);
+        assert_eq!(opts.app.as_deref(), Some("Test"));
+        assert_eq!(pos, vec![s("press"), s("button")]);
+    }
+
+    #[test]
+    fn parse_opts_empty() {
+        let args: Vec<String> = vec![];
+        let (opts, pos) = parse_opts(&args);
+        assert!(opts.app.is_none());
+        assert!(opts.pid.is_none());
+        assert!(pos.is_empty());
+    }
+
+    #[test]
+    fn extract_flag_value_found() {
+        let args = strs(&["--app", "Foo", "--value", "hello"]);
+        assert_eq!(extract_flag_value(&args, "--value"), Some(s("hello")));
+    }
+
+    #[test]
+    fn extract_flag_value_missing() {
+        let args = strs(&["--app", "Foo"]);
+        assert_eq!(extract_flag_value(&args, "--value"), None);
+    }
+
+    #[test]
+    fn extract_flag_value_at_end() {
+        let args = strs(&["--value"]);
+        assert_eq!(extract_flag_value(&args, "--value"), None);
+    }
+
+    // ── Format element ──────────────────────────────────────────────────────
+
+    fn make_element(role: Role, name: Option<&str>) -> ElementData {
+        ElementData {
+            role,
+            name: name.map(String::from),
+            value: None,
+            description: None,
+            bounds: None,
+            actions: vec![],
+            states: StateSet::default(),
+            numeric_value: None,
+            min_value: None,
+            max_value: None,
+            stable_id: None,
+            pid: None,
+            raw: RawPlatformData::Synthetic,
+            handle: 0,
+        }
+    }
+
+    #[test]
+    fn format_element_basic() {
+        let el = make_element(Role::Button, Some("OK"));
+        let out = format_element_oneline(&el);
+        assert!(out.starts_with("button"));
+        assert!(out.contains("\"OK\""));
+        assert!(out.contains("enabled"));
+        assert!(out.contains("visible"));
+    }
+
+    #[test]
+    fn format_element_no_name() {
+        let el = make_element(Role::WebArea, None);
+        let out = format_element_oneline(&el);
+        assert!(out.starts_with("web_area"));
+        assert!(!out.contains('"'));
+    }
+
+    #[test]
+    fn format_element_with_value() {
+        let mut el = make_element(Role::TextField, Some("Search"));
+        el.value = Some("query".into());
+        let out = format_element_oneline(&el);
+        assert!(out.contains("value=\"query\""));
+    }
+
+    #[test]
+    fn format_element_with_bounds() {
+        let mut el = make_element(Role::Button, Some("X"));
+        el.bounds = Some(Rect {
+            x: 10,
+            y: 20,
+            width: 30,
+            height: 40,
+        });
+        let out = format_element_oneline(&el);
+        assert!(out.contains("bounds=(10,20,30,40)"));
+    }
+
+    #[test]
+    fn format_element_disabled() {
+        let mut el = make_element(Role::Button, Some("Cancel"));
+        el.states.enabled = false;
+        let out = format_element_oneline(&el);
+        assert!(out.contains("disabled"));
+        assert!(!out.contains("enabled"));
+    }
+
+    #[test]
+    fn format_element_checked() {
+        let mut el = make_element(Role::CheckBox, Some("Agree"));
+        el.states.checked = Some(Toggled::On);
+        let out = format_element_oneline(&el);
+        assert!(out.contains("checked=on"));
+    }
+
+    #[test]
+    fn format_element_expanded() {
+        let mut el = make_element(Role::TreeItem, Some("Folder"));
+        el.states.expanded = Some(true);
+        let out = format_element_oneline(&el);
+        assert!(out.contains("expanded"));
+    }
+
+    #[test]
+    fn format_element_collapsed() {
+        let mut el = make_element(Role::TreeItem, Some("Folder"));
+        el.states.expanded = Some(false);
+        let out = format_element_oneline(&el);
+        assert!(out.contains("collapsed"));
+    }
+
+    #[test]
+    fn format_element_with_actions() {
+        let mut el = make_element(Role::Button, Some("Go"));
+        el.actions = vec![Action::Press, Action::Focus];
+        let out = format_element_oneline(&el);
+        assert!(out.contains("actions=[press,focus]"));
+    }
+
+    #[test]
+    fn format_element_with_stable_id() {
+        let mut el = make_element(Role::Button, Some("X"));
+        el.stable_id = Some("btn-close".into());
+        let out = format_element_oneline(&el);
+        assert!(out.contains("id=\"btn-close\""));
+    }
+
+    #[test]
+    fn format_element_with_description() {
+        let mut el = make_element(Role::Button, Some("Back"));
+        el.description = Some("Navigate back".into());
+        let out = format_element_oneline(&el);
+        assert!(out.contains("description=\"Navigate back\""));
+    }
+
+    #[test]
+    fn format_element_with_numeric_value() {
+        let mut el = make_element(Role::Slider, Some("Volume"));
+        el.numeric_value = Some(75.0);
+        el.min_value = Some(0.0);
+        el.max_value = Some(100.0);
+        let out = format_element_oneline(&el);
+        assert!(out.contains("numeric_value=75"));
+        assert!(out.contains("min=0"));
+        assert!(out.contains("max=100"));
+    }
+
+    // ── Event formatting ────────────────────────────────────────────────────
+
+    #[test]
+    fn format_event_detail_state_change() {
+        let event = Event {
+            event_type: EventType::StateChanged,
+            app_name: "App".into(),
+            app_pid: 1,
+            target: None,
+            state_flag: Some(StateFlag::Focused),
+            state_value: Some(true),
+            text_change: None,
+            timestamp: std::time::Instant::now(),
+        };
+        let detail = format_event_detail(&event);
+        assert!(detail.contains("Focused=true"));
+    }
+
+    #[test]
+    fn format_event_detail_text_change() {
+        let event = Event {
+            event_type: EventType::TextChanged,
+            app_name: "App".into(),
+            app_pid: 1,
+            target: None,
+            state_flag: None,
+            state_value: None,
+            text_change: Some(TextChangeData {
+                change_type: TextChangeType::Insert,
+                position: Some(5),
+            }),
+            timestamp: std::time::Instant::now(),
+        };
+        let detail = format_event_detail(&event);
+        assert!(detail.contains("Insert"));
+        assert!(detail.contains("@5"));
+    }
+
+    #[test]
+    fn format_event_detail_empty() {
+        let event = Event {
+            event_type: EventType::FocusChanged,
+            app_name: "App".into(),
+            app_pid: 1,
+            target: None,
+            state_flag: None,
+            state_value: None,
+            text_change: None,
+            timestamp: std::time::Instant::now(),
+        };
+        assert!(format_event_detail(&event).is_empty());
+    }
+
+    // ── resolve_app error ───────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_app_no_flags_is_error() {
+        let opts = Opts {
+            app: None,
+            pid: None,
+        };
+        let err = resolve_app(&opts).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("--app") || msg.contains("--pid"));
+    }
+}
