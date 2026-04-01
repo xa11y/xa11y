@@ -30,6 +30,9 @@ pub use xa11y_core::{
 #[doc(hidden)]
 pub use xa11y_core::{CancelHandle, EventReceiver, Provider, Selector};
 
+#[doc(hidden)]
+pub mod cli;
+
 // Re-export the extension trait so `use xa11y::*` enables `App::by_name("Safari")`.
 pub use app_ext::AppExt;
 

@@ -1,140 +1,93 @@
-"""Tests for the xa11y CLI helpers (_cli module)."""
+"""Tests for the xa11y CLI (Rust implementation via _cli_main)."""
 
-from xa11y._cli import _format_element, _parse_opts, _print_tree
+import subprocess
+import sys
 
-# ── Argument parsing ─────────────────────────────────────────────────────────
-
-
-def test_parse_opts_app_flag():
-    opts, pos = _parse_opts(["--app", "Safari"])
-    assert opts["app"] == "Safari"
-    assert opts["pid"] is None
-    assert pos == []
+import pytest
 
 
-def test_parse_opts_pid_flag():
-    opts, pos = _parse_opts(["--pid", "1234"])
-    assert opts["pid"] == "1234"
-    assert opts["app"] is None
-    assert pos == []
+def run_cli(*args: str) -> subprocess.CompletedProcess:
+    """Run the xa11y CLI via the Python entry point."""
+    return subprocess.run(
+        [sys.executable, "-m", "xa11y._cli", *args],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
 
 
-def test_parse_opts_positional_and_flags():
-    opts, pos = _parse_opts(["button[name='OK']", "--app", "MyApp"])
-    assert opts["app"] == "MyApp"
-    assert pos == ["button[name='OK']"]
+# ── Usage / help ─────────────────────────────────────────────────────────────
 
 
-def test_parse_opts_multiple_positional():
-    opts, pos = _parse_opts(["press", "button", "--app", "Test"])
-    assert opts["app"] == "Test"
-    assert pos == ["press", "button"]
+def test_no_args_prints_usage():
+    result = run_cli()
+    assert result.returncode == 0
+    assert "xa11y" in result.stderr
+    assert "apps" in result.stderr
+    assert "tree" in result.stderr
+    assert "find" in result.stderr
+    assert "action" in result.stderr
+    assert "events" in result.stderr
 
 
-def test_parse_opts_empty():
-    opts, pos = _parse_opts([])
-    assert opts["app"] is None
-    assert opts["pid"] is None
-    assert pos == []
+def test_unknown_command_prints_usage():
+    result = run_cli("bogus")
+    assert result.returncode == 0
+    assert "Usage" in result.stderr
 
 
-def test_parse_opts_value_flag():
-    opts, pos = _parse_opts(["--app", "Foo", "--value", "hello"])
-    assert opts["value"] == "hello"
-    assert opts["app"] == "Foo"
-    assert pos == []
+# ── Error cases ──────────────────────────────────────────────────────────────
 
 
-# ── Format element ───────────────────────────────────────────────────────────
+def test_tree_without_app_flag_errors():
+    result = run_cli("tree")
+    assert result.returncode != 0
+    assert "--app" in result.stderr or "--pid" in result.stderr
 
 
-def test_format_element_basic(test_app):
-    app = test_app.element()
-    out = _format_element(app)
-    assert out.startswith("application")
-    assert '"TestApp"' in out
-    assert "enabled" in out
-    assert "visible" in out
+def test_find_without_selector_errors():
+    result = run_cli("find", "--app", "NonexistentApp12345")
+    assert result.returncode != 0
 
 
-def test_format_element_button(test_app):
-    buttons = test_app.descendant("button").elements()
-    out = _format_element(buttons[0])
-    assert out.startswith("button")
-    assert "actions=" in out
+def test_action_missing_args_errors():
+    result = run_cli("action")
+    assert result.returncode != 0
 
 
-def test_format_element_with_value(test_app):
-    search = test_app.descendant("text_field").elements()[0]
-    out = _format_element(search)
-    assert 'value="hello"' in out
-    assert "editable" in out
+def test_action_without_app_errors():
+    result = run_cli("action", "press", "button")
+    assert result.returncode != 0
+    assert "--app" in result.stderr or "--pid" in result.stderr
 
 
-def test_format_element_checked(test_app):
-    cb = test_app.descendant("check_box").elements()[0]
-    out = _format_element(cb)
-    assert "checked=" in out
+# ── Rust CLI module is importable ────────────────────────────────────────────
 
 
-def test_format_element_expanded(test_app):
-    lst = test_app.descendant("list").elements()[0]
-    out = _format_element(lst)
-    assert "expanded" in out
+def test_cli_main_importable():
+    from xa11y._native import _cli_main
+
+    assert callable(_cli_main)
 
 
-def test_format_element_numeric_value(test_app):
-    slider = test_app.descendant("slider").elements()[0]
-    out = _format_element(slider)
-    assert "numeric_value=" in out
-    assert "min=" in out
-    assert "max=" in out
+def test_cli_main_no_args_does_not_crash():
+    """Calling _cli_main with no args should print usage, not crash."""
+    from xa11y._native import _cli_main
+
+    # No args → prints usage to stderr, returns Ok(())
+    _cli_main([])
 
 
-def test_format_element_hidden(test_app):
-    hidden = test_app.descendant("static_text").elements()[0]
-    out = _format_element(hidden)
-    assert "hidden" in out
+def test_cli_main_tree_no_app_raises():
+    """tree without --app should raise an error."""
+    from xa11y._native import _cli_main
+
+    with pytest.raises(Exception, match=r"--app|--pid"):
+        _cli_main(["tree"])
 
 
-def test_format_element_stable_id(test_app):
-    app = test_app.element()
-    out = _format_element(app)
-    assert 'id="app-root"' in out
+def test_cli_main_action_missing_args_raises():
+    from xa11y._native import _cli_main
 
-
-def test_format_element_bounds(test_app):
-    app = test_app.element()
-    out = _format_element(app)
-    assert "bounds=" in out
-
-
-# ── Tree printing ────────────────────────────────────────────────────────────
-
-
-def test_print_tree_no_crash(test_app, capsys):
-    """Printing the full tree should not crash and should produce output."""
-    root = test_app.element()
-    _print_tree(root)
-    captured = capsys.readouterr()
-    assert "application" in captured.out
-    assert "window" in captured.out
-    assert "button" in captured.out
-
-
-def test_print_tree_has_connectors(test_app, capsys):
-    """Tree output should contain tree-drawing characters."""
-    root = test_app.element()
-    _print_tree(root)
-    captured = capsys.readouterr()
-    assert "├── " in captured.out or "└── " in captured.out
-
-
-def test_print_tree_shows_all_children(test_app, capsys):
-    """Tree should include leaf elements deep in the tree."""
-    root = test_app.element()
-    _print_tree(root)
-    captured = capsys.readouterr()
-    # These are deep children in the test tree
-    assert "slider" in captured.out.lower() or "Slider" in captured.out
-    assert "check_box" in captured.out
+    with pytest.raises(Exception, match=r"usage|ACTION"):
+        _cli_main(["action"])
