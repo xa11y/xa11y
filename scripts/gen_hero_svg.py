@@ -126,8 +126,8 @@ TREE = TNode("window", "Slack", "n-window", children=[
         TNode("button", "engineering", "n-eng"),
     ]),
     TNode("group", "Messages", "n-messages", children=[
-        TNode("text", "Hey team, PR is ready", "n-pr"),
-        TNode("text", "LGTM, merging now", "n-lgtm"),
+        TNode("static_text", "Hey team, PR is ready", "n-pr"),
+        TNode("static_text", "LGTM, merging now", "n-lgtm"),
         TNode("text_field", "Message", "n-msgfield"),
         TNode("button", "Send", "n-send"),
     ]),
@@ -149,29 +149,31 @@ class Step:
 
 STEPS = [
     Step("select",
-         'loc = xa11y.locator("Slack", selector=\'button[name="general"]\')',
-         target="n-general"),
-    Step("action", "loc.press()", target="n-general", label="press"),
+         "slack = xa11y.locator('application[name=\"Slack\"]')",
+         target="n-window"),
+    Step("action",
+         "slack.descendant('button[name=\"general\"]').press()",
+         target="n-general", label="press"),
 
     Step("select",
-         'loc = xa11y.locator("Slack", selector=\'text_field[name="Message"]\')',
+         "msg = slack.descendant('text_field[name=\"Message\"]')",
          target="n-msgfield"),
     Step("type_text",
-         'loc.type_text("Looks good, shipping it!")',
+         'msg.type_text("Looks good, shipping it!")',
          target="n-msgfield",
          value_text="Looks good, shipping it!"),
 
     Step("select",
-         'loc = xa11y.locator("Slack", selector=\'button[name="Send"]\')',
+         "send = slack.descendant('button[name=\"Send\"]')",
          target="n-send"),
-    Step("assert_pass", "assert loc.is_enabled()", target="n-send",
-         label="is_enabled() \u2713"),
+    Step("assert_pass", "assert send.exists()", target="n-send",
+         label="exists() \u2713"),
 
     Step("select",
-         'loc = xa11y.locator("Slack", selector=\'text[name*="PR"]\')',
+         "pr = slack.descendant('static_text[name*=\"PR\"]')",
          target="n-pr"),
-    Step("assert_fail", 'assert loc.value() == "wrong text"', target="n-pr",
-         label='value() \u2717'),
+    Step("assert_fail", 'assert pr.element().value == "no"', target="n-pr",
+         label='value \u2717'),
 ]
 
 PAUSE_AFTER_STEP = 0.8
@@ -452,7 +454,7 @@ class SvgBuilder:
             for ci, ct in enumerate(char_times):
                 frac = ct / t_dur if t_dur > 0 else 1.0
                 frac = min(frac, 1.0)
-                w = text_w(code[:ci + 1]) + 2
+                w = text_w(code[:ci + 1]) + CHAR_W
                 key_times.append(f"{frac:.4f}")
                 values.append(f"{w:.1f}")
 
@@ -529,7 +531,7 @@ class SvgBuilder:
             for ci, ct in enumerate(char_times):
                 frac = ct / t_dur if t_dur > 0 else 1.0
                 frac = min(frac, 1.0)
-                cx = CMD_TEXT_X + text_w(code[:ci + 1]) + 1
+                cx = CMD_TEXT_X + text_w(code[:ci + 1]) + CHAR_W
                 key_times.append(f"{frac:.4f}")
                 values.append(f"{cx:.1f}")
 
