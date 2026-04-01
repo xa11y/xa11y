@@ -787,10 +787,21 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let locator_fn_obj = m.getattr("locator_fn")?;
     m.setattr("locator", &locator_fn_obj)?;
 
+    // CLI entry point
+    m.add_function(wrap_pyfunction!(_cli_main, m)?)?;
+
     // Test helpers
     m.add_function(wrap_pyfunction!(_make_test_locator, m)?)?;
 
     Ok(())
+}
+
+/// CLI entry point called from the Python `xa11y` console script.
+///
+/// Runs the Rust CLI implementation with the given args (excluding program name).
+#[pyfunction]
+fn _cli_main(args: Vec<String>) -> PyResult<()> {
+    xa11y::cli::run(&args).map_err(|e| PlatformError::new_err(format!("{e}")))
 }
 
 // ── Test helpers ────────────────────────────────────────────────────────────

@@ -207,6 +207,64 @@ Drop the `Subscription` to stop listening. The subscription is `Send` but not `C
 
 **Event types:** `FocusChanged`, `ValueChanged`, `NameChanged`, `StateChanged`, `StructureChanged`, `WindowOpened`, `WindowClosed`, `WindowActivated`, `WindowDeactivated`, `SelectionChanged`, `MenuOpened`, `MenuClosed`, `TextChanged`, `Alert`.
 
+## CLI
+
+xa11y ships a command-line tool for exploring accessibility trees, finding elements, performing actions, and streaming events. It mirrors the library API and is useful for debugging tests or inspecting an app before writing code.
+
+Install via Rust or Python:
+
+```bash
+cargo install xa11y        # Rust
+pip install xa11y           # Python
+```
+
+### Commands
+
+**List apps:**
+
+```bash
+xa11y apps
+```
+
+**Print a full tree:**
+
+```bash
+xa11y tree --app Calculator
+```
+
+```
+application "Calculator" [enabled visible] bounds=(0,0,400,600)
+├── window "Calculator" [enabled visible] bounds=(0,0,400,600)
+│   ├── group "Display" [enabled visible]
+│   │   └── static_text "Result" value="42" [enabled visible]
+│   └── group "Keypad" [enabled visible]
+│       ├── button "7" [enabled visible focusable] actions=[press,focus]
+│       ├── button "8" [enabled visible focusable] actions=[press,focus]
+│       └── button "+" [enabled visible focusable] actions=[press,focus]
+└── menu_bar [enabled visible]
+```
+
+**Find elements matching a selector:**
+
+```bash
+xa11y find "button" --app Calculator
+```
+
+**Perform an action:**
+
+```bash
+xa11y action press "button[name='7']" --app Calculator
+xa11y action set-value "text_field[name='Search']" --app Safari --value "hello"
+```
+
+**Stream events:**
+
+```bash
+xa11y events --app Calculator
+```
+
+All commands require `--app NAME` or `--pid PID` (except `apps`). The output always shows all element properties.
+
 ## Error handling
 
 All operations return `Result<T>` with a structured `Error` enum:

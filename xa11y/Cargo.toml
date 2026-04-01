@@ -22,6 +22,13 @@ xa11y-windows = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 xa11y-linux = { workspace = true }
 
+[[bin]]
+name = "xa11y"
+path = "src/bin/xa11y.rs"
+
+[dependencies.serde_json]
+workspace = true
+
 [dev-dependencies]
 xa11y = { path = ".", features = ["testing"] }
 serde_json = { workspace = true }
