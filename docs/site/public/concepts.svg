@@ -66,17 +66,17 @@
   <text x="405" y="76" class="label-sm">live handle</text>
 
   <!-- children() / parent() -->
-  <rect x="500" y="42" width="180" height="44" class="box" />
+  <rect x="500" y="42" width="180" height="44" class="box-accent" />
   <text x="590" y="60" class="label-bold">.children() / .parent()</text>
-  <text x="590" y="76" class="label-sm">lazy navigation</text>
+  <text x="590" y="76" class="label-sm">refetches each call</text>
 
   <!-- Read arrows -->
-  <line x1="170" y1="64" x2="208" y2="64" class="arrow" />
-  <line x1="310" y1="64" x2="343" y2="64" class="arrow" />
-  <line x1="465" y1="64" x2="498" y2="64" class="arrow" />
+  <line x1="170" y1="64" x2="208" y2="64" class="arrow-accent" />
+  <line x1="310" y1="64" x2="343" y2="64" class="arrow-accent" />
+  <line x1="465" y1="64" x2="498" y2="64" class="arrow-accent" />
 
   <!-- children()/parent() loops back to Element -->
-  <path d="M 590,86 L 590,110 Q 590,120 580,120 L 415,120 Q 405,120 405,110 L 405,88" class="arrow" />
+  <path d="M 590,86 L 590,110 Q 590,120 580,120 L 415,120 Q 405,120 405,110 L 405,88" class="arrow-accent" />
 
 
   <!-- === ACT LANE === -->
