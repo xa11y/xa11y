@@ -2753,6 +2753,7 @@ dependencies = [
 name = "xa11y-linux"
 version = "0.5.1"
 dependencies = [
+ "rayon",
  "xa11y-core",
  "zbus",
 ]

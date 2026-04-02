@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use rayon::prelude::*;
 use xa11y_core::selector::{AttrName, Combinator, MatchOp, SelectorSegment};
 use xa11y_core::{
     Action, ActionData, CancelHandle, ElementData, Error, Event, EventReceiver, EventType,
@@ -361,6 +362,9 @@ impl LinuxProvider {
     }
 
     /// Build an ElementData from an AccessibleRef, caching the ref for later lookup.
+    ///
+    /// After resolving the role (1-3 sequential D-Bus calls), all remaining
+    /// property fetches are independent and run in parallel via rayon::join.
     fn build_element_data(&self, aref: &AccessibleRef, pid: Option<u32>) -> ElementData {
         let role_name = self.get_role_name(aref).unwrap_or_default();
         let role_num = self.get_role_number(aref).unwrap_or(0);
@@ -373,18 +377,8 @@ impl LinuxProvider {
             let coarse = if by_name != Role::Unknown {
                 by_name
             } else {
-                // role_name is missing or unmapped — try numeric role.
-                // Handles cases where a widget returns a role name string that
-                // our table doesn't recognise (e.g. Qt returning "spinbox"
-                // instead of the canonical "spin button").
                 map_atspi_role_number(role_num)
             };
-            // Refine TextArea → TextField for single-line text widgets.
-            // Both QLineEdit and QTextEdit use the "text" AT-SPI role; the
-            // MULTI_LINE state marks genuinely multi-line widgets. Elements
-            // without MULTI_LINE (including QLineEdit) are mapped to TextField.
-            // Qt's AT-SPI bridge does not reliably set SINGLE_LINE, so we
-            // invert the check: no MULTI_LINE → TextField.
             if coarse == Role::TextArea && !self.is_multi_line(aref) {
                 Role::TextField
             } else {
@@ -392,37 +386,88 @@ impl LinuxProvider {
             }
         };
 
-        let mut name = self.get_name(aref).ok().filter(|s| !s.is_empty());
-        let description = self.get_description(aref).ok().filter(|s| !s.is_empty());
+        // Fetch all independent properties in parallel.
+        // Left tree: (name+value, description)
+        // Right tree: ((states, bounds), (actions, numeric_values))
+        let (
+            ((mut name, value), description),
+            ((states, bounds), (actions, (numeric_value, min_value, max_value))),
+        ) = rayon::join(
+            || {
+                rayon::join(
+                    || {
+                        let name = self.get_name(aref).ok().filter(|s| !s.is_empty());
+                        let value = if role_has_value(role) {
+                            self.get_value(aref)
+                        } else {
+                            None
+                        };
+                        (name, value)
+                    },
+                    || self.get_description(aref).ok().filter(|s| !s.is_empty()),
+                )
+            },
+            || {
+                rayon::join(
+                    || {
+                        rayon::join(
+                            || self.parse_states(aref, role),
+                            || {
+                                if role != Role::Application {
+                                    self.get_extents(aref)
+                                } else {
+                                    None
+                                }
+                            },
+                        )
+                    },
+                    || {
+                        rayon::join(
+                            || {
+                                if role_has_actions(role) {
+                                    self.get_actions(aref)
+                                } else {
+                                    vec![]
+                                }
+                            },
+                            || {
+                                if matches!(
+                                    role,
+                                    Role::Slider
+                                        | Role::ProgressBar
+                                        | Role::ScrollBar
+                                        | Role::SpinButton
+                                ) {
+                                    if let Ok(proxy) = self.make_proxy(
+                                        &aref.bus_name,
+                                        &aref.path,
+                                        "org.a11y.atspi.Value",
+                                    ) {
+                                        (
+                                            proxy.get_property::<f64>("CurrentValue").ok(),
+                                            proxy.get_property::<f64>("MinimumValue").ok(),
+                                            proxy.get_property::<f64>("MaximumValue").ok(),
+                                        )
+                                    } else {
+                                        (None, None, None)
+                                    }
+                                } else {
+                                    (None, None, None)
+                                }
+                            },
+                        )
+                    },
+                )
+            },
+        );
 
-        // Only fetch value/text for roles that have textual content
-        let value = if role_has_value(role) {
-            let v = self.get_value(aref);
-            // For label/static text elements, AT-SPI may put content in the Text
-            // interface (returned as value) rather than the Name property.
-            if name.is_none() && role == Role::StaticText {
-                if let Some(ref v) = v {
-                    name = Some(v.clone());
-                }
+        // For label/static text elements, AT-SPI may put content in the Text
+        // interface (returned as value) rather than the Name property.
+        if name.is_none() && role == Role::StaticText {
+            if let Some(ref v) = value {
+                name = Some(v.clone());
             }
-            v
-        } else {
-            None
-        };
-
-        // Application nodes don't have visual bounds
-        let bounds = if role != Role::Application {
-            self.get_extents(aref)
-        } else {
-            None
-        };
-        let states = self.parse_states(aref, role);
-        // Only probe action interfaces for interactive roles
-        let actions = if role_has_actions(role) {
-            self.get_actions(aref)
-        } else {
-            vec![]
-        };
+        }
 
         let raw = {
             let raw_role = if role_name.is_empty() {
@@ -435,23 +480,6 @@ impl LinuxProvider {
                 bus_name: aref.bus_name.clone(),
                 object_path: aref.path.clone(),
             }
-        };
-
-        let (numeric_value, min_value, max_value) = if matches!(
-            role,
-            Role::Slider | Role::ProgressBar | Role::ScrollBar | Role::SpinButton
-        ) {
-            if let Ok(proxy) = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Value") {
-                (
-                    proxy.get_property::<f64>("CurrentValue").ok(),
-                    proxy.get_property::<f64>("MinimumValue").ok(),
-                    proxy.get_property::<f64>("MaximumValue").ok(),
-                )
-            } else {
-                (None, None, None)
-            }
-        } else {
-            (None, None, None)
         };
 
         let handle = self.cache_element(aref.clone());
@@ -798,25 +826,24 @@ impl LinuxProvider {
     /// DFS collect AccessibleRefs matching a SimpleSelector without building
     /// full ElementData. Only the attributes required by the selector are
     /// fetched for each candidate.
+    ///
+    /// Children at each level are processed in parallel via rayon.
     fn collect_matching_refs(
         &self,
         parent: &AccessibleRef,
         simple: &xa11y_core::selector::SimpleSelector,
         depth: u32,
         max_depth: u32,
-        results: &mut Vec<AccessibleRef>,
         limit: Option<usize>,
-    ) -> Result<()> {
+    ) -> Result<Vec<AccessibleRef>> {
         if depth > max_depth {
-            return Ok(());
-        }
-        if let Some(limit) = limit {
-            if results.len() >= limit {
-                return Ok(());
-            }
+            return Ok(vec![]);
         }
 
         let children = self.get_atspi_children(parent)?;
+
+        // Filter valid children, flattening nested application nodes
+        let mut to_search: Vec<AccessibleRef> = Vec::new();
         for child in children {
             if child.path == "/org/a11y/atspi/null"
                 || child.bus_name.is_empty()
@@ -825,9 +852,6 @@ impl LinuxProvider {
                 continue;
             }
 
-            // Flatten nested application nodes — Qt/PySide6 apps erroneously list
-            // themselves as their own child. Skip the nested application node and
-            // recurse directly into its children instead.
             let child_role = self.get_role_name(&child).unwrap_or_default();
             if child_role == "application" {
                 let grandchildren = self.get_atspi_children(&child).unwrap_or_default();
@@ -842,31 +866,43 @@ impl LinuxProvider {
                     if gc_role == "application" {
                         continue;
                     }
-                    if self.matches_ref(&gc, simple) {
-                        results.push(gc.clone());
-                        if let Some(limit) = limit {
-                            if results.len() >= limit {
-                                return Ok(());
-                            }
-                        }
-                    }
-                    self.collect_matching_refs(&gc, simple, depth + 1, max_depth, results, limit)?;
+                    to_search.push(gc);
                 }
                 continue;
             }
+            to_search.push(child);
+        }
 
-            if self.matches_ref(&child, simple) {
-                results.push(child.clone());
+        // Process each child subtree in parallel: check match + recurse
+        let per_child: Vec<Vec<AccessibleRef>> = to_search
+            .par_iter()
+            .map(|child| {
+                let mut child_results = Vec::new();
+                if self.matches_ref(child, simple) {
+                    child_results.push(child.clone());
+                }
+                if let Ok(sub) =
+                    self.collect_matching_refs(child, simple, depth + 1, max_depth, limit)
+                {
+                    child_results.extend(sub);
+                }
+                child_results
+            })
+            .collect();
+
+        // Merge results, respecting limit
+        let mut results = Vec::new();
+        for batch in per_child {
+            for r in batch {
+                results.push(r);
                 if let Some(limit) = limit {
                     if results.len() >= limit {
-                        return Ok(());
+                        return Ok(results);
                     }
                 }
             }
-
-            self.collect_matching_refs(&child, simple, depth + 1, max_depth, results, limit)?;
         }
-        Ok(())
+        Ok(results)
     }
 }
 
@@ -880,62 +916,73 @@ impl Provider for LinuxProvider {
                     path: "/org/a11y/atspi/accessible/root".to_string(),
                 };
                 let children = self.get_atspi_children(&registry)?;
-                let mut results = Vec::new();
 
-                for child in &children {
-                    if child.path == "/org/a11y/atspi/null" {
-                        continue;
-                    }
-                    let app_name = self.get_name(child).unwrap_or_default();
-                    if app_name.is_empty() {
-                        continue;
-                    }
-                    let pid = self.get_app_pid(child);
-                    let mut data = self.build_element_data(child, pid);
-                    // Override name with the app name (more reliable than AT-SPI Name)
-                    data.name = Some(app_name);
-                    results.push(data);
-                }
+                // Filter valid children first, then build in parallel
+                let valid: Vec<(&AccessibleRef, String)> = children
+                    .iter()
+                    .filter(|c| c.path != "/org/a11y/atspi/null")
+                    .filter_map(|c| {
+                        let name = self.get_name(c).unwrap_or_default();
+                        if name.is_empty() {
+                            None
+                        } else {
+                            Some((c, name))
+                        }
+                    })
+                    .collect();
+
+                let results: Vec<ElementData> = valid
+                    .par_iter()
+                    .map(|(child, app_name)| {
+                        let pid = self.get_app_pid(child);
+                        let mut data = self.build_element_data(child, pid);
+                        data.name = Some(app_name.clone());
+                        data
+                    })
+                    .collect();
 
                 Ok(results)
             }
             Some(element_data) => {
                 let aref = self.get_cached(element_data.handle)?;
                 let children = self.get_atspi_children(&aref).unwrap_or_default();
-                let mut results = Vec::new();
+                let pid = element_data.pid;
 
+                // Pre-filter invalid refs and flatten nested application nodes,
+                // collecting the concrete refs to build in parallel.
+                let mut to_build: Vec<AccessibleRef> = Vec::new();
                 for child_ref in &children {
-                    // Skip invalid refs
                     if child_ref.path == "/org/a11y/atspi/null"
                         || child_ref.bus_name.is_empty()
                         || child_ref.path.is_empty()
                     {
                         continue;
                     }
-                    // Flatten nested application children — application nodes should only
-                    // appear at the top level. Qt/PySide6 apps erroneously list themselves
-                    // as their own child; we skip the duplicate but adopt its real children.
                     let child_role = self.get_role_name(child_ref).unwrap_or_default();
                     if child_role == "application" {
                         let grandchildren = self.get_atspi_children(child_ref).unwrap_or_default();
-                        for gc_ref in &grandchildren {
+                        for gc_ref in grandchildren {
                             if gc_ref.path == "/org/a11y/atspi/null"
                                 || gc_ref.bus_name.is_empty()
                                 || gc_ref.path.is_empty()
                             {
                                 continue;
                             }
-                            let gc_role = self.get_role_name(gc_ref).unwrap_or_default();
+                            let gc_role = self.get_role_name(&gc_ref).unwrap_or_default();
                             if gc_role == "application" {
                                 continue;
                             }
-                            results.push(self.build_element_data(gc_ref, element_data.pid));
+                            to_build.push(gc_ref);
                         }
                         continue;
                     }
-
-                    results.push(self.build_element_data(child_ref, element_data.pid));
+                    to_build.push(child_ref.clone());
                 }
+
+                let results: Vec<ElementData> = to_build
+                    .par_iter()
+                    .map(|r| self.build_element_data(r, pid))
+                    .collect();
 
                 Ok(results)
             }
@@ -985,15 +1032,8 @@ impl Provider for LinuxProvider {
             Some(el) => self.get_cached(el.handle)?,
         };
 
-        let mut matching_refs = Vec::new();
-        self.collect_matching_refs(
-            &start_ref,
-            first,
-            0,
-            phase1_depth,
-            &mut matching_refs,
-            phase1_limit,
-        )?;
+        let mut matching_refs =
+            self.collect_matching_refs(&start_ref, first, 0, phase1_depth, phase1_limit)?;
 
         let pid_from_root = root.and_then(|r| r.pid);
 
@@ -1018,10 +1058,11 @@ impl Provider for LinuxProvider {
                 matching_refs.truncate(limit);
             }
 
+            let is_root_search = root.is_none();
             return Ok(matching_refs
-                .iter()
+                .par_iter()
                 .map(|aref| {
-                    let pid = if root.is_none() {
+                    let pid = if is_root_search {
                         self.get_app_pid(aref)
                             .or_else(|| self.get_dbus_pid(&aref.bus_name))
                     } else {
@@ -1034,10 +1075,11 @@ impl Provider for LinuxProvider {
 
         // Multi-segment: build ElementData for phase 1 matches, then narrow
         // using standard matching on the (small) candidate set.
+        let is_root_search = root.is_none();
         let mut candidates: Vec<ElementData> = matching_refs
-            .iter()
+            .par_iter()
             .map(|aref| {
-                let pid = if root.is_none() {
+                let pid = if is_root_search {
                     self.get_app_pid(aref)
                         .or_else(|| self.get_dbus_pid(&aref.bus_name))
                 } else {
