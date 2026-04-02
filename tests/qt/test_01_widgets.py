@@ -177,38 +177,50 @@ def test_combobox_select_changes_value(qt_app):
     """Selecting a combobox list item via .select() should change the combo value."""
     import xa11y
 
-    combo = qt_app.locator('combo_box[name="Fruit"]')
+    # ComboBox role varies by platform: combo_box on macOS/Windows, may differ on Linux.
+    combo = qt_app.locator('[name="Fruit"]')
     assert combo.exists(), "Fruit combobox not found"
 
-    # Read the initial value
-    initial = combo.element().name
-    assert initial is not None
+    el = combo.element()
+    initial = el.name if el.name != "Fruit" else el.value
+    assert initial is not None, "Could not read initial combobox value"
 
-    # Open the combo popup
-    combo.show_menu()
+    # Open the combo popup — try show_menu first, fall back to press (Windows UIA
+    # doesn't support ShowMenu on combo boxes).
+    try:
+        combo.show_menu()
+    except (xa11y.ActionNotSupportedError, xa11y.XA11yError):
+        combo.expand()
     time.sleep(ACTION_SETTLE)
 
     # Find a different item in the popup and select it.
-    # Qt combobox popup items appear as static_text or table_cell inside table_row.
+    # Qt combobox popup items appear as static_text, list_item, or table_cell
+    # depending on the platform.
     target = "Cherry"
     option = combo.descendant(f'[name="{target}"]')
     if not option.exists():
-        # On some platforms the popup is a separate top-level dialog
-        option = qt_app.locator(f'application').descendant(f'[name="{target}"]')
+        # On some platforms the popup is a top-level element
+        option = qt_app.descendant(f'[name="{target}"]')
     option.select()
     time.sleep(ACTION_SETTLE)
 
     # Verify the combo's accessible name or value changed to reflect the new selection
     updated = combo.element()
-    assert updated.name == target or updated.value == target, (
+    actual = updated.value or updated.name
+    assert target in (updated.name, updated.value), (
         f"Expected combobox to show '{target}' after select, "
         f"got name={updated.name!r} value={updated.value!r}"
     )
 
-    # Restore: select original item back
-    combo.show_menu()
+    # Restore: reopen and select original item back
+    try:
+        combo.show_menu()
+    except (xa11y.ActionNotSupportedError, xa11y.XA11yError):
+        combo.expand()
     time.sleep(ACTION_SETTLE)
     restore = combo.descendant(f'[name="{initial}"]')
+    if not restore.exists():
+        restore = qt_app.descendant(f'[name="{initial}"]')
     if restore.exists():
         restore.select()
         time.sleep(ACTION_SETTLE)
