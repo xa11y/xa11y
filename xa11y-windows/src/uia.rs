@@ -466,8 +466,6 @@ struct ElementPatterns {
     value: Option<IUIAutomationValuePattern>,
     range_value: Option<IUIAutomationRangeValuePattern>,
     selection_item: Option<IUIAutomationSelectionItemPattern>,
-    scroll_item: Option<IUIAutomationScrollItemPattern>,
-    scroll: Option<IUIAutomationScrollPattern>,
 }
 
 impl Provider for WindowsProvider {
