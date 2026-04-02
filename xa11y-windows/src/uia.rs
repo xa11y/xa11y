@@ -34,7 +34,10 @@ fn ensure_com_initialized() -> windows::core::Result<()> {
 /// Windows accessibility provider using UI Automation.
 pub struct WindowsProvider {
     automation: IUIAutomation,
-    /// Cached UIA elements for action dispatch (keyed by handle ID).
+    /// Describes which properties and patterns to pre-fetch in bulk queries.
+    /// Not a cache — each FindAllBuildCache call takes a fresh snapshot.
+    batch_request: IUIAutomationCacheRequest,
+    /// UIA elements retained for action dispatch (keyed by handle ID).
     handle_cache: Mutex<HashMap<u64, IUIAutomationElement>>,
 }
 
@@ -59,8 +62,11 @@ impl WindowsProvider {
             code: e.code().0 as i64,
             message: format!("Failed to create IUIAutomation: {}", e),
         })?;
+        let batch_request = create_batch_request(&automation)?;
+
         Ok(Self {
             automation,
+            batch_request,
             handle_cache: Mutex::new(HashMap::new()),
         })
     }
@@ -123,54 +129,48 @@ impl WindowsProvider {
             })
     }
 
-    /// Query all UIA patterns for an element once, to avoid redundant COM calls.
+    /// Read all UIA patterns from the element's pre-fetched snapshot.
     fn query_patterns(element: &IUIAutomationElement) -> ElementPatterns {
         ElementPatterns {
             invoke: unsafe {
-                element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+                element.GetCachedPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
             }
             .ok(),
             toggle: unsafe {
-                element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
+                element.GetCachedPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
             }
             .ok(),
             expand_collapse: unsafe {
-                element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
+                element.GetCachedPatternAs::<IUIAutomationExpandCollapsePattern>(
                     UIA_ExpandCollapsePatternId,
                 )
             }
             .ok(),
             value: unsafe {
-                element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+                element.GetCachedPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
             }
             .ok(),
             range_value: unsafe {
                 element
-                    .GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId)
+                    .GetCachedPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId)
             }
             .ok(),
             selection_item: unsafe {
-                element.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                element.GetCachedPatternAs::<IUIAutomationSelectionItemPattern>(
                     UIA_SelectionItemPatternId,
                 )
-            }
-            .ok(),
-            scroll_item: unsafe {
-                element
-                    .GetCurrentPatternAs::<IUIAutomationScrollItemPattern>(UIA_ScrollItemPatternId)
-            }
-            .ok(),
-            scroll: unsafe {
-                element.GetCurrentPatternAs::<IUIAutomationScrollPattern>(UIA_ScrollPatternId)
             }
             .ok(),
         }
     }
 
-    /// Build an ElementData from a UIA element, caching the native handle.
-    /// Always reads live (Current*) properties — no stale cached data.
+    /// Build an ElementData from a pre-fetched UIA element snapshot.
+    ///
+    /// The element MUST have been obtained via `FindAllBuildCache` or
+    /// `BuildUpdatedCache` so that Cached* accessors are populated.
+    /// Every query takes a fresh snapshot — callers never see stale data.
     fn build_element_data(&self, element: &IUIAutomationElement, pid: Option<u32>) -> ElementData {
-        let control_type = unsafe { element.CurrentControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
+        let control_type = unsafe { element.CachedControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
         let mut role = map_uia_control_type(control_type);
 
         // Refine role using AriaRole property for elements that UIA maps ambiguously
@@ -179,7 +179,7 @@ impl WindowsProvider {
             role,
             Role::StaticText | Role::Window | Role::Group | Role::Unknown
         ) {
-            if let Some(aria_str) = uia_bstr_property(element, UIA_AriaRolePropertyId) {
+            if let Some(aria_str) = uia_cached_bstr(element, UIA_AriaRolePropertyId) {
                 match aria_str.as_str() {
                     "alert" => role = Role::Alert,
                     "dialog" | "alertdialog" => role = Role::Dialog,
@@ -192,7 +192,7 @@ impl WindowsProvider {
             }
         }
 
-        let name = unsafe { element.CurrentName() }
+        let name = unsafe { element.CachedName() }
             .ok()
             .map(|s| s.to_string())
             .filter(|s| !s.is_empty());
@@ -201,12 +201,12 @@ impl WindowsProvider {
         let value = get_value(role, &patterns);
 
         // Try FullDescription first (AccessKit's description), then HelpText
-        let description = uia_bstr_property(element, UIA_FullDescriptionPropertyId)
-            .or_else(|| uia_bstr_property(element, UIA_HelpTextPropertyId));
+        let description = uia_cached_bstr(element, UIA_FullDescriptionPropertyId)
+            .or_else(|| uia_cached_bstr(element, UIA_HelpTextPropertyId));
 
         let states = parse_states(element, role, &patterns);
 
-        let bounds = unsafe { element.CurrentBoundingRectangle() }
+        let bounds = unsafe { element.CachedBoundingRectangle() }
             .ok()
             .and_then(|r| {
                 let width = (r.right - r.left).max(0) as u32;
@@ -225,12 +225,12 @@ impl WindowsProvider {
 
         let actions = get_actions(element, role, &patterns);
 
-        let automation_id = unsafe { element.CurrentAutomationId() }
+        let automation_id = unsafe { element.CachedAutomationId() }
             .ok()
             .map(|s| s.to_string())
             .filter(|s| !s.is_empty());
 
-        let class_name = unsafe { element.CurrentClassName() }
+        let class_name = unsafe { element.CachedClassName() }
             .ok()
             .map(|s| s.to_string())
             .filter(|s| !s.is_empty());
@@ -247,9 +247,9 @@ impl WindowsProvider {
         ) {
             if let Some(ref pattern) = patterns.range_value {
                 (
-                    unsafe { pattern.CurrentValue() }.ok(),
-                    unsafe { pattern.CurrentMinimum() }.ok(),
-                    unsafe { pattern.CurrentMaximum() }.ok(),
+                    unsafe { pattern.CachedValue() }.ok(),
+                    unsafe { pattern.CachedMinimum() }.ok(),
+                    unsafe { pattern.CachedMaximum() }.ok(),
                 )
             } else {
                 (None, None, None)
@@ -278,12 +278,25 @@ impl WindowsProvider {
         }
     }
 
-    /// Get direct UIA children of an element. Tries FindAll first (works with
-    /// AccessKit fragment roots), falls back to RawViewWalker for native elements.
+    /// Populate a UIA element's snapshot so Cached* accessors work.
+    /// Used for single-element reads (e.g., get_parent) that don't go
+    /// through FindAllBuildCache.
+    fn populate_cache(
+        &self,
+        element: &IUIAutomationElement,
+    ) -> windows::core::Result<IUIAutomationElement> {
+        unsafe { element.BuildUpdatedCache(&self.batch_request) }
+    }
+
+    /// Get direct UIA children of an element with properties pre-fetched.
+    /// Tries FindAllBuildCache first (works with AccessKit fragment roots),
+    /// falls back to RawViewWalker + BuildUpdatedCache for native elements.
     fn uia_children(&self, element: &IUIAutomationElement) -> Vec<IUIAutomationElement> {
-        // Try FindAll(Children) first — works with AccessKit virtual elements
+        // Try FindAllBuildCache(Children) first — works with AccessKit virtual elements
         if let Ok(true_cond) = unsafe { self.automation.CreateTrueCondition() } {
-            if let Ok(arr) = unsafe { element.FindAll(TreeScope_Children, &true_cond) } {
+            if let Ok(arr) = unsafe {
+                element.FindAllBuildCache(TreeScope_Children, &true_cond, &self.batch_request)
+            } {
                 let count = uia_len(&arr);
                 if count > 0 {
                     return (0..count).filter_map(|i| uia_get(&arr, i)).collect();
@@ -296,18 +309,21 @@ impl WindowsProvider {
         if let Ok(walker) = unsafe { self.automation.RawViewWalker() } {
             let mut child = unsafe { walker.GetFirstChildElement(element) }.ok();
             while let Some(ref child_el) = child {
-                children.push(child_el.clone());
+                // Populate snapshot so build_element_data can use Cached* accessors
+                let cached = self.populate_cache(child_el);
+                children.push(cached.as_ref().unwrap_or(child_el).clone());
                 child = unsafe { walker.GetNextSiblingElement(child_el) }.ok();
             }
         }
         children
     }
 
-    /// Fetch the entire subtree of an element in one COM call using
-    /// FindAll(TreeScope_Subtree, TrueCondition).
+    /// Fetch the entire subtree with all properties pre-fetched in one COM call.
     fn find_all_subtree(&self, root: &IUIAutomationElement) -> Result<IUIAutomationElementArray> {
         let true_cond = uia_call(|| unsafe { self.automation.CreateTrueCondition() })?;
-        uia_call(|| unsafe { root.FindAll(TreeScope_Subtree, &true_cond) })
+        uia_call(|| unsafe {
+            root.FindAllBuildCache(TreeScope_Subtree, &true_cond, &self.batch_request)
+        })
     }
 
     /// Narrow phase-1 candidates through subsequent selector segments.
@@ -380,14 +396,56 @@ fn uia_call<T>(f: impl FnOnce() -> windows::core::Result<T>) -> Result<T> {
     })
 }
 
-/// Read a BSTR VARIANT property, returning None if empty or unavailable.
-fn uia_bstr_property(element: &IUIAutomationElement, prop: UIA_PROPERTY_ID) -> Option<String> {
-    unsafe { element.GetCurrentPropertyValue(prop) }
+/// Read a BSTR VARIANT property from the element's pre-fetched snapshot.
+fn uia_cached_bstr(element: &IUIAutomationElement, prop: UIA_PROPERTY_ID) -> Option<String> {
+    unsafe { element.GetCachedPropertyValue(prop) }
         .ok()
         .and_then(|v| windows::core::BSTR::try_from(&v).ok())
         .map(|b| b.to_string())
         .filter(|s| !s.is_empty())
 }
+
+/// Build the batch request that describes which properties and patterns
+/// to pre-fetch. Created once per provider, used on every query.
+fn create_batch_request(automation: &IUIAutomation) -> Result<IUIAutomationCacheRequest> {
+    let request = uia_call(|| unsafe { automation.CreateCacheRequest() })?;
+
+    for prop in BATCH_PROPERTIES {
+        let _ = unsafe { request.AddProperty(*prop) };
+    }
+    for pat in BATCH_PATTERNS {
+        let _ = unsafe { request.AddPattern(*pat) };
+    }
+
+    Ok(request)
+}
+
+/// Properties pre-fetched in every bulk query.
+const BATCH_PROPERTIES: &[UIA_PROPERTY_ID] = &[
+    UIA_ControlTypePropertyId,
+    UIA_AriaRolePropertyId,
+    UIA_NamePropertyId,
+    UIA_FullDescriptionPropertyId,
+    UIA_HelpTextPropertyId,
+    UIA_BoundingRectanglePropertyId,
+    UIA_AutomationIdPropertyId,
+    UIA_ClassNamePropertyId,
+    UIA_ProcessIdPropertyId,
+    UIA_IsEnabledPropertyId,
+    UIA_IsOffscreenPropertyId,
+    UIA_HasKeyboardFocusPropertyId,
+    UIA_IsKeyboardFocusablePropertyId,
+];
+
+/// Patterns pre-fetched in every bulk query.
+const BATCH_PATTERNS: &[UIA_PATTERN_ID] = &[
+    UIA_InvokePatternId,
+    UIA_TogglePatternId,
+    UIA_ExpandCollapsePatternId,
+    UIA_ValuePatternId,
+    UIA_RangeValuePatternId,
+    UIA_SelectionItemPatternId,
+];
 
 /// Safe wrapper for IUIAutomationElementArray::Length.
 fn uia_len(arr: &IUIAutomationElementArray) -> i32 {
@@ -424,7 +482,9 @@ impl Provider for WindowsProvider {
                         &windows::core::VARIANT::from(UIA_WindowControlTypeId.0),
                     )
                 })?;
-                let found = uia_call(|| unsafe { root.FindAll(TreeScope_Children, &condition) })?;
+                let found = uia_call(|| unsafe {
+                    root.FindAllBuildCache(TreeScope_Children, &condition, &self.batch_request)
+                })?;
 
                 let mut results = Vec::new();
                 let mut seen_pids = HashSet::new();
@@ -433,18 +493,22 @@ impl Provider for WindowsProvider {
                     let Some(el) = uia_get(&found, i) else {
                         continue;
                     };
-                    let pid = unsafe { el.CurrentProcessId() }.unwrap_or(0) as u32;
+                    let pid = unsafe { el.CachedProcessId() }.unwrap_or(0) as u32;
                     if pid == 0 || !seen_pids.insert(pid) {
                         continue;
                     }
-                    let name = unsafe { el.CurrentName() }
+                    let name = unsafe { el.CachedName() }
                         .map(|s| s.to_string())
                         .unwrap_or_default();
                     if name.is_empty() {
                         continue;
                     }
-                    // Re-acquire via HWND to activate AccessKit provider
-                    let el = self.reacquire_via_hwnd(&el).unwrap_or(el);
+                    // Re-acquire via HWND to activate AccessKit provider,
+                    // then populate snapshot for build_element_data.
+                    let el = self
+                        .reacquire_via_hwnd(&el)
+                        .and_then(|e| self.populate_cache(&e).map_err(|_| ()))
+                        .unwrap_or(el);
                     let mut data = self.build_element_data(&el, Some(pid));
                     if data.name.is_none() {
                         data.name = Some(name);
@@ -473,9 +537,13 @@ impl Provider for WindowsProvider {
                 // Check if the parent is the desktop root (no further parent)
                 let parent_parent = unsafe { walker.GetParentElement(&parent) };
                 if parent_parent.is_err() {
-                    // Parent is the desktop root — this element is top-level
                     return Ok(None);
                 }
+                // Populate snapshot so build_element_data can read Cached* props
+                let parent = self.populate_cache(&parent).map_err(|e| Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("BuildUpdatedCache failed: {}", e),
+                })?;
                 let data = self.build_element_data(&parent, element.pid);
                 return Ok(Some(data));
             }
@@ -964,7 +1032,7 @@ impl Provider for WindowsProvider {
 
 // ── Helper Functions ─────────────────────────────────────────────────────────
 
-/// Get the value of an element using pre-queried UIA patterns.
+/// Get the value of an element from its pre-fetched pattern snapshot.
 fn get_value(role: Role, patterns: &ElementPatterns) -> Option<String> {
     // For checkboxes/radios, value is handled by state — skip
     if matches!(role, Role::CheckBox | Role::RadioButton) {
@@ -973,14 +1041,14 @@ fn get_value(role: Role, patterns: &ElementPatterns) -> Option<String> {
 
     // Try RangeValuePattern first (sliders, progress bars, spinners)
     if let Some(ref pattern) = patterns.range_value {
-        if let Ok(v) = unsafe { pattern.CurrentValue() } {
+        if let Ok(v) = unsafe { pattern.CachedValue() } {
             return Some(v.to_string());
         }
     }
 
     // Try ValuePattern (text fields, combo boxes)
     if let Some(ref pattern) = patterns.value {
-        if let Ok(v) = unsafe { pattern.CurrentValue() } {
+        if let Ok(v) = unsafe { pattern.CachedValue() } {
             let s = v.to_string();
             if !s.is_empty() {
                 return Some(s);
@@ -1029,7 +1097,7 @@ fn get_actions(
     }
 
     // Focus: most elements can be focused
-    if unsafe { element.CurrentIsKeyboardFocusable() }
+    if unsafe { element.CachedIsKeyboardFocusable() }
         .unwrap_or(BOOL(0))
         .as_bool()
     {
@@ -1053,14 +1121,14 @@ fn parse_states(
     role: Role,
     patterns: &ElementPatterns,
 ) -> StateSet {
-    let enabled = unsafe { element.CurrentIsEnabled() }
+    let enabled = unsafe { element.CachedIsEnabled() }
         .unwrap_or(BOOL(1))
         .as_bool();
-    let offscreen = unsafe { element.CurrentIsOffscreen() }
+    let offscreen = unsafe { element.CachedIsOffscreen() }
         .unwrap_or(BOOL(0))
         .as_bool();
     let visible = !offscreen;
-    let focused = unsafe { element.CurrentHasKeyboardFocus() }
+    let focused = unsafe { element.CachedHasKeyboardFocus() }
         .unwrap_or(BOOL(0))
         .as_bool();
 
@@ -1068,7 +1136,7 @@ fn parse_states(
     let checked = match role {
         Role::CheckBox | Role::RadioButton => {
             if let Some(ref pattern) = patterns.toggle {
-                match unsafe { pattern.CurrentToggleState() } {
+                match unsafe { pattern.CachedToggleState() } {
                     Ok(ToggleState_On) => Some(Toggled::On),
                     Ok(ToggleState_Off) => Some(Toggled::Off),
                     Ok(ToggleState_Indeterminate) => Some(Toggled::Mixed),
@@ -1076,7 +1144,7 @@ fn parse_states(
                 }
             } else if let Some(ref pattern) = patterns.selection_item {
                 // For radio buttons, check SelectionItemPattern
-                if unsafe { pattern.CurrentIsSelected() }
+                if unsafe { pattern.CachedIsSelected() }
                     .unwrap_or(BOOL(0))
                     .as_bool()
                 {
@@ -1093,7 +1161,7 @@ fn parse_states(
 
     // Expanded: from ExpandCollapsePattern
     let expanded = if let Some(ref pattern) = patterns.expand_collapse {
-        match unsafe { pattern.CurrentExpandCollapseState() } {
+        match unsafe { pattern.CachedExpandCollapseState() } {
             Ok(ExpandCollapseState_Expanded) => Some(true),
             Ok(ExpandCollapseState_Collapsed) => Some(false),
             _ => None,
@@ -1104,7 +1172,7 @@ fn parse_states(
 
     // Selected: from SelectionItemPattern
     let selected = if let Some(ref pattern) = patterns.selection_item {
-        unsafe { pattern.CurrentIsSelected() }
+        unsafe { pattern.CachedIsSelected() }
             .unwrap_or(BOOL(0))
             .as_bool()
     } else {
@@ -1114,7 +1182,7 @@ fn parse_states(
     let editable = match role {
         Role::TextField | Role::TextArea => {
             if let Some(ref pattern) = patterns.value {
-                unsafe { pattern.CurrentIsReadOnly() }.unwrap_or(BOOL(1)) == BOOL(0)
+                unsafe { pattern.CachedIsReadOnly() }.unwrap_or(BOOL(1)) == BOOL(0)
             } else {
                 true
             }
@@ -1122,7 +1190,7 @@ fn parse_states(
         _ => false,
     };
 
-    let focusable = unsafe { element.CurrentIsKeyboardFocusable() }.unwrap_or(FALSE) == TRUE;
+    let focusable = unsafe { element.CachedIsKeyboardFocusable() }.unwrap_or(FALSE) == TRUE;
 
     StateSet {
         enabled,
@@ -1211,21 +1279,17 @@ impl WindowsProvider {
                     Err(_) => continue,
                 };
 
-                // Collect all elements by walking children lazily
-                let mut all_elements = Vec::new();
-                let root_data = poll_provider.build_element_data(&root_uia, Some(app_pid));
-                all_elements.push(root_data);
-
-                // BFS to collect subtree
-                let mut queue = vec![root_uia];
-                while let Some(uia) = queue.pop() {
-                    let children = poll_provider.uia_children(&uia);
-                    for child in &children {
-                        let data = poll_provider.build_element_data(child, Some(app_pid));
-                        all_elements.push(data);
-                    }
-                    queue.extend(children);
-                }
+                // Fetch entire subtree with all properties in one COM call
+                let all_elements: Vec<ElementData> =
+                    if let Ok(arr) = poll_provider.find_all_subtree(&root_uia) {
+                        let count = uia_len(&arr);
+                        (0..count)
+                            .filter_map(|i| uia_get(&arr, i))
+                            .map(|el| poll_provider.build_element_data(&el, Some(app_pid)))
+                            .collect()
+                    } else {
+                        continue;
+                    };
 
                 // Detect focus changes
                 let focused_name = all_elements
