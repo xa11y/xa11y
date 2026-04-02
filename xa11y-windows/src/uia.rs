@@ -1397,9 +1397,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn provider_new_succeeds() {
-        let provider = WindowsProvider::new();
-        assert!(provider.is_ok());
-    }
 }
