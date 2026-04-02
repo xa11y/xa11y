@@ -839,7 +839,7 @@ fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
         "AXTextField" | "AXSecureTextField" => Role::TextField,
         "AXTextArea" => Role::TextArea,
         "AXStaticText" => Role::StaticText,
-        "AXComboBox" | "AXPopUpButton" => Role::ComboBox,
+        "AXComboBox" | "AXPopUpButton" | "AXMenuButton" => Role::ComboBox,
         "AXList" => Role::List,
         "AXTable" => Role::Table,
         "AXOutline" => Role::List,
@@ -886,7 +886,9 @@ fn map_ax_action(name: &str) -> Option<Action> {
 #[allow(dead_code)]
 fn xa11y_action_to_ax(action: Action) -> Option<&'static str> {
     match action {
-        Action::Press | Action::Toggle | Action::Select => Some("AXPress"),
+        Action::Press | Action::Toggle => Some("AXPress"),
+        // Select is handled via AXSelected attribute with AXPress fallback
+        Action::Select => None,
         Action::ShowMenu => Some("AXShowMenu"),
         Action::Increment => Some("AXIncrement"),
         Action::Decrement => Some("AXDecrement"),
@@ -1693,7 +1695,7 @@ impl Provider for MacOSProvider {
         let el_ptr = ax.as_ptr();
 
         match action {
-            Action::Press | Action::Toggle | Action::Select => {
+            Action::Press | Action::Toggle => {
                 let ax_action = CFString::new("AXPress");
                 let err = do_perform_action(el_ptr, &ax_action);
                 if err != AX_ERROR_SUCCESS {
@@ -1701,6 +1703,25 @@ impl Provider for MacOSProvider {
                         code: err as i64,
                         message: "AXPress failed".to_string(),
                     });
+                }
+                Ok(())
+            }
+
+            Action::Select => {
+                // Try setting AXSelected attribute first (correct for list/table items).
+                // Fall back to AXPress for elements that don't support AXSelected.
+                let attr = CFString::new("AXSelected");
+                let val = core_foundation::boolean::CFBoolean::true_value();
+                let err = do_set_attribute(el_ptr, &attr, val.as_CFTypeRef());
+                if err != AX_ERROR_SUCCESS {
+                    let press = CFString::new("AXPress");
+                    let err = do_perform_action(el_ptr, &press);
+                    if err != AX_ERROR_SUCCESS {
+                        return Err(Error::Platform {
+                            code: err as i64,
+                            message: "AXSelect failed".to_string(),
+                        });
+                    }
                 }
                 Ok(())
             }
@@ -2235,6 +2256,8 @@ mod tests {
         assert_eq!(map_ax_role("AXColorWell", None), Role::Unknown);
         assert_eq!(map_ax_role("AXValueIndicator", None), Role::Unknown);
         assert_eq!(map_ax_role("TotallyUnknownRole", None), Role::Unknown);
+        // PySide6/Qt exposes QComboBox as AXMenuButton on macOS
+        assert_eq!(map_ax_role("AXMenuButton", None), Role::ComboBox);
     }
 
     #[test]
@@ -2253,7 +2276,8 @@ mod tests {
     fn xa11y_action_to_ax_covers_all_mappings() {
         assert_eq!(xa11y_action_to_ax(Action::Press), Some("AXPress"));
         assert_eq!(xa11y_action_to_ax(Action::Toggle), Some("AXPress"));
-        assert_eq!(xa11y_action_to_ax(Action::Select), Some("AXPress"));
+        // Select is handled via AXSelected attribute, not AXPress action
+        assert_eq!(xa11y_action_to_ax(Action::Select), None);
         assert_eq!(xa11y_action_to_ax(Action::ShowMenu), Some("AXShowMenu"));
         assert_eq!(xa11y_action_to_ax(Action::Increment), Some("AXIncrement"));
         assert_eq!(xa11y_action_to_ax(Action::Decrement), Some("AXDecrement"));

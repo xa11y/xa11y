@@ -173,6 +173,47 @@ def test_combobox_count(qt_app):
     assert qt_app.locator("combo_box").count() >= 1
 
 
+def test_combobox_select_changes_value(qt_app):
+    """Selecting a combobox list item via .select() should change the combo value."""
+    import xa11y
+
+    combo = qt_app.locator('combo_box[name="Fruit"]')
+    assert combo.exists(), "Fruit combobox not found"
+
+    # Read the initial value
+    initial = combo.element().name
+    assert initial is not None
+
+    # Open the combo popup
+    combo.show_menu()
+    time.sleep(ACTION_SETTLE)
+
+    # Find a different item in the popup and select it.
+    # Qt combobox popup items appear as static_text or table_cell inside table_row.
+    target = "Cherry"
+    option = combo.descendant(f'[name="{target}"]')
+    if not option.exists():
+        # On some platforms the popup is a separate top-level dialog
+        option = qt_app.locator(f'application').descendant(f'[name="{target}"]')
+    option.select()
+    time.sleep(ACTION_SETTLE)
+
+    # Verify the combo's accessible name or value changed to reflect the new selection
+    updated = combo.element()
+    assert updated.name == target or updated.value == target, (
+        f"Expected combobox to show '{target}' after select, "
+        f"got name={updated.name!r} value={updated.value!r}"
+    )
+
+    # Restore: select original item back
+    combo.show_menu()
+    time.sleep(ACTION_SETTLE)
+    restore = combo.descendant(f'[name="{initial}"]')
+    if restore.exists():
+        restore.select()
+        time.sleep(ACTION_SETTLE)
+
+
 # ── Slider ──────────────────────────────────────────────────────────────────
 
 
