@@ -27,6 +27,7 @@ def launch_test_app(
     app_names: list[str],
     env_overrides: dict[str, str] | None = None,
     startup_timeout: int = STARTUP_TIMEOUT,
+    content_ready_selector: str | None = None,
 ) -> Generator[xa11y.Element, None, None]:
     """Launch a test app and yield its xa11y Element handle.
 
@@ -35,6 +36,9 @@ def launch_test_app(
         app_names: Names to search for via accessibility API (tried in order).
         env_overrides: Extra environment variables to set for the subprocess.
         startup_timeout: Seconds to wait for the app to appear.
+        content_ready_selector: If set, keep polling until this selector matches
+            within the app element (useful for WebView apps where UI content
+            loads asynchronously after the app window appears).
 
     Yields:
         The xa11y Element for the app's root application node.
@@ -96,6 +100,22 @@ def launch_test_app(
             f"Available apps: {app_list}\n"
             f"stdout: {out}\nstderr: {err}"
         )
+
+    if content_ready_selector is not None:
+        content_deadline = time.monotonic() + startup_timeout
+        while time.monotonic() < content_deadline:
+            try:
+                app.locator(content_ready_selector).element()
+                break
+            except (xa11y.SelectorNotMatchedError, xa11y.PlatformError):
+                time.sleep(0.5)
+        else:
+            proc.terminate()
+            proc.wait(timeout=5)
+            pytest.fail(
+                f"Content not ready: selector {content_ready_selector!r} "
+                f"not found after {startup_timeout}s."
+            )
 
     yield app
 

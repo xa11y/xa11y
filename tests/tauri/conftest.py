@@ -40,4 +40,5 @@ def tauri_app():
     yield from launch_test_app(
         command=[BINARY],
         app_names=APP_NAMES,
+        content_ready_selector='button[name="OK"]',
     )
