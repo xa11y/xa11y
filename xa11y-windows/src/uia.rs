@@ -416,7 +416,7 @@ impl Provider for WindowsProvider {
         let uia_element = self.get_cached(element.handle)?;
 
         match action {
-            Action::Press | Action::Toggle | Action::Select => {
+            Action::Press | Action::Toggle => {
                 // Try InvokePattern first, then TogglePattern, then SelectionItemPattern
                 if let Ok(pattern) = unsafe {
                     uia_element
@@ -446,6 +446,36 @@ impl Provider for WindowsProvider {
                     unsafe { pattern.Select() }.map_err(|e| Error::Platform {
                         code: e.code().0 as i64,
                         message: "Select failed".to_string(),
+                    })?;
+                    return Ok(());
+                }
+                Err(Error::ActionNotSupported {
+                    action,
+                    role: element.role,
+                })
+            }
+
+            Action::Select => {
+                // Try SelectionItemPattern first (correct for list/table items),
+                // then fall back to Invoke/Toggle.
+                if let Ok(pattern) = unsafe {
+                    uia_element.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                        UIA_SelectionItemPatternId,
+                    )
+                } {
+                    unsafe { pattern.Select() }.map_err(|e| Error::Platform {
+                        code: e.code().0 as i64,
+                        message: "Select failed".to_string(),
+                    })?;
+                    return Ok(());
+                }
+                if let Ok(pattern) = unsafe {
+                    uia_element
+                        .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+                } {
+                    unsafe { pattern.Invoke() }.map_err(|e| Error::Platform {
+                        code: e.code().0 as i64,
+                        message: "Invoke failed".to_string(),
                     })?;
                     return Ok(());
                 }
