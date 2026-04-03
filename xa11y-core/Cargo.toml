@@ -6,6 +6,9 @@ license.workspace = true
 repository.workspace = true
 description = "Core types, traits, and selector engine for xa11y cross-platform accessibility"
 
+[features]
+strict-roles = []
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

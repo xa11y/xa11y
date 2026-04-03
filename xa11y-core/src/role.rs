@@ -150,6 +150,17 @@ impl Role {
     }
 }
 
+/// Returns `Role::Unknown` normally, but panics with a descriptive message when
+/// the `strict-roles` feature is enabled. Platform backends call this in their
+/// catch-all mapping arms so that integration tests surface unmapped roles.
+#[inline]
+pub fn unknown_role(context: &str) -> Role {
+    if cfg!(feature = "strict-roles") {
+        panic!("strict-roles: unmapped platform role — {context}");
+    }
+    Role::Unknown
+}
+
 impl std::fmt::Display for Role {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_snake_case())

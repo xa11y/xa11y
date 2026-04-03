@@ -1604,7 +1604,7 @@ fn map_atspi_role(role_name: &str) -> Role {
         "tooltip" | "tool tip" => Role::Tooltip,
         "status bar" | "statusbar" => Role::Status,
         "landmark" | "navigation" => Role::Navigation,
-        _ => Role::Unknown,
+        _ => xa11y_core::unknown_role(role_name),
     }
 }
 
@@ -1673,7 +1673,7 @@ fn map_atspi_role_number(role: u32) -> Role {
         101 => Role::Alert,      // Notification
         116 => Role::StaticText, // Static
         129 => Role::Button,     // PushButtonMenu
-        _ => Role::Unknown,
+        _ => xa11y_core::unknown_role(&format!("AT-SPI role number {role}")),
     }
 }
 

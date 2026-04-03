@@ -23,7 +23,7 @@ echo "=== xa11y macOS integration test harness ==="
 
 # 1. Build everything
 echo "Building workspace..."
-cargo build --workspace 2>&1
+cargo build --workspace --features xa11y/strict-roles 2>&1
 
 # 2. Launch the test application (run binary directly, not via cargo run,
 #    because cargo run changes the process owner name in CGWindowListCopyWindowInfo)
@@ -38,7 +38,7 @@ sleep 2
 # 3. Run integration tests
 echo "Running integration tests..."
 set +e
-cargo test -p xa11y --test integ_test -- --ignored --test-threads=1 2>&1
+cargo test -p xa11y --features strict-roles --test integ_test -- --ignored --test-threads=1 2>&1
 TEST_EXIT=$?
 
 # 4. Run macOS provider AX call count regression tests

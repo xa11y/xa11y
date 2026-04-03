@@ -94,7 +94,7 @@ dbus-send --session --print-reply --dest=org.a11y.Bus /org/a11y/bus \
 
 # 3. Build everything
 echo "Building workspace..."
-cargo build --workspace 2>&1
+cargo build --workspace --features xa11y/strict-roles 2>&1
 
 # Support BUILD_ONLY mode (for pre-warming the build cache)
 if [ "${BUILD_ONLY:-}" = "1" ]; then
@@ -117,9 +117,9 @@ echo "Running integration tests..."
 TEST_FILTER="${TEST_FILTER:-}"
 set +e
 if [ -n "$TEST_FILTER" ]; then
-    cargo test -p xa11y --test integ_test -- --ignored --test-threads=1 $TEST_FILTER 2>&1
+    cargo test -p xa11y --features strict-roles --test integ_test -- --ignored --test-threads=1 $TEST_FILTER 2>&1
 else
-    cargo test -p xa11y --test integ_test -- --ignored --test-threads=1 2>&1
+    cargo test -p xa11y --features strict-roles --test integ_test -- --ignored --test-threads=1 2>&1
 fi
 TEST_EXIT=$?
 set -e

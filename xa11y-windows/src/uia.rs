@@ -1266,7 +1266,7 @@ fn map_uia_control_type(control_type: UIA_CONTROLTYPE_ID) -> Role {
         UIA_ToolTipControlTypeId => Role::Tooltip,
         UIA_CalendarControlTypeId => Role::Group,
         UIA_CustomControlTypeId => Role::Unknown,
-        _ => Role::Unknown,
+        _ => xa11y_core::unknown_role(&format!("UIA control type {}", control_type.0)),
     }
 }
 
