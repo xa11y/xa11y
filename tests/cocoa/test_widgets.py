@@ -208,3 +208,29 @@ def test_list_has_items(cocoa_app: xa11y.Element) -> None:
     # NSTableView (used for list views) is exposed as AXTable, not AXList
     lst = find(cocoa_app, 'table[name="Items"]')
     assert len(lst.children()) >= 1
+
+
+# ── Scroll bar ────────────────────────────────────────────────────────────────
+
+
+def test_scroll_bar_found(cocoa_app: xa11y.Element) -> None:
+    # The main window uses NSScrollView — a scroll_bar should be present.
+    scrollbars = cocoa_app.locator("scroll_bar").elements()
+    assert len(scrollbars) >= 1, "Expected at least one scroll_bar"
+
+
+def test_scroll_thumb_role(cocoa_app: xa11y.Element) -> None:
+    # macOS exposes AXValueIndicator (scroll thumb) as a child of scroll_bar.
+    # It must map to scroll_thumb, not unknown.
+    scrollbars = cocoa_app.locator("scroll_bar").elements()
+    assert scrollbars, "No scroll_bar found — cannot test scroll_thumb"
+    thumbs = [
+        child
+        for sb in scrollbars
+        for child in sb.children()
+        if child.role == "scroll_thumb"
+    ]
+    assert thumbs, (
+        "No scroll_thumb found inside scroll_bar children. "
+        "AXValueIndicator may be mapping to unknown instead of scroll_thumb."
+    )

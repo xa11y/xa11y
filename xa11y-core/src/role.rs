@@ -54,6 +54,8 @@ pub enum Role {
     Status,
     /// Navigation landmark
     Navigation,
+    /// Scroll thumb — the draggable indicator inside a scroll bar
+    ScrollThumb,
 }
 
 impl Role {
@@ -100,6 +102,7 @@ impl Role {
             "tooltip" => Some(Role::Tooltip),
             "status" => Some(Role::Status),
             "navigation" => Some(Role::Navigation),
+            "scroll_thumb" => Some(Role::ScrollThumb),
             _ => None,
         }
     }
@@ -146,6 +149,7 @@ impl Role {
             Role::Tooltip => "tooltip",
             Role::Status => "status",
             Role::Navigation => "navigation",
+            Role::ScrollThumb => "scroll_thumb",
         }
     }
 }
@@ -164,5 +168,75 @@ pub fn unknown_role(context: &str) -> Role {
 impl std::fmt::Display for Role {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_snake_case())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scroll_thumb_roundtrips() {
+        assert_eq!(Role::ScrollThumb.to_snake_case(), "scroll_thumb");
+        assert_eq!(
+            Role::from_snake_case("scroll_thumb"),
+            Some(Role::ScrollThumb)
+        );
+        assert_eq!(format!("{}", Role::ScrollThumb), "scroll_thumb");
+    }
+
+    #[test]
+    fn all_roles_roundtrip() {
+        // Every role must parse back from its own snake_case representation.
+        let roles = [
+            Role::Unknown,
+            Role::Window,
+            Role::Application,
+            Role::Button,
+            Role::CheckBox,
+            Role::RadioButton,
+            Role::TextField,
+            Role::TextArea,
+            Role::StaticText,
+            Role::ComboBox,
+            Role::List,
+            Role::ListItem,
+            Role::Menu,
+            Role::MenuItem,
+            Role::MenuBar,
+            Role::Tab,
+            Role::TabGroup,
+            Role::Table,
+            Role::TableRow,
+            Role::TableCell,
+            Role::Toolbar,
+            Role::ScrollBar,
+            Role::ScrollThumb,
+            Role::Slider,
+            Role::Image,
+            Role::Link,
+            Role::Group,
+            Role::Dialog,
+            Role::Alert,
+            Role::ProgressBar,
+            Role::TreeItem,
+            Role::WebArea,
+            Role::Heading,
+            Role::Separator,
+            Role::SplitGroup,
+            Role::Switch,
+            Role::SpinButton,
+            Role::Tooltip,
+            Role::Status,
+            Role::Navigation,
+        ];
+        for role in roles {
+            let s = role.to_snake_case();
+            assert_eq!(
+                Role::from_snake_case(s),
+                Some(role),
+                "roundtrip failed for {s}"
+            );
+        }
     }
 }

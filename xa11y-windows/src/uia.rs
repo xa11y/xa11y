@@ -1261,7 +1261,7 @@ fn map_uia_control_type(control_type: UIA_CONTROLTYPE_ID) -> Role {
         UIA_SpinnerControlTypeId => Role::SpinButton,
         UIA_SplitButtonControlTypeId => Role::Button,
         UIA_StatusBarControlTypeId => Role::Status,
-        UIA_ThumbControlTypeId => Role::Unknown,
+        UIA_ThumbControlTypeId => Role::ScrollThumb,
         UIA_TitleBarControlTypeId => Role::Group,
         UIA_ToolTipControlTypeId => Role::Tooltip,
         UIA_CalendarControlTypeId => Role::Group,
@@ -1409,6 +1409,10 @@ mod tests {
         assert_eq!(map_uia_control_type(UIA_ImageControlTypeId), Role::Image);
         assert_eq!(map_uia_control_type(UIA_HyperlinkControlTypeId), Role::Link);
         assert_eq!(map_uia_control_type(UIA_GroupControlTypeId), Role::Group);
+        assert_eq!(
+            map_uia_control_type(UIA_ThumbControlTypeId),
+            Role::ScrollThumb
+        );
         assert_eq!(
             map_uia_control_type(UIA_CONTROLTYPE_ID(99999)),
             Role::Unknown
