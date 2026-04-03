@@ -4,6 +4,8 @@ use crate::element::ElementData;
 
 /// Categories of accessibility events, normalized across platforms.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "python", derive(xa11y_macros::PyBindable))]
+#[cfg_attr(feature = "python", py_bind(class_attrs))]
 #[repr(u8)]
 pub enum EventType {
     /// An element gained keyboard focus.

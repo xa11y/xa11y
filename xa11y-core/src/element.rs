@@ -217,6 +217,8 @@ impl Default for StateSet {
 
 /// Tri-state toggle value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "python", derive(xa11y_macros::PyBindable))]
+#[cfg_attr(feature = "python", pyo3::pyclass(frozen, eq, hash))]
 pub enum Toggled {
     Off,
     On,
@@ -228,6 +230,8 @@ pub enum Toggled {
 /// `x`/`y` are signed to support negative multi-monitor coordinates.
 /// `width`/`height` are unsigned (always non-negative).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "python", derive(xa11y_macros::PyBindable))]
+#[cfg_attr(feature = "python", pyo3::pyclass(frozen, eq))]
 pub struct Rect {
     pub x: i32,
     pub y: i32,

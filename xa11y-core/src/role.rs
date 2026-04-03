@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 /// A normalized enum covering UI element types across all platforms.
 /// Derived from ARIA roles, scoped to roles commonly surfaced by real desktop applications.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "python", derive(xa11y_macros::PyBindable))]
+#[cfg_attr(feature = "python", pyo3::pyclass(frozen, eq, hash))]
 #[repr(u8)]
 pub enum Role {
     Unknown,

@@ -1,0 +1,18 @@
+[package]
+name = "xa11y-macros"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Proc macros for generating PyO3 Python bindings from xa11y-core types"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "extra-traits"] }
+
+[dev-dependencies]
+pyo3 = { version = "0.23", features = ["auto-initialize"] }

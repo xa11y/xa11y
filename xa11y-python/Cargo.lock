@@ -1281,9 +1281,11 @@ dependencies = [
 name = "xa11y-core"
 version = "0.5.2"
 dependencies = [
+ "pyo3",
  "serde",
  "serde_json",
  "thiserror",
+ "xa11y-macros",
 ]
 
 [[package]]
@@ -1306,11 +1308,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "xa11y-macros"
+version = "0.5.2"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "xa11y-python"
 version = "0.5.2"
 dependencies = [
  "pyo3",
  "xa11y",
+ "xa11y-core",
 ]
 
 [[package]]

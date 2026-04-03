@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "xa11y-core",
+    "xa11y-macros",
     "xa11y-macos",
     "xa11y-windows",
     "xa11y-linux",

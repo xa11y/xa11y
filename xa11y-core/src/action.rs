@@ -4,6 +4,8 @@ use crate::error::{Error, Result};
 
 /// A normalized enum of interactions that can be performed on accessibility elements.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "python", derive(xa11y_macros::PyBindable))]
+#[cfg_attr(feature = "python", pyo3::pyclass(frozen, eq, hash))]
 #[repr(u8)]
 pub enum Action {
     /// Click / tap / invoke

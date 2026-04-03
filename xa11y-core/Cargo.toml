@@ -6,10 +6,15 @@ license.workspace = true
 repository.workspace = true
 description = "Core types, traits, and selector engine for xa11y cross-platform accessibility"
 
+[features]
+python = ["dep:pyo3", "dep:xa11y-macros"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+pyo3 = { version = "0.23", features = ["abi3-py39"], optional = true }
+xa11y-macros = { path = "../xa11y-macros", version = "0.5.2", optional = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

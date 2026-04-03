@@ -14,6 +14,8 @@ pub use action::{Action, ActionData};
 pub use app::App;
 pub use element::{Element, ElementData, RawPlatformData, Rect, StateSet, Toggled};
 pub use error::{Error, Result};
+#[cfg(feature = "python")]
+pub use event::PyEventType;
 pub use event::{ElementState, Event, EventType, StateFlag, TextChangeData, TextChangeType};
 pub use event_provider::{CancelHandle, EventReceiver, Subscription, SubscriptionIter};
 pub use locator::Locator;
