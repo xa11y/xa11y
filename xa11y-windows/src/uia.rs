@@ -129,34 +129,35 @@ impl WindowsProvider {
             })
     }
 
-    /// Read all UIA patterns from the element's pre-fetched snapshot.
+    /// Query UIA patterns from the element once, sharing across
+    /// `get_value`, `get_actions`, and `parse_states` to avoid duplicate COM calls.
     fn query_patterns(element: &IUIAutomationElement) -> ElementPatterns {
         ElementPatterns {
             invoke: unsafe {
-                element.GetCachedPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+                element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
             }
             .ok(),
             toggle: unsafe {
-                element.GetCachedPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
+                element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
             }
             .ok(),
             expand_collapse: unsafe {
-                element.GetCachedPatternAs::<IUIAutomationExpandCollapsePattern>(
+                element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
                     UIA_ExpandCollapsePatternId,
                 )
             }
             .ok(),
             value: unsafe {
-                element.GetCachedPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+                element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
             }
             .ok(),
             range_value: unsafe {
                 element
-                    .GetCachedPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId)
+                    .GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId)
             }
             .ok(),
             selection_item: unsafe {
-                element.GetCachedPatternAs::<IUIAutomationSelectionItemPattern>(
+                element.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
                     UIA_SelectionItemPatternId,
                 )
             }
@@ -247,9 +248,9 @@ impl WindowsProvider {
         ) {
             if let Some(ref pattern) = patterns.range_value {
                 (
-                    unsafe { pattern.CachedValue() }.ok(),
-                    unsafe { pattern.CachedMinimum() }.ok(),
-                    unsafe { pattern.CachedMaximum() }.ok(),
+                    unsafe { pattern.CurrentValue() }.ok(),
+                    unsafe { pattern.CurrentMinimum() }.ok(),
+                    unsafe { pattern.CurrentMaximum() }.ok(),
                 )
             } else {
                 (None, None, None)
@@ -413,9 +414,6 @@ fn create_batch_request(automation: &IUIAutomation) -> Result<IUIAutomationCache
     for prop in BATCH_PROPERTIES {
         let _ = unsafe { request.AddProperty(*prop) };
     }
-    for pat in BATCH_PATTERNS {
-        let _ = unsafe { request.AddPattern(*pat) };
-    }
 
     Ok(request)
 }
@@ -435,16 +433,6 @@ const BATCH_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     UIA_IsOffscreenPropertyId,
     UIA_HasKeyboardFocusPropertyId,
     UIA_IsKeyboardFocusablePropertyId,
-];
-
-/// Patterns pre-fetched in every bulk query.
-const BATCH_PATTERNS: &[UIA_PATTERN_ID] = &[
-    UIA_InvokePatternId,
-    UIA_TogglePatternId,
-    UIA_ExpandCollapsePatternId,
-    UIA_ValuePatternId,
-    UIA_RangeValuePatternId,
-    UIA_SelectionItemPatternId,
 ];
 
 /// Safe wrapper for IUIAutomationElementArray::Length.
@@ -1069,14 +1057,14 @@ fn get_value(role: Role, patterns: &ElementPatterns) -> Option<String> {
 
     // Try RangeValuePattern first (sliders, progress bars, spinners)
     if let Some(ref pattern) = patterns.range_value {
-        if let Ok(v) = unsafe { pattern.CachedValue() } {
+        if let Ok(v) = unsafe { pattern.CurrentValue() } {
             return Some(v.to_string());
         }
     }
 
     // Try ValuePattern (text fields, combo boxes)
     if let Some(ref pattern) = patterns.value {
-        if let Ok(v) = unsafe { pattern.CachedValue() } {
+        if let Ok(v) = unsafe { pattern.CurrentValue() } {
             let s = v.to_string();
             if !s.is_empty() {
                 return Some(s);
@@ -1164,7 +1152,7 @@ fn parse_states(
     let checked = match role {
         Role::CheckBox | Role::RadioButton => {
             if let Some(ref pattern) = patterns.toggle {
-                match unsafe { pattern.CachedToggleState() } {
+                match unsafe { pattern.CurrentToggleState() } {
                     Ok(ToggleState_On) => Some(Toggled::On),
                     Ok(ToggleState_Off) => Some(Toggled::Off),
                     Ok(ToggleState_Indeterminate) => Some(Toggled::Mixed),
@@ -1172,7 +1160,7 @@ fn parse_states(
                 }
             } else if let Some(ref pattern) = patterns.selection_item {
                 // For radio buttons, check SelectionItemPattern
-                if unsafe { pattern.CachedIsSelected() }
+                if unsafe { pattern.CurrentIsSelected() }
                     .unwrap_or(BOOL(0))
                     .as_bool()
                 {
@@ -1189,7 +1177,7 @@ fn parse_states(
 
     // Expanded: from ExpandCollapsePattern
     let expanded = if let Some(ref pattern) = patterns.expand_collapse {
-        match unsafe { pattern.CachedExpandCollapseState() } {
+        match unsafe { pattern.CurrentExpandCollapseState() } {
             Ok(ExpandCollapseState_Expanded) => Some(true),
             Ok(ExpandCollapseState_Collapsed) => Some(false),
             _ => None,
@@ -1200,7 +1188,7 @@ fn parse_states(
 
     // Selected: from SelectionItemPattern
     let selected = if let Some(ref pattern) = patterns.selection_item {
-        unsafe { pattern.CachedIsSelected() }
+        unsafe { pattern.CurrentIsSelected() }
             .unwrap_or(BOOL(0))
             .as_bool()
     } else {
@@ -1210,7 +1198,7 @@ fn parse_states(
     let editable = match role {
         Role::TextField | Role::TextArea => {
             if let Some(ref pattern) = patterns.value {
-                unsafe { pattern.CachedIsReadOnly() }.unwrap_or(BOOL(1)) == BOOL(0)
+                unsafe { pattern.CurrentIsReadOnly() }.unwrap_or(BOOL(1)) == BOOL(0)
             } else {
                 true
             }
