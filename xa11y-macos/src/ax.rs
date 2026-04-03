@@ -25,6 +25,7 @@ type CFArrayRef = *const c_void;
 type CFIndex = isize;
 
 const AX_ERROR_SUCCESS: i32 = 0;
+const AX_ERROR_ACTION_UNSUPPORTED: i32 = -25206;
 const AX_VALUE_CGPOINT: i32 = 1;
 const AX_VALUE_CGSIZE: i32 = 2;
 const CF_NUMBER_FLOAT64: i32 = 13;
@@ -805,6 +806,20 @@ fn do_perform_action(element: AXUIElementRef, action: &CFString) -> i32 {
 fn do_set_attribute(element: AXUIElementRef, attribute: &CFString, value: CFTypeRef) -> i32 {
     unsafe {
         safe_ax_set_attribute_value(element, attribute.as_concrete_TypeRef() as CFTypeRef, value)
+    }
+}
+
+/// Convert an AX error code from `do_perform_action` into an appropriate
+/// `Error`.  Returns `ActionNotSupported` for -25206 (kAXErrorActionUnsupported)
+/// so callers get a clear, structured error instead of a raw platform code.
+fn action_error(err: i32, action: Action, role: Role, fallback_msg: &str) -> Error {
+    if err == AX_ERROR_ACTION_UNSUPPORTED {
+        Error::ActionNotSupported { action, role }
+    } else {
+        Error::Platform {
+            code: err as i64,
+            message: fallback_msg.to_string(),
+        }
     }
 }
 
@@ -1705,13 +1720,15 @@ impl Provider for MacOSProvider {
 
         match action {
             Action::Press | Action::Toggle => {
+                // Platform limitation: For Electron/web-content apps (VS Code, Chrome),
+                // AXPress fires the JavaScript click handler but the accessibility tree
+                // state (e.g. checked, expanded) may not update. This is an app-side
+                // issue — the AX API call succeeds but the app doesn't reflect the
+                // change in its AX attributes.
                 let ax_action = CFString::new("AXPress");
                 let err = do_perform_action(el_ptr, &ax_action);
                 if err != AX_ERROR_SUCCESS {
-                    return Err(Error::Platform {
-                        code: err as i64,
-                        message: "AXPress failed".to_string(),
-                    });
+                    return Err(action_error(err, action, element.role, "AXPress failed"));
                 }
                 Ok(())
             }
@@ -1719,6 +1736,9 @@ impl Provider for MacOSProvider {
             Action::Select => {
                 // Try setting AXSelected attribute first (correct for list/table items).
                 // Fall back to AXPress for elements that don't support AXSelected.
+                // Usage note: Select targets the selectable item itself (table_cell,
+                // list_item, tree_item), not its text label child (static_text).
+                // Targeting a static_text label will likely fail or have no effect.
                 let attr = CFString::new("AXSelected");
                 let val = core_foundation::boolean::CFBoolean::true_value();
                 let err = do_set_attribute(el_ptr, &attr, val.as_CFTypeRef());
@@ -1726,10 +1746,12 @@ impl Provider for MacOSProvider {
                     let press = CFString::new("AXPress");
                     let err = do_perform_action(el_ptr, &press);
                     if err != AX_ERROR_SUCCESS {
-                        return Err(Error::Platform {
-                            code: err as i64,
-                            message: "AXSelect failed".to_string(),
-                        });
+                        return Err(action_error(
+                            err,
+                            action,
+                            element.role,
+                            "Select failed (AXSelected and AXPress both unsupported)",
+                        ));
                     }
                 }
                 Ok(())
@@ -1748,6 +1770,11 @@ impl Provider for MacOSProvider {
                 Ok(())
             }
 
+            // Platform note: SetValue replaces the element's AXValue attribute.
+            // It does not simulate user interaction — e.g. setting a URL in
+            // Safari's address bar fills the text but does not trigger navigation.
+            // Callers that need to confirm input should follow up with Press on
+            // a submit button or similar.
             Action::SetValue => match data {
                 Some(ActionData::NumericValue(v)) => {
                     let attr = CFString::new("AXValue");
@@ -1781,9 +1808,19 @@ impl Provider for MacOSProvider {
                 let attr = CFString::new("AXExpanded");
                 let val = core_foundation::boolean::CFBoolean::true_value();
                 let err = do_set_attribute(el_ptr, &attr, val.as_CFTypeRef());
-                if err != AX_ERROR_SUCCESS {
-                    let press = CFString::new("AXPress");
-                    let _ = do_perform_action(el_ptr, &press);
+                if err == AX_ERROR_SUCCESS {
+                    return Ok(());
+                }
+                // AXExpanded attribute not supported; try AXPress as fallback
+                // (e.g. disclosure triangles toggle on press).
+                let press = CFString::new("AXPress");
+                let err2 = do_perform_action(el_ptr, &press);
+                if err2 != AX_ERROR_SUCCESS {
+                    return Err(Error::Platform {
+                        code: err as i64,
+                        message: "Expand failed (AXExpanded and AXPress both unsupported)"
+                            .to_string(),
+                    });
                 }
                 Ok(())
             }
@@ -1792,21 +1829,36 @@ impl Provider for MacOSProvider {
                 let attr = CFString::new("AXExpanded");
                 let val = core_foundation::boolean::CFBoolean::false_value();
                 let err = do_set_attribute(el_ptr, &attr, val.as_CFTypeRef());
-                if err != AX_ERROR_SUCCESS {
-                    let press = CFString::new("AXPress");
-                    let _ = do_perform_action(el_ptr, &press);
+                if err == AX_ERROR_SUCCESS {
+                    return Ok(());
+                }
+                // AXExpanded attribute not supported; try AXPress as fallback.
+                let press = CFString::new("AXPress");
+                let err2 = do_perform_action(el_ptr, &press);
+                if err2 != AX_ERROR_SUCCESS {
+                    return Err(Error::Platform {
+                        code: err as i64,
+                        message: "Collapse failed (AXExpanded and AXPress both unsupported)"
+                            .to_string(),
+                    });
                 }
                 Ok(())
             }
 
             Action::Increment => {
+                // Platform note: Some macOS elements report AXIncrement in their
+                // action list but don't actually respond to it (e.g. Calculator's
+                // Mode button). The API call succeeds or returns an error, but
+                // the element state doesn't change. This is app-specific behavior.
                 let ax_action = CFString::new("AXIncrement");
                 let err = do_perform_action(el_ptr, &ax_action);
                 if err != AX_ERROR_SUCCESS {
-                    return Err(Error::Platform {
-                        code: err as i64,
-                        message: "AXIncrement failed".to_string(),
-                    });
+                    return Err(action_error(
+                        err,
+                        action,
+                        element.role,
+                        "AXIncrement failed",
+                    ));
                 }
                 Ok(())
             }
@@ -1815,22 +1867,27 @@ impl Provider for MacOSProvider {
                 let ax_action = CFString::new("AXDecrement");
                 let err = do_perform_action(el_ptr, &ax_action);
                 if err != AX_ERROR_SUCCESS {
-                    return Err(Error::Platform {
-                        code: err as i64,
-                        message: "AXDecrement failed".to_string(),
-                    });
+                    return Err(action_error(
+                        err,
+                        action,
+                        element.role,
+                        "AXDecrement failed",
+                    ));
                 }
                 Ok(())
             }
 
             Action::ShowMenu => {
+                // Platform limitation: AXShowMenu triggers the context menu, but the
+                // resulting menu may not appear as a child of the target element.
+                // On macOS, context menus are often separate AX elements at the
+                // application level (look for role=Menu children of the app root).
+                // Some apps (e.g. Finder) may place menus in the system-wide AX
+                // hierarchy rather than the app's own tree.
                 let ax_action = CFString::new("AXShowMenu");
                 let err = do_perform_action(el_ptr, &ax_action);
                 if err != AX_ERROR_SUCCESS {
-                    return Err(Error::Platform {
-                        code: err as i64,
-                        message: "AXShowMenu failed".to_string(),
-                    });
+                    return Err(action_error(err, action, element.role, "AXShowMenu failed"));
                 }
                 Ok(())
             }
@@ -1913,6 +1970,13 @@ impl Provider for MacOSProvider {
             }
 
             Action::TypeText => {
+                // Platform limitation: TypeText uses AXSelectedText which replaces the
+                // current text selection (or inserts at cursor if nothing is selected).
+                // Some apps (notably Electron-based apps like VS Code, and some terminal
+                // emulators) accept the API call without error but do not actually
+                // insert the text. Use SetValue instead for apps that don't respond to
+                // AXSelectedText — SetValue replaces the entire field value and is more
+                // widely supported.
                 let text = match data {
                     Some(ActionData::Value(text)) => text,
                     _ => {

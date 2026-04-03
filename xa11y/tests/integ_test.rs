@@ -1234,6 +1234,60 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore]
+    fn error_press_on_non_interactive_element() {
+        // Pressing a static_text or other non-interactive element should fail.
+        // On macOS this returns ActionNotSupported; on Linux it returns Platform.
+        let app = h::app_root();
+        let labels = app.locator("static_text").elements().unwrap_or_default();
+        if let Some(label) = labels
+            .into_iter()
+            .find(|e| !e.data().actions.contains(&Action::Press))
+        {
+            let result = h::try_act(&label, Action::Press);
+            assert!(
+                result.is_err(),
+                "Press on static_text should fail: {:?}",
+                result
+            );
+            #[cfg(target_os = "macos")]
+            assert!(
+                matches!(result, Err(Error::ActionNotSupported { .. })),
+                "Expected ActionNotSupported on macOS, got: {:?}",
+                result
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn error_expand_on_non_expandable_element() {
+        // Expanding a button (not expandable) should return an error,
+        // not silently succeed.
+        let app = h::app_root();
+        let button = h::named(&app, "Submit");
+        let result = h::try_act(&button, Action::Expand);
+        assert!(
+            result.is_err(),
+            "Expand on a non-expandable button should fail, not silently succeed"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn error_collapse_on_non_expandable_element() {
+        // Collapsing a button (not expandable) should return an error,
+        // not silently succeed.
+        let app = h::app_root();
+        let button = h::named(&app, "Submit");
+        let result = h::try_act(&button, Action::Collapse);
+        assert!(
+            result.is_err(),
+            "Collapse on a non-expandable button should fail, not silently succeed"
+        );
+    }
+
     // ════════════════════════════════════════════════════════════════
     // Serialization (1 test)
     // ════════════════════════════════════════════════════════════════
