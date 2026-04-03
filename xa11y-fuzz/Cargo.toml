@@ -1,6 +1,6 @@
 [package]
 name = "xa11y-fuzz"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2021"
 publish = false
 
