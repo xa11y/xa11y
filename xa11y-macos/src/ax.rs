@@ -839,7 +839,11 @@ fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
         "AXTextField" | "AXSecureTextField" => Role::TextField,
         "AXTextArea" => Role::TextArea,
         "AXStaticText" => Role::StaticText,
-        "AXComboBox" | "AXPopUpButton" | "AXMenuButton" => Role::ComboBox,
+        "AXComboBox" | "AXPopUpButton" => Role::ComboBox,
+        "AXMenuButton" => match subrole {
+            Some("AXSegment") => Role::Button,
+            _ => Role::ComboBox,
+        },
         "AXList" => Role::List,
         "AXTable" => Role::Table,
         "AXOutline" => Role::List,
@@ -854,7 +858,9 @@ fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
         "AXSlider" => Role::Slider,
         "AXImage" => Role::Image,
         "AXLink" => Role::Link,
-        "AXGroup" | "AXScrollArea" | "AXLayoutArea" | "AXRadioGroup" => Role::Group,
+        "AXGroup" | "AXScrollArea" | "AXLayoutArea" | "AXRadioGroup" | "AXBrowser" | "AXColumn" => {
+            Role::Group
+        }
         "AXDialog" => Role::Dialog,
         "AXProgressIndicator" | "AXBusyIndicator" | "AXLevelIndicator" => Role::ProgressBar,
         "AXDisclosureTriangle" => Role::TreeItem,
@@ -865,8 +871,10 @@ fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
         "AXIncrementor" => Role::SpinButton,
         "AXToolTip" => Role::Tooltip,
         "AXStatusBar" => Role::Status,
-        "AXColorWell" | "AXValueIndicator" | "AXGrid" | "AXRuler" | "AXGrowArea" | "AXMatte"
-        | "AXDockItem" | "AXBrowser" => Role::Unknown,
+        "AXValueIndicator" => Role::ScrollThumb,
+        "AXColorWell" | "AXGrid" | "AXRuler" | "AXGrowArea" | "AXMatte" | "AXDockItem" => {
+            Role::Unknown
+        }
         _ => xa11y_core::unknown_role(role),
     }
 }
@@ -2254,10 +2262,16 @@ mod tests {
         assert_eq!(map_ax_role("AXWebArea", None), Role::WebArea);
         assert_eq!(map_ax_role("AXIncrementor", None), Role::SpinButton);
         assert_eq!(map_ax_role("AXColorWell", None), Role::Unknown);
-        assert_eq!(map_ax_role("AXValueIndicator", None), Role::Unknown);
         assert_eq!(map_ax_role("TotallyUnknownRole", None), Role::Unknown);
         // PySide6/Qt exposes QComboBox as AXMenuButton on macOS
         assert_eq!(map_ax_role("AXMenuButton", None), Role::ComboBox);
+        // AXBrowser (Finder column view) and AXColumn (table columns) map to Group
+        assert_eq!(map_ax_role("AXBrowser", None), Role::Group);
+        assert_eq!(map_ax_role("AXColumn", None), Role::Group);
+        // AXValueIndicator is the scroll thumb inside a scroll bar
+        assert_eq!(map_ax_role("AXValueIndicator", None), Role::ScrollThumb);
+        // AXMenuButton with AXSegment subrole is a segmented control button
+        assert_eq!(map_ax_role("AXMenuButton", Some("AXSegment")), Role::Button);
     }
 
     #[test]

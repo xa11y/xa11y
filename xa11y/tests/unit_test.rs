@@ -400,6 +400,7 @@ fn role_snake_case_roundtrip() {
         Role::TableRow,
         Role::TableCell,
         Role::ScrollBar,
+        Role::ScrollThumb,
         Role::ProgressBar,
         Role::TreeItem,
         Role::WebArea,
