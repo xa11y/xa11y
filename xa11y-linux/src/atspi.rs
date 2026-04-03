@@ -1719,7 +1719,7 @@ mod tests {
         // GTK4's Gtk.Switch and Gtk.ToggleButton both report numeric role 62.
         assert_eq!(map_atspi_role_number(62), Role::Switch);
         // Sanity-check a few well-established numeric mappings.
-        assert_eq!(map_atspi_role_number(43), Role::Button);  // PushButton
+        assert_eq!(map_atspi_role_number(43), Role::Button); // PushButton
         assert_eq!(map_atspi_role_number(7), Role::CheckBox);
         assert_eq!(map_atspi_role_number(67), Role::Unknown); // AT-SPI Unknown
     }
