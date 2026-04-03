@@ -867,7 +867,7 @@ fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
         "AXStatusBar" => Role::Status,
         "AXColorWell" | "AXValueIndicator" | "AXGrid" | "AXRuler" | "AXGrowArea" | "AXMatte"
         | "AXDockItem" | "AXBrowser" => Role::Unknown,
-        _ => Role::Unknown,
+        _ => xa11y_core::unknown_role(role),
     }
 }
 

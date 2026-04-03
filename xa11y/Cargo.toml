@@ -9,6 +9,7 @@ readme = "README.md"
 
 [features]
 testing = []
+strict-roles = ["xa11y-core/strict-roles"]
 
 [dependencies]
 xa11y-core = { workspace = true }
