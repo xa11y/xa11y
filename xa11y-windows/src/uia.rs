@@ -1396,5 +1396,4 @@ mod tests {
             Role::Unknown
         );
     }
-
 }
