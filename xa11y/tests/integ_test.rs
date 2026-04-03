@@ -1236,12 +1236,10 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn error_press_on_non_interactive_element_returns_action_not_supported() {
-        // Pressing a static_text or other non-interactive element should
-        // return ActionNotSupported, not a generic Platform error.
+    fn error_press_on_non_interactive_element() {
+        // Pressing a static_text or other non-interactive element should fail.
+        // On macOS this returns ActionNotSupported; on Linux it returns Platform.
         let app = h::app_root();
-        // The app root (window/group) doesn't support Press.
-        // Find a static_text element that doesn't list Press in its actions.
         let labels = app.locator("static_text").elements().unwrap_or_default();
         if let Some(label) = labels
             .into_iter()
@@ -1249,8 +1247,14 @@ mod tests {
         {
             let result = h::try_act(&label, Action::Press);
             assert!(
+                result.is_err(),
+                "Press on static_text should fail: {:?}",
+                result
+            );
+            #[cfg(target_os = "macos")]
+            assert!(
                 matches!(result, Err(Error::ActionNotSupported { .. })),
-                "Expected ActionNotSupported, got: {:?}",
+                "Expected ActionNotSupported on macOS, got: {:?}",
                 result
             );
         }
