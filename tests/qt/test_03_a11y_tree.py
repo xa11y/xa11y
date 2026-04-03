@@ -245,7 +245,7 @@ def test_tree_roles_are_all_valid(qt_app):
         "radio_button", "text_field", "text_area", "static_text",
         "combo_box", "list", "list_item", "menu", "menu_item",
         "menu_bar", "tab", "tab_group", "table", "table_row",
-        "table_cell", "toolbar", "scroll_bar", "slider", "image",
+        "table_cell", "toolbar", "scroll_bar", "scroll_thumb", "slider", "image",
         "link", "group", "dialog", "alert", "progress_bar",
         "tree_item", "web_area", "heading", "separator", "split_group",
         "switch", "spin_button", "tooltip", "status", "navigation",
