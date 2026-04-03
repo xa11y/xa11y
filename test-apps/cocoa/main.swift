@@ -49,7 +49,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         scroll.hasVerticalScroller = true
         scroll.autoresizingMask = [.width, .height]
 
-        let docView = NSView(frame: NSRect(x: 0, y: 0, width: 680, height: 1200))
+        let docView = NSView(frame: NSRect(x: 0, y: 0, width: 680, height: 1320))
         scroll.documentView = docView
         window.contentView = scroll
 
@@ -233,6 +233,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         listTable.dataSource = self
         tableScroll.documentView = listTable
         listBox.addSubview(tableScroll)
+
+        // ── Grid (NSGridView → AXGrid → table role) ──────────────────────
+        let gridBox = NSBox(frame: NSRect(x: 12, y: y - 120, width: 656, height: 120))
+        gridBox.title = "Grid"
+        docView.addSubview(gridBox)
+        y -= 130
+
+        let nameLabel = NSTextField(frame: .zero)
+        nameLabel.stringValue = "Name"
+        nameLabel.isEditable = false
+        nameLabel.isBordered = false
+        nameLabel.backgroundColor = .clear
+
+        let valueLabel = NSTextField(frame: .zero)
+        valueLabel.stringValue = "Value"
+        valueLabel.isEditable = false
+        valueLabel.isBordered = false
+        valueLabel.backgroundColor = .clear
+
+        let gridView = NSGridView(views: [[nameLabel, valueLabel]])
+        gridView.setAccessibilityLabel("Settings Grid")
+        gridView.frame = NSRect(x: 16, y: 20, width: 300, height: 60)
+        gridBox.addSubview(gridView)
 
         window.center()
         window.makeKeyAndOrderFront(nil)

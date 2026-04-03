@@ -872,9 +872,10 @@ fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
         "AXToolTip" => Role::Tooltip,
         "AXStatusBar" => Role::Status,
         "AXValueIndicator" => Role::ScrollThumb,
-        "AXColorWell" | "AXGrid" | "AXRuler" | "AXGrowArea" | "AXMatte" | "AXDockItem" => {
-            Role::Unknown
-        }
+        "AXGrid" => Role::Table,
+        "AXDockItem" => Role::Button,
+        "AXGrowArea" => Role::ScrollThumb,
+        "AXColorWell" | "AXRuler" | "AXMatte" => Role::Unknown,
         _ => xa11y_core::unknown_role(role),
     }
 }
@@ -2262,6 +2263,12 @@ mod tests {
         assert_eq!(map_ax_role("AXWebArea", None), Role::WebArea);
         assert_eq!(map_ax_role("AXIncrementor", None), Role::SpinButton);
         assert_eq!(map_ax_role("AXColorWell", None), Role::Unknown);
+        // AXGrid (NSGridView) maps to Table — it is a 2-D grid of cells
+        assert_eq!(map_ax_role("AXGrid", None), Role::Table);
+        // AXDockItem (macOS Dock icon) maps to Button — it is activatable
+        assert_eq!(map_ax_role("AXDockItem", None), Role::Button);
+        // AXGrowArea (window resize grip) maps to ScrollThumb — it is a draggable handle
+        assert_eq!(map_ax_role("AXGrowArea", None), Role::ScrollThumb);
         assert_eq!(map_ax_role("TotallyUnknownRole", None), Role::Unknown);
         // PySide6/Qt exposes QComboBox as AXMenuButton on macOS
         assert_eq!(map_ax_role("AXMenuButton", None), Role::ComboBox);

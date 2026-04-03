@@ -125,6 +125,16 @@ class TestWindow(Gtk.ApplicationWindow):
         self.text_view.get_buffer().set_text("Line 1\nLine 2\nLine 3")
         text_group.append(self.text_view)
 
+        # ── Switch ───────────────────────────────────────────────────
+        switch_group = self._make_group("Switch")
+        box.append(switch_group)
+
+        # Gtk.Switch exposes AT-SPI role "toggle button" (62) → xa11y switch role.
+        self.dark_mode_switch = Gtk.Switch()
+        self.dark_mode_switch.set_active(False)
+        self.dark_mode_switch.set_tooltip_text("Dark mode")
+        switch_group.append(self.dark_mode_switch)
+
         # ── List ─────────────────────────────────────────────────────
         list_group = self._make_group("List")
         box.append(list_group)

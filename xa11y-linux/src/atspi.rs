@@ -1568,6 +1568,7 @@ fn map_atspi_role(role_name: &str) -> Role {
         "dialog" | "file chooser" => Role::Dialog,
         "alert" | "notification" => Role::Alert,
         "push button" | "push button menu" => Role::Button,
+        "toggle button" => Role::Switch,
         "check box" | "check menu item" => Role::CheckBox,
         "radio button" | "radio menu item" => Role::RadioButton,
         "entry" | "password text" => Role::TextField,
@@ -1647,7 +1648,7 @@ fn map_atspi_role_number(role: u32) -> Role {
         57 => Role::TableCell,   // TableColumnHeader
         58 => Role::TableCell,   // TableRowHeader
         61 => Role::TextArea,    // Text
-        62 => Role::Button,      // ToggleButton
+        62 => Role::Switch,      // ToggleButton
         63 => Role::Toolbar,     // ToolBar
         65 => Role::Group,       // Tree
         66 => Role::Table,       // TreeTable
@@ -1699,6 +1700,7 @@ mod tests {
     #[test]
     fn test_role_mapping() {
         assert_eq!(map_atspi_role("push button"), Role::Button);
+        assert_eq!(map_atspi_role("toggle button"), Role::Switch);
         assert_eq!(map_atspi_role("check box"), Role::CheckBox);
         assert_eq!(map_atspi_role("entry"), Role::TextField);
         assert_eq!(map_atspi_role("label"), Role::StaticText);
@@ -1709,6 +1711,17 @@ mod tests {
         assert_eq!(map_atspi_role("slider"), Role::Slider);
         assert_eq!(map_atspi_role("panel"), Role::Group);
         assert_eq!(map_atspi_role("unknown_thing"), Role::Unknown);
+    }
+
+    #[test]
+    fn test_numeric_role_mapping() {
+        // ToggleButton (62) must map to Switch, not Button.
+        // GTK4's Gtk.Switch and Gtk.ToggleButton both report numeric role 62.
+        assert_eq!(map_atspi_role_number(62), Role::Switch);
+        // Sanity-check a few well-established numeric mappings.
+        assert_eq!(map_atspi_role_number(43), Role::Button);  // PushButton
+        assert_eq!(map_atspi_role_number(7), Role::CheckBox);
+        assert_eq!(map_atspi_role_number(67), Role::Unknown); // AT-SPI Unknown
     }
 
     #[test]

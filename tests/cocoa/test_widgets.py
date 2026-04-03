@@ -219,6 +219,12 @@ def test_scroll_bar_found(cocoa_app: xa11y.Element) -> None:
     assert len(scrollbars) >= 1, "Expected at least one scroll_bar"
 
 
+def test_grid_has_table_role(cocoa_app: xa11y.Element) -> None:
+    # NSGridView exposes as AXGrid, which must map to 'table', not 'unknown'.
+    grid = find(cocoa_app, 'table[name="Settings Grid"]')
+    assert grid.role == "table"
+
+
 def test_scroll_thumb_role(cocoa_app: xa11y.Element) -> None:
     # macOS exposes AXValueIndicator (scroll thumb) as a child of scroll_bar.
     # It must map to scroll_thumb, not unknown.

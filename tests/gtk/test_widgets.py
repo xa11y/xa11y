@@ -217,6 +217,12 @@ def test_label_found(gtk_app: xa11y.Element) -> None:
 # ── List ──────────────────────────────────────────────────────────────────────
 
 
+def test_switch_role(gtk_app: xa11y.Element) -> None:
+    # Gtk.Switch exposes AT-SPI role "toggle button" (62) → must map to 'switch'.
+    sw = find(gtk_app, "switch")
+    assert sw.role == "switch"
+
+
 def test_list_found(gtk_app: xa11y.Element) -> None:
     lst = find(gtk_app, "list")
     assert lst.role == "list"
