@@ -907,21 +907,31 @@ fn map_ax_action(name: &str) -> Option<Action> {
     }
 }
 
-#[allow(dead_code)]
+/// Map xa11y Action to its canonical macOS AX action name.
+///
+/// Returns the single canonical name that round-trips through [`map_ax_action`].
+/// Actions handled via AX attributes (Focus, SetValue, Expand, Collapse,
+/// Select, Toggle) or other interfaces return `None`.
 fn xa11y_action_to_ax(action: Action) -> Option<&'static str> {
     match action {
-        Action::Press | Action::Toggle => Some("AXPress"),
-        // Select is handled via AXSelected attribute with AXPress fallback
-        Action::Select => None,
+        Action::Press => Some("AXPress"),
         Action::ShowMenu => Some("AXShowMenu"),
         Action::Increment => Some("AXIncrement"),
         Action::Decrement => Some("AXDecrement"),
-        Action::ScrollDown
+        // Toggle, Select, Focus, SetValue, Expand, Collapse are handled via
+        // AX attributes in perform_action, not the AX Action interface.
+        Action::Toggle
+        | Action::Select
+        | Action::Focus
+        | Action::SetValue
+        | Action::Expand
+        | Action::Collapse
+        | Action::ScrollIntoView
+        | Action::ScrollDown
         | Action::ScrollRight
         | Action::Blur
         | Action::SetTextSelection
         | Action::TypeText => None,
-        _ => None,
     }
 }
 
@@ -2360,7 +2370,8 @@ mod tests {
     #[test]
     fn xa11y_action_to_ax_covers_all_mappings() {
         assert_eq!(xa11y_action_to_ax(Action::Press), Some("AXPress"));
-        assert_eq!(xa11y_action_to_ax(Action::Toggle), Some("AXPress"));
+        // Toggle is attribute-based on macOS (no distinct AX action)
+        assert_eq!(xa11y_action_to_ax(Action::Toggle), None);
         // Select is handled via AXSelected attribute, not AXPress action
         assert_eq!(xa11y_action_to_ax(Action::Select), None);
         assert_eq!(xa11y_action_to_ax(Action::ShowMenu), Some("AXShowMenu"));
@@ -2371,6 +2382,60 @@ mod tests {
         assert_eq!(xa11y_action_to_ax(Action::Expand), None);
         assert_eq!(xa11y_action_to_ax(Action::Collapse), None);
         assert_eq!(xa11y_action_to_ax(Action::ScrollIntoView), None);
+    }
+
+    /// Every xa11y Action with a canonical AX name must round-trip:
+    /// xa11y → AX → xa11y produces the same Action.
+    #[test]
+    fn test_action_roundtrip_xa11y_to_ax() {
+        let actions_with_mapping = [
+            Action::Press,
+            Action::ShowMenu,
+            Action::Increment,
+            Action::Decrement,
+        ];
+        for action in actions_with_mapping {
+            let ax_name = xa11y_action_to_ax(action)
+                .unwrap_or_else(|| panic!("{:?} should have a canonical AX name", action));
+            let round_tripped = map_ax_action(ax_name).unwrap_or_else(|| {
+                panic!("canonical name {:?} should map back to an Action", ax_name)
+            });
+            assert_eq!(
+                action, round_tripped,
+                "round-trip failed: {:?} → {:?} → {:?}",
+                action, ax_name, round_tripped
+            );
+        }
+    }
+
+    /// Every AX action name that maps to an xa11y Action must produce an Action
+    /// whose canonical name maps back to the same Action.
+    #[test]
+    fn test_action_roundtrip_ax_to_xa11y() {
+        let ax_names = [
+            "AXPress",
+            "AXConfirm",
+            "AXShowMenu",
+            "AXIncrement",
+            "AXDecrement",
+        ];
+        for name in ax_names {
+            let action = map_ax_action(name)
+                .unwrap_or_else(|| panic!("AX name {:?} should map to an Action", name));
+            let canonical = xa11y_action_to_ax(action).unwrap_or_else(|| {
+                panic!(
+                    "{:?} (from {:?}) should have a canonical name",
+                    action, name
+                )
+            });
+            let back = map_ax_action(canonical)
+                .unwrap_or_else(|| panic!("canonical {:?} should map back", canonical));
+            assert_eq!(
+                action, back,
+                "AX {:?} → {:?} → canonical {:?} → {:?} (expected {:?})",
+                name, action, canonical, back, action
+            );
+        }
     }
 
     #[test]

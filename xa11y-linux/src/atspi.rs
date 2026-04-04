@@ -700,6 +700,22 @@ impl LinuxProvider {
         })
     }
 
+    /// Try all AT-SPI2 alias names for the given xa11y Action, canonical first.
+    fn do_atspi_action_by_alias(&self, aref: &AccessibleRef, action: Action) -> Result<()> {
+        let aliases = atspi_action_aliases(action);
+        let mut last_err = None;
+        for name in aliases {
+            match self.do_atspi_action(aref, name) {
+                Ok(()) => return Ok(()),
+                Err(e) => last_err = Some(e),
+            }
+        }
+        Err(last_err.unwrap_or_else(|| Error::Platform {
+            code: -1,
+            message: format!("No AT-SPI2 aliases for action {:?}", action),
+        }))
+    }
+
     /// Get PID from Application interface, falling back to D-Bus connection PID.
     fn get_app_pid(&self, aref: &AccessibleRef) -> Option<u32> {
         // Try Application.Id first
@@ -1161,14 +1177,7 @@ impl Provider for LinuxProvider {
         let target = self.get_cached(element.handle)?;
 
         match action {
-            Action::Press => self
-                .do_atspi_action(&target, "click")
-                .or_else(|_| self.do_atspi_action(&target, "activate"))
-                .or_else(|_| self.do_atspi_action(&target, "press"))
-                // Qt radio buttons expose "toggle" or "check" rather than
-                // "press" as their primary action name.
-                .or_else(|_| self.do_atspi_action(&target, "toggle"))
-                .or_else(|_| self.do_atspi_action(&target, "check")),
+            Action::Press => self.do_atspi_action_by_alias(&target, action),
             Action::Focus => {
                 // Try Component.GrabFocus first, then fall back to Action interface
                 if let Ok(proxy) =
@@ -1216,22 +1225,11 @@ impl Provider for LinuxProvider {
                     message: "SetValue requires ActionData".to_string(),
                 }),
             },
-            Action::Toggle => self
-                .do_atspi_action(&target, "toggle")
-                .or_else(|_| self.do_atspi_action(&target, "click"))
-                .or_else(|_| self.do_atspi_action(&target, "activate"))
-                // GTK4 check buttons expose "check" as their AT-SPI2 action name.
-                .or_else(|_| self.do_atspi_action(&target, "check")),
-            Action::Expand => self
-                .do_atspi_action(&target, "expand")
-                .or_else(|_| self.do_atspi_action(&target, "open")),
-            Action::Collapse => self
-                .do_atspi_action(&target, "collapse")
-                .or_else(|_| self.do_atspi_action(&target, "close")),
-            Action::Select => self.do_atspi_action(&target, "select"),
-            Action::ShowMenu => self
-                .do_atspi_action(&target, "menu")
-                .or_else(|_| self.do_atspi_action(&target, "showmenu")),
+            Action::Toggle => self.do_atspi_action_by_alias(&target, action),
+            Action::Expand => self.do_atspi_action_by_alias(&target, action),
+            Action::Collapse => self.do_atspi_action_by_alias(&target, action),
+            Action::Select => self.do_atspi_action_by_alias(&target, action),
+            Action::ShowMenu => self.do_atspi_action_by_alias(&target, action),
             Action::ScrollIntoView => {
                 let proxy =
                     self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")?;
@@ -1243,7 +1241,7 @@ impl Provider for LinuxProvider {
                     })?;
                 Ok(())
             }
-            Action::Increment => self.do_atspi_action(&target, "increment").or_else(|_| {
+            Action::Increment => self.do_atspi_action_by_alias(&target, action).or_else(|_| {
                 // Fall back to Value interface: current + step (or +1)
                 let proxy =
                     self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Value")?;
@@ -1263,7 +1261,7 @@ impl Provider for LinuxProvider {
                         message: format!("Value.SetCurrentValue failed: {}", e),
                     })
             }),
-            Action::Decrement => self.do_atspi_action(&target, "decrement").or_else(|_| {
+            Action::Decrement => self.do_atspi_action_by_alias(&target, action).or_else(|_| {
                 let proxy =
                     self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Value")?;
                 let current: f64 =
@@ -1693,6 +1691,38 @@ fn map_atspi_action(action_name: &str) -> Option<Action> {
     }
 }
 
+/// All AT-SPI2 action-name aliases for a given xa11y Action, canonical name first.
+///
+/// Different toolkits expose different names for the same semantic action
+/// (e.g. GTK uses "click", Qt uses "activate"). The canonical name (the one
+/// that round-trips through [`map_atspi_action`]) is always first so that the
+/// most common name is tried before falling back to toolkit-specific aliases.
+///
+/// Actions that don't use the AT-SPI2 Action interface (e.g. Focus via
+/// Component.GrabFocus, SetValue via the Value interface) return an empty slice.
+fn atspi_action_aliases(action: Action) -> &'static [&'static str] {
+    match action {
+        Action::Press => &["click", "activate", "press", "invoke", "toggle", "check"],
+        Action::Toggle => &["toggle", "click", "activate", "check"],
+        Action::Expand => &["expand", "open"],
+        Action::Collapse => &["collapse", "close"],
+        Action::Select => &["select"],
+        Action::ShowMenu => &["menu", "showmenu", "popup", "show menu"],
+        Action::Increment => &["increment"],
+        Action::Decrement => &["decrement"],
+        _ => &[],
+    }
+}
+
+/// Map xa11y Action to its canonical AT-SPI2 action name.
+///
+/// Returns the first alias from [`atspi_action_aliases`] — the single canonical
+/// name that round-trips through [`map_atspi_action`].
+#[cfg(test)]
+fn xa11y_action_to_atspi(action: Action) -> Option<&'static str> {
+    atspi_action_aliases(action).first().copied()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1734,5 +1764,96 @@ mod tests {
         assert_eq!(map_atspi_action("select"), Some(Action::Select));
         assert_eq!(map_atspi_action("increment"), Some(Action::Increment));
         assert_eq!(map_atspi_action("foobar"), None);
+    }
+
+    #[test]
+    fn test_action_reverse_mapping() {
+        assert_eq!(xa11y_action_to_atspi(Action::Press), Some("click"));
+        assert_eq!(xa11y_action_to_atspi(Action::Toggle), Some("toggle"));
+        assert_eq!(xa11y_action_to_atspi(Action::Expand), Some("expand"));
+        assert_eq!(xa11y_action_to_atspi(Action::Collapse), Some("collapse"));
+        assert_eq!(xa11y_action_to_atspi(Action::Select), Some("select"));
+        assert_eq!(xa11y_action_to_atspi(Action::ShowMenu), Some("menu"));
+        assert_eq!(xa11y_action_to_atspi(Action::Increment), Some("increment"));
+        assert_eq!(xa11y_action_to_atspi(Action::Decrement), Some("decrement"));
+        assert_eq!(xa11y_action_to_atspi(Action::Focus), None);
+        assert_eq!(xa11y_action_to_atspi(Action::SetValue), None);
+        assert_eq!(xa11y_action_to_atspi(Action::ScrollIntoView), None);
+        assert_eq!(xa11y_action_to_atspi(Action::Blur), None);
+    }
+
+    /// Every xa11y Action with a canonical AT-SPI2 name must round-trip:
+    /// xa11y → atspi → xa11y produces the same Action.
+    #[test]
+    fn test_action_roundtrip_xa11y_to_atspi() {
+        let actions_with_mapping = [
+            Action::Press,
+            Action::Toggle,
+            Action::Expand,
+            Action::Collapse,
+            Action::Select,
+            Action::ShowMenu,
+            Action::Increment,
+            Action::Decrement,
+        ];
+        for action in actions_with_mapping {
+            let atspi_name = xa11y_action_to_atspi(action)
+                .unwrap_or_else(|| panic!("{:?} should have a canonical AT-SPI2 name", action));
+            let round_tripped = map_atspi_action(atspi_name).unwrap_or_else(|| {
+                panic!(
+                    "canonical name {:?} should map back to an Action",
+                    atspi_name
+                )
+            });
+            assert_eq!(
+                action, round_tripped,
+                "round-trip failed: {:?} → {:?} → {:?}",
+                action, atspi_name, round_tripped
+            );
+        }
+    }
+
+    /// Every AT-SPI2 action name that maps to an xa11y Action must produce an
+    /// Action whose canonical name maps back to the same Action (though not
+    /// necessarily the same string — e.g. "activate" → Press → "click").
+    #[test]
+    fn test_action_roundtrip_atspi_to_xa11y() {
+        let atspi_names = [
+            "click",
+            "activate",
+            "press",
+            "invoke",
+            "toggle",
+            "check",
+            "uncheck",
+            "expand",
+            "open",
+            "collapse",
+            "close",
+            "select",
+            "menu",
+            "showmenu",
+            "popup",
+            "show menu",
+            "increment",
+            "decrement",
+        ];
+        for name in atspi_names {
+            let action = map_atspi_action(name)
+                .unwrap_or_else(|| panic!("AT-SPI2 name {:?} should map to an Action", name));
+            let canonical = xa11y_action_to_atspi(action).unwrap_or_else(|| {
+                panic!(
+                    "{:?} (from {:?}) should have a canonical name",
+                    action, name
+                )
+            });
+            let back = map_atspi_action(canonical)
+                .unwrap_or_else(|| panic!("canonical {:?} should map back", canonical));
+            assert_eq!(
+                action, back,
+                "AT-SPI2 {:?} → {:?} → canonical {:?} → {:?} (expected {:?})",
+                name, action, canonical, back, action
+            );
+        }
     }
 }
