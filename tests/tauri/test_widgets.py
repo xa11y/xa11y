@@ -96,10 +96,10 @@ def test_subscribe_checkbox_checked(tauri_app: xa11y.Element) -> None:
     assert cb.checked == "on"
 
 
-def test_checkbox_press(tauri_app: xa11y.Element) -> None:
+def test_checkbox_toggle(tauri_app: xa11y.Element) -> None:
     cb_loc = tauri_app.locator('check_box[name="Agree to terms"]')
     before = cb_loc.element().checked
-    cb_loc.press()
+    cb_loc.toggle()
     after = cb_loc.element().checked
     assert before != after
 
