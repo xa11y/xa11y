@@ -1069,14 +1069,8 @@ fn get_actions(
         actions.push(Action::Press);
     }
 
-    if patterns.toggle.is_some() {
-        if xa11y_core::is_toggle_role(role) {
-            if !actions.contains(&Action::Toggle) {
-                actions.push(Action::Toggle);
-            }
-        } else if !actions.contains(&Action::Press) {
-            actions.push(Action::Press);
-        }
+    if patterns.toggle.is_some() && !actions.contains(&Action::Toggle) {
+        actions.push(Action::Toggle);
     }
 
     if patterns.expand_collapse.is_some() {
