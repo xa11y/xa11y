@@ -21,6 +21,9 @@ pub struct LinuxProvider {
     a11y_bus: Connection,
     /// Cached AT-SPI accessible refs keyed by handle ID.
     handle_cache: Mutex<HashMap<u64, AccessibleRef>>,
+    /// Cached AT-SPI2 action indices keyed by element handle.
+    /// Maps each xa11y Action to the integer index used by `DoAction(i)`.
+    action_indices: Mutex<HashMap<u64, HashMap<Action, i32>>>,
 }
 
 /// AT-SPI2 accessible reference: (bus_name, object_path).
@@ -40,6 +43,7 @@ impl LinuxProvider {
         Ok(Self {
             a11y_bus,
             handle_cache: Mutex::new(HashMap::new()),
+            action_indices: Mutex::new(HashMap::new()),
         })
     }
 
@@ -266,11 +270,14 @@ impl LinuxProvider {
         })
     }
 
-    /// Get available actions via Action interface.
+    /// Get available actions via Action interface, returning both the action list
+    /// and a map of each action to its AT-SPI2 integer index for direct `DoAction(i)`.
+    ///
     /// Probes the interface directly rather than relying on the Interfaces property,
     /// which some AT-SPI adapters (e.g. AccessKit) don't expose.
-    fn get_actions(&self, aref: &AccessibleRef) -> Vec<Action> {
+    fn get_actions(&self, aref: &AccessibleRef, role: Role) -> (Vec<Action>, HashMap<Action, i32>) {
         let mut actions = Vec::new();
+        let mut indices = HashMap::new();
 
         // Try Action interface directly
         if let Ok(proxy) = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Action") {
@@ -282,9 +289,14 @@ impl LinuxProvider {
             for i in 0..n_actions {
                 if let Ok(reply) = proxy.call_method("GetName", &(i,)) {
                     if let Ok(name) = reply.body().deserialize::<String>() {
-                        if let Some(action) = map_atspi_action(&name) {
+                        if let Some(mut action) = map_atspi_action(&name) {
+                            // Remap Press→Toggle for toggle roles (checkboxes, switches)
+                            if action == Action::Press && xa11y_core::is_toggle_role(role) {
+                                action = Action::Toggle;
+                            }
                             if !actions.contains(&action) {
                                 actions.push(action);
+                                indices.insert(action, i);
                             }
                         }
                     }
@@ -304,7 +316,7 @@ impl LinuxProvider {
             }
         }
 
-        actions
+        (actions, indices)
     }
 
     /// Get value via Value or Text interface.
@@ -391,7 +403,10 @@ impl LinuxProvider {
         // Right tree: ((states, bounds), (actions, numeric_values))
         let (
             ((mut name, value), description),
-            ((states, bounds), (actions, (numeric_value, min_value, max_value))),
+            (
+                (states, bounds),
+                ((actions, action_index_map), (numeric_value, min_value, max_value)),
+            ),
         ) = rayon::join(
             || {
                 rayon::join(
@@ -425,9 +440,9 @@ impl LinuxProvider {
                         rayon::join(
                             || {
                                 if role_has_actions(role) {
-                                    self.get_actions(aref)
+                                    self.get_actions(aref, role)
                                 } else {
-                                    vec![]
+                                    (vec![], HashMap::new())
                                 }
                             },
                             || {
@@ -483,6 +498,12 @@ impl LinuxProvider {
         };
 
         let handle = self.cache_element(aref.clone());
+        if !action_index_map.is_empty() {
+            self.action_indices
+                .lock()
+                .unwrap()
+                .insert(handle, action_index_map);
+        }
 
         ElementData {
             role,
@@ -666,54 +687,58 @@ impl LinuxProvider {
         }
     }
 
-    /// Perform an AT-SPI action by name.
-    fn do_atspi_action(&self, aref: &AccessibleRef, action_name: &str) -> Result<()> {
+    /// Perform an AT-SPI2 action by name (scans action names to find the index).
+    /// Only used for actions not stored during discovery (e.g. scroll directions).
+    fn do_atspi_action_by_name(&self, aref: &AccessibleRef, action_name: &str) -> Result<()> {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Action")?;
-        // NActions may be returned as i32 or u32 depending on AT-SPI implementation.
         let n_actions = proxy
             .get_property::<i32>("NActions")
             .or_else(|_| proxy.get_property::<u32>("NActions").map(|n| n as i32))
             .unwrap_or(0);
-
         for i in 0..n_actions {
             if let Ok(reply) = proxy.call_method("GetName", &(i,)) {
                 if let Ok(name) = reply.body().deserialize::<String>() {
-                    // Case-insensitive match to handle implementations that
-                    // capitalise action names (e.g. "Press" instead of "press").
                     if name.eq_ignore_ascii_case(action_name) {
-                        let _ =
-                            proxy
-                                .call_method("DoAction", &(i,))
-                                .map_err(|e| Error::Platform {
-                                    code: -1,
-                                    message: format!("DoAction failed: {}", e),
-                                })?;
+                        proxy
+                            .call_method("DoAction", &(i,))
+                            .map_err(|e| Error::Platform {
+                                code: -1,
+                                message: format!("DoAction failed: {}", e),
+                            })?;
                         return Ok(());
                     }
                 }
             }
         }
-
         Err(Error::Platform {
             code: -1,
             message: format!("Action '{}' not found", action_name),
         })
     }
 
-    /// Try all AT-SPI2 alias names for the given xa11y Action, canonical first.
-    fn do_atspi_action_by_alias(&self, aref: &AccessibleRef, action: Action) -> Result<()> {
-        let aliases = atspi_action_aliases(action);
-        let mut last_err = None;
-        for name in aliases {
-            match self.do_atspi_action(aref, name) {
-                Ok(()) => return Ok(()),
-                Err(e) => last_err = Some(e),
-            }
-        }
-        Err(last_err.unwrap_or_else(|| Error::Platform {
-            code: -1,
-            message: format!("No AT-SPI2 aliases for action {:?}", action),
-        }))
+    /// Perform an AT-SPI2 action by its integer index (from discovery).
+    fn do_atspi_action_by_index(&self, aref: &AccessibleRef, index: i32) -> Result<()> {
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Action")?;
+        proxy
+            .call_method("DoAction", &(index,))
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("DoAction({}) failed: {}", index, e),
+            })?;
+        Ok(())
+    }
+
+    /// Look up the stored AT-SPI2 action index for the given element and action.
+    fn get_action_index(&self, handle: u64, action: Action) -> Result<i32> {
+        self.action_indices
+            .lock()
+            .unwrap()
+            .get(&handle)
+            .and_then(|map| map.get(&action).copied())
+            .ok_or(Error::ActionNotSupported {
+                action,
+                role: Role::Unknown, // caller will provide better context
+            })
     }
 
     /// Get PID from Application interface, falling back to D-Bus connection PID.
@@ -1177,9 +1202,22 @@ impl Provider for LinuxProvider {
         let target = self.get_cached(element.handle)?;
 
         match action {
-            Action::Press => self.do_atspi_action_by_alias(&target, action),
+            Action::Press
+            | Action::Toggle
+            | Action::Expand
+            | Action::Collapse
+            | Action::Select
+            | Action::ShowMenu => {
+                let index = self.get_action_index(element.handle, action).map_err(|_| {
+                    Error::ActionNotSupported {
+                        action,
+                        role: element.role,
+                    }
+                })?;
+                self.do_atspi_action_by_index(&target, index)
+            }
             Action::Focus => {
-                // Try Component.GrabFocus first, then fall back to Action interface
+                // Try Component.GrabFocus first, then fall back to stored action index
                 if let Ok(proxy) =
                     self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")
                 {
@@ -1187,8 +1225,13 @@ impl Provider for LinuxProvider {
                         return Ok(());
                     }
                 }
-                self.do_atspi_action(&target, "focus")
-                    .or_else(|_| self.do_atspi_action(&target, "setFocus"))
+                if let Ok(index) = self.get_action_index(element.handle, action) {
+                    return self.do_atspi_action_by_index(&target, index);
+                }
+                Err(Error::ActionNotSupported {
+                    action,
+                    role: element.role,
+                })
             }
             Action::SetValue => match data {
                 Some(ActionData::NumericValue(v)) => {
@@ -1225,11 +1268,6 @@ impl Provider for LinuxProvider {
                     message: "SetValue requires ActionData".to_string(),
                 }),
             },
-            Action::Toggle => self.do_atspi_action_by_alias(&target, action),
-            Action::Expand => self.do_atspi_action_by_alias(&target, action),
-            Action::Collapse => self.do_atspi_action_by_alias(&target, action),
-            Action::Select => self.do_atspi_action_by_alias(&target, action),
-            Action::ShowMenu => self.do_atspi_action_by_alias(&target, action),
             Action::ScrollIntoView => {
                 let proxy =
                     self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")?;
@@ -1241,8 +1279,11 @@ impl Provider for LinuxProvider {
                     })?;
                 Ok(())
             }
-            Action::Increment => self.do_atspi_action_by_alias(&target, action).or_else(|_| {
-                // Fall back to Value interface: current + step (or +1)
+            Action::Increment => {
+                // Try stored AT-SPI2 action index first, fall back to Value interface
+                if let Ok(index) = self.get_action_index(element.handle, action) {
+                    return self.do_atspi_action_by_index(&target, index);
+                }
                 let proxy =
                     self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Value")?;
                 let current: f64 =
@@ -1260,8 +1301,11 @@ impl Provider for LinuxProvider {
                         code: -1,
                         message: format!("Value.SetCurrentValue failed: {}", e),
                     })
-            }),
-            Action::Decrement => self.do_atspi_action_by_alias(&target, action).or_else(|_| {
+            }
+            Action::Decrement => {
+                if let Ok(index) = self.get_action_index(element.handle, action) {
+                    return self.do_atspi_action_by_index(&target, index);
+                }
                 let proxy =
                     self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Value")?;
                 let current: f64 =
@@ -1279,7 +1323,7 @@ impl Provider for LinuxProvider {
                         code: -1,
                         message: format!("Value.SetCurrentValue failed: {}", e),
                     })
-            }),
+            }
             Action::Blur => {
                 // Grab focus on parent element to blur the current one
                 if let Ok(Some(parent_ref)) = self.get_atspi_parent(&target) {
@@ -1317,7 +1361,7 @@ impl Provider for LinuxProvider {
                 // Repeat scroll action for each logical unit (AT-SPI has no scroll-by-amount)
                 let count = (amount.abs() as u32).max(1);
                 for _ in 0..count {
-                    if self.do_atspi_action(&target, action_name).is_err() {
+                    if self.do_atspi_action_by_name(&target, action_name).is_err() {
                         // Fall back to Component.ScrollTo (single call, not repeatable)
                         let proxy = self.make_proxy(
                             &target.bus_name,
@@ -1676,51 +1720,89 @@ fn map_atspi_role_number(role: u32) -> Role {
     }
 }
 
-/// Map AT-SPI2 action name to xa11y Action.
-fn map_atspi_action(action_name: &str) -> Option<Action> {
-    match action_name.to_lowercase().as_str() {
-        "click" | "activate" | "press" | "invoke" => Some(Action::Press),
-        "toggle" | "check" | "uncheck" => Some(Action::Toggle),
-        "expand" | "open" => Some(Action::Expand),
-        "collapse" | "close" => Some(Action::Collapse),
-        "select" => Some(Action::Select),
-        "menu" | "showmenu" | "popup" | "show menu" => Some(Action::ShowMenu),
-        "increment" => Some(Action::Increment),
-        "decrement" => Some(Action::Decrement),
-        _ => None,
-    }
+/// A single entry in the AT-SPI2 ↔ xa11y action mapping table.
+///
+/// Each entry pairs one xa11y [`Action`] with its canonical AT-SPI2 name and
+/// any toolkit-specific aliases. Used only for discovery (string→Action
+/// translation). Perform uses the stored action index directly.
+struct AtspiActionMapping {
+    action: Action,
+    /// The canonical AT-SPI2 name (round-trips through [`map_atspi_action`]).
+    canonical: &'static str,
+    /// Additional toolkit-specific names that map to the same xa11y Action
+    /// (e.g. "activate", "press", "invoke" all map to `Action::Press`).
+    aliases: &'static [&'static str],
 }
 
-/// All AT-SPI2 action-name aliases for a given xa11y Action, canonical name first.
-///
-/// Different toolkits expose different names for the same semantic action
-/// (e.g. GTK uses "click", Qt uses "activate"). The canonical name (the one
-/// that round-trips through [`map_atspi_action`]) is always first so that the
-/// most common name is tried before falling back to toolkit-specific aliases.
+/// Single source of truth for AT-SPI2 → xa11y action mappings (discovery only).
 ///
 /// Actions that don't use the AT-SPI2 Action interface (e.g. Focus via
-/// Component.GrabFocus, SetValue via the Value interface) return an empty slice.
-fn atspi_action_aliases(action: Action) -> &'static [&'static str] {
-    match action {
-        Action::Press => &["click", "activate", "press", "invoke", "toggle", "check"],
-        Action::Toggle => &["toggle", "click", "activate", "check"],
-        Action::Expand => &["expand", "open"],
-        Action::Collapse => &["collapse", "close"],
-        Action::Select => &["select"],
-        Action::ShowMenu => &["menu", "showmenu", "popup", "show menu"],
-        Action::Increment => &["increment"],
-        Action::Decrement => &["decrement"],
-        _ => &[],
-    }
+/// Component.GrabFocus, SetValue via the Value interface) are not listed here.
+const ATSPI_ACTION_MAPPINGS: &[AtspiActionMapping] = &[
+    AtspiActionMapping {
+        action: Action::Press,
+        canonical: "click",
+        aliases: &["activate", "press", "invoke"],
+    },
+    AtspiActionMapping {
+        action: Action::Toggle,
+        canonical: "toggle",
+        aliases: &["check", "uncheck"],
+    },
+    AtspiActionMapping {
+        action: Action::Expand,
+        canonical: "expand",
+        aliases: &["open"],
+    },
+    AtspiActionMapping {
+        action: Action::Collapse,
+        canonical: "collapse",
+        aliases: &["close"],
+    },
+    AtspiActionMapping {
+        action: Action::Select,
+        canonical: "select",
+        aliases: &[],
+    },
+    AtspiActionMapping {
+        action: Action::ShowMenu,
+        canonical: "menu",
+        aliases: &["showmenu", "popup", "show menu"],
+    },
+    AtspiActionMapping {
+        action: Action::Increment,
+        canonical: "increment",
+        aliases: &[],
+    },
+    AtspiActionMapping {
+        action: Action::Decrement,
+        canonical: "decrement",
+        aliases: &[],
+    },
+];
+
+/// Map AT-SPI2 action name to xa11y Action.
+fn map_atspi_action(action_name: &str) -> Option<Action> {
+    let lower = action_name.to_lowercase();
+    ATSPI_ACTION_MAPPINGS.iter().find_map(|m| {
+        if m.canonical == lower || m.aliases.contains(&lower.as_str()) {
+            Some(m.action)
+        } else {
+            None
+        }
+    })
 }
 
 /// Map xa11y Action to its canonical AT-SPI2 action name.
 ///
-/// Returns the first alias from [`atspi_action_aliases`] — the single canonical
-/// name that round-trips through [`map_atspi_action`].
+/// Returns the canonical name from the mapping table — the single name that
+/// round-trips through [`map_atspi_action`].
 #[cfg(test)]
 fn xa11y_action_to_atspi(action: Action) -> Option<&'static str> {
-    atspi_action_aliases(action).first().copied()
+    ATSPI_ACTION_MAPPINGS
+        .iter()
+        .find(|m| m.action == action)
+        .map(|m| m.canonical)
 }
 
 #[cfg(test)]
@@ -1854,6 +1936,66 @@ mod tests {
                 "AT-SPI2 {:?} → {:?} → canonical {:?} → {:?} (expected {:?})",
                 name, action, canonical, back, action
             );
+        }
+    }
+
+    /// No duplicate Action entries in the mapping table.
+    #[test]
+    fn test_atspi_mapping_no_duplicate_actions() {
+        for (i, a) in ATSPI_ACTION_MAPPINGS.iter().enumerate() {
+            for b in &ATSPI_ACTION_MAPPINGS[i + 1..] {
+                assert_ne!(
+                    a.action, b.action,
+                    "duplicate Action::{:?} in ATSPI_ACTION_MAPPINGS",
+                    a.action
+                );
+            }
+        }
+    }
+
+    /// No duplicate canonical names in the mapping table.
+    #[test]
+    fn test_atspi_mapping_no_duplicate_canonicals() {
+        for (i, a) in ATSPI_ACTION_MAPPINGS.iter().enumerate() {
+            for b in &ATSPI_ACTION_MAPPINGS[i + 1..] {
+                assert_ne!(
+                    a.canonical, b.canonical,
+                    "duplicate canonical {:?} in ATSPI_ACTION_MAPPINGS",
+                    a.canonical
+                );
+            }
+        }
+    }
+
+    /// Every canonical name round-trips through the table.
+    #[test]
+    fn test_atspi_mapping_canonical_roundtrips() {
+        for m in ATSPI_ACTION_MAPPINGS {
+            let mapped = map_atspi_action(m.canonical);
+            assert_eq!(
+                mapped,
+                Some(m.action),
+                "canonical {:?} should map to {:?}",
+                m.canonical,
+                m.action
+            );
+        }
+    }
+
+    /// Every alias maps to the same action as its canonical.
+    #[test]
+    fn test_atspi_mapping_aliases_consistent() {
+        for m in ATSPI_ACTION_MAPPINGS {
+            for alias in m.aliases {
+                let mapped = map_atspi_action(alias);
+                assert_eq!(
+                    mapped,
+                    Some(m.action),
+                    "alias {:?} should map to {:?}",
+                    alias,
+                    m.action
+                );
+            }
         }
     }
 }

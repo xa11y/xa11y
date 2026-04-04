@@ -895,44 +895,72 @@ fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
     }
 }
 
+/// A single entry in the macOS AX ↔ xa11y action mapping table.
+///
+/// Each entry pairs one xa11y [`Action`] with its canonical AX action name and
+/// any aliases. Actions handled via AX attributes (Focus, SetValue, Expand,
+/// Collapse, Select, Toggle) rather than the AX Action interface are not listed.
+struct AxActionMapping {
+    action: Action,
+    /// The canonical AX action name (round-trips through [`map_ax_action`]).
+    canonical: &'static str,
+    /// Additional AX action names that map to the same xa11y Action.
+    aliases: &'static [&'static str],
+}
+
+/// Single source of truth for macOS AX ↔ xa11y action mappings.
+///
+/// Only actions that use the AX Action interface are listed. Actions handled
+/// via AX attributes (Toggle, Select, Focus, SetValue, Expand, Collapse) or
+/// that have no macOS equivalent are omitted.
+const AX_ACTION_MAPPINGS: &[AxActionMapping] = &[
+    AxActionMapping {
+        action: Action::Press,
+        canonical: "AXPress",
+        aliases: &["AXConfirm"],
+    },
+    AxActionMapping {
+        action: Action::ShowMenu,
+        canonical: "AXShowMenu",
+        aliases: &[],
+    },
+    AxActionMapping {
+        action: Action::Increment,
+        canonical: "AXIncrement",
+        aliases: &[],
+    },
+    AxActionMapping {
+        action: Action::Decrement,
+        canonical: "AXDecrement",
+        aliases: &[],
+    },
+];
+
+/// AX action names that are valid but intentionally unmapped (no xa11y equivalent).
+#[cfg(test)]
+const AX_IGNORED_ACTIONS: &[&str] = &["AXRaise", "AXCancel"];
+
 fn map_ax_action(name: &str) -> Option<Action> {
-    match name {
-        "AXPress" | "AXConfirm" => Some(Action::Press),
-        "AXRaise" => None,
-        "AXShowMenu" => Some(Action::ShowMenu),
-        "AXIncrement" => Some(Action::Increment),
-        "AXDecrement" => Some(Action::Decrement),
-        "AXCancel" => None,
-        _ => None,
-    }
+    AX_ACTION_MAPPINGS.iter().find_map(|m| {
+        if m.canonical == name || m.aliases.contains(&name) {
+            Some(m.action)
+        } else {
+            None
+        }
+    })
 }
 
 /// Map xa11y Action to its canonical macOS AX action name.
 ///
-/// Returns the single canonical name that round-trips through [`map_ax_action`].
-/// Actions handled via AX attributes (Focus, SetValue, Expand, Collapse,
-/// Select, Toggle) or other interfaces return `None`.
+/// Returns the canonical name from the mapping table — the single name that
+/// round-trips through [`map_ax_action`]. Actions handled via AX attributes
+/// (Focus, SetValue, Expand, Collapse, Select, Toggle) return `None`.
+#[cfg(test)]
 fn xa11y_action_to_ax(action: Action) -> Option<&'static str> {
-    match action {
-        Action::Press => Some("AXPress"),
-        Action::ShowMenu => Some("AXShowMenu"),
-        Action::Increment => Some("AXIncrement"),
-        Action::Decrement => Some("AXDecrement"),
-        // Toggle, Select, Focus, SetValue, Expand, Collapse are handled via
-        // AX attributes in perform_action, not the AX Action interface.
-        Action::Toggle
-        | Action::Select
-        | Action::Focus
-        | Action::SetValue
-        | Action::Expand
-        | Action::Collapse
-        | Action::ScrollIntoView
-        | Action::ScrollDown
-        | Action::ScrollRight
-        | Action::Blur
-        | Action::SetTextSelection
-        | Action::TypeText => None,
-    }
+    AX_ACTION_MAPPINGS
+        .iter()
+        .find(|m| m.action == action)
+        .map(|m| m.canonical)
 }
 
 // ── Lightweight selector matching (no ElementData) ───────────────────────────
@@ -1276,6 +1304,15 @@ impl MacOSProvider {
         // Actions still require a separate IPC call (different API).
         let ax_actions = ax_action_names(ax.as_ptr());
         let mut actions: Vec<Action> = ax_actions.iter().filter_map(|a| map_ax_action(a)).collect();
+
+        // Remap Press→Toggle for toggle roles (checkboxes, switches)
+        if xa11y_core::is_toggle_role(role) {
+            for a in &mut actions {
+                if *a == Action::Press {
+                    *a = Action::Toggle;
+                }
+            }
+        }
 
         if attrs.focused.is_some() && !actions.contains(&Action::Focus) {
             actions.push(Action::Focus);
@@ -1729,12 +1766,17 @@ impl Provider for MacOSProvider {
         let el_ptr = ax.as_ptr();
 
         match action {
-            Action::Press | Action::Toggle => {
-                // Platform limitation: For Electron/web-content apps (VS Code, Chrome),
-                // AXPress fires the JavaScript click handler but the accessibility tree
-                // state (e.g. checked, expanded) may not update. This is an app-side
-                // issue — the AX API call succeeds but the app doesn't reflect the
-                // change in its AX attributes.
+            Action::Press => {
+                let ax_action = CFString::new("AXPress");
+                let err = do_perform_action(el_ptr, &ax_action);
+                if err != AX_ERROR_SUCCESS {
+                    return Err(action_error(err, action, element.role, "AXPress failed"));
+                }
+                Ok(())
+            }
+            Action::Toggle => {
+                // On macOS, AXPress IS the toggle mechanism for checkboxes/switches.
+                // The semantic distinction is captured at discovery time (is_toggle_role).
                 let ax_action = CFString::new("AXPress");
                 let err = do_perform_action(el_ptr, &ax_action);
                 if err != AX_ERROR_SUCCESS {
@@ -1744,25 +1786,14 @@ impl Provider for MacOSProvider {
             }
 
             Action::Select => {
-                // Try setting AXSelected attribute first (correct for list/table items).
-                // Fall back to AXPress for elements that don't support AXSelected.
+                // Set AXSelected attribute (correct for list/table items).
                 // Usage note: Select targets the selectable item itself (table_cell,
                 // list_item, tree_item), not its text label child (static_text).
-                // Targeting a static_text label will likely fail or have no effect.
                 let attr = CFString::new("AXSelected");
                 let val = core_foundation::boolean::CFBoolean::true_value();
                 let err = do_set_attribute(el_ptr, &attr, val.as_CFTypeRef());
                 if err != AX_ERROR_SUCCESS {
-                    let press = CFString::new("AXPress");
-                    let err = do_perform_action(el_ptr, &press);
-                    if err != AX_ERROR_SUCCESS {
-                        return Err(action_error(
-                            err,
-                            action,
-                            element.role,
-                            "Select failed (AXSelected and AXPress both unsupported)",
-                        ));
-                    }
+                    return Err(action_error(err, action, element.role, "AXSelected failed"));
                 }
                 Ok(())
             }
@@ -1818,18 +1849,10 @@ impl Provider for MacOSProvider {
                 let attr = CFString::new("AXExpanded");
                 let val = core_foundation::boolean::CFBoolean::true_value();
                 let err = do_set_attribute(el_ptr, &attr, val.as_CFTypeRef());
-                if err == AX_ERROR_SUCCESS {
-                    return Ok(());
-                }
-                // AXExpanded attribute not supported; try AXPress as fallback
-                // (e.g. disclosure triangles toggle on press).
-                let press = CFString::new("AXPress");
-                let err2 = do_perform_action(el_ptr, &press);
-                if err2 != AX_ERROR_SUCCESS {
+                if err != AX_ERROR_SUCCESS {
                     return Err(Error::Platform {
                         code: err as i64,
-                        message: "Expand failed (AXExpanded and AXPress both unsupported)"
-                            .to_string(),
+                        message: "Expand failed (AXExpanded not supported)".to_string(),
                     });
                 }
                 Ok(())
@@ -1839,17 +1862,10 @@ impl Provider for MacOSProvider {
                 let attr = CFString::new("AXExpanded");
                 let val = core_foundation::boolean::CFBoolean::false_value();
                 let err = do_set_attribute(el_ptr, &attr, val.as_CFTypeRef());
-                if err == AX_ERROR_SUCCESS {
-                    return Ok(());
-                }
-                // AXExpanded attribute not supported; try AXPress as fallback.
-                let press = CFString::new("AXPress");
-                let err2 = do_perform_action(el_ptr, &press);
-                if err2 != AX_ERROR_SUCCESS {
+                if err != AX_ERROR_SUCCESS {
                     return Err(Error::Platform {
                         code: err as i64,
-                        message: "Collapse failed (AXExpanded and AXPress both unsupported)"
-                            .to_string(),
+                        message: "Collapse failed (AXExpanded not supported)".to_string(),
                     });
                 }
                 Ok(())
@@ -2434,6 +2450,79 @@ mod tests {
                 action, back,
                 "AX {:?} → {:?} → canonical {:?} → {:?} (expected {:?})",
                 name, action, canonical, back, action
+            );
+        }
+    }
+
+    /// No duplicate Action entries in the mapping table.
+    #[test]
+    fn ax_mapping_no_duplicate_actions() {
+        for (i, a) in AX_ACTION_MAPPINGS.iter().enumerate() {
+            for b in &AX_ACTION_MAPPINGS[i + 1..] {
+                assert_ne!(
+                    a.action, b.action,
+                    "duplicate Action::{:?} in AX_ACTION_MAPPINGS",
+                    a.action
+                );
+            }
+        }
+    }
+
+    /// No duplicate canonical names in the mapping table.
+    #[test]
+    fn ax_mapping_no_duplicate_canonicals() {
+        for (i, a) in AX_ACTION_MAPPINGS.iter().enumerate() {
+            for b in &AX_ACTION_MAPPINGS[i + 1..] {
+                assert_ne!(
+                    a.canonical, b.canonical,
+                    "duplicate canonical {:?} in AX_ACTION_MAPPINGS",
+                    a.canonical
+                );
+            }
+        }
+    }
+
+    /// Every canonical name round-trips through the table.
+    #[test]
+    fn ax_mapping_canonical_roundtrips() {
+        for m in AX_ACTION_MAPPINGS {
+            let mapped = map_ax_action(m.canonical);
+            assert_eq!(
+                mapped,
+                Some(m.action),
+                "canonical {:?} should map to {:?}",
+                m.canonical,
+                m.action
+            );
+        }
+    }
+
+    /// Every alias maps to the same action as its canonical.
+    #[test]
+    fn ax_mapping_aliases_consistent() {
+        for m in AX_ACTION_MAPPINGS {
+            for alias in m.aliases {
+                let mapped = map_ax_action(alias);
+                assert_eq!(
+                    mapped,
+                    Some(m.action),
+                    "alias {:?} should map to {:?}",
+                    alias,
+                    m.action
+                );
+            }
+        }
+    }
+
+    /// Ignored AX actions must not map to any xa11y Action.
+    #[test]
+    fn ax_ignored_actions_return_none() {
+        for name in AX_IGNORED_ACTIONS {
+            assert_eq!(
+                map_ax_action(name),
+                None,
+                "ignored action {:?} should map to None",
+                name
             );
         }
     }

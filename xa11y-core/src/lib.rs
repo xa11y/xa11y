@@ -18,7 +18,7 @@ pub use event::{ElementState, Event, EventType, StateFlag, TextChangeData, TextC
 pub use event_provider::{CancelHandle, EventReceiver, Subscription, SubscriptionIter};
 pub use locator::Locator;
 pub use provider::Provider;
-pub use role::{unknown_role, Role};
+pub use role::{is_toggle_role, unknown_role, Role};
 pub use selector::Selector;
 
 /// Maximum tree traversal depth for providers. Prevents stack overflow from
