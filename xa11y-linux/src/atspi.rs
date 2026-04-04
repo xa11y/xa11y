@@ -275,7 +275,7 @@ impl LinuxProvider {
     ///
     /// Probes the interface directly rather than relying on the Interfaces property,
     /// which some AT-SPI adapters (e.g. AccessKit) don't expose.
-    fn get_actions(&self, aref: &AccessibleRef, role: Role) -> (Vec<Action>, HashMap<Action, i32>) {
+    fn get_actions(&self, aref: &AccessibleRef) -> (Vec<Action>, HashMap<Action, i32>) {
         let mut actions = Vec::new();
         let mut indices = HashMap::new();
 
@@ -289,11 +289,7 @@ impl LinuxProvider {
             for i in 0..n_actions {
                 if let Ok(reply) = proxy.call_method("GetName", &(i,)) {
                     if let Ok(name) = reply.body().deserialize::<String>() {
-                        if let Some(mut action) = map_atspi_action(&name) {
-                            // Remap Press→Toggle for toggle roles (checkboxes, switches)
-                            if action == Action::Press && xa11y_core::is_toggle_role(role) {
-                                action = Action::Toggle;
-                            }
+                        if let Some(action) = map_atspi_action(&name) {
                             if !actions.contains(&action) {
                                 actions.push(action);
                                 indices.insert(action, i);
@@ -440,7 +436,7 @@ impl LinuxProvider {
                         rayon::join(
                             || {
                                 if role_has_actions(role) {
-                                    self.get_actions(aref, role)
+                                    self.get_actions(aref)
                                 } else {
                                     (vec![], HashMap::new())
                                 }

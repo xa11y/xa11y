@@ -850,7 +850,7 @@ mod tests {
         let cbs = app.locator("check_box").elements().unwrap();
         assert!(!cbs.is_empty(), "No checkbox");
         let initial = cbs[0].states.checked;
-        let app2 = h::act(&cbs[0], Action::Toggle);
+        let app2 = h::act(&cbs[0], Action::Press);
         let cb2 = app2.locator("check_box").elements().unwrap();
         if !cb2.is_empty() {
             assert_ne!(
@@ -868,7 +868,7 @@ mod tests {
         let was_enabled = h::named(&app, "Cancel").states.enabled;
         let cbs = app.locator("check_box").elements().unwrap();
         assert!(!cbs.is_empty(), "No checkbox");
-        let app2 = h::act(&cbs[0], Action::Toggle);
+        let app2 = h::act(&cbs[0], Action::Press);
         let cancel2 = h::named(&app2, "Cancel");
         // Some AT-SPI adapters may not reflect enabled state changes.
         // If was_enabled is already true (adapter doesn't report disabled), skip the assertion.
@@ -1095,7 +1095,7 @@ mod tests {
         for _ in 0..5 {
             let cbs = current_app.locator("check_box").elements().unwrap();
             assert!(!cbs.is_empty());
-            current_app = h::act(&cbs[0], Action::Toggle);
+            current_app = h::act(&cbs[0], Action::Press);
         }
         // After 5 toggles (odd), state should have flipped from initial
         let final_cb = current_app.locator("check_box").elements().unwrap();

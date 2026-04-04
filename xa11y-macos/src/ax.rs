@@ -1305,15 +1305,6 @@ impl MacOSProvider {
         let ax_actions = ax_action_names(ax.as_ptr());
         let mut actions: Vec<Action> = ax_actions.iter().filter_map(|a| map_ax_action(a)).collect();
 
-        // Remap Press→Toggle for toggle roles (checkboxes, switches)
-        if xa11y_core::is_toggle_role(role) {
-            for a in &mut actions {
-                if *a == Action::Press {
-                    *a = Action::Toggle;
-                }
-            }
-        }
-
         if attrs.focused.is_some() && !actions.contains(&Action::Focus) {
             actions.push(Action::Focus);
         }
@@ -1766,17 +1757,7 @@ impl Provider for MacOSProvider {
         let el_ptr = ax.as_ptr();
 
         match action {
-            Action::Press => {
-                let ax_action = CFString::new("AXPress");
-                let err = do_perform_action(el_ptr, &ax_action);
-                if err != AX_ERROR_SUCCESS {
-                    return Err(action_error(err, action, element.role, "AXPress failed"));
-                }
-                Ok(())
-            }
-            Action::Toggle => {
-                // On macOS, AXPress IS the toggle mechanism for checkboxes/switches.
-                // The semantic distinction is captured at discovery time (is_toggle_role).
+            Action::Press | Action::Toggle => {
                 let ax_action = CFString::new("AXPress");
                 let err = do_perform_action(el_ptr, &ax_action);
                 if err != AX_ERROR_SUCCESS {

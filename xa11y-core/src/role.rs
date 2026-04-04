@@ -154,19 +154,6 @@ impl Role {
     }
 }
 
-/// Whether this role represents a toggle control (checkbox, switch).
-///
-/// Toggle roles report [`Action::Toggle`](crate::Action::Toggle) instead of
-/// [`Action::Press`](crate::Action::Press) during discovery, because pressing
-/// the control changes its checked/toggled state rather than firing a one-shot
-/// action.
-///
-/// [`RadioButton`](Role::RadioButton) is excluded — it uses Select semantics
-/// (selecting one deselects others in the group).
-pub fn is_toggle_role(role: Role) -> bool {
-    matches!(role, Role::CheckBox | Role::Switch)
-}
-
 /// Returns `Role::Unknown` normally, but panics with a descriptive message when
 /// the `strict-roles` feature is enabled. Platform backends call this in their
 /// catch-all mapping arms so that integration tests surface unmapped roles.
