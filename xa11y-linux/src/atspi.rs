@@ -294,6 +294,11 @@ impl LinuxProvider {
                             if action == Action::Press && xa11y_core::is_toggle_role(role) {
                                 action = Action::Toggle;
                             }
+                            // Remap Toggle→Press for non-toggle roles (e.g. radio buttons
+                            // expose AT-SPI action "toggle" but use press semantics)
+                            if action == Action::Toggle && !xa11y_core::is_toggle_role(role) {
+                                action = Action::Press;
+                            }
                             if !actions.contains(&action) {
                                 actions.push(action);
                                 indices.insert(action, i);
