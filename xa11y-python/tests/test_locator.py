@@ -98,8 +98,8 @@ def test_locator_blur(test_app):
     test_app.descendant('button[name="Back"]').blur()
 
 
-def test_locator_toggle(test_app):
-    test_app.descendant("check_box").toggle()
+def test_locator_press_checkbox(test_app):
+    test_app.descendant("check_box").press()
 
 
 def test_locator_expand(test_app):

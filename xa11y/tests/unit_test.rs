@@ -243,7 +243,7 @@ fn sample_provider() -> Arc<MockProvider> {
             None,
             None,
             None,
-            vec![Action::Press, Action::Toggle],
+            vec![Action::Press],
             StateSet {
                 enabled: true,
                 visible: true,

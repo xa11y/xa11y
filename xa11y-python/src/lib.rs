@@ -1138,7 +1138,7 @@ fn build_test_tree() -> Arc<MockProvider> {
             None,
             None,
             None,
-            vec![Action::Toggle, Action::Focus],
+            vec![Action::Press, Action::Focus],
             StateSet {
                 checked: Some(Toggled::On),
                 focusable: true,

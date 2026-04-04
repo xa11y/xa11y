@@ -106,10 +106,10 @@ def test_subscribe_checkbox_checked(gtk_app: xa11y.Element) -> None:
         "GTK4 checkboxes expose. This is a GTK4/AT-SPI2 platform limitation."
     )
 )
-def test_checkbox_toggle(gtk_app: xa11y.Element) -> None:
+def test_checkbox_press(gtk_app: xa11y.Element) -> None:
     cb_loc = gtk_app.locator('check_box[name="Agree to terms"]')
     before = cb_loc.element().checked
-    cb_loc.toggle()
+    cb_loc.press()
     after = cb_loc.element().checked
     assert before != after
 

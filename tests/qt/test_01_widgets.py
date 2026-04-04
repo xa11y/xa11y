@@ -151,14 +151,16 @@ def test_radio_button_b_unselected(qt_app):
 
 
 def test_radio_select_changes_state(qt_app):
-    qt_app.locator('radio_button[name="Option B"]').press()
+    # Qt radio buttons expose AT-SPI action "toggle", so use toggle()
+    # to match the platform action (lossless translation tenet).
+    qt_app.locator('radio_button[name="Option B"]').toggle()
     time.sleep(ACTION_SETTLE)
     b = qt_app.locator('radio_button[name="Option B"]').element()
     assert b.checked == "on"
     a = qt_app.locator('radio_button[name="Option A"]').element()
     assert a.checked == "off"
     # Restore
-    qt_app.locator('radio_button[name="Option A"]').press()
+    qt_app.locator('radio_button[name="Option A"]').toggle()
     time.sleep(ACTION_SETTLE)
 
 

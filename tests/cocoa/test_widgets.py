@@ -104,10 +104,10 @@ def test_subscribe_checkbox_checked(cocoa_app: xa11y.Element) -> None:
     assert cb.checked == "on"
 
 
-def test_checkbox_toggle(cocoa_app: xa11y.Element) -> None:
+def test_checkbox_press(cocoa_app: xa11y.Element) -> None:
     cb_loc = cocoa_app.locator('check_box[name="Agree to terms"]')
     before = cb_loc.element().checked
-    cb_loc.toggle()
+    cb_loc.press()
     after = cb_loc.element().checked
     assert before != after
 

@@ -196,7 +196,7 @@ def test_actions_slider(test_app):
 
 def test_actions_checkbox(test_app):
     cb = test_app.descendant("check_box").elements()[0]
-    assert set(cb.actions) == {"toggle", "focus"}
+    assert set(cb.actions) == {"press", "focus"}
 
 
 def test_actions_empty(test_app):
