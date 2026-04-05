@@ -28,7 +28,7 @@ Integration tests use shared helpers from `xa11y/tests/integ/mod.rs`:
 
 2. **Only expose what accessibility APIs support.** If a platform has no accessibility interface for an operation, don't implement it with input simulation — leave it out.
 
-3. **Lossless action translation.** Converting a platform action to an xa11y `Action` and back must yield the same platform action. Each platform action maps to exactly one xa11y `Action`, and each xa11y `Action` maps to at most one canonical platform action name. Round-trip fidelity is required because consumers read the allowed actions from the tree and then perform one — the performed action must match what the platform originally advertised.
+3. **Action fidelity.** If an element reports an action name in its `actions` list, calling that action must invoke the original platform action — not a substitute or alias.
 
 ## Pre-Commit / Pre-PR Checklist
 
