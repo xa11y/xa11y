@@ -20,7 +20,7 @@ pytestmark = pytest.mark.skipif(
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 
-def find(app: xa11y.Element, selector: str) -> xa11y.Element:
+def find(app: xa11y.App, selector: str) -> xa11y.Element:
     return app.locator(selector).element()
 
 

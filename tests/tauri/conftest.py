@@ -34,7 +34,7 @@ def _ensure_built() -> None:
 
 @pytest.fixture(scope="session")
 def tauri_app():
-    """Build and launch the Tauri test app; return an xa11y Element handle."""
+    """Build and launch the Tauri test app; return an xa11y App handle."""
     _ensure_built()
     pid_file = tempfile.mktemp(suffix=".pid")
     yield from launch_test_app(

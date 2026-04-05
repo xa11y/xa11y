@@ -578,7 +578,12 @@ impl Provider for WindowsProvider {
         };
 
         // Applications are always direct children of the desktop root
-        if root.is_none() && first.role == Some(Role::Application) {
+        if root.is_none()
+            && matches!(
+                first.role,
+                Some(xa11y_core::selector::RoleMatch::Normalized(Role::Application))
+            )
+        {
             let mut matching = self.get_children(None)?;
 
             // Filter by selector attributes (name etc.)
