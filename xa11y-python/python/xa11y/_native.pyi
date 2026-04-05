@@ -183,8 +183,6 @@ class Element:
         """Get direct children (lazy — each call queries the provider)."""
     def parent(self) -> Element | None:
         """Get parent element (lazy — each call queries the provider)."""
-    def locator(self, selector: str) -> Locator:
-        """Create a Locator scoped to this element's subtree."""
     def subscribe(self) -> Subscription:
         """Subscribe to accessibility events for this element (typically an app)."""
     def __repr__(self) -> str: ...

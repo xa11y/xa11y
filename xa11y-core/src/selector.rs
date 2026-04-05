@@ -44,9 +44,18 @@ pub enum Combinator {
     Child,
 }
 
+/// How a role is matched in a selector.
+#[derive(Debug, Clone)]
+pub enum RoleMatch {
+    /// Match against a normalized role (e.g., `button`, `text_field`).
+    Normalized(Role),
+    /// Match against an original platform role name (e.g., `AXButton`, `PUSH_BUTTON`).
+    Platform(String),
+}
+
 #[derive(Debug, Clone)]
 pub struct SimpleSelector {
-    pub role: Option<Role>,
+    pub role: Option<RoleMatch>,
     pub filters: Vec<AttrFilter>,
     pub nth: Option<usize>,
 }
@@ -58,13 +67,9 @@ pub struct AttrFilter {
     pub value: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum AttrName {
-    Name,
-    Value,
-    Description,
-    Role,
-}
+/// Attribute name for selector filters. Any `snake_case` string is valid —
+/// it is looked up in the element's `attributes` map at match time.
+pub type AttrName = String;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MatchOp {
@@ -162,20 +167,19 @@ impl Selector {
         let mut filters = Vec::new();
         let mut nth = None;
 
-        // Try to parse role name (sequence of [a-z_])
+        // Try to parse role name. Normalized roles are snake_case (e.g., `button`).
+        // Platform roles may include uppercase (e.g., `AXButton`, `PUSH_BUTTON`).
         let start = pos;
-        while pos < chars.len() && (chars[pos].is_ascii_lowercase() || chars[pos] == '_') {
+        while pos < chars.len() && (chars[pos].is_ascii_alphanumeric() || chars[pos] == '_') {
             pos += 1;
         }
         if pos > start {
             let role_str: String = chars[start..pos].iter().collect();
             match Role::from_snake_case(&role_str) {
-                Some(r) => role = Some(r),
+                Some(r) => role = Some(RoleMatch::Normalized(r)),
                 None => {
-                    return Err(Error::InvalidSelector {
-                        selector: input.to_string(),
-                        message: format!("unknown role '{}'", role_str),
-                    });
+                    // Not a normalized role — treat as a platform role name.
+                    role = Some(RoleMatch::Platform(role_str));
                 }
             }
         }
@@ -247,24 +251,18 @@ impl Selector {
         // Skip [
         pos += 1;
 
-        // Parse attribute name
+        // Parse attribute name (allows snake_case: [a-z0-9_]+)
         let attr_start = pos;
-        while pos < chars.len() && chars[pos].is_ascii_alphabetic() {
+        while pos < chars.len() && (chars[pos].is_ascii_alphanumeric() || chars[pos] == '_') {
             pos += 1;
         }
-        let attr_str: String = chars[attr_start..pos].iter().collect();
-        let attr = match attr_str.as_str() {
-            "name" => AttrName::Name,
-            "value" => AttrName::Value,
-            "description" => AttrName::Description,
-            "role" => AttrName::Role,
-            _ => {
-                return Err(Error::InvalidSelector {
-                    selector: input.to_string(),
-                    message: format!("unknown attribute '{}'", attr_str),
-                });
-            }
-        };
+        let attr: String = chars[attr_start..pos].iter().collect();
+        if attr.is_empty() {
+            return Err(Error::InvalidSelector {
+                selector: input.to_string(),
+                message: "empty attribute name in filter".to_string(),
+            });
+        }
 
         // Parse operator
         let op = if pos + 1 < chars.len() && chars[pos] == '*' && chars[pos + 1] == '=' {
@@ -326,22 +324,41 @@ impl Selector {
 /// Check if an element matches a simple selector (no combinators).
 pub fn matches_simple(element: &ElementData, simple: &SimpleSelector) -> bool {
     // Check role
-    if let Some(role) = simple.role {
-        if element.role != role {
-            return false;
+    if let Some(ref role_match) = simple.role {
+        match role_match {
+            RoleMatch::Normalized(role) => {
+                if element.role != *role {
+                    return false;
+                }
+            }
+            RoleMatch::Platform(platform_role) => {
+                // Check raw platform role fields: ax_role (macOS), atspi_role (Linux),
+                // or control_type_id (Windows).
+                let matches = element
+                    .raw
+                    .values()
+                    .any(|v| v.as_str().is_some_and(|s| s == platform_role));
+                if !matches {
+                    return false;
+                }
+            }
         }
     }
 
-    // Check attribute filters
+    // Check attribute filters — look up each attribute in the element's attributes map.
     for filter in &simple.filters {
-        let attr_value = match filter.attr {
-            AttrName::Name => element.name.as_deref(),
-            AttrName::Value => element.value.as_deref(),
-            AttrName::Description => element.description.as_deref(),
-            AttrName::Role => Some(element.role.to_snake_case()),
-        };
+        let attr_value: Option<String> = element.attributes.get(&filter.attr).and_then(|v| {
+            match v {
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Bool(b) => Some(b.to_string()),
+                serde_json::Value::Number(n) => Some(n.to_string()),
+                serde_json::Value::Null => None,
+                // Arrays/objects: convert to JSON string for matching
+                other => Some(other.to_string()),
+            }
+        });
 
-        if !match_op(&filter.op, &filter.value, attr_value) {
+        if !match_op(&filter.op, &filter.value, attr_value.as_deref()) {
             return false;
         }
     }
@@ -412,7 +429,11 @@ pub fn find_elements_in_tree(
 
     // Optimization: when searching from system root for applications,
     // only check direct children (apps are always at depth 0 from root).
-    let phase1_depth = if root.is_none() && first.role == Some(crate::role::Role::Application) {
+    let phase1_depth = if root.is_none()
+        && matches!(
+            first.role,
+            Some(RoleMatch::Normalized(crate::role::Role::Application))
+        ) {
         0
     } else {
         max_depth
@@ -528,7 +549,10 @@ mod tests {
     fn parse_role_only() {
         let sel = Selector::parse("button").unwrap();
         assert_eq!(sel.segments.len(), 1);
-        assert_eq!(sel.segments[0].simple.role, Some(Role::Button));
+        assert!(matches!(
+            sel.segments[0].simple.role,
+            Some(RoleMatch::Normalized(Role::Button))
+        ));
     }
 
     #[test]
@@ -537,7 +561,7 @@ mod tests {
         assert_eq!(sel.segments.len(), 1);
         assert!(sel.segments[0].simple.role.is_none());
         assert_eq!(sel.segments[0].simple.filters.len(), 1);
-        assert_eq!(sel.segments[0].simple.filters[0].attr, AttrName::Name);
+        assert_eq!(sel.segments[0].simple.filters[0].attr, "name");
         assert_eq!(sel.segments[0].simple.filters[0].op, MatchOp::Exact);
         assert_eq!(sel.segments[0].simple.filters[0].value, "Submit");
     }
@@ -545,7 +569,10 @@ mod tests {
     #[test]
     fn parse_role_and_attr() {
         let sel = Selector::parse(r#"button[name="Submit"]"#).unwrap();
-        assert_eq!(sel.segments[0].simple.role, Some(Role::Button));
+        assert!(matches!(
+            sel.segments[0].simple.role,
+            Some(RoleMatch::Normalized(Role::Button))
+        ));
         assert_eq!(sel.segments[0].simple.filters[0].value, "Submit");
     }
 
@@ -571,18 +598,30 @@ mod tests {
     fn parse_child_combinator() {
         let sel = Selector::parse("toolbar > text_field").unwrap();
         assert_eq!(sel.segments.len(), 2);
-        assert_eq!(sel.segments[0].simple.role, Some(Role::Toolbar));
+        assert!(matches!(
+            sel.segments[0].simple.role,
+            Some(RoleMatch::Normalized(Role::Toolbar))
+        ));
         assert_eq!(sel.segments[1].combinator, Combinator::Child);
-        assert_eq!(sel.segments[1].simple.role, Some(Role::TextField));
+        assert!(matches!(
+            sel.segments[1].simple.role,
+            Some(RoleMatch::Normalized(Role::TextField))
+        ));
     }
 
     #[test]
     fn parse_descendant_combinator() {
         let sel = Selector::parse("toolbar text_field").unwrap();
         assert_eq!(sel.segments.len(), 2);
-        assert_eq!(sel.segments[0].simple.role, Some(Role::Toolbar));
+        assert!(matches!(
+            sel.segments[0].simple.role,
+            Some(RoleMatch::Normalized(Role::Toolbar))
+        ));
         assert_eq!(sel.segments[1].combinator, Combinator::Descendant);
-        assert_eq!(sel.segments[1].simple.role, Some(Role::TextField));
+        assert!(matches!(
+            sel.segments[1].simple.role,
+            Some(RoleMatch::Normalized(Role::TextField))
+        ));
     }
 
     #[test]
@@ -595,7 +634,10 @@ mod tests {
     fn parse_complex() {
         let sel = Selector::parse(r#"toolbar > text_field[name*="Address"]"#).unwrap();
         assert_eq!(sel.segments.len(), 2);
-        assert_eq!(sel.segments[1].simple.role, Some(Role::TextField));
+        assert!(matches!(
+            sel.segments[1].simple.role,
+            Some(RoleMatch::Normalized(Role::TextField))
+        ));
         assert_eq!(sel.segments[1].simple.filters[0].op, MatchOp::Contains);
         assert_eq!(sel.segments[1].simple.filters[0].value, "Address");
     }
@@ -606,8 +648,20 @@ mod tests {
     }
 
     #[test]
-    fn parse_unknown_role_error() {
-        assert!(Selector::parse("foobar").is_err());
+    fn parse_unknown_role_is_platform_role() {
+        // Unknown role names are treated as platform role names (e.g., AXButton)
+        let sel = Selector::parse("foobar").unwrap();
+        assert!(matches!(
+            sel.segments[0].simple.role,
+            Some(RoleMatch::Platform(ref s)) if s == "foobar"
+        ));
+
+        // Platform role with uppercase (typical macOS/Windows)
+        let sel = Selector::parse("AXButton").unwrap();
+        assert!(matches!(
+            sel.segments[0].simple.role,
+            Some(RoleMatch::Platform(ref s)) if s == "AXButton"
+        ));
     }
 
     #[test]
@@ -625,7 +679,10 @@ mod tests {
     #[test]
     fn parse_role_and_attr_single_quote() {
         let sel = Selector::parse("button[name='Submit']").unwrap();
-        assert_eq!(sel.segments[0].simple.role, Some(Role::Button));
+        assert!(matches!(
+            sel.segments[0].simple.role,
+            Some(RoleMatch::Normalized(Role::Button))
+        ));
         assert_eq!(sel.segments[0].simple.filters[0].value, "Submit");
     }
 

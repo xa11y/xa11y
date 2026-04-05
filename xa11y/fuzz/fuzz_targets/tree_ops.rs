@@ -85,7 +85,8 @@ fn apply_locator_op(loc: Locator, op: &LocatorOp) {
             let _ = loc.elements();
         }
         LocatorOp::NthThenExists(n) => {
-            let _ = loc.nth(*n).exists();
+            let n = (*n).max(1); // nth is 1-based, clamp to at least 1
+            let _ = loc.nth(n).exists();
         }
         LocatorOp::FirstThenExists => {
             let _ = loc.first().exists();

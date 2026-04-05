@@ -25,6 +25,9 @@ use crate::selector::Selector;
 /// # Ok(())
 /// # }
 /// ```
+/// Default auto-wait timeout for Locator action methods (5 seconds).
+const DEFAULT_ACTION_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[derive(Clone)]
 pub struct Locator {
     provider: Arc<dyn Provider>,
@@ -33,6 +36,8 @@ pub struct Locator {
     selector: String,
     /// Which match to select (0-based). `None` means first match.
     nth: Option<usize>,
+    /// Timeout for auto-wait before action methods.
+    timeout: Duration,
 }
 
 impl Locator {
@@ -46,19 +51,29 @@ impl Locator {
             root,
             selector: selector.to_string(),
             nth: None,
+            timeout: DEFAULT_ACTION_TIMEOUT,
         }
     }
 
-    /// Return a new Locator that selects the nth match (0-based).
+    /// Return a new Locator with a custom auto-wait timeout for action methods.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Return a new Locator that selects the nth match (1-based).
+    ///
+    /// # Panics
+    /// Panics if `n` is 0. Use `.first()` or `.nth(1)` for the first match.
     pub fn nth(mut self, n: usize) -> Self {
-        self.nth = Some(n);
+        assert!(n > 0, "Locator::nth() is 1-based, got 0");
+        self.nth = Some(n - 1); // store 0-based internally
         self
     }
 
     /// Return a new Locator that selects the first match.
-    /// Equivalent to `.nth(0)` — mainly for readability.
     pub fn first(self) -> Self {
-        self.nth(0)
+        self.nth(1)
     }
 
     /// Return a new Locator scoped to a direct child matching `child_selector`.
@@ -164,12 +179,39 @@ impl Locator {
     // ── Actions (each re-queries the provider) ─────────────────────
 
     /// Perform an action on the matched element (internal dispatch).
+    ///
+    /// Auto-waits until the element is attached, visible, and enabled
+    /// before performing the action (with the configured timeout).
     fn perform(&self, action: Action, data: Option<ActionData>) -> Result<()> {
         if let Some(ref d) = data {
             d.validate(action)?;
         }
-        let element = self.resolve_data()?;
+        // Auto-wait: poll until element is attached + visible + enabled.
+        let element = self.auto_wait()?;
         self.provider.perform_action(&element, action, data)
+    }
+
+    /// Poll until the element is attached, visible, and enabled, returning its data.
+    fn auto_wait(&self) -> Result<ElementData> {
+        let start = std::time::Instant::now();
+        let poll_interval = Duration::from_millis(100);
+
+        loop {
+            let elapsed = start.elapsed();
+            if elapsed >= self.timeout {
+                return Err(Error::Timeout { elapsed });
+            }
+
+            match self.resolve_data() {
+                Ok(data) if data.states.visible && data.states.enabled => return Ok(data),
+                Ok(_) | Err(Error::SelectorNotMatched { .. }) => {
+                    // Not yet actionable — poll again
+                }
+                Err(e) => return Err(e),
+            }
+
+            std::thread::sleep(poll_interval);
+        }
     }
 
     /// Click / invoke the matched element.

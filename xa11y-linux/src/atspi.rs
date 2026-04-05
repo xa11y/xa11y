@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use rayon::prelude::*;
-use xa11y_core::selector::{AttrName, Combinator, MatchOp, SelectorSegment};
+use xa11y_core::selector::{Combinator, MatchOp, SelectorSegment};
 use xa11y_core::{
     Action, ActionData, CancelHandle, ElementData, Error, Event, EventReceiver, EventType,
     Provider, Rect, Result, Role, Selector, StateSet, Subscription, Toggled,
@@ -486,10 +486,18 @@ impl LinuxProvider {
             } else {
                 role_name
             };
-            xa11y_core::RawPlatformData::Linux {
-                atspi_role: raw_role,
-                bus_name: aref.bus_name.clone(),
-                object_path: aref.path.clone(),
+            {
+                let mut raw = HashMap::new();
+                raw.insert("atspi_role".into(), serde_json::Value::String(raw_role));
+                raw.insert(
+                    "bus_name".into(),
+                    serde_json::Value::String(aref.bus_name.clone()),
+                );
+                raw.insert(
+                    "object_path".into(),
+                    serde_json::Value::String(aref.path.clone()),
+                );
+                raw
             }
         };
 
@@ -501,7 +509,7 @@ impl LinuxProvider {
                 .insert(handle, action_index_map);
         }
 
-        ElementData {
+        let mut data = ElementData {
             role,
             name,
             value,
@@ -514,9 +522,12 @@ impl LinuxProvider {
             max_value,
             pid,
             stable_id: Some(aref.path.clone()),
+            attributes: HashMap::new(),
             raw,
             handle,
-        }
+        };
+        data.populate_attributes();
+        data
     }
 
     /// Get the AT-SPI parent of an accessible ref.
@@ -800,24 +811,34 @@ impl LinuxProvider {
         simple: &xa11y_core::selector::SimpleSelector,
     ) -> bool {
         // Resolve role only if the selector needs it
-        let needs_role =
-            simple.role.is_some() || simple.filters.iter().any(|f| f.attr == AttrName::Role);
+        let needs_role = simple.role.is_some() || simple.filters.iter().any(|f| f.attr == "role");
         let role = if needs_role {
             Some(self.resolve_role(aref))
         } else {
             None
         };
 
-        if let Some(expected) = simple.role {
-            if role != Some(expected) {
-                return false;
+        if let Some(ref role_match) = simple.role {
+            match role_match {
+                xa11y_core::selector::RoleMatch::Normalized(expected) => {
+                    if role != Some(*expected) {
+                        return false;
+                    }
+                }
+                xa11y_core::selector::RoleMatch::Platform(platform_role) => {
+                    // Match against the raw AT-SPI2 role name
+                    let raw_role = self.get_role_name(aref).unwrap_or_default();
+                    if raw_role != *platform_role {
+                        return false;
+                    }
+                }
             }
         }
 
         for filter in &simple.filters {
-            let attr_value: Option<String> = match filter.attr {
-                AttrName::Role => role.map(|r| r.to_snake_case().to_string()),
-                AttrName::Name => {
+            let attr_value: Option<String> = match filter.attr.as_str() {
+                "role" => role.map(|r| r.to_snake_case().to_string()),
+                "name" => {
                     let name = self.get_name(aref).ok().filter(|s| !s.is_empty());
                     // Mirror build_element_data: StaticText may have name in Text interface
                     if name.is_none() && role == Some(Role::StaticText) {
@@ -826,8 +847,10 @@ impl LinuxProvider {
                         name
                     }
                 }
-                AttrName::Value => self.get_value(aref),
-                AttrName::Description => self.get_description(aref).ok().filter(|s| !s.is_empty()),
+                "value" => self.get_value(aref),
+                "description" => self.get_description(aref).ok().filter(|s| !s.is_empty()),
+                // Unknown attributes: not resolvable in lightweight matching
+                _ => None,
             };
 
             let matches = match &filter.op {
@@ -1055,7 +1078,13 @@ impl Provider for LinuxProvider {
         };
 
         // Applications are always direct children of the registry root
-        let phase1_depth = if root.is_none() && first.role == Some(Role::Application) {
+        let phase1_depth = if root.is_none()
+            && matches!(
+                first.role,
+                Some(xa11y_core::selector::RoleMatch::Normalized(
+                    Role::Application
+                ))
+            ) {
             0
         } else {
             max_depth_val

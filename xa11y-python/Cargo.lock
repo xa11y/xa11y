@@ -1291,6 +1291,7 @@ name = "xa11y-linux"
 version = "0.5.3"
 dependencies = [
  "rayon",
+ "serde_json",
  "xa11y-core",
  "zbus",
 ]
@@ -1302,6 +1303,7 @@ dependencies = [
  "cc",
  "core-foundation",
  "rayon",
+ "serde_json",
  "xa11y-core",
 ]
 
@@ -1317,6 +1319,7 @@ dependencies = [
 name = "xa11y-windows"
 version = "0.5.3"
 dependencies = [
+ "serde_json",
  "windows",
  "xa11y-core",
 ]

@@ -8,6 +8,7 @@ description = "Linux accessibility backend for xa11y (AT-SPI2)"
 
 [dependencies]
 xa11y-core = { workspace = true }
+serde_json = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rayon = "1"
