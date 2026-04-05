@@ -31,14 +31,24 @@ impl App {
     /// Returns [`Error::PermissionDenied`] if the platform provider was created
     /// without required permissions.
     pub fn by_name_with(provider: Arc<dyn Provider>, name: &str) -> Result<Self> {
-        let selector_str = format!(r#"application[name="{}"]"#, name);
-        let selector = Selector::parse(&selector_str)?;
-        let results = provider.find_elements(None, &selector, Some(1), Some(0))?;
+        // Try application role first (Linux/macOS), then window role (Windows —
+        // UIA has no Application node at the top level).
+        let app_selector = format!(r#"application[name="{}"]"#, name);
+        if let Ok(results) =
+            provider.find_elements(None, &Selector::parse(&app_selector)?, Some(1), Some(0))
+        {
+            if let Some(data) = results.into_iter().next() {
+                return Ok(Self::from_data(provider, data));
+            }
+        }
+        let win_selector = format!(r#"window[name="{}"]"#, name);
+        let results =
+            provider.find_elements(None, &Selector::parse(&win_selector)?, Some(1), Some(0))?;
         let data = results
             .into_iter()
             .next()
             .ok_or(Error::SelectorNotMatched {
-                selector: selector_str,
+                selector: app_selector,
             })?;
         Ok(Self::from_data(provider, data))
     }
@@ -48,17 +58,18 @@ impl App {
     /// Prefer `App::by_pid` from the `xa11y` crate which uses the global
     /// singleton provider.
     pub fn by_pid_with(provider: Arc<dyn Provider>, pid: u32) -> Result<Self> {
-        let selector_str = "application";
-        let selector = Selector::parse(selector_str)?;
-        let results = provider.find_elements(None, &selector, None, Some(0))?;
-        let data =
-            results
-                .into_iter()
-                .find(|d| d.pid == Some(pid))
-                .ok_or(Error::SelectorNotMatched {
-                    selector: format!("application with pid={}", pid),
-                })?;
-        Ok(Self::from_data(provider, data))
+        // Try application role first, then window role (Windows fallback).
+        for role in ["application", "window"] {
+            let selector = Selector::parse(role)?;
+            if let Ok(results) = provider.find_elements(None, &selector, None, Some(0)) {
+                if let Some(data) = results.into_iter().find(|d| d.pid == Some(pid)) {
+                    return Ok(Self::from_data(provider, data));
+                }
+            }
+        }
+        Err(Error::SelectorNotMatched {
+            selector: format!("application with pid={}", pid),
+        })
     }
 
     /// List all running applications, using an explicit provider.
@@ -66,12 +77,26 @@ impl App {
     /// Prefer `App::list` from the `xa11y` crate which uses the global
     /// singleton provider.
     pub fn list_with(provider: Arc<dyn Provider>) -> Result<Vec<Self>> {
-        let selector = Selector::parse("application")?;
-        let results = provider.find_elements(None, &selector, None, Some(0))?;
-        Ok(results
-            .into_iter()
-            .map(|d| Self::from_data(Arc::clone(&provider), d))
-            .collect())
+        // Collect application role elements (Linux/macOS), then add window
+        // role elements (Windows fallback) for any not already found by PID.
+        let mut apps = Vec::new();
+        let mut seen_pids = std::collections::HashSet::new();
+
+        for role in ["application", "window"] {
+            let selector = Selector::parse(role)?;
+            if let Ok(results) = provider.find_elements(None, &selector, None, Some(0)) {
+                for d in results {
+                    if let Some(pid) = d.pid {
+                        if !seen_pids.insert(pid) {
+                            continue; // already found via application role
+                        }
+                    }
+                    apps.push(Self::from_data(Arc::clone(&provider), d));
+                }
+            }
+        }
+
+        Ok(apps)
     }
 
     fn from_data(provider: Arc<dyn Provider>, data: ElementData) -> Self {
