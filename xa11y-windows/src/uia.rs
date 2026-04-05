@@ -581,7 +581,9 @@ impl Provider for WindowsProvider {
         if root.is_none()
             && matches!(
                 first.role,
-                Some(xa11y_core::selector::RoleMatch::Normalized(Role::Application))
+                Some(xa11y_core::selector::RoleMatch::Normalized(
+                    Role::Application
+                ))
             )
         {
             let mut matching = self.get_children(None)?;

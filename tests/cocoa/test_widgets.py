@@ -48,8 +48,11 @@ def dump_tree(el: xa11y.Element, depth: int = 0, max_depth: int = 20) -> str:
 # ── Diagnostics ───────────────────────────────────────────────────────────────
 
 
-def test_tree_dump(cocoa_app: xa11y.Element) -> None:
-    tree_text = dump_tree(cocoa_app)
+def test_tree_dump(cocoa_app: xa11y.App) -> None:
+    lines = [f"application  name=\"{cocoa_app.name}\""]
+    for child in cocoa_app.children():
+        lines.append(dump_tree(child, depth=1))
+    tree_text = "\n".join(lines)
     warnings.warn(f"\n=== Accessibility Tree (darwin/cocoa) ===\n{tree_text}\n=== End Tree ===")
 
 

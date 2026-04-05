@@ -66,13 +66,21 @@ def launch_test_app(
                 f"stdout: {out}\nstderr: {err}"
             )
 
+        try:
+            all_running = xa11y.App.list()
+        except (xa11y.SelectorNotMatchedError, xa11y.PlatformError) as e:
+            last_err = e
+            time.sleep(0.5)
+            continue
+
         for name in app_names:
-            try:
-                candidate = xa11y.App.by_name(name)
-                app = candidate
+            for candidate in all_running:
+                if name.lower() in (candidate.name or "").lower():
+                    app = candidate
+                    break
+            if app is not None:
                 break
-            except (xa11y.SelectorNotMatchedError, xa11y.PlatformError) as e:
-                last_err = e
+
         if app is not None:
             break
 

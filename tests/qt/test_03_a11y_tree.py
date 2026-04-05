@@ -19,7 +19,7 @@ import pytest
 # ── helpers ────────────────────────────────────────────────────────────────────
 
 
-def collect_tree(el, *, max_depth: int = 30, _depth: int = 0) -> list[dict]:
+def collect_tree_from_element(el, *, max_depth: int = 30, _depth: int = 0) -> list[dict]:
     """Recursively collect the a11y tree into a flat list of dicts."""
     if _depth > max_depth:
         return []
@@ -30,7 +30,15 @@ def collect_tree(el, *, max_depth: int = 30, _depth: int = 0) -> list[dict]:
     }
     nodes = [node]
     for child in el.children():
-        nodes.extend(collect_tree(child, max_depth=max_depth, _depth=_depth + 1))
+        nodes.extend(collect_tree_from_element(child, max_depth=max_depth, _depth=_depth + 1))
+    return nodes
+
+
+def collect_tree(app, *, max_depth: int = 30) -> list[dict]:
+    """Collect the a11y tree from an App, starting from its children."""
+    nodes = [{"role": "application", "name": app.name, "depth": 0}]
+    for child in app.children():
+        nodes.extend(collect_tree_from_element(child, max_depth=max_depth, _depth=1))
     return nodes
 
 

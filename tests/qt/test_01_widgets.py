@@ -46,16 +46,19 @@ def test_tree_dump(qt_app):
             lines.append(dump(c, indent + 2, depth + 1))
         return "\n".join(lines)
 
-    tree_text = dump(qt_app)
     import warnings
 
+    lines = [f"application  name=\"{qt_app.name}\""]
+    for child in qt_app.children():
+        lines.append(dump(child, indent=2, depth=1))
+    tree_text = "\n".join(lines)
     warnings.warn(
         f"\n=== Accessibility Tree ({sys.platform}) ===\n{tree_text}\n=== End Tree ===",
         stacklevel=1,
     )
     assert qt_app is not None
     assert len(qt_app.children()) > 0, (
-        f"Tree is empty! Root: role={qt_app.role}, name={qt_app.name}"
+        f"Tree is empty! App: name={qt_app.name}"
     )
 
 
@@ -67,14 +70,10 @@ def test_app_pid(qt_app):
 
 
 def test_window_role_and_name(qt_app):
-    # On Windows, the top-level element IS the window (UIA has no Application node).
-    # On Linux/macOS, the top-level element is the application, which has a window child.
-    if qt_app.role == "window":
-        assert "xa11y-qt-test-app" in qt_app.name
-    else:
-        w = qt_app.locator("window").element()
-        assert w.role == "window"
-        assert "xa11y-qt-test-app" in w.name
+    # App always has a window child (on all platforms).
+    w = qt_app.locator("window").element()
+    assert w.role == "window"
+    assert "xa11y-qt-test-app" in w.name
 
 
 # ── Buttons ─────────────────────────────────────────────────────────────────
