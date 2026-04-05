@@ -53,8 +53,9 @@ def test_catch_with_specific_class(test_app):
 
 def test_selector_not_matched_message(test_app):
     loc = test_app.descendant("menu_item")
+    # element() raises SelectorNotMatchedError immediately (no auto-wait)
     try:
-        loc.press()
+        loc.element()
     except xa11y.SelectorNotMatchedError as e:
         assert "menu_item" in str(e)
 

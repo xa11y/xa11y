@@ -13,7 +13,7 @@ use rayon::prelude::*;
 
 use xa11y_core::{
     Action, ActionData, CancelHandle, ElementData, Error, Event, EventReceiver, EventType,
-    Provider, RawPlatformData, Rect, Result, Role, StateSet, Subscription, Toggled,
+    Provider, Rect, Result, Role, StateSet, Subscription, Toggled,
 };
 
 // ── FFI Declarations ──────────────────────────────────────────────────────────
@@ -965,7 +965,7 @@ fn xa11y_action_to_ax(action: Action) -> Option<&'static str> {
 
 // ── Lightweight selector matching (no ElementData) ───────────────────────────
 
-use xa11y_core::selector::{match_op, AttrName, Combinator, SimpleSelector};
+use xa11y_core::selector::{match_op, Combinator, SimpleSelector};
 use xa11y_core::Selector;
 
 /// Test whether a raw AXElement matches a SimpleSelector, fetching only the
@@ -984,8 +984,7 @@ fn matches_ax_with_role(
     precomputed_role: Option<Role>,
 ) -> bool {
     // Resolve role only if the selector cares about it and it wasn't pre-computed.
-    let needs_role =
-        simple.role.is_some() || simple.filters.iter().any(|f| f.attr == AttrName::Role);
+    let needs_role = simple.role.is_some() || simple.filters.iter().any(|f| f.attr == "role");
 
     let role = if needs_role {
         match precomputed_role {
@@ -1003,16 +1002,27 @@ fn matches_ax_with_role(
         precomputed_role
     };
 
-    if let Some(expected) = simple.role {
-        if role != Some(expected) {
-            return false;
+    if let Some(ref role_match) = simple.role {
+        match role_match {
+            xa11y_core::selector::RoleMatch::Normalized(expected) => {
+                if role != Some(*expected) {
+                    return false;
+                }
+            }
+            xa11y_core::selector::RoleMatch::Platform(platform_role) => {
+                // Match against the original AX role string
+                let ax_role = ax_string(ax, "AXRole").unwrap_or_default();
+                if ax_role != *platform_role {
+                    return false;
+                }
+            }
         }
     }
 
     for filter in &simple.filters {
-        let attr_value: Option<String> = match filter.attr {
-            AttrName::Role => role.map(|r| r.to_snake_case().to_string()),
-            AttrName::Name => {
+        let attr_value: Option<String> = match filter.attr.as_str() {
+            "role" => role.map(|r| r.to_snake_case().to_string()),
+            "name" => {
                 // Mirror build_element_data name logic.
                 let ax_title = ax_string(ax, "AXTitle");
                 ax_title.or_else(|| {
@@ -1023,8 +1033,8 @@ fn matches_ax_with_role(
                     }
                 })
             }
-            AttrName::Value => ax_value_string(ax),
-            AttrName::Description => {
+            "value" => ax_value_string(ax),
+            "description" => {
                 // Mirror build_element_data description logic.
                 let ax_title = ax_string(ax, "AXTitle");
                 let ax_description = ax_string(ax, "AXDescription");
@@ -1043,6 +1053,8 @@ fn matches_ax_with_role(
                     }
                 })
             }
+            // Unknown attributes: not resolvable in lightweight matching
+            _ => None,
         };
 
         if !match_op(&filter.op, &filter.value, attr_value.as_deref()) {
@@ -1215,6 +1227,68 @@ impl MacOSProvider {
 
         let role = map_ax_role(&attrs.role_str, attrs.subrole_str.as_deref());
 
+        // Build raw platform data map before consuming attrs fields.
+        let mut raw = std::collections::HashMap::new();
+        raw.insert(
+            "ax_role".into(),
+            serde_json::Value::String(attrs.role_str.clone()),
+        );
+        if let Some(ref sr) = attrs.subrole_str {
+            raw.insert("ax_subrole".into(), serde_json::Value::String(sr.clone()));
+        }
+        if let Some(ref id) = attrs.identifier {
+            raw.insert(
+                "ax_identifier".into(),
+                serde_json::Value::String(id.clone()),
+            );
+        }
+        if let Some(ref t) = attrs.ax_title {
+            raw.insert("AXTitle".into(), serde_json::Value::String(t.clone()));
+        }
+        if let Some(ref d) = attrs.ax_description {
+            raw.insert("AXDescription".into(), serde_json::Value::String(d.clone()));
+        }
+        if let Some(ref h) = attrs.ax_help {
+            raw.insert("AXHelp".into(), serde_json::Value::String(h.clone()));
+        }
+        if let Some(e) = attrs.enabled {
+            raw.insert("AXEnabled".into(), serde_json::Value::Bool(e));
+        }
+        if let Some(f) = attrs.focused {
+            raw.insert("AXFocused".into(), serde_json::Value::Bool(f));
+        }
+        if let Some(s) = attrs.selected {
+            raw.insert("AXSelected".into(), serde_json::Value::Bool(s));
+        }
+        if let Some(h) = attrs.hidden {
+            raw.insert("AXHidden".into(), serde_json::Value::Bool(h));
+        }
+        if let Some(e) = attrs.expanded {
+            raw.insert("AXExpanded".into(), serde_json::Value::Bool(e));
+        }
+        if let Some(m) = attrs.modal {
+            raw.insert("AXModal".into(), serde_json::Value::Bool(m));
+        }
+        if let Some((x, y)) = attrs.position {
+            raw.insert("AXPosition".into(), serde_json::json!({"x": x, "y": y}));
+        }
+        if let Some((w, h)) = attrs.size {
+            raw.insert(
+                "AXSize".into(),
+                serde_json::json!({"width": w, "height": h}),
+            );
+        }
+        if let Some(n) = attrs.value_number {
+            raw.insert(
+                "AXValue".into(),
+                serde_json::Value::Number(
+                    serde_json::Number::from_f64(n).unwrap_or_else(|| serde_json::Number::from(0)),
+                ),
+            );
+        } else if let Some(ref v) = attrs.value_string {
+            raw.insert("AXValue".into(), serde_json::Value::String(v.clone()));
+        }
+
         // Name: prefer AXTitle, fall back to AXDescription only if no title
         let name = attrs.ax_title.or_else(|| {
             if role == Role::StaticText {
@@ -1314,12 +1388,6 @@ impl MacOSProvider {
             actions.push(Action::SetValue);
         }
 
-        let raw = RawPlatformData::MacOS {
-            ax_role: attrs.role_str,
-            ax_subrole: attrs.subrole_str,
-            ax_identifier: attrs.identifier.clone(),
-        };
-
         let numeric_value = match role {
             Role::Slider | Role::ProgressBar | Role::SpinButton => attrs.value_number,
             _ => None,
@@ -1336,7 +1404,7 @@ impl MacOSProvider {
 
         let handle = self.cache_element(ax.clone());
 
-        ElementData {
+        let mut data = ElementData {
             role,
             name,
             value,
@@ -1348,10 +1416,13 @@ impl MacOSProvider {
             numeric_value,
             min_value,
             max_value,
+            attributes: std::collections::HashMap::new(),
             raw,
             pid,
             handle,
-        }
+        };
+        data.populate_attributes();
+        data
     }
 
     /// Should this child be filtered out (macOS system chrome)?
@@ -1623,13 +1694,18 @@ impl Provider for MacOSProvider {
                 // Searching from system root for applications. Use
                 // CGWindowList (no AX calls) to filter apps by name, then
                 // only build full ElementData for matches.
-                if first.role == Some(Role::Application) {
+                if matches!(
+                    first.role,
+                    Some(xa11y_core::selector::RoleMatch::Normalized(
+                        Role::Application
+                    ))
+                ) {
                     let apps = Self::list_gui_apps();
                     let mut matching: Vec<ElementData> = Vec::new();
                     for (pid, app_name) in &apps {
                         // Check name filters against CGWindowList name
                         let name_matches = first.filters.iter().all(|f| {
-                            if f.attr != AttrName::Name {
+                            if f.attr != "name" {
                                 return true; // non-name filters checked after build
                             }
                             match_op(&f.op, &f.value, Some(app_name.as_str()))
@@ -2056,21 +2132,26 @@ unsafe extern "C" fn ax_observer_callback(
         let role_str = ax_string(element, "AXRole").unwrap_or_default();
         let subrole = ax_string(element, "AXSubrole");
         let role = map_ax_role(&role_str, subrole.as_deref());
-        Some(ElementData {
-            role,
-            name: ax_string(element, "AXTitle"),
-            value: ax_value_string(element),
-            description: ax_string(element, "AXDescription"),
-            bounds: None,
-            actions: vec![],
-            states: StateSet::default(),
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: None,
-            raw: RawPlatformData::Synthetic,
-            pid: None,
-            handle: 0,
+        Some({
+            let mut data = ElementData {
+                role,
+                name: ax_string(element, "AXTitle"),
+                value: ax_value_string(element),
+                description: ax_string(element, "AXDescription"),
+                bounds: None,
+                actions: vec![],
+                states: StateSet::default(),
+                numeric_value: None,
+                min_value: None,
+                max_value: None,
+                stable_id: None,
+                attributes: std::collections::HashMap::new(),
+                raw: std::collections::HashMap::new(),
+                pid: None,
+                handle: 0,
+            };
+            data.populate_attributes();
+            data
         })
     } else {
         None
@@ -2540,10 +2621,10 @@ mod tests {
 
     #[test]
     fn matches_ax_returns_false_for_null_element() {
-        use xa11y_core::selector::SimpleSelector;
+        use xa11y_core::selector::{RoleMatch, SimpleSelector};
         // Role-only selector should not match a null element
         let simple = SimpleSelector {
-            role: Some(Role::Button),
+            role: Some(RoleMatch::Normalized(Role::Button)),
             filters: vec![],
             nth: None,
         };
@@ -2567,9 +2648,9 @@ mod tests {
 
     #[test]
     fn matches_ax_rejects_wrong_role() {
-        use xa11y_core::selector::SimpleSelector;
+        use xa11y_core::selector::{RoleMatch, SimpleSelector};
         let simple = SimpleSelector {
-            role: Some(Role::CheckBox),
+            role: Some(RoleMatch::Normalized(Role::CheckBox)),
             filters: vec![],
             nth: None,
         };
@@ -2579,11 +2660,11 @@ mod tests {
 
     #[test]
     fn matches_ax_with_name_filter_rejects_null() {
-        use xa11y_core::selector::{AttrFilter, AttrName, MatchOp, SimpleSelector};
+        use xa11y_core::selector::{AttrFilter, MatchOp, SimpleSelector};
         let simple = SimpleSelector {
             role: None,
             filters: vec![AttrFilter {
-                attr: AttrName::Name,
+                attr: "name".to_string(),
                 op: MatchOp::Exact,
                 value: "Submit".to_string(),
             }],

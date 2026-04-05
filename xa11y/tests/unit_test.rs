@@ -286,23 +286,26 @@ fn sample_provider() -> Arc<MockProvider> {
     for (i, (role, name, value, desc, bounds, actions, states, nv, minv, maxv)) in
         elements.into_iter().enumerate()
     {
+        let mut data = ElementData {
+            role,
+            name: name.map(String::from),
+            value: value.map(String::from),
+            description: desc.map(String::from),
+            bounds,
+            actions,
+            states,
+            numeric_value: nv,
+            min_value: minv,
+            max_value: maxv,
+            stable_id: None,
+            pid: Some(1234),
+            attributes: std::collections::HashMap::new(),
+            raw: std::collections::HashMap::new(),
+            handle: i as u64,
+        };
+        data.populate_attributes();
         nodes.push(MockNode {
-            data: ElementData {
-                role,
-                name: name.map(String::from),
-                value: value.map(String::from),
-                description: desc.map(String::from),
-                bounds,
-                actions,
-                states,
-                numeric_value: nv,
-                min_value: minv,
-                max_value: maxv,
-                stable_id: None,
-                pid: Some(1234),
-                raw: RawPlatformData::Synthetic,
-                handle: i as u64,
-            },
+            data,
             children: children_map[i].clone(),
             parent: parent_map[i],
         });
@@ -569,7 +572,8 @@ fn element_json_serialization() {
         numeric_value: None,
         min_value: None,
         max_value: None,
-        raw: RawPlatformData::Synthetic,
+        attributes: std::collections::HashMap::new(),
+        raw: std::collections::HashMap::new(),
         handle: 0,
     };
 
@@ -582,30 +586,30 @@ fn element_json_serialization() {
 
 #[test]
 fn raw_platform_data_serialization() {
-    let raw_mac = RawPlatformData::MacOS {
-        ax_role: "AXButton".to_string(),
-        ax_subrole: None,
-        ax_identifier: Some("submit-btn".to_string()),
-    };
-    let json = serde_json::to_string(&raw_mac).unwrap();
+    let mut raw: RawPlatformData = std::collections::HashMap::new();
+    raw.insert(
+        "ax_role".into(),
+        serde_json::Value::String("AXButton".into()),
+    );
+    raw.insert(
+        "ax_identifier".into(),
+        serde_json::Value::String("submit-btn".into()),
+    );
+    let json = serde_json::to_string(&raw).unwrap();
     let deserialized: RawPlatformData = serde_json::from_str(&json).unwrap();
-    match deserialized {
-        RawPlatformData::MacOS {
-            ax_role,
-            ax_identifier,
-            ..
-        } => {
-            assert_eq!(ax_role, "AXButton");
-            assert_eq!(ax_identifier.as_deref(), Some("submit-btn"));
-        }
-        _ => panic!("expected MacOS variant"),
-    }
+    assert_eq!(deserialized["ax_role"], "AXButton");
+    assert_eq!(deserialized["ax_identifier"], "submit-btn");
 
-    let raw_linux = RawPlatformData::Linux {
-        atspi_role: "push button".to_string(),
-        bus_name: ":1.42".to_string(),
-        object_path: "/org/a11y/atspi/accessible/1234".to_string(),
-    };
+    let mut raw_linux: RawPlatformData = std::collections::HashMap::new();
+    raw_linux.insert(
+        "atspi_role".into(),
+        serde_json::Value::String("push button".into()),
+    );
+    raw_linux.insert("bus_name".into(), serde_json::Value::String(":1.42".into()));
+    raw_linux.insert(
+        "object_path".into(),
+        serde_json::Value::String("/org/a11y/atspi/accessible/1234".into()),
+    );
     let json = serde_json::to_string(&raw_linux).unwrap();
     assert!(json.contains("push button"));
 }
@@ -749,8 +753,17 @@ fn query_no_match() {
 #[test]
 fn query_invalid_selector() {
     let app = sample_app();
-    let result = app.locator("foobar").elements();
+    // Invalid syntax (not just unknown role) should error
+    let result = app.locator("").elements();
     assert!(result.is_err());
+}
+
+#[test]
+fn query_unknown_platform_role_returns_empty() {
+    let app = sample_app();
+    // Unknown role names are valid (treated as platform roles) but match nothing
+    let results = app.locator("foobar").elements().unwrap();
+    assert_eq!(results.len(), 0);
 }
 
 #[test]
@@ -807,7 +820,8 @@ fn locator_not_found() {
 fn locator_nth() {
     let app = sample_app();
     // There are 3 buttons in window's subtree: Back(3), Submit(7), Cancel(8)
-    let loc = app.locator("window button").nth(1);
+    // nth is 1-based: 1=Back, 2=Submit, 3=Cancel
+    let loc = app.locator("window button").nth(2);
     assert_eq!(loc.element().unwrap().name.as_deref(), Some("Submit"));
 }
 
@@ -903,23 +917,26 @@ fn multi_app_provider() -> Arc<MultiAppMockProvider> {
 
     let mut nodes = Vec::new();
     for (i, (role, name, pid)) in defs.into_iter().enumerate() {
+        let mut data = ElementData {
+            role,
+            name: name.map(String::from),
+            value: None,
+            description: None,
+            bounds: None,
+            actions: vec![],
+            states: StateSet::default(),
+            numeric_value: None,
+            min_value: None,
+            max_value: None,
+            stable_id: None,
+            pid,
+            attributes: std::collections::HashMap::new(),
+            raw: std::collections::HashMap::new(),
+            handle: i as u64,
+        };
+        data.populate_attributes();
         nodes.push(MockNode {
-            data: ElementData {
-                role,
-                name: name.map(String::from),
-                value: None,
-                description: None,
-                bounds: None,
-                actions: vec![],
-                states: StateSet::default(),
-                numeric_value: None,
-                min_value: None,
-                max_value: None,
-                stable_id: None,
-                pid,
-                raw: RawPlatformData::Synthetic,
-                handle: i as u64,
-            },
+            data,
             children: children_map[i].clone(),
             parent: parent_map[i],
         });

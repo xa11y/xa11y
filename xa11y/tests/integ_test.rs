@@ -812,18 +812,24 @@ mod tests {
     fn raw_data_always_present() {
         let _app = h::app_root();
         #[cfg(target_os = "linux")]
-        match &_app.data.raw {
-            RawPlatformData::Linux { atspi_role, .. } => {
-                assert!(!atspi_role.is_empty());
-            }
-            _ => panic!("Expected Linux raw data"),
+        {
+            let atspi_role = _app
+                .data
+                .raw
+                .get("atspi_role")
+                .and_then(|v| v.as_str())
+                .expect("Expected atspi_role in raw data");
+            assert!(!atspi_role.is_empty());
         }
         #[cfg(target_os = "macos")]
-        match &_app.data.raw {
-            RawPlatformData::MacOS { ax_role, .. } => {
-                assert!(!ax_role.is_empty());
-            }
-            _ => panic!("Expected macOS raw data"),
+        {
+            let ax_role = _app
+                .data
+                .raw
+                .get("ax_role")
+                .and_then(|v| v.as_str())
+                .expect("Expected ax_role in raw data");
+            assert!(!ax_role.is_empty());
         }
     }
 

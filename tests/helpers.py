@@ -3,7 +3,7 @@
 Provides launch_test_app(), a reusable generator that:
   - Launches a test app subprocess
   - Polls the accessibility API until the app appears
-  - Yields an xa11y Element handle
+  - Yields an xa11y App handle
   - Kills the process on teardown
 """
 
@@ -28,8 +28,8 @@ def launch_test_app(
     env_overrides: dict[str, str] | None = None,
     startup_timeout: int = STARTUP_TIMEOUT,
     content_ready_selector: str | None = None,
-) -> Generator[xa11y.Element, None, None]:
-    """Launch a test app and yield its xa11y Element handle.
+) -> Generator[xa11y.App, None, None]:
+    """Launch a test app and yield its xa11y App handle.
 
     Args:
         command: The subprocess command to launch the app.
@@ -37,11 +37,11 @@ def launch_test_app(
         env_overrides: Extra environment variables to set for the subprocess.
         startup_timeout: Seconds to wait for the app to appear.
         content_ready_selector: If set, keep polling until this selector matches
-            within the app element (useful for WebView apps where UI content
+            within the app's tree (useful for WebView apps where UI content
             loads asynchronously after the app window appears).
 
     Yields:
-        The xa11y Element for the app's root application node.
+        The xa11y App for the running application.
     """
     env = os.environ.copy()
     if env_overrides:
@@ -66,18 +66,28 @@ def launch_test_app(
                 f"stdout: {out}\nstderr: {err}"
             )
 
+        # Try exact match first (fast path on Linux/macOS)
         for name in app_names:
-            # Try application role first (Linux/macOS), then window role (Windows —
-            # UIA exposes top-level apps as Window elements, not Application elements).
-            for role in ("application", "window"):
-                try:
-                    candidate = xa11y.locator(f'{role}[name*="{name}"]').element()
-                    app = candidate
-                    break
-                except (xa11y.SelectorNotMatchedError, xa11y.PlatformError) as e:
-                    last_err = e
-            if app is not None:
+            try:
+                app = xa11y.App.by_name(name)
                 break
+            except (xa11y.SelectorNotMatchedError, xa11y.PlatformError):
+                pass
+
+        # Fall back to listing all apps and substring matching (needed when
+        # the app name includes extra text like the PID)
+        if app is None:
+            try:
+                all_running = xa11y.App.list()
+                for name in app_names:
+                    for candidate in all_running:
+                        if name.lower() in (candidate.name or "").lower():
+                            app = candidate
+                            break
+                    if app is not None:
+                        break
+            except (xa11y.SelectorNotMatchedError, xa11y.PlatformError) as e:
+                last_err = e
 
         if app is not None:
             break
@@ -86,7 +96,7 @@ def launch_test_app(
 
     if app is None:
         try:
-            all_apps = xa11y.locator("application").elements() + xa11y.locator("window").elements()
+            all_apps = xa11y.App.list()
             app_list = [(a.name, a.pid) for a in all_apps]
         except Exception:
             app_list = "<failed to list>"
@@ -107,7 +117,8 @@ def launch_test_app(
             try:
                 app.locator(content_ready_selector).element()
                 break
-            except (xa11y.SelectorNotMatchedError, xa11y.PlatformError):
+            except (xa11y.SelectorNotMatchedError, xa11y.PlatformError,
+                    xa11y.TimeoutError):
                 time.sleep(0.5)
         else:
             proc.terminate()

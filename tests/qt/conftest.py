@@ -16,7 +16,7 @@ APP_NAMES = ["xa11y-qt-test-app", "xa11y", "python3", "python", "Python", "app.p
 
 @pytest.fixture(scope="session")
 def qt_app():
-    """Launch the Qt test app and return an xa11y Element handle."""
+    """Launch the Qt test app and return an xa11y App handle."""
     pid_file = tempfile.mktemp(suffix=".pid")
     yield from launch_test_app(
         command=[sys.executable, APP_SCRIPT, "--pid-file", pid_file],

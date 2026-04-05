@@ -7,8 +7,8 @@
 use arbitrary::Arbitrary;
 use std::sync::Arc;
 use xa11y::{
-    Action, ActionData, ElementData, Error, Provider, RawPlatformData, Rect, Result, Role,
-    StateSet, Subscription, Toggled,
+    Action, ActionData, ElementData, Error, Provider, Rect, Result, Role, StateSet, Subscription,
+    Toggled,
 };
 
 // ── Role and Action tables ────────────────────────────────────────────────────
@@ -95,23 +95,9 @@ pub struct FuzzStateSet {
 }
 
 #[derive(Arbitrary, Debug)]
-pub enum FuzzRawPlatform {
-    MacOS {
-        ax_role: String,
-        ax_subrole: Option<String>,
-        ax_identifier: Option<String>,
-    },
-    Windows {
-        control_type_id: i32,
-        automation_id: Option<String>,
-        class_name: Option<String>,
-    },
-    Linux {
-        atspi_role: String,
-        bus_name: String,
-        object_path: String,
-    },
-    Synthetic,
+pub struct FuzzRawPlatform {
+    pub key: String,
+    pub value: Option<String>,
 }
 
 /// Full ElementData shape exposed to the fuzzer.
@@ -210,37 +196,16 @@ pub fn make_state(s: &FuzzStateSet) -> StateSet {
     }
 }
 
-pub fn make_raw(r: &FuzzRawPlatform) -> RawPlatformData {
-    match r {
-        FuzzRawPlatform::MacOS {
-            ax_role,
-            ax_subrole,
-            ax_identifier,
-        } => RawPlatformData::MacOS {
-            ax_role: ax_role.clone(),
-            ax_subrole: ax_subrole.clone(),
-            ax_identifier: ax_identifier.clone(),
-        },
-        FuzzRawPlatform::Windows {
-            control_type_id,
-            automation_id,
-            class_name,
-        } => RawPlatformData::Windows {
-            control_type_id: *control_type_id,
-            automation_id: automation_id.clone(),
-            class_name: class_name.clone(),
-        },
-        FuzzRawPlatform::Linux {
-            atspi_role,
-            bus_name,
-            object_path,
-        } => RawPlatformData::Linux {
-            atspi_role: atspi_role.clone(),
-            bus_name: bus_name.clone(),
-            object_path: object_path.clone(),
-        },
-        FuzzRawPlatform::Synthetic => RawPlatformData::Synthetic,
+pub fn make_raw(r: &FuzzRawPlatform) -> std::collections::HashMap<String, serde_json::Value> {
+    let mut map = std::collections::HashMap::new();
+    if !r.key.is_empty() {
+        let val = match &r.value {
+            Some(v) => serde_json::Value::String(v.clone()),
+            None => serde_json::Value::Null,
+        };
+        map.insert(r.key.clone(), val);
     }
+    map
 }
 
 /// Build a random mock provider from fuzz-driven elements.
@@ -286,6 +251,7 @@ pub fn build_provider(elements: &[FuzzElement]) -> Option<Arc<FuzzProvider>> {
                 min_value: fuzz.min_value,
                 max_value: fuzz.max_value,
                 pid: fuzz.pid,
+                attributes: std::collections::HashMap::new(),
                 raw: make_raw(&fuzz.raw),
                 handle: i as u64,
             },

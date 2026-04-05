@@ -16,7 +16,7 @@ APP_NAMES = ["xa11y-gtk-test-app", "gtk-test-app", "python3", "python", "Python"
 
 @pytest.fixture(scope="session")
 def gtk_app():
-    """Launch the GTK4 test app and return an xa11y Element handle."""
+    """Launch the GTK4 test app and return an xa11y App handle."""
     pid_file = tempfile.mktemp(suffix=".pid")
     yield from launch_test_app(
         command=[sys.executable, APP_SCRIPT, "--pid-file", pid_file],

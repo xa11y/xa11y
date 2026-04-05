@@ -526,7 +526,8 @@ mod tests {
             max_value: None,
             stable_id: None,
             pid: None,
-            raw: RawPlatformData::Synthetic,
+            attributes: std::collections::HashMap::new(),
+            raw: std::collections::HashMap::new(),
             handle: 0,
         }
     }

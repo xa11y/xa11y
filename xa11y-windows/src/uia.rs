@@ -13,7 +13,7 @@ use windows::Win32::UI::Accessibility::*;
 use xa11y_core::{
     selector::{matches_simple, Combinator, Selector, SelectorSegment},
     Action, ActionData, CancelHandle, ElementData, Error, Event, EventReceiver, EventType,
-    Provider, RawPlatformData, Rect, Result, Role, StateSet, Subscription, Toggled,
+    Provider, Rect, Result, Role, StateSet, Subscription, Toggled,
 };
 
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
@@ -236,10 +236,22 @@ impl WindowsProvider {
             .map(|s| s.to_string())
             .filter(|s| !s.is_empty());
 
-        let raw = RawPlatformData::Windows {
-            control_type_id: control_type.0,
-            automation_id: automation_id.clone(),
-            class_name,
+        let raw = {
+            let mut raw = std::collections::HashMap::new();
+            raw.insert(
+                "control_type_id".into(),
+                serde_json::Value::Number(serde_json::Number::from(control_type.0)),
+            );
+            if let Some(ref aid) = automation_id {
+                raw.insert(
+                    "automation_id".into(),
+                    serde_json::Value::String(aid.clone()),
+                );
+            }
+            if let Some(ref cn) = class_name {
+                raw.insert("class_name".into(), serde_json::Value::String(cn.clone()));
+            }
+            raw
         };
 
         let (numeric_value, min_value, max_value) = if matches!(
@@ -261,7 +273,7 @@ impl WindowsProvider {
 
         let handle = self.cache_element(element.clone());
 
-        ElementData {
+        let mut data = ElementData {
             role,
             name,
             value,
@@ -274,9 +286,12 @@ impl WindowsProvider {
             min_value,
             max_value,
             pid,
+            attributes: std::collections::HashMap::new(),
             raw,
             handle,
-        }
+        };
+        data.populate_attributes();
+        data
     }
 
     /// Populate a UIA element's snapshot so Cached* accessors work.
@@ -563,7 +578,14 @@ impl Provider for WindowsProvider {
         };
 
         // Applications are always direct children of the desktop root
-        if root.is_none() && first.role == Some(Role::Application) {
+        if root.is_none()
+            && matches!(
+                first.role,
+                Some(xa11y_core::selector::RoleMatch::Normalized(
+                    Role::Application
+                ))
+            )
+        {
             let mut matching = self.get_children(None)?;
 
             // Filter by selector attributes (name etc.)

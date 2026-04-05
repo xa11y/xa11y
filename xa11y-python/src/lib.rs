@@ -238,17 +238,6 @@ impl Element {
         }
     }
 
-    /// Create a Locator scoped to this element's subtree.
-    fn locator(&self, selector: &str) -> Locator {
-        Locator {
-            inner: xa11y::Locator::new(
-                self.provider.clone(),
-                Some(self.inner_data.clone()),
-                selector,
-            ),
-        }
-    }
-
     /// Subscribe to accessibility events for this element (typically an app).
     fn subscribe(&self, py: Python<'_>) -> PyResult<Subscription> {
         let provider = self.provider.clone();
@@ -1273,23 +1262,26 @@ fn build_test_tree() -> Arc<MockProvider> {
     for (i, (role, name, value, desc, bounds, actions, states, nv, minv, maxv, sid)) in
         element_defs.into_iter().enumerate()
     {
+        let mut data = ElementData {
+            role,
+            name: name.map(String::from),
+            value: value.map(String::from),
+            description: desc.map(String::from),
+            bounds,
+            actions,
+            states,
+            numeric_value: nv,
+            min_value: minv,
+            max_value: maxv,
+            stable_id: sid.map(String::from),
+            pid: Some(1234),
+            attributes: std::collections::HashMap::new(),
+            raw: std::collections::HashMap::new(),
+            handle: i as u64,
+        };
+        data.populate_attributes();
         nodes.push(MockNode {
-            data: ElementData {
-                role,
-                name: name.map(String::from),
-                value: value.map(String::from),
-                description: desc.map(String::from),
-                bounds,
-                actions,
-                states,
-                numeric_value: nv,
-                min_value: minv,
-                max_value: maxv,
-                stable_id: sid.map(String::from),
-                pid: Some(1234),
-                raw: RawPlatformData::Synthetic,
-                handle: i as u64,
-            },
+            data,
             children: children_map[i].clone(),
             parent: parent_map[i],
         });

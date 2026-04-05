@@ -8,6 +8,7 @@ description = "macOS accessibility backend for xa11y (AXUIElement)"
 
 [dependencies]
 xa11y-core = { workspace = true }
+serde_json = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"

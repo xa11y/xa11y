@@ -21,7 +21,7 @@ def test_locator_repr(test_app):
 
 
 def test_nth(test_app):
-    loc = test_app.descendant("button").nth(1)
+    loc = test_app.descendant("button").nth(2)  # 1-based indexing
     assert loc.element().name == "Forward"
 
 
