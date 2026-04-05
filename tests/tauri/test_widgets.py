@@ -45,8 +45,11 @@ def dump_tree(el: xa11y.Element, depth: int = 0, max_depth: int = 20) -> str:
 # ── Diagnostics ───────────────────────────────────────────────────────────────
 
 
-def test_tree_dump(tauri_app: xa11y.Element) -> None:
-    tree_text = dump_tree(tauri_app)
+def test_tree_dump(tauri_app: xa11y.App) -> None:
+    lines = [f"application  name=\"{tauri_app.name}\""]
+    for child in tauri_app.children():
+        lines.append(dump_tree(child, depth=1))
+    tree_text = "\n".join(lines)
     warnings.warn(f"\n=== Accessibility Tree (tauri) ===\n{tree_text}\n=== End Tree ===")
 
 
