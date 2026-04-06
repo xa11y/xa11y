@@ -182,8 +182,8 @@ pub(crate) fn format_element_oneline(el: &ElementData) -> String {
         parts.push(format!("id=\"{}\"", id));
     }
 
-    if !el.actions.is_empty() {
-        let action_names: Vec<&str> = el
+    if !el.actions.is_empty() || !el.custom_actions.is_empty() {
+        let known: Vec<&str> = el
             .actions
             .iter()
             .map(|a| match a {
@@ -205,7 +205,9 @@ pub(crate) fn format_element_oneline(el: &ElementData) -> String {
                 Action::TypeText => "type-text",
             })
             .collect();
-        parts.push(format!("actions=[{}]", action_names.join(",")));
+        let custom: Vec<&str> = el.custom_actions.iter().map(|s| s.as_str()).collect();
+        let all: Vec<&str> = known.into_iter().chain(custom).collect();
+        parts.push(format!("actions=[{}]", all.join(",")));
     }
 
     parts.join(" ")
@@ -520,6 +522,7 @@ mod tests {
             description: None,
             bounds: None,
             actions: vec![],
+            custom_actions: vec![],
             states: StateSet::default(),
             numeric_value: None,
             min_value: None,

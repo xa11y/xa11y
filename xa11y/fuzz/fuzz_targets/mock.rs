@@ -245,6 +245,7 @@ pub fn build_provider(elements: &[FuzzElement]) -> Option<Arc<FuzzProvider>> {
                     height: b.height,
                 }),
                 actions,
+                custom_actions: vec![],
                 states: make_state(&fuzz.states),
                 stable_id: fuzz.stable_id.clone(),
                 numeric_value: fuzz.numeric_value,

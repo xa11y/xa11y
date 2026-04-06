@@ -823,6 +823,165 @@ fn action_error(err: i32, action: Action, role: Role, fallback_msg: &str) -> Err
     }
 }
 
+/// Like `action_error` but for custom (string-named) actions.
+fn action_error_custom(err: i32, name: &str, role: Role, ax_name: &str) -> Error {
+    if err == AX_ERROR_ACTION_UNSUPPORTED {
+        Error::CustomActionNotSupported {
+            name: name.to_string(),
+            role,
+        }
+    } else {
+        Error::Platform {
+            code: err as i64,
+            message: format!("{ax_name} failed"),
+        }
+    }
+}
+
+// ── Action Helpers ──────────────────────────────────────────────────────────
+//
+// Small functions that reduce repetition in `perform_action`. Each wraps a
+// single AX API call pattern and converts the result to `Result<()>`.
+
+/// Invoke an AX action by name. Used for Press, ShowMenu, Increment, Decrement.
+fn perform_ax_action(
+    el_ptr: AXUIElementRef,
+    ax_name: &str,
+    action: Action,
+    role: Role,
+) -> Result<()> {
+    let cf = CFString::new(ax_name);
+    let err = do_perform_action(el_ptr, &cf);
+    if err != AX_ERROR_SUCCESS {
+        return Err(action_error(
+            err,
+            action,
+            role,
+            &format!("{ax_name} failed"),
+        ));
+    }
+    Ok(())
+}
+
+/// Set a boolean attribute. Used for Focus, Blur, Select, Expand, Collapse.
+fn set_bool_attr(
+    el_ptr: AXUIElementRef,
+    attr_name: &str,
+    value: bool,
+    action: Action,
+    role: Role,
+) -> Result<()> {
+    let attr = CFString::new(attr_name);
+    let val = if value {
+        core_foundation::boolean::CFBoolean::true_value()
+    } else {
+        core_foundation::boolean::CFBoolean::false_value()
+    };
+    let err = do_set_attribute(el_ptr, &attr, val.as_CFTypeRef());
+    if err != AX_ERROR_SUCCESS {
+        return Err(action_error(
+            err,
+            action,
+            role,
+            &format!("Set {attr_name}={value} failed"),
+        ));
+    }
+    Ok(())
+}
+
+/// SetValue: set AXValue to either a string or numeric value.
+fn perform_set_value(el_ptr: AXUIElementRef, data: Option<ActionData>) -> Result<()> {
+    match data {
+        Some(ActionData::NumericValue(v)) => {
+            let attr = CFString::new("AXValue");
+            let num = CFNumber::from(v);
+            let err = do_set_attribute(el_ptr, &attr, num.as_CFTypeRef());
+            if err != AX_ERROR_SUCCESS {
+                return Err(Error::Platform {
+                    code: err as i64,
+                    message: "SetValue numeric failed".to_string(),
+                });
+            }
+            Ok(())
+        }
+        Some(ActionData::Value(text)) => {
+            let attr = CFString::new("AXValue");
+            let val = CFString::new(&text);
+            let err = do_set_attribute(el_ptr, &attr, val.as_concrete_TypeRef() as CFTypeRef);
+            if err != AX_ERROR_SUCCESS {
+                return Err(Error::TextValueNotSupported);
+            }
+            Ok(())
+        }
+        _ => Err(Error::InvalidActionData {
+            message: "SetValue requires ActionData::Value or ActionData::NumericValue".to_string(),
+        }),
+    }
+}
+
+/// Extract scroll amount from ActionData.
+fn require_scroll_amount(data: Option<ActionData>) -> Result<f64> {
+    match data {
+        Some(ActionData::ScrollAmount(amount)) => Ok(amount),
+        _ => Err(Error::InvalidActionData {
+            message: "Scroll requires ActionData::ScrollAmount".to_string(),
+        }),
+    }
+}
+
+/// SetTextSelection: set AXSelectedTextRange to a CFRange.
+fn perform_set_text_selection(el_ptr: AXUIElementRef, data: Option<ActionData>) -> Result<()> {
+    let (start, end) = match data {
+        Some(ActionData::TextSelection { start, end }) => (start, end),
+        _ => {
+            return Err(Error::InvalidActionData {
+                message: "SetTextSelection requires ActionData::TextSelection".to_string(),
+            })
+        }
+    };
+    let location = start as isize;
+    let length = (end - start) as isize;
+    let range_value = unsafe { safe_ax_value_create_cf_range(location, length) };
+    if range_value.is_null() {
+        return Err(Error::Platform {
+            code: -1,
+            message: "Failed to create CFRange value".to_string(),
+        });
+    }
+    let attr = CFString::new("AXSelectedTextRange");
+    let err = do_set_attribute(el_ptr, &attr, range_value);
+    unsafe { CFRelease(range_value) };
+    if err != AX_ERROR_SUCCESS {
+        return Err(Error::Platform {
+            code: err as i64,
+            message: "Set AXSelectedTextRange failed".to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// TypeText: set AXSelectedText to insert text at the cursor.
+fn perform_type_text(el_ptr: AXUIElementRef, data: Option<ActionData>) -> Result<()> {
+    let text = match data {
+        Some(ActionData::Value(text)) => text,
+        _ => {
+            return Err(Error::InvalidActionData {
+                message: "TypeText requires ActionData::Value".to_string(),
+            })
+        }
+    };
+    let attr = CFString::new("AXSelectedText");
+    let val = CFString::new(&text);
+    let err = do_set_attribute(el_ptr, &attr, val.as_concrete_TypeRef() as CFTypeRef);
+    if err != AX_ERROR_SUCCESS {
+        return Err(Error::Platform {
+            code: err as i64,
+            message: "Set AXSelectedText failed".to_string(),
+        });
+    }
+    Ok(())
+}
+
 // ── Role Mapping ──────────────────────────────────────────────────────────────
 
 fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
@@ -895,11 +1054,33 @@ fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
     }
 }
 
+// ── Action Mapping ───────────────────────────────────────────────────────────
+//
+// The macOS action system has two kinds of operations:
+//
+// 1. **AX actions** — invoked via `AXUIElementPerformAction`. These are
+//    freeform strings like "AXPress", "AXShowMenu", "AXCustomThing".
+//
+// 2. **Attribute-based actions** — performed by setting an attribute via
+//    `AXUIElementSetAttributeValue` (e.g. `AXFocused = true` for Focus).
+//
+// The mapping table below covers only AX actions (type 1). Attribute-based
+// actions are handled directly in `perform_action`.
+//
+// For **reading** which actions an element supports:
+//   - `AXUIElementCopyActionNames` returns the element's AX action list
+//   - Known names (e.g. "AXPress") map to `Action` enum variants
+//   - Unknown names following `AXFooBar` convention become `snake_case` custom
+//     actions (e.g. "AXCustomThing" → "custom_thing")
+//   - Implicit actions are added from settable attributes (Focus, SetValue)
+//
+// For **performing** a custom action by name:
+//   1. Convert `snake_case` → `AXPascalCase` (e.g. "custom_thing" → "AXCustomThing")
+//   2. Check if the element's action list contains that name
+//   3. If not, try the literal `snake_case` name
+//   4. If neither matches, return error
+
 /// A single entry in the macOS AX ↔ xa11y action mapping table.
-///
-/// Each entry pairs one xa11y [`Action`] with its canonical AX action name and
-/// any aliases. Actions handled via AX attributes (Focus, SetValue, Expand,
-/// Collapse, Select, Toggle) rather than the AX Action interface are not listed.
 struct AxActionMapping {
     action: Action,
     /// The canonical AX action name (round-trips through [`map_ax_action`]).
@@ -937,9 +1118,13 @@ const AX_ACTION_MAPPINGS: &[AxActionMapping] = &[
 ];
 
 /// AX action names that are valid but intentionally unmapped (no xa11y equivalent).
-#[cfg(test)]
+/// These are recognized platform actions that we deliberately skip during
+/// action discovery — they don't correspond to any user-facing automation action.
 const AX_IGNORED_ACTIONS: &[&str] = &["AXRaise", "AXCancel"];
 
+/// Map an AX action name to a well-known xa11y Action.
+///
+/// Returns `None` for unrecognized names (which may be custom actions).
 fn map_ax_action(name: &str) -> Option<Action> {
     AX_ACTION_MAPPINGS.iter().find_map(|m| {
         if m.canonical == name || m.aliases.contains(&name) {
@@ -950,17 +1135,81 @@ fn map_ax_action(name: &str) -> Option<Action> {
     })
 }
 
-/// Map xa11y Action to its canonical macOS AX action name.
+/// Map a well-known xa11y Action to its canonical macOS AX action name.
 ///
-/// Returns the canonical name from the mapping table — the single name that
-/// round-trips through [`map_ax_action`]. Actions handled via AX attributes
-/// (Focus, SetValue, Expand, Collapse, Select, Toggle) return `None`.
-#[cfg(test)]
+/// Returns `None` for actions handled via AX attributes rather than the
+/// AX Action interface.
 fn xa11y_action_to_ax(action: Action) -> Option<&'static str> {
     AX_ACTION_MAPPINGS
         .iter()
         .find(|m| m.action == action)
         .map(|m| m.canonical)
+}
+
+/// Convert an `AXPascalCase` name to `snake_case`, stripping the `AX` prefix.
+///
+/// `"AXCustomThing"` → `"custom_thing"`
+/// `"AXPress"` → `"press"`
+/// `"NoPrefix"` → `"no_prefix"`
+fn ax_pascal_to_snake(ax_name: &str) -> String {
+    let name = ax_name.strip_prefix("AX").unwrap_or(ax_name);
+    let mut result = String::with_capacity(name.len() + 4);
+    for (i, ch) in name.chars().enumerate() {
+        if ch.is_ascii_uppercase() {
+            if i > 0 {
+                result.push('_');
+            }
+            result.push(ch.to_ascii_lowercase());
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+/// Convert a `snake_case` name to `AXPascalCase`.
+///
+/// `"custom_thing"` → `"AXCustomThing"`
+/// `"press"` → `"AXPress"`
+fn snake_to_ax_pascal(snake: &str) -> String {
+    let mut result = String::with_capacity(snake.len() + 2);
+    result.push_str("AX");
+    let mut capitalize_next = true;
+    for ch in snake.chars() {
+        if ch == '_' {
+            capitalize_next = true;
+        } else if capitalize_next {
+            result.push(ch.to_ascii_uppercase());
+            capitalize_next = false;
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+/// Classify an AX action name from `AXUIElementCopyActionNames`.
+///
+/// Returns:
+/// - `Some(action)` for well-known actions
+/// - `None` for ignored actions (AXRaise, AXCancel)
+///
+/// Unknown actions are not returned here — the caller handles them separately
+/// by converting to `snake_case` via [`ax_pascal_to_snake`].
+fn classify_ax_action(name: &str) -> ActionClassification {
+    if let Some(action) = map_ax_action(name) {
+        ActionClassification::Known(action)
+    } else if AX_IGNORED_ACTIONS.contains(&name) {
+        ActionClassification::Ignored
+    } else {
+        ActionClassification::Custom(ax_pascal_to_snake(name))
+    }
+}
+
+enum ActionClassification {
+    Known(Action),
+    Ignored,
+    Custom(String),
 }
 
 // ── Lightweight selector matching (no ElementData) ───────────────────────────
@@ -1375,10 +1624,28 @@ impl MacOSProvider {
             _ => None,
         };
 
-        // Actions still require a separate IPC call (different API).
+        // Discover actions via AXUIElementCopyActionNames + implicit attributes.
         let ax_actions = ax_action_names(ax.as_ptr());
-        let mut actions: Vec<Action> = ax_actions.iter().filter_map(|a| map_ax_action(a)).collect();
+        let mut actions: Vec<Action> = Vec::new();
+        let mut custom_actions: Vec<String> = Vec::new();
 
+        for ax_name in &ax_actions {
+            match classify_ax_action(ax_name) {
+                ActionClassification::Known(action) => {
+                    if !actions.contains(&action) {
+                        actions.push(action);
+                    }
+                }
+                ActionClassification::Custom(snake) => {
+                    if !custom_actions.contains(&snake) {
+                        custom_actions.push(snake);
+                    }
+                }
+                ActionClassification::Ignored => {}
+            }
+        }
+
+        // Implicit actions from settable attributes.
         if attrs.focused.is_some() && !actions.contains(&Action::Focus) {
             actions.push(Action::Focus);
         }
@@ -1411,6 +1678,7 @@ impl MacOSProvider {
             description,
             bounds,
             actions,
+            custom_actions,
             states,
             stable_id: attrs.identifier,
             numeric_value,
@@ -1833,254 +2101,84 @@ impl Provider for MacOSProvider {
         let el_ptr = ax.as_ptr();
 
         match action {
+            // ── AX Action interface ─────────────────────────────────────
+            //
+            // These actions map 1:1 to AX action names via the mapping table.
+            // Press and Toggle both invoke AXPress — macOS uses the same
+            // action for buttons, checkboxes, and switches.
             Action::Press | Action::Toggle => {
-                let ax_action = CFString::new("AXPress");
-                let err = do_perform_action(el_ptr, &ax_action);
-                if err != AX_ERROR_SUCCESS {
-                    return Err(action_error(err, action, element.role, "AXPress failed"));
-                }
-                Ok(())
+                perform_ax_action(el_ptr, "AXPress", action, element.role)
             }
+            Action::ShowMenu => perform_ax_action(el_ptr, "AXShowMenu", action, element.role),
+            Action::Increment => perform_ax_action(el_ptr, "AXIncrement", action, element.role),
+            Action::Decrement => perform_ax_action(el_ptr, "AXDecrement", action, element.role),
 
-            Action::Select => {
-                // Set AXSelected attribute (correct for list/table items).
-                // Usage note: Select targets the selectable item itself (table_cell,
-                // list_item, tree_item), not its text label child (static_text).
-                let attr = CFString::new("AXSelected");
-                let val = core_foundation::boolean::CFBoolean::true_value();
-                let err = do_set_attribute(el_ptr, &attr, val.as_CFTypeRef());
-                if err != AX_ERROR_SUCCESS {
-                    return Err(action_error(err, action, element.role, "AXSelected failed"));
-                }
-                Ok(())
-            }
+            // ── Attribute-based actions ─────────────────────────────────
+            //
+            // These actions set AX attributes rather than invoking AX actions.
+            Action::Focus => set_bool_attr(el_ptr, "AXFocused", true, action, element.role),
+            Action::Blur => set_bool_attr(el_ptr, "AXFocused", false, action, element.role),
+            Action::Select => set_bool_attr(el_ptr, "AXSelected", true, action, element.role),
+            Action::Expand => set_bool_attr(el_ptr, "AXExpanded", true, action, element.role),
+            Action::Collapse => set_bool_attr(el_ptr, "AXExpanded", false, action, element.role),
 
-            Action::Focus => {
-                let attr = CFString::new("AXFocused");
-                let val = core_foundation::boolean::CFBoolean::true_value();
-                let err = do_set_attribute(el_ptr, &attr, val.as_CFTypeRef());
-                if err != AX_ERROR_SUCCESS {
-                    return Err(Error::Platform {
-                        code: err as i64,
-                        message: "Set AXFocused failed".to_string(),
-                    });
-                }
-                Ok(())
-            }
+            Action::SetValue => perform_set_value(el_ptr, data),
 
-            // Platform note: SetValue replaces the element's AXValue attribute.
-            // It does not simulate user interaction — e.g. setting a URL in
-            // Safari's address bar fills the text but does not trigger navigation.
-            // Callers that need to confirm input should follow up with Press on
-            // a submit button or similar.
-            Action::SetValue => match data {
-                Some(ActionData::NumericValue(v)) => {
-                    let attr = CFString::new("AXValue");
-                    let num = CFNumber::from(v);
-                    let err = do_set_attribute(el_ptr, &attr, num.as_CFTypeRef());
-                    if err != AX_ERROR_SUCCESS {
-                        return Err(Error::Platform {
-                            code: err as i64,
-                            message: "SetValue numeric failed".to_string(),
-                        });
-                    }
-                    Ok(())
-                }
-                Some(ActionData::Value(text)) => {
-                    let attr = CFString::new("AXValue");
-                    let val = CFString::new(&text);
-                    let err =
-                        do_set_attribute(el_ptr, &attr, val.as_concrete_TypeRef() as CFTypeRef);
-                    if err != AX_ERROR_SUCCESS {
-                        return Err(Error::TextValueNotSupported);
-                    }
-                    Ok(())
-                }
-                _ => Err(Error::Platform {
-                    code: -1,
-                    message: "SetValue requires ActionData".to_string(),
-                }),
-            },
-
-            Action::Expand => {
-                let attr = CFString::new("AXExpanded");
-                let val = core_foundation::boolean::CFBoolean::true_value();
-                let err = do_set_attribute(el_ptr, &attr, val.as_CFTypeRef());
-                if err != AX_ERROR_SUCCESS {
-                    return Err(Error::Platform {
-                        code: err as i64,
-                        message: "Expand failed (AXExpanded not supported)".to_string(),
-                    });
-                }
-                Ok(())
-            }
-
-            Action::Collapse => {
-                let attr = CFString::new("AXExpanded");
-                let val = core_foundation::boolean::CFBoolean::false_value();
-                let err = do_set_attribute(el_ptr, &attr, val.as_CFTypeRef());
-                if err != AX_ERROR_SUCCESS {
-                    return Err(Error::Platform {
-                        code: err as i64,
-                        message: "Collapse failed (AXExpanded not supported)".to_string(),
-                    });
-                }
-                Ok(())
-            }
-
-            Action::Increment => {
-                // Platform note: Some macOS elements report AXIncrement in their
-                // action list but don't actually respond to it (e.g. Calculator's
-                // Mode button). The API call succeeds or returns an error, but
-                // the element state doesn't change. This is app-specific behavior.
-                let ax_action = CFString::new("AXIncrement");
-                let err = do_perform_action(el_ptr, &ax_action);
-                if err != AX_ERROR_SUCCESS {
-                    return Err(action_error(
-                        err,
-                        action,
-                        element.role,
-                        "AXIncrement failed",
-                    ));
-                }
-                Ok(())
-            }
-
-            Action::Decrement => {
-                let ax_action = CFString::new("AXDecrement");
-                let err = do_perform_action(el_ptr, &ax_action);
-                if err != AX_ERROR_SUCCESS {
-                    return Err(action_error(
-                        err,
-                        action,
-                        element.role,
-                        "AXDecrement failed",
-                    ));
-                }
-                Ok(())
-            }
-
-            Action::ShowMenu => {
-                // Platform limitation: AXShowMenu triggers the context menu, but the
-                // resulting menu may not appear as a child of the target element.
-                // On macOS, context menus are often separate AX elements at the
-                // application level (look for role=Menu children of the app root).
-                // Some apps (e.g. Finder) may place menus in the system-wide AX
-                // hierarchy rather than the app's own tree.
-                let ax_action = CFString::new("AXShowMenu");
-                let err = do_perform_action(el_ptr, &ax_action);
-                if err != AX_ERROR_SUCCESS {
-                    return Err(action_error(err, action, element.role, "AXShowMenu failed"));
-                }
-                Ok(())
-            }
-
+            // ── Scroll ──────────────────────────────────────────────────
+            //
+            // macOS has no accessibility API for programmatic scrolling, so
+            // these use CGEvent scroll wheel events (input simulation).
             Action::ScrollIntoView => Ok(()),
 
-            Action::Blur => {
-                let attr = CFString::new("AXFocused");
-                let val = core_foundation::boolean::CFBoolean::false_value();
-                let err = do_set_attribute(el_ptr, &attr, val.as_CFTypeRef());
-                if err != AX_ERROR_SUCCESS {
-                    return Err(Error::Platform {
-                        code: err as i64,
-                        message: "Set AXFocused=false failed".to_string(),
-                    });
-                }
-                Ok(())
-            }
-
             Action::ScrollDown => {
-                let amount = match data {
-                    Some(ActionData::ScrollAmount(amount)) => amount,
-                    _ => {
-                        return Err(Error::Platform {
-                            code: -1,
-                            message: "ScrollDown requires ActionData::ScrollAmount".to_string(),
-                        })
-                    }
-                };
+                let amount = require_scroll_amount(data)?;
                 let dy = -(amount * 10.0) as i32;
                 unsafe { safe_cg_post_scroll_event(dy, 0) };
                 Ok(())
             }
-
             Action::ScrollRight => {
-                let amount = match data {
-                    Some(ActionData::ScrollAmount(amount)) => amount,
-                    _ => {
-                        return Err(Error::Platform {
-                            code: -1,
-                            message: "ScrollRight requires ActionData::ScrollAmount".to_string(),
-                        })
-                    }
-                };
+                let amount = require_scroll_amount(data)?;
                 let dx = -(amount * 10.0) as i32;
                 unsafe { safe_cg_post_scroll_event(0, dx) };
                 Ok(())
             }
 
-            Action::SetTextSelection => {
-                let (start, end) = match data {
-                    Some(ActionData::TextSelection { start, end }) => (start, end),
-                    _ => {
-                        return Err(Error::Platform {
-                            code: -1,
-                            message: "SetTextSelection requires ActionData::TextSelection"
-                                .to_string(),
-                        })
-                    }
-                };
-                let location = start as isize;
-                let length = (end - start) as isize;
-                let range_value = unsafe { safe_ax_value_create_cf_range(location, length) };
-                if range_value.is_null() {
-                    return Err(Error::Platform {
-                        code: -1,
-                        message: "Failed to create CFRange value".to_string(),
-                    });
-                }
-                let attr = CFString::new("AXSelectedTextRange");
-                let err = do_set_attribute(el_ptr, &attr, range_value);
-                unsafe { CFRelease(range_value) };
-                if err != AX_ERROR_SUCCESS {
-                    return Err(Error::Platform {
-                        code: err as i64,
-                        message: "Set AXSelectedTextRange failed".to_string(),
-                    });
-                }
-                Ok(())
-            }
-
-            Action::TypeText => {
-                // Platform limitation: TypeText uses AXSelectedText which replaces the
-                // current text selection (or inserts at cursor if nothing is selected).
-                // Some apps (notably Electron-based apps like VS Code, and some terminal
-                // emulators) accept the API call without error but do not actually
-                // insert the text. Use SetValue instead for apps that don't respond to
-                // AXSelectedText — SetValue replaces the entire field value and is more
-                // widely supported.
-                let text = match data {
-                    Some(ActionData::Value(text)) => text,
-                    _ => {
-                        return Err(Error::Platform {
-                            code: -1,
-                            message: "TypeText requires ActionData::Value".to_string(),
-                        })
-                    }
-                };
-                let attr = CFString::new("AXSelectedText");
-                let val = CFString::new(&text);
-                let err = do_set_attribute(el_ptr, &attr, val.as_concrete_TypeRef() as CFTypeRef);
-                if err != AX_ERROR_SUCCESS {
-                    return Err(Error::Platform {
-                        code: err as i64,
-                        message: "Set AXSelectedText failed".to_string(),
-                    });
-                }
-                Ok(())
-            }
+            // ── Text operations ─────────────────────────────────────────
+            Action::SetTextSelection => perform_set_text_selection(el_ptr, data),
+            Action::TypeText => perform_type_text(el_ptr, data),
         }
+    }
+
+    fn perform_custom_action(&self, element: &ElementData, name: &str) -> Result<()> {
+        let ax = self.get_cached(element.handle)?;
+        let el_ptr = ax.as_ptr();
+        let available = ax_action_names(el_ptr);
+
+        // Strategy 1: convert snake_case to AXPascalCase and check
+        let ax_name = snake_to_ax_pascal(name);
+        if available.iter().any(|a| a == &ax_name) {
+            let cf_action = CFString::new(&ax_name);
+            let err = do_perform_action(el_ptr, &cf_action);
+            if err != AX_ERROR_SUCCESS {
+                return Err(action_error_custom(err, name, element.role, &ax_name));
+            }
+            return Ok(());
+        }
+
+        // Strategy 2: try the literal snake_case name (some apps may use it)
+        if available.iter().any(|a| a == name) {
+            let cf_action = CFString::new(name);
+            let err = do_perform_action(el_ptr, &cf_action);
+            if err != AX_ERROR_SUCCESS {
+                return Err(action_error_custom(err, name, element.role, name));
+            }
+            return Ok(());
+        }
+
+        Err(Error::CustomActionNotSupported {
+            name: name.to_string(),
+            role: element.role,
+        })
     }
 
     fn subscribe(&self, element: &ElementData) -> Result<Subscription> {
@@ -2140,6 +2238,7 @@ unsafe extern "C" fn ax_observer_callback(
                 description: ax_string(element, "AXDescription"),
                 bounds: None,
                 actions: vec![],
+                custom_actions: vec![],
                 states: StateSet::default(),
                 numeric_value: None,
                 min_value: None,
@@ -2586,6 +2685,70 @@ mod tests {
                 "ignored action {:?} should map to None",
                 name
             );
+        }
+    }
+
+    // ── Name conversion tests ───────────────────────────────────────
+
+    #[test]
+    fn ax_pascal_to_snake_basic() {
+        assert_eq!(ax_pascal_to_snake("AXPress"), "press");
+        assert_eq!(ax_pascal_to_snake("AXShowMenu"), "show_menu");
+        assert_eq!(ax_pascal_to_snake("AXCustomThing"), "custom_thing");
+        assert_eq!(ax_pascal_to_snake("AXIncrement"), "increment");
+    }
+
+    #[test]
+    fn ax_pascal_to_snake_no_prefix() {
+        assert_eq!(ax_pascal_to_snake("NoPrefix"), "no_prefix");
+    }
+
+    #[test]
+    fn snake_to_ax_pascal_basic() {
+        assert_eq!(snake_to_ax_pascal("press"), "AXPress");
+        assert_eq!(snake_to_ax_pascal("show_menu"), "AXShowMenu");
+        assert_eq!(snake_to_ax_pascal("custom_thing"), "AXCustomThing");
+        assert_eq!(snake_to_ax_pascal("increment"), "AXIncrement");
+    }
+
+    #[test]
+    fn name_conversion_roundtrips() {
+        let names = ["custom_thing", "my_action", "foo_bar_baz", "press"];
+        for name in names {
+            let ax = snake_to_ax_pascal(name);
+            let back = ax_pascal_to_snake(&ax);
+            assert_eq!(name, back, "round-trip failed: {name} → {ax} → {back}");
+        }
+    }
+
+    #[test]
+    fn classify_ax_action_known() {
+        match classify_ax_action("AXPress") {
+            ActionClassification::Known(Action::Press) => {}
+            other => panic!(
+                "expected Known(Press), got {:?}",
+                std::mem::discriminant(&other)
+            ),
+        }
+    }
+
+    #[test]
+    fn classify_ax_action_ignored() {
+        assert!(matches!(
+            classify_ax_action("AXRaise"),
+            ActionClassification::Ignored
+        ));
+        assert!(matches!(
+            classify_ax_action("AXCancel"),
+            ActionClassification::Ignored
+        ));
+    }
+
+    #[test]
+    fn classify_ax_action_custom() {
+        match classify_ax_action("AXCustomThing") {
+            ActionClassification::Custom(name) => assert_eq!(name, "custom_thing"),
+            other => panic!("expected Custom, got {:?}", std::mem::discriminant(&other)),
         }
     }
 

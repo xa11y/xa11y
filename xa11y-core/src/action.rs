@@ -3,6 +3,12 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Error, Result};
 
 /// A normalized enum of interactions that can be performed on accessibility elements.
+///
+/// These are the well-known actions with dedicated variants. Platform-specific
+/// actions that don't map to a known variant are available via
+/// [`Element::perform_custom_action`](crate::Element::perform_custom_action)
+/// and listed in [`ElementData::custom_actions`](crate::ElementData::custom_actions)
+/// as `snake_case` strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum Action {

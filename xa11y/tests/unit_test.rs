@@ -293,6 +293,7 @@ fn sample_provider() -> Arc<MockProvider> {
             description: desc.map(String::from),
             bounds,
             actions,
+            custom_actions: vec![],
             states,
             numeric_value: nv,
             min_value: minv,
@@ -561,6 +562,7 @@ fn element_json_serialization() {
             height: 30,
         }),
         actions: vec![Action::Press],
+        custom_actions: vec![],
         states: StateSet {
             enabled: true,
             visible: true,
@@ -924,6 +926,7 @@ fn multi_app_provider() -> Arc<MultiAppMockProvider> {
             description: None,
             bounds: None,
             actions: vec![],
+            custom_actions: vec![],
             states: StateSet::default(),
             numeric_value: None,
             min_value: None,

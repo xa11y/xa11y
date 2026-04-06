@@ -34,6 +34,9 @@ fn to_py_err(e: xa11y::Error) -> PyErr {
         xa11y::Error::ActionNotSupported { action, role } => {
             ActionNotSupportedError::new_err(format!("{action} not supported on {role}"))
         }
+        xa11y::Error::CustomActionNotSupported { name, role } => ActionNotSupportedError::new_err(
+            format!("Custom action \"{name}\" not supported on {role}"),
+        ),
         xa11y::Error::TextValueNotSupported => {
             ActionNotSupportedError::new_err("Text value not supported for this element")
         }
@@ -86,11 +89,12 @@ fn make_py_element(
         xa11y::Toggled::On => "on".to_string(),
         xa11y::Toggled::Mixed => "mixed".to_string(),
     });
-    let actions: Vec<String> = data
+    let mut actions: Vec<String> = data
         .actions
         .iter()
         .map(|a| action_to_str(a).to_string())
         .collect();
+    actions.extend(data.custom_actions.iter().cloned());
     Py::new(
         py,
         Element {
@@ -1269,6 +1273,7 @@ fn build_test_tree() -> Arc<MockProvider> {
             description: desc.map(String::from),
             bounds,
             actions,
+            custom_actions: vec![],
             states,
             numeric_value: nv,
             min_value: minv,

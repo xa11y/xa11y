@@ -516,6 +516,7 @@ impl LinuxProvider {
             description,
             bounds,
             actions,
+            custom_actions: vec![],
             states,
             numeric_value,
             min_value,

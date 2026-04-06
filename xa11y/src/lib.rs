@@ -73,6 +73,9 @@ impl Provider for StaticProviderRef {
     ) -> Result<()> {
         self.0.perform_action(element, action, data)
     }
+    fn perform_custom_action(&self, element: &ElementData, name: &str) -> Result<()> {
+        self.0.perform_custom_action(element, name)
+    }
     fn subscribe(&self, element: &ElementData) -> Result<Subscription> {
         self.0.subscribe(element)
     }
