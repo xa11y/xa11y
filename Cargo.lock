@@ -2721,7 +2721,7 @@ checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
 
 [[package]]
 name = "xa11y"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "serde_json",
  "xa11y",
@@ -2733,7 +2733,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-core"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2742,7 +2742,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-fuzz"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "rand",
  "xa11y",
@@ -2751,7 +2751,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-linux"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "rayon",
  "serde_json",
@@ -2761,7 +2761,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-macos"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "cc",
  "core-foundation 0.10.1",
@@ -2772,7 +2772,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-test-app"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -2781,7 +2781,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-windows"
-version = "0.5.3"
+version = "0.6.0"
 dependencies = [
  "serde_json",
  "windows 0.58.0",
@@ -2815,7 +2815,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xtask"
-version = "0.5.3"
+version = "0.6.0"
 
 [[package]]
 name = "zbus"
