@@ -273,9 +273,7 @@ class Locator:
         """Wait until the element has keyboard focus."""
     def wait_unfocused(self, timeout: float = 5.0) -> Element:
         """Wait until the element does not have keyboard focus."""
-    def wait_until(
-        self, predicate: Callable[[Element | None], bool], timeout: float = 5.0
-    ) -> None:
+    def wait_until(self, predicate: Callable[[Element | None], bool], timeout: float = 5.0) -> None:
         """Wait until an arbitrary predicate is satisfied."""
     def __repr__(self) -> str: ...
 
