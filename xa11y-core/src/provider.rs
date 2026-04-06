@@ -1,4 +1,3 @@
-use crate::action::{Action, ActionData};
 use crate::element::ElementData;
 use crate::error::Result;
 use crate::event_provider::Subscription;
@@ -10,10 +9,18 @@ use crate::selector::Selector;
 /// by their [`ElementData`] (which contains a provider-specific `handle` for
 /// looking up the underlying platform object).
 ///
+/// # Action model
+///
+/// Common actions are first-class methods with proper typed signatures.
+/// Platform-specific or custom actions use [`perform_action`](Self::perform_action)
+/// as an escape hatch — it takes a `snake_case` action name string.
+///
 /// Providers should check platform permissions in their constructor (`new()`)
 /// and return [`Error::PermissionDenied`](crate::Error::PermissionDenied) if
 /// required permissions are not granted.
 pub trait Provider: Send + Sync {
+    // ── Tree navigation ─────────────────────────────────────────────
+
     /// Get direct children of an element.
     ///
     /// If `element` is `None`, returns top-level application elements.
@@ -50,22 +57,77 @@ pub trait Provider: Send + Sync {
         )
     }
 
-    /// Perform an action on an element.
+    // ── Common actions ──────────────────────────────────────────────
+
+    /// Click / tap / invoke the element.
+    fn press(&self, element: &ElementData) -> Result<()>;
+
+    /// Set keyboard focus to the element.
+    fn focus(&self, element: &ElementData) -> Result<()>;
+
+    /// Remove keyboard focus from the element.
+    fn blur(&self, element: &ElementData) -> Result<()>;
+
+    /// Toggle a checkbox or switch.
+    fn toggle(&self, element: &ElementData) -> Result<()>;
+
+    /// Select an item in a list, tab group, or menu.
+    fn select(&self, element: &ElementData) -> Result<()>;
+
+    /// Expand a collapsible element (combo box, tree item, disclosure).
+    fn expand(&self, element: &ElementData) -> Result<()>;
+
+    /// Collapse an expanded element.
+    fn collapse(&self, element: &ElementData) -> Result<()>;
+
+    /// Show the element's context menu or dropdown.
+    fn show_menu(&self, element: &ElementData) -> Result<()>;
+
+    /// Increment a slider or spinner by one step.
+    fn increment(&self, element: &ElementData) -> Result<()>;
+
+    /// Decrement a slider or spinner by one step.
+    fn decrement(&self, element: &ElementData) -> Result<()>;
+
+    /// Scroll the element into the visible area.
+    fn scroll_into_view(&self, element: &ElementData) -> Result<()>;
+
+    // ── Typed operations ────────────────────────────────────────────
+
+    /// Set the text value of the element.
+    fn set_value(&self, element: &ElementData, value: &str) -> Result<()>;
+
+    /// Set the numeric value of the element (slider, spinner).
+    fn set_numeric_value(&self, element: &ElementData, value: f64) -> Result<()>;
+
+    /// Insert text at the current cursor position.
+    fn type_text(&self, element: &ElementData, text: &str) -> Result<()>;
+
+    /// Select a text range (0-based character offsets).
+    fn set_text_selection(&self, element: &ElementData, start: u32, end: u32) -> Result<()>;
+
+    /// Scroll in the given direction by the given amount.
     ///
-    /// Handles both well-known actions (`Action::Press`, etc.) and custom
-    /// platform-specific actions (`Action::Custom("name")`). For custom actions,
-    /// the provider converts the `snake_case` name to the platform's convention
-    /// (e.g. `"custom_thing"` → `"AXCustomThing"` on macOS).
+    /// Amount is in logical scroll units (≈ one mouse wheel notch).
+    fn scroll_down(&self, element: &ElementData, amount: f64) -> Result<()>;
+    fn scroll_up(&self, element: &ElementData, amount: f64) -> Result<()>;
+    fn scroll_right(&self, element: &ElementData, amount: f64) -> Result<()>;
+    fn scroll_left(&self, element: &ElementData, amount: f64) -> Result<()>;
+
+    // ── Generic action escape hatch ─────────────────────────────────
+
+    /// Perform an action by `snake_case` name.
     ///
-    /// `Ok(())` means the platform API accepted the request without error.
-    /// It does **not** guarantee the action had an observable effect — use
-    /// `Locator::wait_*` methods to verify state changes.
-    fn perform_action(
-        &self,
-        element: &ElementData,
-        action: Action,
-        data: Option<ActionData>,
-    ) -> Result<()>;
+    /// This is the escape hatch for platform-specific actions not covered by
+    /// the first-class methods above. The provider converts the name to the
+    /// platform's convention (e.g. `"custom_thing"` → `"AXCustomThing"` on
+    /// macOS) and invokes it.
+    ///
+    /// Well-known action names (`"press"`, `"focus"`, etc.) should also work
+    /// here — providers should delegate to the corresponding method.
+    fn perform_action(&self, element: &ElementData, action: &str) -> Result<()>;
+
+    // ── Events ──────────────────────────────────────────────────────
 
     /// Subscribe to all accessibility events for an application.
     ///

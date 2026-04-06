@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::action::{Action, ActionData};
 use crate::element::{Element, ElementData};
 use crate::error::{Error, Result};
 use crate::event::ElementState;
@@ -176,20 +175,7 @@ impl Locator {
             .collect())
     }
 
-    // ── Actions (each re-queries the provider) ─────────────────────
-
-    /// Perform an action on the matched element (internal dispatch).
-    ///
-    /// Auto-waits until the element is attached, visible, and enabled
-    /// before performing the action (with the configured timeout).
-    fn perform(&self, action: Action, data: Option<ActionData>) -> Result<()> {
-        if let Some(ref d) = data {
-            d.validate(&action)?;
-        }
-        // Auto-wait: poll until element is attached + visible + enabled.
-        let element = self.auto_wait()?;
-        self.provider.perform_action(&element, action, data)
-    }
+    // ── Auto-wait ──────────────────────────────────────────────────
 
     /// Poll until the element is attached, visible, and enabled, returning its data.
     fn auto_wait(&self) -> Result<ElementData> {
@@ -214,114 +200,143 @@ impl Locator {
         }
     }
 
+    // ── Common actions (auto-wait, then delegate to provider) ──────
+
     /// Click / invoke the matched element.
     pub fn press(&self) -> Result<()> {
-        self.perform(Action::Press, None)
+        let el = self.auto_wait()?;
+        self.provider.press(&el)
     }
 
     /// Set keyboard focus on the matched element.
     pub fn focus(&self) -> Result<()> {
-        self.perform(Action::Focus, None)
-    }
-
-    /// Toggle the matched element (checkbox, switch).
-    pub fn toggle(&self) -> Result<()> {
-        self.perform(Action::Toggle, None)
-    }
-
-    /// Select the matched element (list item, etc.).
-    pub fn select(&self) -> Result<()> {
-        self.perform(Action::Select, None)
-    }
-
-    /// Expand the matched element.
-    pub fn expand(&self) -> Result<()> {
-        self.perform(Action::Expand, None)
-    }
-
-    /// Collapse the matched element.
-    pub fn collapse(&self) -> Result<()> {
-        self.perform(Action::Collapse, None)
-    }
-
-    /// Set the text value of the matched element.
-    pub fn set_value(&self, value: &str) -> Result<()> {
-        self.perform(Action::SetValue, Some(ActionData::Value(value.to_string())))
-    }
-
-    /// Set the numeric value of the matched element (slider, spinner).
-    pub fn set_numeric_value(&self, value: f64) -> Result<()> {
-        self.perform(Action::SetValue, Some(ActionData::NumericValue(value)))
-    }
-
-    /// Increment the matched element (slider, spinner).
-    pub fn increment(&self) -> Result<()> {
-        self.perform(Action::Increment, None)
-    }
-
-    /// Decrement the matched element (slider, spinner).
-    pub fn decrement(&self) -> Result<()> {
-        self.perform(Action::Decrement, None)
-    }
-
-    /// Show the context menu for the matched element.
-    pub fn show_menu(&self) -> Result<()> {
-        self.perform(Action::ShowMenu, None)
-    }
-
-    /// Scroll the matched element into view.
-    pub fn scroll_into_view(&self) -> Result<()> {
-        self.perform(Action::ScrollIntoView, None)
-    }
-
-    /// Type text character-by-character on the matched element.
-    pub fn type_text(&self, text: &str) -> Result<()> {
-        self.perform(Action::TypeText, Some(ActionData::Value(text.to_string())))
-    }
-
-    /// Select a text range within the matched element.
-    pub fn select_text(&self, start: u32, end: u32) -> Result<()> {
-        self.perform(
-            Action::SetTextSelection,
-            Some(ActionData::TextSelection { start, end }),
-        )
+        let el = self.auto_wait()?;
+        self.provider.focus(&el)
     }
 
     /// Remove keyboard focus from the matched element.
     pub fn blur(&self) -> Result<()> {
-        self.perform(Action::Blur, None)
+        let el = self.auto_wait()?;
+        self.provider.blur(&el)
     }
 
-    /// Scroll the matched element upward.
-    pub fn scroll_up(&self, amount: f64) -> Result<()> {
-        self.perform(Action::ScrollDown, Some(ActionData::ScrollAmount(-amount)))
+    /// Toggle the matched element (checkbox, switch).
+    pub fn toggle(&self) -> Result<()> {
+        let el = self.auto_wait()?;
+        self.provider.toggle(&el)
+    }
+
+    /// Select the matched element (list item, etc.).
+    pub fn select(&self) -> Result<()> {
+        let el = self.auto_wait()?;
+        self.provider.select(&el)
+    }
+
+    /// Expand the matched element.
+    pub fn expand(&self) -> Result<()> {
+        let el = self.auto_wait()?;
+        self.provider.expand(&el)
+    }
+
+    /// Collapse the matched element.
+    pub fn collapse(&self) -> Result<()> {
+        let el = self.auto_wait()?;
+        self.provider.collapse(&el)
+    }
+
+    /// Show the context menu for the matched element.
+    pub fn show_menu(&self) -> Result<()> {
+        let el = self.auto_wait()?;
+        self.provider.show_menu(&el)
+    }
+
+    /// Increment the matched element (slider, spinner).
+    pub fn increment(&self) -> Result<()> {
+        let el = self.auto_wait()?;
+        self.provider.increment(&el)
+    }
+
+    /// Decrement the matched element (slider, spinner).
+    pub fn decrement(&self) -> Result<()> {
+        let el = self.auto_wait()?;
+        self.provider.decrement(&el)
+    }
+
+    /// Scroll the matched element into view.
+    pub fn scroll_into_view(&self) -> Result<()> {
+        let el = self.auto_wait()?;
+        self.provider.scroll_into_view(&el)
+    }
+
+    // ── Typed operations (auto-wait, then delegate) ────────────────
+
+    /// Set the text value of the matched element.
+    pub fn set_value(&self, value: &str) -> Result<()> {
+        let el = self.auto_wait()?;
+        self.provider.set_value(&el, value)
+    }
+
+    /// Set the numeric value of the matched element (slider, spinner).
+    pub fn set_numeric_value(&self, value: f64) -> Result<()> {
+        if !value.is_finite() {
+            return Err(Error::InvalidActionData {
+                message: format!("set_numeric_value requires a finite value, got {}", value),
+            });
+        }
+        let el = self.auto_wait()?;
+        self.provider.set_numeric_value(&el, value)
+    }
+
+    /// Type text at the current cursor position on the matched element.
+    pub fn type_text(&self, text: &str) -> Result<()> {
+        let el = self.auto_wait()?;
+        self.provider.type_text(&el, text)
+    }
+
+    /// Select a text range within the matched element.
+    pub fn select_text(&self, start: u32, end: u32) -> Result<()> {
+        if start > end {
+            return Err(Error::InvalidActionData {
+                message: format!("select_text start ({}) must be <= end ({})", start, end),
+            });
+        }
+        let el = self.auto_wait()?;
+        self.provider.set_text_selection(&el, start, end)
     }
 
     /// Scroll the matched element downward.
     pub fn scroll_down(&self, amount: f64) -> Result<()> {
-        self.perform(Action::ScrollDown, Some(ActionData::ScrollAmount(amount)))
+        let el = self.auto_wait()?;
+        self.provider.scroll_down(&el, amount)
     }
 
-    /// Scroll the matched element leftward.
-    pub fn scroll_left(&self, amount: f64) -> Result<()> {
-        self.perform(Action::ScrollRight, Some(ActionData::ScrollAmount(-amount)))
+    /// Scroll the matched element upward.
+    pub fn scroll_up(&self, amount: f64) -> Result<()> {
+        let el = self.auto_wait()?;
+        self.provider.scroll_up(&el, amount)
     }
 
     /// Scroll the matched element rightward.
     pub fn scroll_right(&self, amount: f64) -> Result<()> {
-        self.perform(Action::ScrollRight, Some(ActionData::ScrollAmount(amount)))
+        let el = self.auto_wait()?;
+        self.provider.scroll_right(&el, amount)
     }
 
-    /// Perform any action with optional data (with auto-wait).
+    /// Scroll the matched element leftward.
+    pub fn scroll_left(&self, amount: f64) -> Result<()> {
+        let el = self.auto_wait()?;
+        self.provider.scroll_left(&el, amount)
+    }
+
+    // ── Generic action escape hatch ────────────────────────────────
+
+    /// Perform an action by name (with auto-wait).
     ///
-    /// This is the generic version of the named action methods (`.press()`,
-    /// `.toggle()`, etc.). Also supports `Action::Custom("name")` for
-    /// platform-specific actions.
-    ///
-    /// Auto-waits until the element is attached, visible, and enabled
-    /// before performing the action.
-    pub fn perform_action(&self, action: Action, data: Option<ActionData>) -> Result<()> {
-        self.perform(action, data)
+    /// This is the escape hatch for platform-specific actions not covered
+    /// by the named methods above. Also works for well-known action names.
+    pub fn perform_action(&self, action: &str) -> Result<()> {
+        let el = self.auto_wait()?;
+        self.provider.perform_action(&el, action)
     }
 
     // ── Wait operations ─────────────────────────────────────────────

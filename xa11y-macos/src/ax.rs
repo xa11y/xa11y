@@ -12,8 +12,8 @@ use core_foundation::string::CFString;
 use rayon::prelude::*;
 
 use xa11y_core::{
-    Action, ActionData, CancelHandle, ElementData, Error, Event, EventReceiver, EventType,
-    Provider, Rect, Result, Role, StateSet, Subscription, Toggled,
+    CancelHandle, ElementData, Error, Event, EventReceiver, EventType, Provider, Rect, Result,
+    Role, Selector, StateSet, Subscription, Toggled,
 };
 
 // ── FFI Declarations ──────────────────────────────────────────────────────────
@@ -812,10 +812,10 @@ fn do_set_attribute(element: AXUIElementRef, attribute: &CFString, value: CFType
 /// Convert an AX error code from `do_perform_action` into an appropriate
 /// `Error`.  Returns `ActionNotSupported` for -25206 (kAXErrorActionUnsupported)
 /// so callers get a clear, structured error instead of a raw platform code.
-fn action_error(err: i32, action: &Action, role: Role, fallback_msg: &str) -> Error {
+fn action_error(err: i32, action: &str, role: Role, fallback_msg: &str) -> Error {
     if err == AX_ERROR_ACTION_UNSUPPORTED {
         Error::ActionNotSupported {
-            action: action.clone(),
+            action: action.to_string(),
             role,
         }
     } else {
@@ -835,7 +835,7 @@ fn action_error(err: i32, action: &Action, role: Role, fallback_msg: &str) -> Er
 fn perform_ax_action(
     el_ptr: AXUIElementRef,
     ax_name: &str,
-    action: &Action,
+    action: &str,
     role: Role,
 ) -> Result<()> {
     let cf = CFString::new(ax_name);
@@ -856,7 +856,7 @@ fn set_bool_attr(
     el_ptr: AXUIElementRef,
     attr_name: &str,
     value: bool,
-    action: &Action,
+    action: &str,
     role: Role,
 ) -> Result<()> {
     let attr = CFString::new(attr_name);
@@ -873,99 +873,6 @@ fn set_bool_attr(
             role,
             &format!("Set {attr_name}={value} failed"),
         ));
-    }
-    Ok(())
-}
-
-/// SetValue: set AXValue to either a string or numeric value.
-fn perform_set_value(el_ptr: AXUIElementRef, data: Option<ActionData>) -> Result<()> {
-    match data {
-        Some(ActionData::NumericValue(v)) => {
-            let attr = CFString::new("AXValue");
-            let num = CFNumber::from(v);
-            let err = do_set_attribute(el_ptr, &attr, num.as_CFTypeRef());
-            if err != AX_ERROR_SUCCESS {
-                return Err(Error::Platform {
-                    code: err as i64,
-                    message: "SetValue numeric failed".to_string(),
-                });
-            }
-            Ok(())
-        }
-        Some(ActionData::Value(text)) => {
-            let attr = CFString::new("AXValue");
-            let val = CFString::new(&text);
-            let err = do_set_attribute(el_ptr, &attr, val.as_concrete_TypeRef() as CFTypeRef);
-            if err != AX_ERROR_SUCCESS {
-                return Err(Error::TextValueNotSupported);
-            }
-            Ok(())
-        }
-        _ => Err(Error::InvalidActionData {
-            message: "SetValue requires ActionData::Value or ActionData::NumericValue".to_string(),
-        }),
-    }
-}
-
-/// Extract scroll amount from ActionData.
-fn require_scroll_amount(data: Option<ActionData>) -> Result<f64> {
-    match data {
-        Some(ActionData::ScrollAmount(amount)) => Ok(amount),
-        _ => Err(Error::InvalidActionData {
-            message: "Scroll requires ActionData::ScrollAmount".to_string(),
-        }),
-    }
-}
-
-/// SetTextSelection: set AXSelectedTextRange to a CFRange.
-fn perform_set_text_selection(el_ptr: AXUIElementRef, data: Option<ActionData>) -> Result<()> {
-    let (start, end) = match data {
-        Some(ActionData::TextSelection { start, end }) => (start, end),
-        _ => {
-            return Err(Error::InvalidActionData {
-                message: "SetTextSelection requires ActionData::TextSelection".to_string(),
-            })
-        }
-    };
-    let location = start as isize;
-    let length = (end - start) as isize;
-    let range_value = unsafe { safe_ax_value_create_cf_range(location, length) };
-    if range_value.is_null() {
-        return Err(Error::Platform {
-            code: -1,
-            message: "Failed to create CFRange value".to_string(),
-        });
-    }
-    let attr = CFString::new("AXSelectedTextRange");
-    let err = do_set_attribute(el_ptr, &attr, range_value);
-    unsafe { CFRelease(range_value) };
-    if err != AX_ERROR_SUCCESS {
-        return Err(Error::Platform {
-            code: err as i64,
-            message: "Set AXSelectedTextRange failed".to_string(),
-        });
-    }
-    Ok(())
-}
-
-/// TypeText: set AXSelectedText to insert text at the cursor.
-fn perform_type_text(el_ptr: AXUIElementRef, data: Option<ActionData>) -> Result<()> {
-    let text = match data {
-        Some(ActionData::Value(text)) => text,
-        _ => {
-            return Err(Error::InvalidActionData {
-                message: "TypeText requires ActionData::Value".to_string(),
-            })
-        }
-    };
-    let attr = CFString::new("AXSelectedText");
-    let val = CFString::new(&text);
-    let err = do_set_attribute(el_ptr, &attr, val.as_concrete_TypeRef() as CFTypeRef);
-    if err != AX_ERROR_SUCCESS {
-        return Err(Error::Platform {
-            code: err as i64,
-            message: "Set AXSelectedText failed".to_string(),
-        });
     }
     Ok(())
 }
@@ -1057,7 +964,7 @@ fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
 //
 // For **reading** which actions an element supports:
 //   - `AXUIElementCopyActionNames` returns the element's AX action list
-//   - Known names (e.g. "AXPress") map to `Action` enum variants
+//   - Known names (e.g. "AXPress") map to well-known action name strings
 //   - Unknown names following `AXFooBar` convention become `snake_case` custom
 //     actions (e.g. "AXCustomThing" → "custom_thing")
 //   - Implicit actions are added from settable attributes (Focus, SetValue)
@@ -1068,70 +975,22 @@ fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
 //   3. If not, try the literal `snake_case` name
 //   4. If neither matches, return error
 
-/// A single entry in the macOS AX ↔ xa11y action mapping table.
-struct AxActionMapping {
-    action: Action,
-    /// The canonical AX action name (round-trips through [`map_ax_action`]).
-    canonical: &'static str,
-    /// Additional AX action names that map to the same xa11y Action.
-    aliases: &'static [&'static str],
-}
-
-/// Single source of truth for macOS AX ↔ xa11y action mappings.
-///
-/// Only actions that use the AX Action interface are listed. Actions handled
-/// via AX attributes (Toggle, Select, Focus, SetValue, Expand, Collapse) or
-/// that have no macOS equivalent are omitted.
-const AX_ACTION_MAPPINGS: &[AxActionMapping] = &[
-    AxActionMapping {
-        action: Action::Press,
-        canonical: "AXPress",
-        aliases: &["AXConfirm"],
-    },
-    AxActionMapping {
-        action: Action::ShowMenu,
-        canonical: "AXShowMenu",
-        aliases: &[],
-    },
-    AxActionMapping {
-        action: Action::Increment,
-        canonical: "AXIncrement",
-        aliases: &[],
-    },
-    AxActionMapping {
-        action: Action::Decrement,
-        canonical: "AXDecrement",
-        aliases: &[],
-    },
-];
-
 /// AX action names that are valid but intentionally unmapped (no xa11y equivalent).
 /// These are recognized platform actions that we deliberately skip during
 /// action discovery — they don't correspond to any user-facing automation action.
 const AX_IGNORED_ACTIONS: &[&str] = &["AXRaise", "AXCancel"];
 
-/// Map an AX action name to a well-known xa11y Action.
+/// Map an AX action name to a well-known xa11y action name string.
 ///
 /// Returns `None` for unrecognized names (which may be custom actions).
-fn map_ax_action(name: &str) -> Option<Action> {
-    AX_ACTION_MAPPINGS.iter().find_map(|m| {
-        if m.canonical == name || m.aliases.contains(&name) {
-            Some(m.action)
-        } else {
-            None
-        }
-    })
-}
-
-/// Map a well-known xa11y Action to its canonical macOS AX action name.
-///
-/// Returns `None` for actions handled via AX attributes rather than the
-/// AX Action interface.
-fn xa11y_action_to_ax(action: &Action) -> Option<&'static str> {
-    AX_ACTION_MAPPINGS
-        .iter()
-        .find(|m| m.action == *action)
-        .map(|m| m.canonical)
+fn ax_action_to_name(ax_name: &str) -> Option<&'static str> {
+    match ax_name {
+        "AXPress" | "AXConfirm" => Some("press"),
+        "AXShowMenu" => Some("show_menu"),
+        "AXIncrement" => Some("increment"),
+        "AXDecrement" => Some("decrement"),
+        _ => None,
+    }
 }
 
 /// Convert an `AXPascalCase` name to `snake_case`, stripping the `AX` prefix.
@@ -1176,34 +1035,9 @@ fn snake_to_ax_pascal(snake: &str) -> String {
     result
 }
 
-/// Classify an AX action name from `AXUIElementCopyActionNames`.
-///
-/// Returns:
-/// - `Some(action)` for well-known actions
-/// - `None` for ignored actions (AXRaise, AXCancel)
-///
-/// Unknown actions are not returned here — the caller handles them separately
-/// by converting to `snake_case` via [`ax_pascal_to_snake`].
-fn classify_ax_action(name: &str) -> ActionClassification {
-    if let Some(action) = map_ax_action(name) {
-        ActionClassification::Known(action)
-    } else if AX_IGNORED_ACTIONS.contains(&name) {
-        ActionClassification::Ignored
-    } else {
-        ActionClassification::Custom(ax_pascal_to_snake(name))
-    }
-}
-
-enum ActionClassification {
-    Known(Action),
-    Ignored,
-    Custom(String),
-}
-
 // ── Lightweight selector matching (no ElementData) ───────────────────────────
 
 use xa11y_core::selector::{match_op, Combinator, SimpleSelector};
-use xa11y_core::Selector;
 
 /// Test whether a raw AXElement matches a SimpleSelector, fetching only the
 /// attributes the selector actually inspects. This avoids building a full
@@ -1614,33 +1448,35 @@ impl MacOSProvider {
 
         // Discover actions via AXUIElementCopyActionNames + implicit attributes.
         let ax_actions = ax_action_names(ax.as_ptr());
-        let mut actions: Vec<Action> = Vec::new();
+        let mut actions: Vec<String> = Vec::new();
 
         for ax_name in &ax_actions {
-            match classify_ax_action(ax_name) {
-                ActionClassification::Known(action) => {
-                    if !actions.contains(&action) {
-                        actions.push(action);
-                    }
+            if AX_IGNORED_ACTIONS.contains(&ax_name.as_str()) {
+                continue;
+            }
+            if let Some(known) = ax_action_to_name(ax_name) {
+                let s = known.to_string();
+                if !actions.contains(&s) {
+                    actions.push(s);
                 }
-                ActionClassification::Custom(snake) => {
-                    let custom = Action::Custom(snake);
-                    if !actions.contains(&custom) {
-                        actions.push(custom);
-                    }
+            } else {
+                let snake = ax_pascal_to_snake(ax_name);
+                if !actions.contains(&snake) {
+                    actions.push(snake);
                 }
-                ActionClassification::Ignored => {}
             }
         }
 
         // Implicit actions from settable attributes.
-        if attrs.focused.is_some() && !actions.contains(&Action::Focus) {
-            actions.push(Action::Focus);
+        let focus_str = "focus".to_string();
+        if attrs.focused.is_some() && !actions.contains(&focus_str) {
+            actions.push(focus_str);
         }
+        let set_value_str = "set_value".to_string();
         if matches!(role, Role::TextField | Role::TextArea | Role::Slider)
-            && !actions.contains(&Action::SetValue)
+            && !actions.contains(&set_value_str)
         {
-            actions.push(Action::SetValue);
+            actions.push(set_value_str);
         }
 
         let numeric_value = match role {
@@ -2078,94 +1914,220 @@ impl Provider for MacOSProvider {
         }
     }
 
-    fn perform_action(
-        &self,
-        element: &ElementData,
-        action: Action,
-        data: Option<ActionData>,
-    ) -> Result<()> {
+    // ── Common actions ──────────────────────────────────────────────
+
+    fn press(&self, element: &ElementData) -> Result<()> {
         let ax = self.get_cached(element.handle)?;
-        let el_ptr = ax.as_ptr();
+        perform_ax_action(ax.as_ptr(), "AXPress", "press", element.role)
+    }
 
+    fn toggle(&self, element: &ElementData) -> Result<()> {
+        let ax = self.get_cached(element.handle)?;
+        perform_ax_action(ax.as_ptr(), "AXPress", "toggle", element.role)
+    }
+
+    fn show_menu(&self, element: &ElementData) -> Result<()> {
+        let ax = self.get_cached(element.handle)?;
+        perform_ax_action(ax.as_ptr(), "AXShowMenu", "show_menu", element.role)
+    }
+
+    fn increment(&self, element: &ElementData) -> Result<()> {
+        let ax = self.get_cached(element.handle)?;
+        perform_ax_action(ax.as_ptr(), "AXIncrement", "increment", element.role)
+    }
+
+    fn decrement(&self, element: &ElementData) -> Result<()> {
+        let ax = self.get_cached(element.handle)?;
+        perform_ax_action(ax.as_ptr(), "AXDecrement", "decrement", element.role)
+    }
+
+    fn focus(&self, element: &ElementData) -> Result<()> {
+        let ax = self.get_cached(element.handle)?;
+        set_bool_attr(ax.as_ptr(), "AXFocused", true, "focus", element.role)
+    }
+
+    fn blur(&self, element: &ElementData) -> Result<()> {
+        let ax = self.get_cached(element.handle)?;
+        set_bool_attr(ax.as_ptr(), "AXFocused", false, "blur", element.role)
+    }
+
+    fn select(&self, element: &ElementData) -> Result<()> {
+        let ax = self.get_cached(element.handle)?;
+        set_bool_attr(ax.as_ptr(), "AXSelected", true, "select", element.role)
+    }
+
+    fn expand(&self, element: &ElementData) -> Result<()> {
+        let ax = self.get_cached(element.handle)?;
+        set_bool_attr(ax.as_ptr(), "AXExpanded", true, "expand", element.role)
+    }
+
+    fn collapse(&self, element: &ElementData) -> Result<()> {
+        let ax = self.get_cached(element.handle)?;
+        set_bool_attr(ax.as_ptr(), "AXExpanded", false, "collapse", element.role)
+    }
+
+    fn scroll_into_view(&self, _element: &ElementData) -> Result<()> {
+        // macOS has no accessibility API equivalent for scroll-into-view.
+        Ok(())
+    }
+
+    // ── Typed operations ────────────────────────────────────────────
+
+    fn set_value(&self, element: &ElementData, value: &str) -> Result<()> {
+        let ax = self.get_cached(element.handle)?;
+        let attr = CFString::new("AXValue");
+        let cf_value = CFString::new(value);
+        let err = do_set_attribute(
+            ax.as_ptr(),
+            &attr,
+            cf_value.as_concrete_TypeRef() as CFTypeRef,
+        );
+        if err != AX_ERROR_SUCCESS {
+            return Err(action_error(
+                err,
+                "set_value",
+                element.role,
+                "Set AXValue (string) failed",
+            ));
+        }
+        Ok(())
+    }
+
+    fn set_numeric_value(&self, element: &ElementData, value: f64) -> Result<()> {
+        let ax = self.get_cached(element.handle)?;
+        let attr = CFString::new("AXValue");
+        let cf_num = CFNumber::from(value);
+        let err = do_set_attribute(
+            ax.as_ptr(),
+            &attr,
+            cf_num.as_concrete_TypeRef() as CFTypeRef,
+        );
+        if err != AX_ERROR_SUCCESS {
+            return Err(action_error(
+                err,
+                "set_numeric_value",
+                element.role,
+                "Set AXValue (number) failed",
+            ));
+        }
+        Ok(())
+    }
+
+    fn type_text(&self, element: &ElementData, text: &str) -> Result<()> {
+        let ax = self.get_cached(element.handle)?;
+        let attr = CFString::new("AXSelectedText");
+        let cf_text = CFString::new(text);
+        let err = do_set_attribute(
+            ax.as_ptr(),
+            &attr,
+            cf_text.as_concrete_TypeRef() as CFTypeRef,
+        );
+        if err != AX_ERROR_SUCCESS {
+            return Err(action_error(
+                err,
+                "type_text",
+                element.role,
+                "Set AXSelectedText failed",
+            ));
+        }
+        Ok(())
+    }
+
+    fn set_text_selection(&self, element: &ElementData, start: u32, end: u32) -> Result<()> {
+        let ax = self.get_cached(element.handle)?;
+        let location = start as isize;
+        let length = (end as isize) - (start as isize);
+        let range_value = unsafe { safe_ax_value_create_cf_range(location, length) };
+        if range_value.is_null() {
+            return Err(Error::Platform {
+                code: -1,
+                message: "Failed to create CFRange value for text selection".to_string(),
+            });
+        }
+        let attr = CFString::new("AXSelectedTextRange");
+        let err = do_set_attribute(ax.as_ptr(), &attr, range_value);
+        unsafe { CFRelease(range_value) };
+        if err != AX_ERROR_SUCCESS {
+            return Err(action_error(
+                err,
+                "set_text_selection",
+                element.role,
+                "Set AXSelectedTextRange failed",
+            ));
+        }
+        Ok(())
+    }
+
+    // ── Scroll operations ───────────────────────────────────────────
+
+    fn scroll_down(&self, _element: &ElementData, amount: f64) -> Result<()> {
+        let dy = -(amount * 10.0) as i32;
+        unsafe { safe_cg_post_scroll_event(dy, 0) };
+        Ok(())
+    }
+
+    fn scroll_up(&self, _element: &ElementData, amount: f64) -> Result<()> {
+        let dy = (amount * 10.0) as i32;
+        unsafe { safe_cg_post_scroll_event(dy, 0) };
+        Ok(())
+    }
+
+    fn scroll_right(&self, _element: &ElementData, amount: f64) -> Result<()> {
+        let dx = -(amount * 10.0) as i32;
+        unsafe { safe_cg_post_scroll_event(0, dx) };
+        Ok(())
+    }
+
+    fn scroll_left(&self, _element: &ElementData, amount: f64) -> Result<()> {
+        let dx = (amount * 10.0) as i32;
+        unsafe { safe_cg_post_scroll_event(0, dx) };
+        Ok(())
+    }
+
+    // ── Generic action escape hatch ─────────────────────────────────
+
+    fn perform_action(&self, element: &ElementData, action: &str) -> Result<()> {
         match action {
-            // ── AX Action interface ─────────────────────────────────────
-            //
-            // These actions map 1:1 to AX action names via the mapping table.
-            // Press and Toggle both invoke AXPress — macOS uses the same
-            // action for buttons, checkboxes, and switches.
-            Action::Press | Action::Toggle => {
-                perform_ax_action(el_ptr, "AXPress", &action, element.role)
-            }
-            Action::ShowMenu => perform_ax_action(el_ptr, "AXShowMenu", &action, element.role),
-            Action::Increment => perform_ax_action(el_ptr, "AXIncrement", &action, element.role),
-            Action::Decrement => perform_ax_action(el_ptr, "AXDecrement", &action, element.role),
-
-            // ── Attribute-based actions ─────────────────────────────────
-            //
-            // These actions set AX attributes rather than invoking AX actions.
-            Action::Focus => set_bool_attr(el_ptr, "AXFocused", true, &action, element.role),
-            Action::Blur => set_bool_attr(el_ptr, "AXFocused", false, &action, element.role),
-            Action::Select => set_bool_attr(el_ptr, "AXSelected", true, &action, element.role),
-            Action::Expand => set_bool_attr(el_ptr, "AXExpanded", true, &action, element.role),
-            Action::Collapse => set_bool_attr(el_ptr, "AXExpanded", false, &action, element.role),
-
-            Action::SetValue => perform_set_value(el_ptr, data),
-
-            // ── Scroll ──────────────────────────────────────────────────
-            //
-            // macOS has no accessibility API for programmatic scrolling, so
-            // these use CGEvent scroll wheel events (input simulation).
-            Action::ScrollIntoView => Ok(()),
-
-            Action::ScrollDown => {
-                let amount = require_scroll_amount(data)?;
-                let dy = -(amount * 10.0) as i32;
-                unsafe { safe_cg_post_scroll_event(dy, 0) };
-                Ok(())
-            }
-            Action::ScrollRight => {
-                let amount = require_scroll_amount(data)?;
-                let dx = -(amount * 10.0) as i32;
-                unsafe { safe_cg_post_scroll_event(0, dx) };
-                Ok(())
-            }
-
-            // ── Text operations ─────────────────────────────────────────
-            Action::SetTextSelection => perform_set_text_selection(el_ptr, data),
-            Action::TypeText => perform_type_text(el_ptr, data),
-
-            // ── Custom platform-specific actions ────────────────────────
-            //
-            // Resolution strategy per design doc:
-            // 1. Convert snake_case → AXPascalCase, check element's action list
-            // 2. Try the literal snake_case name
-            // 3. Return error if neither matches
-            Action::Custom(ref name) => {
+            "press" => self.press(element),
+            "focus" => self.focus(element),
+            "blur" => self.blur(element),
+            "toggle" => self.toggle(element),
+            "select" => self.select(element),
+            "expand" => self.expand(element),
+            "collapse" => self.collapse(element),
+            "show_menu" => self.show_menu(element),
+            "increment" => self.increment(element),
+            "decrement" => self.decrement(element),
+            "scroll_into_view" => self.scroll_into_view(element),
+            _ => {
+                // Custom action resolution: snake_case → AXPascalCase
+                let ax = self.get_cached(element.handle)?;
+                let el_ptr = ax.as_ptr();
                 let available = ax_action_names(el_ptr);
 
                 // Strategy 1: snake_case → AXPascalCase
-                let ax_name = snake_to_ax_pascal(name);
+                let ax_name = snake_to_ax_pascal(action);
                 if available.iter().any(|a| a == &ax_name) {
                     let cf_action = CFString::new(&ax_name);
                     let err = do_perform_action(el_ptr, &cf_action);
                     if err != AX_ERROR_SUCCESS {
-                        return Err(action_error(err, &action, element.role, &ax_name));
+                        return Err(action_error(err, action, element.role, &ax_name));
                     }
                     return Ok(());
                 }
 
                 // Strategy 2: literal name
-                if available.iter().any(|a| a == name.as_str()) {
-                    let cf_action = CFString::new(name);
+                if available.iter().any(|a| a == action) {
+                    let cf_action = CFString::new(action);
                     let err = do_perform_action(el_ptr, &cf_action);
                     if err != AX_ERROR_SUCCESS {
-                        return Err(action_error(err, &action, element.role, name));
+                        return Err(action_error(err, action, element.role, action));
                     }
                     return Ok(());
                 }
 
                 Err(Error::ActionNotSupported {
-                    action,
+                    action: action.to_string(),
                     role: element.role,
                 })
             }
@@ -2523,154 +2485,28 @@ mod tests {
     }
 
     #[test]
-    fn map_ax_action_covers_all_mappings() {
-        assert_eq!(map_ax_action("AXPress"), Some(Action::Press));
-        assert_eq!(map_ax_action("AXConfirm"), Some(Action::Press));
-        assert_eq!(map_ax_action("AXShowMenu"), Some(Action::ShowMenu));
-        assert_eq!(map_ax_action("AXIncrement"), Some(Action::Increment));
-        assert_eq!(map_ax_action("AXDecrement"), Some(Action::Decrement));
-        assert_eq!(map_ax_action("AXRaise"), None);
-        assert_eq!(map_ax_action("AXCancel"), None);
-        assert_eq!(map_ax_action("UnknownAction"), None);
+    fn ax_action_to_name_covers_known() {
+        assert_eq!(ax_action_to_name("AXPress"), Some("press"));
+        assert_eq!(ax_action_to_name("AXConfirm"), Some("press"));
+        assert_eq!(ax_action_to_name("AXShowMenu"), Some("show_menu"));
+        assert_eq!(ax_action_to_name("AXIncrement"), Some("increment"));
+        assert_eq!(ax_action_to_name("AXDecrement"), Some("decrement"));
     }
 
     #[test]
-    fn xa11y_action_to_ax_covers_all_mappings() {
-        assert_eq!(xa11y_action_to_ax(&Action::Press), Some("AXPress"));
-        // Toggle is attribute-based on macOS (no distinct AX action)
-        assert_eq!(xa11y_action_to_ax(&Action::Toggle), None);
-        // Select is handled via AXSelected attribute, not AXPress action
-        assert_eq!(xa11y_action_to_ax(&Action::Select), None);
-        assert_eq!(xa11y_action_to_ax(&Action::ShowMenu), Some("AXShowMenu"));
-        assert_eq!(xa11y_action_to_ax(&Action::Increment), Some("AXIncrement"));
-        assert_eq!(xa11y_action_to_ax(&Action::Decrement), Some("AXDecrement"));
-        assert_eq!(xa11y_action_to_ax(&Action::Focus), None);
-        assert_eq!(xa11y_action_to_ax(&Action::SetValue), None);
-        assert_eq!(xa11y_action_to_ax(&Action::Expand), None);
-        assert_eq!(xa11y_action_to_ax(&Action::Collapse), None);
-        assert_eq!(xa11y_action_to_ax(&Action::ScrollIntoView), None);
+    fn ax_action_to_name_returns_none_for_unknown() {
+        assert_eq!(ax_action_to_name("AXRaise"), None);
+        assert_eq!(ax_action_to_name("AXCancel"), None);
+        assert_eq!(ax_action_to_name("AXCustomThing"), None);
+        assert_eq!(ax_action_to_name("UnknownAction"), None);
     }
 
-    /// Every xa11y Action with a canonical AX name must round-trip:
-    /// xa11y → AX → xa11y produces the same Action.
-    #[test]
-    fn test_action_roundtrip_xa11y_to_ax() {
-        let actions_with_mapping = [
-            Action::Press,
-            Action::ShowMenu,
-            Action::Increment,
-            Action::Decrement,
-        ];
-        for action in &actions_with_mapping {
-            let ax_name = xa11y_action_to_ax(action)
-                .unwrap_or_else(|| panic!("{:?} should have a canonical AX name", action));
-            let round_tripped = map_ax_action(ax_name).unwrap_or_else(|| {
-                panic!("canonical name {:?} should map back to an Action", ax_name)
-            });
-            assert_eq!(
-                *action, round_tripped,
-                "round-trip failed: {:?} → {:?} → {:?}",
-                action, ax_name, round_tripped
-            );
-        }
-    }
-
-    /// Every AX action name that maps to an xa11y Action must produce an Action
-    /// whose canonical name maps back to the same Action.
-    #[test]
-    fn test_action_roundtrip_ax_to_xa11y() {
-        let ax_names = [
-            "AXPress",
-            "AXConfirm",
-            "AXShowMenu",
-            "AXIncrement",
-            "AXDecrement",
-        ];
-        for name in ax_names {
-            let action = map_ax_action(name)
-                .unwrap_or_else(|| panic!("AX name {:?} should map to an Action", name));
-            let canonical = xa11y_action_to_ax(&action).unwrap_or_else(|| {
-                panic!(
-                    "{:?} (from {:?}) should have a canonical name",
-                    action, name
-                )
-            });
-            let back = map_ax_action(canonical)
-                .unwrap_or_else(|| panic!("canonical {:?} should map back", canonical));
-            assert_eq!(
-                action, back,
-                "AX {:?} → {:?} → canonical {:?} → {:?} (expected {:?})",
-                name, action, canonical, back, action
-            );
-        }
-    }
-
-    /// No duplicate Action entries in the mapping table.
-    #[test]
-    fn ax_mapping_no_duplicate_actions() {
-        for (i, a) in AX_ACTION_MAPPINGS.iter().enumerate() {
-            for b in &AX_ACTION_MAPPINGS[i + 1..] {
-                assert_ne!(
-                    a.action, b.action,
-                    "duplicate Action::{:?} in AX_ACTION_MAPPINGS",
-                    a.action
-                );
-            }
-        }
-    }
-
-    /// No duplicate canonical names in the mapping table.
-    #[test]
-    fn ax_mapping_no_duplicate_canonicals() {
-        for (i, a) in AX_ACTION_MAPPINGS.iter().enumerate() {
-            for b in &AX_ACTION_MAPPINGS[i + 1..] {
-                assert_ne!(
-                    a.canonical, b.canonical,
-                    "duplicate canonical {:?} in AX_ACTION_MAPPINGS",
-                    a.canonical
-                );
-            }
-        }
-    }
-
-    /// Every canonical name round-trips through the table.
-    #[test]
-    fn ax_mapping_canonical_roundtrips() {
-        for m in AX_ACTION_MAPPINGS {
-            let mapped = map_ax_action(m.canonical);
-            assert_eq!(
-                mapped,
-                Some(m.action),
-                "canonical {:?} should map to {:?}",
-                m.canonical,
-                m.action
-            );
-        }
-    }
-
-    /// Every alias maps to the same action as its canonical.
-    #[test]
-    fn ax_mapping_aliases_consistent() {
-        for m in AX_ACTION_MAPPINGS {
-            for alias in m.aliases {
-                let mapped = map_ax_action(alias);
-                assert_eq!(
-                    mapped,
-                    Some(m.action),
-                    "alias {:?} should map to {:?}",
-                    alias,
-                    m.action
-                );
-            }
-        }
-    }
-
-    /// Ignored AX actions must not map to any xa11y Action.
+    /// Ignored AX actions must not map to any known name.
     #[test]
     fn ax_ignored_actions_return_none() {
         for name in AX_IGNORED_ACTIONS {
             assert_eq!(
-                map_ax_action(name),
+                ax_action_to_name(name),
                 None,
                 "ignored action {:?} should map to None",
                 name
@@ -2708,37 +2544,6 @@ mod tests {
             let ax = snake_to_ax_pascal(name);
             let back = ax_pascal_to_snake(&ax);
             assert_eq!(name, back, "round-trip failed: {name} → {ax} → {back}");
-        }
-    }
-
-    #[test]
-    fn classify_ax_action_known() {
-        match classify_ax_action("AXPress") {
-            ActionClassification::Known(Action::Press) => {}
-            other => panic!(
-                "expected Known(Press), got {:?}",
-                std::mem::discriminant(&other)
-            ),
-        }
-    }
-
-    #[test]
-    fn classify_ax_action_ignored() {
-        assert!(matches!(
-            classify_ax_action("AXRaise"),
-            ActionClassification::Ignored
-        ));
-        assert!(matches!(
-            classify_ax_action("AXCancel"),
-            ActionClassification::Ignored
-        ));
-    }
-
-    #[test]
-    fn classify_ax_action_custom() {
-        match classify_ax_action("AXCustomThing") {
-            ActionClassification::Custom(name) => assert_eq!(name, "custom_thing"),
-            other => panic!("expected Custom, got {:?}", std::mem::discriminant(&other)),
         }
     }
 

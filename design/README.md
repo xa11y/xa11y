@@ -461,29 +461,35 @@ app.locator("text_area").type_text("hello")
 app.locator("text_area").select_text(0, 5)
 ```
 
-The full set of normalized actions:
+Actions are split into two categories:
 
-| Action | Data | Description |
-|--------|------|-------------|
-| `press` | — | Click, tap, or invoke the element |
-| `focus` | — | Set keyboard focus to the element |
-| `blur` | — | Remove keyboard focus from the element. Platform behavior varies: macOS sets `AXFocused = false` directly; Linux moves focus to the parent via `GrabFocus()`; Windows moves focus to the desktop root. Best-effort — may have side effects on some platforms. |
-| `toggle` | — | Toggle a checkbox or switch |
-| `select` | — | Select a list item, tab, or menu item |
-| `expand` | — | Expand a collapsible element (combo box, tree item, disclosure) |
-| `collapse` | — | Collapse an expanded element |
-| `show_menu` | — | Show the element's context menu or dropdown |
-| `increment` | — | Increment a slider or spinner by one step |
-| `decrement` | — | Decrement a slider or spinner by one step |
-| `scroll_into_view` | — | Scroll the element into the visible area |
-| `scroll_down` | amount (float) | Scroll vertically by the given amount |
-| `scroll_right` | amount (float) | Scroll horizontally by the given amount |
-| `set_value` | string or float | Set the element's value (text content or numeric value) |
-| `type_text` | string | Insert text at the current cursor position |
-| `set_text_selection` | start, end (int) | Select a range of text (0-based positions) |
-| `Custom(name)` | — | A platform-specific action not covered above. `name` is `snake_case`; providers convert to/from platform naming (e.g. macOS `AXCustomThing` ↔ `"custom_thing"`). |
+**First-class methods** — common actions that every provider must implement as individual typed methods. These have proper signatures (no generic data bag) and are the primary way callers interact with elements:
 
-All actions — both well-known and custom — live in a single `Action` enum and a single `element.actions` list. There is no separate "custom actions" concept; `Action::Custom("name")` is a first-class action that can be passed to `locator.perform_action()` like any other.
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `press()` | — | Click, tap, or invoke the element |
+| `focus()` | — | Set keyboard focus to the element |
+| `blur()` | — | Remove keyboard focus from the element |
+| `toggle()` | — | Toggle a checkbox or switch |
+| `select()` | — | Select a list item, tab, or menu item |
+| `expand()` | — | Expand a collapsible element |
+| `collapse()` | — | Collapse an expanded element |
+| `show_menu()` | — | Show the element's context menu or dropdown |
+| `increment()` | — | Increment a slider or spinner by one step |
+| `decrement()` | — | Decrement a slider or spinner by one step |
+| `scroll_into_view()` | — | Scroll the element into the visible area |
+| `set_value(value)` | `&str` | Set the element's text value |
+| `set_numeric_value(value)` | `f64` | Set the element's numeric value |
+| `type_text(text)` | `&str` | Insert text at the current cursor position |
+| `select_text(start, end)` | `u32, u32` | Select a range of text (0-based positions) |
+| `scroll_down(amount)` | `f64` | Scroll downward by the given amount |
+| `scroll_up(amount)` | `f64` | Scroll upward |
+| `scroll_left(amount)` | `f64` | Scroll leftward |
+| `scroll_right(amount)` | `f64` | Scroll rightward |
+
+**Generic `perform_action(name)` escape hatch** — for platform-specific actions not covered by the methods above. Takes a `snake_case` action name string. Well-known action names (`"press"`, `"focus"`, etc.) also work here — providers delegate to the corresponding method. Custom platform actions (e.g. macOS `AXCustomThing` → `"custom_thing"`) are resolved by the provider.
+
+**`element.actions`** is a `Vec<String>` listing the actions the element reports. Well-known actions use their standard names (`"press"`, `"toggle"`, etc.). Platform-specific actions use their `snake_case` converted names. Typed operations like `set_value` and `type_text` are role-based capabilities, not reported actions.
 
 ### How actions map to platforms
 

@@ -474,8 +474,8 @@ mod tests {
         let submit = h::named(&app, "Submit");
         assert!(!submit.actions.is_empty());
         assert!(
-            submit.actions.contains(&Action::Press),
-            "Submit should support Press, got: {:?}",
+            submit.actions.iter().any(|a| a == "press"),
+            "Submit should support press, got: {:?}",
             submit.actions
         );
     }
@@ -563,7 +563,7 @@ mod tests {
         let app = h::app_root();
         let submit = h::named(&app, "Submit");
         // Focus action may succeed or fail depending on AT-SPI adapter support
-        let result = h::try_act(&submit, Action::Focus);
+        let result = h::try_act(&submit, "focus");
         if result.is_ok() {
             std::thread::sleep(std::time::Duration::from_millis(100));
             let app2 = h::app_root();
@@ -642,7 +642,7 @@ mod tests {
         let app = h::app_root();
         // Click Apple to select it
         let apple = h::named(&app, "Apple");
-        let app2 = h::act(&apple, Action::Press);
+        let app2 = h::act(&apple, "press");
         // Verify selection (may come through as Click -> Select depending on AT-SPI mapping)
         let apple2 = h::named(&app2, "Apple");
         // Selection might be reported differently; at least verify the action didn't crash
@@ -842,7 +842,7 @@ mod tests {
     fn action_press_button() {
         let app = h::app_root();
         let submit = h::named(&app, "Submit");
-        let result = h::try_act(&submit, Action::Press);
+        let result = h::try_act(&submit, "press");
         match result {
             Ok(()) => println!("Submit pressed"),
             Err(e) => println!("Submit press result: {}", e),
@@ -856,7 +856,7 @@ mod tests {
         let cbs = app.locator("check_box").elements().unwrap();
         assert!(!cbs.is_empty(), "No checkbox");
         let initial = cbs[0].states.checked;
-        let app2 = h::act(&cbs[0], Action::Press);
+        let app2 = h::act(&cbs[0], "press");
         let cb2 = app2.locator("check_box").elements().unwrap();
         if !cb2.is_empty() {
             assert_ne!(
@@ -874,7 +874,7 @@ mod tests {
         let was_enabled = h::named(&app, "Cancel").states.enabled;
         let cbs = app.locator("check_box").elements().unwrap();
         assert!(!cbs.is_empty(), "No checkbox");
-        let app2 = h::act(&cbs[0], Action::Press);
+        let app2 = h::act(&cbs[0], "press");
         let cancel2 = h::named(&app2, "Cancel");
         // Some AT-SPI adapters may not reflect enabled state changes.
         // If was_enabled is already true (adapter doesn't report disabled), skip the assertion.
@@ -892,7 +892,7 @@ mod tests {
         let app = h::app_root();
         // Find text entry by name "Name"
         let text = find_text_entry(&app);
-        let result = h::try_act(&text, Action::Focus);
+        let result = h::try_act(&text, "focus");
         assert!(result.is_ok(), "Focus should succeed: {:?}", result.err());
     }
 
@@ -901,11 +901,7 @@ mod tests {
     fn action_set_value_text() {
         let app = h::app_root();
         let text = find_text_entry(&app);
-        match h::try_act_with(
-            &text,
-            Action::SetValue,
-            Some(ActionData::Value("Jane Smith".to_string())),
-        ) {
+        match text.provider().set_value(&text, "Jane Smith") {
             Ok(()) => {
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 let app2 = h::app_root();
@@ -929,11 +925,7 @@ mod tests {
         let app = h::app_root();
         let sliders = app.locator("slider").elements().unwrap();
         assert!(!sliders.is_empty());
-        let result = h::try_act_with(
-            &sliders[0],
-            Action::SetValue,
-            Some(ActionData::NumericValue(75.0)),
-        );
+        let result = sliders[0].provider().set_numeric_value(&sliders[0], 75.0);
         assert!(result.is_ok(), "SetValue numeric: {:?}", result.err());
         std::thread::sleep(std::time::Duration::from_millis(300));
         let app2 = h::app_root();
@@ -959,7 +951,7 @@ mod tests {
         let spin = sliders.first();
         if let Some(spin) = spin {
             let initial: f64 = spin.value.as_deref().unwrap_or("0").parse().unwrap_or(0.0);
-            let result = h::try_act(spin, Action::Increment);
+            let result = h::try_act(spin, "increment");
             if result.is_ok() {
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 let app2 = h::app_root();
@@ -986,7 +978,7 @@ mod tests {
         let spin = sliders.first();
         if let Some(spin) = spin {
             let before: f64 = spin.value.as_deref().unwrap_or("0").parse().unwrap_or(0.0);
-            let result = h::try_act(spin, Action::Decrement);
+            let result = h::try_act(spin, "decrement");
             if result.is_ok() {
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 let app2 = h::app_root();
@@ -1017,7 +1009,7 @@ mod tests {
             .next();
         if let Some(node) = expander {
             // Expand
-            if h::try_act(&node, Action::Expand).is_ok() {
+            if h::try_act(&node, "expand").is_ok() {
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 let app2 = h::app_root();
                 let n2 = app2
@@ -1029,7 +1021,7 @@ mod tests {
                 if let Some(n) = n2 {
                     if n.states.expanded == Some(true) {
                         // Collapse
-                        if h::try_act(&n, Action::Collapse).is_ok() {
+                        if h::try_act(&n, "collapse").is_ok() {
                             std::thread::sleep(std::time::Duration::from_millis(300));
                             let app3 = h::app_root();
                             let n3 = app3
@@ -1054,7 +1046,7 @@ mod tests {
         let app = h::app_root();
         let apple = app.locator(r#"[name*="Apple"]"#).elements().unwrap();
         if !apple.is_empty() {
-            let _ = h::try_act(&apple[0], Action::Press);
+            let _ = h::try_act(&apple[0], "press");
             // Selection verified by not crashing; state_selected_on_list_item tests the state
         }
     }
@@ -1101,7 +1093,7 @@ mod tests {
         for _ in 0..5 {
             let cbs = current_app.locator("check_box").elements().unwrap();
             assert!(!cbs.is_empty());
-            current_app = h::act(&cbs[0], Action::Press);
+            current_app = h::act(&cbs[0], "press");
         }
         // After 5 toggles (odd), state should have flipped from initial
         let final_cb = current_app.locator("check_box").elements().unwrap();
@@ -1130,7 +1122,7 @@ mod tests {
         for _ in 0..10 {
             let sliders = current_app.locator("slider").elements().unwrap();
             let slider = sliders.first().expect("No slider");
-            current_app = h::act(slider, Action::Increment);
+            current_app = h::act(slider, "increment");
         }
         let s = current_app.locator("slider").elements().unwrap();
         if !s.is_empty() {
@@ -1160,12 +1152,7 @@ mod tests {
         if has_expander {
             let mut ct = app;
             // expand, collapse, expand, collapse
-            for action in [
-                Action::Expand,
-                Action::Collapse,
-                Action::Expand,
-                Action::Collapse,
-            ] {
+            for action in ["expand", "collapse", "expand", "collapse"] {
                 let node = ct
                     .locator(r#"[name*="Expander"]"#)
                     .elements()
@@ -1229,7 +1216,7 @@ mod tests {
         let app = h::app_root();
         let buttons = app.locator(r#"[name*="Submit"]"#).elements().unwrap();
         assert!(!buttons.is_empty());
-        let result = h::try_act(&buttons[0], Action::Press);
+        let result = h::try_act(&buttons[0], "press");
         match result {
             Ok(()) => {}
             Err(e) => assert!(
@@ -1249,9 +1236,9 @@ mod tests {
         let labels = app.locator("static_text").elements().unwrap_or_default();
         if let Some(label) = labels
             .into_iter()
-            .find(|e| !e.data().actions.contains(&Action::Press))
+            .find(|e| !e.data().actions.iter().any(|a| a == "press"))
         {
-            let result = h::try_act(&label, Action::Press);
+            let result = h::try_act(&label, "press");
             assert!(
                 result.is_err(),
                 "Press on static_text should fail: {:?}",
@@ -1273,7 +1260,7 @@ mod tests {
         // not silently succeed.
         let app = h::app_root();
         let button = h::named(&app, "Submit");
-        let result = h::try_act(&button, Action::Expand);
+        let result = h::try_act(&button, "expand");
         assert!(
             result.is_err(),
             "Expand on a non-expandable button should fail, not silently succeed"
@@ -1287,7 +1274,7 @@ mod tests {
         // not silently succeed.
         let app = h::app_root();
         let button = h::named(&app, "Submit");
-        let result = h::try_act(&button, Action::Collapse);
+        let result = h::try_act(&button, "collapse");
         assert!(
             result.is_err(),
             "Collapse on a non-expandable button should fail, not silently succeed"
@@ -1320,13 +1307,13 @@ mod tests {
         let text = find_text_entry(&app);
 
         // Focus first
-        let result = h::try_act(&text, Action::Focus);
+        let result = h::try_act(&text, "focus");
         assert!(result.is_ok(), "Focus should succeed: {:?}", result.err());
 
         // Then blur — re-find the text entry from a fresh root
         let app2 = h::app_root();
         let text2 = find_text_entry(&app2);
-        let result = h::try_act(&text2, Action::Blur);
+        let result = h::try_act(&text2, "blur");
         assert!(result.is_ok(), "Blur should succeed: {:?}", result.err());
     }
 
@@ -1342,11 +1329,7 @@ mod tests {
             .next()
             .or_else(|| windows.into_iter().next())
             .expect("No scrollable element found");
-        let result = h::try_act_with(
-            &target,
-            Action::ScrollDown,
-            Some(ActionData::ScrollAmount(3.0)),
-        );
+        let result = target.provider().scroll_down(&target, 3.0);
         // Scroll may not be supported on all elements; verify no crash
         match result {
             Ok(()) => println!("Scroll succeeded"),
@@ -1364,14 +1347,10 @@ mod tests {
         let text = find_text_entry(&app);
 
         // Focus first
-        let _ = h::try_act(&text, Action::Focus);
+        let _ = h::try_act(&text, "focus");
 
         // Select characters 0..4 ("John")
-        let result = h::try_act_with(
-            &text,
-            Action::SetTextSelection,
-            Some(ActionData::TextSelection { start: 0, end: 4 }),
-        );
+        let result = text.provider().set_text_selection(&text, 0, 4);
         match result {
             Ok(()) => println!("SetTextSelection succeeded"),
             Err(e) => println!("SetTextSelection result: {}", e),
@@ -1385,14 +1364,10 @@ mod tests {
         let text = find_text_entry(&app);
 
         // Focus first
-        let _ = h::try_act(&text, Action::Focus);
+        let _ = h::try_act(&text, "focus");
 
         // Type text
-        let result = h::try_act_with(
-            &text,
-            Action::TypeText,
-            Some(ActionData::Value("hi".to_string())),
-        );
+        let result = text.provider().type_text(&text, "hi");
         match result {
             Ok(()) => println!("TypeText succeeded"),
             Err(e) => println!("TypeText result: {}", e),
@@ -1415,7 +1390,7 @@ mod tests {
 
         // Trigger a focus change
         let text = find_text_entry(&app);
-        let _ = text.provider().perform_action(&text, Action::Focus, None);
+        let _ = text.provider().focus(&text);
 
         // Wait briefly for the event
         std::thread::sleep(Duration::from_millis(500));
@@ -1450,7 +1425,7 @@ mod tests {
 
         // Trigger a focus change
         let text = find_text_entry(&app);
-        let _ = text.provider().perform_action(&text, Action::Focus, None);
+        let _ = text.provider().focus(&text);
 
         // recv should return the event (polling backends may take up to 200ms)
         match sub.recv(Duration::from_secs(2)) {
@@ -1491,7 +1466,7 @@ mod tests {
 
         // Trigger a focus change (produces FocusChanged, not Alert)
         let text = find_text_entry(&app);
-        let _ = text.provider().perform_action(&text, Action::Focus, None);
+        let _ = text.provider().focus(&text);
 
         // wait_for with FocusChanged predicate should match
         match sub.wait_for(
@@ -1518,7 +1493,7 @@ mod tests {
 
         // Trigger a focus change
         let text = find_text_entry(&app);
-        let _ = text.provider().perform_action(&text, Action::Focus, None);
+        let _ = text.provider().focus(&text);
 
         std::thread::sleep(Duration::from_millis(500));
         if let Some(event) = sub.try_recv() {
@@ -1542,7 +1517,7 @@ mod tests {
 
         // Trigger a focus change
         let text = find_text_entry(&app);
-        let _ = text.provider().perform_action(&text, Action::Focus, None);
+        let _ = text.provider().focus(&text);
 
         // Use recv to check if there's an event (iter blocks forever, so we
         // can't use it directly without a timeout)
@@ -1585,7 +1560,7 @@ mod tests {
 
         // Trigger a focus change
         let text = find_text_entry(&app);
-        let _ = text.provider().perform_action(&text, Action::Focus, None);
+        let _ = text.provider().focus(&text);
 
         std::thread::sleep(Duration::from_millis(500));
         if let Some(event) = sub.try_recv() {
@@ -1616,9 +1591,7 @@ mod tests {
             .locator(r#"[name="Add Item"]"#)
             .element()
             .expect("Add Item button not found");
-        let _ = add_btn
-            .provider()
-            .perform_action(&add_btn, Action::Press, None);
+        let _ = add_btn.provider().press(&add_btn);
 
         // The polling backend checks every 100ms; give it time to detect the change
         match sub.wait_for(
@@ -1655,7 +1628,7 @@ mod tests {
 
         // Trigger a focus change from the main thread
         let text = find_text_entry(&app);
-        let _ = text.provider().perform_action(&text, Action::Focus, None);
+        let _ = text.provider().focus(&text);
 
         // Join the thread and verify it received the event
         let result = handle.join().expect("Thread panicked");

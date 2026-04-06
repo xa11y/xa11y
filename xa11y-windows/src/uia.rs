@@ -12,8 +12,8 @@ use windows::Win32::UI::Accessibility::*;
 
 use xa11y_core::{
     selector::{matches_simple, Combinator, Selector, SelectorSegment},
-    Action, ActionData, CancelHandle, ElementData, Error, Event, EventReceiver, EventType,
-    Provider, Rect, Result, Role, StateSet, Subscription, Toggled,
+    CancelHandle, ElementData, Error, Event, EventReceiver, EventType, Provider, Rect, Result,
+    Role, StateSet, Subscription, Toggled,
 };
 
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
@@ -679,361 +679,339 @@ impl Provider for WindowsProvider {
         self.narrow_multi_segment(matching, &selector.segments[1..], max_depth_val, limit)
     }
 
-    fn perform_action(
+    fn press(&self, element: &ElementData) -> Result<()> {
+        let uia_element = self.get_cached(element.handle)?;
+        if let Ok(pattern) = unsafe {
+            uia_element
+                .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+        } {
+            unsafe { pattern.Invoke() }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: "Invoke failed".to_string(),
+            })?;
+            return Ok(());
+        }
+        Err(Error::ActionNotSupported {
+            action: "press".to_string(),
+            role: element.role,
+        })
+    }
+
+    fn focus(&self, element: &ElementData) -> Result<()> {
+        let uia_element = self.get_cached(element.handle)?;
+        unsafe { uia_element.SetFocus() }.map_err(|e| Error::Platform {
+            code: e.code().0 as i64,
+            message: "SetFocus failed".to_string(),
+        })?;
+        Ok(())
+    }
+
+    fn blur(&self, _element: &ElementData) -> Result<()> {
+        // Focus the desktop root to blur the current element
+        let root =
+            unsafe { self.automation.GetRootElement() }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: "GetRootElement failed".to_string(),
+            })?;
+        unsafe { root.SetFocus() }.map_err(|e| Error::Platform {
+            code: e.code().0 as i64,
+            message: "SetFocus on root failed".to_string(),
+        })?;
+        Ok(())
+    }
+
+    fn toggle(&self, element: &ElementData) -> Result<()> {
+        let uia_element = self.get_cached(element.handle)?;
+        if let Ok(pattern) = unsafe {
+            uia_element
+                .GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
+        } {
+            unsafe { pattern.Toggle() }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: "Toggle failed".to_string(),
+            })?;
+            return Ok(());
+        }
+        Err(Error::ActionNotSupported {
+            action: "toggle".to_string(),
+            role: element.role,
+        })
+    }
+
+    fn select(&self, element: &ElementData) -> Result<()> {
+        let uia_element = self.get_cached(element.handle)?;
+        if let Ok(pattern) = unsafe {
+            uia_element.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                UIA_SelectionItemPatternId,
+            )
+        } {
+            unsafe { pattern.Select() }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: "Select failed".to_string(),
+            })?;
+            return Ok(());
+        }
+        Err(Error::ActionNotSupported {
+            action: "select".to_string(),
+            role: element.role,
+        })
+    }
+
+    fn expand(&self, element: &ElementData) -> Result<()> {
+        let uia_element = self.get_cached(element.handle)?;
+        if let Ok(pattern) = unsafe {
+            uia_element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
+                UIA_ExpandCollapsePatternId,
+            )
+        } {
+            // Ignore errors (may already be expanded)
+            let _ = unsafe { pattern.Expand() };
+            return Ok(());
+        }
+        if let Ok(pattern) = unsafe {
+            uia_element
+                .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+        } {
+            let _ = unsafe { pattern.Invoke() };
+        }
+        Ok(())
+    }
+
+    fn collapse(&self, element: &ElementData) -> Result<()> {
+        let uia_element = self.get_cached(element.handle)?;
+        if let Ok(pattern) = unsafe {
+            uia_element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
+                UIA_ExpandCollapsePatternId,
+            )
+        } {
+            // Ignore errors (may already be collapsed)
+            let _ = unsafe { pattern.Collapse() };
+            return Ok(());
+        }
+        if let Ok(pattern) = unsafe {
+            uia_element
+                .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+        } {
+            let _ = unsafe { pattern.Invoke() };
+        }
+        Ok(())
+    }
+
+    fn show_menu(&self, element: &ElementData) -> Result<()> {
+        // No direct UIA equivalent; try context menu via legacy
+        Err(Error::ActionNotSupported {
+            action: "show_menu".to_string(),
+            role: element.role,
+        })
+    }
+
+    fn increment(&self, element: &ElementData) -> Result<()> {
+        let uia_element = self.get_cached(element.handle)?;
+        if let Ok(pattern) = unsafe {
+            uia_element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(
+                UIA_RangeValuePatternId,
+            )
+        } {
+            let current = unsafe { pattern.CurrentValue() }.unwrap_or(0.0);
+            let small = unsafe { pattern.CurrentSmallChange() }.unwrap_or(1.0);
+            let step = if small <= 0.0 { 1.0 } else { small };
+            unsafe { pattern.SetValue(current + step) }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: "Increment failed".to_string(),
+            })?;
+            return Ok(());
+        }
+        Err(Error::ActionNotSupported {
+            action: "increment".to_string(),
+            role: element.role,
+        })
+    }
+
+    fn decrement(&self, element: &ElementData) -> Result<()> {
+        let uia_element = self.get_cached(element.handle)?;
+        if let Ok(pattern) = unsafe {
+            uia_element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(
+                UIA_RangeValuePatternId,
+            )
+        } {
+            let current = unsafe { pattern.CurrentValue() }.unwrap_or(0.0);
+            let small = unsafe { pattern.CurrentSmallChange() }.unwrap_or(1.0);
+            let step = if small <= 0.0 { 1.0 } else { small };
+            unsafe { pattern.SetValue(current - step) }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: "Decrement failed".to_string(),
+            })?;
+            return Ok(());
+        }
+        Err(Error::ActionNotSupported {
+            action: "decrement".to_string(),
+            role: element.role,
+        })
+    }
+
+    fn scroll_into_view(&self, element: &ElementData) -> Result<()> {
+        let uia_element = self.get_cached(element.handle)?;
+        if let Ok(pattern) = unsafe {
+            uia_element.GetCurrentPatternAs::<IUIAutomationScrollItemPattern>(
+                UIA_ScrollItemPatternId,
+            )
+        } {
+            let _ = unsafe { pattern.ScrollIntoView() };
+        }
+        Ok(())
+    }
+
+    fn set_value(&self, element: &ElementData, value: &str) -> Result<()> {
+        let uia_element = self.get_cached(element.handle)?;
+        if let Ok(pattern) = unsafe {
+            uia_element
+                .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+        } {
+            let s: windows::core::BSTR = value.into();
+            unsafe { pattern.SetValue(&s) }
+                .map_err(|_| Error::TextValueNotSupported)?;
+            return Ok(());
+        }
+        Err(Error::TextValueNotSupported)
+    }
+
+    fn set_numeric_value(&self, element: &ElementData, value: f64) -> Result<()> {
+        let uia_element = self.get_cached(element.handle)?;
+        if let Ok(pattern) = unsafe {
+            uia_element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(
+                UIA_RangeValuePatternId,
+            )
+        } {
+            unsafe { pattern.SetValue(value) }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: "RangeValue.SetValue failed".to_string(),
+            })?;
+            return Ok(());
+        }
+        // Fall back to ValuePattern with string
+        if let Ok(pattern) = unsafe {
+            uia_element
+                .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+        } {
+            let s: windows::core::BSTR = value.to_string().into();
+            unsafe { pattern.SetValue(&s) }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: "Value.SetValue failed".to_string(),
+            })?;
+            return Ok(());
+        }
+        Err(Error::Platform {
+            code: -1,
+            message: "No Value or RangeValue pattern".to_string(),
+        })
+    }
+
+    fn type_text(&self, element: &ElementData, text: &str) -> Result<()> {
+        let uia_element = self.get_cached(element.handle)?;
+        // Insert text via ValuePattern (accessibility API, not input simulation).
+        // Get current value, get insertion point from TextPattern, splice, set new value.
+        if let Ok(value_pattern) = unsafe {
+            uia_element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+        } {
+            let current = unsafe { value_pattern.CurrentValue() }
+                .map(|s| s.to_string())
+                .unwrap_or_default();
+
+            // Try to get cursor position from TextPattern
+            let insert_pos = if let Ok(text_pattern) = unsafe {
+                uia_element
+                    .GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
+            } {
+                // Get the selection/caret range — its start offset is the cursor
+                unsafe { text_pattern.GetSelection() }
+                    .ok()
+                    .and_then(|arr| unsafe { arr.GetElement(0) }.ok())
+                    .map(|_| current.len()) // Fallback: append at end
+                    .unwrap_or(current.len())
+            } else {
+                current.len() // No TextPattern — append at end
+            };
+
+            let mut new_value = current;
+            new_value.insert_str(insert_pos.min(new_value.len()), text);
+            let bstr: windows::core::BSTR = new_value.into();
+            unsafe { value_pattern.SetValue(&bstr) }
+                .map_err(|_| Error::TextValueNotSupported)?;
+            return Ok(());
+        }
+        Err(Error::TextValueNotSupported)
+    }
+
+    fn set_text_selection(
         &self,
         element: &ElementData,
-        action: Action,
-        data: Option<ActionData>,
+        start: u32,
+        end: u32,
     ) -> Result<()> {
         let uia_element = self.get_cached(element.handle)?;
+        if let Ok(pattern) = unsafe {
+            uia_element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
+        } {
+            let range =
+                unsafe { pattern.DocumentRange() }.map_err(|e| Error::Platform {
+                    code: e.code().0 as i64,
+                    message: "DocumentRange failed".to_string(),
+                })?;
+            // Collapse and move to start position
+            let _ = unsafe { range.Move(TextUnit_Character, start as i32) };
+            // Extend end to selection length
+            let _ = unsafe {
+                range.MoveEndpointByUnit(
+                    TextPatternRangeEndpoint_End,
+                    TextUnit_Character,
+                    (end - start) as i32,
+                )
+            };
+            unsafe { range.Select() }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: "Select range failed".to_string(),
+            })?;
+            return Ok(());
+        }
+        Err(Error::ActionNotSupported {
+            action: "set_text_selection".to_string(),
+            role: element.role,
+        })
+    }
 
+    fn scroll_down(&self, element: &ElementData, amount: f64) -> Result<()> {
+        self.scroll_impl(element, amount, true)
+    }
+
+    fn scroll_up(&self, element: &ElementData, amount: f64) -> Result<()> {
+        self.scroll_impl(element, -amount, true)
+    }
+
+    fn scroll_right(&self, element: &ElementData, amount: f64) -> Result<()> {
+        self.scroll_impl(element, amount, false)
+    }
+
+    fn scroll_left(&self, element: &ElementData, amount: f64) -> Result<()> {
+        self.scroll_impl(element, -amount, false)
+    }
+
+    fn perform_action(&self, element: &ElementData, action: &str) -> Result<()> {
         match action {
-            Action::Press => {
-                if let Ok(pattern) = unsafe {
-                    uia_element
-                        .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
-                } {
-                    unsafe { pattern.Invoke() }.map_err(|e| Error::Platform {
-                        code: e.code().0 as i64,
-                        message: "Invoke failed".to_string(),
-                    })?;
-                    return Ok(());
-                }
-                Err(Error::ActionNotSupported {
-                    action,
-                    role: element.role,
-                })
-            }
-            Action::Toggle => {
-                if let Ok(pattern) = unsafe {
-                    uia_element
-                        .GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
-                } {
-                    unsafe { pattern.Toggle() }.map_err(|e| Error::Platform {
-                        code: e.code().0 as i64,
-                        message: "Toggle failed".to_string(),
-                    })?;
-                    return Ok(());
-                }
-                Err(Error::ActionNotSupported {
-                    action,
-                    role: element.role,
-                })
-            }
-
-            Action::Select => {
-                if let Ok(pattern) = unsafe {
-                    uia_element.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
-                        UIA_SelectionItemPatternId,
-                    )
-                } {
-                    unsafe { pattern.Select() }.map_err(|e| Error::Platform {
-                        code: e.code().0 as i64,
-                        message: "Select failed".to_string(),
-                    })?;
-                    return Ok(());
-                }
-                Err(Error::ActionNotSupported {
-                    action,
-                    role: element.role,
-                })
-            }
-
-            Action::Focus => {
-                unsafe { uia_element.SetFocus() }.map_err(|e| Error::Platform {
-                    code: e.code().0 as i64,
-                    message: "SetFocus failed".to_string(),
-                })?;
-                Ok(())
-            }
-
-            Action::SetValue => match data {
-                Some(ActionData::NumericValue(v)) => {
-                    if let Ok(pattern) = unsafe {
-                        uia_element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(
-                            UIA_RangeValuePatternId,
-                        )
-                    } {
-                        unsafe { pattern.SetValue(v) }.map_err(|e| Error::Platform {
-                            code: e.code().0 as i64,
-                            message: "RangeValue.SetValue failed".to_string(),
-                        })?;
-                        return Ok(());
-                    }
-                    // Fall back to ValuePattern with string
-                    if let Ok(pattern) = unsafe {
-                        uia_element
-                            .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
-                    } {
-                        let s: windows::core::BSTR = v.to_string().into();
-                        unsafe { pattern.SetValue(&s) }.map_err(|e| Error::Platform {
-                            code: e.code().0 as i64,
-                            message: "Value.SetValue failed".to_string(),
-                        })?;
-                        return Ok(());
-                    }
-                    Err(Error::Platform {
-                        code: -1,
-                        message: "No Value or RangeValue pattern".to_string(),
-                    })
-                }
-                Some(ActionData::Value(text)) => {
-                    if let Ok(pattern) = unsafe {
-                        uia_element
-                            .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
-                    } {
-                        let s: windows::core::BSTR = text.into();
-                        unsafe { pattern.SetValue(&s) }
-                            .map_err(|_| Error::TextValueNotSupported)?;
-                        return Ok(());
-                    }
-                    Err(Error::TextValueNotSupported)
-                }
-                _ => Err(Error::Platform {
-                    code: -1,
-                    message: "SetValue requires ActionData".to_string(),
-                }),
-            },
-
-            Action::Expand => {
-                if let Ok(pattern) = unsafe {
-                    uia_element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
-                        UIA_ExpandCollapsePatternId,
-                    )
-                } {
-                    // Ignore errors (may already be expanded)
-                    let _ = unsafe { pattern.Expand() };
-                    return Ok(());
-                }
-                if let Ok(pattern) = unsafe {
-                    uia_element
-                        .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
-                } {
-                    let _ = unsafe { pattern.Invoke() };
-                }
-                Ok(())
-            }
-
-            Action::Collapse => {
-                if let Ok(pattern) = unsafe {
-                    uia_element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
-                        UIA_ExpandCollapsePatternId,
-                    )
-                } {
-                    // Ignore errors (may already be collapsed)
-                    let _ = unsafe { pattern.Collapse() };
-                    return Ok(());
-                }
-                if let Ok(pattern) = unsafe {
-                    uia_element
-                        .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
-                } {
-                    let _ = unsafe { pattern.Invoke() };
-                }
-                Ok(())
-            }
-
-            Action::Increment => {
-                if let Ok(pattern) = unsafe {
-                    uia_element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(
-                        UIA_RangeValuePatternId,
-                    )
-                } {
-                    let current = unsafe { pattern.CurrentValue() }.unwrap_or(0.0);
-                    let small = unsafe { pattern.CurrentSmallChange() }.unwrap_or(1.0);
-                    let step = if small <= 0.0 { 1.0 } else { small };
-                    unsafe { pattern.SetValue(current + step) }.map_err(|e| Error::Platform {
-                        code: e.code().0 as i64,
-                        message: "Increment failed".to_string(),
-                    })?;
-                    return Ok(());
-                }
-                Err(Error::ActionNotSupported {
-                    action,
-                    role: element.role,
-                })
-            }
-
-            Action::Decrement => {
-                if let Ok(pattern) = unsafe {
-                    uia_element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(
-                        UIA_RangeValuePatternId,
-                    )
-                } {
-                    let current = unsafe { pattern.CurrentValue() }.unwrap_or(0.0);
-                    let small = unsafe { pattern.CurrentSmallChange() }.unwrap_or(1.0);
-                    let step = if small <= 0.0 { 1.0 } else { small };
-                    unsafe { pattern.SetValue(current - step) }.map_err(|e| Error::Platform {
-                        code: e.code().0 as i64,
-                        message: "Decrement failed".to_string(),
-                    })?;
-                    return Ok(());
-                }
-                Err(Error::ActionNotSupported {
-                    action,
-                    role: element.role,
-                })
-            }
-
-            Action::ShowMenu => {
-                // No direct UIA equivalent; try context menu via legacy
-                Err(Error::ActionNotSupported {
-                    action,
-                    role: element.role,
-                })
-            }
-
-            Action::ScrollIntoView => {
-                if let Ok(pattern) = unsafe {
-                    uia_element.GetCurrentPatternAs::<IUIAutomationScrollItemPattern>(
-                        UIA_ScrollItemPatternId,
-                    )
-                } {
-                    let _ = unsafe { pattern.ScrollIntoView() };
-                }
-                Ok(())
-            }
-
-            Action::Blur => {
-                // Focus the desktop root to blur the current element
-                let root =
-                    unsafe { self.automation.GetRootElement() }.map_err(|e| Error::Platform {
-                        code: e.code().0 as i64,
-                        message: "GetRootElement failed".to_string(),
-                    })?;
-                unsafe { root.SetFocus() }.map_err(|e| Error::Platform {
-                    code: e.code().0 as i64,
-                    message: "SetFocus on root failed".to_string(),
-                })?;
-                Ok(())
-            }
-
-            Action::ScrollDown | Action::ScrollRight => {
-                let amount = match data {
-                    Some(ActionData::ScrollAmount(amount)) => amount,
-                    _ => {
-                        return Err(Error::Platform {
-                            code: -1,
-                            message: "Scroll requires ActionData::ScrollAmount".to_string(),
-                        })
-                    }
-                };
-                if let Ok(pattern) = unsafe {
-                    uia_element
-                        .GetCurrentPatternAs::<IUIAutomationScrollPattern>(UIA_ScrollPatternId)
-                } {
-                    let count = (amount.abs() as u32).max(1);
-                    let is_vertical = matches!(action, Action::ScrollDown);
-                    for _ in 0..count {
-                        let (h, v) = if is_vertical {
-                            let v = if amount >= 0.0 {
-                                ScrollAmount_SmallIncrement
-                            } else {
-                                ScrollAmount_SmallDecrement
-                            };
-                            (ScrollAmount_NoAmount, v)
-                        } else {
-                            let h = if amount >= 0.0 {
-                                ScrollAmount_SmallIncrement
-                            } else {
-                                ScrollAmount_SmallDecrement
-                            };
-                            (h, ScrollAmount_NoAmount)
-                        };
-                        let _ = unsafe { pattern.Scroll(h, v) };
-                    }
-                    return Ok(());
-                }
-                Err(Error::ActionNotSupported {
-                    action,
-                    role: element.role,
-                })
-            }
-
-            Action::SetTextSelection => {
-                let (start, end) = match data {
-                    Some(ActionData::TextSelection { start, end }) => (start, end),
-                    _ => {
-                        return Err(Error::Platform {
-                            code: -1,
-                            message: "SetTextSelection requires ActionData::TextSelection"
-                                .to_string(),
-                        })
-                    }
-                };
-                if let Ok(pattern) = unsafe {
-                    uia_element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
-                } {
-                    let range =
-                        unsafe { pattern.DocumentRange() }.map_err(|e| Error::Platform {
-                            code: e.code().0 as i64,
-                            message: "DocumentRange failed".to_string(),
-                        })?;
-                    // Collapse and move to start position
-                    let _ = unsafe { range.Move(TextUnit_Character, start as i32) };
-                    // Extend end to selection length
-                    let _ = unsafe {
-                        range.MoveEndpointByUnit(
-                            TextPatternRangeEndpoint_End,
-                            TextUnit_Character,
-                            (end - start) as i32,
-                        )
-                    };
-                    unsafe { range.Select() }.map_err(|e| Error::Platform {
-                        code: e.code().0 as i64,
-                        message: "Select range failed".to_string(),
-                    })?;
-                    return Ok(());
-                }
-                Err(Error::ActionNotSupported {
-                    action,
-                    role: element.role,
-                })
-            }
-
-            Action::TypeText => {
-                let text = match data {
-                    Some(ActionData::Value(text)) => text,
-                    _ => {
-                        return Err(Error::Platform {
-                            code: -1,
-                            message: "TypeText requires ActionData::Value".to_string(),
-                        })
-                    }
-                };
-                // Insert text via ValuePattern (accessibility API, not input simulation).
-                // Get current value, get insertion point from TextPattern, splice, set new value.
-                if let Ok(value_pattern) = unsafe {
-                    uia_element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
-                } {
-                    let current = unsafe { value_pattern.CurrentValue() }
-                        .map(|s| s.to_string())
-                        .unwrap_or_default();
-
-                    // Try to get cursor position from TextPattern
-                    let insert_pos = if let Ok(text_pattern) = unsafe {
-                        uia_element
-                            .GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
-                    } {
-                        // Get the selection/caret range — its start offset is the cursor
-                        unsafe { text_pattern.GetSelection() }
-                            .ok()
-                            .and_then(|arr| unsafe { arr.GetElement(0) }.ok())
-                            .map(|_| current.len()) // Fallback: append at end
-                            .unwrap_or(current.len())
-                    } else {
-                        current.len() // No TextPattern — append at end
-                    };
-
-                    let mut new_value = current;
-                    new_value.insert_str(insert_pos.min(new_value.len()), &text);
-                    let bstr: windows::core::BSTR = new_value.into();
-                    unsafe { value_pattern.SetValue(&bstr) }
-                        .map_err(|_| Error::TextValueNotSupported)?;
-                    return Ok(());
-                }
-                Err(Error::TextValueNotSupported)
-            }
+            "press" => self.press(element),
+            "focus" => self.focus(element),
+            "blur" => self.blur(element),
+            "toggle" => self.toggle(element),
+            "select" => self.select(element),
+            "expand" => self.expand(element),
+            "collapse" => self.collapse(element),
+            "show_menu" => self.show_menu(element),
+            "increment" => self.increment(element),
+            "decrement" => self.decrement(element),
+            "scroll_into_view" => self.scroll_into_view(element),
+            _ => Err(Error::ActionNotSupported {
+                action: action.to_string(),
+                role: element.role,
+            }),
         }
     }
 

@@ -54,28 +54,6 @@ fn to_py_err(e: xa11y::Error) -> PyErr {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-fn action_to_string(a: &xa11y::Action) -> String {
-    match a {
-        xa11y::Action::Press => "press".into(),
-        xa11y::Action::Focus => "focus".into(),
-        xa11y::Action::SetValue => "set_value".into(),
-        xa11y::Action::Toggle => "toggle".into(),
-        xa11y::Action::Expand => "expand".into(),
-        xa11y::Action::Collapse => "collapse".into(),
-        xa11y::Action::Select => "select".into(),
-        xa11y::Action::ShowMenu => "show_menu".into(),
-        xa11y::Action::ScrollIntoView => "scroll_into_view".into(),
-        xa11y::Action::ScrollDown => "scroll_down".into(),
-        xa11y::Action::ScrollRight => "scroll_right".into(),
-        xa11y::Action::Increment => "increment".into(),
-        xa11y::Action::Decrement => "decrement".into(),
-        xa11y::Action::Blur => "blur".into(),
-        xa11y::Action::SetTextSelection => "set_text_selection".into(),
-        xa11y::Action::TypeText => "type_text".into(),
-        xa11y::Action::Custom(name) => name.clone(),
-    }
-}
-
 /// Create a Python Element from Rust ElementData.
 fn make_py_element(
     py: Python<'_>,
@@ -87,7 +65,7 @@ fn make_py_element(
         xa11y::Toggled::On => "on".to_string(),
         xa11y::Toggled::Mixed => "mixed".to_string(),
     });
-    let actions: Vec<String> = data.actions.iter().map(action_to_string).collect();
+    let actions: Vec<String> = data.actions.clone();
     Py::new(
         py,
         Element {
@@ -950,17 +928,157 @@ impl xa11y::Provider for MockProvider {
         Ok(self.nodes[idx].parent.map(|i| self.nodes[i].data.clone()))
     }
 
-    fn perform_action(
-        &self,
-        element: &xa11y::ElementData,
-        action: xa11y::Action,
-        data: Option<xa11y::ActionData>,
-    ) -> xa11y::Result<()> {
-        let data_debug = data.map(|d| format!("{d:?}"));
+    fn press(&self, element: &xa11y::ElementData) -> xa11y::Result<()> {
         self.actions
             .lock()
             .unwrap()
-            .push((element.handle, format!("{action}"), data_debug));
+            .push((element.handle, "press".into(), None));
+        Ok(())
+    }
+    fn focus(&self, element: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.actions
+            .lock()
+            .unwrap()
+            .push((element.handle, "focus".into(), None));
+        Ok(())
+    }
+    fn blur(&self, element: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.actions
+            .lock()
+            .unwrap()
+            .push((element.handle, "blur".into(), None));
+        Ok(())
+    }
+    fn toggle(&self, element: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.actions
+            .lock()
+            .unwrap()
+            .push((element.handle, "toggle".into(), None));
+        Ok(())
+    }
+    fn select(&self, element: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.actions
+            .lock()
+            .unwrap()
+            .push((element.handle, "select".into(), None));
+        Ok(())
+    }
+    fn expand(&self, element: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.actions
+            .lock()
+            .unwrap()
+            .push((element.handle, "expand".into(), None));
+        Ok(())
+    }
+    fn collapse(&self, element: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.actions
+            .lock()
+            .unwrap()
+            .push((element.handle, "collapse".into(), None));
+        Ok(())
+    }
+    fn show_menu(&self, element: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.actions
+            .lock()
+            .unwrap()
+            .push((element.handle, "show_menu".into(), None));
+        Ok(())
+    }
+    fn increment(&self, element: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.actions
+            .lock()
+            .unwrap()
+            .push((element.handle, "increment".into(), None));
+        Ok(())
+    }
+    fn decrement(&self, element: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.actions
+            .lock()
+            .unwrap()
+            .push((element.handle, "decrement".into(), None));
+        Ok(())
+    }
+    fn scroll_into_view(&self, element: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.actions
+            .lock()
+            .unwrap()
+            .push((element.handle, "scroll_into_view".into(), None));
+        Ok(())
+    }
+    fn set_value(&self, element: &xa11y::ElementData, value: &str) -> xa11y::Result<()> {
+        self.actions.lock().unwrap().push((
+            element.handle,
+            "set_value".into(),
+            Some(value.to_string()),
+        ));
+        Ok(())
+    }
+    fn set_numeric_value(&self, element: &xa11y::ElementData, value: f64) -> xa11y::Result<()> {
+        self.actions.lock().unwrap().push((
+            element.handle,
+            "set_numeric_value".into(),
+            Some(format!("{value}")),
+        ));
+        Ok(())
+    }
+    fn type_text(&self, element: &xa11y::ElementData, text: &str) -> xa11y::Result<()> {
+        self.actions.lock().unwrap().push((
+            element.handle,
+            "type_text".into(),
+            Some(text.to_string()),
+        ));
+        Ok(())
+    }
+    fn set_text_selection(
+        &self,
+        element: &xa11y::ElementData,
+        start: u32,
+        end: u32,
+    ) -> xa11y::Result<()> {
+        self.actions.lock().unwrap().push((
+            element.handle,
+            "set_text_selection".into(),
+            Some(format!("{start}..{end}")),
+        ));
+        Ok(())
+    }
+    fn scroll_down(&self, element: &xa11y::ElementData, amount: f64) -> xa11y::Result<()> {
+        self.actions.lock().unwrap().push((
+            element.handle,
+            "scroll_down".into(),
+            Some(format!("{amount}")),
+        ));
+        Ok(())
+    }
+    fn scroll_up(&self, element: &xa11y::ElementData, amount: f64) -> xa11y::Result<()> {
+        self.actions.lock().unwrap().push((
+            element.handle,
+            "scroll_up".into(),
+            Some(format!("{amount}")),
+        ));
+        Ok(())
+    }
+    fn scroll_right(&self, element: &xa11y::ElementData, amount: f64) -> xa11y::Result<()> {
+        self.actions.lock().unwrap().push((
+            element.handle,
+            "scroll_right".into(),
+            Some(format!("{amount}")),
+        ));
+        Ok(())
+    }
+    fn scroll_left(&self, element: &xa11y::ElementData, amount: f64) -> xa11y::Result<()> {
+        self.actions.lock().unwrap().push((
+            element.handle,
+            "scroll_left".into(),
+            Some(format!("{amount}")),
+        ));
+        Ok(())
+    }
+    fn perform_action(&self, element: &xa11y::ElementData, action: &str) -> xa11y::Result<()> {
+        self.actions
+            .lock()
+            .unwrap()
+            .push((element.handle, action.to_string(), None));
         Ok(())
     }
 
@@ -981,7 +1099,7 @@ fn build_test_tree() -> Arc<MockProvider> {
         Option<&str>,
         Option<&str>,
         Option<Rect>,
-        Vec<Action>,
+        Vec<&str>,
         StateSet,
         Option<f64>,
         Option<f64>,
@@ -1051,7 +1169,7 @@ fn build_test_tree() -> Arc<MockProvider> {
                 width: 50,
                 height: 30,
             }),
-            vec![Action::Press, Action::Focus],
+            vec!["press", "focus"],
             StateSet {
                 focusable: true,
                 ..StateSet::default()
@@ -1072,7 +1190,7 @@ fn build_test_tree() -> Arc<MockProvider> {
                 width: 50,
                 height: 30,
             }),
-            vec![Action::Press, Action::Focus],
+            vec!["press", "focus"],
             StateSet {
                 enabled: false,
                 focusable: true,
@@ -1107,7 +1225,7 @@ fn build_test_tree() -> Arc<MockProvider> {
                 width: 300,
                 height: 25,
             }),
-            vec![Action::Focus, Action::SetValue, Action::TypeText],
+            vec!["focus", "set_value", "type_text"],
             StateSet {
                 editable: true,
                 focusable: true,
@@ -1124,7 +1242,7 @@ fn build_test_tree() -> Arc<MockProvider> {
             None,
             None,
             None,
-            vec![Action::Press, Action::Focus],
+            vec!["press", "focus"],
             StateSet {
                 checked: Some(Toggled::On),
                 focusable: true,
@@ -1141,12 +1259,7 @@ fn build_test_tree() -> Arc<MockProvider> {
             Some("75"),
             None,
             None,
-            vec![
-                Action::Increment,
-                Action::Decrement,
-                Action::SetValue,
-                Action::Focus,
-            ],
+            vec!["increment", "decrement", "set_value", "focus"],
             StateSet {
                 focusable: true,
                 ..StateSet::default()
@@ -1194,7 +1307,7 @@ fn build_test_tree() -> Arc<MockProvider> {
             None,
             None,
             None,
-            vec![Action::Select, Action::Focus],
+            vec!["select", "focus"],
             StateSet {
                 selected: true,
                 focusable: true,
@@ -1211,7 +1324,7 @@ fn build_test_tree() -> Arc<MockProvider> {
             None,
             None,
             None,
-            vec![Action::Select, Action::Focus],
+            vec!["select", "focus"],
             StateSet {
                 focusable: true,
                 ..StateSet::default()
@@ -1265,7 +1378,7 @@ fn build_test_tree() -> Arc<MockProvider> {
             value: value.map(String::from),
             description: desc.map(String::from),
             bounds,
-            actions,
+            actions: actions.iter().map(|s| s.to_string()).collect(),
             states,
             numeric_value: nv,
             min_value: minv,

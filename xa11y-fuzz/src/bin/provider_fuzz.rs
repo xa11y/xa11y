@@ -75,23 +75,23 @@ mod provider_fuzz {
 
     // ── All Actions ─────────────────────────────────────────────────────────
 
-    const ALL_ACTIONS: &[Action] = &[
-        Action::Press,
-        Action::Focus,
-        Action::SetValue,
-        Action::Toggle,
-        Action::Expand,
-        Action::Collapse,
-        Action::Select,
-        Action::ShowMenu,
-        Action::ScrollIntoView,
-        Action::ScrollDown,
-        Action::ScrollRight,
-        Action::Increment,
-        Action::Decrement,
-        Action::Blur,
-        Action::SetTextSelection,
-        Action::TypeText,
+    const ALL_ACTIONS: &[&str] = &[
+        "press",
+        "focus",
+        "set_value",
+        "toggle",
+        "expand",
+        "collapse",
+        "select",
+        "show_menu",
+        "scroll_into_view",
+        "scroll_down",
+        "scroll_right",
+        "increment",
+        "decrement",
+        "blur",
+        "set_text_selection",
+        "type_text",
     ];
 
     // ── Selector Generation ─────────────────────────────────────────────────
@@ -132,25 +132,33 @@ mod provider_fuzz {
         }
     }
 
-    // ── ActionData Generation ───────────────────────────────────────────────
+    // ── Typed action execution ────────────────────────────────────────────────
 
-    fn random_action_data(rng: &mut StdRng, action: &Action) -> Option<ActionData> {
+    /// Execute a random typed method on the provider for actions that need parameters.
+    /// Returns true if the action was handled as a typed call, false if it should
+    /// use perform_action instead.
+    fn try_typed_action(
+        provider: &dyn Provider,
+        target: &ElementData,
+        action: &str,
+        rng: &mut StdRng,
+    ) -> Option<Result<()>> {
         match action {
-            Action::SetValue => {
+            "set_value" => {
                 if rng.random_bool(0.5) {
-                    Some(ActionData::Value("hello".to_string()))
+                    Some(provider.set_value(target, "hello"))
                 } else {
-                    Some(ActionData::NumericValue(rng.random_range(0.0..100.0)))
+                    Some(provider.set_numeric_value(target, rng.random_range(0.0..100.0)))
                 }
             }
-            Action::TypeText => Some(ActionData::Value("test".to_string())),
-            Action::ScrollDown | Action::ScrollRight => {
-                Some(ActionData::ScrollAmount(rng.random_range(-3.0..3.0)))
+            "type_text" => Some(provider.type_text(target, "test")),
+            "scroll_down" => Some(provider.scroll_down(target, rng.random_range(0.0..3.0))),
+            "scroll_right" => Some(provider.scroll_right(target, rng.random_range(0.0..3.0))),
+            "set_text_selection" => {
+                let start = rng.random_range(0..10);
+                let end = rng.random_range(start..20);
+                Some(provider.set_text_selection(target, start, end))
             }
-            Action::SetTextSelection => Some(ActionData::TextSelection {
-                start: rng.random_range(0..10),
-                end: rng.random_range(0..20),
-            }),
             _ => None,
         }
     }
@@ -286,19 +294,23 @@ mod provider_fuzz {
         }
 
         let target = &elements[state.rng.random_range(0..elements.len())];
-        let action = if !target.actions.is_empty() && state.rng.random_bool(0.8) {
-            target.actions[state.rng.random_range(0..target.actions.len())].clone()
+        let action: &str = if !target.actions.is_empty() && state.rng.random_bool(0.8) {
+            &target.actions[state.rng.random_range(0..target.actions.len())]
         } else {
-            ALL_ACTIONS[state.rng.random_range(0..ALL_ACTIONS.len())].clone()
+            ALL_ACTIONS[state.rng.random_range(0..ALL_ACTIONS.len())]
         };
 
-        let data = random_action_data(&mut state.rng, &action);
         state.log(&format!(
-            "perform_action(role={:?}, action={:?})",
+            "action(role={:?}, action={})",
             target.role, action
         ));
 
-        match state.provider.perform_action(target, action, data) {
+        let result = match try_typed_action(&*state.provider, target, action, &mut state.rng) {
+            Some(r) => r,
+            None => state.provider.perform_action(target, action),
+        };
+
+        match result {
             Ok(()) => {
                 std::thread::sleep(std::time::Duration::from_millis(20));
                 state.app_element = None; // force re-fetch

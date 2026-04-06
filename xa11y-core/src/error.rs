@@ -1,4 +1,3 @@
-use crate::action::Action;
 use crate::role::Role;
 
 /// Result type alias for xa11y operations.
@@ -22,7 +21,7 @@ pub enum Error {
 
     /// The requested action is not supported by this element.
     #[error("Action {action} not supported on {role}")]
-    ActionNotSupported { action: Action, role: Role },
+    ActionNotSupported { action: String, role: Role },
 
     /// Text value input is not supported for this element on this platform.
     #[error("Text value input not supported for this element")]
@@ -36,7 +35,7 @@ pub enum Error {
     #[error("Invalid selector '{selector}': {message}")]
     InvalidSelector { selector: String, message: String },
 
-    /// The ActionData provided is invalid (e.g., reversed range, non-finite number).
+    /// Invalid argument to an action method.
     #[error("Invalid action data: {message}")]
     InvalidActionData { message: String },
 

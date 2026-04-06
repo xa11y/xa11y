@@ -183,29 +183,7 @@ pub(crate) fn format_element_oneline(el: &ElementData) -> String {
     }
 
     if !el.actions.is_empty() {
-        let names: Vec<&str> = el
-            .actions
-            .iter()
-            .map(|a| match a {
-                Action::Press => "press",
-                Action::Focus => "focus",
-                Action::Blur => "blur",
-                Action::SetValue => "set-value",
-                Action::Toggle => "toggle",
-                Action::Expand => "expand",
-                Action::Collapse => "collapse",
-                Action::Select => "select",
-                Action::ShowMenu => "show-menu",
-                Action::ScrollIntoView => "scroll-into-view",
-                Action::ScrollDown => "scroll-down",
-                Action::ScrollRight => "scroll-right",
-                Action::Increment => "increment",
-                Action::Decrement => "decrement",
-                Action::SetTextSelection => "select-text",
-                Action::TypeText => "type-text",
-                Action::Custom(name) => name.as_str(),
-            })
-            .collect();
+        let names: Vec<&str> = el.actions.iter().map(|a| a.as_str()).collect();
         parts.push(format!("actions=[{}]", names.join(",")));
     }
 
@@ -608,7 +586,7 @@ mod tests {
     #[test]
     fn format_element_with_actions() {
         let mut el = make_element(Role::Button, Some("Go"));
-        el.actions = vec![Action::Press, Action::Focus];
+        el.actions = vec!["press".to_string(), "focus".to_string()];
         let out = format_element_oneline(&el);
         assert!(out.contains("actions=[press,focus]"));
     }
