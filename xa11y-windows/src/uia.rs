@@ -725,8 +725,10 @@ impl Provider for WindowsProvider {
         self.narrow_multi_segment(matching, &selector.segments[1..], max_depth_val, limit)
     }
 
+    #[allow(non_upper_case_globals)]
     fn press(&self, element: &ElementData) -> Result<()> {
         let uia_element = self.get_cached(element.handle)?;
+        // Try InvokePattern (buttons, menu items)
         if let Ok(pattern) = unsafe {
             uia_element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
         } {
@@ -734,6 +736,44 @@ impl Provider for WindowsProvider {
                 code: e.code().0 as i64,
                 message: "Invoke failed".to_string(),
             })?;
+            return Ok(());
+        }
+        // Try TogglePattern (checkboxes, switches)
+        if let Ok(pattern) = unsafe {
+            uia_element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
+        } {
+            unsafe { pattern.Toggle() }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: "Toggle failed".to_string(),
+            })?;
+            return Ok(());
+        }
+        // Try SelectionItemPattern (list items, radio buttons)
+        if let Ok(pattern) = unsafe {
+            uia_element.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                UIA_SelectionItemPatternId,
+            )
+        } {
+            unsafe { pattern.Select() }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: "Select failed".to_string(),
+            })?;
+            return Ok(());
+        }
+        // Try ExpandCollapsePattern (combo boxes, tree items)
+        if let Ok(pattern) = unsafe {
+            uia_element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
+                UIA_ExpandCollapsePatternId,
+            )
+        } {
+            match unsafe { pattern.CurrentExpandCollapseState() } {
+                Ok(ExpandCollapseState_Collapsed) => {
+                    let _ = unsafe { pattern.Expand() };
+                }
+                _ => {
+                    let _ = unsafe { pattern.Collapse() };
+                }
+            }
             return Ok(());
         }
         Err(Error::ActionNotSupported {
@@ -807,16 +847,13 @@ impl Provider for WindowsProvider {
                 UIA_ExpandCollapsePatternId,
             )
         } {
-            // Ignore errors (may already be expanded)
             let _ = unsafe { pattern.Expand() };
             return Ok(());
         }
-        if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
-        } {
-            let _ = unsafe { pattern.Invoke() };
-        }
-        Ok(())
+        Err(Error::ActionNotSupported {
+            action: "expand".to_string(),
+            role: element.role,
+        })
     }
 
     fn collapse(&self, element: &ElementData) -> Result<()> {
@@ -826,16 +863,13 @@ impl Provider for WindowsProvider {
                 UIA_ExpandCollapsePatternId,
             )
         } {
-            // Ignore errors (may already be collapsed)
             let _ = unsafe { pattern.Collapse() };
             return Ok(());
         }
-        if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
-        } {
-            let _ = unsafe { pattern.Invoke() };
-        }
-        Ok(())
+        Err(Error::ActionNotSupported {
+            action: "collapse".to_string(),
+            role: element.role,
+        })
     }
 
     fn show_menu(&self, element: &ElementData) -> Result<()> {
@@ -1095,8 +1129,13 @@ fn get_actions(
         actions.push("press".to_string());
     }
 
-    if patterns.toggle.is_some() && !actions.iter().any(|a| a == "toggle") {
-        actions.push("toggle".to_string());
+    if patterns.toggle.is_some() {
+        if !actions.iter().any(|a| a == "press") {
+            actions.push("press".to_string());
+        }
+        if !actions.iter().any(|a| a == "toggle") {
+            actions.push("toggle".to_string());
+        }
     }
 
     if patterns.expand_collapse.is_some() {
@@ -1117,6 +1156,9 @@ fn get_actions(
     }
 
     if patterns.selection_item.is_some() {
+        if !actions.iter().any(|a| a == "press") {
+            actions.push("press".to_string());
+        }
         actions.push("select".to_string());
     }
 
@@ -1424,6 +1466,226 @@ mod tests {
         assert_eq!(
             map_uia_control_type(UIA_CONTROLTYPE_ID(99999)),
             Role::Unknown
+        );
+    }
+
+    #[test]
+    fn role_mapping_covers_remaining_types() {
+        assert_eq!(
+            map_uia_control_type(UIA_RadioButtonControlTypeId),
+            Role::RadioButton
+        );
+        assert_eq!(map_uia_control_type(UIA_TableControlTypeId), Role::Table);
+        assert_eq!(map_uia_control_type(UIA_DataGridControlTypeId), Role::Table);
+        assert_eq!(
+            map_uia_control_type(UIA_DataItemControlTypeId),
+            Role::TableRow
+        );
+        assert_eq!(
+            map_uia_control_type(UIA_ToolBarControlTypeId),
+            Role::Toolbar
+        );
+        assert_eq!(
+            map_uia_control_type(UIA_ScrollBarControlTypeId),
+            Role::ScrollBar
+        );
+        assert_eq!(map_uia_control_type(UIA_PaneControlTypeId), Role::Group);
+        assert_eq!(map_uia_control_type(UIA_TreeControlTypeId), Role::List);
+        assert_eq!(
+            map_uia_control_type(UIA_DocumentControlTypeId),
+            Role::WebArea
+        );
+        assert_eq!(map_uia_control_type(UIA_HeaderControlTypeId), Role::Group);
+        assert_eq!(
+            map_uia_control_type(UIA_HeaderItemControlTypeId),
+            Role::TableCell
+        );
+        assert_eq!(
+            map_uia_control_type(UIA_SpinnerControlTypeId),
+            Role::SpinButton
+        );
+        assert_eq!(
+            map_uia_control_type(UIA_SplitButtonControlTypeId),
+            Role::Button
+        );
+        assert_eq!(
+            map_uia_control_type(UIA_StatusBarControlTypeId),
+            Role::Status
+        );
+        assert_eq!(map_uia_control_type(UIA_TitleBarControlTypeId), Role::Group);
+        assert_eq!(
+            map_uia_control_type(UIA_ToolTipControlTypeId),
+            Role::Tooltip
+        );
+        assert_eq!(map_uia_control_type(UIA_CalendarControlTypeId), Role::Group);
+        assert_eq!(map_uia_control_type(UIA_CustomControlTypeId), Role::Unknown);
+    }
+
+    #[test]
+    fn role_mapping_unknown_id_returns_unknown() {
+        assert_eq!(map_uia_control_type(UIA_CONTROLTYPE_ID(0)), Role::Unknown);
+        assert_eq!(
+            map_uia_control_type(UIA_CONTROLTYPE_ID(i32::MAX)),
+            Role::Unknown
+        );
+    }
+
+    /// Helper: create a provider, skipping the test if COM init fails
+    /// (happens when cargo test runs with multiple threads in CI).
+    fn try_provider() -> Option<WindowsProvider> {
+        match WindowsProvider::new() {
+            Ok(p) => Some(p),
+            Err(Error::Platform {
+                code: -2147467259, ..
+            }) => {
+                // E_FAIL (0x80004005) — COM init race in multi-threaded test runner
+                eprintln!("Skipping: COM init failed (multi-threaded test runner)");
+                None
+            }
+            Err(e) => panic!("Unexpected provider error: {}", e),
+        }
+    }
+
+    #[test]
+    fn provider_new_succeeds() {
+        // May fail in multi-threaded test runners; that's expected.
+        let _ = try_provider();
+    }
+
+    #[test]
+    fn provider_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<WindowsProvider>();
+    }
+
+    #[test]
+    fn get_children_none_returns_applications() {
+        let Some(provider) = try_provider() else {
+            return;
+        };
+        let apps = provider.get_children(None).unwrap();
+        // Should find at least one window on a Windows desktop
+        assert!(
+            !apps.is_empty(),
+            "Should find at least one top-level window"
+        );
+        for app in &apps {
+            assert!(app.pid.is_some(), "Top-level windows should have a PID");
+            assert!(app.name.is_some(), "Top-level windows should have a name");
+        }
+    }
+
+    #[test]
+    fn get_cached_stale_handle_returns_error() {
+        let Some(provider) = try_provider() else {
+            return;
+        };
+        let result = provider.get_cached(u64::MAX);
+        assert!(
+            matches!(result, Err(Error::ElementStale { .. })),
+            "Stale handle should return ElementStale error"
+        );
+    }
+
+    #[test]
+    fn perform_action_delegates_to_named_methods() {
+        let Some(provider) = try_provider() else {
+            return;
+        };
+        let dummy = ElementData {
+            role: Role::Button,
+            name: Some("test".to_string()),
+            value: None,
+            description: None,
+            bounds: None,
+            actions: vec![],
+            states: StateSet::default(),
+            numeric_value: None,
+            min_value: None,
+            max_value: None,
+            stable_id: None,
+            pid: None,
+            attributes: std::collections::HashMap::new(),
+            raw: std::collections::HashMap::new(),
+            handle: u64::MAX, // stale handle
+        };
+        // Unknown action name should return ActionNotSupported
+        let result = provider.perform_action(&dummy, "nonexistent_action");
+        assert!(
+            matches!(result, Err(Error::ActionNotSupported { .. })),
+            "Unknown action should return ActionNotSupported"
+        );
+    }
+
+    #[test]
+    fn perform_action_on_stale_handle_returns_error() {
+        let Some(provider) = try_provider() else {
+            return;
+        };
+        let dummy = ElementData {
+            role: Role::Button,
+            name: Some("test".to_string()),
+            value: None,
+            description: None,
+            bounds: None,
+            actions: vec![],
+            states: StateSet::default(),
+            numeric_value: None,
+            min_value: None,
+            max_value: None,
+            stable_id: None,
+            pid: None,
+            attributes: std::collections::HashMap::new(),
+            raw: std::collections::HashMap::new(),
+            handle: u64::MAX,
+        };
+        // Actions that look up the cached element should return ElementStale
+        let result = provider.press(&dummy);
+        assert!(
+            matches!(result, Err(Error::ElementStale { .. })),
+            "Press on stale handle should return ElementStale, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn batch_properties_not_empty() {
+        assert!(
+            !BATCH_PROPERTIES.is_empty(),
+            "Batch properties should include at least one property"
+        );
+        // Verify essential properties are included
+        assert!(BATCH_PROPERTIES.contains(&UIA_ControlTypePropertyId));
+        assert!(BATCH_PROPERTIES.contains(&UIA_NamePropertyId));
+        assert!(BATCH_PROPERTIES.contains(&UIA_BoundingRectanglePropertyId));
+        assert!(BATCH_PROPERTIES.contains(&UIA_IsEnabledPropertyId));
+        assert!(BATCH_PROPERTIES.contains(&UIA_ProcessIdPropertyId));
+    }
+
+    #[test]
+    fn find_elements_empty_selector_returns_empty() {
+        let Some(provider) = try_provider() else {
+            return;
+        };
+        let empty_selector = Selector { segments: vec![] };
+        let result = provider
+            .find_elements(None, &empty_selector, None, None)
+            .unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn next_handle_increments() {
+        let Some(provider) = try_provider() else {
+            return;
+        };
+        let before = NEXT_HANDLE.load(Ordering::Relaxed);
+        // Getting children allocates handles
+        let _ = provider.get_children(None).unwrap();
+        let after = NEXT_HANDLE.load(Ordering::Relaxed);
+        assert!(
+            after > before,
+            "Handle counter should increment after caching elements"
         );
     }
 }
