@@ -400,6 +400,52 @@ impl WindowsProvider {
 
         Ok(candidates)
     }
+
+    /// Scroll implementation shared by scroll_down/scroll_up/scroll_right/scroll_left.
+    fn scroll_impl(&self, element: &ElementData, amount: f64, is_vertical: bool) -> Result<()> {
+        let uia_element = self.get_cached(element.handle)?;
+        if let Ok(pattern) = unsafe {
+            uia_element.GetCurrentPatternAs::<IUIAutomationScrollPattern>(UIA_ScrollPatternId)
+        } {
+            let count = (amount.abs() as u32).max(1);
+            for _ in 0..count {
+                let (h, v) = if is_vertical {
+                    let v = if amount >= 0.0 {
+                        ScrollAmount_SmallIncrement
+                    } else {
+                        ScrollAmount_SmallDecrement
+                    };
+                    (ScrollAmount_NoAmount, v)
+                } else {
+                    let h = if amount >= 0.0 {
+                        ScrollAmount_SmallIncrement
+                    } else {
+                        ScrollAmount_SmallDecrement
+                    };
+                    (h, ScrollAmount_NoAmount)
+                };
+                let _ = unsafe { pattern.Scroll(h, v) };
+            }
+            return Ok(());
+        }
+        let dir = if is_vertical {
+            if amount >= 0.0 {
+                "scroll_down"
+            } else {
+                "scroll_up"
+            }
+        } else {
+            if amount >= 0.0 {
+                "scroll_right"
+            } else {
+                "scroll_left"
+            }
+        };
+        Err(Error::ActionNotSupported {
+            action: dir.to_string(),
+            role: element.role,
+        })
+    }
 }
 
 // ── Safe UIA helpers ────────────────────────────────────────────────────────
@@ -682,8 +728,7 @@ impl Provider for WindowsProvider {
     fn press(&self, element: &ElementData) -> Result<()> {
         let uia_element = self.get_cached(element.handle)?;
         if let Ok(pattern) = unsafe {
-            uia_element
-                .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+            uia_element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
         } {
             unsafe { pattern.Invoke() }.map_err(|e| Error::Platform {
                 code: e.code().0 as i64,
@@ -708,11 +753,10 @@ impl Provider for WindowsProvider {
 
     fn blur(&self, _element: &ElementData) -> Result<()> {
         // Focus the desktop root to blur the current element
-        let root =
-            unsafe { self.automation.GetRootElement() }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: "GetRootElement failed".to_string(),
-            })?;
+        let root = unsafe { self.automation.GetRootElement() }.map_err(|e| Error::Platform {
+            code: e.code().0 as i64,
+            message: "GetRootElement failed".to_string(),
+        })?;
         unsafe { root.SetFocus() }.map_err(|e| Error::Platform {
             code: e.code().0 as i64,
             message: "SetFocus on root failed".to_string(),
@@ -723,8 +767,7 @@ impl Provider for WindowsProvider {
     fn toggle(&self, element: &ElementData) -> Result<()> {
         let uia_element = self.get_cached(element.handle)?;
         if let Ok(pattern) = unsafe {
-            uia_element
-                .GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
+            uia_element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
         } {
             unsafe { pattern.Toggle() }.map_err(|e| Error::Platform {
                 code: e.code().0 as i64,
@@ -769,8 +812,7 @@ impl Provider for WindowsProvider {
             return Ok(());
         }
         if let Ok(pattern) = unsafe {
-            uia_element
-                .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+            uia_element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
         } {
             let _ = unsafe { pattern.Invoke() };
         }
@@ -789,8 +831,7 @@ impl Provider for WindowsProvider {
             return Ok(());
         }
         if let Ok(pattern) = unsafe {
-            uia_element
-                .GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+            uia_element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
         } {
             let _ = unsafe { pattern.Invoke() };
         }
@@ -808,9 +849,8 @@ impl Provider for WindowsProvider {
     fn increment(&self, element: &ElementData) -> Result<()> {
         let uia_element = self.get_cached(element.handle)?;
         if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(
-                UIA_RangeValuePatternId,
-            )
+            uia_element
+                .GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId)
         } {
             let current = unsafe { pattern.CurrentValue() }.unwrap_or(0.0);
             let small = unsafe { pattern.CurrentSmallChange() }.unwrap_or(1.0);
@@ -830,9 +870,8 @@ impl Provider for WindowsProvider {
     fn decrement(&self, element: &ElementData) -> Result<()> {
         let uia_element = self.get_cached(element.handle)?;
         if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(
-                UIA_RangeValuePatternId,
-            )
+            uia_element
+                .GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId)
         } {
             let current = unsafe { pattern.CurrentValue() }.unwrap_or(0.0);
             let small = unsafe { pattern.CurrentSmallChange() }.unwrap_or(1.0);
@@ -852,9 +891,8 @@ impl Provider for WindowsProvider {
     fn scroll_into_view(&self, element: &ElementData) -> Result<()> {
         let uia_element = self.get_cached(element.handle)?;
         if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationScrollItemPattern>(
-                UIA_ScrollItemPatternId,
-            )
+            uia_element
+                .GetCurrentPatternAs::<IUIAutomationScrollItemPattern>(UIA_ScrollItemPatternId)
         } {
             let _ = unsafe { pattern.ScrollIntoView() };
         }
@@ -864,12 +902,10 @@ impl Provider for WindowsProvider {
     fn set_value(&self, element: &ElementData, value: &str) -> Result<()> {
         let uia_element = self.get_cached(element.handle)?;
         if let Ok(pattern) = unsafe {
-            uia_element
-                .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+            uia_element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
         } {
             let s: windows::core::BSTR = value.into();
-            unsafe { pattern.SetValue(&s) }
-                .map_err(|_| Error::TextValueNotSupported)?;
+            unsafe { pattern.SetValue(&s) }.map_err(|_| Error::TextValueNotSupported)?;
             return Ok(());
         }
         Err(Error::TextValueNotSupported)
@@ -878,9 +914,8 @@ impl Provider for WindowsProvider {
     fn set_numeric_value(&self, element: &ElementData, value: f64) -> Result<()> {
         let uia_element = self.get_cached(element.handle)?;
         if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(
-                UIA_RangeValuePatternId,
-            )
+            uia_element
+                .GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId)
         } {
             unsafe { pattern.SetValue(value) }.map_err(|e| Error::Platform {
                 code: e.code().0 as i64,
@@ -890,8 +925,7 @@ impl Provider for WindowsProvider {
         }
         // Fall back to ValuePattern with string
         if let Ok(pattern) = unsafe {
-            uia_element
-                .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+            uia_element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
         } {
             let s: windows::core::BSTR = value.to_string().into();
             unsafe { pattern.SetValue(&s) }.map_err(|e| Error::Platform {
@@ -919,8 +953,7 @@ impl Provider for WindowsProvider {
 
             // Try to get cursor position from TextPattern
             let insert_pos = if let Ok(text_pattern) = unsafe {
-                uia_element
-                    .GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
+                uia_element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
             } {
                 // Get the selection/caret range — its start offset is the cursor
                 unsafe { text_pattern.GetSelection() }
@@ -935,28 +968,21 @@ impl Provider for WindowsProvider {
             let mut new_value = current;
             new_value.insert_str(insert_pos.min(new_value.len()), text);
             let bstr: windows::core::BSTR = new_value.into();
-            unsafe { value_pattern.SetValue(&bstr) }
-                .map_err(|_| Error::TextValueNotSupported)?;
+            unsafe { value_pattern.SetValue(&bstr) }.map_err(|_| Error::TextValueNotSupported)?;
             return Ok(());
         }
         Err(Error::TextValueNotSupported)
     }
 
-    fn set_text_selection(
-        &self,
-        element: &ElementData,
-        start: u32,
-        end: u32,
-    ) -> Result<()> {
+    fn set_text_selection(&self, element: &ElementData, start: u32, end: u32) -> Result<()> {
         let uia_element = self.get_cached(element.handle)?;
         if let Ok(pattern) = unsafe {
             uia_element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
         } {
-            let range =
-                unsafe { pattern.DocumentRange() }.map_err(|e| Error::Platform {
-                    code: e.code().0 as i64,
-                    message: "DocumentRange failed".to_string(),
-                })?;
+            let range = unsafe { pattern.DocumentRange() }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: "DocumentRange failed".to_string(),
+            })?;
             // Collapse and move to start position
             let _ = unsafe { range.Move(TextUnit_Character, start as i32) };
             // Extend end to selection length
@@ -1062,36 +1088,36 @@ fn get_actions(
     element: &IUIAutomationElement,
     role: Role,
     patterns: &ElementPatterns,
-) -> Vec<Action> {
-    let mut actions: Vec<Action> = Vec::new();
+) -> Vec<String> {
+    let mut actions: Vec<String> = Vec::new();
 
     if patterns.invoke.is_some() {
-        actions.push(Action::Press);
+        actions.push("press".to_string());
     }
 
-    if patterns.toggle.is_some() && !actions.contains(&Action::Toggle) {
-        actions.push(Action::Toggle);
+    if patterns.toggle.is_some() && !actions.iter().any(|a| a == "toggle") {
+        actions.push("toggle".to_string());
     }
 
     if patterns.expand_collapse.is_some() {
-        actions.push(Action::Expand);
-        actions.push(Action::Collapse);
+        actions.push("expand".to_string());
+        actions.push("collapse".to_string());
     }
 
-    if patterns.value.is_some() && !actions.contains(&Action::SetValue) {
-        actions.push(Action::SetValue);
+    if patterns.value.is_some() && !actions.iter().any(|a| a == "set_value") {
+        actions.push("set_value".to_string());
     }
 
     if patterns.range_value.is_some() {
-        if !actions.contains(&Action::SetValue) {
-            actions.push(Action::SetValue);
+        if !actions.iter().any(|a| a == "set_value") {
+            actions.push("set_value".to_string());
         }
-        actions.push(Action::Increment);
-        actions.push(Action::Decrement);
+        actions.push("increment".to_string());
+        actions.push("decrement".to_string());
     }
 
     if patterns.selection_item.is_some() {
-        actions.push(Action::Select);
+        actions.push("select".to_string());
     }
 
     // Focus: most elements can be focused
@@ -1099,14 +1125,14 @@ fn get_actions(
         .unwrap_or(BOOL(0))
         .as_bool()
     {
-        actions.push(Action::Focus);
+        actions.push("focus".to_string());
     }
 
-    // For text fields and sliders, ensure SetValue is present
+    // For text fields and sliders, ensure set_value is present
     if matches!(role, Role::TextField | Role::TextArea | Role::Slider)
-        && !actions.contains(&Action::SetValue)
+        && !actions.iter().any(|a| a == "set_value")
     {
-        actions.push(Action::SetValue);
+        actions.push("set_value".to_string());
     }
 
     actions
