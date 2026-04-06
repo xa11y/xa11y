@@ -6,10 +6,7 @@
 
 use arbitrary::Arbitrary;
 use std::sync::Arc;
-use xa11y::{
-    Action, ActionData, ElementData, Error, Provider, Rect, Result, Role, StateSet, Subscription,
-    Toggled,
-};
+use xa11y::{ElementData, Error, Provider, Rect, Result, Role, StateSet, Subscription, Toggled};
 
 // ── Role and Action tables ────────────────────────────────────────────────────
 
@@ -49,23 +46,23 @@ pub const ROLES: [Role; 33] = [
     Role::Separator,
 ];
 
-pub const ALL_ACTIONS: [Action; 16] = [
-    Action::Press,
-    Action::Focus,
-    Action::SetValue,
-    Action::Toggle,
-    Action::Expand,
-    Action::Collapse,
-    Action::Select,
-    Action::ShowMenu,
-    Action::ScrollIntoView,
-    Action::ScrollDown,
-    Action::ScrollRight,
-    Action::Increment,
-    Action::Decrement,
-    Action::Blur,
-    Action::SetTextSelection,
-    Action::TypeText,
+pub const ALL_ACTIONS: &[&str] = &[
+    "press",
+    "focus",
+    "set_value",
+    "toggle",
+    "expand",
+    "collapse",
+    "select",
+    "show_menu",
+    "scroll_into_view",
+    "scroll_down",
+    "scroll_right",
+    "increment",
+    "decrement",
+    "blur",
+    "set_text_selection",
+    "type_text",
 ];
 
 // ── Fuzz element types ────────────────────────────────────────────────────────
@@ -162,9 +159,26 @@ impl Provider for FuzzProvider {
         Ok(self.nodes[idx].parent.map(|i| self.nodes[i].data.clone()))
     }
 
-    fn perform_action(&self, _: &ElementData, _: Action, _: Option<ActionData>) -> Result<()> {
-        Ok(())
-    }
+    fn press(&self, _: &ElementData) -> Result<()> { Ok(()) }
+    fn focus(&self, _: &ElementData) -> Result<()> { Ok(()) }
+    fn blur(&self, _: &ElementData) -> Result<()> { Ok(()) }
+    fn toggle(&self, _: &ElementData) -> Result<()> { Ok(()) }
+    fn select(&self, _: &ElementData) -> Result<()> { Ok(()) }
+    fn expand(&self, _: &ElementData) -> Result<()> { Ok(()) }
+    fn collapse(&self, _: &ElementData) -> Result<()> { Ok(()) }
+    fn show_menu(&self, _: &ElementData) -> Result<()> { Ok(()) }
+    fn increment(&self, _: &ElementData) -> Result<()> { Ok(()) }
+    fn decrement(&self, _: &ElementData) -> Result<()> { Ok(()) }
+    fn scroll_into_view(&self, _: &ElementData) -> Result<()> { Ok(()) }
+    fn set_value(&self, _: &ElementData, _: &str) -> Result<()> { Ok(()) }
+    fn set_numeric_value(&self, _: &ElementData, _: f64) -> Result<()> { Ok(()) }
+    fn type_text(&self, _: &ElementData, _: &str) -> Result<()> { Ok(()) }
+    fn set_text_selection(&self, _: &ElementData, _: u32, _: u32) -> Result<()> { Ok(()) }
+    fn scroll_down(&self, _: &ElementData, _: f64) -> Result<()> { Ok(()) }
+    fn scroll_up(&self, _: &ElementData, _: f64) -> Result<()> { Ok(()) }
+    fn scroll_right(&self, _: &ElementData, _: f64) -> Result<()> { Ok(()) }
+    fn scroll_left(&self, _: &ElementData, _: f64) -> Result<()> { Ok(()) }
+    fn perform_action(&self, _: &ElementData, _: &str) -> Result<()> { Ok(()) }
 
     fn subscribe(&self, _: &ElementData) -> Result<Subscription> {
         Err(Error::Platform {
@@ -227,10 +241,10 @@ pub fn build_provider(elements: &[FuzzElement]) -> Option<Arc<FuzzProvider>> {
         } else {
             ROLES[fuzz.role_idx as usize % ROLES.len()]
         };
-        let actions: Vec<Action> = fuzz
+        let actions: Vec<String> = fuzz
             .action_idxs
             .iter()
-            .map(|&idx| ALL_ACTIONS[idx as usize % ALL_ACTIONS.len()])
+            .map(|&idx| ALL_ACTIONS[idx as usize % ALL_ACTIONS.len()].to_string())
             .collect();
         nodes.push(FuzzNode {
             data: ElementData {

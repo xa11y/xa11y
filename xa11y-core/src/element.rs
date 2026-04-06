@@ -5,7 +5,6 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::action::Action;
 use crate::provider::Provider;
 use crate::role::Role;
 
@@ -31,8 +30,13 @@ pub struct ElementData {
     /// Bounding rectangle in screen pixels
     pub bounds: Option<Rect>,
 
-    /// Available actions
-    pub actions: Vec<Action>,
+    /// Available actions reported by the platform.
+    ///
+    /// Names are `snake_case` strings — well-known actions use their standard
+    /// names (`"press"`, `"toggle"`, `"expand"`, etc.) and platform-specific
+    /// actions use their converted names (e.g. macOS `AXCustomThing` →
+    /// `"custom_thing"`).
+    pub actions: Vec<String>,
 
     /// Current state flags
     pub states: StateSet,

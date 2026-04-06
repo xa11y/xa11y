@@ -48,25 +48,14 @@ pub fn named(app: &App, substring: &str) -> Element {
     results.into_iter().next().unwrap()
 }
 
-/// Try to perform an action on an element. Returns the result without panicking.
-pub fn try_act(element: &Element, action: Action) -> Result<()> {
-    try_act_with(element, action, None)
-}
-
-/// Try to perform an action with data on an element.
-pub fn try_act_with(element: &Element, action: Action, data: Option<ActionData>) -> Result<()> {
-    element.provider().perform_action(element, action, data)
+/// Try to perform an action on an element by name. Returns the result without panicking.
+pub fn try_act(element: &Element, action: &str) -> Result<()> {
+    element.provider().perform_action(element, action)
 }
 
 /// Perform an action on an element, wait briefly, then re-read the app root.
-pub fn act(element: &Element, action: Action) -> App {
-    act_with(element, action, None)
-}
-
-/// Perform an action with data on an element, wait, then re-read the app root.
-pub fn act_with(element: &Element, action: Action, data: Option<ActionData>) -> App {
-    try_act_with(element, action, data)
-        .unwrap_or_else(|e| panic!("Action {:?} failed: {}", action, e));
+pub fn act(element: &Element, action: &str) -> App {
+    try_act(element, action).unwrap_or_else(|e| panic!("Action '{}' failed: {}", action, e));
     std::thread::sleep(std::time::Duration::from_millis(100));
     app_root()
 }

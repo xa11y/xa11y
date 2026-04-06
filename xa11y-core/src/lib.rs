@@ -10,7 +10,7 @@ pub mod role;
 pub mod selector;
 
 // Re-export primary types at the crate root for convenience.
-pub use action::{Action, ActionData};
+pub use action::ScrollDirection;
 pub use app::App;
 pub use element::{Element, ElementData, RawPlatformData, Rect, StateSet, Toggled};
 pub use error::{Error, Result};

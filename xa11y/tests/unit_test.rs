@@ -19,7 +19,7 @@ struct MockNode {
 /// Mock provider that serves an in-memory tree.
 struct MockProvider {
     nodes: Vec<MockNode>,
-    last_action: std::sync::Mutex<Option<(u64, Action)>>,
+    last_action: std::sync::Mutex<Option<(u64, String)>>,
 }
 
 impl Provider for MockProvider {
@@ -54,13 +54,85 @@ impl Provider for MockProvider {
         Ok(self.nodes[idx].parent.map(|i| self.nodes[i].data.clone()))
     }
 
-    fn perform_action(
-        &self,
-        element: &ElementData,
-        action: Action,
-        _data: Option<ActionData>,
-    ) -> Result<()> {
-        *self.last_action.lock().unwrap() = Some((element.handle, action));
+    fn press(&self, element: &ElementData) -> Result<()> {
+        *self.last_action.lock().unwrap() = Some((element.handle, "press".to_string()));
+        Ok(())
+    }
+    fn focus(&self, element: &ElementData) -> Result<()> {
+        *self.last_action.lock().unwrap() = Some((element.handle, "focus".to_string()));
+        Ok(())
+    }
+    fn blur(&self, element: &ElementData) -> Result<()> {
+        *self.last_action.lock().unwrap() = Some((element.handle, "blur".to_string()));
+        Ok(())
+    }
+    fn toggle(&self, element: &ElementData) -> Result<()> {
+        *self.last_action.lock().unwrap() = Some((element.handle, "toggle".to_string()));
+        Ok(())
+    }
+    fn select(&self, element: &ElementData) -> Result<()> {
+        *self.last_action.lock().unwrap() = Some((element.handle, "select".to_string()));
+        Ok(())
+    }
+    fn expand(&self, element: &ElementData) -> Result<()> {
+        *self.last_action.lock().unwrap() = Some((element.handle, "expand".to_string()));
+        Ok(())
+    }
+    fn collapse(&self, element: &ElementData) -> Result<()> {
+        *self.last_action.lock().unwrap() = Some((element.handle, "collapse".to_string()));
+        Ok(())
+    }
+    fn show_menu(&self, element: &ElementData) -> Result<()> {
+        *self.last_action.lock().unwrap() = Some((element.handle, "show_menu".to_string()));
+        Ok(())
+    }
+    fn increment(&self, element: &ElementData) -> Result<()> {
+        *self.last_action.lock().unwrap() = Some((element.handle, "increment".to_string()));
+        Ok(())
+    }
+    fn decrement(&self, element: &ElementData) -> Result<()> {
+        *self.last_action.lock().unwrap() = Some((element.handle, "decrement".to_string()));
+        Ok(())
+    }
+    fn scroll_into_view(&self, element: &ElementData) -> Result<()> {
+        *self.last_action.lock().unwrap() = Some((element.handle, "scroll_into_view".to_string()));
+        Ok(())
+    }
+    fn set_value(&self, element: &ElementData, _value: &str) -> Result<()> {
+        *self.last_action.lock().unwrap() = Some((element.handle, "set_value".to_string()));
+        Ok(())
+    }
+    fn set_numeric_value(&self, element: &ElementData, _value: f64) -> Result<()> {
+        *self.last_action.lock().unwrap() = Some((element.handle, "set_numeric_value".to_string()));
+        Ok(())
+    }
+    fn type_text(&self, element: &ElementData, _text: &str) -> Result<()> {
+        *self.last_action.lock().unwrap() = Some((element.handle, "type_text".to_string()));
+        Ok(())
+    }
+    fn set_text_selection(&self, element: &ElementData, _start: u32, _end: u32) -> Result<()> {
+        *self.last_action.lock().unwrap() =
+            Some((element.handle, "set_text_selection".to_string()));
+        Ok(())
+    }
+    fn scroll_down(&self, element: &ElementData, _amount: f64) -> Result<()> {
+        *self.last_action.lock().unwrap() = Some((element.handle, "scroll_down".to_string()));
+        Ok(())
+    }
+    fn scroll_up(&self, element: &ElementData, _amount: f64) -> Result<()> {
+        *self.last_action.lock().unwrap() = Some((element.handle, "scroll_up".to_string()));
+        Ok(())
+    }
+    fn scroll_right(&self, element: &ElementData, _amount: f64) -> Result<()> {
+        *self.last_action.lock().unwrap() = Some((element.handle, "scroll_right".to_string()));
+        Ok(())
+    }
+    fn scroll_left(&self, element: &ElementData, _amount: f64) -> Result<()> {
+        *self.last_action.lock().unwrap() = Some((element.handle, "scroll_left".to_string()));
+        Ok(())
+    }
+    fn perform_action(&self, element: &ElementData, action: &str) -> Result<()> {
+        *self.last_action.lock().unwrap() = Some((element.handle, action.to_string()));
         Ok(())
     }
 
@@ -144,7 +216,7 @@ fn sample_provider() -> Arc<MockProvider> {
                 width: 60,
                 height: 34,
             }),
-            vec![Action::Press, Action::Focus],
+            vec!["press".to_string(), "focus".to_string()],
             StateSet {
                 enabled: true,
                 visible: true,
@@ -165,7 +237,7 @@ fn sample_provider() -> Arc<MockProvider> {
                 width: 600,
                 height: 34,
             }),
-            vec![Action::Focus, Action::SetValue],
+            vec!["focus".to_string(), "set_value".to_string()],
             StateSet {
                 enabled: true,
                 visible: true,
@@ -211,7 +283,7 @@ fn sample_provider() -> Arc<MockProvider> {
             None,
             None,
             None,
-            vec![Action::Press, Action::Focus],
+            vec!["press".to_string(), "focus".to_string()],
             StateSet {
                 enabled: true,
                 visible: true,
@@ -227,7 +299,7 @@ fn sample_provider() -> Arc<MockProvider> {
             None,
             None,
             None,
-            vec![Action::Press, Action::Focus],
+            vec!["press".to_string(), "focus".to_string()],
             StateSet {
                 enabled: false,
                 visible: true,
@@ -243,7 +315,7 @@ fn sample_provider() -> Arc<MockProvider> {
             None,
             None,
             None,
-            vec![Action::Press],
+            vec!["press".to_string()],
             StateSet {
                 enabled: true,
                 visible: true,
@@ -462,57 +534,6 @@ fn rect_negative_coords() {
     assert_eq!(rect.y, -500);
 }
 
-// ── Action ──
-
-#[test]
-fn action_display() {
-    assert_eq!(format!("{}", Action::Press), "Press");
-    assert_eq!(format!("{}", Action::SetValue), "SetValue");
-    assert_eq!(format!("{}", Action::ScrollIntoView), "ScrollIntoView");
-}
-
-#[test]
-fn validate_text_selection_start_must_be_lte_end() {
-    let valid = ActionData::TextSelection { start: 0, end: 5 };
-    assert!(valid.validate(Action::SetTextSelection).is_ok());
-
-    let equal = ActionData::TextSelection { start: 3, end: 3 };
-    assert!(equal.validate(Action::SetTextSelection).is_ok());
-
-    let reversed = ActionData::TextSelection { start: 5, end: 2 };
-    assert!(matches!(
-        reversed.validate(Action::SetTextSelection),
-        Err(Error::InvalidActionData { .. })
-    ));
-}
-
-#[test]
-fn validate_numeric_value_must_be_finite() {
-    let valid = ActionData::NumericValue(42.0);
-    assert!(valid.validate(Action::SetValue).is_ok());
-
-    let nan = ActionData::NumericValue(f64::NAN);
-    assert!(matches!(
-        nan.validate(Action::SetValue),
-        Err(Error::InvalidActionData { .. })
-    ));
-
-    let inf = ActionData::NumericValue(f64::INFINITY);
-    assert!(matches!(
-        inf.validate(Action::SetValue),
-        Err(Error::InvalidActionData { .. })
-    ));
-}
-
-#[test]
-fn validate_other_action_data_always_ok() {
-    let text = ActionData::Value("hello".to_string());
-    assert!(text.validate(Action::TypeText).is_ok());
-
-    let scroll = ActionData::ScrollAmount(0.0);
-    assert!(scroll.validate(Action::ScrollDown).is_ok());
-}
-
 // ── Error ──
 
 #[test]
@@ -533,10 +554,10 @@ fn error_display() {
     assert!(format!("{}", err).contains("stale"));
 
     let err = Error::ActionNotSupported {
-        action: Action::Toggle,
+        action: "toggle".to_string(),
         role: Role::StaticText,
     };
-    assert!(format!("{}", err).contains("Toggle"));
+    assert!(format!("{}", err).contains("toggle"));
 
     let err = Error::InvalidSelector {
         selector: "bad".to_string(),
@@ -560,7 +581,7 @@ fn element_json_serialization() {
             width: 80,
             height: 30,
         }),
-        actions: vec![Action::Press],
+        actions: vec!["press".to_string()],
         states: StateSet {
             enabled: true,
             visible: true,
@@ -803,8 +824,8 @@ fn locator_press_dispatches_action() {
     let app = App::by_name_with(Arc::clone(&p) as Arc<dyn Provider>, "Test App").unwrap();
     let loc = app.locator(r#"window button[name="Submit"]"#);
     loc.press().unwrap();
-    let (handle, action) = p.last_action.lock().unwrap().unwrap();
-    assert_eq!(action, Action::Press);
+    let (handle, action) = p.last_action.lock().unwrap().clone().unwrap();
+    assert_eq!(action, "press");
     assert_eq!(handle, 7); // Submit button is handle 7
 }
 
@@ -853,23 +874,6 @@ fn locator_selector_getter() {
     let app = sample_app();
     let loc = app.locator("button").child("text_field");
     assert_eq!(loc.selector(), "button > text_field");
-}
-
-// ── ActionData serialization ──
-
-#[test]
-fn action_data_variants() {
-    let text = ActionData::Value("hello".to_string());
-    let json = serde_json::to_string(&text).unwrap();
-    assert!(json.contains("hello"));
-
-    let numeric = ActionData::NumericValue(42.5);
-    let json = serde_json::to_string(&numeric).unwrap();
-    assert!(json.contains("42.5"));
-
-    let scroll = ActionData::ScrollAmount(100.0);
-    let json = serde_json::to_string(&scroll).unwrap();
-    assert!(json.contains("100"));
 }
 
 // ── Multi-app mock for system-root searches ──
@@ -985,7 +989,64 @@ impl Provider for MultiAppMockProvider {
         Ok(self.nodes[idx].parent.map(|i| self.nodes[i].data.clone()))
     }
 
-    fn perform_action(&self, _: &ElementData, _: Action, _: Option<ActionData>) -> Result<()> {
+    fn press(&self, _: &ElementData) -> Result<()> {
+        Ok(())
+    }
+    fn focus(&self, _: &ElementData) -> Result<()> {
+        Ok(())
+    }
+    fn blur(&self, _: &ElementData) -> Result<()> {
+        Ok(())
+    }
+    fn toggle(&self, _: &ElementData) -> Result<()> {
+        Ok(())
+    }
+    fn select(&self, _: &ElementData) -> Result<()> {
+        Ok(())
+    }
+    fn expand(&self, _: &ElementData) -> Result<()> {
+        Ok(())
+    }
+    fn collapse(&self, _: &ElementData) -> Result<()> {
+        Ok(())
+    }
+    fn show_menu(&self, _: &ElementData) -> Result<()> {
+        Ok(())
+    }
+    fn increment(&self, _: &ElementData) -> Result<()> {
+        Ok(())
+    }
+    fn decrement(&self, _: &ElementData) -> Result<()> {
+        Ok(())
+    }
+    fn scroll_into_view(&self, _: &ElementData) -> Result<()> {
+        Ok(())
+    }
+    fn set_value(&self, _: &ElementData, _: &str) -> Result<()> {
+        Ok(())
+    }
+    fn set_numeric_value(&self, _: &ElementData, _: f64) -> Result<()> {
+        Ok(())
+    }
+    fn type_text(&self, _: &ElementData, _: &str) -> Result<()> {
+        Ok(())
+    }
+    fn set_text_selection(&self, _: &ElementData, _: u32, _: u32) -> Result<()> {
+        Ok(())
+    }
+    fn scroll_down(&self, _: &ElementData, _: f64) -> Result<()> {
+        Ok(())
+    }
+    fn scroll_up(&self, _: &ElementData, _: f64) -> Result<()> {
+        Ok(())
+    }
+    fn scroll_right(&self, _: &ElementData, _: f64) -> Result<()> {
+        Ok(())
+    }
+    fn scroll_left(&self, _: &ElementData, _: f64) -> Result<()> {
+        Ok(())
+    }
+    fn perform_action(&self, _: &ElementData, _: &str) -> Result<()> {
         Ok(())
     }
 

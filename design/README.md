@@ -461,26 +461,35 @@ app.locator("text_area").type_text("hello")
 app.locator("text_area").select_text(0, 5)
 ```
 
-The full set of normalized actions:
+Actions are split into two categories:
 
-| Action | Data | Description |
-|--------|------|-------------|
-| `press` | — | Click, tap, or invoke the element |
-| `focus` | — | Set keyboard focus to the element |
-| `blur` | — | Remove keyboard focus from the element. Platform behavior varies: macOS sets `AXFocused = false` directly; Linux moves focus to the parent via `GrabFocus()`; Windows moves focus to the desktop root. Best-effort — may have side effects on some platforms. |
-| `toggle` | — | Toggle a checkbox or switch |
-| `select` | — | Select a list item, tab, or menu item |
-| `expand` | — | Expand a collapsible element (combo box, tree item, disclosure) |
-| `collapse` | — | Collapse an expanded element |
-| `show_menu` | — | Show the element's context menu or dropdown |
-| `increment` | — | Increment a slider or spinner by one step |
-| `decrement` | — | Decrement a slider or spinner by one step |
-| `scroll_into_view` | — | Scroll the element into the visible area |
-| `scroll_down` | amount (float) | Scroll vertically by the given amount |
-| `scroll_right` | amount (float) | Scroll horizontally by the given amount |
-| `set_value` | string or float | Set the element's value (text content or numeric value) |
-| `type_text` | string | Insert text at the current cursor position |
-| `set_text_selection` | start, end (int) | Select a range of text (0-based positions) |
+**First-class methods** — common actions that every provider must implement as individual typed methods. These have proper signatures (no generic data bag) and are the primary way callers interact with elements:
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `press()` | — | Click, tap, or invoke the element |
+| `focus()` | — | Set keyboard focus to the element |
+| `blur()` | — | Remove keyboard focus from the element |
+| `toggle()` | — | Toggle a checkbox or switch |
+| `select()` | — | Select a list item, tab, or menu item |
+| `expand()` | — | Expand a collapsible element |
+| `collapse()` | — | Collapse an expanded element |
+| `show_menu()` | — | Show the element's context menu or dropdown |
+| `increment()` | — | Increment a slider or spinner by one step |
+| `decrement()` | — | Decrement a slider or spinner by one step |
+| `scroll_into_view()` | — | Scroll the element into the visible area |
+| `set_value(value)` | `&str` | Set the element's text value |
+| `set_numeric_value(value)` | `f64` | Set the element's numeric value |
+| `type_text(text)` | `&str` | Insert text at the current cursor position |
+| `select_text(start, end)` | `u32, u32` | Select a range of text (0-based positions) |
+| `scroll_down(amount)` | `f64` | Scroll downward by the given amount |
+| `scroll_up(amount)` | `f64` | Scroll upward |
+| `scroll_left(amount)` | `f64` | Scroll leftward |
+| `scroll_right(amount)` | `f64` | Scroll rightward |
+
+**Generic `perform_action(name)` escape hatch** — for platform-specific actions not covered by the methods above. Takes a `snake_case` action name string. Well-known action names (`"press"`, `"focus"`, etc.) also work here — providers delegate to the corresponding method. Custom platform actions (e.g. macOS `AXCustomThing` → `"custom_thing"`) are resolved by the provider.
+
+**`element.actions`** is a `Vec<String>` listing the actions the element reports. Well-known actions use their standard names (`"press"`, `"toggle"`, etc.). Platform-specific actions use their `snake_case` converted names. Typed operations like `set_value` and `type_text` are role-based capabilities, not reported actions.
 
 ### How actions map to platforms
 
@@ -529,9 +538,11 @@ macOS exposes some operations as AX actions (performed via `AXUIElementPerformAc
 | `scroll_into_view` | Not supported (no AX equivalent) |
 | `scroll_down/right` | CGEvent scroll wheel events. **Exception to tenet 5**: macOS has no accessibility API for programmatic scrolling, so this uses input simulation (`CGEventCreateScrollWheelEvent`). Documented here rather than silently omitted because scrolling is a core automation primitive. |
 
-For **reading** which actions an element supports: the provider calls `AXUIElementCopyActionNames` to get the element's action list (e.g. `["AXPress", "AXShowMenu", "AXCustomThing"]`). Actions in the normalized table (like `AXPress` → `press`) are mapped to their normalized names. Actions not in the table but following the `AXFooBar` naming convention are converted to `snake_case` — e.g. `AXCustomThing` → `custom_thing`. The provider also adds implicit actions based on settable attributes (e.g. if `AXValue` is settable, add `set_value`; if `AXFocused` is present, add `focus`).
+For **reading** which actions an element supports: the provider calls `AXUIElementCopyActionNames` to get the element's action list (e.g. `["AXPress", "AXShowMenu", "AXCustomThing"]`). Known AX action names map to their standard `snake_case` name (e.g. `"AXPress"` → `"press"`). All other actions have the `AX` prefix stripped and are converted from `PascalCase` to `snake_case` (e.g. `"AXRaise"` → `"raise"`, `"AXCustomThing"` → `"custom_thing"`). No actions are silently hidden — if the platform reports it, it appears in `element.actions`.
 
-For **performing** an action by name: the provider first checks the normalized table (e.g. `press` → `AXPress`). For action names not in the table, it converts `snake_case` back to `AXPascalCase` and looks for that in the element's action list. If found, it invokes it. If not found, it looks for the `snake_case` name literally. If neither is supported by the element, it returns an error. For example, calling `custom_thing` would first try `AXCustomThing`, then `custom_thing`, then fail.
+The provider also adds implicit actions based on settable attributes (e.g. if `AXFocused` is present, add `"focus"`; if the role is a text field or slider, add `"set_value"`).
+
+For **performing** an action via `perform_action("custom_thing")`: the provider first checks if it's a well-known name and delegates to the corresponding typed method. For unknown names, it converts `snake_case` back to `AXPascalCase` and looks for that in the element's action list. If found, it invokes it via `AXUIElementPerformAction`. If not found, it tries the literal `snake_case` name. If neither is supported, it returns `ActionNotSupported`. For example, `perform_action("custom_thing")` would first try `"AXCustomThing"`, then `"custom_thing"`, then fail.
 
 #### Linux (AT-SPI2 action names and D-Bus interfaces)
 

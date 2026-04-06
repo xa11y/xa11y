@@ -8,7 +8,6 @@
 //! - App::locator, App::children
 //! - Locator: exists, count, element, elements, nth, first, child, descendant
 //! - Element: children, parent, Display
-//! - ActionData::validate (all action × data combinations)
 //! - ElementData serde round-trip (arbitrary bytes → from_slice)
 #![no_main]
 
@@ -19,8 +18,8 @@ use std::sync::Arc;
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
-use mock::{build_provider, FuzzElement, ALL_ACTIONS};
-use xa11y::{ActionData, App, ElementData, Locator, Provider, Selector};
+use mock::{build_provider, FuzzElement};
+use xa11y::{App, ElementData, Locator, Provider, Selector};
 
 // ── Fuzz-only types (tree_ops-specific) ───────────────────────────────────────
 
@@ -39,18 +38,6 @@ enum LocatorOp {
     DescendantThenExists(String),
 }
 
-/// Fuzzes ActionData::validate across all action × data combinations.
-#[derive(Arbitrary, Debug)]
-struct FuzzActionCase {
-    action_idx: u8,
-    /// 0=Value, 1=NumericValue, 2=ScrollAmount, 3=TextSelection
-    data_kind: u8,
-    string_val: String,
-    numeric_val: f64,
-    start: u32,
-    end: u32,
-}
-
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
     fuzz_elements: Vec<FuzzElement>,
@@ -62,8 +49,6 @@ struct FuzzInput {
     pid: u32,
     /// Sequence of Locator API calls to exercise on each found app.
     locator_ops: Vec<LocatorOp>,
-    /// ActionData::validate cases.
-    action_cases: Vec<FuzzActionCase>,
     /// Arbitrary bytes tried as ElementData JSON for serde fuzzing.
     json_bytes: Vec<u8>,
 }
@@ -106,40 +91,24 @@ fuzz_target!(|input: FuzzInput| {
     // ── 1. Selector::parse — pure parser, no provider needed ─────────────────
     let _ = Selector::parse(&input.selector);
 
-    // ── 2. ActionData::validate — all action × data combinations ─────────────
-    for case in input.action_cases.iter().take(32) {
-        let action = ALL_ACTIONS[case.action_idx as usize % ALL_ACTIONS.len()];
-        let datas = [
-            ActionData::Value(case.string_val.clone()),
-            ActionData::NumericValue(case.numeric_val),
-            ActionData::ScrollAmount(case.numeric_val),
-            ActionData::TextSelection {
-                start: case.start,
-                end: case.end,
-            },
-        ];
-        let data = &datas[case.data_kind as usize % datas.len()];
-        let _ = data.validate(action);
-    }
-
-    // ── 3. ElementData serde — try to deserialize arbitrary bytes ────────────
+    // ── 2. ElementData serde — try to deserialize arbitrary bytes ────────────
     let _ = serde_json::from_slice::<ElementData>(&input.json_bytes);
 
-    // ── 4. Build the mock provider ────────────────────────────────────────────
+    // ── 3. Build the mock provider ────────────────────────────────────────────
     let Some(provider) = build_provider(&input.fuzz_elements) else {
         return;
     };
     let provider: Arc<dyn Provider> = provider;
 
-    // ── 5. App::by_name_with — exercises name-embedding in selector string ────
+    // ── 4. App::by_name_with — exercises name-embedding in selector string ────
     //    Names containing '"' produce invalid selector strings; the method must
     //    return Err, not panic.
     let _ = App::by_name_with(Arc::clone(&provider), &input.app_name);
 
-    // ── 6. App::by_pid_with ───────────────────────────────────────────────────
+    // ── 5. App::by_pid_with ───────────────────────────────────────────────────
     let _ = App::by_pid_with(Arc::clone(&provider), input.pid);
 
-    // ── 7. App::list_with → children, locator, serde ─────────────────────────
+    // ── 6. App::list_with → children, locator, serde ─────────────────────────
     let Ok(apps) = App::list_with(Arc::clone(&provider)) else {
         return;
     };

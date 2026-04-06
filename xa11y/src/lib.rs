@@ -21,8 +21,8 @@ use std::sync::{Arc, OnceLock};
 
 // Re-export public types.
 pub use xa11y_core::{
-    Action, ActionData, App, Element, ElementData, ElementState, Error, Event, EventType, Locator,
-    RawPlatformData, Rect, Result, Role, StateFlag, StateSet, Subscription, SubscriptionIter,
+    App, Element, ElementData, ElementState, Error, Event, EventType, Locator, RawPlatformData,
+    Rect, Result, Role, ScrollDirection, StateFlag, StateSet, Subscription, SubscriptionIter,
     TextChangeData, TextChangeType, Toggled,
 };
 
@@ -65,13 +65,65 @@ impl Provider for StaticProviderRef {
     fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
         self.0.get_parent(element)
     }
-    fn perform_action(
-        &self,
-        element: &ElementData,
-        action: Action,
-        data: Option<ActionData>,
-    ) -> Result<()> {
-        self.0.perform_action(element, action, data)
+    fn press(&self, element: &ElementData) -> Result<()> {
+        self.0.press(element)
+    }
+    fn focus(&self, element: &ElementData) -> Result<()> {
+        self.0.focus(element)
+    }
+    fn blur(&self, element: &ElementData) -> Result<()> {
+        self.0.blur(element)
+    }
+    fn toggle(&self, element: &ElementData) -> Result<()> {
+        self.0.toggle(element)
+    }
+    fn select(&self, element: &ElementData) -> Result<()> {
+        self.0.select(element)
+    }
+    fn expand(&self, element: &ElementData) -> Result<()> {
+        self.0.expand(element)
+    }
+    fn collapse(&self, element: &ElementData) -> Result<()> {
+        self.0.collapse(element)
+    }
+    fn show_menu(&self, element: &ElementData) -> Result<()> {
+        self.0.show_menu(element)
+    }
+    fn increment(&self, element: &ElementData) -> Result<()> {
+        self.0.increment(element)
+    }
+    fn decrement(&self, element: &ElementData) -> Result<()> {
+        self.0.decrement(element)
+    }
+    fn scroll_into_view(&self, element: &ElementData) -> Result<()> {
+        self.0.scroll_into_view(element)
+    }
+    fn set_value(&self, element: &ElementData, value: &str) -> Result<()> {
+        self.0.set_value(element, value)
+    }
+    fn set_numeric_value(&self, element: &ElementData, value: f64) -> Result<()> {
+        self.0.set_numeric_value(element, value)
+    }
+    fn type_text(&self, element: &ElementData, text: &str) -> Result<()> {
+        self.0.type_text(element, text)
+    }
+    fn set_text_selection(&self, element: &ElementData, start: u32, end: u32) -> Result<()> {
+        self.0.set_text_selection(element, start, end)
+    }
+    fn scroll_down(&self, element: &ElementData, amount: f64) -> Result<()> {
+        self.0.scroll_down(element, amount)
+    }
+    fn scroll_up(&self, element: &ElementData, amount: f64) -> Result<()> {
+        self.0.scroll_up(element, amount)
+    }
+    fn scroll_right(&self, element: &ElementData, amount: f64) -> Result<()> {
+        self.0.scroll_right(element, amount)
+    }
+    fn scroll_left(&self, element: &ElementData, amount: f64) -> Result<()> {
+        self.0.scroll_left(element, amount)
+    }
+    fn perform_action(&self, element: &ElementData, action: &str) -> Result<()> {
+        self.0.perform_action(element, action)
     }
     fn subscribe(&self, element: &ElementData) -> Result<Subscription> {
         self.0.subscribe(element)

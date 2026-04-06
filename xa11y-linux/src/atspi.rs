@@ -8,8 +8,8 @@ use std::time::Duration;
 use rayon::prelude::*;
 use xa11y_core::selector::{Combinator, MatchOp, SelectorSegment};
 use xa11y_core::{
-    Action, ActionData, CancelHandle, ElementData, Error, Event, EventReceiver, EventType,
-    Provider, Rect, Result, Role, Selector, StateSet, Subscription, Toggled,
+    CancelHandle, ElementData, Error, Event, EventReceiver, EventType, Provider, Rect, Result,
+    Role, Selector, StateSet, Subscription, Toggled,
 };
 use zbus::blocking::{Connection, Proxy};
 
@@ -22,8 +22,8 @@ pub struct LinuxProvider {
     /// Cached AT-SPI accessible refs keyed by handle ID.
     handle_cache: Mutex<HashMap<u64, AccessibleRef>>,
     /// Cached AT-SPI2 action indices keyed by element handle.
-    /// Maps each xa11y Action to the integer index used by `DoAction(i)`.
-    action_indices: Mutex<HashMap<u64, HashMap<Action, i32>>>,
+    /// Maps each action name (snake_case) to the integer index used by `DoAction(i)`.
+    action_indices: Mutex<HashMap<u64, HashMap<String, i32>>>,
 }
 
 /// AT-SPI2 accessible reference: (bus_name, object_path).
@@ -271,11 +271,11 @@ impl LinuxProvider {
     }
 
     /// Get available actions via Action interface, returning both the action list
-    /// and a map of each action to its AT-SPI2 integer index for direct `DoAction(i)`.
+    /// and a map of each action name to its AT-SPI2 integer index for direct `DoAction(i)`.
     ///
     /// Probes the interface directly rather than relying on the Interfaces property,
     /// which some AT-SPI adapters (e.g. AccessKit) don't expose.
-    fn get_actions(&self, aref: &AccessibleRef) -> (Vec<Action>, HashMap<Action, i32>) {
+    fn get_actions(&self, aref: &AccessibleRef) -> (Vec<String>, HashMap<String, i32>) {
         let mut actions = Vec::new();
         let mut indices = HashMap::new();
 
@@ -289,10 +289,10 @@ impl LinuxProvider {
             for i in 0..n_actions {
                 if let Ok(reply) = proxy.call_method("GetName", &(i,)) {
                     if let Ok(name) = reply.body().deserialize::<String>() {
-                        if let Some(action) = map_atspi_action(&name) {
-                            if !actions.contains(&action) {
-                                actions.push(action);
-                                indices.insert(action, i);
+                        if let Some(action_name) = map_atspi_action_name(&name) {
+                            if !actions.contains(&action_name) {
+                                indices.insert(action_name.clone(), i);
+                                actions.push(action_name);
                             }
                         }
                     }
@@ -301,13 +301,13 @@ impl LinuxProvider {
         }
 
         // Try Component interface for Focus
-        if !actions.contains(&Action::Focus) {
+        if !actions.contains(&"focus".to_string()) {
             if let Ok(proxy) =
                 self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Component")
             {
                 // Verify the interface exists by trying a method
                 if proxy.call_method("GetExtents", &(0u32,)).is_ok() {
-                    actions.push(Action::Focus);
+                    actions.push("focus".to_string());
                 }
             }
         }
@@ -736,14 +736,14 @@ impl LinuxProvider {
     }
 
     /// Look up the stored AT-SPI2 action index for the given element and action.
-    fn get_action_index(&self, handle: u64, action: Action) -> Result<i32> {
+    fn get_action_index(&self, handle: u64, action: &str) -> Result<i32> {
         self.action_indices
             .lock()
             .unwrap()
             .get(&handle)
-            .and_then(|map| map.get(&action).copied())
-            .ok_or(Error::ActionNotSupported {
-                action,
+            .and_then(|map| map.get(action).copied())
+            .ok_or_else(|| Error::ActionNotSupported {
+                action: action.to_string(),
                 role: Role::Unknown, // caller will provide better context
             })
     }
@@ -1218,272 +1218,358 @@ impl Provider for LinuxProvider {
         }
     }
 
-    fn perform_action(
-        &self,
-        element: &ElementData,
-        action: Action,
-        data: Option<ActionData>,
-    ) -> Result<()> {
+    fn press(&self, element: &ElementData) -> Result<()> {
         let target = self.get_cached(element.handle)?;
+        let index = self
+            .get_action_index(element.handle, "press")
+            .map_err(|_| Error::ActionNotSupported {
+                action: "press".to_string(),
+                role: element.role,
+            })?;
+        self.do_atspi_action_by_index(&target, index)
+    }
 
-        match action {
-            Action::Press
-            | Action::Toggle
-            | Action::Expand
-            | Action::Collapse
-            | Action::Select
-            | Action::ShowMenu => {
-                let index = self.get_action_index(element.handle, action).map_err(|_| {
-                    Error::ActionNotSupported {
-                        action,
-                        role: element.role,
-                    }
-                })?;
-                self.do_atspi_action_by_index(&target, index)
+    fn focus(&self, element: &ElementData) -> Result<()> {
+        let target = self.get_cached(element.handle)?;
+        // Try Component.GrabFocus first, then fall back to stored action index
+        if let Ok(proxy) =
+            self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")
+        {
+            if proxy.call_method("GrabFocus", &()).is_ok() {
+                return Ok(());
             }
-            Action::Focus => {
-                // Try Component.GrabFocus first, then fall back to stored action index
-                if let Ok(proxy) =
-                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")
-                {
-                    if proxy.call_method("GrabFocus", &()).is_ok() {
-                        return Ok(());
-                    }
+        }
+        if let Ok(index) = self.get_action_index(element.handle, "focus") {
+            return self.do_atspi_action_by_index(&target, index);
+        }
+        Err(Error::ActionNotSupported {
+            action: "focus".to_string(),
+            role: element.role,
+        })
+    }
+
+    fn blur(&self, element: &ElementData) -> Result<()> {
+        let target = self.get_cached(element.handle)?;
+        // Grab focus on parent element to blur the current one
+        if let Ok(Some(parent_ref)) = self.get_atspi_parent(&target) {
+            if parent_ref.path != "/org/a11y/atspi/null" {
+                if let Ok(p) = self.make_proxy(
+                    &parent_ref.bus_name,
+                    &parent_ref.path,
+                    "org.a11y.atspi.Component",
+                ) {
+                    let _ = p.call_method("GrabFocus", &());
+                    return Ok(());
                 }
-                if let Ok(index) = self.get_action_index(element.handle, action) {
-                    return self.do_atspi_action_by_index(&target, index);
-                }
-                Err(Error::ActionNotSupported {
-                    action,
-                    role: element.role,
-                })
             }
-            Action::SetValue => match data {
-                Some(ActionData::NumericValue(v)) => {
-                    let proxy =
-                        self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Value")?;
-                    proxy
-                        .set_property("CurrentValue", v)
-                        .map_err(|e| Error::Platform {
-                            code: -1,
-                            message: format!("SetValue failed: {}", e),
-                        })
-                }
-                Some(ActionData::Value(text)) => {
-                    let proxy = self
-                        .make_proxy(
-                            &target.bus_name,
-                            &target.path,
-                            "org.a11y.atspi.EditableText",
-                        )
-                        .map_err(|_| Error::TextValueNotSupported)?;
-                    // Try SetTextContents first (WebKit2GTK exposes this but not InsertText).
-                    if proxy.call_method("SetTextContents", &(&*text)).is_ok() {
-                        return Ok(());
-                    }
-                    // Fall back to delete-then-insert for other AT-SPI2 implementations.
-                    let _ = proxy.call_method("DeleteText", &(0i32, i32::MAX));
-                    proxy
-                        .call_method("InsertText", &(0i32, &*text, text.len() as i32))
-                        .map_err(|_| Error::TextValueNotSupported)?;
-                    Ok(())
-                }
-                _ => Err(Error::Platform {
+        }
+        Ok(())
+    }
+
+    fn toggle(&self, element: &ElementData) -> Result<()> {
+        let target = self.get_cached(element.handle)?;
+        let index = self
+            .get_action_index(element.handle, "toggle")
+            .map_err(|_| Error::ActionNotSupported {
+                action: "toggle".to_string(),
+                role: element.role,
+            })?;
+        self.do_atspi_action_by_index(&target, index)
+    }
+
+    fn select(&self, element: &ElementData) -> Result<()> {
+        let target = self.get_cached(element.handle)?;
+        let index = self
+            .get_action_index(element.handle, "select")
+            .map_err(|_| Error::ActionNotSupported {
+                action: "select".to_string(),
+                role: element.role,
+            })?;
+        self.do_atspi_action_by_index(&target, index)
+    }
+
+    fn expand(&self, element: &ElementData) -> Result<()> {
+        let target = self.get_cached(element.handle)?;
+        let index = self
+            .get_action_index(element.handle, "expand")
+            .map_err(|_| Error::ActionNotSupported {
+                action: "expand".to_string(),
+                role: element.role,
+            })?;
+        self.do_atspi_action_by_index(&target, index)
+    }
+
+    fn collapse(&self, element: &ElementData) -> Result<()> {
+        let target = self.get_cached(element.handle)?;
+        let index = self
+            .get_action_index(element.handle, "collapse")
+            .map_err(|_| Error::ActionNotSupported {
+                action: "collapse".to_string(),
+                role: element.role,
+            })?;
+        self.do_atspi_action_by_index(&target, index)
+    }
+
+    fn show_menu(&self, element: &ElementData) -> Result<()> {
+        let target = self.get_cached(element.handle)?;
+        let index = self
+            .get_action_index(element.handle, "show_menu")
+            .map_err(|_| Error::ActionNotSupported {
+                action: "show_menu".to_string(),
+                role: element.role,
+            })?;
+        self.do_atspi_action_by_index(&target, index)
+    }
+
+    fn increment(&self, element: &ElementData) -> Result<()> {
+        let target = self.get_cached(element.handle)?;
+        // Try stored AT-SPI2 action index first, fall back to Value interface
+        if let Ok(index) = self.get_action_index(element.handle, "increment") {
+            return self.do_atspi_action_by_index(&target, index);
+        }
+        let proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Value")?;
+        let current: f64 = proxy
+            .get_property("CurrentValue")
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("Value.CurrentValue failed: {}", e),
+            })?;
+        let step: f64 = proxy.get_property("MinimumIncrement").unwrap_or(1.0);
+        let step = if step <= 0.0 { 1.0 } else { step };
+        proxy
+            .set_property("CurrentValue", current + step)
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("Value.SetCurrentValue failed: {}", e),
+            })
+    }
+
+    fn decrement(&self, element: &ElementData) -> Result<()> {
+        let target = self.get_cached(element.handle)?;
+        if let Ok(index) = self.get_action_index(element.handle, "decrement") {
+            return self.do_atspi_action_by_index(&target, index);
+        }
+        let proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Value")?;
+        let current: f64 = proxy
+            .get_property("CurrentValue")
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("Value.CurrentValue failed: {}", e),
+            })?;
+        let step: f64 = proxy.get_property("MinimumIncrement").unwrap_or(1.0);
+        let step = if step <= 0.0 { 1.0 } else { step };
+        proxy
+            .set_property("CurrentValue", current - step)
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("Value.SetCurrentValue failed: {}", e),
+            })
+    }
+
+    fn scroll_into_view(&self, element: &ElementData) -> Result<()> {
+        let target = self.get_cached(element.handle)?;
+        let proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")?;
+        proxy
+            .call_method("ScrollTo", &(0u32,))
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("ScrollTo failed: {}", e),
+            })?;
+        Ok(())
+    }
+
+    fn set_value(&self, element: &ElementData, value: &str) -> Result<()> {
+        let target = self.get_cached(element.handle)?;
+        let proxy = self
+            .make_proxy(
+                &target.bus_name,
+                &target.path,
+                "org.a11y.atspi.EditableText",
+            )
+            .map_err(|_| Error::TextValueNotSupported)?;
+        // Try SetTextContents first (WebKit2GTK exposes this but not InsertText).
+        if proxy.call_method("SetTextContents", &(value,)).is_ok() {
+            return Ok(());
+        }
+        // Fall back to delete-then-insert for other AT-SPI2 implementations.
+        let _ = proxy.call_method("DeleteText", &(0i32, i32::MAX));
+        proxy
+            .call_method("InsertText", &(0i32, value, value.len() as i32))
+            .map_err(|_| Error::TextValueNotSupported)?;
+        Ok(())
+    }
+
+    fn set_numeric_value(&self, element: &ElementData, value: f64) -> Result<()> {
+        let target = self.get_cached(element.handle)?;
+        let proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Value")?;
+        proxy
+            .set_property("CurrentValue", value)
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("SetValue failed: {}", e),
+            })
+    }
+
+    fn type_text(&self, element: &ElementData, text: &str) -> Result<()> {
+        let target = self.get_cached(element.handle)?;
+        // Insert text via EditableText interface (accessibility API, not input simulation).
+        // Get cursor position from Text interface, then insert at that position.
+        let text_proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Text");
+        let insert_pos = text_proxy
+            .as_ref()
+            .ok()
+            .and_then(|p| p.get_property::<i32>("CaretOffset").ok())
+            .unwrap_or(-1); // -1 = append at end
+
+        let proxy = self
+            .make_proxy(
+                &target.bus_name,
+                &target.path,
+                "org.a11y.atspi.EditableText",
+            )
+            .map_err(|_| Error::TextValueNotSupported)?;
+        let pos = if insert_pos >= 0 {
+            insert_pos
+        } else {
+            i32::MAX
+        };
+        proxy
+            .call_method("InsertText", &(pos, text, text.len() as i32))
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("EditableText.InsertText failed: {}", e),
+            })?;
+        Ok(())
+    }
+
+    fn set_text_selection(&self, element: &ElementData, start: u32, end: u32) -> Result<()> {
+        let target = self.get_cached(element.handle)?;
+        let proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Text")?;
+        // Try SetSelection first, fall back to AddSelection
+        if proxy
+            .call_method("SetSelection", &(0i32, start as i32, end as i32))
+            .is_err()
+        {
+            proxy
+                .call_method("AddSelection", &(start as i32, end as i32))
+                .map_err(|e| Error::Platform {
                     code: -1,
-                    message: "SetValue requires ActionData".to_string(),
-                }),
-            },
-            Action::ScrollIntoView => {
+                    message: format!("Text.AddSelection failed: {}", e),
+                })?;
+        }
+        Ok(())
+    }
+
+    fn scroll_down(&self, element: &ElementData, amount: f64) -> Result<()> {
+        let target = self.get_cached(element.handle)?;
+        let count = (amount.abs() as u32).max(1);
+        for _ in 0..count {
+            if self
+                .do_atspi_action_by_name(&target, "scroll down")
+                .is_err()
+            {
+                // Fall back to Component.ScrollTo (single call, not repeatable)
                 let proxy =
                     self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")?;
+                // BOTTOM_EDGE = 3
                 proxy
-                    .call_method("ScrollTo", &(0u32,))
+                    .call_method("ScrollTo", &(3u32,))
                     .map_err(|e| Error::Platform {
                         code: -1,
                         message: format!("ScrollTo failed: {}", e),
                     })?;
-                Ok(())
+                return Ok(());
             }
-            Action::Increment => {
-                // Try stored AT-SPI2 action index first, fall back to Value interface
-                if let Ok(index) = self.get_action_index(element.handle, action) {
-                    return self.do_atspi_action_by_index(&target, index);
-                }
+        }
+        Ok(())
+    }
+
+    fn scroll_up(&self, element: &ElementData, amount: f64) -> Result<()> {
+        let target = self.get_cached(element.handle)?;
+        let count = (amount.abs() as u32).max(1);
+        for _ in 0..count {
+            if self.do_atspi_action_by_name(&target, "scroll up").is_err() {
+                // Fall back to Component.ScrollTo (single call, not repeatable)
                 let proxy =
-                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Value")?;
-                let current: f64 =
-                    proxy
-                        .get_property("CurrentValue")
-                        .map_err(|e| Error::Platform {
-                            code: -1,
-                            message: format!("Value.CurrentValue failed: {}", e),
-                        })?;
-                let step: f64 = proxy.get_property("MinimumIncrement").unwrap_or(1.0);
-                let step = if step <= 0.0 { 1.0 } else { step };
+                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")?;
+                // TOP_EDGE = 2
                 proxy
-                    .set_property("CurrentValue", current + step)
+                    .call_method("ScrollTo", &(2u32,))
                     .map_err(|e| Error::Platform {
                         code: -1,
-                        message: format!("Value.SetCurrentValue failed: {}", e),
-                    })
-            }
-            Action::Decrement => {
-                if let Ok(index) = self.get_action_index(element.handle, action) {
-                    return self.do_atspi_action_by_index(&target, index);
-                }
-                let proxy =
-                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Value")?;
-                let current: f64 =
-                    proxy
-                        .get_property("CurrentValue")
-                        .map_err(|e| Error::Platform {
-                            code: -1,
-                            message: format!("Value.CurrentValue failed: {}", e),
-                        })?;
-                let step: f64 = proxy.get_property("MinimumIncrement").unwrap_or(1.0);
-                let step = if step <= 0.0 { 1.0 } else { step };
-                proxy
-                    .set_property("CurrentValue", current - step)
-                    .map_err(|e| Error::Platform {
-                        code: -1,
-                        message: format!("Value.SetCurrentValue failed: {}", e),
-                    })
-            }
-            Action::Blur => {
-                // Grab focus on parent element to blur the current one
-                if let Ok(Some(parent_ref)) = self.get_atspi_parent(&target) {
-                    if parent_ref.path != "/org/a11y/atspi/null" {
-                        if let Ok(p) = self.make_proxy(
-                            &parent_ref.bus_name,
-                            &parent_ref.path,
-                            "org.a11y.atspi.Component",
-                        ) {
-                            let _ = p.call_method("GrabFocus", &());
-                            return Ok(());
-                        }
-                    }
-                }
-                Ok(())
-            }
-
-            Action::ScrollDown | Action::ScrollRight => {
-                let amount = match data {
-                    Some(ActionData::ScrollAmount(amount)) => amount,
-                    _ => {
-                        return Err(Error::Platform {
-                            code: -1,
-                            message: "Scroll requires ActionData::ScrollAmount".to_string(),
-                        })
-                    }
-                };
-                let is_vertical = matches!(action, Action::ScrollDown);
-                let (pos_name, neg_name) = if is_vertical {
-                    ("scroll down", "scroll up")
-                } else {
-                    ("scroll right", "scroll left")
-                };
-                let action_name = if amount >= 0.0 { pos_name } else { neg_name };
-                // Repeat scroll action for each logical unit (AT-SPI has no scroll-by-amount)
-                let count = (amount.abs() as u32).max(1);
-                for _ in 0..count {
-                    if self.do_atspi_action_by_name(&target, action_name).is_err() {
-                        // Fall back to Component.ScrollTo (single call, not repeatable)
-                        let proxy = self.make_proxy(
-                            &target.bus_name,
-                            &target.path,
-                            "org.a11y.atspi.Component",
-                        )?;
-                        let scroll_type: u32 = if is_vertical {
-                            if amount >= 0.0 {
-                                3
-                            } else {
-                                2
-                            } // BOTTOM_EDGE / TOP_EDGE
-                        } else if amount >= 0.0 {
-                            5
-                        } else {
-                            4
-                        }; // RIGHT_EDGE / LEFT_EDGE
-                        proxy
-                            .call_method("ScrollTo", &(scroll_type,))
-                            .map_err(|e| Error::Platform {
-                                code: -1,
-                                message: format!("ScrollTo failed: {}", e),
-                            })?;
-                        return Ok(());
-                    }
-                }
-                Ok(())
-            }
-
-            Action::SetTextSelection => {
-                let (start, end) = match data {
-                    Some(ActionData::TextSelection { start, end }) => (start, end),
-                    _ => {
-                        return Err(Error::Platform {
-                            code: -1,
-                            message: "SetTextSelection requires ActionData::TextSelection"
-                                .to_string(),
-                        })
-                    }
-                };
-                let proxy =
-                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Text")?;
-                // Try SetSelection first, fall back to AddSelection
-                if proxy
-                    .call_method("SetSelection", &(0i32, start as i32, end as i32))
-                    .is_err()
-                {
-                    proxy
-                        .call_method("AddSelection", &(start as i32, end as i32))
-                        .map_err(|e| Error::Platform {
-                            code: -1,
-                            message: format!("Text.AddSelection failed: {}", e),
-                        })?;
-                }
-                Ok(())
-            }
-
-            Action::TypeText => {
-                let text = match data {
-                    Some(ActionData::Value(text)) => text,
-                    _ => {
-                        return Err(Error::Platform {
-                            code: -1,
-                            message: "TypeText requires ActionData::Value".to_string(),
-                        })
-                    }
-                };
-                // Insert text via EditableText interface (accessibility API, not input simulation).
-                // Get cursor position from Text interface, then insert at that position.
-                let text_proxy =
-                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Text");
-                let insert_pos = text_proxy
-                    .as_ref()
-                    .ok()
-                    .and_then(|p| p.get_property::<i32>("CaretOffset").ok())
-                    .unwrap_or(-1); // -1 = append at end
-
-                let proxy = self
-                    .make_proxy(
-                        &target.bus_name,
-                        &target.path,
-                        "org.a11y.atspi.EditableText",
-                    )
-                    .map_err(|_| Error::TextValueNotSupported)?;
-                let pos = if insert_pos >= 0 {
-                    insert_pos
-                } else {
-                    i32::MAX
-                };
-                proxy
-                    .call_method("InsertText", &(pos, &*text, text.len() as i32))
-                    .map_err(|e| Error::Platform {
-                        code: -1,
-                        message: format!("EditableText.InsertText failed: {}", e),
+                        message: format!("ScrollTo failed: {}", e),
                     })?;
-                Ok(())
+                return Ok(());
             }
+        }
+        Ok(())
+    }
+
+    fn scroll_right(&self, element: &ElementData, amount: f64) -> Result<()> {
+        let target = self.get_cached(element.handle)?;
+        let count = (amount.abs() as u32).max(1);
+        for _ in 0..count {
+            if self
+                .do_atspi_action_by_name(&target, "scroll right")
+                .is_err()
+            {
+                // Fall back to Component.ScrollTo (single call, not repeatable)
+                let proxy =
+                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")?;
+                // RIGHT_EDGE = 5
+                proxy
+                    .call_method("ScrollTo", &(5u32,))
+                    .map_err(|e| Error::Platform {
+                        code: -1,
+                        message: format!("ScrollTo failed: {}", e),
+                    })?;
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    fn scroll_left(&self, element: &ElementData, amount: f64) -> Result<()> {
+        let target = self.get_cached(element.handle)?;
+        let count = (amount.abs() as u32).max(1);
+        for _ in 0..count {
+            if self
+                .do_atspi_action_by_name(&target, "scroll left")
+                .is_err()
+            {
+                // Fall back to Component.ScrollTo (single call, not repeatable)
+                let proxy =
+                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")?;
+                // LEFT_EDGE = 4
+                proxy
+                    .call_method("ScrollTo", &(4u32,))
+                    .map_err(|e| Error::Platform {
+                        code: -1,
+                        message: format!("ScrollTo failed: {}", e),
+                    })?;
+                return Ok(());
+            }
+        }
+        Ok(())
+    }
+
+    fn perform_action(&self, element: &ElementData, action: &str) -> Result<()> {
+        match action {
+            "press" => self.press(element),
+            "focus" => self.focus(element),
+            "blur" => self.blur(element),
+            "toggle" => self.toggle(element),
+            "select" => self.select(element),
+            "expand" => self.expand(element),
+            "collapse" => self.collapse(element),
+            "show_menu" => self.show_menu(element),
+            "increment" => self.increment(element),
+            "decrement" => self.decrement(element),
+            "scroll_into_view" => self.scroll_into_view(element),
+            _ => Err(Error::ActionNotSupported {
+                action: action.to_string(),
+                role: element.role,
+            }),
         }
     }
 
@@ -1745,89 +1831,33 @@ fn map_atspi_role_number(role: u32) -> Role {
     }
 }
 
-/// A single entry in the AT-SPI2 ↔ xa11y action mapping table.
+/// Map an AT-SPI2 action name to its canonical `snake_case` xa11y action name.
 ///
-/// Each entry pairs one xa11y [`Action`] with its canonical AT-SPI2 name and
-/// any toolkit-specific aliases. Used only for discovery (string→Action
-/// translation). Perform uses the stored action index directly.
-struct AtspiActionMapping {
-    action: Action,
-    /// The canonical AT-SPI2 name (round-trips through [`map_atspi_action`]).
-    canonical: &'static str,
-    /// Additional toolkit-specific names that map to the same xa11y Action
-    /// (e.g. "activate", "press", "invoke" all map to `Action::Press`).
-    aliases: &'static [&'static str],
-}
-
-/// Single source of truth for AT-SPI2 → xa11y action mappings (discovery only).
+/// Toolkit-specific aliases are normalised to the single canonical name:
+///   "click" / "activate" / "press" / "invoke" → "press"
+///   "toggle" / "check" / "uncheck"            → "toggle"
+///   "expand" / "open"                          → "expand"
+///   "collapse" / "close"                       → "collapse"
+///   "menu" / "showmenu" / "popup" / "show menu" → "show_menu"
+///   "select"                                    → "select"
+///   "increment"                                 → "increment"
+///   "decrement"                                 → "decrement"
 ///
-/// Actions that don't use the AT-SPI2 Action interface (e.g. Focus via
-/// Component.GrabFocus, SetValue via the Value interface) are not listed here.
-const ATSPI_ACTION_MAPPINGS: &[AtspiActionMapping] = &[
-    AtspiActionMapping {
-        action: Action::Press,
-        canonical: "click",
-        aliases: &["activate", "press", "invoke"],
-    },
-    AtspiActionMapping {
-        action: Action::Toggle,
-        canonical: "toggle",
-        aliases: &["check", "uncheck"],
-    },
-    AtspiActionMapping {
-        action: Action::Expand,
-        canonical: "expand",
-        aliases: &["open"],
-    },
-    AtspiActionMapping {
-        action: Action::Collapse,
-        canonical: "collapse",
-        aliases: &["close"],
-    },
-    AtspiActionMapping {
-        action: Action::Select,
-        canonical: "select",
-        aliases: &[],
-    },
-    AtspiActionMapping {
-        action: Action::ShowMenu,
-        canonical: "menu",
-        aliases: &["showmenu", "popup", "show menu"],
-    },
-    AtspiActionMapping {
-        action: Action::Increment,
-        canonical: "increment",
-        aliases: &[],
-    },
-    AtspiActionMapping {
-        action: Action::Decrement,
-        canonical: "decrement",
-        aliases: &[],
-    },
-];
-
-/// Map AT-SPI2 action name to xa11y Action.
-fn map_atspi_action(action_name: &str) -> Option<Action> {
+/// Returns `None` for unrecognised names.
+fn map_atspi_action_name(action_name: &str) -> Option<String> {
     let lower = action_name.to_lowercase();
-    ATSPI_ACTION_MAPPINGS.iter().find_map(|m| {
-        if m.canonical == lower || m.aliases.contains(&lower.as_str()) {
-            Some(m.action)
-        } else {
-            None
-        }
-    })
-}
-
-/// Map xa11y Action to its canonical AT-SPI2 action name.
-///
-/// Returns the canonical name from the mapping table — the single name that
-/// round-trips through [`map_atspi_action`].
-#[cfg(test)]
-fn xa11y_action_to_atspi(action: Action) -> Option<&'static str> {
-    ATSPI_ACTION_MAPPINGS
-        .iter()
-        .find(|m| m.action == action)
-        .map(|m| m.canonical)
+    let canonical = match lower.as_str() {
+        "click" | "activate" | "press" | "invoke" => "press",
+        "toggle" | "check" | "uncheck" => "toggle",
+        "expand" | "open" => "expand",
+        "collapse" | "close" => "collapse",
+        "select" => "select",
+        "menu" | "showmenu" | "show_menu" | "popup" | "show menu" => "show_menu",
+        "increment" => "increment",
+        "decrement" => "decrement",
+        _ => return None,
+    };
+    Some(canonical.to_string())
 }
 
 #[cfg(test)]
@@ -1862,69 +1892,50 @@ mod tests {
     }
 
     #[test]
-    fn test_action_mapping() {
-        assert_eq!(map_atspi_action("click"), Some(Action::Press));
-        assert_eq!(map_atspi_action("activate"), Some(Action::Press));
-        assert_eq!(map_atspi_action("toggle"), Some(Action::Toggle));
-        assert_eq!(map_atspi_action("expand"), Some(Action::Expand));
-        assert_eq!(map_atspi_action("collapse"), Some(Action::Collapse));
-        assert_eq!(map_atspi_action("select"), Some(Action::Select));
-        assert_eq!(map_atspi_action("increment"), Some(Action::Increment));
-        assert_eq!(map_atspi_action("foobar"), None);
+    fn test_action_name_mapping() {
+        assert_eq!(map_atspi_action_name("click"), Some("press".to_string()));
+        assert_eq!(map_atspi_action_name("activate"), Some("press".to_string()));
+        assert_eq!(map_atspi_action_name("press"), Some("press".to_string()));
+        assert_eq!(map_atspi_action_name("invoke"), Some("press".to_string()));
+        assert_eq!(map_atspi_action_name("toggle"), Some("toggle".to_string()));
+        assert_eq!(map_atspi_action_name("check"), Some("toggle".to_string()));
+        assert_eq!(map_atspi_action_name("uncheck"), Some("toggle".to_string()));
+        assert_eq!(map_atspi_action_name("expand"), Some("expand".to_string()));
+        assert_eq!(map_atspi_action_name("open"), Some("expand".to_string()));
+        assert_eq!(
+            map_atspi_action_name("collapse"),
+            Some("collapse".to_string())
+        );
+        assert_eq!(map_atspi_action_name("close"), Some("collapse".to_string()));
+        assert_eq!(map_atspi_action_name("select"), Some("select".to_string()));
+        assert_eq!(map_atspi_action_name("menu"), Some("show_menu".to_string()));
+        assert_eq!(
+            map_atspi_action_name("showmenu"),
+            Some("show_menu".to_string())
+        );
+        assert_eq!(
+            map_atspi_action_name("popup"),
+            Some("show_menu".to_string())
+        );
+        assert_eq!(
+            map_atspi_action_name("show menu"),
+            Some("show_menu".to_string())
+        );
+        assert_eq!(
+            map_atspi_action_name("increment"),
+            Some("increment".to_string())
+        );
+        assert_eq!(
+            map_atspi_action_name("decrement"),
+            Some("decrement".to_string())
+        );
+        assert_eq!(map_atspi_action_name("foobar"), None);
     }
 
+    /// All known AT-SPI2 aliases map to one of the well-known action names,
+    /// and re-mapping the canonical name produces the same canonical name.
     #[test]
-    fn test_action_reverse_mapping() {
-        assert_eq!(xa11y_action_to_atspi(Action::Press), Some("click"));
-        assert_eq!(xa11y_action_to_atspi(Action::Toggle), Some("toggle"));
-        assert_eq!(xa11y_action_to_atspi(Action::Expand), Some("expand"));
-        assert_eq!(xa11y_action_to_atspi(Action::Collapse), Some("collapse"));
-        assert_eq!(xa11y_action_to_atspi(Action::Select), Some("select"));
-        assert_eq!(xa11y_action_to_atspi(Action::ShowMenu), Some("menu"));
-        assert_eq!(xa11y_action_to_atspi(Action::Increment), Some("increment"));
-        assert_eq!(xa11y_action_to_atspi(Action::Decrement), Some("decrement"));
-        assert_eq!(xa11y_action_to_atspi(Action::Focus), None);
-        assert_eq!(xa11y_action_to_atspi(Action::SetValue), None);
-        assert_eq!(xa11y_action_to_atspi(Action::ScrollIntoView), None);
-        assert_eq!(xa11y_action_to_atspi(Action::Blur), None);
-    }
-
-    /// Every xa11y Action with a canonical AT-SPI2 name must round-trip:
-    /// xa11y → atspi → xa11y produces the same Action.
-    #[test]
-    fn test_action_roundtrip_xa11y_to_atspi() {
-        let actions_with_mapping = [
-            Action::Press,
-            Action::Toggle,
-            Action::Expand,
-            Action::Collapse,
-            Action::Select,
-            Action::ShowMenu,
-            Action::Increment,
-            Action::Decrement,
-        ];
-        for action in actions_with_mapping {
-            let atspi_name = xa11y_action_to_atspi(action)
-                .unwrap_or_else(|| panic!("{:?} should have a canonical AT-SPI2 name", action));
-            let round_tripped = map_atspi_action(atspi_name).unwrap_or_else(|| {
-                panic!(
-                    "canonical name {:?} should map back to an Action",
-                    atspi_name
-                )
-            });
-            assert_eq!(
-                action, round_tripped,
-                "round-trip failed: {:?} → {:?} → {:?}",
-                action, atspi_name, round_tripped
-            );
-        }
-    }
-
-    /// Every AT-SPI2 action name that maps to an xa11y Action must produce an
-    /// Action whose canonical name maps back to the same Action (though not
-    /// necessarily the same string — e.g. "activate" → Press → "click").
-    #[test]
-    fn test_action_roundtrip_atspi_to_xa11y() {
+    fn test_action_name_aliases_roundtrip() {
         let atspi_names = [
             "click",
             "activate",
@@ -1946,81 +1957,28 @@ mod tests {
             "decrement",
         ];
         for name in atspi_names {
-            let action = map_atspi_action(name)
-                .unwrap_or_else(|| panic!("AT-SPI2 name {:?} should map to an Action", name));
-            let canonical = xa11y_action_to_atspi(action).unwrap_or_else(|| {
-                panic!(
-                    "{:?} (from {:?}) should have a canonical name",
-                    action, name
-                )
+            let canonical = map_atspi_action_name(name).unwrap_or_else(|| {
+                panic!("AT-SPI2 name {:?} should map to a canonical name", name)
             });
-            let back = map_atspi_action(canonical)
-                .unwrap_or_else(|| panic!("canonical {:?} should map back", canonical));
+            // Re-mapping the canonical name must produce itself.
+            let back = map_atspi_action_name(&canonical)
+                .unwrap_or_else(|| panic!("canonical {:?} should map back to itself", canonical));
             assert_eq!(
-                action, back,
-                "AT-SPI2 {:?} → {:?} → canonical {:?} → {:?} (expected {:?})",
-                name, action, canonical, back, action
+                canonical, back,
+                "AT-SPI2 {:?} -> {:?} -> {:?} (expected {:?})",
+                name, canonical, back, canonical
             );
         }
     }
 
-    /// No duplicate Action entries in the mapping table.
+    /// Case-insensitive mapping works.
     #[test]
-    fn test_atspi_mapping_no_duplicate_actions() {
-        for (i, a) in ATSPI_ACTION_MAPPINGS.iter().enumerate() {
-            for b in &ATSPI_ACTION_MAPPINGS[i + 1..] {
-                assert_ne!(
-                    a.action, b.action,
-                    "duplicate Action::{:?} in ATSPI_ACTION_MAPPINGS",
-                    a.action
-                );
-            }
-        }
-    }
-
-    /// No duplicate canonical names in the mapping table.
-    #[test]
-    fn test_atspi_mapping_no_duplicate_canonicals() {
-        for (i, a) in ATSPI_ACTION_MAPPINGS.iter().enumerate() {
-            for b in &ATSPI_ACTION_MAPPINGS[i + 1..] {
-                assert_ne!(
-                    a.canonical, b.canonical,
-                    "duplicate canonical {:?} in ATSPI_ACTION_MAPPINGS",
-                    a.canonical
-                );
-            }
-        }
-    }
-
-    /// Every canonical name round-trips through the table.
-    #[test]
-    fn test_atspi_mapping_canonical_roundtrips() {
-        for m in ATSPI_ACTION_MAPPINGS {
-            let mapped = map_atspi_action(m.canonical);
-            assert_eq!(
-                mapped,
-                Some(m.action),
-                "canonical {:?} should map to {:?}",
-                m.canonical,
-                m.action
-            );
-        }
-    }
-
-    /// Every alias maps to the same action as its canonical.
-    #[test]
-    fn test_atspi_mapping_aliases_consistent() {
-        for m in ATSPI_ACTION_MAPPINGS {
-            for alias in m.aliases {
-                let mapped = map_atspi_action(alias);
-                assert_eq!(
-                    mapped,
-                    Some(m.action),
-                    "alias {:?} should map to {:?}",
-                    alias,
-                    m.action
-                );
-            }
-        }
+    fn test_action_name_case_insensitive() {
+        assert_eq!(map_atspi_action_name("Click"), Some("press".to_string()));
+        assert_eq!(map_atspi_action_name("TOGGLE"), Some("toggle".to_string()));
+        assert_eq!(
+            map_atspi_action_name("Increment"),
+            Some("increment".to_string())
+        );
     }
 }
