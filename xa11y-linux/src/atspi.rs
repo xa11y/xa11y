@@ -291,8 +291,8 @@ impl LinuxProvider {
                     if let Ok(name) = reply.body().deserialize::<String>() {
                         if let Some(action) = map_atspi_action(&name) {
                             if !actions.contains(&action) {
+                                indices.insert(action.clone(), i);
                                 actions.push(action);
-                                indices.insert(action, i);
                             }
                         }
                     }
@@ -516,7 +516,6 @@ impl LinuxProvider {
             description,
             bounds,
             actions,
-            custom_actions: vec![],
             states,
             numeric_value,
             min_value,
@@ -737,14 +736,14 @@ impl LinuxProvider {
     }
 
     /// Look up the stored AT-SPI2 action index for the given element and action.
-    fn get_action_index(&self, handle: u64, action: Action) -> Result<i32> {
+    fn get_action_index(&self, handle: u64, action: &Action) -> Result<i32> {
         self.action_indices
             .lock()
             .unwrap()
             .get(&handle)
-            .and_then(|map| map.get(&action).copied())
-            .ok_or(Error::ActionNotSupported {
-                action,
+            .and_then(|map| map.get(action).copied())
+            .ok_or_else(|| Error::ActionNotSupported {
+                action: action.clone(),
                 role: Role::Unknown, // caller will provide better context
             })
     }
@@ -1234,12 +1233,12 @@ impl Provider for LinuxProvider {
             | Action::Collapse
             | Action::Select
             | Action::ShowMenu => {
-                let index = self.get_action_index(element.handle, action).map_err(|_| {
-                    Error::ActionNotSupported {
-                        action,
+                let index = self
+                    .get_action_index(element.handle, &action)
+                    .map_err(|_| Error::ActionNotSupported {
+                        action: action.clone(),
                         role: element.role,
-                    }
-                })?;
+                    })?;
                 self.do_atspi_action_by_index(&target, index)
             }
             Action::Focus => {
@@ -1251,7 +1250,7 @@ impl Provider for LinuxProvider {
                         return Ok(());
                     }
                 }
-                if let Ok(index) = self.get_action_index(element.handle, action) {
+                if let Ok(index) = self.get_action_index(element.handle, &action) {
                     return self.do_atspi_action_by_index(&target, index);
                 }
                 Err(Error::ActionNotSupported {
@@ -1307,7 +1306,7 @@ impl Provider for LinuxProvider {
             }
             Action::Increment => {
                 // Try stored AT-SPI2 action index first, fall back to Value interface
-                if let Ok(index) = self.get_action_index(element.handle, action) {
+                if let Ok(index) = self.get_action_index(element.handle, &action) {
                     return self.do_atspi_action_by_index(&target, index);
                 }
                 let proxy =
@@ -1329,7 +1328,7 @@ impl Provider for LinuxProvider {
                     })
             }
             Action::Decrement => {
-                if let Ok(index) = self.get_action_index(element.handle, action) {
+                if let Ok(index) = self.get_action_index(element.handle, &action) {
                     return self.do_atspi_action_by_index(&target, index);
                 }
                 let proxy =
@@ -1485,6 +1484,11 @@ impl Provider for LinuxProvider {
                     })?;
                 Ok(())
             }
+
+            Action::Custom(_) => Err(Error::ActionNotSupported {
+                action,
+                role: element.role,
+            }),
         }
     }
 
@@ -1812,7 +1816,7 @@ fn map_atspi_action(action_name: &str) -> Option<Action> {
     let lower = action_name.to_lowercase();
     ATSPI_ACTION_MAPPINGS.iter().find_map(|m| {
         if m.canonical == lower || m.aliases.contains(&lower.as_str()) {
-            Some(m.action)
+            Some(m.action.clone())
         } else {
             None
         }
@@ -1824,10 +1828,10 @@ fn map_atspi_action(action_name: &str) -> Option<Action> {
 /// Returns the canonical name from the mapping table — the single name that
 /// round-trips through [`map_atspi_action`].
 #[cfg(test)]
-fn xa11y_action_to_atspi(action: Action) -> Option<&'static str> {
+fn xa11y_action_to_atspi(action: &Action) -> Option<&'static str> {
     ATSPI_ACTION_MAPPINGS
         .iter()
-        .find(|m| m.action == action)
+        .find(|m| m.action == *action)
         .map(|m| m.canonical)
 }
 
@@ -1876,18 +1880,18 @@ mod tests {
 
     #[test]
     fn test_action_reverse_mapping() {
-        assert_eq!(xa11y_action_to_atspi(Action::Press), Some("click"));
-        assert_eq!(xa11y_action_to_atspi(Action::Toggle), Some("toggle"));
-        assert_eq!(xa11y_action_to_atspi(Action::Expand), Some("expand"));
-        assert_eq!(xa11y_action_to_atspi(Action::Collapse), Some("collapse"));
-        assert_eq!(xa11y_action_to_atspi(Action::Select), Some("select"));
-        assert_eq!(xa11y_action_to_atspi(Action::ShowMenu), Some("menu"));
-        assert_eq!(xa11y_action_to_atspi(Action::Increment), Some("increment"));
-        assert_eq!(xa11y_action_to_atspi(Action::Decrement), Some("decrement"));
-        assert_eq!(xa11y_action_to_atspi(Action::Focus), None);
-        assert_eq!(xa11y_action_to_atspi(Action::SetValue), None);
-        assert_eq!(xa11y_action_to_atspi(Action::ScrollIntoView), None);
-        assert_eq!(xa11y_action_to_atspi(Action::Blur), None);
+        assert_eq!(xa11y_action_to_atspi(&Action::Press), Some("click"));
+        assert_eq!(xa11y_action_to_atspi(&Action::Toggle), Some("toggle"));
+        assert_eq!(xa11y_action_to_atspi(&Action::Expand), Some("expand"));
+        assert_eq!(xa11y_action_to_atspi(&Action::Collapse), Some("collapse"));
+        assert_eq!(xa11y_action_to_atspi(&Action::Select), Some("select"));
+        assert_eq!(xa11y_action_to_atspi(&Action::ShowMenu), Some("menu"));
+        assert_eq!(xa11y_action_to_atspi(&Action::Increment), Some("increment"));
+        assert_eq!(xa11y_action_to_atspi(&Action::Decrement), Some("decrement"));
+        assert_eq!(xa11y_action_to_atspi(&Action::Focus), None);
+        assert_eq!(xa11y_action_to_atspi(&Action::SetValue), None);
+        assert_eq!(xa11y_action_to_atspi(&Action::ScrollIntoView), None);
+        assert_eq!(xa11y_action_to_atspi(&Action::Blur), None);
     }
 
     /// Every xa11y Action with a canonical AT-SPI2 name must round-trip:
@@ -1904,7 +1908,7 @@ mod tests {
             Action::Increment,
             Action::Decrement,
         ];
-        for action in actions_with_mapping {
+        for action in &actions_with_mapping {
             let atspi_name = xa11y_action_to_atspi(action)
                 .unwrap_or_else(|| panic!("{:?} should have a canonical AT-SPI2 name", action));
             let round_tripped = map_atspi_action(atspi_name).unwrap_or_else(|| {
@@ -1914,7 +1918,7 @@ mod tests {
                 )
             });
             assert_eq!(
-                action, round_tripped,
+                *action, round_tripped,
                 "round-trip failed: {:?} → {:?} → {:?}",
                 action, atspi_name, round_tripped
             );
@@ -1949,7 +1953,7 @@ mod tests {
         for name in atspi_names {
             let action = map_atspi_action(name)
                 .unwrap_or_else(|| panic!("AT-SPI2 name {:?} should map to an Action", name));
-            let canonical = xa11y_action_to_atspi(action).unwrap_or_else(|| {
+            let canonical = xa11y_action_to_atspi(&action).unwrap_or_else(|| {
                 panic!(
                     "{:?} (from {:?}) should have a canonical name",
                     action, name
@@ -1959,7 +1963,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("canonical {:?} should map back", canonical));
             assert_eq!(
                 action, back,
-                "AT-SPI2 {:?} → {:?} → canonical {:?} → {:?} (expected {:?})",
+                "AT-SPI2 {:?} → {:?} → canonical {:?} �� {:?} (expected {:?})",
                 name, action, canonical, back, action
             );
         }
@@ -2000,7 +2004,7 @@ mod tests {
             let mapped = map_atspi_action(m.canonical);
             assert_eq!(
                 mapped,
-                Some(m.action),
+                Some(m.action.clone()),
                 "canonical {:?} should map to {:?}",
                 m.canonical,
                 m.action
@@ -2016,7 +2020,7 @@ mod tests {
                 let mapped = map_atspi_action(alias);
                 assert_eq!(
                     mapped,
-                    Some(m.action),
+                    Some(m.action.clone()),
                     "alias {:?} should map to {:?}",
                     alias,
                     m.action

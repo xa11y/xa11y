@@ -52,6 +52,11 @@ pub trait Provider: Send + Sync {
 
     /// Perform an action on an element.
     ///
+    /// Handles both well-known actions (`Action::Press`, etc.) and custom
+    /// platform-specific actions (`Action::Custom("name")`). For custom actions,
+    /// the provider converts the `snake_case` name to the platform's convention
+    /// (e.g. `"custom_thing"` → `"AXCustomThing"` on macOS).
+    ///
     /// `Ok(())` means the platform API accepted the request without error.
     /// It does **not** guarantee the action had an observable effect — use
     /// `Locator::wait_*` methods to verify state changes.
@@ -61,21 +66,6 @@ pub trait Provider: Send + Sync {
         action: Action,
         data: Option<ActionData>,
     ) -> Result<()>;
-
-    /// Perform a custom (platform-specific) action by `snake_case` name.
-    ///
-    /// The provider converts the name to the platform's naming convention
-    /// (e.g. `"custom_thing"` → `"AXCustomThing"` on macOS) and looks for it
-    /// in the element's action list. Returns [`Error::ActionNotSupported`] if
-    /// the element doesn't support the action.
-    ///
-    /// The default implementation always returns `ActionNotSupported`.
-    fn perform_custom_action(&self, element: &ElementData, name: &str) -> Result<()> {
-        Err(crate::Error::CustomActionNotSupported {
-            name: name.to_string(),
-            role: element.role,
-        })
-    }
 
     /// Subscribe to all accessibility events for an application.
     ///

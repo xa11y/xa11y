@@ -280,7 +280,6 @@ impl WindowsProvider {
             description,
             bounds,
             actions,
-            custom_actions: vec![],
             states,
             stable_id: automation_id,
             numeric_value,

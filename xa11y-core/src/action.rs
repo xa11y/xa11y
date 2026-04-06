@@ -2,15 +2,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
-/// A normalized enum of interactions that can be performed on accessibility elements.
+/// Interactions that can be performed on accessibility elements.
 ///
-/// These are the well-known actions with dedicated variants. Platform-specific
-/// actions that don't map to a known variant are available via
-/// [`Element::perform_custom_action`](crate::Element::perform_custom_action)
-/// and listed in [`ElementData::custom_actions`](crate::ElementData::custom_actions)
-/// as `snake_case` strings.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[repr(u8)]
+/// Well-known actions have dedicated variants. Platform-specific actions not
+/// covered by a dedicated variant use [`Custom`](Action::Custom) with a
+/// `snake_case` name (e.g. macOS `AXCustomThing` → `Custom("custom_thing")`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Action {
     /// Click / tap / invoke
     Press,
@@ -66,6 +63,11 @@ pub enum Action {
     ///
     /// Accepts `ActionData::Value(String)`.
     TypeText,
+    /// A platform-specific action not covered by the known variants.
+    ///
+    /// The name is `snake_case` — providers convert to/from platform naming
+    /// conventions (e.g. macOS `AXCustomThing` ↔ `"custom_thing"`).
+    Custom(String),
 }
 
 impl std::fmt::Display for Action {
@@ -87,6 +89,7 @@ impl std::fmt::Display for Action {
             Action::Blur => write!(f, "Blur"),
             Action::SetTextSelection => write!(f, "SetTextSelection"),
             Action::TypeText => write!(f, "TypeText"),
+            Action::Custom(name) => write!(f, "Custom({name})"),
         }
     }
 }
@@ -113,7 +116,7 @@ impl ActionData {
     ///
     /// Does NOT query the element (e.g., does not check if indices are within
     /// text length or if numeric value is within min/max range).
-    pub fn validate(&self, action: Action) -> Result<()> {
+    pub fn validate(&self, action: &Action) -> Result<()> {
         match self {
             ActionData::TextSelection { start, end } => {
                 if start > end {

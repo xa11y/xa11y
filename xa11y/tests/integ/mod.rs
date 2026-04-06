@@ -65,8 +65,9 @@ pub fn act(element: &Element, action: Action) -> App {
 
 /// Perform an action with data on an element, wait, then re-read the app root.
 pub fn act_with(element: &Element, action: Action, data: Option<ActionData>) -> App {
+    let action_dbg = format!("{:?}", action);
     try_act_with(element, action, data)
-        .unwrap_or_else(|e| panic!("Action {:?} failed: {}", action, e));
+        .unwrap_or_else(|e| panic!("Action {} failed: {}", action_dbg, e));
     std::thread::sleep(std::time::Duration::from_millis(100));
     app_root()
 }

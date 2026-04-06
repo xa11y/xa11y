@@ -24,10 +24,6 @@ pub enum Error {
     #[error("Action {action} not supported on {role}")]
     ActionNotSupported { action: Action, role: Role },
 
-    /// A custom (platform-specific) action is not supported by this element.
-    #[error("Custom action \"{name}\" not supported on {role}")]
-    CustomActionNotSupported { name: String, role: Role },
-
     /// Text value input is not supported for this element on this platform.
     #[error("Text value input not supported for this element")]
     TextValueNotSupported,

@@ -34,9 +34,6 @@ fn to_py_err(e: xa11y::Error) -> PyErr {
         xa11y::Error::ActionNotSupported { action, role } => {
             ActionNotSupportedError::new_err(format!("{action} not supported on {role}"))
         }
-        xa11y::Error::CustomActionNotSupported { name, role } => ActionNotSupportedError::new_err(
-            format!("Custom action \"{name}\" not supported on {role}"),
-        ),
         xa11y::Error::TextValueNotSupported => {
             ActionNotSupportedError::new_err("Text value not supported for this element")
         }
@@ -57,24 +54,25 @@ fn to_py_err(e: xa11y::Error) -> PyErr {
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-fn action_to_str(a: &xa11y::Action) -> &'static str {
+fn action_to_string(a: &xa11y::Action) -> String {
     match a {
-        xa11y::Action::Press => "press",
-        xa11y::Action::Focus => "focus",
-        xa11y::Action::SetValue => "set_value",
-        xa11y::Action::Toggle => "toggle",
-        xa11y::Action::Expand => "expand",
-        xa11y::Action::Collapse => "collapse",
-        xa11y::Action::Select => "select",
-        xa11y::Action::ShowMenu => "show_menu",
-        xa11y::Action::ScrollIntoView => "scroll_into_view",
-        xa11y::Action::ScrollDown => "scroll_down",
-        xa11y::Action::ScrollRight => "scroll_right",
-        xa11y::Action::Increment => "increment",
-        xa11y::Action::Decrement => "decrement",
-        xa11y::Action::Blur => "blur",
-        xa11y::Action::SetTextSelection => "set_text_selection",
-        xa11y::Action::TypeText => "type_text",
+        xa11y::Action::Press => "press".into(),
+        xa11y::Action::Focus => "focus".into(),
+        xa11y::Action::SetValue => "set_value".into(),
+        xa11y::Action::Toggle => "toggle".into(),
+        xa11y::Action::Expand => "expand".into(),
+        xa11y::Action::Collapse => "collapse".into(),
+        xa11y::Action::Select => "select".into(),
+        xa11y::Action::ShowMenu => "show_menu".into(),
+        xa11y::Action::ScrollIntoView => "scroll_into_view".into(),
+        xa11y::Action::ScrollDown => "scroll_down".into(),
+        xa11y::Action::ScrollRight => "scroll_right".into(),
+        xa11y::Action::Increment => "increment".into(),
+        xa11y::Action::Decrement => "decrement".into(),
+        xa11y::Action::Blur => "blur".into(),
+        xa11y::Action::SetTextSelection => "set_text_selection".into(),
+        xa11y::Action::TypeText => "type_text".into(),
+        xa11y::Action::Custom(name) => name.clone(),
     }
 }
 
@@ -89,12 +87,7 @@ fn make_py_element(
         xa11y::Toggled::On => "on".to_string(),
         xa11y::Toggled::Mixed => "mixed".to_string(),
     });
-    let mut actions: Vec<String> = data
-        .actions
-        .iter()
-        .map(|a| action_to_str(a).to_string())
-        .collect();
-    actions.extend(data.custom_actions.iter().cloned());
+    let actions: Vec<String> = data.actions.iter().map(action_to_string).collect();
     Py::new(
         py,
         Element {
@@ -1273,7 +1266,6 @@ fn build_test_tree() -> Arc<MockProvider> {
             description: desc.map(String::from),
             bounds,
             actions,
-            custom_actions: vec![],
             states,
             numeric_value: nv,
             min_value: minv,

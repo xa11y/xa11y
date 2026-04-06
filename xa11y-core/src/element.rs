@@ -31,15 +31,8 @@ pub struct ElementData {
     /// Bounding rectangle in screen pixels
     pub bounds: Option<Rect>,
 
-    /// Available well-known actions.
+    /// Available actions (well-known and platform-specific).
     pub actions: Vec<Action>,
-
-    /// Platform-specific actions not covered by [`Action`] variants.
-    ///
-    /// Names are in `snake_case` — providers convert to/from platform naming
-    /// conventions (e.g. macOS `AXCustomThing` ↔ `"custom_thing"`).
-    #[serde(default)]
-    pub custom_actions: Vec<String>,
 
     /// Current state flags
     pub states: StateSet,
@@ -247,30 +240,6 @@ impl Element {
     /// Get the process ID from the element data.
     pub fn pid(&self) -> Option<u32> {
         self.data.pid
-    }
-
-    /// Perform a well-known action on this element.
-    ///
-    /// This is the direct, no-auto-wait version. For auto-waiting behavior,
-    /// use the corresponding [`Locator`](crate::Locator) methods instead.
-    pub fn perform_action(
-        &self,
-        action: crate::Action,
-        data: Option<crate::ActionData>,
-    ) -> crate::error::Result<()> {
-        self.provider.perform_action(&self.data, action, data)
-    }
-
-    /// Perform a custom (platform-specific) action by `snake_case` name.
-    ///
-    /// Custom actions are platform-specific operations not covered by the
-    /// [`Action`](crate::Action) enum. Available custom actions are listed
-    /// in [`ElementData::custom_actions`].
-    ///
-    /// The provider converts the name to the platform's convention (e.g.
-    /// `"custom_thing"` → `"AXCustomThing"` on macOS) and invokes it.
-    pub fn perform_custom_action(&self, name: &str) -> crate::error::Result<()> {
-        self.provider.perform_custom_action(&self.data, name)
     }
 }
 

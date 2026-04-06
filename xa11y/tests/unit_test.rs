@@ -293,7 +293,6 @@ fn sample_provider() -> Arc<MockProvider> {
             description: desc.map(String::from),
             bounds,
             actions,
-            custom_actions: vec![],
             states,
             numeric_value: nv,
             min_value: minv,
@@ -475,14 +474,14 @@ fn action_display() {
 #[test]
 fn validate_text_selection_start_must_be_lte_end() {
     let valid = ActionData::TextSelection { start: 0, end: 5 };
-    assert!(valid.validate(Action::SetTextSelection).is_ok());
+    assert!(valid.validate(&Action::SetTextSelection).is_ok());
 
     let equal = ActionData::TextSelection { start: 3, end: 3 };
-    assert!(equal.validate(Action::SetTextSelection).is_ok());
+    assert!(equal.validate(&Action::SetTextSelection).is_ok());
 
     let reversed = ActionData::TextSelection { start: 5, end: 2 };
     assert!(matches!(
-        reversed.validate(Action::SetTextSelection),
+        reversed.validate(&Action::SetTextSelection),
         Err(Error::InvalidActionData { .. })
     ));
 }
@@ -490,17 +489,17 @@ fn validate_text_selection_start_must_be_lte_end() {
 #[test]
 fn validate_numeric_value_must_be_finite() {
     let valid = ActionData::NumericValue(42.0);
-    assert!(valid.validate(Action::SetValue).is_ok());
+    assert!(valid.validate(&Action::SetValue).is_ok());
 
     let nan = ActionData::NumericValue(f64::NAN);
     assert!(matches!(
-        nan.validate(Action::SetValue),
+        nan.validate(&Action::SetValue),
         Err(Error::InvalidActionData { .. })
     ));
 
     let inf = ActionData::NumericValue(f64::INFINITY);
     assert!(matches!(
-        inf.validate(Action::SetValue),
+        inf.validate(&Action::SetValue),
         Err(Error::InvalidActionData { .. })
     ));
 }
@@ -508,10 +507,10 @@ fn validate_numeric_value_must_be_finite() {
 #[test]
 fn validate_other_action_data_always_ok() {
     let text = ActionData::Value("hello".to_string());
-    assert!(text.validate(Action::TypeText).is_ok());
+    assert!(text.validate(&Action::TypeText).is_ok());
 
     let scroll = ActionData::ScrollAmount(0.0);
-    assert!(scroll.validate(Action::ScrollDown).is_ok());
+    assert!(scroll.validate(&Action::ScrollDown).is_ok());
 }
 
 // ── Error ──
@@ -562,7 +561,6 @@ fn element_json_serialization() {
             height: 30,
         }),
         actions: vec![Action::Press],
-        custom_actions: vec![],
         states: StateSet {
             enabled: true,
             visible: true,
@@ -805,7 +803,7 @@ fn locator_press_dispatches_action() {
     let app = App::by_name_with(Arc::clone(&p) as Arc<dyn Provider>, "Test App").unwrap();
     let loc = app.locator(r#"window button[name="Submit"]"#);
     loc.press().unwrap();
-    let (handle, action) = p.last_action.lock().unwrap().unwrap();
+    let (handle, action) = p.last_action.lock().unwrap().clone().unwrap();
     assert_eq!(action, Action::Press);
     assert_eq!(handle, 7); // Submit button is handle 7
 }
@@ -926,7 +924,6 @@ fn multi_app_provider() -> Arc<MultiAppMockProvider> {
             description: None,
             bounds: None,
             actions: vec![],
-            custom_actions: vec![],
             states: StateSet::default(),
             numeric_value: None,
             min_value: None,

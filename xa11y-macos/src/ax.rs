@@ -812,28 +812,16 @@ fn do_set_attribute(element: AXUIElementRef, attribute: &CFString, value: CFType
 /// Convert an AX error code from `do_perform_action` into an appropriate
 /// `Error`.  Returns `ActionNotSupported` for -25206 (kAXErrorActionUnsupported)
 /// so callers get a clear, structured error instead of a raw platform code.
-fn action_error(err: i32, action: Action, role: Role, fallback_msg: &str) -> Error {
+fn action_error(err: i32, action: &Action, role: Role, fallback_msg: &str) -> Error {
     if err == AX_ERROR_ACTION_UNSUPPORTED {
-        Error::ActionNotSupported { action, role }
-    } else {
-        Error::Platform {
-            code: err as i64,
-            message: fallback_msg.to_string(),
-        }
-    }
-}
-
-/// Like `action_error` but for custom (string-named) actions.
-fn action_error_custom(err: i32, name: &str, role: Role, ax_name: &str) -> Error {
-    if err == AX_ERROR_ACTION_UNSUPPORTED {
-        Error::CustomActionNotSupported {
-            name: name.to_string(),
+        Error::ActionNotSupported {
+            action: action.clone(),
             role,
         }
     } else {
         Error::Platform {
             code: err as i64,
-            message: format!("{ax_name} failed"),
+            message: fallback_msg.to_string(),
         }
     }
 }
@@ -847,7 +835,7 @@ fn action_error_custom(err: i32, name: &str, role: Role, ax_name: &str) -> Error
 fn perform_ax_action(
     el_ptr: AXUIElementRef,
     ax_name: &str,
-    action: Action,
+    action: &Action,
     role: Role,
 ) -> Result<()> {
     let cf = CFString::new(ax_name);
@@ -868,7 +856,7 @@ fn set_bool_attr(
     el_ptr: AXUIElementRef,
     attr_name: &str,
     value: bool,
-    action: Action,
+    action: &Action,
     role: Role,
 ) -> Result<()> {
     let attr = CFString::new(attr_name);
@@ -1139,10 +1127,10 @@ fn map_ax_action(name: &str) -> Option<Action> {
 ///
 /// Returns `None` for actions handled via AX attributes rather than the
 /// AX Action interface.
-fn xa11y_action_to_ax(action: Action) -> Option<&'static str> {
+fn xa11y_action_to_ax(action: &Action) -> Option<&'static str> {
     AX_ACTION_MAPPINGS
         .iter()
-        .find(|m| m.action == action)
+        .find(|m| m.action == *action)
         .map(|m| m.canonical)
 }
 
@@ -1627,7 +1615,6 @@ impl MacOSProvider {
         // Discover actions via AXUIElementCopyActionNames + implicit attributes.
         let ax_actions = ax_action_names(ax.as_ptr());
         let mut actions: Vec<Action> = Vec::new();
-        let mut custom_actions: Vec<String> = Vec::new();
 
         for ax_name in &ax_actions {
             match classify_ax_action(ax_name) {
@@ -1637,8 +1624,9 @@ impl MacOSProvider {
                     }
                 }
                 ActionClassification::Custom(snake) => {
-                    if !custom_actions.contains(&snake) {
-                        custom_actions.push(snake);
+                    let custom = Action::Custom(snake);
+                    if !actions.contains(&custom) {
+                        actions.push(custom);
                     }
                 }
                 ActionClassification::Ignored => {}
@@ -1678,7 +1666,6 @@ impl MacOSProvider {
             description,
             bounds,
             actions,
-            custom_actions,
             states,
             stable_id: attrs.identifier,
             numeric_value,
@@ -2107,20 +2094,20 @@ impl Provider for MacOSProvider {
             // Press and Toggle both invoke AXPress — macOS uses the same
             // action for buttons, checkboxes, and switches.
             Action::Press | Action::Toggle => {
-                perform_ax_action(el_ptr, "AXPress", action, element.role)
+                perform_ax_action(el_ptr, "AXPress", &action, element.role)
             }
-            Action::ShowMenu => perform_ax_action(el_ptr, "AXShowMenu", action, element.role),
-            Action::Increment => perform_ax_action(el_ptr, "AXIncrement", action, element.role),
-            Action::Decrement => perform_ax_action(el_ptr, "AXDecrement", action, element.role),
+            Action::ShowMenu => perform_ax_action(el_ptr, "AXShowMenu", &action, element.role),
+            Action::Increment => perform_ax_action(el_ptr, "AXIncrement", &action, element.role),
+            Action::Decrement => perform_ax_action(el_ptr, "AXDecrement", &action, element.role),
 
             // ── Attribute-based actions ─────────────────────────────────
             //
             // These actions set AX attributes rather than invoking AX actions.
-            Action::Focus => set_bool_attr(el_ptr, "AXFocused", true, action, element.role),
-            Action::Blur => set_bool_attr(el_ptr, "AXFocused", false, action, element.role),
-            Action::Select => set_bool_attr(el_ptr, "AXSelected", true, action, element.role),
-            Action::Expand => set_bool_attr(el_ptr, "AXExpanded", true, action, element.role),
-            Action::Collapse => set_bool_attr(el_ptr, "AXExpanded", false, action, element.role),
+            Action::Focus => set_bool_attr(el_ptr, "AXFocused", true, &action, element.role),
+            Action::Blur => set_bool_attr(el_ptr, "AXFocused", false, &action, element.role),
+            Action::Select => set_bool_attr(el_ptr, "AXSelected", true, &action, element.role),
+            Action::Expand => set_bool_attr(el_ptr, "AXExpanded", true, &action, element.role),
+            Action::Collapse => set_bool_attr(el_ptr, "AXExpanded", false, &action, element.role),
 
             Action::SetValue => perform_set_value(el_ptr, data),
 
@@ -2146,39 +2133,43 @@ impl Provider for MacOSProvider {
             // ── Text operations ─────────────────────────────────────────
             Action::SetTextSelection => perform_set_text_selection(el_ptr, data),
             Action::TypeText => perform_type_text(el_ptr, data),
-        }
-    }
 
-    fn perform_custom_action(&self, element: &ElementData, name: &str) -> Result<()> {
-        let ax = self.get_cached(element.handle)?;
-        let el_ptr = ax.as_ptr();
-        let available = ax_action_names(el_ptr);
+            // ── Custom platform-specific actions ────────────────────────
+            //
+            // Resolution strategy per design doc:
+            // 1. Convert snake_case → AXPascalCase, check element's action list
+            // 2. Try the literal snake_case name
+            // 3. Return error if neither matches
+            Action::Custom(ref name) => {
+                let available = ax_action_names(el_ptr);
 
-        // Strategy 1: convert snake_case to AXPascalCase and check
-        let ax_name = snake_to_ax_pascal(name);
-        if available.iter().any(|a| a == &ax_name) {
-            let cf_action = CFString::new(&ax_name);
-            let err = do_perform_action(el_ptr, &cf_action);
-            if err != AX_ERROR_SUCCESS {
-                return Err(action_error_custom(err, name, element.role, &ax_name));
+                // Strategy 1: snake_case → AXPascalCase
+                let ax_name = snake_to_ax_pascal(name);
+                if available.iter().any(|a| a == &ax_name) {
+                    let cf_action = CFString::new(&ax_name);
+                    let err = do_perform_action(el_ptr, &cf_action);
+                    if err != AX_ERROR_SUCCESS {
+                        return Err(action_error(err, &action, element.role, &ax_name));
+                    }
+                    return Ok(());
+                }
+
+                // Strategy 2: literal name
+                if available.iter().any(|a| a == name.as_str()) {
+                    let cf_action = CFString::new(name);
+                    let err = do_perform_action(el_ptr, &cf_action);
+                    if err != AX_ERROR_SUCCESS {
+                        return Err(action_error(err, &action, element.role, name));
+                    }
+                    return Ok(());
+                }
+
+                Err(Error::ActionNotSupported {
+                    action,
+                    role: element.role,
+                })
             }
-            return Ok(());
         }
-
-        // Strategy 2: try the literal snake_case name (some apps may use it)
-        if available.iter().any(|a| a == name) {
-            let cf_action = CFString::new(name);
-            let err = do_perform_action(el_ptr, &cf_action);
-            if err != AX_ERROR_SUCCESS {
-                return Err(action_error_custom(err, name, element.role, name));
-            }
-            return Ok(());
-        }
-
-        Err(Error::CustomActionNotSupported {
-            name: name.to_string(),
-            role: element.role,
-        })
     }
 
     fn subscribe(&self, element: &ElementData) -> Result<Subscription> {
@@ -2238,7 +2229,6 @@ unsafe extern "C" fn ax_observer_callback(
                 description: ax_string(element, "AXDescription"),
                 bounds: None,
                 actions: vec![],
-                custom_actions: vec![],
                 states: StateSet::default(),
                 numeric_value: None,
                 min_value: None,
@@ -2546,19 +2536,19 @@ mod tests {
 
     #[test]
     fn xa11y_action_to_ax_covers_all_mappings() {
-        assert_eq!(xa11y_action_to_ax(Action::Press), Some("AXPress"));
+        assert_eq!(xa11y_action_to_ax(&Action::Press), Some("AXPress"));
         // Toggle is attribute-based on macOS (no distinct AX action)
-        assert_eq!(xa11y_action_to_ax(Action::Toggle), None);
+        assert_eq!(xa11y_action_to_ax(&Action::Toggle), None);
         // Select is handled via AXSelected attribute, not AXPress action
-        assert_eq!(xa11y_action_to_ax(Action::Select), None);
-        assert_eq!(xa11y_action_to_ax(Action::ShowMenu), Some("AXShowMenu"));
-        assert_eq!(xa11y_action_to_ax(Action::Increment), Some("AXIncrement"));
-        assert_eq!(xa11y_action_to_ax(Action::Decrement), Some("AXDecrement"));
-        assert_eq!(xa11y_action_to_ax(Action::Focus), None);
-        assert_eq!(xa11y_action_to_ax(Action::SetValue), None);
-        assert_eq!(xa11y_action_to_ax(Action::Expand), None);
-        assert_eq!(xa11y_action_to_ax(Action::Collapse), None);
-        assert_eq!(xa11y_action_to_ax(Action::ScrollIntoView), None);
+        assert_eq!(xa11y_action_to_ax(&Action::Select), None);
+        assert_eq!(xa11y_action_to_ax(&Action::ShowMenu), Some("AXShowMenu"));
+        assert_eq!(xa11y_action_to_ax(&Action::Increment), Some("AXIncrement"));
+        assert_eq!(xa11y_action_to_ax(&Action::Decrement), Some("AXDecrement"));
+        assert_eq!(xa11y_action_to_ax(&Action::Focus), None);
+        assert_eq!(xa11y_action_to_ax(&Action::SetValue), None);
+        assert_eq!(xa11y_action_to_ax(&Action::Expand), None);
+        assert_eq!(xa11y_action_to_ax(&Action::Collapse), None);
+        assert_eq!(xa11y_action_to_ax(&Action::ScrollIntoView), None);
     }
 
     /// Every xa11y Action with a canonical AX name must round-trip:
@@ -2571,14 +2561,14 @@ mod tests {
             Action::Increment,
             Action::Decrement,
         ];
-        for action in actions_with_mapping {
+        for action in &actions_with_mapping {
             let ax_name = xa11y_action_to_ax(action)
                 .unwrap_or_else(|| panic!("{:?} should have a canonical AX name", action));
             let round_tripped = map_ax_action(ax_name).unwrap_or_else(|| {
                 panic!("canonical name {:?} should map back to an Action", ax_name)
             });
             assert_eq!(
-                action, round_tripped,
+                *action, round_tripped,
                 "round-trip failed: {:?} → {:?} → {:?}",
                 action, ax_name, round_tripped
             );
@@ -2599,7 +2589,7 @@ mod tests {
         for name in ax_names {
             let action = map_ax_action(name)
                 .unwrap_or_else(|| panic!("AX name {:?} should map to an Action", name));
-            let canonical = xa11y_action_to_ax(action).unwrap_or_else(|| {
+            let canonical = xa11y_action_to_ax(&action).unwrap_or_else(|| {
                 panic!(
                     "{:?} (from {:?}) should have a canonical name",
                     action, name

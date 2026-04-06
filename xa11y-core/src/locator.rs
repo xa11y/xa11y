@@ -184,7 +184,7 @@ impl Locator {
     /// before performing the action (with the configured timeout).
     fn perform(&self, action: Action, data: Option<ActionData>) -> Result<()> {
         if let Some(ref d) = data {
-            d.validate(action)?;
+            d.validate(&action)?;
         }
         // Auto-wait: poll until element is attached + visible + enabled.
         let element = self.auto_wait()?;
@@ -312,22 +312,16 @@ impl Locator {
         self.perform(Action::ScrollRight, Some(ActionData::ScrollAmount(amount)))
     }
 
-    /// Perform any well-known action with optional data (with auto-wait).
+    /// Perform any action with optional data (with auto-wait).
     ///
     /// This is the generic version of the named action methods (`.press()`,
-    /// `.toggle()`, etc.). Auto-waits until the element is attached, visible,
-    /// and enabled before performing the action.
+    /// `.toggle()`, etc.). Also supports `Action::Custom("name")` for
+    /// platform-specific actions.
+    ///
+    /// Auto-waits until the element is attached, visible, and enabled
+    /// before performing the action.
     pub fn perform_action(&self, action: Action, data: Option<ActionData>) -> Result<()> {
         self.perform(action, data)
-    }
-
-    /// Perform a custom (platform-specific) action by `snake_case` name (with auto-wait).
-    ///
-    /// See [`Element::perform_custom_action`](crate::Element::perform_custom_action)
-    /// for details on custom action naming.
-    pub fn perform_custom_action(&self, name: &str) -> Result<()> {
-        let element = self.auto_wait()?;
-        self.provider.perform_custom_action(&element, name)
     }
 
     // ── Wait operations ─────────────────────────────────────────────

@@ -134,7 +134,7 @@ mod provider_fuzz {
 
     // ── ActionData Generation ───────────────────────────────────────────────
 
-    fn random_action_data(rng: &mut StdRng, action: Action) -> Option<ActionData> {
+    fn random_action_data(rng: &mut StdRng, action: &Action) -> Option<ActionData> {
         match action {
             Action::SetValue => {
                 if rng.random_bool(0.5) {
@@ -287,12 +287,12 @@ mod provider_fuzz {
 
         let target = &elements[state.rng.random_range(0..elements.len())];
         let action = if !target.actions.is_empty() && state.rng.random_bool(0.8) {
-            target.actions[state.rng.random_range(0..target.actions.len())]
+            target.actions[state.rng.random_range(0..target.actions.len())].clone()
         } else {
-            ALL_ACTIONS[state.rng.random_range(0..ALL_ACTIONS.len())]
+            ALL_ACTIONS[state.rng.random_range(0..ALL_ACTIONS.len())].clone()
         };
 
-        let data = random_action_data(&mut state.rng, action);
+        let data = random_action_data(&mut state.rng, &action);
         state.log(&format!(
             "perform_action(role={:?}, action={:?})",
             target.role, action
