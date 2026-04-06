@@ -538,14 +538,11 @@ macOS exposes some operations as AX actions (performed via `AXUIElementPerformAc
 | `scroll_into_view` | Not supported (no AX equivalent) |
 | `scroll_down/right` | CGEvent scroll wheel events. **Exception to tenet 5**: macOS has no accessibility API for programmatic scrolling, so this uses input simulation (`CGEventCreateScrollWheelEvent`). Documented here rather than silently omitted because scrolling is a core automation primitive. |
 
-For **reading** which actions an element supports: the provider calls `AXUIElementCopyActionNames` to get the element's action list (e.g. `["AXPress", "AXShowMenu", "AXCustomThing"]`). Each name is classified:
-1. **Known** — names in the mapping table (e.g. `"AXPress"` → `Action::Press`)
-2. **Ignored** — recognized but unmapped names (e.g. `"AXRaise"`, `"AXCancel"`) that have no automation meaning
-3. **Custom** — everything else. The `AX` prefix is stripped and the name is converted from `PascalCase` to `snake_case` (e.g. `"AXCustomThing"` → `Action::Custom("custom_thing")`)
+For **reading** which actions an element supports: the provider calls `AXUIElementCopyActionNames` to get the element's action list (e.g. `["AXPress", "AXShowMenu", "AXCustomThing"]`). Known AX action names map to their standard `snake_case` name (e.g. `"AXPress"` → `"press"`). All other actions have the `AX` prefix stripped and are converted from `PascalCase` to `snake_case` (e.g. `"AXRaise"` → `"raise"`, `"AXCustomThing"` → `"custom_thing"`). No actions are silently hidden — if the platform reports it, it appears in `element.actions`.
 
-The provider also adds implicit actions based on settable attributes (e.g. if `AXFocused` is present, add `Focus`; if the role is a text field or slider, add `SetValue`).
+The provider also adds implicit actions based on settable attributes (e.g. if `AXFocused` is present, add `"focus"`; if the role is a text field or slider, add `"set_value"`).
 
-For **performing** an `Action::Custom(name)`: the provider converts `snake_case` back to `AXPascalCase` and looks for that in the element's action list. If found, it invokes it via `AXUIElementPerformAction`. If not found, it tries the literal `snake_case` name. If neither is supported by the element, it returns `ActionNotSupported`. For example, `Action::Custom("custom_thing")` would first try `"AXCustomThing"`, then `"custom_thing"`, then fail.
+For **performing** an action via `perform_action("custom_thing")`: the provider first checks if it's a well-known name and delegates to the corresponding typed method. For unknown names, it converts `snake_case` back to `AXPascalCase` and looks for that in the element's action list. If found, it invokes it via `AXUIElementPerformAction`. If not found, it tries the literal `snake_case` name. If neither is supported, it returns `ActionNotSupported`. For example, `perform_action("custom_thing")` would first try `"AXCustomThing"`, then `"custom_thing"`, then fail.
 
 #### Linux (AT-SPI2 action names and D-Bus interfaces)
 

@@ -975,11 +975,6 @@ fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
 //   3. If not, try the literal `snake_case` name
 //   4. If neither matches, return error
 
-/// AX action names that are valid but intentionally unmapped (no xa11y equivalent).
-/// These are recognized platform actions that we deliberately skip during
-/// action discovery — they don't correspond to any user-facing automation action.
-const AX_IGNORED_ACTIONS: &[&str] = &["AXRaise", "AXCancel"];
-
 /// Map an AX action name to a well-known xa11y action name string.
 ///
 /// Returns `None` for unrecognized names (which may be custom actions).
@@ -1451,9 +1446,6 @@ impl MacOSProvider {
         let mut actions: Vec<String> = Vec::new();
 
         for ax_name in &ax_actions {
-            if AX_IGNORED_ACTIONS.contains(&ax_name.as_str()) {
-                continue;
-            }
             if let Some(known) = ax_action_to_name(ax_name) {
                 let s = known.to_string();
                 if !actions.contains(&s) {
@@ -2495,23 +2487,11 @@ mod tests {
 
     #[test]
     fn ax_action_to_name_returns_none_for_unknown() {
+        // Unknown AX actions get converted via ax_pascal_to_snake instead
         assert_eq!(ax_action_to_name("AXRaise"), None);
         assert_eq!(ax_action_to_name("AXCancel"), None);
         assert_eq!(ax_action_to_name("AXCustomThing"), None);
         assert_eq!(ax_action_to_name("UnknownAction"), None);
-    }
-
-    /// Ignored AX actions must not map to any known name.
-    #[test]
-    fn ax_ignored_actions_return_none() {
-        for name in AX_IGNORED_ACTIONS {
-            assert_eq!(
-                ax_action_to_name(name),
-                None,
-                "ignored action {:?} should map to None",
-                name
-            );
-        }
     }
 
     // ── Name conversion tests ───────────────────────────────────────

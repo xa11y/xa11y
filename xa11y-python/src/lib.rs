@@ -384,8 +384,9 @@ impl Locator {
     fn scroll_right(&self, amount: f64) -> PyResult<()> {
         self.inner.scroll_right(amount).map_err(to_py_err)
     }
-
-    // ── Wait operations ──
+    fn perform_action(&self, action: &str) -> PyResult<()> {
+        self.inner.perform_action(action).map_err(to_py_err)
+    }
 
     // ── Wait operations ──
 
