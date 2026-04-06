@@ -191,49 +191,90 @@ class Element:
 # ── Locator ──────────────────────────────────────────────────────────────
 
 class Locator:
-    """A resilient element reference that re-queries on each interaction."""
+    """A resilient element reference that re-queries on each interaction.
+
+    Locators never hold a live reference to a UI element. Instead, they store
+    a selector and resolve it on demand, making them immune to staleness.
+    Action methods auto-wait for the element to appear before acting.
+    """
 
     @property
-    def selector(self) -> str: ...
-    def nth(self, n: int) -> Locator: ...
-    def first(self) -> Locator: ...
-    def child(self, selector: str) -> Locator: ...
-    def descendant(self, selector: str) -> Locator: ...
-    def exists(self) -> bool: ...
-    def count(self) -> int: ...
-    def element(self) -> Element: ...
-    def elements(self) -> list[Element]: ...
-    def press(self) -> None: ...
-    def focus(self) -> None: ...
-    def blur(self) -> None: ...
-    def toggle(self) -> None: ...
-    def expand(self) -> None: ...
-    def collapse(self) -> None: ...
-    def select(self) -> None: ...
-    def show_menu(self) -> None: ...
-    def scroll_into_view(self) -> None: ...
-    def increment(self) -> None: ...
-    def decrement(self) -> None: ...
-    def set_value(self, value: str) -> None: ...
-    def set_numeric_value(self, value: float) -> None: ...
-    def type_text(self, text: str) -> None: ...
-    def select_text(self, start: int, end: int) -> None: ...
-    def scroll_up(self, amount: float = 1.0) -> None: ...
-    def scroll_down(self, amount: float = 1.0) -> None: ...
-    def scroll_left(self, amount: float = 1.0) -> None: ...
-    def scroll_right(self, amount: float = 1.0) -> None: ...
-    def perform_action(self, action: str) -> None: ...
-    def wait_visible(self, timeout: float = 5.0) -> Element: ...
-    def wait_attached(self, timeout: float = 5.0) -> Element: ...
-    def wait_detached(self, timeout: float = 5.0) -> None: ...
-    def wait_enabled(self, timeout: float = 5.0) -> Element: ...
-    def wait_hidden(self, timeout: float = 5.0) -> None: ...
-    def wait_disabled(self, timeout: float = 5.0) -> Element: ...
-    def wait_focused(self, timeout: float = 5.0) -> Element: ...
-    def wait_unfocused(self, timeout: float = 5.0) -> Element: ...
-    def wait_until(
-        self, predicate: Callable[[Element | None], bool], timeout: float = 5.0
-    ) -> None: ...
+    def selector(self) -> str:
+        """The CSS-like selector string for this locator."""
+    def nth(self, n: int) -> Locator:
+        """Return a new Locator that selects the *n*-th match (1-based)."""
+    def first(self) -> Locator:
+        """Return a new Locator that selects the first match."""
+    def child(self, selector: str) -> Locator:
+        """Return a new Locator scoped to direct children matching *selector*."""
+    def descendant(self, selector: str) -> Locator:
+        """Return a new Locator scoped to descendants matching *selector*."""
+    def exists(self) -> bool:
+        """Check if a matching element exists."""
+    def count(self) -> int:
+        """Count matching elements."""
+    def element(self) -> Element:
+        """Get a single Element handle for the matched element."""
+    def elements(self) -> list[Element]:
+        """Get all matching elements."""
+    def press(self) -> None:
+        """Click / invoke the matched element."""
+    def focus(self) -> None:
+        """Set keyboard focus on the matched element."""
+    def blur(self) -> None:
+        """Remove keyboard focus from the matched element."""
+    def toggle(self) -> None:
+        """Toggle the matched element (checkbox, switch)."""
+    def expand(self) -> None:
+        """Expand the matched element."""
+    def collapse(self) -> None:
+        """Collapse the matched element."""
+    def select(self) -> None:
+        """Select the matched element (list item, tab, etc.)."""
+    def show_menu(self) -> None:
+        """Show the context menu for the matched element."""
+    def scroll_into_view(self) -> None:
+        """Scroll the matched element into the visible area."""
+    def increment(self) -> None:
+        """Increment the matched element (slider, spinner)."""
+    def decrement(self) -> None:
+        """Decrement the matched element (slider, spinner)."""
+    def set_value(self, value: str) -> None:
+        """Set the text value of the matched element."""
+    def set_numeric_value(self, value: float) -> None:
+        """Set the numeric value of the matched element (slider, spinner)."""
+    def type_text(self, text: str) -> None:
+        """Type text at the current cursor position on the matched element."""
+    def select_text(self, start: int, end: int) -> None:
+        """Select a text range within the matched element (0-based offsets)."""
+    def scroll_up(self, amount: float = 1.0) -> None:
+        """Scroll the matched element upward."""
+    def scroll_down(self, amount: float = 1.0) -> None:
+        """Scroll the matched element downward."""
+    def scroll_left(self, amount: float = 1.0) -> None:
+        """Scroll the matched element leftward."""
+    def scroll_right(self, amount: float = 1.0) -> None:
+        """Scroll the matched element rightward."""
+    def perform_action(self, action: str) -> None:
+        """Perform an action by snake_case name."""
+    def wait_visible(self, timeout: float = 5.0) -> Element:
+        """Wait until the element is visible, polling the provider."""
+    def wait_attached(self, timeout: float = 5.0) -> Element:
+        """Wait until the element exists in the tree."""
+    def wait_detached(self, timeout: float = 5.0) -> None:
+        """Wait until the element is removed from the tree."""
+    def wait_enabled(self, timeout: float = 5.0) -> Element:
+        """Wait until the element is enabled."""
+    def wait_hidden(self, timeout: float = 5.0) -> None:
+        """Wait until the element is hidden or removed."""
+    def wait_disabled(self, timeout: float = 5.0) -> Element:
+        """Wait until the element is disabled."""
+    def wait_focused(self, timeout: float = 5.0) -> Element:
+        """Wait until the element has keyboard focus."""
+    def wait_unfocused(self, timeout: float = 5.0) -> Element:
+        """Wait until the element does not have keyboard focus."""
+    def wait_until(self, predicate: Callable[[Element | None], bool], timeout: float = 5.0) -> None:
+        """Wait until an arbitrary predicate is satisfied."""
     def __repr__(self) -> str: ...
 
 # ── Module-level functions ───────────────────────────────────────────────────

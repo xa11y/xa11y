@@ -11,6 +11,7 @@ autoapi_type = "python"
 autoapi_dirs = ["../../xa11y-python/python"]
 autoapi_options = [
     "members",
+    "undoc-members",
     "show-inheritance",
     "show-module-summary",
     "imported-members",

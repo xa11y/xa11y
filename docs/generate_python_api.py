@@ -335,6 +335,8 @@ def _categorize_locator_methods(
         "is_focused",
         "exists",
         "count",
+        "element",
+        "elements",
         "get",
     }
 
