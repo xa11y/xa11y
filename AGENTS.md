@@ -83,7 +83,7 @@ cd xa11y/fuzz && cargo +nightly fuzz run tree_ops -- -max_total_time=60
 - `xa11y-core/` — Platform-independent types, traits, selector engine
 - `xa11y-linux/` — AT-SPI2 backend via zbus
 - `xa11y-macos/` — macOS backend (AXUIElement, with ObjC exception safety)
-- `xa11y-windows/` — Windows backend (stub)
+- `xa11y-windows/` — Windows backend (UI Automation)
 - `xa11y/` — Umbrella crate, unit tests, integration tests
 - `test-apps/accesskit/` — AccessKit + winit app used as target for Rust integration tests
 - `test-apps/qt/` — PySide6 Qt test app
