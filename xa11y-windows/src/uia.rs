@@ -89,10 +89,8 @@ impl WindowsProvider {
     fn find_app_by_pid(&self, pid: u32) -> Result<(IUIAutomationElement, String)> {
         let root = uia_call(|| unsafe { self.automation.GetRootElement() })?;
         let condition = uia_call(|| unsafe {
-            self.automation.CreatePropertyCondition(
-                UIA_ProcessIdPropertyId,
-                &VARIANT::from(pid as i32),
-            )
+            self.automation
+                .CreatePropertyCondition(UIA_ProcessIdPropertyId, &VARIANT::from(pid as i32))
         })?;
         let el = unsafe { root.FindFirst(TreeScope_Children, &condition) }.map_err(|_| {
             Error::Platform {
