@@ -5,9 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
+use windows::core::BOOL;
 use windows::Win32::Foundation::*;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT};
-
+use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::*;
 
 use xa11y_core::{
@@ -88,10 +89,8 @@ impl WindowsProvider {
     fn find_app_by_pid(&self, pid: u32) -> Result<(IUIAutomationElement, String)> {
         let root = uia_call(|| unsafe { self.automation.GetRootElement() })?;
         let condition = uia_call(|| unsafe {
-            self.automation.CreatePropertyCondition(
-                UIA_ProcessIdPropertyId,
-                &windows::core::VARIANT::from(pid as i32),
-            )
+            self.automation
+                .CreatePropertyCondition(UIA_ProcessIdPropertyId, &VARIANT::from(pid as i32))
         })?;
         let el = unsafe { root.FindFirst(TreeScope_Children, &condition) }.map_err(|_| {
             Error::Platform {
@@ -526,7 +525,7 @@ impl Provider for WindowsProvider {
                 let condition = uia_call(|| unsafe {
                     self.automation.CreatePropertyCondition(
                         UIA_ControlTypePropertyId,
-                        &windows::core::VARIANT::from(UIA_WindowControlTypeId.0),
+                        &VARIANT::from(UIA_WindowControlTypeId.0),
                     )
                 })?;
                 let found = uia_call(|| unsafe {
