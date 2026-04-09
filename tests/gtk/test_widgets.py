@@ -235,3 +235,23 @@ def test_list_has_items(gtk_app: xa11y.Element) -> None:
     lst = find(gtk_app, "list")
     children = lst.children()
     assert len(children) >= 1
+
+
+# ── Focus action ─────────────────────────────────────────────────────────────
+
+
+def test_button_focus_action_consistency(gtk_app: xa11y.Element) -> None:
+    """Test that if 'focus' is in actions, calling focus() works.
+
+    Regression test for GitHub issue #98: On GTK4, elements may report 'focus'
+    in their actions list even when GrabFocus() doesn't work, leading to
+    ActionNotSupportedError. Elements should only report 'focus' if focusing
+    actually works (i.e., the Action interface exposes a focus action).
+    """
+    ok = find(gtk_app, 'button[name="OK"]')
+    if "focus" in ok.actions:
+        # If focus is reported as available, it should work
+        gtk_app.locator('button[name="OK"]').focus()
+        # Verify focus was actually set
+        ok_after = find(gtk_app, 'button[name="OK"]')
+        assert ok_after.focused, "focus() should set focused state"
