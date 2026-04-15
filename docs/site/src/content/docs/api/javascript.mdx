@@ -1,0 +1,449 @@
+---
+title: "JavaScript API Reference"
+description: "API reference for the xa11y Node.js bindings (@xa11y/xa11y)."
+---
+
+{/* This page is auto-generated from xa11y-js/index.d.ts. */}
+{/* Do not edit by hand — run `cargo xtask docs` to regenerate. */}
+
+## Overview
+
+The `@xa11y/xa11y` package provides cross-platform accessibility queries
+and actions for Node.js. All methods that touch the accessibility tree
+are asynchronous — they run on the napi tokio worker pool so the Node
+event loop stays responsive.
+
+```js
+import { App, locator } from '@xa11y/xa11y';
+
+const app = await App.byName('Safari');
+await app.locator('button[name="OK"]').press();
+```
+
+## Errors
+
+### `XA11yError`
+
+Base class for all xa11y errors.
+
+### `PermissionDeniedError`
+
+Accessibility permissions have not been granted.
+
+### `SelectorNotMatchedError`
+
+No element matched the selector (also used for stale elements).
+
+### `ActionNotSupportedError`
+
+The requested action is not supported on the target element.
+
+### `TimeoutError`
+
+An operation exceeded its timeout.
+
+### `InvalidSelectorError`
+
+The selector string has invalid syntax or the action data was rejected.
+
+### `PlatformError`
+
+An OS-level accessibility error occurred.
+
+## Classes
+
+### `Rect`
+
+A bounding rectangle in screen coordinates (pixels).
+
+#### Properties
+
+#### `x`
+
+*Type:* `number`
+
+#### `y`
+
+*Type:* `number`
+
+#### `width`
+
+*Type:* `number`
+
+#### `height`
+
+*Type:* `number`
+
+### `Element`
+
+A live element snapshot with lazy navigation back into the provider.
+
+Property getters are synchronous — the values were captured when the element
+was resolved. Navigation methods (`children`, `parent`, `subscribe`) re-query
+the platform on demand and return Promises.
+
+#### Properties
+
+#### `role`
+
+*Type:* `string`
+
+Role, as a snake_case string (e.g. `"button"`, `"check_box"`).
+
+#### `name`
+
+*Type:* `string | null`
+
+#### `value`
+
+*Type:* `string | null`
+
+#### `description`
+
+*Type:* `string | null`
+
+#### `numericValue`
+
+*Type:* `number | null`
+
+#### `minValue`
+
+*Type:* `number | null`
+
+#### `maxValue`
+
+*Type:* `number | null`
+
+#### `stableId`
+
+*Type:* `string | null`
+
+#### `pid`
+
+*Type:* `number | null`
+
+#### `actions`
+
+*Type:* `string[]`
+
+#### `bounds`
+
+*Type:* `Rect | null`
+
+#### `enabled`
+
+*Type:* `boolean`
+
+#### `visible`
+
+*Type:* `boolean`
+
+#### `focused`
+
+*Type:* `boolean`
+
+#### `checked`
+
+*Type:* `CheckedState | null`
+
+#### `selected`
+
+*Type:* `boolean`
+
+#### `expanded`
+
+*Type:* `boolean | null`
+
+#### `editable`
+
+*Type:* `boolean`
+
+#### `focusable`
+
+*Type:* `boolean`
+
+#### `modal`
+
+*Type:* `boolean`
+
+#### `required`
+
+*Type:* `boolean`
+
+#### `busy`
+
+*Type:* `boolean`
+
+#### Methods
+
+#### `children(): Promise<Element[]>`
+
+Get direct children (each call re-queries the provider).
+
+#### `parent(): Promise<Element | null>`
+
+Get the parent element, or `null` if this is the root.
+
+#### `subscribe(): Promise<Subscription>`
+
+Subscribe to accessibility events for this element.
+
+### `Locator`
+
+A resilient, Playwright-style element reference.
+
+Locators never hold a live UI element — they store a selector and re-resolve
+it on each action, which makes them immune to tree staleness. Action methods
+auto-wait up to a default 5s for the element to become visible and enabled.
+
+#### Properties
+
+#### `selector`
+
+*Type:* `string`
+
+The CSS-like selector string.
+
+#### Methods
+
+#### `nth(n: number): Locator`
+
+Return a new Locator that selects the *n*-th match (1-based).
+
+#### `first(): Locator`
+
+Return a new Locator that selects the first match.
+
+#### `child(selector: string): Locator`
+
+Return a new Locator scoped to direct children matching `selector`.
+
+#### `descendant(selector: string): Locator`
+
+Return a new Locator scoped to descendants matching `selector`.
+
+#### `exists(): Promise<boolean>`
+
+Check whether a matching element exists (does *not* throw).
+
+#### `count(): Promise<number>`
+
+Count matching elements.
+
+#### `element(): Promise<Element>`
+
+Resolve to a single snapshot; throws `SelectorNotMatchedError` on miss.
+
+#### `elements(): Promise<Element[]>`
+
+Resolve to all matching snapshots.
+
+#### `press(): Promise<void>`
+
+Click / invoke the matched element.
+
+#### `focus(): Promise<void>`
+
+Set keyboard focus on the matched element.
+
+#### `blur(): Promise<void>`
+
+Remove keyboard focus from the matched element.
+
+#### `toggle(): Promise<void>`
+
+Toggle the matched element (checkbox, switch).
+
+#### `expand(): Promise<void>`
+
+Expand the matched element.
+
+#### `collapse(): Promise<void>`
+
+Collapse the matched element.
+
+#### `select(): Promise<void>`
+
+Select the matched element (list item, tab, etc.).
+
+#### `showMenu(): Promise<void>`
+
+Show the context menu for the matched element.
+
+#### `scrollIntoView(): Promise<void>`
+
+Scroll the matched element into the visible area.
+
+#### `increment(): Promise<void>`
+
+Increment the matched element (slider, spinner).
+
+#### `decrement(): Promise<void>`
+
+Decrement the matched element (slider, spinner).
+
+#### `setValue(value: string): Promise<void>`
+
+Set the text value of the matched element.
+
+#### `setNumericValue(value: number): Promise<void>`
+
+Set the numeric value of the matched element.
+
+#### `typeText(text: string): Promise<void>`
+
+Type text at the current cursor on the matched element.
+
+#### `selectText(start: number, end: number): Promise<void>`
+
+Select a text range within the matched element (0-based offsets).
+
+#### `scrollUp(amount?: number): Promise<void>`
+
+#### `scrollDown(amount?: number): Promise<void>`
+
+#### `scrollLeft(amount?: number): Promise<void>`
+
+#### `scrollRight(amount?: number): Promise<void>`
+
+#### `performAction(action: string): Promise<void>`
+
+Perform an action by its snake_case name.
+
+#### `waitVisible(timeoutSeconds?: number): Promise<Element>`
+
+Wait until the element is visible.
+
+#### `waitAttached(timeoutSeconds?: number): Promise<Element>`
+
+Wait until the element exists in the tree.
+
+#### `waitDetached(timeoutSeconds?: number): Promise<void>`
+
+Wait until the element is removed from the tree.
+
+#### `waitEnabled(timeoutSeconds?: number): Promise<Element>`
+
+Wait until the element is enabled.
+
+#### `waitHidden(timeoutSeconds?: number): Promise<void>`
+
+Wait until the element is hidden or removed.
+
+#### `waitDisabled(timeoutSeconds?: number): Promise<Element>`
+
+Wait until the element is disabled.
+
+#### `waitFocused(timeoutSeconds?: number): Promise<Element>`
+
+Wait until the element has keyboard focus.
+
+#### `waitUnfocused(timeoutSeconds?: number): Promise<Element>`
+
+Wait until the element does not have keyboard focus.
+
+### `App`
+
+A running application — the entry point for accessibility queries.
+
+`App` is **not** an `Element`. It represents the application as a whole and
+provides a `locator()` to search its accessibility tree.
+
+#### Static methods
+
+#### `static byName(name: string): Promise<App>`
+
+Find an application by exact name.
+
+#### `static byPid(pid: number): Promise<App>`
+
+Find an application by process ID.
+
+#### `static list(): Promise<App[]>`
+
+List all running applications.
+
+#### Properties
+
+#### `name`
+
+*Type:* `string`
+
+#### `pid`
+
+*Type:* `number | null`
+
+#### Methods
+
+#### `locator(selector: string): Locator`
+
+Create a `Locator` scoped to this application's accessibility tree.
+
+#### `children(): Promise<Element[]>`
+
+Get direct children (typically windows) of this application.
+
+#### `subscribe(): Promise<Subscription>`
+
+Subscribe to accessibility events from this application.
+
+### `Event`
+
+An accessibility event delivered to subscribers.
+
+#### Properties
+
+#### `eventType`
+
+*Type:* `EventTypeName`
+
+Event kind, as a camelCase string.
+
+#### `appName`
+
+*Type:* `string`
+
+#### `appPid`
+
+*Type:* `number`
+
+#### `target`
+
+*Type:* `Element | null`
+
+Snapshot of the element that triggered the event, if available.
+
+### `Subscription`
+
+A live event subscription. Use `recv()` / `tryRecv()` or iterate with
+`for await (const ev of sub)`. Call `close()` (or drop out of the
+iterator, which calls it for you) to unsubscribe.
+
+#### Properties
+
+#### `active`
+
+*Type:* `boolean`
+
+Whether the subscription is still open.
+
+#### Methods
+
+#### `tryRecv(): Event | null`
+
+Try to receive an event without waiting. Returns `null` if none ready.
+
+#### `recv(timeoutSeconds?: number): Promise<Event>`
+
+Wait for the next event, up to `timeoutSeconds` (default 5).
+
+#### `close(): void`
+
+Close the subscription.
+
+## Functions
+
+### `locator(selector: string): Locator`
+
+Create a top-level Locator searching from the system accessibility root.
+

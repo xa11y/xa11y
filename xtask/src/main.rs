@@ -13,6 +13,8 @@ COMMANDS:
     lint                Run clippy and ruff check
     test                Run Rust unit tests (cargo test --workspace)
     test-python         Build and test Python bindings
+    test-js             Build and unit-test JS (Node) bindings
+    test-js-integ       Run JS integration tests against the AccessKit test app
     test-integ          Run integration tests (delegates to scripts/)
     test-integ-container  Run Linux integration tests in container
     test-qt             Run Qt (PySide6) integration tests
@@ -24,7 +26,7 @@ COMMANDS:
     coverage            Generate code coverage report
     fuzz [ARGS..]       Run provider fuzzer (pass-through args)
     sync-readmes [--check]  Generate crates.io/PyPI READMEs from root README.md
-    check               Run ALL pre-PR checks (fmt, lint, test, test-python, docs)
+    check               Run ALL pre-PR checks (fmt, lint, test, test-python, test-js, docs)
     help                Show this help
 ";
 
@@ -38,6 +40,8 @@ fn main() -> ExitCode {
         "lint" => do_lint(),
         "test" => do_test(),
         "test-python" => do_test_python(),
+        "test-js" => do_test_js(),
+        "test-js-integ" => do_test_js_integ(),
         "test-integ" => do_test_integ(rest),
         "test-integ-container" => do_test_integ_container(rest),
         "test-qt" => do_test_qt(),
@@ -94,9 +98,13 @@ fn run_in(cmd: &str, args: &[&str], dir: &std::path::Path) -> bool {
 }
 
 fn run_with_env(cmd: &str, args: &[&str], key: &str, val: &str) -> bool {
+    run_with_env_in(cmd, args, &project_root(), key, val)
+}
+
+fn run_with_env_in(cmd: &str, args: &[&str], dir: &std::path::Path, key: &str, val: &str) -> bool {
     let status = Command::new(cmd)
         .args(args)
-        .current_dir(project_root())
+        .current_dir(dir)
         .env(key, val)
         .status();
     match status {
@@ -158,7 +166,14 @@ fn do_lint() -> bool {
     heading("Python Rust format check");
     let py_fmt_ok = run_in("cargo", &["fmt", "--", "--check"], &python_dir);
 
-    clippy_ok && ruff_ok && py_cargo_ok && py_fmt_ok
+    heading("JS bindings: cargo check");
+    let js_dir = project_root().join("xa11y-js");
+    let js_cargo_ok = run_with_env_in("cargo", &["check"], &js_dir, "RUSTFLAGS", "-Dwarnings");
+
+    heading("JS bindings: cargo fmt --check");
+    let js_fmt_ok = run_in("cargo", &["fmt", "--", "--check"], &js_dir);
+
+    clippy_ok && ruff_ok && py_cargo_ok && py_fmt_ok && js_cargo_ok && js_fmt_ok
 }
 
 fn do_test() -> bool {
@@ -176,6 +191,45 @@ fn do_test_python() -> bool {
 
     heading("Python bindings: test");
     run_in("python", &["-m", "pytest", "tests/", "-v"], &python_dir)
+}
+
+fn do_test_js() -> bool {
+    let js_dir = project_root().join("xa11y-js");
+
+    heading("JS bindings: install dev deps");
+    if !js_dir.join("node_modules").exists() && !run_in("npm", &["ci"], &js_dir) {
+        return false;
+    }
+
+    heading("JS bindings: build (debug)");
+    if !run_in(
+        "npx",
+        &[
+            "napi",
+            "build",
+            "--platform",
+            "--js",
+            "native.js",
+            "--dts",
+            "native.d.ts",
+        ],
+        &js_dir,
+    ) {
+        return false;
+    }
+
+    heading("JS bindings: unit tests");
+    run_in("npm", &["test"], &js_dir)
+}
+
+fn do_test_js_integ() -> bool {
+    heading("JS bindings: integration tests");
+    let root = project_root();
+    if env::consts::OS == "windows" {
+        eprintln!("JS integration tests on Windows: run scripts/run_js_tests.sh from a PowerShell that mirrors the Linux flow, or run on CI.");
+        return false;
+    }
+    run_in("bash", &["scripts/run_js_tests.sh"], &root)
 }
 
 fn do_test_integ(args: &[String]) -> bool {
@@ -258,6 +312,12 @@ fn do_docs() -> bool {
     heading("Generate Python API docs");
     let gen_ok = run_in("python", &["docs/generate_python_api.py"], &root);
     if !gen_ok {
+        return false;
+    }
+
+    heading("Generate JavaScript API docs");
+    let gen_js_ok = run_in("python", &["docs/generate_js_api.py"], &root);
+    if !gen_js_ok {
         return false;
     }
 
@@ -393,6 +453,12 @@ fn do_check() -> bool {
     heading("PRE-PR CHECK: test-python");
     if !do_test_python() {
         eprintln!("!! Python tests failed.");
+        ok = false;
+    }
+
+    heading("PRE-PR CHECK: test-js");
+    if !do_test_js() {
+        eprintln!("!! JS unit tests failed.");
         ok = false;
     }
 

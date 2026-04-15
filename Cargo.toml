@@ -11,6 +11,7 @@ members = [
 ]
 exclude = [
     "xa11y-python",
+    "xa11y-js",
     "test-apps/tauri",  # Tauri requires platform-specific system deps (WebKit2GTK etc.)
 ]
 resolver = "2"

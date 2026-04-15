@@ -200,11 +200,19 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Check JS bindings formatting
+        working-directory: xa11y-js
+        run: cargo fmt -- --check
+
       - name: Check READMEs are in sync
         run: cargo xtask sync-readmes --check
 
       - name: Run clippy
         run: cargo clippy --workspace --all-targets
+
+      - name: Run clippy on JS bindings
+        working-directory: xa11y-js
+        run: cargo clippy --all-targets
 
   # ── License check ─────────────────────────────────────────────────
   license-check:
@@ -323,6 +331,9 @@ jobs:
       - name: Generate Python API docs
         run: python docs/generate_python_api.py
 
+      - name: Generate JavaScript API docs
+        run: python docs/generate_js_api.py
+
       - name: Install npm dependencies
         working-directory: docs/site
         run: npm ci
@@ -330,6 +341,102 @@ jobs:
       - name: Build Starlight site
         working-directory: docs/site
         run: npm run build
+
+  # ── JavaScript bindings ───────────────────────────────────────────
+  js:
+    name: JS bindings (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            xa11y-js/target
+          key: ${{ runner.os }}-cargo-js-${{ hashFiles('xa11y-js/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-js-
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: xa11y-js/package-lock.json
+
+      - name: Install JS dev dependencies
+        working-directory: xa11y-js
+        run: npm ci
+
+      - name: Cargo check (warnings as errors)
+        working-directory: xa11y-js
+        env:
+          RUSTFLAGS: -Dwarnings
+        run: cargo check
+
+      - name: Cargo fmt --check
+        working-directory: xa11y-js
+        run: cargo fmt -- --check
+
+      - name: Build native binding (debug)
+        working-directory: xa11y-js
+        run: npx napi build --platform --js native.js --dts native.d.ts
+
+      - name: Run unit tests
+        working-directory: xa11y-js
+        run: npm test
+
+  # ── JS integration tests on Linux against the AccessKit test app ──
+  js-integ:
+    name: JS integration (Linux)
+    runs-on: ubuntu-latest
+    needs: js
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            xa11y-js/target
+          key: ${{ runner.os }}-cargo-js-integ-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-js-integ-
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: xa11y-js/package-lock.json
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            xvfb dbus dbus-x11 \
+            at-spi2-core \
+            libxkbcommon-x11-0 libxkbcommon-x11-dev \
+            libxcursor1 libxrandr2 libxi6 \
+            libx11-xcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0 \
+            libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3
+
+      - name: Run JS integration tests
+        run: ./scripts/run_js_tests.sh
 
   # ── Fuzz testing ───────────────────────────────────────────────────
   fuzz:
