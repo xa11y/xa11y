@@ -146,8 +146,36 @@ set -e
 
 if [ -z "$XA11Y_TEST_APP_NAME" ]; then
     echo "!! Test app never became visible through xa11y. Dumping diagnostics:"
+    echo "--- ps (xa11y / at-spi) ---"
     ps -ef | grep -E "xa11y|at-spi" | grep -v grep || true
-    echo "DBus session: $DBUS_SESSION_BUS_ADDRESS"
+    echo "--- DBus session: $DBUS_SESSION_BUS_ADDRESS ---"
+    echo "--- DBus services on session bus ---"
+    dbus-send --session --dest=org.freedesktop.DBus \
+        --type=method_call --print-reply \
+        /org/freedesktop/DBus org.freedesktop.DBus.ListNames 2>&1 \
+        | grep -iE "a11y|xa11y|accessibility" || echo "(no a11y services visible)"
+    echo "--- dmesg tail (if readable) ---"
+    dmesg 2>/dev/null | tail -20 || true
+
+    # Surface the failure in the GitHub Actions UI even if the raw logs
+    # are hard to reach.
+    echo "::error title=Test app not discoverable::xa11y-test-app (pid=$APP_PID) did not register with AT-SPI within 30s. See the Run JS integration tests step for diagnostics."
+    if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+        {
+            echo "## JS integration (Linux) — test app not discoverable"
+            echo ""
+            echo "The test app \`xa11y-test-app\` (pid \`$APP_PID\`) was launched but"
+            echo "never appeared in \`App.list()\` within the 30 s budget."
+            echo ""
+            echo "### Diagnostics"
+            echo '```'
+            ps -ef | grep -E "xa11y|at-spi" | grep -v grep 2>&1 || true
+            echo ""
+            echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"
+            echo "DISPLAY=$DISPLAY"
+            echo '```'
+        } >>"$GITHUB_STEP_SUMMARY"
+    fi
 fi
 
 # ── Run tests ────────────────────────────────────────────────────────
@@ -156,10 +184,24 @@ echo "Running JS integration tests..."
 set +e
 # Per-file timeout of 60s gives getApp() up to 30s of retry budget plus
 # actual test work; overall 180s bounds the whole suite so CI never hangs.
+# Capture the output so we can also surface it in the GitHub step summary
+# when the raw logs aren't easily reachable.
+NODE_TEST_LOG="$JS_DIR/.node-test-output.log"
 timeout 180 node --test --test-timeout=60000 --test-reporter=spec \
-    '__test__/integ/**/*.test.js'
-TEST_EXIT=$?
+    '__test__/integ/**/*.test.js' 2>&1 | tee "$NODE_TEST_LOG"
+TEST_EXIT=${PIPESTATUS[0]}
 set -e
+
+if [ "$TEST_EXIT" -ne 0 ] && [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    {
+        echo "## JS integration (Linux) — test run failed (exit $TEST_EXIT)"
+        echo ""
+        echo '```'
+        tail -200 "$NODE_TEST_LOG"
+        echo '```'
+    } >>"$GITHUB_STEP_SUMMARY"
+    echo "::error title=JS integration tests failed::See the Run JS integration tests step (exit code $TEST_EXIT) for details."
+fi
 
 echo "=== JS integration tests finished (exit code: $TEST_EXIT) ==="
 exit $TEST_EXIT
