@@ -391,6 +391,14 @@ jobs:
         working-directory: xa11y-js
         run: npx napi build --platform --js native.js --dts native.d.ts
 
+      - name: Patch native.d.ts
+        working-directory: xa11y-js
+        run: node scripts/patch-native-dts.mjs
+
+      - name: Type-check (tsc --noEmit)
+        working-directory: xa11y-js
+        run: npx tsc --noEmit
+
       - name: Run unit tests
         working-directory: xa11y-js
         run: npm test

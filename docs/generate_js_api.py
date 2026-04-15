@@ -1,37 +1,57 @@
 #!/usr/bin/env python3
-"""Generate the JavaScript API reference MDX from xa11y-js/index.d.ts.
+"""Generate the JavaScript API reference MDX for xa11y.
 
 Usage:
     python docs/generate_js_api.py
 
-Reads:  xa11y-js/index.d.ts
-Writes: docs/site/src/content/docs/api/javascript.mdx
+Reads:
+  - xa11y-js/native.d.ts  (auto-generated from Rust by napi-rs, then
+    post-processed by xa11y-js/scripts/patch-native-dts.mjs)
+  - xa11y-js/index.d.ts   (hand-written; only adds the error classes
+    and the `EventType` constants object that don't exist in Rust)
 
-The hand-written TypeScript declaration file is the single source of truth.
-We parse it with a tiny line-based state machine — the file has a regular
-structure (JSDoc blocks followed by `export class` / `export function` /
-`export interface`) that doesn't need the full TypeScript compiler.
+Writes:
+  docs/site/src/content/docs/api/javascript.mdx
+
+The split means:
+  * every class / method / type that mirrors the Rust API comes from
+    native.d.ts (one source of truth — the Rust source itself)
+  * only JS-only symbols (error classes, EventType const) are read
+    from index.d.ts
+
+Before calling this script, make sure `xa11y-js/native.d.ts` exists and is
+up to date:
+
+    cd xa11y-js && npx napi build --platform --js native.js --dts native.d.ts \
+        && node scripts/patch-native-dts.mjs
 """
 
 from __future__ import annotations
 
 import re
+import sys
 import textwrap
 from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DTS_PATH = REPO_ROOT / "xa11y-js" / "index.d.ts"
+NATIVE_DTS = REPO_ROOT / "xa11y-js" / "native.d.ts"
+INDEX_DTS = REPO_ROOT / "xa11y-js" / "index.d.ts"
 OUTPUT_PATH = (
     REPO_ROOT / "docs" / "site" / "src" / "content" / "docs" / "api" / "javascript.mdx"
 )
 
-# ── Parse ───────────────────────────────────────────────────────────────────
+# Skip these when walking index.d.ts — everything else in index.d.ts is
+# an error class or the EventType constants object, which we want.
+SKIP_FROM_INDEX = {"EventType"}  # handled specially in the render step
+
+
+# ── Data model ──────────────────────────────────────────────────────────────
 
 
 @dataclass
 class Member:
-    kind: str  # "method" | "getter" | "property" | "static"
+    kind: str  # "method" | "getter" | "static" | "property"
     name: str
     signature: str
     doc: str = ""
@@ -52,27 +72,68 @@ class FunctionDef:
     doc: str = ""
 
 
+@dataclass
+class TypeAlias:
+    name: str
+    definition: str
+    doc: str = ""
+
+
+# ── Parsing ─────────────────────────────────────────────────────────────────
+
+
 def _strip_jsdoc(lines: list[str]) -> str:
     """Turn a JSDoc block into clean MDX-safe markdown text."""
     text = "\n".join(lines)
-    # Strip leading `/**` / trailing `*/` / per-line `*`
     text = re.sub(r"^\s*/\*\*", "", text)
     text = re.sub(r"\*/\s*$", "", text)
     cleaned = []
     for line in text.splitlines():
         cleaned.append(re.sub(r"^\s*\*\s?", "", line))
     text = textwrap.dedent("\n".join(cleaned)).strip()
-    # MDX parses `{...}` as a JS expression. Convert `{@link Foo.bar | label}`
-    # and `{@link Foo}` JSDoc references to inline `code` so they round-trip
-    # safely through the MDX renderer.
+    # MDX parses `{...}` as a JS expression, so convert JSDoc `{@link}`
+    # references to inline code.
     text = re.sub(r"\{@link\s+([^}|]+)\|\s*([^}]+)\}", r"`\2`", text)
     text = re.sub(r"\{@link\s+([^}]+)\}", r"`\1`", text)
     return text
 
 
-def parse(source: str) -> tuple[list[ClassDef], list[FunctionDef]]:
+def _parse_member(line: str, doc: str) -> Member | None:
+    line = line.rstrip(";").strip()
+    if not line or line.startswith("//"):
+        return None
+
+    m = re.match(r"(?:public\s+)?static\s+(?:readonly\s+)?(\w+)\s*(\(.*\).*)", line)
+    if m:
+        return Member(kind="static", name=m.group(1), signature=m.group(2).strip(), doc=doc)
+
+    m = re.match(r"get\s+(\w+)\s*\(\s*\)\s*:\s*(.+)$", line)
+    if m:
+        return Member(kind="getter", name=m.group(1), signature=m.group(2).strip(), doc=doc)
+
+    m = re.match(r"readonly\s+(\w+)\s*:\s*(.+)$", line)
+    if m:
+        return Member(kind="getter", name=m.group(1), signature=m.group(2).strip(), doc=doc)
+
+    m = re.match(r"(\[Symbol\.\w+\])\s*(\(.*\).*)", line)
+    if m:
+        return Member(kind="method", name=m.group(1), signature=m.group(2).strip(), doc=doc)
+
+    m = re.match(r"(\w+)\s*(\(.*\).*)", line)
+    if m:
+        return Member(kind="method", name=m.group(1), signature=m.group(2).strip(), doc=doc)
+
+    m = re.match(r"(\w+)\s*:\s*(.+)$", line)
+    if m:
+        return Member(kind="property", name=m.group(1), signature=m.group(2).strip(), doc=doc)
+
+    return None
+
+
+def parse_dts(source: str) -> tuple[list[ClassDef], list[FunctionDef], list[TypeAlias]]:
     classes: list[ClassDef] = []
     functions: list[FunctionDef] = []
+    aliases: list[TypeAlias] = []
 
     lines = source.splitlines()
     i = 0
@@ -94,12 +155,28 @@ def parse(source: str) -> tuple[list[ClassDef], list[FunctionDef]]:
             i += 1
             continue
 
-        # export class / export declare class / export interface
+        # Type alias `export type Name = ...` (possibly multi-line)
+        m = re.match(r"export\s+type\s+(\w+)\s*=\s*(.*)$", stripped)
+        if m:
+            name = m.group(1)
+            definition = m.group(2).strip()
+            # Continue until we hit a `;`
+            while not definition.rstrip().endswith(";"):
+                i += 1
+                if i >= len(lines):
+                    break
+                definition += "\n" + lines[i].rstrip()
+            definition = definition.rstrip(";").strip()
+            aliases.append(TypeAlias(name=name, definition=definition, doc=pending_doc))
+            pending_doc = ""
+            i += 1
+            continue
+
+        # Class / interface
         m = re.match(r"export\s+(?:declare\s+)?(class|interface)\s+(\w+)", stripped)
         if m:
             cls = ClassDef(kind=m.group(1), name=m.group(2), doc=pending_doc)
             pending_doc = ""
-            # Find body
             depth = stripped.count("{") - stripped.count("}")
             i += 1
             member_doc = ""
@@ -118,12 +195,10 @@ def parse(source: str) -> tuple[list[ClassDef], list[FunctionDef]]:
                     i += 1
                     continue
 
-                # Track braces for nesting
                 depth += mline.count("{") - mline.count("}")
                 if depth <= 0:
                     break
 
-                # Parse member line
                 member = _parse_member(mstrip, member_doc)
                 if member is not None:
                     cls.members.append(member)
@@ -134,58 +209,28 @@ def parse(source: str) -> tuple[list[ClassDef], list[FunctionDef]]:
             i += 1
             continue
 
-        # export function
-        m = re.match(r"export\s+(?:declare\s+)?function\s+(\w+)\s*(\(.*\).*?);?\s*$", stripped)
+        # Function
+        m = re.match(
+            r"export\s+(?:declare\s+)?function\s+(\w+)\s*(\(.*\).*?);?\s*$", stripped
+        )
         if m:
             functions.append(
-                FunctionDef(name=m.group(1), signature=m.group(2).rstrip(";").strip(), doc=pending_doc)
+                FunctionDef(
+                    name=m.group(1),
+                    signature=m.group(2).rstrip(";").strip(),
+                    doc=pending_doc,
+                )
             )
             pending_doc = ""
             i += 1
             continue
 
-        # Reset pending doc if we hit a non-declaration line
-        if stripped and not stripped.startswith("//") and not stripped.startswith("*"):
-            # Keep pending_doc if followed by blank line, reset otherwise
-            pass
         i += 1
 
-    return classes, functions
+    return classes, functions, aliases
 
 
-def _parse_member(line: str, doc: str) -> Member | None:
-    line = line.rstrip(";").strip()
-    if not line or line.startswith("//"):
-        return None
-
-    # Static method: `static name(args): Ret` or `static readonly x: T`
-    m = re.match(r"(?:public\s+)?static\s+(?:readonly\s+)?(\w+)\s*(\(.*\).*)", line)
-    if m:
-        return Member(
-            kind="static", name=m.group(1), signature=m.group(2).strip(), doc=doc
-        )
-
-    # Getter (from hand-written .d.ts the shape is `readonly name: T`)
-    m = re.match(r"readonly\s+(\w+)\s*:\s*(.+)$", line)
-    if m:
-        return Member(kind="getter", name=m.group(1), signature=m.group(2).strip(), doc=doc)
-
-    # Method: `name(args): Ret`
-    m = re.match(r"(\w+)\s*(\(.*\).*)", line)
-    if m:
-        return Member(
-            kind="method", name=m.group(1), signature=m.group(2).strip(), doc=doc
-        )
-
-    # Plain property
-    m = re.match(r"(\w+)\s*:\s*(.+)$", line)
-    if m:
-        return Member(kind="property", name=m.group(1), signature=m.group(2).strip(), doc=doc)
-
-    return None
-
-
-# ── Render ─────────────────────────────────────────────────────────────────
+# ── Rendering ──────────────────────────────────────────────────────────────
 
 
 def render_member(m: Member) -> list[str]:
@@ -246,15 +291,50 @@ def render_function(fn: FunctionDef) -> list[str]:
     return lines
 
 
-def render(classes: list[ClassDef], functions: list[FunctionDef]) -> str:
+def render_alias(alias: TypeAlias) -> list[str]:
+    lines = [f"### `type {alias.name}`", ""]
+    if alias.doc:
+        lines.append(alias.doc)
+        lines.append("")
+    lines.append("```ts")
+    lines.append(f"type {alias.name} = {alias.definition};")
+    lines.append("```")
+    lines.append("")
+    return lines
+
+
+# ── Main ───────────────────────────────────────────────────────────────────
+
+
+def main() -> None:
+    if not NATIVE_DTS.exists():
+        sys.exit(
+            f"error: {NATIVE_DTS.relative_to(REPO_ROOT)} not found.\n"
+            "Run `cd xa11y-js && npx napi build --platform --js native.js "
+            "--dts native.d.ts && node scripts/patch-native-dts.mjs` first."
+        )
+
+    native_classes, native_fns, native_aliases = parse_dts(NATIVE_DTS.read_text())
+    index_classes, _, _ = parse_dts(INDEX_DTS.read_text())
+
+    # Keep the error hierarchy from index.d.ts (they don't exist on the Rust side)
+    error_classes = [
+        c for c in index_classes if c.name.endswith("Error") and c.name not in SKIP_FROM_INDEX
+    ]
+
+    # Filter out private symbols
+    native_classes = [c for c in native_classes if not c.name.startswith("_")]
+    native_fns = [f for f in native_fns if not f.name.startswith("_")]
+
     out: list[str] = [
         "---",
         'title: "JavaScript API Reference"',
         'description: "API reference for the xa11y Node.js bindings (@xa11y/xa11y)."',
         "---",
         "",
-        "{/* This page is auto-generated from xa11y-js/index.d.ts. */}",
-        "{/* Do not edit by hand — run `cargo xtask docs` to regenerate. */}",
+        "{/* This page is auto-generated. Do not edit by hand. */}",
+        "{/* Source: xa11y-js/native.d.ts (Rust → napi-rs → patch-native-dts.mjs) */}",
+        "{/* Regenerate with: python docs/generate_js_api.py */}",
         "",
         "## Overview",
         "",
@@ -264,42 +344,45 @@ def render(classes: list[ClassDef], functions: list[FunctionDef]) -> str:
         "event loop stays responsive.",
         "",
         "```js",
-        "import { App, locator } from '@xa11y/xa11y';",
+        "import { App } from '@xa11y/xa11y';",
         "",
         "const app = await App.byName('Safari');",
         "await app.locator('button[name=\"OK\"]').press();",
         "```",
         "",
-        "## Errors",
-        "",
     ]
 
-    error_classes = [c for c in classes if c.name.endswith("Error")]
-    other_classes = [c for c in classes if not c.name.endswith("Error")]
+    if native_aliases:
+        out.extend(["## Types", ""])
+        for a in native_aliases:
+            out.extend(render_alias(a))
 
+    out.extend(["## Errors", ""])
+    out.append(
+        "All operations throw subclasses of `XA11yError`. Catch a specific "
+        "subclass with `instanceof` and let the rest propagate."
+    )
+    out.append("")
     for c in error_classes:
         out.extend(render_class(c))
 
     out.extend(["## Classes", ""])
-    for c in other_classes:
+    for c in native_classes:
         out.extend(render_class(c))
 
-    if functions:
+    if native_fns:
         out.extend(["## Functions", ""])
-        for f in functions:
+        for f in native_fns:
             out.extend(render_function(f))
 
-    return "\n".join(out) + "\n"
-
-
-def main() -> None:
-    source = DTS_PATH.read_text()
-    classes, functions = parse(source)
-    content = render(classes, functions)
+    content = "\n".join(out) + "\n"
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     OUTPUT_PATH.write_text(content)
     print(f"Wrote {OUTPUT_PATH.relative_to(REPO_ROOT)}")
-    print(f"  {len(classes)} classes, {len(functions)} functions")
+    print(
+        f"  {len(native_classes)} classes, {len(native_fns)} functions, "
+        f"{len(native_aliases)} type aliases, {len(error_classes)} error classes"
+    )
 
 
 if __name__ == "__main__":

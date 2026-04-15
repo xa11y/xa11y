@@ -218,6 +218,16 @@ fn do_test_js() -> bool {
         return false;
     }
 
+    heading("JS bindings: patch native.d.ts");
+    if !run_in("node", &["scripts/patch-native-dts.mjs"], &js_dir) {
+        return false;
+    }
+
+    heading("JS bindings: tsc --noEmit");
+    if !run_in("npx", &["tsc", "--noEmit"], &js_dir) {
+        return false;
+    }
+
     heading("JS bindings: unit tests");
     run_in("npm", &["test"], &js_dir)
 }

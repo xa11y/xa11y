@@ -100,6 +100,7 @@ fi
 
 echo "Building JS bindings (debug)..."
 npx napi build --platform --js native.js --dts native.d.ts
+node scripts/patch-native-dts.mjs
 
 # ── Launch the test application ──────────────────────────────────────
 

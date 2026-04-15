@@ -3,7 +3,8 @@ target/
 *.node
 *.tsbuildinfo
 
-# napi-rs auto-generated bindings — regenerated on build
+# napi-rs auto-generated bindings — regenerated on build and then
+# post-processed by scripts/patch-native-dts.mjs.
 native.js
 native.d.ts
 
