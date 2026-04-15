@@ -110,16 +110,54 @@ APP_PID=$!
 CLEANUP_PIDS+=("$APP_PID")
 
 echo "Waiting for test app (pid=$APP_PID) to register with the a11y bus..."
-sleep 3
+
+# Wait up to 30s for the test app to become visible through the bindings
+# before handing off to node --test. This gives a much clearer failure
+# signal than letting the node test runner time out internally.
+cd "$JS_DIR"
+export XA11Y_TEST_APP_NAME=""
+set +e
+for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    if ! kill -0 "$APP_PID" 2>/dev/null; then
+        echo "!! xa11y-test-app (pid=$APP_PID) exited before registering with the a11y bus"
+        break
+    fi
+    FOUND=$(node -e "
+        const { App } = require('./index.js');
+        App.list()
+          .then((apps) => {
+              const names = apps.map((a) => a.name).filter(Boolean);
+              const hit = names.find((n) => n.toLowerCase().includes('xa11y'));
+              if (hit) { console.log('FOUND:' + hit); process.exit(0); }
+              console.error('visible apps: ' + JSON.stringify(names));
+              process.exit(1);
+          })
+          .catch((err) => { console.error('App.list() threw: ' + err.message); process.exit(2); });
+    " 2>&1)
+    if echo "$FOUND" | grep -q '^FOUND:'; then
+        XA11Y_TEST_APP_NAME="${FOUND#FOUND:}"
+        echo "Test app registered: $XA11Y_TEST_APP_NAME"
+        break
+    fi
+    echo "attempt $attempt/15: $FOUND"
+    sleep 2
+done
+set -e
+
+if [ -z "$XA11Y_TEST_APP_NAME" ]; then
+    echo "!! Test app never became visible through xa11y. Dumping diagnostics:"
+    ps -ef | grep -E "xa11y|at-spi" | grep -v grep || true
+    echo "DBus session: $DBUS_SESSION_BUS_ADDRESS"
+fi
 
 # ── Run tests ────────────────────────────────────────────────────────
 
 echo "Running JS integration tests..."
 set +e
-# 90s overall budget: tree discovery and actions each have their own
-# internal timeouts.
-cd "$JS_DIR"
-timeout 180 node --test --test-timeout=60000 '__test__/integ/**/*.test.js'
+# Per-file timeout of 60s gives getApp() up to 30s of retry budget plus
+# actual test work; overall 180s bounds the whole suite so CI never hangs.
+timeout 180 node --test --test-timeout=60000 --test-reporter=spec \
+    '__test__/integ/**/*.test.js'
 TEST_EXIT=$?
 set -e
 

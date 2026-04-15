@@ -10,8 +10,15 @@
 const xa11y = require('../../index.js');
 const { App, SelectorNotMatchedError, PlatformError, TimeoutError } = xa11y;
 
-const APP_NAMES = ['xa11y-test-app', 'xa11y Test App'];
-const STARTUP_TIMEOUT_MS = 15_000;
+// Candidate app names. `scripts/run_js_tests.sh` can pre-resolve the actual
+// name of a running test app and pass it via `XA11Y_TEST_APP_NAME`, in which
+// case we try it first and skip the startup polling loop entirely.
+const APP_NAMES = [
+  ...(process.env.XA11Y_TEST_APP_NAME ? [process.env.XA11Y_TEST_APP_NAME] : []),
+  'xa11y-test-app',
+  'xa11y Test App',
+];
+const STARTUP_TIMEOUT_MS = 30_000;
 
 let cachedApp = null;
 
