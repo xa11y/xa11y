@@ -439,6 +439,12 @@ jobs:
     name: JS integration (Linux)
     runs-on: ubuntu-latest
     needs: js
+    permissions:
+      contents: read
+      # Needed so the "Post diagnostics to PR on failure" step can write
+      # a comment. No-op on runs from forks (GITHUB_TOKEN is read-only).
+      pull-requests: write
+      issues: write
     steps:
       - uses: actions/checkout@v6
 
@@ -479,7 +485,48 @@ jobs:
             libxcb-image0 libxcb-render-util0 libxcb-xkb1
 
       - name: Run JS integration tests
+        id: js_integ
         run: ./scripts/run_js_tests.sh
+
+      # Surface diagnostics as a PR comment on failure, so that reviewers
+      # (and assistants like Claude Code) can read the actual error output
+      # without needing access to the raw run logs.
+      - name: Post diagnostics to PR on failure
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const jsDir = 'xa11y-js';
+            const sections = [];
+            const diag = path.join(jsDir, '.failure-diagnostics.log');
+            if (fs.existsSync(diag)) {
+              sections.push('### Diagnostic dump\n\n```\n' + fs.readFileSync(diag, 'utf8') + '\n```');
+            }
+            const appLog = path.join(jsDir, '.xa11y-test-app.log');
+            if (fs.existsSync(appLog)) {
+              sections.push('### xa11y-test-app stdout/stderr\n\n```\n' + fs.readFileSync(appLog, 'utf8') + '\n```');
+            }
+            const nodeLog = path.join(jsDir, '.node-test-output.log');
+            if (fs.existsSync(nodeLog)) {
+              const content = fs.readFileSync(nodeLog, 'utf8');
+              const tail = content.split('\n').slice(-200).join('\n');
+              sections.push('### node --test output (tail)\n\n```\n' + tail + '\n```');
+            }
+            if (sections.length === 0) {
+              sections.push('_No diagnostic files were produced — the failure happened before the test step could write them._');
+            }
+            const body =
+              '### JS integration (Linux) failure — run ' + context.runId + '\n\n' +
+              sections.join('\n\n') +
+              '\n\n<sub>Posted automatically from `ci.yml` `js-integ` job.</sub>';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
 
   # ── Fuzz testing ───────────────────────────────────────────────────
   fuzz:

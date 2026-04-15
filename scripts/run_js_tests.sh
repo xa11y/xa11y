@@ -104,8 +104,14 @@ node scripts/patch-native-dts.mjs
 
 # ── Launch the test application ──────────────────────────────────────
 
-echo "Launching xa11y-test-app..."
-"$PROJECT_ROOT/target/debug/xa11y-test-app" --headless &
+APP_LOG="$JS_DIR/.xa11y-test-app.log"
+rm -f "$APP_LOG"
+echo "Launching xa11y-test-app (log: $APP_LOG)..."
+# Set RUST_BACKTRACE so if the test-app panics we get a useful trace,
+# and force it to flush stdout.
+RUST_BACKTRACE=1 \
+    "$PROJECT_ROOT/target/debug/xa11y-test-app" --headless \
+    >"$APP_LOG" 2>&1 &
 APP_PID=$!
 CLEANUP_PIDS+=("$APP_PID")
 
@@ -144,35 +150,52 @@ for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
 done
 set -e
 
-if [ -z "$XA11Y_TEST_APP_NAME" ]; then
-    echo "!! Test app never became visible through xa11y. Dumping diagnostics:"
+dump_diagnostics() {
+    echo "=============================================================="
+    echo "DIAGNOSTIC DUMP"
+    echo "=============================================================="
+    echo "--- xa11y-test-app process status ---"
+    if kill -0 "$APP_PID" 2>/dev/null; then
+        echo "pid=$APP_PID is still alive"
+    else
+        echo "pid=$APP_PID is NOT alive (exited)"
+    fi
+    echo ""
+    echo "--- xa11y-test-app stdout/stderr ($APP_LOG) ---"
+    if [ -f "$APP_LOG" ]; then
+        cat "$APP_LOG" || true
+    else
+        echo "(no log file)"
+    fi
+    echo ""
     echo "--- ps (xa11y / at-spi) ---"
-    ps -ef | grep -E "xa11y|at-spi" | grep -v grep || true
-    echo "--- DBus session: $DBUS_SESSION_BUS_ADDRESS ---"
-    echo "--- DBus services on session bus ---"
+    ps -ef | grep -E "xa11y|at-spi" | grep -v grep || echo "(no matching processes)"
+    echo ""
+    echo "--- environment ---"
+    echo "DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-}"
+    echo "DISPLAY=${DISPLAY:-}"
+    echo ""
+    echo "--- DBus names on session bus ---"
     dbus-send --session --dest=org.freedesktop.DBus \
         --type=method_call --print-reply \
         /org/freedesktop/DBus org.freedesktop.DBus.ListNames 2>&1 \
         | grep -iE "a11y|xa11y|accessibility" || echo "(no a11y services visible)"
-    echo "--- dmesg tail (if readable) ---"
-    dmesg 2>/dev/null | tail -20 || true
+    echo ""
+    echo "=============================================================="
+}
 
-    # Surface the failure in the GitHub Actions UI even if the raw logs
-    # are hard to reach.
-    echo "::error title=Test app not discoverable::xa11y-test-app (pid=$APP_PID) did not register with AT-SPI within 30s. See the Run JS integration tests step for diagnostics."
+if [ -z "$XA11Y_TEST_APP_NAME" ]; then
+    echo "!! Test app never became visible through xa11y."
+    DIAG_FILE="$JS_DIR/.failure-diagnostics.log"
+    dump_diagnostics | tee "$DIAG_FILE"
+
+    echo "::error title=Test app not discoverable::xa11y-test-app (pid=$APP_PID) did not register with AT-SPI within 30s. See the step for diagnostics."
     if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
         {
             echo "## JS integration (Linux) — test app not discoverable"
             echo ""
-            echo "The test app \`xa11y-test-app\` (pid \`$APP_PID\`) was launched but"
-            echo "never appeared in \`App.list()\` within the 30 s budget."
-            echo ""
-            echo "### Diagnostics"
             echo '```'
-            ps -ef | grep -E "xa11y|at-spi" | grep -v grep 2>&1 || true
-            echo ""
-            echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"
-            echo "DISPLAY=$DISPLAY"
+            cat "$DIAG_FILE"
             echo '```'
         } >>"$GITHUB_STEP_SUMMARY"
     fi
