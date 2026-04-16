@@ -14,7 +14,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/xa11y/xa11y"
+    "url": "git+https://github.com/xa11y/xa11y.git"
   },
   "homepage": "https://xa11y.dev",
   "main": "index.js",
