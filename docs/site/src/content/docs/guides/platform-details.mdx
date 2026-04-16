@@ -127,3 +127,40 @@ The tri-state checked value (`Off` / `On` / `Mixed`) is derived differently:
 - **macOS:** Parses the `AXValue` attribute — `"0"` = Off, `"1"` = On, `"2"` = Mixed.
 - **Linux:** Uses AT-SPI state bits — `Checked` (0x10) and `Mixed` (0x2000).
 - **Windows:** Reads `TogglePattern.CurrentToggleState` — 0 = Off, 1 = On, 2 = Indeterminate.
+
+### Linux Electron and Chromium apps
+
+On Linux, Electron and Chromium-based apps ship with their AT-SPI2 bridge disabled by default for performance. xa11y will connect to the app but its tree will contain only the top-level window — `App.by_name("…").locator("button").count()` returns 0 even though buttons are visible on screen.
+
+To expose the full tree, launch the app with `--force-renderer-accessibility`:
+
+```bash
+# VS Code
+code --force-renderer-accessibility
+
+# Cursor
+cursor --force-renderer-accessibility
+
+# Google Chrome / Chromium
+google-chrome --force-renderer-accessibility
+```
+
+Representative node counts on Ubuntu 24.04 + GNOME 46 (Wayland):
+
+| App       | Without flag | With flag |
+| --------- | ------------:| ---------:|
+| VS Code   | 1            | 140       |
+| Cursor    | 1            | 116       |
+| Chrome    | 1            | 210       |
+
+Native GTK apps (Nautilus, gnome-terminal, GNOME Calculator, gnome-text-editor) don't need the flag — their AT-SPI2 bridge is enabled by default.
+
+Firefox exposes its tree when launched with `MOZ_ACCESSIBILITY_ATK2=1` set in the environment.
+
+To diagnose whether a target app has AT-SPI2 enabled at all:
+
+```bash
+busctl --user tree org.a11y.atspi.Registry | grep -i "<app-name>"
+```
+
+If the app's subtree is missing, the problem is the app's accessibility configuration, not xa11y.
