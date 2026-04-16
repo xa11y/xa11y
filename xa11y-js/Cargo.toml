@@ -1,0 +1,21 @@
+[package]
+name = "xa11y-js"
+version = "0.6.0"
+edition = "2021"
+license = "MIT"
+publish = false # Published to npm, not crates.io
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+xa11y = { path = "../xa11y" }
+napi = { version = "3", default-features = false, features = ["napi4", "async", "error_anyhow"] }
+napi-derive = "3"
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+lto = true
+strip = "symbols"

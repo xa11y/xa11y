@@ -1,0 +1,16 @@
+node_modules/
+target/
+*.node
+*.tsbuildinfo
+
+# napi-rs auto-generated bindings — regenerated on build and then
+# post-processed by scripts/patch-native-dts.mjs.
+native.js
+native.d.ts
+
+# Per-platform npm subpackages, populated by `napi prepublish`
+npm/
+
+# Test/build outputs
+coverage/
+.nyc_output/
