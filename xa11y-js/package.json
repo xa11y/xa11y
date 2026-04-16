@@ -24,7 +24,6 @@
     "index.d.ts",
     "native.js",
     "native.d.ts",
-    "xa11y.*.node",
     "README.md"
   ],
   "napi": {
@@ -38,12 +37,19 @@
       "aarch64-pc-windows-msvc"
     ]
   },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "engines": {
     "node": ">=18"
   },
   "scripts": {
+    "artifacts": "napi artifacts",
     "build": "napi build --platform --release --js native.js --dts native.d.ts && node scripts/patch-native-dts.mjs",
     "build:debug": "napi build --platform --js native.js --dts native.d.ts && node scripts/patch-native-dts.mjs",
+    "create-npm-dirs": "napi create-npm-dirs",
+    "prepublishOnly": "napi pre-publish -t npm --no-gh-release",
     "typecheck": "tsc --noEmit",
     "test": "node --test '__test__/unit/**/*.test.js'",
     "test:integ": "node --test --test-timeout=60000 '__test__/integ/**/*.test.js'"
