@@ -1,0 +1,56 @@
+{
+  "name": "@xa11y/xa11y",
+  "version": "0.6.0",
+  "description": "Cross-platform accessibility client library for Node.js",
+  "keywords": [
+    "accessibility",
+    "a11y",
+    "automation",
+    "ui-testing",
+    "screen-reader",
+    "at-spi",
+    "uiautomation"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/xa11y/xa11y"
+  },
+  "homepage": "https://xa11y.dev",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "native.js",
+    "native.d.ts",
+    "xa11y.*.node",
+    "README.md"
+  ],
+  "napi": {
+    "binaryName": "xa11y",
+    "targets": [
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc",
+      "aarch64-pc-windows-msvc"
+    ]
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "napi build --platform --release --js native.js --dts native.d.ts && node scripts/patch-native-dts.mjs",
+    "build:debug": "napi build --platform --js native.js --dts native.d.ts && node scripts/patch-native-dts.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test '__test__/unit/**/*.test.js'",
+    "test:integ": "node --test --test-timeout=60000 '__test__/integ/**/*.test.js'"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.0.0",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}

@@ -1469,17 +1469,21 @@ impl Provider for LinuxProvider {
                 .do_atspi_action_by_name(&target, "scroll down")
                 .is_err()
             {
-                // Fall back to Component.ScrollTo (single call, not repeatable)
-                let proxy =
-                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")?;
-                // BOTTOM_EDGE = 3
-                proxy
-                    .call_method("ScrollTo", &(3u32,))
-                    .map_err(|e| Error::Platform {
-                        code: -1,
-                        message: format!("ScrollTo failed: {}", e),
-                    })?;
-                return Ok(());
+                // Fall back to Component.ScrollTo (single call, not repeatable).
+                // If both fail, return ActionNotSupported for clearer error handling.
+                // Fixes GitHub issue #99.
+                if let Ok(proxy) =
+                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")
+                {
+                    // BOTTOM_EDGE = 3
+                    if proxy.call_method("ScrollTo", &(3u32,)).is_ok() {
+                        return Ok(());
+                    }
+                }
+                return Err(Error::ActionNotSupported {
+                    action: "scroll_down".to_string(),
+                    role: element.role,
+                });
             }
         }
         Ok(())
@@ -1490,17 +1494,21 @@ impl Provider for LinuxProvider {
         let count = (amount.abs() as u32).max(1);
         for _ in 0..count {
             if self.do_atspi_action_by_name(&target, "scroll up").is_err() {
-                // Fall back to Component.ScrollTo (single call, not repeatable)
-                let proxy =
-                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")?;
-                // TOP_EDGE = 2
-                proxy
-                    .call_method("ScrollTo", &(2u32,))
-                    .map_err(|e| Error::Platform {
-                        code: -1,
-                        message: format!("ScrollTo failed: {}", e),
-                    })?;
-                return Ok(());
+                // Fall back to Component.ScrollTo (single call, not repeatable).
+                // If both fail, return ActionNotSupported for clearer error handling.
+                // Fixes GitHub issue #99.
+                if let Ok(proxy) =
+                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")
+                {
+                    // TOP_EDGE = 2
+                    if proxy.call_method("ScrollTo", &(2u32,)).is_ok() {
+                        return Ok(());
+                    }
+                }
+                return Err(Error::ActionNotSupported {
+                    action: "scroll_up".to_string(),
+                    role: element.role,
+                });
             }
         }
         Ok(())
@@ -1514,17 +1522,21 @@ impl Provider for LinuxProvider {
                 .do_atspi_action_by_name(&target, "scroll right")
                 .is_err()
             {
-                // Fall back to Component.ScrollTo (single call, not repeatable)
-                let proxy =
-                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")?;
-                // RIGHT_EDGE = 5
-                proxy
-                    .call_method("ScrollTo", &(5u32,))
-                    .map_err(|e| Error::Platform {
-                        code: -1,
-                        message: format!("ScrollTo failed: {}", e),
-                    })?;
-                return Ok(());
+                // Fall back to Component.ScrollTo (single call, not repeatable).
+                // If both fail, return ActionNotSupported for clearer error handling.
+                // Fixes GitHub issue #99.
+                if let Ok(proxy) =
+                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")
+                {
+                    // RIGHT_EDGE = 5
+                    if proxy.call_method("ScrollTo", &(5u32,)).is_ok() {
+                        return Ok(());
+                    }
+                }
+                return Err(Error::ActionNotSupported {
+                    action: "scroll_right".to_string(),
+                    role: element.role,
+                });
             }
         }
         Ok(())
@@ -1538,17 +1550,21 @@ impl Provider for LinuxProvider {
                 .do_atspi_action_by_name(&target, "scroll left")
                 .is_err()
             {
-                // Fall back to Component.ScrollTo (single call, not repeatable)
-                let proxy =
-                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")?;
-                // LEFT_EDGE = 4
-                proxy
-                    .call_method("ScrollTo", &(4u32,))
-                    .map_err(|e| Error::Platform {
-                        code: -1,
-                        message: format!("ScrollTo failed: {}", e),
-                    })?;
-                return Ok(());
+                // Fall back to Component.ScrollTo (single call, not repeatable).
+                // If both fail, return ActionNotSupported for clearer error handling.
+                // Fixes GitHub issue #99.
+                if let Ok(proxy) =
+                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")
+                {
+                    // LEFT_EDGE = 4
+                    if proxy.call_method("ScrollTo", &(4u32,)).is_ok() {
+                        return Ok(());
+                    }
+                }
+                return Err(Error::ActionNotSupported {
+                    action: "scroll_left".to_string(),
+                    role: element.role,
+                });
             }
         }
         Ok(())

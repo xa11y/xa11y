@@ -200,11 +200,19 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Check JS bindings formatting
+        working-directory: xa11y-js
+        run: cargo fmt -- --check
+
       - name: Check READMEs are in sync
         run: cargo xtask sync-readmes --check
 
       - name: Run clippy
         run: cargo clippy --workspace --all-targets
+
+      - name: Run clippy on JS bindings
+        working-directory: xa11y-js
+        run: cargo clippy --all-targets
 
   # ── License check ─────────────────────────────────────────────────
   license-check:
@@ -310,6 +318,20 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            xa11y-js/target
+          key: ${{ runner.os }}-cargo-docs-${{ hashFiles('xa11y-js/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-docs-
+
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -318,18 +340,193 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: docs/site/package-lock.json
+          cache-dependency-path: |
+            docs/site/package-lock.json
+            xa11y-js/package-lock.json
+
+      # The JS API doc generator reads xa11y-js/native.d.ts, which is
+      # produced by napi-rs from the Rust source. Build + patch it here
+      # so the generator has a fresh source of truth to read from.
+      - name: Install xa11y-js dev deps
+        working-directory: xa11y-js
+        run: npm ci
+
+      - name: Build xa11y-js native binding (for type stubs)
+        working-directory: xa11y-js
+        run: npx napi build --platform --js native.js --dts native.d.ts
+
+      - name: Patch native.d.ts
+        working-directory: xa11y-js
+        run: node scripts/patch-native-dts.mjs
 
       - name: Generate Python API docs
         run: python docs/generate_python_api.py
 
-      - name: Install npm dependencies
+      - name: Generate JavaScript API docs
+        run: python docs/generate_js_api.py
+
+      - name: Install Starlight npm dependencies
         working-directory: docs/site
         run: npm ci
 
       - name: Build Starlight site
         working-directory: docs/site
         run: npm run build
+
+  # ── JavaScript bindings ───────────────────────────────────────────
+  js:
+    name: JS bindings (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            xa11y-js/target
+          key: ${{ runner.os }}-cargo-js-${{ hashFiles('xa11y-js/Cargo.lock', '**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-js-
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: xa11y-js/package-lock.json
+
+      - name: Install JS dev dependencies
+        working-directory: xa11y-js
+        run: npm ci
+
+      - name: Cargo check (warnings as errors)
+        working-directory: xa11y-js
+        env:
+          RUSTFLAGS: -Dwarnings
+        run: cargo check
+
+      - name: Cargo fmt --check
+        working-directory: xa11y-js
+        run: cargo fmt -- --check
+
+      - name: Build native binding (debug)
+        working-directory: xa11y-js
+        run: npx napi build --platform --js native.js --dts native.d.ts
+
+      - name: Patch native.d.ts
+        working-directory: xa11y-js
+        run: node scripts/patch-native-dts.mjs
+
+      - name: Type-check (tsc --noEmit)
+        working-directory: xa11y-js
+        run: npx tsc --noEmit
+
+      - name: Run unit tests
+        working-directory: xa11y-js
+        run: npm test
+
+  # ── JS integration tests on Linux against the AccessKit test app ──
+  js-integ:
+    name: JS integration (Linux)
+    runs-on: ubuntu-latest
+    needs: js
+    permissions:
+      contents: read
+      # Needed so the "Post diagnostics to PR on failure" step can write
+      # a comment. No-op on runs from forks (GITHUB_TOKEN is read-only).
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            xa11y-js/target
+          key: ${{ runner.os }}-cargo-js-integ-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-js-integ-
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: xa11y-js/package-lock.json
+
+      - name: Install system dependencies
+        # Same list as the Linux unit-test job: xvfb + dbus + at-spi2 for
+        # accessibility, xcb/xkb/egl for winit's window backend.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            xvfb dbus dbus-x11 \
+            at-spi2-core \
+            libxkbcommon-x11-0 libxkbcommon-x11-dev \
+            libxcursor1 libxrandr2 libxi6 \
+            libx11-xcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0 \
+            libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 \
+            libxcb-image0 libxcb-render-util0 libxcb-xkb1
+
+      - name: Run JS integration tests
+        id: js_integ
+        run: ./scripts/run_js_tests.sh
+
+      # Surface diagnostics as a PR comment on failure, so that reviewers
+      # (and assistants like Claude Code) can read the actual error output
+      # without needing access to the raw run logs.
+      - name: Post diagnostics to PR on failure
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const jsDir = 'xa11y-js';
+            const sections = [];
+            const diag = path.join(jsDir, '.failure-diagnostics.log');
+            if (fs.existsSync(diag)) {
+              sections.push('### Diagnostic dump\n\n```\n' + fs.readFileSync(diag, 'utf8') + '\n```');
+            }
+            const appLog = path.join(jsDir, '.xa11y-test-app.log');
+            if (fs.existsSync(appLog)) {
+              sections.push('### xa11y-test-app stdout/stderr\n\n```\n' + fs.readFileSync(appLog, 'utf8') + '\n```');
+            }
+            const nodeLog = path.join(jsDir, '.node-test-output.log');
+            if (fs.existsSync(nodeLog)) {
+              const content = fs.readFileSync(nodeLog, 'utf8');
+              const tail = content.split('\n').slice(-200).join('\n');
+              sections.push('### node --test output (tail)\n\n```\n' + tail + '\n```');
+            }
+            if (sections.length === 0) {
+              sections.push('_No diagnostic files were produced — the failure happened before the test step could write them._');
+            }
+            const body =
+              '### JS integration (Linux) failure — run ' + context.runId + '\n\n' +
+              sections.join('\n\n') +
+              '\n\n<sub>Posted automatically from `ci.yml` `js-integ` job.</sub>';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
 
   # ── Fuzz testing ───────────────────────────────────────────────────
   fuzz:
