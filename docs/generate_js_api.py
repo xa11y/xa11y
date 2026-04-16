@@ -7,17 +7,17 @@ Usage:
 Reads:
   - xa11y-js/native.d.ts  (auto-generated from Rust by napi-rs, then
     post-processed by xa11y-js/scripts/patch-native-dts.mjs)
-  - xa11y-js/index.d.ts   (hand-written; only adds the error classes
-    and the `EventType` constants object that don't exist in Rust)
+  - xa11y-js/index.d.ts   (hand-written; adds the error classes, the
+    EventEmitter-based Subscription, and App augmentations)
 
 Writes:
   docs/site/src/content/docs/api/javascript.mdx
 
 The split means:
   * every class / method / type that mirrors the Rust API comes from
-    native.d.ts (one source of truth — the Rust source itself)
-  * only JS-only symbols (error classes, EventType const) are read
-    from index.d.ts
+    native.d.ts (one source of truth -- the Rust source itself)
+  * only JS-only symbols (error classes, Subscription, App interface
+    augmentation) are read from index.d.ts
 
 Before calling this script, make sure `xa11y-js/native.d.ts` exists and is
 up to date:
@@ -41,9 +41,9 @@ OUTPUT_PATH = (
     REPO_ROOT / "docs" / "site" / "src" / "content" / "docs" / "api" / "javascript.mdx"
 )
 
-# Skip these when walking index.d.ts — everything else in index.d.ts is
-# an error class or the EventType constants object, which we want.
-SKIP_FROM_INDEX = {"EventType"}  # handled specially in the render step
+# Skip these when walking index.d.ts -- everything else in index.d.ts is
+# either an error class or the EventEmitter-based Subscription, which we want.
+SKIP_FROM_INDEX: set[str] = set()
 
 
 # ── Data model ──────────────────────────────────────────────────────────────

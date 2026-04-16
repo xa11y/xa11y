@@ -1,19 +1,21 @@
 // Type-level sanity check: compile with `tsc --noEmit` to make sure the
-// public API narrows as expected. This file is never executed — it only
+// public API narrows as expected. This file is never executed -- it only
 // exists to keep the type surface honest.
 
 import {
   App,
   Element,
   Event,
-  EventType,
   Locator,
   Subscription,
   XA11yError,
   SelectorNotMatchedError,
+  TimeoutError,
   type CheckedState,
   type EventTypeName,
   type Rect,
+  type SubscribeOptions,
+  type WaitForEventOptions,
 } from '../../index.js';
 
 async function checks() {
@@ -41,31 +43,52 @@ async function checks() {
   // Narrowed by patch-native-dts:
   const checked: CheckedState | null = el.checked;
   if (checked === 'on' || checked === 'off' || checked === 'mixed' || checked === null) {
-    // OK — exhaustive
+    // OK -- exhaustive
   }
 
-  // Subscription / Event
-  const sub: Subscription = await app.subscribe();
-  const ev: Event = await sub.recv();
-  const kind: EventTypeName = ev.eventType;
+  // ── Subscription (EventEmitter) ─────────────────────────────────────
+
+  // Subscribe with options
+  const ctrl = new AbortController();
+  const subOpts: SubscribeOptions = { signal: ctrl.signal };
+  const sub: Subscription = await app.subscribe(subOpts);
+
+  // Typed on/once/off
+  sub.on('focusChanged', (ev: Event) => {
+    const _type: EventTypeName = ev.type;
+    const _target: Element | null = ev.target;
+  });
+  sub.once('windowOpened', (_ev: Event) => {});
+  sub.on('event', (_ev: Event) => {});
+  sub.off('focusChanged', () => {});
+
+  // waitForEvent with options
+  const waitOpts: WaitForEventOptions = {
+    predicate: (e) => e.target?.role === 'button',
+    timeout: 3000,
+    signal: ctrl.signal,
+  };
+  const ev: Event = await sub.waitForEvent('focusChanged', waitOpts);
+  const kind: EventTypeName = ev.type;
   if (
     kind === 'focusChanged' ||
     kind === 'valueChanged' ||
     kind === 'textChanged'
   ) {
-    // OK — literal narrowing works
+    // OK -- literal narrowing works
   }
 
-  // Async iteration over a subscription
-  for await (const e of sub) {
-    const _k: EventTypeName = e.eventType;
-  }
+  // closed getter
+  const _closed: boolean = sub.closed;
+
+  // close
   sub.close();
 
-  // EventType constants object
-  const _focus: EventTypeName = EventType.FocusChanged;
+  // app.waitForEvent (convenience)
+  const ev2: Event = await app.waitForEvent('windowOpened', { timeout: 2000 });
+  void ev2;
 
-  // Error hierarchy — instanceof narrows to subclass
+  // Error hierarchy -- instanceof narrows to subclass
   try {
     await loc.element();
   } catch (e) {
@@ -73,6 +96,9 @@ async function checks() {
       const _msg: string = e.message;
     }
     if (e instanceof XA11yError) {
+      const _msg: string = e.message;
+    }
+    if (e instanceof TimeoutError) {
       const _msg: string = e.message;
     }
   }
