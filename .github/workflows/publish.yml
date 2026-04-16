@@ -242,12 +242,13 @@ jobs:
 
   # ── npm (JavaScript bindings) ──────────────────────────────────────
   #
-  # napi-rs publishes one package per target triple
-  # (e.g. @xa11y/xa11y-linux-x64-gnu) containing only the prebuilt `.node`
-  # binary, plus the umbrella `@xa11y/xa11y` package that references them
-  # via `optionalDependencies` and dispatches at load time. We build the
-  # six supported triples in a fan-out matrix, upload each `.node` as an
-  # artifact, then fan back in for a single publish job.
+  # napi-rs publishes one package per target triple (e.g.
+  # @crowecawcaw/xa11y-linux-x64-gnu) containing only the prebuilt
+  # `.node` binary, plus the umbrella `@crowecawcaw/xa11y` package that
+  # references them via `optionalDependencies` and dispatches at load
+  # time. We build the six supported triples in a fan-out matrix, upload
+  # each `.node` as an artifact, then fan back in for a single publish
+  # job.
 
   build-npm:
     name: Build npm (${{ matrix.settings.target }})
@@ -385,7 +386,7 @@ jobs:
       # npm --no-gh-release`, which syncs versions in npm/<triple>/,
       # rewrites the main package.json `optionalDependencies`, and
       # publishes each per-target subpackage. Then npm publishes the
-      # umbrella `@xa11y/xa11y` package.
+      # umbrella `@crowecawcaw/xa11y` package.
       #
       # NPM_CONFIG_PROVENANCE=true attaches npm provenance statements to
       # every publish call (umbrella + subpackages) rather than only to

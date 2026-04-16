@@ -1,6 +1,6 @@
-# @xa11y/xa11y
+# @crowecawcaw/xa11y
 
-[![npm](https://img.shields.io/npm/v/@xa11y/xa11y)](https://www.npmjs.com/package/@xa11y/xa11y)
+[![npm](https://img.shields.io/npm/v/@crowecawcaw/xa11y)](https://www.npmjs.com/package/@crowecawcaw/xa11y)
 [![CI](https://github.com/xa11y/xa11y/actions/workflows/ci.yml/badge.svg)](https://github.com/xa11y/xa11y/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/xa11y/xa11y/blob/main/LICENSE)
 [![Docs](https://img.shields.io/badge/docs-xa11y.dev-blueviolet)](https://xa11y.dev)
@@ -20,7 +20,7 @@ auditing.
 ## Quick example
 
 ```js
-import { App } from '@xa11y/xa11y';
+import { App } from '@crowecawcaw/xa11y';
 
 const safari = await App.byName('Safari');
 
@@ -37,7 +37,7 @@ await safari.locator('text_field[name^="Search"]').setValue('hello world');
 ## Installation
 
 ```bash
-npm install @xa11y/xa11y
+npm install @crowecawcaw/xa11y
 ```
 
 Requires Node.js 18 or newer. Pre-built native binaries are published for
@@ -136,7 +136,7 @@ All operations throw subclasses of `XA11yError`:
 Catch a specific subclass and let the rest propagate:
 
 ```js
-import { App, SelectorNotMatchedError } from '@xa11y/xa11y';
+import { App, SelectorNotMatchedError } from '@crowecawcaw/xa11y';
 
 try {
   await app.locator('button[name="Submit"]').press();

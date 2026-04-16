@@ -3,7 +3,7 @@
  *
  * @example
  * ```ts
- * import { App } from '@xa11y/xa11y';
+ * import { App } from '@crowecawcaw/xa11y';
  *
  * const app = await App.byName('Safari');
  * await app.locator('button[name="OK"]').press();
