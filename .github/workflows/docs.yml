@@ -26,7 +26,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: docs/site/package-lock.json
+          cache-dependency-path: |
+            docs/site/package-lock.json
+            xa11y-js/package-lock.json
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -38,6 +40,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
+            xa11y-js/target
           key: docs-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: docs-cargo-
 
@@ -48,6 +51,27 @@ jobs:
 
       - name: Install Sphinx
         run: pip install sphinx sphinx-rtd-theme sphinx-autoapi
+
+      # The JS API doc generator reads xa11y-js/native.d.ts, which is
+      # produced by napi-rs from the Rust source. Build + patch it here
+      # so the generator has a fresh source of truth to read from.
+      - name: Install xa11y-js dev dependencies
+        working-directory: xa11y-js
+        run: npm ci
+
+      - name: Build xa11y-js native binding (for type stubs)
+        working-directory: xa11y-js
+        run: npx napi build --platform --js native.js --dts native.d.ts
+
+      - name: Patch native.d.ts
+        working-directory: xa11y-js
+        run: node scripts/patch-native-dts.mjs
+
+      - name: Generate Python API docs
+        run: python docs/generate_python_api.py
+
+      - name: Generate JavaScript API docs
+        run: python docs/generate_js_api.py
 
       - name: Install npm dependencies
         working-directory: docs/site
