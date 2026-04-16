@@ -2,21 +2,27 @@
 /**
  * Public entry point for the xa11y Node.js bindings.
  *
- * This file re-exports the raw napi-rs bindings from `./native.js` with two
+ * This file re-exports the raw napi-rs bindings from `./native.js` with three
  * sugar layers on top:
  *
- *   1. Typed error subclasses — the napi `Error` thrown from Rust carries a
+ *   1. Typed error subclasses -- the napi `Error` thrown from Rust carries a
  *      `XA11Y_*` tag in its `message`. We catch, split, and re-throw as a
  *      `XA11yError` subclass so consumers can do `instanceof` checks.
  *
- *   2. Subscription async iteration — `for await (const ev of sub)` works by
- *      wrapping the `recv()` polling loop.
+ *   2. Subscription as EventEmitter -- `Subscription` extends `EventEmitter`.
+ *      The native `_NativeSubscription` is internal; the public class emits
+ *      typed events (`'focusChanged'`, `'valueChanged'`, ...) and supports
+ *      `close()` / `signal` for cancellation.
+ *
+ *   3. `waitForEvent()` on App and Subscription -- a Playwright-style one-shot
+ *      wait with optional predicate and timeout.
  *
  * The Rust-facing API is considered unstable. Always import from this file.
  */
 
 'use strict';
 
+const { EventEmitter } = require('node:events');
 const native = require('./native.js');
 
 // ── Error types ────────────────────────────────────────────────────────────
@@ -118,13 +124,6 @@ function wrap(fn) {
 }
 
 // ── Patch native classes ────────────────────────────────────────────────────
-//
-// napi-rs emits classes whose methods throw raw `Error` objects. For instance
-// methods (on `.prototype`) the property descriptors are configurable, so we
-// rewrite them in place with a typed-error wrapper. Static methods on the
-// class itself are non-configurable, so we model `App` as a subclass that
-// overrides its three static factories and proxies `instanceof` back to the
-// native class via `Symbol.hasInstance`.
 
 function patchPrototypeMethods(cls) {
   if (!cls || !cls.prototype) return;
@@ -139,14 +138,121 @@ function patchPrototypeMethods(cls) {
 patchPrototypeMethods(native.App);
 patchPrototypeMethods(native.Element);
 patchPrototypeMethods(native.Locator);
-patchPrototypeMethods(native.Subscription);
 patchPrototypeMethods(native.Event);
+
+// ── Subscription (EventEmitter wrapper) ────────────────────────────────────
+
+/**
+ * EventEmitter-based subscription for accessibility events.
+ *
+ * Events are emitted both under their specific type name (`'focusChanged'`,
+ * `'valueChanged'`, ...) and the catch-all `'event'` name. Use standard
+ * `.on()` / `.once()` / `.off()` to attach handlers.
+ *
+ * @example
+ * ```js
+ * const sub = await app.subscribe();
+ * sub.on('focusChanged', (ev) => console.log(ev.target?.name));
+ * sub.on('event', (ev) => metrics.record(ev.type));
+ * // ...
+ * sub.close();
+ * ```
+ */
+class Subscription extends EventEmitter {
+  /** @param {object} nativeSub - A _NativeSubscription instance from Rust */
+  constructor(nativeSub) {
+    super();
+    this._native = nativeSub;
+    this._closed = false;
+
+    // Register the wake-up callback. Each time Rust pushes events, it calls
+    // this function on the JS main thread. We drain and emit.
+    this._native.start(() => {
+      if (this._closed) return;
+      const events = this._native.drain();
+      for (const ev of events) {
+        this.emit(ev.type, ev);
+        this.emit('event', ev);
+      }
+    });
+  }
+
+  /** Whether the subscription has been closed. */
+  get closed() {
+    return this._closed;
+  }
+
+  /** Stop event delivery and release the underlying platform subscription. */
+  close() {
+    if (this._closed) return;
+    this._closed = true;
+    this._native.close();
+    this.removeAllListeners();
+  }
+
+  /**
+   * Wait for a single event matching `type` and optional `predicate`.
+   *
+   * @param {string} type - Event type name (e.g. `'focusChanged'`) or `'event'`
+   * @param {object} [opts]
+   * @param {(ev: object) => boolean} [opts.predicate] - Filter function
+   * @param {number} [opts.timeout=5000] - Timeout in milliseconds
+   * @param {AbortSignal} [opts.signal] - Abort signal for cancellation
+   * @returns {Promise<object>} The matching event
+   */
+  waitForEvent(type, opts = {}) {
+    const { predicate, timeout = 5000, signal } = opts;
+    return new Promise((resolve, reject) => {
+      if (this._closed) {
+        reject(new PlatformError('Subscription is closed'));
+        return;
+      }
+
+      let timer = null;
+
+      const cleanup = () => {
+        if (timer) clearTimeout(timer);
+        this.off(type, onEvent);
+        if (signal) signal.removeEventListener('abort', onAbort);
+      };
+
+      const onEvent = (ev) => {
+        if (predicate && !predicate(ev)) return;
+        cleanup();
+        resolve(ev);
+      };
+
+      const onAbort = () => {
+        cleanup();
+        reject(new DOMException('The operation was aborted', 'AbortError'));
+      };
+
+      if (signal) {
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+
+      if (timeout > 0) {
+        timer = setTimeout(() => {
+          cleanup();
+          reject(new TimeoutError(`Timeout after ${timeout}ms waiting for '${type}'`));
+        }, timeout);
+      }
+
+      this.on(type, onEvent);
+    });
+  }
+}
+
+// ── App wrapper ────────────────────────────────────────────────────────────
 
 /**
  * User-facing `App` class. Extends the native class so properties and
  * instance methods behave identically, but overrides the three async static
- * factories to rethrow typed errors. `Symbol.hasInstance` is overridden so
- * `instance instanceof App` also returns true for napi-constructed instances.
+ * factories and `subscribe()` to produce the EventEmitter-based Subscription.
  */
 class App extends native.App {
   static [Symbol.hasInstance](instance) {
@@ -176,40 +282,63 @@ class App extends native.App {
       throw toTypedError(err);
     }
   }
-}
 
-// ── Subscription sugar ──────────────────────────────────────────────────────
-//
-// Add a Symbol.asyncIterator so users can `for await (const ev of sub)`.
-// The iterator loops with short recv timeouts so the AbortSignal (or an
-// external close()) can break it.
+  /**
+   * Subscribe to accessibility events from this application.
+   *
+   * @param {object} [opts]
+   * @param {AbortSignal} [opts.signal] - Abort signal; closes the sub on abort
+   * @returns {Promise<Subscription>}
+   */
+  async subscribe(opts = {}) {
+    let nativeSub;
+    try {
+      nativeSub = await native.App.prototype.subscribe.call(this);
+    } catch (err) {
+      throw toTypedError(err);
+    }
+    const sub = new Subscription(nativeSub);
 
-if (native.Subscription && native.Subscription.prototype) {
-  native.Subscription.prototype[Symbol.asyncIterator] = function events() {
-    const sub = this;
-    return {
-      next: async () => {
-        if (!sub.active) return { value: undefined, done: true };
-        while (sub.active) {
-          try {
-            const ev = await sub.recv(0.1);
-            return { value: ev, done: false };
-          } catch (err) {
-            if (err instanceof TimeoutError) continue;
-            if (err instanceof PlatformError && /closed/i.test(err.message)) {
-              return { value: undefined, done: true };
-            }
-            throw err;
-          }
-        }
-        return { value: undefined, done: true };
-      },
-      return: async () => {
+    if (opts.signal) {
+      if (opts.signal.aborted) {
         sub.close();
-        return { value: undefined, done: true };
-      },
-    };
-  };
+        return sub;
+      }
+      const onAbort = () => sub.close();
+      opts.signal.addEventListener('abort', onAbort, { once: true });
+      // Clean up the abort listener when the sub is closed independently.
+      const origClose = sub.close.bind(sub);
+      sub.close = function () {
+        opts.signal.removeEventListener('abort', onAbort);
+        origClose();
+      };
+    }
+
+    return sub;
+  }
+
+  /**
+   * Wait for a single accessibility event from this application.
+   *
+   * Creates a temporary subscription, waits for a matching event, then
+   * closes it. For multiple waits, use `.subscribe()` and call
+   * `.waitForEvent()` on the subscription directly.
+   *
+   * @param {string} type - Event type name (e.g. `'focusChanged'`) or `'event'`
+   * @param {object} [opts]
+   * @param {(ev: object) => boolean} [opts.predicate]
+   * @param {number} [opts.timeout=5000]
+   * @param {AbortSignal} [opts.signal]
+   * @returns {Promise<object>}
+   */
+  async waitForEvent(type, opts = {}) {
+    const sub = await this.subscribe({ signal: opts.signal });
+    try {
+      return await sub.waitForEvent(type, opts);
+    } finally {
+      sub.close();
+    }
+  }
 }
 
 // ── Top-level locator ────────────────────────────────────────────────────────
@@ -224,34 +353,14 @@ function locator(selector) {
   return wrap(native.locator)(selector);
 }
 
-// ── Event type constants (namespace object) ─────────────────────────────────
-
-const EventType = Object.freeze({
-  FocusChanged: 'focusChanged',
-  ValueChanged: 'valueChanged',
-  NameChanged: 'nameChanged',
-  StateChanged: 'stateChanged',
-  StructureChanged: 'structureChanged',
-  WindowOpened: 'windowOpened',
-  WindowClosed: 'windowClosed',
-  WindowActivated: 'windowActivated',
-  WindowDeactivated: 'windowDeactivated',
-  SelectionChanged: 'selectionChanged',
-  MenuOpened: 'menuOpened',
-  MenuClosed: 'menuClosed',
-  Alert: 'alert',
-  TextChanged: 'textChanged',
-});
-
 // ── Re-exports ──────────────────────────────────────────────────────────────
 
 module.exports = {
   App,
   Element: native.Element,
   Event: native.Event,
-  EventType,
   Locator: native.Locator,
-  Subscription: native.Subscription,
+  Subscription,
   locator,
 
   // Error classes
@@ -263,6 +372,6 @@ module.exports = {
   InvalidSelectorError,
   PlatformError,
 
-  // @internal — used by unit tests
+  // @internal -- used by unit tests
   _makeTestLocator: native._makeTestLocator,
 };

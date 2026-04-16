@@ -6,8 +6,8 @@
 // Responsibilities:
 //   1. Prepend shared type aliases (`CheckedState`, `EventTypeName`) that
 //      the Rust side can't express.
-//   2. Narrow `Element.checked: string | null` → `CheckedState | null`.
-//   3. Narrow `Event.eventType: string` → `EventTypeName`.
+//   2. Narrow `Element.checked: string | null` -> `CheckedState | null`.
+//   3. Narrow `Event.type: string` -> `EventTypeName`.
 //
 // Each substitution is guarded: if a pattern stops matching (because napi
 // changed its output format), the script fails loudly so the drift is
@@ -47,27 +47,19 @@ export type EventTypeName =
 `;
 
 /**
- * List of narrowings. Each entry is a required substitution — if `from`
+ * List of narrowings. Each entry is a required substitution -- if `from`
  * doesn't appear, the script exits non-zero so the drift is caught in CI.
  */
 const REPLACEMENTS = [
   {
-    name: 'Element.checked → CheckedState | null',
+    name: 'Element.checked -> CheckedState | null',
     from: '  get checked(): string | null',
     to: '  get checked(): CheckedState | null',
   },
   {
-    name: 'Event.eventType → EventTypeName',
-    from: '  get eventType(): string\n',
-    to: '  get eventType(): EventTypeName\n',
-  },
-  {
-    // The async iterator is installed at runtime in index.js but the
-    // napi-generated types don't know about it. Inject a matching
-    // declaration so `for await (const ev of sub)` type-checks.
-    name: 'Subscription.[Symbol.asyncIterator]()',
-    from: '  /** Whether the subscription is still active (not closed). */\n  get active(): boolean\n}',
-    to: '  /** Whether the subscription is still active (not closed). */\n  get active(): boolean\n  /** Async-iterate over events. Closes the subscription on iterator return. */\n  [Symbol.asyncIterator](): AsyncIterableIterator<Event>\n}',
+    name: 'Event.type -> EventTypeName',
+    from: '  get type(): string\n',
+    to: '  get type(): EventTypeName\n',
   },
 ];
 
@@ -76,10 +68,10 @@ function patch() {
 
   // napi build regenerates native.d.ts from scratch every time, so the
   // marker only survives across a no-op rerun. If it's still there, the
-  // file is already patched and we short-circuit — this keeps `npm run
+  // file is already patched and we short-circuit -- this keeps `npm run
   // build && npm run build` idempotent.
   if (source.includes(MARKER)) {
-    console.error(`native.d.ts already patched — skipping`);
+    console.error(`native.d.ts already patched -- skipping`);
     return;
   }
 

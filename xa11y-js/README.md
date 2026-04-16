@@ -77,18 +77,47 @@ await app.locator('dialog[name="Save Changes?"] button[name="OK"]').press();
 
 ## Subscribing to events
 
-Subscriptions are async iterables, so you can use `for await` to consume
-events. Calling `close()` (or breaking out of the iterator) tears down the
-underlying receiver.
+Subscriptions extend Node's `EventEmitter`, so you can use the familiar
+`.on()` / `.once()` / `.off()` API. Events are emitted both under their
+specific type name and the catch-all `'event'` name. Call `close()` (or
+pass an `AbortSignal`) to tear down the subscription.
 
 ```js
 const sub = await app.subscribe();
-for await (const event of sub) {
-  if (event.eventType === 'focusChanged') {
-    console.log('focus moved to', event.target?.name);
-    if (event.target?.role === 'window') break;
-  }
-}
+sub.on('focusChanged', (ev) => console.log('focus moved to', ev.target?.name));
+sub.on('event', (ev) => console.log(ev.type, ev.appName));
+// ... later
+sub.close();
+```
+
+### Waiting for a single event
+
+Use `waitForEvent()` for Playwright-style one-shot waits with optional
+predicate and timeout:
+
+```js
+const [opened] = await Promise.all([
+  app.waitForEvent('windowOpened'),
+  app.locator('button[name="Settings"]').press(),
+]);
+
+// With predicate + timeout
+const ev = await sub.waitForEvent('focusChanged', {
+  predicate: (e) => e.target?.role === 'button',
+  timeout: 3000,
+});
+```
+
+### AbortSignal support
+
+Both `subscribe()` and `waitForEvent()` accept an `AbortSignal` for
+cancellation:
+
+```js
+const ctrl = new AbortController();
+const sub = await app.subscribe({ signal: ctrl.signal });
+sub.on('focusChanged', (ev) => { /* ... */ });
+// ctrl.abort() closes the subscription automatically
 ```
 
 ## Errors

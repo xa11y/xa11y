@@ -5,7 +5,7 @@ use std::sync::Arc;
 use napi::bindgen_prelude::{AsyncTask, Env, Task};
 
 use crate::map_err;
-use crate::subscription::Subscription;
+use crate::subscription::NativeSubscription;
 use crate::types::{toggled_to_str, Rect};
 
 #[napi]
@@ -160,7 +160,7 @@ impl Element {
     }
 
     /// Subscribe to accessibility events for this element (typically an app).
-    #[napi(ts_return_type = "Promise<Subscription>")]
+    #[napi(ts_return_type = "Promise<_NativeSubscription>")]
     pub fn subscribe(&self) -> AsyncTask<SubscribeTask> {
         AsyncTask::new(SubscribeTask {
             data: self.data.clone(),
@@ -219,13 +219,13 @@ pub struct SubscribeTask {
 
 impl Task for SubscribeTask {
     type Output = xa11y::Subscription;
-    type JsValue = Subscription;
+    type JsValue = NativeSubscription;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
         self.provider.subscribe(&self.data).map_err(map_err)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
-        Ok(Subscription::new(output, self.provider.clone()))
+        Ok(NativeSubscription::new(output, self.provider.clone()))
     }
 }
