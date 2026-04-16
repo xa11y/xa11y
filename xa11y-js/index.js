@@ -261,7 +261,9 @@ class App extends native.App {
 
   static async byName(name) {
     try {
-      return await native.App.byName(name);
+      const a = await native.App.byName(name);
+      Object.setPrototypeOf(a, App.prototype);
+      return a;
     } catch (err) {
       throw toTypedError(err);
     }
@@ -269,7 +271,9 @@ class App extends native.App {
 
   static async byPid(pid) {
     try {
-      return await native.App.byPid(pid);
+      const a = await native.App.byPid(pid);
+      Object.setPrototypeOf(a, App.prototype);
+      return a;
     } catch (err) {
       throw toTypedError(err);
     }
@@ -277,7 +281,9 @@ class App extends native.App {
 
   static async list() {
     try {
-      return await native.App.list();
+      const apps = await native.App.list();
+      for (const a of apps) Object.setPrototypeOf(a, App.prototype);
+      return apps;
     } catch (err) {
       throw toTypedError(err);
     }
