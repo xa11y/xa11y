@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Integration test harness for xa11y Electron tests on Linux.
+# Integration test harness for the xa11y Electron tests on Linux.
 #
-# Sets up Xvfb, D-Bus session, AT-SPI2, installs Electron via npm if needed,
-# then runs the pytest suite in tests/electron.
+# Sets up Xvfb + D-Bus + AT-SPI2, installs Electron in test-apps/electron, builds
+# the JS bindings, then runs the JS Electron integration suite via `node --test`.
 #
 # Usage: ./scripts/run_electron_tests.sh
 
@@ -11,6 +11,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 ELECTRON_APP_DIR="$PROJECT_ROOT/test-apps/electron"
+JS_DIR="$PROJECT_ROOT/xa11y-js"
 
 CLEANUP_PIDS=()
 
@@ -91,34 +92,23 @@ if [ ! -x "$ELECTRON_APP_DIR/node_modules/electron/dist/electron" ]; then
     (cd "$ELECTRON_APP_DIR" && npm install --no-audit --no-fund --silent)
 fi
 
-# ── Python venv ──────────────────────────────────────────────────────
-VENV_DIR="$PROJECT_ROOT/.venv-electron-test"
-if [ ! -d "$VENV_DIR" ]; then
-    echo "Creating virtualenv at $VENV_DIR..."
-    python3 -m venv "$VENV_DIR"
+# ── Build the JS bindings ────────────────────────────────────────────
+echo "Installing JS dev dependencies..."
+cd "$JS_DIR"
+if [ ! -d node_modules ]; then
+    npm ci
 fi
 
-PIP="$VENV_DIR/bin/pip"
-PYTEST="$VENV_DIR/bin/pytest"
-
-echo "Installing dependencies..."
-"$PIP" install --quiet maturin
-"$PIP" install --quiet -r "$PROJECT_ROOT/tests/requirements.txt"
-
-echo "Generating xa11y-python README..."
-cd "$PROJECT_ROOT"
-cargo xtask sync-readmes 2>&1
-
-echo "Building xa11y Python bindings..."
-cd "$PROJECT_ROOT/xa11y-python"
-"$PIP" install --quiet -e .
-
-cd "$PROJECT_ROOT"
+echo "Building JS bindings (debug)..."
+npx napi build --platform --js native.js --dts native.d.ts
+node scripts/patch-native-dts.mjs
 
 # ── Run tests ────────────────────────────────────────────────────────
+cd "$JS_DIR"
 echo "Running Electron integration tests..."
 set +e
-timeout 300 "$PYTEST" "$PROJECT_ROOT/tests/electron/" -v -s --timeout=60 --rootdir="$PROJECT_ROOT" 2>&1
+timeout 300 node --test --test-timeout=120000 --test-reporter=spec \
+    '__test__/integ-electron/**/*.test.js'
 TEST_EXIT=$?
 set -e
 
