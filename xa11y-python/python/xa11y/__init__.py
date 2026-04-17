@@ -9,6 +9,7 @@ Quick start:
 """
 
 from xa11y._native import (
+    AccessibilityNotEnabledError,
     ActionNotSupportedError,
     App,
     Element,
@@ -27,6 +28,7 @@ from xa11y._native import (
 )
 
 __all__ = [
+    "AccessibilityNotEnabledError",
     "ActionNotSupportedError",
     "App",
     "Element",

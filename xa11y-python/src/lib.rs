@@ -14,6 +14,7 @@ fn get_provider() -> PyResult<Arc<dyn xa11y::Provider>> {
 
 pyo3::create_exception!(_native, XA11yError, PyException);
 pyo3::create_exception!(_native, PermissionDeniedError, XA11yError);
+pyo3::create_exception!(_native, AccessibilityNotEnabledError, XA11yError);
 pyo3::create_exception!(_native, SelectorNotMatchedError, XA11yError);
 pyo3::create_exception!(_native, ActionNotSupportedError, XA11yError);
 pyo3::create_exception!(_native, XA11yTimeoutError, XA11yError);
@@ -24,6 +25,11 @@ fn to_py_err(e: xa11y::Error) -> PyErr {
     match e {
         xa11y::Error::PermissionDenied { instructions } => {
             PermissionDeniedError::new_err(instructions)
+        }
+        xa11y::Error::AccessibilityNotEnabled { app, instructions } => {
+            AccessibilityNotEnabledError::new_err(format!(
+                "Accessibility not enabled for {app}: {instructions}"
+            ))
         }
         xa11y::Error::SelectorNotMatched { selector } => {
             SelectorNotMatchedError::new_err(format!("No element matched: {selector}"))
@@ -839,6 +845,10 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "PermissionDeniedError",
         m.py().get_type::<PermissionDeniedError>(),
+    )?;
+    m.add(
+        "AccessibilityNotEnabledError",
+        m.py().get_type::<AccessibilityNotEnabledError>(),
     )?;
     m.add(
         "SelectorNotMatchedError",

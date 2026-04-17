@@ -24,6 +24,9 @@ pub struct LinuxProvider {
     /// Cached AT-SPI2 action indices keyed by element handle.
     /// Maps each action name (snake_case) to the integer index used by `DoAction(i)`.
     action_indices: Mutex<HashMap<u64, HashMap<String, i32>>>,
+    /// Cached `Application.ToolkitName` per AT-SPI bus_name. `None` means the
+    /// property could not be read (non-application connection, etc.).
+    toolkit_cache: Mutex<HashMap<String, Option<String>>>,
 }
 
 /// AT-SPI2 accessible reference: (bus_name, object_path).
@@ -44,6 +47,7 @@ impl LinuxProvider {
             a11y_bus,
             handle_cache: Mutex::new(HashMap::new()),
             action_indices: Mutex::new(HashMap::new()),
+            toolkit_cache: Mutex::new(HashMap::new()),
         })
     }
 
@@ -159,6 +163,81 @@ impl LinuxProvider {
                 code: -1,
                 message: format!("GetRoleName deserialize failed: {}", e),
             })
+    }
+
+    /// Get the `Application.ToolkitName` property for an AT-SPI bus connection,
+    /// caching the result. Returns `None` if the property cannot be read
+    /// (the connection isn't an Application root, the property is missing,
+    /// or the call errors).
+    ///
+    /// Used to identify Chromium/Electron apps so we can detect the empty-tree
+    /// signature that indicates the renderer accessibility bridge is disabled.
+    fn get_toolkit_name(&self, bus_name: &str) -> Option<String> {
+        if let Some(cached) = self.toolkit_cache.lock().unwrap().get(bus_name) {
+            return cached.clone();
+        }
+        let result = (|| -> Option<String> {
+            let proxy = self
+                .make_proxy(
+                    bus_name,
+                    "/org/a11y/atspi/accessible/root",
+                    "org.a11y.atspi.Application",
+                )
+                .ok()?;
+            proxy.get_property::<String>("ToolkitName").ok()
+        })();
+        self.toolkit_cache
+            .lock()
+            .unwrap()
+            .insert(bus_name.to_string(), result.clone());
+        result
+    }
+
+    /// Detect Chromium/Electron's "accessibility bridge disabled" signature.
+    ///
+    /// On Linux, Chromium-based apps (Electron, VS Code, Chrome, …) register
+    /// with AT-SPI but expose only an `application → frame` skeleton — the
+    /// frame's children list is empty (just the `/org/a11y/atspi/null`
+    /// sentinel) — unless the process was launched with the
+    /// `--force-renderer-accessibility` flag. Without this detection, callers
+    /// see zero results and assume their selector is wrong.
+    ///
+    /// Call this after observing an empty filtered children list. Returns an
+    /// error only when the parent is a window/frame whose AT-SPI bus reports
+    /// `Application.ToolkitName == "Chromium"`; otherwise returns `Ok(())` so
+    /// genuinely empty windows in other toolkits stay valid.
+    ///
+    /// `role_hint` lets callers that already know the role skip a `GetRole`
+    /// round-trip. The toolkit lookup is checked first because it short-
+    /// circuits cheaply for non-Chromium apps (cached after the first call).
+    fn check_chromium_a11y_enabled(
+        &self,
+        parent: &AccessibleRef,
+        role_hint: Option<Role>,
+    ) -> Result<()> {
+        let toolkit = match self.get_toolkit_name(&parent.bus_name) {
+            Some(t) => t,
+            None => return Ok(()),
+        };
+        if !toolkit.eq_ignore_ascii_case("Chromium") {
+            return Ok(());
+        }
+        let role = role_hint.unwrap_or_else(|| self.resolve_role(parent));
+        if role != Role::Window {
+            return Ok(());
+        }
+        let app_root = AccessibleRef {
+            bus_name: parent.bus_name.clone(),
+            path: "/org/a11y/atspi/accessible/root".to_string(),
+        };
+        let app_name = self.get_name(&app_root).unwrap_or_default();
+        Err(Error::AccessibilityNotEnabled {
+            app: app_name,
+            instructions: "Chromium/Electron app exposes an empty accessibility tree on Linux. \
+                Relaunch with `--force-renderer-accessibility` (or set the env var \
+                `ACCESSIBILITY_ENABLED=1`) so the renderer accessibility bridge is initialised."
+                .to_string(),
+        })
     }
 
     /// Get the name of an accessible element.
@@ -933,6 +1012,14 @@ impl LinuxProvider {
             to_search.push(child);
         }
 
+        // Detect Chromium/Electron's empty-tree signature whenever we
+        // descend into a parent and find no real children. The toolkit
+        // lookup is cached per bus, so the cost is one extra D-Bus call
+        // the first time we see a given app.
+        if to_search.is_empty() {
+            self.check_chromium_a11y_enabled(parent, None)?;
+        }
+
         // Process each child subtree in parallel: check match + recurse
         let per_child: Vec<Vec<AccessibleRef>> = to_search
             .par_iter()
@@ -1037,6 +1124,10 @@ impl Provider for LinuxProvider {
                         continue;
                     }
                     to_build.push(child_ref.clone());
+                }
+
+                if to_build.is_empty() {
+                    self.check_chromium_a11y_enabled(&aref, Some(element_data.role))?;
                 }
 
                 let results: Vec<ElementData> = to_build

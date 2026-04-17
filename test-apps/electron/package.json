@@ -1,0 +1,13 @@
+{
+  "name": "xa11y-electron-test-app",
+  "version": "1.0.0",
+  "description": "Minimal Electron test app for xa11y integration tests.",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}

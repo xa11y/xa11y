@@ -21,7 +21,8 @@ COMMANDS:
     test-gtk            Run GTK4 integration tests
     test-cocoa          Run Cocoa/AppKit integration tests (macOS only)
     test-tauri          Run Tauri integration tests
-    test-apps           Run all app integration test suites (qt, gtk, cocoa, tauri)
+    test-electron       Run Electron integration tests (Linux only)
+    test-apps           Run all app integration test suites (qt, gtk, cocoa, tauri, electron)
     docs                Build documentation
     coverage            Generate code coverage report
     fuzz [ARGS..]       Run provider fuzzer (pass-through args)
@@ -48,6 +49,7 @@ fn main() -> ExitCode {
         "test-gtk" => do_test_gtk(),
         "test-cocoa" => do_test_cocoa(),
         "test-tauri" => do_test_tauri(),
+        "test-electron" => do_test_electron(),
         "test-apps" => do_test_apps(),
         "docs" => do_docs(),
         "coverage" => do_coverage(),
@@ -293,6 +295,12 @@ fn do_test_tauri() -> bool {
     run_in("bash", &["scripts/run_tauri_tests.sh"], &root)
 }
 
+fn do_test_electron() -> bool {
+    heading("Electron integration tests");
+    let root = project_root();
+    run_in("bash", &["scripts/run_electron_tests.sh"], &root)
+}
+
 fn do_test_apps() -> bool {
     heading("All app integration tests");
     let mut ok = true;
@@ -306,6 +314,9 @@ fn do_test_apps() -> bool {
         ok = false;
     }
     if !do_test_tauri() {
+        ok = false;
+    }
+    if env::consts::OS == "linux" && !do_test_electron() {
         ok = false;
     }
     ok
