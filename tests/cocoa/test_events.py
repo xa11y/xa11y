@@ -38,7 +38,7 @@ def test_try_recv_empty_then_event(cocoa_app):
     """try_recv returns None before any action; recv returns an event after one."""
     with cocoa_app.subscribe() as sub:
         assert sub.try_recv() is None
-        cocoa_app.locator('spin_button[name="Quantity"]').first().increment()
+        cocoa_app.locator('slider[name="Volume"]').first().increment()
         event = sub.recv(timeout=3.0)
         assert event.event_type is not None
 
@@ -70,7 +70,7 @@ def test_event_has_target(cocoa_app):
 
 def test_wait_for_event(cocoa_app):
     with cocoa_app.subscribe() as sub:
-        cocoa_app.locator('spin_button[name="Quantity"]').first().increment()
+        cocoa_app.locator('slider[name="Volume"]').first().increment()
         event = sub.wait_for(lambda e: e.event_type is not None, timeout=3.0)
         assert event is not None
 

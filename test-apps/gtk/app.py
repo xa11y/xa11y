@@ -148,6 +148,11 @@ class TestWindow(Gtk.ApplicationWindow):
             self.list_box.append(row)
         list_group.append(self.list_box)
 
+        self._item_count = 5
+        add_item_btn = Gtk.Button(label="Add Item")
+        add_item_btn.connect("clicked", self._on_add_item_clicked)
+        list_group.append(add_item_btn)
+
     def _make_group(self, name: str) -> Gtk.Box:
         inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         inner.set_margin_top(8)
@@ -158,6 +163,12 @@ class TestWindow(Gtk.ApplicationWindow):
 
     def _on_ok_clicked(self, _btn: Gtk.Button) -> None:
         self.cancel_button.set_sensitive(True)
+
+    def _on_add_item_clicked(self, _btn: Gtk.Button) -> None:
+        self._item_count += 1
+        row = Gtk.ListBoxRow()
+        row.set_child(Gtk.Label(label=f"Item {self._item_count}"))
+        self.list_box.append(row)
 
 
 def main() -> None:

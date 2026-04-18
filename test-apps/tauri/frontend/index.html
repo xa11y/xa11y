@@ -148,6 +148,7 @@ Line 3</textarea>
       <li role="option" aria-selected="false">Item 4</li>
       <li role="option" aria-selected="false">Item 5</li>
     </ul>
+    <button id="add-item-button" aria-label="Add Item">Add Item</button>
   </fieldset>
 
   <script>
@@ -162,6 +163,17 @@ Line 3</textarea>
     slider.addEventListener('input', () => {
       slider.setAttribute('aria-valuenow', slider.value);
       output.textContent = slider.value;
+    });
+
+    // Add Item button appends a new list option (triggers StructureChanged)
+    let itemCount = 5;
+    document.getElementById('add-item-button').addEventListener('click', () => {
+      itemCount += 1;
+      const li = document.createElement('li');
+      li.setAttribute('role', 'option');
+      li.setAttribute('aria-selected', 'false');
+      li.textContent = `Item ${itemCount}`;
+      document.getElementById('items-list').appendChild(li);
     });
 
     // Spin syncs aria-valuenow

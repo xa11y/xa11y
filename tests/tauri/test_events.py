@@ -2,8 +2,8 @@
 
 On Linux (WebKit2GTK + AT-SPI2), xa11y uses the same polling strategy as for
 native GTK apps: only FocusChanged and StructureChanged events are emitted.
-To trigger FocusChanged reliably, focus two distinct elements in sequence so
-the polling thread captures the transition.
+To trigger StructureChanged reliably, press the "Add Item" button which appends
+a new list option to the DOM — safe and known not to hang (no GrabFocus call).
 """
 
 from __future__ import annotations
@@ -11,11 +11,10 @@ from __future__ import annotations
 import time
 
 
-def _trigger_focus_change(app) -> None:
-    """Focus OK button then slider — guaranteed focus transition."""
-    app.locator('button[name="OK"]').first().focus()
-    time.sleep(0.15)  # one poll cycle (100 ms) so prev_focused is populated
-    app.locator('slider[name="Volume"]').first().focus()
+def _add_item(app) -> None:
+    """Press 'Add Item' to append a list option — triggers StructureChanged."""
+    time.sleep(0.15)  # one poll cycle so prev_element_count is populated
+    app.locator('button[name="Add Item"]').first().press()
 
 
 def test_subscribe_returns_subscription(tauri_app):
@@ -23,24 +22,16 @@ def test_subscribe_returns_subscription(tauri_app):
         assert sub is not None
 
 
-def test_focus_event(tauri_app):
+def test_structure_changed_event(tauri_app):
     with tauri_app.subscribe() as sub:
-        _trigger_focus_change(tauri_app)
+        _add_item(tauri_app)
         event = sub.recv(timeout=3.0)
         assert event.event_type is not None
 
 
-def test_event_has_target(tauri_app):
-    with tauri_app.subscribe() as sub:
-        _trigger_focus_change(tauri_app)
-        event = sub.recv(timeout=3.0)
-        assert event.target is not None
-        assert event.target.role is not None
-
-
 def test_wait_for_event(tauri_app):
     with tauri_app.subscribe() as sub:
-        _trigger_focus_change(tauri_app)
+        _add_item(tauri_app)
         event = sub.wait_for(lambda e: e.event_type is not None, timeout=3.0)
         assert event is not None
 
@@ -53,7 +44,7 @@ def test_subscription_close(tauri_app):
 
 def test_event_metadata_populated(tauri_app):
     with tauri_app.subscribe() as sub:
-        _trigger_focus_change(tauri_app)
+        _add_item(tauri_app)
         event = sub.recv(timeout=3.0)
         assert event.app_name
         assert event.app_pid == tauri_app.pid

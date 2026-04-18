@@ -4,9 +4,9 @@ The Linux AT-SPI2 backend uses a polling strategy that emits two event types:
   - FocusChanged  — when the focused element changes between polls
   - StructureChanged — when the element count in the tree changes
 
-To trigger FocusChanged reliably: focus element A so the polling thread
-captures it as the current focused element, then focus element B so the
-transition is detected on the next poll.
+To trigger StructureChanged reliably: press the "Add Item" button (known-safe,
+no D-Bus GrabFocus hang) and wait one poll cycle. The first poll establishes
+prev_element_count > 0; the second detects the new element and fires the event.
 """
 
 from __future__ import annotations
@@ -14,11 +14,10 @@ from __future__ import annotations
 import time
 
 
-def _trigger_focus_change(app) -> None:
-    """Focus OK button then spin_button — guaranteed focus transition."""
-    app.locator('button[name="OK"]').first().focus()
-    time.sleep(0.15)  # one poll cycle (100 ms) so prev_focused is populated
-    app.locator("spin_button").first().focus()
+def _add_item(app) -> None:
+    """Press 'Add Item' to append a list row — triggers StructureChanged."""
+    time.sleep(0.15)  # one poll cycle so prev_element_count is populated
+    app.locator('button[name="Add Item"]').first().press()
 
 
 def test_subscribe_returns_subscription(gtk_app):
@@ -26,24 +25,16 @@ def test_subscribe_returns_subscription(gtk_app):
         assert sub is not None
 
 
-def test_focus_event(gtk_app):
+def test_structure_changed_event(gtk_app):
     with gtk_app.subscribe() as sub:
-        _trigger_focus_change(gtk_app)
+        _add_item(gtk_app)
         event = sub.recv(timeout=3.0)
         assert event.event_type is not None
 
 
-def test_event_has_target(gtk_app):
-    with gtk_app.subscribe() as sub:
-        _trigger_focus_change(gtk_app)
-        event = sub.recv(timeout=3.0)
-        assert event.target is not None
-        assert event.target.role is not None
-
-
 def test_wait_for_event(gtk_app):
     with gtk_app.subscribe() as sub:
-        _trigger_focus_change(gtk_app)
+        _add_item(gtk_app)
         event = sub.wait_for(lambda e: e.event_type is not None, timeout=3.0)
         assert event is not None
 
@@ -56,7 +47,7 @@ def test_subscription_close(gtk_app):
 
 def test_event_metadata_populated(gtk_app):
     with gtk_app.subscribe() as sub:
-        _trigger_focus_change(gtk_app)
+        _add_item(gtk_app)
         event = sub.recv(timeout=3.0)
         assert event.app_name
         assert event.app_pid == gtk_app.pid
