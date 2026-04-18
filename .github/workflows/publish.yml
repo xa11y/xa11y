@@ -340,7 +340,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # Required for npm publish provenance (via NPM_CONFIG_PROVENANCE below).
+      # Required for npm trusted publishing (OIDC). The npm CLI auto-detects
+      # the OIDC token and uses it instead of NODE_AUTH_TOKEN.
       id-token: write
     steps:
       - uses: actions/checkout@v6
@@ -353,6 +354,11 @@ jobs:
           cache: npm
           cache-dependency-path: xa11y-js/package-lock.json
           registry-url: https://registry.npmjs.org/
+
+      # Trusted publishing requires npm CLI ≥ 11.5.1. Node 22 still ships
+      # with npm 10.x as of this writing, so upgrade explicitly.
+      - name: Upgrade npm for trusted publishing
+        run: npm install -g npm@latest
 
       - name: Install JS dev dependencies
         working-directory: xa11y-js
@@ -388,16 +394,13 @@ jobs:
       # publishes each per-target subpackage. Then npm publishes the
       # umbrella `@crowecawcaw/xa11y` package.
       #
-      # NPM_CONFIG_PROVENANCE=true attaches npm provenance statements to
-      # every publish call (umbrella + subpackages) rather than only to
-      # the outer `npm publish` invocation.
+      # Uses OIDC trusted publishing — no NPM_TOKEN needed. Each of the
+      # 7 packages has a trusted publisher configured on npmjs.com
+      # pointing to this workflow. Provenance attestations are attached
+      # automatically.
       - name: Publish umbrella + per-target packages
         working-directory: xa11y-js
         run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_CONFIG_PROVENANCE: "true"
 
   # ── GitHub Release ─────────────────────────────────────────────────
   create-release:
