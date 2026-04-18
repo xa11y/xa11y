@@ -1,11 +1,20 @@
-"""Integration tests: accessibility events from the Cocoa/AppKit test app via xa11y."""
+"""Integration tests: accessibility events from the Cocoa/AppKit test app via xa11y.
+
+The macOS AXObserver backend registers real AX notifications and emits events for:
+  AXValueChanged, AXFocusedUIElementChanged, AXWindowCreated/Miniaturized,
+  AXUIElementDestroyed, AXSelectedTextChanged, AXMenuOpened/Closed, AXTitleChanged.
+
+Note: AXEnabled changes (e.g. enabling a disabled button) do NOT fire AXValueChanged,
+so button-press-enables-cancel is not a valid event trigger here.  Use slider
+increment (AXValueChanged) or checkbox press (AXValueChanged on checked state)
+as reliable triggers instead.
+"""
 
 from __future__ import annotations
 
 import sys
 
 import pytest
-import xa11y
 
 pytestmark = pytest.mark.skipif(
     sys.platform != "darwin",
@@ -19,13 +28,15 @@ def test_subscribe_returns_subscription(cocoa_app):
 
 
 def test_focus_event(cocoa_app):
+    """Text-field focus fires AXFocusedUIElementChanged."""
     with cocoa_app.subscribe() as sub:
-        cocoa_app.locator("button").first().focus()
+        cocoa_app.locator('text_field[name="Search"]').first().focus()
         event = sub.recv(timeout=3.0)
         assert event.event_type is not None
 
 
 def test_value_change_event(cocoa_app):
+    """Slider increment fires AXValueChanged."""
     with cocoa_app.subscribe() as sub:
         cocoa_app.locator('slider[name="Volume"]').first().increment()
         event = sub.wait_for(lambda e: e.event_type is not None, timeout=3.0)
@@ -33,6 +44,7 @@ def test_value_change_event(cocoa_app):
 
 
 def test_toggle_event(cocoa_app):
+    """Checkbox press fires AXValueChanged (the checked state is the AXValue)."""
     with cocoa_app.subscribe() as sub:
         cocoa_app.locator('check_box[name="Agree to terms"]').first().press()
         event = sub.wait_for(lambda e: e.event_type is not None, timeout=3.0)
@@ -40,9 +52,10 @@ def test_toggle_event(cocoa_app):
 
 
 def test_event_has_target(cocoa_app):
+    """AXValueChanged carries the changed element as the event target."""
     with cocoa_app.subscribe() as sub:
-        cocoa_app.locator('button[name="OK"]').first().press()
-        event = sub.recv(timeout=3.0)
+        cocoa_app.locator('check_box[name="Agree to terms"]').first().press()
+        event = sub.wait_for(lambda e: e.event_type is not None, timeout=3.0)
         assert event.target is not None
         assert event.target.role is not None
 
