@@ -34,6 +34,16 @@ export interface SubscribeOptions {
   signal?: AbortSignal;
 }
 
+export interface AppLookupOptions {
+  /**
+   * Poll the accessibility API until the app appears, up to this many
+   * milliseconds. Useful when the app may not yet be registered (e.g.
+   * just-launched). Only "not found" errors trigger a retry; permission
+   * errors and the like fail fast. Defaults to no polling (single attempt).
+   */
+  timeout?: number;
+}
+
 export interface WaitForEventOptions {
   /** Only resolve for events matching this predicate. */
   predicate?: (event: Event) => boolean;
@@ -92,9 +102,9 @@ export class Subscription extends EventEmitter {
 
 export declare class App {
   /** Find an application by exact name. */
-  static byName(name: string): Promise<App>;
+  static byName(name: string, options?: AppLookupOptions): Promise<App>;
   /** Find an application by process ID. */
-  static byPid(pid: number): Promise<App>;
+  static byPid(pid: number, options?: AppLookupOptions): Promise<App>;
   /** List all running applications with an accessibility tree. */
   static list(): Promise<App[]>;
 

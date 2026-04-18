@@ -6,6 +6,9 @@ use xa11y::*;
 pub fn app_root() -> App {
     // On Linux/macOS, AT-SPI and AX report the process name ("xa11y-test-app").
     // On Windows, UIA reports the window title ("xa11y Test App").
+    // Two candidate names to interleave, so we keep the manual loop (a
+    // single `by_name_timeout` per name would block on the wrong name for
+    // its full timeout before trying the right one).
     let names = ["xa11y-test-app", "xa11y Test App"];
     for attempt in 0..3 {
         for name in &names {

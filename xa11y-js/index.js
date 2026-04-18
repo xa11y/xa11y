@@ -267,9 +267,9 @@ class App extends native.App {
     return instance instanceof native.App;
   }
 
-  static async byName(name) {
+  static async byName(name, options) {
     try {
-      const a = await native.App.byName(name);
+      const a = await native.App.byName(name, options);
       Object.setPrototypeOf(a, App.prototype);
       return a;
     } catch (err) {
@@ -277,9 +277,9 @@ class App extends native.App {
     }
   }
 
-  static async byPid(pid) {
+  static async byPid(pid, options) {
     try {
-      const a = await native.App.byPid(pid);
+      const a = await native.App.byPid(pid, options);
       Object.setPrototypeOf(a, App.prototype);
       return a;
     } catch (err) {

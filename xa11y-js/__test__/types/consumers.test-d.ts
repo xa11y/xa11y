@@ -11,6 +11,7 @@ import {
   XA11yError,
   SelectorNotMatchedError,
   TimeoutError,
+  type AppLookupOptions,
   type CheckedState,
   type EventTypeName,
   type Rect,
@@ -23,6 +24,11 @@ async function checks() {
   const app: App = await App.byName('Test');
   const _app2: App = await App.byPid(1234);
   const apps: App[] = await App.list();
+
+  // Optional lookup options.
+  const lookupOpts: AppLookupOptions = { timeout: 30_000 };
+  const _app3: App = await App.byName('Test', lookupOpts);
+  const _app4: App = await App.byPid(1234, { timeout: 5_000 });
 
   // Locator instance methods return promises or locators.
   const loc: Locator = app.locator('button[name="OK"]');

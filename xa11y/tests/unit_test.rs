@@ -1202,3 +1202,201 @@ fn handle_preserved_through_find() {
     let btn = app2.locator(r#"button[name="Btn2"]"#).element().unwrap();
     assert_eq!(btn.handle, 5); // Btn2 is node index 5
 }
+
+// ── Timeout polling tests ──
+
+/// Provider wrapper that delays root-level lookups (`get_children(None)`)
+/// until `succeed_after` calls have been made. Earlier calls return an empty
+/// Vec, simulating an app that hasn't registered with the accessibility API
+/// yet. Non-root tree navigation and all other Provider methods forward to
+/// `inner` unchanged.
+struct DelayedProvider {
+    inner: Arc<dyn Provider>,
+    root_calls: std::sync::atomic::AtomicUsize,
+    succeed_after: usize,
+    always_fail_permission: bool,
+}
+
+impl DelayedProvider {
+    fn new(inner: Arc<dyn Provider>, succeed_after: usize) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            root_calls: std::sync::atomic::AtomicUsize::new(0),
+            succeed_after,
+            always_fail_permission: false,
+        })
+    }
+
+    /// On every root-level lookup, return `PermissionDenied` (a non-retryable
+    /// error). Used to verify that lookup polling short-circuits.
+    fn always_fail_permission(inner: Arc<dyn Provider>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            root_calls: std::sync::atomic::AtomicUsize::new(0),
+            succeed_after: 0,
+            always_fail_permission: true,
+        })
+    }
+
+    fn root_call_count(&self) -> usize {
+        self.root_calls.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Provider for DelayedProvider {
+    fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
+        if element.is_none() {
+            let n = self
+                .root_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.always_fail_permission {
+                return Err(Error::PermissionDenied {
+                    instructions: "test".to_string(),
+                });
+            }
+            if n < self.succeed_after {
+                return Ok(vec![]);
+            }
+        }
+        self.inner.get_children(element)
+    }
+    fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
+        self.inner.get_parent(element)
+    }
+    fn press(&self, e: &ElementData) -> Result<()> {
+        self.inner.press(e)
+    }
+    fn focus(&self, e: &ElementData) -> Result<()> {
+        self.inner.focus(e)
+    }
+    fn blur(&self, e: &ElementData) -> Result<()> {
+        self.inner.blur(e)
+    }
+    fn toggle(&self, e: &ElementData) -> Result<()> {
+        self.inner.toggle(e)
+    }
+    fn select(&self, e: &ElementData) -> Result<()> {
+        self.inner.select(e)
+    }
+    fn expand(&self, e: &ElementData) -> Result<()> {
+        self.inner.expand(e)
+    }
+    fn collapse(&self, e: &ElementData) -> Result<()> {
+        self.inner.collapse(e)
+    }
+    fn show_menu(&self, e: &ElementData) -> Result<()> {
+        self.inner.show_menu(e)
+    }
+    fn increment(&self, e: &ElementData) -> Result<()> {
+        self.inner.increment(e)
+    }
+    fn decrement(&self, e: &ElementData) -> Result<()> {
+        self.inner.decrement(e)
+    }
+    fn scroll_into_view(&self, e: &ElementData) -> Result<()> {
+        self.inner.scroll_into_view(e)
+    }
+    fn set_value(&self, e: &ElementData, v: &str) -> Result<()> {
+        self.inner.set_value(e, v)
+    }
+    fn set_numeric_value(&self, e: &ElementData, v: f64) -> Result<()> {
+        self.inner.set_numeric_value(e, v)
+    }
+    fn type_text(&self, e: &ElementData, t: &str) -> Result<()> {
+        self.inner.type_text(e, t)
+    }
+    fn set_text_selection(&self, e: &ElementData, s: u32, en: u32) -> Result<()> {
+        self.inner.set_text_selection(e, s, en)
+    }
+    fn scroll_down(&self, e: &ElementData, a: f64) -> Result<()> {
+        self.inner.scroll_down(e, a)
+    }
+    fn scroll_up(&self, e: &ElementData, a: f64) -> Result<()> {
+        self.inner.scroll_up(e, a)
+    }
+    fn scroll_right(&self, e: &ElementData, a: f64) -> Result<()> {
+        self.inner.scroll_right(e, a)
+    }
+    fn scroll_left(&self, e: &ElementData, a: f64) -> Result<()> {
+        self.inner.scroll_left(e, a)
+    }
+    fn perform_action(&self, e: &ElementData, a: &str) -> Result<()> {
+        self.inner.perform_action(e, a)
+    }
+    fn subscribe(&self, e: &ElementData) -> Result<Subscription> {
+        self.inner.subscribe(e)
+    }
+}
+
+#[test]
+fn by_name_with_timeout_polls_until_app_appears() {
+    let inner = multi_app_provider();
+    // `by_name_with` issues two root lookups per attempt (application
+    // selector, then window selector). Failing the first 3 root calls means
+    // the first attempt fails entirely and the second attempt succeeds on
+    // its first selector.
+    let p = DelayedProvider::new(inner, 3);
+    let app = App::by_name_with_timeout(
+        Arc::clone(&p) as Arc<dyn Provider>,
+        "App1",
+        std::time::Duration::from_secs(2),
+    )
+    .expect("app should appear after a few polls");
+    assert_eq!(app.name, "App1");
+    assert!(
+        p.root_call_count() > 2,
+        "expected polling to retry, got {} root calls",
+        p.root_call_count()
+    );
+}
+
+#[test]
+fn by_name_with_timeout_zero_is_single_attempt() {
+    let inner = multi_app_provider();
+    let p = DelayedProvider::new(inner, 100); // never succeeds during the test
+    let result = App::by_name_with_timeout(
+        Arc::clone(&p) as Arc<dyn Provider>,
+        "App1",
+        std::time::Duration::ZERO,
+    );
+    assert!(matches!(result, Err(Error::SelectorNotMatched { .. })));
+    // One outer attempt = at most two selector lookups (application + window).
+    assert!(
+        p.root_call_count() <= 2,
+        "ZERO timeout must not retry, got {} calls",
+        p.root_call_count()
+    );
+}
+
+#[test]
+fn by_name_with_timeout_short_circuits_on_non_retryable_error() {
+    let inner = multi_app_provider();
+    let p = DelayedProvider::always_fail_permission(inner);
+    let start = std::time::Instant::now();
+    let result = App::by_name_with_timeout(
+        Arc::clone(&p) as Arc<dyn Provider>,
+        "App1",
+        std::time::Duration::from_secs(10),
+    );
+    assert!(matches!(result, Err(Error::PermissionDenied { .. })));
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(1),
+        "non-retryable error must fail fast, took {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn by_pid_with_timeout_polls_until_app_appears() {
+    let inner = multi_app_provider();
+    let p = DelayedProvider::new(inner, 3);
+    // App1 has pid 100 in multi_app_provider.
+    let app = App::by_pid_with_timeout(
+        Arc::clone(&p) as Arc<dyn Provider>,
+        100,
+        std::time::Duration::from_secs(2),
+    )
+    .expect("app should appear after a few polls");
+    assert_eq!(app.pid, Some(100));
+    assert!(p.root_call_count() > 2);
+}

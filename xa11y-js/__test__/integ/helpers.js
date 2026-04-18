@@ -23,40 +23,31 @@ const STARTUP_TIMEOUT_MS = 30_000;
 let cachedApp = null;
 
 /**
- * Return the xa11y App handle for the running test app. Polls up to
- * `STARTUP_TIMEOUT_MS` on first call so the test app has time to register
- * with AT-SPI2 / UIA / AX.
+ * Return the xa11y App handle for the running test app. Races all candidate
+ * names in parallel so the first one to register (up to `STARTUP_TIMEOUT_MS`)
+ * wins — handles cross-platform name differences without interleaved polling.
  */
 async function getApp() {
   if (cachedApp !== null) return cachedApp;
-  const deadline = Date.now() + STARTUP_TIMEOUT_MS;
-  let lastErr = null;
-  while (Date.now() < deadline) {
-    for (const name of APP_NAMES) {
-      try {
-        cachedApp = await App.byName(name);
-        return cachedApp;
-      } catch (e) {
-        if (!(e instanceof SelectorNotMatchedError || e instanceof PlatformError)) {
-          throw e;
-        }
-        lastErr = e;
-      }
-    }
-    await new Promise((r) => setTimeout(r, 250));
-  }
-  // One last attempt to list apps for a useful error message.
-  let listed = '<failed to list>';
-  try {
-    const apps = await App.list();
-    listed = JSON.stringify(apps.map((a) => ({ name: a.name, pid: a.pid })));
-  } catch {
-    /* ignore */
-  }
-  throw new Error(
-    `Test app not found after ${STARTUP_TIMEOUT_MS}ms (tried ${APP_NAMES.join(', ')}). ` +
-      `Last error: ${lastErr}. Running apps: ${listed}`,
+  const attempts = APP_NAMES.map((name) =>
+    App.byName(name, { timeout: STARTUP_TIMEOUT_MS }),
   );
+  try {
+    cachedApp = await Promise.any(attempts);
+    return cachedApp;
+  } catch (err) {
+    let listed = '<failed to list>';
+    try {
+      const apps = await App.list();
+      listed = JSON.stringify(apps.map((a) => ({ name: a.name, pid: a.pid })));
+    } catch {
+      /* ignore */
+    }
+    throw new Error(
+      `Test app not found after ${STARTUP_TIMEOUT_MS}ms (tried ${APP_NAMES.join(', ')}). ` +
+        `Errors: ${err.errors?.map((e) => e.message).join(' | ') ?? err}. Running apps: ${listed}`,
+    );
+  }
 }
 
 /**
