@@ -219,6 +219,10 @@ jobs:
   publish-pypi:
     name: Publish to PyPI
     needs: [build-wheels-linux, build-wheels-macos, build-wheels-windows, build-sdist]
+    # Explicit if: needed because version-bump (transitive ancestor) may be
+    # skipped on level=release, which causes GitHub Actions to skip all
+    # descendants unless they opt in.
+    if: always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
@@ -332,6 +336,7 @@ jobs:
   publish-npm:
     name: Publish to npm
     needs: [build-npm]
+    if: always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -399,6 +404,7 @@ jobs:
   create-release:
     name: Create GitHub Release
     needs: [publish-crates, publish-pypi, publish-npm]
+    if: always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     permissions:
       contents: write
