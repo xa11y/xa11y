@@ -87,7 +87,7 @@ jobs:
             local output
             if output=$(cargo publish -p "$1" 2>&1); then
               echo "✓ $1 published"
-            elif echo "$output" | grep -q "already uploaded"; then
+            elif echo "$output" | grep -qE "already (uploaded|exists)"; then
               echo "⊘ $1 already on crates.io, skipping"
             else
               echo "$output" >&2
@@ -233,6 +233,7 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
+          skip-existing: true
 
   # ── npm (JavaScript bindings) ──────────────────────────────────────
   #
