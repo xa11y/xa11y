@@ -4,10 +4,17 @@ The macOS AXObserver backend registers real AX notifications and emits events fo
   AXValueChanged, AXFocusedUIElementChanged, AXWindowCreated/Miniaturized,
   AXUIElementDestroyed, AXSelectedTextChanged, AXMenuOpened/Closed, AXTitleChanged.
 
-Note: AXEnabled changes (e.g. enabling a disabled button) do NOT fire AXValueChanged,
-so button-press-enables-cancel is not a valid event trigger here.  Use slider
-increment (AXValueChanged) or checkbox press (AXValueChanged on checked state)
-as reliable triggers instead.
+Reliable triggers in the headless test app:
+  - Slider increment  → AXValueChanged on the slider
+  - Checkbox press    → AXValueChanged on the checkbox (checked state = AXValue)
+  - Spin button step  → AXValueChanged on the spin button
+
+Focus events (AXFocusedUIElementChanged) are NOT reliable here: the app uses
+NSApp.setActivationPolicy(.accessory) in headless mode, which means its windows
+are never the key window and setting AXFocused does not fire the notification.
+
+AXEnabled changes (e.g. button-press-enables-cancel) also do NOT fire AXValueChanged;
+they fire AXEnabledChanged which is not in the registered notification set.
 """
 
 from __future__ import annotations
@@ -27,10 +34,11 @@ def test_subscribe_returns_subscription(cocoa_app):
         assert sub is not None
 
 
-def test_focus_event(cocoa_app):
-    """Text-field focus fires AXFocusedUIElementChanged."""
+def test_try_recv_empty_then_event(cocoa_app):
+    """try_recv returns None before any action; recv returns an event after one."""
     with cocoa_app.subscribe() as sub:
-        cocoa_app.locator('text_field[name="Search"]').first().focus()
+        assert sub.try_recv() is None
+        cocoa_app.locator('spin_button[name="Quantity"]').first().increment()
         event = sub.recv(timeout=3.0)
         assert event.event_type is not None
 
