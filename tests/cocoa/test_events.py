@@ -5,9 +5,11 @@ The macOS AXObserver backend registers real AX notifications and emits events fo
   AXUIElementDestroyed, AXSelectedTextChanged, AXMenuOpened/Closed, AXTitleChanged.
 
 Reliable triggers in the headless test app:
-  - Slider increment  → AXValueChanged on the slider
-  - Checkbox press    → AXValueChanged on the checkbox (checked state = AXValue)
-  - Spin button step  → AXValueChanged on the spin button
+  - Slider increment  → AXValueChanged propagates to app-level observer
+  - Checkbox press    → AXValueChanged propagates to app-level observer
+
+NSStepper (spin_button) does NOT work: its AXValueChanged is only delivered
+to element-specific observers, not to the app-level observer registered here.
 
 Focus events (AXFocusedUIElementChanged) are NOT reliable here: the app uses
 NSApp.setActivationPolicy(.accessory) in headless mode, which means its windows
