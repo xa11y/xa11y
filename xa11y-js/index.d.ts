@@ -148,6 +148,16 @@ export class XA11yError extends Error {}
 /** Accessibility permissions have not been granted. */
 export class PermissionDeniedError extends XA11yError {}
 
+/**
+ * The target app advertises an accessibility tree but it is empty.
+ *
+ * Raised on Linux when a Chromium/Electron app is launched without
+ * `--force-renderer-accessibility` (or the `ACCESSIBILITY_ENABLED=1`
+ * environment variable), so the renderer accessibility bridge never
+ * populates the window's subtree.
+ */
+export class AccessibilityNotEnabledError extends XA11yError {}
+
 /** No element matched the selector (also used for stale elements). */
 export class SelectorNotMatchedError extends XA11yError {}
 

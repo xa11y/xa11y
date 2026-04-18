@@ -13,6 +13,15 @@ class XA11yError(Exception):
 class PermissionDeniedError(XA11yError):
     """Accessibility permissions have not been granted."""
 
+class AccessibilityNotEnabledError(XA11yError):
+    """The target app advertises an accessibility tree but it is empty.
+
+    Raised on Linux when a Chromium/Electron app is launched without
+    ``--force-renderer-accessibility`` (or the ``ACCESSIBILITY_ENABLED=1``
+    environment variable), so the renderer accessibility bridge never
+    populates the window's subtree.
+    """
+
 class SelectorNotMatchedError(XA11yError):
     """No element in the tree matched the given selector."""
 

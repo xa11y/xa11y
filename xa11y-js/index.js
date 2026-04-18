@@ -42,6 +42,13 @@ class PermissionDeniedError extends XA11yError {
   }
 }
 
+class AccessibilityNotEnabledError extends XA11yError {
+  constructor(message) {
+    super(message);
+    this.name = 'AccessibilityNotEnabledError';
+  }
+}
+
 class SelectorNotMatchedError extends XA11yError {
   constructor(message) {
     super(message);
@@ -79,6 +86,7 @@ class PlatformError extends XA11yError {
 
 const CODE_TO_CLASS = {
   XA11Y_PERMISSION_DENIED: PermissionDeniedError,
+  XA11Y_ACCESSIBILITY_NOT_ENABLED: AccessibilityNotEnabledError,
   XA11Y_SELECTOR_NOT_MATCHED: SelectorNotMatchedError,
   XA11Y_ELEMENT_STALE: SelectorNotMatchedError,
   XA11Y_ACTION_NOT_SUPPORTED: ActionNotSupportedError,
@@ -366,6 +374,7 @@ module.exports = {
   // Error classes
   XA11yError,
   PermissionDeniedError,
+  AccessibilityNotEnabledError,
   SelectorNotMatchedError,
   ActionNotSupportedError,
   TimeoutError,

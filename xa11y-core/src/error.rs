@@ -11,6 +11,13 @@ pub enum Error {
     #[error("Permission denied: {instructions}")]
     PermissionDenied { instructions: String },
 
+    /// The target application advertises an accessibility tree but its
+    /// content is empty because the app's accessibility bridge is disabled
+    /// (Chromium/Electron on Linux without `--force-renderer-accessibility`,
+    /// for example).
+    #[error("Accessibility not enabled for {app}: {instructions}")]
+    AccessibilityNotEnabled { app: String, instructions: String },
+
     /// No element matched the selector.
     #[error("No element matched selector: {selector}")]
     SelectorNotMatched { selector: String },

@@ -15,6 +15,10 @@ def test_permission_denied_inherits():
     assert issubclass(xa11y.PermissionDeniedError, xa11y.XA11yError)
 
 
+def test_accessibility_not_enabled_inherits():
+    assert issubclass(xa11y.AccessibilityNotEnabledError, xa11y.XA11yError)
+
+
 def test_selector_not_matched_inherits():
     assert issubclass(xa11y.SelectorNotMatchedError, xa11y.XA11yError)
 

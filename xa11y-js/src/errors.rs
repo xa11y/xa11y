@@ -9,6 +9,7 @@ use napi::{Error, Status};
 /// into a typed `XA11yError` subclass.
 pub mod codes {
     pub const PERMISSION_DENIED: &str = "XA11Y_PERMISSION_DENIED";
+    pub const ACCESSIBILITY_NOT_ENABLED: &str = "XA11Y_ACCESSIBILITY_NOT_ENABLED";
     pub const SELECTOR_NOT_MATCHED: &str = "XA11Y_SELECTOR_NOT_MATCHED";
     pub const ELEMENT_STALE: &str = "XA11Y_ELEMENT_STALE";
     pub const ACTION_NOT_SUPPORTED: &str = "XA11Y_ACTION_NOT_SUPPORTED";
@@ -25,6 +26,10 @@ pub mod codes {
 pub fn map_err(e: xa11y::Error) -> Error {
     let (code, msg) = match e {
         xa11y::Error::PermissionDenied { instructions } => (codes::PERMISSION_DENIED, instructions),
+        xa11y::Error::AccessibilityNotEnabled { app, instructions } => (
+            codes::ACCESSIBILITY_NOT_ENABLED,
+            format!("Accessibility not enabled for {app}: {instructions}"),
+        ),
         xa11y::Error::SelectorNotMatched { selector } => (
             codes::SELECTOR_NOT_MATCHED,
             format!("No element matched: {selector}"),
