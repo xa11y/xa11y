@@ -41,7 +41,7 @@ export interface AppLookupOptions {
    * just-launched). Only "not found" errors trigger a retry; permission
    * errors and the like fail fast. Defaults to no polling (single attempt).
    */
-  timeoutMs?: number;
+  timeout?: number;
 }
 
 export interface WaitForEventOptions {

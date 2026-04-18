@@ -36,7 +36,7 @@ pub struct AppLookupOptions {
     /// many milliseconds elapse. Useful when the app may not yet be
     /// registered (e.g. just-launched). Only "not found" errors trigger a
     /// retry; other errors fail fast.
-    pub timeout_ms: Option<u32>,
+    pub timeout: Option<u32>,
 }
 
 #[napi]
@@ -108,7 +108,7 @@ impl App {
 
 fn timeout_from(options: Option<AppLookupOptions>) -> Duration {
     options
-        .and_then(|o| o.timeout_ms)
+        .and_then(|o| o.timeout)
         .map(|ms| Duration::from_millis(ms.into()))
         .unwrap_or(Duration::ZERO)
 }

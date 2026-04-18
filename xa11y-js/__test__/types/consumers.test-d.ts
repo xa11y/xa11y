@@ -26,9 +26,9 @@ async function checks() {
   const apps: App[] = await App.list();
 
   // Optional lookup options.
-  const lookupOpts: AppLookupOptions = { timeoutMs: 30_000 };
+  const lookupOpts: AppLookupOptions = { timeout: 30_000 };
   const _app3: App = await App.byName('Test', lookupOpts);
-  const _app4: App = await App.byPid(1234, { timeoutMs: 5_000 });
+  const _app4: App = await App.byPid(1234, { timeout: 5_000 });
 
   // Locator instance methods return promises or locators.
   const loc: Locator = app.locator('button[name="OK"]');
