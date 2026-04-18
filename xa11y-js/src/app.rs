@@ -1,6 +1,7 @@
 //! JS `App` class: the entry point for accessibility queries.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use napi::bindgen_prelude::{AsyncTask, Env, Task};
 
@@ -28,18 +29,34 @@ impl App {
     }
 }
 
+/// Options for `App.byName` / `App.byPid`.
+#[napi(object)]
+pub struct AppLookupOptions {
+    /// If set, poll the accessibility API until the app appears or this
+    /// many milliseconds elapse. Useful when the app may not yet be
+    /// registered (e.g. just-launched). Only "not found" errors trigger a
+    /// retry; other errors fail fast.
+    pub timeout_ms: Option<u32>,
+}
+
 #[napi]
 impl App {
     /// Find an application by exact name.
     #[napi(ts_return_type = "Promise<App>")]
-    pub fn by_name(name: String) -> AsyncTask<FindByNameTask> {
-        AsyncTask::new(FindByNameTask { name })
+    pub fn by_name(name: String, options: Option<AppLookupOptions>) -> AsyncTask<FindByNameTask> {
+        AsyncTask::new(FindByNameTask {
+            name,
+            timeout: timeout_from(options),
+        })
     }
 
     /// Find an application by process ID.
     #[napi(ts_return_type = "Promise<App>")]
-    pub fn by_pid(pid: u32) -> AsyncTask<FindByPidTask> {
-        AsyncTask::new(FindByPidTask { pid })
+    pub fn by_pid(pid: u32, options: Option<AppLookupOptions>) -> AsyncTask<FindByPidTask> {
+        AsyncTask::new(FindByPidTask {
+            pid,
+            timeout: timeout_from(options),
+        })
     }
 
     /// List all running applications with an accessibility tree.
@@ -89,8 +106,16 @@ impl App {
 
 // ── Tasks ──────────────────────────────────────────────────────────────
 
+fn timeout_from(options: Option<AppLookupOptions>) -> Duration {
+    options
+        .and_then(|o| o.timeout_ms)
+        .map(|ms| Duration::from_millis(ms.into()))
+        .unwrap_or(Duration::ZERO)
+}
+
 pub struct FindByNameTask {
     name: String,
+    timeout: Duration,
 }
 
 impl Task for FindByNameTask {
@@ -99,7 +124,7 @@ impl Task for FindByNameTask {
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
         let provider = crate::provider()?;
-        xa11y::App::by_name_with(provider, &self.name).map_err(map_err)
+        xa11y::App::by_name_with_timeout(provider, &self.name, self.timeout).map_err(map_err)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
@@ -109,6 +134,7 @@ impl Task for FindByNameTask {
 
 pub struct FindByPidTask {
     pid: u32,
+    timeout: Duration,
 }
 
 impl Task for FindByPidTask {
@@ -117,7 +143,7 @@ impl Task for FindByPidTask {
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
         let provider = crate::provider()?;
-        xa11y::App::by_pid_with(provider, self.pid).map_err(map_err)
+        xa11y::App::by_pid_with_timeout(provider, self.pid, self.timeout).map_err(map_err)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {

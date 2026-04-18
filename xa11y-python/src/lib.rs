@@ -713,6 +713,19 @@ impl Subscription {
 
 /// A running application — the entry point for accessibility queries.
 ///
+/// Convert an optional `timeout` in seconds (as exposed to Python) to a
+/// [`Duration`]. `None` and zero both mean "no polling, single attempt".
+/// Negative or non-finite values raise `ValueError`.
+fn timeout_from(timeout: Option<f64>) -> PyResult<Duration> {
+    match timeout {
+        None => Ok(Duration::ZERO),
+        Some(t) if t.is_finite() && t >= 0.0 => Ok(Duration::from_secs_f64(t)),
+        Some(t) => Err(PyValueError::new_err(format!(
+            "timeout must be a non-negative number of seconds, got {t}"
+        ))),
+    }
+}
+
 /// `App` is **not** an `Element`. It represents the application as a whole
 /// and provides a `locator()` to search its accessibility tree.
 #[pyclass(frozen)]
@@ -728,21 +741,32 @@ struct App {
 #[pymethods]
 impl App {
     /// Find an application by exact name.
+    ///
+    /// If `timeout` is set (in seconds), poll the accessibility API until the
+    /// app appears or the timeout elapses. Useful when the app may not yet
+    /// be registered (e.g. just-launched). Only "not found" errors trigger a
+    /// retry; other errors fail fast.
     #[staticmethod]
-    fn by_name(py: Python<'_>, name: &str) -> PyResult<Self> {
+    #[pyo3(signature = (name, *, timeout=None))]
+    fn by_name(py: Python<'_>, name: &str, timeout: Option<f64>) -> PyResult<Self> {
         let provider = get_provider()?;
+        let timeout = timeout_from(timeout)?;
         let app = py
-            .allow_threads(move || xa11y::App::by_name_with(provider, name))
+            .allow_threads(move || xa11y::App::by_name_with_timeout(provider, name, timeout))
             .map_err(to_py_err)?;
         Ok(Self::from_core(app))
     }
 
     /// Find an application by process ID.
+    ///
+    /// See [`by_name`] for `timeout` semantics.
     #[staticmethod]
-    fn by_pid(py: Python<'_>, pid: u32) -> PyResult<Self> {
+    #[pyo3(signature = (pid, *, timeout=None))]
+    fn by_pid(py: Python<'_>, pid: u32, timeout: Option<f64>) -> PyResult<Self> {
         let provider = get_provider()?;
+        let timeout = timeout_from(timeout)?;
         let app = py
-            .allow_threads(move || xa11y::App::by_pid_with(provider, pid))
+            .allow_threads(move || xa11y::App::by_pid_with_timeout(provider, pid, timeout))
             .map_err(to_py_err)?;
         Ok(Self::from_core(app))
     }

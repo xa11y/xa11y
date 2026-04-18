@@ -122,11 +122,17 @@ class App:
     @property
     def pid(self) -> int | None: ...
     @staticmethod
-    def by_name(name: str) -> App:
-        """Find an application by exact name."""
+    def by_name(name: str, *, timeout: float | None = None) -> App:
+        """Find an application by exact name.
+
+        If ``timeout`` is set (seconds), poll the accessibility API until the
+        app appears or the timeout elapses. Useful when the app may not yet
+        be registered (e.g. just-launched). Only "not found" errors trigger a
+        retry; other errors fail fast.
+        """
     @staticmethod
-    def by_pid(pid: int) -> App:
-        """Find an application by process ID."""
+    def by_pid(pid: int, *, timeout: float | None = None) -> App:
+        """Find an application by process ID. See ``by_name`` for ``timeout``."""
     @staticmethod
     def list() -> list[App]:
         """List all running applications."""

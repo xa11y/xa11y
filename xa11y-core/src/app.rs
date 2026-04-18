@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::element::{Element, ElementData};
 use crate::error::{Error, Result};
@@ -6,6 +7,33 @@ use crate::event_provider::Subscription;
 use crate::locator::Locator;
 use crate::provider::Provider;
 use crate::selector::Selector;
+
+/// Polling interval shared by all `*_with_timeout` lookups.
+const LOOKUP_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Run `attempt` repeatedly until it succeeds or `timeout` elapses, treating
+/// `SelectorNotMatched` as a "not yet" signal. All other errors short-circuit.
+///
+/// `Duration::ZERO` performs exactly one attempt — identical to a non-polling
+/// call. On timeout, returns the last `SelectorNotMatched` error.
+fn poll_lookup<F>(timeout: Duration, mut attempt: F) -> Result<App>
+where
+    F: FnMut() -> Result<App>,
+{
+    let start = Instant::now();
+    loop {
+        match attempt() {
+            Ok(app) => return Ok(app),
+            Err(e @ Error::SelectorNotMatched { .. }) => {
+                if start.elapsed() >= timeout {
+                    return Err(e);
+                }
+            }
+            Err(e) => return Err(e),
+        }
+        std::thread::sleep(LOOKUP_POLL_INTERVAL);
+    }
+}
 
 /// A running application, the entry point for accessibility queries.
 ///
@@ -53,6 +81,23 @@ impl App {
         Ok(Self::from_data(provider, data))
     }
 
+    /// Like [`by_name_with`](Self::by_name_with), but polls until the app
+    /// appears or `timeout` elapses.
+    ///
+    /// Useful when the app may not yet be registered with the platform
+    /// accessibility API (e.g. just-launched test apps). Only
+    /// [`Error::SelectorNotMatched`] triggers a retry; other errors
+    /// (permission, parse, platform) short-circuit immediately.
+    ///
+    /// `Duration::ZERO` is equivalent to [`by_name_with`](Self::by_name_with).
+    pub fn by_name_with_timeout(
+        provider: Arc<dyn Provider>,
+        name: &str,
+        timeout: Duration,
+    ) -> Result<Self> {
+        poll_lookup(timeout, || Self::by_name_with(Arc::clone(&provider), name))
+    }
+
     /// Find an application by process ID, using an explicit provider.
     ///
     /// Prefer `App::by_pid` from the `xa11y` crate which uses the global
@@ -70,6 +115,17 @@ impl App {
         Err(Error::SelectorNotMatched {
             selector: format!("application with pid={}", pid),
         })
+    }
+
+    /// Like [`by_pid_with`](Self::by_pid_with), but polls until the app
+    /// appears or `timeout` elapses. See [`by_name_with_timeout`](Self::by_name_with_timeout)
+    /// for the retry semantics.
+    pub fn by_pid_with_timeout(
+        provider: Arc<dyn Provider>,
+        pid: u32,
+        timeout: Duration,
+    ) -> Result<Self> {
+        poll_lookup(timeout, || Self::by_pid_with(Arc::clone(&provider), pid))
     }
 
     /// List all running applications, using an explicit provider.
