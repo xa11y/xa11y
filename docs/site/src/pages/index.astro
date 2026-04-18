@@ -1,0 +1,854 @@
+---
+// Custom landing page — Graphite theme with lime accent
+// Overrides the Starlight splash page for the root URL
+---
+
+<!doctype html>
+<html lang="en" data-density="compact">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>xa11y — Cross-platform accessibility trees</title>
+<meta name="description" content="A unified API for accessibility trees across macOS, Windows, and Linux. Test desktop apps, power AI agents, or build assistive tools." />
+<link rel="canonical" href="https://xa11y.dev/" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+<style is:global>
+  :root{
+    --paper:#f7f7f6;
+    --paper-2:#f1f1ef;
+    --surface:#ffffff;
+    --ink:#0a0a0a;
+    --ink-muted:#555555;
+    --ink-dim:#9a9a97;
+    --rule:#d6d6d1;
+    --rule-2:#bfbfb8;
+    --accent:#84cc16;
+    --accent-ink:#1a2003;
+
+    --mono: "JetBrains Mono", ui-monospace, monospace;
+    --sans: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  }
+
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; background:var(--paper); color:var(--ink); font-family:var(--sans); -webkit-font-smoothing:antialiased; }
+  a{ color:inherit; text-decoration:none; }
+
+  html[data-density="compact"]     { --pad-y:40px; --sec-y:44px; --hero-gap:36px; --main-max:1200px; }
+  html[data-density="comfortable"] { --pad-y:64px; --sec-y:72px; --hero-gap:56px; --main-max:1200px; }
+
+  /* ===== Topbar ===== */
+  .topbar{
+    position:sticky; top:0; z-index:50;
+    display:flex; align-items:center; gap:24px;
+    padding:12px 24px;
+    background: color-mix(in oklab, var(--paper) 88%, transparent);
+    backdrop-filter: blur(10px);
+    border-bottom:1px dashed var(--rule-2);
+  }
+  .brand{ display:flex; align-items:center; gap:9px; font:600 15px/1 var(--sans); letter-spacing:-0.01em; }
+  .brand .glyph{
+    width:22px; height:22px; border-radius:6px;
+    background: var(--ink); color:var(--paper); font:600 12px/22px var(--mono);
+    text-align:center; letter-spacing:-0.04em; position:relative;
+  }
+  .brand .glyph::after{
+    content:''; position:absolute; right:-3px; bottom:-3px; width:8px; height:8px; background:var(--accent); border-radius:2px;
+  }
+  .brand .ver{ color:var(--ink-dim); font:400 12px/1 var(--mono); margin-left:2px; }
+  nav.nav{ display:flex; gap:20px; font-size:13.5px; color:var(--ink-muted); }
+  nav.nav a{ text-decoration:none; }
+  nav.nav a:hover{ color:var(--ink); }
+  .spacer{ flex:1; }
+  .icon-btn{
+    background:transparent; border:1px solid var(--rule-2);
+    color:var(--ink-muted); padding:6px 10px; border-radius:6px;
+    font:13px/1 var(--sans); cursor:pointer; display:inline-flex; gap:8px; align-items:center;
+    text-decoration:none;
+  }
+  .icon-btn:hover{ color:var(--ink); border-color:var(--ink); }
+
+  main{ max-width:var(--main-max); margin:0 auto; padding:0 24px; }
+
+  /* ===== Hero ===== */
+  .hero{
+    padding: calc(var(--pad-y) * 0.9) 0 calc(var(--pad-y) * 0.5);
+    display:grid; grid-template-columns: 1fr;
+    gap: var(--hero-gap);
+  }
+  .hero-meta{ display:flex; gap:8px; align-items:center; margin-bottom:18px; flex-wrap:wrap; }
+  .pill{
+    font:500 11px/1 var(--mono); letter-spacing:.04em;
+    padding:5px 9px; border-radius:99px; border:1px solid var(--rule-2);
+    background:var(--surface); color:var(--ink-muted);
+    display:inline-flex; gap:6px; align-items:center;
+  }
+  .pill em{ font-style:normal; color:var(--ink); background:var(--accent); padding:0 4px; border-radius:2px; }
+  .pill .dot{ width:6px; height:6px; border-radius:50%; background:var(--accent); box-shadow:0 0 0 3px color-mix(in oklab, var(--accent) 30%, transparent); }
+
+  h1.head{
+    font-family:var(--sans); font-weight:700;
+    font-size: clamp(44px, 5.4vw, 72px); line-height:0.95;
+    letter-spacing:-0.045em; margin:0 0 16px;
+  }
+  h1.head em{ font-style:normal; background: var(--accent); color: var(--accent-ink); padding: 0 8px; border-radius: 4px; }
+
+  .lede{ font-size:16px; line-height:1.55; color:var(--ink-muted); max-width:48ch; margin:0 0 22px; }
+
+  .cta{ display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  .btn{
+    font:500 14px/1 var(--sans);
+    padding:12px 16px; border-radius:8px; text-decoration:none;
+    display:inline-flex; align-items:center; gap:8px; border:1px solid transparent; cursor:pointer;
+  }
+  .btn.primary{ background:var(--accent); color:var(--accent-ink); font-weight:700; }
+  .btn.primary:hover{ filter: brightness(1.04); }
+  .btn.ghost{ color:var(--ink); border:1px solid var(--rule-2); background:transparent; }
+  .btn.ghost:hover{ border-color:var(--ink); }
+  .btn .arrow{ transition:transform .2s; }
+  .btn:hover .arrow{ transform: translateX(3px); }
+
+  .install{
+    margin-top:14px; font:13px/1 var(--mono); color:var(--ink-muted);
+    display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  }
+  .install code{ color:var(--ink); background:var(--paper-2); padding:6px 9px; border-radius:5px; }
+  .install .prompt{ user-select:none; color:var(--ink-dim); }
+
+  /* ===== Split panel ===== */
+  .split{
+    background:var(--surface); border:1px solid var(--rule); border-radius:12px;
+    box-shadow: 0 24px 48px -32px rgba(60,40,20,.18), 0 1px 0 rgba(255,255,255,.6) inset;
+    overflow:hidden;
+  }
+  .split-head{
+    display:flex; align-items:center; gap:8px; padding:9px 12px;
+    border-bottom:1px solid var(--rule); background:var(--paper);
+    font:11px/1 var(--mono); color:var(--ink-muted);
+  }
+  .split-head .dots{ display:flex; gap:5px; margin-right:6px; }
+  .split-head .dots i{ width:9px; height:9px; border-radius:50%; background:var(--rule-2); display:block; }
+  .split-head .title{ flex:1; }
+  .split-tabs{
+    display:flex; gap:2px; padding:8px 10px;
+    border-bottom:1px solid var(--rule); background:var(--paper);
+  }
+  .split-tabs button{
+    background:transparent; color:var(--ink-muted); border:1px solid transparent; padding:6px 11px;
+    border-radius:5px; font:12.5px/1 var(--mono); cursor:pointer;
+  }
+  .split-tabs button[aria-selected="true"]{ background:var(--surface); color:var(--ink); border-color:var(--rule); }
+  .split-grid{ display:grid; grid-template-columns: 1fr 1fr; min-height: 360px; }
+  .split-code{ padding:16px 18px; border-right:1px dashed var(--rule-2); font:12.5px/1.6 var(--mono); white-space:pre; color:var(--ink); overflow:auto; }
+  .split-code .ln{ color:var(--ink-dim); margin-right:12px; user-select:none; }
+  .tok-kw{ color:#9b5be8; }
+  .tok-fn{ color:#3a7be8; }
+  .tok-str{ color:#1f8b5b; }
+  .tok-com{ color:var(--ink-dim); font-style:italic; }
+  .split-code .hit{
+    background: color-mix(in oklab, var(--accent) 16%, var(--paper));
+    border-radius:3px; padding:0 2px; box-shadow: 0 0 0 1px var(--accent);
+  }
+
+  /* ===== Skeleton UI ===== */
+  .skel{
+    padding:18px 16px; position:relative;
+    background:
+      radial-gradient(circle at 1px 1px, rgba(0,0,0,0.07) 1px, transparent 0) 0 0/12px 12px;
+  }
+  .skel .win{
+    height:100%; background:var(--surface);
+    border:1px solid var(--rule-2); border-radius:8px;
+    display:flex; flex-direction:column; overflow:hidden;
+  }
+  .skel .win-bar{
+    height:22px; border-bottom:1px solid var(--rule); display:flex; align-items:center;
+    padding:0 10px; gap:5px; font:10px/1 var(--mono); color:var(--ink-muted);
+    background:var(--paper);
+  }
+  .skel .win-bar i{ width:7px; height:7px; border-radius:50%; background:var(--rule-2); display:block; }
+  .skel .body{ flex:1; padding:12px 10px 10px; display:grid; gap:8px; grid-template-rows: auto 1fr auto; }
+  .skel .toolbar{ display:grid; grid-template-columns: repeat(3, 1fr); gap:6px; }
+  .skel .box{
+    border:1px dashed var(--ink-muted);
+    background: rgba(255,255,255,.5);
+    border-radius:5px;
+    font:11px/1.2 var(--sans); color:var(--ink-muted);
+    min-height:26px; display:flex; align-items:center; padding:0 10px;
+  }
+  .skel .box[data-active="true"]{
+    border-style:solid; border-color:var(--accent);
+    background: color-mix(in oklab, var(--accent) 14%, var(--surface));
+    color:var(--ink);
+  }
+  .skel .messages{ display:grid; gap:6px; align-content:start; }
+  .skel .msg{ padding:7px 10px; }
+  .skel .msg .who{ font:600 10.5px/1.2 var(--sans); color:var(--ink); }
+  .skel .msg .txt{ font:11px/1.35 var(--sans); color:var(--ink-muted); margin-top:2px; }
+  .skel .msg[data-active="true"] .txt{ color:var(--ink); }
+  .skel .composer{ display:grid; grid-template-columns: 1fr auto; gap:6px; }
+  .skel .send{
+    background:var(--accent); color:#fff; border-color:var(--accent);
+    font:600 11px/1 var(--sans); padding:0 14px;
+  }
+
+  /* ===== Sections ===== */
+  section{ padding: var(--sec-y) 0; border-top:1px dashed var(--rule-2); }
+  section.no-rule{ border-top:none; }
+  section.no-rule + section{ border-top:none; }
+  .sec-eyebrow{
+    font:700 24px/1 var(--sans); color:var(--ink);
+    letter-spacing:-0.02em;
+    margin-bottom:20px;
+  }
+  .sec-eyebrow::after{
+    content:''; display:block; flex:1; height:0;
+    border-top:1px dashed var(--rule-2);
+  }
+  .sec-head{ display:flex; align-items:flex-end; justify-content:space-between; gap:28px; margin-bottom:28px; }
+  .sec-head h2{ font-family:var(--sans); font-weight:700; font-size:32px; letter-spacing:-0.03em; margin:0; max-width:22ch; line-height:1.08; }
+  .sec-head h2 em{ font-style:normal; background:var(--accent); color:var(--accent-ink); padding:0 6px; border-radius:4px; }
+  .sec-head p{ max-width:38ch; color:var(--ink-muted); font-size:14.5px; line-height:1.55; margin:0; }
+
+  /* ===== Code block ===== */
+  .code-block{
+    background:var(--surface); border:1px solid var(--rule); border-radius:10px; overflow:hidden;
+  }
+  .code-tabs{ display:flex; gap:2px; padding:8px 10px; border-bottom:1px solid var(--rule); background:var(--paper); align-items:center; }
+  .code-tabs button{
+    background:transparent; color:var(--ink-muted); border:1px solid transparent; padding:6px 11px;
+    border-radius:5px; font:12.5px/1 var(--mono); cursor:pointer;
+  }
+  .code-tabs button[aria-selected="true"]{ background:var(--surface); color:var(--ink); border-color:var(--rule); }
+  .code-tabs .copy{ margin-left:auto; font:11px/1 var(--mono); color:var(--ink-dim); padding:6px 10px; background:transparent; border:1px solid var(--rule-2); border-radius:5px; cursor:pointer; }
+  .code-tabs .copy:hover{ color:var(--ink); border-color:var(--ink-muted); }
+  .code-body{ padding:18px 22px; font:13px/1.65 var(--mono); white-space:pre; overflow:auto; max-height:460px; }
+
+  /* ===== Feature cards ===== */
+  .features{ display:grid; grid-template-columns: repeat(2, 1fr); gap:16px; }
+  .feature{
+    background:var(--surface); border:1px solid var(--rule); border-radius:10px;
+    padding:20px; display:flex; flex-direction:column; gap:10px;
+  }
+  .feature .tag{ font:500 10.5px/1 var(--mono); color:var(--ink); letter-spacing:.12em; }
+  .feature h3{ font-family:var(--sans); font-weight:700; font-size:18px; line-height:1.2; margin:0; letter-spacing:-0.02em; }
+  .feature p{ margin:0; color:var(--ink-muted); font-size:14px; line-height:1.5; }
+
+  /* ===== Use cases ===== */
+  .cases{ display:grid; grid-template-columns: repeat(3, 1fr); gap:16px; }
+  .case{
+    background:var(--surface); border:1px solid var(--rule); border-radius:10px;
+    padding:20px; display:flex; flex-direction:column; gap:12px; min-height:230px;
+  }
+  .case .tag{ font:500 10.5px/1 var(--mono); color:var(--ink); letter-spacing:.12em; }
+  .case h3{ font-family:var(--sans); font-weight:700; font-size:20px; line-height:1.15; margin:0; letter-spacing:-0.025em; }
+  .case p{ margin:0; color:var(--ink-muted); font-size:14px; line-height:1.5; }
+  .case .sel{
+    margin-top:auto; font:12px/1.4 var(--mono); color:var(--ink);
+    background:var(--paper); border:1px dashed var(--rule-2); border-radius:6px; padding:8px 10px;
+    word-break:break-all;
+  }
+  .case .sel .op{ color:var(--accent); }
+
+  /* ===== Quick start ===== */
+  .qs{ display:grid; grid-template-columns: 260px 1fr; gap:20px; align-items:start; }
+  .qs ol{ list-style:none; padding:0; margin:0; counter-reset:q; display:grid; gap:2px; }
+  .qs ol li{
+    counter-increment:q; padding:11px 14px; border-radius:7px; cursor:pointer;
+    border:1px solid transparent; display:flex; gap:12px; align-items:flex-start;
+  }
+  .qs ol li::before{ content: counter(q,decimal-leading-zero); font:11.5px/1.4 var(--mono); color:var(--ink-dim); }
+  .qs ol li[aria-current="true"]{ background:var(--surface); border-color:var(--rule); }
+  .qs ol li[aria-current="true"]::before{ color:var(--accent); }
+  .qs ol li h4{ margin:0 0 2px; font:500 14px/1.2 var(--sans); }
+  .qs ol li p{ margin:0; font-size:12.5px; color:var(--ink-muted); line-height:1.5; }
+  .qs-pane{ background:var(--surface); border:1px solid var(--rule); border-radius:10px; min-height:260px; }
+  .qs-pane pre{ margin:0; padding:18px 22px; font:13px/1.65 var(--mono); white-space:pre; color:var(--ink); }
+
+  /* ===== Footer ===== */
+  footer{
+    padding:36px 24px 52px; border-top:1px dashed var(--rule-2);
+    display:grid; grid-template-columns: 1.5fr 1fr 1fr 1fr; gap:28px;
+    font-size:13px; max-width:var(--main-max); margin:0 auto;
+  }
+  footer h5{ font:500 10.5px/1 var(--mono); color:var(--ink-dim); letter-spacing:.12em; margin:0 0 12px; }
+  footer ul{ list-style:none; padding:0; margin:0; display:grid; gap:7px; }
+  footer a{ color:var(--ink-muted); text-decoration:none; }
+  footer a:hover{ color:var(--ink); }
+  .colophon{ grid-column:1/-1; padding-top:18px; border-top:1px dashed var(--rule-2); display:flex; justify-content:space-between; color:var(--ink-dim); font:11.5px/1.4 var(--mono); }
+
+  @media (max-width: 1000px){
+    .hero{ grid-template-columns:1fr; }
+    .split-grid{ grid-template-columns:1fr; }
+    .features{ grid-template-columns:1fr; }
+    .cases{ grid-template-columns:1fr; }
+    .qs{ grid-template-columns:1fr; }
+    footer{ grid-template-columns: repeat(2, 1fr); }
+    nav.nav{ display:none; }
+  }
+</style>
+</head>
+<body>
+
+<header class="topbar">
+  <a class="brand" href="/"><span class="glyph">x</span> xa11y <span class="ver">v0.6</span></a>
+  <nav class="nav">
+    <a href="/guides/quick-start/">quick start</a>
+    <a href="/guides/overview/">overview</a>
+    <a href="/guides/cli/">CLI</a>
+    <a href="/api/rust/reference/xa11y/">API</a>
+    <a href="/guides/desktop-testing/">testing</a>
+    <a href="/guides/platform-details/">platforms</a>
+  </nav>
+  <div class="spacer"></div>
+  <a class="icon-btn" href="https://github.com/xa11y/xa11y">GitHub &rarr;</a>
+</header>
+
+<main>
+
+<!-- HERO -->
+<section class="hero" style="border-top:0;">
+  <div>
+    <h1 class="head">
+      cross-platform<br/>
+      accessibility <em>trees</em>.
+    </h1>
+
+    <p class="lede">
+      A unified API for accessibility trees across macOS, Windows, and Linux.
+      Test desktop apps, power AI agents, or build assistive tools.
+    </p>
+
+    <div class="cta">
+      <a class="btn primary" href="/guides/quick-start/">get started <span class="arrow">&rarr;</span></a>
+      <a class="btn ghost" href="https://github.com/xa11y/xa11y">GitHub</a>
+    </div>
+
+    <div class="install">
+      <code><span class="prompt">$ </span>cargo add xa11y</code>
+      <span>or</span>
+      <code><span class="prompt">$ </span>pip install xa11y</code>
+      <span>or</span>
+      <code><span class="prompt">$ </span>npm install @crowecawcaw/xa11y</code>
+    </div>
+  </div>
+
+  <div class="split">
+    <div class="split-tabs" role="tablist">
+      <button role="tab" data-lang="rust" aria-selected="true">rust</button>
+      <button role="tab" data-lang="python" aria-selected="false">python</button>
+      <button role="tab" data-lang="node" aria-selected="false">node</button>
+      <button role="tab" data-lang="cli" aria-selected="false">cli</button>
+    </div>
+    <div class="split-grid">
+      <div class="split-code"><pre id="hero-code-pane"></pre></div>
+
+      <div class="skel">
+        <div class="win">
+          <div class="win-bar"><i></i><i></i><i></i> <span style="margin-left:auto;">Slack &mdash; #general</span></div>
+          <div class="body">
+            <div class="toolbar">
+              <div class="box">Call</div>
+              <div class="box">Pinned</div>
+              <div class="box">Details</div>
+            </div>
+            <div class="messages">
+              <div class="box msg">
+                <div><div class="who">Ada Lovelace</div><div class="txt">lgtm &mdash; merging</div></div>
+              </div>
+              <div class="box msg" data-active="true">
+                <div><div class="who">Grace Hopper</div><div class="txt">ship it</div></div>
+              </div>
+            </div>
+            <div class="composer">
+              <div class="box" data-active="true">Message #general</div>
+              <div class="box send" data-active="true">Send</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- FEATURES -->
+<section class="no-rule">
+  <div class="features">
+    <div class="feature">
+      <h3>simple interface</h3>
+      <p>Read the accessibility tree, find nodes, perform actions. A small, intuitive API that stays out of your way.</p>
+    </div>
+    <div class="feature">
+      <h3>cross-platform</h3>
+      <p>One API for macOS (AXUIElement), Windows (UI Automation), and Linux (AT-SPI2). Write once, query anywhere.</p>
+    </div>
+    <div class="feature">
+      <h3>flexible selectors</h3>
+      <p>Query accessibility trees with CSS-like syntax: <code style="font-size:12px; background:var(--paper-2); padding:2px 4px; border-radius:3px;">button[name='Submit']</code>, <code style="font-size:12px; background:var(--paper-2); padding:2px 4px; border-radius:3px;">textfield[name^='Search']</code>, <code style="font-size:12px; background:var(--paper-2); padding:2px 4px; border-radius:3px;">group&nbsp;&gt;&nbsp;button</code>.</p>
+    </div>
+    <div class="feature">
+      <h3>permissive licensing</h3>
+      <p>MIT-licensed, with permissively licensed dependencies throughout. Use it freely in commercial and open-source projects alike.</p>
+    </div>
+  </div>
+</section>
+
+<!-- USE CASES -->
+<section>
+  <div class="sec-eyebrow">use cases</div>
+  <div class="qs">
+    <ol id="uc-list" role="tablist"></ol>
+    <div class="qs-pane"><pre id="uc-pane"></pre></div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div>
+    <div class="brand" style="margin-bottom:12px;"><span class="glyph">x</span> xa11y <span class="ver">v0.6</span></div>
+    <div style="color:var(--ink-muted); font-size:13px; line-height:1.55; max-width:34ch;">
+      A unified API for accessibility trees on macOS, Windows and Linux. MIT-licensed, built in the open.
+    </div>
+  </div>
+  <div>
+    <h5>docs</h5>
+    <ul>
+      <li><a href="/guides/quick-start/">quick start</a></li>
+      <li><a href="/guides/overview/">overview</a></li>
+      <li><a href="/api/rust/reference/xa11y/">rust API</a></li>
+      <li><a href="/api/python/reference/api/xa11y/">python API</a></li>
+    </ul>
+  </div>
+  <div>
+    <h5>project</h5>
+    <ul>
+      <li><a href="https://github.com/xa11y/xa11y">GitHub</a></li>
+      <li><a href="https://github.com/xa11y/xa11y/blob/main/CHANGELOG.md">changelog</a></li>
+      <li><a href="https://github.com/xa11y/xa11y/issues">issues</a></li>
+    </ul>
+  </div>
+  <div>
+    <h5>guides</h5>
+    <ul>
+      <li><a href="/guides/desktop-testing/">desktop testing</a></li>
+      <li><a href="/guides/platform-details/">platform details</a></li>
+    </ul>
+  </div>
+  <div class="colophon">
+    <span>&copy; 2025 &middot; MIT-licensed</span>
+  </div>
+</footer>
+
+<script is:inline>
+  // --- Syntax highlighting ---
+  function escapeHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  function hl(code, lang) {
+    if (lang === 'cli') {
+      // Tokenize lines: $ lines are comments, otherwise highlight inline
+      return code.split('\n').map(function(line) {
+        var s = escapeHtml(line);
+        if (/^\$/.test(line)) return '<span class="tok-com">' + s + '</span>';
+        // Highlight strings, roles, and bracketed state
+        s = s.replace(/"[^"]*"/g, '<span class="tok-str">$&</span>');
+        s = s.replace(/\b(button|textfield|text|list|group|toolbar|window|listitem|heading)\b/g, '<span class="tok-kw">$1</span>');
+        s = s.replace(/(\[[^\]]+\])/g, '<span class="tok-fn">$1</span>');
+        return s;
+      }).join('\n');
+    }
+
+    // Tokenize: pull out strings and comments first, highlight rest
+    var tokens = [];
+    var commentRe = lang === 'python' ? /#[^\n]*/ : /\/\/[^\n]*/;
+    var re = /"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|\/\/[^\n]*|#[^\n]*/g;
+    var last = 0;
+    var m;
+    while ((m = re.exec(code)) !== null) {
+      if (m.index > last) tokens.push({ type: 'code', text: code.slice(last, m.index) });
+      var ch = m[0][0];
+      if (ch === '"' || ch === "'") {
+        tokens.push({ type: 'str', text: m[0] });
+      } else if ((ch === '/' && lang !== 'python') || (ch === '#' && lang === 'python')) {
+        tokens.push({ type: 'com', text: m[0] });
+      } else {
+        tokens.push({ type: 'code', text: m[0] });
+      }
+      last = re.lastIndex;
+    }
+    if (last < code.length) tokens.push({ type: 'code', text: code.slice(last) });
+
+    var kws = {
+      rust: ['use','fn','let','mut','if','else','match','return','impl','pub','crate','as','async','await','for','in'],
+      python: ['from','import','def','class','return','if','else','for','in','assert','async','await','with','as','print'],
+      node: ['import','from','const','let','var','async','await','return','class','new','export','for','of']
+    };
+    var kwSet = {};
+    (kws[lang] || []).forEach(function(k) { kwSet[k] = true; });
+    var fns = ['query','query_all','queryAll','press','type_text','typeText','connect','frontmost',
+               'expect','toBeVisible','is_ok','assert','println','tree_json','treeJson',
+               'role','name','len','children','parent','actions','perform_action'];
+    var fnSet = {};
+    fns.forEach(function(f) { fnSet[f] = true; });
+
+    return tokens.map(function(t) {
+      var s = escapeHtml(t.text);
+      if (t.type === 'str') return '<span class="tok-str">' + s + '</span>';
+      if (t.type === 'com') return '<span class="tok-com">' + s + '</span>';
+      // Highlight keywords and functions in code segments
+      s = s.replace(/\b[a-zA-Z_]\w*\b/g, function(w) {
+        if (kwSet[w]) return '<span class="tok-kw">' + w + '</span>';
+        if (fnSet[w]) return '<span class="tok-fn">' + w + '</span>';
+        return w;
+      });
+      return s;
+    }).join('');
+  }
+
+  // --- Hero code samples ---
+  var SAMPLES = {
+    rust: [
+'use xa11y::prelude::*;',
+'',
+'fn main() -> Result<()> {',
+'    let app = Desktop::connect("Slack")?;',
+'',
+'    // CSS-like selectors over the a11y tree',
+'    let send = app.query("button[name=\'Send\']")?;',
+'    let composer = app.query("textfield[name^=\'Message\']")?;',
+'',
+'    composer.type_text("ship it")?;',
+'    send.press()?;',
+'',
+'    // Walk children, read properties',
+'    let messages = app.query_all("list > group")?;',
+'    for msg in &messages {',
+'        println!("{}: {}", msg.role(), msg.name());',
+'    }',
+'',
+'    assert!(app.query("text[name*=\'ship it\']").is_ok());',
+'    Ok(())',
+'}',
+    ].join('\n'),
+
+    python: [
+'from xa11y import Desktop',
+'',
+'app = Desktop.connect("Slack")',
+'',
+'# CSS-like selectors over the a11y tree',
+'send = app.query("button[name=\'Send\']")',
+'composer = app.query("textfield[name^=\'Message\']")',
+'',
+'composer.type_text("ship it")',
+'send.press()',
+'',
+'# Walk children, read properties',
+'messages = app.query_all("list > group")',
+'for msg in messages:',
+'    print(f"{msg.role()}: {msg.name()}")',
+'',
+'assert app.query("text[name*=\'ship it\']")',
+    ].join('\n'),
+
+    node: [
+'import { Desktop } from "@crowecawcaw/xa11y";',
+'',
+'const app = await Desktop.connect("Slack");',
+'',
+'// CSS-like selectors over the a11y tree',
+'const send = await app.query("button[name=\'Send\']");',
+'const composer = await app.query("textfield[name^=\'Message\']");',
+'',
+'await composer.typeText("ship it");',
+'await send.press();',
+'',
+'// Walk children, read properties',
+'const messages = await app.queryAll("list > group");',
+'for (const msg of messages) {',
+'    console.log(`${msg.role()}: ${msg.name()}`);',
+'}',
+'',
+'await app.expect("text[name*=\'ship it\']").toBeVisible();',
+    ].join('\n'),
+
+    cli: [
+'$ xa11y inspect --app "Slack"',
+'window "Slack | #general"',
+'├─ toolbar "Channel header"',
+'│  ├─ button "Call"        [enabled]',
+'│  └─ button "Details"     [enabled]',
+'├─ list "Messages"         [scrollable, 142 items]',
+'│  ├─ group "Message from Ada"',
+'│  │  └─ text "lgtm — merging"',
+'│  └─ group "Message from Grace"',
+'│     └─ text "ship it"',
+'└─ group "Composer"',
+'   ├─ textfield "Message #general"  [focused]',
+'   └─ button "Send"                 [enabled]',
+    ].join('\n'),
+  };
+
+  var currentLang = 'rust';
+
+  function setLang(lang) {
+    currentLang = lang;
+    document.querySelectorAll('.split-tabs button[data-lang]').forEach(function(b) {
+      b.setAttribute('aria-selected', String(b.dataset.lang === lang));
+    });
+    document.getElementById('hero-code-pane').innerHTML = hl(SAMPLES[lang], lang);
+    // Also update use case pane
+    var activeUC = document.querySelector('#uc-list li[aria-current="true"]');
+    if (activeUC) setUC(+activeUC.dataset.i);
+  }
+
+  document.querySelectorAll('.split-tabs button[data-lang]').forEach(function(b) {
+    b.onclick = function() { setLang(b.dataset.lang); };
+  });
+  setLang('rust');
+
+  // --- Use cases (multi-language) ---
+  var UC = [
+    {
+      h: 'end-to-end testing',
+      d: 'Write real assertions against native UI — buttons, fields, menus. No image diffing, no sleeps.',
+      rust: [
+'use xa11y::prelude::*;',
+'',
+'let app = Desktop::connect("MyApp")?;',
+'',
+'// Fill out a form and submit',
+'let name = app.query("textfield[name=\'Full name\']")?;',
+'name.type_text("Grace Hopper")?;',
+'',
+'let email = app.query("textfield[name=\'Email\']")?;',
+'email.type_text("grace@example.com")?;',
+'',
+'let submit = app.query("button[name=\'Submit\']")?;',
+'submit.press()?;',
+'',
+'// Assert the confirmation appeared',
+'let toast = app.query("text[name*=\'submitted\']")?;',
+'assert!(toast.is_ok());',
+      ].join('\n'),
+      python: [
+'from xa11y import Desktop',
+'',
+'app = Desktop.connect("MyApp")',
+'',
+'# Fill out a form and submit',
+'name = app.query("textfield[name=\'Full name\']")',
+'name.type_text("Grace Hopper")',
+'',
+'email = app.query("textfield[name=\'Email\']")',
+'email.type_text("grace@example.com")',
+'',
+'submit = app.query("button[name=\'Submit\']")',
+'submit.press()',
+'',
+'# Assert the confirmation appeared',
+'assert app.query("text[name*=\'submitted\']")',
+      ].join('\n'),
+      node: [
+'import { Desktop } from "@crowecawcaw/xa11y";',
+'',
+'const app = await Desktop.connect("MyApp");',
+'',
+'// Fill out a form and submit',
+'const name = await app.query("textfield[name=\'Full name\']");',
+'await name.typeText("Grace Hopper");',
+'',
+'const email = await app.query("textfield[name=\'Email\']");',
+'await email.typeText("grace@example.com");',
+'',
+'const submit = await app.query("button[name=\'Submit\']");',
+'await submit.press();',
+'',
+'// Assert the confirmation appeared',
+'await app.expect("text[name*=\'submitted\']").toBeVisible();',
+      ].join('\n'),
+      cli: [
+'$ xa11y query --app "MyApp" "textfield[name=\'Full name\']" --type "Grace Hopper"',
+'$ xa11y query --app "MyApp" "textfield[name=\'Email\']" --type "grace@example.com"',
+'$ xa11y query --app "MyApp" "button[name=\'Submit\']" --press',
+'$ xa11y query --app "MyApp" "text[name*=\'submitted\']"',
+'text "Form submitted successfully"',
+      ].join('\n'),
+    },
+    {
+      h: 'AI agents',
+      d: 'Snapshot the tree as JSON, hand it to a model, let it call press() and type_text() — without screenshot OCR.',
+      rust: [
+'use xa11y::prelude::*;',
+'',
+'let app = Desktop::frontmost()?;',
+'',
+'// Structured tree snapshot for an LLM',
+'let snapshot = app.tree_json()?;',
+'let action = ask_model(&snapshot)?;',
+'',
+'// Model says: type into search, click result',
+'let search = app.query("textfield[name^=\'Search\']")?;',
+'search.type_text(&action.query)?;',
+'',
+'let result = app.query("listitem[name*=\'Q4 Report\']")?;',
+'result.press()?;',
+'',
+'// Verify the document opened',
+'let heading = app.query("heading[name*=\'Q4\']")?;',
+'assert!(heading.is_ok());',
+      ].join('\n'),
+      python: [
+'from xa11y import Desktop',
+'',
+'app = Desktop.frontmost()',
+'',
+'# Structured tree snapshot for an LLM',
+'snapshot = app.tree_json()',
+'action = ask_model(snapshot)',
+'',
+'# Model says: type into search, click result',
+'search = app.query("textfield[name^=\'Search\']")',
+'search.type_text(action.query)',
+'',
+'result = app.query("listitem[name*=\'Q4 Report\']")',
+'result.press()',
+'',
+'# Verify the document opened',
+'assert app.query("heading[name*=\'Q4\']")',
+      ].join('\n'),
+      node: [
+'import { Desktop } from "@crowecawcaw/xa11y";',
+'',
+'const app = await Desktop.frontmost();',
+'',
+'// Structured tree snapshot for an LLM',
+'const snapshot = await app.treeJson();',
+'const action = await askModel(snapshot);',
+'',
+'// Model says: type into search, click result',
+'const search = await app.query("textfield[name^=\'Search\']");',
+'await search.typeText(action.query);',
+'',
+'const result = await app.query("listitem[name*=\'Q4 Report\']");',
+'await result.press();',
+'',
+'// Verify the document opened',
+'await app.expect("heading[name*=\'Q4\']").toBeVisible();',
+      ].join('\n'),
+      cli: [
+'$ xa11y tree --app "frontmost" --json | llm-agent',
+'# Agent output: search for "Q4 Report"',
+'$ xa11y query --app "frontmost" "textfield[name^=\'Search\']" --type "Q4 Report"',
+'$ xa11y query --app "frontmost" "listitem[name*=\'Q4 Report\']" --press',
+'$ xa11y query --app "frontmost" "heading[name*=\'Q4\']"',
+'heading "Q4 Report — FY2026"',
+      ].join('\n'),
+    },
+    {
+      h: 'assistive tools',
+      d: 'Same APIs the OS exposes to assistive technology. No private frameworks, no vendor SDKs.',
+      rust: [
+'use xa11y::prelude::*;',
+'',
+'let app = Desktop::frontmost()?;',
+'',
+'// Read all headings on screen',
+'let headings = app.query_all("*[role=\'heading\']")?;',
+'for h in &headings {',
+'    println!("h{}: {}", h.role(), h.name());',
+'}',
+'',
+'// Find the focused element',
+'let focused = app.query("*:focused")?;',
+'println!("focused: {} \'{}\'", focused.role(), focused.name());',
+'',
+'// List available actions',
+'let actions = focused.actions()?;',
+'for a in &actions {',
+'    println!("  action: {}", a);',
+'}',
+      ].join('\n'),
+      python: [
+'from xa11y import Desktop',
+'',
+'app = Desktop.frontmost()',
+'',
+'# Read all headings on screen',
+'headings = app.query_all("*[role=\'heading\']")',
+'for h in headings:',
+'    print(f"h{h.role()}: {h.name()}")',
+'',
+'# Find the focused element',
+'focused = app.query("*:focused")',
+'print(f"focused: {focused.role()} \'{focused.name()}\'")',
+'',
+'# List available actions',
+'for a in focused.actions():',
+'    print(f"  action: {a}")',
+      ].join('\n'),
+      node: [
+'import { Desktop } from "@crowecawcaw/xa11y";',
+'',
+'const app = await Desktop.frontmost();',
+'',
+'// Read all headings on screen',
+'const headings = await app.queryAll("*[role=\'heading\']");',
+'for (const h of headings) {',
+'    console.log(`h${h.role()}: ${h.name()}`);',
+'}',
+'',
+'// Find the focused element',
+'const focused = await app.query("*:focused");',
+'console.log(`focused: ${focused.role()} \'${focused.name()}\'`);',
+'',
+'// List available actions',
+'const actions = await focused.actions();',
+'for (const a of actions) {',
+'    console.log(`  action: ${a}`);',
+'}',
+      ].join('\n'),
+      cli: [
+'$ xa11y query --app "frontmost" "*[role=\'heading\']"',
+'heading "Dashboard"',
+'heading "Recent activity"',
+'heading "Settings"',
+'',
+'$ xa11y query --app "frontmost" "*:focused"',
+'textfield "Search" [focused, editable]',
+'  actions: press, set_value',
+'',
+'$ xa11y inspect --app "frontmost" --actions',
+'window "MyApp"',
+'├─ heading "Dashboard"',
+'├─ textfield "Search"  [focused]',
+'│  actions: press, set_value',
+'└─ button "Submit"     [enabled]',
+'   actions: press',
+      ].join('\n'),
+    },
+  ];
+
+  var ucList = document.getElementById('uc-list');
+  ucList.innerHTML = UC.map(function(u, i) {
+    return '<li data-i="' + i + '" ' + (i === 0 ? 'aria-current="true"' : '') + ' role="tab"><div><h4>' + u.h + '</h4><p>' + u.d + '</p></div></li>';
+  }).join('');
+
+  function setUC(i) {
+    ucList.querySelectorAll('li').forEach(function(li, idx) {
+      li.setAttribute('aria-current', String(idx === i));
+    });
+    var lang = currentLang;
+    document.getElementById('uc-pane').innerHTML = hl(UC[i][lang], lang);
+  }
+
+  ucList.querySelectorAll('li').forEach(function(li) {
+    li.onclick = function() { setUC(+li.dataset.i); };
+  });
+  setUC(0);
+</script>
+</body>
+</html>

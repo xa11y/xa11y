@@ -1,20 +1,63 @@
-/* Ensure hero image never overflows */
-.hero > .hero-html img {
-  max-width: 100%;
-  height: auto;
+/* ===== Graphite theme for Starlight docs ===== */
+
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+/* Light mode (default for docs) */
+:root,
+:root[data-theme='light'] {
+  --sl-font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  --sl-font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  /* Lime accent — light mode: high = dark text on accent bg, low = tinted bg */
+  --sl-color-accent-low: hsl(84, 60%, 93%);
+  --sl-color-accent: hsl(84, 78%, 50%);
+  --sl-color-accent-high: hsl(84, 45%, 30%);
+
+  /* Graphite grays — warm neutral */
+  --sl-color-white: #0a0a0a;
+  --sl-color-gray-1: #1a1a18;
+  --sl-color-gray-2: #333330;
+  --sl-color-gray-3: #555555;
+  --sl-color-gray-4: #9a9a97;
+  --sl-color-gray-5: #d6d6d1;
+  --sl-color-gray-6: #f1f1ef;
+  --sl-color-gray-7: #f7f7f6;
+  --sl-color-black: #ffffff;
+
+  --sl-color-text-accent: hsl(84, 45%, 30%);
+  --sl-color-text-invert: #0a0a0a;
+  --sl-color-bg: var(--sl-color-black);
+  --sl-color-bg-nav: var(--sl-color-gray-7);
+  --sl-color-bg-sidebar: var(--sl-color-bg);
+  --sl-color-bg-inline-code: var(--sl-color-gray-6);
+  --sl-color-bg-accent: hsl(84, 60%, 93%);
+  --sl-color-hairline-light: var(--sl-color-gray-6);
+  --sl-color-hairline-shade: var(--sl-color-gray-5);
 }
 
-/* Give the hero image more room on desktop */
-@media (min-width: 50rem) {
-  .hero > .hero-html {
-    width: 30rem;
-  }
+/* Dark mode overrides */
+:root[data-theme='dark'] {
+  --sl-color-accent-low: hsl(84, 40%, 14%);
+  --sl-color-accent: hsl(84, 78%, 44%);
+  --sl-color-accent-high: hsl(84, 70%, 78%);
+
+  --sl-color-white: #f0f0ed;
+  --sl-color-gray-1: #d6d6d1;
+  --sl-color-gray-2: #9a9a97;
+  --sl-color-gray-3: #777774;
+  --sl-color-gray-4: #555555;
+  --sl-color-gray-5: #333330;
+  --sl-color-gray-6: #1a1a18;
+  --sl-color-gray-7: #111110;
+  --sl-color-black: #0a0a0a;
+
+  --sl-color-text-accent: var(--sl-color-accent-high);
 }
 
 /* Smaller content headings */
 .sl-markdown-content h2 {
   font-size: var(--sl-text-2xl);
-  border-bottom: 2px solid var(--sl-color-gray-5);
+  border-bottom: 1px dashed var(--sl-color-gray-5);
   padding-bottom: 0.4rem;
 }
 
@@ -33,22 +76,20 @@
 }
 
 .sl-markdown-content table thead tr {
-  border-bottom: 2px solid var(--sl-color-gray-5);
+  border-bottom: 1px dashed var(--sl-color-gray-5);
 }
 
 .sl-markdown-content table tbody tr:nth-child(even) {
   background: var(--sl-color-gray-7, rgba(128, 128, 128, 0.06));
 }
 
-/* Accent tint for inline code */
+/* Inline code — lime tint */
 .sl-markdown-content :not(pre) > code {
-  background: rgba(124, 110, 240, 0.08);
+  background: hsl(84, 50%, 90%);
 }
 
-@media (prefers-color-scheme: light) {
-  .sl-markdown-content :not(pre) > code {
-    background: rgba(124, 110, 240, 0.1);
-  }
+:root[data-theme='dark'] .sl-markdown-content :not(pre) > code {
+  background: hsl(84, 30%, 15%);
 }
 
 /* Prevent inline code from wrapping in tables */
@@ -56,12 +97,10 @@
   white-space: nowrap;
 }
 
-/* Mobile: place hero image below title/tagline and center it */
-@media (max-width: 50rem) {
-  .hero > .hero-html {
-    order: 1;
-    width: min(30rem, 100%);
-    display: flex;
-    justify-content: center;
-  }
+/* Sidebar link active state — light lime bg, dark text */
+[aria-current='page'],
+[aria-current='page']:hover,
+[aria-current='page']:focus {
+  background-color: hsl(84, 60%, 90%) !important;
+  color: hsl(84, 45%, 25%) !important;
 }

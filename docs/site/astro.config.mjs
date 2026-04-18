@@ -18,20 +18,21 @@ export default defineConfig({
       ],
       sidebar: [
         {
-          label: "Getting Started",
+          label: "Docs",
           items: [
             { label: "Quick Start", slug: "guides/quick-start" },
             { label: "Overview", slug: "guides/overview" },
+            { label: "CLI", slug: "guides/cli" },
             { label: "Desktop Testing", slug: "guides/desktop-testing" },
             { label: "Platform Details", slug: "guides/platform-details" },
           ],
         },
         {
-          label: "API Reference",
+          label: "API",
           items: [
-            { label: "Rust API", link: "/api/rust/reference/xa11y/" },
-            { label: "Python API", link: "/api/python/reference/api/xa11y/" },
-            { label: "JavaScript API", link: "/api/javascript/" },
+            { label: "Rust", link: "/api/rust/reference/xa11y/" },
+            { label: "Python", link: "/api/python/reference/api/xa11y/" },
+            { label: "JavaScript", link: "/api/javascript/" },
           ],
         },
       ],

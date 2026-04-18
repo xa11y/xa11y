@@ -1,0 +1,195 @@
+---
+title: CLI
+description: Use the xa11y CLI to explore accessibility trees, find elements, and debug tests.
+---
+
+The `xa11y` command-line tool is for exploring and debugging. It mirrors the library API and is useful for inspecting an app before writing code, or figuring out why a selector isn't matching.
+
+If you're looking to build agents that control desktop applications, see [agent-desktop.dev](https://agent-desktop.dev) — a purpose-built tool for that, built on xa11y.
+
+## Install
+
+```bash
+cargo install xa11y        # from crates.io
+pip install xa11y           # includes the CLI binary
+```
+
+## Commands
+
+### `xa11y apps`
+
+List running applications with their PIDs.
+
+```bash
+xa11y apps
+```
+
+```
+1234  Calculator
+5678  Slack
+9012  Firefox
+```
+
+### `xa11y tree`
+
+Print the full accessibility tree for an application.
+
+```bash
+xa11y tree --app Calculator
+```
+
+```
+application "Calculator" [enabled visible] bounds=(0,0,400,600)
+├── window "Calculator" [enabled visible] bounds=(0,0,400,600)
+│   ├── group "Display" [enabled visible]
+│   │   └── static_text "Result" value="42" [enabled visible]
+│   └── group "Keypad" [enabled visible]
+│       ├── button "7" [enabled visible focusable] actions=[press,focus]
+│       ├── button "8" [enabled visible focusable] actions=[press,focus]
+│       └── button "+" [enabled visible focusable] actions=[press,focus]
+└── menu_bar [enabled visible]
+```
+
+This is the fastest way to understand an app's structure. Every element shows its role, name, value, states, bounds, and available actions.
+
+### `xa11y find`
+
+Find elements matching a CSS-like selector.
+
+```bash
+xa11y find "button" --app Calculator
+```
+
+```
+button "7" [enabled visible focusable] actions=[press,focus]
+button "8" [enabled visible focusable] actions=[press,focus]
+button "+" [enabled visible focusable] actions=[press,focus]
+
+3 matches
+```
+
+Use this to test selectors before putting them in code:
+
+```bash
+# Does this selector match what I expect?
+xa11y find "textfield[name^='Message']" --app Slack
+
+# How many list items are there?
+xa11y find "list > listitem" --app Finder
+```
+
+### `xa11y action`
+
+Perform an action on the first element matching a selector.
+
+```bash
+xa11y action press "button[name='7']" --app Calculator
+```
+
+```
+ok
+```
+
+Actions that need a value use `--value`:
+
+```bash
+xa11y action set-value "textfield[name='Search']" --app Safari --value "hello"
+xa11y action type-text "textfield[name='Message']" --app Slack --value "ship it"
+xa11y action select-text "textfield" --app TextEdit --value "0,5"
+```
+
+Scrolling actions take an optional numeric value (default 1.0):
+
+```bash
+xa11y action scroll-down "list[name='Messages']" --app Slack
+xa11y action scroll-down "list[name='Messages']" --app Slack --value 3.0
+```
+
+#### Available actions
+
+| Action | Description |
+| --- | --- |
+| `press` | Press a button or activate a control |
+| `focus` | Move focus to the element |
+| `blur` | Remove focus from the element |
+| `toggle` | Toggle a checkbox or switch |
+| `expand` | Expand a disclosure or menu |
+| `collapse` | Collapse a disclosure or menu |
+| `select` | Select an item |
+| `show-menu` | Show a context menu |
+| `scroll-into-view` | Scroll the element into view |
+| `scroll-down` | Scroll down (optional `--value` for amount) |
+| `scroll-right` | Scroll right (optional `--value` for amount) |
+| `increment` | Increment a numeric value |
+| `decrement` | Decrement a numeric value |
+| `set-value` | Set text value (requires `--value`) |
+| `type-text` | Type text as keystrokes (requires `--value`) |
+| `select-text` | Select a text range (requires `--value START,END`) |
+
+### `xa11y events`
+
+Stream accessibility events in real time. Runs until you press ctrl-c.
+
+```bash
+xa11y events --app Calculator
+```
+
+```
+FocusChanged  button "7"
+ValueChanged  static_text "Result" value="7"
+FocusChanged  button "+"
+FocusChanged  button "3"
+ValueChanged  static_text "Result" value="10"
+```
+
+Useful for understanding what events fire when you interact with an app, or for debugging event subscriptions in your code.
+
+## Flags
+
+All commands except `apps` require a target application:
+
+| Flag | Description |
+| --- | --- |
+| `--app NAME` | Target application by name (substring match) |
+| `--pid PID` | Target application by process ID |
+
+## Common workflows
+
+**Figure out the right selector for a test:**
+
+```bash
+# 1. See the full tree
+xa11y tree --app MyApp
+
+# 2. Try a selector
+xa11y find "button[name='Submit']" --app MyApp
+
+# 3. Narrow it down
+xa11y find "dialog button[name='Submit']" --app MyApp
+```
+
+**Debug a failing test:**
+
+```bash
+# What does the tree actually look like right now?
+xa11y tree --app MyApp
+
+# Is the element there but with a different name?
+xa11y find "button" --app MyApp
+
+# Watch events to see what's happening
+xa11y events --app MyApp
+```
+
+**Explore an unfamiliar app:**
+
+```bash
+# What apps are running?
+xa11y apps
+
+# What's the structure?
+xa11y tree --app Slack
+
+# What can I interact with?
+xa11y find "*[focusable]" --app Slack
+```
