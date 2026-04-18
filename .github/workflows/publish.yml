@@ -79,34 +79,28 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Publish xa11y-core
-        run: cargo publish -p xa11y-core
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      - name: Publish xa11y-macos
-        run: cargo publish -p xa11y-macos
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Publish xa11y-windows
-        run: cargo publish -p xa11y-windows
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Publish xa11y-linux
-        run: cargo publish -p xa11y-linux
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Wait for crates.io index
-        run: sleep 30
-
-      - name: Publish xa11y
-        run: cargo publish -p xa11y
+      # Publish crates in dependency order. On re-release (level=release),
+      # versions may already exist on crates.io — skip those gracefully.
+      - name: Publish all crates
+        run: |
+          publish_or_skip() {
+            local output
+            if output=$(cargo publish -p "$1" 2>&1); then
+              echo "✓ $1 published"
+            elif echo "$output" | grep -q "already uploaded"; then
+              echo "⊘ $1 already on crates.io, skipping"
+            else
+              echo "$output" >&2
+              return 1
+            fi
+          }
+          publish_or_skip xa11y-core
+          sleep 30
+          publish_or_skip xa11y-macos
+          publish_or_skip xa11y-windows
+          publish_or_skip xa11y-linux
+          sleep 30
+          publish_or_skip xa11y
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -348,17 +342,15 @@ jobs:
         with:
           ref: main
 
+      # Node 24 ships with npm 11.x which supports OIDC trusted publishing.
+      # Do NOT set registry-url here — setup-node injects a NODE_AUTH_TOKEN
+      # .npmrc that conflicts with OIDC. The registry is configured via
+      # publishConfig in package.json instead.
       - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           cache-dependency-path: xa11y-js/package-lock.json
-          registry-url: https://registry.npmjs.org/
-
-      # Trusted publishing requires npm CLI ≥ 11.5.1. Node 22 still ships
-      # with npm 10.x as of this writing, so upgrade explicitly.
-      - name: Upgrade npm for trusted publishing
-        run: npm install -g npm@latest
 
       - name: Install JS dev dependencies
         working-directory: xa11y-js
