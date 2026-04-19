@@ -252,8 +252,8 @@
   .case .sel .op{ color:var(--accent); }
 
   /* ===== Quick start ===== */
-  .qs{ display:grid; grid-template-columns: 260px 1fr; gap:20px; align-items:start; }
-  .qs ol{ list-style:none; padding:0; margin:0; counter-reset:q; display:grid; gap:2px; }
+  .qs{ display:grid; grid-template-columns: 260px 1fr; gap:20px; align-items:start; min-width:0; }
+  .qs ol{ list-style:none; padding:0; margin:0; counter-reset:q; display:grid; gap:2px; min-width:0; }
   .qs ol li{
     counter-increment:q; padding:11px 14px; border-radius:7px; cursor:pointer;
     border:1px solid transparent; display:flex; gap:12px; align-items:flex-start;
@@ -263,8 +263,8 @@
   .qs ol li[aria-current="true"]::before{ color:var(--accent); }
   .qs ol li h4{ margin:0 0 2px; font:500 14px/1.2 var(--sans); }
   .qs ol li p{ margin:0; font-size:12.5px; color:var(--ink-muted); line-height:1.5; }
-  .qs-pane{ background:var(--surface); border:1px solid var(--rule); border-radius:10px; min-height:260px; }
-  .qs-pane pre{ margin:0; padding:18px 22px; font:13px/1.65 var(--mono); white-space:pre; color:var(--ink); }
+  .qs-pane{ background:var(--surface); border:1px solid var(--rule); border-radius:10px; min-height:260px; min-width:0; overflow:hidden; }
+  .qs-pane pre{ margin:0; padding:18px 22px; font:13px/1.65 var(--mono); white-space:pre; color:var(--ink); overflow-x:auto; }
 
   /* ===== Footer ===== */
   footer{
@@ -355,10 +355,10 @@
             </div>
             <div class="messages">
               <div class="box msg">
-                <div><div class="who">Ada Lovelace</div><div class="txt">lgtm &mdash; merging</div></div>
+                <div><div class="who">Sam</div><div class="txt">lgtm &mdash; merging</div></div>
               </div>
               <div class="box msg" data-active="true">
-                <div><div class="who">Grace Hopper</div><div class="txt">ship it</div></div>
+                <div><div class="who">Elena</div><div class="txt">ship it</div></div>
               </div>
             </div>
             <div class="composer">
@@ -582,9 +582,9 @@
 '│  ├─ button "Call"        [enabled]',
 '│  └─ button "Details"     [enabled]',
 '├─ list "Messages"         [scrollable, 142 items]',
-'│  ├─ group "Message from Ada"',
+'│  ├─ group "Message from Sam"',
 '│  │  └─ text "lgtm — merging"',
-'│  └─ group "Message from Grace"',
+'│  └─ group "Message from Elena"',
 '│     └─ text "ship it"',
 '└─ group "Composer"',
 '   ├─ textfield "Message #general"  [focused]',
@@ -622,7 +622,7 @@
 '',
 '// Fill out a form and submit',
 'let name = app.query("textfield[name=\'Full name\']")?;',
-'name.type_text("Grace Hopper")?;',
+'name.type_text("Elena")?;',
 '',
 'let email = app.query("textfield[name=\'Email\']")?;',
 'email.type_text("grace@example.com")?;',
@@ -641,7 +641,7 @@
 '',
 '# Fill out a form and submit',
 'name = app.query("textfield[name=\'Full name\']")',
-'name.type_text("Grace Hopper")',
+'name.type_text("Elena")',
 '',
 'email = app.query("textfield[name=\'Email\']")',
 'email.type_text("grace@example.com")',
@@ -659,7 +659,7 @@
 '',
 '// Fill out a form and submit',
 'const name = await app.query("textfield[name=\'Full name\']");',
-'await name.typeText("Grace Hopper");',
+'await name.typeText("Elena");',
 '',
 'const email = await app.query("textfield[name=\'Email\']");',
 'await email.typeText("grace@example.com");',
@@ -671,7 +671,7 @@
 'await app.expect("text[name*=\'submitted\']").toBeVisible();',
       ].join('\n'),
       cli: [
-'$ xa11y query --app "MyApp" "textfield[name=\'Full name\']" --type "Grace Hopper"',
+'$ xa11y query --app "MyApp" "textfield[name=\'Full name\']" --type "Elena"',
 '$ xa11y query --app "MyApp" "textfield[name=\'Email\']" --type "grace@example.com"',
 '$ xa11y query --app "MyApp" "button[name=\'Submit\']" --press',
 '$ xa11y query --app "MyApp" "text[name*=\'submitted\']"',
