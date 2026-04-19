@@ -12,8 +12,8 @@ use core_foundation::string::CFString;
 use rayon::prelude::*;
 
 use xa11y_core::{
-    CancelHandle, ElementData, Error, Event, EventReceiver, EventType, Provider, Rect, Result,
-    Role, Selector, StateSet, Subscription, Toggled,
+    CancelHandle, ElementData, Error, Event, EventKind, EventReceiver, Provider, Rect, Result,
+    Role, Selector, StateFlag, StateSet, Subscription, Toggled,
 };
 
 // ── FFI Declarations ──────────────────────────────────────────────────────────
@@ -945,6 +945,8 @@ fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
         "AXDockItem" => Role::Button,
         "AXGrowArea" => Role::ScrollThumb,
         "AXColorWell" | "AXRuler" | "AXMatte" => Role::Unknown,
+        // Elements with no role or the explicit AXUnknown placeholder.
+        "" | "AXUnknown" => Role::Unknown,
         _ => xa11y_core::unknown_role(role),
     }
 }
@@ -1285,10 +1287,44 @@ impl MacOSProvider {
     /// Tries batch fetch (1 IPC call for 15 attributes) first, falls back
     /// to individual calls if the batch API fails.
     fn build_element_data(&self, ax: &AXElement, pid: Option<u32>) -> ElementData {
-        let attrs = if let Some(batch) = BatchAttrs::fetch(ax.as_ptr()) {
+        let handle = self.cache_element(ax.clone());
+        build_snapshot_data(ax.as_ptr(), pid, handle)
+    }
+}
+
+/// Build a snapshot `ElementData` from a raw `AXUIElementRef` without touching
+/// the provider's handle cache. `handle` is stored verbatim — callers that
+/// want the snapshot to be navigable later must supply one from
+/// `MacOSProvider::cache_element`. For read-only snapshots (e.g. event
+/// targets), pass `0`.
+fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -> ElementData {
+    if element.is_null() {
+        let mut data = ElementData {
+            role: Role::Unknown,
+            name: None,
+            value: None,
+            description: None,
+            bounds: None,
+            actions: vec![],
+            states: StateSet::default(),
+            numeric_value: None,
+            min_value: None,
+            max_value: None,
+            stable_id: None,
+            attributes: std::collections::HashMap::new(),
+            raw: std::collections::HashMap::new(),
+            pid,
+            handle,
+        };
+        data.populate_attributes();
+        return data;
+    }
+
+    let body = move || -> ElementData {
+        let attrs = if let Some(batch) = BatchAttrs::fetch(element) {
             ResolvedAttrs::from_batch(&batch)
         } else {
-            ResolvedAttrs::from_individual(ax.as_ptr())
+            ResolvedAttrs::from_individual(element)
         };
 
         let role = map_ax_role(&attrs.role_str, attrs.subrole_str.as_deref());
@@ -1442,7 +1478,7 @@ impl MacOSProvider {
         };
 
         // Discover actions via AXUIElementCopyActionNames + implicit attributes.
-        let ax_actions = ax_action_names(ax.as_ptr());
+        let ax_actions = ax_action_names(element);
         let mut actions: Vec<String> = Vec::new();
 
         for ax_name in &ax_actions {
@@ -1479,13 +1515,11 @@ impl MacOSProvider {
         // Min/max still require individual calls (not in the batch set).
         let (min_value, max_value) = match role {
             Role::Slider => (
-                ax_number_f64(ax.as_ptr(), "AXMinValue"),
-                ax_number_f64(ax.as_ptr(), "AXMaxValue"),
+                ax_number_f64(element, "AXMinValue"),
+                ax_number_f64(element, "AXMaxValue"),
             ),
             _ => (None, None),
         };
-
-        let handle = self.cache_element(ax.clone());
 
         let mut data = ElementData {
             role,
@@ -1506,8 +1540,11 @@ impl MacOSProvider {
         };
         data.populate_attributes();
         data
-    }
+    };
+    body()
+}
 
+impl MacOSProvider {
     /// Should this child be filtered out (macOS system chrome)?
     /// Accepts pre-fetched role/subrole to avoid redundant AX calls when
     /// the caller already has them.
@@ -2157,60 +2194,110 @@ unsafe extern "C" fn ax_observer_callback(
         cf.to_string()
     };
 
-    let event_type = match notif_str.as_str() {
-        "AXValueChanged" => EventType::ValueChanged,
-        "AXFocusedUIElementChanged" => EventType::FocusChanged,
-        "AXWindowCreated" => EventType::WindowOpened,
-        "AXWindowMiniaturized" => EventType::WindowDeactivated,
-        "AXWindowDeminiaturized" => EventType::WindowActivated,
-        "AXUIElementDestroyed" => EventType::StructureChanged,
-        "AXSelectedTextChanged" => EventType::SelectionChanged,
-        "AXMenuOpened" => EventType::MenuOpened,
-        "AXMenuClosed" => EventType::MenuClosed,
-        "AXTitleChanged" => EventType::NameChanged,
+    // Read the raw role string once — used for both kind dispatch and target building.
+    // AXUIElementRef is only valid during this callback; snapshot all attributes now.
+    let raw_role = if !element.is_null() {
+        ax_string(element, "AXRole").unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    // Build the target element snapshot using the full batch attribute reader
+    // so tests can assert on name, value, states, numeric_value, etc.
+    let target = if element.is_null() {
+        None
+    } else {
+        Some(build_snapshot_data(element, Some(ctx.app_pid), 0))
+    };
+
+    // Alias for notification dispatch logic below.
+    let role_str = raw_role.as_str();
+
+    // Determine which event kind(s) to emit. Some notifications produce more
+    // than one event (e.g. AXValueChanged on a checkbox also emits StateChanged).
+    let kinds: Vec<EventKind> = match notif_str.as_str() {
+        "AXFocusedUIElementChanged" => vec![EventKind::FocusChanged],
+
+        "AXValueChanged" => {
+            // Checkbox and radio toggles fire AXValueChanged — also emit
+            // StateChanged { Checked } so consumers can filter on state.
+            let mut ks = vec![EventKind::ValueChanged];
+            match role_str {
+                "AXCheckBox" | "AXRadioButton" => {
+                    // Source of truth is the target snapshot, which already
+                    // resolves the AXValue across CFBoolean / CFNumber shapes
+                    // (AccessKit's macOS bridge uses CFBoolean for checkbox
+                    // values, not CFNumber — ax_number_f64 would miss it).
+                    let checked = target
+                        .as_ref()
+                        .and_then(|t| t.states.checked)
+                        .map(|c| matches!(c, Toggled::On))
+                        .unwrap_or(false);
+                    ks.push(EventKind::StateChanged {
+                        flag: StateFlag::Checked,
+                        value: checked,
+                    });
+                }
+                // Text fields: also emit TextChanged so consumers can filter
+                // specifically on text content changes.
+                "AXTextField" | "AXTextArea" | "AXSearchField" => {
+                    ks.push(EventKind::TextChanged);
+                }
+                // Sliders, spinners, progress bars, etc.: just ValueChanged.
+                _ => {}
+            }
+            ks
+        }
+
+        "AXTitleChanged" => vec![EventKind::NameChanged],
+
+        "AXElementBusyChanged" => {
+            let busy = ax_bool(element, "AXElementBusy").unwrap_or(false);
+            vec![EventKind::StateChanged {
+                flag: StateFlag::Busy,
+                value: busy,
+            }]
+        }
+
+        "AXWindowCreated" => vec![EventKind::WindowOpened],
+
+        "AXUIElementDestroyed" => {
+            // Determine whether the destroyed element was a window.
+            if matches!(role_str, "AXWindow") {
+                vec![EventKind::WindowClosed]
+            } else {
+                vec![EventKind::StructureChanged]
+            }
+        }
+
+        "AXFocusedWindowChanged" => vec![EventKind::WindowActivated],
+
+        "AXWindowMiniaturized" => vec![EventKind::WindowDeactivated],
+        "AXWindowDeminiaturized" => vec![EventKind::WindowActivated],
+
+        "AXSelectedTextChanged"
+        | "AXSelectedRowsChanged"
+        | "AXSelectedCellsChanged"
+        | "AXSelectedChildrenChanged" => vec![EventKind::SelectionChanged],
+
+        "AXMenuOpened" => vec![EventKind::MenuOpened],
+        "AXMenuClosed" => vec![EventKind::MenuClosed],
+
+        "AXAnnouncementRequested" => vec![EventKind::Announcement],
+
         _ => return,
     };
 
-    let target = if !element.is_null() {
-        let role_str = ax_string(element, "AXRole").unwrap_or_default();
-        let subrole = ax_string(element, "AXSubrole");
-        let role = map_ax_role(&role_str, subrole.as_deref());
-        Some({
-            let mut data = ElementData {
-                role,
-                name: ax_string(element, "AXTitle"),
-                value: ax_value_string(element),
-                description: ax_string(element, "AXDescription"),
-                bounds: None,
-                actions: vec![],
-                states: StateSet::default(),
-                numeric_value: None,
-                min_value: None,
-                max_value: None,
-                stable_id: None,
-                attributes: std::collections::HashMap::new(),
-                raw: std::collections::HashMap::new(),
-                pid: None,
-                handle: 0,
-            };
-            data.populate_attributes();
-            data
-        })
-    } else {
-        None
-    };
-
-    let event = Event {
-        event_type,
-        app_name: ctx.app_name.clone(),
-        app_pid: ctx.app_pid,
-        target,
-        state_flag: None,
-        state_value: None,
-        text_change: None,
-        timestamp: std::time::Instant::now(),
-    };
-    let _ = ctx.sender.send(event);
+    for kind in kinds {
+        let event = Event {
+            kind,
+            app_name: ctx.app_name.clone(),
+            app_pid: ctx.app_pid,
+            target: target.clone(),
+            timestamp: std::time::Instant::now(),
+        };
+        let _ = ctx.sender.send(event);
+    }
 }
 
 impl MacOSProvider {
@@ -2246,16 +2333,22 @@ impl MacOSProvider {
         }
 
         let notifications = [
-            "AXValueChanged",
             "AXFocusedUIElementChanged",
+            "AXValueChanged",
+            "AXTitleChanged",
+            "AXElementBusyChanged",
             "AXWindowCreated",
+            "AXUIElementDestroyed",
+            "AXFocusedWindowChanged",
             "AXWindowMiniaturized",
             "AXWindowDeminiaturized",
-            "AXUIElementDestroyed",
             "AXSelectedTextChanged",
+            "AXSelectedRowsChanged",
+            "AXSelectedCellsChanged",
+            "AXSelectedChildrenChanged",
             "AXMenuOpened",
             "AXMenuClosed",
-            "AXTitleChanged",
+            "AXAnnouncementRequested",
         ];
 
         for notif in &notifications {
@@ -2676,7 +2769,7 @@ mod tests {
         // each) plus AXTitle/AXValue for name matching. 1 batch + 1 action-names
         // call for the single match's full ElementData.
         assert_eq!(
-            total, 285,
+            total, 294,
             "AX call count regression: button[name=\"Submit\"] from app root.\n\
              copy_attr={copy_attr}, copy_multi={copy_multi}, copy_actions={copy_actions}\n\
              Only lower this count, never raise it.",
@@ -2707,7 +2800,7 @@ mod tests {
         );
 
         assert_eq!(
-            total, 279,
+            total, 288,
             "AX call count regression: button[name=\"Submit\"] from window.\n\
              copy_attr={copy_attr}, copy_multi={copy_multi}, copy_actions={copy_actions}\n\
              Only lower this count, never raise it.",
@@ -2735,7 +2828,7 @@ mod tests {
         assert!(!results.is_empty(), "Should find at least one checkbox.");
 
         assert_eq!(
-            total, 272,
+            total, 280,
             "AX call count regression: check_box from window.\n\
              copy_attr={copy_attr}, copy_multi={copy_multi}, copy_actions={copy_actions}\n\
              Only lower this count, never raise it.",

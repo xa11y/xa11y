@@ -7,7 +7,8 @@
 //! Run with: cargo run -p xa11y-test-app -- --headless
 
 use accesskit::{
-    Action, ActionData, ActionRequest, Node, NodeId, Rect, Role, Toggled, Tree, TreeId, TreeUpdate,
+    Action, ActionData, ActionRequest, Live, Node, NodeId, Rect, Role, Toggled, Tree, TreeId,
+    TreeUpdate,
 };
 use accesskit_winit::{Adapter, Event as AccessKitEvent, WindowEvent as AccessKitWindowEvent};
 use winit::{
@@ -94,6 +95,11 @@ const DYNAMIC_LIST_LABEL: NodeId = NodeId(68);
 const DYNAMIC_LIST: NodeId = NodeId(69);
 const ADD_ITEM_BTN: NodeId = NodeId(70);
 const REMOVE_ITEM_BTN: NodeId = NodeId(71);
+
+// Announcement widgets — live region + button that updates its value
+const ANNOUNCE_BTN: NodeId = NodeId(72);
+const ANNOUNCE_LIVE_REGION: NodeId = NodeId(73);
+
 // Dynamic items start at NodeId(100) to leave room for future static nodes
 const DYNAMIC_ITEM_BASE: u64 = 100;
 
@@ -111,6 +117,11 @@ struct AppState {
     selected_radio: usize,
     selected_list_item: Option<usize>,
     dynamic_item_count: usize,
+    /// Value of the live region updated by the Announce button.
+    announcement_text: String,
+    /// Counter so each press produces a distinct announcement payload
+    /// (AccessKit only posts AXAnnouncementRequested when the value changes).
+    announcement_counter: u32,
 }
 
 impl AppState {
@@ -127,6 +138,8 @@ impl AppState {
             selected_radio: 0,
             selected_list_item: None,
             dynamic_item_count: 0,
+            announcement_text: String::new(),
+            announcement_counter: 0,
         }
     }
 }
@@ -171,7 +184,7 @@ fn build_tree(state: &AppState) -> TreeUpdate {
     build_lists_panel(state, &mut nodes);
 
     // ── Extra Panel ──
-    build_extra_panel(&mut nodes);
+    build_extra_panel(state, &mut nodes);
 
     TreeUpdate {
         nodes,
@@ -618,7 +631,7 @@ fn build_lists_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
     }
 }
 
-fn build_extra_panel(nodes: &mut Vec<(NodeId, Node)>) {
+fn build_extra_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
     let mut extra_panel = Node::new(Role::GenericContainer);
     extra_panel.set_label("Extra Panel");
     extra_panel.set_children(vec![
@@ -629,8 +642,27 @@ fn build_extra_panel(nodes: &mut Vec<(NodeId, Node)>) {
         SECTION_HEADING,
         SCROLL_BAR_NODE,
         SPLIT_GROUP_NODE,
+        ANNOUNCE_BTN,
+        ANNOUNCE_LIVE_REGION,
     ]);
     nodes.push((EXTRA_PANEL, extra_panel));
+
+    // Announce button + live region. Pressing the button updates the live
+    // region's value, which on macOS translates to
+    // AXAnnouncementRequestedNotification (posted on the window by AccessKit).
+    let mut announce_btn = Node::new(Role::Button);
+    announce_btn.set_label("Announce");
+    announce_btn.add_action(Action::Click);
+    announce_btn.add_action(Action::Focus);
+    nodes.push((ANNOUNCE_BTN, announce_btn));
+
+    // AccessKit's macOS bridge emits AXAnnouncementRequested when a live
+    // region's *value* changes. The role must support values — Label does.
+    let mut live = Node::new(Role::Label);
+    live.set_label("Announcements");
+    live.set_value(state.announcement_text.as_str());
+    live.set_live(Live::Polite);
+    nodes.push((ANNOUNCE_LIVE_REGION, live));
 
     let mut link = Node::new(Role::Link);
     link.set_label("Visit Example");
@@ -799,6 +831,14 @@ fn handle_action(request: &ActionRequest, state: &mut AppState) -> bool {
             if state.dynamic_item_count > 0 {
                 state.dynamic_item_count -= 1;
             }
+            true
+        }
+
+        // Announce button — update live region value so AccessKit posts
+        // AXAnnouncementRequested via the Cocoa bridge.
+        (id, Action::Click) if id == ANNOUNCE_BTN => {
+            state.announcement_counter += 1;
+            state.announcement_text = format!("Announcement #{}", state.announcement_counter);
             true
         }
 

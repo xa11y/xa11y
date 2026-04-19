@@ -385,22 +385,17 @@ fn cmd_events(args: &[String]) -> Result<()> {
             })
             .unwrap_or_else(|| "-".into());
         let detail = format_event_detail(&event);
-        println!("[{:?}] {target_str}{detail}", event.event_type);
+        println!("[{:?}] {target_str}{detail}", event.kind);
     }
     Ok(())
 }
 
 pub(crate) fn format_event_detail(event: &Event) -> String {
-    let mut parts = Vec::new();
-    if let Some(flag) = &event.state_flag {
-        let val = event.state_value.unwrap_or(false);
-        parts.push(format!(" {flag:?}={val}"));
+    if let EventKind::StateChanged { flag, value } = event.kind {
+        format!(" {flag:?}={value}")
+    } else {
+        String::new()
     }
-    if let Some(tc) = &event.text_change {
-        let pos = tc.position.map(|p| format!(" @{p}")).unwrap_or_default();
-        parts.push(format!(" {:?}{pos}", tc.change_type));
-    }
-    parts.join("")
 }
 
 pub(crate) fn extract_flag_value(args: &[String], flag: &str) -> Option<String> {
@@ -624,13 +619,13 @@ mod tests {
     #[test]
     fn format_event_detail_state_change() {
         let event = Event {
-            event_type: EventType::StateChanged,
+            kind: EventKind::StateChanged {
+                flag: StateFlag::Focused,
+                value: true,
+            },
             app_name: "App".into(),
             app_pid: 1,
             target: None,
-            state_flag: Some(StateFlag::Focused),
-            state_value: Some(true),
-            text_change: None,
             timestamp: std::time::Instant::now(),
         };
         let detail = format_event_detail(&event);
@@ -638,35 +633,12 @@ mod tests {
     }
 
     #[test]
-    fn format_event_detail_text_change() {
-        let event = Event {
-            event_type: EventType::TextChanged,
-            app_name: "App".into(),
-            app_pid: 1,
-            target: None,
-            state_flag: None,
-            state_value: None,
-            text_change: Some(TextChangeData {
-                change_type: TextChangeType::Insert,
-                position: Some(5),
-            }),
-            timestamp: std::time::Instant::now(),
-        };
-        let detail = format_event_detail(&event);
-        assert!(detail.contains("Insert"));
-        assert!(detail.contains("@5"));
-    }
-
-    #[test]
     fn format_event_detail_empty() {
         let event = Event {
-            event_type: EventType::FocusChanged,
+            kind: EventKind::FocusChanged,
             app_name: "App".into(),
             app_pid: 1,
             target: None,
-            state_flag: None,
-            state_value: None,
-            text_change: None,
             timestamp: std::time::Instant::now(),
         };
         assert!(format_event_detail(&event).is_empty());
