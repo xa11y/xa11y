@@ -3,7 +3,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
 
 use rayon::prelude::*;
 use xa11y_core::selector::{Combinator, MatchOp, SelectorSegment};
@@ -693,6 +692,11 @@ impl LinuxProvider {
     }
 
     /// Find an application by PID.
+    ///
+    /// Unused until the AT-SPI2 signal-subscription backend lands — the old
+    /// polling subscription was the only caller. Kept here because the real
+    /// implementation will need it to filter D-Bus signals by sender.
+    #[allow(dead_code)]
     fn find_app_by_pid(&self, pid: u32) -> Result<AccessibleRef> {
         let registry = AccessibleRef {
             bus_name: "org.a11y.atspi.Registry".to_string(),

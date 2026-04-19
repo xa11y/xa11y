@@ -85,6 +85,12 @@ impl WindowsProvider {
         unsafe { self.automation.ElementFromHandle(hwnd) }.map_err(|_| ())
     }
 
+    /// Find an application's root UIA element + window name by PID.
+    ///
+    /// Unused until the UIA event-handler backend lands — the old polling
+    /// subscription was the only caller. Kept because the real
+    /// implementation will need it to scope event handlers to a single app.
+    #[allow(dead_code)]
     fn find_app_by_pid(&self, pid: u32) -> Result<(IUIAutomationElement, String)> {
         let root = uia_call(|| unsafe { self.automation.GetRootElement() })?;
         let condition = uia_call(|| unsafe {
