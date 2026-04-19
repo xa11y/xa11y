@@ -559,28 +559,42 @@ Implemented in `xa11y-macos/src/ax.rs`:
 - `AXValueChanged` on a checkbox/radio emits `StateChanged { Checked, … }` alongside `ValueChanged`. The `Checked` value is sourced from the snapshot's resolved `states.checked`, which handles both `CFBoolean` and `CFNumber` representations (AccessKit's macOS bridge exposes checkbox values as `CFBoolean` — the earlier `ax_number_f64` path returned `false` unconditionally and was corrected).
 - `AXValueChanged` on a text role additionally emits `TextChanged`. `AXUIElementDestroyed` emits `WindowClosed` when the destroyed element's role is `AXWindow` and `StructureChanged` otherwise.
 
-### Linux & Windows — stub providers
+### Windows — shipping
 
-`xa11y-linux` and `xa11y-windows` ship with inert subscription stubs: `subscribe()` returns a valid `Subscription` whose receiver never yields events. This preserves the public API across platforms while the AT-SPI2 / UIA backends are being built. The prior polling implementations were removed — they only detected focus and tree-count changes and masked the event model's real semantics.
+Implemented in `xa11y-windows/src/uia.rs`:
 
-### End-to-end test coverage (macOS)
+- Four COM event handlers are registered via the `IUIAutomation` root object: `AddFocusChangedEventHandler` (system-wide focus), `AddAutomationEventHandler` (window open/close, menu open/close, text changed, selection-item changes, live-region and notification events), `AddPropertyChangedEventHandler` (name, IsEnabled, ToggleState, Value, RangeValue, ExpandCollapseState), and `AddStructureChangedEventHandler`. All scoped handlers target `TreeScope_Subtree` on the app root resolved via `find_app_by_pid`.
+- Handlers are COM-implementable via the `#[implement(...)]` macro from `windows-core`. Each wraps an `Arc<EventContext>` that holds the `mpsc::Sender<Event>` (protected by a `Mutex` because `std::sync::mpsc::Sender` is `!Sync`), the application name, PID, and a shared cache request.
+- Handlers filter by PID inside the callback (the focus-changed registration has no scope parameter, and scoped handlers occasionally deliver events from neighbouring processes), then build a full `ElementData` snapshot via `build_snapshot_data` — the same free function the tree-read path uses — and queue an `Event` on the channel. `event.target` is therefore a durable snapshot, not a handle to a COM pointer that may become invalid as UIA cleans up.
+- `PropertyChanged(ToggleState)` emits both `StateChanged { Checked }` and `ValueChanged` so consumers can filter on either; `PropertyChanged(ExpandCollapseState)` emits `StateChanged { Expanded, new == Expanded }`; `PropertyChanged(IsEnabled)` emits `StateChanged { Enabled, new }`. VARIANT payloads are decoded via the `TryFrom<&VARIANT>` impls provided by `windows::Win32::System::Variant`.
+- The `Subscription`'s `CancelHandle` holds the four handler COM pointers + automation/root via a `ComSend<T>` wrapper (an explicit `unsafe impl Send for ComSend<T>` whose safety rests on the same MTA guarantee that backs the existing `unsafe impl Send for WindowsProvider`, with a private inner field so Rust 2021 disjoint captures don't peel the wrapper back). On drop, the closure calls each `RemoveXxxEventHandler` synchronously — when those return, UIA guarantees no further handler invocations, so a subsequent `subscribe()` call starts with a clean slate.
 
-Integration tests in `xa11y/tests/integ_test.rs` are `#[cfg(target_os = "macos")]` and drive the AccessKit + winit test app. Each test subscribes, performs a deterministic action that is known to change AccessKit's tree, and hard-asserts that the expected `EventKind` arrives within 3–5 s. **No test catches `Error::Timeout` to pass silently** — a prior iteration of the suite did, and it hid real regressions.
+### Linux — stub provider
 
-| EventKind                         | Covered | Trigger                                                       |
-|-----------------------------------|---------|---------------------------------------------------------------|
-| `FocusChanged`                    | Yes     | `focus()` on Cancel button                                    |
-| `ValueChanged`                    | Yes     | `set_numeric_value()` on Slider                               |
-| `NameChanged`                     | Yes     | Flip checkbox + press Submit to force a status-label update   |
-| `StateChanged { Checked }`        | Yes     | Toggle checkbox                                               |
-| `TextChanged`                     | Yes     | `set_value()` on Name text field                              |
-| `Announcement`                    | Yes     | Press "Announce" button (updates a `Live::Polite` label value) |
-| `StructureChanged`                | **No**  | See below                                                     |
-| `SelectionChanged`                | **No**  | See below                                                     |
-| `WindowOpened` / `WindowClosed`   | **No**  | Test app is single-window                                     |
-| `WindowActivated` / `WindowDeactivated` | **No** | Requires an OS-level key-window change                   |
-| `MenuOpened` / `MenuClosed`       | **No**  | AccessKit's macOS bridge does not synthesize NSMenu events    |
-| `StateChanged` (non-`Checked` flags) | **No** | AccessKit does not post `AXElementBusyChanged` etc.          |
+`xa11y-linux` still ships with an inert subscription stub: `subscribe()` returns a valid `Subscription` whose receiver never yields events. This preserves the public API across platforms while the AT-SPI2 backend is being built. The prior polling implementation was removed — it only detected focus and tree-count changes and masked the event model's real semantics.
+
+### End-to-end test coverage (macOS + Windows)
+
+Integration tests in `xa11y/tests/integ_test.rs` are gated on `#[cfg(target_os = "macos")]` and `#[cfg(target_os = "windows")]` and drive the AccessKit + winit test app. Each test subscribes, performs a deterministic action that is known to change AccessKit's tree, and hard-asserts that the expected `EventKind` arrives within 3 s. **No test catches `Error::Timeout` to pass silently** — a prior iteration of the suite did, and it hid real regressions.
+
+On Windows the tests are **not** exercised by GitHub Actions (the hosted Windows runners lack the interactive desktop UIA needs); they run locally via `scripts/run_integ_tests_windows.ps1`. `xa11y-windows`'s unit tests — which exercise the subscribe/cancel round-trip, the VARIANT decoders, and the event-ID allowlists — are run by the Windows CI job.
+
+| EventKind                         | macOS | Windows | Trigger                                                       |
+|-----------------------------------|-------|---------|---------------------------------------------------------------|
+| `FocusChanged`                    | Yes   | Yes     | `focus()` on Cancel button                                    |
+| `ValueChanged`                    | Yes   | Yes     | `set_numeric_value()` on Slider (also asserted alongside `ToggleState` on Windows) |
+| `NameChanged`                     | Yes   | Yes     | Flip checkbox + press Submit to force a status-label update   |
+| `StateChanged { Checked }`        | Yes   | Yes     | Toggle checkbox                                               |
+| `TextChanged`                     | Yes   | Yes¹    | `set_value()` on Name text field                              |
+| `Announcement`                    | Yes   | **No**  | Press "Announce" button (updates a `Live::Polite` label value) |
+| `StructureChanged`                | **No** | **No** | See below                                                     |
+| `SelectionChanged`                | **No** | **No** | See below                                                     |
+| `WindowOpened` / `WindowClosed`   | **No** | **No** | Test app is single-window                                     |
+| `WindowActivated` / `WindowDeactivated` | **No** | **No** | Requires an OS-level key-window change                   |
+| `MenuOpened` / `MenuClosed`       | **No** | **No** | AccessKit bridges do not synthesize menu events               |
+| `StateChanged` (non-`Checked` flags) | **No** | **No** | AccessKit does not post Busy/Enabled/Expanded state deltas in the test app |
+
+¹ On Windows the test accepts either `TextChanged` or `ValueChanged` because AccessKit's text provider may not expose the UIA TextPattern on every widget, causing the UIA runtime to emit `UIA_Value_PropertyChanged` instead of `UIA_Text_TextChangedEventId`. Either signal is a real text-mutation notification; treating them interchangeably keeps the test from breaking on unrelated AccessKit refactors.
 
 **Limitations uncovered by the implementation effort:**
 
@@ -591,6 +605,6 @@ Integration tests in `xa11y/tests/integ_test.rs` are `#[cfg(target_os = "macos")
 ### Follow-ups
 
 - Linux AT-SPI2 signal subscription (per the Linux section above).
-- Windows UIA `AddAutomationEventHandler` wiring (per the Windows section above).
 - Either element-scoped subscriptions or a Cocoa test harness to cover the EventKinds that AccessKit's macOS bridge does not raise.
+- A dedicated Win32/WPF test app (or widget additions to the AccessKit test app) so the Windows integration suite can cover `Announcement`, `MenuOpened`/`MenuClosed`, `WindowOpened`/`WindowClosed`, and `StateChanged { Enabled | Expanded }`.
 - Test-app enhancements: `Role::TextRun` children on the text field to enable text-selection events; a secondary-window workflow; `Node::set_busy()` drive for `StateChanged { Busy }`.

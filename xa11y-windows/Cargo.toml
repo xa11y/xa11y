@@ -22,3 +22,7 @@ windows = { version = "0.62", features = [
     "Win32_System_Threading",
     "Win32_System_ProcessStatus",
 ] }
+# Needed by the `#[implement]` macro, whose generated code references
+# `::windows_core::*` paths directly rather than going through the `windows`
+# re-export.
+windows-core = "0.62"
