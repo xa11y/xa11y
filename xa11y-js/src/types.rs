@@ -1,4 +1,4 @@
-//! Small plain-data types exposed to JS: `Rect`, `EventType`, etc.
+//! Small plain-data types exposed to JS: `Rect`, `EventKind`, etc.
 
 /// A bounding rectangle in screen coordinates (pixels).
 #[napi(object)]
@@ -21,23 +21,40 @@ impl From<xa11y::Rect> for Rect {
     }
 }
 
-/// Convert an `xa11y::EventType` into a camelCase string used across the JS API.
-pub fn event_type_to_str(event_type: xa11y::EventType) -> &'static str {
-    match event_type {
-        xa11y::EventType::FocusChanged => "focusChanged",
-        xa11y::EventType::ValueChanged => "valueChanged",
-        xa11y::EventType::NameChanged => "nameChanged",
-        xa11y::EventType::StateChanged => "stateChanged",
-        xa11y::EventType::StructureChanged => "structureChanged",
-        xa11y::EventType::WindowOpened => "windowOpened",
-        xa11y::EventType::WindowClosed => "windowClosed",
-        xa11y::EventType::WindowActivated => "windowActivated",
-        xa11y::EventType::WindowDeactivated => "windowDeactivated",
-        xa11y::EventType::SelectionChanged => "selectionChanged",
-        xa11y::EventType::MenuOpened => "menuOpened",
-        xa11y::EventType::MenuClosed => "menuClosed",
-        xa11y::EventType::Alert => "alert",
-        xa11y::EventType::TextChanged => "textChanged",
+/// Convert an `xa11y::EventKind` into a camelCase string used across the JS API.
+pub fn event_kind_to_str(kind: &xa11y::EventKind) -> &'static str {
+    match kind {
+        xa11y::EventKind::FocusChanged => "focusChanged",
+        xa11y::EventKind::ValueChanged => "valueChanged",
+        xa11y::EventKind::NameChanged => "nameChanged",
+        xa11y::EventKind::StateChanged { .. } => "stateChanged",
+        xa11y::EventKind::StructureChanged => "structureChanged",
+        xa11y::EventKind::WindowOpened => "windowOpened",
+        xa11y::EventKind::WindowClosed => "windowClosed",
+        xa11y::EventKind::WindowActivated => "windowActivated",
+        xa11y::EventKind::WindowDeactivated => "windowDeactivated",
+        xa11y::EventKind::SelectionChanged => "selectionChanged",
+        xa11y::EventKind::MenuOpened => "menuOpened",
+        xa11y::EventKind::MenuClosed => "menuClosed",
+        xa11y::EventKind::TextChanged => "textChanged",
+        xa11y::EventKind::Announcement => "announcement",
+    }
+}
+
+/// Convert an `xa11y::StateFlag` to a camelCase string.
+pub fn state_flag_to_str(flag: xa11y::StateFlag) -> &'static str {
+    match flag {
+        xa11y::StateFlag::Enabled => "enabled",
+        xa11y::StateFlag::Visible => "visible",
+        xa11y::StateFlag::Focused => "focused",
+        xa11y::StateFlag::Checked => "checked",
+        xa11y::StateFlag::Selected => "selected",
+        xa11y::StateFlag::Expanded => "expanded",
+        xa11y::StateFlag::Editable => "editable",
+        xa11y::StateFlag::Focusable => "focusable",
+        xa11y::StateFlag::Modal => "modal",
+        xa11y::StateFlag::Required => "required",
+        xa11y::StateFlag::Busy => "busy",
     }
 }
 

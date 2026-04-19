@@ -2,91 +2,103 @@ use serde::{Deserialize, Serialize};
 
 use crate::element::ElementData;
 
-/// Categories of accessibility events, normalized across platforms.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[repr(u8)]
-pub enum EventType {
-    /// An element gained keyboard focus.
+/// The kind of accessibility event, normalized across platforms.
+///
+/// Variants carry payload only when that data is guaranteed to be present
+/// on all supporting platforms. For everything else, re-query the `target`
+/// element after receipt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum EventKind {
+    /// Keyboard focus moved to a new element.
+    /// Target: the element that gained focus.
     FocusChanged,
-    /// An element's value changed.
+
+    /// An element's value changed (slider position, text field contents,
+    /// checkbox state, spin button, progress, etc.).
+    /// Target: the element whose value changed.
     ValueChanged,
-    /// An element's name/label changed.
+
+    /// An element's name or label changed.
+    /// Target: the element whose name changed.
     NameChanged,
-    /// A boolean state flag changed.
-    StateChanged,
-    /// Children were added or removed from an element.
-    StructureChanged,
-    /// A new window was created.
-    WindowOpened,
-    /// A window was closed/destroyed.
-    WindowClosed,
-    /// A window was activated (brought to front).
-    WindowActivated,
-    /// A window was deactivated (lost focus).
-    WindowDeactivated,
-    /// Selection changed in a list, table, or text.
-    SelectionChanged,
-    /// A menu was opened.
-    MenuOpened,
-    /// A menu was closed.
-    MenuClosed,
-    /// An alert or notification was posted.
-    Alert,
-    /// Text content changed in an editable element.
+
+    /// A boolean state flag changed on an element.
+    /// Target: the element whose state changed.
     ///
-    /// On Linux, position comes from the AT-SPI event signal.
-    /// On Windows 10+, position comes from `TextEditTextChangedEventId`.
-    /// On macOS, position is inferred by diffing (may be `None` for ambiguous changes).
+    /// `flag` and `value` are always populated — this variant is only emitted
+    /// when both are known. Coverage varies by platform:
+    /// - Linux: all state bits via Object:StateChanged.
+    /// - Windows: IsEnabled, ToggleState, ExpandCollapseState,
+    ///   SelectionItem_IsSelected via PropertyChanged events.
+    /// - macOS: Checked (via AXValueChanged on checkbox/radio) and Busy
+    ///   (via AXElementBusyChanged). Enabled is NOT deliverable via any
+    ///   public app-level macOS notification and will never fire on macOS.
+    StateChanged { flag: StateFlag, value: bool },
+
+    /// Children were added to or removed from an element, or the tree
+    /// structure was otherwise invalidated.
+    /// Target: the parent element whose children changed, if known.
+    StructureChanged,
+
+    /// A new window was created.
+    /// Target: the window element.
+    WindowOpened,
+
+    /// A window was closed or destroyed.
+    /// Target: snapshot taken at destruction time; some attributes may be absent.
+    WindowClosed,
+
+    /// A window became the active/focused window.
+    /// Target: the window element.
+    ///
+    /// - macOS: AXFocusedWindowChanged.
+    /// - Linux: Window:Activate.
+    /// - Windows: no first-class UIA event; inferred from focus changes.
+    WindowActivated,
+
+    /// A window lost active status.
+    /// Target: the window element.
+    WindowDeactivated,
+
+    /// The selection changed in a list, table, or other container.
+    /// Target: the container element (not the selected items).
+    SelectionChanged,
+
+    /// A menu became visible.
+    /// Target: the menu element.
+    ///
+    /// - macOS: AXMenuOpened.
+    /// - Windows: UIA_MenuOpenedEventId.
+    /// - Linux: not reliably emitted; this event will not fire on Linux.
+    MenuOpened,
+
+    /// A menu was dismissed.
+    /// Target: the menu element.
+    MenuClosed,
+
+    /// Text content changed in an editable element.
+    /// Target: the text element (re-query its value for current contents).
+    ///
+    /// No payload: macOS AXValueChanged carries no delta, so change_type and
+    /// position cannot be populated cross-platform.
     TextChanged,
+
+    /// An accessibility announcement was posted (live region update, alert,
+    /// or explicit announcement request).
+    /// Target: the element that made the announcement, if available.
+    ///
+    /// No text payload: Windows UIA_LiveRegionChangedEventId carries no text,
+    /// so the announcement text cannot be populated cross-platform. Consumers
+    /// should re-query a nearby alert or live region element for the content.
+    ///
+    /// - macOS: AXAnnouncementRequested.
+    /// - Linux: Object:Announcement.
+    /// - Windows: UIA_NotificationEventId and UIA_LiveRegionChangedEventId.
+    Announcement,
 }
 
-/// An accessibility event delivered to subscribers.
-#[derive(Debug, Clone)]
-pub struct Event {
-    /// What type of event occurred.
-    pub event_type: EventType,
-    /// Name of the application that produced this event.
-    pub app_name: String,
-    /// PID of the application that produced this event.
-    pub app_pid: u32,
-    /// A snapshot of the element that triggered the event, if available.
-    pub target: Option<ElementData>,
-    /// For StateChanged events: which state flag changed.
-    pub state_flag: Option<StateFlag>,
-    /// For StateChanged events: the new value of the flag.
-    pub state_value: Option<bool>,
-    /// For TextChanged events: details about the text modification.
-    pub text_change: Option<TextChangeData>,
-    /// Monotonic timestamp at event receipt.
-    pub timestamp: std::time::Instant,
-}
-
-/// Details about a text change event.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TextChangeData {
-    /// What kind of text change occurred.
-    pub change_type: TextChangeType,
-    /// Character position where the change occurred.
-    /// `None` on macOS when the change is ambiguous (e.g., full replacement).
-    pub position: Option<u32>,
-}
-
-/// The type of text modification.
+/// Individual state flags used in [`EventKind::StateChanged`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum TextChangeType {
-    /// Text was inserted.
-    Insert,
-    /// Text was deleted.
-    Delete,
-    /// Text was replaced (simultaneous insert + delete).
-    Replace,
-    /// Change type could not be determined (macOS fallback).
-    Unknown,
-}
-
-/// Individual state flags, for use in StateChanged events and filters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[repr(u8)]
 pub enum StateFlag {
     Enabled,
     Visible,
@@ -99,6 +111,22 @@ pub enum StateFlag {
     Modal,
     Required,
     Busy,
+}
+
+/// An accessibility event delivered to subscribers.
+#[derive(Debug, Clone)]
+pub struct Event {
+    /// What happened and any type-specific data.
+    pub kind: EventKind,
+    /// Snapshot of the element that triggered the event, if available.
+    /// None for events where the element is not available or already destroyed.
+    pub target: Option<ElementData>,
+    /// Name of the application that produced this event.
+    pub app_name: String,
+    /// Process ID of the application that produced this event.
+    pub app_pid: u32,
+    /// Monotonic timestamp at event receipt.
+    pub timestamp: std::time::Instant,
 }
 
 /// Desired element state for wait_for operations.

@@ -496,24 +496,40 @@ impl Locator {
     }
 }
 
-// ── EventType ──────────────────────────────────────────────────────────────
+// ── EventKind ─────────────────────────────────────────────────────────────
 
-fn event_type_to_str(event_type: xa11y::EventType) -> &'static str {
-    match event_type {
-        xa11y::EventType::FocusChanged => "focus_changed",
-        xa11y::EventType::ValueChanged => "value_changed",
-        xa11y::EventType::NameChanged => "name_changed",
-        xa11y::EventType::StateChanged => "state_changed",
-        xa11y::EventType::StructureChanged => "structure_changed",
-        xa11y::EventType::WindowOpened => "window_opened",
-        xa11y::EventType::WindowClosed => "window_closed",
-        xa11y::EventType::WindowActivated => "window_activated",
-        xa11y::EventType::WindowDeactivated => "window_deactivated",
-        xa11y::EventType::SelectionChanged => "selection_changed",
-        xa11y::EventType::MenuOpened => "menu_opened",
-        xa11y::EventType::MenuClosed => "menu_closed",
-        xa11y::EventType::Alert => "alert",
-        xa11y::EventType::TextChanged => "text_changed",
+fn event_kind_to_str(kind: &xa11y::EventKind) -> &'static str {
+    match kind {
+        xa11y::EventKind::FocusChanged => "focus_changed",
+        xa11y::EventKind::ValueChanged => "value_changed",
+        xa11y::EventKind::NameChanged => "name_changed",
+        xa11y::EventKind::StateChanged { .. } => "state_changed",
+        xa11y::EventKind::StructureChanged => "structure_changed",
+        xa11y::EventKind::WindowOpened => "window_opened",
+        xa11y::EventKind::WindowClosed => "window_closed",
+        xa11y::EventKind::WindowActivated => "window_activated",
+        xa11y::EventKind::WindowDeactivated => "window_deactivated",
+        xa11y::EventKind::SelectionChanged => "selection_changed",
+        xa11y::EventKind::MenuOpened => "menu_opened",
+        xa11y::EventKind::MenuClosed => "menu_closed",
+        xa11y::EventKind::TextChanged => "text_changed",
+        xa11y::EventKind::Announcement => "announcement",
+    }
+}
+
+fn state_flag_to_str(flag: xa11y::StateFlag) -> &'static str {
+    match flag {
+        xa11y::StateFlag::Enabled => "enabled",
+        xa11y::StateFlag::Visible => "visible",
+        xa11y::StateFlag::Focused => "focused",
+        xa11y::StateFlag::Checked => "checked",
+        xa11y::StateFlag::Selected => "selected",
+        xa11y::StateFlag::Expanded => "expanded",
+        xa11y::StateFlag::Editable => "editable",
+        xa11y::StateFlag::Focusable => "focusable",
+        xa11y::StateFlag::Modal => "modal",
+        xa11y::StateFlag::Required => "required",
+        xa11y::StateFlag::Busy => "busy",
     }
 }
 
@@ -547,9 +563,9 @@ impl EventType {
     #[classattr]
     const MENU_CLOSED: &'static str = "menu_closed";
     #[classattr]
-    const ALERT: &'static str = "alert";
-    #[classattr]
     const TEXT_CHANGED: &'static str = "text_changed";
+    #[classattr]
+    const ANNOUNCEMENT: &'static str = "announcement";
 }
 
 // ── Event ──────────────────────────────────────────────────────────────────
@@ -557,6 +573,7 @@ impl EventType {
 #[pyclass(frozen)]
 #[derive(Clone)]
 struct Event {
+    /// String representation of the event kind (e.g. "focus_changed").
     #[pyo3(get)]
     event_type: String,
     #[pyo3(get)]
@@ -565,16 +582,30 @@ struct Event {
     app_pid: u32,
     target_data: Option<xa11y::ElementData>,
     provider: Arc<dyn xa11y::Provider>,
+    /// For state_changed events: which flag changed (e.g. "checked").
+    #[pyo3(get)]
+    state_flag: Option<String>,
+    /// For state_changed events: the new boolean value.
+    #[pyo3(get)]
+    state_value: Option<bool>,
 }
 
 impl Event {
     fn from_core(event: xa11y::Event, provider: Arc<dyn xa11y::Provider>) -> Self {
+        let (state_flag, state_value) = match &event.kind {
+            xa11y::EventKind::StateChanged { flag, value } => {
+                (Some(state_flag_to_str(*flag).to_string()), Some(*value))
+            }
+            _ => (None, None),
+        };
         Self {
-            event_type: event_type_to_str(event.event_type).to_string(),
+            event_type: event_kind_to_str(&event.kind).to_string(),
             app_name: event.app_name,
             app_pid: event.app_pid,
             target_data: event.target,
             provider,
+            state_flag,
+            state_value,
         }
     }
 }

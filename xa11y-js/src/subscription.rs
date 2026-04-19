@@ -22,13 +22,17 @@ use std::time::Duration;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 
 use crate::element::Element;
-use crate::types::event_type_to_str;
+use crate::types::{event_kind_to_str, state_flag_to_str};
 
 // ── Event ──────────────────────────────────────────────────────────────────
 
 #[napi]
 pub struct Event {
     kind: String,
+    /// For `stateChanged` events: the flag that changed (e.g. `"checked"`).
+    state_flag: Option<String>,
+    /// For `stateChanged` events: the new boolean value of the flag.
+    state_value: Option<bool>,
     app_name: String,
     app_pid: u32,
     target_data: Option<xa11y::ElementData>,
@@ -37,8 +41,17 @@ pub struct Event {
 
 impl Event {
     pub(crate) fn from_core(event: xa11y::Event, provider: Arc<dyn xa11y::Provider>) -> Self {
+        let kind_str = event_kind_to_str(&event.kind).to_string();
+        let (state_flag, state_value) =
+            if let xa11y::EventKind::StateChanged { flag, value } = event.kind {
+                (Some(state_flag_to_str(flag).to_string()), Some(value))
+            } else {
+                (None, None)
+            };
         Self {
-            kind: event_type_to_str(event.event_type).to_string(),
+            kind: kind_str,
+            state_flag,
+            state_value,
             app_name: event.app_name,
             app_pid: event.app_pid,
             target_data: event.target,
@@ -53,6 +66,20 @@ impl Event {
     #[napi(getter, js_name = "type")]
     pub fn event_type(&self) -> String {
         self.kind.clone()
+    }
+
+    /// For `stateChanged` events: the flag that changed (e.g. `"checked"`, `"busy"`).
+    /// `null` for all other event kinds.
+    #[napi(getter)]
+    pub fn state_flag(&self) -> Option<String> {
+        self.state_flag.clone()
+    }
+
+    /// For `stateChanged` events: the new boolean value of the flag.
+    /// `null` for all other event kinds.
+    #[napi(getter)]
+    pub fn state_value(&self) -> Option<bool> {
+        self.state_value
     }
 
     #[napi(getter)]

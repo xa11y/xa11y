@@ -544,3 +544,53 @@ The following concepts were considered and excluded:
 **InvokeEvent (button activated)**: UIA `Invoke_InvokedEventId` has no direct counterpart on macOS or Linux at the accessibility event level. Excluded. Consumers wanting to observe button presses should watch `StateChanged` or `ValueChanged` on the downstream effect.
 
 **Element-scoped subscriptions**: All three platforms support listening to a narrower subtree or individual element. This requires tracking which elements to observe and handling their lifecycle. Valuable, but a future addition — app-scoped subscriptions cover the current use cases (testing, automation).
+
+---
+
+## Implementation Status
+
+### macOS — shipping
+
+Implemented in `xa11y-macos/src/ax.rs`:
+
+- `AXObserverCreate` is called for the target app's PID; the returned run loop source is attached to a dedicated thread's `CFRunLoop`, so delivery is push-based and does not block the calling thread.
+- App-level registrations cover `AXFocusedUIElementChanged`, `AXValueChanged`, `AXTitleChanged`, `AXElementBusyChanged`, `AXWindowCreated`, `AXUIElementDestroyed`, `AXFocusedWindowChanged`, `AXWindowMiniaturized`, `AXWindowDeminiaturized`, `AXSelectedTextChanged`, `AXSelectedRowsChanged`, `AXSelectedCellsChanged`, `AXSelectedChildrenChanged`, `AXMenuOpened`, `AXMenuClosed`, and `AXAnnouncementRequested`.
+- The callback builds a full `ElementData` snapshot via a standalone `build_snapshot_data` (shared with `Provider::build_element_data`) before the live `AXUIElementRef` goes out of scope, so `event.target` is a durable snapshot rather than a zombie reference.
+- `AXValueChanged` on a checkbox/radio emits `StateChanged { Checked, … }` alongside `ValueChanged`. The `Checked` value is sourced from the snapshot's resolved `states.checked`, which handles both `CFBoolean` and `CFNumber` representations (AccessKit's macOS bridge exposes checkbox values as `CFBoolean` — the earlier `ax_number_f64` path returned `false` unconditionally and was corrected).
+- `AXValueChanged` on a text role additionally emits `TextChanged`. `AXUIElementDestroyed` emits `WindowClosed` when the destroyed element's role is `AXWindow` and `StructureChanged` otherwise.
+
+### Linux & Windows — stub providers
+
+`xa11y-linux` and `xa11y-windows` ship with inert subscription stubs: `subscribe()` returns a valid `Subscription` whose receiver never yields events. This preserves the public API across platforms while the AT-SPI2 / UIA backends are being built. The prior polling implementations were removed — they only detected focus and tree-count changes and masked the event model's real semantics.
+
+### End-to-end test coverage (macOS)
+
+Integration tests in `xa11y/tests/integ_test.rs` are `#[cfg(target_os = "macos")]` and drive the AccessKit + winit test app. Each test subscribes, performs a deterministic action that is known to change AccessKit's tree, and hard-asserts that the expected `EventKind` arrives within 3–5 s. **No test catches `Error::Timeout` to pass silently** — a prior iteration of the suite did, and it hid real regressions.
+
+| EventKind                         | Covered | Trigger                                                       |
+|-----------------------------------|---------|---------------------------------------------------------------|
+| `FocusChanged`                    | Yes     | `focus()` on Cancel button                                    |
+| `ValueChanged`                    | Yes     | `set_numeric_value()` on Slider                               |
+| `NameChanged`                     | Yes     | Flip checkbox + press Submit to force a status-label update   |
+| `StateChanged { Checked }`        | Yes     | Toggle checkbox                                               |
+| `TextChanged`                     | Yes     | `set_value()` on Name text field                              |
+| `Announcement`                    | Yes     | Press "Announce" button (updates a `Live::Polite` label value) |
+| `StructureChanged`                | **No**  | See below                                                     |
+| `SelectionChanged`                | **No**  | See below                                                     |
+| `WindowOpened` / `WindowClosed`   | **No**  | Test app is single-window                                     |
+| `WindowActivated` / `WindowDeactivated` | **No** | Requires an OS-level key-window change                   |
+| `MenuOpened` / `MenuClosed`       | **No**  | AccessKit's macOS bridge does not synthesize NSMenu events    |
+| `StateChanged` (non-`Checked` flags) | **No** | AccessKit does not post `AXElementBusyChanged` etc.          |
+
+**Limitations uncovered by the implementation effort:**
+
+1. **`AXUIElementDestroyed` does not propagate to app-level observers through AccessKit.** Registration at the `AXApplication` element succeeds (`AXError == kAXErrorSuccess`), and most other notifications reach the callback as expected — but `AXUIElementDestroyed` fired by `accesskit_macos::EventGenerator::node_removed` on a subtree removal never reaches the observer. Other tests in the same session prove the observer is otherwise healthy. Covering `StructureChanged` therefore requires either per-element observer registration (tracking element lifetime) or a non-AccessKit test harness. Kept the design-level app-scope commitment; documented the gap here.
+2. **AccessKit's `AXSelectedTextChangedNotification` requires `supports_text_ranges`,** which in turn requires `Role::TextRun` children on the text field. The current test app's `TextInput` node has no runs, so `set_text_selection` lands at the AX layer but AccessKit never synthesizes the notification. `AXSelectedRowsChangedNotification` / `AXSelectedChildrenChangedNotification` are documented as element-scope only and likewise don't surface at the app observer for descendants. Either a text-run-aware test app or element-scoped subscriptions unblock `SelectionChanged`.
+3. **AccessKit does not post `AXElementBusyChanged`, `AXMenuOpened`, `AXMenuClosed`, or `AXWindowCreated`/`Miniaturized`/`Deminiaturized`.** These are driven by native AppKit objects (NSMenu, NSWindow), not by AccessKit's synthesized tree. A Cocoa/AppKit test app under `test-apps/cocoa/` is the right place to cover them.
+
+### Follow-ups
+
+- Linux AT-SPI2 signal subscription (per the Linux section above).
+- Windows UIA `AddAutomationEventHandler` wiring (per the Windows section above).
+- Either element-scoped subscriptions or a Cocoa test harness to cover the EventKinds that AccessKit's macOS bridge does not raise.
+- Test-app enhancements: `Role::TextRun` children on the text field to enable text-selection events; a secondary-window workflow; `Node::set_busy()` drive for `StateChanged { Busy }`.

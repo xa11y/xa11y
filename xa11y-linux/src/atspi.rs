@@ -3,13 +3,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
 
 use rayon::prelude::*;
 use xa11y_core::selector::{Combinator, MatchOp, SelectorSegment};
 use xa11y_core::{
-    CancelHandle, ElementData, Error, Event, EventReceiver, EventType, Provider, Rect, Result,
-    Role, Selector, StateSet, Subscription, Toggled,
+    CancelHandle, ElementData, Error, EventReceiver, Provider, Rect, Result, Role, Selector,
+    StateSet, Subscription, Toggled,
 };
 use zbus::blocking::{Connection, Proxy};
 
@@ -693,6 +692,11 @@ impl LinuxProvider {
     }
 
     /// Find an application by PID.
+    ///
+    /// Unused until the AT-SPI2 signal-subscription backend lands — the old
+    /// polling subscription was the only caller. Kept here because the real
+    /// implementation will need it to filter D-Bus signals by sender.
+    #[allow(dead_code)]
     fn find_app_by_pid(&self, pid: u32) -> Result<AccessibleRef> {
         let registry = AccessibleRef {
             bus_name: "org.a11y.atspi.Registry".to_string(),
@@ -1653,99 +1657,18 @@ impl Provider for LinuxProvider {
         }
     }
 
-    fn subscribe(&self, element: &ElementData) -> Result<Subscription> {
-        let pid = element.pid.ok_or(Error::Platform {
-            code: -1,
-            message: "Element has no PID for subscribe".to_string(),
-        })?;
-        let app_name = element.name.clone().unwrap_or_default();
-        self.subscribe_impl(app_name, pid, pid)
-    }
-}
-
-// ── Event subscription ──────────────────────────────────────────────────────
-
-impl LinuxProvider {
-    /// Spawn a polling thread that detects focus and structure changes.
-    fn subscribe_impl(&self, app_name: String, app_pid: u32, pid: u32) -> Result<Subscription> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let poll_provider = LinuxProvider::new()?;
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let stop_clone = stop.clone();
-
-        let handle = std::thread::spawn(move || {
-            let mut prev_focused: Option<String> = None;
-            let mut prev_element_count: usize = 0;
-
-            while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(100));
-
-                // Find the app element by PID
-                let app_ref = match poll_provider.find_app_by_pid(pid) {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
-                let app_data = poll_provider.build_element_data(&app_ref, Some(pid));
-
-                // Walk the tree lazily to find focused element and count
-                let mut stack = vec![app_data];
-                let mut element_count: usize = 0;
-                let mut focused_element: Option<ElementData> = None;
-                let mut visited = HashSet::new();
-
-                while let Some(el) = stack.pop() {
-                    let path_key = format!("{:?}:{}", el.raw, el.handle);
-                    if !visited.insert(path_key) {
-                        continue;
-                    }
-                    element_count += 1;
-                    if el.states.focused && focused_element.is_none() {
-                        focused_element = Some(el.clone());
-                    }
-                    if let Ok(children) = poll_provider.get_children(Some(&el)) {
-                        stack.extend(children);
-                    }
-                }
-
-                let focused_name = focused_element.as_ref().and_then(|e| e.name.clone());
-                if focused_name != prev_focused {
-                    if prev_focused.is_some() {
-                        let _ = tx.send(Event {
-                            event_type: EventType::FocusChanged,
-                            app_name: app_name.clone(),
-                            app_pid,
-                            target: focused_element,
-                            state_flag: None,
-                            state_value: None,
-                            text_change: None,
-                            timestamp: std::time::Instant::now(),
-                        });
-                    }
-                    prev_focused = focused_name;
-                }
-
-                if element_count != prev_element_count && prev_element_count > 0 {
-                    let _ = tx.send(Event {
-                        event_type: EventType::StructureChanged,
-                        app_name: app_name.clone(),
-                        app_pid,
-                        target: None,
-                        state_flag: None,
-                        state_value: None,
-                        text_change: None,
-                        timestamp: std::time::Instant::now(),
-                    });
-                }
-                prev_element_count = element_count;
-            }
-        });
-
-        let cancel = CancelHandle::new(move || {
-            stop.store(true, std::sync::atomic::Ordering::Relaxed);
-            let _ = handle.join();
-        });
-
-        Ok(Subscription::new(EventReceiver::new(rx), cancel))
+    fn subscribe(&self, _element: &ElementData) -> Result<Subscription> {
+        // Linux event subscription is not yet implemented. Returns an inert
+        // subscription: no events will ever be delivered, but wait_for / recv
+        // remain usable and will time out as expected.
+        //
+        // TODO: Implement a zbus-based AT-SPI2 signal subscription per the
+        // events design doc.
+        let (_tx, rx) = std::sync::mpsc::channel();
+        Ok(Subscription::new(
+            EventReceiver::new(rx),
+            CancelHandle::noop(),
+        ))
     }
 }
 

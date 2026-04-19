@@ -14,7 +14,7 @@ pub use action::ScrollDirection;
 pub use app::App;
 pub use element::{Element, ElementData, RawPlatformData, Rect, StateSet, Toggled};
 pub use error::{Error, Result};
-pub use event::{ElementState, Event, EventType, StateFlag, TextChangeData, TextChangeType};
+pub use event::{ElementState, Event, EventKind, StateFlag};
 pub use event_provider::{CancelHandle, EventReceiver, Subscription, SubscriptionIter};
 pub use locator::Locator;
 pub use provider::Provider;

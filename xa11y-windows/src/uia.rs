@@ -3,7 +3,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
 
 use windows::core::BOOL;
 use windows::Win32::Foundation::*;
@@ -13,8 +12,8 @@ use windows::Win32::UI::Accessibility::*;
 
 use xa11y_core::{
     selector::{matches_simple, Combinator, Selector, SelectorSegment},
-    CancelHandle, ElementData, Error, Event, EventReceiver, EventType, Provider, Rect, Result,
-    Role, StateSet, Subscription, Toggled,
+    CancelHandle, ElementData, Error, EventReceiver, Provider, Rect, Result, Role, StateSet,
+    Subscription, Toggled,
 };
 
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
@@ -86,6 +85,12 @@ impl WindowsProvider {
         unsafe { self.automation.ElementFromHandle(hwnd) }.map_err(|_| ())
     }
 
+    /// Find an application's root UIA element + window name by PID.
+    ///
+    /// Unused until the UIA event-handler backend lands — the old polling
+    /// subscription was the only caller. Kept because the real
+    /// implementation will need it to scope event handlers to a single app.
+    #[allow(dead_code)]
     fn find_app_by_pid(&self, pid: u32) -> Result<(IUIAutomationElement, String)> {
         let root = uia_call(|| unsafe { self.automation.GetRootElement() })?;
         let condition = uia_call(|| unsafe {
@@ -1074,16 +1079,19 @@ impl Provider for WindowsProvider {
         }
     }
 
-    fn subscribe(&self, element: &ElementData) -> Result<Subscription> {
-        let pid = element.pid.ok_or(Error::Platform {
-            code: -1,
-            message: "Element has no PID for subscribe".to_string(),
-        })?;
-        let app_name = element.name.clone().unwrap_or_default();
-        self.subscribe_impl(app_name, pid, move |p| {
-            let (el, _name) = p.find_app_by_pid(pid)?;
-            Ok(el)
-        })
+    fn subscribe(&self, _element: &ElementData) -> Result<Subscription> {
+        // Windows event subscription is not yet implemented. Returns an inert
+        // subscription: no events will ever be delivered, but wait_for / recv
+        // remain usable and will time out as expected.
+        //
+        // TODO: Implement UIA native event handlers (AddFocusChangedEventHandler,
+        // AddAutomationEventHandler, AddPropertyChangedEventHandler) per the
+        // events design doc.
+        let (_tx, rx) = std::sync::mpsc::channel();
+        Ok(Subscription::new(
+            EventReceiver::new(rx),
+            CancelHandle::noop(),
+        ))
     }
 }
 
@@ -1316,91 +1324,6 @@ fn map_uia_control_type(control_type: UIA_CONTROLTYPE_ID) -> Role {
         UIA_CalendarControlTypeId => Role::Group,
         UIA_CustomControlTypeId => Role::Unknown,
         _ => xa11y_core::unknown_role(&format!("UIA control type {}", control_type.0)),
-    }
-}
-
-// ── Event subscription (polling-based) ───────────────────────────────────────
-
-impl WindowsProvider {
-    /// Spawn a polling thread that detects focus and structure changes.
-    fn subscribe_impl<F>(&self, app_name: String, app_pid: u32, root_fn: F) -> Result<Subscription>
-    where
-        F: Fn(&WindowsProvider) -> Result<IUIAutomationElement> + Send + 'static,
-    {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let poll_provider = WindowsProvider::new()?;
-        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let stop_clone = stop.clone();
-
-        let handle = std::thread::spawn(move || {
-            let mut prev_focused: Option<String> = None;
-            let mut prev_element_count: usize = 0;
-
-            while !stop_clone.load(std::sync::atomic::Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(100));
-
-                let root_uia = match root_fn(&poll_provider) {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
-
-                // Fetch entire subtree with all properties in one COM call
-                let all_elements: Vec<ElementData> =
-                    if let Ok(arr) = poll_provider.find_all_subtree(&root_uia) {
-                        let count = uia_len(&arr);
-                        (0..count)
-                            .filter_map(|i| uia_get(&arr, i))
-                            .map(|el| poll_provider.build_element_data(&el, Some(app_pid)))
-                            .collect()
-                    } else {
-                        continue;
-                    };
-
-                // Detect focus changes
-                let focused_name = all_elements
-                    .iter()
-                    .find(|n| n.states.focused)
-                    .and_then(|n| n.name.clone());
-                if focused_name != prev_focused {
-                    if prev_focused.is_some() {
-                        let _ = tx.send(Event {
-                            event_type: EventType::FocusChanged,
-                            app_name: app_name.clone(),
-                            app_pid,
-                            target: all_elements.iter().find(|n| n.states.focused).cloned(),
-                            state_flag: None,
-                            state_value: None,
-                            text_change: None,
-                            timestamp: std::time::Instant::now(),
-                        });
-                    }
-                    prev_focused = focused_name;
-                }
-
-                // Detect structure changes
-                let element_count = all_elements.len();
-                if element_count != prev_element_count && prev_element_count > 0 {
-                    let _ = tx.send(Event {
-                        event_type: EventType::StructureChanged,
-                        app_name: app_name.clone(),
-                        app_pid,
-                        target: None,
-                        state_flag: None,
-                        state_value: None,
-                        text_change: None,
-                        timestamp: std::time::Instant::now(),
-                    });
-                }
-                prev_element_count = element_count;
-            }
-        });
-
-        let cancel = CancelHandle::new(move || {
-            stop.store(true, std::sync::atomic::Ordering::Relaxed);
-            let _ = handle.join();
-        });
-
-        Ok(Subscription::new(EventReceiver::new(rx), cancel))
     }
 }
 
