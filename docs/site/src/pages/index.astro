@@ -355,10 +355,10 @@
             </div>
             <div class="messages">
               <div class="box msg">
-                <div><div class="who">Priya Shah</div><div class="txt">lgtm &mdash; merging</div></div>
+                <div><div class="who">Sam</div><div class="txt">lgtm &mdash; merging</div></div>
               </div>
               <div class="box msg" data-active="true">
-                <div><div class="who">Marcus Chen</div><div class="txt">ship it</div></div>
+                <div><div class="who">Elena</div><div class="txt">ship it</div></div>
               </div>
             </div>
             <div class="composer">
@@ -582,9 +582,9 @@
 '│  ├─ button "Call"        [enabled]',
 '│  └─ button "Details"     [enabled]',
 '├─ list "Messages"         [scrollable, 142 items]',
-'│  ├─ group "Message from Priya"',
+'│  ├─ group "Message from Sam"',
 '│  │  └─ text "lgtm — merging"',
-'│  └─ group "Message from Marcus"',
+'│  └─ group "Message from Elena"',
 '│     └─ text "ship it"',
 '└─ group "Composer"',
 '   ├─ textfield "Message #general"  [focused]',
@@ -622,7 +622,7 @@
 '',
 '// Fill out a form and submit',
 'let name = app.query("textfield[name=\'Full name\']")?;',
-'name.type_text("Marcus Chen")?;',
+'name.type_text("Elena")?;',
 '',
 'let email = app.query("textfield[name=\'Email\']")?;',
 'email.type_text("grace@example.com")?;',
@@ -641,7 +641,7 @@
 '',
 '# Fill out a form and submit',
 'name = app.query("textfield[name=\'Full name\']")',
-'name.type_text("Marcus Chen")',
+'name.type_text("Elena")',
 '',
 'email = app.query("textfield[name=\'Email\']")',
 'email.type_text("grace@example.com")',
@@ -659,7 +659,7 @@
 '',
 '// Fill out a form and submit',
 'const name = await app.query("textfield[name=\'Full name\']");',
-'await name.typeText("Marcus Chen");',
+'await name.typeText("Elena");',
 '',
 'const email = await app.query("textfield[name=\'Email\']");',
 'await email.typeText("grace@example.com");',
@@ -671,7 +671,7 @@
 'await app.expect("text[name*=\'submitted\']").toBeVisible();',
       ].join('\n'),
       cli: [
-'$ xa11y query --app "MyApp" "textfield[name=\'Full name\']" --type "Marcus Chen"',
+'$ xa11y query --app "MyApp" "textfield[name=\'Full name\']" --type "Elena"',
 '$ xa11y query --app "MyApp" "textfield[name=\'Email\']" --type "grace@example.com"',
 '$ xa11y query --app "MyApp" "button[name=\'Submit\']" --press',
 '$ xa11y query --app "MyApp" "text[name*=\'submitted\']"',
