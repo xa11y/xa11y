@@ -349,12 +349,24 @@ pub(crate) fn signal_to_kinds(
             }
         }
 
-        // Object.PropertyChange — name/description/parent changed. `detail`
-        // carries the property name ("accessible-name" / "accessible-description").
+        // Object.PropertyChange — AccessKit's AT-SPI bridge publishes both
+        // name changes and numeric value changes through this signal with
+        // `detail` set to the AT-SPI property id (`accessible-name`,
+        // `accessible-value`, `accessible-description`, `accessible-parent`,
+        // `accessible-role`). The design doc maps:
+        // - name  → NameChanged
+        // - value → ValueChanged (+ TextChanged on text roles, mirroring macOS)
+        // - description/parent/role → no cross-platform EventKind; drop.
         ("org.a11y.atspi.Event.Object", "PropertyChange") => {
-            if detail.eq_ignore_ascii_case("accessible-name") || detail.eq_ignore_ascii_case("name")
-            {
+            let d = detail.to_ascii_lowercase();
+            if d == "accessible-name" || d == "name" {
                 vec![EventKind::NameChanged]
+            } else if d == "accessible-value" || d == "value" {
+                let mut kinds = vec![EventKind::ValueChanged];
+                if matches!(target_role, Some(Role::TextField | Role::TextArea)) {
+                    kinds.push(EventKind::TextChanged);
+                }
+                kinds
             } else {
                 vec![]
             }
@@ -845,6 +857,36 @@ mod tests {
             None,
         );
         assert!(kinds.is_empty());
+    }
+
+    #[test]
+    fn property_change_value_emits_value_changed() {
+        // AccessKit's AT-SPI bridge emits Object:PropertyChange with
+        // detail="accessible-value" for slider/range value changes.
+        let kinds = signal_to_kinds(
+            "org.a11y.atspi.Event.Object",
+            "PropertyChange",
+            "accessible-value",
+            0,
+            Some(Role::Slider),
+        );
+        assert_eq!(kinds, vec![EventKind::ValueChanged]);
+    }
+
+    #[test]
+    fn property_change_value_on_text_role_also_emits_text_changed() {
+        // If a text-role element's value changes via PropertyChange, the
+        // provider synthesizes TextChanged too so the macOS/Windows text
+        // pattern carries over to Linux.
+        let kinds = signal_to_kinds(
+            "org.a11y.atspi.Event.Object",
+            "PropertyChange",
+            "accessible-value",
+            0,
+            Some(Role::TextField),
+        );
+        assert!(kinds.contains(&EventKind::ValueChanged));
+        assert!(kinds.contains(&EventKind::TextChanged));
     }
 
     #[test]
