@@ -111,16 +111,21 @@ pub(crate) fn subscribe_for_pid(
         conn: conn.clone(),
     });
 
+    // Activate the broadcast receiver *before* spawning the worker. If we
+    // waited until inside the spawned thread to construct the iterator,
+    // there would be a window between `add_match_rule` returning above and
+    // the thread scheduling its first statement during which the daemon
+    // could deliver matching signals to our Connection — where they would
+    // fan out to zero subscribers and be dropped. Creating the iterator
+    // here makes the subscription atomic from the caller's point of view:
+    // any signal that arrives after every `add_match_rule` call has
+    // returned is guaranteed to land in our queue.
+    let iter = MessageIterator::from(conn.clone());
+
     let stop = Arc::new(AtomicBool::new(false));
     let stop_for_thread = stop.clone();
     let ctx_for_thread = ctx.clone();
-    let iter_conn = conn.clone();
     let handle = thread::spawn(move || {
-        // `MessageIterator::from(conn)` wraps an internal broadcast
-        // subscription on the connection: every incoming message fan-outs to
-        // every iterator. Blocks on `.next()` until a message arrives or
-        // every Connection clone is dropped.
-        let iter = MessageIterator::from(iter_conn);
         for msg in iter {
             if stop_for_thread.load(Ordering::Relaxed) {
                 break;

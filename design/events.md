@@ -588,12 +588,12 @@ On Windows the tests are **not** exercised by GitHub Actions (the hosted Windows
 
 | EventKind                         | macOS | Windows | Linux | Trigger                                                       |
 |-----------------------------------|-------|---------|-------|---------------------------------------------------------------|
-| `FocusChanged`                    | Yes   | Yes     | **No**⁴ | `focus()` on Cancel button                                    |
+| `FocusChanged`                    | Yes   | Yes     | Yes⁴  | `focus()` on New toolbar button                               |
 | `ValueChanged`                    | Yes   | Yes     | Yes   | `set_numeric_value()` on Slider (also asserted alongside `ToggleState` on Windows) |
-| `NameChanged`                     | Yes   | Yes     | **No**⁵ | Flip checkbox + press Submit to force a status-label update   |
+| `NameChanged`                     | Yes   | Yes     | Yes⁵  | Flip checkbox + press Submit to force a status-label update   |
 | `StateChanged { Checked }`        | Yes   | Yes     | Yes   | Toggle checkbox                                               |
 | `TextChanged`                     | Yes   | Yes¹    | **No**³ | `set_value()` on Name text field                              |
-| `Announcement`                    | Yes   | **No**  | **No** | Press "Announce" button (updates a `Live::Polite` label value) |
+| `Announcement`                    | Yes   | **No**  | Yes   | Press "Announce" button (updates a `Live::Polite` label value) |
 | `StructureChanged`                | **No** | **No** | **No** | See below                                                     |
 | `SelectionChanged`                | **No** | **No** | **No** | See below                                                     |
 | `WindowOpened` / `WindowClosed`   | **No** | **No** | **No** | Test app is single-window                                     |
@@ -607,9 +607,9 @@ On Windows the tests are **not** exercised by GitHub Actions (the hosted Windows
 
 ³ `TextChanged` on Linux has no end-to-end test yet. AccessKit's AT-SPI bridge only emits `Object:TextChanged` when the AccessKit tree's text content changes (`TextInserted` / `TextRemoved` diffs), but the xa11y `set_value` path on Linux goes through the AT-SPI `EditableText` interface — which AccessKit's bridge does not implement — so the tree never observes a mutation and no signal fires. The provider's mapping is covered by unit tests in `xa11y-linux::events::tests` (both `Object:TextChanged` and `PropertyChange(accessible-value)` on a text role promote to `TextChanged`). Real end-to-end coverage will require a GTK/Qt test harness on Linux.
 
-⁴ `FocusChanged` on Linux has no end-to-end test yet. AccessKit's AT-SPI bridge emits `Object:StateChanged(focused, true)` from its `focus_moved()` path, which `signal_to_kinds` maps to `FocusChanged` + `StateChanged{Focused, true}` (covered by unit tests). Driving the bridge to actually fire that signal against the winit test app in headless Xvfb is flaky under the integration-test harness — the Focus action dispatches but the bridge's tree diff doesn't consistently observe the focus change within the 3 s window. A GTK/Qt harness or a non-disabled focus target would unblock reliable e2e coverage.
+⁴ `FocusChanged` on Linux required two concessions to run reliably under headless Xvfb. First, AccessKit's AT-SPI tree diff gates `focus_moved()` on `Tree::is_host_focused()` (otherwise `focus()` collapses to `None` on both sides of the diff and the transition is silently suppressed); under Xvfb winit never delivers `WindowEvent::Focused(true)` on its own, so the test app synthesises it on startup and re-asserts it on every user-event boundary. Second, AccessKit's `focus_moved` only fires when the `focus` field actually changes between adjacent tree updates — focusing a *disabled* node (e.g. the default-off Cancel button) short-circuits silently, so the test targets the always-enabled "New" toolbar button. Both workarounds live in `test-apps/accesskit/src/main.rs`.
 
-⁵ `NameChanged` on Linux has no end-to-end test yet. AccessKit emits `Object:PropertyChange(accessible-name)` when a node's label changes — the mapping is pinned by `property_change_name_emits_name_changed` unit tests — but driving a reliable label mutation from two Submit presses against the winit test app is flaky under the same harness. A deterministic single-action label mutation (or a GTK/Qt harness) would unblock this e2e test.
+⁵ `NameChanged` on Linux fires when the status label's AT-SPI `accessible-name` changes. AccessKit's AT-SPI bridge derives the `accessible-name` of `Role::Label` nodes from `value()`, not `label()` (`NodeWrapper::name()` gates on `label_comes_from_value()`, which is true iff the role is `Label`). The test app therefore sets both `set_label` (for the macOS / Windows tests, whose bridges read label) *and* `set_value` on `STATUS_TEXT`, so a label-content mutation surfaces as a `PropertyChange(accessible-name)` on every platform.
 
 **Limitations uncovered by the implementation effort:**
 
@@ -621,5 +621,5 @@ On Windows the tests are **not** exercised by GitHub Actions (the hosted Windows
 
 - Either element-scoped subscriptions or a Cocoa test harness to cover the EventKinds that AccessKit's macOS bridge does not raise.
 - A dedicated Win32/WPF test app (or widget additions to the AccessKit test app) so the Windows integration suite can cover `Announcement`, `MenuOpened`/`MenuClosed`, `WindowOpened`/`WindowClosed`, and `StateChanged { Enabled | Expanded }`.
-- A GTK / Qt harness on Linux so we can reliably drive `Object:Announcement`, `Window:Create`/`Destroy`, and state deltas that AccessKit's AT-SPI bridge doesn't synthesize.
+- A GTK / Qt harness on Linux so we can reliably drive `Window:Create`/`Destroy` and state deltas (`StateChanged{Busy,Enabled,Expanded}`) that AccessKit's AT-SPI bridge doesn't synthesize against our winit test app.
 - Test-app enhancements: `Role::TextRun` children on the text field to enable text-selection events; a secondary-window workflow; `Node::set_busy()` drive for `StateChanged { Busy }`.
