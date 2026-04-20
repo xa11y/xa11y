@@ -569,32 +569,41 @@ Implemented in `xa11y-windows/src/uia.rs`:
 - `PropertyChanged(ToggleState)` emits both `StateChanged { Checked }` and `ValueChanged` so consumers can filter on either; `PropertyChanged(ExpandCollapseState)` emits `StateChanged { Expanded, new == Expanded }`; `PropertyChanged(IsEnabled)` emits `StateChanged { Enabled, new }`. VARIANT payloads are decoded via the `TryFrom<&VARIANT>` impls provided by `windows::Win32::System::Variant`.
 - The `Subscription`'s `CancelHandle` holds the four handler COM pointers + automation/root via a `ComSend<T>` wrapper (an explicit `unsafe impl Send for ComSend<T>` whose safety rests on the same MTA guarantee that backs the existing `unsafe impl Send for WindowsProvider`, with a private inner field so Rust 2021 disjoint captures don't peel the wrapper back). On drop, the closure calls each `RemoveXxxEventHandler` synchronously — when those return, UIA guarantees no further handler invocations, so a subsequent `subscribe()` call starts with a clean slate.
 
-### Linux — stub provider
+### Linux — shipping
 
-`xa11y-linux` still ships with an inert subscription stub: `subscribe()` returns a valid `Subscription` whose receiver never yields events. This preserves the public API across platforms while the AT-SPI2 backend is being built. The prior polling implementation was removed — it only detected focus and tree-count changes and masked the event model's real semantics.
+Implemented in `xa11y-linux/src/events.rs`:
 
-### End-to-end test coverage (macOS + Windows)
+- Each `subscribe()` call opens a dedicated `zbus::blocking::Connection` to the AT-SPI accessibility bus (falling back to the session bus when the a11y bus launcher is unavailable) and registers four AT-SPI2 signal match rules via `org.freedesktop.DBus.AddMatch`: one per event interface (`Event.Object`, `Event.Window`, `Event.Focus`, `Event.Document`). Every rule is scoped by the target app's D-Bus unique name — resolved via `LinuxProvider::find_app_by_pid` — so signals from other applications never enter the subscription's channel.
+- A dedicated OS thread drives `zbus::blocking::MessageIterator::from(conn.clone())` and fan-outs received signals to an `mpsc::Sender<Event>`. Because match rules are installed on the same Connection the iterator reads, the D-Bus daemon only forwards relevant traffic to us.
+- Each incoming signal is dispatched through `signal_to_kinds(interface, member, detail, detail1, target_role)`, a pure mapping table covered by unit tests. The table intentionally emits multiple `EventKind`s from a single signal when the cross-platform model requires it: `Object:StateChanged(focused,true)` raises both `FocusChanged` and `StateChanged{Focused,true}` (GTK4 sometimes omits `Focus:Focus`), and `Object:ValueChanged` on a text role raises both `ValueChanged` and `TextChanged` (AccessKit's AT-SPI bridge publishes text mutations via ValueChanged, not TextChanged).
+- The event's `target` is built via a free `build_event_snapshot(conn, aref, pid)` helper that fetches role (name + numeric fallback), states (parsed from the AT-SPI2 bitfield), name, value (Text interface, then Value), and numeric bounds via direct D-Bus method calls. The snapshot's `handle` is always `0` — event targets are read-only, not live handles into the provider's cache. Consumers that need to drive actions must re-locate through the normal locator path.
+- Cancellation is cooperative: on drop the cancel closure flips an `AtomicBool`, removes every match rule via `DBusProxy::remove_match_rule`, and triggers a D-Bus `Peer.Ping` round-trip whose reply travels through the iterator thread, forcing `.next()` to return so the stop flag can be observed. The thread is then joined — a subsequent `subscribe()` starts with a clean slate.
+- `MenuOpened`/`MenuClosed` never fire on Linux (AT-SPI2 has no menu signals — documented in the design section above). `StateChanged{Enabled}` is sourced from either `Object:StateChanged(enabled, _)` or `Object:StateChanged(sensitive, _)` — AT-SPI2 still exposes both, and xa11y collapses them.
 
-Integration tests in `xa11y/tests/integ_test.rs` are gated on `#[cfg(target_os = "macos")]` and `#[cfg(target_os = "windows")]` and drive the AccessKit + winit test app. Each test subscribes, performs a deterministic action that is known to change AccessKit's tree, and hard-asserts that the expected `EventKind` arrives within 3 s. **No test catches `Error::Timeout` to pass silently** — a prior iteration of the suite did, and it hid real regressions.
+### End-to-end test coverage (macOS + Windows + Linux)
 
-On Windows the tests are **not** exercised by GitHub Actions (the hosted Windows runners lack the interactive desktop UIA needs); they run locally via `scripts/run_integ_tests_windows.ps1`. `xa11y-windows`'s unit tests — which exercise the subscribe/cancel round-trip, the VARIANT decoders, and the event-ID allowlists — are run by the Windows CI job.
+Integration tests in `xa11y/tests/integ_test.rs` are gated on `#[cfg(target_os = "macos")]`, `#[cfg(target_os = "windows")]`, and `#[cfg(target_os = "linux")]` and drive the AccessKit + winit test app. Each test subscribes, performs a deterministic action that is known to change AccessKit's tree, and hard-asserts that the expected `EventKind` arrives within 3 s. **No test catches `Error::Timeout` to pass silently** — a prior iteration of the suite did, and it hid real regressions.
 
-| EventKind                         | macOS | Windows | Trigger                                                       |
-|-----------------------------------|-------|---------|---------------------------------------------------------------|
-| `FocusChanged`                    | Yes   | Yes     | `focus()` on Cancel button                                    |
-| `ValueChanged`                    | Yes   | Yes     | `set_numeric_value()` on Slider (also asserted alongside `ToggleState` on Windows) |
-| `NameChanged`                     | Yes   | Yes     | Flip checkbox + press Submit to force a status-label update   |
-| `StateChanged { Checked }`        | Yes   | Yes     | Toggle checkbox                                               |
-| `TextChanged`                     | Yes   | Yes¹    | `set_value()` on Name text field                              |
-| `Announcement`                    | Yes   | **No**  | Press "Announce" button (updates a `Live::Polite` label value) |
-| `StructureChanged`                | **No** | **No** | See below                                                     |
-| `SelectionChanged`                | **No** | **No** | See below                                                     |
-| `WindowOpened` / `WindowClosed`   | **No** | **No** | Test app is single-window                                     |
-| `WindowActivated` / `WindowDeactivated` | **No** | **No** | Requires an OS-level key-window change                   |
-| `MenuOpened` / `MenuClosed`       | **No** | **No** | AccessKit bridges do not synthesize menu events               |
-| `StateChanged` (non-`Checked` flags) | **No** | **No** | AccessKit does not post Busy/Enabled/Expanded state deltas in the test app |
+On Windows the tests are **not** exercised by GitHub Actions (the hosted Windows runners lack the interactive desktop UIA needs); they run locally via `scripts/run_integ_tests_windows.ps1`. `xa11y-windows`'s unit tests — which exercise the subscribe/cancel round-trip, the VARIANT decoders, and the event-ID allowlists — are run by the Windows CI job. The Linux tests run in the Ubuntu CI job (`scripts/run_integ_tests.sh` sets up Xvfb + dbus-run-session + at-spi2-registryd); `xa11y-linux::events::tests` unit-tests the `signal_to_kinds` mapping table in isolation.
 
-¹ On Windows the test accepts either `TextChanged` or `ValueChanged` because AccessKit's text provider may not expose the UIA TextPattern on every widget, causing the UIA runtime to emit `UIA_Value_PropertyChanged` instead of `UIA_Text_TextChangedEventId`. Either signal is a real text-mutation notification; treating them interchangeably keeps the test from breaking on unrelated AccessKit refactors.
+| EventKind                         | macOS | Windows | Linux | Trigger                                                       |
+|-----------------------------------|-------|---------|-------|---------------------------------------------------------------|
+| `FocusChanged`                    | Yes   | Yes     | Yes   | `focus()` on Cancel button                                    |
+| `ValueChanged`                    | Yes   | Yes     | Yes   | `set_numeric_value()` on Slider (also asserted alongside `ToggleState` on Windows) |
+| `NameChanged`                     | Yes   | Yes     | Yes   | Flip checkbox + press Submit to force a status-label update   |
+| `StateChanged { Checked }`        | Yes   | Yes     | Yes   | Toggle checkbox                                               |
+| `TextChanged`                     | Yes   | Yes¹    | Yes¹  | `set_value()` on Name text field                              |
+| `Announcement`                    | Yes   | **No**  | **No** | Press "Announce" button (updates a `Live::Polite` label value) |
+| `StructureChanged`                | **No** | **No** | **No** | See below                                                     |
+| `SelectionChanged`                | **No** | **No** | **No** | See below                                                     |
+| `WindowOpened` / `WindowClosed`   | **No** | **No** | **No** | Test app is single-window                                     |
+| `WindowActivated` / `WindowDeactivated` | **No** | **No** | **No** | Requires an OS-level key-window change                   |
+| `MenuOpened` / `MenuClosed`       | **No** | **No** | **No**² | AccessKit bridges do not synthesize menu events               |
+| `StateChanged` (non-`Checked` flags) | **No** | **No** | **No** | AccessKit does not post Busy/Enabled/Expanded state deltas in the test app |
+
+¹ On Windows and Linux the text-field test accepts either `TextChanged` or `ValueChanged`. Windows: AccessKit's text provider may not expose the UIA TextPattern on every widget, causing the UIA runtime to emit `UIA_Value_PropertyChanged` instead of `UIA_Text_TextChangedEventId`. Linux: AccessKit's AT-SPI bridge publishes text mutations via `Object:ValueChanged` rather than `Object:TextChanged`; the provider promotes ValueChanged-on-a-text-role to TextChanged, but accepting either keeps the test resilient to bridge refactors.
+
+² `MenuOpened` / `MenuClosed` will never fire on Linux. AT-SPI2 has no menu-open/close signal — the design doc calls this out as a genuine gap. Non-Linux bridges synthesize it; Linux consumers must poll or observe structural changes.
 
 **Limitations uncovered by the implementation effort:**
 
@@ -604,7 +613,7 @@ On Windows the tests are **not** exercised by GitHub Actions (the hosted Windows
 
 ### Follow-ups
 
-- Linux AT-SPI2 signal subscription (per the Linux section above).
 - Either element-scoped subscriptions or a Cocoa test harness to cover the EventKinds that AccessKit's macOS bridge does not raise.
 - A dedicated Win32/WPF test app (or widget additions to the AccessKit test app) so the Windows integration suite can cover `Announcement`, `MenuOpened`/`MenuClosed`, `WindowOpened`/`WindowClosed`, and `StateChanged { Enabled | Expanded }`.
+- A GTK / Qt harness on Linux so we can reliably drive `Object:Announcement`, `Window:Create`/`Destroy`, and state deltas that AccessKit's AT-SPI bridge doesn't synthesize.
 - Test-app enhancements: `Role::TextRun` children on the text field to enable text-selection events; a secondary-window workflow; `Node::set_busy()` drive for `StateChanged { Busy }`.

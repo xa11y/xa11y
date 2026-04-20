@@ -7,8 +7,7 @@ use std::sync::Mutex;
 use rayon::prelude::*;
 use xa11y_core::selector::{Combinator, MatchOp, SelectorSegment};
 use xa11y_core::{
-    CancelHandle, ElementData, Error, EventReceiver, Provider, Rect, Result, Role, Selector,
-    StateSet, Subscription, Toggled,
+    ElementData, Error, Provider, Rect, Result, Role, Selector, StateSet, Subscription, Toggled,
 };
 use zbus::blocking::{Connection, Proxy};
 
@@ -27,9 +26,9 @@ pub struct LinuxProvider {
 
 /// AT-SPI2 accessible reference: (bus_name, object_path).
 #[derive(Debug, Clone)]
-struct AccessibleRef {
-    bus_name: String,
-    path: String,
+pub(crate) struct AccessibleRef {
+    pub(crate) bus_name: String,
+    pub(crate) path: String,
 }
 
 impl LinuxProvider {
@@ -46,7 +45,7 @@ impl LinuxProvider {
         })
     }
 
-    fn connect_a11y_bus() -> Result<Connection> {
+    pub(crate) fn connect_a11y_bus() -> Result<Connection> {
         // Try getting the AT-SPI bus address from the a11y bus launcher,
         // then connect to it. If that fails, fall back to the session bus
         // (AT-SPI2 may use the session bus directly).
@@ -693,11 +692,9 @@ impl LinuxProvider {
 
     /// Find an application by PID.
     ///
-    /// Unused until the AT-SPI2 signal-subscription backend lands — the old
-    /// polling subscription was the only caller. Kept here because the real
-    /// implementation will need it to filter D-Bus signals by sender.
-    #[allow(dead_code)]
-    fn find_app_by_pid(&self, pid: u32) -> Result<AccessibleRef> {
+    /// Used by `subscribe` to resolve the target app's D-Bus sender name so
+    /// signal match rules can be scoped to it.
+    pub(crate) fn find_app_by_pid(&self, pid: u32) -> Result<AccessibleRef> {
         let registry = AccessibleRef {
             bus_name: "org.a11y.atspi.Registry".to_string(),
             path: "/org/a11y/atspi/accessible/root".to_string(),
@@ -1657,18 +1654,13 @@ impl Provider for LinuxProvider {
         }
     }
 
-    fn subscribe(&self, _element: &ElementData) -> Result<Subscription> {
-        // Linux event subscription is not yet implemented. Returns an inert
-        // subscription: no events will ever be delivered, but wait_for / recv
-        // remain usable and will time out as expected.
-        //
-        // TODO: Implement a zbus-based AT-SPI2 signal subscription per the
-        // events design doc.
-        let (_tx, rx) = std::sync::mpsc::channel();
-        Ok(Subscription::new(
-            EventReceiver::new(rx),
-            CancelHandle::noop(),
-        ))
+    fn subscribe(&self, element: &ElementData) -> Result<Subscription> {
+        let pid = element.pid.ok_or(Error::Platform {
+            code: -1,
+            message: "Element has no PID for subscribe".to_string(),
+        })?;
+        let app_name = element.name.clone().unwrap_or_default();
+        crate::events::subscribe_for_pid(self, pid, app_name)
     }
 }
 
@@ -1717,7 +1709,7 @@ fn role_has_actions(role: Role) -> bool {
 }
 
 /// Map AT-SPI2 role name to xa11y Role.
-fn map_atspi_role(role_name: &str) -> Role {
+pub(crate) fn map_atspi_role(role_name: &str) -> Role {
     match role_name.to_lowercase().as_str() {
         "application" => Role::Application,
         "window" | "frame" => Role::Window,
@@ -1767,7 +1759,7 @@ fn map_atspi_role(role_name: &str) -> Role {
 
 /// Map AT-SPI2 numeric role (AtspiRole enum) to xa11y Role.
 /// Values from atspi-common Role enum (repr(u32)).
-fn map_atspi_role_number(role: u32) -> Role {
+pub(crate) fn map_atspi_role_number(role: u32) -> Role {
     match role {
         2 => Role::Alert,        // Alert
         7 => Role::CheckBox,     // CheckBox

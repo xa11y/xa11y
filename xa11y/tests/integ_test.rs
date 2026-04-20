@@ -2193,6 +2193,338 @@ mod tests {
     // app that exercise the relevant bridge code paths.
 
     // ════════════════════════════════════════════════════════════════
+    // Event subscription (Linux-only end-to-end tests)
+    // ════════════════════════════════════════════════════════════════
+    //
+    // These tests exercise the native AT-SPI2 event subscription backend
+    // against the AccessKit test app. They are `#[ignore]` like all the
+    // other integration tests; CI runs them via `scripts/run_integ_tests.sh`
+    // (Xvfb + dbus-run-session + at-spi2-registryd).
+    //
+    // AccessKit's Linux bridge (accesskit_unix) publishes AT-SPI2 signals
+    // whenever a tree update touches the relevant properties:
+    //
+    //     AT-SPI2 signal                        → xa11y EventKind
+    //     Focus:Focus                           → FocusChanged
+    //     Object:StateChanged(focused,true)     → FocusChanged + StateChanged{Focused}
+    //     Object:StateChanged(checked,_)        → StateChanged{Checked}
+    //     Object:StateChanged(enabled,_)        → StateChanged{Enabled}
+    //     Object:PropertyChange(accessible-name) → NameChanged
+    //     Object:ValueChanged (slider/range)    → ValueChanged
+    //     Object:ValueChanged (text role)       → ValueChanged + TextChanged
+    //     Object:TextChanged                    → TextChanged
+    //     Object:ChildrenChanged                → StructureChanged
+    //     Object:SelectionChanged               → SelectionChanged
+    //     Object:Announcement                   → Announcement
+    //     Window:Create / Activate              → WindowOpened / WindowActivated
+    //     Window:Destroy / Deactivate           → WindowClosed / WindowDeactivated
+    //
+    // AT-SPI2 has no menu open/close signal, so MenuOpened/MenuClosed
+    // never fire on Linux — the design doc calls this out explicitly.
+    //
+    // Unlike the macOS tests, these tests MUST NOT catch Error::Timeout
+    // and pass silently — a hard panic on timeout is the only way to
+    // surface real regressions.
+
+    #[cfg(target_os = "linux")]
+    fn find_name_field_linux(app: &App) -> Element {
+        app.locator(r#"[name="Name"]"#)
+            .elements()
+            .unwrap_or_default()
+            .into_iter()
+            .next()
+            .expect("Name text field not found in test app")
+    }
+
+    #[cfg(target_os = "linux")]
+    fn ensure_checkbox_linux(app: &App, want_on: bool) {
+        let chk = app
+            .locator("check_box")
+            .element()
+            .expect("check_box not found");
+        let is_on = chk.states.checked == Some(Toggled::On);
+        if is_on != want_on {
+            chk.provider().toggle(&chk).expect("toggle failed");
+            std::thread::sleep(std::time::Duration::from_millis(150));
+        }
+    }
+
+    // ── Subscription mechanics ──
+
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "linux")]
+    fn event_try_recv_returns_none_when_idle_linux() {
+        use std::time::Duration;
+        let app = h::app_root();
+        let sub = app.subscribe().expect("subscribe");
+
+        // Drain any signals that may have been queued during subscription setup
+        // (AT-SPI2 often replays focus/state bits to new subscribers).
+        std::thread::sleep(Duration::from_millis(300));
+        while sub.try_recv().is_some() {}
+
+        assert!(sub.try_recv().is_none());
+    }
+
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "linux")]
+    fn event_recv_times_out_when_idle_linux() {
+        use std::time::Duration;
+        let app = h::app_root();
+        let sub = app.subscribe().expect("subscribe");
+
+        std::thread::sleep(Duration::from_millis(300));
+        while sub.try_recv().is_some() {}
+
+        let r = sub.recv(Duration::from_millis(300));
+        assert!(
+            matches!(r, Err(Error::Timeout { .. })),
+            "expected Timeout, got {:?}",
+            r
+        );
+    }
+
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "linux")]
+    fn event_drop_unsubscribes_cleanly_linux() {
+        let app = h::app_root();
+        {
+            let _sub = app.subscribe().expect("subscribe");
+        }
+        // Re-subscribing after drop must not hang or fail: the cancel
+        // closure removes every match rule and joins the iterator thread
+        // before returning, so the second subscribe starts clean.
+        let _sub2 = app.subscribe().expect("re-subscribe");
+    }
+
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "linux")]
+    fn event_metadata_populated_linux() {
+        use std::time::Duration;
+        let app = h::app_root();
+        let expected_pid = app.pid;
+
+        // Drive a deterministic event via the slider — setting a distinct
+        // value always fires Object:ValueChanged, independent of prior
+        // test state.
+        let slider = app.locator(r#"[role="slider"]"#).element().expect("slider");
+        let target_val = if slider.numeric_value == Some(42.0) {
+            17.0
+        } else {
+            42.0
+        };
+
+        let sub = app.subscribe().expect("subscribe");
+        slider
+            .provider()
+            .set_numeric_value(&slider, target_val)
+            .expect("set_numeric_value");
+
+        let event = sub
+            .wait_for(|_| true, Duration::from_secs(3))
+            .expect("at least one event must arrive within 3s");
+
+        if let Some(pid) = expected_pid {
+            assert_eq!(event.app_pid, pid, "app_pid must match subscribed app");
+        }
+        assert!(!event.app_name.is_empty(), "app_name must be populated");
+    }
+
+    // ── Per-EventKind end-to-end tests ──
+
+    /// FocusChanged: focus a non-default button to force a focus move.
+    /// AT-SPI2 fires Focus:Focus and/or Object:StateChanged(focused,true);
+    /// the Linux backend maps both to FocusChanged.
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "linux")]
+    fn event_focus_changed_linux() {
+        use std::time::Duration;
+        let app = h::app_root();
+        let target = app
+            .locator(r#"button[name="Cancel"]"#)
+            .element()
+            .expect("Cancel button not found");
+
+        let sub = app.subscribe().expect("subscribe");
+        target.provider().focus(&target).expect("focus failed");
+
+        let event = sub
+            .wait_for(
+                |e| e.kind == EventKind::FocusChanged,
+                Duration::from_secs(3),
+            )
+            .expect("FocusChanged must be delivered within 3s");
+
+        assert_eq!(event.kind, EventKind::FocusChanged);
+        let tgt = event.target.expect("FocusChanged target must be populated");
+        assert_eq!(
+            tgt.role,
+            Role::Button,
+            "expected Button, got {:?}",
+            tgt.role
+        );
+    }
+
+    /// ValueChanged: setting the slider fires Object:ValueChanged on the
+    /// slider element, which the Linux backend maps to ValueChanged.
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "linux")]
+    fn event_value_changed_linux() {
+        use std::time::Duration;
+        let app = h::app_root();
+        let slider = app
+            .locator(r#"[role="slider"]"#)
+            .element()
+            .expect("slider not found");
+
+        let sub = app.subscribe().expect("subscribe");
+        slider
+            .provider()
+            .set_numeric_value(&slider, 73.0)
+            .expect("set_numeric_value failed");
+
+        let event = sub
+            .wait_for(
+                |e| e.kind == EventKind::ValueChanged,
+                Duration::from_secs(3),
+            )
+            .expect("ValueChanged must be delivered within 3s");
+        assert_eq!(event.kind, EventKind::ValueChanged);
+        let tgt = event.target.expect("target");
+        assert_eq!(tgt.role, Role::Slider);
+    }
+
+    /// NameChanged: pressing Submit mutates the status label's name,
+    /// which the AccessKit bridge publishes as Object:PropertyChange
+    /// with detail="accessible-name".
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "linux")]
+    fn event_name_changed_linux() {
+        use std::time::Duration;
+
+        // Step 1: prime status to "Please agree to terms" (checkbox off).
+        let app = h::app_root();
+        ensure_checkbox_linux(&app, false);
+        let app = h::app_root();
+        let submit = h::named(&app, "Submit");
+        submit
+            .provider()
+            .press(&submit)
+            .expect("prime press failed");
+        std::thread::sleep(Duration::from_millis(200));
+
+        // Step 2: flip checkbox on so the next Submit press drives status
+        // to "Submitted", guaranteed distinct from step 1.
+        let app = h::app_root();
+        ensure_checkbox_linux(&app, true);
+        std::thread::sleep(Duration::from_millis(200));
+
+        // Step 3: subscribe, press Submit, assert NameChanged.
+        let app = h::app_root();
+        let sub = app.subscribe().expect("subscribe");
+        let submit = h::named(&app, "Submit");
+        submit
+            .provider()
+            .press(&submit)
+            .expect("trigger press failed");
+
+        let event = sub
+            .wait_for(|e| e.kind == EventKind::NameChanged, Duration::from_secs(3))
+            .expect("NameChanged must be delivered within 3s");
+        assert_eq!(event.kind, EventKind::NameChanged);
+    }
+
+    /// TextChanged: setting a text field's value publishes either
+    /// Object:TextChanged directly or Object:ValueChanged on a text role,
+    /// which the Linux backend promotes to TextChanged too. Either signal
+    /// is a real text-mutation notification; accept both so the test
+    /// survives minor AccessKit bridge refactors.
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "linux")]
+    fn event_text_changed_or_value_changed_linux() {
+        use std::time::Duration;
+        let app = h::app_root();
+        let text = find_name_field_linux(&app);
+
+        let sub = app.subscribe().expect("subscribe");
+        text.provider()
+            .set_value(&text, "Event E2E Text")
+            .expect("set_value failed");
+
+        let event = sub
+            .wait_for(
+                |e| matches!(e.kind, EventKind::TextChanged | EventKind::ValueChanged),
+                Duration::from_secs(3),
+            )
+            .expect("TextChanged or ValueChanged must be delivered within 3s");
+        assert!(matches!(
+            event.kind,
+            EventKind::TextChanged | EventKind::ValueChanged
+        ));
+    }
+
+    /// StateChanged{Checked}: toggling the checkbox fires
+    /// Object:StateChanged(checked, new_value), which the Linux backend
+    /// maps to StateChanged{Checked}.
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "linux")]
+    fn event_state_changed_checked_linux() {
+        use std::time::Duration;
+        let app = h::app_root();
+        let chk = app
+            .locator("check_box")
+            .element()
+            .expect("check_box not found");
+        let was_on = chk.states.checked == Some(Toggled::On);
+
+        let sub = app.subscribe().expect("subscribe");
+        chk.provider().toggle(&chk).expect("toggle failed");
+
+        let event = sub
+            .wait_for(
+                |e| {
+                    matches!(
+                        e.kind,
+                        EventKind::StateChanged {
+                            flag: StateFlag::Checked,
+                            ..
+                        }
+                    )
+                },
+                Duration::from_secs(3),
+            )
+            .expect("StateChanged{Checked} must be delivered within 3s");
+
+        match event.kind {
+            EventKind::StateChanged {
+                flag: StateFlag::Checked,
+                value,
+            } => {
+                assert_eq!(value, !was_on, "checked flag must flip");
+            }
+            other => panic!("unexpected kind: {:?}", other),
+        }
+    }
+
+    // Announcement, StructureChanged, SelectionChanged, Window* —
+    // AccessKit's AT-SPI bridge may or may not synthesize these for the
+    // specific widgets in the test app. They're covered by the dispatch
+    // table's unit tests (xa11y-linux::events::tests); when the bridge
+    // does emit them, the test-app-independent pathway forwards them
+    // correctly. A dedicated Linux-specific test harness (or AccessKit
+    // bridge widgets that reliably emit these signals) would be the right
+    // place to add end-to-end coverage later.
+
+    // ════════════════════════════════════════════════════════════════
     // Helper: find text entry element
     // ════════════════════════════════════════════════════════════════
 

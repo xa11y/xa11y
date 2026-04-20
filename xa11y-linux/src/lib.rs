@@ -7,6 +7,9 @@
 mod atspi;
 
 #[cfg(target_os = "linux")]
+mod events;
+
+#[cfg(target_os = "linux")]
 pub use atspi::LinuxProvider;
 
 #[cfg(not(target_os = "linux"))]
