@@ -2424,6 +2424,23 @@ mod tests {
             }
             other => panic!("unexpected kind: {:?}", other),
         }
+
+        // Restore the checkbox to its pre-test state so later tests in the
+        // same `cargo test --test-threads=1` run (e.g. `state_checked_off_
+        // on_checkbox`, `thrash_toggle_checkbox_5_times`) see the app in
+        // its expected initial state. The macOS/Windows counterparts of
+        // this test run against isolated processes in their respective
+        // harnesses, so they don't need this cleanup.
+        let app = h::app_root();
+        let chk = app
+            .locator("check_box")
+            .element()
+            .expect("check_box not found (post-test)");
+        if (chk.states.checked == Some(Toggled::On)) != was_on {
+            chk.provider()
+                .press(&chk)
+                .expect("post-test press to restore checkbox");
+        }
     }
 
     // Announcement, StructureChanged, SelectionChanged, Window* —
