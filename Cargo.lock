@@ -2706,6 +2706,7 @@ version = "0.6.2"
 dependencies = [
  "serde_json",
  "windows",
+ "windows-core",
  "xa11y-core",
 ]
 
