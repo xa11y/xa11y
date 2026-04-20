@@ -384,7 +384,7 @@ pub(crate) fn signal_to_kinds(
         // role so the macOS/Windows text-field pattern survives.
         ("org.a11y.atspi.Event.Object", "ValueChanged") => {
             let mut kinds = vec![EventKind::ValueChanged];
-            if matches!(target_role, Some(Role::TextField) | Some(Role::TextArea)) {
+            if matches!(target_role, Some(Role::TextField | Role::TextArea)) {
                 kinds.push(EventKind::TextChanged);
             }
             kinds
