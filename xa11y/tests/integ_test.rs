@@ -2226,23 +2226,6 @@ mod tests {
     // and pass silently — a hard panic on timeout is the only way to
     // surface real regressions.
 
-    #[cfg(target_os = "linux")]
-    fn ensure_checkbox_linux(app: &App, want_on: bool) {
-        let chk = app
-            .locator("check_box")
-            .element()
-            .expect("check_box not found");
-        let is_on = chk.states.checked == Some(Toggled::On);
-        if is_on != want_on {
-            // AccessKit's AT-SPI bridge exposes checkbox toggling as the
-            // generic "click" action, not a separate "toggle" — so go
-            // through press() to match the existing action_toggle_checkbox
-            // integration test.
-            chk.provider().press(&chk).expect("press failed");
-            std::thread::sleep(std::time::Duration::from_millis(150));
-        }
-    }
-
     // ── Subscription mechanics ──
 
     #[test]
@@ -2330,39 +2313,17 @@ mod tests {
 
     // ── Per-EventKind end-to-end tests ──
 
-    /// FocusChanged: focus a non-default button to force a focus move.
-    /// AT-SPI2 fires Focus:Focus and/or Object:StateChanged(focused,true);
-    /// the Linux backend maps both to FocusChanged.
-    #[test]
-    #[ignore]
-    #[cfg(target_os = "linux")]
-    fn event_focus_changed_linux() {
-        use std::time::Duration;
-        let app = h::app_root();
-        let target = app
-            .locator(r#"button[name="Cancel"]"#)
-            .element()
-            .expect("Cancel button not found");
-
-        let sub = app.subscribe().expect("subscribe");
-        target.provider().focus(&target).expect("focus failed");
-
-        let event = sub
-            .wait_for(
-                |e| e.kind == EventKind::FocusChanged,
-                Duration::from_secs(3),
-            )
-            .expect("FocusChanged must be delivered within 3s");
-
-        assert_eq!(event.kind, EventKind::FocusChanged);
-        let tgt = event.target.expect("FocusChanged target must be populated");
-        assert_eq!(
-            tgt.role,
-            Role::Button,
-            "expected Button, got {:?}",
-            tgt.role
-        );
-    }
+    // FocusChanged: no end-to-end test on Linux yet.
+    //
+    // AccessKit's AT-SPI bridge emits `Object:StateChanged(focused, true)`
+    // from its focus_moved() path, which our `signal_to_kinds` maps to
+    // `FocusChanged` + `StateChanged{Focused, true}` (covered by unit
+    // tests). However, driving the bridge to actually fire that signal
+    // against the AccessKit winit test app in headless Xvfb has proven
+    // flaky — the Focus action dispatches but the bridge's diff doesn't
+    // always observe the focus change under the test harness's timing.
+    // The mapping is pinned by unit tests; a GTK/Qt test harness or a
+    // non-disabled focus target would unblock a reliable e2e test.
 
     /// ValueChanged: setting the slider fires Object:ValueChanged on the
     /// slider element, which the Linux backend maps to ValueChanged.
@@ -2394,46 +2355,17 @@ mod tests {
         assert_eq!(tgt.role, Role::Slider);
     }
 
-    /// NameChanged: pressing Submit mutates the status label's name,
-    /// which the AccessKit bridge publishes as Object:PropertyChange
-    /// with detail="accessible-name".
-    #[test]
-    #[ignore]
-    #[cfg(target_os = "linux")]
-    fn event_name_changed_linux() {
-        use std::time::Duration;
-
-        // Step 1: prime status to "Please agree to terms" (checkbox off).
-        let app = h::app_root();
-        ensure_checkbox_linux(&app, false);
-        let app = h::app_root();
-        let submit = h::named(&app, "Submit");
-        submit
-            .provider()
-            .press(&submit)
-            .expect("prime press failed");
-        std::thread::sleep(Duration::from_millis(200));
-
-        // Step 2: flip checkbox on so the next Submit press drives status
-        // to "Submitted", guaranteed distinct from step 1.
-        let app = h::app_root();
-        ensure_checkbox_linux(&app, true);
-        std::thread::sleep(Duration::from_millis(200));
-
-        // Step 3: subscribe, press Submit, assert NameChanged.
-        let app = h::app_root();
-        let sub = app.subscribe().expect("subscribe");
-        let submit = h::named(&app, "Submit");
-        submit
-            .provider()
-            .press(&submit)
-            .expect("trigger press failed");
-
-        let event = sub
-            .wait_for(|e| e.kind == EventKind::NameChanged, Duration::from_secs(3))
-            .expect("NameChanged must be delivered within 3s");
-        assert_eq!(event.kind, EventKind::NameChanged);
-    }
+    // NameChanged: no end-to-end test on Linux yet.
+    //
+    // AccessKit's AT-SPI bridge emits
+    // `Object:PropertyChange(accessible-name)` when a node's label
+    // changes, which our `signal_to_kinds` maps to `NameChanged` (covered
+    // by unit tests). Driving this reliably against the winit test app's
+    // Status label under headless Xvfb has proven flaky — the diff
+    // between two Submit presses isn't always caught by the bridge in
+    // the time the integration test has available. The mapping is pinned
+    // by unit tests; a GTK/Qt harness (or a test app change that drives
+    // a single deterministic label mutation) would unblock this e2e test.
 
     // TextChanged: no end-to-end test yet on Linux.
     //

@@ -588,9 +588,9 @@ On Windows the tests are **not** exercised by GitHub Actions (the hosted Windows
 
 | EventKind                         | macOS | Windows | Linux | Trigger                                                       |
 |-----------------------------------|-------|---------|-------|---------------------------------------------------------------|
-| `FocusChanged`                    | Yes   | Yes     | Yes   | `focus()` on Cancel button                                    |
+| `FocusChanged`                    | Yes   | Yes     | **No**⁴ | `focus()` on Cancel button                                    |
 | `ValueChanged`                    | Yes   | Yes     | Yes   | `set_numeric_value()` on Slider (also asserted alongside `ToggleState` on Windows) |
-| `NameChanged`                     | Yes   | Yes     | Yes   | Flip checkbox + press Submit to force a status-label update   |
+| `NameChanged`                     | Yes   | Yes     | **No**⁵ | Flip checkbox + press Submit to force a status-label update   |
 | `StateChanged { Checked }`        | Yes   | Yes     | Yes   | Toggle checkbox                                               |
 | `TextChanged`                     | Yes   | Yes¹    | **No**³ | `set_value()` on Name text field                              |
 | `Announcement`                    | Yes   | **No**  | **No** | Press "Announce" button (updates a `Live::Polite` label value) |
@@ -606,6 +606,10 @@ On Windows the tests are **not** exercised by GitHub Actions (the hosted Windows
 ² `MenuOpened` / `MenuClosed` will never fire on Linux. AT-SPI2 has no menu-open/close signal — the design doc calls this out as a genuine gap. Non-Linux bridges synthesize it; Linux consumers must poll or observe structural changes.
 
 ³ `TextChanged` on Linux has no end-to-end test yet. AccessKit's AT-SPI bridge only emits `Object:TextChanged` when the AccessKit tree's text content changes (`TextInserted` / `TextRemoved` diffs), but the xa11y `set_value` path on Linux goes through the AT-SPI `EditableText` interface — which AccessKit's bridge does not implement — so the tree never observes a mutation and no signal fires. The provider's mapping is covered by unit tests in `xa11y-linux::events::tests` (both `Object:TextChanged` and `PropertyChange(accessible-value)` on a text role promote to `TextChanged`). Real end-to-end coverage will require a GTK/Qt test harness on Linux.
+
+⁴ `FocusChanged` on Linux has no end-to-end test yet. AccessKit's AT-SPI bridge emits `Object:StateChanged(focused, true)` from its `focus_moved()` path, which `signal_to_kinds` maps to `FocusChanged` + `StateChanged{Focused, true}` (covered by unit tests). Driving the bridge to actually fire that signal against the winit test app in headless Xvfb is flaky under the integration-test harness — the Focus action dispatches but the bridge's tree diff doesn't consistently observe the focus change within the 3 s window. A GTK/Qt harness or a non-disabled focus target would unblock reliable e2e coverage.
+
+⁵ `NameChanged` on Linux has no end-to-end test yet. AccessKit emits `Object:PropertyChange(accessible-name)` when a node's label changes — the mapping is pinned by `property_change_name_emits_name_changed` unit tests — but driving a reliable label mutation from two Submit presses against the winit test app is flaky under the same harness. A deterministic single-action label mutation (or a GTK/Qt harness) would unblock this e2e test.
 
 **Limitations uncovered by the implementation effort:**
 
