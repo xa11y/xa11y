@@ -394,9 +394,12 @@ pub(crate) fn signal_to_kinds(
 
         // BoundsChanged / VisibleDataChanged / AttributesChanged — no cross
         // platform EventKind; skip.
-        ("org.a11y.atspi.Event.Object", "BoundsChanged" | "VisibleDataChanged"
-        | "AttributesChanged" | "ModelChanged" | "ColumnReordered" | "RowReordered"
-        | "ColumnInserted" | "RowInserted" | "ColumnDeleted" | "RowDeleted") => vec![],
+        (
+            "org.a11y.atspi.Event.Object",
+            "BoundsChanged" | "VisibleDataChanged" | "AttributesChanged" | "ModelChanged"
+            | "ColumnReordered" | "RowReordered" | "ColumnInserted" | "RowInserted"
+            | "ColumnDeleted" | "RowDeleted",
+        ) => vec![],
 
         // Window interface.
         ("org.a11y.atspi.Event.Window", "Create") => vec![EventKind::WindowOpened],
@@ -515,12 +518,7 @@ fn build_event_snapshot(
     Some(data)
 }
 
-fn make_proxy<'a>(
-    conn: &'a Connection,
-    bus: &str,
-    path: &str,
-    iface: &str,
-) -> Option<Proxy<'a>> {
+fn make_proxy<'a>(conn: &'a Connection, bus: &str, path: &str, iface: &str) -> Option<Proxy<'a>> {
     zbus::blocking::proxy::Builder::<Proxy>::new(conn)
         .destination(bus.to_owned())
         .ok()?
@@ -534,24 +532,44 @@ fn make_proxy<'a>(
 }
 
 fn get_role_name(conn: &Connection, aref: &AccessibleRef) -> Option<String> {
-    let proxy = make_proxy(conn, &aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
+    let proxy = make_proxy(
+        conn,
+        &aref.bus_name,
+        &aref.path,
+        "org.a11y.atspi.Accessible",
+    )?;
     let reply = proxy.call_method("GetRoleName", &()).ok()?;
     reply.body().deserialize::<String>().ok()
 }
 
 fn get_role_number(conn: &Connection, aref: &AccessibleRef) -> Option<u32> {
-    let proxy = make_proxy(conn, &aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
+    let proxy = make_proxy(
+        conn,
+        &aref.bus_name,
+        &aref.path,
+        "org.a11y.atspi.Accessible",
+    )?;
     let reply = proxy.call_method("GetRole", &()).ok()?;
     reply.body().deserialize::<u32>().ok()
 }
 
 fn get_name(conn: &Connection, aref: &AccessibleRef) -> Option<String> {
-    let proxy = make_proxy(conn, &aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
+    let proxy = make_proxy(
+        conn,
+        &aref.bus_name,
+        &aref.path,
+        "org.a11y.atspi.Accessible",
+    )?;
     proxy.get_property::<String>("Name").ok()
 }
 
 fn get_state(conn: &Connection, aref: &AccessibleRef) -> Option<Vec<u32>> {
-    let proxy = make_proxy(conn, &aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
+    let proxy = make_proxy(
+        conn,
+        &aref.bus_name,
+        &aref.path,
+        "org.a11y.atspi.Accessible",
+    )?;
     let reply = proxy.call_method("GetState", &()).ok()?;
     reply.body().deserialize::<Vec<u32>>().ok()
 }
@@ -766,13 +784,8 @@ mod tests {
         // AT-SPI2 exposes both `enabled` and `sensitive`; xa11y's cross
         // platform model collapses them onto `Enabled`.
         for name in ["enabled", "sensitive"] {
-            let kinds = signal_to_kinds(
-                "org.a11y.atspi.Event.Object",
-                "StateChanged",
-                name,
-                1,
-                None,
-            );
+            let kinds =
+                signal_to_kinds("org.a11y.atspi.Event.Object", "StateChanged", name, 1, None);
             assert_eq!(
                 kinds,
                 vec![EventKind::StateChanged {
@@ -926,13 +939,7 @@ mod tests {
 
     #[test]
     fn announcement_maps_to_announcement() {
-        let kinds = signal_to_kinds(
-            "org.a11y.atspi.Event.Object",
-            "Announcement",
-            "",
-            0,
-            None,
-        );
+        let kinds = signal_to_kinds("org.a11y.atspi.Event.Object", "Announcement", "", 0, None);
         assert_eq!(kinds, vec![EventKind::Announcement]);
     }
 
@@ -942,8 +949,7 @@ mod tests {
         // empty vec so we don't flood consumers with no-op events.
         assert!(signal_to_kinds("org.a11y.atspi.Event.Window", "Move", "", 0, None).is_empty());
         assert!(
-            signal_to_kinds("org.a11y.atspi.Event.Object", "BoundsChanged", "", 0, None)
-                .is_empty()
+            signal_to_kinds("org.a11y.atspi.Event.Object", "BoundsChanged", "", 0, None).is_empty()
         );
         assert!(signal_to_kinds("com.example.OtherBus", "Whatever", "", 0, None).is_empty());
     }
