@@ -1615,9 +1615,20 @@ impl Provider for LinuxProvider {
         }
         // Fall back to delete-then-insert for other AT-SPI2 implementations.
         let _ = proxy.call_method("DeleteText", &(0i32, i32::MAX));
-        proxy
-            .call_method("InsertText", &(0i32, value, value.len() as i32))
-            .map_err(|_| Error::TextValueNotSupported)?;
+        // Capture the underlying D-Bus error so callers can distinguish an
+        // absent `EditableText` interface (common on Chromium — the Chrome
+        // URL bar only exposes read-only `Text`; see issue #101) from other
+        // failures. Collapsing to `TextValueNotSupported` hides the reason.
+        if let Err(e) = proxy.call_method("InsertText", &(0i32, value, value.len() as i32)) {
+            let msg = e.to_string();
+            if msg.contains("UnknownMethod") || msg.contains("UnknownInterface") {
+                return Err(Error::TextValueNotSupported);
+            }
+            return Err(Error::Platform {
+                code: -1,
+                message: format!("EditableText.InsertText failed: {}", msg),
+            });
+        }
         Ok(())
     }
 
@@ -2028,25 +2039,34 @@ fn is_never_descend_atspi_role(role: &str) -> bool {
 /// Map an AT-SPI2 action name to its canonical `snake_case` xa11y action name.
 ///
 /// Toolkit-specific aliases are normalised to the single canonical name:
-///   "click" / "activate" / "press" / "invoke" → "press"
+///   "click" / "activate" / "press" / "invoke" / "dodefault" → "press"
 ///   "toggle" / "check" / "uncheck"            → "toggle"
 ///   "expand" / "open"                          → "expand"
 ///   "collapse" / "close"                       → "collapse"
-///   "menu" / "showmenu" / "popup" / "show menu" → "show_menu"
+///   "menu" / "showmenu" / "showcontextmenu" / "popup" / "show menu" → "show_menu"
 ///   "select"                                    → "select"
 ///   "increment"                                 → "increment"
 ///   "decrement"                                 → "decrement"
 ///
 /// Returns `None` for unrecognised names.
 fn map_atspi_action_name(action_name: &str) -> Option<String> {
+    // Normalise by lowercasing and stripping underscores/spaces so that
+    // "show_menu", "show menu", "showMenu" and "showContextMenu" all collapse
+    // to the same canonical form. Chromium is the main motivator: it uses
+    // `doDefault` as the default activation action on ~190 elements per
+    // window (Back/Forward buttons, toolbar icons, menu items, sliders,
+    // notifications) and `showContextMenu` as the context-menu action. The
+    // previous table dropped both, leaving those elements with no `press`
+    // mapping at all. See issue #101.
     let lower = action_name.to_lowercase();
-    let canonical = match lower.as_str() {
-        "click" | "activate" | "press" | "invoke" => "press",
+    let collapsed: String = lower.chars().filter(|c| !matches!(c, '_' | ' ')).collect();
+    let canonical = match collapsed.as_str() {
+        "click" | "activate" | "press" | "invoke" | "dodefault" => "press",
         "toggle" | "check" | "uncheck" => "toggle",
         "expand" | "open" => "expand",
         "collapse" | "close" => "collapse",
         "select" => "select",
-        "menu" | "showmenu" | "show_menu" | "popup" | "show menu" => "show_menu",
+        "menu" | "showmenu" | "showcontextmenu" | "contextmenu" | "popup" => "show_menu",
         "increment" => "increment",
         "decrement" => "decrement",
         _ => return None,
@@ -2091,6 +2111,15 @@ mod tests {
         assert_eq!(map_atspi_action_name("activate"), Some("press".to_string()));
         assert_eq!(map_atspi_action_name("press"), Some("press".to_string()));
         assert_eq!(map_atspi_action_name("invoke"), Some("press".to_string()));
+        // Chromium uses `doDefault` for default activation on ~190 elements.
+        assert_eq!(
+            map_atspi_action_name("doDefault"),
+            Some("press".to_string())
+        );
+        assert_eq!(
+            map_atspi_action_name("do_default"),
+            Some("press".to_string())
+        );
         assert_eq!(map_atspi_action_name("toggle"), Some("toggle".to_string()));
         assert_eq!(map_atspi_action_name("check"), Some("toggle".to_string()));
         assert_eq!(map_atspi_action_name("uncheck"), Some("toggle".to_string()));
@@ -2115,6 +2144,16 @@ mod tests {
             map_atspi_action_name("show menu"),
             Some("show_menu".to_string())
         );
+        // Chrome / Chromium expose the URL-bar context-menu action as
+        // `showContextMenu`; the previous table missed both spellings.
+        assert_eq!(
+            map_atspi_action_name("showContextMenu"),
+            Some("show_menu".to_string())
+        );
+        assert_eq!(
+            map_atspi_action_name("show_context_menu"),
+            Some("show_menu".to_string())
+        );
         assert_eq!(
             map_atspi_action_name("increment"),
             Some("increment".to_string())
@@ -2135,6 +2174,8 @@ mod tests {
             "activate",
             "press",
             "invoke",
+            "doDefault",
+            "do_default",
             "toggle",
             "check",
             "uncheck",
@@ -2145,6 +2186,8 @@ mod tests {
             "select",
             "menu",
             "showmenu",
+            "showContextMenu",
+            "show_context_menu",
             "popup",
             "show menu",
             "increment",
