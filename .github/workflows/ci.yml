@@ -152,8 +152,15 @@ jobs:
       - name: Run unit tests
         run: cargo test --workspace
 
-      # Rust integration tests require an interactive desktop for UIA.
-      # Run locally with: .\run_integ_tests_windows.ps1
+      # Rust integration tests, including the UIA event subscriptions.
+      # Hosted windows-latest runners DO have an interactive desktop session
+      # (the same runner that executes the Qt UIA tests below), so UIA works
+      # fine here. The harness script launches the AccessKit test app in the
+      # background, waits for it to register with UIA, runs the `#[ignore]`
+      # integration tests with --test-threads=1, and tears the app down.
+      - name: Run Rust integration tests
+        shell: pwsh
+        run: .\scripts\run_integ_tests_windows.ps1
 
       - name: Create virtualenv and install deps
         shell: bash

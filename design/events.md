@@ -189,8 +189,8 @@ UIA provides COM event handler interfaces registered against the `IUIAutomation`
 | **Structure changed** | `AXUIElementDestroyed` (app) / `AXCreated` (elem only) | `Object:ChildrenChanged` | `StructureChangedEventHandler` |
 | **Window opened** | `AXWindowCreated` | `Window:Create` | `UIA_Window_WindowOpenedEventId` |
 | **Window closed** | `AXUIElementDestroyed` on window | `Window:Destroy` | `UIA_Window_WindowClosedEventId` |
-| **Window activated** | `AXFocusedWindowChanged` | `Window:Activate` | Inferred (no dedicated event)² |
-| **Window deactivated** | `AXFocusedWindowChanged` | `Window:Deactivate` | Inferred² |
+| **Window activated** | `AXFocusedWindowChanged` | `Window:Activate` | Not emitted² |
+| **Window deactivated** | `AXFocusedWindowChanged` | `Window:Deactivate` | Not emitted² |
 | **Menu opened/closed** | `AXMenuOpened` / `AXMenuClosed` | None reliably | `UIA_MenuOpenedEventId` / `UIA_MenuClosedEventId` |
 | **Text changed** | `AXValueChanged` (no position) | `Text:TextChanged` (position + type) | `UIA_Text_TextChangedEventId` |
 | **Selection changed** | `AXSelectedTextChanged` (app) / row/cell (elem only) | `Object:SelectionChanged` | `SelectionItem_*` events |
@@ -198,7 +198,7 @@ UIA provides COM event handler interfaces registered against the `IUIAutomation`
 
 ¹ macOS has no single "state changed" notification. Separate notifications exist for some state transitions (`AXValueChanged` covers checkbox toggle, `AXElementBusyChanged` for busy), but `AXEnabledChanged` does not exist as a public notification. To detect enabled/disabled changes on macOS, you must either poll or observe `AXValueChanged` on the element and re-query `AXEnabled`. This is a genuine gap.
 
-² Windows has no `WindowActivated` UIA event ID. Window focus can be inferred from `AddFocusChangedEventHandler` when the focused element is a window-level element, but this is indirect.
+² Windows has no `WindowActivated` UIA event ID. Inferring from `AddFocusChangedEventHandler` is possible but lossy — focus moves from an always-focused child across apps (alt-tab) don't fire, tool windows that open without taking element focus don't fire, and internal focus moves across windows in a multi-window app fire spuriously. xa11y does not emit `WindowActivated`/`WindowDeactivated` on Windows; consumers that need it should watch `WindowOpened` plus focus changes explicitly.
 
 ---
 
@@ -340,11 +340,16 @@ pub enum EventKind {
     ///
     /// - macOS: AXFocusedWindowChanged.
     /// - Linux: Window:Activate.
-    /// - Windows: no first-class UIA event; inferred from focus changes.
+    /// - Windows: not emitted. UIA has no first-class event, and
+    ///   inferring from focus changes is lossy (alt-tab misses it, tool
+    ///   windows that open without taking focus miss it, multi-window
+    ///   apps get spurious emissions). Consumers that need it should
+    ///   watch `WindowOpened` plus focus changes explicitly.
     WindowActivated,
 
     /// A window lost active status.
     /// Target: the window element.
+    /// (Not emitted on Windows — see `WindowActivated`.)
     WindowDeactivated,
 
     /// The selection changed in a list, table, or other container.
@@ -563,7 +568,9 @@ Implemented in `xa11y-macos/src/ax.rs`:
 
 Implemented in `xa11y-windows/src/uia.rs`:
 
-- Four COM event handlers are registered via the `IUIAutomation` root object: `AddFocusChangedEventHandler` (system-wide focus), `AddAutomationEventHandler` (window open/close, menu open/close, text changed, selection-item changes, live-region and notification events), `AddPropertyChangedEventHandler` (name, IsEnabled, ToggleState, Value, RangeValue, ExpandCollapseState), and `AddStructureChangedEventHandler`. All scoped handlers target `TreeScope_Subtree` on the app root resolved via `find_app_by_pid`.
+- Four COM event handlers are registered via the `IUIAutomation` root object: `AddFocusChangedEventHandler` (system-wide focus), `AddAutomationEventHandler` (window open/close, menu open/close, text changed, selection-item changes, live-region, notification, and system-alert events), `AddPropertyChangedEventHandler` (name, IsEnabled, ToggleState, Value, RangeValue, ExpandCollapseState), and `AddStructureChangedEventHandler`. All scoped handlers target `TreeScope_Subtree` on the app root resolved via `find_app_by_pid`.
+- `UIA_SystemAlertEventId` is registered alongside `UIA_NotificationEventId` and `UIA_LiveRegionChangedEventId`; all three map to `EventKind::Announcement`. Pre-Windows-10 alert providers raise `SystemAlert` only, so dropping it would silently lose announcements from legacy apps.
+- `WindowActivated` / `WindowDeactivated` are deliberately **not emitted on Windows**. UIA has no first-class event for window activation, and inferring from focus changes was considered and rejected: it misses alt-tab (focused element doesn't move), misses tool windows that open without taking element focus, and fires spuriously on in-app focus moves across multiple windows. The honest surface is to admit UIA has no such event.
 - Handlers are COM-implementable via the `#[implement(...)]` macro from `windows-core`. Each wraps an `Arc<EventContext>` that holds the `mpsc::Sender<Event>` (protected by a `Mutex` because `std::sync::mpsc::Sender` is `!Sync`), the application name, PID, and a shared cache request.
 - Handlers filter by PID inside the callback (the focus-changed registration has no scope parameter, and scoped handlers occasionally deliver events from neighbouring processes), then build a full `ElementData` snapshot via `build_snapshot_data` — the same free function the tree-read path uses — and queue an `Event` on the channel. `event.target` is therefore a durable snapshot, not a handle to a COM pointer that may become invalid as UIA cleans up.
 - `PropertyChanged(ToggleState)` emits both `StateChanged { Checked }` and `ValueChanged` so consumers can filter on either; `PropertyChanged(ExpandCollapseState)` emits `StateChanged { Expanded, new == Expanded }`; `PropertyChanged(IsEnabled)` emits `StateChanged { Enabled, new }`. VARIANT payloads are decoded via the `TryFrom<&VARIANT>` impls provided by `windows::Win32::System::Variant`.
@@ -584,7 +591,7 @@ Implemented in `xa11y-linux/src/events.rs`:
 
 Integration tests in `xa11y/tests/integ_test.rs` are gated on `#[cfg(target_os = "macos")]`, `#[cfg(target_os = "windows")]`, and `#[cfg(target_os = "linux")]` and drive the AccessKit + winit test app. Each test subscribes, performs a deterministic action that is known to change AccessKit's tree, and hard-asserts that the expected `EventKind` arrives within 3 s. **No test catches `Error::Timeout` to pass silently** — a prior iteration of the suite did, and it hid real regressions.
 
-On Windows the tests are **not** exercised by GitHub Actions (the hosted Windows runners lack the interactive desktop UIA needs); they run locally via `scripts/run_integ_tests_windows.ps1`. `xa11y-windows`'s unit tests — which exercise the subscribe/cancel round-trip, the VARIANT decoders, and the event-ID allowlists — are run by the Windows CI job. The Linux tests run in the Ubuntu CI job (`scripts/run_integ_tests.sh` sets up Xvfb + dbus-run-session + at-spi2-registryd); `xa11y-linux::events::tests` unit-tests the `signal_to_kinds` mapping table in isolation.
+On Windows the tests now run in CI on `windows-latest` via `scripts/run_integ_tests_windows.ps1` (the same runner class already executes the Qt UIA tests, confirming hosted Windows runners provide the interactive desktop UIA needs — an earlier version of this doc incorrectly claimed otherwise). `xa11y-windows`'s unit tests — which exercise the subscribe/cancel round-trip, the VARIANT decoders, and the event-ID allowlists — are also run by the Windows CI job. The Linux tests run in the Ubuntu CI job (`scripts/run_integ_tests.sh` sets up Xvfb + dbus-run-session + at-spi2-registryd); `xa11y-linux::events::tests` unit-tests the `signal_to_kinds` mapping table in isolation.
 
 | EventKind                         | macOS | Windows | Linux | Trigger                                                       |
 |-----------------------------------|-------|---------|-------|---------------------------------------------------------------|
@@ -593,11 +600,12 @@ On Windows the tests are **not** exercised by GitHub Actions (the hosted Windows
 | `NameChanged`                     | Yes   | Yes     | Yes⁵  | Flip checkbox + press Submit to force a status-label update   |
 | `StateChanged { Checked }`        | Yes   | Yes     | Yes   | Toggle checkbox                                               |
 | `TextChanged`                     | Yes   | Yes¹    | **No**³ | `set_value()` on Name text field                              |
-| `Announcement`                    | Yes   | **No**  | Yes   | Press "Announce" button (updates a `Live::Polite` label value) |
+| `Announcement`                    | Yes   | Yes     | Yes   | Press "Announce" button (updates a `Live::Polite` label value) |
 | `StructureChanged`                | **No** | **No** | **No** | See below                                                     |
 | `SelectionChanged`                | **No** | **No** | **No** | See below                                                     |
 | `WindowOpened` / `WindowClosed`   | **No** | **No** | **No** | Test app is single-window                                     |
-| `WindowActivated` / `WindowDeactivated` | **No** | **No** | **No** | Requires an OS-level key-window change                   |
+| `WindowActivated`                 | **No** | **n/a** | **No** | Not emitted on Windows (UIA has no such event)                |
+| `WindowDeactivated`               | **No** | **n/a** | **No** | Not emitted on Windows (UIA has no such event)                |
 | `MenuOpened` / `MenuClosed`       | **No** | **No** | **No**² | AccessKit bridges do not synthesize menu events               |
 | `StateChanged` (non-`Checked` flags) | **No** | **No** | **No** | AccessKit does not post Busy/Enabled/Expanded state deltas in the test app |
 
@@ -620,6 +628,6 @@ On Windows the tests are **not** exercised by GitHub Actions (the hosted Windows
 ### Follow-ups
 
 - Either element-scoped subscriptions or a Cocoa test harness to cover the EventKinds that AccessKit's macOS bridge does not raise.
-- A dedicated Win32/WPF test app (or widget additions to the AccessKit test app) so the Windows integration suite can cover `Announcement`, `MenuOpened`/`MenuClosed`, `WindowOpened`/`WindowClosed`, and `StateChanged { Enabled | Expanded }`.
+- A dedicated Win32/WPF test app (or widget additions to the AccessKit test app) so the Windows integration suite can cover `MenuOpened`/`MenuClosed`, `WindowOpened`/`WindowClosed`, and `StateChanged { Enabled | Expanded }`.
 - A GTK / Qt harness on Linux so we can reliably drive `Window:Create`/`Destroy` and state deltas (`StateChanged{Busy,Enabled,Expanded}`) that AccessKit's AT-SPI bridge doesn't synthesize against our winit test app.
 - Test-app enhancements: `Role::TextRun` children on the text field to enable text-selection events; a secondary-window workflow; `Node::set_busy()` drive for `StateChanged { Busy }`.

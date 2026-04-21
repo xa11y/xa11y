@@ -1836,9 +1836,10 @@ mod tests {
     //
     // These tests exercise the native UIA event subscription backend
     // against the AccessKit test app. They are `#[ignore]` like all the
-    // other integration tests; run them with `run_integ_tests_windows.ps1`
-    // (CI doesn't exercise them because GitHub's Windows runners lack the
-    // interactive desktop UIA needs).
+    // other integration tests. CI runs them on windows-latest via
+    // `scripts/run_integ_tests_windows.ps1`; the same runner class already
+    // executes the Qt UIA tests, so the "no interactive desktop" objection
+    // that earlier versions of this doc raised is factually wrong.
     //
     // AccessKit's Windows bridge (accesskit_windows) emits UIA events via
     // `UiaRaiseAutomationEvent`, `UiaRaiseAutomationPropertyChangedEvent`,
@@ -1978,6 +1979,14 @@ mod tests {
     // ── Per-EventKind end-to-end tests ──
 
     /// FocusChanged: focus a non-default button to force a focus move.
+    /// Targets the always-enabled "New" toolbar button rather than
+    /// "Cancel" — Cancel starts disabled, and the Windows UIA SetFocus
+    /// call fails (`E_INVALIDARG`, HRESULT 0x80070057 when the provider
+    /// reports IsEnabled=false) against disabled elements. The earlier
+    /// test ran only locally (via `run_integ_tests_windows.ps1`, where
+    /// prior tests may have enabled Cancel by toggling the checkbox);
+    /// now that CI runs the suite cold it needs a target that's
+    /// guaranteed focusable from a fresh app launch.
     #[test]
     #[ignore]
     #[cfg(target_os = "windows")]
@@ -1985,9 +1994,9 @@ mod tests {
         use std::time::Duration;
         let app = h::app_root();
         let target = app
-            .locator(r#"button[name="Cancel"]"#)
+            .locator(r#"button[name="New"]"#)
             .element()
-            .expect("Cancel button not found");
+            .expect("New toolbar button not found");
 
         let sub = app.subscribe().expect("subscribe");
         target.provider().focus(&target).expect("focus failed");
@@ -2121,6 +2130,23 @@ mod tests {
             }
             other => panic!("unexpected kind: {:?}", other),
         }
+
+        // Restore the checkbox to its pre-test state so later tests in the
+        // same `cargo test --test-threads=1` run (state_checked_off_on_
+        // checkbox, state_disabled_on_cancel, thrash_toggle_checkbox_5_
+        // times) see the app in its expected initial state. Toggling the
+        // checkbox also drives `state.cancel_enabled`, so a dirty checkbox
+        // leaks into multiple fixtures. Matches the Linux test's cleanup.
+        let app = h::app_root();
+        let chk = app
+            .locator("check_box")
+            .element()
+            .expect("check_box not found (post-test)");
+        if (chk.states.checked == Some(Toggled::On)) != was_on {
+            chk.provider()
+                .toggle(&chk)
+                .expect("post-test toggle to restore checkbox");
+        }
     }
 
     /// ToggleState also produces a ValueChanged event (the design doc
@@ -2179,18 +2205,56 @@ mod tests {
         ));
     }
 
+    /// Announcement: pressing the Announce button updates the live
+    /// region's value, which AccessKit's Windows bridge forwards as
+    /// `UIA_LiveRegionChangedEventId`. Our handler maps any of
+    /// `UIA_LiveRegionChangedEventId`, `UIA_NotificationEventId`, or
+    /// `UIA_SystemAlertEventId` to `EventKind::Announcement`, so we accept
+    /// all three.
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "windows")]
+    fn event_announcement_win() {
+        use std::time::Duration;
+        let app = h::app_root();
+        let btn = app
+            .locator(r#"button[name="Announce"]"#)
+            .element()
+            .expect("Announce button not found");
+
+        let sub = app.subscribe().expect("subscribe");
+        btn.provider().press(&btn).expect("Announce press failed");
+
+        let event = sub
+            .wait_for(
+                |e| e.kind == EventKind::Announcement,
+                Duration::from_secs(3),
+            )
+            .expect("Announcement must be delivered within 3s");
+        assert_eq!(event.kind, EventKind::Announcement);
+    }
+
     // StructureChanged, SelectionChanged, WindowOpened / WindowClosed,
     // WindowActivated / WindowDeactivated, MenuOpened / MenuClosed,
-    // Announcement, StateChanged{Enabled|Expanded|Busy} — no end-to-end
-    // test yet.
+    // StateChanged{Enabled|Expanded|Busy} — no end-to-end test.
     //
-    // AccessKit's Windows bridge does not synthesize these events for the
-    // widgets in our test app (single-window, no menus, no disabled/busy
-    // cycle), and some require native Win32/WPF constructs (NSMenu-style
-    // menus, live regions backed by real UIA providers) that AccessKit
-    // doesn't model. Covering them requires either a dedicated Win32 test
-    // app (future `test-apps/win32/`) or widget additions to the AccessKit
-    // app that exercise the relevant bridge code paths.
+    // WindowActivated / WindowDeactivated are not emitted on Windows at
+    // all: UIA has no first-class event for them, and the design doc
+    // principle is to not model what at least two platforms don't deliver
+    // natively. (Earlier iterations of this provider inferred them from
+    // focus changes; the inference was lossy enough — false negatives on
+    // windows that open without taking focus, spurious emissions for
+    // in-app focus moves across multiple windows — to be misleading, so
+    // it was removed.)
+    //
+    // The other kinds: AccessKit's Windows bridge does not synthesize
+    // them for the widgets in our test app (single-window, no menus, no
+    // disabled/busy cycle), and some require native Win32/WPF constructs
+    // (NSMenu-style menus, live regions backed by real UIA providers)
+    // that AccessKit doesn't model. Covering them requires either a
+    // dedicated Win32 test app (future `test-apps/win32/`) or widget
+    // additions to the AccessKit app that exercise the relevant bridge
+    // code paths.
 
     // ════════════════════════════════════════════════════════════════
     // Event subscription (Linux-only end-to-end tests)
