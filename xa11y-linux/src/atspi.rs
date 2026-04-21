@@ -352,17 +352,12 @@ impl LinuxProvider {
             }
         }
 
-        // Try Component interface for Focus
-        if !actions.contains(&"focus".to_string()) {
-            if let Ok(proxy) =
-                self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Component")
-            {
-                // Verify the interface exists by trying a method
-                if proxy.call_method("GetExtents", &(0u32,)).is_ok() {
-                    actions.push("focus".to_string());
-                }
-            }
-        }
+        // NOTE: We do NOT add implicit "focus" based on Component interface existence.
+        // On GTK4, GrabFocus() often returns false even when Component interface exists,
+        // violating design tenet 3 ("if action is listed, calling it must work").
+        // Only report "focus" if it's explicitly in the AT-SPI Action interface with a
+        // proper index. This ensures focus() will work when reported.
+        // Fixes GitHub issue #98.
 
         (actions, indices)
     }
@@ -1296,12 +1291,18 @@ impl Provider for LinuxProvider {
 
     fn focus(&self, element: &ElementData) -> Result<()> {
         let target = self.get_cached(element.handle)?;
-        // Try Component.GrabFocus first, then fall back to stored action index
+        // Try Component.GrabFocus first, then fall back to stored action index.
+        // GrabFocus returns a boolean indicating success — we must check it.
+        // Fixes GitHub issue #98.
         if let Ok(proxy) =
             self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")
         {
-            if proxy.call_method("GrabFocus", &()).is_ok() {
-                return Ok(());
+            if let Ok(reply) = proxy.call_method("GrabFocus", &()) {
+                // GrabFocus returns boolean: true if focus was grabbed, false otherwise
+                if let Ok(true) = reply.body().deserialize::<bool>() {
+                    return Ok(());
+                }
+                // GrabFocus returned false — fall through to action index fallback
             }
         }
         if let Ok(index) = self.get_action_index(element.handle, "focus") {
