@@ -116,10 +116,14 @@ sleep 3
 echo "Running integration tests..."
 TEST_FILTER="${TEST_FILTER:-}"
 set +e
+NOCAPTURE_ARG=""
+if [ "${INTEG_NOCAPTURE:-0}" = "1" ]; then
+    NOCAPTURE_ARG="--nocapture"
+fi
 if [ -n "$TEST_FILTER" ]; then
-    cargo test -p xa11y --features strict-roles --test integ_test -- --ignored --test-threads=1 $TEST_FILTER 2>&1
+    cargo test -p xa11y --features strict-roles --test integ_test -- --ignored --test-threads=1 $NOCAPTURE_ARG $TEST_FILTER 2>&1
 else
-    cargo test -p xa11y --features strict-roles --test integ_test -- --ignored --test-threads=1 2>&1
+    cargo test -p xa11y --features strict-roles --test integ_test -- --ignored --test-threads=1 $NOCAPTURE_ARG 2>&1
 fi
 TEST_EXIT=$?
 set -e

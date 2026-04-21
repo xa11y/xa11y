@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
-# Run Linux integration tests in a finch container with bind-mounted source.
+# Run Linux integration tests in a container (finch or docker) with
+# bind-mounted source.
 #
 # First time: builds base image (~2min) and creates cargo cache volume.
 # Subsequent runs: incremental build + test (~10-30s).
+#
+# Container runtime selection:
+#   Override with CONTAINER=docker|finch. If unset, picks whichever is on
+#   PATH (finch preferred when both are present to preserve prior CI/dev
+#   behaviour).
 #
 # Usage:
 #   ./run_integ_container.sh                    # run all integ tests
@@ -16,18 +22,33 @@ cd "$(dirname "$0")/.."
 IMAGE="xa11y-base"
 VOLUME="xa11y-cargo-cache"
 
+# Pick a container runtime. Explicit override wins; otherwise prefer finch
+# (matches the existing developer workflow) and fall back to docker.
+if [ -n "${CONTAINER:-}" ]; then
+    :
+elif command -v finch >/dev/null 2>&1; then
+    CONTAINER=finch
+elif command -v docker >/dev/null 2>&1; then
+    CONTAINER=docker
+else
+    echo "error: neither 'finch' nor 'docker' found on PATH." >&2
+    echo "install one, or set CONTAINER=<tool> to override." >&2
+    exit 1
+fi
+echo "Using container runtime: $CONTAINER"
+
 # Build base image if it doesn't exist
-if ! finch image inspect "$IMAGE" &>/dev/null; then
+if ! "$CONTAINER" image inspect "$IMAGE" &>/dev/null; then
     echo "Building base image (one-time)..."
-    finch build -t "$IMAGE" -f Containerfile.base .
+    "$CONTAINER" build -t "$IMAGE" -f Containerfile.base .
 fi
 
 # Create cargo cache volume if it doesn't exist
-finch volume inspect "$VOLUME" &>/dev/null 2>&1 || finch volume create "$VOLUME" >/dev/null
+"$CONTAINER" volume inspect "$VOLUME" &>/dev/null 2>&1 || "$CONTAINER" volume create "$VOLUME" >/dev/null
 
 # Handle --shell mode
 if [ "${1:-}" = "--shell" ]; then
-    exec finch run --rm -it \
+    exec "$CONTAINER" run --rm -it \
         -v "$(pwd):/xa11y" \
         -v "$VOLUME:/xa11y/target" \
         "$IMAGE" bash
@@ -42,7 +63,7 @@ elif [ -n "${1:-}" ]; then
     TEST_FILTER="$*"
 fi
 
-finch run --rm \
+"$CONTAINER" run --rm \
     -v "$(pwd):/xa11y" \
     -v "$VOLUME:/xa11y/target" \
     -e "BUILD_ONLY=$BUILD_ONLY" \

@@ -512,9 +512,14 @@ fn build_main_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
     });
     nodes.push((IMAGE_NODE, image));
 
-    // Status text
+    // Status text. For Role::Label, accesskit_atspi_common's NodeWrapper
+    // reads the AT-SPI accessible-name from value(), not label()
+    // (`label_comes_from_value() == (role == Role::Label)`). Setting both
+    // keeps macOS/Windows (which read label) working while letting the
+    // AT-SPI bridge observe a label mutation as a PropertyChange(Name).
     let mut status = Node::new(Role::Label);
     status.set_label(&*state.status_text);
+    status.set_value(&*state.status_text);
     nodes.push((STATUS_TEXT, status));
 }
 
@@ -872,9 +877,22 @@ impl ApplicationHandler<AccessKitEvent> for Application {
             .create_window(window_attributes)
             .expect("Failed to create window");
 
-        let adapter = Adapter::with_event_loop_proxy(event_loop, &window, self.proxy.clone());
+        let mut adapter = Adapter::with_event_loop_proxy(event_loop, &window, self.proxy.clone());
 
         window.set_visible(true);
+
+        // Under headless Xvfb (the integration-test harness) there is no
+        // window manager, so winit never dispatches
+        // `WindowEvent::Focused(true)` to the adapter. AccessKit's AT-SPI
+        // bridge gates focus-change notifications (`focus_moved`, which
+        // fans out to `StateChanged(focused, _)` and `PropertyChange` via
+        // the tree diff) on the host being OS-focused — without this
+        // nudge `Tree::focus()` collapses to `None` on every diff and
+        // any focus transition is silently suppressed. Synthesise
+        // the event on startup, then re-assert it on every AccessKit
+        // user-event boundary in `user_event` (below) so that winit's
+        // `Focused(false)` on window creation doesn't clobber the flag.
+        adapter.process_event(&window, &WindowEvent::Focused(true));
 
         self.window = Some(WindowState {
             window,
@@ -899,16 +917,25 @@ impl ApplicationHandler<AccessKitEvent> for Application {
             Some(ws) => ws,
             None => return,
         };
-        let adapter = &mut ws.adapter;
-        let state = &mut ws.state;
 
         match user_event.window_event {
             AccessKitWindowEvent::InitialTreeRequested => {
-                adapter.update_if_active(|| build_tree(state));
+                // Re-assert host focus on every boundary the app touches —
+                // cheap and idempotent when already true. See the rationale
+                // on the synthesised WindowEvent::Focused(true) in
+                // `resumed()`: under headless Xvfb winit never emits the
+                // event itself, and without `is_host_focused = true` the
+                // AT-SPI bridge's tree diff treats focus as perpetually
+                // None and silently suppresses focus_moved.
+                ws.adapter
+                    .process_event(&ws.window, &WindowEvent::Focused(true));
+                ws.adapter.update_if_active(|| build_tree(&ws.state));
             }
             AccessKitWindowEvent::ActionRequested(request) => {
-                if handle_action(&request, state) {
-                    adapter.update_if_active(|| build_tree(state));
+                ws.adapter
+                    .process_event(&ws.window, &WindowEvent::Focused(true));
+                if handle_action(&request, &mut ws.state) {
+                    ws.adapter.update_if_active(|| build_tree(&ws.state));
                 }
             }
             AccessKitWindowEvent::AccessibilityDeactivated => {}
