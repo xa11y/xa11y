@@ -128,6 +128,10 @@ The tri-state checked value (`Off` / `On` / `Mixed`) is derived differently:
 - **Linux:** Uses AT-SPI state bits — `Checked` (0x10) and `Mixed` (0x2000).
 - **Windows:** Reads `TogglePattern.CurrentToggleState` — 0 = Off, 1 = On, 2 = Indeterminate.
 
+### GTK press fallback (Linux)
+
+GTK 4 menu-button widgets (`GtkMenuButton`, `AdwMenuButton`, `AdwSplitButton`) present as an outer `push button` accessible that advertises `NActions = 0` wrapping an inner `toggle button` that carries the real `click` action. Calling `press()` on the outer would normally raise `ActionNotSupported`. When the owning application identifies itself as GTK via `Application.ToolkitName == "GTK"`, xa11y-linux instead walks a bounded slice of the outer's subtree (BFS, depth 3, actionable roles only, name must match) and invokes the single actionable descendant it finds. The fallback is strictly scoped: it only runs inside GTK apps, only when the widget's own Action interface is empty, and only when exactly one candidate matches — ambiguous subtrees still surface the original error.
+
 ### Linux Electron and Chromium apps
 
 On Linux, Electron and Chromium-based apps ship with their AT-SPI2 bridge disabled by default for performance. xa11y will connect to the app but its tree will contain only the top-level window — `App.by_name("…").locator("button").count()` returns 0 even though buttons are visible on screen.

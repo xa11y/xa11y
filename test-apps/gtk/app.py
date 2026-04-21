@@ -135,6 +135,25 @@ class TestWindow(Gtk.ApplicationWindow):
         self.dark_mode_switch.set_tooltip_text("Dark mode")
         switch_group.append(self.dark_mode_switch)
 
+        # ── Menu button (wrapper pattern) ────────────────────────────
+        # Gtk.MenuButton is the stock GNOME "outer push-button wraps inner
+        # toggle-button" pattern.  In AT-SPI2 the outer push-button reports
+        # NActions=0 while the inner toggle-button exposes `click`, so
+        # calling press() on the outer must fall through to the inner under
+        # the GTK-scoped press-fallback in xa11y-linux.
+        menu_group = self._make_group("MenuButton")
+        box.append(menu_group)
+        popover_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        # This label becomes reachable in the AT-SPI tree once the popover
+        # is shown — the integration test uses it to prove the inner
+        # toggle-button was actually activated.
+        popover_box.append(Gtk.Label(label="menu-popover-open"))
+        popover = Gtk.Popover()
+        popover.set_child(popover_box)
+        self.menu_button = Gtk.MenuButton(label="More")
+        self.menu_button.set_popover(popover)
+        menu_group.append(self.menu_button)
+
         # ── List ─────────────────────────────────────────────────────
         list_group = self._make_group("List")
         box.append(list_group)

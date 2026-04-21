@@ -255,3 +255,35 @@ def test_button_focus_action_consistency(gtk_app: xa11y.Element) -> None:
         # Verify focus was actually set
         ok_after = find(gtk_app, 'button[name="OK"]')
         assert ok_after.focused, "focus() should set focused state"
+
+
+# ── Menu button (GtkMenuButton press-fallback) ────────────────────────────────
+# GtkMenuButton / AdwMenuButton expose an outer push-button whose AT-SPI2
+# Action interface is empty, wrapping an inner toggle-button that carries the
+# real `click` action. Pressing the outer button via xa11y must transparently
+# resolve to the inner toggle-button; the GTK-scoped fallback in xa11y-linux
+# performs that resolution.
+
+
+def test_menu_button_found(gtk_app: xa11y.Element) -> None:
+    mb = find(gtk_app, 'button[name="More"]')
+    assert mb.role == "button"
+    assert mb.name == "More"
+
+
+def test_menu_button_press_opens_popover(gtk_app: xa11y.Element) -> None:
+    # Before: the popover's inner label is not yet reachable.
+    assert (
+        gtk_app.locator('static_text[name="menu-popover-open"]').elements() == []
+    ), "popover label should not be visible until the MenuButton is pressed"
+
+    # Press the outer push-button. Without the GTK press-fallback this raises
+    # ActionNotSupported because the outer advertises NActions=0; with it,
+    # xa11y-linux resolves to the inner toggle-button and invokes its click.
+    gtk_app.locator('button[name="More"]').press()
+    time.sleep(0.4)
+
+    # After: the popover is showing and its inner label is reachable.
+    label = find(gtk_app, 'static_text[name="menu-popover-open"]')
+    assert label.role == "static_text"
+    assert label.name == "menu-popover-open"
