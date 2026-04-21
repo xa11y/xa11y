@@ -1,6 +1,6 @@
 //! Real AT-SPI2 backend implementation using zbus D-Bus bindings.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
@@ -360,6 +360,149 @@ impl LinuxProvider {
         // Fixes GitHub issue #98.
 
         (actions, indices)
+    }
+
+    /// Return true when the accessible's application identifies itself as GTK
+    /// via `org.a11y.atspi.Application.ToolkitName`.
+    ///
+    /// Used to scope the press-fallback heuristic for the
+    /// AdwMenuButton/GtkMenuButton wrapper pattern; other toolkits are
+    /// unaffected.
+    fn is_gtk_toolkit(&self, aref: &AccessibleRef) -> bool {
+        let app_root = AccessibleRef {
+            bus_name: aref.bus_name.clone(),
+            path: "/org/a11y/atspi/accessible/root".to_string(),
+        };
+        self.make_proxy(
+            &app_root.bus_name,
+            &app_root.path,
+            "org.a11y.atspi.Application",
+        )
+        .ok()
+        .and_then(|proxy| proxy.get_property::<String>("ToolkitName").ok())
+        .map(|t| t.eq_ignore_ascii_case("GTK"))
+        .unwrap_or(false)
+    }
+
+    /// GTK press-fallback resolver.
+    ///
+    /// Walks the accessible's descendants (BFS, depth-capped) looking for a
+    /// single activatable child that shares the outer widget's name. Returns
+    /// the (ref, action_index) pair when exactly one suitable candidate
+    /// exists at the shallowest matching depth. Returns `None` when the
+    /// subtree contains nothing suitable or multiple equally plausible
+    /// candidates — refusing to guess.
+    ///
+    /// Empirically fixes the `GtkMenuButton` / `AdwMenuButton` wrappers that
+    /// ship in every stock GNOME app (Calculator, Text Editor, Logs, Clocks,
+    /// Characters, …).
+    fn find_gtk_press_fallback(
+        &self,
+        outer: &AccessibleRef,
+        outer_name: &str,
+    ) -> Option<(AccessibleRef, i32)> {
+        let mut queue: VecDeque<(AccessibleRef, u32)> = VecDeque::new();
+        queue.push_back((outer.clone(), 0));
+        let mut visited: usize = 0;
+        let mut shallowest_depth: Option<u32> = None;
+        let mut hits: Vec<(AccessibleRef, i32)> = Vec::new();
+
+        while let Some((node, depth)) = queue.pop_front() {
+            // Once we've found the shallowest level with hits, don't look deeper.
+            if let Some(best) = shallowest_depth {
+                if depth > best {
+                    continue;
+                }
+            }
+            if visited > GTK_FALLBACK_MAX_NODES {
+                break;
+            }
+
+            let role_name = if depth == 0 {
+                String::new()
+            } else {
+                visited += 1;
+                self.get_role_name(&node).unwrap_or_default().to_lowercase()
+            };
+
+            if depth > 0 && is_actionable_atspi_role(&role_name) {
+                if let Some(idx) = self.gtk_fallback_pick(&node, outer_name) {
+                    match shallowest_depth {
+                        Some(d) if depth < d => {
+                            shallowest_depth = Some(depth);
+                            hits.clear();
+                            hits.push((node.clone(), idx));
+                        }
+                        Some(d) if depth == d => hits.push((node.clone(), idx)),
+                        Some(_) => {}
+                        None => {
+                            shallowest_depth = Some(depth);
+                            hits.push((node.clone(), idx));
+                        }
+                    }
+                }
+            }
+
+            // Do not descend into static/decorative roles. Descend through
+            // containers and actionable roles alike (actionable roles may
+            // themselves wrap an inner actionable — e.g. an AdwSplitButton's
+            // primary button inside a toggle-button shell).
+            let stop_descending = depth >= GTK_FALLBACK_MAX_DEPTH
+                || (depth > 0 && is_never_descend_atspi_role(&role_name));
+            if stop_descending {
+                continue;
+            }
+            if let Ok(children) = self.get_atspi_children(&node) {
+                for c in children {
+                    queue.push_back((c, depth + 1));
+                }
+            }
+        }
+
+        if hits.len() == 1 {
+            Some(hits.into_iter().next().unwrap())
+        } else {
+            None
+        }
+    }
+
+    /// Per-node filter for `find_gtk_press_fallback`. Returns the AT-SPI
+    /// action index to invoke when `aref` is a valid fallback candidate.
+    fn gtk_fallback_pick(&self, aref: &AccessibleRef, outer_name: &str) -> Option<i32> {
+        let (_, index_map) = self.get_actions(aref);
+        let idx = *index_map.get("press")?;
+        if !self.is_showing_visible_sensitive(aref) {
+            return None;
+        }
+        // If the outer has a name, require the candidate to share it. Rules
+        // out unrelated suffix widgets (e.g. a switch inside an AdwActionRow
+        // that happens to expose `click`).
+        if !outer_name.is_empty() {
+            let inner_name = self.get_name(aref).unwrap_or_default();
+            if !inner_name.is_empty() && inner_name != outer_name {
+                return None;
+            }
+        }
+        Some(idx)
+    }
+
+    /// True when the accessible's state has SHOWING, VISIBLE, and SENSITIVE
+    /// set. ENABLED is deliberately excluded: in GTK4 it reflects "has an
+    /// enabled GAction bound", which is false for the exact widgets we
+    /// rescue.
+    fn is_showing_visible_sensitive(&self, aref: &AccessibleRef) -> bool {
+        let raw = self.get_state(aref).unwrap_or_default();
+        let bits: u64 = if raw.len() >= 2 {
+            (raw[0] as u64) | ((raw[1] as u64) << 32)
+        } else if raw.len() == 1 {
+            raw[0] as u64
+        } else {
+            0
+        };
+        const SENSITIVE: u64 = 1 << 24;
+        const SHOWING: u64 = 1 << 25;
+        const VISIBLE: u64 = 1 << 30;
+        (bits & (SHOWING | VISIBLE | SENSITIVE)) == (SHOWING | VISIBLE | SENSITIVE)
     }
 
     /// Get value via Value or Text interface.
@@ -1280,13 +1423,26 @@ impl Provider for LinuxProvider {
 
     fn press(&self, element: &ElementData) -> Result<()> {
         let target = self.get_cached(element.handle)?;
-        let index = self
-            .get_action_index(element.handle, "press")
-            .map_err(|_| Error::ActionNotSupported {
-                action: "press".to_string(),
-                role: element.role,
-            })?;
-        self.do_atspi_action_by_index(&target, index)
+        // Fast path: the widget exposes `press` on its own Action interface.
+        if let Ok(index) = self.get_action_index(element.handle, "press") {
+            return self.do_atspi_action_by_index(&target, index);
+        }
+        // GTK-only fallback for the AdwMenuButton / GtkMenuButton pattern:
+        // the outer push-button accessible advertises NActions=0, but its
+        // immediate subtree contains an inner toggle-button (or similar
+        // actionable widget) with the real `click` action. We only apply this
+        // inside GTK — AccessKit, Qt, macOS, Windows all continue to surface
+        // ActionNotSupported as before.
+        if self.is_gtk_toolkit(&target) {
+            let outer_name = self.get_name(&target).unwrap_or_default();
+            if let Some((inner, index)) = self.find_gtk_press_fallback(&target, &outer_name) {
+                return self.do_atspi_action_by_index(&inner, index);
+            }
+        }
+        Err(Error::ActionNotSupported {
+            action: "press".to_string(),
+            role: element.role,
+        })
     }
 
     fn focus(&self, element: &ElementData) -> Result<()> {
@@ -1827,6 +1983,48 @@ pub(crate) fn map_atspi_role_number(role: u32) -> Role {
     }
 }
 
+/// Depth cap for the GTK press-fallback BFS. Wrapper patterns nest at most
+/// two levels (e.g. `AdwSplitButton` → inner toggle-button → inner label);
+/// depth 3 covers them with headroom without letting the walk wander.
+const GTK_FALLBACK_MAX_DEPTH: u32 = 3;
+
+/// Hard cap on visited accessibles per fallback resolution. Defensive — the
+/// depth cap already bounds typical cases to ≤ 20 nodes.
+const GTK_FALLBACK_MAX_NODES: usize = 200;
+
+/// Whether an AT-SPI2 role name represents an activatable widget we are
+/// willing to invoke via the fallback path. Deliberately narrow: roles that
+/// could carry destructive or misleading semantics (e.g. `label` with the
+/// synthesised clipboard/selection actions) are excluded.
+fn is_actionable_atspi_role(role: &str) -> bool {
+    matches!(
+        role,
+        "push button"
+            | "toggle button"
+            | "check box"
+            | "radio button"
+            | "menu item"
+            | "check menu item"
+            | "radio menu item"
+            | "link"
+            | "page tab"
+            | "tab"
+            | "list item"
+            | "tree item"
+    )
+}
+
+/// Roles the BFS refuses to descend into. Static and decorative roles never
+/// lead anywhere useful, and `label` in particular carries a fan-out of
+/// text-editing actions (`clipboard.copy`, `selection.delete`, …) that we
+/// must never reach via a press heuristic.
+fn is_never_descend_atspi_role(role: &str) -> bool {
+    matches!(
+        role,
+        "label" | "separator" | "image" | "icon" | "static" | "caption"
+    )
+}
+
 /// Map an AT-SPI2 action name to its canonical `snake_case` xa11y action name.
 ///
 /// Toolkit-specific aliases are normalised to the single canonical name:
@@ -1976,5 +2174,75 @@ mod tests {
             map_atspi_action_name("Increment"),
             Some("increment".to_string())
         );
+    }
+
+    /// The GTK press-fallback's actionable-role set must include the inner
+    /// toggle-button pattern used by `GtkMenuButton` / `AdwMenuButton`, plus
+    /// the other standard activatable roles we're willing to synthesise a
+    /// click for.
+    #[test]
+    fn test_gtk_fallback_actionable_roles() {
+        for role in [
+            "push button",
+            "toggle button",
+            "check box",
+            "radio button",
+            "menu item",
+            "link",
+            "tab",
+            "list item",
+            "tree item",
+        ] {
+            assert!(
+                is_actionable_atspi_role(role),
+                "{role:?} should be actionable"
+            );
+        }
+    }
+
+    /// Never treat static / decorative accessibles as fallback candidates.
+    /// Particularly important for `label`, whose synthesised text-editing
+    /// actions (`clipboard.copy`, `selection.delete`) must never be invoked
+    /// by a press heuristic.
+    #[test]
+    fn test_gtk_fallback_non_actionable_roles() {
+        for role in [
+            "label",
+            "panel",
+            "filler",
+            "section",
+            "group",
+            "image",
+            "separator",
+            "static",
+            "frame",
+            "window",
+        ] {
+            assert!(
+                !is_actionable_atspi_role(role),
+                "{role:?} must not be treated as actionable"
+            );
+        }
+    }
+
+    /// The BFS stops at static/decorative roles. `label` in particular must
+    /// never be descended into — its children are text spans with bogus
+    /// actions.
+    #[test]
+    fn test_gtk_fallback_never_descend_roles() {
+        for role in ["label", "separator", "image", "icon", "static", "caption"] {
+            assert!(
+                is_never_descend_atspi_role(role),
+                "{role:?} must block BFS descent"
+            );
+        }
+        // Containers — panel / filler / section / group / frame — stay
+        // walkable so the BFS can reach a wrapped inner actionable.
+        for role in ["panel", "filler", "section", "group", "frame"] {
+            assert!(
+                !is_never_descend_atspi_role(role),
+                "container role {role:?} must remain descendable"
+            );
+        }
     }
 }
