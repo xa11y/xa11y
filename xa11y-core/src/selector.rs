@@ -332,12 +332,27 @@ pub fn matches_simple(element: &ElementData, simple: &SimpleSelector) -> bool {
                 }
             }
             RoleMatch::Platform(platform_role) => {
-                // Check raw platform role fields: ax_role (macOS), atspi_role (Linux),
-                // or control_type_id (Windows).
-                let matches = element
-                    .raw
-                    .values()
-                    .any(|v| v.as_str().is_some_and(|s| s == platform_role));
+                // Check only raw platform role keys, not every string value in
+                // the raw map. Without this allowlist a selector like
+                // `[platform:AXButton]` would match any element whose AXTitle /
+                // AXDescription / class_name happens to be "AXButton".
+                //
+                // Allowlisted keys correspond to actual platform role fields:
+                //   - ax_role, ax_subrole   (macOS)
+                //   - atspi_role            (Linux / AT-SPI2)
+                //   - class_name            (Windows / UIA — Windows uses a
+                //                            numeric control_type_id which is
+                //                            not a string; class_name is the
+                //                            closest role-bearing string key)
+                const PLATFORM_ROLE_KEYS: &[&str] =
+                    &["ax_role", "ax_subrole", "atspi_role", "class_name"];
+                let matches = PLATFORM_ROLE_KEYS.iter().any(|k| {
+                    element
+                        .raw
+                        .get(*k)
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| s == platform_role)
+                });
                 if !matches {
                     return false;
                 }
@@ -699,5 +714,137 @@ mod tests {
         // parse as Ok but produce a Root-combinator segment in a non-first
         // position, causing an unreachable!() panic in find_elements_in_tree.
         assert!(Selector::parse("button:nth(1):nth(2)").is_err());
+    }
+
+    /// Helper: build an ElementData with a given `raw` map for matcher tests.
+    fn element_with_raw(raw: crate::element::RawPlatformData) -> ElementData {
+        ElementData {
+            role: Role::Unknown,
+            name: None,
+            value: None,
+            description: None,
+            bounds: None,
+            actions: Vec::new(),
+            states: crate::element::StateSet::default(),
+            numeric_value: None,
+            min_value: None,
+            max_value: None,
+            stable_id: None,
+            pid: None,
+            attributes: std::collections::HashMap::new(),
+            raw,
+            handle: 0,
+        }
+    }
+
+    #[test]
+    fn platform_role_matches_allowlisted_keys() {
+        // ax_role → match
+        let mut raw = std::collections::HashMap::new();
+        raw.insert(
+            "ax_role".into(),
+            serde_json::Value::String("AXButton".into()),
+        );
+        let el = element_with_raw(raw);
+        let sel = Selector::parse("AXButton").unwrap();
+        assert!(matches_simple(&el, &sel.segments[0].simple));
+
+        // ax_subrole → match
+        let mut raw = std::collections::HashMap::new();
+        raw.insert(
+            "ax_role".into(),
+            serde_json::Value::String("AXButton".into()),
+        );
+        raw.insert(
+            "ax_subrole".into(),
+            serde_json::Value::String("AXCloseButton".into()),
+        );
+        let el = element_with_raw(raw);
+        let sel = Selector::parse("AXCloseButton").unwrap();
+        assert!(matches_simple(&el, &sel.segments[0].simple));
+
+        // atspi_role → match. The role position in a selector is parsed as
+        // an identifier, so use an AT-SPI role name without spaces. "pushbutton"
+        // is not a known normalized Role, so it becomes a Platform role match.
+        let mut raw = std::collections::HashMap::new();
+        raw.insert(
+            "atspi_role".into(),
+            serde_json::Value::String("pushbutton".into()),
+        );
+        let el = element_with_raw(raw);
+        let sel = Selector::parse("pushbutton").unwrap();
+        assert!(matches!(
+            sel.segments[0].simple.role,
+            Some(RoleMatch::Platform(_))
+        ));
+        assert!(matches_simple(&el, &sel.segments[0].simple));
+
+        // class_name → match
+        let mut raw = std::collections::HashMap::new();
+        raw.insert(
+            "class_name".into(),
+            serde_json::Value::String("CustomControl".into()),
+        );
+        let el = element_with_raw(raw);
+        let sel = Selector::parse("CustomControl").unwrap();
+        assert!(matches_simple(&el, &sel.segments[0].simple));
+    }
+
+    #[test]
+    fn platform_role_does_not_match_non_role_string_fields() {
+        // An element whose AXTitle happens to equal "AXButton" must NOT
+        // match a platform-role selector `AXButton` — previously the
+        // matcher scanned every value in the raw map and treated any match
+        // as a role hit, which is a bug.
+        let mut raw = std::collections::HashMap::new();
+        raw.insert(
+            "ax_role".into(),
+            serde_json::Value::String("AXStaticText".into()),
+        );
+        raw.insert(
+            "AXTitle".into(),
+            serde_json::Value::String("AXButton".into()),
+        );
+        raw.insert(
+            "AXDescription".into(),
+            serde_json::Value::String("AXButton".into()),
+        );
+        raw.insert(
+            "AXHelp".into(),
+            serde_json::Value::String("AXButton".into()),
+        );
+        raw.insert(
+            "AXValue".into(),
+            serde_json::Value::String("AXButton".into()),
+        );
+        raw.insert(
+            "ax_identifier".into(),
+            serde_json::Value::String("AXButton".into()),
+        );
+        let el = element_with_raw(raw);
+
+        let sel = Selector::parse("AXButton").unwrap();
+        assert!(matches!(
+            sel.segments[0].simple.role,
+            Some(RoleMatch::Platform(_))
+        ));
+        assert!(
+            !matches_simple(&el, &sel.segments[0].simple),
+            "platform role `AXButton` should not match when only AXTitle / AXDescription / \
+             AXHelp / AXValue / ax_identifier carry that string",
+        );
+
+        // Same element, but with ax_role flipped to AXButton → should match.
+        let mut raw = std::collections::HashMap::new();
+        raw.insert(
+            "ax_role".into(),
+            serde_json::Value::String("AXButton".into()),
+        );
+        raw.insert(
+            "AXTitle".into(),
+            serde_json::Value::String("Click me".into()),
+        );
+        let el = element_with_raw(raw);
+        assert!(matches_simple(&el, &sel.segments[0].simple));
     }
 }
