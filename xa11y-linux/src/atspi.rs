@@ -1427,13 +1427,25 @@ impl Provider for LinuxProvider {
         if let Ok(index) = self.get_action_index(element.handle, "press") {
             return self.do_atspi_action_by_index(&target, index);
         }
-        // GTK-only fallback for the AdwMenuButton / GtkMenuButton pattern:
-        // the outer push-button accessible advertises NActions=0, but its
-        // immediate subtree contains an inner toggle-button (or similar
-        // actionable widget) with the real `click` action. We only apply this
-        // inside GTK — AccessKit, Qt, macOS, Windows all continue to surface
-        // ActionNotSupported as before.
-        if self.is_gtk_toolkit(&target) {
+        // TENET-BREAK(1): substitute target. Human approval granted for this
+        // break (see batch B6 / PR #125 / commit daeaf59). Justification: GTK4
+        // menu-button widgets (GtkMenuButton, AdwMenuButton, AdwSplitButton)
+        // expose their AT-SPI Action interface on an *inner* toggle-button
+        // child, not the outer push-button accessible the app author addresses
+        // by name. Without this workaround, `press()` silently does nothing on
+        // every GtkMenuButton in every stock GNOME app (Calculator, Text
+        // Editor, Logs, …). Alternatives considered and rejected:
+        //   1. Expose the inner widget in the tree — breaks AT-SPI tree
+        //      fidelity and leaks a GTK implementation detail into every
+        //      consumer.
+        //   2. Return ActionNotSupported — every GTK consumer would have to
+        //      reimplement the same subtree search to work around it.
+        // The break is narrowly scoped: gated on (a) the owning toolkit being
+        // GTK and (b) the outer role being Role::Button (push-button, which is
+        // what all three menu-button variants present as). Non-GtkMenuButton
+        // roles and non-GTK toolkits continue to fail-fast with
+        // ActionNotSupported.
+        if element.role == Role::Button && self.is_gtk_toolkit(&target) {
             let outer_name = self.get_name(&target).unwrap_or_default();
             if let Some((inner, index)) = self.find_gtk_press_fallback(&target, &outer_name) {
                 return self.do_atspi_action_by_index(&inner, index);
@@ -1472,20 +1484,28 @@ impl Provider for LinuxProvider {
 
     fn blur(&self, element: &ElementData) -> Result<()> {
         let target = self.get_cached(element.handle)?;
-        // Grab focus on parent element to blur the current one
-        if let Ok(Some(parent_ref)) = self.get_atspi_parent(&target) {
+        // Grab focus on parent element to blur the current one. We propagate
+        // every failure — no silent fallbacks (tenet 1): callers need to see
+        // when blur can't do anything useful.
+        if let Some(parent_ref) = self.get_atspi_parent(&target)? {
             if parent_ref.path != "/org/a11y/atspi/null" {
-                if let Ok(p) = self.make_proxy(
+                let p = self.make_proxy(
                     &parent_ref.bus_name,
                     &parent_ref.path,
                     "org.a11y.atspi.Component",
-                ) {
-                    let _ = p.call_method("GrabFocus", &());
-                    return Ok(());
-                }
+                )?;
+                p.call_method("GrabFocus", &())
+                    .map_err(|e| Error::Platform {
+                        code: -1,
+                        message: format!("Component.GrabFocus on parent failed: {}", e),
+                    })?;
+                return Ok(());
             }
         }
-        Ok(())
+        Err(Error::ActionNotSupported {
+            action: "blur".to_string(),
+            role: element.role,
+        })
     }
 
     fn toggle(&self, element: &ElementData) -> Result<()> {
@@ -1614,20 +1634,26 @@ impl Provider for LinuxProvider {
             return Ok(());
         }
         // Fall back to delete-then-insert for other AT-SPI2 implementations.
-        let _ = proxy.call_method("DeleteText", &(0i32, i32::MAX));
         // Capture the underlying D-Bus error so callers can distinguish an
         // absent `EditableText` interface (common on Chromium — the Chrome
         // URL bar only exposes read-only `Text`; see issue #101) from other
         // failures. Collapsing to `TextValueNotSupported` hides the reason.
-        if let Err(e) = proxy.call_method("InsertText", &(0i32, value, value.len() as i32)) {
+        let classify_editable_text_error = |op: &str, e: zbus::Error| -> Error {
             let msg = e.to_string();
             if msg.contains("UnknownMethod") || msg.contains("UnknownInterface") {
-                return Err(Error::TextValueNotSupported);
+                Error::TextValueNotSupported
+            } else {
+                Error::Platform {
+                    code: -1,
+                    message: format!("EditableText.{} failed: {}", op, msg),
+                }
             }
-            return Err(Error::Platform {
-                code: -1,
-                message: format!("EditableText.InsertText failed: {}", msg),
-            });
+        };
+        if let Err(e) = proxy.call_method("DeleteText", &(0i32, i32::MAX)) {
+            return Err(classify_editable_text_error("DeleteText", e));
+        }
+        if let Err(e) = proxy.call_method("InsertText", &(0i32, value, value.len() as i32)) {
+            return Err(classify_editable_text_error("InsertText", e));
         }
         Ok(())
     }

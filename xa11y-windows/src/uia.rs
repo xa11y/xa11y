@@ -310,7 +310,10 @@ impl WindowsProvider {
                     };
                     (h, ScrollAmount_NoAmount)
                 };
-                let _ = unsafe { pattern.Scroll(h, v) };
+                unsafe { pattern.Scroll(h, v) }.map_err(|e| Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("Scroll failed: {}", e),
+                })?;
             }
             return Ok(());
         }
@@ -781,12 +784,23 @@ impl Provider for WindowsProvider {
                 UIA_ExpandCollapsePatternId,
             )
         } {
-            match unsafe { pattern.CurrentExpandCollapseState() } {
-                Ok(ExpandCollapseState_Collapsed) => {
-                    let _ = unsafe { pattern.Expand() };
+            let state =
+                unsafe { pattern.CurrentExpandCollapseState() }.map_err(|e| Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("CurrentExpandCollapseState failed: {}", e),
+                })?;
+            match state {
+                ExpandCollapseState_Collapsed => {
+                    unsafe { pattern.Expand() }.map_err(|e| Error::Platform {
+                        code: e.code().0 as i64,
+                        message: format!("Expand failed: {}", e),
+                    })?;
                 }
                 _ => {
-                    let _ = unsafe { pattern.Collapse() };
+                    unsafe { pattern.Collapse() }.map_err(|e| Error::Platform {
+                        code: e.code().0 as i64,
+                        message: format!("Collapse failed: {}", e),
+                    })?;
                 }
             }
             return Ok(());
@@ -862,7 +876,10 @@ impl Provider for WindowsProvider {
                 UIA_ExpandCollapsePatternId,
             )
         } {
-            let _ = unsafe { pattern.Expand() };
+            unsafe { pattern.Expand() }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("Expand failed: {}", e),
+            })?;
             return Ok(());
         }
         Err(Error::ActionNotSupported {
@@ -878,7 +895,10 @@ impl Provider for WindowsProvider {
                 UIA_ExpandCollapsePatternId,
             )
         } {
-            let _ = unsafe { pattern.Collapse() };
+            unsafe { pattern.Collapse() }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("Collapse failed: {}", e),
+            })?;
             return Ok(());
         }
         Err(Error::ActionNotSupported {
@@ -901,7 +921,10 @@ impl Provider for WindowsProvider {
             uia_element
                 .GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId)
         } {
-            let current = unsafe { pattern.CurrentValue() }.unwrap_or(0.0);
+            let current = unsafe { pattern.CurrentValue() }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("RangeValue.CurrentValue failed: {}", e),
+            })?;
             let small = unsafe { pattern.CurrentSmallChange() }.unwrap_or(1.0);
             let step = if small <= 0.0 { 1.0 } else { small };
             unsafe { pattern.SetValue(current + step) }.map_err(|e| Error::Platform {
@@ -922,7 +945,10 @@ impl Provider for WindowsProvider {
             uia_element
                 .GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId)
         } {
-            let current = unsafe { pattern.CurrentValue() }.unwrap_or(0.0);
+            let current = unsafe { pattern.CurrentValue() }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("RangeValue.CurrentValue failed: {}", e),
+            })?;
             let small = unsafe { pattern.CurrentSmallChange() }.unwrap_or(1.0);
             let step = if small <= 0.0 { 1.0 } else { small };
             unsafe { pattern.SetValue(current - step) }.map_err(|e| Error::Platform {
@@ -943,9 +969,16 @@ impl Provider for WindowsProvider {
             uia_element
                 .GetCurrentPatternAs::<IUIAutomationScrollItemPattern>(UIA_ScrollItemPatternId)
         } {
-            let _ = unsafe { pattern.ScrollIntoView() };
+            unsafe { pattern.ScrollIntoView() }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("ScrollIntoView failed: {}", e),
+            })?;
+            return Ok(());
         }
-        Ok(())
+        Err(Error::ActionNotSupported {
+            action: "scroll_into_view".to_string(),
+            role: element.role,
+        })
     }
 
     fn set_value(&self, element: &ElementData, value: &str) -> Result<()> {
@@ -998,7 +1031,10 @@ impl Provider for WindowsProvider {
         } {
             let current = unsafe { value_pattern.CurrentValue() }
                 .map(|s| s.to_string())
-                .unwrap_or_default();
+                .map_err(|e| Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("Value.CurrentValue failed: {}", e),
+                })?;
 
             // Try to get cursor position from TextPattern
             let insert_pos = if let Ok(text_pattern) = unsafe {
@@ -1174,11 +1210,19 @@ fn get_actions(
         actions.push("select".to_string());
     }
 
-    // Focus: most elements can be focused
-    if unsafe { element.CachedIsKeyboardFocusable() }
+    // Advertise `focus` iff focusing would have an observable effect: the
+    // element must be both keyboard-focusable and enabled. A disabled-but-
+    // focusable element shouldn't claim to support focus because SetFocus is
+    // either a no-op or throws. This aligns Windows with Linux (requires
+    // AT-SPI Action interface listing `focus`) and macOS (requires
+    // `AXFocused` to be settable).
+    let is_focusable = unsafe { element.CachedIsKeyboardFocusable() }
         .unwrap_or(BOOL(0))
-        .as_bool()
-    {
+        .as_bool();
+    let is_enabled = unsafe { element.CachedIsEnabled() }
+        .unwrap_or(BOOL(1))
+        .as_bool();
+    if is_focusable && is_enabled {
         actions.push("focus".to_string());
     }
 
