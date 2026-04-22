@@ -1438,7 +1438,7 @@ fn build_test_tree() -> Arc<MockProvider> {
     for (i, (role, name, value, desc, bounds, actions, states, nv, minv, maxv, sid)) in
         element_defs.into_iter().enumerate()
     {
-        let mut data = ElementData {
+        let data = ElementData {
             role,
             name: name.map(String::from),
             value: value.map(String::from),
@@ -1451,11 +1451,9 @@ fn build_test_tree() -> Arc<MockProvider> {
             max_value: maxv,
             stable_id: sid.map(String::from),
             pid: Some(1234),
-            attributes: std::collections::HashMap::new(),
             raw: std::collections::HashMap::new(),
             handle: i as u64,
         };
-        data.populate_attributes();
         nodes.push(MockNode {
             data,
             children: children_map[i].clone(),

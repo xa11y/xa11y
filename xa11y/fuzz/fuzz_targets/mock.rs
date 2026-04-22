@@ -265,7 +265,6 @@ pub fn build_provider(elements: &[FuzzElement]) -> Option<Arc<FuzzProvider>> {
                 min_value: fuzz.min_value,
                 max_value: fuzz.max_value,
                 pid: fuzz.pid,
-                attributes: std::collections::HashMap::new(),
                 raw: make_raw(&fuzz.raw),
                 handle: i as u64,
             },

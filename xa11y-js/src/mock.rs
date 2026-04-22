@@ -236,7 +236,7 @@ fn build_tree() -> Arc<MockProvider> {
 
     let mut nodes = Vec::new();
     for (i, (role, name, value, actions, states)) in elements.into_iter().enumerate() {
-        let mut data = ElementData {
+        let data = ElementData {
             role,
             name: name.map(String::from),
             value: value.map(String::from),
@@ -254,11 +254,9 @@ fn build_tree() -> Arc<MockProvider> {
             max_value: None,
             stable_id: None,
             pid: Some(4242),
-            attributes: HashMap::new(),
             raw: HashMap::new(),
             handle: i as u64,
         };
-        data.populate_attributes();
         nodes.push(MockNode {
             data,
             children: children_map[i].clone(),

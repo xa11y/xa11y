@@ -702,7 +702,7 @@ impl LinuxProvider {
                 .insert(handle, action_index_map);
         }
 
-        let mut data = ElementData {
+        ElementData {
             role,
             name,
             value,
@@ -715,12 +715,9 @@ impl LinuxProvider {
             max_value,
             pid,
             stable_id: Some(aref.path.clone()),
-            attributes: HashMap::new(),
             raw,
             handle,
-        };
-        data.populate_attributes();
-        data
+        }
     }
 
     /// Get the AT-SPI parent of an accessible ref.

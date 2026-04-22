@@ -17,7 +17,7 @@
 
 use std::collections::HashSet;
 
-use crate::element::ElementData;
+use crate::element::{ElementData, Toggled};
 use crate::error::{Error, Result};
 use crate::role::Role;
 
@@ -68,7 +68,9 @@ pub struct AttrFilter {
 }
 
 /// Attribute name for selector filters. Any `snake_case` string is valid —
-/// it is looked up in the element's `attributes` map at match time.
+/// normalized names (e.g. `name`, `enabled`, `checked`) dispatch to the
+/// corresponding `ElementData` field; anything else is looked up in the
+/// element's `raw` platform-data map at match time.
 pub type AttrName = String;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -360,18 +362,11 @@ pub fn matches_simple(element: &ElementData, simple: &SimpleSelector) -> bool {
         }
     }
 
-    // Check attribute filters — look up each attribute in the element's attributes map.
+    // Check attribute filters. Normalized attribute names dispatch to
+    // `ElementData` struct fields; any other name falls back to the
+    // platform-specific `raw` map.
     for filter in &simple.filters {
-        let attr_value: Option<String> = element.attributes.get(&filter.attr).and_then(|v| {
-            match v {
-                serde_json::Value::String(s) => Some(s.clone()),
-                serde_json::Value::Bool(b) => Some(b.to_string()),
-                serde_json::Value::Number(n) => Some(n.to_string()),
-                serde_json::Value::Null => None,
-                // Arrays/objects: convert to JSON string for matching
-                other => Some(other.to_string()),
-            }
-        });
+        let attr_value = resolve_attr(element, &filter.attr);
 
         if !match_op(&filter.op, &filter.value, attr_value.as_deref()) {
             return false;
@@ -379,6 +374,70 @@ pub fn matches_simple(element: &ElementData, simple: &SimpleSelector) -> bool {
     }
 
     true
+}
+
+/// Resolve an attribute name for selector matching.
+///
+/// For normalized attribute names (`role`, `name`, `enabled`, `checked`, …)
+/// this reads directly from the corresponding `ElementData` field and formats
+/// it as a string. For any other name it falls back to the platform-specific
+/// `raw` map, using the same `Value → Option<String>` conversion the old
+/// filter loop performed.
+///
+/// The format produced here is the match contract consumers depend on — it
+/// must stay byte-for-byte identical to what a now-removed
+/// `populate_attributes`-driven map would have yielded.
+fn resolve_attr(element: &ElementData, name: &str) -> Option<String> {
+    match name {
+        "role" => Some(element.role.to_snake_case().to_string()),
+        "name" => element.name.clone(),
+        "value" => element.value.clone(),
+        "description" => element.description.clone(),
+        "bounds" => element.bounds.as_ref().map(|b| {
+            serde_json::json!({
+                "x": b.x, "y": b.y, "width": b.width, "height": b.height,
+            })
+            .to_string()
+        }),
+        "numeric_value" => number_to_string(element.numeric_value),
+        "min_value" => number_to_string(element.min_value),
+        "max_value" => number_to_string(element.max_value),
+        "stable_id" => element.stable_id.clone(),
+        "enabled" => Some(element.states.enabled.to_string()),
+        "visible" => Some(element.states.visible.to_string()),
+        "focused" => Some(element.states.focused.to_string()),
+        "focusable" => Some(element.states.focusable.to_string()),
+        "selected" => Some(element.states.selected.to_string()),
+        "editable" => Some(element.states.editable.to_string()),
+        "modal" => Some(element.states.modal.to_string()),
+        "required" => Some(element.states.required.to_string()),
+        "busy" => Some(element.states.busy.to_string()),
+        "expanded" => element.states.expanded.map(|b| b.to_string()),
+        "checked" => element.states.checked.map(|c| {
+            match c {
+                Toggled::On => "on",
+                Toggled::Off => "off",
+                Toggled::Mixed => "mixed",
+            }
+            .to_string()
+        }),
+        other => element.raw.get(other).and_then(|v| match v {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Bool(b) => Some(b.to_string()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            serde_json::Value::Null => None,
+            // Arrays/objects: convert to JSON string for matching
+            other => Some(other.to_string()),
+        }),
+    }
+}
+
+/// Format an `Option<f64>` the same way `serde_json::Number::from_f64`
+/// followed by `Number::to_string()` would have — which is the contract the
+/// old `populate_attributes` path established.
+fn number_to_string(v: Option<f64>) -> Option<String> {
+    v.and_then(serde_json::Number::from_f64)
+        .map(|n| n.to_string())
 }
 
 /// Test whether `actual` matches `expected` according to the given `MatchOp`.
@@ -731,7 +790,6 @@ mod tests {
             max_value: None,
             stable_id: None,
             pid: None,
-            attributes: std::collections::HashMap::new(),
             raw,
             handle: 0,
         }
@@ -846,5 +904,223 @@ mod tests {
         );
         let el = element_with_raw(raw);
         assert!(matches_simple(&el, &sel.segments[0].simple));
+    }
+
+    // ── resolve_attr / normalized dispatch ──────────────────────────────────
+
+    /// Build a default-ish ElementData; callers tweak the fields they care
+    /// about via a closure. Keeps each resolve_attr test focussed on one
+    /// normalized key.
+    fn element_default() -> ElementData {
+        element_with_raw(std::collections::HashMap::new())
+    }
+
+    #[test]
+    fn resolve_role_reads_struct_field() {
+        let mut el = element_default();
+        el.role = Role::Button;
+        assert_eq!(resolve_attr(&el, "role").as_deref(), Some("button"));
+    }
+
+    #[test]
+    fn resolve_name_reads_struct_field() {
+        let mut el = element_default();
+        assert_eq!(resolve_attr(&el, "name"), None);
+        el.name = Some("Submit".into());
+        assert_eq!(resolve_attr(&el, "name").as_deref(), Some("Submit"));
+    }
+
+    #[test]
+    fn resolve_value_reads_struct_field() {
+        let mut el = element_default();
+        assert_eq!(resolve_attr(&el, "value"), None);
+        el.value = Some("hello".into());
+        assert_eq!(resolve_attr(&el, "value").as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn resolve_description_reads_struct_field() {
+        let mut el = element_default();
+        assert_eq!(resolve_attr(&el, "description"), None);
+        el.description = Some("tooltip".into());
+        assert_eq!(resolve_attr(&el, "description").as_deref(), Some("tooltip"),);
+    }
+
+    #[test]
+    fn resolve_bounds_formats_as_json_object() {
+        let mut el = element_default();
+        assert_eq!(resolve_attr(&el, "bounds"), None);
+        el.bounds = Some(crate::element::Rect {
+            x: 1,
+            y: 2,
+            width: 3,
+            height: 4,
+        });
+        // Contract: same JSON object `populate_attributes` previously wrote.
+        let got = resolve_attr(&el, "bounds").expect("bounds set");
+        let parsed: serde_json::Value = serde_json::from_str(&got).unwrap();
+        assert_eq!(parsed["x"], 1);
+        assert_eq!(parsed["y"], 2);
+        assert_eq!(parsed["width"], 3);
+        assert_eq!(parsed["height"], 4);
+    }
+
+    #[test]
+    fn resolve_numeric_value_matches_json_number_format() {
+        let mut el = element_default();
+        assert_eq!(resolve_attr(&el, "numeric_value"), None);
+        el.numeric_value = Some(42.0);
+        // Mirror serde_json::Number::from_f64(42.0).to_string().
+        let expected = serde_json::Number::from_f64(42.0).unwrap().to_string();
+        assert_eq!(
+            resolve_attr(&el, "numeric_value").as_deref(),
+            Some(expected.as_str()),
+        );
+    }
+
+    #[test]
+    fn resolve_min_value_matches_json_number_format() {
+        let mut el = element_default();
+        el.min_value = Some(0.5);
+        let expected = serde_json::Number::from_f64(0.5).unwrap().to_string();
+        assert_eq!(
+            resolve_attr(&el, "min_value").as_deref(),
+            Some(expected.as_str()),
+        );
+    }
+
+    #[test]
+    fn resolve_max_value_matches_json_number_format() {
+        let mut el = element_default();
+        el.max_value = Some(100.0);
+        let expected = serde_json::Number::from_f64(100.0).unwrap().to_string();
+        assert_eq!(
+            resolve_attr(&el, "max_value").as_deref(),
+            Some(expected.as_str()),
+        );
+    }
+
+    #[test]
+    fn resolve_numeric_value_nan_is_none() {
+        let mut el = element_default();
+        el.numeric_value = Some(f64::NAN);
+        // `serde_json::Number::from_f64` rejects NaN, so the old path produced
+        // None for this element. Preserve that.
+        assert_eq!(resolve_attr(&el, "numeric_value"), None);
+    }
+
+    #[test]
+    fn resolve_stable_id_reads_struct_field() {
+        let mut el = element_default();
+        assert_eq!(resolve_attr(&el, "stable_id"), None);
+        el.stable_id = Some("abc".into());
+        assert_eq!(resolve_attr(&el, "stable_id").as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn resolve_bool_states_always_present() {
+        let el = element_default();
+        // StateSet::default() → enabled=true, visible=true, others=false.
+        assert_eq!(resolve_attr(&el, "enabled").as_deref(), Some("true"));
+        assert_eq!(resolve_attr(&el, "visible").as_deref(), Some("true"));
+        assert_eq!(resolve_attr(&el, "focused").as_deref(), Some("false"));
+        assert_eq!(resolve_attr(&el, "focusable").as_deref(), Some("false"));
+        assert_eq!(resolve_attr(&el, "selected").as_deref(), Some("false"));
+        assert_eq!(resolve_attr(&el, "editable").as_deref(), Some("false"));
+        assert_eq!(resolve_attr(&el, "modal").as_deref(), Some("false"));
+        assert_eq!(resolve_attr(&el, "required").as_deref(), Some("false"));
+        assert_eq!(resolve_attr(&el, "busy").as_deref(), Some("false"));
+    }
+
+    #[test]
+    fn resolve_expanded_tri_state() {
+        let mut el = element_default();
+        // Default: None → not expandable.
+        assert_eq!(resolve_attr(&el, "expanded"), None);
+        el.states.expanded = Some(true);
+        assert_eq!(resolve_attr(&el, "expanded").as_deref(), Some("true"));
+        el.states.expanded = Some(false);
+        assert_eq!(resolve_attr(&el, "expanded").as_deref(), Some("false"));
+    }
+
+    #[test]
+    fn resolve_checked_tri_state() {
+        let mut el = element_default();
+        assert_eq!(resolve_attr(&el, "checked"), None);
+        el.states.checked = Some(Toggled::On);
+        assert_eq!(resolve_attr(&el, "checked").as_deref(), Some("on"));
+        el.states.checked = Some(Toggled::Off);
+        assert_eq!(resolve_attr(&el, "checked").as_deref(), Some("off"));
+        el.states.checked = Some(Toggled::Mixed);
+        assert_eq!(resolve_attr(&el, "checked").as_deref(), Some("mixed"));
+    }
+
+    #[test]
+    fn resolve_unknown_key_falls_back_to_raw() {
+        let mut raw = std::collections::HashMap::new();
+        raw.insert(
+            "custom_thing".into(),
+            serde_json::Value::String("foo".into()),
+        );
+        raw.insert("a_bool".into(), serde_json::Value::Bool(true));
+        raw.insert(
+            "a_num".into(),
+            serde_json::Value::Number(serde_json::Number::from(7)),
+        );
+        raw.insert("a_null".into(), serde_json::Value::Null);
+        raw.insert("a_list".into(), serde_json::json!(["x", "y"]));
+        let el = element_with_raw(raw);
+
+        assert_eq!(resolve_attr(&el, "custom_thing").as_deref(), Some("foo"),);
+        assert_eq!(resolve_attr(&el, "a_bool").as_deref(), Some("true"));
+        assert_eq!(resolve_attr(&el, "a_num").as_deref(), Some("7"));
+        assert_eq!(resolve_attr(&el, "a_null"), None);
+        // Arrays serialize to their JSON representation for matching.
+        assert_eq!(resolve_attr(&el, "a_list").as_deref(), Some(r#"["x","y"]"#),);
+        // Totally absent key → None.
+        assert_eq!(resolve_attr(&el, "never_set"), None);
+    }
+
+    #[test]
+    fn custom_filter_reads_from_raw_end_to_end() {
+        // Regression: a filter on a non-normalized key must still match via
+        // `raw`, so existing selectors like `[custom=foo]` keep working.
+        let mut raw = std::collections::HashMap::new();
+        raw.insert("custom".into(), serde_json::Value::String("foo".into()));
+        let el = element_with_raw(raw);
+        let sel = Selector::parse(r#"[custom="foo"]"#).unwrap();
+        assert!(matches_simple(&el, &sel.segments[0].simple));
+
+        let sel = Selector::parse(r#"[custom="bar"]"#).unwrap();
+        assert!(!matches_simple(&el, &sel.segments[0].simple));
+    }
+
+    #[test]
+    fn enabled_filter_reads_struct_field_end_to_end() {
+        // Regression: `[enabled="true"]` reads `states.enabled` directly.
+        let mut el = element_default();
+        el.states.enabled = true;
+        let sel = Selector::parse(r#"[enabled="true"]"#).unwrap();
+        assert!(matches_simple(&el, &sel.segments[0].simple));
+
+        el.states.enabled = false;
+        assert!(!matches_simple(&el, &sel.segments[0].simple));
+
+        let sel_false = Selector::parse(r#"[enabled="false"]"#).unwrap();
+        assert!(matches_simple(&el, &sel_false.segments[0].simple));
+    }
+
+    #[test]
+    fn checked_filter_reads_struct_field_end_to_end() {
+        let mut el = element_default();
+        el.states.checked = Some(Toggled::On);
+        let sel = Selector::parse(r#"[checked="on"]"#).unwrap();
+        assert!(matches_simple(&el, &sel.segments[0].simple));
+
+        el.states.checked = Some(Toggled::Off);
+        assert!(!matches_simple(&el, &sel.segments[0].simple));
+
+        el.states.checked = None;
+        assert!(!matches_simple(&el, &sel.segments[0].simple));
     }
 }

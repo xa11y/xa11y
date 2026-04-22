@@ -358,7 +358,7 @@ fn sample_provider() -> Arc<MockProvider> {
     for (i, (role, name, value, desc, bounds, actions, states, nv, minv, maxv)) in
         elements.into_iter().enumerate()
     {
-        let mut data = ElementData {
+        let data = ElementData {
             role,
             name: name.map(String::from),
             value: value.map(String::from),
@@ -371,11 +371,9 @@ fn sample_provider() -> Arc<MockProvider> {
             max_value: maxv,
             stable_id: None,
             pid: Some(1234),
-            attributes: std::collections::HashMap::new(),
             raw: std::collections::HashMap::new(),
             handle: i as u64,
         };
-        data.populate_attributes();
         nodes.push(MockNode {
             data,
             children: children_map[i].clone(),
@@ -593,7 +591,6 @@ fn element_json_serialization() {
         numeric_value: None,
         min_value: None,
         max_value: None,
-        attributes: std::collections::HashMap::new(),
         raw: std::collections::HashMap::new(),
         handle: 0,
     };
@@ -921,7 +918,7 @@ fn multi_app_provider() -> Arc<MultiAppMockProvider> {
 
     let mut nodes = Vec::new();
     for (i, (role, name, pid)) in defs.into_iter().enumerate() {
-        let mut data = ElementData {
+        let data = ElementData {
             role,
             name: name.map(String::from),
             value: None,
@@ -934,11 +931,9 @@ fn multi_app_provider() -> Arc<MultiAppMockProvider> {
             max_value: None,
             stable_id: None,
             pid,
-            attributes: std::collections::HashMap::new(),
             raw: std::collections::HashMap::new(),
             handle: i as u64,
         };
-        data.populate_attributes();
         nodes.push(MockNode {
             data,
             children: children_map[i].clone(),

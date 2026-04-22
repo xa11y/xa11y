@@ -511,7 +511,7 @@ fn build_event_snapshot(
         raw
     };
 
-    let mut data = ElementData {
+    Some(ElementData {
         role,
         name,
         value,
@@ -524,15 +524,12 @@ fn build_event_snapshot(
         max_value,
         stable_id: Some(aref.path.clone()),
         pid,
-        attributes: HashMap::new(),
         raw,
         // Handle is 0 — snapshots are read-only targets, not live handles
         // into the main provider's cache. Consumers wanting to drive actions
         // must re-resolve through the regular locator path.
         handle: 0,
-    };
-    data.populate_attributes();
-    Some(data)
+    })
 }
 
 fn make_proxy<'a>(conn: &'a Connection, bus: &str, path: &str, iface: &str) -> Option<Proxy<'a>> {

@@ -464,7 +464,7 @@ fn build_snapshot_data(
         (None, None, None)
     };
 
-    let mut data = ElementData {
+    ElementData {
         role,
         name,
         value,
@@ -477,12 +477,9 @@ fn build_snapshot_data(
         min_value,
         max_value,
         pid,
-        attributes: std::collections::HashMap::new(),
         raw,
         handle,
-    };
-    data.populate_attributes();
-    data
+    }
 }
 
 /// Build the batch request that describes which properties and patterns
@@ -1933,7 +1930,6 @@ mod tests {
             max_value: None,
             stable_id: None,
             pid: None,
-            attributes: std::collections::HashMap::new(),
             raw: std::collections::HashMap::new(),
             handle: u64::MAX, // stale handle
         };
@@ -1963,7 +1959,6 @@ mod tests {
             max_value: None,
             stable_id: None,
             pid: None,
-            attributes: std::collections::HashMap::new(),
             raw: std::collections::HashMap::new(),
             handle: u64::MAX,
         };
@@ -2033,7 +2028,6 @@ mod tests {
             max_value: None,
             stable_id: None,
             pid,
-            attributes: std::collections::HashMap::new(),
             raw: std::collections::HashMap::new(),
             handle: 0,
         }

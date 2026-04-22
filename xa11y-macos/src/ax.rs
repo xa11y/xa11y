@@ -1302,7 +1302,7 @@ impl MacOSProvider {
 /// targets), pass `0`.
 fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -> ElementData {
     if element.is_null() {
-        let mut data = ElementData {
+        return ElementData {
             role: Role::Unknown,
             name: None,
             value: None,
@@ -1314,13 +1314,10 @@ fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -
             min_value: None,
             max_value: None,
             stable_id: None,
-            attributes: std::collections::HashMap::new(),
             raw: std::collections::HashMap::new(),
             pid,
             handle,
         };
-        data.populate_attributes();
-        return data;
     }
 
     let body = move || -> ElementData {
@@ -1524,7 +1521,7 @@ fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -
             _ => (None, None),
         };
 
-        let mut data = ElementData {
+        ElementData {
             role,
             name,
             value,
@@ -1536,13 +1533,10 @@ fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -
             numeric_value,
             min_value,
             max_value,
-            attributes: std::collections::HashMap::new(),
             raw,
             pid,
             handle,
-        };
-        data.populate_attributes();
-        data
+        }
     };
     body()
 }
