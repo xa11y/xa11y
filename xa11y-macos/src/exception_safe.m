@@ -224,6 +224,65 @@ CFTypeRef safe_cf_dict_get_value(CFDictionaryRef dict, CFTypeRef key) {
     }
 }
 
+// Safe wrappers for the well-known CF type-ID functions. These are called
+// frequently (once per type check) so we wrap each one to keep the call sites
+// uniform with the rest of the safe_cf_* API. They're defined in system
+// frameworks and shouldn't throw, but we wrap them for consistency and
+// defence-in-depth.
+CFTypeID safe_cf_string_get_type_id(void) {
+    @try {
+        return CFStringGetTypeID();
+    } @catch (NSException *e) {
+        return 0;
+    }
+}
+
+CFTypeID safe_cf_number_get_type_id(void) {
+    @try {
+        return CFNumberGetTypeID();
+    } @catch (NSException *e) {
+        return 0;
+    }
+}
+
+CFTypeID safe_cf_boolean_get_type_id(void) {
+    @try {
+        return CFBooleanGetTypeID();
+    } @catch (NSException *e) {
+        return 0;
+    }
+}
+
+CFTypeID safe_cf_array_get_type_id(void) {
+    @try {
+        return CFArrayGetTypeID();
+    } @catch (NSException *e) {
+        return 0;
+    }
+}
+
+// Safe CFArrayCreate. Creates a new CFArray from an array of CFTypeRef
+// pointers using kCFTypeArrayCallBacks (retains each value). Returns NULL
+// on failure or if an ObjC exception was thrown.
+CFArrayRef safe_cf_array_create(const void **values, CFIndex num_values) {
+    @try {
+        return CFArrayCreate(NULL, values, num_values, &kCFTypeArrayCallBacks);
+    } @catch (NSException *e) {
+        return NULL;
+    }
+}
+
+// ── Process Trust ─────────────────────────────────────────────────────────────
+
+// Safe wrapper for AXIsProcessTrusted.
+Boolean safe_ax_is_process_trusted(void) {
+    @try {
+        return AXIsProcessTrusted();
+    } @catch (NSException *e) {
+        return false;
+    }
+}
+
 // ── AXObserver Helpers (for EventProvider) ───────────────────────────────────
 
 // Create an AXObserver for a given PID with a callback.

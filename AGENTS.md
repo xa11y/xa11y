@@ -54,7 +54,7 @@ These tenets are firm defaults, not absolutes. If a situation genuinely requires
 
 ### macOS: ObjC exception safety
 
-All raw CoreFoundation / AX FFI calls in `xa11y-macos/src/ax.rs` must go through the wrappers in `xa11y-macos/src/exception_safe.m`. That file wraps calls like `CFRetain`, `CFRelease`, `CFGetTypeID`, `CFNumberGetValue`, `CFBooleanGetValue`, `CFArrayGetCount`, `CFArrayGetValueAtIndex`, and `CFDictionaryGetValue` in `@try`/`@catch`. A misbehaving AX value's `-release` / `-getTypeID` can throw an `NSException` that unwinds through `extern "C"` → process abort. When adding a new CF or AX interop call, go through the `safe_*` wrapper; if one doesn't exist, add it to `exception_safe.m` first.
+All raw CoreFoundation / AX FFI calls in `xa11y-macos/src/ax.rs` must go through the wrappers in `xa11y-macos/src/exception_safe.m`. That file wraps calls like `CFRetain`, `CFRelease`, `CFGetTypeID`, `CFNumberGetValue`, `CFBooleanGetValue`, `CFArrayGetCount`, `CFArrayGetValueAtIndex`, and `CFDictionaryGetValue` in `@try`/`@catch`. A misbehaving AX value's `-release` / `-getTypeID` can throw an `NSException` that unwinds through `extern "C"` → process abort. When adding a new CF or AX interop call, go through the `safe_*` wrapper; if one doesn't exist, add it to `exception_safe.m` first. Enforced by `cargo xtask check-macos-ffi` (run automatically as part of `cargo xtask check`), which fails the build if any raw CF/AX symbol is referenced outside a `//` comment in `ax.rs`.
 
 ## Pre-Commit / Pre-PR Checklist
 
