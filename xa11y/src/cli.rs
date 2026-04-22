@@ -307,12 +307,26 @@ fn cmd_action(args: &[String]) -> Result<()> {
                 .unwrap_or(1.0);
             locator.scroll_down(amount)?;
         }
+        "scroll-up" => {
+            let amount = value
+                .as_deref()
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(1.0);
+            locator.scroll_up(amount)?;
+        }
         "scroll-right" => {
             let amount = value
                 .as_deref()
                 .and_then(|v| v.parse::<f64>().ok())
                 .unwrap_or(1.0);
             locator.scroll_right(amount)?;
+        }
+        "scroll-left" => {
+            let amount = value
+                .as_deref()
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(1.0);
+            locator.scroll_left(amount)?;
         }
         "increment" => locator.increment()?,
         "decrement" => locator.decrement()?,

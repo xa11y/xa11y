@@ -20,7 +20,7 @@ Integration tests use shared helpers from `xa11y/tests/integ/mod.rs`:
 
 ### Key coverage gaps to address
 
-- **macOS integration tests** — blocked on `xa11y-macos` provider implementation
+- **Qt-on-macOS integration tests in CI** — currently skipped in `.github/workflows/ci.yml` (macOS Qt job disabled); macOS integ for the AccessKit app is working and covered.
 
 ## Design Tenets
 

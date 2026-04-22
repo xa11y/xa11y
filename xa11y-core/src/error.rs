@@ -23,7 +23,7 @@ pub enum Error {
     SelectorNotMatched { selector: String },
 
     /// The node's platform handle is stale and re-traversal could not relocate it.
-    #[error("Element stale: could not relocate element")]
+    #[error("Element stale: could not relocate element for selector: {selector}")]
     ElementStale { selector: String },
 
     /// The requested action is not supported by this element.
