@@ -38,8 +38,6 @@ async function checks() {
   const _all: Element[] = await loc.elements();
   await loc.press();
   await loc.setValue('hello');
-  await loc.scrollDown();
-  await loc.scrollDown(2.5);
 
   // Element getters are sync and narrowed.
   const _role: string = el.role;

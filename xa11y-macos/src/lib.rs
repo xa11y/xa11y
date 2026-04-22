@@ -73,18 +73,6 @@ mod stub {
         fn set_text_selection(&self, _: &ElementData, _: u32, _: u32) -> Result<()> {
             unreachable!()
         }
-        fn scroll_down(&self, _: &ElementData, _: f64) -> Result<()> {
-            unreachable!()
-        }
-        fn scroll_up(&self, _: &ElementData, _: f64) -> Result<()> {
-            unreachable!()
-        }
-        fn scroll_right(&self, _: &ElementData, _: f64) -> Result<()> {
-            unreachable!()
-        }
-        fn scroll_left(&self, _: &ElementData, _: f64) -> Result<()> {
-            unreachable!()
-        }
         fn perform_action(&self, _: &ElementData, _: &str) -> Result<()> {
             unreachable!()
         }

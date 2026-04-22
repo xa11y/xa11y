@@ -85,8 +85,6 @@ mod provider_fuzz {
         "select",
         "show_menu",
         "scroll_into_view",
-        "scroll_down",
-        "scroll_right",
         "increment",
         "decrement",
         "blur",
@@ -152,8 +150,6 @@ mod provider_fuzz {
                 }
             }
             "type_text" => Some(provider.type_text(target, "test")),
-            "scroll_down" => Some(provider.scroll_down(target, rng.random_range(0.0..3.0))),
-            "scroll_right" => Some(provider.scroll_right(target, rng.random_range(0.0..3.0))),
             "set_text_selection" => {
                 let start = rng.random_range(0..10);
                 let end = rng.random_range(start..20);

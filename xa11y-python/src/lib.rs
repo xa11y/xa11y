@@ -374,22 +374,6 @@ impl Locator {
     fn select_text(&self, start: u32, end: u32) -> PyResult<()> {
         self.inner.select_text(start, end).map_err(to_py_err)
     }
-    #[pyo3(signature = (amount=1.0))]
-    fn scroll_up(&self, amount: f64) -> PyResult<()> {
-        self.inner.scroll_up(amount).map_err(to_py_err)
-    }
-    #[pyo3(signature = (amount=1.0))]
-    fn scroll_down(&self, amount: f64) -> PyResult<()> {
-        self.inner.scroll_down(amount).map_err(to_py_err)
-    }
-    #[pyo3(signature = (amount=1.0))]
-    fn scroll_left(&self, amount: f64) -> PyResult<()> {
-        self.inner.scroll_left(amount).map_err(to_py_err)
-    }
-    #[pyo3(signature = (amount=1.0))]
-    fn scroll_right(&self, amount: f64) -> PyResult<()> {
-        self.inner.scroll_right(amount).map_err(to_py_err)
-    }
     fn perform_action(&self, action: &str) -> PyResult<()> {
         self.inner.perform_action(action).map_err(to_py_err)
     }
@@ -1105,38 +1089,6 @@ impl xa11y::Provider for MockProvider {
             element.handle,
             "set_text_selection".into(),
             Some(format!("{start}..{end}")),
-        ));
-        Ok(())
-    }
-    fn scroll_down(&self, element: &xa11y::ElementData, amount: f64) -> xa11y::Result<()> {
-        self.actions.lock().unwrap().push((
-            element.handle,
-            "scroll_down".into(),
-            Some(format!("{amount}")),
-        ));
-        Ok(())
-    }
-    fn scroll_up(&self, element: &xa11y::ElementData, amount: f64) -> xa11y::Result<()> {
-        self.actions.lock().unwrap().push((
-            element.handle,
-            "scroll_up".into(),
-            Some(format!("{amount}")),
-        ));
-        Ok(())
-    }
-    fn scroll_right(&self, element: &xa11y::ElementData, amount: f64) -> xa11y::Result<()> {
-        self.actions.lock().unwrap().push((
-            element.handle,
-            "scroll_right".into(),
-            Some(format!("{amount}")),
-        ));
-        Ok(())
-    }
-    fn scroll_left(&self, element: &xa11y::ElementData, amount: f64) -> xa11y::Result<()> {
-        self.actions.lock().unwrap().push((
-            element.handle,
-            "scroll_left".into(),
-            Some(format!("{amount}")),
         ));
         Ok(())
     }

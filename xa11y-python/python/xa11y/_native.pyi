@@ -262,14 +262,6 @@ class Locator:
         """Type text at the current cursor position on the matched element."""
     def select_text(self, start: int, end: int) -> None:
         """Select a text range within the matched element (0-based offsets)."""
-    def scroll_up(self, amount: float = 1.0) -> None:
-        """Scroll the matched element upward."""
-    def scroll_down(self, amount: float = 1.0) -> None:
-        """Scroll the matched element downward."""
-    def scroll_left(self, amount: float = 1.0) -> None:
-        """Scroll the matched element leftward."""
-    def scroll_right(self, amount: float = 1.0) -> None:
-        """Scroll the matched element rightward."""
     def perform_action(self, action: str) -> None:
         """Perform an action by snake_case name."""
     def wait_visible(self, timeout: float = 5.0) -> Element:

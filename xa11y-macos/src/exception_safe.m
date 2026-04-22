@@ -344,23 +344,6 @@ void safe_cf_run_loop_stop(CFRunLoopRef rl) {
     }
 }
 
-// ── CGEvent Helpers (for Scroll action) ──────────────────────────────────────
-
-// Post a scroll wheel event with pixel-based amounts.
-// dy: positive = scroll up, negative = scroll down
-// dx: positive = scroll left, negative = scroll right
-void safe_cg_post_scroll_event(int32_t dy, int32_t dx) {
-    @try {
-        CGEventRef event = CGEventCreateScrollWheelEvent(NULL, kCGScrollEventUnitPixel, 2, dy, dx);
-        if (event) {
-            CGEventPost(kCGHIDEventTap, event);
-            CFRelease(event);
-        }
-    } @catch (NSException *e) {
-        // swallow
-    }
-}
-
 // Create an AXValue containing a CFRange (for AXSelectedTextRange).
 CFTypeRef safe_ax_value_create_cf_range(CFIndex location, CFIndex length) {
     @try {

@@ -95,7 +95,6 @@ extern "C" {
     fn safe_cf_run_loop_get_current() -> CFTypeRef;
     fn safe_cf_run_loop_run();
     fn safe_cf_run_loop_stop(run_loop: CFTypeRef);
-    fn safe_cg_post_scroll_event(dy: i32, dx: i32);
     fn safe_ax_value_create_cf_range(location: isize, length: isize) -> CFTypeRef;
 
     // CoreFoundation helpers - all calls from ax.rs go through these.
@@ -2085,32 +2084,6 @@ impl Provider for MacOSProvider {
                 "Set AXSelectedTextRange failed",
             ));
         }
-        Ok(())
-    }
-
-    // ── Scroll operations ───────────────────────────────────────────
-
-    fn scroll_down(&self, _element: &ElementData, amount: f64) -> Result<()> {
-        let dy = -(amount * 10.0) as i32;
-        unsafe { safe_cg_post_scroll_event(dy, 0) };
-        Ok(())
-    }
-
-    fn scroll_up(&self, _element: &ElementData, amount: f64) -> Result<()> {
-        let dy = (amount * 10.0) as i32;
-        unsafe { safe_cg_post_scroll_event(dy, 0) };
-        Ok(())
-    }
-
-    fn scroll_right(&self, _element: &ElementData, amount: f64) -> Result<()> {
-        let dx = -(amount * 10.0) as i32;
-        unsafe { safe_cg_post_scroll_event(0, dx) };
-        Ok(())
-    }
-
-    fn scroll_left(&self, _element: &ElementData, amount: f64) -> Result<()> {
-        let dx = (amount * 10.0) as i32;
-        unsafe { safe_cg_post_scroll_event(0, dx) };
         Ok(())
     }
 

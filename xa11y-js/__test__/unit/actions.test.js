@@ -47,10 +47,3 @@ test('toggle() on a checkbox resolves', async () => {
 test('performAction() dispatches arbitrary action names', async () => {
   await button('OK').performAction('press');
 });
-
-test('scroll helpers default to amount=1', async () => {
-  await button('OK').scrollDown();
-  await button('OK').scrollUp(2);
-  await button('OK').scrollLeft();
-  await button('OK').scrollRight(0.5);
-});

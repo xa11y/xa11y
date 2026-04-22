@@ -106,14 +106,6 @@ pub trait Provider: Send + Sync {
     /// Select a text range (0-based character offsets).
     fn set_text_selection(&self, element: &ElementData, start: u32, end: u32) -> Result<()>;
 
-    /// Scroll in the given direction by the given amount.
-    ///
-    /// Amount is in logical scroll units (≈ one mouse wheel notch).
-    fn scroll_down(&self, element: &ElementData, amount: f64) -> Result<()>;
-    fn scroll_up(&self, element: &ElementData, amount: f64) -> Result<()>;
-    fn scroll_right(&self, element: &ElementData, amount: f64) -> Result<()>;
-    fn scroll_left(&self, element: &ElementData, amount: f64) -> Result<()>;
-
     // ── Generic action escape hatch ─────────────────────────────────
 
     /// Perform an action by `snake_case` name.

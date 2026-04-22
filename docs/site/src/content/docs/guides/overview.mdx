@@ -146,7 +146,7 @@ println!("Found {} buttons", buttons.len());
 
 **Best practice:** make selectors specific so they stay stable as the UI evolves. Don't select `button` — select `button[name='Cancel']` inside a specific group or window. A vague selector like `button` can become unreliable when new elements are added — it may match the wrong element or start returning multiple matches unexpectedly.
 
-**Actions:** `press()`, `focus()`, `blur()`, `toggle()`, `select()`, `expand()`, `collapse()`, `set_value()`, `set_numeric_value()`, `type_text()`, `select_text()`, `increment()`, `decrement()`, `show_menu()`, `scroll_into_view()`, `scroll_up()`, `scroll_down()`, `scroll_left()`, `scroll_right()`.
+**Actions:** `press()`, `focus()`, `blur()`, `toggle()`, `select()`, `expand()`, `collapse()`, `set_value()`, `set_numeric_value()`, `type_text()`, `select_text()`, `increment()`, `decrement()`, `show_menu()`, `scroll_into_view()`.
 
 **Waits:** `wait_visible()`, `wait_hidden()`, `wait_attached()`, `wait_detached()`, `wait_enabled()`, `wait_disabled()`, `wait_focused()`, `wait_unfocused()`, `wait_for_state()`, `wait_until()`.
 

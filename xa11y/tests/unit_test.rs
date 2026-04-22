@@ -115,22 +115,6 @@ impl Provider for MockProvider {
             Some((element.handle, "set_text_selection".to_string()));
         Ok(())
     }
-    fn scroll_down(&self, element: &ElementData, _amount: f64) -> Result<()> {
-        *self.last_action.lock().unwrap() = Some((element.handle, "scroll_down".to_string()));
-        Ok(())
-    }
-    fn scroll_up(&self, element: &ElementData, _amount: f64) -> Result<()> {
-        *self.last_action.lock().unwrap() = Some((element.handle, "scroll_up".to_string()));
-        Ok(())
-    }
-    fn scroll_right(&self, element: &ElementData, _amount: f64) -> Result<()> {
-        *self.last_action.lock().unwrap() = Some((element.handle, "scroll_right".to_string()));
-        Ok(())
-    }
-    fn scroll_left(&self, element: &ElementData, _amount: f64) -> Result<()> {
-        *self.last_action.lock().unwrap() = Some((element.handle, "scroll_left".to_string()));
-        Ok(())
-    }
     fn perform_action(&self, element: &ElementData, action: &str) -> Result<()> {
         *self.last_action.lock().unwrap() = Some((element.handle, action.to_string()));
         Ok(())
@@ -1029,18 +1013,6 @@ impl Provider for MultiAppMockProvider {
     fn set_text_selection(&self, _: &ElementData, _: u32, _: u32) -> Result<()> {
         Ok(())
     }
-    fn scroll_down(&self, _: &ElementData, _: f64) -> Result<()> {
-        Ok(())
-    }
-    fn scroll_up(&self, _: &ElementData, _: f64) -> Result<()> {
-        Ok(())
-    }
-    fn scroll_right(&self, _: &ElementData, _: f64) -> Result<()> {
-        Ok(())
-    }
-    fn scroll_left(&self, _: &ElementData, _: f64) -> Result<()> {
-        Ok(())
-    }
     fn perform_action(&self, _: &ElementData, _: &str) -> Result<()> {
         Ok(())
     }
@@ -1302,18 +1274,6 @@ impl Provider for DelayedProvider {
     }
     fn set_text_selection(&self, e: &ElementData, s: u32, en: u32) -> Result<()> {
         self.inner.set_text_selection(e, s, en)
-    }
-    fn scroll_down(&self, e: &ElementData, a: f64) -> Result<()> {
-        self.inner.scroll_down(e, a)
-    }
-    fn scroll_up(&self, e: &ElementData, a: f64) -> Result<()> {
-        self.inner.scroll_up(e, a)
-    }
-    fn scroll_right(&self, e: &ElementData, a: f64) -> Result<()> {
-        self.inner.scroll_right(e, a)
-    }
-    fn scroll_left(&self, e: &ElementData, a: f64) -> Result<()> {
-        self.inner.scroll_left(e, a)
     }
     fn perform_action(&self, e: &ElementData, a: &str) -> Result<()> {
         self.inner.perform_action(e, a)

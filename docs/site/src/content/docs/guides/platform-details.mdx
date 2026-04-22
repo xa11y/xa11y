@@ -68,19 +68,8 @@ Roles not recognized by a platform map to `Unknown`.
 | `Decrement` | AXDecrement | decrement *(or Value -step)* | RangeValuePattern *(-step)* |
 | `ShowMenu` | AXShowMenu | menu, showmenu, popup | ExpandCollapsePattern |
 | `ScrollIntoView` | *(no-op — no AX equivalent)* | Component.ScrollTo | ScrollItemPattern |
-| `Scroll` | CGEvent pixel scroll | repeated scroll action | ScrollPattern SmallIncrement |
 
 ## Platform caveats
-
-### Scroll units
-
-The `amount` parameter in `scroll_up()`, `scroll_down()`, etc. is in **logical scroll units** (roughly one mouse wheel notch), but the underlying mechanism differs:
-
-| Platform | Implementation | 1 unit equals |
-| --- | --- | --- |
-| macOS | `CGEventCreateScrollWheelEvent` | ~10 pixels |
-| Linux | Repeats AT-SPI scroll action N times | 1 discrete scroll step |
-| Windows | Repeats `ScrollPattern.Scroll(SmallIncrement)` N times | 1 SmallIncrement step |
 
 ### ScrollIntoView
 

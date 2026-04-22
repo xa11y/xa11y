@@ -74,7 +74,6 @@ Query accessibility trees with CSS-like selectors:
 | `set_value` | Set a text field's value |
 | `type_text` | Type text into an element |
 | `increment` / `decrement` | Adjust a slider or stepper |
-| `scroll` | Scroll in a direction |
 | `show_menu` | Open a context menu |
 
 ## Platform Support

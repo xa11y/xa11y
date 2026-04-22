@@ -116,18 +116,6 @@ impl xa11y::Provider for MockProvider {
     ) -> xa11y::Result<()> {
         self.record(el, "set_text_selection", Some(format!("{start}..{end}")))
     }
-    fn scroll_down(&self, el: &xa11y::ElementData, amount: f64) -> xa11y::Result<()> {
-        self.record(el, "scroll_down", Some(format!("{amount}")))
-    }
-    fn scroll_up(&self, el: &xa11y::ElementData, amount: f64) -> xa11y::Result<()> {
-        self.record(el, "scroll_up", Some(format!("{amount}")))
-    }
-    fn scroll_left(&self, el: &xa11y::ElementData, amount: f64) -> xa11y::Result<()> {
-        self.record(el, "scroll_left", Some(format!("{amount}")))
-    }
-    fn scroll_right(&self, el: &xa11y::ElementData, amount: f64) -> xa11y::Result<()> {
-        self.record(el, "scroll_right", Some(format!("{amount}")))
-    }
     fn perform_action(&self, el: &xa11y::ElementData, action: &str) -> xa11y::Result<()> {
         self.record(el, action, None)
     }

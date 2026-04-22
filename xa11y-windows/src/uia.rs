@@ -286,55 +286,6 @@ impl WindowsProvider {
 
         Ok(candidates)
     }
-
-    /// Scroll implementation shared by scroll_down/scroll_up/scroll_right/scroll_left.
-    fn scroll_impl(&self, element: &ElementData, amount: f64, is_vertical: bool) -> Result<()> {
-        let uia_element = self.get_cached(element.handle)?;
-        if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationScrollPattern>(UIA_ScrollPatternId)
-        } {
-            let count = (amount.abs() as u32).max(1);
-            for _ in 0..count {
-                let (h, v) = if is_vertical {
-                    let v = if amount >= 0.0 {
-                        ScrollAmount_SmallIncrement
-                    } else {
-                        ScrollAmount_SmallDecrement
-                    };
-                    (ScrollAmount_NoAmount, v)
-                } else {
-                    let h = if amount >= 0.0 {
-                        ScrollAmount_SmallIncrement
-                    } else {
-                        ScrollAmount_SmallDecrement
-                    };
-                    (h, ScrollAmount_NoAmount)
-                };
-                unsafe { pattern.Scroll(h, v) }.map_err(|e| Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!("Scroll failed: {}", e),
-                })?;
-            }
-            return Ok(());
-        }
-        let dir = if is_vertical {
-            if amount >= 0.0 {
-                "scroll_down"
-            } else {
-                "scroll_up"
-            }
-        } else {
-            if amount >= 0.0 {
-                "scroll_right"
-            } else {
-                "scroll_left"
-            }
-        };
-        Err(Error::ActionNotSupported {
-            action: dir.to_string(),
-            role: element.role,
-        })
-    }
 }
 
 // ── Safe UIA helpers ────────────────────────────────────────────────────────
@@ -1088,22 +1039,6 @@ impl Provider for WindowsProvider {
             action: "set_text_selection".to_string(),
             role: element.role,
         })
-    }
-
-    fn scroll_down(&self, element: &ElementData, amount: f64) -> Result<()> {
-        self.scroll_impl(element, amount, true)
-    }
-
-    fn scroll_up(&self, element: &ElementData, amount: f64) -> Result<()> {
-        self.scroll_impl(element, -amount, true)
-    }
-
-    fn scroll_right(&self, element: &ElementData, amount: f64) -> Result<()> {
-        self.scroll_impl(element, amount, false)
-    }
-
-    fn scroll_left(&self, element: &ElementData, amount: f64) -> Result<()> {
-        self.scroll_impl(element, -amount, false)
     }
 
     fn perform_action(&self, element: &ElementData, action: &str) -> Result<()> {

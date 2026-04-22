@@ -109,18 +109,6 @@ impl Provider for StaticProviderRef {
     fn set_text_selection(&self, element: &ElementData, start: u32, end: u32) -> Result<()> {
         self.0.set_text_selection(element, start, end)
     }
-    fn scroll_down(&self, element: &ElementData, amount: f64) -> Result<()> {
-        self.0.scroll_down(element, amount)
-    }
-    fn scroll_up(&self, element: &ElementData, amount: f64) -> Result<()> {
-        self.0.scroll_up(element, amount)
-    }
-    fn scroll_right(&self, element: &ElementData, amount: f64) -> Result<()> {
-        self.0.scroll_right(element, amount)
-    }
-    fn scroll_left(&self, element: &ElementData, amount: f64) -> Result<()> {
-        self.0.scroll_left(element, amount)
-    }
     fn perform_action(&self, element: &ElementData, action: &str) -> Result<()> {
         self.0.perform_action(element, action)
     }
