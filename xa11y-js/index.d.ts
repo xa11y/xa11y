@@ -177,8 +177,11 @@ export class ActionNotSupportedError extends XA11yError {}
 /** An operation exceeded its timeout. */
 export class TimeoutError extends XA11yError {}
 
-/** The selector string has invalid syntax or the action data was rejected. */
+/** The selector string has invalid syntax. */
 export class InvalidSelectorError extends XA11yError {}
+
+/** The data passed to an action method was rejected (e.g. out-of-range slider value). */
+export class InvalidActionDataError extends XA11yError {}
 
 /** An OS-level accessibility error occurred. */
 export class PlatformError extends XA11yError {}

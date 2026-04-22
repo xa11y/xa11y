@@ -115,7 +115,10 @@ impl WindowsProvider {
     /// Cache a UIA element and return its handle ID.
     fn cache_element(&self, uia: IUIAutomationElement) -> u64 {
         let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
-        self.handle_cache.lock().unwrap().insert(handle, uia);
+        self.handle_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(handle, uia);
         handle
     }
 
@@ -123,7 +126,7 @@ impl WindowsProvider {
     fn get_cached(&self, handle: u64) -> Result<IUIAutomationElement> {
         self.handle_cache
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&handle)
             .cloned()
             .ok_or(Error::ElementStale {

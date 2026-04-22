@@ -1267,7 +1267,10 @@ impl MacOSProvider {
     /// Cache an AXElement and return a new handle ID.
     fn cache_element(&self, ax: AXElement) -> u64 {
         let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
-        self.handle_cache.lock().unwrap().insert(handle, ax);
+        self.handle_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(handle, ax);
         handle
     }
 
@@ -1275,7 +1278,7 @@ impl MacOSProvider {
     fn get_cached(&self, handle: u64) -> Result<AXElement> {
         self.handle_cache
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&handle)
             .cloned()
             .ok_or(Error::ElementStale {

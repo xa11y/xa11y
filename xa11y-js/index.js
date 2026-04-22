@@ -77,6 +77,13 @@ class InvalidSelectorError extends XA11yError {
   }
 }
 
+class InvalidActionDataError extends XA11yError {
+  constructor(message) {
+    super(message);
+    this.name = 'InvalidActionDataError';
+  }
+}
+
 class PlatformError extends XA11yError {
   constructor(message) {
     super(message);
@@ -93,7 +100,7 @@ const CODE_TO_CLASS = {
   XA11Y_TEXT_VALUE_NOT_SUPPORTED: ActionNotSupportedError,
   XA11Y_TIMEOUT: TimeoutError,
   XA11Y_INVALID_SELECTOR: InvalidSelectorError,
-  XA11Y_INVALID_ACTION_DATA: InvalidSelectorError,
+  XA11Y_INVALID_ACTION_DATA: InvalidActionDataError,
   XA11Y_PLATFORM: PlatformError,
 };
 
@@ -385,6 +392,7 @@ module.exports = {
   ActionNotSupportedError,
   TimeoutError,
   InvalidSelectorError,
+  InvalidActionDataError,
   PlatformError,
 
   // @internal -- used by unit tests

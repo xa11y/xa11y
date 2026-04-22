@@ -113,26 +113,26 @@ impl EventReceiver {
 
 /// Handle to cancel a subscription. Dropping this stops event delivery.
 pub struct CancelHandle {
-    _cancel_fn: Option<Box<dyn FnOnce() + Send>>,
+    cancel_fn: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl CancelHandle {
     /// Create a cancel handle with a cancellation callback.
     pub fn new(cancel_fn: impl FnOnce() + Send + 'static) -> Self {
         Self {
-            _cancel_fn: Some(Box::new(cancel_fn)),
+            cancel_fn: Some(Box::new(cancel_fn)),
         }
     }
 
     /// Create a no-op cancel handle.
     pub fn noop() -> Self {
-        Self { _cancel_fn: None }
+        Self { cancel_fn: None }
     }
 }
 
 impl Drop for CancelHandle {
     fn drop(&mut self) {
-        if let Some(cancel) = self._cancel_fn.take() {
+        if let Some(cancel) = self.cancel_fn.take() {
             cancel();
         }
     }

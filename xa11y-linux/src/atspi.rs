@@ -543,7 +543,10 @@ impl LinuxProvider {
     /// Cache an AccessibleRef and return a new handle ID.
     fn cache_element(&self, aref: AccessibleRef) -> u64 {
         let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
-        self.handle_cache.lock().unwrap().insert(handle, aref);
+        self.handle_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(handle, aref);
         handle
     }
 
@@ -551,7 +554,7 @@ impl LinuxProvider {
     fn get_cached(&self, handle: u64) -> Result<AccessibleRef> {
         self.handle_cache
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&handle)
             .cloned()
             .ok_or(Error::ElementStale {
@@ -695,7 +698,7 @@ impl LinuxProvider {
         if !action_index_map.is_empty() {
             self.action_indices
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .insert(handle, action_index_map);
         }
 
@@ -932,7 +935,7 @@ impl LinuxProvider {
     fn get_action_index(&self, handle: u64, action: &str) -> Result<i32> {
         self.action_indices
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&handle)
             .and_then(|map| map.get(action).copied())
             .ok_or_else(|| Error::ActionNotSupported {
