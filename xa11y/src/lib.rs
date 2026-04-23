@@ -44,89 +44,24 @@ pub use app_ext::AppExt;
 
 // ── Internal singleton ──────────────────────────────────────────────────────
 
-static PROVIDER: OnceLock<std::result::Result<&'static dyn Provider, String>> = OnceLock::new();
-
-fn get_provider_ref() -> Result<&'static dyn Provider> {
-    PROVIDER
-        .get_or_init(|| {
-            create_provider_boxed()
-                .map(|b| &*Box::leak(b))
-                .map_err(|e| format!("{e}"))
-        })
-        .as_ref()
-        .copied()
-        .map_err(|msg| Error::Platform {
-            code: -1,
-            message: msg.clone(),
-        })
-}
-
-/// Wrapper that lets a `&'static dyn Provider` be shared as `Arc<dyn Provider>`.
-struct StaticProviderRef(&'static dyn Provider);
-
-impl Provider for StaticProviderRef {
-    fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
-        self.0.get_children(element)
-    }
-    fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
-        self.0.get_parent(element)
-    }
-    fn press(&self, element: &ElementData) -> Result<()> {
-        self.0.press(element)
-    }
-    fn focus(&self, element: &ElementData) -> Result<()> {
-        self.0.focus(element)
-    }
-    fn blur(&self, element: &ElementData) -> Result<()> {
-        self.0.blur(element)
-    }
-    fn toggle(&self, element: &ElementData) -> Result<()> {
-        self.0.toggle(element)
-    }
-    fn select(&self, element: &ElementData) -> Result<()> {
-        self.0.select(element)
-    }
-    fn expand(&self, element: &ElementData) -> Result<()> {
-        self.0.expand(element)
-    }
-    fn collapse(&self, element: &ElementData) -> Result<()> {
-        self.0.collapse(element)
-    }
-    fn show_menu(&self, element: &ElementData) -> Result<()> {
-        self.0.show_menu(element)
-    }
-    fn increment(&self, element: &ElementData) -> Result<()> {
-        self.0.increment(element)
-    }
-    fn decrement(&self, element: &ElementData) -> Result<()> {
-        self.0.decrement(element)
-    }
-    fn scroll_into_view(&self, element: &ElementData) -> Result<()> {
-        self.0.scroll_into_view(element)
-    }
-    fn set_value(&self, element: &ElementData, value: &str) -> Result<()> {
-        self.0.set_value(element, value)
-    }
-    fn set_numeric_value(&self, element: &ElementData, value: f64) -> Result<()> {
-        self.0.set_numeric_value(element, value)
-    }
-    fn type_text(&self, element: &ElementData, text: &str) -> Result<()> {
-        self.0.type_text(element, text)
-    }
-    fn set_text_selection(&self, element: &ElementData, start: u32, end: u32) -> Result<()> {
-        self.0.set_text_selection(element, start, end)
-    }
-    fn perform_action(&self, element: &ElementData, action: &str) -> Result<()> {
-        self.0.perform_action(element, action)
-    }
-    fn subscribe(&self, element: &ElementData) -> Result<Subscription> {
-        self.0.subscribe(element)
-    }
-}
+// Store the provider as an Arc<dyn Provider> so callers can cheaply clone a
+// shared handle without an extra delegation wrapper or a leaked box. Err is
+// carried as a string so we can clone the OnceLock's payload on every access.
+static PROVIDER: OnceLock<std::result::Result<Arc<dyn Provider>, String>> = OnceLock::new();
 
 #[doc(hidden)]
 pub fn provider() -> Result<Arc<dyn Provider>> {
-    Ok(Arc::new(StaticProviderRef(get_provider_ref()?)))
+    match PROVIDER.get_or_init(|| {
+        create_provider_boxed()
+            .map(Arc::from)
+            .map_err(|e| format!("{e}"))
+    }) {
+        Ok(arc) => Ok(Arc::clone(arc)),
+        Err(msg) => Err(Error::Platform {
+            code: -1,
+            message: msg.clone(),
+        }),
+    }
 }
 
 // ── Platform provider construction (internal) ───────────────────────────────
