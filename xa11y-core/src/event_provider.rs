@@ -42,6 +42,11 @@ impl Subscription {
     }
 
     /// Block until an event matching `predicate` arrives or the timeout expires.
+    ///
+    /// If the event stream disconnects (all senders dropped) before a match
+    /// arrives, `wait_for` short-circuits with `Error::Timeout` carrying the
+    /// actual elapsed time — no further matching event can ever arrive, so
+    /// burning the remainder of the timeout in a dead poll loop is pointless.
     pub fn wait_for(&self, predicate: impl Fn(&Event) -> bool, timeout: Duration) -> Result<Event> {
         let start = std::time::Instant::now();
         loop {
@@ -51,11 +56,21 @@ impl Subscription {
                     elapsed: start.elapsed(),
                 });
             }
-            // Poll with short recv timeouts so we can re-check the deadline.
+            // Poll with short recv timeouts so we can re-check the deadline,
+            // and break out early on disconnect instead of polling a dead
+            // channel until the outer timeout fires.
             let poll = remaining.min(Duration::from_millis(10));
-            if let Some(event) = self.rx.recv_timeout(poll) {
-                if predicate(&event) {
-                    return Ok(event);
+            match self.rx.recv_timeout_status(poll) {
+                RecvStatus::Event(event) => {
+                    if predicate(&event) {
+                        return Ok(*event);
+                    }
+                }
+                RecvStatus::Timeout => continue,
+                RecvStatus::Disconnected => {
+                    return Err(Error::Timeout {
+                        elapsed: start.elapsed(),
+                    });
                 }
             }
         }
@@ -218,6 +233,32 @@ mod tests {
             RecvStatus::Timeout => panic!("expected Disconnected, got Timeout"),
             RecvStatus::Event(_) => panic!("unexpected event"),
         }
+    }
+
+    #[test]
+    fn wait_for_short_circuits_on_disconnect() {
+        // wait_for used to poll until its outer timeout even after the sender
+        // was dropped, because it used recv_timeout (no disconnect signal).
+        // It must now return as soon as the channel disconnects.
+        let (tx, rx) = mpsc::channel::<Event>();
+        drop(tx); // sender gone — no event will ever match.
+
+        let sub = Subscription::new(EventReceiver::new(rx), CancelHandle::noop());
+
+        let start = std::time::Instant::now();
+        let err = sub
+            .wait_for(|_| true, Duration::from_secs(5))
+            .expect_err("wait_for must not return an event on a disconnected stream");
+        let elapsed = start.elapsed();
+
+        match err {
+            Error::Timeout { .. } => {}
+            other => panic!("expected Timeout error, got {other:?}"),
+        }
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "wait_for blocked for {elapsed:?} — should short-circuit on disconnect"
+        );
     }
 
     #[test]
