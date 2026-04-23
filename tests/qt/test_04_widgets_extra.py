@@ -30,13 +30,33 @@ def test_selector_nth(qt_app):
     assert first[0].role == "button"
 
 
-# NOTE: The `[enabled="..."]` / `[checked="..."]` attribute-filter tests
-# that used to live here depended on the Linux fast-path selector
-# matcher delegating to a full ElementData build for unknown attrs.
-# That delegation was reverted while isolating an unrelated GTK CI
-# regression. When the delegation comes back (or when the fast-path
-# matcher learns to answer `enabled` / `checked` directly), re-add
-# these cases.
+def test_selector_attribute_enabled_true(qt_app):
+    """Attribute filter ``[enabled="true"]`` matches only enabled elements."""
+    enabled_buttons = qt_app.locator('button[enabled="true"]').elements()
+    assert enabled_buttons
+    for b in enabled_buttons:
+        assert b.enabled is True
+
+
+def test_selector_attribute_enabled_false(qt_app):
+    """Attribute filter ``[enabled="false"]`` matches disabled elements."""
+    # Cancel starts disabled. If a prior test pressed OK it may now be enabled,
+    # so tolerate either arrangement and only verify the filter's invariant.
+    disabled = qt_app.locator('[enabled="false"]').elements()
+    cancel = qt_app.locator('button[name="Cancel"]').element()
+    if not cancel.enabled:
+        assert any(d.name == "Cancel" for d in disabled)
+    else:
+        for d in disabled:
+            assert d.enabled is False
+
+
+def test_selector_attribute_checked_on(qt_app):
+    """Attribute filter ``[checked="on"]`` matches pre-checked widgets."""
+    matches = qt_app.locator('[checked="on"]').elements()
+    names = [m.name for m in matches]
+    # Subscribe and Option A are both initially checked.
+    assert "Subscribe" in names or "Option A" in names
 
 
 def test_selector_descendant_combinator(qt_app):

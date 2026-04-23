@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use rayon::prelude::*;
-use xa11y_core::selector::{Combinator, MatchOp, SelectorSegment};
+use xa11y_core::selector::{Combinator, SelectorSegment};
 use xa11y_core::{
     ElementData, Error, Provider, Rect, Result, Role, Selector, StateSet, Subscription, Toggled,
 };
@@ -13,6 +13,32 @@ use zbus::blocking::{Connection, Proxy};
 
 /// Global handle counter for mapping ElementData back to AccessibleRefs.
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
+
+/// Format a normalized state attribute as the same string `xa11y_core::selector::resolve_attr`
+/// would produce, so fast-path matching agrees byte-for-byte with the slow path.
+fn state_attr_to_string(name: &str, s: &StateSet) -> Option<String> {
+    match name {
+        "enabled" => Some(s.enabled.to_string()),
+        "visible" => Some(s.visible.to_string()),
+        "focused" => Some(s.focused.to_string()),
+        "focusable" => Some(s.focusable.to_string()),
+        "selected" => Some(s.selected.to_string()),
+        "editable" => Some(s.editable.to_string()),
+        "modal" => Some(s.modal.to_string()),
+        "required" => Some(s.required.to_string()),
+        "busy" => Some(s.busy.to_string()),
+        "expanded" => s.expanded.map(|b| b.to_string()),
+        "checked" => s.checked.map(|c| {
+            match c {
+                Toggled::On => "on",
+                Toggled::Off => "off",
+                Toggled::Mixed => "mixed",
+            }
+            .to_string()
+        }),
+        _ => None,
+    }
+}
 
 /// Linux accessibility provider using AT-SPI2 over D-Bus.
 pub struct LinuxProvider {
@@ -969,13 +995,29 @@ impl LinuxProvider {
 
     /// Check if an accessible ref matches a simple selector, fetching only the
     /// attributes the selector actually requires.
+    ///
+    /// Filter routing (cheapest first):
+    ///   * `role` / `name` / `value` / `description` — single targeted D-Bus
+    ///     call against this accessible.
+    ///   * Normalized state attrs (`enabled`, `checked`, `focused`, …) —
+    ///     one shared `GetState` call, cached for the rest of this match.
+    ///   * Anything else (custom `raw` keys, `bounds`, numeric values) — fall
+    ///     through to building a full `ElementData` and delegating to
+    ///     [`xa11y_core::selector::matches_simple`]. This is slower but keeps
+    ///     selectors with rare attribute filters semantically equivalent to
+    ///     the default tree-traversal path.
     fn matches_ref(
         &self,
         aref: &AccessibleRef,
         simple: &xa11y_core::selector::SimpleSelector,
     ) -> bool {
-        // Resolve role only if the selector needs it
-        let needs_role = simple.role.is_some() || simple.filters.iter().any(|f| f.attr == "role");
+        // Resolve role only if the selector needs it (for either the role
+        // segment or any role/checked filter — checked depends on role).
+        let needs_role = simple.role.is_some()
+            || simple
+                .filters
+                .iter()
+                .any(|f| matches!(f.attr.as_str(), "role" | "checked"));
         let role = if needs_role {
             Some(self.resolve_role(aref))
         } else {
@@ -990,7 +1032,6 @@ impl LinuxProvider {
                     }
                 }
                 xa11y_core::selector::RoleMatch::Platform(platform_role) => {
-                    // Match against the raw AT-SPI2 role name
                     let raw_role = self.get_role_name(aref).unwrap_or_default();
                     if raw_role != *platform_role {
                         return false;
@@ -999,48 +1040,56 @@ impl LinuxProvider {
             }
         }
 
+        let mut state_set: Option<StateSet> = None;
+
         for filter in &simple.filters {
-            let attr_value: Option<String> = match filter.attr.as_str() {
-                "role" => role.map(|r| r.to_snake_case().to_string()),
+            let attr = filter.attr.as_str();
+            let resolved: Option<Option<String>> = match attr {
+                "role" => Some(role.map(|r| r.to_snake_case().to_string())),
                 "name" => {
                     let name = self.get_name(aref).ok().filter(|s| !s.is_empty());
-                    // Mirror build_element_data: StaticText may have name in Text interface
-                    if name.is_none() && role == Some(Role::StaticText) {
+                    // Mirror build_element_data: StaticText carries its name
+                    // in the Text interface's Value when Name is empty.
+                    let resolved = if name.is_none() && role == Some(Role::StaticText) {
                         self.get_value(aref)
                     } else {
                         name
+                    };
+                    Some(resolved)
+                }
+                "value" => Some(self.get_value(aref)),
+                "description" => Some(self.get_description(aref).ok().filter(|s| !s.is_empty())),
+                "enabled" | "visible" | "focused" | "focusable" | "selected" | "editable"
+                | "modal" | "required" | "busy" | "expanded" | "checked" => {
+                    let s = state_set.get_or_insert_with(|| {
+                        // `parse_states` reads `checked` based on role; pass
+                        // whatever we already resolved (Unknown is a no-op for
+                        // the role-gated `checked` mapping).
+                        self.parse_states(aref, role.unwrap_or(Role::Unknown))
+                    });
+                    Some(state_attr_to_string(attr, s))
+                }
+                _ => None, // Routed through full ElementData below.
+            };
+
+            match resolved {
+                Some(value) => {
+                    if !xa11y_core::selector::match_op(&filter.op, &filter.value, value.as_deref())
+                    {
+                        return false;
                     }
                 }
-                "value" => self.get_value(aref),
-                "description" => self.get_description(aref).ok().filter(|s| !s.is_empty()),
-                // Unknown attributes: not resolvable in lightweight matching
-                _ => None,
-            };
-
-            let matches = match &filter.op {
-                MatchOp::Exact => attr_value.as_deref() == Some(filter.value.as_str()),
-                MatchOp::Contains => {
-                    let fl = filter.value.to_lowercase();
-                    attr_value
-                        .as_deref()
-                        .is_some_and(|v| v.to_lowercase().contains(&fl))
+                None => {
+                    // Filter targets an attribute the fast path doesn't know
+                    // (e.g. `bounds`, `numeric_value`, a custom `raw` key).
+                    // Build the full ElementData once and let the shared
+                    // matcher handle every remaining filter — it dispatches
+                    // to `ElementData` fields and the `raw` map identically
+                    // to the default tree-traversal path.
+                    let pid = None; // pid isn't selector-addressable
+                    let data = self.build_element_data(aref, pid);
+                    return xa11y_core::selector::matches_simple(&data, simple);
                 }
-                MatchOp::StartsWith => {
-                    let fl = filter.value.to_lowercase();
-                    attr_value
-                        .as_deref()
-                        .is_some_and(|v| v.to_lowercase().starts_with(&fl))
-                }
-                MatchOp::EndsWith => {
-                    let fl = filter.value.to_lowercase();
-                    attr_value
-                        .as_deref()
-                        .is_some_and(|v| v.to_lowercase().ends_with(&fl))
-                }
-            };
-
-            if !matches {
-                return false;
             }
         }
 
@@ -1066,7 +1115,14 @@ impl LinuxProvider {
 
         let children = self.get_atspi_children(parent)?;
 
-        // Filter valid children, flattening nested application nodes
+        // Filter invalid refs. Application-node flattening (collapsing a
+        // redundant `application` accessible into its grandchildren) is only
+        // valid when the parent is itself an application — i.e. we have already
+        // descended past the registry. At the registry root, the children *are*
+        // the applications and must not be collapsed, otherwise selectors like
+        // `application` (used by `App::list` / `App::by_name`) match nothing
+        // because the app accessibles get dissolved into their windows.
+        let parent_is_registry = parent.bus_name == "org.a11y.atspi.Registry";
         let mut to_search: Vec<AccessibleRef> = Vec::new();
         for child in children {
             if child.path == "/org/a11y/atspi/null"
@@ -1076,23 +1132,25 @@ impl LinuxProvider {
                 continue;
             }
 
-            let child_role = self.get_role_name(&child).unwrap_or_default();
-            if child_role == "application" {
-                let grandchildren = self.get_atspi_children(&child).unwrap_or_default();
-                for gc in grandchildren {
-                    if gc.path == "/org/a11y/atspi/null"
-                        || gc.bus_name.is_empty()
-                        || gc.path.is_empty()
-                    {
-                        continue;
+            if !parent_is_registry {
+                let child_role = self.get_role_name(&child).unwrap_or_default();
+                if child_role == "application" {
+                    let grandchildren = self.get_atspi_children(&child).unwrap_or_default();
+                    for gc in grandchildren {
+                        if gc.path == "/org/a11y/atspi/null"
+                            || gc.bus_name.is_empty()
+                            || gc.path.is_empty()
+                        {
+                            continue;
+                        }
+                        let gc_role = self.get_role_name(&gc).unwrap_or_default();
+                        if gc_role == "application" {
+                            continue;
+                        }
+                        to_search.push(gc);
                     }
-                    let gc_role = self.get_role_name(&gc).unwrap_or_default();
-                    if gc_role == "application" {
-                        continue;
-                    }
-                    to_search.push(gc);
+                    continue;
                 }
-                continue;
             }
             to_search.push(child);
         }
