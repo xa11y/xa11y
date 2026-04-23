@@ -1,0 +1,141 @@
+# Intentional divergence between xa11y-core's public API and its language
+# bindings. Every entry must have a rationale. Audit these periodically.
+#
+# Enforced by `cargo xtask check-bindings-parity`.
+
+[python]
+# Rust-only methods not exposed to Python. key = "Type::method".
+# Entries take the form: { method = "Type::method", reason = "why not exposed" }.
+rust_only = [
+    # ── App: explicit-provider plumbing ───────────────────────────────────
+    { method = "App::by_name_with", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "App::by_name_with_timeout", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "App::by_pid_with", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "App::by_pid_with_timeout", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "App::list_with", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+
+    # ── Internal constructors / plumbing accessors ────────────────────────
+    { method = "App::provider", reason = "Internal plumbing for provider implementors, not user API." },
+    { method = "App::data", reason = "Internal plumbing for provider implementors, not user API." },
+    { method = "Locator::new", reason = "Internal Rust constructor; bindings construct Locators via App.locator() / module-level locator()." },
+    { method = "Locator::provider", reason = "Internal plumbing for provider implementors, not user API." },
+    { method = "Locator::root", reason = "Internal plumbing for provider implementors, not user API." },
+    { method = "Locator::nth_index", reason = "Internal plumbing for provider implementors, not user API." },
+    { method = "Element::new", reason = "Internal Rust constructor; bindings construct Elements via Locator / navigation methods." },
+    { method = "Element::data", reason = "Internal plumbing for provider implementors, not user API." },
+    { method = "Element::provider", reason = "Internal plumbing for provider implementors, not user API." },
+    { method = "Element::states", reason = "Python flattens StateSet into individual getters (enabled, visible, focused, checked, ...) instead of exposing a nested states struct." },
+    { method = "Element::handle", reason = "Opaque provider handle; not part of the user-visible API." },
+    { method = "Subscription::new", reason = "Internal Rust constructor; bindings create Subscriptions via App.subscribe() / Element.subscribe()." },
+
+    # ── Wait / event-loop idiom differences ───────────────────────────────
+    { method = "Locator::with_timeout", reason = "Rust Locator uses builder-set default timeout; Python uses per-call timeout parameters on every wait_* / action method instead." },
+    { method = "Locator::wait_for_state", reason = "Rust generic state-enum wait; Python exposes specific wait_visible/wait_enabled/etc. plus predicate-based wait_until." },
+    { method = "Subscription::recv_status", reason = "Rust explicit disconnected-vs-timeout polling variant; Python uses predicate-based wait_for over typed Event receiver." },
+    { method = "Subscription::iter", reason = "Python exposes __iter__/__next__ context-manager idiom instead of an explicit blocking iterator." },
+]
+# Python-only methods not in Rust core. Python dunder methods (__repr__,
+# __str__, __eq__, __hash__, __iter__, __next__, __enter__, __exit__, __len__)
+# are filtered out automatically — no allowlist entry required.
+python_only = [
+    # App convenience constructors wrap the `_with` variants and inject the
+    # singleton provider. The Rust equivalents live on the `AppExt` trait in
+    # the `xa11y` umbrella crate, not on `xa11y_core::App`.
+    { method = "App::by_name", reason = "Binding-level convenience over App::by_name_with using the singleton provider; mirrors `xa11y::AppExt::by_name`." },
+    { method = "App::by_pid", reason = "Binding-level convenience over App::by_pid_with using the singleton provider; mirrors `xa11y::AppExt::by_pid`." },
+    { method = "App::list", reason = "Binding-level convenience over App::list_with using the singleton provider; mirrors `xa11y::AppExt::list`." },
+
+    # Flattened StateSet: Python exposes each boolean state directly on
+    # Element (element.enabled, element.visible, ...) instead of a nested
+    # states object. Core keeps these grouped under ElementData.states.
+    { method = "Element::enabled", reason = "Flattened from ElementData.states.enabled for Python ergonomics." },
+    { method = "Element::visible", reason = "Flattened from ElementData.states.visible for Python ergonomics." },
+    { method = "Element::focused", reason = "Flattened from ElementData.states.focused for Python ergonomics." },
+    { method = "Element::checked", reason = "Flattened from ElementData.states.checked for Python ergonomics." },
+    { method = "Element::selected", reason = "Flattened from ElementData.states.selected for Python ergonomics." },
+    { method = "Element::expanded", reason = "Flattened from ElementData.states.expanded for Python ergonomics." },
+    { method = "Element::editable", reason = "Flattened from ElementData.states.editable for Python ergonomics." },
+    { method = "Element::focusable", reason = "Flattened from ElementData.states.focusable for Python ergonomics." },
+    { method = "Element::modal", reason = "Flattened from ElementData.states.modal for Python ergonomics." },
+    { method = "Element::required", reason = "Flattened from ElementData.states.required for Python ergonomics." },
+    { method = "Element::busy", reason = "Flattened from ElementData.states.busy for Python ergonomics." },
+
+    # Element.subscribe is a binding convenience — core requires going through
+    # App.subscribe(), but the bindings let users subscribe to any element.
+    { method = "Element::subscribe", reason = "Binding convenience: subscribe to events for any element, delegating to the underlying provider.subscribe()." },
+
+    # Subscription.close pairs with __enter__ / __exit__ for explicit cleanup.
+    { method = "Subscription::close", reason = "Python context-manager idiom; pairs with __enter__ / __exit__ for explicit resource cleanup." },
+]
+
+[js]
+# Rust-only methods not exposed to JS. key = "Type::method".
+rust_only = [
+    # ── App: explicit-provider plumbing ───────────────────────────────────
+    { method = "App::by_name_with", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "App::by_name_with_timeout", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "App::by_pid_with", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "App::by_pid_with_timeout", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "App::list_with", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+
+    # ── Internal constructors / plumbing accessors ────────────────────────
+    { method = "App::provider", reason = "Internal plumbing for provider implementors, not user API." },
+    { method = "App::data", reason = "Internal plumbing for provider implementors, not user API." },
+    { method = "Locator::new", reason = "Internal Rust constructor; bindings construct Locators via App.locator() / module-level locator()." },
+    { method = "Locator::provider", reason = "Internal plumbing for provider implementors, not user API." },
+    { method = "Locator::root", reason = "Internal plumbing for provider implementors, not user API." },
+    { method = "Locator::nth_index", reason = "Internal plumbing for provider implementors, not user API." },
+    { method = "Element::new", reason = "Internal Rust constructor; bindings construct Elements via Locator / navigation methods." },
+    { method = "Element::data", reason = "Internal plumbing for provider implementors, not user API." },
+    { method = "Element::provider", reason = "Internal plumbing for provider implementors, not user API." },
+    { method = "Element::states", reason = "JS flattens StateSet into individual getters (enabled, visible, focused, checked, ...) instead of exposing a nested states object." },
+    { method = "Element::handle", reason = "Opaque provider handle; not part of the user-visible API." },
+    { method = "Subscription::new", reason = "Internal Rust constructor; bindings create Subscriptions via App.subscribe() / Element.subscribe()." },
+
+    # ── Wait / event-loop idiom differences ───────────────────────────────
+    { method = "Locator::with_timeout", reason = "Rust Locator uses builder-set default timeout; JS uses per-call timeout option on every wait* / action method instead." },
+    { method = "Locator::wait_for_state", reason = "Rust generic state-enum wait; JS exposes specific wait* helpers plus predicate-based waitUntil." },
+    { method = "Subscription::recv_status", reason = "Rust explicit disconnected-vs-timeout polling variant; JS uses predicate-based waitFor and EventEmitter model over blocking recv." },
+    { method = "Subscription::try_recv", reason = "JS exposes async EventEmitter + `start`/`drain` worker pattern instead of blocking recv/try_recv." },
+    { method = "Subscription::recv", reason = "JS exposes async EventEmitter + `start`/`drain` worker pattern instead of blocking recv/try_recv." },
+    { method = "Subscription::iter", reason = "JS exposes async EventEmitter + `start`/`drain` worker pattern instead of a blocking iterator." },
+]
+# JS-only methods not in Rust core. `constructor` is filtered automatically.
+js_only = [
+    # App convenience constructors mirror the Rust `xa11y::AppExt::by_name`
+    # etc. but live as static methods on the napi-generated App class.
+    { method = "App::by_name", reason = "Binding-level convenience over App::by_name_with using the singleton provider; mirrors `xa11y::AppExt::by_name`." },
+    { method = "App::by_pid", reason = "Binding-level convenience over App::by_pid_with using the singleton provider; mirrors `xa11y::AppExt::by_pid`." },
+    { method = "App::list", reason = "Binding-level convenience over App::list_with using the singleton provider; mirrors `xa11y::AppExt::list`." },
+
+    # App.waitForEvent is a JS-only convenience that wraps subscribe() + a
+    # one-shot waitForEvent() on the returned Subscription.
+    { method = "App::wait_for_event", reason = "JS-only convenience: temporary subscription + single-event wait, declared in index.d.ts." },
+
+    # Flattened StateSet: JS exposes each boolean state directly on Element
+    # (element.enabled, element.visible, ...) instead of a nested states
+    # object. Core keeps these grouped under ElementData.states.
+    { method = "Element::enabled", reason = "Flattened from ElementData.states.enabled for JS ergonomics." },
+    { method = "Element::visible", reason = "Flattened from ElementData.states.visible for JS ergonomics." },
+    { method = "Element::focused", reason = "Flattened from ElementData.states.focused for JS ergonomics." },
+    { method = "Element::checked", reason = "Flattened from ElementData.states.checked for JS ergonomics." },
+    { method = "Element::selected", reason = "Flattened from ElementData.states.selected for JS ergonomics." },
+    { method = "Element::expanded", reason = "Flattened from ElementData.states.expanded for JS ergonomics." },
+    { method = "Element::editable", reason = "Flattened from ElementData.states.editable for JS ergonomics." },
+    { method = "Element::focusable", reason = "Flattened from ElementData.states.focusable for JS ergonomics." },
+    { method = "Element::modal", reason = "Flattened from ElementData.states.modal for JS ergonomics." },
+    { method = "Element::required", reason = "Flattened from ElementData.states.required for JS ergonomics." },
+    { method = "Element::busy", reason = "Flattened from ElementData.states.busy for JS ergonomics." },
+
+    # Element.subscribe is a binding convenience — core requires going through
+    # App.subscribe(), but the bindings let users subscribe to any element.
+    { method = "Element::subscribe", reason = "Binding convenience: subscribe to events for any element, delegating to the underlying provider.subscribe()." },
+
+    # _NativeSubscription worker-pattern helpers. These are internal plumbing
+    # for the EventEmitter-based Subscription wrapper in index.js.
+    { method = "Subscription::start", reason = "JS threadsafe-function worker pattern for async event delivery; not user API." },
+    { method = "Subscription::drain", reason = "JS threadsafe-function worker pattern for async event delivery; not user API." },
+    { method = "Subscription::close", reason = "JS idiom for explicit subscription teardown, exposed on both _NativeSubscription (napi) and the user-facing EventEmitter wrapper." },
+    { method = "Subscription::closed", reason = "JS readonly property on the EventEmitter-based Subscription wrapper." },
+    { method = "Subscription::wait_for_event", reason = "JS-only EventEmitter convenience, declared in index.d.ts." },
+]

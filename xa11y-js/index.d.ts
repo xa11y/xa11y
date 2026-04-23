@@ -53,6 +53,31 @@ export interface WaitForEventOptions {
   signal?: AbortSignal;
 }
 
+export interface WaitUntilOptions {
+  /** Timeout in milliseconds. Default: 5000. Rejects with `TimeoutError`. */
+  timeout?: number;
+  /** Abort signal for cancellation. Rejects with `AbortError`. */
+  signal?: AbortSignal;
+}
+
+// Add `waitUntil` to the napi-generated `Locator` class via interface merging.
+// The method is attached to `native.Locator.prototype` in index.js.
+declare module './native.js' {
+  interface Locator {
+    /**
+     * Poll until `predicate` returns true, or the timeout elapses.
+     *
+     * The predicate is passed the first matching element, or `undefined` if
+     * none match — this lets callers wait for either appearance or
+     * detachment.
+     */
+    waitUntil(
+      predicate: (element: Element | undefined) => boolean | Promise<boolean>,
+      opts?: WaitUntilOptions,
+    ): Promise<void>;
+  }
+}
+
 // ── Subscription (EventEmitter) ───────────────────────────────────────────
 
 /**
@@ -89,6 +114,15 @@ export class Subscription extends EventEmitter {
   waitForEvent(
     type: EventTypeName | 'event',
     opts?: WaitForEventOptions,
+  ): Promise<Event>;
+
+  /**
+   * Wait for a single event matching `predicate`, regardless of type.
+   * Convenience wrapper over `waitForEvent('event', { predicate, ...opts })`.
+   */
+  waitFor(
+    predicate: (event: Event) => boolean,
+    opts?: Omit<WaitForEventOptions, 'predicate'>,
   ): Promise<Event>;
 }
 

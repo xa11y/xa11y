@@ -5,7 +5,11 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { _makeDisconnectedSubscription, _Subscription } = require('../../index.js');
+const {
+  _makeDisconnectedSubscription,
+  _Subscription,
+  TimeoutError,
+} = require('../../index.js');
 
 test('disconnected subscription stops the worker loop without hanging', async () => {
   // Create a _NativeSubscription whose backing mpsc sender has already been
@@ -35,4 +39,34 @@ test('closing a disconnected subscription is idempotent', () => {
   sub.close();
   sub.close(); // second close must not throw
   assert.equal(sub.closed, true);
+});
+
+test('waitFor rejects with TimeoutError when no event arrives', async () => {
+  const sub = new _Subscription(_makeDisconnectedSubscription());
+  try {
+    await assert.rejects(
+      sub.waitFor(() => true, { timeout: 50 }),
+      (err) => err instanceof TimeoutError,
+    );
+  } finally {
+    sub.close();
+  }
+});
+
+test('waitFor resolves with the first event matching the predicate', async () => {
+  const sub = new _Subscription(_makeDisconnectedSubscription());
+  try {
+    const wanted = { type: 'focusChanged', target: { name: 'Wanted' } };
+    const promise = sub.waitFor((ev) => ev.target && ev.target.name === 'Wanted', {
+      timeout: 1000,
+    });
+    // Subscription extends EventEmitter, so emit('event', …) directly feeds
+    // the catch-all listener that waitFor installs via waitForEvent('event').
+    sub.emit('event', { type: 'valueChanged', target: { name: 'Other' } });
+    sub.emit('event', wanted);
+    const got = await promise;
+    assert.equal(got, wanted);
+  } finally {
+    sub.close();
+  }
 });
