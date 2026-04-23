@@ -36,6 +36,8 @@ Integration tests use shared helpers from `xa11y/tests/integ/mod.rs`:
 
 3. **Action fidelity.** If an element reports an action name in its `actions` list, calling that action must invoke the original platform action — not a substitute or alias.
 
+   `press`, `toggle`, `focus`, `select`, `expand`, `collapse` are *semantic verbs* — cross-platform concepts. Tenet 3 applies to the semantic verb, not a specific platform API name. For example: `press` on Windows legitimately dispatches to Invoke, Toggle, SelectionItem.Select, or ExpandCollapse based on the element's primary-activation pattern — this is the Windows canonical implementation of "activate this element," matching AXPress on macOS and AT-SPI `DoAction("click")` on Linux. A violation would be advertising `press` in actions but calling a platform API that doesn't implement the semantic (e.g. input simulation, or an unrelated pattern).
+
 4. **Fail surfaceably, not fatally.** Prefer `Result` over `.unwrap()` / `.expect()` in provider and binding code.
    - **Locks**: `.lock().unwrap()` on caches or memoized state should be `.lock().unwrap_or_else(|e| e.into_inner())` — poisoning in a cache is recoverable. Only panic on locks that guard a genuine invariant.
    - **Platform FFI returns**: never `.unwrap()` a CF / AX / UIA / AT-SPI2 return. Propagate as `Error::Platform`.

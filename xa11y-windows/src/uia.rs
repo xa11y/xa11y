@@ -696,6 +696,16 @@ impl Provider for WindowsProvider {
 
     #[allow(non_upper_case_globals)]
     fn press(&self, element: &ElementData) -> Result<()> {
+        // `press` dispatches to the element's primary-activation UIA pattern:
+        // Invoke (buttons, menu items, links), Toggle (checkboxes, switches),
+        // SelectionItem.Select (list items, radio buttons), or ExpandCollapse
+        // (combo boxes, tree items). These patterns are mutually exclusive in
+        // practice — a given UIA element supports at most one. This mirrors
+        // AXPress on macOS and AT-SPI `DoAction("click")` on Linux, which
+        // likewise collapse all activation under a single verb. Tenet 3
+        // applies to the *semantic* verb (`press` = "activate this element"),
+        // not the underlying API — each branch below is Windows' canonical
+        // implementation of that semantic for the element's pattern.
         let uia_element = self.get_cached(element.handle)?;
         // Try InvokePattern (buttons, menu items)
         if let Ok(pattern) = unsafe {
@@ -946,31 +956,19 @@ impl Provider for WindowsProvider {
 
     fn set_numeric_value(&self, element: &ElementData, value: f64) -> Result<()> {
         let uia_element = self.get_cached(element.handle)?;
-        if let Ok(pattern) = unsafe {
+        let pattern = unsafe {
             uia_element
                 .GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId)
-        } {
-            unsafe { pattern.SetValue(value) }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: "RangeValue.SetValue failed".to_string(),
-            })?;
-            return Ok(());
         }
-        // Fall back to ValuePattern with string
-        if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
-        } {
-            let s: windows::core::BSTR = value.to_string().into();
-            unsafe { pattern.SetValue(&s) }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: "Value.SetValue failed".to_string(),
-            })?;
-            return Ok(());
-        }
-        Err(Error::Platform {
-            code: -1,
-            message: "No Value or RangeValue pattern".to_string(),
-        })
+        .map_err(|_| Error::ActionNotSupported {
+            action: "set_numeric_value".to_string(),
+            role: element.role,
+        })?;
+        unsafe { pattern.SetValue(value) }.map_err(|e| Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("RangeValue.SetValue failed: {}", e),
+        })?;
+        Ok(())
     }
 
     fn type_text(&self, element: &ElementData, text: &str) -> Result<()> {
