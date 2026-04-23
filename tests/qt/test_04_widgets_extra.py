@@ -65,8 +65,15 @@ def test_selector_attribute_enabled_false_matches_cancel(qt_app):
     strict=False,
 )
 def test_selector_attribute_checked_on(qt_app):
-    """Attribute filter ``[checked="on"]`` matches the pre-checked widget."""
-    # Subscribe checkbox is pre-checked in the test app.
+    """Attribute filter ``[checked="on"]`` matches a checked widget."""
+    # Earlier tests may have toggled the Subscribe checkbox off, so drive it
+    # into a known-checked state before asserting the selector hits it.
+    subscribe = qt_app.locator('check_box[name="Subscribe"]')
+    if subscribe.element().checked != "on":
+        subscribe.toggle()
+        time.sleep(ACTION_SETTLE)
+    assert subscribe.element().checked == "on", "pre-condition: Subscribe must be checked"
+
     matches = qt_app.locator('check_box[checked="on"]').elements()
     names = [m.name for m in matches]
     assert "Subscribe" in names, f"Expected 'Subscribe' in {names}"
