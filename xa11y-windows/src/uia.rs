@@ -1078,6 +1078,11 @@ impl Provider for WindowsProvider {
     }
 
     fn set_text_selection(&self, element: &ElementData, start: u32, end: u32) -> Result<()> {
+        if start > end {
+            return Err(Error::InvalidActionData {
+                message: format!("set_text_selection start ({start}) must be <= end ({end})"),
+            });
+        }
         let uia_element = self.get_cached(element.handle)?;
         if let Ok(pattern) = unsafe {
             uia_element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
@@ -1095,7 +1100,8 @@ impl Provider for WindowsProvider {
                     message: format!("TextRange::Move to {start} failed: {e}"),
                 }
             })?;
-            // Extend end to selection length.
+            // Extend end to selection length. `end >= start` is enforced
+            // above, so the u32 subtraction cannot underflow.
             unsafe {
                 range.MoveEndpointByUnit(
                     TextPatternRangeEndpoint_End,
