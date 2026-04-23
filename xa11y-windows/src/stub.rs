@@ -1,5 +1,6 @@
 //! Stub backend for non-Windows platforms (allows compilation on all targets).
 
+use xa11y_core::input::{InputProvider, Key, MouseButton, Point, ScrollDelta};
 use xa11y_core::{ElementData, Error, Provider, Result, Subscription};
 
 #[derive(Default)]
@@ -11,6 +12,45 @@ impl WindowsProvider {
             code: -1,
             message: "Windows backend only available on Windows".to_string(),
         })
+    }
+}
+
+#[derive(Default)]
+pub struct WindowsInputProvider;
+
+impl WindowsInputProvider {
+    pub fn new() -> Result<Self> {
+        Err(Error::Platform {
+            code: -1,
+            message: "Windows input backend only available on Windows".to_string(),
+        })
+    }
+}
+
+impl InputProvider for WindowsInputProvider {
+    fn pointer_move(&self, _: Point) -> Result<()> {
+        unreachable!()
+    }
+    fn pointer_down(&self, _: MouseButton) -> Result<()> {
+        unreachable!()
+    }
+    fn pointer_up(&self, _: MouseButton) -> Result<()> {
+        unreachable!()
+    }
+    fn pointer_click(&self, _: Point, _: MouseButton, _: u32) -> Result<()> {
+        unreachable!()
+    }
+    fn pointer_scroll(&self, _: Point, _: ScrollDelta) -> Result<()> {
+        unreachable!()
+    }
+    fn key_down(&self, _: &Key) -> Result<()> {
+        unreachable!()
+    }
+    fn key_up(&self, _: &Key) -> Result<()> {
+        unreachable!()
+    }
+    fn type_text(&self, _: &str) -> Result<()> {
+        unreachable!()
     }
 }
 

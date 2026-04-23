@@ -2741,6 +2741,7 @@ version = "0.6.2"
 dependencies = [
  "rayon",
  "serde_json",
+ "x11rb",
  "xa11y-core",
  "zbus",
 ]

@@ -6,8 +6,12 @@
 mod splice;
 
 #[cfg(target_os = "windows")]
+mod input;
+#[cfg(target_os = "windows")]
 mod uia;
 
+#[cfg(target_os = "windows")]
+pub use input::WindowsInputProvider;
 #[cfg(target_os = "windows")]
 pub use uia::WindowsProvider;
 
@@ -15,7 +19,7 @@ pub use uia::WindowsProvider;
 mod stub;
 
 #[cfg(not(target_os = "windows"))]
-pub use stub::WindowsProvider;
+pub use stub::{WindowsInputProvider, WindowsProvider};
 
 #[cfg(test)]
 mod tests {
