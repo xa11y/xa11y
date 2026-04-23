@@ -257,6 +257,47 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         gridView.frame = NSRect(x: 16, y: 20, width: 300, height: 60)
         gridBox.addSubview(gridView)
 
+        // ── Dynamic (events) ───────────────────────────────────────────
+        // Widgets that mutate on action so event tests can exercise
+        // NameChanged (Submit → status label) and StructureChanged
+        // (Add/Remove Item → list rows).
+        let dynBox = NSBox(frame: NSRect(x: 12, y: y - 120, width: 656, height: 120))
+        dynBox.title = "Dynamic"
+        docView.addSubview(dynBox)
+        y -= 130
+
+        statusLabel = NSTextField(frame: NSRect(x: 16, y: 78, width: 300, height: 24))
+        statusLabel.stringValue = "Status: Ready"
+        statusLabel.isEditable = false
+        statusLabel.isBordered = false
+        statusLabel.backgroundColor = .clear
+        statusLabel.setAccessibilityLabel("Status: Ready")
+        dynBox.addSubview(statusLabel)
+
+        let submitButton = NSButton(frame: NSRect(x: 16, y: 44, width: 120, height: 24))
+        submitButton.bezelStyle = .rounded
+        submitButton.title = "Submit"
+        submitButton.setAccessibilityLabel("Submit")
+        submitButton.target = self
+        submitButton.action = #selector(AppDelegate.onSubmitPressed)
+        dynBox.addSubview(submitButton)
+
+        let addItemButton = NSButton(frame: NSRect(x: 148, y: 44, width: 120, height: 24))
+        addItemButton.bezelStyle = .rounded
+        addItemButton.title = "Add Item"
+        addItemButton.setAccessibilityLabel("Add Item")
+        addItemButton.target = self
+        addItemButton.action = #selector(AppDelegate.onAddItemPressed)
+        dynBox.addSubview(addItemButton)
+
+        let removeItemButton = NSButton(frame: NSRect(x: 280, y: 44, width: 120, height: 24))
+        removeItemButton.bezelStyle = .rounded
+        removeItemButton.title = "Remove Item"
+        removeItemButton.setAccessibilityLabel("Remove Item")
+        removeItemButton.target = self
+        removeItemButton.action = #selector(AppDelegate.onRemoveItemPressed)
+        dynBox.addSubview(removeItemButton)
+
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -268,17 +309,40 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         cancelButton.isEnabled = true
     }
 
+    @objc func onSubmitPressed() {
+        // Alternate so every press produces a distinct AXTitleChanged event.
+        let current = statusLabel.stringValue
+        let next = current == "Status: Submitted" ? "Status: Ready" : "Status: Submitted"
+        statusLabel.stringValue = next
+        // Update the accessibility label too so NameChanged fires.
+        statusLabel.setAccessibilityLabel(next)
+    }
+
+    @objc func onAddItemPressed() {
+        rowCount += 1
+        listTable.reloadData()
+    }
+
+    @objc func onRemoveItemPressed() {
+        if rowCount > 0 {
+            rowCount -= 1
+            listTable.reloadData()
+        }
+    }
+
     // References to controls that need state changes
     var cancelButton: NSButton!
     var radioA: NSButton!
     var slider: NSSlider!
     var listTable: NSTableView!
+    var statusLabel: NSTextField!
+    var rowCount: Int = 5
 }
 
 // ── NSTableViewDataSource ─────────────────────────────────────────────────────
 
 extension AppDelegate: NSTableViewDataSource {
-    func numberOfRows(in _: NSTableView) -> Int { 5 }
+    func numberOfRows(in _: NSTableView) -> Int { rowCount }
 
     func tableView(_ tableView: NSTableView, objectValueFor column: NSTableColumn?, row: Int) -> Any? {
         "Item \(row + 1)"

@@ -160,12 +160,36 @@ class TestWindow(Gtk.ApplicationWindow):
 
         # Only one list in the app — identified by role in tests.
         self.list_box = Gtk.ListBox()
+        self._next_item_ix = 6  # tracks next dynamic item id
         for i in range(1, 6):
             row = Gtk.ListBoxRow()
             row_label = Gtk.Label(label=f"Item {i}")
             row.set_child(row_label)
             self.list_box.append(row)
         list_group.append(self.list_box)
+
+        # ── Dynamic (events) ─────────────────────────────────────────
+        # Widgets that mutate on action so event tests can exercise
+        # NameChanged (Submit → status label) and StructureChanged
+        # (Add/Remove Item → list rows).
+        dyn_group = self._make_group("Dynamic")
+        box.append(dyn_group)
+
+        # Status label whose accessible name changes on Submit press.
+        self.status_label = Gtk.Label(label="Status: Ready")
+        dyn_group.append(self.status_label)
+
+        self.submit_button = Gtk.Button(label="Submit")
+        self.submit_button.connect("clicked", self._on_submit_clicked)
+        dyn_group.append(self.submit_button)
+
+        self.add_item_button = Gtk.Button(label="Add Item")
+        self.add_item_button.connect("clicked", self._on_add_item_clicked)
+        dyn_group.append(self.add_item_button)
+
+        self.remove_item_button = Gtk.Button(label="Remove Item")
+        self.remove_item_button.connect("clicked", self._on_remove_item_clicked)
+        dyn_group.append(self.remove_item_button)
 
     def _make_group(self, name: str) -> Gtk.Box:
         inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -177,6 +201,26 @@ class TestWindow(Gtk.ApplicationWindow):
 
     def _on_ok_clicked(self, _btn: Gtk.Button) -> None:
         self.cancel_button.set_sensitive(True)
+
+    def _on_submit_clicked(self, _btn: Gtk.Button) -> None:
+        # Alternate the label text on each press so every press produces
+        # a distinct AT-SPI2 NameChanged event.
+        current = self.status_label.get_label()
+        new = "Status: Submitted" if current != "Status: Submitted" else "Status: Ready"
+        self.status_label.set_label(new)
+
+    def _on_add_item_clicked(self, _btn: Gtk.Button) -> None:
+        row = Gtk.ListBoxRow()
+        row_label = Gtk.Label(label=f"Item {self._next_item_ix}")
+        row.set_child(row_label)
+        self.list_box.append(row)
+        self._next_item_ix += 1
+
+    def _on_remove_item_clicked(self, _btn: Gtk.Button) -> None:
+        # Remove the last row if any remain.
+        last = self.list_box.get_last_child()
+        if last is not None:
+            self.list_box.remove(last)
 
 
 def main() -> None:
