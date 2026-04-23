@@ -15,6 +15,7 @@ from xa11y._native import (
     Element,
     Event,
     EventType,
+    InputSim,
     InvalidActionDataError,
     InvalidSelectorError,
     Locator,
@@ -25,6 +26,7 @@ from xa11y._native import (
     Subscription,
     TimeoutError,
     XA11yError,
+    input_sim,
     locator,
 )
 
@@ -35,6 +37,7 @@ __all__ = [
     "Element",
     "Event",
     "EventType",
+    "InputSim",
     "InvalidActionDataError",
     "InvalidSelectorError",
     "Locator",
@@ -45,5 +48,6 @@ __all__ = [
     "Subscription",
     "TimeoutError",
     "XA11yError",
+    "input_sim",
     "locator",
 ]

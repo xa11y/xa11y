@@ -42,3 +42,36 @@ def tauri_app():
         app_names=APP_NAMES,
         content_ready_selector='button[name="OK"]',
     )
+
+
+@pytest.fixture(scope="module")
+def tauri_input_app():
+    """Launch the Tauri app and navigate to the input-events page.
+
+    A module-scoped fixture (separate process) so the event log starts
+    empty and focus state doesn't bleed in from the widget tests.
+    """
+    import time
+
+    _ensure_built()
+    gen = launch_test_app(
+        command=[BINARY],
+        app_names=APP_NAMES,
+        content_ready_selector='button[name="OK"]',
+    )
+    app = next(gen)
+    # Click the link to navigate to input-events.html, then wait for the
+    # hit target to appear in the a11y tree before handing off to tests.
+    app.locator('link[name="input events →"]').press()
+    for _ in range(50):
+        if app.locator('region[name="Hit target"]').exists():
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("input-events page did not load within 5s")
+    try:
+        yield app
+    finally:
+        # Advance the launch generator to run its teardown.
+        for _ in gen:
+            pass
