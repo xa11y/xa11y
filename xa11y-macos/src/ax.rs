@@ -2412,13 +2412,37 @@ impl MacOSProvider {
             }
         });
 
-        let run_loop_usize =
-            rl_rx
-                .recv_timeout(Duration::from_secs(5))
-                .map_err(|_| Error::Platform {
+        let run_loop_usize = match rl_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(rl) => rl,
+            Err(_) => {
+                // Either the worker thread exited before reporting its
+                // RunLoop pointer (source-null case: the sender drops and
+                // `recv_timeout` returns `Disconnected` almost immediately),
+                // or the thread is genuinely stuck (should not happen —
+                // `rl_tx.send` precedes `safe_cf_run_loop_run`). Either way,
+                // clean up rather than leaking `observer`, the
+                // `ObserverContext` box, and the thread handle, which the
+                // original code dropped on the ground when `?` fired.
+                //
+                // `handle.is_finished()` lets us join without risk of hang
+                // in the common (source-null) case; in the unlikely
+                // still-running case we release the observer but abandon
+                // the thread handle — releasing the observer tears down
+                // the run-loop source the thread is polling, so it will
+                // wake up and exit on its own soon after.
+                if handle.is_finished() {
+                    let _ = handle.join();
+                }
+                unsafe {
+                    safe_cf_release(observer);
+                    drop(Box::from_raw(ctx_ptr as *mut ObserverContext));
+                }
+                return Err(Error::Platform {
                     code: -1,
                     message: "Failed to start observer RunLoop".to_string(),
-                })?;
+                });
+            }
+        };
 
         let ctx_usize = ctx_ptr as usize;
 
