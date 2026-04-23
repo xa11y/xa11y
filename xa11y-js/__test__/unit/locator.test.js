@@ -6,7 +6,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
 const xa11y = require('../../index.js');
-const { _makeTestLocator, Locator, SelectorNotMatchedError } = xa11y;
+const { _makeTestLocator, Locator, SelectorNotMatchedError, TimeoutError } = xa11y;
 
 function root() {
   return _makeTestLocator();
@@ -66,4 +66,35 @@ test('locator properties are preserved across chains', () => {
   assert.ok(derived instanceof Locator);
   assert.ok(typeof derived.selector === 'string');
   assert.ok(derived.selector.includes('button'));
+});
+
+test('waitUntil resolves when predicate is satisfied by a present element', async () => {
+  const loc = root().descendant('button[name="Back"]');
+  await loc.waitUntil((el) => el !== undefined && el.name === 'Back', {
+    timeout: 1000,
+  });
+});
+
+test('waitUntil sees `undefined` when no element matches', async () => {
+  const loc = root().descendant('button[name="Nope"]');
+  await loc.waitUntil((el) => el === undefined, { timeout: 1000 });
+});
+
+test('waitUntil rejects with TimeoutError when predicate never matches', async () => {
+  const loc = root();
+  await assert.rejects(
+    loc.waitUntil(() => false, { timeout: 50 }),
+    (err) => err instanceof TimeoutError,
+  );
+});
+
+test('waitUntil supports async predicates', async () => {
+  const loc = root().descendant('button[name="Back"]');
+  await loc.waitUntil(
+    async (el) => {
+      await new Promise((r) => setTimeout(r, 1));
+      return el !== undefined;
+    },
+    { timeout: 1000 },
+  );
 });

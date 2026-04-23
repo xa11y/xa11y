@@ -232,6 +232,9 @@ jobs:
         working-directory: xa11y-js
         run: cargo clippy --all-targets
 
+      - name: Check bindings parity
+        run: cargo xtask check-bindings-parity
+
   # ── License check ─────────────────────────────────────────────────
   license-check:
     name: License Check
@@ -545,6 +548,226 @@ jobs:
               issue_number: context.issue.number,
               body,
             });
+
+  # ── JS integration tests on macOS against the AccessKit test app ──
+  js-integ-macos:
+    name: JS integration (macOS)
+    runs-on: macos-latest
+    needs: js
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            xa11y-js/target
+          key: ${{ runner.os }}-cargo-js-integ-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-js-integ-
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: xa11y-js/package-lock.json
+
+      - name: Grant accessibility TCC permission
+        run: |
+          # Grant kTCCServiceAccessibility to the node binary so that when
+          # node --test drives the xa11y JS bindings against the AccessKit
+          # test app, AXUIElement calls aren't blocked. Same SQL pattern as
+          # the `macos` job — SIP covers /System/* only on hosted runners.
+          NODE_PATH=$(which node)
+          echo "Granting TCC kTCCServiceAccessibility to: $NODE_PATH"
+          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+            "INSERT OR REPLACE INTO access(service,client,client_type,auth_value,auth_reason,auth_version,csreq,policy_id,indirect_object_identifier_type,indirect_object_identifier,indirect_object_code_identity,flags,last_modified) \
+             VALUES('kTCCServiceAccessibility','${NODE_PATH}',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));"
+          sudo launchctl stop com.apple.tccd 2>/dev/null || true
+          sleep 2
+
+      - name: Run JS integration tests
+        id: js_integ
+        run: ./scripts/run_js_tests.sh
+
+      - name: Post diagnostics to PR on failure
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const jsDir = 'xa11y-js';
+            const sections = [];
+            const diag = path.join(jsDir, '.failure-diagnostics.log');
+            if (fs.existsSync(diag)) {
+              sections.push('### Diagnostic dump\n\n```\n' + fs.readFileSync(diag, 'utf8') + '\n```');
+            }
+            const appLog = path.join(jsDir, '.xa11y-test-app.log');
+            if (fs.existsSync(appLog)) {
+              sections.push('### xa11y-test-app stdout/stderr\n\n```\n' + fs.readFileSync(appLog, 'utf8') + '\n```');
+            }
+            const nodeLog = path.join(jsDir, '.node-test-output.log');
+            if (fs.existsSync(nodeLog)) {
+              const content = fs.readFileSync(nodeLog, 'utf8');
+              const tail = content.split('\n').slice(-200).join('\n');
+              sections.push('### node --test output (tail)\n\n```\n' + tail + '\n```');
+            }
+            if (sections.length === 0) {
+              sections.push('_No diagnostic files were produced — the failure happened before the test step could write them._');
+            }
+            const body =
+              '### JS integration (macOS) failure — run ' + context.runId + '\n\n' +
+              sections.join('\n\n') +
+              '\n\n<sub>Posted automatically from `ci.yml` `js-integ-macos` job.</sub>';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+  # ── JS integration tests on Windows against the AccessKit test app ──
+  js-integ-windows:
+    name: JS integration (Windows)
+    runs-on: windows-latest
+    needs: js
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            xa11y-js/target
+          key: ${{ runner.os }}-cargo-js-integ-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-js-integ-
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: xa11y-js/package-lock.json
+
+      - name: Run JS integration tests
+        id: js_integ
+        # `shell: bash` on windows-latest routes to Git Bash, which provides
+        # the POSIX environment run_js_tests.sh expects. The script uses
+        # `timeout` which is shipped with Git Bash's coreutils on the
+        # hosted runner image — see task notes if that ever changes.
+        shell: bash
+        run: ./scripts/run_js_tests.sh
+
+      - name: Post diagnostics to PR on failure
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v9
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const jsDir = 'xa11y-js';
+            const sections = [];
+            const diag = path.join(jsDir, '.failure-diagnostics.log');
+            if (fs.existsSync(diag)) {
+              sections.push('### Diagnostic dump\n\n```\n' + fs.readFileSync(diag, 'utf8') + '\n```');
+            }
+            const appLog = path.join(jsDir, '.xa11y-test-app.log');
+            if (fs.existsSync(appLog)) {
+              sections.push('### xa11y-test-app stdout/stderr\n\n```\n' + fs.readFileSync(appLog, 'utf8') + '\n```');
+            }
+            const nodeLog = path.join(jsDir, '.node-test-output.log');
+            if (fs.existsSync(nodeLog)) {
+              const content = fs.readFileSync(nodeLog, 'utf8');
+              const tail = content.split('\n').slice(-200).join('\n');
+              sections.push('### node --test output (tail)\n\n```\n' + tail + '\n```');
+            }
+            if (sections.length === 0) {
+              sections.push('_No diagnostic files were produced — the failure happened before the test step could write them._');
+            }
+            const body =
+              '### JS integration (Windows) failure — run ' + context.runId + '\n\n' +
+              sections.join('\n\n') +
+              '\n\n<sub>Posted automatically from `ci.yml` `js-integ-windows` job.</sub>';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+  # ── Electron integration tests (Linux only; bug is Linux-specific) ──
+  electron:
+    name: Electron integration (Linux)
+    runs-on: ubuntu-latest
+    needs: js
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+            xa11y-js/target
+          key: ${{ runner.os }}-cargo-electron-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-electron-
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: xa11y-js/package-lock.json
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            xvfb dbus dbus-x11 \
+            at-spi2-core \
+            libxkbcommon-x11-0 libxkbcommon-x11-dev \
+            libxcursor1 libxrandr2 libxi6 \
+            libx11-xcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0 \
+            libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3 \
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 \
+            libxcb-image0 libxcb-render-util0 libxcb-xkb1 \
+            libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
+            libdrm2 libgbm1 libxcomposite1 libxdamage1 libxfixes3 \
+            libpango-1.0-0 libasound2t64
+
+      - name: Run Electron integration tests
+        id: electron_integ
+        run: ./scripts/run_electron_tests.sh
 
   # ── Fuzz testing ───────────────────────────────────────────────────
   fuzz:

@@ -1023,7 +1023,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// Runs the Rust CLI implementation with the given args (excluding program name).
 #[pyfunction]
 fn _cli_main(args: Vec<String>) -> PyResult<()> {
-    xa11y::cli::run(&args).map_err(|e| PlatformError::new_err(format!("{e}")))
+    xa11y::cli::run(&args).map_err(to_py_err)
 }
 
 // ── Test helpers ────────────────────────────────────────────────────────────

@@ -58,15 +58,20 @@ test('press on "Add Item" grows the dynamic list', async () => {
   const addBtn = app.locator('button[name="Add Item"]');
   if (!(await addBtn.exists())) return; // not all builds expose this button
 
-  const countBefore = await app.locator('list_item').count();
+  // Match by name prefix rather than role: AccessKit's macOS bridge maps
+  // Role::ListItem to a non-list-item AX role, so a role selector like
+  // `list_item` matches 0 elements on macOS even when the dynamic items exist.
+  // The dynamic items are uniquely labeled "Item 1", "Item 2", ...
+  const itemSelector = '[name^="Item "]';
+  const countBefore = await app.locator(itemSelector).count();
   await addBtn.press();
-  await sleep(200);
+  await sleep(500);
 
   app = await getApp();
-  const countAfter = await app.locator('list_item').count();
+  const countAfter = await app.locator(itemSelector).count();
   assert.ok(
     countAfter >= countBefore + 1,
-    `expected list to grow from ${countBefore} to >= ${countBefore + 1}, got ${countAfter}`,
+    `expected item count to grow from ${countBefore} to >= ${countBefore + 1}, got ${countAfter}`,
   );
 });
 

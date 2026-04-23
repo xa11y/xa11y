@@ -1,4 +1,29 @@
 //! Integration test helpers — minimize boilerplate for cross-platform tests.
+//!
+//! Test bodies live in thematic submodules so this crate stays navigable:
+//!
+//! * `tree` — tree structure, role coverage, tree methods, element fields,
+//!   stateset fields, selector queries, serialization, provider operations.
+//! * `actions` — action dispatch, new actions (Blur/SetTextSelection/TypeText),
+//!   complex/stress scenarios, error paths.
+//! * `events_{macos,windows,linux}` — platform-specific event subscription
+//!   end-to-end tests. The `#[cfg(target_os = "…")]` gate lives on the
+//!   module declaration below so individual tests don't need it.
+//!
+//! The helpers in this file (`app_root`, `one`, `named`, `act`, `try_act`)
+//! are reached from submodule tests via `use crate::integ as h;`.
+
+pub mod actions;
+pub mod tree;
+
+#[cfg(target_os = "macos")]
+pub mod events_macos;
+
+#[cfg(target_os = "windows")]
+pub mod events_windows;
+
+#[cfg(target_os = "linux")]
+pub mod events_linux;
 
 use xa11y::*;
 

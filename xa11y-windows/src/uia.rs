@@ -1447,6 +1447,7 @@ impl EventContext {
             timestamp: std::time::Instant::now(),
         };
         if let Ok(tx) = self.sender.lock() {
+            // Receiver may be dropped after close(); lost event is expected then.
             let _ = tx.send(event);
         }
     }
@@ -1796,6 +1797,7 @@ impl WindowsProvider {
             )
         } {
             unsafe {
+                // Cleanup during error path; can't override the original error.
                 let _ = self
                     .automation
                     .RemovePropertyChangedEventHandler(&app_root, &property);

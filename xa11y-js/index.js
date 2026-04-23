@@ -155,6 +155,56 @@ patchPrototypeMethods(native.Element);
 patchPrototypeMethods(native.Locator);
 patchPrototypeMethods(native.Event);
 
+// ── Locator.waitUntil (JS-side polling loop) ───────────────────────────────
+//
+// Implemented on top of the existing `elements()` call rather than surfaced
+// through napi, mirroring the Rust `Locator::wait_until` internal loop.
+// The 50ms poll interval matches the Python equivalent in
+// `xa11y-python/src/lib.rs::Locator::wait_until`.
+Object.defineProperty(native.Locator.prototype, 'waitUntil', {
+  configurable: true,
+  writable: true,
+  value: async function waitUntil(predicate, opts = {}) {
+    const { timeout = 5000, signal } = opts;
+    const deadline = Date.now() + timeout;
+
+    if (signal && signal.aborted) {
+      throw new DOMException('The operation was aborted', 'AbortError');
+    }
+
+    while (true) {
+      // Predicate sees `undefined` when no element matches (mirror of
+      // Python's `None`) so callers can wait for detachment, too.
+      const elements = await this.elements();
+      const el = elements[0];
+      if (await predicate(el)) return;
+
+      if (signal && signal.aborted) {
+        throw new DOMException('The operation was aborted', 'AbortError');
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new TimeoutError(
+          `Timeout after ${timeout}ms waiting for predicate on '${this.selector}'`,
+        );
+      }
+
+      await new Promise((resolve, reject) => {
+        const delay = Math.min(50, remaining);
+        const timer = setTimeout(() => {
+          if (signal) signal.removeEventListener('abort', onAbort);
+          resolve();
+        }, delay);
+        const onAbort = () => {
+          clearTimeout(timer);
+          reject(new DOMException('The operation was aborted', 'AbortError'));
+        };
+        if (signal) signal.addEventListener('abort', onAbort, { once: true });
+      });
+    }
+  },
+});
+
 // ── Subscription (EventEmitter wrapper) ────────────────────────────────────
 
 /**
@@ -259,6 +309,21 @@ class Subscription extends EventEmitter {
 
       this.on(type, onEvent);
     });
+  }
+
+  /**
+   * Wait for a single event matching `predicate`, regardless of type.
+   *
+   * Convenience wrapper over `waitForEvent('event', { predicate, ...opts })`.
+   *
+   * @param {(ev: object) => boolean} predicate
+   * @param {object} [opts]
+   * @param {number} [opts.timeout=5000]
+   * @param {AbortSignal} [opts.signal]
+   * @returns {Promise<object>}
+   */
+  waitFor(predicate, opts = {}) {
+    return this.waitForEvent('event', { ...opts, predicate });
   }
 }
 
