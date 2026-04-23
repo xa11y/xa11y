@@ -34,6 +34,10 @@ class TimeoutError(XA11yError):
 class InvalidSelectorError(XA11yError):
     """The selector string has invalid syntax."""
 
+class InvalidActionDataError(XA11yError):
+    """An action received invalid data (e.g. ``Locator.nth(0)``, or a
+    text-selection range with ``start > end``)."""
+
 class PlatformError(XA11yError):
     """An OS-level accessibility error occurred."""
 

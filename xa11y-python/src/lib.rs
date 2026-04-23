@@ -20,6 +20,7 @@ pyo3::create_exception!(_native, SelectorNotMatchedError, XA11yError);
 pyo3::create_exception!(_native, ActionNotSupportedError, XA11yError);
 pyo3::create_exception!(_native, XA11yTimeoutError, XA11yError);
 pyo3::create_exception!(_native, InvalidSelectorError, XA11yError);
+pyo3::create_exception!(_native, InvalidActionDataError, XA11yError);
 pyo3::create_exception!(_native, PlatformError, XA11yError);
 
 fn to_py_err(e: xa11y::Error) -> PyErr {
@@ -51,7 +52,7 @@ fn to_py_err(e: xa11y::Error) -> PyErr {
             InvalidSelectorError::new_err(format!("Invalid selector '{selector}': {message}"))
         }
         xa11y::Error::InvalidActionData { message } => {
-            PyValueError::new_err(format!("Invalid action data: {message}"))
+            InvalidActionDataError::new_err(format!("Invalid action data: {message}"))
         }
         xa11y::Error::Platform { code, message } => {
             PlatformError::new_err(format!("Platform error ({code}): {message}"))
@@ -340,10 +341,17 @@ impl Locator {
         self.inner.selector()
     }
 
-    fn nth(&self, n: usize) -> Self {
-        Self {
-            inner: self.inner.clone().nth(n),
+    fn nth(&self, n: usize) -> PyResult<Self> {
+        // Reject n == 0 at the binding boundary instead of forwarding to
+        // `Locator::nth`, which asserts and panics (crashes Python).
+        if n == 0 {
+            return Err(to_py_err(xa11y::Error::InvalidActionData {
+                message: "Locator.nth is 1-based; got 0".to_string(),
+            }));
         }
+        Ok(Self {
+            inner: self.inner.clone().nth(n),
+        })
     }
 
     fn first(&self) -> Self {
@@ -987,6 +995,10 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "InvalidSelectorError",
         m.py().get_type::<InvalidSelectorError>(),
+    )?;
+    m.add(
+        "InvalidActionDataError",
+        m.py().get_type::<InvalidActionDataError>(),
     )?;
     m.add("PlatformError", m.py().get_type::<PlatformError>())?;
 

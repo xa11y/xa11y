@@ -3,6 +3,8 @@
 //! This backend implements the `Provider` trait using the Windows UI Automation API.
 //! No special permissions are required for local UIA queries.
 
+mod splice;
+
 #[cfg(target_os = "windows")]
 mod uia;
 

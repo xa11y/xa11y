@@ -49,14 +49,19 @@ Actions: press, focus, blur, toggle, expand, collapse, select, show-menu,
 pub(crate) struct Opts {
     pub app: Option<String>,
     pub pid: Option<u32>,
+    pub value: Option<String>,
 }
 
-/// Parse --app NAME and --pid PID from a slice, returning the Opts and
-/// remaining positional arguments.
+/// Parse known flags (`--app`, `--pid`, `--value`) from a slice, returning
+/// the parsed Opts and the remaining positional arguments.
+///
+/// Unknown flags are left in the positional output (so downstream callers
+/// see them and can surface a sensible error) rather than swallowed.
 pub(crate) fn parse_opts(args: &[String]) -> (Opts, Vec<String>) {
     let mut opts = Opts {
         app: None,
         pid: None,
+        value: None,
     };
     let mut positional = Vec::new();
     let mut i = 0;
@@ -69,6 +74,10 @@ pub(crate) fn parse_opts(args: &[String]) -> (Opts, Vec<String>) {
             "--pid" => {
                 i += 1;
                 opts.pid = args.get(i).and_then(|s| s.parse().ok());
+            }
+            "--value" => {
+                i += 1;
+                opts.value = args.get(i).cloned();
             }
             other => positional.push(other.to_string()),
         }
@@ -283,9 +292,7 @@ fn cmd_action(args: &[String]) -> Result<()> {
     }
     let action_name = &positional[0];
     let selector = &positional[1];
-
-    // Extract --value from the raw args (before opts parsing strips it)
-    let value = extract_flag_value(args, "--value");
+    let value = opts.value.clone();
 
     let app = resolve_app(&opts)?;
     let locator = app.locator(selector);
@@ -384,17 +391,6 @@ pub(crate) fn format_event_detail(event: &Event) -> String {
     }
 }
 
-pub(crate) fn extract_flag_value(args: &[String], flag: &str) -> Option<String> {
-    let mut i = 0;
-    while i < args.len() {
-        if args[i] == flag {
-            return args.get(i + 1).cloned();
-        }
-        i += 1;
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,21 +449,31 @@ mod tests {
     }
 
     #[test]
-    fn extract_flag_value_found() {
-        let args = strs(&["--app", "Foo", "--value", "hello"]);
-        assert_eq!(extract_flag_value(&args, "--value"), Some(s("hello")));
+    fn parse_opts_value_flag() {
+        let args = strs(&["--value", "hello"]);
+        let (opts, pos) = parse_opts(&args);
+        assert_eq!(opts.value.as_deref(), Some("hello"));
+        assert!(pos.is_empty());
     }
 
     #[test]
-    fn extract_flag_value_missing() {
-        let args = strs(&["--app", "Foo"]);
-        assert_eq!(extract_flag_value(&args, "--value"), None);
+    fn parse_opts_value_before_positional_does_not_leak() {
+        // Regression: `--value` used to fall into the positional arm, so
+        // an args list that placed it before the selector produced a
+        // positional list of ["action", "--value", "text", "selector"],
+        // and the CLI mistook "--value" for the selector.
+        let args = strs(&["set-value", "--value", "hello", "button[name='OK']"]);
+        let (opts, pos) = parse_opts(&args);
+        assert_eq!(opts.value.as_deref(), Some("hello"));
+        assert_eq!(pos, vec![s("set-value"), s("button[name='OK']")]);
     }
 
     #[test]
-    fn extract_flag_value_at_end() {
+    fn parse_opts_value_missing_trailing_arg() {
         let args = strs(&["--value"]);
-        assert_eq!(extract_flag_value(&args, "--value"), None);
+        let (opts, pos) = parse_opts(&args);
+        assert!(opts.value.is_none());
+        assert!(pos.is_empty());
     }
 
     // ── Format element ──────────────────────────────────────────────────────
@@ -636,6 +642,7 @@ mod tests {
         let opts = Opts {
             app: None,
             pid: None,
+            value: None,
         };
         let err = resolve_app(&opts).unwrap_err();
         let msg = format!("{err}");

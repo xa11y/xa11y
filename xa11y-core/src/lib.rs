@@ -10,7 +10,9 @@ pub mod selector;
 
 /// Shared in-memory mock Provider. Gated behind `test-support` so only the
 /// language bindings' test builds (and other explicit opt-ins) compile it.
-#[cfg(feature = "test-support")]
+/// Also available during `cargo test` on this crate so internal unit tests
+/// can exercise end-to-end provider flows without duplicating the fixture.
+#[cfg(any(feature = "test-support", test))]
 pub mod mock;
 
 // Re-export primary types at the crate root for convenience.

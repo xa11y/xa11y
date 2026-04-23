@@ -795,7 +795,7 @@ impl LinuxProvider {
         let visible = (bits & VISIBLE) != 0 || (bits & SHOWING) != 0;
 
         let checked = match role {
-            Role::CheckBox | Role::RadioButton | Role::MenuItem => {
+            Role::CheckBox | Role::RadioButton | Role::MenuItem | Role::Switch => {
                 if (bits & INDETERMINATE) != 0 {
                     Some(Toggled::Mixed)
                 } else if (bits & CHECKED) != 0 {
@@ -1675,18 +1675,12 @@ impl Provider for LinuxProvider {
     fn set_text_selection(&self, element: &ElementData, start: u32, end: u32) -> Result<()> {
         let target = self.get_cached(element.handle)?;
         let proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Text")?;
-        // Try SetSelection first, fall back to AddSelection
-        if proxy
+        proxy
             .call_method("SetSelection", &(0i32, start as i32, end as i32))
-            .is_err()
-        {
-            proxy
-                .call_method("AddSelection", &(start as i32, end as i32))
-                .map_err(|e| Error::Platform {
-                    code: -1,
-                    message: format!("Text.AddSelection failed: {}", e),
-                })?;
-        }
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("Text.SetSelection failed: {}", e),
+            })?;
         Ok(())
     }
 

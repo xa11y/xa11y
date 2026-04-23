@@ -276,7 +276,15 @@ fn ax_bool(element: AXUIElementRef, attribute: &str) -> Option<bool> {
 fn ax_number_f64(element: AXUIElementRef, attribute: &str) -> Option<f64> {
     let value = ax_attr(element, attribute)?;
     unsafe {
-        if safe_cf_get_type_id(value) == safe_cf_number_get_type_id() {
+        let type_id = safe_cf_get_type_id(value);
+        // Each branch owns the CFRelease of `value` exactly once: the number
+        // path releases explicitly after the copy; the string path transfers
+        // ownership to `CFString::wrap_under_create_rule`, which releases on
+        // drop; the fall-through releases before returning `None`. The
+        // previous control flow released in the number branch and then read
+        // `value` again in the string branch (use-after-free) and released
+        // it a second time on the fall-through path (double-release).
+        if type_id == safe_cf_number_get_type_id() {
             let mut result: f64 = 0.0;
             let ok = safe_cf_number_get_value(
                 value,
@@ -284,11 +292,11 @@ fn ax_number_f64(element: AXUIElementRef, attribute: &str) -> Option<f64> {
                 &mut result as *mut _ as *mut c_void,
             );
             safe_cf_release(value);
-            if ok {
-                return Some(result);
-            }
+            return if ok { Some(result) } else { None };
         }
-        if safe_cf_get_type_id(value) == safe_cf_string_get_type_id() {
+        if type_id == safe_cf_string_get_type_id() {
+            // `wrap_under_create_rule` adopts the existing +1 retain; the
+            // resulting `CFString` releases on drop.
             let s = CFString::wrap_under_create_rule(value as *const _);
             return s.to_string().trim().parse::<f64>().ok();
         }
@@ -2404,13 +2412,37 @@ impl MacOSProvider {
             }
         });
 
-        let run_loop_usize =
-            rl_rx
-                .recv_timeout(Duration::from_secs(5))
-                .map_err(|_| Error::Platform {
+        let run_loop_usize = match rl_rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(rl) => rl,
+            Err(_) => {
+                // Either the worker thread exited before reporting its
+                // RunLoop pointer (source-null case: the sender drops and
+                // `recv_timeout` returns `Disconnected` almost immediately),
+                // or the thread is genuinely stuck (should not happen —
+                // `rl_tx.send` precedes `safe_cf_run_loop_run`). Either way,
+                // clean up rather than leaking `observer`, the
+                // `ObserverContext` box, and the thread handle, which the
+                // original code dropped on the ground when `?` fired.
+                //
+                // `handle.is_finished()` lets us join without risk of hang
+                // in the common (source-null) case; in the unlikely
+                // still-running case we release the observer but abandon
+                // the thread handle — releasing the observer tears down
+                // the run-loop source the thread is polling, so it will
+                // wake up and exit on its own soon after.
+                if handle.is_finished() {
+                    let _ = handle.join();
+                }
+                unsafe {
+                    safe_cf_release(observer);
+                    drop(Box::from_raw(ctx_ptr as *mut ObserverContext));
+                }
+                return Err(Error::Platform {
                     code: -1,
                     message: "Failed to start observer RunLoop".to_string(),
-                })?;
+                });
+            }
+        };
 
         let ctx_usize = ctx_ptr as usize;
 

@@ -28,8 +28,15 @@ impl Locator {
 
     /// Return a new Locator that selects the *n*-th match (1-based).
     #[napi]
-    pub fn nth(&self, n: u32) -> Self {
-        Self::from_inner(self.inner.clone().nth(n as usize))
+    pub fn nth(&self, n: u32) -> napi::Result<Self> {
+        // Reject n == 0 at the binding boundary instead of forwarding to
+        // `Locator::nth`, which asserts and panics (crashes Node).
+        if n == 0 {
+            return Err(crate::errors::map_err(xa11y::Error::InvalidActionData {
+                message: "Locator.nth is 1-based; got 0".to_string(),
+            }));
+        }
+        Ok(Self::from_inner(self.inner.clone().nth(n as usize)))
     }
 
     /// Return a new Locator that selects the first match.
