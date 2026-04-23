@@ -102,6 +102,8 @@ const CODE_TO_CLASS = {
   XA11Y_INVALID_SELECTOR: InvalidSelectorError,
   XA11Y_INVALID_ACTION_DATA: InvalidActionDataError,
   XA11Y_PLATFORM: PlatformError,
+  XA11Y_NO_ELEMENT_BOUNDS: InvalidActionDataError,
+  XA11Y_UNSUPPORTED: ActionNotSupportedError,
 };
 
 /** Convert any thrown value into a typed xa11y error if it carries our tag. */

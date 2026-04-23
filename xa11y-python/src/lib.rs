@@ -57,6 +57,12 @@ fn to_py_err(e: xa11y::Error) -> PyErr {
         xa11y::Error::Platform { code, message } => {
             PlatformError::new_err(format!("Platform error ({code}): {message}"))
         }
+        xa11y::Error::NoElementBounds => {
+            PyValueError::new_err("Element has no bounds; cannot compute a screen point")
+        }
+        xa11y::Error::Unsupported { feature } => {
+            ActionNotSupportedError::new_err(format!("Unsupported: {feature}"))
+        }
     }
 }
 
