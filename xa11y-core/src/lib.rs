@@ -3,6 +3,7 @@ pub mod element;
 pub mod error;
 pub mod event;
 pub mod event_provider;
+pub mod input;
 pub mod locator;
 pub mod provider;
 pub mod role;
@@ -21,6 +22,10 @@ pub use element::{Element, ElementData, RawPlatformData, Rect, StateSet, Toggled
 pub use error::{Error, Result};
 pub use event::{ElementState, Event, EventKind, StateFlag};
 pub use event_provider::{CancelHandle, EventReceiver, RecvStatus, Subscription, SubscriptionIter};
+pub use input::{
+    anchor_point, point_for, Anchor, ClickOptions, ClickTarget, DragOptions, InputProvider,
+    InputSim, IntoPoint, Key, Modifier, MouseButton, Point, ScrollDelta,
+};
 pub use locator::Locator;
 pub use provider::Provider;
 pub use role::{unknown_role, Role};
