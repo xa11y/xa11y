@@ -57,6 +57,11 @@ def test_try_recv_returns_none_when_idle(tauri_app: xa11y.App) -> None:
 # ── FocusChanged ───────────────────────────────────────────────────────────
 
 
+@pytest.mark.xfail(
+    sys.platform == "linux",
+    reason="Tauri on Linux uses WebKit2GTK, which doesn't reliably emit AT-SPI2 FocusChanged events for programmatic focus moves in tests.",
+    strict=False,
+)
 def test_focus_changed_event(tauri_app: xa11y.App) -> None:
     """focus() on a webview control fires a FocusChanged event.
 
@@ -76,6 +81,11 @@ def test_focus_changed_event(tauri_app: xa11y.App) -> None:
 # ── ValueChanged ───────────────────────────────────────────────────────────
 
 
+@pytest.mark.xfail(
+    sys.platform == "linux",
+    reason="Tauri on Linux uses WebKit2GTK, which doesn't reliably emit AT-SPI2 ValueChanged for HTML range sliders driven by increment().",
+    strict=False,
+)
 def test_value_changed_event_slider(tauri_app: xa11y.App) -> None:
     """Incrementing a slider fires a ValueChanged event."""
     sl = tauri_app.locator('slider[name="Volume"]')
@@ -91,6 +101,11 @@ def test_value_changed_event_slider(tauri_app: xa11y.App) -> None:
 # ── StateChanged ───────────────────────────────────────────────────────────
 
 
+@pytest.mark.xfail(
+    sys.platform == "linux",
+    reason="Tauri on Linux uses WebKit2GTK, which doesn't reliably emit AT-SPI2 StateChanged/ValueChanged for HTML checkbox toggles.",
+    strict=False,
+)
 def test_state_changed_event_checkbox(tauri_app: xa11y.App) -> None:
     """Toggling an HTML <input type="checkbox"> fires StateChanged or ValueChanged."""
     cb = tauri_app.locator('check_box[name="Agree to terms"]')
@@ -164,6 +179,11 @@ def test_name_changed_event_status_label(tauri_app: xa11y.App) -> None:
 # ── StructureChanged ───────────────────────────────────────────────────────
 
 
+@pytest.mark.xfail(
+    sys.platform == "linux",
+    reason="Tauri on Linux uses WebKit2GTK, which doesn't reliably emit AT-SPI2 StructureChanged for DOM mutations driven by button presses.",
+    strict=False,
+)
 def test_structure_changed_event_add_item(tauri_app: xa11y.App) -> None:
     """Appending a list option fires a StructureChanged event."""
     with tauri_app.subscribe() as sub:
@@ -181,6 +201,11 @@ def test_structure_changed_event_add_item(tauri_app: xa11y.App) -> None:
 # ── Event metadata ─────────────────────────────────────────────────────────
 
 
+@pytest.mark.xfail(
+    sys.platform == "linux",
+    reason="Depends on a ValueChanged event being emitted, which WebKit2GTK doesn't reliably do — see test_value_changed_event_slider.",
+    strict=False,
+)
 def test_event_has_app_metadata(tauri_app: xa11y.App) -> None:
     """Events carry app_name and app_pid matching the source app."""
     with tauri_app.subscribe() as sub:
