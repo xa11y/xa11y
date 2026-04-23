@@ -34,56 +34,6 @@ fn role_named(role: Role, name: &str) -> Selector {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::selector::{matches_simple, Combinator};
-    use serde_json::json;
-
-    #[test]
-    fn role_named_preserves_literal_name_with_special_chars() {
-        // Regression for a selector-injection bug: `App::by_name_with` used
-        // `format!(r#"application[name="{}"]"#, name)` without escaping, so a
-        // name containing `"` terminated the attribute value early and either
-        // failed to parse or matched the wrong element. The AST-based builder
-        // stores the literal name in the filter value.
-        let name = r#"My "Weird" App ]["#;
-        let sel = role_named(Role::Application, name);
-        assert_eq!(sel.segments.len(), 1);
-        assert_eq!(sel.segments[0].combinator, Combinator::Root);
-        let simple = &sel.segments[0].simple;
-        assert_eq!(simple.filters.len(), 1);
-        assert_eq!(simple.filters[0].attr, "name");
-        assert_eq!(simple.filters[0].value, name);
-    }
-
-    #[test]
-    fn role_named_matches_element_with_quoted_name() {
-        // End-to-end: the constructed selector actually matches an element
-        // whose name contains the special chars. Build a minimal ElementData
-        // and verify `matches_simple`.
-        let name = r#"Name"With"Quote"#;
-        let data = ElementData {
-            role: Role::Application,
-            name: Some(name.to_string()),
-            value: None,
-            description: None,
-            bounds: None,
-            actions: vec![],
-            states: crate::element::StateSet::default(),
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: None,
-            pid: Some(1),
-            raw: std::collections::HashMap::from([("app_name".to_string(), json!(name))]),
-            handle: 0,
-        };
-        let sel = role_named(Role::Application, name);
-        assert!(matches_simple(&data, &sel.segments[0].simple));
-    }
-}
-
 /// Polling interval shared by all `*_with_timeout` lookups.
 const LOOKUP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -290,5 +240,55 @@ impl std::fmt::Debug for App {
             .field("name", &self.name)
             .field("pid", &self.pid)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::selector::{matches_simple, Combinator};
+    use serde_json::json;
+
+    #[test]
+    fn role_named_preserves_literal_name_with_special_chars() {
+        // Regression for a selector-injection bug: `App::by_name_with` used
+        // `format!(r#"application[name="{}"]"#, name)` without escaping, so a
+        // name containing `"` terminated the attribute value early and either
+        // failed to parse or matched the wrong element. The AST-based builder
+        // stores the literal name in the filter value.
+        let name = r#"My "Weird" App ]["#;
+        let sel = role_named(Role::Application, name);
+        assert_eq!(sel.segments.len(), 1);
+        assert_eq!(sel.segments[0].combinator, Combinator::Root);
+        let simple = &sel.segments[0].simple;
+        assert_eq!(simple.filters.len(), 1);
+        assert_eq!(simple.filters[0].attr, "name");
+        assert_eq!(simple.filters[0].value, name);
+    }
+
+    #[test]
+    fn role_named_matches_element_with_quoted_name() {
+        // End-to-end: the constructed selector actually matches an element
+        // whose name contains the special chars. Build a minimal ElementData
+        // and verify `matches_simple`.
+        let name = r#"Name"With"Quote"#;
+        let data = ElementData {
+            role: Role::Application,
+            name: Some(name.to_string()),
+            value: None,
+            description: None,
+            bounds: None,
+            actions: vec![],
+            states: crate::element::StateSet::default(),
+            numeric_value: None,
+            min_value: None,
+            max_value: None,
+            stable_id: None,
+            pid: Some(1),
+            raw: std::collections::HashMap::from([("app_name".to_string(), json!(name))]),
+            handle: 0,
+        };
+        let sel = role_named(Role::Application, name);
+        assert!(matches_simple(&data, &sel.segments[0].simple));
     }
 }
