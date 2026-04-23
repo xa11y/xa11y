@@ -374,22 +374,6 @@ impl Locator {
     fn select_text(&self, start: u32, end: u32) -> PyResult<()> {
         self.inner.select_text(start, end).map_err(to_py_err)
     }
-    #[pyo3(signature = (amount=1.0))]
-    fn scroll_up(&self, amount: f64) -> PyResult<()> {
-        self.inner.scroll_up(amount).map_err(to_py_err)
-    }
-    #[pyo3(signature = (amount=1.0))]
-    fn scroll_down(&self, amount: f64) -> PyResult<()> {
-        self.inner.scroll_down(amount).map_err(to_py_err)
-    }
-    #[pyo3(signature = (amount=1.0))]
-    fn scroll_left(&self, amount: f64) -> PyResult<()> {
-        self.inner.scroll_left(amount).map_err(to_py_err)
-    }
-    #[pyo3(signature = (amount=1.0))]
-    fn scroll_right(&self, amount: f64) -> PyResult<()> {
-        self.inner.scroll_right(amount).map_err(to_py_err)
-    }
     fn perform_action(&self, action: &str) -> PyResult<()> {
         self.inner.perform_action(action).map_err(to_py_err)
     }
@@ -1108,38 +1092,6 @@ impl xa11y::Provider for MockProvider {
         ));
         Ok(())
     }
-    fn scroll_down(&self, element: &xa11y::ElementData, amount: f64) -> xa11y::Result<()> {
-        self.actions.lock().unwrap().push((
-            element.handle,
-            "scroll_down".into(),
-            Some(format!("{amount}")),
-        ));
-        Ok(())
-    }
-    fn scroll_up(&self, element: &xa11y::ElementData, amount: f64) -> xa11y::Result<()> {
-        self.actions.lock().unwrap().push((
-            element.handle,
-            "scroll_up".into(),
-            Some(format!("{amount}")),
-        ));
-        Ok(())
-    }
-    fn scroll_right(&self, element: &xa11y::ElementData, amount: f64) -> xa11y::Result<()> {
-        self.actions.lock().unwrap().push((
-            element.handle,
-            "scroll_right".into(),
-            Some(format!("{amount}")),
-        ));
-        Ok(())
-    }
-    fn scroll_left(&self, element: &xa11y::ElementData, amount: f64) -> xa11y::Result<()> {
-        self.actions.lock().unwrap().push((
-            element.handle,
-            "scroll_left".into(),
-            Some(format!("{amount}")),
-        ));
-        Ok(())
-    }
     fn perform_action(&self, element: &xa11y::ElementData, action: &str) -> xa11y::Result<()> {
         self.actions
             .lock()
@@ -1438,7 +1390,7 @@ fn build_test_tree() -> Arc<MockProvider> {
     for (i, (role, name, value, desc, bounds, actions, states, nv, minv, maxv, sid)) in
         element_defs.into_iter().enumerate()
     {
-        let mut data = ElementData {
+        let data = ElementData {
             role,
             name: name.map(String::from),
             value: value.map(String::from),
@@ -1451,11 +1403,9 @@ fn build_test_tree() -> Arc<MockProvider> {
             max_value: maxv,
             stable_id: sid.map(String::from),
             pid: Some(1234),
-            attributes: std::collections::HashMap::new(),
             raw: std::collections::HashMap::new(),
             handle: i as u64,
         };
-        data.populate_attributes();
         nodes.push(MockNode {
             data,
             children: children_map[i].clone(),

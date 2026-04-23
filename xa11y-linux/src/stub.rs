@@ -89,22 +89,6 @@ impl Provider for LinuxProvider {
         Err(unavailable())
     }
 
-    fn scroll_down(&self, _: &ElementData, _: f64) -> Result<()> {
-        Err(unavailable())
-    }
-
-    fn scroll_up(&self, _: &ElementData, _: f64) -> Result<()> {
-        Err(unavailable())
-    }
-
-    fn scroll_right(&self, _: &ElementData, _: f64) -> Result<()> {
-        Err(unavailable())
-    }
-
-    fn scroll_left(&self, _: &ElementData, _: f64) -> Result<()> {
-        Err(unavailable())
-    }
-
     fn perform_action(&self, _: &ElementData, _: &str) -> Result<()> {
         Err(unavailable())
     }

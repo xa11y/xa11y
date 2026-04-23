@@ -56,8 +56,6 @@ pub const ALL_ACTIONS: &[&str] = &[
     "select",
     "show_menu",
     "scroll_into_view",
-    "scroll_down",
-    "scroll_right",
     "increment",
     "decrement",
     "blur",
@@ -174,10 +172,6 @@ impl Provider for FuzzProvider {
     fn set_numeric_value(&self, _: &ElementData, _: f64) -> Result<()> { Ok(()) }
     fn type_text(&self, _: &ElementData, _: &str) -> Result<()> { Ok(()) }
     fn set_text_selection(&self, _: &ElementData, _: u32, _: u32) -> Result<()> { Ok(()) }
-    fn scroll_down(&self, _: &ElementData, _: f64) -> Result<()> { Ok(()) }
-    fn scroll_up(&self, _: &ElementData, _: f64) -> Result<()> { Ok(()) }
-    fn scroll_right(&self, _: &ElementData, _: f64) -> Result<()> { Ok(()) }
-    fn scroll_left(&self, _: &ElementData, _: f64) -> Result<()> { Ok(()) }
     fn perform_action(&self, _: &ElementData, _: &str) -> Result<()> { Ok(()) }
 
     fn subscribe(&self, _: &ElementData) -> Result<Subscription> {
@@ -265,7 +259,6 @@ pub fn build_provider(elements: &[FuzzElement]) -> Option<Arc<FuzzProvider>> {
                 min_value: fuzz.min_value,
                 max_value: fuzz.max_value,
                 pid: fuzz.pid,
-                attributes: std::collections::HashMap::new(),
                 raw: make_raw(&fuzz.raw),
                 handle: i as u64,
             },

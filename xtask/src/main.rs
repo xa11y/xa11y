@@ -27,6 +27,7 @@ COMMANDS:
     coverage            Generate code coverage report
     fuzz [ARGS..]       Run provider fuzzer (pass-through args)
     sync-readmes [--check]  Generate crates.io/PyPI READMEs from root README.md
+    check-macos-ffi     Verify xa11y-macos/src/ax.rs only uses safe_* CF/AX wrappers
     check               Run ALL pre-PR checks (fmt, lint, test, test-python, test-js, docs)
     help                Show this help
 ";
@@ -55,6 +56,7 @@ fn main() -> ExitCode {
         "coverage" => do_coverage(),
         "fuzz" => do_fuzz(rest),
         "sync-readmes" => do_sync_readmes(rest),
+        "check-macos-ffi" => do_check_macos_ffi(),
         "check" => do_check(),
         "help" | "--help" | "-h" => {
             print!("{HELP}");
@@ -444,12 +446,184 @@ fn strip_lang_blocks(source: &str, keep: &str, remove: &str) -> String {
     result
 }
 
+/// Verify that `xa11y-macos/src/ax.rs` only uses the `safe_*` wrappers from
+/// `exception_safe.m` for CoreFoundation / AX interop. A misbehaving AX
+/// value's `-release` / `-getTypeID` can throw an `NSException` that unwinds
+/// through `extern "C"` -> process abort, so every raw CF/AX call must go
+/// through an Objective-C `@try`/`@catch` wrapper.
+///
+/// This is a simple token check over `ax.rs`. If a new raw symbol is needed,
+/// add a `safe_*` wrapper to `exception_safe.m` first and call that instead.
+/// References in `//` line comments are ignored so documentation can still
+/// mention the forbidden symbols by name.
+fn do_check_macos_ffi() -> bool {
+    heading("macOS FFI exception-safety check");
+
+    // Symbols that MUST be called through a `safe_*` wrapper, not directly.
+    // Matching is on a whole-identifier token followed by `(`, so `CFRelease,`
+    // in prose passes but `CFRelease(...)` / `CFRelease (...)` do not.
+    const FORBIDDEN_CALLS: &[&str] = &[
+        "CFRelease",
+        "CFRetain",
+        "CFGetTypeID",
+        "CFStringGetTypeID",
+        "CFNumberGetTypeID",
+        "CFBooleanGetTypeID",
+        "CFArrayGetTypeID",
+        "CFArrayGetCount",
+        "CFArrayGetValueAtIndex",
+        "CFBooleanGetValue",
+        "CFNumberGetValue",
+        "CFDictionaryGetValue",
+        "CFArrayCreate",
+        "AXIsProcessTrusted",
+    ];
+    // Statics don't use `(`; match as whole identifiers.
+    const FORBIDDEN_STATICS: &[&str] = &["kCFTypeArrayCallBacks"];
+
+    let path = project_root().join("xa11y-macos/src/ax.rs");
+    let src = match fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to read {}: {e}", path.display());
+            return false;
+        }
+    };
+
+    let mut violations: Vec<(usize, String, String)> = Vec::new();
+
+    for (lineno, line) in src.lines().enumerate() {
+        let code = strip_line_comment(line);
+        if code.trim().is_empty() {
+            continue;
+        }
+
+        for &sym in FORBIDDEN_CALLS {
+            if contains_ident_followed_by(code, sym, b'(') {
+                violations.push((lineno + 1, sym.to_string(), line.to_string()));
+            }
+        }
+        for &sym in FORBIDDEN_STATICS {
+            if contains_ident(code, sym) {
+                violations.push((lineno + 1, sym.to_string(), line.to_string()));
+            }
+        }
+    }
+
+    if violations.is_empty() {
+        eprintln!(
+            "OK: xa11y-macos/src/ax.rs uses only safe_* CF/AX wrappers ({} forbidden symbols checked).",
+            FORBIDDEN_CALLS.len() + FORBIDDEN_STATICS.len(),
+        );
+        return true;
+    }
+
+    eprintln!(
+        "!! {} raw CF/AX call site(s) found in xa11y-macos/src/ax.rs:",
+        violations.len()
+    );
+    for (lineno, sym, line) in &violations {
+        eprintln!(
+            "  {}:{}: {}  ->  {}",
+            path.display(),
+            lineno,
+            sym,
+            line.trim()
+        );
+    }
+    eprintln!(
+        "\n  Each of these must go through a safe_* wrapper defined in\n  \
+         xa11y-macos/src/exception_safe.m. If the wrapper does not yet exist,\n  \
+         add one following the @try/@catch pattern of the existing wrappers."
+    );
+    false
+}
+
+/// Strip a trailing `// ...` line comment from a Rust source line. Approximate
+/// (doesn't handle `/* */` blocks or raw strings) but good enough to skip
+/// documentation comments in the ax.rs header block.
+fn strip_line_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    let mut in_str = false;
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        let c = bytes[i];
+        if in_str {
+            if c == b'\\' {
+                i += 2;
+                continue;
+            }
+            if c == b'"' {
+                in_str = false;
+            }
+        } else if c == b'"' {
+            in_str = true;
+        } else if c == b'/' && bytes[i + 1] == b'/' {
+            return &line[..i];
+        }
+        i += 1;
+    }
+    line
+}
+
+fn contains_ident_followed_by(haystack: &str, needle: &str, next: u8) -> bool {
+    let bytes = haystack.as_bytes();
+    let needle_bytes = needle.as_bytes();
+    let mut i = 0;
+    while i + needle_bytes.len() <= bytes.len() {
+        if &bytes[i..i + needle_bytes.len()] == needle_bytes {
+            let left_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
+            let right_idx = i + needle_bytes.len();
+            let right_ok = right_idx >= bytes.len() || !is_ident_byte(bytes[right_idx]);
+            if left_ok && right_ok {
+                let mut j = right_idx;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == next {
+                    return true;
+                }
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn contains_ident(haystack: &str, needle: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    let needle_bytes = needle.as_bytes();
+    let mut i = 0;
+    while i + needle_bytes.len() <= bytes.len() {
+        if &bytes[i..i + needle_bytes.len()] == needle_bytes {
+            let left_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
+            let right_idx = i + needle_bytes.len();
+            let right_ok = right_idx >= bytes.len() || !is_ident_byte(bytes[right_idx]);
+            if left_ok && right_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
 fn do_check() -> bool {
     let mut ok = true;
 
     heading("PRE-PR CHECK: sync-readmes");
     if !do_sync_readmes(&["--check".to_string()]) {
         eprintln!("!! READMEs out of date. Run `cargo xtask sync-readmes` to fix.");
+        ok = false;
+    }
+
+    heading("PRE-PR CHECK: macos-ffi");
+    if !do_check_macos_ffi() {
+        eprintln!("!! macOS FFI check failed. See above for details.");
         ok = false;
     }
 

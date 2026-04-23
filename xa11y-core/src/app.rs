@@ -61,13 +61,17 @@ impl App {
     pub fn by_name_with(provider: Arc<dyn Provider>, name: &str) -> Result<Self> {
         // Try application role first (Linux/macOS), then window role (Windows —
         // UIA has no Application node at the top level).
+        //
+        // `find_elements` returns `Ok(vec![])` for "no match" and reserves
+        // `Err(_)` for real failures (permission denied, platform errors,
+        // malformed selectors). We only fall through on an empty result —
+        // real errors must propagate so callers can distinguish "app not
+        // found" from "accessibility is broken".
         let app_selector = format!(r#"application[name="{}"]"#, name);
-        if let Ok(results) =
-            provider.find_elements(None, &Selector::parse(&app_selector)?, Some(1), Some(0))
-        {
-            if let Some(data) = results.into_iter().next() {
-                return Ok(Self::from_data(provider, data));
-            }
+        let results =
+            provider.find_elements(None, &Selector::parse(&app_selector)?, Some(1), Some(0))?;
+        if let Some(data) = results.into_iter().next() {
+            return Ok(Self::from_data(provider, data));
         }
         let win_selector = format!(r#"window[name="{}"]"#, name);
         let results =
@@ -104,12 +108,13 @@ impl App {
     /// singleton provider.
     pub fn by_pid_with(provider: Arc<dyn Provider>, pid: u32) -> Result<Self> {
         // Try application role first, then window role (Windows fallback).
+        // Propagate real errors; only fall through when the role yielded
+        // no matching element.
         for role in ["application", "window"] {
             let selector = Selector::parse(role)?;
-            if let Ok(results) = provider.find_elements(None, &selector, None, Some(0)) {
-                if let Some(data) = results.into_iter().find(|d| d.pid == Some(pid)) {
-                    return Ok(Self::from_data(provider, data));
-                }
+            let results = provider.find_elements(None, &selector, None, Some(0))?;
+            if let Some(data) = results.into_iter().find(|d| d.pid == Some(pid)) {
+                return Ok(Self::from_data(provider, data));
             }
         }
         Err(Error::SelectorNotMatched {
@@ -135,20 +140,20 @@ impl App {
     pub fn list_with(provider: Arc<dyn Provider>) -> Result<Vec<Self>> {
         // Collect application role elements (Linux/macOS), then add window
         // role elements (Windows fallback) for any not already found by PID.
+        // Real errors from either lookup propagate to the caller.
         let mut apps = Vec::new();
         let mut seen_pids = std::collections::HashSet::new();
 
         for role in ["application", "window"] {
             let selector = Selector::parse(role)?;
-            if let Ok(results) = provider.find_elements(None, &selector, None, Some(0)) {
-                for d in results {
-                    if let Some(pid) = d.pid {
-                        if !seen_pids.insert(pid) {
-                            continue; // already found via application role
-                        }
+            let results = provider.find_elements(None, &selector, None, Some(0))?;
+            for d in results {
+                if let Some(pid) = d.pid {
+                    if !seen_pids.insert(pid) {
+                        continue; // already found via application role
                     }
-                    apps.push(Self::from_data(Arc::clone(&provider), d));
                 }
+                apps.push(Self::from_data(Arc::clone(&provider), d));
             }
         }
 

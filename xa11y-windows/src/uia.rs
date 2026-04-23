@@ -115,7 +115,10 @@ impl WindowsProvider {
     /// Cache a UIA element and return its handle ID.
     fn cache_element(&self, uia: IUIAutomationElement) -> u64 {
         let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
-        self.handle_cache.lock().unwrap().insert(handle, uia);
+        self.handle_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(handle, uia);
         handle
     }
 
@@ -123,7 +126,7 @@ impl WindowsProvider {
     fn get_cached(&self, handle: u64) -> Result<IUIAutomationElement> {
         self.handle_cache
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&handle)
             .cloned()
             .ok_or(Error::ElementStale {
@@ -283,52 +286,6 @@ impl WindowsProvider {
 
         Ok(candidates)
     }
-
-    /// Scroll implementation shared by scroll_down/scroll_up/scroll_right/scroll_left.
-    fn scroll_impl(&self, element: &ElementData, amount: f64, is_vertical: bool) -> Result<()> {
-        let uia_element = self.get_cached(element.handle)?;
-        if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationScrollPattern>(UIA_ScrollPatternId)
-        } {
-            let count = (amount.abs() as u32).max(1);
-            for _ in 0..count {
-                let (h, v) = if is_vertical {
-                    let v = if amount >= 0.0 {
-                        ScrollAmount_SmallIncrement
-                    } else {
-                        ScrollAmount_SmallDecrement
-                    };
-                    (ScrollAmount_NoAmount, v)
-                } else {
-                    let h = if amount >= 0.0 {
-                        ScrollAmount_SmallIncrement
-                    } else {
-                        ScrollAmount_SmallDecrement
-                    };
-                    (h, ScrollAmount_NoAmount)
-                };
-                let _ = unsafe { pattern.Scroll(h, v) };
-            }
-            return Ok(());
-        }
-        let dir = if is_vertical {
-            if amount >= 0.0 {
-                "scroll_down"
-            } else {
-                "scroll_up"
-            }
-        } else {
-            if amount >= 0.0 {
-                "scroll_right"
-            } else {
-                "scroll_left"
-            }
-        };
-        Err(Error::ActionNotSupported {
-            action: dir.to_string(),
-            role: element.role,
-        })
-    }
 }
 
 // ── Safe UIA helpers ────────────────────────────────────────────────────────
@@ -461,7 +418,7 @@ fn build_snapshot_data(
         (None, None, None)
     };
 
-    let mut data = ElementData {
+    ElementData {
         role,
         name,
         value,
@@ -474,12 +431,9 @@ fn build_snapshot_data(
         min_value,
         max_value,
         pid,
-        attributes: std::collections::HashMap::new(),
         raw,
         handle,
-    };
-    data.populate_attributes();
-    data
+    }
 }
 
 /// Build the batch request that describes which properties and patterns
@@ -781,12 +735,23 @@ impl Provider for WindowsProvider {
                 UIA_ExpandCollapsePatternId,
             )
         } {
-            match unsafe { pattern.CurrentExpandCollapseState() } {
-                Ok(ExpandCollapseState_Collapsed) => {
-                    let _ = unsafe { pattern.Expand() };
+            let state =
+                unsafe { pattern.CurrentExpandCollapseState() }.map_err(|e| Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("CurrentExpandCollapseState failed: {}", e),
+                })?;
+            match state {
+                ExpandCollapseState_Collapsed => {
+                    unsafe { pattern.Expand() }.map_err(|e| Error::Platform {
+                        code: e.code().0 as i64,
+                        message: format!("Expand failed: {}", e),
+                    })?;
                 }
                 _ => {
-                    let _ = unsafe { pattern.Collapse() };
+                    unsafe { pattern.Collapse() }.map_err(|e| Error::Platform {
+                        code: e.code().0 as i64,
+                        message: format!("Collapse failed: {}", e),
+                    })?;
                 }
             }
             return Ok(());
@@ -862,7 +827,10 @@ impl Provider for WindowsProvider {
                 UIA_ExpandCollapsePatternId,
             )
         } {
-            let _ = unsafe { pattern.Expand() };
+            unsafe { pattern.Expand() }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("Expand failed: {}", e),
+            })?;
             return Ok(());
         }
         Err(Error::ActionNotSupported {
@@ -878,7 +846,10 @@ impl Provider for WindowsProvider {
                 UIA_ExpandCollapsePatternId,
             )
         } {
-            let _ = unsafe { pattern.Collapse() };
+            unsafe { pattern.Collapse() }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("Collapse failed: {}", e),
+            })?;
             return Ok(());
         }
         Err(Error::ActionNotSupported {
@@ -901,7 +872,10 @@ impl Provider for WindowsProvider {
             uia_element
                 .GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId)
         } {
-            let current = unsafe { pattern.CurrentValue() }.unwrap_or(0.0);
+            let current = unsafe { pattern.CurrentValue() }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("RangeValue.CurrentValue failed: {}", e),
+            })?;
             let small = unsafe { pattern.CurrentSmallChange() }.unwrap_or(1.0);
             let step = if small <= 0.0 { 1.0 } else { small };
             unsafe { pattern.SetValue(current + step) }.map_err(|e| Error::Platform {
@@ -922,7 +896,10 @@ impl Provider for WindowsProvider {
             uia_element
                 .GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId)
         } {
-            let current = unsafe { pattern.CurrentValue() }.unwrap_or(0.0);
+            let current = unsafe { pattern.CurrentValue() }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("RangeValue.CurrentValue failed: {}", e),
+            })?;
             let small = unsafe { pattern.CurrentSmallChange() }.unwrap_or(1.0);
             let step = if small <= 0.0 { 1.0 } else { small };
             unsafe { pattern.SetValue(current - step) }.map_err(|e| Error::Platform {
@@ -943,9 +920,16 @@ impl Provider for WindowsProvider {
             uia_element
                 .GetCurrentPatternAs::<IUIAutomationScrollItemPattern>(UIA_ScrollItemPatternId)
         } {
-            let _ = unsafe { pattern.ScrollIntoView() };
+            unsafe { pattern.ScrollIntoView() }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("ScrollIntoView failed: {}", e),
+            })?;
+            return Ok(());
         }
-        Ok(())
+        Err(Error::ActionNotSupported {
+            action: "scroll_into_view".to_string(),
+            role: element.role,
+        })
     }
 
     fn set_value(&self, element: &ElementData, value: &str) -> Result<()> {
@@ -998,7 +982,10 @@ impl Provider for WindowsProvider {
         } {
             let current = unsafe { value_pattern.CurrentValue() }
                 .map(|s| s.to_string())
-                .unwrap_or_default();
+                .map_err(|e| Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("Value.CurrentValue failed: {}", e),
+                })?;
 
             // Try to get cursor position from TextPattern
             let insert_pos = if let Ok(text_pattern) = unsafe {
@@ -1052,22 +1039,6 @@ impl Provider for WindowsProvider {
             action: "set_text_selection".to_string(),
             role: element.role,
         })
-    }
-
-    fn scroll_down(&self, element: &ElementData, amount: f64) -> Result<()> {
-        self.scroll_impl(element, amount, true)
-    }
-
-    fn scroll_up(&self, element: &ElementData, amount: f64) -> Result<()> {
-        self.scroll_impl(element, -amount, true)
-    }
-
-    fn scroll_right(&self, element: &ElementData, amount: f64) -> Result<()> {
-        self.scroll_impl(element, amount, false)
-    }
-
-    fn scroll_left(&self, element: &ElementData, amount: f64) -> Result<()> {
-        self.scroll_impl(element, -amount, false)
     }
 
     fn perform_action(&self, element: &ElementData, action: &str) -> Result<()> {
@@ -1174,11 +1145,19 @@ fn get_actions(
         actions.push("select".to_string());
     }
 
-    // Focus: most elements can be focused
-    if unsafe { element.CachedIsKeyboardFocusable() }
+    // Advertise `focus` iff focusing would have an observable effect: the
+    // element must be both keyboard-focusable and enabled. A disabled-but-
+    // focusable element shouldn't claim to support focus because SetFocus is
+    // either a no-op or throws. This aligns Windows with Linux (requires
+    // AT-SPI Action interface listing `focus`) and macOS (requires
+    // `AXFocused` to be settable).
+    let is_focusable = unsafe { element.CachedIsKeyboardFocusable() }
         .unwrap_or(BOOL(0))
-        .as_bool()
-    {
+        .as_bool();
+    let is_enabled = unsafe { element.CachedIsEnabled() }
+        .unwrap_or(BOOL(1))
+        .as_bool();
+    if is_focusable && is_enabled {
         actions.push("focus".to_string());
     }
 
@@ -1930,7 +1909,6 @@ mod tests {
             max_value: None,
             stable_id: None,
             pid: None,
-            attributes: std::collections::HashMap::new(),
             raw: std::collections::HashMap::new(),
             handle: u64::MAX, // stale handle
         };
@@ -1960,7 +1938,6 @@ mod tests {
             max_value: None,
             stable_id: None,
             pid: None,
-            attributes: std::collections::HashMap::new(),
             raw: std::collections::HashMap::new(),
             handle: u64::MAX,
         };
@@ -2030,7 +2007,6 @@ mod tests {
             max_value: None,
             stable_id: None,
             pid,
-            attributes: std::collections::HashMap::new(),
             raw: std::collections::HashMap::new(),
             handle: 0,
         }

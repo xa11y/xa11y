@@ -482,10 +482,6 @@ Actions are split into two categories:
 | `set_numeric_value(value)` | `f64` | Set the element's numeric value |
 | `type_text(text)` | `&str` | Insert text at the current cursor position |
 | `select_text(start, end)` | `u32, u32` | Select a range of text (0-based positions) |
-| `scroll_down(amount)` | `f64` | Scroll downward by the given amount |
-| `scroll_up(amount)` | `f64` | Scroll upward |
-| `scroll_left(amount)` | `f64` | Scroll leftward |
-| `scroll_right(amount)` | `f64` | Scroll rightward |
 
 **Generic `perform_action(name)` escape hatch** — for platform-specific actions not covered by the methods above. Takes a `snake_case` action name string. Well-known action names (`"press"`, `"focus"`, etc.) also work here — providers delegate to the corresponding method. Custom platform actions (e.g. macOS `AXCustomThing` → `"custom_thing"`) are resolved by the provider.
 
@@ -512,7 +508,6 @@ Windows is the most straightforward — UIA patterns map directly to normalized 
 | `increment` | `RangeValuePattern.SetValue(current + SmallChange)` |
 | `decrement` | `RangeValuePattern.SetValue(current - SmallChange)` |
 | `scroll_into_view` | `ScrollItemPattern.ScrollIntoView()` |
-| `scroll_down/right` | `ScrollPattern.Scroll()` |
 | `type_text` | Read cursor position via `TextPattern.GetSelection()`, splice text into the current value at that position, then `ValuePattern.SetValue()` with the modified string. Falls back to appending if `TextPattern` is unavailable. This is a read-modify-write — not atomic with respect to concurrent user input. |
 | `set_text_selection` | `TextPattern` range operations |
 
@@ -536,7 +531,6 @@ macOS exposes some operations as AX actions (performed via `AXUIElementPerformAc
 | `type_text` | Set `AXSelectedText` (replaces current selection) |
 | `set_text_selection` | Set `AXSelectedTextRange` |
 | `scroll_into_view` | Not supported (no AX equivalent) |
-| `scroll_down/right` | CGEvent scroll wheel events. **Exception to tenet 5**: macOS has no accessibility API for programmatic scrolling, so this uses input simulation (`CGEventCreateScrollWheelEvent`). Documented here rather than silently omitted because scrolling is a core automation primitive. |
 
 For **reading** which actions an element supports: the provider calls `AXUIElementCopyActionNames` to get the element's action list (e.g. `["AXPress", "AXShowMenu", "AXCustomThing"]`). Known AX action names map to their standard `snake_case` name (e.g. `"AXPress"` → `"press"`). All other actions have the `AX` prefix stripped and are converted from `PascalCase` to `snake_case` (e.g. `"AXRaise"` → `"raise"`, `"AXCustomThing"` → `"custom_thing"`). No actions are silently hidden — if the platform reports it, it appears in `element.actions`.
 
@@ -566,7 +560,6 @@ The library handles this with an alias table: each normalized action maps to a c
 | `type_text` | `EditableText.InsertText()` at cursor | — |
 | `set_text_selection` | `Text.SetSelection()` or `Text.AddSelection()` | — |
 | `scroll_into_view` | `Component.ScrollTo()` | — |
-| `scroll_down/right` | `Action.DoAction` or `Component.ScrollTo` with direction | `"scroll down"`, `"scroll up"`, etc. |
 
 ### Action fidelity requirement
 

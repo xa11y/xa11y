@@ -61,12 +61,6 @@ pub struct ElementData {
     /// Process ID of the application that owns this element.
     pub pid: Option<u32>,
 
-    /// Full set of element attributes — both normalized properties and
-    /// platform-specific ones — keyed by `snake_case` names. Named properties
-    /// (name, value, enabled, etc.) also appear here.
-    #[serde(default)]
-    pub attributes: HashMap<String, serde_json::Value>,
-
     /// Platform-specific raw data
     pub raw: RawPlatformData,
 
@@ -74,76 +68,6 @@ pub struct ElementData {
     /// Not serialized — only valid within the provider that created it.
     #[serde(skip, default)]
     pub handle: u64,
-}
-
-impl ElementData {
-    /// Populate the `attributes` map from the struct's named properties.
-    /// Providers should call this after constructing `ElementData` to ensure
-    /// normalized attributes are present in the map.
-    pub fn populate_attributes(&mut self) {
-        use serde_json::Value;
-        let a = &mut self.attributes;
-
-        a.insert(
-            "role".into(),
-            Value::String(self.role.to_snake_case().to_string()),
-        );
-        if let Some(ref n) = self.name {
-            a.insert("name".into(), Value::String(n.clone()));
-        }
-        if let Some(ref v) = self.value {
-            a.insert("value".into(), Value::String(v.clone()));
-        }
-        if let Some(ref d) = self.description {
-            a.insert("description".into(), Value::String(d.clone()));
-        }
-        if let Some(ref b) = self.bounds {
-            a.insert(
-                "bounds".into(),
-                serde_json::json!({
-                    "x": b.x, "y": b.y, "width": b.width, "height": b.height
-                }),
-            );
-        }
-        if let Some(nv) = self.numeric_value {
-            if let Some(n) = serde_json::Number::from_f64(nv) {
-                a.insert("numeric_value".into(), Value::Number(n));
-            }
-        }
-        if let Some(nv) = self.min_value {
-            if let Some(n) = serde_json::Number::from_f64(nv) {
-                a.insert("min_value".into(), Value::Number(n));
-            }
-        }
-        if let Some(nv) = self.max_value {
-            if let Some(n) = serde_json::Number::from_f64(nv) {
-                a.insert("max_value".into(), Value::Number(n));
-            }
-        }
-        if let Some(ref sid) = self.stable_id {
-            a.insert("stable_id".into(), Value::String(sid.clone()));
-        }
-        a.insert("enabled".into(), Value::Bool(self.states.enabled));
-        a.insert("visible".into(), Value::Bool(self.states.visible));
-        a.insert("focused".into(), Value::Bool(self.states.focused));
-        a.insert("focusable".into(), Value::Bool(self.states.focusable));
-        a.insert("selected".into(), Value::Bool(self.states.selected));
-        a.insert("editable".into(), Value::Bool(self.states.editable));
-        a.insert("modal".into(), Value::Bool(self.states.modal));
-        a.insert("required".into(), Value::Bool(self.states.required));
-        a.insert("busy".into(), Value::Bool(self.states.busy));
-        if let Some(exp) = self.states.expanded {
-            a.insert("expanded".into(), Value::Bool(exp));
-        }
-        if let Some(ref chk) = self.states.checked {
-            let s = match chk {
-                Toggled::On => "on",
-                Toggled::Off => "off",
-                Toggled::Mixed => "mixed",
-            };
-            a.insert("checked".into(), Value::String(s.into()));
-        }
-    }
 }
 
 /// A live element with lazy navigation via a provider reference.

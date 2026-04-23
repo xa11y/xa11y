@@ -116,18 +116,6 @@ impl xa11y::Provider for MockProvider {
     ) -> xa11y::Result<()> {
         self.record(el, "set_text_selection", Some(format!("{start}..{end}")))
     }
-    fn scroll_down(&self, el: &xa11y::ElementData, amount: f64) -> xa11y::Result<()> {
-        self.record(el, "scroll_down", Some(format!("{amount}")))
-    }
-    fn scroll_up(&self, el: &xa11y::ElementData, amount: f64) -> xa11y::Result<()> {
-        self.record(el, "scroll_up", Some(format!("{amount}")))
-    }
-    fn scroll_left(&self, el: &xa11y::ElementData, amount: f64) -> xa11y::Result<()> {
-        self.record(el, "scroll_left", Some(format!("{amount}")))
-    }
-    fn scroll_right(&self, el: &xa11y::ElementData, amount: f64) -> xa11y::Result<()> {
-        self.record(el, "scroll_right", Some(format!("{amount}")))
-    }
     fn perform_action(&self, el: &xa11y::ElementData, action: &str) -> xa11y::Result<()> {
         self.record(el, action, None)
     }
@@ -236,7 +224,7 @@ fn build_tree() -> Arc<MockProvider> {
 
     let mut nodes = Vec::new();
     for (i, (role, name, value, actions, states)) in elements.into_iter().enumerate() {
-        let mut data = ElementData {
+        let data = ElementData {
             role,
             name: name.map(String::from),
             value: value.map(String::from),
@@ -254,11 +242,9 @@ fn build_tree() -> Arc<MockProvider> {
             max_value: None,
             stable_id: None,
             pid: Some(4242),
-            attributes: HashMap::new(),
             raw: HashMap::new(),
             handle: i as u64,
         };
-        data.populate_attributes();
         nodes.push(MockNode {
             data,
             children: children_map[i].clone(),

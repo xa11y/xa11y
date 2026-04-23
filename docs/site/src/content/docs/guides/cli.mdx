@@ -98,13 +98,6 @@ xa11y action type-text "textfield[name='Message']" --app Slack --value "ship it"
 xa11y action select-text "textfield" --app TextEdit --value "0,5"
 ```
 
-Scrolling actions take an optional numeric value (default 1.0):
-
-```bash
-xa11y action scroll-down "list[name='Messages']" --app Slack
-xa11y action scroll-down "list[name='Messages']" --app Slack --value 3.0
-```
-
 #### Available actions
 
 | Action | Description |
@@ -118,8 +111,6 @@ xa11y action scroll-down "list[name='Messages']" --app Slack --value 3.0
 | `select` | Select an item |
 | `show-menu` | Show a context menu |
 | `scroll-into-view` | Scroll the element into view |
-| `scroll-down` | Scroll down (optional `--value` for amount) |
-| `scroll-right` | Scroll right (optional `--value` for amount) |
 | `increment` | Increment a numeric value |
 | `decrement` | Decrement a numeric value |
 | `set-value` | Set text value (requires `--value`) |

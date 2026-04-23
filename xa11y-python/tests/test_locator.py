@@ -146,22 +146,6 @@ def test_locator_select_text(test_app):
     test_app.descendant("text_field").select_text(0, 3)
 
 
-def test_locator_scroll_down(test_app):
-    test_app.descendant("list").scroll_down()
-
-
-def test_locator_scroll_up_with_amount(test_app):
-    test_app.descendant("list").scroll_up(5.0)
-
-
-def test_locator_scroll_left(test_app):
-    test_app.descendant("list").scroll_left()
-
-
-def test_locator_scroll_right(test_app):
-    test_app.descendant("list").scroll_right(2.0)
-
-
 # ── Wait operations ──────────────────────────────────────────────────────────
 
 

@@ -185,42 +185,6 @@ impl Locator {
         ))
     }
 
-    #[napi(ts_args_type = "amount?: number", ts_return_type = "Promise<void>")]
-    pub fn scroll_up(&self, amount: Option<f64>) -> AsyncTask<ActionTask> {
-        AsyncTask::new(ActionTask::with_num(
-            self.inner.clone(),
-            ActionKind::ScrollUp,
-            amount.unwrap_or(1.0),
-        ))
-    }
-
-    #[napi(ts_args_type = "amount?: number", ts_return_type = "Promise<void>")]
-    pub fn scroll_down(&self, amount: Option<f64>) -> AsyncTask<ActionTask> {
-        AsyncTask::new(ActionTask::with_num(
-            self.inner.clone(),
-            ActionKind::ScrollDown,
-            amount.unwrap_or(1.0),
-        ))
-    }
-
-    #[napi(ts_args_type = "amount?: number", ts_return_type = "Promise<void>")]
-    pub fn scroll_left(&self, amount: Option<f64>) -> AsyncTask<ActionTask> {
-        AsyncTask::new(ActionTask::with_num(
-            self.inner.clone(),
-            ActionKind::ScrollLeft,
-            amount.unwrap_or(1.0),
-        ))
-    }
-
-    #[napi(ts_args_type = "amount?: number", ts_return_type = "Promise<void>")]
-    pub fn scroll_right(&self, amount: Option<f64>) -> AsyncTask<ActionTask> {
-        AsyncTask::new(ActionTask::with_num(
-            self.inner.clone(),
-            ActionKind::ScrollRight,
-            amount.unwrap_or(1.0),
-        ))
-    }
-
     /// Perform an action by snake_case name.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn perform_action(&self, action: String) -> AsyncTask<ActionTask> {
@@ -416,10 +380,6 @@ pub enum ActionKind {
     SetNumericValue,
     TypeText,
     SelectText,
-    ScrollUp,
-    ScrollDown,
-    ScrollLeft,
-    ScrollRight,
     PerformAction,
 }
 
@@ -494,10 +454,6 @@ impl Task for ActionTask {
                 let (s, e) = self.range.unwrap_or((0, 0));
                 self.inner.select_text(s, e)
             }
-            ActionKind::ScrollUp => self.inner.scroll_up(self.num.unwrap_or(1.0)),
-            ActionKind::ScrollDown => self.inner.scroll_down(self.num.unwrap_or(1.0)),
-            ActionKind::ScrollLeft => self.inner.scroll_left(self.num.unwrap_or(1.0)),
-            ActionKind::ScrollRight => self.inner.scroll_right(self.num.unwrap_or(1.0)),
             ActionKind::PerformAction => self
                 .inner
                 .perform_action(self.text.as_deref().unwrap_or("")),

@@ -304,30 +304,6 @@ impl Locator {
         self.provider.set_text_selection(&el, start, end)
     }
 
-    /// Scroll the matched element downward.
-    pub fn scroll_down(&self, amount: f64) -> Result<()> {
-        let el = self.auto_wait()?;
-        self.provider.scroll_down(&el, amount)
-    }
-
-    /// Scroll the matched element upward.
-    pub fn scroll_up(&self, amount: f64) -> Result<()> {
-        let el = self.auto_wait()?;
-        self.provider.scroll_up(&el, amount)
-    }
-
-    /// Scroll the matched element rightward.
-    pub fn scroll_right(&self, amount: f64) -> Result<()> {
-        let el = self.auto_wait()?;
-        self.provider.scroll_right(&el, amount)
-    }
-
-    /// Scroll the matched element leftward.
-    pub fn scroll_left(&self, amount: f64) -> Result<()> {
-        let el = self.auto_wait()?;
-        self.provider.scroll_left(&el, amount)
-    }
-
     // ── Generic action escape hatch ────────────────────────────────
 
     /// Perform an action by name (with auto-wait).

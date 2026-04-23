@@ -543,7 +543,10 @@ impl LinuxProvider {
     /// Cache an AccessibleRef and return a new handle ID.
     fn cache_element(&self, aref: AccessibleRef) -> u64 {
         let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
-        self.handle_cache.lock().unwrap().insert(handle, aref);
+        self.handle_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(handle, aref);
         handle
     }
 
@@ -551,7 +554,7 @@ impl LinuxProvider {
     fn get_cached(&self, handle: u64) -> Result<AccessibleRef> {
         self.handle_cache
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&handle)
             .cloned()
             .ok_or(Error::ElementStale {
@@ -695,11 +698,11 @@ impl LinuxProvider {
         if !action_index_map.is_empty() {
             self.action_indices
                 .lock()
-                .unwrap()
+                .unwrap_or_else(|e| e.into_inner())
                 .insert(handle, action_index_map);
         }
 
-        let mut data = ElementData {
+        ElementData {
             role,
             name,
             value,
@@ -712,12 +715,9 @@ impl LinuxProvider {
             max_value,
             pid,
             stable_id: Some(aref.path.clone()),
-            attributes: HashMap::new(),
             raw,
             handle,
-        };
-        data.populate_attributes();
-        data
+        }
     }
 
     /// Get the AT-SPI parent of an accessible ref.
@@ -887,35 +887,6 @@ impl LinuxProvider {
         }
     }
 
-    /// Perform an AT-SPI2 action by name (scans action names to find the index).
-    /// Only used for actions not stored during discovery (e.g. scroll directions).
-    fn do_atspi_action_by_name(&self, aref: &AccessibleRef, action_name: &str) -> Result<()> {
-        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Action")?;
-        let n_actions = proxy
-            .get_property::<i32>("NActions")
-            .or_else(|_| proxy.get_property::<u32>("NActions").map(|n| n as i32))
-            .unwrap_or(0);
-        for i in 0..n_actions {
-            if let Ok(reply) = proxy.call_method("GetName", &(i,)) {
-                if let Ok(name) = reply.body().deserialize::<String>() {
-                    if name.eq_ignore_ascii_case(action_name) {
-                        proxy
-                            .call_method("DoAction", &(i,))
-                            .map_err(|e| Error::Platform {
-                                code: -1,
-                                message: format!("DoAction failed: {}", e),
-                            })?;
-                        return Ok(());
-                    }
-                }
-            }
-        }
-        Err(Error::Platform {
-            code: -1,
-            message: format!("Action '{}' not found", action_name),
-        })
-    }
-
     /// Perform an AT-SPI2 action by its integer index (from discovery).
     fn do_atspi_action_by_index(&self, aref: &AccessibleRef, index: i32) -> Result<()> {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Action")?;
@@ -932,7 +903,7 @@ impl LinuxProvider {
     fn get_action_index(&self, handle: u64, action: &str) -> Result<i32> {
         self.action_indices
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&handle)
             .and_then(|map| map.get(action).copied())
             .ok_or_else(|| Error::ActionNotSupported {
@@ -1427,13 +1398,25 @@ impl Provider for LinuxProvider {
         if let Ok(index) = self.get_action_index(element.handle, "press") {
             return self.do_atspi_action_by_index(&target, index);
         }
-        // GTK-only fallback for the AdwMenuButton / GtkMenuButton pattern:
-        // the outer push-button accessible advertises NActions=0, but its
-        // immediate subtree contains an inner toggle-button (or similar
-        // actionable widget) with the real `click` action. We only apply this
-        // inside GTK — AccessKit, Qt, macOS, Windows all continue to surface
-        // ActionNotSupported as before.
-        if self.is_gtk_toolkit(&target) {
+        // TENET-BREAK(1): substitute target. Human approval granted for this
+        // break (see batch B6 / PR #125 / commit daeaf59). Justification: GTK4
+        // menu-button widgets (GtkMenuButton, AdwMenuButton, AdwSplitButton)
+        // expose their AT-SPI Action interface on an *inner* toggle-button
+        // child, not the outer push-button accessible the app author addresses
+        // by name. Without this workaround, `press()` silently does nothing on
+        // every GtkMenuButton in every stock GNOME app (Calculator, Text
+        // Editor, Logs, …). Alternatives considered and rejected:
+        //   1. Expose the inner widget in the tree — breaks AT-SPI tree
+        //      fidelity and leaks a GTK implementation detail into every
+        //      consumer.
+        //   2. Return ActionNotSupported — every GTK consumer would have to
+        //      reimplement the same subtree search to work around it.
+        // The break is narrowly scoped: gated on (a) the owning toolkit being
+        // GTK and (b) the outer role being Role::Button (push-button, which is
+        // what all three menu-button variants present as). Non-GtkMenuButton
+        // roles and non-GTK toolkits continue to fail-fast with
+        // ActionNotSupported.
+        if element.role == Role::Button && self.is_gtk_toolkit(&target) {
             let outer_name = self.get_name(&target).unwrap_or_default();
             if let Some((inner, index)) = self.find_gtk_press_fallback(&target, &outer_name) {
                 return self.do_atspi_action_by_index(&inner, index);
@@ -1472,20 +1455,28 @@ impl Provider for LinuxProvider {
 
     fn blur(&self, element: &ElementData) -> Result<()> {
         let target = self.get_cached(element.handle)?;
-        // Grab focus on parent element to blur the current one
-        if let Ok(Some(parent_ref)) = self.get_atspi_parent(&target) {
+        // Grab focus on parent element to blur the current one. We propagate
+        // every failure — no silent fallbacks (tenet 1): callers need to see
+        // when blur can't do anything useful.
+        if let Some(parent_ref) = self.get_atspi_parent(&target)? {
             if parent_ref.path != "/org/a11y/atspi/null" {
-                if let Ok(p) = self.make_proxy(
+                let p = self.make_proxy(
                     &parent_ref.bus_name,
                     &parent_ref.path,
                     "org.a11y.atspi.Component",
-                ) {
-                    let _ = p.call_method("GrabFocus", &());
-                    return Ok(());
-                }
+                )?;
+                p.call_method("GrabFocus", &())
+                    .map_err(|e| Error::Platform {
+                        code: -1,
+                        message: format!("Component.GrabFocus on parent failed: {}", e),
+                    })?;
+                return Ok(());
             }
         }
-        Ok(())
+        Err(Error::ActionNotSupported {
+            action: "blur".to_string(),
+            role: element.role,
+        })
     }
 
     fn toggle(&self, element: &ElementData) -> Result<()> {
@@ -1614,20 +1605,26 @@ impl Provider for LinuxProvider {
             return Ok(());
         }
         // Fall back to delete-then-insert for other AT-SPI2 implementations.
-        let _ = proxy.call_method("DeleteText", &(0i32, i32::MAX));
         // Capture the underlying D-Bus error so callers can distinguish an
         // absent `EditableText` interface (common on Chromium — the Chrome
         // URL bar only exposes read-only `Text`; see issue #101) from other
         // failures. Collapsing to `TextValueNotSupported` hides the reason.
-        if let Err(e) = proxy.call_method("InsertText", &(0i32, value, value.len() as i32)) {
+        let classify_editable_text_error = |op: &str, e: zbus::Error| -> Error {
             let msg = e.to_string();
             if msg.contains("UnknownMethod") || msg.contains("UnknownInterface") {
-                return Err(Error::TextValueNotSupported);
+                Error::TextValueNotSupported
+            } else {
+                Error::Platform {
+                    code: -1,
+                    message: format!("EditableText.{} failed: {}", op, msg),
+                }
             }
-            return Err(Error::Platform {
-                code: -1,
-                message: format!("EditableText.InsertText failed: {}", msg),
-            });
+        };
+        if let Err(e) = proxy.call_method("DeleteText", &(0i32, i32::MAX)) {
+            return Err(classify_editable_text_error("DeleteText", e));
+        }
+        if let Err(e) = proxy.call_method("InsertText", &(0i32, value, value.len() as i32)) {
+            return Err(classify_editable_text_error("InsertText", e));
         }
         Ok(())
     }
@@ -1689,115 +1686,6 @@ impl Provider for LinuxProvider {
                     code: -1,
                     message: format!("Text.AddSelection failed: {}", e),
                 })?;
-        }
-        Ok(())
-    }
-
-    fn scroll_down(&self, element: &ElementData, amount: f64) -> Result<()> {
-        let target = self.get_cached(element.handle)?;
-        let count = (amount.abs() as u32).max(1);
-        for _ in 0..count {
-            if self
-                .do_atspi_action_by_name(&target, "scroll down")
-                .is_err()
-            {
-                // Fall back to Component.ScrollTo (single call, not repeatable).
-                // If both fail, return ActionNotSupported for clearer error handling.
-                // Fixes GitHub issue #99.
-                if let Ok(proxy) =
-                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")
-                {
-                    // BOTTOM_EDGE = 3
-                    if proxy.call_method("ScrollTo", &(3u32,)).is_ok() {
-                        return Ok(());
-                    }
-                }
-                return Err(Error::ActionNotSupported {
-                    action: "scroll_down".to_string(),
-                    role: element.role,
-                });
-            }
-        }
-        Ok(())
-    }
-
-    fn scroll_up(&self, element: &ElementData, amount: f64) -> Result<()> {
-        let target = self.get_cached(element.handle)?;
-        let count = (amount.abs() as u32).max(1);
-        for _ in 0..count {
-            if self.do_atspi_action_by_name(&target, "scroll up").is_err() {
-                // Fall back to Component.ScrollTo (single call, not repeatable).
-                // If both fail, return ActionNotSupported for clearer error handling.
-                // Fixes GitHub issue #99.
-                if let Ok(proxy) =
-                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")
-                {
-                    // TOP_EDGE = 2
-                    if proxy.call_method("ScrollTo", &(2u32,)).is_ok() {
-                        return Ok(());
-                    }
-                }
-                return Err(Error::ActionNotSupported {
-                    action: "scroll_up".to_string(),
-                    role: element.role,
-                });
-            }
-        }
-        Ok(())
-    }
-
-    fn scroll_right(&self, element: &ElementData, amount: f64) -> Result<()> {
-        let target = self.get_cached(element.handle)?;
-        let count = (amount.abs() as u32).max(1);
-        for _ in 0..count {
-            if self
-                .do_atspi_action_by_name(&target, "scroll right")
-                .is_err()
-            {
-                // Fall back to Component.ScrollTo (single call, not repeatable).
-                // If both fail, return ActionNotSupported for clearer error handling.
-                // Fixes GitHub issue #99.
-                if let Ok(proxy) =
-                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")
-                {
-                    // RIGHT_EDGE = 5
-                    if proxy.call_method("ScrollTo", &(5u32,)).is_ok() {
-                        return Ok(());
-                    }
-                }
-                return Err(Error::ActionNotSupported {
-                    action: "scroll_right".to_string(),
-                    role: element.role,
-                });
-            }
-        }
-        Ok(())
-    }
-
-    fn scroll_left(&self, element: &ElementData, amount: f64) -> Result<()> {
-        let target = self.get_cached(element.handle)?;
-        let count = (amount.abs() as u32).max(1);
-        for _ in 0..count {
-            if self
-                .do_atspi_action_by_name(&target, "scroll left")
-                .is_err()
-            {
-                // Fall back to Component.ScrollTo (single call, not repeatable).
-                // If both fail, return ActionNotSupported for clearer error handling.
-                // Fixes GitHub issue #99.
-                if let Ok(proxy) =
-                    self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")
-                {
-                    // LEFT_EDGE = 4
-                    if proxy.call_method("ScrollTo", &(4u32,)).is_ok() {
-                        return Ok(());
-                    }
-                }
-                return Err(Error::ActionNotSupported {
-                    action: "scroll_left".to_string(),
-                    role: element.role,
-                });
-            }
         }
         Ok(())
     }

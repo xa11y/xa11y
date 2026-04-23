@@ -47,33 +47,17 @@ struct CGSize {
     height: f64,
 }
 
-extern "C" {
-    fn CFRelease(cf: CFTypeRef);
-    fn CFRetain(cf: CFTypeRef) -> CFTypeRef;
-    fn CFGetTypeID(cf: CFTypeRef) -> u64;
-    fn CFStringGetTypeID() -> u64;
-    fn CFNumberGetTypeID() -> u64;
-    fn CFBooleanGetTypeID() -> u64;
-    fn CFArrayGetTypeID() -> u64;
-    fn CFArrayGetCount(arr: CFArrayRef) -> CFIndex;
-    fn CFArrayGetValueAtIndex(arr: CFArrayRef, idx: CFIndex) -> CFTypeRef;
-    fn CFBooleanGetValue(b: CFTypeRef) -> bool;
-    fn CFNumberGetValue(num: CFTypeRef, the_type: i32, value_ptr: *mut c_void) -> bool;
-    fn CFDictionaryGetValue(dict: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
-    fn CFArrayCreate(
-        allocator: CFTypeRef,
-        values: *const CFTypeRef,
-        num_values: CFIndex,
-        callbacks: *const c_void,
-    ) -> CFArrayRef;
-    static kCFTypeArrayCallBacks: c_void;
-}
-
-#[link(name = "ApplicationServices", kind = "framework")]
-extern "C" {
-    fn AXIsProcessTrusted() -> bool;
-}
-
+// All CF / AX interop in this file goes through the `safe_*` wrappers defined
+// in `exception_safe.m`. Each wrapper runs its underlying call inside an
+// Objective-C `@try`/`@catch` so a misbehaving AX value's `-release` /
+// `-getTypeID` can't unwind through `extern "C"` frames and abort the
+// process. Raw CF / AX symbols (CFRelease, CFRetain, CFGetTypeID,
+// CFNumberGetValue, CFBooleanGetValue, CFArrayGetCount,
+// CFArrayGetValueAtIndex, CFDictionaryGetValue, CFArrayCreate,
+// CFStringGetTypeID, CFNumberGetTypeID, CFBooleanGetTypeID,
+// CFArrayGetTypeID, AXIsProcessTrusted) are intentionally NOT declared here
+// - if you need a new one, add a `safe_*` wrapper to `exception_safe.m`.
+// Enforced by `cargo xtask check-macos-ffi`.
 extern "C" {
     fn safe_ax_copy_attribute_value(
         element: AXUIElementRef,
@@ -111,8 +95,24 @@ extern "C" {
     fn safe_cf_run_loop_get_current() -> CFTypeRef;
     fn safe_cf_run_loop_run();
     fn safe_cf_run_loop_stop(run_loop: CFTypeRef);
-    fn safe_cg_post_scroll_event(dy: i32, dx: i32);
     fn safe_ax_value_create_cf_range(location: isize, length: isize) -> CFTypeRef;
+
+    // CoreFoundation helpers - all calls from ax.rs go through these.
+    fn safe_cf_retain(cf: CFTypeRef) -> CFTypeRef;
+    fn safe_cf_release(cf: CFTypeRef);
+    fn safe_cf_get_type_id(cf: CFTypeRef) -> u64;
+    fn safe_cf_array_get_count(arr: CFArrayRef) -> CFIndex;
+    fn safe_cf_array_get_value(arr: CFArrayRef, idx: CFIndex) -> CFTypeRef;
+    fn safe_cf_boolean_get_value(b: CFTypeRef) -> bool;
+    fn safe_cf_number_get_value(num: CFTypeRef, the_type: i32, value_ptr: *mut c_void) -> bool;
+    fn safe_cf_dict_get_value(dict: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
+    fn safe_cf_array_create(values: *const CFTypeRef, num_values: CFIndex) -> CFArrayRef;
+    fn safe_cf_string_get_type_id() -> u64;
+    fn safe_cf_number_get_type_id() -> u64;
+    fn safe_cf_boolean_get_type_id() -> u64;
+    fn safe_cf_array_get_type_id() -> u64;
+
+    fn safe_ax_is_process_trusted() -> bool;
 
     #[cfg(test)]
     fn test_throw_and_catch_nsexception() -> i32;
@@ -132,7 +132,7 @@ impl AXElement {
 
     fn from_borrowed(ptr: AXUIElementRef) -> Self {
         if !ptr.is_null() {
-            unsafe { CFRetain(ptr) };
+            unsafe { safe_cf_retain(ptr) };
         }
         Self(ptr)
     }
@@ -155,7 +155,7 @@ impl Clone for AXElement {
 impl Drop for AXElement {
     fn drop(&mut self) {
         if !self.0.is_null() {
-            unsafe { CFRelease(self.0) };
+            unsafe { safe_cf_release(self.0) };
         }
     }
 }
@@ -249,11 +249,11 @@ fn ax_attr(element: AXUIElementRef, attribute: &str) -> Option<CFTypeRef> {
 fn ax_string(element: AXUIElementRef, attribute: &str) -> Option<String> {
     let value = ax_attr(element, attribute)?;
     unsafe {
-        if CFGetTypeID(value) == CFStringGetTypeID() {
+        if safe_cf_get_type_id(value) == safe_cf_string_get_type_id() {
             let s = CFString::wrap_under_create_rule(value as *const _);
             Some(s.to_string())
         } else {
-            CFRelease(value);
+            safe_cf_release(value);
             None
         }
     }
@@ -262,12 +262,12 @@ fn ax_string(element: AXUIElementRef, attribute: &str) -> Option<String> {
 fn ax_bool(element: AXUIElementRef, attribute: &str) -> Option<bool> {
     let value = ax_attr(element, attribute)?;
     unsafe {
-        if CFGetTypeID(value) == CFBooleanGetTypeID() {
-            let b = CFBooleanGetValue(value);
-            CFRelease(value);
+        if safe_cf_get_type_id(value) == safe_cf_boolean_get_type_id() {
+            let b = safe_cf_boolean_get_value(value);
+            safe_cf_release(value);
             Some(b)
         } else {
-            CFRelease(value);
+            safe_cf_release(value);
             None
         }
     }
@@ -276,23 +276,23 @@ fn ax_bool(element: AXUIElementRef, attribute: &str) -> Option<bool> {
 fn ax_number_f64(element: AXUIElementRef, attribute: &str) -> Option<f64> {
     let value = ax_attr(element, attribute)?;
     unsafe {
-        if CFGetTypeID(value) == CFNumberGetTypeID() {
+        if safe_cf_get_type_id(value) == safe_cf_number_get_type_id() {
             let mut result: f64 = 0.0;
-            let ok = CFNumberGetValue(
+            let ok = safe_cf_number_get_value(
                 value,
                 CF_NUMBER_FLOAT64,
                 &mut result as *mut _ as *mut c_void,
             );
-            CFRelease(value);
+            safe_cf_release(value);
             if ok {
                 return Some(result);
             }
         }
-        if CFGetTypeID(value) == CFStringGetTypeID() {
+        if safe_cf_get_type_id(value) == safe_cf_string_get_type_id() {
             let s = CFString::wrap_under_create_rule(value as *const _);
             return s.to_string().trim().parse::<f64>().ok();
         }
-        CFRelease(value);
+        safe_cf_release(value);
         None
     }
 }
@@ -301,21 +301,21 @@ fn ax_number_f64(element: AXUIElementRef, attribute: &str) -> Option<f64> {
 fn ax_number_i32(element: AXUIElementRef, attribute: &str) -> Option<i32> {
     let value = ax_attr(element, attribute)?;
     unsafe {
-        if CFGetTypeID(value) == CFNumberGetTypeID() {
+        if safe_cf_get_type_id(value) == safe_cf_number_get_type_id() {
             let mut result: i32 = 0;
-            let ok = CFNumberGetValue(
+            let ok = safe_cf_number_get_value(
                 value,
                 CF_NUMBER_SINT32,
                 &mut result as *mut _ as *mut c_void,
             );
-            CFRelease(value);
+            safe_cf_release(value);
             if ok {
                 Some(result)
             } else {
                 None
             }
         } else {
-            CFRelease(value);
+            safe_cf_release(value);
             None
         }
     }
@@ -325,21 +325,21 @@ fn ax_number_i32(element: AXUIElementRef, attribute: &str) -> Option<i32> {
 fn ax_number_i64(element: AXUIElementRef, attribute: &str) -> Option<i64> {
     let value = ax_attr(element, attribute)?;
     unsafe {
-        if CFGetTypeID(value) == CFNumberGetTypeID() {
+        if safe_cf_get_type_id(value) == safe_cf_number_get_type_id() {
             let mut result: i64 = 0;
-            let ok = CFNumberGetValue(
+            let ok = safe_cf_number_get_value(
                 value,
                 CF_NUMBER_SINT64,
                 &mut result as *mut _ as *mut c_void,
             );
-            CFRelease(value);
+            safe_cf_release(value);
             if ok {
                 Some(result)
             } else {
                 None
             }
         } else {
-            CFRelease(value);
+            safe_cf_release(value);
             None
         }
     }
@@ -351,19 +351,19 @@ fn ax_children(element: AXUIElementRef) -> Vec<AXElement> {
         None => return vec![],
     };
     unsafe {
-        if CFGetTypeID(value) != CFArrayGetTypeID() {
-            CFRelease(value);
+        if safe_cf_get_type_id(value) != safe_cf_array_get_type_id() {
+            safe_cf_release(value);
             return vec![];
         }
-        let count = CFArrayGetCount(value);
+        let count = safe_cf_array_get_count(value);
         let mut children = Vec::with_capacity(count as usize);
         for i in 0..count {
-            let child = CFArrayGetValueAtIndex(value, i);
+            let child = safe_cf_array_get_value(value, i);
             if !child.is_null() {
                 children.push(AXElement::from_borrowed(child));
             }
         }
-        CFRelease(value);
+        safe_cf_release(value);
         children
     }
 }
@@ -381,16 +381,16 @@ fn ax_action_names(element: AXUIElementRef) -> Vec<String> {
         return vec![];
     }
     unsafe {
-        let count = CFArrayGetCount(names);
+        let count = safe_cf_array_get_count(names);
         let mut result = Vec::with_capacity(count as usize);
         for i in 0..count {
-            let name = CFArrayGetValueAtIndex(names, i);
-            if !name.is_null() && CFGetTypeID(name) == CFStringGetTypeID() {
+            let name = safe_cf_array_get_value(names, i);
+            if !name.is_null() && safe_cf_get_type_id(name) == safe_cf_string_get_type_id() {
                 let s = CFString::wrap_under_get_rule(name as *const _);
                 result.push(s.to_string());
             }
         }
-        CFRelease(names);
+        safe_cf_release(names);
         result
     }
 }
@@ -401,7 +401,7 @@ fn ax_position(element: AXUIElementRef) -> Option<(f64, f64)> {
     let ok = unsafe {
         safe_ax_value_get_value(value, AX_VALUE_CGPOINT, &mut point as *mut _ as *mut c_void)
     };
-    unsafe { CFRelease(value) };
+    unsafe { safe_cf_release(value) };
     if ok {
         Some((point.x, point.y))
     } else {
@@ -415,7 +415,7 @@ fn ax_size(element: AXUIElementRef) -> Option<(f64, f64)> {
     let ok = unsafe {
         safe_ax_value_get_value(value, AX_VALUE_CGSIZE, &mut size as *mut _ as *mut c_void)
     };
-    unsafe { CFRelease(value) };
+    unsafe { safe_cf_release(value) };
     if ok {
         Some((size.width, size.height))
     } else {
@@ -426,19 +426,19 @@ fn ax_size(element: AXUIElementRef) -> Option<(f64, f64)> {
 fn ax_value_string(element: AXUIElementRef) -> Option<String> {
     let value = ax_attr(element, "AXValue")?;
     unsafe {
-        let tid = CFGetTypeID(value);
-        if tid == CFStringGetTypeID() {
+        let tid = safe_cf_get_type_id(value);
+        if tid == safe_cf_string_get_type_id() {
             let s = CFString::wrap_under_create_rule(value as *const _);
             return Some(s.to_string());
         }
-        if tid == CFNumberGetTypeID() {
+        if tid == safe_cf_number_get_type_id() {
             let mut f: f64 = 0.0;
-            if CFNumberGetValue(value, CF_NUMBER_FLOAT64, &mut f as *mut _ as *mut c_void) {
-                CFRelease(value);
+            if safe_cf_number_get_value(value, CF_NUMBER_FLOAT64, &mut f as *mut _ as *mut c_void) {
+                safe_cf_release(value);
                 return Some(f.to_string());
             }
         }
-        CFRelease(value);
+        safe_cf_release(value);
         None
     }
 }
@@ -446,19 +446,20 @@ fn ax_value_string(element: AXUIElementRef) -> Option<String> {
 fn ax_value_number(element: AXUIElementRef) -> Option<f64> {
     let value = ax_attr(element, "AXValue")?;
     unsafe {
-        if CFGetTypeID(value) == CFNumberGetTypeID() {
+        if safe_cf_get_type_id(value) == safe_cf_number_get_type_id() {
             let mut f: f64 = 0.0;
-            let ok = CFNumberGetValue(value, CF_NUMBER_FLOAT64, &mut f as *mut _ as *mut c_void);
-            CFRelease(value);
+            let ok =
+                safe_cf_number_get_value(value, CF_NUMBER_FLOAT64, &mut f as *mut _ as *mut c_void);
+            safe_cf_release(value);
             if ok {
                 return Some(f);
             }
         }
-        if CFGetTypeID(value) == CFStringGetTypeID() {
+        if safe_cf_get_type_id(value) == safe_cf_string_get_type_id() {
             let s = CFString::wrap_under_create_rule(value as *const _);
             return s.to_string().trim().parse::<f64>().ok();
         }
-        CFRelease(value);
+        safe_cf_release(value);
         None
     }
 }
@@ -466,15 +467,16 @@ fn ax_value_number(element: AXUIElementRef) -> Option<f64> {
 fn ax_value_int(element: AXUIElementRef) -> Option<i32> {
     let value = ax_attr(element, "AXValue")?;
     unsafe {
-        if CFGetTypeID(value) == CFNumberGetTypeID() {
+        if safe_cf_get_type_id(value) == safe_cf_number_get_type_id() {
             let mut i: i32 = 0;
-            let ok = CFNumberGetValue(value, CF_NUMBER_SINT32, &mut i as *mut _ as *mut c_void);
-            CFRelease(value);
+            let ok =
+                safe_cf_number_get_value(value, CF_NUMBER_SINT32, &mut i as *mut _ as *mut c_void);
+            safe_cf_release(value);
             if ok {
                 return Some(i);
             }
         }
-        CFRelease(value);
+        safe_cf_release(value);
         None
     }
 }
@@ -538,30 +540,23 @@ impl BatchAttrs {
             .map(|s| s.as_concrete_TypeRef() as CFTypeRef)
             .collect();
 
-        let cf_attrs = unsafe {
-            CFArrayCreate(
-                std::ptr::null(),
-                ptrs.as_ptr(),
-                ptrs.len() as CFIndex,
-                &kCFTypeArrayCallBacks,
-            )
-        };
+        let cf_attrs = unsafe { safe_cf_array_create(ptrs.as_ptr(), ptrs.len() as CFIndex) };
         if cf_attrs.is_null() {
             return None;
         }
 
         let mut values: CFArrayRef = std::ptr::null();
         let err = ffi_copy_multiple_attribute_values(element, cf_attrs, &mut values);
-        unsafe { CFRelease(cf_attrs) };
+        unsafe { safe_cf_release(cf_attrs) };
 
         if err != AX_ERROR_SUCCESS || values.is_null() {
             return None;
         }
 
-        let count = unsafe { CFArrayGetCount(values) } as usize;
+        let count = unsafe { safe_cf_array_get_count(values) } as usize;
         let mut vals = [std::ptr::null(); attr_idx::COUNT];
         for (i, slot) in vals.iter_mut().enumerate().take(count.min(attr_idx::COUNT)) {
-            let v = unsafe { CFArrayGetValueAtIndex(values, i as CFIndex) };
+            let v = unsafe { safe_cf_array_get_value(values, i as CFIndex) };
             *slot = v;
         }
 
@@ -578,7 +573,7 @@ impl BatchAttrs {
             return None;
         }
         unsafe {
-            if CFGetTypeID(v) == CFStringGetTypeID() {
+            if safe_cf_get_type_id(v) == safe_cf_string_get_type_id() {
                 let s = CFString::wrap_under_get_rule(v as *const _);
                 Some(s.to_string())
             } else {
@@ -594,8 +589,8 @@ impl BatchAttrs {
             return None;
         }
         unsafe {
-            if CFGetTypeID(v) == CFBooleanGetTypeID() {
-                Some(CFBooleanGetValue(v))
+            if safe_cf_get_type_id(v) == safe_cf_boolean_get_type_id() {
+                Some(safe_cf_boolean_get_value(v))
             } else {
                 None
             }
@@ -609,14 +604,14 @@ impl BatchAttrs {
             return None;
         }
         unsafe {
-            let tid = CFGetTypeID(v);
-            if tid == CFStringGetTypeID() {
+            let tid = safe_cf_get_type_id(v);
+            if tid == safe_cf_string_get_type_id() {
                 let s = CFString::wrap_under_get_rule(v as *const _);
                 return Some(s.to_string());
             }
-            if tid == CFNumberGetTypeID() {
+            if tid == safe_cf_number_get_type_id() {
                 let mut f: f64 = 0.0;
-                if CFNumberGetValue(v, CF_NUMBER_FLOAT64, &mut f as *mut _ as *mut c_void) {
+                if safe_cf_number_get_value(v, CF_NUMBER_FLOAT64, &mut f as *mut _ as *mut c_void) {
                     return Some(f.to_string());
                 }
             }
@@ -631,13 +626,13 @@ impl BatchAttrs {
             return None;
         }
         unsafe {
-            if CFGetTypeID(v) == CFNumberGetTypeID() {
+            if safe_cf_get_type_id(v) == safe_cf_number_get_type_id() {
                 let mut f: f64 = 0.0;
-                if CFNumberGetValue(v, CF_NUMBER_FLOAT64, &mut f as *mut _ as *mut c_void) {
+                if safe_cf_number_get_value(v, CF_NUMBER_FLOAT64, &mut f as *mut _ as *mut c_void) {
                     return Some(f);
                 }
             }
-            if CFGetTypeID(v) == CFStringGetTypeID() {
+            if safe_cf_get_type_id(v) == safe_cf_string_get_type_id() {
                 let s = CFString::wrap_under_get_rule(v as *const _);
                 return s.to_string().trim().parse::<f64>().ok();
             }
@@ -652,9 +647,9 @@ impl BatchAttrs {
             return None;
         }
         unsafe {
-            if CFGetTypeID(v) == CFNumberGetTypeID() {
+            if safe_cf_get_type_id(v) == safe_cf_number_get_type_id() {
                 let mut i: i32 = 0;
-                if CFNumberGetValue(v, CF_NUMBER_SINT32, &mut i as *mut _ as *mut c_void) {
+                if safe_cf_number_get_value(v, CF_NUMBER_SINT32, &mut i as *mut _ as *mut c_void) {
                     return Some(i);
                 }
             }
@@ -700,7 +695,7 @@ impl BatchAttrs {
 impl Drop for BatchAttrs {
     fn drop(&mut self) {
         if !self._values_array.is_null() {
-            unsafe { CFRelease(self._values_array) };
+            unsafe { safe_cf_release(self._values_array) };
         }
     }
 }
@@ -741,8 +736,8 @@ impl ResolvedAttrs {
                 None
             } else {
                 unsafe {
-                    if CFGetTypeID(v) == CFBooleanGetTypeID() {
-                        Some(CFBooleanGetValue(v))
+                    if safe_cf_get_type_id(v) == safe_cf_boolean_get_type_id() {
+                        Some(safe_cf_boolean_get_value(v))
                     } else {
                         None
                     }
@@ -1145,7 +1140,7 @@ pub struct MacOSProvider {
 
 impl MacOSProvider {
     pub fn new() -> Result<Self> {
-        if !unsafe { AXIsProcessTrusted() } {
+        if !unsafe { safe_ax_is_process_trusted() } {
             return Err(Error::PermissionDenied {
                 instructions:
                     "Enable Accessibility in System Settings → Privacy & Security → Accessibility"
@@ -1185,32 +1180,38 @@ impl MacOSProvider {
         let mut apps = Vec::new();
 
         unsafe {
-            let count = CFArrayGetCount(info);
+            let count = safe_cf_array_get_count(info);
             for i in 0..count {
-                let dict = CFArrayGetValueAtIndex(info, i);
+                let dict = safe_cf_array_get_value(info, i);
                 if dict.is_null() {
                     continue;
                 }
 
                 let pid_val =
-                    CFDictionaryGetValue(dict, pid_key.as_concrete_TypeRef() as CFTypeRef);
+                    safe_cf_dict_get_value(dict, pid_key.as_concrete_TypeRef() as CFTypeRef);
                 let name_val =
-                    CFDictionaryGetValue(dict, name_key.as_concrete_TypeRef() as CFTypeRef);
+                    safe_cf_dict_get_value(dict, name_key.as_concrete_TypeRef() as CFTypeRef);
 
                 if pid_val.is_null() {
                     continue;
                 }
 
                 let mut pid: i32 = 0;
-                if CFGetTypeID(pid_val) == CFNumberGetTypeID() {
-                    CFNumberGetValue(pid_val, CF_NUMBER_SINT32, &mut pid as *mut _ as *mut c_void);
+                if safe_cf_get_type_id(pid_val) == safe_cf_number_get_type_id() {
+                    safe_cf_number_get_value(
+                        pid_val,
+                        CF_NUMBER_SINT32,
+                        &mut pid as *mut _ as *mut c_void,
+                    );
                 }
 
                 if pid <= 0 || !seen.insert(pid) {
                     continue;
                 }
 
-                let name = if !name_val.is_null() && CFGetTypeID(name_val) == CFStringGetTypeID() {
+                let name = if !name_val.is_null()
+                    && safe_cf_get_type_id(name_val) == safe_cf_string_get_type_id()
+                {
                     CFString::wrap_under_get_rule(name_val as *const _).to_string()
                 } else {
                     String::new()
@@ -1220,7 +1221,7 @@ impl MacOSProvider {
                     apps.push((pid, name));
                 }
             }
-            CFRelease(info);
+            safe_cf_release(info);
         }
 
         apps
@@ -1238,17 +1239,19 @@ impl MacOSProvider {
         let layer_key = CFString::new("kCGWindowLayer");
         let mut has_app_window = false;
         unsafe {
-            let count = CFArrayGetCount(info);
+            let count = safe_cf_array_get_count(info);
             for i in 0..count {
-                let dict = CFArrayGetValueAtIndex(info, i);
+                let dict = safe_cf_array_get_value(info, i);
                 if dict.is_null() {
                     continue;
                 }
                 let layer_val =
-                    CFDictionaryGetValue(dict, layer_key.as_concrete_TypeRef() as CFTypeRef);
-                if !layer_val.is_null() && CFGetTypeID(layer_val) == CFNumberGetTypeID() {
+                    safe_cf_dict_get_value(dict, layer_key.as_concrete_TypeRef() as CFTypeRef);
+                if !layer_val.is_null()
+                    && safe_cf_get_type_id(layer_val) == safe_cf_number_get_type_id()
+                {
                     let mut layer: i32 = -1;
-                    CFNumberGetValue(
+                    safe_cf_number_get_value(
                         layer_val,
                         CF_NUMBER_SINT32,
                         &mut layer as *mut _ as *mut c_void,
@@ -1259,7 +1262,7 @@ impl MacOSProvider {
                     }
                 }
             }
-            CFRelease(info);
+            safe_cf_release(info);
         }
         has_app_window
     }
@@ -1267,7 +1270,10 @@ impl MacOSProvider {
     /// Cache an AXElement and return a new handle ID.
     fn cache_element(&self, ax: AXElement) -> u64 {
         let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
-        self.handle_cache.lock().unwrap().insert(handle, ax);
+        self.handle_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(handle, ax);
         handle
     }
 
@@ -1275,7 +1281,7 @@ impl MacOSProvider {
     fn get_cached(&self, handle: u64) -> Result<AXElement> {
         self.handle_cache
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(&handle)
             .cloned()
             .ok_or(Error::ElementStale {
@@ -1299,7 +1305,7 @@ impl MacOSProvider {
 /// targets), pass `0`.
 fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -> ElementData {
     if element.is_null() {
-        let mut data = ElementData {
+        return ElementData {
             role: Role::Unknown,
             name: None,
             value: None,
@@ -1311,13 +1317,10 @@ fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -
             min_value: None,
             max_value: None,
             stable_id: None,
-            attributes: std::collections::HashMap::new(),
             raw: std::collections::HashMap::new(),
             pid,
             handle,
         };
-        data.populate_attributes();
-        return data;
     }
 
     let body = move || -> ElementData {
@@ -1521,7 +1524,7 @@ fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -
             _ => (None, None),
         };
 
-        let mut data = ElementData {
+        ElementData {
             role,
             name,
             value,
@@ -1533,13 +1536,10 @@ fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -
             numeric_value,
             min_value,
             max_value,
-            attributes: std::collections::HashMap::new(),
             raw,
             pid,
             handle,
-        };
-        data.populate_attributes();
-        data
+        }
     };
     body()
 }
@@ -2075,7 +2075,7 @@ impl Provider for MacOSProvider {
         }
         let attr = CFString::new("AXSelectedTextRange");
         let err = do_set_attribute(ax.as_ptr(), &attr, range_value);
-        unsafe { CFRelease(range_value) };
+        unsafe { safe_cf_release(range_value) };
         if err != AX_ERROR_SUCCESS {
             return Err(action_error(
                 err,
@@ -2084,32 +2084,6 @@ impl Provider for MacOSProvider {
                 "Set AXSelectedTextRange failed",
             ));
         }
-        Ok(())
-    }
-
-    // ── Scroll operations ───────────────────────────────────────────
-
-    fn scroll_down(&self, _element: &ElementData, amount: f64) -> Result<()> {
-        let dy = -(amount * 10.0) as i32;
-        unsafe { safe_cg_post_scroll_event(dy, 0) };
-        Ok(())
-    }
-
-    fn scroll_up(&self, _element: &ElementData, amount: f64) -> Result<()> {
-        let dy = (amount * 10.0) as i32;
-        unsafe { safe_cg_post_scroll_event(dy, 0) };
-        Ok(())
-    }
-
-    fn scroll_right(&self, _element: &ElementData, amount: f64) -> Result<()> {
-        let dx = -(amount * 10.0) as i32;
-        unsafe { safe_cg_post_scroll_event(0, dx) };
-        Ok(())
-    }
-
-    fn scroll_left(&self, _element: &ElementData, amount: f64) -> Result<()> {
-        let dx = (amount * 10.0) as i32;
-        unsafe { safe_cg_post_scroll_event(0, dx) };
         Ok(())
     }
 
@@ -2324,7 +2298,7 @@ impl MacOSProvider {
         let app_element = unsafe { safe_ax_create_application(pid) };
         if app_element.is_null() {
             unsafe {
-                CFRelease(observer);
+                safe_cf_release(observer);
                 drop(Box::from_raw(ctx_ptr as *mut ObserverContext));
             }
             return Err(Error::SelectorNotMatched {
@@ -2363,7 +2337,7 @@ impl MacOSProvider {
             };
         }
 
-        unsafe { CFRelease(app_element) };
+        unsafe { safe_cf_release(app_element) };
 
         let (rl_tx, rl_rx) = std::sync::mpsc::sync_channel::<usize>(1);
         let observer_usize = observer as usize;
@@ -2399,7 +2373,7 @@ impl MacOSProvider {
             let _ = handle.join();
             unsafe {
                 drop(Box::from_raw(ctx_usize as *mut ObserverContext));
-                CFRelease(observer_usize as CFTypeRef);
+                safe_cf_release(observer_usize as CFTypeRef);
             }
         });
 

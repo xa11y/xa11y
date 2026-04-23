@@ -1364,29 +1364,6 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn action_scroll_direction() {
-        let app = h::app_root();
-        // Try scroll on a scrollbar or window
-        let scrollbars = app.locator("scroll_bar").elements().unwrap();
-        let windows = app.locator("window").elements().unwrap();
-        let target = scrollbars
-            .into_iter()
-            .next()
-            .or_else(|| windows.into_iter().next())
-            .expect("No scrollable element found");
-        let result = target.provider().scroll_down(&target, 3.0);
-        // Scroll may not be supported on all elements; verify no crash
-        match result {
-            Ok(()) => println!("Scroll succeeded"),
-            Err(e) => println!(
-                "Scroll result: {} (OK — not all elements support scroll)",
-                e
-            ),
-        }
-    }
-
-    #[test]
-    #[ignore]
     fn action_set_text_selection() {
         let app = h::app_root();
         let text = find_text_entry(&app);

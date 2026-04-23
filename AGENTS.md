@@ -20,15 +20,41 @@ Integration tests use shared helpers from `xa11y/tests/integ/mod.rs`:
 
 ### Key coverage gaps to address
 
-- **macOS integration tests** — blocked on `xa11y-macos` provider implementation
+- **Qt-on-macOS integration tests in CI** — currently skipped in `.github/workflows/ci.yml` (macOS Qt job disabled); macOS integ for the AccessKit app is working and covered.
 
 ## Design Tenets
 
 1. **No silent fallbacks.** If an operation fails, return the error — don't silently try a different mechanism. Fallbacks hide bugs and make behavior unpredictable for consumers. Surface failures clearly so callers can handle them.
 
+   **Anti-patterns that violate this tenet:**
+   - `let _ = some_call();` — if the call's result matters, propagate it; if it genuinely doesn't, leave a one-line comment explaining why.
+   - `some_call().ok()` used to coerce `Result → Option` and discard the error reason.
+   - `if let Ok(x) = some_call() { ... } // else fall through` — this treats a real error as "no match". Match on the specific expected variant (e.g. `Err(Error::SelectorNotMatched)`) and propagate the rest.
+   - Fallback chains: try A, on failure try B, on failure try C. Each step hides the original failure and changes effective behavior. If multiple mechanisms genuinely need to be tried, do it explicitly with logged reasoning, not silent fall-through.
+
 2. **Only expose what accessibility APIs support.** If a platform has no accessibility interface for an operation, don't implement it with input simulation — leave it out.
 
 3. **Action fidelity.** If an element reports an action name in its `actions` list, calling that action must invoke the original platform action — not a substitute or alias.
+
+4. **Fail surfaceably, not fatally.** Prefer `Result` over `.unwrap()` / `.expect()` in provider and binding code.
+   - **Locks**: `.lock().unwrap()` on caches or memoized state should be `.lock().unwrap_or_else(|e| e.into_inner())` — poisoning in a cache is recoverable. Only panic on locks that guard a genuine invariant.
+   - **Platform FFI returns**: never `.unwrap()` a CF / AX / UIA / AT-SPI2 return. Propagate as `Error::Platform`.
+   - **Tests** may use `.expect("...")` with a descriptive message when failure would indicate a broken test fixture.
+   - If you add a new `.unwrap()`, a reviewer should be able to point at an invariant one line above that proves it can't panic.
+
+### Breaking a tenet
+
+These tenets are firm defaults, not absolutes. If a situation genuinely requires breaking one:
+
+1. **Get human approval first.** Do not land a tenet-breaking change without an explicit human sign-off on that specific break. Agents must pause and ask.
+2. **Document it at the call site.** Add a comment immediately above the break, prefixed `// TENET-BREAK(<N>):` where `<N>` is the tenet number, explaining *why* the break is justified here (platform limitation, known upstream bug, etc.) and what the alternative would cost.
+3. **Make the break discoverable.** These comments should be greppable (`rg 'TENET-BREAK'`) so the full set of exceptions stays visible and reviewable.
+
+## Platform notes
+
+### macOS: ObjC exception safety
+
+All raw CoreFoundation / AX FFI calls in `xa11y-macos/src/ax.rs` must go through the wrappers in `xa11y-macos/src/exception_safe.m`. That file wraps calls like `CFRetain`, `CFRelease`, `CFGetTypeID`, `CFNumberGetValue`, `CFBooleanGetValue`, `CFArrayGetCount`, `CFArrayGetValueAtIndex`, and `CFDictionaryGetValue` in `@try`/`@catch`. A misbehaving AX value's `-release` / `-getTypeID` can throw an `NSException` that unwinds through `extern "C"` → process abort. When adding a new CF or AX interop call, go through the `safe_*` wrapper; if one doesn't exist, add it to `exception_safe.m` first. Enforced by `cargo xtask check-macos-ffi` (run automatically as part of `cargo xtask check`), which fails the build if any raw CF/AX symbol is referenced outside a `//` comment in `ax.rs`.
 
 ## Pre-Commit / Pre-PR Checklist
 

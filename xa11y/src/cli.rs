@@ -38,7 +38,7 @@ Usage:
   xa11y events [--app NAME | --pid PID]     Stream accessibility events
 
 Actions: press, focus, blur, toggle, expand, collapse, select, show-menu,
-  scroll-into-view, scroll-down, scroll-right, increment, decrement,
+  scroll-into-view, increment, decrement,
   set-value (requires --value), type-text (requires --value),
   select-text (requires --value START,END)"
     );
@@ -300,20 +300,6 @@ fn cmd_action(args: &[String]) -> Result<()> {
         "select" => locator.select()?,
         "show-menu" => locator.show_menu()?,
         "scroll-into-view" => locator.scroll_into_view()?,
-        "scroll-down" => {
-            let amount = value
-                .as_deref()
-                .and_then(|v| v.parse::<f64>().ok())
-                .unwrap_or(1.0);
-            locator.scroll_down(amount)?;
-        }
-        "scroll-right" => {
-            let amount = value
-                .as_deref()
-                .and_then(|v| v.parse::<f64>().ok())
-                .unwrap_or(1.0);
-            locator.scroll_right(amount)?;
-        }
         "increment" => locator.increment()?,
         "decrement" => locator.decrement()?,
         "set-value" => {
@@ -500,7 +486,6 @@ mod tests {
             max_value: None,
             stable_id: None,
             pid: None,
-            attributes: std::collections::HashMap::new(),
             raw: std::collections::HashMap::new(),
             handle: 0,
         }
