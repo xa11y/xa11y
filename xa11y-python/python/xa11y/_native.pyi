@@ -173,6 +173,16 @@ class Element:
     @property
     def bounds(self) -> Rect | None: ...
     @property
+    def raw(self) -> dict[str, object]:
+        """Platform-specific raw data attached to this element.
+
+        Keys are provider-defined (e.g. ``"ax_role"`` on macOS,
+        ``"uia_control_type"`` on Windows). Values are JSON-compatible
+        (strings, numbers, booleans, lists, nested dicts). Intended for
+        debugging and platform-specific queries — prefer the cross-platform
+        fields (``role``, ``name``, etc.) for portable logic.
+        """
+    @property
     def enabled(self) -> bool: ...
     @property
     def visible(self) -> bool: ...
@@ -292,3 +302,4 @@ def locator(selector: str) -> Locator:
 # ── Test helpers ─────────────────────────────────────────────────────────────
 
 def _make_test_locator() -> Locator: ...
+def _make_disconnected_subscription() -> Subscription: ...

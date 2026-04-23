@@ -19,14 +19,14 @@ test('count matches the mock tree', async () => {
 });
 
 test('exists() does not throw on miss', async () => {
-  assert.equal(await root().descendant('button[name="OK"]').exists(), true);
+  assert.equal(await root().descendant('button[name="Back"]').exists(), true);
   assert.equal(await root().descendant('button[name="NoSuch"]').exists(), false);
 });
 
 test('element() resolves to a live Element snapshot', async () => {
-  const el = await root().descendant('button[name="OK"]').element();
+  const el = await root().descendant('button[name="Back"]').element();
   assert.equal(el.role, 'button');
-  assert.equal(el.name, 'OK');
+  assert.equal(el.name, 'Back');
   assert.equal(el.enabled, true);
   assert.deepEqual(el.actions.sort(), ['focus', 'press']);
 });
@@ -43,14 +43,14 @@ test('elements() returns all matches', async () => {
   assert.equal(buttons.length, 2);
   assert.deepEqual(
     buttons.map((b) => b.name).sort(),
-    ['Cancel', 'OK'],
+    ['Back', 'Forward'],
   );
 });
 
 test('child() narrows the selector', async () => {
   const win = root().child('window');
   assert.equal(await win.count(), 1);
-  const button = win.descendant('button[name="OK"]');
+  const button = win.descendant('button[name="Back"]');
   assert.equal(await button.exists(), true);
 });
 
@@ -62,7 +62,7 @@ test('nth() is 1-based', async () => {
 
 test('locator properties are preserved across chains', () => {
   const base = root();
-  const derived = base.child('window').descendant('button[name="OK"]');
+  const derived = base.child('window').descendant('button[name="Back"]');
   assert.ok(derived instanceof Locator);
   assert.ok(typeof derived.selector === 'string');
   assert.ok(derived.selector.includes('button'));

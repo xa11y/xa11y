@@ -129,3 +129,77 @@ pub trait Provider: Send + Sync {
     /// Returns a [`Subscription`] that receives events until dropped.
     fn subscribe(&self, element: &ElementData) -> Result<Subscription>;
 }
+
+// Blanket impl so shared references to a provider act as providers themselves.
+// Used by the umbrella crate's singleton (a `&'static dyn Provider` wrapped in
+// `Arc<_>`) and by any caller that wants to share a provider via `&T`. The
+// orphan rules keep this collision-free for downstream crates because `xa11y-core`
+// owns the `Provider` trait.
+impl<T: Provider + ?Sized> Provider for &T {
+    fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
+        (**self).get_children(element)
+    }
+    fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
+        (**self).get_parent(element)
+    }
+    fn find_elements(
+        &self,
+        root: Option<&ElementData>,
+        selector: &Selector,
+        limit: Option<usize>,
+        max_depth: Option<u32>,
+    ) -> Result<Vec<ElementData>> {
+        (**self).find_elements(root, selector, limit, max_depth)
+    }
+    fn press(&self, element: &ElementData) -> Result<()> {
+        (**self).press(element)
+    }
+    fn focus(&self, element: &ElementData) -> Result<()> {
+        (**self).focus(element)
+    }
+    fn blur(&self, element: &ElementData) -> Result<()> {
+        (**self).blur(element)
+    }
+    fn toggle(&self, element: &ElementData) -> Result<()> {
+        (**self).toggle(element)
+    }
+    fn select(&self, element: &ElementData) -> Result<()> {
+        (**self).select(element)
+    }
+    fn expand(&self, element: &ElementData) -> Result<()> {
+        (**self).expand(element)
+    }
+    fn collapse(&self, element: &ElementData) -> Result<()> {
+        (**self).collapse(element)
+    }
+    fn show_menu(&self, element: &ElementData) -> Result<()> {
+        (**self).show_menu(element)
+    }
+    fn increment(&self, element: &ElementData) -> Result<()> {
+        (**self).increment(element)
+    }
+    fn decrement(&self, element: &ElementData) -> Result<()> {
+        (**self).decrement(element)
+    }
+    fn scroll_into_view(&self, element: &ElementData) -> Result<()> {
+        (**self).scroll_into_view(element)
+    }
+    fn set_value(&self, element: &ElementData, value: &str) -> Result<()> {
+        (**self).set_value(element, value)
+    }
+    fn set_numeric_value(&self, element: &ElementData, value: f64) -> Result<()> {
+        (**self).set_numeric_value(element, value)
+    }
+    fn type_text(&self, element: &ElementData, text: &str) -> Result<()> {
+        (**self).type_text(element, text)
+    }
+    fn set_text_selection(&self, element: &ElementData, start: u32, end: u32) -> Result<()> {
+        (**self).set_text_selection(element, start, end)
+    }
+    fn perform_action(&self, element: &ElementData, action: &str) -> Result<()> {
+        (**self).perform_action(element, action)
+    }
+    fn subscribe(&self, element: &ElementData) -> Result<Subscription> {
+        (**self).subscribe(element)
+    }
+}

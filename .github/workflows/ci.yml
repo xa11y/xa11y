@@ -119,6 +119,17 @@ jobs:
       - name: Run Cocoa integration tests
         run: ./scripts/run_cocoa_tests.sh
 
+      # macOS Rust integration tests (including the AX-call-count regression
+      # tests in `xa11y-macos/src/ax.rs`) are intentionally NOT wired into CI.
+      # They require kTCCServiceAccessibility to be granted to the Rust test
+      # harness binary, whose path is cargo-hashed (e.g.
+      # `target/debug/deps/integ_test-abc123`). Granting TCC to moving paths
+      # has proven fragile under macos-latest runners (hash changes across
+      # builds; tccd reloads race with the tests). Developers run them
+      # locally via `./scripts/run_integ_tests_macos.sh` where their terminal
+      # already has TCC. The ax_calls_* tests are #[ignore]d so they are
+      # skipped by `cargo test --workspace`.
+
       # Qt integration tests skipped: macOS AX tree for Qt apps has
       # incomplete structure (nested AXApplication nodes). The depth
       # limit prevents hangs but widgets aren't fully exposed.

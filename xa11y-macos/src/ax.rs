@@ -2756,17 +2756,19 @@ mod tests {
             "Should find Submit button. Got no results."
         );
 
-        // Expected counts — ONLY LOWER THESE, never raise them.
-        // When you optimize, update the count to match the new (lower) value.
+        // Upper bound — this counts AX IPC calls. Reducing this number is good;
+        // increasing it is a regression. Update the bound if a deliberate feature
+        // addition raises it.
         //
         // Breakdown: lightweight DFS fetches AXRole+AXSubrole per node (~2 calls
         // each) plus AXTitle/AXValue for name matching. 1 batch + 1 action-names
         // call for the single match's full ElementData.
-        assert_eq!(
-            total, 294,
+        const MAX_CALLS: u64 = 294;
+        assert!(
+            total <= MAX_CALLS,
             "AX call count regression: button[name=\"Submit\"] from app root.\n\
-             copy_attr={copy_attr}, copy_multi={copy_multi}, copy_actions={copy_actions}\n\
-             Only lower this count, never raise it.",
+             got {total}, expected <= {MAX_CALLS}\n\
+             copy_attr={copy_attr}, copy_multi={copy_multi}, copy_actions={copy_actions}",
         );
     }
 
@@ -2793,11 +2795,15 @@ mod tests {
             "Should find Submit button from window."
         );
 
-        assert_eq!(
-            total, 288,
+        // Upper bound — this counts AX IPC calls. Reducing this number is good;
+        // increasing it is a regression. Update the bound if a deliberate feature
+        // addition raises it.
+        const MAX_CALLS: u64 = 288;
+        assert!(
+            total <= MAX_CALLS,
             "AX call count regression: button[name=\"Submit\"] from window.\n\
-             copy_attr={copy_attr}, copy_multi={copy_multi}, copy_actions={copy_actions}\n\
-             Only lower this count, never raise it.",
+             got {total}, expected <= {MAX_CALLS}\n\
+             copy_attr={copy_attr}, copy_multi={copy_multi}, copy_actions={copy_actions}",
         );
     }
 
@@ -2821,11 +2827,15 @@ mod tests {
 
         assert!(!results.is_empty(), "Should find at least one checkbox.");
 
-        assert_eq!(
-            total, 280,
+        // Upper bound — this counts AX IPC calls. Reducing this number is good;
+        // increasing it is a regression. Update the bound if a deliberate feature
+        // addition raises it.
+        const MAX_CALLS: u64 = 280;
+        assert!(
+            total <= MAX_CALLS,
             "AX call count regression: check_box from window.\n\
-             copy_attr={copy_attr}, copy_multi={copy_multi}, copy_actions={copy_actions}\n\
-             Only lower this count, never raise it.",
+             got {total}, expected <= {MAX_CALLS}\n\
+             copy_attr={copy_attr}, copy_multi={copy_multi}, copy_actions={copy_actions}",
         );
     }
 
@@ -2843,14 +2853,16 @@ mod tests {
         let _children = provider.get_children(Some(&window)).unwrap();
         let (copy_attr, copy_multi, copy_actions) = ax_counters::snapshot();
 
-        // With batch fetch, copy_multi should equal the number of children
-        // (1 batch call per child for attributes, 1 action-names call per child).
-        // copy_attr covers the filter checks (role/subrole for should_filter_child).
+        // Structural invariant: when batch fetch is in effect, copy_multi
+        // (AXUIElementCopyMultipleAttributeValues calls) should equal
+        // copy_actions (1 per child). This is not a count bound — it's
+        // testing that we go through the batch code path rather than falling
+        // back to per-attribute fetches. If batch were bypassed, copy_multi
+        // would be ~0 and copy_attr would spike instead.
         assert_eq!(
             copy_multi, copy_actions,
             "Batch fetches should equal action-name fetches (1 per child).\n\
-             copy_attr={copy_attr}, copy_multi={copy_multi}, copy_actions={copy_actions}\n\
-             Only lower this count, never raise it.",
+             copy_attr={copy_attr}, copy_multi={copy_multi}, copy_actions={copy_actions}",
         );
     }
 }

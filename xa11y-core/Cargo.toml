@@ -8,6 +8,9 @@ description = "Core types, traits, and selector engine for xa11y cross-platform 
 
 [features]
 strict-roles = []
+# Opt-in shared mock Provider used by binding tests. Kept off by default so
+# production consumers don't pull the extra fixture code.
+test-support = []
 
 [dependencies]
 serde = { workspace = true }

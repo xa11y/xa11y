@@ -175,6 +175,25 @@ def test_busy(test_app):
     assert app.busy is False
 
 
+# ── Raw platform data ────────────────────────────────────────────────────────
+
+
+def test_raw_exposes_provider_metadata(test_app):
+    """`Element.raw` exposes the platform-specific raw data map. The shared
+    mock sets `{"ax_role": "AXApplication"}` on the application node so we
+    have a concrete value to assert against."""
+    app = test_app.element()
+    assert isinstance(app.raw, dict)
+    assert app.raw == {"ax_role": "AXApplication"}
+
+
+def test_raw_defaults_to_empty(test_app):
+    """Elements without raw metadata should expose an empty dict (not None)."""
+    buttons = test_app.descendant("button").elements()
+    back = next(b for b in buttons if b.name == "Back")
+    assert back.raw == {}
+
+
 # ── Actions list ─────────────────────────────────────────────────────────────
 
 

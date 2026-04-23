@@ -33,6 +33,14 @@ impl Subscription {
             .ok_or(Error::Timeout { elapsed: timeout })
     }
 
+    /// Block until an event arrives, the timeout expires, or the event source
+    /// disconnects. Unlike [`recv`](Self::recv), this preserves the distinction
+    /// between "no event yet" and "no events will ever arrive" so bindings can
+    /// terminate their poll loops cleanly when the subscription shuts down.
+    pub fn recv_status(&self, timeout: Duration) -> RecvStatus {
+        self.rx.recv_timeout_status(timeout)
+    }
+
     /// Block until an event matching `predicate` arrives or the timeout expires.
     pub fn wait_for(&self, predicate: impl Fn(&Event) -> bool, timeout: Duration) -> Result<Event> {
         let start = std::time::Instant::now();

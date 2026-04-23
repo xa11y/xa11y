@@ -441,8 +441,15 @@ fn build_snapshot_data(
 fn create_batch_request(automation: &IUIAutomation) -> Result<IUIAutomationCacheRequest> {
     let request = uia_call(|| unsafe { automation.CreateCacheRequest() })?;
 
+    // The property list is a fixed constant array of valid UIA property IDs.
+    // If AddProperty ever fails here, something is structurally wrong with the
+    // UIA environment (e.g. COM state corrupted). Propagate rather than
+    // silently producing a half-configured cache request (tenet 1).
     for prop in BATCH_PROPERTIES {
-        let _ = unsafe { request.AddProperty(*prop) };
+        unsafe { request.AddProperty(*prop) }.map_err(|e| Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("AddProperty({:?}) failed: {e}", prop),
+        })?;
     }
 
     Ok(request)
@@ -1017,16 +1024,27 @@ impl Provider for WindowsProvider {
                 code: e.code().0 as i64,
                 message: "DocumentRange failed".to_string(),
             })?;
-            // Collapse and move to start position
-            let _ = unsafe { range.Move(TextUnit_Character, start as i32) };
-            // Extend end to selection length
-            let _ = unsafe {
+            // Collapse and move to start position. If the move fails, the
+            // subsequent Select() would land on the wrong range — propagate
+            // rather than silently mis-selecting (tenet 1).
+            unsafe { range.Move(TextUnit_Character, start as i32) }.map_err(|e| {
+                Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("TextRange::Move to {start} failed: {e}"),
+                }
+            })?;
+            // Extend end to selection length.
+            unsafe {
                 range.MoveEndpointByUnit(
                     TextPatternRangeEndpoint_End,
                     TextUnit_Character,
                     (end - start) as i32,
                 )
-            };
+            }
+            .map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("TextRange::MoveEndpointByUnit({start}..{end}) failed: {e}"),
+            })?;
             unsafe { range.Select() }.map_err(|e| Error::Platform {
                 code: e.code().0 as i64,
                 message: "Select range failed".to_string(),
@@ -1646,9 +1664,26 @@ impl WindowsProvider {
             }
         })?;
 
-        // Other handlers are scoped to the app root's subtree.
+        // Other handlers are scoped to the app root's subtree. If any
+        // registration fails, events of that type would never arrive — the
+        // caller must know (tenet 1). Clean up already-registered handlers
+        // before returning so we don't leak native handlers on the app root.
+        let cleanup_focus = || unsafe {
+            let _ = self.automation.RemoveFocusChangedEventHandler(&focus);
+        };
+        let cleanup_automation = |registered: &[UIA_EVENT_ID]| unsafe {
+            for eid in registered {
+                let _ = self.automation.RemoveAutomationEventHandler(
+                    *eid,
+                    &app_root,
+                    &automation_handler,
+                );
+            }
+        };
+
+        let mut registered_automation_ids: Vec<UIA_EVENT_ID> = Vec::new();
         for eid in AUTOMATION_EVENT_IDS {
-            let _ = unsafe {
+            if let Err(e) = unsafe {
                 self.automation.AddAutomationEventHandler(
                     *eid,
                     &app_root,
@@ -1656,10 +1691,18 @@ impl WindowsProvider {
                     &cache,
                     &automation_handler,
                 )
-            };
+            } {
+                cleanup_automation(&registered_automation_ids);
+                cleanup_focus();
+                return Err(Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("AddAutomationEventHandler({:?}) failed: {e}", eid),
+                });
+            }
+            registered_automation_ids.push(*eid);
         }
 
-        let _ = unsafe {
+        if let Err(e) = unsafe {
             self.automation.AddPropertyChangedEventHandlerNativeArray(
                 &app_root,
                 TreeScope_Subtree,
@@ -1667,16 +1710,35 @@ impl WindowsProvider {
                 &property,
                 PROPERTY_CHANGE_IDS,
             )
-        };
+        } {
+            cleanup_automation(&registered_automation_ids);
+            cleanup_focus();
+            return Err(Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("AddPropertyChangedEventHandlerNativeArray failed: {e}"),
+            });
+        }
 
-        let _ = unsafe {
+        if let Err(e) = unsafe {
             self.automation.AddStructureChangedEventHandler(
                 &app_root,
                 TreeScope_Subtree,
                 &cache,
                 &structure,
             )
-        };
+        } {
+            unsafe {
+                let _ = self
+                    .automation
+                    .RemovePropertyChangedEventHandler(&app_root, &property);
+            }
+            cleanup_automation(&registered_automation_ids);
+            cleanup_focus();
+            return Err(Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("AddStructureChangedEventHandler failed: {e}"),
+            });
+        }
 
         // Each captured COM interface is wrapped in ComSend so the cancel
         // closure satisfies CancelHandle::new's `Send` bound. See ComSend's

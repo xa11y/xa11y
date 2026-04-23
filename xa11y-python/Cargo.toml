@@ -10,5 +10,10 @@ name = "xa11y_python"
 crate-type = ["cdylib"]
 
 [dependencies]
-xa11y = { path = "../xa11y" }
+# `test-support` exposes the shared mock provider used by Python unit tests.
+# The feature is gated behind a cargo feature so it doesn't ship with
+# production-only builds; we always enable it here because the Python wheel
+# already carries the `_make_test_locator()` helper for `tests/` to import.
+xa11y = { path = "../xa11y", features = ["test-support"] }
 pyo3 = { version = "0.23", features = ["abi3-py39"] }
+serde_json = "1"

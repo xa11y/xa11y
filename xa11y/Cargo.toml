@@ -10,6 +10,9 @@ readme = "README.md"
 [features]
 testing = []
 strict-roles = ["xa11y-core/strict-roles"]
+# Re-exports the shared mock Provider from xa11y-core. Used by language
+# bindings' test builds; not needed in production.
+test-support = ["xa11y-core/test-support"]
 
 [dependencies]
 xa11y-core = { workspace = true }
