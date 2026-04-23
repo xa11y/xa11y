@@ -482,6 +482,75 @@ fn uia_get(arr: &IUIAutomationElementArray, index: i32) -> Option<IUIAutomationE
     unsafe { arr.GetElement(index) }.ok()
 }
 
+/// Locate the caret within a control's TextPattern, as a character offset
+/// from the start of the document.
+///
+/// Returns:
+/// - `Ok(Some(n))` if TextPattern reports a selection whose start lies `n`
+///   characters into the document. For a collapsed caret, `n` is the caret
+///   position. For a non-empty selection, `n` is the selection's start —
+///   mirroring macOS/AT-SPI semantics of "insert at selection start".
+/// - `Ok(None)` if the control has no TextPattern, or its selection array is
+///   empty (no caret available). The caller should fall back to "append at
+///   end" — the behaviour documented in design/README.md.
+/// - `Err(..)` if TextPattern is present but a COM call to walk the range
+///   fails. These are propagated rather than silently falling back, so
+///   genuine platform errors surface (tenet 1).
+fn caret_char_offset(uia_element: &IUIAutomationElement) -> Result<Option<usize>> {
+    let text_pattern = match unsafe {
+        uia_element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
+    } {
+        Ok(p) => p,
+        Err(_) => return Ok(None), // TextPattern not supported on this control.
+    };
+
+    let selection = match unsafe { text_pattern.GetSelection() } {
+        Ok(s) => s,
+        // No active selection (e.g. control never focused) — treat as "no caret".
+        Err(_) => return Ok(None),
+    };
+
+    if unsafe { selection.Length() }.unwrap_or(0) == 0 {
+        return Ok(None);
+    }
+
+    let selection_range = unsafe { selection.GetElement(0) }.map_err(|e| Error::Platform {
+        code: e.code().0 as i64,
+        message: format!("TextRangeArray::GetElement(0) failed: {}", e),
+    })?;
+
+    let doc_range = unsafe { text_pattern.DocumentRange() }.map_err(|e| Error::Platform {
+        code: e.code().0 as i64,
+        message: format!("TextPattern::DocumentRange failed: {}", e),
+    })?;
+
+    // Clone the document range and clip it so it spans [doc start .. selection start].
+    // The length of its text (in Unicode characters) is the caret offset.
+    let prefix = unsafe { doc_range.Clone() }.map_err(|e| Error::Platform {
+        code: e.code().0 as i64,
+        message: format!("TextRange::Clone failed: {}", e),
+    })?;
+    unsafe {
+        prefix.MoveEndpointByRange(
+            TextPatternRangeEndpoint_End,
+            &selection_range,
+            TextPatternRangeEndpoint_Start,
+        )
+    }
+    .map_err(|e| Error::Platform {
+        code: e.code().0 as i64,
+        message: format!("TextRange::MoveEndpointByRange failed: {}", e),
+    })?;
+    let prefix_text = unsafe { prefix.GetText(-1) }
+        .map(|s| s.to_string())
+        .map_err(|e| Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("TextRange::GetText failed: {}", e),
+        })?;
+
+    Ok(Some(prefix_text.chars().count()))
+}
+
 /// Pre-queried UIA patterns for an element, avoiding redundant COM calls
 /// across `get_value`, `get_actions`, and `parse_states`.
 struct ElementPatterns {
@@ -992,22 +1061,15 @@ impl Provider for WindowsProvider {
                     message: format!("Value.CurrentValue failed: {}", e),
                 })?;
 
-            // Try to get cursor position from TextPattern
-            let insert_pos = if let Ok(text_pattern) = unsafe {
-                uia_element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
-            } {
-                // Get the selection/caret range — its start offset is the cursor
-                unsafe { text_pattern.GetSelection() }
-                    .ok()
-                    .and_then(|arr| unsafe { arr.GetElement(0) }.ok())
-                    .map(|_| current.len()) // Fallback: append at end
-                    .unwrap_or(current.len())
-            } else {
-                current.len() // No TextPattern — append at end
-            };
+            // If TextPattern is present, use it to locate the caret (start
+            // endpoint of the first selection range). If TextPattern is not
+            // supported on this control, or no selection exists, fall back to
+            // appending at the end of the current value — matching the
+            // documented behaviour in design/README.md.
+            let caret_char_offset =
+                caret_char_offset(&uia_element)?.unwrap_or_else(|| current.chars().count());
 
-            let mut new_value = current;
-            new_value.insert_str(insert_pos.min(new_value.len()), text);
+            let new_value = crate::splice::splice_at_char_offset(&current, text, caret_char_offset);
             let bstr: windows::core::BSTR = new_value.into();
             unsafe { value_pattern.SetValue(&bstr) }.map_err(|_| Error::TextValueNotSupported)?;
             return Ok(());
