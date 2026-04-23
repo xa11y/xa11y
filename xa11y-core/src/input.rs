@@ -319,9 +319,10 @@ impl Default for DragOptions {
 
 /// Platform backend trait for synthesised user input.
 ///
-/// Implementors generate OS-level pointer and keyboard events. Each method
-/// corresponds to a single, low-level operation; the higher-level
-/// [`InputSim`] composes these into ergonomic actions.
+/// Implementors generate OS-level pointer and keyboard events. Most methods
+/// correspond to a single low-level operation; a few (marked "provided") are
+/// synthesised by default but may be overridden when a platform has a
+/// higher-fidelity primitive.
 ///
 /// **This trait is intentionally separate from [`crate::Provider`].** A
 /// backend that only knows how to read the accessibility tree should not
@@ -337,7 +338,7 @@ impl Default for DragOptions {
 ///   degrade — surface the missing capability per Tenet 1.
 /// - [`Error::Platform`] for raw OS failures.
 pub trait InputProvider: Send + Sync {
-    // ── Pointer ─────────────────────────────────────────────────────
+    // ── Pointer (required) ──────────────────────────────────────────
 
     /// Move the pointer to `to` without pressing any buttons.
     fn pointer_move(&self, to: Point) -> Result<()>;
@@ -349,22 +350,15 @@ pub trait InputProvider: Send + Sync {
     fn pointer_up(&self, button: MouseButton) -> Result<()>;
 
     /// Click `button` at `at`, repeated `count` times. The backend is
-    /// responsible for honouring the OS double-click interval when `count > 1`.
+    /// responsible for honouring the OS double-click interval when
+    /// `count > 1` and for any platform-specific click-state bookkeeping
+    /// (e.g. `kCGMouseEventClickState` on macOS).
     fn pointer_click(&self, at: Point, button: MouseButton, count: u32) -> Result<()>;
-
-    /// Press `button` at `from`, move to `to` over `duration`, then release.
-    fn pointer_drag(
-        &self,
-        from: Point,
-        to: Point,
-        button: MouseButton,
-        duration: Duration,
-    ) -> Result<()>;
 
     /// Scroll by `delta` ticks at `at`.
     fn pointer_scroll(&self, at: Point, delta: ScrollDelta) -> Result<()>;
 
-    // ── Keyboard ────────────────────────────────────────────────────
+    // ── Keyboard (required) ─────────────────────────────────────────
 
     /// Press `key` (no release). Use [`key_up`](Self::key_up) to release.
     ///
@@ -374,14 +368,45 @@ pub trait InputProvider: Send + Sync {
     /// Release `key`.
     fn key_up(&self, key: &Key) -> Result<()>;
 
-    /// Press and release `key` while `held` are held down.
-    fn key_tap(&self, key: &Key, held: &[Key]) -> Result<()>;
-
     /// Type `text` as literal user input.
     ///
     /// Backends should prefer the OS's text-input path (with IME support)
     /// over synthesising individual key presses where possible.
     fn type_text(&self, text: &str) -> Result<()>;
+
+    // ── Pointer (provided, override for platform fidelity) ──────────
+
+    /// Press `button` at `from`, interpolate to `to` over `duration`, release.
+    ///
+    /// The default synthesis posts `pointer_down` → a series of `pointer_move`
+    /// calls (≈60 Hz cadence) → `pointer_up`. Backends **should override** to
+    /// emit platform-specific drag events where they differ from move events
+    /// — on macOS, drag-and-drop source apps filter for
+    /// `kCGEventLeftMouseDragged`, which is distinct from
+    /// `kCGEventMouseMoved`. On Windows and X11 the default synthesis is
+    /// usually sufficient.
+    fn pointer_drag(
+        &self,
+        from: Point,
+        to: Point,
+        button: MouseButton,
+        duration: Duration,
+    ) -> Result<()> {
+        const STEP: Duration = Duration::from_millis(16);
+        self.pointer_move(from)?;
+        self.pointer_down(button)?;
+        let steps = (duration.as_millis() / STEP.as_millis().max(1)).max(1) as i32;
+        for i in 1..=steps {
+            let t = i as f64 / steps as f64;
+            let x = from.x + ((to.x - from.x) as f64 * t).round() as i32;
+            let y = from.y + ((to.y - from.y) as f64 * t).round() as i32;
+            self.pointer_move(Point::new(x, y))?;
+            if i < steps {
+                std::thread::sleep(STEP);
+            }
+        }
+        self.pointer_up(button)
+    }
 }
 
 // ── Public façade ───────────────────────────────────────────────────
@@ -548,7 +573,8 @@ impl Keyboard<'_> {
     /// Tap `key` (press + release) with no other keys held.
     pub fn press(&self, key: Key) -> Result<()> {
         key.validate()?;
-        self.backend.key_tap(&key, &[])
+        self.backend.key_down(&key)?;
+        self.backend.key_up(&key)
     }
 
     /// Tap `key` while `held` are held down.
@@ -565,7 +591,10 @@ impl Keyboard<'_> {
         for k in held {
             k.validate()?;
         }
-        self.backend.key_tap(&key, held)
+        with_keys_held(self.backend.as_ref(), held, || {
+            self.backend.key_down(&key)?;
+            self.backend.key_up(&key)
+        })
     }
 
     /// Press `key` without releasing. Pair with [`up`](Self::up).
