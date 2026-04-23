@@ -13,11 +13,11 @@ function button(name) {
 }
 
 test('press() resolves for an enabled button', async () => {
-  await button('OK').press();
+  await button('Back').press();
 });
 
 test('press() on disabled button times out (auto-wait never succeeds)', async () => {
-  // Cancel is disabled in the mock tree, so auto-wait can never satisfy the
+  // Forward is disabled in the mock tree, so auto-wait can never satisfy the
   // visible+enabled precondition. The locator should eventually throw a
   // TimeoutError. We give it a short budget via a custom locator timeout
   // by relying on the default 5s — test is marked slow.
@@ -26,7 +26,7 @@ test('press() on disabled button times out (auto-wait never succeeds)', async ()
 });
 
 test('focus() resolves', async () => {
-  await button('OK').focus();
+  await button('Back').focus();
 });
 
 test('setValue() propagates the value arg', async () => {
@@ -45,5 +45,5 @@ test('toggle() on a checkbox resolves', async () => {
 });
 
 test('performAction() dispatches arbitrary action names', async () => {
-  await button('OK').performAction('press');
+  await button('Back').performAction('press');
 });

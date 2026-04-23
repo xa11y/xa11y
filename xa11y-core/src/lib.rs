@@ -8,6 +8,11 @@ pub mod provider;
 pub mod role;
 pub mod selector;
 
+/// Shared in-memory mock Provider. Gated behind `test-support` so only the
+/// language bindings' test builds (and other explicit opt-ins) compile it.
+#[cfg(feature = "test-support")]
+pub mod mock;
+
 // Re-export primary types at the crate root for convenience.
 pub use app::App;
 pub use element::{Element, ElementData, RawPlatformData, Rect, StateSet, Toggled};

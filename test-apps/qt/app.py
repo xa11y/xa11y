@@ -68,6 +68,7 @@ class TestWindow(QMainWindow):
         self._add_text(layout)
         self._add_list(layout)
         self._add_tree(layout)
+        self._add_dynamic(layout)
 
         layout.addStretch()
         scroll.setWidget(content)
@@ -282,6 +283,53 @@ class TestWindow(QMainWindow):
         lay.addWidget(self.tree_widget)
 
         parent_layout.addWidget(grp)
+
+    def _add_dynamic(self, parent_layout: QVBoxLayout) -> None:
+        """Dynamic widgets used by the event test suite.
+
+        These mutate on action so event tests can exercise:
+          - NameChanged  (Submit → status label text change)
+          - StructureChanged  (Add/Remove Item → list row add/remove)
+        """
+        grp = QGroupBox("Dynamic")
+        grp.setAccessibleName("Dynamic")
+        lay = QVBoxLayout(grp)
+
+        self.status_label = QLabel("Status: Ready")
+        self.status_label.setAccessibleName("Status: Ready")
+        lay.addWidget(self.status_label)
+
+        self.submit_btn = QPushButton("Submit")
+        self.submit_btn.setAccessibleName("Submit")
+        self.submit_btn.clicked.connect(self._on_submit_clicked)
+        lay.addWidget(self.submit_btn)
+
+        self.add_item_btn = QPushButton("Add Item")
+        self.add_item_btn.setAccessibleName("Add Item")
+        self.add_item_btn.clicked.connect(self._on_add_item_clicked)
+        lay.addWidget(self.add_item_btn)
+
+        self.remove_item_btn = QPushButton("Remove Item")
+        self.remove_item_btn.setAccessibleName("Remove Item")
+        self.remove_item_btn.clicked.connect(self._on_remove_item_clicked)
+        lay.addWidget(self.remove_item_btn)
+
+        parent_layout.addWidget(grp)
+
+    def _on_submit_clicked(self) -> None:
+        current = self.status_label.text()
+        new = "Status: Submitted" if current != "Status: Submitted" else "Status: Ready"
+        self.status_label.setText(new)
+        self.status_label.setAccessibleName(new)
+
+    def _on_add_item_clicked(self) -> None:
+        new_index = self.list_widget.count() + 1
+        self.list_widget.addItem(f"Item {new_index}")
+
+    def _on_remove_item_clicked(self) -> None:
+        count = self.list_widget.count()
+        if count > 0:
+            self.list_widget.takeItem(count - 1)
 
 
 def main() -> None:

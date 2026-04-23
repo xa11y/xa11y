@@ -72,6 +72,7 @@ require.cache[nativePath] = {
     _NativeSubscription: NativeSubscriptionStub,
     NativeSubscription: NativeSubscriptionStub,
     _makeTestLocator: () => {},
+    _makeDisconnectedSubscription: () => new NativeSubscriptionStub(),
     locator: () => {},
   },
 };

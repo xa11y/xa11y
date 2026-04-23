@@ -150,6 +150,23 @@ Line 3</textarea>
     </ul>
   </fieldset>
 
+  <!--
+    Dynamic widgets used by the event test suite. These mutate on click so
+    NameChanged (Submit → status label) and StructureChanged (Add/Remove Item
+    → list rows) can be exercised end-to-end.
+  -->
+  <fieldset>
+    <legend>Dynamic</legend>
+    <div class="row">
+      <p id="status-label" aria-label="Status: Ready">Status: Ready</p>
+    </div>
+    <div class="row">
+      <button id="submit-button" aria-label="Submit">Submit</button>
+      <button id="add-item-button" aria-label="Add Item">Add Item</button>
+      <button id="remove-item-button" aria-label="Remove Item">Remove Item</button>
+    </div>
+  </fieldset>
+
   <script>
     // OK button enables Cancel
     document.getElementById('ok-button').addEventListener('click', () => {
@@ -168,6 +185,31 @@ Line 3</textarea>
     const spin = document.getElementById('quantity-spin');
     spin.addEventListener('input', () => {
       spin.setAttribute('aria-valuenow', spin.value);
+    });
+
+    // Submit toggles the status label text (drives NameChanged)
+    const statusLabel = document.getElementById('status-label');
+    document.getElementById('submit-button').addEventListener('click', () => {
+      const current = statusLabel.textContent;
+      const next = current === 'Status: Submitted' ? 'Status: Ready' : 'Status: Submitted';
+      statusLabel.textContent = next;
+      statusLabel.setAttribute('aria-label', next);
+    });
+
+    // Add/Remove Item mutate the list (drive StructureChanged)
+    const itemsList = document.getElementById('items-list');
+    let nextItemIx = 6;
+    document.getElementById('add-item-button').addEventListener('click', () => {
+      const li = document.createElement('li');
+      li.setAttribute('role', 'option');
+      li.setAttribute('aria-selected', 'false');
+      li.textContent = `Item ${nextItemIx}`;
+      itemsList.appendChild(li);
+      nextItemIx += 1;
+    });
+    document.getElementById('remove-item-button').addEventListener('click', () => {
+      const last = itemsList.lastElementChild;
+      if (last) itemsList.removeChild(last);
     });
   </script>
 </body>

@@ -144,13 +144,17 @@ impl NativeSubscription {
 
         std::thread::spawn(move || {
             while !cancelled.load(Ordering::Acquire) {
-                match sub.recv(Duration::from_millis(100)) {
-                    Ok(evt) => {
-                        queue.lock().unwrap().push_back(evt);
+                match sub.recv_status(Duration::from_millis(100)) {
+                    xa11y::RecvStatus::Event(evt) => {
+                        queue.lock().unwrap().push_back(*evt);
                         wakeup.call(Ok(()), ThreadsafeFunctionCallMode::NonBlocking);
                     }
-                    Err(xa11y::Error::Timeout { .. }) => continue,
-                    Err(_) => break,
+                    xa11y::RecvStatus::Timeout => continue,
+                    // All senders dropped — the native event source has shut
+                    // down, so the stream is legitimately finished. Exit the
+                    // worker; JS sees no further events but no error either
+                    // (mirrors how Subscription::iter terminates on disconnect).
+                    xa11y::RecvStatus::Disconnected => break,
                 }
             }
             // `sub` drops here, releasing the platform subscription.

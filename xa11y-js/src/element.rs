@@ -80,6 +80,24 @@ impl Element {
         self.data.bounds.map(Into::into)
     }
 
+    /// Platform-specific raw data attached to this element, as a plain JS
+    /// object. Keys are provider-defined (e.g. `ax_role`/`ax_subrole` on macOS,
+    /// `uia_control_type` on Windows). Values are JSON-compatible — strings,
+    /// numbers, booleans, arrays, nested objects. Intended for debugging and
+    /// platform-specific queries.
+    #[napi(getter, ts_return_type = "Record<string, unknown>")]
+    pub fn raw(&self) -> serde_json::Value {
+        // Build a JSON Object from the raw HashMap. napi's serde-json
+        // integration converts this to a plain JS object when returned.
+        let map: serde_json::Map<String, serde_json::Value> = self
+            .data
+            .raw
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        serde_json::Value::Object(map)
+    }
+
     #[napi(getter)]
     pub fn enabled(&self) -> bool {
         self.data.states.enabled

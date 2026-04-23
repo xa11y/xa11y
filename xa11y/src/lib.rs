@@ -27,7 +27,14 @@ pub use xa11y_core::{
 
 // Implementation details used by platform backends and Python bindings.
 #[doc(hidden)]
-pub use xa11y_core::{CancelHandle, EventReceiver, Provider, Selector};
+pub use xa11y_core::{CancelHandle, EventReceiver, Provider, RecvStatus, Selector};
+
+/// Shared in-memory mock Provider — re-exported from `xa11y-core` when the
+/// `test-support` feature is enabled. Used by language-binding tests so
+/// Python and JS don't each carry their own copy of the fixture.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use xa11y_core::mock;
 
 #[doc(hidden)]
 pub mod cli;

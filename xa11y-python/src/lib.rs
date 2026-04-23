@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use pyo3::exceptions::*;
 use pyo3::prelude::*;
+use pyo3::types::{PyDict, PyList};
 
 // ── Singleton provider ─────────────────────────────────────────────────────
 
@@ -59,6 +60,46 @@ fn to_py_err(e: xa11y::Error) -> PyErr {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Convert a `serde_json::Value` to a Python object. Used by `Element.raw` to
+/// expose platform-specific data that arrives as JSON (the provider traits
+/// store it as `HashMap<String, serde_json::Value>`).
+fn json_to_py(py: Python<'_>, value: &serde_json::Value) -> PyResult<PyObject> {
+    Ok(match value {
+        serde_json::Value::Null => py.None(),
+        serde_json::Value::Bool(b) => b.into_pyobject(py)?.to_owned().into_any().unbind(),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                i.into_pyobject(py)?.into_any().unbind()
+            } else if let Some(u) = n.as_u64() {
+                u.into_pyobject(py)?.into_any().unbind()
+            } else if let Some(f) = n.as_f64() {
+                f.into_pyobject(py)?.into_any().unbind()
+            } else {
+                // serde_json::Number always holds one of i64/u64/f64; the
+                // above branches are exhaustive.
+                return Err(PyValueError::new_err(format!(
+                    "Unrepresentable JSON number: {n}"
+                )));
+            }
+        }
+        serde_json::Value::String(s) => s.into_pyobject(py)?.into_any().unbind(),
+        serde_json::Value::Array(items) => {
+            let list = PyList::empty(py);
+            for item in items {
+                list.append(json_to_py(py, item)?)?;
+            }
+            list.into_any().unbind()
+        }
+        serde_json::Value::Object(map) => {
+            let dict = PyDict::new(py);
+            for (k, v) in map {
+                dict.set_item(k, json_to_py(py, v)?)?;
+            }
+            dict.into_any().unbind()
+        }
+    })
+}
 
 /// Create a Python Element from Rust ElementData.
 fn make_py_element(
@@ -240,6 +281,24 @@ impl Element {
             width: w,
             height: h,
         })
+    }
+
+    /// Platform-specific raw data attached to this element, as a Python dict.
+    ///
+    /// Keys are provider-defined (e.g. `"ax_role"`, `"ax_subrole"` on macOS;
+    /// `"uia_control_type"` on Windows). Values are the JSON representation
+    /// the provider produced — strings, numbers, booleans, nested objects.
+    ///
+    /// Intended for debugging and platform-specific advanced queries. Prefer
+    /// the cross-platform fields (`role`, `name`, `states`, etc.) for
+    /// portable logic.
+    #[getter]
+    fn raw(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let dict = PyDict::new(py);
+        for (k, v) in &self.inner_data.raw {
+            dict.set_item(k, json_to_py(py, v)?)?;
+        }
+        Ok(dict.into_any().unbind())
     }
 
     fn __repr__(&self) -> String {
@@ -648,7 +707,7 @@ impl Subscription {
     }
 
     #[pyo3(signature = (predicate, timeout=5.0))]
-    fn wait_for(&self, predicate: PyObject, timeout: f64) -> PyResult<Event> {
+    fn wait_for(&self, py: Python<'_>, predicate: PyObject, timeout: f64) -> PyResult<Event> {
         let dur = Duration::from_secs_f64(timeout);
         let start = std::time::Instant::now();
 
@@ -661,19 +720,31 @@ impl Subscription {
             }
             let poll = remaining.min(Duration::from_millis(50));
             let provider = self.provider.clone();
-            let maybe_event =
-                self.with_sub(|sub| sub.try_recv().map(|e| Event::from_core(e, provider)))?;
-            if let Some(py_event) = maybe_event {
-                let matched = Python::with_gil(|py| -> PyResult<bool> {
-                    let py_ref = Py::new(py, py_event.clone())?;
-                    let result = predicate.call1(py, (py_ref,))?;
-                    result.extract::<bool>(py)
-                })?;
-                if matched {
-                    return Ok(py_event);
+            // Use recv_status so a sender-disconnect is surfaced explicitly
+            // rather than silently spinning forever (tenet 1).
+            let status = py.allow_threads(|| self.with_sub(|sub| sub.recv_status(poll)))?;
+            let py_event = match status {
+                xa11y::RecvStatus::Event(evt) => Event::from_core(*evt, provider),
+                xa11y::RecvStatus::Timeout => {
+                    py.check_signals()?;
+                    continue;
                 }
-            } else {
-                std::thread::sleep(poll);
+                xa11y::RecvStatus::Disconnected => {
+                    // Event source is gone — no further events can match the
+                    // predicate. Surface this as a platform error rather than
+                    // hanging until the overall timeout elapses.
+                    return Err(PlatformError::new_err(
+                        "Subscription event source disconnected before predicate matched",
+                    ));
+                }
+            };
+            let matched = {
+                let py_ref = Py::new(py, py_event.clone())?;
+                let result = predicate.call1(py, (py_ref,))?;
+                result.extract::<bool>(py)?
+            };
+            if matched {
+                return Ok(py_event);
             }
         }
     }
@@ -701,18 +772,33 @@ impl Subscription {
         slf
     }
 
-    fn __next__(&self) -> PyResult<Option<Event>> {
-        let provider = self.provider.clone();
-        let maybe_event = self.with_sub(|sub| {
-            sub.recv(Duration::from_millis(100))
-                .ok()
-                .map(|e| Event::from_core(e, provider))
-        })?;
-        if maybe_event.is_some() {
-            return Ok(maybe_event);
+    fn __next__(&self, py: Python<'_>) -> PyResult<Event> {
+        // Loop, polling in short bursts so KeyboardInterrupt is responsive.
+        // Distinguish:
+        //   - Event     → yield it
+        //   - Timeout   → continue polling (stream still live)
+        //   - Disconnect → raise StopIteration (sender gone, stream finished)
+        // Returning `Ok(None)` from __next__ would terminate iteration on the
+        // first timeout, which is wrong — the stream is still open. Using
+        // recv_status lets us surface only the actual end-of-stream condition
+        // as StopIteration (tenet 1: no silent fallbacks).
+        loop {
+            let status = py.allow_threads(|| {
+                self.with_sub(|sub| sub.recv_status(Duration::from_millis(100)))
+            })?;
+            match status {
+                xa11y::RecvStatus::Event(evt) => {
+                    return Ok(Event::from_core(*evt, self.provider.clone()));
+                }
+                xa11y::RecvStatus::Timeout => {
+                    py.check_signals()?;
+                    continue;
+                }
+                xa11y::RecvStatus::Disconnected => {
+                    return Err(PyStopIteration::new_err(()));
+                }
+            }
         }
-        Python::with_gil(|py| py.check_signals())?;
-        Ok(None)
     }
 
     fn __repr__(&self) -> String {
@@ -915,6 +1001,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Test helpers
     m.add_function(wrap_pyfunction!(_make_test_locator, m)?)?;
+    m.add_function(wrap_pyfunction!(_make_disconnected_subscription, m)?)?;
 
     Ok(())
 }
@@ -928,502 +1015,28 @@ fn _cli_main(args: Vec<String>) -> PyResult<()> {
 }
 
 // ── Test helpers ────────────────────────────────────────────────────────────
+//
+// The mock Provider, tree, and action log used by these helpers live in
+// `xa11y-core::mock` (gated by the `test-support` feature) so the JS
+// bindings can share the exact same fixture without a parallel copy.
 
-/// Mock provider for Python unit tests.
-struct MockProvider {
-    nodes: Vec<MockNode>,
-    actions: std::sync::Mutex<Vec<(u64, String, Option<String>)>>,
-}
-
-struct MockNode {
-    data: xa11y::ElementData,
-    children: Vec<usize>,
-    parent: Option<usize>,
-}
-
-impl xa11y::Provider for MockProvider {
-    fn get_children(
-        &self,
-        element: Option<&xa11y::ElementData>,
-    ) -> xa11y::Result<Vec<xa11y::ElementData>> {
-        match element {
-            None => {
-                if self.nodes.is_empty() {
-                    return Ok(vec![]);
-                }
-                Ok(vec![self.nodes[0].data.clone()])
-            }
-            Some(el) => {
-                let idx = el.handle as usize;
-                if idx >= self.nodes.len() {
-                    return Ok(vec![]);
-                }
-                Ok(self.nodes[idx]
-                    .children
-                    .iter()
-                    .map(|&i| self.nodes[i].data.clone())
-                    .collect())
-            }
-        }
-    }
-
-    fn get_parent(
-        &self,
-        element: &xa11y::ElementData,
-    ) -> xa11y::Result<Option<xa11y::ElementData>> {
-        let idx = element.handle as usize;
-        if idx >= self.nodes.len() {
-            return Ok(None);
-        }
-        Ok(self.nodes[idx].parent.map(|i| self.nodes[i].data.clone()))
-    }
-
-    fn press(&self, element: &xa11y::ElementData) -> xa11y::Result<()> {
-        self.actions
-            .lock()
-            .unwrap()
-            .push((element.handle, "press".into(), None));
-        Ok(())
-    }
-    fn focus(&self, element: &xa11y::ElementData) -> xa11y::Result<()> {
-        self.actions
-            .lock()
-            .unwrap()
-            .push((element.handle, "focus".into(), None));
-        Ok(())
-    }
-    fn blur(&self, element: &xa11y::ElementData) -> xa11y::Result<()> {
-        self.actions
-            .lock()
-            .unwrap()
-            .push((element.handle, "blur".into(), None));
-        Ok(())
-    }
-    fn toggle(&self, element: &xa11y::ElementData) -> xa11y::Result<()> {
-        self.actions
-            .lock()
-            .unwrap()
-            .push((element.handle, "toggle".into(), None));
-        Ok(())
-    }
-    fn select(&self, element: &xa11y::ElementData) -> xa11y::Result<()> {
-        self.actions
-            .lock()
-            .unwrap()
-            .push((element.handle, "select".into(), None));
-        Ok(())
-    }
-    fn expand(&self, element: &xa11y::ElementData) -> xa11y::Result<()> {
-        self.actions
-            .lock()
-            .unwrap()
-            .push((element.handle, "expand".into(), None));
-        Ok(())
-    }
-    fn collapse(&self, element: &xa11y::ElementData) -> xa11y::Result<()> {
-        self.actions
-            .lock()
-            .unwrap()
-            .push((element.handle, "collapse".into(), None));
-        Ok(())
-    }
-    fn show_menu(&self, element: &xa11y::ElementData) -> xa11y::Result<()> {
-        self.actions
-            .lock()
-            .unwrap()
-            .push((element.handle, "show_menu".into(), None));
-        Ok(())
-    }
-    fn increment(&self, element: &xa11y::ElementData) -> xa11y::Result<()> {
-        self.actions
-            .lock()
-            .unwrap()
-            .push((element.handle, "increment".into(), None));
-        Ok(())
-    }
-    fn decrement(&self, element: &xa11y::ElementData) -> xa11y::Result<()> {
-        self.actions
-            .lock()
-            .unwrap()
-            .push((element.handle, "decrement".into(), None));
-        Ok(())
-    }
-    fn scroll_into_view(&self, element: &xa11y::ElementData) -> xa11y::Result<()> {
-        self.actions
-            .lock()
-            .unwrap()
-            .push((element.handle, "scroll_into_view".into(), None));
-        Ok(())
-    }
-    fn set_value(&self, element: &xa11y::ElementData, value: &str) -> xa11y::Result<()> {
-        self.actions.lock().unwrap().push((
-            element.handle,
-            "set_value".into(),
-            Some(value.to_string()),
-        ));
-        Ok(())
-    }
-    fn set_numeric_value(&self, element: &xa11y::ElementData, value: f64) -> xa11y::Result<()> {
-        self.actions.lock().unwrap().push((
-            element.handle,
-            "set_numeric_value".into(),
-            Some(format!("{value}")),
-        ));
-        Ok(())
-    }
-    fn type_text(&self, element: &xa11y::ElementData, text: &str) -> xa11y::Result<()> {
-        self.actions.lock().unwrap().push((
-            element.handle,
-            "type_text".into(),
-            Some(text.to_string()),
-        ));
-        Ok(())
-    }
-    fn set_text_selection(
-        &self,
-        element: &xa11y::ElementData,
-        start: u32,
-        end: u32,
-    ) -> xa11y::Result<()> {
-        self.actions.lock().unwrap().push((
-            element.handle,
-            "set_text_selection".into(),
-            Some(format!("{start}..{end}")),
-        ));
-        Ok(())
-    }
-    fn perform_action(&self, element: &xa11y::ElementData, action: &str) -> xa11y::Result<()> {
-        self.actions
-            .lock()
-            .unwrap()
-            .push((element.handle, action.to_string(), None));
-        Ok(())
-    }
-
-    fn subscribe(&self, _element: &xa11y::ElementData) -> xa11y::Result<xa11y::Subscription> {
-        Err(xa11y::Error::Platform {
-            code: -1,
-            message: "MockProvider does not support subscribe".to_string(),
-        })
-    }
-}
-
-fn build_test_tree() -> Arc<MockProvider> {
-    use xa11y::*;
-
-    let element_defs: Vec<(
-        Role,
-        Option<&str>,
-        Option<&str>,
-        Option<&str>,
-        Option<Rect>,
-        Vec<&str>,
-        StateSet,
-        Option<f64>,
-        Option<f64>,
-        Option<f64>,
-        Option<&str>,
-    )> = vec![
-        (
-            Role::Application,
-            Some("TestApp"),
-            None,
-            Some("Test application"),
-            Some(Rect {
-                x: 0,
-                y: 0,
-                width: 1920,
-                height: 1080,
-            }),
-            vec![],
-            StateSet::default(),
-            None,
-            None,
-            None,
-            Some("app-root"),
-        ),
-        (
-            Role::Window,
-            Some("Main Window"),
-            None,
-            None,
-            Some(Rect {
-                x: 100,
-                y: 50,
-                width: 800,
-                height: 600,
-            }),
-            vec![],
-            StateSet {
-                focused: true,
-                ..StateSet::default()
-            },
-            None,
-            None,
-            None,
-            None,
-        ),
-        (
-            Role::Toolbar,
-            Some("Navigation"),
-            None,
-            None,
-            None,
-            vec![],
-            StateSet::default(),
-            None,
-            None,
-            None,
-            None,
-        ),
-        (
-            Role::Button,
-            Some("Back"),
-            None,
-            Some("Go back"),
-            Some(Rect {
-                x: 110,
-                y: 60,
-                width: 50,
-                height: 30,
-            }),
-            vec!["press", "focus"],
-            StateSet {
-                focusable: true,
-                ..StateSet::default()
-            },
-            None,
-            None,
-            None,
-            Some("btn-back"),
-        ),
-        (
-            Role::Button,
-            Some("Forward"),
-            None,
-            None,
-            Some(Rect {
-                x: 170,
-                y: 60,
-                width: 50,
-                height: 30,
-            }),
-            vec!["press", "focus"],
-            StateSet {
-                enabled: false,
-                focusable: true,
-                ..StateSet::default()
-            },
-            None,
-            None,
-            None,
-            None,
-        ),
-        (
-            Role::Group,
-            Some("Content"),
-            None,
-            None,
-            None,
-            vec![],
-            StateSet::default(),
-            None,
-            None,
-            None,
-            None,
-        ),
-        (
-            Role::TextField,
-            Some("Search"),
-            Some("hello"),
-            Some("Search field"),
-            Some(Rect {
-                x: 200,
-                y: 120,
-                width: 300,
-                height: 25,
-            }),
-            vec!["focus", "set_value", "type_text"],
-            StateSet {
-                editable: true,
-                focusable: true,
-                ..StateSet::default()
-            },
-            None,
-            None,
-            None,
-            None,
-        ),
-        (
-            Role::CheckBox,
-            Some("Agree"),
-            None,
-            None,
-            None,
-            vec!["press", "focus"],
-            StateSet {
-                checked: Some(Toggled::On),
-                focusable: true,
-                ..StateSet::default()
-            },
-            None,
-            None,
-            None,
-            None,
-        ),
-        (
-            Role::Slider,
-            Some("Volume"),
-            Some("75"),
-            None,
-            None,
-            vec!["increment", "decrement", "set_value", "focus"],
-            StateSet {
-                focusable: true,
-                ..StateSet::default()
-            },
-            Some(75.0),
-            Some(0.0),
-            Some(100.0),
-            None,
-        ),
-        (
-            Role::StaticText,
-            Some("Status"),
-            Some("Loading..."),
-            None,
-            None,
-            vec![],
-            StateSet {
-                visible: false,
-                ..StateSet::default()
-            },
-            None,
-            None,
-            None,
-            None,
-        ),
-        (
-            Role::List,
-            Some("Items"),
-            None,
-            None,
-            None,
-            vec![],
-            StateSet {
-                expanded: Some(true),
-                ..StateSet::default()
-            },
-            None,
-            None,
-            None,
-            None,
-        ),
-        (
-            Role::ListItem,
-            Some("Item 1"),
-            None,
-            None,
-            None,
-            vec!["select", "focus"],
-            StateSet {
-                selected: true,
-                focusable: true,
-                ..StateSet::default()
-            },
-            None,
-            None,
-            None,
-            None,
-        ),
-        (
-            Role::ListItem,
-            Some("Item 2"),
-            None,
-            None,
-            None,
-            vec!["select", "focus"],
-            StateSet {
-                focusable: true,
-                ..StateSet::default()
-            },
-            None,
-            None,
-            None,
-            None,
-        ),
-    ];
-
-    let children_map: Vec<Vec<usize>> = vec![
-        vec![1],    // 0: application
-        vec![2, 5], // 1: window
-        vec![3, 4], // 2: toolbar
-        vec![],
-        vec![],               // 3, 4: buttons
-        vec![6, 7, 8, 9, 10], // 5: group
-        vec![],
-        vec![],
-        vec![],
-        vec![],       // 6-9: leaf nodes
-        vec![11, 12], // 10: list
-        vec![],
-        vec![], // 11, 12: list items
-    ];
-
-    let parent_map: Vec<Option<usize>> = vec![
-        None,
-        Some(0),
-        Some(1),
-        Some(2),
-        Some(2),
-        Some(1),
-        Some(5),
-        Some(5),
-        Some(5),
-        Some(5),
-        Some(5),
-        Some(10),
-        Some(10),
-    ];
-
-    let mut nodes = Vec::new();
-    for (i, (role, name, value, desc, bounds, actions, states, nv, minv, maxv, sid)) in
-        element_defs.into_iter().enumerate()
-    {
-        let data = ElementData {
-            role,
-            name: name.map(String::from),
-            value: value.map(String::from),
-            description: desc.map(String::from),
-            bounds,
-            actions: actions.iter().map(|s| s.to_string()).collect(),
-            states,
-            numeric_value: nv,
-            min_value: minv,
-            max_value: maxv,
-            stable_id: sid.map(String::from),
-            pid: Some(1234),
-            raw: std::collections::HashMap::new(),
-            handle: i as u64,
-        };
-        nodes.push(MockNode {
-            data,
-            children: children_map[i].clone(),
-            parent: parent_map[i],
-        });
-    }
-
-    Arc::new(MockProvider {
-        nodes,
-        actions: std::sync::Mutex::new(Vec::new()),
-    })
-}
-
-/// Create a test Locator backed by a mock provider.
+/// Create a test Locator backed by the shared mock provider.
 #[pyfunction]
 fn _make_test_locator() -> PyResult<Locator> {
-    let provider = build_test_tree();
+    let provider = xa11y::mock::build_provider();
     Ok(Locator {
         inner: xa11y::Locator::new(provider as Arc<dyn xa11y::Provider>, None, "application"),
     })
+}
+
+/// Create a Subscription whose backing channel has already been disconnected.
+///
+/// Lets Python tests exercise the iterator/recv disconnect paths without
+/// needing a live platform event source.
+#[pyfunction]
+fn _make_disconnected_subscription() -> Subscription {
+    Subscription {
+        inner: std::sync::Mutex::new(Some(xa11y::mock::disconnected_subscription())),
+        provider: xa11y::mock::build_provider(),
+    }
 }

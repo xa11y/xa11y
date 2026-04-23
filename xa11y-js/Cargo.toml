@@ -9,8 +9,12 @@ publish = false # Published to npm, not crates.io
 crate-type = ["cdylib"]
 
 [dependencies]
-xa11y = { path = "../xa11y" }
-napi = { version = "3", default-features = false, features = ["napi4", "async", "error_anyhow"] }
+# `test-support` exposes the shared mock provider used by JS unit tests.
+# Always enabled here because the .node bundle already exports
+# `_makeTestLocator()` for the `__test__/unit` suite to consume.
+xa11y = { path = "../xa11y", features = ["test-support"] }
+napi = { version = "3", default-features = false, features = ["napi4", "async", "error_anyhow", "serde-json"] }
+serde_json = "1"
 napi-derive = "3"
 
 [build-dependencies]

@@ -397,4 +397,6 @@ module.exports = {
 
   // @internal -- used by unit tests
   _makeTestLocator: native._makeTestLocator,
+  _makeDisconnectedSubscription: native._makeDisconnectedSubscription,
+  _Subscription: Subscription,
 };
