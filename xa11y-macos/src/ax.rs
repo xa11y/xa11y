@@ -1509,6 +1509,17 @@ fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -
         {
             actions.push(set_value_str);
         }
+        // `toggle` is a cross-platform semantic verb; macOS implements it via
+        // AXPress for toggleable roles. Advertise it alongside `press` when
+        // the element both reports AXPress natively and is one of the known
+        // toggleable roles.
+        let toggle_str = "toggle".to_string();
+        if matches!(role, Role::CheckBox | Role::Switch | Role::RadioButton)
+            && ax_actions.iter().any(|a| a == "AXPress")
+            && !actions.contains(&toggle_str)
+        {
+            actions.push(toggle_str);
+        }
 
         let numeric_value = match role {
             Role::Slider | Role::ProgressBar | Role::SpinButton => attrs.value_number,
@@ -1951,6 +1962,15 @@ impl Provider for MacOSProvider {
     }
 
     fn toggle(&self, element: &ElementData) -> Result<()> {
+        if !matches!(
+            element.role,
+            Role::CheckBox | Role::Switch | Role::RadioButton
+        ) {
+            return Err(Error::ActionNotSupported {
+                action: "toggle".to_string(),
+                role: element.role,
+            });
+        }
         let ax = self.get_cached(element.handle)?;
         perform_ax_action(ax.as_ptr(), "AXPress", "toggle", element.role)
     }
