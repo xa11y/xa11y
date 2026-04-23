@@ -47,15 +47,19 @@ pub use app_ext::AppExt;
 // Store the provider as an Arc<dyn Provider> so callers can cheaply clone a
 // shared handle without an extra delegation wrapper or a leaked box. Err is
 // carried as a string so we can clone the OnceLock's payload on every access.
+//
+// Provider construction goes through `Arc::new(Concrete)` (not
+// `Arc::from(Box)`), because `Arc::from(Box<dyn Trait>)` allocates a new
+// ArcInner and memcpies the provider data into it — moving the provider to
+// a fresh address. Some provider internals (e.g. the AT-SPI2 zbus
+// connection on Linux) don't tolerate being moved after construction, so we
+// allocate directly into the Arc via `Arc::new` and only then coerce to the
+// `dyn` trait object.
 static PROVIDER: OnceLock<std::result::Result<Arc<dyn Provider>, String>> = OnceLock::new();
 
 #[doc(hidden)]
 pub fn provider() -> Result<Arc<dyn Provider>> {
-    match PROVIDER.get_or_init(|| {
-        create_provider_boxed()
-            .map(Arc::from)
-            .map_err(|e| format!("{e}"))
-    }) {
+    match PROVIDER.get_or_init(|| create_provider_arc().map_err(|e| format!("{e}"))) {
         Ok(arc) => Ok(Arc::clone(arc)),
         Err(msg) => Err(Error::Platform {
             code: -1,
@@ -69,21 +73,21 @@ pub fn provider() -> Result<Arc<dyn Provider>> {
 #[doc(hidden)]
 #[cfg(feature = "testing")]
 pub fn create_provider() -> Result<Arc<dyn Provider>> {
-    create_provider_boxed().map(Arc::from)
+    create_provider_arc()
 }
 
-fn create_provider_boxed() -> Result<Box<dyn Provider>> {
+fn create_provider_arc() -> Result<Arc<dyn Provider>> {
     #[cfg(target_os = "macos")]
     {
-        Ok(Box::new(xa11y_macos::MacOSProvider::new()?))
+        Ok(Arc::new(xa11y_macos::MacOSProvider::new()?))
     }
     #[cfg(target_os = "windows")]
     {
-        Ok(Box::new(xa11y_windows::WindowsProvider::new()?))
+        Ok(Arc::new(xa11y_windows::WindowsProvider::new()?))
     }
     #[cfg(target_os = "linux")]
     {
-        Ok(Box::new(xa11y_linux::LinuxProvider::new()?))
+        Ok(Arc::new(xa11y_linux::LinuxProvider::new()?))
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
