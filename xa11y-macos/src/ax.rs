@@ -1039,6 +1039,14 @@ fn matches_ax(ax: AXUIElementRef, simple: &SimpleSelector) -> bool {
     matches_ax_with_role(ax, simple, None)
 }
 
+/// Attributes the lightweight `matches_ax_with_role` fast path knows how to
+/// resolve without building a full `ElementData`. Any selector filter whose
+/// attr is *not* in this list forces a fall-through to `build_snapshot_data`
+/// combined with `xa11y_core::selector::matches_simple`, so normalized state
+/// attrs (`enabled`, `checked`, `focused`, …) and raw platform-attr map keys
+/// still match correctly.
+const FAST_PATH_ATTRS: &[&str] = &["role", "name", "value", "description"];
+
 /// Like `matches_ax` but accepts a pre-resolved role to avoid redundant
 /// AX API calls when the caller already fetched the role.
 fn matches_ax_with_role(
@@ -1046,6 +1054,25 @@ fn matches_ax_with_role(
     simple: &SimpleSelector,
     precomputed_role: Option<Role>,
 ) -> bool {
+    // If any filter targets an attr the fast path can't resolve, fall through
+    // to a full snapshot + canonical core matcher. This keeps selectors like
+    // `[enabled="true"]`, `[checked="on"]`, `[focused="true"]` (and raw AX
+    // platform keys) correct.
+    if simple
+        .filters
+        .iter()
+        .any(|f| !FAST_PATH_ATTRS.contains(&f.attr.as_str()))
+    {
+        if ax.is_null() {
+            return false;
+        }
+        // Snapshot handle is 0 — this path is only used to decide whether to
+        // keep a candidate; callers re-resolve via the provider cache after
+        // the match set is assembled.
+        let data = build_snapshot_data(ax, None, 0);
+        return xa11y_core::selector::matches_simple(&data, simple);
+    }
+
     // Resolve role only if the selector cares about it and it wasn't pre-computed.
     let needs_role = simple.role.is_some() || simple.filters.iter().any(|f| f.attr == "role");
 
@@ -1116,8 +1143,9 @@ fn matches_ax_with_role(
                     }
                 })
             }
-            // Unknown attributes: not resolvable in lightweight matching
-            _ => None,
+            // Unreachable: we bailed to the full-snapshot path above for any
+            // filter whose attr isn't in FAST_PATH_ATTRS.
+            _ => unreachable!("non-fast-path attr should have taken the fallback above"),
         };
 
         if !match_op(&filter.op, &filter.value, attr_value.as_deref()) {
@@ -2697,6 +2725,34 @@ mod tests {
         };
         // Null element has no name — filter should fail
         assert!(!matches_ax(std::ptr::null(), &simple));
+    }
+
+    #[test]
+    fn matches_ax_non_fast_path_attr_takes_full_fallback() {
+        // Filters on normalized state attributes (`enabled`, `checked`,
+        // `focused`, …) aren't in FAST_PATH_ATTRS. The fast path must bail
+        // out to the full-snapshot matcher rather than silently returning
+        // `None` from the filter-value switch (which would make every
+        // element fail the filter and break these selectors entirely). For
+        // a null AXUIElementRef the fallback should return `false` without
+        // panicking.
+        use xa11y_core::selector::{AttrFilter, MatchOp, SimpleSelector};
+        for attr in ["enabled", "checked", "focused", "selected"] {
+            let simple = SimpleSelector {
+                role: None,
+                filters: vec![AttrFilter {
+                    attr: attr.to_string(),
+                    op: MatchOp::Exact,
+                    value: "true".to_string(),
+                }],
+                nth: None,
+            };
+            assert!(
+                !matches_ax(std::ptr::null(), &simple),
+                "non-fast-path attr `{attr}` should fall through to the full matcher \
+                 without panicking, and a null element should not match"
+            );
+        }
     }
 
     // ════════════════════════════════════════════════════════════════

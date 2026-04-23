@@ -967,6 +967,14 @@ impl LinuxProvider {
         }
     }
 
+    /// Attributes the lightweight `matches_ref` fast path knows how to resolve
+    /// without building a full `ElementData`. Any selector filter whose attr is
+    /// *not* in this list forces a fall-through to `build_element_data`
+    /// combined with `xa11y_core::selector::matches_simple`, so normalized
+    /// state attrs (`enabled`, `checked`, `focused`, …) and raw platform attrs
+    /// still work.
+    const FAST_PATH_ATTRS: &'static [&'static str] = &["role", "name", "value", "description"];
+
     /// Check if an accessible ref matches a simple selector, fetching only the
     /// attributes the selector actually requires.
     fn matches_ref(
@@ -974,6 +982,20 @@ impl LinuxProvider {
         aref: &AccessibleRef,
         simple: &xa11y_core::selector::SimpleSelector,
     ) -> bool {
+        // If any filter targets an attr the fast path can't resolve, fall
+        // through to building a full ElementData and running the canonical
+        // core matcher. This keeps selectors like `[enabled="true"]`,
+        // `[checked="on"]`, `[focused="true"]` (and raw-map keys) correct.
+        if simple
+            .filters
+            .iter()
+            .any(|f| !Self::FAST_PATH_ATTRS.contains(&f.attr.as_str()))
+        {
+            let pid = self.get_app_pid(aref);
+            let data = self.build_element_data(aref, pid);
+            return xa11y_core::selector::matches_simple(&data, simple);
+        }
+
         // Resolve role only if the selector needs it
         let needs_role = simple.role.is_some() || simple.filters.iter().any(|f| f.attr == "role");
         let role = if needs_role {
@@ -1013,8 +1035,9 @@ impl LinuxProvider {
                 }
                 "value" => self.get_value(aref),
                 "description" => self.get_description(aref).ok().filter(|s| !s.is_empty()),
-                // Unknown attributes: not resolvable in lightweight matching
-                _ => None,
+                // Unreachable: we bailed to the full-build path above for any
+                // filter whose attr isn't in FAST_PATH_ATTRS.
+                _ => unreachable!("non-fast-path attr should have taken the fallback above"),
             };
 
             let matches = match &filter.op {

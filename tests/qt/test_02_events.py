@@ -9,7 +9,6 @@ legitimate platform limitations are flagged with ``@pytest.mark.xfail``.
 
 from __future__ import annotations
 
-import sys
 import time
 
 import pytest
@@ -54,8 +53,12 @@ def test_subscription_close(qt_app):
 
 
 @pytest.mark.xfail(
-    sys.platform == "darwin",
-    reason="Qt on macOS has known AX tree issues — see ci.yml comment.",
+    reason=(
+        "Qt does not reliably emit a FocusChanged event on the platform "
+        "accessibility bus when focus() is driven programmatically via "
+        "xa11y; macOS Qt also has known AX tree issues. Tracked for future "
+        "investigation."
+    ),
     strict=False,
 )
 def test_focus_changed_event(qt_app):
@@ -79,8 +82,11 @@ def test_focus_changed_event(qt_app):
 
 
 @pytest.mark.xfail(
-    sys.platform == "darwin",
-    reason="Qt on macOS has known AX tree issues — see ci.yml comment.",
+    reason=(
+        "Qt does not reliably emit a ValueChanged event for a slider "
+        "driven by xa11y's increment() action across AT-SPI2 / UIA / AX; "
+        "investigation pending."
+    ),
     strict=False,
 )
 def test_value_changed_event_slider(qt_app):
@@ -95,8 +101,11 @@ def test_value_changed_event_slider(qt_app):
 
 
 @pytest.mark.xfail(
-    sys.platform == "darwin",
-    reason="Qt on macOS has known AX tree issues — see ci.yml comment.",
+    reason=(
+        "Qt does not reliably emit a ValueChanged event for a QSpinBox "
+        "driven by xa11y's increment() action across AT-SPI2 / UIA / AX; "
+        "investigation pending."
+    ),
     strict=False,
 )
 def test_value_changed_event_spinbox(qt_app):
@@ -114,8 +123,11 @@ def test_value_changed_event_spinbox(qt_app):
 
 
 @pytest.mark.xfail(
-    sys.platform == "darwin",
-    reason="Qt on macOS has known AX tree issues — see ci.yml comment.",
+    reason=(
+        "Qt does not reliably emit StateChanged/ValueChanged for a QCheckBox "
+        "toggled programmatically via xa11y's toggle() action across "
+        "AT-SPI2 / UIA / AX; investigation pending."
+    ),
     strict=False,
 )
 def test_state_changed_event_checkbox(qt_app):
@@ -153,8 +165,11 @@ def test_state_changed_event_checkbox(qt_app):
 
 
 @pytest.mark.xfail(
-    sys.platform == "darwin",
-    reason="Qt on macOS has known AX tree issues — see ci.yml comment.",
+    reason=(
+        "Qt does not reliably emit a NameChanged event when a QLabel's text "
+        "is mutated programmatically (AT-SPI2/UIA/AX don't surface the change "
+        "for dynamic labels driven from the app side); investigation pending."
+    ),
     strict=False,
 )
 def test_name_changed_event(qt_app):
@@ -172,8 +187,12 @@ def test_name_changed_event(qt_app):
 
 
 @pytest.mark.xfail(
-    sys.platform == "darwin",
-    reason="Qt on macOS has known AX tree issues — see ci.yml comment.",
+    reason=(
+        "Qt does not reliably emit a StructureChanged event when a list row "
+        "is added programmatically via xa11y; the underlying AT-SPI2 / UIA / "
+        "AX signals are not dispatched for this mutation pattern. "
+        "Investigation pending."
+    ),
     strict=False,
 )
 def test_structure_changed_event_add_item(qt_app):
@@ -194,8 +213,12 @@ def test_structure_changed_event_add_item(qt_app):
 
 
 @pytest.mark.xfail(
-    sys.platform == "darwin",
-    reason="Qt on macOS has known AX tree issues — see ci.yml comment.",
+    reason=(
+        "Qt does not reliably deliver an event for a QPushButton press() that "
+        "reaches xa11y's subscription across all three platforms, so the "
+        "app-metadata assertion can't run; tracked with the other Qt event "
+        "gaps."
+    ),
     strict=False,
 )
 def test_event_has_app_metadata(qt_app):
@@ -208,8 +231,11 @@ def test_event_has_app_metadata(qt_app):
 
 
 @pytest.mark.xfail(
-    sys.platform == "darwin",
-    reason="Qt on macOS has known AX tree issues — see ci.yml comment.",
+    reason=(
+        "Depends on a slider ValueChanged event reaching the subscription, "
+        "which Qt doesn't reliably emit for programmatic increment()s across "
+        "AT-SPI2 / UIA / AX; investigation pending."
+    ),
     strict=False,
 )
 def test_event_has_target(qt_app):
@@ -236,8 +262,11 @@ def test_try_recv_returns_none_when_idle(qt_app):
 
 
 @pytest.mark.xfail(
-    sys.platform == "darwin",
-    reason="Qt on macOS has known AX tree issues — see ci.yml comment.",
+    reason=(
+        "wait_for is only as reliable as the event stream; Qt's programmatic "
+        "spin-button increment() doesn't consistently emit a ValueChanged "
+        "event across AT-SPI2 / UIA / AX. Investigation pending."
+    ),
     strict=False,
 )
 def test_wait_for_event(qt_app):

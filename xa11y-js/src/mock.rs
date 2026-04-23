@@ -12,6 +12,10 @@ use crate::subscription::NativeSubscription;
 /// Create a mock `Locator` rooted at the shared synthetic tree. Used only
 /// from the JS unit tests — not part of the public API.
 #[napi(js_name = "_makeTestLocator")]
+#[allow(
+    dead_code,
+    reason = "Exported via napi-derive for JS unit tests; the lib-test clippy build doesn't see the JS-side consumer"
+)]
 pub fn make_test_locator() -> Locator {
     let provider = xa11y::mock::build_provider();
     Locator::from_inner(xa11y::Locator::new(
@@ -25,6 +29,10 @@ pub fn make_test_locator() -> Locator {
 /// disconnected. Used by tests to verify the worker loop terminates cleanly
 /// on sender-drop rather than hanging.
 #[napi(js_name = "_makeDisconnectedSubscription")]
+#[allow(
+    dead_code,
+    reason = "Exported via napi-derive for JS unit tests; the lib-test clippy build doesn't see the JS-side consumer"
+)]
 pub fn make_disconnected_subscription() -> NativeSubscription {
     let provider = xa11y::mock::build_provider();
     NativeSubscription::new(
