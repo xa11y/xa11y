@@ -24,7 +24,7 @@ pub use event::{ElementState, Event, EventKind, StateFlag};
 pub use event_provider::{CancelHandle, EventReceiver, RecvStatus, Subscription, SubscriptionIter};
 pub use input::{
     anchor_point, point_for, Anchor, ClickOptions, ClickTarget, DragOptions, InputProvider,
-    InputSim, IntoPoint, Key, Modifier, MouseButton, Point, ScrollDelta,
+    InputSim, IntoPoint, Key, Keyboard, Mouse, MouseButton, Point, ScrollDelta,
 };
 pub use locator::Locator;
 pub use provider::Provider;

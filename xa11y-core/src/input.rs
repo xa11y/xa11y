@@ -16,10 +16,24 @@
 //!   macOS, Wayland portal grants on Linux, etc.).
 //!
 //! There is **no implicit bridge** between the two: an accessibility-action
-//! failure never falls back to input simulation, and `InputSim` never inspects
-//! or auto-resolves the a11y tree on behalf of the caller. If you want to
-//! click an element, you compute its bounds (via the a11y API) and pass them
-//! in — see [`IntoPoint`] and [`InputSim::point_for`].
+//! failure never falls back to input simulation, and [`InputSim`] never
+//! inspects or auto-resolves the a11y tree on behalf of the caller. If you
+//! want to click an element, you compute its bounds (via the a11y API) and
+//! pass them in — see [`IntoPoint`] and [`point_for`].
+//!
+//! # Layout
+//!
+//! [`InputSim`] exposes two sub-handles:
+//!
+//! - [`InputSim::mouse`] → [`Mouse`] for pointer operations (`click`, `drag`,
+//!   `scroll`, `down`/`up`).
+//! - [`InputSim::keyboard`] → [`Keyboard`] for key operations (`press`,
+//!   `chord`, `down`/`up`, `type_text`).
+//!
+//! Modifier keys (`Shift`, `Ctrl`, `Alt`, `Meta`) are regular variants of
+//! [`Key`] — there is no separate `Modifier` type. `Key::Char(c)` represents
+//! the unshifted physical key; use [`Key::Shift`] explicitly for uppercase
+//! or shifted symbols (see [`Key`] for the rationale).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -43,12 +57,6 @@ pub struct Point {
 
 impl Point {
     pub const fn new(x: i32, y: i32) -> Self {
-        Self { x, y }
-    }
-}
-
-impl From<(i32, i32)> for Point {
-    fn from((x, y): (i32, i32)) -> Self {
         Self { x, y }
     }
 }
@@ -124,7 +132,7 @@ impl IntoPoint for Point {
 
 impl IntoPoint for (i32, i32) {
     fn into_point(self) -> Result<Point> {
-        Ok(self.into())
+        Ok(Point::new(self.0, self.1))
     }
 }
 
@@ -170,28 +178,51 @@ impl ScrollDelta {
 
 // ── Keyboard ────────────────────────────────────────────────────────
 
-/// A keyboard modifier.
+/// A keyboard key.
+///
+/// Modifier keys (`Shift`, `Ctrl`, `Alt`, `Meta`) are regular variants of this
+/// enum — they are not a separate type. This matches the physical reality that
+/// modifiers are keys like any other, and the convention of Playwright,
+/// Puppeteer, Selenium, pyautogui, `SendInput`, and `XTest`.
+///
+/// # `Key::Char` semantics
+///
+/// `Key::Char(c)` represents **the physical key labeled with the unshifted
+/// character `c`**. It does **not** auto-synthesise `Shift`. To produce an
+/// uppercase letter or shifted symbol, hold [`Key::Shift`] explicitly:
+///
+/// ```ignore
+/// // Cmd+A (select all):
+/// keyboard.chord(Key::Char('a'), &[Key::Meta]);
+///
+/// // Uppercase 'A':
+/// keyboard.chord(Key::Char('a'), &[Key::Shift]);
+/// ```
+///
+/// For this reason, `Key::Char` **rejects ASCII uppercase letters at the API
+/// boundary** ([`Error::InvalidActionData`]). This prevents the common
+/// footgun where `chord(Key::Char('K'), &[Key::Meta])` is read as "Cmd+K"
+/// but would silently mean "Cmd+Shift+K" under auto-shift semantics.
+///
+/// To type arbitrary text (with IME support and correct case handling), use
+/// [`Keyboard::type_text`] — `Key` is for single-key presses.
+///
+/// # `Meta`
 ///
 /// `Meta` is the platform's "command" modifier: Cmd on macOS, Win on Windows,
-/// Super on Linux. Use this when you want a portable shortcut; backends are
-/// responsible for the platform mapping.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Modifier {
+/// Super on Linux. Backends are responsible for the platform mapping.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Key {
+    /// A printable character (lowercase, no shifted symbols). Backends
+    /// translate this to the matching physical key. See the type-level docs
+    /// for the rationale on rejecting uppercase letters.
+    Char(char),
+
+    // Modifiers (held-key form — combine with other keys via `chord`).
     Shift,
     Ctrl,
     Alt,
     Meta,
-}
-
-/// A single key for a press / release.
-///
-/// For typing arbitrary text (with IME support and correct shift handling),
-/// prefer [`InputSim::type_text`] over a sequence of `Key::Char` taps.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum Key {
-    /// A printable character. Backends are responsible for any modifier
-    /// synthesis required to produce it (e.g. shift for `'A'`).
-    Char(char),
 
     Enter,
     Escape,
@@ -215,16 +246,39 @@ pub enum Key {
     F(u8),
 }
 
+impl Key {
+    /// Validate a key for use at the API boundary.
+    ///
+    /// Returns [`Error::InvalidActionData`] for `Key::Char` with an ASCII
+    /// uppercase letter — callers must lowercase and hold [`Key::Shift`]
+    /// explicitly. See the type-level docs.
+    pub(crate) fn validate(&self) -> Result<()> {
+        if let Key::Char(c) = self {
+            if c.is_ascii_uppercase() {
+                return Err(Error::InvalidActionData {
+                    message: format!(
+                        "Key::Char('{c}') is uppercase; use Key::Char('{}') \
+                         with Key::Shift held to produce an uppercase letter",
+                        c.to_ascii_lowercase()
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 // ── Click / drag option structs ─────────────────────────────────────
 
-/// Options for [`InputSim::click_with`].
+/// Options for [`Mouse::click_with`].
 #[derive(Debug, Clone)]
 pub struct ClickOptions {
     pub button: MouseButton,
     /// Number of consecutive clicks (1 = single, 2 = double, …).
     pub count: u32,
-    /// Modifiers held for the duration of the click.
-    pub modifiers: Vec<Modifier>,
+    /// Keys held (pressed but not released) for the duration of the click —
+    /// typically modifier keys like [`Key::Shift`] or [`Key::Meta`].
+    pub held: Vec<Key>,
     /// Anchor used when the target is an [`Element`]. Ignored for raw points.
     pub anchor: Anchor,
 }
@@ -234,17 +288,18 @@ impl Default for ClickOptions {
         Self {
             button: MouseButton::Left,
             count: 1,
-            modifiers: Vec::new(),
+            held: Vec::new(),
             anchor: Anchor::Center,
         }
     }
 }
 
-/// Options for [`InputSim::drag_with`].
+/// Options for [`Mouse::drag_with`].
 #[derive(Debug, Clone)]
 pub struct DragOptions {
     pub button: MouseButton,
-    pub modifiers: Vec<Modifier>,
+    /// Keys held for the duration of the drag.
+    pub held: Vec<Key>,
     /// Total time over which the drag is performed. Backends interpolate
     /// pointer movement across this duration.
     pub duration: Duration,
@@ -254,7 +309,7 @@ impl Default for DragOptions {
     fn default() -> Self {
         Self {
             button: MouseButton::Left,
-            modifiers: Vec::new(),
+            held: Vec::new(),
             duration: Duration::from_millis(150),
         }
     }
@@ -287,11 +342,11 @@ pub trait InputProvider: Send + Sync {
     /// Move the pointer to `to` without pressing any buttons.
     fn pointer_move(&self, to: Point) -> Result<()>;
 
-    /// Press `button` at the current pointer location.
-    fn pointer_press(&self, button: MouseButton) -> Result<()>;
+    /// Press `button` at the current pointer location (no release).
+    fn pointer_down(&self, button: MouseButton) -> Result<()>;
 
     /// Release `button` at the current pointer location.
-    fn pointer_release(&self, button: MouseButton) -> Result<()>;
+    fn pointer_up(&self, button: MouseButton) -> Result<()>;
 
     /// Click `button` at `at`, repeated `count` times. The backend is
     /// responsible for honouring the OS double-click interval when `count > 1`.
@@ -311,39 +366,51 @@ pub trait InputProvider: Send + Sync {
 
     // ── Keyboard ────────────────────────────────────────────────────
 
-    /// Press `key` (no release).
+    /// Press `key` (no release). Use [`key_up`](Self::key_up) to release.
+    ///
+    /// Modifiers are just keys: hold `Key::Shift` via `key_down(&Key::Shift)`.
     fn key_down(&self, key: &Key) -> Result<()>;
 
     /// Release `key`.
     fn key_up(&self, key: &Key) -> Result<()>;
 
-    /// Press and release `key` while `modifiers` are held.
-    fn key_tap(&self, key: &Key, modifiers: &[Modifier]) -> Result<()>;
+    /// Press and release `key` while `held` are held down.
+    fn key_tap(&self, key: &Key, held: &[Key]) -> Result<()>;
 
     /// Type `text` as literal user input.
     ///
     /// Backends should prefer the OS's text-input path (with IME support)
     /// over synthesising individual key presses where possible.
     fn type_text(&self, text: &str) -> Result<()>;
-
-    // ── Modifier holds ──────────────────────────────────────────────
-
-    /// Press a modifier (without release). Pair with [`modifier_up`](Self::modifier_up).
-    fn modifier_down(&self, modifier: Modifier) -> Result<()>;
-
-    /// Release a previously pressed modifier.
-    fn modifier_up(&self, modifier: Modifier) -> Result<()>;
 }
 
 // ── Public façade ───────────────────────────────────────────────────
 
 /// Synthesises OS-level pointer and keyboard events.
 ///
-/// `InputSim` is a thin façade over an [`InputProvider`] backend. Use it only
-/// when the accessibility action layer cannot express the interaction you
-/// need — see the [module docs](self) for the rationale.
+/// `InputSim` is a thin façade over an [`InputProvider`] backend. Methods are
+/// organised by input device: [`InputSim::mouse`] returns a [`Mouse`] handle
+/// with pointer operations, [`InputSim::keyboard`] returns a [`Keyboard`]
+/// handle with key operations. This structure matches Playwright and
+/// Puppeteer's `page.mouse.*` / `page.keyboard.*` layout and keeps the combo
+/// verbs (`click`, `press`) unambiguous even though `Element::press` exists
+/// at the a11y layer.
+///
+/// Use this only when the accessibility action layer cannot express the
+/// interaction you need — see the [module docs](self) for the rationale.
 ///
 /// `InputSim` is cheap to clone (it shares the backend via `Arc`).
+///
+/// # Example
+///
+/// ```ignore
+/// # use xa11y_core::{input::*, Element};
+/// # fn go(sim: InputSim, button: Element) -> xa11y_core::Result<()> {
+/// sim.mouse().click(&button)?;
+/// sim.keyboard().chord(Key::Char('a'), &[Key::Meta])?; // Cmd/Ctrl+A
+/// sim.keyboard().type_text("hello")?;
+/// # Ok(()) }
+/// ```
 #[derive(Clone)]
 pub struct InputSim {
     backend: Arc<dyn InputProvider>,
@@ -359,8 +426,33 @@ impl InputSim {
         &self.backend
     }
 
-    // ── Pointer ─────────────────────────────────────────────────────
+    /// Handle for pointer operations.
+    pub fn mouse(&self) -> Mouse<'_> {
+        Mouse {
+            backend: &self.backend,
+        }
+    }
 
+    /// Handle for keyboard operations.
+    pub fn keyboard(&self) -> Keyboard<'_> {
+        Keyboard {
+            backend: &self.backend,
+        }
+    }
+
+    /// Resolve an element's current bounds to a screen point using `anchor`.
+    /// Equivalent to the free function [`point_for`].
+    pub fn point_for(&self, element: &Element, anchor: Anchor) -> Result<Point> {
+        point_for(element, anchor)
+    }
+}
+
+/// Pointer operations. Obtain via [`InputSim::mouse`].
+pub struct Mouse<'a> {
+    backend: &'a Arc<dyn InputProvider>,
+}
+
+impl Mouse<'_> {
     /// Left-click `target` once at its [`Anchor::Center`] (for elements) or
     /// at the literal point.
     pub fn click(&self, target: impl IntoPoint) -> Result<()> {
@@ -368,16 +460,19 @@ impl InputSim {
         self.backend.pointer_click(pt, MouseButton::Left, 1)
     }
 
-    /// Click with explicit options (button, count, modifiers, anchor).
+    /// Click with explicit options (button, count, held keys, anchor).
     ///
     /// `opts.anchor` is used only when `target` is an [`Element`]; for raw
     /// points it is ignored.
     pub fn click_with(&self, target: ClickTarget<'_>, opts: ClickOptions) -> Result<()> {
+        for k in &opts.held {
+            k.validate()?;
+        }
         let pt = match target {
             ClickTarget::Point(p) => p,
             ClickTarget::Element(el) => point_for(el, opts.anchor)?,
         };
-        with_modifiers(self.backend.as_ref(), &opts.modifiers, || {
+        with_keys_held(self.backend.as_ref(), &opts.held, || {
             self.backend.pointer_click(pt, opts.button, opts.count)
         })
     }
@@ -392,6 +487,16 @@ impl InputSim {
     pub fn right_click(&self, target: impl IntoPoint) -> Result<()> {
         let pt = target.into_point()?;
         self.backend.pointer_click(pt, MouseButton::Right, 1)
+    }
+
+    /// Press `button` at the current pointer location (no release).
+    pub fn down(&self, button: MouseButton) -> Result<()> {
+        self.backend.pointer_down(button)
+    }
+
+    /// Release `button` at the current pointer location.
+    pub fn up(&self, button: MouseButton) -> Result<()> {
+        self.backend.pointer_up(button)
     }
 
     /// Move the pointer to `target` without pressing any buttons.
@@ -416,9 +521,12 @@ impl InputSim {
         to: impl IntoPoint,
         opts: DragOptions,
     ) -> Result<()> {
+        for k in &opts.held {
+            k.validate()?;
+        }
         let from = from.into_point()?;
         let to = to.into_point()?;
-        with_modifiers(self.backend.as_ref(), &opts.modifiers, || {
+        with_keys_held(self.backend.as_ref(), &opts.held, || {
             self.backend
                 .pointer_drag(from, to, opts.button, opts.duration)
         })
@@ -429,49 +537,62 @@ impl InputSim {
         let pt = target.into_point()?;
         self.backend.pointer_scroll(pt, delta)
     }
+}
 
-    // ── Keyboard ────────────────────────────────────────────────────
+/// Keyboard operations. Obtain via [`InputSim::keyboard`].
+pub struct Keyboard<'a> {
+    backend: &'a Arc<dyn InputProvider>,
+}
 
-    /// Type literal text into whichever element currently has keyboard focus.
-    ///
-    /// `InputSim` does not focus the target for you — call the appropriate
-    /// accessibility action (e.g. `Element::focus` via the provider) first.
-    pub fn type_text(&self, text: &str) -> Result<()> {
-        self.backend.type_text(text)
-    }
-
-    /// Tap `key` (press + release) with no modifiers.
-    pub fn key(&self, key: Key) -> Result<()> {
+impl Keyboard<'_> {
+    /// Tap `key` (press + release) with no other keys held.
+    pub fn press(&self, key: Key) -> Result<()> {
+        key.validate()?;
         self.backend.key_tap(&key, &[])
     }
 
-    /// Tap `key` while `modifiers` are held.
+    /// Tap `key` while `held` are held down.
     ///
-    /// Example: `chord(Key::Char('a'), &[Modifier::Meta])` for select-all.
-    pub fn chord(&self, key: Key, modifiers: &[Modifier]) -> Result<()> {
-        self.backend.key_tap(&key, modifiers)
+    /// Modifiers are ordinary keys in this API — pass `Key::Shift`,
+    /// `Key::Ctrl`, `Key::Alt`, or `Key::Meta` via `held`.
+    ///
+    /// ```ignore
+    /// // Cmd/Ctrl+A:
+    /// keyboard.chord(Key::Char('a'), &[Key::Meta])?;
+    /// ```
+    pub fn chord(&self, key: Key, held: &[Key]) -> Result<()> {
+        key.validate()?;
+        for k in held {
+            k.validate()?;
+        }
+        self.backend.key_tap(&key, held)
     }
 
-    /// Press `key` without releasing. Pair with [`key_up`](Self::key_up).
-    pub fn key_down(&self, key: Key) -> Result<()> {
+    /// Press `key` without releasing. Pair with [`up`](Self::up).
+    pub fn down(&self, key: Key) -> Result<()> {
+        key.validate()?;
         self.backend.key_down(&key)
     }
 
     /// Release a previously pressed key.
-    pub fn key_up(&self, key: Key) -> Result<()> {
+    pub fn up(&self, key: Key) -> Result<()> {
+        key.validate()?;
         self.backend.key_up(&key)
     }
 
-    // ── Geometry helpers ────────────────────────────────────────────
-
-    /// Resolve an element's current bounds to a screen point using `anchor`.
-    /// Equivalent to the free function [`point_for`].
-    pub fn point_for(&self, element: &Element, anchor: Anchor) -> Result<Point> {
-        point_for(element, anchor)
+    /// Type literal text into whichever element currently has keyboard focus.
+    ///
+    /// `Keyboard` does not focus the target for you — call the appropriate
+    /// accessibility action (e.g. `Element::focus` via the provider) first.
+    ///
+    /// Unlike [`press`](Self::press), this accepts any text (including
+    /// uppercase and shifted symbols); backends handle the case/shift synthesis.
+    pub fn type_text(&self, text: &str) -> Result<()> {
+        self.backend.type_text(text)
     }
 }
 
-/// Explicit target for [`InputSim::click_with`]: either a raw point or an
+/// Explicit target for [`Mouse::click_with`]: either a raw point or an
 /// element to anchor against.
 pub enum ClickTarget<'a> {
     Point(Point),
@@ -486,7 +607,7 @@ impl From<Point> for ClickTarget<'_> {
 
 impl From<(i32, i32)> for ClickTarget<'_> {
     fn from(t: (i32, i32)) -> Self {
-        Self::Point(t.into())
+        Self::Point(Point::new(t.0, t.1))
     }
 }
 
@@ -496,20 +617,20 @@ impl<'a> From<&'a Element> for ClickTarget<'a> {
     }
 }
 
-/// Run `body` with each modifier in `mods` held down, releasing them all
-/// (in reverse order) before returning. Errors during release are returned
-/// only when `body` succeeded — a body failure takes precedence.
-fn with_modifiers<F>(backend: &dyn InputProvider, mods: &[Modifier], body: F) -> Result<()>
+/// Run `body` with each key in `keys` held down, releasing them all (in
+/// reverse order) before returning. Errors during release are returned only
+/// when `body` succeeded — a body failure takes precedence.
+fn with_keys_held<F>(backend: &dyn InputProvider, keys: &[Key], body: F) -> Result<()>
 where
     F: FnOnce() -> Result<()>,
 {
-    for m in mods {
-        backend.modifier_down(*m)?;
+    for k in keys {
+        backend.key_down(k)?;
     }
     let result = body();
     let mut release_err: Option<Error> = None;
-    for m in mods.iter().rev() {
-        if let Err(e) = backend.modifier_up(*m) {
+    for k in keys.iter().rev() {
+        if let Err(e) = backend.key_up(k) {
             // Keep the first release error so we can surface it if the body
             // succeeded; if the body already failed, the body error wins.
             if release_err.is_none() {
