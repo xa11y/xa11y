@@ -795,7 +795,7 @@ impl LinuxProvider {
         let visible = (bits & VISIBLE) != 0 || (bits & SHOWING) != 0;
 
         let checked = match role {
-            Role::CheckBox | Role::RadioButton | Role::MenuItem => {
+            Role::CheckBox | Role::RadioButton | Role::MenuItem | Role::Switch => {
                 if (bits & INDETERMINATE) != 0 {
                     Some(Toggled::Mixed)
                 } else if (bits & CHECKED) != 0 {
