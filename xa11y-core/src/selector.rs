@@ -523,6 +523,13 @@ pub fn find_elements_in_tree(
         phase1_limit,
     )?;
 
+    // Apply :nth for the first segment before descending, so later segments
+    // narrow against the single selected element rather than every candidate
+    // that matched the head. Without this, `button:nth(2) > label` treated
+    // `:nth(2)` as a limit on the phase-1 pool and returned labels of *all*
+    // buttons up to the second, not labels of the second button.
+    apply_nth(&mut candidates, first.nth);
+
     // Phase 2: For each subsequent segment, narrow candidates
     for segment in &selector.segments[1..] {
         let mut next_candidates = Vec::new();
@@ -554,15 +561,11 @@ pub fn find_elements_in_tree(
         let mut seen = HashSet::new();
         next_candidates.retain(|e| seen.insert(e.handle));
         candidates = next_candidates;
-    }
-
-    // Apply :nth on the last segment
-    if let Some(nth) = selector.segments.last().and_then(|s| s.simple.nth) {
-        if nth <= candidates.len() {
-            candidates = vec![candidates.remove(nth - 1)];
-        } else {
-            candidates.clear();
-        }
+        // Apply :nth for this segment before moving on to the next one.
+        // This also subsumes the former "apply :nth on the last segment"
+        // trailing block — the final segment's :nth runs as part of its
+        // own loop iteration.
+        apply_nth(&mut candidates, segment.simple.nth);
     }
 
     // Apply limit
@@ -571,6 +574,19 @@ pub fn find_elements_in_tree(
     }
 
     Ok(candidates)
+}
+
+/// Apply a `:nth(N)` (1-based) filter to a candidate list, collapsing it to
+/// the n-th element (or emptying it if fewer than `n` are present).
+fn apply_nth(candidates: &mut Vec<ElementData>, nth: Option<usize>) {
+    let Some(n) = nth else { return };
+    if n <= candidates.len() {
+        let kept = candidates.remove(n - 1);
+        candidates.clear();
+        candidates.push(kept);
+    } else {
+        candidates.clear();
+    }
 }
 
 /// DFS collect all elements matching a simple selector under `root`.
@@ -765,6 +781,107 @@ mod tests {
         let sel = Selector::parse("[name*='addr']").unwrap();
         assert_eq!(sel.segments[0].simple.filters[0].op, MatchOp::Contains);
         assert_eq!(sel.segments[0].simple.filters[0].value, "addr");
+    }
+
+    #[test]
+    fn nth_on_non_last_segment_filters_during_traversal() {
+        // Regression: `:nth(N)` on a non-last segment used to be treated as a
+        // pool limit on phase-1 (so up to N candidates were collected and
+        // *all* of their children expanded). The expected behaviour is that
+        // `:nth(N)` collapses the candidate set to just the N-th match
+        // before descending.
+        //
+        // Tree:
+        //   root (application)
+        //     ├── toolbar "A" → button "A1", button "A2"
+        //     └── toolbar "B" → button "B1", button "B2"
+        //
+        // `toolbar:nth(2) > button` must return only [B1, B2], not
+        // [A1, A2, B1, B2].
+        struct Row {
+            handle: u64,
+            role: Role,
+            name: &'static str,
+            parent: Option<u64>,
+        }
+        let tree: Vec<Row> = vec![
+            Row {
+                handle: 0,
+                role: Role::Application,
+                name: "root",
+                parent: None,
+            },
+            Row {
+                handle: 1,
+                role: Role::Toolbar,
+                name: "A",
+                parent: Some(0),
+            },
+            Row {
+                handle: 2,
+                role: Role::Toolbar,
+                name: "B",
+                parent: Some(0),
+            },
+            Row {
+                handle: 3,
+                role: Role::Button,
+                name: "A1",
+                parent: Some(1),
+            },
+            Row {
+                handle: 4,
+                role: Role::Button,
+                name: "A2",
+                parent: Some(1),
+            },
+            Row {
+                handle: 5,
+                role: Role::Button,
+                name: "B1",
+                parent: Some(2),
+            },
+            Row {
+                handle: 6,
+                role: Role::Button,
+                name: "B2",
+                parent: Some(2),
+            },
+        ];
+        let make_data = |row: &Row| ElementData {
+            role: row.role,
+            name: Some(row.name.to_string()),
+            value: None,
+            description: None,
+            bounds: None,
+            actions: vec![],
+            states: crate::element::StateSet::default(),
+            numeric_value: None,
+            min_value: None,
+            max_value: None,
+            stable_id: None,
+            pid: Some(1),
+            raw: std::collections::HashMap::new(),
+            handle: row.handle,
+        };
+        let tree_ref = &tree;
+        let get_children = move |parent: Option<&ElementData>| -> Result<Vec<ElementData>> {
+            let parent_handle = parent.map(|e| e.handle);
+            Ok(tree_ref
+                .iter()
+                .filter(|row| row.parent == parent_handle)
+                .map(make_data)
+                .collect())
+        };
+
+        let sel = Selector::parse("toolbar:nth(2) > button").unwrap();
+        let results = find_elements_in_tree(get_children, None, &sel, None, None).unwrap();
+        let names: Vec<_> = results.iter().map(|e| e.name.clone().unwrap()).collect();
+        assert_eq!(
+            names,
+            vec!["B1".to_string(), "B2".to_string()],
+            "toolbar:nth(2) > button must return only the children of the 2nd toolbar"
+        );
     }
 
     #[test]
