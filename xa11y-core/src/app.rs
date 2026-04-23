@@ -6,7 +6,83 @@ use crate::error::{Error, Result};
 use crate::event_provider::Subscription;
 use crate::locator::Locator;
 use crate::provider::Provider;
-use crate::selector::Selector;
+use crate::role::Role;
+use crate::selector::{
+    AttrFilter, Combinator, MatchOp, RoleMatch, Selector, SelectorSegment, SimpleSelector,
+};
+
+/// Build a single-segment selector that matches `role` with an exact-name filter.
+///
+/// Constructed directly from the selector AST rather than via string
+/// interpolation, so an application name containing characters that are
+/// special in the selector grammar (`"`, `]`, `\`) still produces a
+/// well-formed selector that matches the literal name.
+fn role_named(role: Role, name: &str) -> Selector {
+    Selector {
+        segments: vec![SelectorSegment {
+            combinator: Combinator::Root,
+            simple: SimpleSelector {
+                role: Some(RoleMatch::Normalized(role)),
+                filters: vec![AttrFilter {
+                    attr: "name".to_string(),
+                    op: MatchOp::Exact,
+                    value: name.to_string(),
+                }],
+                nth: None,
+            },
+        }],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::selector::{matches_simple, Combinator};
+    use serde_json::json;
+
+    #[test]
+    fn role_named_preserves_literal_name_with_special_chars() {
+        // Regression for a selector-injection bug: `App::by_name_with` used
+        // `format!(r#"application[name="{}"]"#, name)` without escaping, so a
+        // name containing `"` terminated the attribute value early and either
+        // failed to parse or matched the wrong element. The AST-based builder
+        // stores the literal name in the filter value.
+        let name = r#"My "Weird" App ]["#;
+        let sel = role_named(Role::Application, name);
+        assert_eq!(sel.segments.len(), 1);
+        assert_eq!(sel.segments[0].combinator, Combinator::Root);
+        let simple = &sel.segments[0].simple;
+        assert_eq!(simple.filters.len(), 1);
+        assert_eq!(simple.filters[0].attr, "name");
+        assert_eq!(simple.filters[0].value, name);
+    }
+
+    #[test]
+    fn role_named_matches_element_with_quoted_name() {
+        // End-to-end: the constructed selector actually matches an element
+        // whose name contains the special chars. Build a minimal ElementData
+        // and verify `matches_simple`.
+        let name = r#"Name"With"Quote"#;
+        let data = ElementData {
+            role: Role::Application,
+            name: Some(name.to_string()),
+            value: None,
+            description: None,
+            bounds: None,
+            actions: vec![],
+            states: crate::element::StateSet::default(),
+            numeric_value: None,
+            min_value: None,
+            max_value: None,
+            stable_id: None,
+            pid: Some(1),
+            raw: std::collections::HashMap::from([("app_name".to_string(), json!(name))]),
+            handle: 0,
+        };
+        let sel = role_named(Role::Application, name);
+        assert!(matches_simple(&data, &sel.segments[0].simple));
+    }
+}
 
 /// Polling interval shared by all `*_with_timeout` lookups.
 const LOOKUP_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -62,25 +138,27 @@ impl App {
         // Try application role first (Linux/macOS), then window role (Windows —
         // UIA has no Application node at the top level).
         //
+        // Selectors are built directly from the AST so app names containing
+        // `"`, `]`, or other characters significant in the selector grammar
+        // don't break or require escaping.
+        //
         // `find_elements` returns `Ok(vec![])` for "no match" and reserves
         // `Err(_)` for real failures (permission denied, platform errors,
         // malformed selectors). We only fall through on an empty result —
         // real errors must propagate so callers can distinguish "app not
         // found" from "accessibility is broken".
-        let app_selector = format!(r#"application[name="{}"]"#, name);
-        let results =
-            provider.find_elements(None, &Selector::parse(&app_selector)?, Some(1), Some(0))?;
+        let app_selector = role_named(Role::Application, name);
+        let results = provider.find_elements(None, &app_selector, Some(1), Some(0))?;
         if let Some(data) = results.into_iter().next() {
             return Ok(Self::from_data(provider, data));
         }
-        let win_selector = format!(r#"window[name="{}"]"#, name);
-        let results =
-            provider.find_elements(None, &Selector::parse(&win_selector)?, Some(1), Some(0))?;
+        let win_selector = role_named(Role::Window, name);
+        let results = provider.find_elements(None, &win_selector, Some(1), Some(0))?;
         let data = results
             .into_iter()
             .next()
-            .ok_or(Error::SelectorNotMatched {
-                selector: app_selector,
+            .ok_or_else(|| Error::SelectorNotMatched {
+                selector: format!(r#"application[name="{}"]"#, name),
             })?;
         Ok(Self::from_data(provider, data))
     }
