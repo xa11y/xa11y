@@ -210,8 +210,16 @@ set +e
 # Capture the output so we can also surface it in the GitHub step summary
 # when the raw logs aren't easily reachable.
 NODE_TEST_LOG="$JS_DIR/.node-test-output.log"
-timeout 180 node --test --test-timeout=60000 --test-reporter=spec \
-    '__test__/integ/**/*.test.js' 2>&1 | tee "$NODE_TEST_LOG"
+# GNU `timeout` is present on Linux and Git-Bash-on-Windows but not on
+# stock macOS. Fall back to an un-bounded run there; --test-timeout still
+# caps each individual file.
+if command -v timeout >/dev/null 2>&1; then
+    timeout 180 node --test --test-timeout=60000 --test-reporter=spec \
+        '__test__/integ/**/*.test.js' 2>&1 | tee "$NODE_TEST_LOG"
+else
+    node --test --test-timeout=60000 --test-reporter=spec \
+        '__test__/integ/**/*.test.js' 2>&1 | tee "$NODE_TEST_LOG"
+fi
 TEST_EXIT=${PIPESTATUS[0]}
 set -e
 
