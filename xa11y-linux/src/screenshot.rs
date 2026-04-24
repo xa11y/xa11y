@@ -28,16 +28,20 @@ pub struct LinuxScreenshot {
     backend: Backend,
 }
 
+// Box the X11 variant's fields — `RustConnection` is large enough that the
+// enum would otherwise be dominated by the X11 case and clippy flags it as
+// `large_enum_variant`. The backend sits behind an `Arc` in `Screenshotter`,
+// so the extra indirection costs at most one allocation per process.
 enum Backend {
-    X11 {
-        conn: Mutex<RustConnection>,
-        root_width: u16,
-        root_height: u16,
-        root: u32,
-    },
-    Wayland {
-        conn: ZbusConnection,
-    },
+    X11(Box<X11Backend>),
+    Wayland { conn: ZbusConnection },
+}
+
+struct X11Backend {
+    conn: Mutex<RustConnection>,
+    root_width: u16,
+    root_height: u16,
+    root: u32,
 }
 
 impl LinuxScreenshot {
@@ -63,12 +67,12 @@ impl LinuxScreenshot {
             let root_width = screen.width_in_pixels;
             let root_height = screen.height_in_pixels;
             Ok(Self {
-                backend: Backend::X11 {
+                backend: Backend::X11(Box::new(X11Backend {
                     conn: Mutex::new(conn),
                     root,
                     root_width,
                     root_height,
-                },
+                })),
             })
         } else if wayland {
             let conn = ZbusConnection::session().map_err(|e| Error::Platform {
@@ -250,24 +254,16 @@ impl LinuxScreenshot {
 impl ScreenshotProvider for LinuxScreenshot {
     fn capture_full(&self) -> Result<Screenshot> {
         match &self.backend {
-            Backend::X11 {
-                conn,
-                root,
-                root_width,
-                root_height,
-            } => self.capture_x11(conn, *root, *root_width, *root_height, None),
+            Backend::X11(x) => self.capture_x11(&x.conn, x.root, x.root_width, x.root_height, None),
             Backend::Wayland { conn } => self.capture_wayland(conn, None),
         }
     }
 
     fn capture_region(&self, rect: Rect) -> Result<Screenshot> {
         match &self.backend {
-            Backend::X11 {
-                conn,
-                root,
-                root_width,
-                root_height,
-            } => self.capture_x11(conn, *root, *root_width, *root_height, Some(rect)),
+            Backend::X11(x) => {
+                self.capture_x11(&x.conn, x.root, x.root_width, x.root_height, Some(rect))
+            }
             Backend::Wayland { conn } => self.capture_wayland(conn, Some(rect)),
         }
     }

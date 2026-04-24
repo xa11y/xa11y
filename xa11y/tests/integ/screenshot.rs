@@ -8,10 +8,20 @@ mod tests {
     #[test]
     #[ignore]
     fn capture_full_screen_yields_nonempty_png() {
-        let shot = xa11y::screenshotter()
+        let shot = match xa11y::screenshotter()
             .expect("screenshotter construction")
             .capture()
-            .expect("full-screen capture");
+        {
+            Ok(s) => s,
+            // Disconnected RDP sessions / non-interactive CI jobs can't capture
+            // the desktop; the backend surfaces that as Unsupported. Skip
+            // rather than fail — the construction path is still exercised.
+            Err(xa11y::Error::Unsupported { feature }) => {
+                eprintln!("skipping: {feature}");
+                return;
+            }
+            Err(e) => panic!("full-screen capture: {e}"),
+        };
         assert!(shot.width > 0 && shot.height > 0, "empty capture dims");
         assert_eq!(
             shot.pixels.len(),
@@ -43,10 +53,17 @@ mod tests {
             return;
         }
 
-        let shot = xa11y::screenshotter()
+        let shot = match xa11y::screenshotter()
             .expect("screenshotter construction")
             .capture_element(&button)
-            .expect("element capture");
+        {
+            Ok(s) => s,
+            Err(xa11y::Error::Unsupported { feature }) => {
+                eprintln!("skipping: {feature}");
+                return;
+            }
+            Err(e) => panic!("element capture: {e}"),
+        };
 
         assert!(shot.scale > 0.0);
         let expected_w = (bounds.width as f32 * shot.scale).round() as u32;

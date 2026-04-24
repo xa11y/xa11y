@@ -16,7 +16,9 @@ COMMANDS:
     test-js             Build and unit-test JS (Node) bindings
     test-js-integ       Run JS integration tests against the AccessKit test app
     test-integ          Run integration tests (delegates to scripts/)
-    test-integ-container  Run Linux integration tests in container
+    test-integ-container  Run Linux X11 integration tests in container
+    test-integ-wayland-container  Run Linux Wayland portal tests in container
+    test-integ-input-smoke-container  Run Linux XTest input smoke in container
     test-qt             Run Qt (PySide6) integration tests
     test-gtk            Run GTK4 integration tests
     test-cocoa          Run Cocoa/AppKit integration tests (macOS only)
@@ -47,6 +49,8 @@ fn main() -> ExitCode {
         "test-js-integ" => do_test_js_integ(),
         "test-integ" => do_test_integ(rest),
         "test-integ-container" => do_test_integ_container(rest),
+        "test-integ-wayland-container" => do_test_integ_wayland_container(),
+        "test-integ-input-smoke-container" => do_test_integ_input_smoke_container(),
         "test-qt" => do_test_qt(),
         "test-gtk" => do_test_gtk(),
         "test-cocoa" => do_test_cocoa(),
@@ -273,6 +277,70 @@ fn do_test_integ_container(args: &[String]) -> bool {
     let mut cmd_args = vec!["scripts/run_integ_container.sh"];
     cmd_args.extend(&str_args);
     run_in("bash", &cmd_args, &root)
+}
+
+fn do_test_integ_wayland_container() -> bool {
+    heading("Wayland portal screenshot tests (container)");
+    let root = project_root();
+    // Build the Wayland container image (extends xa11y-base with sway +
+    // xdg-desktop-portal + pipewire) if it isn't already present.
+    let img_exists = std::process::Command::new("docker")
+        .args(["image", "inspect", "xa11y-wayland"])
+        .current_dir(&root)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !img_exists
+        && !run_in(
+            "docker",
+            &[
+                "build",
+                "-t",
+                "xa11y-wayland",
+                "-f",
+                "Containerfile.wayland",
+                ".",
+            ],
+            &root,
+        )
+    {
+        return false;
+    }
+    run_in(
+        "docker",
+        &[
+            "run",
+            "--rm",
+            "-v",
+            &format!("{}:/xa11y", root.display()),
+            "-v",
+            "xa11y-cargo-cache:/xa11y/target",
+            "xa11y-wayland",
+            "bash",
+            "/xa11y/scripts/run_wayland_portal.sh",
+        ],
+        &root,
+    )
+}
+
+fn do_test_integ_input_smoke_container() -> bool {
+    heading("Linux X11 input smoke (container)");
+    let root = project_root();
+    run_in(
+        "docker",
+        &[
+            "run",
+            "--rm",
+            "-v",
+            &format!("{}:/xa11y", root.display()),
+            "-v",
+            "xa11y-cargo-cache:/xa11y/target",
+            "xa11y-base",
+            "bash",
+            "/xa11y/scripts/run_input_smoke.sh",
+        ],
+        &root,
+    )
 }
 
 fn do_test_qt() -> bool {
