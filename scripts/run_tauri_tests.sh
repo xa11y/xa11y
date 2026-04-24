@@ -50,6 +50,23 @@ if [[ "$(uname)" == "Linux" ]]; then
         CLEANUP_PIDS+=($!)
         sleep 1
         export DISPLAY="$XVFB_DISPLAY"
+
+        # Start a minimal window manager so synthesised input events (XTest
+        # ButtonPress/KeyPress) reach the Tauri window properly — bare Xvfb
+        # has no focus management, so keyboard events end up at the root
+        # window and never reach the webview.
+        if command -v fluxbox &>/dev/null; then
+            echo "Starting fluxbox (for focus routing under Xvfb)..."
+            fluxbox >/dev/null 2>&1 &
+            CLEANUP_PIDS+=($!)
+            sleep 1
+        else
+            echo "WARNING: fluxbox not installed; input-sim tests may fail."
+            echo "         Install with: sudo apt-get install -y fluxbox"
+            # Signal to pytest to skip input-sim tests rather than fail them
+            # with a confusing "event log is empty" message.
+            export XA11Y_SKIP_INPUT_SIM=1
+        fi
     fi
     echo "DISPLAY=$DISPLAY"
 

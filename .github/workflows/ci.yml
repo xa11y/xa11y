@@ -40,7 +40,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            xvfb dbus dbus-x11 \
+            xvfb dbus dbus-x11 fluxbox \
             at-spi2-core \
             libxkbcommon-x11-0 libxkbcommon-x11-dev \
             libxcursor1 libxrandr2 libxi6 \
@@ -496,7 +496,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            xvfb dbus dbus-x11 \
+            xvfb dbus dbus-x11 fluxbox \
             at-spi2-core \
             libxkbcommon-x11-0 libxkbcommon-x11-dev \
             libxcursor1 libxrandr2 libxi6 \
@@ -753,7 +753,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            xvfb dbus dbus-x11 \
+            xvfb dbus dbus-x11 fluxbox \
             at-spi2-core \
             libxkbcommon-x11-0 libxkbcommon-x11-dev \
             libxcursor1 libxrandr2 libxi6 \
