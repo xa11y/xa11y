@@ -3,6 +3,8 @@
 // This module is `#[doc(hidden)]` and not part of the public API.
 // It powers both `cargo install xa11y` and `pip install xa11y` via PyO3.
 
+use std::time::Duration;
+
 use crate::*;
 
 /// Run the CLI with the given arguments (excluding the program name).
@@ -16,6 +18,13 @@ pub fn run(args: &[String]) -> Result<()> {
         Some("find") => cmd_find(&args[1..]),
         Some("action") => cmd_action(&args[1..]),
         Some("events") => cmd_events(&args[1..]),
+        Some("click") => cmd_click(&args[1..]),
+        Some("move") => cmd_move(&args[1..]),
+        Some("drag") => cmd_drag(&args[1..]),
+        Some("scroll") => cmd_scroll(&args[1..]),
+        Some("key") => cmd_key(&args[1..]),
+        Some("type") => cmd_type(&args[1..]),
+        Some("screenshot") => cmd_screenshot(&args[1..]),
         _ => {
             print_usage();
             Ok(())
@@ -28,14 +37,31 @@ fn print_usage() {
         "\
 xa11y — accessibility tree explorer
 
-Usage:
+Accessibility tree:
   xa11y apps                                List running applications
   xa11y tree   [--app NAME | --pid PID]     Print the accessibility tree
-  xa11y find   SELECTOR [--app NAME | --pid PID]
+  xa11y find   SELECTOR [--app NAME | --pid PID] [-o pretty|bounds|center]
                                             Find elements matching a selector
   xa11y action ACTION SELECTOR [--app NAME | --pid PID] [--value V]
                                             Perform an action on an element
   xa11y events [--app NAME | --pid PID]     Stream accessibility events
+
+Input simulation (coords only — no selectors, no a11y):
+  xa11y click  --at X,Y [--button left|right|middle] [--count N] [--held K,K]
+  xa11y move   --at X,Y
+  xa11y drag   --from X,Y --to X,Y [--button B] [--duration-ms MS] [--held K,K]
+  xa11y scroll --at X,Y [--dx N] [--dy N]
+  xa11y key    KEY [--held K,K]
+  xa11y type   TEXT
+
+Screenshot (regions only — no selectors, no a11y):
+  xa11y screenshot [--region X,Y,W,H] --out PATH
+                                            --out - writes PNG bytes to stdout
+
+Compose a11y + input/screenshot via `find -o bounds|center`:
+  region=$(xa11y find 'button[name=\"OK\"]' --app Safari -o bounds)
+  xa11y screenshot --region \"$region\" --out button.png
+  xa11y click --at \"$(xa11y find 'button[name=\"OK\"]' --app Safari -o center)\"
 
 Actions: press, focus, blur, toggle, expand, collapse, select, show-menu,
   scroll-into-view, increment, decrement,
@@ -46,23 +72,34 @@ Actions: press, focus, blur, toggle, expand, collapse, select, show-menu,
 
 // ── Argument helpers ────────────────────────────────────────────────────────
 
+#[derive(Default)]
 pub(crate) struct Opts {
     pub app: Option<String>,
     pub pid: Option<u32>,
     pub value: Option<String>,
+    // Input simulation / screenshot
+    pub at: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub button: Option<String>,
+    pub count: Option<u32>,
+    pub held: Option<String>,
+    pub dx: Option<i32>,
+    pub dy: Option<i32>,
+    pub duration_ms: Option<u64>,
+    pub region: Option<String>,
+    pub out: Option<String>,
+    // Output format for `find`
+    pub output_format: Option<String>,
 }
 
-/// Parse known flags (`--app`, `--pid`, `--value`) from a slice, returning
-/// the parsed Opts and the remaining positional arguments.
+/// Parse known flags from a slice, returning the parsed Opts and the
+/// remaining positional arguments.
 ///
 /// Unknown flags are left in the positional output (so downstream callers
 /// see them and can surface a sensible error) rather than swallowed.
 pub(crate) fn parse_opts(args: &[String]) -> (Opts, Vec<String>) {
-    let mut opts = Opts {
-        app: None,
-        pid: None,
-        value: None,
-    };
+    let mut opts = Opts::default();
     let mut positional = Vec::new();
     let mut i = 0;
     while i < args.len() {
@@ -79,11 +116,180 @@ pub(crate) fn parse_opts(args: &[String]) -> (Opts, Vec<String>) {
                 i += 1;
                 opts.value = args.get(i).cloned();
             }
+            "--at" => {
+                i += 1;
+                opts.at = args.get(i).cloned();
+            }
+            "--from" => {
+                i += 1;
+                opts.from = args.get(i).cloned();
+            }
+            "--to" => {
+                i += 1;
+                opts.to = args.get(i).cloned();
+            }
+            "--button" => {
+                i += 1;
+                opts.button = args.get(i).cloned();
+            }
+            "--count" => {
+                i += 1;
+                opts.count = args.get(i).and_then(|s| s.parse().ok());
+            }
+            "--held" => {
+                i += 1;
+                opts.held = args.get(i).cloned();
+            }
+            "--dx" => {
+                i += 1;
+                opts.dx = args.get(i).and_then(|s| s.parse().ok());
+            }
+            "--dy" => {
+                i += 1;
+                opts.dy = args.get(i).and_then(|s| s.parse().ok());
+            }
+            "--duration-ms" => {
+                i += 1;
+                opts.duration_ms = args.get(i).and_then(|s| s.parse().ok());
+            }
+            "--region" => {
+                i += 1;
+                opts.region = args.get(i).cloned();
+            }
+            "--out" => {
+                i += 1;
+                opts.out = args.get(i).cloned();
+            }
+            "-o" => {
+                i += 1;
+                opts.output_format = args.get(i).cloned();
+            }
             other => positional.push(other.to_string()),
         }
         i += 1;
     }
     (opts, positional)
+}
+
+// ── Parsers for complex flag values ─────────────────────────────────────────
+
+fn missing(what: &str) -> Error {
+    Error::Platform {
+        code: -1,
+        message: format!("missing {what}"),
+    }
+}
+
+pub(crate) fn parse_point_arg(s: &str, ctx: &str) -> Result<Point> {
+    let parts: Vec<&str> = s.split(',').collect();
+    if parts.len() != 2 {
+        return Err(Error::Platform {
+            code: -1,
+            message: format!("{ctx} must be X,Y (got: {s})"),
+        });
+    }
+    let x: i32 = parts[0].trim().parse().map_err(|_| Error::Platform {
+        code: -1,
+        message: format!("invalid X in {ctx}: {}", parts[0]),
+    })?;
+    let y: i32 = parts[1].trim().parse().map_err(|_| Error::Platform {
+        code: -1,
+        message: format!("invalid Y in {ctx}: {}", parts[1]),
+    })?;
+    Ok(Point::new(x, y))
+}
+
+pub(crate) fn parse_region_arg(s: &str) -> Result<Rect> {
+    let parts: Vec<&str> = s.split(',').collect();
+    if parts.len() != 4 {
+        return Err(Error::Platform {
+            code: -1,
+            message: format!("--region must be X,Y,W,H (got: {s})"),
+        });
+    }
+    let x: i32 = parts[0].trim().parse().map_err(|_| Error::Platform {
+        code: -1,
+        message: format!("invalid X in --region: {}", parts[0]),
+    })?;
+    let y: i32 = parts[1].trim().parse().map_err(|_| Error::Platform {
+        code: -1,
+        message: format!("invalid Y in --region: {}", parts[1]),
+    })?;
+    let width: u32 = parts[2].trim().parse().map_err(|_| Error::Platform {
+        code: -1,
+        message: format!("invalid W in --region: {}", parts[2]),
+    })?;
+    let height: u32 = parts[3].trim().parse().map_err(|_| Error::Platform {
+        code: -1,
+        message: format!("invalid H in --region: {}", parts[3]),
+    })?;
+    Ok(Rect {
+        x,
+        y,
+        width,
+        height,
+    })
+}
+
+/// Parse a key-name string into a [`Key`]. Accepts single chars (`"a"`,
+/// `"7"`), named modifiers (`"Shift"`, `"Ctrl"`/`"Control"`, `"Alt"`/
+/// `"Option"`, `"Meta"`/`"Cmd"`/`"Command"`/`"Super"`/`"Win"`), named keys
+/// (`"Enter"`, `"Tab"`, `"Escape"`, `"ArrowUp/Down/Left/Right"`, …), and
+/// function keys (`"F1"` … `"F24"`). Mirrors the Python bindings.
+pub(crate) fn parse_key_name(name: &str) -> Result<Key> {
+    let k = match name {
+        "Shift" => Key::Shift,
+        "Ctrl" | "Control" => Key::Ctrl,
+        "Alt" | "Option" => Key::Alt,
+        "Meta" | "Cmd" | "Command" | "Super" | "Win" => Key::Meta,
+        "Enter" | "Return" => Key::Enter,
+        "Escape" | "Esc" => Key::Escape,
+        "Backspace" => Key::Backspace,
+        "Tab" => Key::Tab,
+        "Space" => Key::Space,
+        "Delete" => Key::Delete,
+        "Insert" => Key::Insert,
+        "ArrowUp" | "Up" => Key::ArrowUp,
+        "ArrowDown" | "Down" => Key::ArrowDown,
+        "ArrowLeft" | "Left" => Key::ArrowLeft,
+        "ArrowRight" | "Right" => Key::ArrowRight,
+        "Home" => Key::Home,
+        "End" => Key::End,
+        "PageUp" => Key::PageUp,
+        "PageDown" => Key::PageDown,
+        s if s.starts_with('F') && s.len() >= 2 && s[1..].chars().all(|c| c.is_ascii_digit()) => {
+            let n: u8 = s[1..].parse().map_err(|_| Error::InvalidActionData {
+                message: format!("invalid function key: {s}"),
+            })?;
+            Key::F(n)
+        }
+        s if s.chars().count() == 1 => Key::Char(s.chars().next().unwrap()),
+        _ => {
+            return Err(Error::InvalidActionData {
+                message: format!("unknown key name: {name}"),
+            });
+        }
+    };
+    Ok(k)
+}
+
+pub(crate) fn parse_held(raw: Option<&str>) -> Result<Vec<Key>> {
+    match raw {
+        None => Ok(Vec::new()),
+        Some("") => Ok(Vec::new()),
+        Some(s) => s.split(',').map(|p| parse_key_name(p.trim())).collect(),
+    }
+}
+
+pub(crate) fn parse_button(raw: &str) -> Result<MouseButton> {
+    match raw {
+        "left" => Ok(MouseButton::Left),
+        "right" => Ok(MouseButton::Right),
+        "middle" => Ok(MouseButton::Middle),
+        other => Err(Error::InvalidActionData {
+            message: format!("unknown button: {other} (expected left|right|middle)"),
+        }),
+    }
 }
 
 pub(crate) fn resolve_app(opts: &Opts) -> Result<App> {
@@ -265,19 +471,45 @@ fn cmd_find(args: &[String]) -> Result<()> {
     let (opts, positional) = parse_opts(args);
     let selector = positional.first().ok_or(Error::Platform {
         code: -1,
-        message: "usage: xa11y find SELECTOR [--app NAME | --pid PID]".into(),
+        message: "usage: xa11y find SELECTOR [--app NAME | --pid PID] [-o pretty|bounds|center]"
+            .into(),
     })?;
 
     let app = resolve_app(&opts)?;
     let elements = app.locator(selector).elements()?;
-    for el in &elements {
-        println!("{}", format_element_oneline(el));
+    let fmt = opts.output_format.as_deref().unwrap_or("pretty");
+    match fmt {
+        "pretty" => {
+            for el in &elements {
+                println!("{}", format_element_oneline(el));
+            }
+            println!(
+                "({} match{})",
+                elements.len(),
+                if elements.len() == 1 { "" } else { "es" }
+            );
+        }
+        "bounds" => {
+            for el in &elements {
+                let b = el.bounds.ok_or(Error::NoElementBounds)?;
+                println!("{},{},{},{}", b.x, b.y, b.width, b.height);
+            }
+        }
+        "center" => {
+            for el in &elements {
+                let b = el.bounds.ok_or(Error::NoElementBounds)?;
+                let cx = b.x + (b.width as i32) / 2;
+                let cy = b.y + (b.height as i32) / 2;
+                println!("{cx},{cy}");
+            }
+        }
+        other => {
+            return Err(Error::Platform {
+                code: -1,
+                message: format!("unknown -o format: {other} (expected pretty|bounds|center)"),
+            });
+        }
     }
-    println!(
-        "({} match{})",
-        elements.len(),
-        if elements.len() == 1 { "" } else { "es" }
-    );
     Ok(())
 }
 
@@ -389,6 +621,161 @@ pub(crate) fn format_event_detail(event: &Event) -> String {
     } else {
         String::new()
     }
+}
+
+// ── Input simulation ────────────────────────────────────────────────────────
+
+fn cmd_click(args: &[String]) -> Result<()> {
+    let (opts, _pos) = parse_opts(args);
+    let at = parse_point_arg(
+        opts.at.as_deref().ok_or_else(|| missing("--at X,Y"))?,
+        "--at",
+    )?;
+    let button = opts
+        .button
+        .as_deref()
+        .map(parse_button)
+        .transpose()?
+        .unwrap_or(MouseButton::Left);
+    let count = opts.count.unwrap_or(1);
+    let held = parse_held(opts.held.as_deref())?;
+
+    let sim = crate::input_sim()?;
+    sim.mouse().click_with(
+        ClickTarget::Point(at),
+        ClickOptions {
+            button,
+            count,
+            held,
+            anchor: Anchor::Center,
+        },
+    )?;
+    println!("ok");
+    Ok(())
+}
+
+fn cmd_move(args: &[String]) -> Result<()> {
+    let (opts, _pos) = parse_opts(args);
+    let at = parse_point_arg(
+        opts.at.as_deref().ok_or_else(|| missing("--at X,Y"))?,
+        "--at",
+    )?;
+    let sim = crate::input_sim()?;
+    sim.mouse().move_to(at)?;
+    println!("ok");
+    Ok(())
+}
+
+fn cmd_drag(args: &[String]) -> Result<()> {
+    let (opts, _pos) = parse_opts(args);
+    let from = parse_point_arg(
+        opts.from.as_deref().ok_or_else(|| missing("--from X,Y"))?,
+        "--from",
+    )?;
+    let to = parse_point_arg(
+        opts.to.as_deref().ok_or_else(|| missing("--to X,Y"))?,
+        "--to",
+    )?;
+    let button = opts
+        .button
+        .as_deref()
+        .map(parse_button)
+        .transpose()?
+        .unwrap_or(MouseButton::Left);
+    let held = parse_held(opts.held.as_deref())?;
+    let duration = Duration::from_millis(opts.duration_ms.unwrap_or(150));
+
+    let sim = crate::input_sim()?;
+    sim.mouse().drag_with(
+        from,
+        to,
+        DragOptions {
+            button,
+            held,
+            duration,
+        },
+    )?;
+    println!("ok");
+    Ok(())
+}
+
+fn cmd_scroll(args: &[String]) -> Result<()> {
+    let (opts, _pos) = parse_opts(args);
+    let at = parse_point_arg(
+        opts.at.as_deref().ok_or_else(|| missing("--at X,Y"))?,
+        "--at",
+    )?;
+    let dx = opts.dx.unwrap_or(0);
+    let dy = opts.dy.unwrap_or(0);
+    let sim = crate::input_sim()?;
+    sim.mouse().scroll(at, ScrollDelta::new(dx, dy))?;
+    println!("ok");
+    Ok(())
+}
+
+fn cmd_key(args: &[String]) -> Result<()> {
+    let (opts, positional) = parse_opts(args);
+    let name = positional.first().ok_or(Error::Platform {
+        code: -1,
+        message: "usage: xa11y key KEY [--held K,K]".into(),
+    })?;
+    let key = parse_key_name(name)?;
+    let held = parse_held(opts.held.as_deref())?;
+    let sim = crate::input_sim()?;
+    if held.is_empty() {
+        sim.keyboard().press(key)?;
+    } else {
+        sim.keyboard().chord(key, &held)?;
+    }
+    println!("ok");
+    Ok(())
+}
+
+fn cmd_type(args: &[String]) -> Result<()> {
+    let (_opts, positional) = parse_opts(args);
+    let text = positional.first().ok_or(Error::Platform {
+        code: -1,
+        message: "usage: xa11y type TEXT".into(),
+    })?;
+    let sim = crate::input_sim()?;
+    sim.keyboard().type_text(text)?;
+    println!("ok");
+    Ok(())
+}
+
+// ── Screenshot ──────────────────────────────────────────────────────────────
+
+fn cmd_screenshot(args: &[String]) -> Result<()> {
+    let (opts, _pos) = parse_opts(args);
+    let out = opts
+        .out
+        .as_deref()
+        .ok_or_else(|| missing("--out PATH (use - for stdout)"))?;
+
+    let shot = if let Some(region_str) = opts.region.as_deref() {
+        let rect = parse_region_arg(region_str)?;
+        crate::screenshot_region(rect)?
+    } else {
+        crate::screenshot()?
+    };
+
+    if out == "-" {
+        use std::io::Write;
+        let bytes = shot.to_png()?;
+        std::io::stdout()
+            .write_all(&bytes)
+            .map_err(|e| Error::Platform {
+                code: e.raw_os_error().unwrap_or(-1) as i64,
+                message: format!("write stdout: {e}"),
+            })?;
+    } else {
+        shot.save_png(out)?;
+        eprintln!(
+            "wrote {out} ({}x{} @{}x)",
+            shot.width, shot.height, shot.scale
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -639,13 +1026,188 @@ mod tests {
 
     #[test]
     fn resolve_app_no_flags_is_error() {
-        let opts = Opts {
-            app: None,
-            pid: None,
-            value: None,
-        };
+        let opts = Opts::default();
         let err = resolve_app(&opts).unwrap_err();
         let msg = format!("{err}");
         assert!(msg.contains("--app") || msg.contains("--pid"));
+    }
+
+    // ── Input-sim / screenshot flag parsing ─────────────────────────────────
+
+    #[test]
+    fn parse_opts_at_flag() {
+        let args = strs(&["--at", "100,200"]);
+        let (opts, pos) = parse_opts(&args);
+        assert_eq!(opts.at.as_deref(), Some("100,200"));
+        assert!(pos.is_empty());
+    }
+
+    #[test]
+    fn parse_opts_from_to_flags() {
+        let args = strs(&["--from", "1,2", "--to", "3,4"]);
+        let (opts, _) = parse_opts(&args);
+        assert_eq!(opts.from.as_deref(), Some("1,2"));
+        assert_eq!(opts.to.as_deref(), Some("3,4"));
+    }
+
+    #[test]
+    fn parse_opts_button_count_held() {
+        let args = strs(&["--button", "right", "--count", "2", "--held", "Shift,Meta"]);
+        let (opts, _) = parse_opts(&args);
+        assert_eq!(opts.button.as_deref(), Some("right"));
+        assert_eq!(opts.count, Some(2));
+        assert_eq!(opts.held.as_deref(), Some("Shift,Meta"));
+    }
+
+    #[test]
+    fn parse_opts_scroll_deltas() {
+        let args = strs(&["--dx", "-3", "--dy", "5"]);
+        let (opts, _) = parse_opts(&args);
+        assert_eq!(opts.dx, Some(-3));
+        assert_eq!(opts.dy, Some(5));
+    }
+
+    #[test]
+    fn parse_opts_duration_region_out() {
+        let args = strs(&[
+            "--duration-ms",
+            "250",
+            "--region",
+            "10,20,30,40",
+            "--out",
+            "shot.png",
+        ]);
+        let (opts, _) = parse_opts(&args);
+        assert_eq!(opts.duration_ms, Some(250));
+        assert_eq!(opts.region.as_deref(), Some("10,20,30,40"));
+        assert_eq!(opts.out.as_deref(), Some("shot.png"));
+    }
+
+    #[test]
+    fn parse_opts_output_format() {
+        let args = strs(&["-o", "bounds"]);
+        let (opts, _) = parse_opts(&args);
+        assert_eq!(opts.output_format.as_deref(), Some("bounds"));
+    }
+
+    // ── Point / region parsers ──────────────────────────────────────────────
+
+    #[test]
+    fn parse_point_basic() {
+        let pt = parse_point_arg("100,200", "--at").unwrap();
+        assert_eq!(pt, Point::new(100, 200));
+    }
+
+    #[test]
+    fn parse_point_trims_whitespace() {
+        let pt = parse_point_arg("100, 200", "--at").unwrap();
+        assert_eq!(pt, Point::new(100, 200));
+    }
+
+    #[test]
+    fn parse_point_negative() {
+        let pt = parse_point_arg("-5,-10", "--at").unwrap();
+        assert_eq!(pt, Point::new(-5, -10));
+    }
+
+    #[test]
+    fn parse_point_wrong_arity_errors() {
+        assert!(parse_point_arg("100", "--at").is_err());
+        assert!(parse_point_arg("1,2,3", "--at").is_err());
+    }
+
+    #[test]
+    fn parse_point_non_numeric_errors() {
+        assert!(parse_point_arg("abc,200", "--at").is_err());
+        assert!(parse_point_arg("100,xyz", "--at").is_err());
+    }
+
+    #[test]
+    fn parse_region_basic() {
+        let r = parse_region_arg("10,20,30,40").unwrap();
+        assert_eq!(r.x, 10);
+        assert_eq!(r.y, 20);
+        assert_eq!(r.width, 30);
+        assert_eq!(r.height, 40);
+    }
+
+    #[test]
+    fn parse_region_wrong_arity_errors() {
+        assert!(parse_region_arg("10,20,30").is_err());
+        assert!(parse_region_arg("10,20,30,40,50").is_err());
+    }
+
+    #[test]
+    fn parse_region_rejects_negative_dimensions() {
+        // W/H are u32 — parsing "-1" as u32 must fail.
+        assert!(parse_region_arg("0,0,-1,100").is_err());
+    }
+
+    // ── Key / button / held parsers ─────────────────────────────────────────
+
+    #[test]
+    fn parse_key_named() {
+        assert!(matches!(parse_key_name("Enter").unwrap(), Key::Enter));
+        assert!(matches!(parse_key_name("Return").unwrap(), Key::Enter));
+        assert!(matches!(parse_key_name("Shift").unwrap(), Key::Shift));
+        assert!(matches!(parse_key_name("Cmd").unwrap(), Key::Meta));
+        assert!(matches!(parse_key_name("ArrowUp").unwrap(), Key::ArrowUp));
+        assert!(matches!(parse_key_name("Up").unwrap(), Key::ArrowUp));
+    }
+
+    #[test]
+    fn parse_key_char_single() {
+        assert!(matches!(parse_key_name("a").unwrap(), Key::Char('a')));
+        assert!(matches!(parse_key_name("7").unwrap(), Key::Char('7')));
+        assert!(matches!(parse_key_name(";").unwrap(), Key::Char(';')));
+    }
+
+    #[test]
+    fn parse_key_function() {
+        assert!(matches!(parse_key_name("F1").unwrap(), Key::F(1)));
+        assert!(matches!(parse_key_name("F12").unwrap(), Key::F(12)));
+    }
+
+    #[test]
+    fn parse_key_unknown_errors() {
+        assert!(parse_key_name("NotAKey").is_err());
+        assert!(parse_key_name("").is_err());
+    }
+
+    #[test]
+    fn parse_held_none_and_empty_are_empty() {
+        assert!(parse_held(None).unwrap().is_empty());
+        assert!(parse_held(Some("")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_held_multi() {
+        let keys = parse_held(Some("Shift,Meta")).unwrap();
+        assert_eq!(keys.len(), 2);
+        assert!(matches!(keys[0], Key::Shift));
+        assert!(matches!(keys[1], Key::Meta));
+    }
+
+    #[test]
+    fn parse_held_trims_whitespace() {
+        let keys = parse_held(Some(" Shift , Ctrl ")).unwrap();
+        assert!(matches!(keys[0], Key::Shift));
+        assert!(matches!(keys[1], Key::Ctrl));
+    }
+
+    #[test]
+    fn parse_button_names() {
+        assert!(matches!(parse_button("left").unwrap(), MouseButton::Left));
+        assert!(matches!(parse_button("right").unwrap(), MouseButton::Right));
+        assert!(matches!(
+            parse_button("middle").unwrap(),
+            MouseButton::Middle
+        ));
+    }
+
+    #[test]
+    fn parse_button_unknown_errors() {
+        assert!(parse_button("Left").is_err()); // case-sensitive
+        assert!(parse_button("nope").is_err());
     }
 }
