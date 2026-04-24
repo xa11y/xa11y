@@ -10,6 +10,11 @@ use crate::locator::Locator;
 use crate::map_err;
 use crate::subscription::NativeSubscription;
 
+/// A running application — the entry point for accessibility queries.
+///
+/// Construct via {@link App.byName}, {@link App.byPid}, or {@link App.list}.
+/// An `App` is **not** an `Element` — it represents the application as a
+/// whole and provides {@link App.locator} to search its accessibility tree.
 #[napi]
 pub struct App {
     name: String,
@@ -42,6 +47,14 @@ pub struct AppLookupOptions {
 #[napi]
 impl App {
     /// Find an application by exact name.
+    ///
+    /// Pass `options.timeout` (ms) to poll the accessibility API until the
+    /// app appears. Useful when the app may not yet be registered (e.g.
+    /// just-launched). Only "not found" errors trigger a retry; permission
+    /// errors and the like fail fast.
+    ///
+    /// Rejects with `PermissionDeniedError` if accessibility is not enabled,
+    /// or `SelectorNotMatchedError` if no matching app is found.
     #[napi(ts_return_type = "Promise<App>")]
     pub fn by_name(name: String, options: Option<AppLookupOptions>) -> AsyncTask<FindByNameTask> {
         AsyncTask::new(FindByNameTask {
@@ -51,6 +64,8 @@ impl App {
     }
 
     /// Find an application by process ID.
+    ///
+    /// See {@link App.byName} for the `options.timeout` behaviour.
     #[napi(ts_return_type = "Promise<App>")]
     pub fn by_pid(pid: u32, options: Option<AppLookupOptions>) -> AsyncTask<FindByPidTask> {
         AsyncTask::new(FindByPidTask {
@@ -65,17 +80,24 @@ impl App {
         AsyncTask::new(ListAppsTask {})
     }
 
+    /// The application's human-readable name (e.g. `"Safari"`).
     #[napi(getter)]
     pub fn name(&self) -> String {
         self.name.clone()
     }
 
+    /// The application's process ID, or `null` if the platform does not
+    /// expose one for this app.
     #[napi(getter)]
     pub fn pid(&self) -> Option<u32> {
         self.pid
     }
 
-    /// Create a [`Locator`] scoped to this application's accessibility tree.
+    /// Create a `Locator` scoped to this application's accessibility tree.
+    ///
+    /// The locator re-resolves `selector` on every operation, so it always
+    /// targets the current UI state — see the `Locator` class for the full
+    /// API.
     #[napi]
     pub fn locator(&self, selector: String) -> Locator {
         Locator::from_inner(xa11y::Locator::new(

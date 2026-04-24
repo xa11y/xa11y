@@ -8,6 +8,9 @@
 //      the Rust side can't express.
 //   2. Narrow `Element.checked: string | null` -> `CheckedState | null`.
 //   3. Narrow `Event.type: string` -> `EventTypeName`.
+//   4. Append a `;` to the napi-emitted `NativeSubscription` type alias
+//      (napi-rs omits terminators, which confuses the docs generator's
+//      multi-line type-alias parser).
 //
 // Each substitution is guarded: if a pattern stops matching (because napi
 // changed its output format), the script fails loudly so the drift is
@@ -60,6 +63,17 @@ const REPLACEMENTS = [
     name: 'Event.type -> EventTypeName',
     from: '  get type(): string\n',
     to: '  get type(): EventTypeName\n',
+  },
+  {
+    // napi-rs emits this line without a trailing `;`. The docs generator
+    // (docs/generate_js_api.py) uses `;` to terminate multi-line type
+    // aliases, so an unterminated alias silently swallows every later
+    // class declaration until it hits any line that happens to end in `;`.
+    // Appending the terminator here is a one-line fix that keeps the parser
+    // honest.
+    name: 'NativeSubscription type alias terminator',
+    from: 'export type NativeSubscription = _NativeSubscription\n',
+    to: 'export type NativeSubscription = _NativeSubscription;\n',
   },
 ];
 

@@ -26,6 +26,12 @@ use crate::types::{event_kind_to_str, state_flag_to_str};
 
 // ── Event ──────────────────────────────────────────────────────────────────
 
+/// An accessibility event delivered to a `Subscription`.
+///
+/// Events are emitted from the source application — focus changes, value
+/// edits, window lifecycle, structural updates. Attach a listener via
+/// `subscription.on(type, handler)` or await one with
+/// `subscription.waitForEvent(type, opts)`.
 #[napi]
 pub struct Event {
     kind: String,
@@ -82,11 +88,13 @@ impl Event {
         self.state_value
     }
 
+    /// Name of the application that emitted this event.
     #[napi(getter)]
     pub fn app_name(&self) -> String {
         self.app_name.clone()
     }
 
+    /// Process ID of the application that emitted this event.
     #[napi(getter)]
     pub fn app_pid(&self) -> u32 {
         self.app_pid

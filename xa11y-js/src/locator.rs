@@ -7,6 +7,23 @@ use napi::bindgen_prelude::{AsyncTask, Env, Task};
 use crate::element::Element;
 use crate::map_err;
 
+/// A resilient element reference that re-queries on each interaction.
+///
+/// Locators never hold a live reference to a UI element. Instead, they
+/// store a selector and resolve it on demand, making them immune to
+/// staleness. Action methods (`press`, `typeText`, `toggle`, …) auto-wait
+/// for the element to appear (up to 5 seconds by default) before acting.
+///
+/// Locators are cheap to clone — the chaining methods (`child`, `descendant`,
+/// `nth`, `first`) return new locators rather than mutating in place.
+///
+/// @example
+/// ```ts
+/// const app = await App.byName('MyApp');
+/// const save = app.locator("button[name='Save']");
+/// await save.press();                  // auto-waits, then presses
+/// await save.waitEnabled(10);          // wait up to 10 seconds
+/// ```
 #[napi]
 pub struct Locator {
     inner: xa11y::Locator,
@@ -95,26 +112,43 @@ impl Locator {
     // ── Actions (each auto-waits, then performs the action) ────────────
 
     /// Click / invoke the matched element.
+    ///
+    /// Auto-waits for the element to exist before acting. For elements whose
+    /// primary activation is `toggle` or `select` (checkbox, tab, radio),
+    /// `press` dispatches to that semantic — there is no need to distinguish.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn press(&self) -> AsyncTask<ActionTask> {
         AsyncTask::new(ActionTask::nullary(self.inner.clone(), ActionKind::Press))
     }
+
+    /// Move keyboard focus to the matched element.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn focus(&self) -> AsyncTask<ActionTask> {
         AsyncTask::new(ActionTask::nullary(self.inner.clone(), ActionKind::Focus))
     }
+
+    /// Remove keyboard focus from the matched element.
+    ///
+    /// Not supported on Linux or Windows — on those platforms this rejects
+    /// with `ActionNotSupportedError`.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn blur(&self) -> AsyncTask<ActionTask> {
         AsyncTask::new(ActionTask::nullary(self.inner.clone(), ActionKind::Blur))
     }
+
+    /// Toggle a two- or three-state control (checkbox, switch, toggle button).
     #[napi(ts_return_type = "Promise<void>")]
     pub fn toggle(&self) -> AsyncTask<ActionTask> {
         AsyncTask::new(ActionTask::nullary(self.inner.clone(), ActionKind::Toggle))
     }
+
+    /// Expand a disclosure, menu, or tree item.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn expand(&self) -> AsyncTask<ActionTask> {
         AsyncTask::new(ActionTask::nullary(self.inner.clone(), ActionKind::Expand))
     }
+
+    /// Collapse a disclosure, menu, or tree item.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn collapse(&self) -> AsyncTask<ActionTask> {
         AsyncTask::new(ActionTask::nullary(
@@ -122,10 +156,14 @@ impl Locator {
             ActionKind::Collapse,
         ))
     }
+
+    /// Select the matched element (list item, tab, row).
     #[napi(js_name = "select", ts_return_type = "Promise<void>")]
     pub fn select_(&self) -> AsyncTask<ActionTask> {
         AsyncTask::new(ActionTask::nullary(self.inner.clone(), ActionKind::Select))
     }
+
+    /// Open the element's context menu.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn show_menu(&self) -> AsyncTask<ActionTask> {
         AsyncTask::new(ActionTask::nullary(
@@ -133,6 +171,11 @@ impl Locator {
             ActionKind::ShowMenu,
         ))
     }
+
+    /// Scroll the element into the visible area.
+    ///
+    /// No-op on macOS — the macOS accessibility API has no equivalent. Uses
+    /// `Component.ScrollTo` on Linux and `ScrollItemPattern` on Windows.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn scroll_into_view(&self) -> AsyncTask<ActionTask> {
         AsyncTask::new(ActionTask::nullary(
@@ -140,6 +183,8 @@ impl Locator {
             ActionKind::ScrollIntoView,
         ))
     }
+
+    /// Increment a numeric value (slider, spin button) by its platform step.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn increment(&self) -> AsyncTask<ActionTask> {
         AsyncTask::new(ActionTask::nullary(
@@ -147,6 +192,8 @@ impl Locator {
             ActionKind::Increment,
         ))
     }
+
+    /// Decrement a numeric value (slider, spin button) by its platform step.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn decrement(&self) -> AsyncTask<ActionTask> {
         AsyncTask::new(ActionTask::nullary(
@@ -155,6 +202,8 @@ impl Locator {
         ))
     }
 
+    /// Set the text value of the matched element. Replaces the entire value
+    /// rather than inserting at the caret — use `typeText` for insertion.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn set_value(&self, value: String) -> AsyncTask<ActionTask> {
         AsyncTask::new(ActionTask::with_text(
@@ -164,6 +213,7 @@ impl Locator {
         ))
     }
 
+    /// Set the numeric value of the matched element (slider, spin button).
     #[napi(ts_return_type = "Promise<void>")]
     pub fn set_numeric_value(&self, value: f64) -> AsyncTask<ActionTask> {
         AsyncTask::new(ActionTask::with_num(
@@ -173,6 +223,11 @@ impl Locator {
         ))
     }
 
+    /// Type `text` at the current caret position.
+    ///
+    /// Uses the platform accessibility API — never simulates keyboard events.
+    /// For synthesised keystrokes (global shortcuts, drag gestures), use the
+    /// `InputSim` surface instead.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn type_text(&self, text: String) -> AsyncTask<ActionTask> {
         AsyncTask::new(ActionTask::with_text(
@@ -182,6 +237,8 @@ impl Locator {
         ))
     }
 
+    /// Select the text range from `start` to `end` (0-based character offsets).
+    /// Rejects with `InvalidActionDataError` if `start > end`.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn select_text(&self, start: u32, end: u32) -> AsyncTask<ActionTask> {
         AsyncTask::new(ActionTask::with_range(
@@ -192,7 +249,11 @@ impl Locator {
         ))
     }
 
-    /// Perform an action by snake_case name.
+    /// Perform a custom action by its snake_case name.
+    ///
+    /// Use this for actions the element advertises in its `actions` list
+    /// that don't have a dedicated method. Rejects with
+    /// `ActionNotSupportedError` if the element does not advertise `action`.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn perform_action(&self, action: String) -> AsyncTask<ActionTask> {
         AsyncTask::new(ActionTask::with_text(
@@ -203,7 +264,14 @@ impl Locator {
     }
 
     // ── Waits ──────────────────────────────────────────────────────────
+    //
+    // Each wait polls the provider until its condition is satisfied or
+    // `timeoutSeconds` elapses (default: 5s). Waits that expect the element
+    // to be present resolve with the matched `Element`; waits that expect it
+    // to be gone resolve with `undefined`.
 
+    /// Wait for a matching element to become visible.
+    /// Rejects with `TimeoutError` if still hidden after `timeoutSeconds`.
     #[napi(
         ts_args_type = "timeoutSeconds?: number",
         ts_return_type = "Promise<Element>"
@@ -216,6 +284,8 @@ impl Locator {
         ))
     }
 
+    /// Wait for a matching element to exist in the tree (may not be visible).
+    /// Rejects with `TimeoutError` if no match appears within `timeoutSeconds`.
     #[napi(
         ts_args_type = "timeoutSeconds?: number",
         ts_return_type = "Promise<Element>"
@@ -228,6 +298,7 @@ impl Locator {
         ))
     }
 
+    /// Wait for the matching element to be removed from the tree.
     #[napi(
         ts_args_type = "timeoutSeconds?: number",
         ts_return_type = "Promise<void>"
@@ -240,6 +311,7 @@ impl Locator {
         ))
     }
 
+    /// Wait for the matching element to become enabled (interactive).
     #[napi(
         ts_args_type = "timeoutSeconds?: number",
         ts_return_type = "Promise<Element>"
@@ -252,6 +324,7 @@ impl Locator {
         ))
     }
 
+    /// Wait for the matching element to be hidden or removed.
     #[napi(
         ts_args_type = "timeoutSeconds?: number",
         ts_return_type = "Promise<void>"
@@ -264,6 +337,7 @@ impl Locator {
         ))
     }
 
+    /// Wait for the matching element to become disabled (non-interactive).
     #[napi(
         ts_args_type = "timeoutSeconds?: number",
         ts_return_type = "Promise<Element>"
@@ -276,6 +350,7 @@ impl Locator {
         ))
     }
 
+    /// Wait for the matching element to receive keyboard focus.
     #[napi(
         ts_args_type = "timeoutSeconds?: number",
         ts_return_type = "Promise<Element>"
@@ -288,6 +363,7 @@ impl Locator {
         ))
     }
 
+    /// Wait for the matching element to lose keyboard focus.
     #[napi(
         ts_args_type = "timeoutSeconds?: number",
         ts_return_type = "Promise<Element>"
