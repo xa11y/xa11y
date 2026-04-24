@@ -47,13 +47,19 @@ test('moveTo accepts an Element', { skip }, async () => {
 
 test('moveTo rejects a malformed tuple', { skip }, async () => {
   const sim = xa11y.inputSim();
-  await assert.rejects(sim.moveTo([1]), (err) => err instanceof InvalidActionDataError);
+  // Argument validation runs synchronously in the napi entry point, so the
+  // call throws before a Promise is constructed — wrap in a thunk so
+  // `assert.rejects` can catch either shape.
+  await assert.rejects(
+    async () => sim.moveTo([1]),
+    (err) => err instanceof InvalidActionDataError,
+  );
 });
 
 test('press rejects an unknown key name', { skip }, async () => {
   const sim = xa11y.inputSim();
   await assert.rejects(
-    sim.press('NotARealKey'),
+    async () => sim.press('NotARealKey'),
     (err) => err instanceof InvalidActionDataError,
   );
 });

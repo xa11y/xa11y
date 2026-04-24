@@ -21,12 +21,6 @@ pub struct InputSim {
     inner: xa11y::InputSim,
 }
 
-impl InputSim {
-    pub(crate) fn from_inner(inner: xa11y::InputSim) -> Self {
-        Self { inner }
-    }
-}
-
 /// Parse a JS target into an `xa11y::Point`. Accepts either an `[x, y]`
 /// tuple (as `Vec<i32>` of length 2) or an `Element` (uses its bounds centre).
 fn parse_target(target: Either<Vec<i32>, &Element>) -> napi::Result<xa11y::Point> {
@@ -285,7 +279,11 @@ impl Task for KeyboardTask {
 
 /// Construct an [`InputSim`] backed by the platform's native input path.
 #[napi(js_name = "inputSim")]
+#[allow(
+    dead_code,
+    reason = "Exported via napi-derive; clippy on the Rust-only build can't see the JS-side caller"
+)]
 pub fn make_input_sim() -> napi::Result<InputSim> {
     let sim = xa11y::input_sim().map_err(map_err)?;
-    Ok(InputSim::from_inner(sim))
+    Ok(InputSim { inner: sim })
 }

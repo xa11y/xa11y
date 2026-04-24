@@ -53,10 +53,22 @@ def test_capture_region_matches_requested_size_at_scale(tauri_app):
 
 
 def test_capture_element_uses_element_bounds(tauri_app):
-    el = tauri_app.locator('button[name="OK"]').element()
-    bounds = el.bounds
-    if bounds is None or bounds.width == 0 or bounds.height == 0:
-        pytest.skip("target element has no on-screen bounds (likely headless)")
+    # Submit is the first button on the widgets page; it appears in the a11y
+    # tree on all three platforms (macOS, Windows, Linux AT-SPI). Fall back
+    # to any button with bounds if the widget set drifts, so the test stays
+    # resilient to unrelated test-app changes.
+    for selector in ['button[name="Submit"]', "button"]:
+        candidates = tauri_app.locator(selector).elements()
+        for candidate in candidates:
+            if candidate.bounds and candidate.bounds.width > 0 and candidate.bounds.height > 0:
+                el = candidate
+                bounds = candidate.bounds
+                break
+        else:
+            continue
+        break
+    else:
+        pytest.skip("no button with on-screen bounds available")
 
     shooter = xa11y.screenshotter()
     shot = _capture_or_skip(lambda: shooter.capture_element(el))

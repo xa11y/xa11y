@@ -69,12 +69,6 @@ pub struct Screenshotter {
     inner: xa11y::Screenshotter,
 }
 
-impl Screenshotter {
-    pub(crate) fn from_inner(inner: xa11y::Screenshotter) -> Self {
-        Self { inner }
-    }
-}
-
 #[napi]
 impl Screenshotter {
     /// Capture the full primary display.
@@ -108,7 +102,7 @@ impl Screenshotter {
         let el = xa11y::Element::new(element.data.clone(), element.provider.clone());
         AsyncTask::new(CaptureTask {
             inner: self.inner.clone(),
-            op: CaptureOp::Element(el),
+            op: CaptureOp::Element(Box::new(el)),
         })
     }
 }
@@ -116,7 +110,8 @@ impl Screenshotter {
 pub enum CaptureOp {
     Full,
     Region(xa11y::Rect),
-    Element(xa11y::Element),
+    // Box the Element (~280 bytes) so the enum stays small for hot paths.
+    Element(Box<xa11y::Element>),
 }
 
 pub struct CaptureTask {
@@ -144,7 +139,11 @@ impl Task for CaptureTask {
 
 /// Construct a [`Screenshotter`] backed by the platform's native capture API.
 #[napi(js_name = "screenshotter")]
+#[allow(
+    dead_code,
+    reason = "Exported via napi-derive; clippy on the Rust-only build can't see the JS-side caller"
+)]
 pub fn make_screenshotter() -> napi::Result<Screenshotter> {
     let inner = xa11y::screenshotter().map_err(map_err)?;
-    Ok(Screenshotter::from_inner(inner))
+    Ok(Screenshotter { inner })
 }
