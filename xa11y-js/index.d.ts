@@ -21,7 +21,18 @@ import { EventEmitter } from 'node:events';
 
 // Re-export Rust-generated classes (except App and _NativeSubscription,
 // which are shadowed by the JS wrapper classes below).
-export { Element, Event, Locator, locator, _makeTestLocator } from './native.js';
+export {
+  Element,
+  Event,
+  InputSim,
+  Locator,
+  Screenshot,
+  Screenshotter,
+  inputSim,
+  locator,
+  screenshotter,
+  _makeTestLocator,
+} from './native.js';
 
 // Forward the narrowed types from native.d.ts.
 export type { CheckedState, EventTypeName, Rect } from './native.js';

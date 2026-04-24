@@ -156,6 +156,9 @@ patchPrototypeMethods(native.App);
 patchPrototypeMethods(native.Element);
 patchPrototypeMethods(native.Locator);
 patchPrototypeMethods(native.Event);
+patchPrototypeMethods(native.InputSim);
+patchPrototypeMethods(native.Screenshot);
+patchPrototypeMethods(native.Screenshotter);
 
 // ── Locator.waitUntil (JS-side polling loop) ───────────────────────────────
 //
@@ -441,15 +444,36 @@ function locator(selector) {
   return wrap(native.locator)(selector);
 }
 
+/**
+ * Construct an `InputSim` backed by the platform's native input path.
+ * Errors are wrapped in typed `XA11yError` subclasses like every other
+ * entry point.
+ */
+function inputSim() {
+  return wrap(native.inputSim)();
+}
+
+/**
+ * Construct a `Screenshotter` backed by the platform's native capture API.
+ */
+function screenshotter() {
+  return wrap(native.screenshotter)();
+}
+
 // ── Re-exports ──────────────────────────────────────────────────────────────
 
 module.exports = {
   App,
   Element: native.Element,
   Event: native.Event,
+  InputSim: native.InputSim,
   Locator: native.Locator,
+  Screenshot: native.Screenshot,
+  Screenshotter: native.Screenshotter,
   Subscription,
+  inputSim,
   locator,
+  screenshotter,
 
   // Error classes
   XA11yError,

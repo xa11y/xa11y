@@ -298,10 +298,96 @@ class Locator:
         """Wait until an arbitrary predicate is satisfied."""
     def __repr__(self) -> str: ...
 
+# ── InputSim ─────────────────────────────────────────────────────────────────
+
+class InputSim:
+    """Input-simulation façade for synthesised pointer and keyboard events.
+
+    Targets are either a ``(x, y)`` tuple in screen pixels, or an ``Element``
+    (uses its bounds centre). Key values are strings: printable characters
+    are literal (``"a"``, ``"7"``, ``";"``); named keys use their Pascal name
+    (``"Enter"``, ``"ArrowUp"``, ``"F5"``); modifiers are ``"Shift"``,
+    ``"Ctrl"``, ``"Alt"``, ``"Meta"``.
+
+    Input simulation is distinct from the accessibility action layer — prefer
+    ``Locator.press()`` / ``Locator.type_text()`` when the target exposes the
+    semantic action. Use ``InputSim`` for gestures with no a11y equivalent
+    (drag-and-drop, scroll wheels, global shortcuts).
+    """
+
+    def click(self, target: tuple[int, int] | Element) -> None:
+        """Left-click once at ``target``."""
+    def double_click(self, target: tuple[int, int] | Element) -> None:
+        """Left double-click at ``target``."""
+    def right_click(self, target: tuple[int, int] | Element) -> None:
+        """Right-click at ``target``."""
+    def move_to(self, target: tuple[int, int] | Element) -> None:
+        """Move the pointer to ``target`` without pressing any button."""
+    def drag(
+        self,
+        start: tuple[int, int] | Element,
+        end: tuple[int, int] | Element,
+    ) -> None:
+        """Left-drag from ``start`` to ``end``."""
+    def scroll(
+        self,
+        target: tuple[int, int] | Element,
+        dx: int = 0,
+        dy: int = 0,
+    ) -> None:
+        """Scroll at ``target``. ``dx`` positive → right, ``dy`` positive → down."""
+    def press(self, key: str) -> None:
+        """Tap a key (press + release)."""
+    def chord(self, key: str, held: list[str] = ...) -> None:
+        """Tap ``key`` while the keys in ``held`` are held down."""
+    def type_text(self, text: str) -> None:
+        """Type literal text into the currently focused control."""
+
+# ── Screenshot ───────────────────────────────────────────────────────────────
+
+class Screenshot:
+    """A captured image: raw RGBA8 pixels plus dimensions and scale.
+
+    ``width`` and ``height`` are in physical pixels. ``scale`` is the
+    physical-to-logical ratio (1.0 on standard displays, 2.0 on typical
+    Retina). ``pixels`` has length ``width * height * 4``.
+    """
+
+    @property
+    def width(self) -> int: ...
+    @property
+    def height(self) -> int: ...
+    @property
+    def scale(self) -> float: ...
+    @property
+    def pixels(self) -> bytes:
+        """Raw RGBA8 pixel bytes (``width * height * 4``)."""
+    def to_png(self) -> bytes:
+        """Encode the image as a PNG and return the bytes."""
+    def save_png(self, path: str | bytes | object) -> None:
+        """Encode as PNG and write to ``path``. Accepts ``str``, ``bytes`` or ``os.PathLike``."""
+    def __repr__(self) -> str: ...
+
+class Screenshotter:
+    """Screenshot capture façade. Cheap to clone — constructed via ``screenshotter()``."""
+
+    def capture(self) -> Screenshot:
+        """Capture the full primary display."""
+    def capture_region(self, rect: tuple[int, int, int, int]) -> Screenshot:
+        """Capture a sub-rectangle ``(x, y, width, height)`` in logical screen coords."""
+    def capture_element(self, element: Element) -> Screenshot:
+        """Capture the pixels under an element's current bounds."""
+
 # ── Module-level functions ───────────────────────────────────────────────────
 
 def locator(selector: str) -> Locator:
     """Create a top-level Locator searching from the system root."""
+
+def input_sim() -> InputSim:
+    """Construct an ``InputSim`` backed by the platform's native input path."""
+
+def screenshotter() -> Screenshotter:
+    """Construct a ``Screenshotter`` backed by the platform's native capture path."""
 
 # ── Test helpers ─────────────────────────────────────────────────────────────
 

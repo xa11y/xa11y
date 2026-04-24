@@ -14,8 +14,10 @@ extern crate napi_derive;
 mod app;
 mod element;
 mod errors;
+mod input;
 mod locator;
 mod mock;
+mod screenshot;
 mod subscription;
 mod types;
 
