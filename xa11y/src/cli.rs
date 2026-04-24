@@ -37,6 +37,8 @@ fn print_usage() {
         "\
 xa11y — accessibility tree explorer
 
+Usage:
+
 Accessibility tree:
   xa11y apps                                List running applications
   xa11y tree   [--app NAME | --pid PID]     Print the accessibility tree
