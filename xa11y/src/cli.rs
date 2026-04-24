@@ -491,16 +491,12 @@ fn cmd_find(args: &[String]) -> Result<()> {
         }
         "bounds" => {
             for el in &elements {
-                let b = el.bounds.ok_or(Error::NoElementBounds)?;
-                println!("{},{},{},{}", b.x, b.y, b.width, b.height);
+                println!("{}", format_bounds_line(el)?);
             }
         }
         "center" => {
             for el in &elements {
-                let b = el.bounds.ok_or(Error::NoElementBounds)?;
-                let cx = b.x + (b.width as i32) / 2;
-                let cy = b.y + (b.height as i32) / 2;
-                println!("{cx},{cy}");
+                println!("{}", format_center_line(el)?);
             }
         }
         other => {
@@ -511,6 +507,20 @@ fn cmd_find(args: &[String]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Format an element's bounds as `X,Y,W,H` — the input to `--region`.
+pub(crate) fn format_bounds_line(el: &ElementData) -> Result<String> {
+    let b = el.bounds.ok_or(Error::NoElementBounds)?;
+    Ok(format!("{},{},{},{}", b.x, b.y, b.width, b.height))
+}
+
+/// Format the center of an element's bounds as `X,Y` — the input to `--at`.
+pub(crate) fn format_center_line(el: &ElementData) -> Result<String> {
+    let b = el.bounds.ok_or(Error::NoElementBounds)?;
+    let cx = b.x + (b.width as i32) / 2;
+    let cy = b.y + (b.height as i32) / 2;
+    Ok(format!("{cx},{cy}"))
 }
 
 fn cmd_action(args: &[String]) -> Result<()> {
@@ -631,6 +641,17 @@ fn cmd_click(args: &[String]) -> Result<()> {
         opts.at.as_deref().ok_or_else(|| missing("--at X,Y"))?,
         "--at",
     )?;
+    let click_opts = build_click_options(&opts)?;
+
+    let sim = crate::input_sim()?;
+    sim.mouse().click_with(ClickTarget::Point(at), click_opts)?;
+    println!("ok");
+    Ok(())
+}
+
+/// Translate parsed flags into [`ClickOptions`]. Extracted so the flag
+/// → options mapping is unit-testable without a live input backend.
+pub(crate) fn build_click_options(opts: &Opts) -> Result<ClickOptions> {
     let button = opts
         .button
         .as_deref()
@@ -639,19 +660,12 @@ fn cmd_click(args: &[String]) -> Result<()> {
         .unwrap_or(MouseButton::Left);
     let count = opts.count.unwrap_or(1);
     let held = parse_held(opts.held.as_deref())?;
-
-    let sim = crate::input_sim()?;
-    sim.mouse().click_with(
-        ClickTarget::Point(at),
-        ClickOptions {
-            button,
-            count,
-            held,
-            anchor: Anchor::Center,
-        },
-    )?;
-    println!("ok");
-    Ok(())
+    Ok(ClickOptions {
+        button,
+        count,
+        held,
+        anchor: Anchor::Center,
+    })
 }
 
 fn cmd_move(args: &[String]) -> Result<()> {
@@ -676,6 +690,17 @@ fn cmd_drag(args: &[String]) -> Result<()> {
         opts.to.as_deref().ok_or_else(|| missing("--to X,Y"))?,
         "--to",
     )?;
+    let drag_opts = build_drag_options(&opts)?;
+
+    let sim = crate::input_sim()?;
+    sim.mouse().drag_with(from, to, drag_opts)?;
+    println!("ok");
+    Ok(())
+}
+
+/// Translate parsed flags into [`DragOptions`]. Extracted so the flag
+/// → options mapping is unit-testable without a live input backend.
+pub(crate) fn build_drag_options(opts: &Opts) -> Result<DragOptions> {
     let button = opts
         .button
         .as_deref()
@@ -684,19 +709,11 @@ fn cmd_drag(args: &[String]) -> Result<()> {
         .unwrap_or(MouseButton::Left);
     let held = parse_held(opts.held.as_deref())?;
     let duration = Duration::from_millis(opts.duration_ms.unwrap_or(150));
-
-    let sim = crate::input_sim()?;
-    sim.mouse().drag_with(
-        from,
-        to,
-        DragOptions {
-            button,
-            held,
-            duration,
-        },
-    )?;
-    println!("ok");
-    Ok(())
+    Ok(DragOptions {
+        button,
+        held,
+        duration,
+    })
 }
 
 fn cmd_scroll(args: &[String]) -> Result<()> {
@@ -1209,5 +1226,141 @@ mod tests {
     fn parse_button_unknown_errors() {
         assert!(parse_button("Left").is_err()); // case-sensitive
         assert!(parse_button("nope").is_err());
+    }
+
+    // ── `find -o bounds|center` output formatters ───────────────────────────
+
+    #[test]
+    fn format_bounds_line_basic() {
+        let mut el = make_element(Role::Button, Some("OK"));
+        el.bounds = Some(Rect {
+            x: 10,
+            y: 20,
+            width: 30,
+            height: 40,
+        });
+        assert_eq!(format_bounds_line(&el).unwrap(), "10,20,30,40");
+    }
+
+    #[test]
+    fn format_bounds_line_negative_origin() {
+        // Negative X/Y are legal on multi-monitor layouts — propagate verbatim.
+        let mut el = make_element(Role::Button, Some("B"));
+        el.bounds = Some(Rect {
+            x: -5,
+            y: -10,
+            width: 20,
+            height: 30,
+        });
+        assert_eq!(format_bounds_line(&el).unwrap(), "-5,-10,20,30");
+    }
+
+    #[test]
+    fn format_bounds_line_errors_without_bounds() {
+        let el = make_element(Role::Button, Some("X"));
+        assert!(matches!(
+            format_bounds_line(&el),
+            Err(Error::NoElementBounds)
+        ));
+    }
+
+    #[test]
+    fn format_center_line_basic() {
+        let mut el = make_element(Role::Button, Some("OK"));
+        el.bounds = Some(Rect {
+            x: 10,
+            y: 20,
+            width: 30,
+            height: 40,
+        });
+        // Center of (10,20,30,40) = (10+15, 20+20) = (25, 40).
+        assert_eq!(format_center_line(&el).unwrap(), "25,40");
+    }
+
+    #[test]
+    fn format_center_line_odd_dimensions_floor() {
+        // Integer division — center of (0,0,5,7) = (2, 3), not (2.5, 3.5).
+        let mut el = make_element(Role::Button, Some("B"));
+        el.bounds = Some(Rect {
+            x: 0,
+            y: 0,
+            width: 5,
+            height: 7,
+        });
+        assert_eq!(format_center_line(&el).unwrap(), "2,3");
+    }
+
+    #[test]
+    fn format_center_line_errors_without_bounds() {
+        let el = make_element(Role::Button, Some("X"));
+        assert!(matches!(
+            format_center_line(&el),
+            Err(Error::NoElementBounds)
+        ));
+    }
+
+    // ── Flags → ClickOptions / DragOptions round-trip ───────────────────────
+
+    #[test]
+    fn build_click_options_defaults() {
+        let opts = Opts::default();
+        let co = build_click_options(&opts).unwrap();
+        assert!(matches!(co.button, MouseButton::Left));
+        assert_eq!(co.count, 1);
+        assert!(co.held.is_empty());
+        assert!(matches!(co.anchor, Anchor::Center));
+    }
+
+    #[test]
+    fn build_click_options_from_parsed_args() {
+        let args = strs(&["--button", "right", "--count", "3", "--held", "Shift,Meta"]);
+        let (opts, _) = parse_opts(&args);
+        let co = build_click_options(&opts).unwrap();
+        assert!(matches!(co.button, MouseButton::Right));
+        assert_eq!(co.count, 3);
+        assert_eq!(co.held.len(), 2);
+        assert!(matches!(co.held[0], Key::Shift));
+        assert!(matches!(co.held[1], Key::Meta));
+    }
+
+    #[test]
+    fn build_click_options_bad_button_errors() {
+        let args = strs(&["--button", "nope"]);
+        let (opts, _) = parse_opts(&args);
+        assert!(build_click_options(&opts).is_err());
+    }
+
+    #[test]
+    fn build_click_options_bad_held_errors() {
+        let args = strs(&["--held", "NotAKey"]);
+        let (opts, _) = parse_opts(&args);
+        assert!(build_click_options(&opts).is_err());
+    }
+
+    #[test]
+    fn build_drag_options_defaults_150ms() {
+        let opts = Opts::default();
+        let d = build_drag_options(&opts).unwrap();
+        assert!(matches!(d.button, MouseButton::Left));
+        assert!(d.held.is_empty());
+        assert_eq!(d.duration, Duration::from_millis(150));
+    }
+
+    #[test]
+    fn build_drag_options_from_parsed_args() {
+        let args = strs(&[
+            "--button",
+            "middle",
+            "--held",
+            "Ctrl",
+            "--duration-ms",
+            "500",
+        ]);
+        let (opts, _) = parse_opts(&args);
+        let d = build_drag_options(&opts).unwrap();
+        assert!(matches!(d.button, MouseButton::Middle));
+        assert_eq!(d.held.len(), 1);
+        assert!(matches!(d.held[0], Key::Ctrl));
+        assert_eq!(d.duration, Duration::from_millis(500));
     }
 }
