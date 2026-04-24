@@ -110,31 +110,9 @@ echo "Building Tauri test app..."
 cd "$PROJECT_ROOT"
 cargo build --manifest-path test-apps/tauri/Cargo.toml
 
-# ── Set up Python venv ───────────────────────────────────────────────
-
-VENV_DIR="$PROJECT_ROOT/.venv-tauri-test"
-
-if [ ! -d "$VENV_DIR" ]; then
-    echo "Creating virtualenv at $VENV_DIR..."
-    python3 -m venv "$VENV_DIR"
-fi
-
-PIP="$VENV_DIR/bin/pip"
-PYTEST="$VENV_DIR/bin/pytest"
-
-echo "Installing dependencies..."
-"$PIP" install --quiet maturin
-"$PIP" install --quiet -r "$PROJECT_ROOT/tests/requirements.txt"
-
-# Generate README for xa11y-python (it's in .gitignore, maturin needs it)
-echo "Generating xa11y-python README..."
-cd "$PROJECT_ROOT"
-cargo xtask sync-readmes 2>&1
-
-# Build and install xa11y Python bindings
-echo "Building xa11y Python bindings..."
-cd "$PROJECT_ROOT/xa11y-python"
-"$PIP" install --quiet -e .
+# ── Set up shared Python integ venv ──────────────────────────────────
+# shellcheck source=setup_python_integ_env.sh
+source "$SCRIPT_DIR/setup_python_integ_env.sh"
 
 cd "$PROJECT_ROOT"
 
