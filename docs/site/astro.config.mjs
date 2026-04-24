@@ -24,6 +24,8 @@ export default defineConfig({
             { label: "Overview", slug: "guides/overview" },
             { label: "CLI", slug: "guides/cli" },
             { label: "Desktop Testing", slug: "guides/desktop-testing" },
+            { label: "Input Simulation", slug: "guides/input" },
+            { label: "Screenshots", slug: "guides/screenshots" },
             { label: "Platform Details", slug: "guides/platform-details" },
           ],
         },

@@ -19,20 +19,21 @@ hero:
 import { Card, CardGrid } from "@astrojs/starlight/components";
 
 <CardGrid stagger>
-  <Card title="Simple Interface" icon="open-book">
-    Read the accessibility tree, find nodes, perform actions. A small, intuitive
-    API that stays out of your way.
+  <Card title="Read the tree" icon="open-book">
+    Lazy, live navigation of the accessibility tree. CSS-like selectors
+    — `button[name='Submit']`, `textfield[name^='Search']`, `group > button`.
   </Card>
-  <Card title="Cross-Platform" icon="laptop">
+  <Card title="Drive the UI" icon="rocket">
+    Invoke accessibility actions directly — `press`, `toggle`, `type_text`,
+    `set_value`. Plus a separate `InputSim` for drag-and-drop, scroll wheels,
+    and global shortcuts.
+  </Card>
+  <Card title="Capture pixels" icon="seti:image">
+    Take screenshots of the full display, an explicit region, or the pixels
+    under any accessibility element. RGBA buffers and PNG encoding built in.
+  </Card>
+  <Card title="Cross-platform" icon="laptop">
     One API for macOS (AXUIElement), Windows (UI Automation), and Linux
     (AT-SPI2). Write once, query anywhere.
-  </Card>
-  <Card title="Flexible Selectors" icon="magnifier">
-    Query accessibility trees with CSS-like syntax:
-    `button[name='Submit']`, `textfield[name^='Search']`, `group > button`.
-  </Card>
-  <Card title="Permissive Licensing" icon="approve-check">
-    MIT-licensed, with permissively licensed dependencies throughout. Use it
-    freely in commercial and open-source projects alike.
   </Card>
 </CardGrid>
