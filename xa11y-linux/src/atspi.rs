@@ -1161,26 +1161,41 @@ impl LinuxProvider {
             self.check_chromium_a11y_enabled(parent, None)?;
         }
 
-        // Process each child subtree in parallel: check match + recurse
-        let per_child: Vec<Vec<AccessibleRef>> = to_search
+        // Process each child subtree in parallel: check match + recurse.
+        // We deliberately swallow transient sibling errors here — a single
+        // flaky D-Bus call on one child shouldn't fail the whole locator
+        // query (the rest of this file is similarly tolerant via
+        // `unwrap_or_default()`). But `AccessibilityNotEnabled` is *not* a
+        // transient error: it's the signal that a Chromium renderer bridge
+        // isn't initialised, and callers need to see it. So we propagate
+        // that variant specifically and keep tolerating everything else.
+        let per_child: Vec<(Vec<AccessibleRef>, Option<Error>)> = to_search
             .par_iter()
             .map(|child| {
                 let mut child_results = Vec::new();
                 if self.matches_ref(child, simple) {
                     child_results.push(child.clone());
                 }
-                if let Ok(sub) =
-                    self.collect_matching_refs(child, simple, depth + 1, max_depth, limit)
-                {
-                    child_results.extend(sub);
+                match self.collect_matching_refs(child, simple, depth + 1, max_depth, limit) {
+                    Ok(sub) => {
+                        child_results.extend(sub);
+                        (child_results, None)
+                    }
+                    Err(e @ Error::AccessibilityNotEnabled { .. }) => (Vec::new(), Some(e)),
+                    Err(_) => (child_results, None),
                 }
-                child_results
             })
             .collect();
 
-        // Merge results, respecting limit
+        // Merge results, respecting limit. The first AccessibilityNotEnabled
+        // error seen wins — any child subtree raising it means the whole
+        // query is untrustworthy, so surface it rather than return partial
+        // data.
         let mut results = Vec::new();
-        for batch in per_child {
+        for (batch, maybe_err) in per_child {
+            if let Some(err) = maybe_err {
+                return Err(err);
+            }
             for r in batch {
                 results.push(r);
                 if let Some(limit) = limit {
