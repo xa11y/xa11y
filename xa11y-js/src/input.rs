@@ -11,11 +11,22 @@ use napi::Either;
 use crate::element::Element;
 use crate::map_err;
 
-/// Input-simulation façade. Constructed via the module-level `inputSim()`.
+/// Synthesises OS-level pointer and keyboard events.
 ///
-/// Methods return `Promise<void>` — platform input APIs are synchronous but
-/// can block briefly, so they run on the napi worker pool like the other
-/// provider-touching calls.
+/// Constructed via the module-level `inputSim()` function. Targets are
+/// either an `[x, y]` tuple in screen pixels, or an `Element` (centred on
+/// its bounds). Key values are strings: printable characters are literal
+/// (`"a"`, `"7"`, `";"`); named keys use their Pascal name (`"Enter"`,
+/// `"ArrowUp"`, `"F5"`); modifiers are `"Shift"`, `"Ctrl"`, `"Alt"`,
+/// `"Meta"`.
+///
+/// Input simulation is distinct from the accessibility action layer —
+/// prefer `Locator.press` / `Locator.typeText` when the target exposes
+/// the semantic action. Use `InputSim` for gestures with no a11y
+/// equivalent (drag-and-drop, scroll wheels, global shortcuts).
+///
+/// Methods return `Promise<void>` — the underlying OS input APIs are
+/// synchronous but can block briefly, so they run on the napi worker pool.
 #[napi]
 pub struct InputSim {
     inner: xa11y::InputSim,
@@ -277,7 +288,11 @@ impl Task for KeyboardTask {
     }
 }
 
-/// Construct an [`InputSim`] backed by the platform's native input path.
+/// Construct an `InputSim` backed by the platform's native input path
+/// (CGEvent on macOS, SendInput on Windows, XTest on X11).
+///
+/// Throws `PlatformError` on a Wayland-only Linux session (no XTest
+/// available). `InputSim` is cheap to hold; construct one and reuse.
 #[napi(js_name = "inputSim")]
 #[allow(
     dead_code,

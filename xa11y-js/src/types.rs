@@ -1,12 +1,20 @@
 //! Small plain-data types exposed to JS: `Rect`, `EventKind`, etc.
 
-/// A bounding rectangle in screen coordinates (pixels).
+/// A bounding rectangle in screen coordinates.
+///
+/// Coordinates use the platform's native coordinate space: points on macOS,
+/// physical pixels on Windows and Linux. Origin is the top-left of the
+/// primary display; negative `x` / `y` are valid on multi-monitor setups.
 #[napi(object)]
 #[derive(Clone)]
 pub struct Rect {
+    /// Left edge, in screen coordinates.
     pub x: i32,
+    /// Top edge, in screen coordinates.
     pub y: i32,
+    /// Width in screen-coordinate units.
     pub width: i32,
+    /// Height in screen-coordinate units.
     pub height: i32,
 }
 

@@ -32,16 +32,20 @@ impl Screenshot {
 
 #[napi]
 impl Screenshot {
+    /// Image width in physical pixels.
     #[napi(getter)]
     pub fn width(&self) -> u32 {
         self.inner.width
     }
 
+    /// Image height in physical pixels.
     #[napi(getter)]
     pub fn height(&self) -> u32 {
         self.inner.height
     }
 
+    /// Physical-to-logical pixel ratio (1.0 on standard displays, 2.0 on
+    /// typical Retina, 1.5 / 1.75 / 2.0 on common Windows / Linux HiDPI).
     #[napi(getter)]
     pub fn scale(&self) -> f64 {
         self.inner.scale as f64

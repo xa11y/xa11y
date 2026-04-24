@@ -8,6 +8,16 @@ use crate::map_err;
 use crate::subscription::NativeSubscription;
 use crate::types::{toggled_to_str, Rect};
 
+/// A snapshot of a node in the accessibility tree.
+///
+/// Property getters (`role`, `name`, `value`, state flags, etc.) are
+/// synchronous — they read the snapshot data captured when the element
+/// was fetched. Navigation methods (`children()`, `parent()`) are async
+/// and re-query the provider on every call, so you always see the latest
+/// tree state.
+///
+/// Elements are cheap to pass around; they share the provider handle
+/// internally.
 #[napi]
 pub struct Element {
     pub(crate) data: xa11y::ElementData,
@@ -30,51 +40,67 @@ impl Element {
         self.data.role.to_snake_case().to_string()
     }
 
+    /// Human-readable name (title, label, or ARIA name).
     #[napi(getter)]
     pub fn name(&self) -> Option<String> {
         self.data.name.clone()
     }
 
+    /// Current value — text content for editable fields, stringified slider
+    /// position, etc. For numeric controls, prefer `numericValue`.
     #[napi(getter)]
     pub fn value(&self) -> Option<String> {
         self.data.value.clone()
     }
 
+    /// Supplementary description (tooltip text, ARIA description).
     #[napi(getter)]
     pub fn description(&self) -> Option<String> {
         self.data.description.clone()
     }
 
+    /// Numeric value for sliders, spin buttons, and progress indicators.
     #[napi(getter)]
     pub fn numeric_value(&self) -> Option<f64> {
         self.data.numeric_value
     }
 
+    /// Minimum numeric value for bounded controls (slider, spin button).
     #[napi(getter)]
     pub fn min_value(&self) -> Option<f64> {
         self.data.min_value
     }
 
+    /// Maximum numeric value for bounded controls (slider, spin button).
     #[napi(getter)]
     pub fn max_value(&self) -> Option<f64> {
         self.data.max_value
     }
 
+    /// Platform-assigned identifier that is stable across queries for the
+    /// same element. Not available on every platform / every widget.
     #[napi(getter)]
     pub fn stable_id(&self) -> Option<String> {
         self.data.stable_id.clone()
     }
 
+    /// Process ID of the owning application.
     #[napi(getter)]
     pub fn pid(&self) -> Option<u32> {
         self.data.pid
     }
 
+    /// Names of actions the element advertises (e.g. `["press", "focus"]`).
+    /// Use `Locator.performAction(name)` to invoke a custom action, or the
+    /// named convenience methods (`press`, `toggle`, etc.) for the common
+    /// ones.
     #[napi(getter)]
     pub fn actions(&self) -> Vec<String> {
         self.data.actions.clone()
     }
 
+    /// Screen-coordinate bounding rectangle, or `null` for virtual /
+    /// off-screen elements that do not have a physical position.
     #[napi(getter)]
     pub fn bounds(&self) -> Option<Rect> {
         self.data.bounds.map(Into::into)
@@ -98,21 +124,26 @@ impl Element {
         serde_json::Value::Object(map)
     }
 
+    /// `true` if the element is interactive (not greyed out or disabled).
     #[napi(getter)]
     pub fn enabled(&self) -> bool {
         self.data.states.enabled
     }
 
+    /// `true` if the element is currently rendered on screen (not hidden,
+    /// not clipped off the viewport).
     #[napi(getter)]
     pub fn visible(&self) -> bool {
         self.data.states.visible
     }
 
+    /// `true` if the element currently has keyboard focus.
     #[napi(getter)]
     pub fn focused(&self) -> bool {
         self.data.states.focused
     }
 
+    /// Tri-state checked value for checkboxes, toggle buttons, and menu items:
     /// `"on"`, `"off"`, `"mixed"`, or `null` if the element is not toggleable.
     #[napi(getter)]
     pub fn checked(&self) -> Option<String> {
@@ -122,36 +153,48 @@ impl Element {
             .map(|t| toggled_to_str(t).to_string())
     }
 
+    /// `true` if the element is selected (list item, tab, row).
     #[napi(getter)]
     pub fn selected(&self) -> bool {
         self.data.states.selected
     }
 
+    /// `true` / `false` for expandable elements (disclosures, menus, tree
+    /// items); `null` if the element is not expandable.
     #[napi(getter)]
     pub fn expanded(&self) -> Option<bool> {
         self.data.states.expanded
     }
 
+    /// `true` if the element accepts text editing (text field, text area,
+    /// rich-text region).
     #[napi(getter)]
     pub fn editable(&self) -> bool {
         self.data.states.editable
     }
 
+    /// `true` if the element can receive keyboard focus (distinct from
+    /// `focused`, which reports the current state).
     #[napi(getter)]
     pub fn focusable(&self) -> bool {
         self.data.states.focusable
     }
 
+    /// `true` if the element is a modal dialog that blocks interaction with
+    /// the rest of the app.
     #[napi(getter)]
     pub fn modal(&self) -> bool {
         self.data.states.modal
     }
 
+    /// `true` for form fields that are marked required.
     #[napi(getter)]
     pub fn required(&self) -> bool {
         self.data.states.required
     }
 
+    /// `true` if the element is loading or otherwise indicating a busy
+    /// state (progress indicator, spinner region).
     #[napi(getter)]
     pub fn busy(&self) -> bool {
         self.data.states.busy
