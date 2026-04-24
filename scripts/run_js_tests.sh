@@ -1,16 +1,38 @@
 #!/usr/bin/env bash
 # Integration test harness for xa11y JS bindings.
 #
-# On Linux: sets up Xvfb + D-Bus + AT-SPI2 + launches the AccessKit test app,
+# On Linux: sets up Xvfb + D-Bus + AT-SPI2 + launches the test app,
 # then runs node --test against the JS integration suite. On macOS and Windows
 # the caller is responsible for providing an interactive session, and we
 # assume the test app has already been built.
+#
+# Usage:
+#   scripts/run_js_tests.sh [--app <name>]
+#
+# --app <name>   Select which test app to launch (default: accesskit).
+#                Known values: accesskit, qt, gtk, cocoa, tauri, electron.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 JS_DIR="$PROJECT_ROOT/xa11y-js"
+
+# ── Argument parsing ──────────────────────────────────────────────────
+
+APP_NAME="accesskit"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --app)
+            APP_NAME="${2:?--app requires a value}"
+            shift 2
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            exit 1
+            ;;
+    esac
+done
 
 CLEANUP_PIDS=()
 
@@ -23,14 +45,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "=== xa11y JS integration test harness ==="
+echo "=== xa11y JS integration test harness (app=$APP_NAME) ==="
 
 # ── Platform-specific display setup ──────────────────────────────────
 
 if [[ "$(uname)" == "Linux" ]]; then
     if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
         echo "No D-Bus session found, re-launching under dbus-run-session..."
-        exec dbus-run-session -- bash "$0" "$@"
+        exec dbus-run-session -- bash "$0" --app "$APP_NAME" "$@"
     fi
 
     echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"
@@ -84,12 +106,6 @@ if [[ "$(uname)" == "Linux" ]]; then
         2>/dev/null || true
 fi
 
-# ── Build the AccessKit test app ─────────────────────────────────────
-
-echo "Building xa11y-test-app..."
-cd "$PROJECT_ROOT"
-cargo build -p xa11y-test-app
-
 # ── Build the JS bindings ────────────────────────────────────────────
 
 echo "Installing JS dev dependencies..."
@@ -102,17 +118,70 @@ echo "Building JS bindings (debug)..."
 npx napi build --platform --js native.js --dts native.d.ts
 node scripts/patch-native-dts.mjs
 
-# ── Launch the test application ──────────────────────────────────────
+# ── Build and launch the test application ────────────────────────────
 
 APP_LOG="$JS_DIR/.xa11y-test-app.log"
 rm -f "$APP_LOG"
-echo "Launching xa11y-test-app (log: $APP_LOG)..."
-# Set RUST_BACKTRACE so if the test-app panics we get a useful trace,
-# and force it to flush stdout.
-RUST_BACKTRACE=1 \
-    "$PROJECT_ROOT/target/debug/xa11y-test-app" --headless \
-    >"$APP_LOG" 2>&1 &
-APP_PID=$!
+
+case "$APP_NAME" in
+    accesskit)
+        echo "Building xa11y-test-app..."
+        cd "$PROJECT_ROOT"
+        cargo build -p xa11y-test-app
+        echo "Launching xa11y-test-app (log: $APP_LOG)..."
+        RUST_BACKTRACE=1 \
+            "$PROJECT_ROOT/target/debug/xa11y-test-app" --headless \
+            >"$APP_LOG" 2>&1 &
+        APP_PID=$!
+        ;;
+    qt)
+        echo "Launching Qt test app (log: $APP_LOG)..."
+        QT_ACCESSIBILITY=1 python3 "$PROJECT_ROOT/test-apps/qt/app.py" \
+            >"$APP_LOG" 2>&1 &
+        APP_PID=$!
+        ;;
+    gtk)
+        echo "Launching GTK test app (log: $APP_LOG)..."
+        python3 "$PROJECT_ROOT/test-apps/gtk/app.py" \
+            >"$APP_LOG" 2>&1 &
+        APP_PID=$!
+        ;;
+    cocoa)
+        COCOA_BIN="$PROJECT_ROOT/test-apps/cocoa/xa11y-cocoa-test-app"
+        if [ ! -f "$COCOA_BIN" ]; then
+            echo "Building Cocoa test app..."
+            make -C "$PROJECT_ROOT/test-apps/cocoa" build
+        fi
+        echo "Launching Cocoa test app (log: $APP_LOG)..."
+        "$COCOA_BIN" --headless >"$APP_LOG" 2>&1 &
+        APP_PID=$!
+        ;;
+    tauri)
+        TAURI_BIN="$PROJECT_ROOT/test-apps/tauri/target/debug/xa11y-tauri-test-app"
+        if [ ! -f "$TAURI_BIN" ]; then
+            echo "Building Tauri test app..."
+            cargo build --manifest-path "$PROJECT_ROOT/test-apps/tauri/Cargo.toml"
+        fi
+        echo "Launching Tauri test app (log: $APP_LOG)..."
+        RUST_BACKTRACE=1 "$TAURI_BIN" >"$APP_LOG" 2>&1 &
+        APP_PID=$!
+        ;;
+    electron)
+        echo "Launching Electron test app (log: $APP_LOG)..."
+        cd "$PROJECT_ROOT/test-apps/electron"
+        if [ ! -d node_modules ]; then
+            npm ci
+        fi
+        npx electron . >"$APP_LOG" 2>&1 &
+        APP_PID=$!
+        ;;
+    *)
+        echo "Unknown --app value: $APP_NAME" >&2
+        echo "Known values: accesskit, qt, gtk, cocoa, tauri, electron" >&2
+        exit 1
+        ;;
+esac
+
 CLEANUP_PIDS+=("$APP_PID")
 
 echo "Waiting for test app (pid=$APP_PID) to register with the a11y bus..."
@@ -121,11 +190,12 @@ echo "Waiting for test app (pid=$APP_PID) to register with the a11y bus..."
 # before handing off to node --test. This gives a much clearer failure
 # signal than letting the node test runner time out internally.
 cd "$JS_DIR"
+export XA11Y_TEST_APP="$APP_NAME"
 export XA11Y_TEST_APP_NAME=""
 set +e
 for attempt in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
     if ! kill -0 "$APP_PID" 2>/dev/null; then
-        echo "!! xa11y-test-app (pid=$APP_PID) exited before registering with the a11y bus"
+        echo "!! test app (pid=$APP_PID) exited before registering with the a11y bus"
         break
     fi
     FOUND=$(node -e "
@@ -154,14 +224,14 @@ dump_diagnostics() {
     echo "=============================================================="
     echo "DIAGNOSTIC DUMP"
     echo "=============================================================="
-    echo "--- xa11y-test-app process status ---"
+    echo "--- test app process status (app=$APP_NAME) ---"
     if kill -0 "$APP_PID" 2>/dev/null; then
         echo "pid=$APP_PID is still alive"
     else
         echo "pid=$APP_PID is NOT alive (exited)"
     fi
     echo ""
-    echo "--- xa11y-test-app stdout/stderr ($APP_LOG) ---"
+    echo "--- test app stdout/stderr ($APP_LOG) ---"
     if [ -f "$APP_LOG" ]; then
         cat "$APP_LOG" || true
     else
@@ -189,10 +259,10 @@ if [ -z "$XA11Y_TEST_APP_NAME" ]; then
     DIAG_FILE="$JS_DIR/.failure-diagnostics.log"
     dump_diagnostics | tee "$DIAG_FILE"
 
-    echo "::error title=Test app not discoverable::xa11y-test-app (pid=$APP_PID) did not register with AT-SPI within 30s. See the step for diagnostics."
+    echo "::error title=Test app not discoverable::$APP_NAME (pid=$APP_PID) did not register with AT-SPI within 30s. See the step for diagnostics."
     if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
         {
-            echo "## JS integration (Linux) — test app not discoverable"
+            echo "## JS integration ($APP_NAME) — test app not discoverable"
             echo ""
             echo '```'
             cat "$DIAG_FILE"
@@ -203,7 +273,7 @@ fi
 
 # ── Run tests ────────────────────────────────────────────────────────
 
-echo "Running JS integration tests..."
+echo "Running JS integration tests (XA11Y_TEST_APP=$APP_NAME)..."
 set +e
 # Per-file timeout of 60s gives getApp() up to 30s of retry budget plus
 # actual test work; overall 180s bounds the whole suite so CI never hangs.
@@ -215,17 +285,17 @@ NODE_TEST_LOG="$JS_DIR/.node-test-output.log"
 # caps each individual file.
 if command -v timeout >/dev/null 2>&1; then
     timeout 180 node --test --test-timeout=60000 --test-reporter=spec \
-        '__test__/integ/**/*.test.js' 2>&1 | tee "$NODE_TEST_LOG"
+        "$PROJECT_ROOT/tests/suites/js/**/*.test.js" 2>&1 | tee "$NODE_TEST_LOG"
 else
     node --test --test-timeout=60000 --test-reporter=spec \
-        '__test__/integ/**/*.test.js' 2>&1 | tee "$NODE_TEST_LOG"
+        "$PROJECT_ROOT/tests/suites/js/**/*.test.js" 2>&1 | tee "$NODE_TEST_LOG"
 fi
 TEST_EXIT=${PIPESTATUS[0]}
 set -e
 
 if [ "$TEST_EXIT" -ne 0 ] && [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     {
-        echo "## JS integration (Linux) — test run failed (exit $TEST_EXIT)"
+        echo "## JS integration ($APP_NAME) — test run failed (exit $TEST_EXIT)"
         echo ""
         echo '```'
         tail -200 "$NODE_TEST_LOG"

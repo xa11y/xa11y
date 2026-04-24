@@ -15,6 +15,9 @@ const APP_NAME = getCliArg('xa11y-app-name', 'xa11y-electron-test-app');
 // can be located unambiguously via `xa11y.App.by_name(...)`.
 app.setName(APP_NAME);
 
+// Enable accessibility for web content so AT-SPI/AX APIs can read the DOM.
+app.commandLine.appendSwitch('force-renderer-accessibility');
+
 function createWindow() {
   const win = new BrowserWindow({
     width: 800,

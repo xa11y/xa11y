@@ -1,0 +1,150 @@
+# xa11y test coverage matrix
+# Each entry lists covered features, [] for none, or unsupported: {reason: "..."}
+
+apps:
+  accesskit:
+    platforms: [linux, macos, windows]
+    notes: >
+      Core Rust test app (winit + AccessKit). The primary coverage vehicle is the
+      Rust integ suite in xa11y/tests/integ/, not the per-app compat matrix.
+      JS integ tests also target this app for compat, actions, input_sim, and screenshot.
+
+  qt:
+    platforms: [linux, windows]
+    unsupported:
+      macos:
+        reason: "Qt/PySide6 AX tree does not correctly nest child elements on macOS"
+        status: known_gap
+
+  gtk:
+    platforms: [linux]
+
+  cocoa:
+    platforms: [macos]
+
+  tauri:
+    platforms: [linux, macos, windows]
+    notes: >
+      Primary vehicle for input_sim and screenshot coverage (one-per-platform strategy).
+      Uses a dedicated event-log page that captures synthesised pointer and keyboard
+      events, enabling end-to-end assertions rather than smoke tests.
+
+  electron:
+    platforms: [linux]
+    notes: >
+      Chromium-based. JS integ tests also exercise AccessibilityNotEnabledError detection
+      (app launched without --force-renderer-accessibility).
+
+features:
+  compat:
+    description: "a11y API compatibility: tree structure, find, roles, widget discovery"
+    per_app: true
+
+  actions:
+    description: "press, focus, toggle, type, expand/collapse"
+    per_app: true
+
+  events:
+    description: "event subscription and state change detection"
+    per_app: true
+
+  input_sim:
+    description: "input simulation: click, double-click, right-click, drag, key press, chord, type, scroll"
+    per_app: false
+    tested_on: [tauri, accesskit]
+    notes: >
+      Tests platform input APIs, not a11y compatibility. Covered once per platform.
+      Python: Tauri app (end-to-end with event log). JS: AccessKit app (smoke tests).
+
+  screenshot:
+    description: "window and element screenshots; PNG save"
+    per_app: false
+    tested_on: [tauri, accesskit]
+    notes: >
+      Tests platform screenshot APIs. Covered once per platform.
+      Python: Tauri app. JS: AccessKit app.
+
+# rust_core is the xa11y/tests/integ/ suite — separate from per-app compat suites.
+rust_core:
+  app: accesskit
+  features: [compat, actions, events, screenshot]
+  note: >
+    Fast-path core validation. All tests are #[ignore] and run via `cargo xtask test-integ`.
+    Platform-split event tests: events_linux.rs, events_macos.rs, events_windows.rs.
+
+# coverage[app][language] = list of features covered, or [] for none.
+coverage:
+  accesskit:
+    python: []          # intentional: Rust integ suite is the primary vehicle (see gaps.accesskit_python_suite)
+    js: [compat, actions, input_sim, screenshot]
+    cli: [compat, actions]  # CLI is Rust — natural to test against the Rust test app
+
+  qt:
+    python: [compat, actions, events]
+    js: [compat, actions]
+    cli: [compat, actions]
+
+  gtk:
+    python: [compat, actions]  # NOTE: events not covered (see gaps.gtk_events)
+    js: [compat, actions]
+    cli: [compat, actions]
+
+  cocoa:
+    python: [compat, actions, events]
+    js: [compat, actions]
+    cli: [compat, actions]
+
+  tauri:
+    python: [compat, actions, events, input_sim, screenshot]
+    js: [compat, actions]
+    cli: [compat, actions, input_sim, screenshot]
+
+  electron:
+    python: [compat, actions]
+    js: [compat, actions]
+    cli: [compat, actions]
+
+gaps:
+  - id: accesskit_python_suite
+    description: >
+      No Python compat suite for the AccessKit app. The Rust integ suite in
+      xa11y/tests/integ/ is the primary coverage vehicle; duplicating it in Python
+      would add noise without signal. CLI is covered (CLI is Rust — natural fit).
+    severity: low
+    workaround: "Rust integ suite (cargo xtask test-integ) covers compat, actions, events, screenshot"
+    affects:
+      apps: [accesskit]
+      language: python
+
+  - id: macos_qt
+    description: >
+      Qt/PySide6 macOS AX tree does not correctly nest child elements; macOS Qt tests
+      are disabled.
+    severity: medium
+    workaround: "Qt tested on Linux and Windows only"
+    affects:
+      apps: [qt]
+      platforms: [macos]
+
+  - id: js_input_sim_per_app
+    description: >
+      JS input_sim and screenshot tests run only against AccessKit and Electron.
+      Not per-app by design — tests platform input/screenshot APIs, not a11y compat.
+    severity: low
+    workaround: "Python covers input_sim+screenshot on Tauri; JS covers on AccessKit+Electron"
+    affects:
+      apps: [qt, gtk, cocoa, tauri]
+      language: js
+      features: [input_sim, screenshot]
+
+  - id: gtk_events
+    description: >
+      No event subscription tests for GTK. Only compat and actions are covered in
+      the Python GTK suite.
+    severity: low
+    workaround: "GTK event subscription is exercised via AT-SPI2 in the Rust integ suite"
+    affects:
+      apps: [gtk]
+      language: python
+      features: [events]
+

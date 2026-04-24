@@ -25,6 +25,8 @@ COMMANDS:
     test-tauri          Run Tauri integration tests
     test-electron       Run Electron integration tests (Linux only)
     test-apps           Run all app integration test suites (qt, gtk, cocoa, tauri, electron)
+    test-compat [APP]   Run shared harness (python + js + cli suites) against APP (default: tauri)
+    test-matrix-check   Validate the tests/matrix.yaml coverage index
     docs                Build documentation
     coverage            Generate code coverage report
     fuzz [ARGS..]       Run provider fuzzer (pass-through args)
@@ -57,6 +59,8 @@ fn main() -> ExitCode {
         "test-tauri" => do_test_tauri(),
         "test-electron" => do_test_electron(),
         "test-apps" => do_test_apps(),
+        "test-compat" => do_test_compat(rest),
+        "test-matrix-check" => do_test_matrix_check(),
         "docs" => do_docs(),
         "coverage" => do_coverage(),
         "fuzz" => do_fuzz(rest),
@@ -392,6 +396,32 @@ fn do_test_apps() -> bool {
         ok = false;
     }
     ok
+}
+
+fn do_test_compat(args: &[String]) -> bool {
+    heading("Compat harness (shared python + js + cli suites)");
+    let app = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "tauri".to_string());
+    let root = project_root();
+    let status = Command::new("python")
+        .args(["tests/harness/launch.py", &app])
+        .current_dir(&root)
+        .status();
+    match status {
+        Ok(s) => s.success(),
+        Err(e) => {
+            eprintln!("Failed to run tests/harness/launch.py: {e}");
+            false
+        }
+    }
+}
+
+fn do_test_matrix_check() -> bool {
+    heading("Test coverage matrix check");
+    let root = project_root();
+    run_in("python", &["tests/matrix_check.py"], &root)
 }
 
 fn do_docs() -> bool {

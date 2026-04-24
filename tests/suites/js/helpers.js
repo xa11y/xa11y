@@ -7,18 +7,86 @@
 
 'use strict';
 
-const xa11y = require('../../index.js');
+const xa11y = require('../../../xa11y-js/index.js');
 const { App, SelectorNotMatchedError, PlatformError, TimeoutError } = xa11y;
+
+// ---------------------------------------------------------------------------
+// Per-app configuration
+// ---------------------------------------------------------------------------
+//
+// Mirrors the Python APP_CONFIGS dict in tests/suites/python/conftest.py.
+// Tests use `appConfig` to adapt selectors and assertions to the current app.
+
+const APP_CONFIG = {
+  accesskit: {
+    okButtonName: 'Submit',        // AccessKit test app uses "Submit" as the primary button
+    textFieldName: 'Name',
+    minButtons: 2,
+    hasCheckbox: true,
+    hasRadio: true,
+  },
+  qt: {
+    okButtonName: 'OK',
+    textFieldName: 'Search',
+    minButtons: 2,
+    hasCheckbox: true,
+    hasRadio: true,
+  },
+  gtk: {
+    okButtonName: 'OK',
+    textFieldName: null,           // GTK doesn't reliably expose AX label on text_field
+    minButtons: 2,
+    hasCheckbox: true,
+    hasRadio: true,
+  },
+  cocoa: {
+    okButtonName: 'OK',
+    textFieldName: 'Search',
+    minButtons: 2,
+    hasCheckbox: true,
+    hasRadio: true,
+  },
+  tauri: {
+    okButtonName: 'OK',
+    textFieldName: 'Search',
+    minButtons: 2,
+    hasCheckbox: true,
+    hasRadio: true,
+  },
+  electron: {
+    okButtonName: 'OK',           // Electron index.html has <button id="ok">OK</button>
+    textFieldName: null,           // Electron text input has no AX label
+    minButtons: 2,                 // "OK" + "Cancel"
+    hasCheckbox: false,
+    hasRadio: false,
+  },
+};
 
 // Candidate app names. `scripts/run_js_tests.sh` can pre-resolve the actual
 // name of a running test app and pass it via `XA11Y_TEST_APP_NAME`, in which
 // case we try it first and skip the startup polling loop entirely.
+//
+// `XA11Y_TEST_APP` selects a named fixture (accesskit, electron, …) whose
+// known process names are added to the candidate list automatically.
+const APP_NAMES_BY_APP = {
+  accesskit: ['xa11y-test-app', 'xa11y Test App'],
+  qt: ['xa11y-qt-test-app', 'xa11y', 'python3', 'python', 'Python'],
+  gtk: ['xa11y-gtk-test-app', 'xa11y', 'python3', 'python', 'Python'],
+  cocoa: ['xa11y-cocoa-test-app'],
+  tauri: ['xa11y-tauri-test-app'],
+  electron: ['xa11y-electron-test-app', 'Electron', 'xa11y'],
+};
+
+const appEnv = process.env.XA11Y_TEST_APP || 'accesskit';
 const APP_NAMES = [
   ...(process.env.XA11Y_TEST_APP_NAME ? [process.env.XA11Y_TEST_APP_NAME] : []),
+  ...(APP_NAMES_BY_APP[appEnv] ?? []),
   'xa11y-test-app',
   'xa11y Test App',
 ];
 const STARTUP_TIMEOUT_MS = 30_000;
+
+const appConfig = APP_CONFIG[appEnv] || APP_CONFIG.accesskit;
 
 let cachedApp = null;
 
@@ -89,6 +157,9 @@ async function act(locator, action, ...args) {
 
 module.exports = {
   APP_NAMES,
+  APP_CONFIG,
+  appConfig,
+  appEnv,
   TimeoutError,
   SelectorNotMatchedError,
   PlatformError,

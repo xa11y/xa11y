@@ -24,6 +24,16 @@ import time
 import pytest
 import xa11y
 
+pytestmark = pytest.mark.skipif(
+    os.environ.get("XA11Y_TEST_APP") not in ("tauri", None)
+    or os.environ.get("XA11Y_SKIP_INPUT_SIM") == "1",
+    reason=(
+        "input_sim tests only run against Tauri (one-per-platform strategy). "
+        "Set XA11Y_TEST_APP=tauri (or leave unset) and ensure "
+        "XA11Y_SKIP_INPUT_SIM is not '1'."
+    ),
+)
+
 HIT_TARGET = 'button[name="Hit target"]'
 EVENT_LOG = 'text_area[name="Event log"]'
 TYPED_FIELD = 'text_field[name="Typed text"]'
@@ -33,13 +43,9 @@ CLEAR_BUTTON = 'button[name="Clear log"]'
 LOG_SETTLE_TIMEOUT = 2.0
 
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("XA11Y_SKIP_INPUT_SIM") == "1",
-    reason="Input simulation disabled (XA11Y_SKIP_INPUT_SIM=1)",
-)
-
-
-# ── Helpers ────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 
 def _read_log(app: xa11y.App) -> str:
@@ -84,7 +90,9 @@ def _hit_center(app: xa11y.App) -> tuple[int, int]:
     return (r.x + r.width // 2, r.y + r.height // 2)
 
 
-# ── Fixture ────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Fixture
+# ---------------------------------------------------------------------------
 
 
 @pytest.fixture
@@ -92,7 +100,9 @@ def sim() -> xa11y.InputSim:
     return xa11y.input_sim()
 
 
-# ── Mouse ──────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Mouse
+# ---------------------------------------------------------------------------
 
 
 def test_single_click_reports_mousedown_and_up(tauri_input_app, sim):
@@ -144,7 +154,9 @@ def test_drag_emits_mousemove_between_down_and_up(tauri_input_app, sim):
     assert "mouseup" in log
 
 
-# ── Keyboard ───────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Keyboard
+# ---------------------------------------------------------------------------
 
 
 def test_key_press_reports_keydown_keyup(tauri_input_app, sim):
@@ -195,7 +207,9 @@ def test_platform_meta_chord(tauri_input_app, sim):
     )
 
 
-# ── Typing ─────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Typing
+# ---------------------------------------------------------------------------
 
 
 def test_type_text_writes_to_focused_input(tauri_input_app, sim):
@@ -214,7 +228,9 @@ def test_type_text_writes_to_focused_input(tauri_input_app, sim):
     pytest.fail(f"typed-text field did not receive expected text, got: {val!r}")
 
 
-# ── Scroll ─────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Scroll
+# ---------------------------------------------------------------------------
 
 
 def test_scroll_reports_wheel(tauri_input_app, sim):
@@ -224,7 +240,9 @@ def test_scroll_reports_wheel(tauri_input_app, sim):
     assert "wheel" in log
 
 
-# ── Smoke ──────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Smoke
+# ---------------------------------------------------------------------------
 
 
 def test_input_sim_construct():

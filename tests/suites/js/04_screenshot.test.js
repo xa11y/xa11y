@@ -8,13 +8,20 @@
 
 'use strict';
 
+// Only runs against Tauri and Electron — input_sim tests one-per-platform strategy
+const XA11Y_TEST_APP = process.env.XA11Y_TEST_APP || 'accesskit';
+if (!['tauri', 'electron'].includes(XA11Y_TEST_APP)) {
+  console.log(`Skipping screenshot tests for app=${XA11Y_TEST_APP}`);
+  process.exit(0);
+}
+
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const xa11y = require('../../index.js');
+const xa11y = require('../../../xa11y-js/index.js');
 const { ActionNotSupportedError, InvalidActionDataError, PermissionDeniedError } = xa11y;
 const { getApp } = require('./helpers.js');
 

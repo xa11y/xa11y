@@ -52,7 +52,7 @@
     "prepublishOnly": "napi pre-publish -t npm --no-gh-release",
     "typecheck": "tsc --noEmit",
     "test": "node --test '__test__/unit/**/*.test.js'",
-    "test:integ": "node --test --test-timeout=60000 '__test__/integ/**/*.test.js'"
+    "test:integ": "node --test --test-timeout=60000 '../tests/suites/js/**/*.test.js'"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.0.0",

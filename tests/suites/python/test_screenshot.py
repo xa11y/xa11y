@@ -10,8 +10,15 @@ than a failure so they stay useful on headless CI runners.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 import xa11y
+
+pytestmark = pytest.mark.skipif(
+    os.environ.get("XA11Y_TEST_APP") not in ("tauri", None),
+    reason="screenshot tests only run against Tauri (one-per-platform strategy)",
+)
 
 
 def _capture_or_skip(fn):
@@ -37,7 +44,7 @@ def _capture_or_skip(fn):
         raise
 
 
-def test_capture_full_display_returns_rgba_png(tauri_app):
+def test_capture_full_display_returns_rgba_png(app):
     shot = _capture_or_skip(xa11y.screenshot)
 
     assert shot.width > 0
@@ -51,7 +58,7 @@ def test_capture_full_display_returns_rgba_png(tauri_app):
     assert len(png) > 100
 
 
-def test_capture_region_matches_requested_size_at_scale(tauri_app):
+def test_capture_region_matches_requested_size_at_scale(app):
     rect = (0, 0, 50, 40)
     shot = _capture_or_skip(lambda: xa11y.screenshot(region=rect))
 
@@ -63,13 +70,13 @@ def test_capture_region_matches_requested_size_at_scale(tauri_app):
     assert len(shot.pixels) == shot.width * shot.height * 4
 
 
-def test_capture_element_uses_element_bounds(tauri_app):
+def test_capture_element_uses_element_bounds(app):
     # Submit is the first button on the widgets page; it appears in the a11y
     # tree on all three platforms (macOS, Windows, Linux AT-SPI). Fall back
     # to any button with bounds if the widget set drifts, so the test stays
     # resilient to unrelated test-app changes.
     for selector in ['button[name="Submit"]', "button"]:
-        candidates = tauri_app.locator(selector).elements()
+        candidates = app.locator(selector).elements()
         for candidate in candidates:
             if candidate.bounds and candidate.bounds.width > 0 and candidate.bounds.height > 0:
                 el = candidate
@@ -89,7 +96,7 @@ def test_capture_element_uses_element_bounds(tauri_app):
     assert abs(shot.height - expected_h) <= 1
 
 
-def test_save_png_writes_valid_file(tauri_app, tmp_path):
+def test_save_png_writes_valid_file(app, tmp_path):
     shot = _capture_or_skip(lambda: xa11y.screenshot(region=(0, 0, 20, 20)))
 
     out = tmp_path / "shot.png"
@@ -98,7 +105,7 @@ def test_save_png_writes_valid_file(tauri_app, tmp_path):
     assert data[:8] == b"\x89PNG\r\n\x1a\n"
 
 
-def test_passing_both_element_and_region_raises(tauri_app):
-    el = tauri_app.locator("button").first().element()
+def test_passing_both_element_and_region_raises(app):
+    el = app.locator("button").first().element()
     with pytest.raises(ValueError, match="element.*region"):
         xa11y.screenshot(element=el, region=(0, 0, 10, 10))

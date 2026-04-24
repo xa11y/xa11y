@@ -111,7 +111,7 @@ set +e
 # timeout prevents CI hangs if xa11y calls block (e.g. broken AT-SPI)
 # Per-test timeout of 60s (lazy API does per-element IPC, slower than snapshots);
 # overall timeout of 300s
-timeout 300 "$PYTEST" "$PROJECT_ROOT/tests/qt/" -v -s --timeout=60 --rootdir="$PROJECT_ROOT" 2>&1
+XA11Y_TEST_APP=qt timeout 300 "$PYTEST" "$PROJECT_ROOT/tests/suites/python/" -v -s --timeout=60 --rootdir="$PROJECT_ROOT" 2>&1
 TEST_EXIT=$?
 set -e
 

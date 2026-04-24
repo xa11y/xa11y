@@ -120,7 +120,7 @@ cd "$PROJECT_ROOT"
 
 echo "Running Tauri integration tests..."
 set +e
-timeout 300 "$PYTEST" "$PROJECT_ROOT/tests/tauri/" -v -s --timeout=60 --rootdir="$PROJECT_ROOT" 2>&1
+XA11Y_TEST_APP=tauri timeout 300 "$PYTEST" "$PROJECT_ROOT/tests/suites/python/" -v -s --timeout=60 --rootdir="$PROJECT_ROOT" 2>&1
 TEST_EXIT=$?
 set -e
 

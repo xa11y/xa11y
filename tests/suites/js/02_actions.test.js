@@ -1,23 +1,26 @@
-// Integration tests: action invocation against the AccessKit test app.
+// Integration tests: action invocation against the test app.
 //
-// The test app mutates its state in response to actions and rebuilds its
-// tree, so we can observe state changes across calls.
+// The AccessKit test app mutates its state in response to actions and rebuilds
+// its tree, so we can observe state changes across calls. Other apps may not
+// support all actions — tests are guarded by appConfig where needed.
 
 'use strict';
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const xa11y = require('../../index.js');
+const xa11y = require('../../../xa11y-js/index.js');
 const { ActionNotSupportedError } = xa11y;
-const { getApp, one, act, sleep } = require('./helpers.js');
+const { getApp, one, act, sleep, appConfig } = require('./helpers.js');
 
-test('press on Submit button succeeds', async () => {
+test('press on primary button succeeds', async () => {
+  if (!appConfig.okButtonName) return; // skip if app has no named primary button
   const app = await getApp();
-  await app.locator('button[name="Submit"]').press();
+  await app.locator(`button[name="${appConfig.okButtonName}"]`).press();
 });
 
 test('pressing Checkbox flips checked state', async () => {
+  if (!appConfig.hasCheckbox) return; // skip if app has no checkbox
   // AccessKit exposes `press` (not `toggle`) as the checkbox action on Linux
   // AT-SPI. This test matches `action_toggle_checkbox` in the Rust integ suite.
   let app = await getApp();
@@ -39,13 +42,17 @@ test('setValue on text field is exercised (AT-SPI may reject)', async () => {
   // `action_set_value_text` test, which treats TextValueNotSupported as an
   // acceptable outcome.
   const app = await getApp();
-  const field = app.locator('text_field[name="Name"]');
+  const selector = appConfig.textFieldName
+    ? `text_field[name="${appConfig.textFieldName}"]`
+    : 'text_field';
+  const fieldLocator = app.locator(selector);
+  if (!(await fieldLocator.exists())) return; // skip if no text field is present
   try {
-    await field.setValue('Jane Doe');
+    await fieldLocator.setValue('Jane Doe');
     await sleep(200);
     // If the call succeeded, the value may or may not be reflected in the
     // next tree snapshot — this depends on the platform adapter.
-    const refreshed = await one(await getApp(), 'text_field[name="Name"]');
+    const refreshed = await one(await getApp(), selector);
     assert.ok(typeof refreshed.value === 'string' || refreshed.value === null);
   } catch (err) {
     if (!(err instanceof ActionNotSupportedError)) throw err;
@@ -82,8 +89,13 @@ test('exists() is false for a nonexistent selector', async () => {
 
 test('auto-wait focus() resolves before returning', async () => {
   const app = await getApp();
-  const name = app.locator('text_field[name="Name"]');
-  await name.focus();
+  // Use the named text field if available; fall back to any button.
+  const selector = appConfig.textFieldName
+    ? `text_field[name="${appConfig.textFieldName}"]`
+    : 'button';
+  const locator = app.locator(selector);
+  if (!(await locator.exists())) return;
+  await locator.focus();
 });
 
 test('act() helper re-reads the tree after an action', async () => {

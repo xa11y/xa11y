@@ -104,13 +104,35 @@ npx napi build --platform --js native.js --dts native.d.ts
 node scripts/patch-native-dts.mjs
 
 # ── Run tests ────────────────────────────────────────────────────────
-cd "$JS_DIR"
-echo "Running Electron integration tests..."
-set +e
-timeout 300 node --test --test-timeout=120000 --test-reporter=spec \
-    '__test__/integ-electron/**/*.test.js'
-TEST_EXIT=$?
-set -e
+cd "$PROJECT_ROOT"
+OVERALL_EXIT=0
 
-echo "=== Electron integration tests finished (exit code: $TEST_EXIT) ==="
-exit $TEST_EXIT
+echo "Running Electron JS integration tests..."
+set +e
+XA11Y_TEST_APP=electron timeout 300 node --test --test-timeout=120000 --test-reporter=spec \
+    'tests/suites/js/**/*.test.js'
+JS_EXIT=$?
+set -e
+[ $JS_EXIT -ne 0 ] && OVERALL_EXIT=$JS_EXIT
+echo "--- JS suite finished (exit code: $JS_EXIT) ---"
+
+echo "Running Electron Python integration tests..."
+set +e
+XA11Y_TEST_APP=electron timeout 300 python3 -m pytest tests/suites/python/ \
+    -v -s --timeout=60 --rootdir=.
+PYTHON_EXIT=$?
+set -e
+[ $PYTHON_EXIT -ne 0 ] && OVERALL_EXIT=$PYTHON_EXIT
+echo "--- Python suite finished (exit code: $PYTHON_EXIT) ---"
+
+echo "Running Electron CLI integration tests..."
+set +e
+XA11Y_TEST_APP=electron timeout 300 python3 -m pytest tests/suites/cli/ \
+    -v -s --timeout=60 --rootdir=.
+CLI_EXIT=$?
+set -e
+[ $CLI_EXIT -ne 0 ] && OVERALL_EXIT=$CLI_EXIT
+echo "--- CLI suite finished (exit code: $CLI_EXIT) ---"
+
+echo "=== Electron integration tests finished (overall exit code: $OVERALL_EXIT) ==="
+exit $OVERALL_EXIT

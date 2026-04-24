@@ -56,7 +56,7 @@ cd "$PROJECT_ROOT"
 
 echo "Running Cocoa/AppKit integration tests..."
 set +e
-"$PYTEST" "$PROJECT_ROOT/tests/cocoa/" -v -s --timeout=60 --rootdir="$PROJECT_ROOT" 2>&1
+XA11Y_TEST_APP=cocoa "$PYTEST" "$PROJECT_ROOT/tests/suites/python/" -v -s --timeout=60 --rootdir="$PROJECT_ROOT" 2>&1
 TEST_EXIT=$?
 set -e
 
