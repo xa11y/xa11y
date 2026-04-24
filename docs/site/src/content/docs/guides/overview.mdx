@@ -3,6 +3,8 @@ title: Overview
 description: What xa11y is, how it works, and how it compares to other tools.
 ---
 
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
 **xa11y** is a cross-platform library for reading accessibility trees, taking actions, listening to accessibility event streams, synthesising low-level input, and capturing screenshots.
 
 ## What is desktop accessibility?
@@ -81,18 +83,50 @@ xa11y is built around three core types:
 
 ## Connecting to an app
 
-```rust
-use xa11y::*;
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    ```rust
+    use xa11y::*;
 
-// Connect by name (returns PermissionDenied if accessibility is not enabled)
-let safari = App::by_name("Safari")?;
+    // Connect by name (returns PermissionDenied if accessibility is not enabled)
+    let safari = App::by_name("Safari")?;
 
-// Connect by PID
-let app = App::by_pid(1234)?;
+    // Connect by PID
+    let app = App::by_pid(1234)?;
 
-// List all running apps
-let all = App::list()?;
-```
+    // List all running apps
+    let all = App::list()?;
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import xa11y
+
+    # Connect by name (raises PermissionDeniedError if accessibility is not enabled)
+    safari = xa11y.App.by_name("Safari")
+
+    # Connect by PID
+    app = xa11y.App.by_pid(1234)
+
+    # List all running apps
+    all_apps = xa11y.App.list()
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    import { App } from '@crowecawcaw/xa11y';
+
+    // Connect by name (throws PermissionDeniedError if accessibility is not enabled)
+    const safari = await App.byName('Safari');
+
+    // Connect by PID
+    const app = await App.byPid(1234);
+
+    // List all running apps
+    const all = await App.list();
+    ```
+  </TabItem>
+</Tabs>
 
 ## Reading accessibility data
 
@@ -100,16 +134,44 @@ let all = App::list()?;
 
 `app.children()` returns the top-level elements (typically windows). Each `Element` supports `children()` and `parent()` for further navigation — every call queries the platform lazily, so you always see the current state of the UI.
 
-```rust
-let calc = App::by_name("Calculator")?;
-let windows = calc.children()?;
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    ```rust
+    let calc = App::by_name("Calculator")?;
+    let windows = calc.children()?;
 
-let children = windows[0].children()?;
-let parent = children[0].parent()?;
+    let children = windows[0].children()?;
+    let parent = children[0].parent()?;
 
-// Read properties (via Deref to ElementData)
-println!("{} — {}", children[0].role, children[0].name.as_deref().unwrap_or(""));
-```
+    // Read properties (via Deref to ElementData)
+    println!("{} — {}", children[0].role, children[0].name.as_deref().unwrap_or(""));
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    calc = xa11y.App.by_name("Calculator")
+    windows = calc.children()
+
+    children = windows[0].children()
+    parent = children[0].parent()
+
+    # Read properties
+    print(f"{children[0].role} — {children[0].name or ''}")
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    const calc = await App.byName('Calculator');
+    const windows = await calc.children();
+
+    const children = await windows[0].children();
+    const parent = await children[0].parent();
+
+    // Read properties
+    console.log(`${children[0].role} — ${children[0].name ?? ''}`);
+    ```
+  </TabItem>
+</Tabs>
 
 Element properties: `role`, `name`, `value`, `description`, `bounds`, `states`, `actions`, `numeric_value`, `min_value`, `max_value`, `stable_id`, `pid`.
 
@@ -117,13 +179,35 @@ Element properties: `role`, `name`, `value`, `description`, `bounds`, `states`, 
 
 Every call to `children()` or `parent()` queries the platform. There are no cached snapshots — you always see the latest tree state.
 
-```rust
-let windows = calc.children()?;
-println!("{:?}", windows[0].children()?[0].name);  // queries platform
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    ```rust
+    let windows = calc.children()?;
+    println!("{:?}", windows[0].children()?[0].name);  // queries platform
 
-// UI changed? Just navigate again:
-let windows = calc.children()?;                     // fresh query
-```
+    // UI changed? Just navigate again:
+    let windows = calc.children()?;                     // fresh query
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    windows = calc.children()
+    print(windows[0].children()[0].name)  # queries platform
+
+    # UI changed? Just navigate again:
+    windows = calc.children()             # fresh query
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    let windows = await calc.children();
+    console.log((await windows[0].children())[0].name);  // queries platform
+
+    // UI changed? Just navigate again:
+    windows = await calc.children();                      // fresh query
+    ```
+  </TabItem>
+</Tabs>
 
 To find specific elements, use a Locator (below) — it uses CSS-like selectors to find elements efficiently.
 
@@ -133,24 +217,68 @@ To find specific elements, use a Locator (below) — it uses CSS-like selectors 
 
 A `Locator` holds a selector and **re-resolves on every operation**. Create one via `app.locator(selector)`. Actions always target the current state of the UI.
 
-```rust
-let calc = App::by_name("Calculator")?;
-let btn = calc.locator("button[name='=']");
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    ```rust
+    let calc = App::by_name("Calculator")?;
+    let btn = calc.locator("button[name='=']");
 
-// Each call re-resolves the selector, finds the element, then acts
-btn.press()?;
+    // Each call re-resolves the selector, finds the element, then acts
+    btn.press()?;
 
-// Read properties via .element()
-let element = btn.element()?;
-println!("{:?}", element.name);
+    // Read properties via .element()
+    let element = btn.element()?;
+    println!("{:?}", element.name);
 
-// Wait for state changes (polls until condition met)
-btn.wait_enabled(Duration::from_secs(5))?;
+    // Wait for state changes (polls until condition met)
+    btn.wait_enabled(Duration::from_secs(5))?;
 
-// Get all matching elements
-let buttons = calc.locator("button").elements()?;
-println!("Found {} buttons", buttons.len());
-```
+    // Get all matching elements
+    let buttons = calc.locator("button").elements()?;
+    println!("Found {} buttons", buttons.len());
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    calc = xa11y.App.by_name("Calculator")
+    btn = calc.locator("button[name='=']")
+
+    # Each call re-resolves the selector, finds the element, then acts
+    btn.press()
+
+    # Read properties via .element()
+    element = btn.element()
+    print(element.name)
+
+    # Wait for state changes (polls until condition met)
+    btn.wait_enabled(timeout=5.0)
+
+    # Get all matching elements
+    buttons = calc.locator("button").elements()
+    print(f"Found {len(buttons)} buttons")
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    const calc = await App.byName('Calculator');
+    const btn = calc.locator("button[name='=']");
+
+    // Each call re-resolves the selector, finds the element, then acts
+    await btn.press();
+
+    // Read properties via .element()
+    const element = await btn.element();
+    console.log(element.name);
+
+    // Wait for state changes (polls until condition met)
+    await btn.waitEnabled(5);
+
+    // Get all matching elements
+    const buttons = await calc.locator('button').elements();
+    console.log(`Found ${buttons.length} buttons`);
+    ```
+  </TabItem>
+</Tabs>
 
 **Best practice:** make selectors specific so they stay stable as the UI evolves. Don't select `button` — select `button[name='Cancel']` inside a specific group or window. A vague selector like `button` can become unreliable when new elements are added — it may match the wrong element or start returning multiple matches unexpectedly.
 
@@ -187,31 +315,80 @@ button:nth(2)                    # 2nd match (1-based)
 
 ## Events
 
-Subscribe to accessibility events from an app with `app.subscribe()`. The returned `Subscription` is a pull-based event stream — no filters or selectors, just all events for the app.
+Subscribe to accessibility events from an app with `app.subscribe()`.
 
-```rust
-let calc = App::by_name("Calculator")?;
-let sub = calc.subscribe()?;
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    The returned `Subscription` is a pull-based event stream — no filters or selectors, just all events for the app.
 
-// Block until a specific event arrives
-let event = sub.wait_for(
-    |e| e.event_type == EventType::FocusChanged,
-    Duration::from_secs(5),
-)?;
-println!("Focus moved to: {:?}", event.target);
+    ```rust
+    let calc = App::by_name("Calculator")?;
+    let sub = calc.subscribe()?;
 
-// Or poll without blocking
-if let Some(event) = sub.try_recv() {
-    println!("{:?}", event.event_type);
-}
+    // Block until a specific event arrives
+    let event = sub.wait_for(
+        |e| e.event_type == EventType::FocusChanged,
+        Duration::from_secs(5),
+    )?;
+    println!("Focus moved to: {:?}", event.target);
 
-// Or iterate (blocks until next event)
-for event in sub.iter() {
-    println!("{:?}: {}", event.event_type, event.app_name);
-}
-```
+    // Or poll without blocking
+    if let Some(event) = sub.try_recv() {
+        println!("{:?}", event.event_type);
+    }
 
-Drop the `Subscription` to stop listening. The subscription is `Send` but not `Clone` — move it to another thread if needed.
+    // Or iterate (blocks until next event)
+    for event in sub.iter() {
+        println!("{:?}: {}", event.event_type, event.app_name);
+    }
+    ```
+
+    Drop the `Subscription` to stop listening. The subscription is `Send` but not `Clone` — move it to another thread if needed.
+  </TabItem>
+  <TabItem label="Python">
+    The returned `Subscription` is a pull-based event stream. Use it as a context manager or iterate it directly.
+
+    ```python
+    calc = xa11y.App.by_name("Calculator")
+
+    with calc.subscribe() as sub:
+        # Block until a specific event arrives
+        event = sub.wait_for(
+            lambda e: e.event_type == xa11y.EventType.FOCUS_CHANGED,
+            timeout=5.0,
+        )
+        print(f"Focus moved to: {event.target}")
+
+        # Or poll without blocking
+        event = sub.try_recv()
+        if event is not None:
+            print(event.event_type)
+
+        # Or iterate (blocks until next event)
+        for event in sub:
+            print(f"{event.event_type}: {event.app_name}")
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    The returned `Subscription` is an `EventEmitter`. Attach handlers, or `await` a single event with `waitForEvent` / `waitFor`.
+
+    ```js
+    const calc = await App.byName('Calculator');
+    const sub = await calc.subscribe();
+
+    // Handle every event of a given type
+    sub.on('focusChanged', (ev) => {
+        console.log(`Focus moved to: ${ev.target?.name}`);
+    });
+
+    // Or await a single matching event
+    const ev = await sub.waitForEvent('focusChanged', { timeout: 5000 });
+
+    // Stop delivery
+    sub.close();
+    ```
+  </TabItem>
+</Tabs>
 
 **Event types:** `FocusChanged`, `ValueChanged`, `NameChanged`, `StateChanged`, `StructureChanged`, `WindowOpened`, `WindowClosed`, `WindowActivated`, `WindowDeactivated`, `SelectionChanged`, `MenuOpened`, `MenuClosed`, `TextChanged`, `Alert`.
 
