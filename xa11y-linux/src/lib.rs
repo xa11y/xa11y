@@ -13,13 +13,19 @@ mod events;
 mod input;
 
 #[cfg(target_os = "linux")]
+mod screenshot;
+
+#[cfg(target_os = "linux")]
 pub use atspi::LinuxProvider;
 
 #[cfg(target_os = "linux")]
 pub use input::LinuxInputProvider;
 
+#[cfg(target_os = "linux")]
+pub use screenshot::LinuxScreenshot;
+
 #[cfg(not(target_os = "linux"))]
 mod stub;
 
 #[cfg(not(target_os = "linux"))]
-pub use stub::{LinuxInputProvider, LinuxProvider};
+pub use stub::{LinuxInputProvider, LinuxProvider, LinuxScreenshot};

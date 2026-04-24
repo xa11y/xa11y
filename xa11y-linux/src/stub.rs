@@ -1,7 +1,9 @@
 //! Stub backend for non-Linux platforms (allows compilation on all targets).
 
 use xa11y_core::input::{InputProvider, Key, MouseButton, Point, ScrollDelta};
-use xa11y_core::{ElementData, Error, Provider, Result, Subscription};
+use xa11y_core::{
+    ElementData, Error, Provider, Rect, Result, Screenshot, ScreenshotProvider, Subscription,
+};
 
 #[derive(Default)]
 pub struct LinuxProvider;
@@ -47,6 +49,26 @@ impl InputProvider for LinuxInputProvider {
         unreachable!()
     }
     fn type_text(&self, _: &str) -> Result<()> {
+        unreachable!()
+    }
+}
+
+pub struct LinuxScreenshot;
+
+impl LinuxScreenshot {
+    pub fn new() -> Result<Self> {
+        Err(Error::Platform {
+            code: -1,
+            message: "Linux screenshot backend only available on Linux".to_string(),
+        })
+    }
+}
+
+impl ScreenshotProvider for LinuxScreenshot {
+    fn capture_full(&self) -> Result<Screenshot> {
+        unreachable!()
+    }
+    fn capture_region(&self, _: Rect) -> Result<Screenshot> {
         unreachable!()
     }
 }

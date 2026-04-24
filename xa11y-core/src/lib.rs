@@ -7,6 +7,7 @@ pub mod input;
 pub mod locator;
 pub mod provider;
 pub mod role;
+pub mod screenshot;
 pub mod selector;
 
 /// Shared in-memory mock Provider. Gated behind `test-support` so only the
@@ -29,6 +30,7 @@ pub use input::{
 pub use locator::Locator;
 pub use provider::Provider;
 pub use role::{unknown_role, Role};
+pub use screenshot::{Screenshot, ScreenshotProvider, Screenshotter};
 pub use selector::Selector;
 
 /// Maximum tree traversal depth for providers. Prevents stack overflow from

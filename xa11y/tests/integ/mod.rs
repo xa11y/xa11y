@@ -14,6 +14,7 @@
 //! are reached from submodule tests via `use crate::integ as h;`.
 
 pub mod actions;
+pub mod screenshot;
 pub mod tree;
 
 #[cfg(target_os = "macos")]
