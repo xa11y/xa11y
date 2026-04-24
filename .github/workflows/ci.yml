@@ -32,6 +32,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-
 
+      - name: Cache Tauri test app build
+        uses: actions/cache@v5
+        with:
+          path: test-apps/tauri/target
+          key: ${{ runner.os }}-tauri-app-${{ hashFiles('test-apps/tauri/Cargo.lock', 'test-apps/tauri/Cargo.toml', 'test-apps/tauri/build.rs', 'test-apps/tauri/tauri.conf.json', 'test-apps/tauri/src/**', 'test-apps/tauri/frontend/**') }}
+          restore-keys: |
+            ${{ runner.os }}-tauri-app-
+
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -742,6 +750,14 @@ jobs:
           key: ${{ runner.os }}-cargo-electron-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-electron-
+
+      - name: Cache Electron node_modules
+        uses: actions/cache@v5
+        with:
+          path: test-apps/electron/node_modules
+          key: ${{ runner.os }}-electron-app-${{ hashFiles('test-apps/electron/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-app-
 
       - uses: actions/setup-node@v6
         with:
