@@ -417,9 +417,9 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-node@v6
         with:
-          python-version: "3.12"
+          node-version: 22
 
       - name: Get version from Cargo.toml
         id: version
@@ -443,7 +443,7 @@ jobs:
           set -euo pipefail
           TAG="${{ steps.version.outputs.tag }}"
           NOTES_FILE="$RUNNER_TEMP/release_notes.md"
-          if ! python3 .github/scripts/generate_release_notes.py "$TAG" > "$NOTES_FILE"; then
+          if ! node .github/scripts/generate-release-notes.mjs "$TAG" > "$NOTES_FILE"; then
             echo "LLM release-note generation failed; falling back to plain git log." >&2
             PREV_TAG=$(git tag --sort=-v:refname | grep -A1 "^${TAG}$" | tail -1 || true)
             {
