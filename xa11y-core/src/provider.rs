@@ -1,7 +1,7 @@
 use crate::element::ElementData;
 use crate::error::Result;
 use crate::event_provider::Subscription;
-use crate::selector::Selector;
+use crate::selector::{matches_simple, Combinator, Selector, SelectorSegment};
 
 /// Platform backend trait for accessibility tree access.
 ///
@@ -55,6 +55,66 @@ pub trait Provider: Send + Sync {
             limit,
             max_depth,
         )
+    }
+
+    /// Narrow candidates through remaining selector segments (Child/Descendant
+    /// combinators), deduplicate, apply final :nth and limit.
+    fn narrow_multi_segment(
+        &self,
+        mut candidates: Vec<ElementData>,
+        segments: &[SelectorSegment],
+        max_depth: u32,
+        limit: Option<usize>,
+    ) -> Result<Vec<ElementData>> {
+        for segment in segments {
+            let mut next_candidates = Vec::new();
+            for candidate in &candidates {
+                match segment.combinator {
+                    Combinator::Child => {
+                        let children = self.get_children(Some(candidate))?;
+                        for child in children {
+                            if matches_simple(&child, &segment.simple) {
+                                next_candidates.push(child);
+                            }
+                        }
+                    }
+                    Combinator::Descendant => {
+                        let sub_selector = Selector {
+                            segments: vec![SelectorSegment {
+                                combinator: Combinator::Root,
+                                simple: segment.simple.clone(),
+                            }],
+                        };
+                        let mut sub_results = self.find_elements(
+                            Some(candidate),
+                            &sub_selector,
+                            None,
+                            Some(max_depth),
+                        )?;
+                        next_candidates.append(&mut sub_results);
+                    }
+                    Combinator::Root => unreachable!(),
+                }
+            }
+            let mut seen = std::collections::HashSet::new();
+            next_candidates.retain(|e| seen.insert(e.handle));
+            candidates = next_candidates;
+        }
+
+        // Apply :nth on last segment
+        if let Some(nth) = segments.last().and_then(|s| s.simple.nth) {
+            if nth <= candidates.len() {
+                candidates = vec![candidates.remove(nth - 1)];
+            } else {
+                candidates.clear();
+            }
+        }
+
+        if let Some(limit) = limit {
+            candidates.truncate(limit);
+        }
+
+        Ok(candidates)
     }
 
     // ── Common actions ──────────────────────────────────────────────
@@ -150,6 +210,15 @@ impl<T: Provider + ?Sized> Provider for &T {
         max_depth: Option<u32>,
     ) -> Result<Vec<ElementData>> {
         (**self).find_elements(root, selector, limit, max_depth)
+    }
+    fn narrow_multi_segment(
+        &self,
+        candidates: Vec<ElementData>,
+        segments: &[SelectorSegment],
+        max_depth: u32,
+        limit: Option<usize>,
+    ) -> Result<Vec<ElementData>> {
+        (**self).narrow_multi_segment(candidates, segments, max_depth, limit)
     }
     fn press(&self, element: &ElementData) -> Result<()> {
         (**self).press(element)
