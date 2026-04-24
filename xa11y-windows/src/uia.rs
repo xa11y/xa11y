@@ -11,7 +11,7 @@ use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::*;
 
 use xa11y_core::{
-    selector::{matches_simple, Combinator, Selector, SelectorSegment},
+    selector::{matches_simple, Selector},
     CancelHandle, ElementData, Error, Event, EventKind, EventReceiver, Provider, Rect, Result,
     Role, StateFlag, StateSet, Subscription, Toggled,
 };
@@ -226,65 +226,6 @@ impl WindowsProvider {
         uia_call(|| unsafe {
             root.FindAllBuildCache(TreeScope_Subtree, &true_cond, &self.batch_request)
         })
-    }
-
-    /// Narrow phase-1 candidates through subsequent selector segments.
-    fn narrow_multi_segment(
-        &self,
-        mut candidates: Vec<ElementData>,
-        segments: &[SelectorSegment],
-        max_depth: u32,
-        limit: Option<usize>,
-    ) -> Result<Vec<ElementData>> {
-        for segment in segments {
-            let mut next_candidates = Vec::new();
-            for candidate in &candidates {
-                match segment.combinator {
-                    Combinator::Child => {
-                        let children = self.get_children(Some(candidate))?;
-                        for child in children {
-                            if matches_simple(&child, &segment.simple) {
-                                next_candidates.push(child);
-                            }
-                        }
-                    }
-                    Combinator::Descendant => {
-                        let sub_selector = Selector {
-                            segments: vec![SelectorSegment {
-                                combinator: Combinator::Root,
-                                simple: segment.simple.clone(),
-                            }],
-                        };
-                        let mut sub_results = self.find_elements(
-                            Some(candidate),
-                            &sub_selector,
-                            None,
-                            Some(max_depth),
-                        )?;
-                        next_candidates.append(&mut sub_results);
-                    }
-                    Combinator::Root => unreachable!(),
-                }
-            }
-            let mut seen = HashSet::new();
-            next_candidates.retain(|e| seen.insert(e.handle));
-            candidates = next_candidates;
-        }
-
-        // Apply :nth on last segment
-        if let Some(nth) = segments.last().and_then(|s| s.simple.nth) {
-            if nth <= candidates.len() {
-                candidates = vec![candidates.remove(nth - 1)];
-            } else {
-                candidates.clear();
-            }
-        }
-
-        if let Some(limit) = limit {
-            candidates.truncate(limit);
-        }
-
-        Ok(candidates)
     }
 }
 
