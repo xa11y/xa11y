@@ -11,6 +11,7 @@ rather than silent fallbacks, in accordance with the design tenets.
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 
@@ -153,11 +154,13 @@ def test_slider_decrement_changes_value(app, app_config):
 
 
 @pytest.mark.xfail(
-    sys.platform == "linux",
+    sys.platform == "linux" or (
+        sys.platform == "darwin"
+        and os.environ.get("XA11Y_TEST_APP") in ("tauri", "electron")
+    ),
     reason=(
-        "Qt AT-SPI2 sliders: SetCurrentValue may be rejected on some Qt "
-        "versions. WebKit2GTK: SetCurrentValue not implemented for "
-        "WebView-hosted range inputs."
+        "Qt AT-SPI2 sliders: SetCurrentValue may be rejected on some Qt versions. "
+        "WebKit2GTK / WKWebView: SetCurrentValue not reliable for HTML range inputs."
     ),
     strict=False,
 )

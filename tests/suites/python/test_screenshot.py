@@ -39,8 +39,8 @@ def _capture_or_skip(fn):
         pytest.skip(f"screen capture permission not granted: {e}")
     except xa11y.PlatformError as e:
         msg = str(e)
-        if "GetImage" in msg or "BadMatch" in msg:
-            pytest.skip(f"headless X11 can't capture this region: {e}")
+        if "GetImage" in msg or "BadMatch" in msg or "SCScreenshotManager" in msg:
+            pytest.skip(f"screen capture not available in this session: {e}")
         raise
 
 

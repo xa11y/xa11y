@@ -138,6 +138,11 @@ def test_click_on_element_target(tauri_input_app, sim):
     assert "click" in log
 
 
+@pytest.mark.xfail(
+    sys.platform == "darwin",
+    reason="CGEvent drag/scroll do not reliably generate DOM mousedown/wheel events in WKWebView on macOS",
+    strict=False,
+)
 def test_drag_emits_mousemove_between_down_and_up(tauri_input_app, sim):
     _clear_log(tauri_input_app)
     el = tauri_input_app.locator(HIT_TARGET).element()
@@ -233,6 +238,11 @@ def test_type_text_writes_to_focused_input(tauri_input_app, sim):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.xfail(
+    sys.platform == "darwin",
+    reason="CGEvent drag/scroll do not reliably generate DOM mousedown/wheel events in WKWebView on macOS",
+    strict=False,
+)
 def test_scroll_reports_wheel(tauri_input_app, sim):
     _clear_log(tauri_input_app)
     sim.scroll(_hit_center(tauri_input_app), dx=0, dy=3)

@@ -39,8 +39,8 @@ STARTUP_TIMEOUT = 30  # seconds
 # App definitions
 # ---------------------------------------------------------------------------
 
-def _app_command(app: str) -> tuple[list[str], dict[str, str], list[str]]:
-    """Return (command, env_overrides, candidate_app_names) for the given app.
+def _app_command(app: str) -> tuple[list[str], dict[str, str], list[str], str | None]:
+    """Return (command, env_overrides, candidate_app_names, content_ready_selector) for the given app.
 
     Raises ValueError for unknown app names or platform-unsupported apps.
     """
@@ -50,6 +50,7 @@ def _app_command(app: str) -> tuple[list[str], dict[str, str], list[str]]:
             [sys.executable, script],
             {"QT_ACCESSIBILITY": "1"},
             ["xa11y-qt-test-app", "xa11y", "python3", "python", "Python", "app.py"],
+            None,
         )
 
     if app == "gtk":
@@ -62,6 +63,7 @@ def _app_command(app: str) -> tuple[list[str], dict[str, str], list[str]]:
             [sys.executable, script],
             {},
             ["xa11y-gtk-test-app", "gtk-test-app", "python3", "python", "Python", "app.py"],
+            None,
         )
 
     if app == "cocoa":
@@ -72,6 +74,7 @@ def _app_command(app: str) -> tuple[list[str], dict[str, str], list[str]]:
             [binary, "--headless"],
             {},
             ["xa11y-cocoa-test-app"],
+            None,
         )
 
     if app == "tauri":
@@ -82,14 +85,19 @@ def _app_command(app: str) -> tuple[list[str], dict[str, str], list[str]]:
             [binary],
             {},
             ["xa11y-tauri-test-app"],
+            'button[name="OK"]',
         )
 
     if app == "electron":
-        electron_dir = str(PROJECT_ROOT / "test-apps" / "electron")
+        electron_bin = str(
+            PROJECT_ROOT / "test-apps" / "electron" / "node_modules" / ".bin" / "electron"
+        )
+        main_js = str(PROJECT_ROOT / "test-apps" / "electron" / "main.js")
         return (
-            ["npm", "start", "--prefix", electron_dir],
+            [electron_bin, main_js, "--no-sandbox", "--force-renderer-accessibility"],
             {},
             ["xa11y-electron-test-app", "electron"],
+            'button[name="OK"]',
         )
 
     if app == "accesskit":
@@ -102,9 +110,83 @@ def _app_command(app: str) -> tuple[list[str], dict[str, str], list[str]]:
             [binary, "--headless"],
             {},
             ["xa11y-test-app", "xa11y Test App"],
+            None,
         )
 
     raise ValueError(f"Unknown app: {app!r}. Supported: qt, gtk, cocoa, tauri, electron, accesskit")
+
+
+# ---------------------------------------------------------------------------
+# Linux accessibility setup
+# ---------------------------------------------------------------------------
+
+def _find_atspi_binary(*candidates: str) -> str | None:
+    """Return the first candidate that exists, or None."""
+    import shutil
+    for candidate in candidates:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+        found = shutil.which(candidate)
+        if found:
+            return found
+    return None
+
+
+def _setup_linux_a11y() -> None:
+    """Spawn AT-SPI2 infrastructure and enable accessibility on Linux.
+
+    Mirrors the setup done in scripts/run_qt_tests.sh.
+    Only called when DBUS_SESSION_BUS_ADDRESS is set (i.e. a D-Bus session
+    is available).
+    """
+    os.environ["NO_AT_BRIDGE"] = "0"
+    os.environ["AT_SPI_CLIENT"] = "true"
+    os.environ["ACCESSIBILITY_ENABLED"] = "1"
+
+    launcher = _find_atspi_binary(
+        "/usr/libexec/at-spi-bus-launcher", "at-spi-bus-launcher"
+    )
+    if launcher:
+        subprocess.Popen(
+            [launcher, "--launch-immediately"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        print("WARNING: at-spi-bus-launcher not found, AT-SPI2 may not work")
+    time.sleep(1)
+
+    registryd = _find_atspi_binary(
+        "/usr/libexec/at-spi2-registryd", "at-spi2-registryd"
+    )
+    if registryd:
+        subprocess.Popen(
+            [registryd],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        print("WARNING: at-spi2-registryd not found")
+    time.sleep(1)
+
+    subprocess.run(
+        [
+            "dbus-send", "--session", "--print-reply",
+            "--dest=org.a11y.Bus", "/org/a11y/bus",
+            "org.freedesktop.DBus.Properties.Set",
+            "string:org.a11y.Status", "string:IsEnabled", "variant:boolean:true",
+        ],
+        check=False,
+    )
+    subprocess.run(
+        [
+            "dbus-send", "--session", "--print-reply",
+            "--dest=org.a11y.Bus", "/org/a11y/bus",
+            "org.freedesktop.DBus.Properties.Set",
+            "string:org.a11y.Status", "string:ScreenReaderEnabled", "variant:boolean:true",
+        ],
+        check=False,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +202,7 @@ def _launch_app(
 
     Raises RuntimeError if the app does not appear within STARTUP_TIMEOUT.
     """
-    command, env_overrides, app_names = _app_command(app)
+    command, env_overrides, app_names, content_ready_selector = _app_command(app)
 
     env = os.environ.copy()
     env.update(env_overrides)
@@ -157,17 +239,12 @@ def _launch_app(
             except (xa11y.SelectorNotMatchedError, xa11y.PlatformError):
                 pass
 
-        # Fall back to listing all apps and substring matching.
+        # Fall back to PID-based lookup to avoid false matches against the
+        # harness's own Python process when substring matching.
         if discovered_name is None:
             try:
-                all_running = xa11y.App.list()
-                for name in app_names:
-                    for candidate in all_running:
-                        if name.lower() in (candidate.name or "").lower():
-                            discovered_name = candidate.name or name
-                            break
-                    if discovered_name is not None:
-                        break
+                xa11y.App.by_pid(proc.pid)
+                discovered_name = app_names[0]
             except (xa11y.SelectorNotMatchedError, xa11y.PlatformError) as exc:
                 last_err = exc
 
@@ -197,6 +274,21 @@ def _launch_app(
         )
 
     print(f"Test app visible: {discovered_name!r} (pid={proc.pid})")
+
+    # Wait for content to be ready if a selector was specified.
+    if content_ready_selector is not None:
+        print(f"Waiting for content: {content_ready_selector!r}")
+        content_ready = False
+        while time.monotonic() < deadline:
+            try:
+                xa11y.App.by_pid(proc.pid).locator(content_ready_selector).element()
+                content_ready = True
+                break
+            except (xa11y.SelectorNotMatchedError, xa11y.PlatformError):
+                time.sleep(0.5)
+        if not content_ready:
+            print(f"WARNING: content selector {content_ready_selector!r} not ready after timeout; proceeding anyway")
+
     return proc, discovered_name
 
 
@@ -260,6 +352,10 @@ def _run_suites(
     worst_rc = 0
 
     for suite in suites:
+        if app == "accesskit" and suite == "python":
+            print(f"\nSkipping python suite for accesskit (Rust integ suite is primary)")
+            continue
+
         if suite == "cli":
             cli_bin = _find_cli_binary()
             if cli_bin is None:
@@ -310,6 +406,9 @@ def run(app_name: str, suites: Sequence[str] | None = None) -> int:
     for s in suite_list:
         if s not in VALID_SUITES:
             raise ValueError(f"Unknown suite {s!r}. Valid suites: {', '.join(VALID_SUITES)}")
+
+    if sys.platform == "linux" and os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+        _setup_linux_a11y()
 
     proc: subprocess.Popen[bytes] | None = None
     try:

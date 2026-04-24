@@ -479,6 +479,12 @@ fn cmd_find(args: &[String]) -> Result<()> {
 
     let app = resolve_app(&opts)?;
     let elements = app.locator(selector).elements()?;
+    if elements.is_empty() {
+        return Err(Error::Platform {
+            code: 1,
+            message: format!("no elements matched selector: {selector}"),
+        });
+    }
     let fmt = opts.output_format.as_deref().unwrap_or("pretty");
     match fmt {
         "pretty" => {
@@ -493,12 +499,16 @@ fn cmd_find(args: &[String]) -> Result<()> {
         }
         "bounds" => {
             for el in &elements {
-                println!("{}", format_bounds_line(el)?);
+                if let Some(line) = format_bounds_opt(el) {
+                    println!("{line}");
+                }
             }
         }
         "center" => {
             for el in &elements {
-                println!("{}", format_center_line(el)?);
+                if let Some(line) = format_center_opt(el) {
+                    println!("{line}");
+                }
             }
         }
         other => {
@@ -512,17 +522,35 @@ fn cmd_find(args: &[String]) -> Result<()> {
 }
 
 /// Format an element's bounds as `X,Y,W,H` — the input to `--region`.
+// Used in unit tests below; production callers use `format_bounds_opt`.
+#[allow(dead_code)]
 pub(crate) fn format_bounds_line(el: &ElementData) -> Result<String> {
     let b = el.bounds.ok_or(Error::NoElementBounds)?;
     Ok(format!("{},{},{},{}", b.x, b.y, b.width, b.height))
 }
 
+/// Format an element's bounds as `X,Y,W,H`, returning None if bounds are absent.
+fn format_bounds_opt(el: &ElementData) -> Option<String> {
+    let b = el.bounds?;
+    Some(format!("{},{},{},{}", b.x, b.y, b.width, b.height))
+}
+
 /// Format the center of an element's bounds as `X,Y` — the input to `--at`.
+// Used in unit tests below; production callers use `format_center_opt`.
+#[allow(dead_code)]
 pub(crate) fn format_center_line(el: &ElementData) -> Result<String> {
     let b = el.bounds.ok_or(Error::NoElementBounds)?;
     let cx = b.x + (b.width as i32) / 2;
     let cy = b.y + (b.height as i32) / 2;
     Ok(format!("{cx},{cy}"))
+}
+
+/// Format the center of an element's bounds as `X,Y`, returning None if bounds are absent.
+fn format_center_opt(el: &ElementData) -> Option<String> {
+    let b = el.bounds?;
+    let cx = b.x + (b.width as i32) / 2;
+    let cy = b.y + (b.height as i32) / 2;
+    Some(format!("{cx},{cy}"))
 }
 
 fn cmd_action(args: &[String]) -> Result<()> {
