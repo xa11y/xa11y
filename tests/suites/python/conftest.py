@@ -293,7 +293,7 @@ def app(app_name: str) -> xa11y.App:
     pid_env = os.environ.get("XA11Y_TEST_APP_PID")
     if pid_env:
         pid = int(pid_env)
-        app_handle = xa11y.App.from_pid(pid)
+        app_handle = xa11y.App.by_pid(pid)
         yield app_handle
         return
 

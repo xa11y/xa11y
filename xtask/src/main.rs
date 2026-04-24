@@ -400,10 +400,7 @@ fn do_test_apps() -> bool {
 
 fn do_test_compat(args: &[String]) -> bool {
     heading("Compat harness (shared python + js + cli suites)");
-    let app = args
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "tauri".to_string());
+    let app = args.first().cloned().unwrap_or_else(|| "tauri".to_string());
     let root = project_root();
     let status = Command::new("python")
         .args(["tests/harness/launch.py", &app])
