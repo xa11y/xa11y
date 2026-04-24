@@ -1,8 +1,13 @@
-//! JS `Screenshotter` / `Screenshot` classes: pixel-level screen capture.
+//! JS `screenshot` surface: pixel-level screen capture.
 //!
 //! Capture runs on the napi worker pool because the underlying platform
 //! APIs (ScreenCaptureKit, X11 `GetImage`, BitBlt) can block for tens of
 //! milliseconds.
+//!
+//! The public JS entry point is a single async function — `screenshot(opts?)`
+//! — with optional `element` and `region` fields. Dispatch across the three
+//! capture shapes happens in `index.js`, which calls one of three
+//! underscore-prefixed napi exports here depending on which fields are set.
 
 use napi::bindgen_prelude::{AsyncTask, Buffer, Env, Task};
 
@@ -62,51 +67,6 @@ impl Screenshot {
     }
 }
 
-/// Screenshot capture façade. Cheap to clone — constructed via the
-/// module-level `screenshotter()`.
-#[napi]
-pub struct Screenshotter {
-    inner: xa11y::Screenshotter,
-}
-
-#[napi]
-impl Screenshotter {
-    /// Capture the full primary display.
-    #[napi(ts_return_type = "Promise<Screenshot>")]
-    pub fn capture(&self) -> AsyncTask<CaptureTask> {
-        AsyncTask::new(CaptureTask {
-            inner: self.inner.clone(),
-            op: CaptureOp::Full,
-        })
-    }
-
-    /// Capture a sub-rectangle given as `{ x, y, width, height }` in logical
-    /// screen coordinates (same coordinate space as `Element.bounds`).
-    #[napi(ts_return_type = "Promise<Screenshot>")]
-    pub fn capture_region(&self, rect: crate::types::Rect) -> AsyncTask<CaptureTask> {
-        AsyncTask::new(CaptureTask {
-            inner: self.inner.clone(),
-            op: CaptureOp::Region(xa11y::Rect {
-                x: rect.x,
-                y: rect.y,
-                width: rect.width.max(0) as u32,
-                height: rect.height.max(0) as u32,
-            }),
-        })
-    }
-
-    /// Capture the pixels under an element's current bounds. The target
-    /// window is **not** raised — see the core docs for rationale.
-    #[napi(ts_return_type = "Promise<Screenshot>")]
-    pub fn capture_element(&self, element: &Element) -> AsyncTask<CaptureTask> {
-        let el = xa11y::Element::new(element.data.clone(), element.provider.clone());
-        AsyncTask::new(CaptureTask {
-            inner: self.inner.clone(),
-            op: CaptureOp::Element(Box::new(el)),
-        })
-    }
-}
-
 pub enum CaptureOp {
     Full,
     Region(xa11y::Rect),
@@ -115,7 +75,6 @@ pub enum CaptureOp {
 }
 
 pub struct CaptureTask {
-    inner: xa11y::Screenshotter,
     op: CaptureOp,
 }
 
@@ -125,9 +84,9 @@ impl Task for CaptureTask {
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
         match &self.op {
-            CaptureOp::Full => self.inner.capture(),
-            CaptureOp::Region(r) => self.inner.capture_region(*r),
-            CaptureOp::Element(el) => self.inner.capture_element(el),
+            CaptureOp::Full => xa11y::screenshot(),
+            CaptureOp::Region(r) => xa11y::screenshot_region(*r),
+            CaptureOp::Element(el) => xa11y::screenshot_element(el),
         }
         .map_err(map_err)
     }
@@ -137,13 +96,52 @@ impl Task for CaptureTask {
     }
 }
 
-/// Construct a [`Screenshotter`] backed by the platform's native capture API.
-#[napi(js_name = "screenshotter")]
+// ── napi entry points ──────────────────────────────────────────────────
+//
+// These three free functions correspond 1:1 to the Rust umbrella crate's
+// `xa11y::screenshot*` fns. `index.js` hides the split behind a single
+// `screenshot(opts?)` wrapper so JS callers never see the underscored names.
+
+/// Capture the full primary display.
+#[napi(js_name = "_screenshot", ts_return_type = "Promise<Screenshot>")]
 #[allow(
     dead_code,
     reason = "Exported via napi-derive; clippy on the Rust-only build can't see the JS-side caller"
 )]
-pub fn make_screenshotter() -> napi::Result<Screenshotter> {
-    let inner = xa11y::screenshotter().map_err(map_err)?;
-    Ok(Screenshotter { inner })
+pub fn screenshot_full() -> AsyncTask<CaptureTask> {
+    AsyncTask::new(CaptureTask {
+        op: CaptureOp::Full,
+    })
+}
+
+/// Capture a sub-rectangle given as `{ x, y, width, height }` in logical
+/// screen coordinates (same coordinate space as `Element.bounds`).
+#[napi(js_name = "_screenshotRegion", ts_return_type = "Promise<Screenshot>")]
+#[allow(
+    dead_code,
+    reason = "Exported via napi-derive; clippy on the Rust-only build can't see the JS-side caller"
+)]
+pub fn screenshot_region(rect: crate::types::Rect) -> AsyncTask<CaptureTask> {
+    AsyncTask::new(CaptureTask {
+        op: CaptureOp::Region(xa11y::Rect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width.max(0) as u32,
+            height: rect.height.max(0) as u32,
+        }),
+    })
+}
+
+/// Capture the pixels under an element's current bounds. The target
+/// window is **not** raised — see the core docs for rationale.
+#[napi(js_name = "_screenshotElement", ts_return_type = "Promise<Screenshot>")]
+#[allow(
+    dead_code,
+    reason = "Exported via napi-derive; clippy on the Rust-only build can't see the JS-side caller"
+)]
+pub fn screenshot_element(element: &Element) -> AsyncTask<CaptureTask> {
+    let el = xa11y::Element::new(element.data.clone(), element.provider.clone());
+    AsyncTask::new(CaptureTask {
+        op: CaptureOp::Element(Box::new(el)),
+    })
 }

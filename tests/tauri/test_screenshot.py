@@ -1,4 +1,4 @@
-"""Integration tests for ``xa11y.screenshotter()`` against the Tauri test app.
+"""Integration tests for ``xa11y.screenshot()`` against the Tauri test app.
 
 The screenshot pipeline needs pixel-capture permission on some platforms
 (Screen Recording on macOS, a working X11 DISPLAY or Wayland portal on
@@ -38,8 +38,7 @@ def _capture_or_skip(fn):
 
 
 def test_capture_full_display_returns_rgba_png(tauri_app):
-    shooter = xa11y.screenshotter()
-    shot = _capture_or_skip(shooter.capture)
+    shot = _capture_or_skip(xa11y.screenshot)
 
     assert shot.width > 0
     assert shot.height > 0
@@ -53,9 +52,8 @@ def test_capture_full_display_returns_rgba_png(tauri_app):
 
 
 def test_capture_region_matches_requested_size_at_scale(tauri_app):
-    shooter = xa11y.screenshotter()
     rect = (0, 0, 50, 40)
-    shot = _capture_or_skip(lambda: shooter.capture_region(rect))
+    shot = _capture_or_skip(lambda: xa11y.screenshot(region=rect))
 
     # Physical pixels = logical * scale, within 1px of rounding.
     expected_w = round(rect[2] * shot.scale)
@@ -83,8 +81,7 @@ def test_capture_element_uses_element_bounds(tauri_app):
     else:
         pytest.skip("no button with on-screen bounds available")
 
-    shooter = xa11y.screenshotter()
-    shot = _capture_or_skip(lambda: shooter.capture_element(el))
+    shot = _capture_or_skip(lambda: xa11y.screenshot(element=el))
 
     expected_w = round(bounds.width * shot.scale)
     expected_h = round(bounds.height * shot.scale)
@@ -93,10 +90,15 @@ def test_capture_element_uses_element_bounds(tauri_app):
 
 
 def test_save_png_writes_valid_file(tauri_app, tmp_path):
-    shooter = xa11y.screenshotter()
-    shot = _capture_or_skip(lambda: shooter.capture_region((0, 0, 20, 20)))
+    shot = _capture_or_skip(lambda: xa11y.screenshot(region=(0, 0, 20, 20)))
 
     out = tmp_path / "shot.png"
     shot.save_png(out)
     data = out.read_bytes()
     assert data[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_passing_both_element_and_region_raises(tauri_app):
+    el = tauri_app.locator("button").first().element()
+    with pytest.raises(ValueError, match="element.*region"):
+        xa11y.screenshot(element=el, region=(0, 0, 10, 10))

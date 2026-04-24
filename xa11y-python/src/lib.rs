@@ -1142,72 +1142,49 @@ impl Screenshot {
     }
 }
 
-/// Screenshot capture façade. Constructed via [`screenshotter()`][screenshotter_fn].
-#[pyclass]
-struct Screenshotter {
-    inner: xa11y::Screenshotter,
-}
-
-#[pymethods]
-impl Screenshotter {
-    /// Capture the full primary display.
-    fn capture(&self, py: Python<'_>) -> PyResult<Screenshot> {
-        let inner = self.inner.clone();
-        let shot = py
-            .allow_threads(move || inner.capture())
-            .map_err(to_py_err)?;
-        Ok(Screenshot {
-            width: shot.width,
-            height: shot.height,
-            scale: shot.scale,
-            inner: shot,
-        })
-    }
-
-    /// Capture a sub-rectangle given as `(x, y, width, height)` in logical
-    /// screen coordinates (the same coordinate space as `Element.bounds`).
-    fn capture_region(&self, py: Python<'_>, rect: (i32, i32, u32, u32)) -> PyResult<Screenshot> {
-        let inner = self.inner.clone();
-        let rect = xa11y::Rect {
-            x: rect.0,
-            y: rect.1,
-            width: rect.2,
-            height: rect.3,
-        };
-        let shot = py
-            .allow_threads(move || inner.capture_region(rect))
-            .map_err(to_py_err)?;
-        Ok(Screenshot {
-            width: shot.width,
-            height: shot.height,
-            scale: shot.scale,
-            inner: shot,
-        })
-    }
-
-    /// Capture the pixels under an element's current bounds. The target
-    /// window is **not** raised — see the core `Screenshotter::capture_element`
-    /// docs for the rationale.
-    fn capture_element(&self, py: Python<'_>, element: &Element) -> PyResult<Screenshot> {
-        let inner = self.inner.clone();
-        let el = xa11y::Element::new(element.inner_data.clone(), element.provider.clone());
-        let shot = py
-            .allow_threads(move || inner.capture_element(&el))
-            .map_err(to_py_err)?;
-        Ok(Screenshot {
-            width: shot.width,
-            height: shot.height,
-            scale: shot.scale,
-            inner: shot,
-        })
-    }
-}
-
-/// Construct a [`Screenshotter`] backed by the platform's native capture API.
+/// Capture pixels from the screen.
+///
+/// With no arguments, captures the full primary display. Pass `element=` to
+/// capture the pixels under an element's current bounds, or `region=(x, y,
+/// width, height)` to capture an explicit rectangle in logical screen
+/// coordinates.
+///
+/// Raises `ValueError` if both `element` and `region` are given.
 #[pyfunction]
-fn screenshotter() -> PyResult<Screenshotter> {
-    let shot = xa11y::screenshotter().map_err(to_py_err)?;
-    Ok(Screenshotter { inner: shot })
+#[pyo3(signature = (*, element=None, region=None))]
+fn screenshot(
+    py: Python<'_>,
+    element: Option<&Element>,
+    region: Option<(i32, i32, u32, u32)>,
+) -> PyResult<Screenshot> {
+    if element.is_some() && region.is_some() {
+        return Err(PyValueError::new_err(
+            "screenshot: pass either `element` or `region`, not both",
+        ));
+    }
+
+    let shot = if let Some(element) = element {
+        let el = xa11y::Element::new(element.inner_data.clone(), element.provider.clone());
+        py.allow_threads(move || xa11y::screenshot_element(&el))
+    } else if let Some((x, y, w, h)) = region {
+        let rect = xa11y::Rect {
+            x,
+            y,
+            width: w,
+            height: h,
+        };
+        py.allow_threads(move || xa11y::screenshot_region(rect))
+    } else {
+        py.allow_threads(xa11y::screenshot)
+    }
+    .map_err(to_py_err)?;
+
+    Ok(Screenshot {
+        width: shot.width,
+        height: shot.height,
+        scale: shot.scale,
+        inner: shot,
+    })
 }
 
 // ── Module-level functions ──────────────────────────────────────────────────
@@ -1234,7 +1211,6 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Locator>()?;
     m.add_class::<Rect>()?;
     m.add_class::<Screenshot>()?;
-    m.add_class::<Screenshotter>()?;
     m.add_class::<Subscription>()?;
 
     m.add("XA11yError", m.py().get_type::<XA11yError>())?;
@@ -1274,8 +1250,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Input simulation factory
     m.add_function(wrap_pyfunction!(input_sim, m)?)?;
 
-    // Screenshot factory
-    m.add_function(wrap_pyfunction!(screenshotter, m)?)?;
+    // Screenshot entry point
+    m.add_function(wrap_pyfunction!(screenshot, m)?)?;
 
     // CLI entry point
     m.add_function(wrap_pyfunction!(_cli_main, m)?)?;

@@ -8,10 +8,7 @@ mod tests {
     #[test]
     #[ignore]
     fn capture_full_screen_yields_nonempty_png() {
-        let shot = match xa11y::screenshotter()
-            .expect("screenshotter construction")
-            .capture()
-        {
+        let shot = match xa11y::screenshot() {
             Ok(s) => s,
             // Disconnected RDP sessions / non-interactive CI jobs can't capture
             // the desktop; the backend surfaces that as Unsupported. Skip
@@ -53,10 +50,7 @@ mod tests {
             return;
         }
 
-        let shot = match xa11y::screenshotter()
-            .expect("screenshotter construction")
-            .capture_element(&button)
-        {
+        let shot = match xa11y::screenshot_element(&button) {
             Ok(s) => s,
             Err(xa11y::Error::Unsupported { feature }) => {
                 eprintln!("skipping: {feature}");

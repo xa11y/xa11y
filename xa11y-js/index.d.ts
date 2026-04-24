@@ -27,16 +27,14 @@ export {
   InputSim,
   Locator,
   Screenshot,
-  Screenshotter,
   inputSim,
   locator,
-  screenshotter,
   _makeTestLocator,
 } from './native.js';
 
 // Forward the narrowed types from native.d.ts.
 export type { CheckedState, EventTypeName, Rect } from './native.js';
-import type { Element, Event, EventTypeName, Locator, Rect } from './native.js';
+import type { Element, Event, EventTypeName, Locator, Rect, Screenshot } from './native.js';
 
 // ── Options ───────────────────────────────────────────────────────────────
 
@@ -194,6 +192,31 @@ export declare class App {
     opts?: WaitForEventOptions,
   ): Promise<Event>;
 }
+
+// ── Screenshot ────────────────────────────────────────────────────────────
+
+export interface ScreenshotOptions {
+  /** Capture the pixels under this element's current bounds. */
+  element?: Element;
+  /** Capture an explicit sub-rectangle in logical screen coordinates. */
+  region?: Rect;
+}
+
+/**
+ * Capture pixels from the screen.
+ *
+ * With no arguments, captures the full primary display. Pass `element` to
+ * capture an element's bounds, or `region` to capture an explicit rectangle.
+ * Passing both throws `InvalidActionDataError`.
+ *
+ * @example
+ * ```ts
+ * const full = await screenshot();
+ * const region = await screenshot({ region: { x: 0, y: 0, width: 100, height: 100 } });
+ * const el = await screenshot({ element: await locator('button').element() });
+ * ```
+ */
+export declare function screenshot(options?: ScreenshotOptions): Promise<Screenshot>;
 
 // ── JS-only: typed error hierarchy ─────────────────────────────────────────
 

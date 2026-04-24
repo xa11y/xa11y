@@ -158,7 +158,6 @@ patchPrototypeMethods(native.Locator);
 patchPrototypeMethods(native.Event);
 patchPrototypeMethods(native.InputSim);
 patchPrototypeMethods(native.Screenshot);
-patchPrototypeMethods(native.Screenshotter);
 
 // ── Locator.waitUntil (JS-side polling loop) ───────────────────────────────
 //
@@ -454,10 +453,31 @@ function inputSim() {
 }
 
 /**
- * Construct a `Screenshotter` backed by the platform's native capture API.
+ * Capture pixels from the screen.
+ *
+ * With no arguments, captures the full primary display. Pass `element` to
+ * capture the pixels under an element's current bounds, or `region` as
+ * `{x, y, width, height}` to capture an explicit rectangle in logical
+ * screen coordinates. Passing both throws `InvalidActionDataError`.
+ *
+ * @param {object} [options]
+ * @param {import('./native.js').Element} [options.element]
+ * @param {{x: number, y: number, width: number, height: number}} [options.region]
+ * @returns {Promise<import('./native.js').Screenshot>}
  */
-function screenshotter() {
-  return wrap(native.screenshotter)();
+function screenshot(options) {
+  if (options && options.element && options.region) {
+    throw new InvalidActionDataError(
+      'screenshot: pass either `element` or `region`, not both',
+    );
+  }
+  if (options && options.element) {
+    return wrap(native._screenshotElement)(options.element);
+  }
+  if (options && options.region) {
+    return wrap(native._screenshotRegion)(options.region);
+  }
+  return wrap(native._screenshot)();
 }
 
 // ── Re-exports ──────────────────────────────────────────────────────────────
@@ -469,11 +489,10 @@ module.exports = {
   InputSim: native.InputSim,
   Locator: native.Locator,
   Screenshot: native.Screenshot,
-  Screenshotter: native.Screenshotter,
   Subscription,
   inputSim,
   locator,
-  screenshotter,
+  screenshot,
 
   // Error classes
   XA11yError,

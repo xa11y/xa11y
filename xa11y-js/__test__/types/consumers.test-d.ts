@@ -9,17 +9,17 @@ import {
   InputSim,
   Locator,
   Screenshot,
-  Screenshotter,
   Subscription,
   XA11yError,
   SelectorNotMatchedError,
   TimeoutError,
   inputSim,
-  screenshotter,
+  screenshot,
   type AppLookupOptions,
   type CheckedState,
   type EventTypeName,
   type Rect,
+  type ScreenshotOptions,
   type SubscribeOptions,
   type WaitForEventOptions,
 } from '../../index.js';
@@ -123,22 +123,19 @@ async function checks() {
   await sim.chord('a', ['Shift']);
   await sim.typeText('hello');
 
-  // ── Screenshotter ──────────────────────────────────────────────────
-  const shooter: Screenshotter = screenshotter();
-  const shot: Screenshot = await shooter.capture();
+  // ── screenshot ─────────────────────────────────────────────────────
+  const shot: Screenshot = await screenshot();
   const _w: number = shot.width;
   const _h: number = shot.height;
   const _s: number = shot.scale;
   const _px: Buffer = shot.pixels;
   const _png: Buffer = shot.toPng();
   shot.savePng('/tmp/out.png');
-  const _shot2: Screenshot = await shooter.captureRegion({
-    x: 0,
-    y: 0,
-    width: 10,
-    height: 10,
-  });
-  const _shot3: Screenshot = await shooter.captureElement(el);
+  const shotOpts: ScreenshotOptions = {
+    region: { x: 0, y: 0, width: 10, height: 10 },
+  };
+  const _shot2: Screenshot = await screenshot(shotOpts);
+  const _shot3: Screenshot = await screenshot({ element: el });
 
   // Unused to silence noUnusedLocals
   void _app2;

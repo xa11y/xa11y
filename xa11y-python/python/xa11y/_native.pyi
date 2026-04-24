@@ -368,16 +368,6 @@ class Screenshot:
         """Encode as PNG and write to ``path``. Accepts ``str``, ``bytes`` or ``os.PathLike``."""
     def __repr__(self) -> str: ...
 
-class Screenshotter:
-    """Screenshot capture façade. Cheap to clone — constructed via ``screenshotter()``."""
-
-    def capture(self) -> Screenshot:
-        """Capture the full primary display."""
-    def capture_region(self, rect: tuple[int, int, int, int]) -> Screenshot:
-        """Capture a sub-rectangle ``(x, y, width, height)`` in logical screen coords."""
-    def capture_element(self, element: Element) -> Screenshot:
-        """Capture the pixels under an element's current bounds."""
-
 # ── Module-level functions ───────────────────────────────────────────────────
 
 def locator(selector: str) -> Locator:
@@ -386,8 +376,18 @@ def locator(selector: str) -> Locator:
 def input_sim() -> InputSim:
     """Construct an ``InputSim`` backed by the platform's native input path."""
 
-def screenshotter() -> Screenshotter:
-    """Construct a ``Screenshotter`` backed by the platform's native capture path."""
+def screenshot(
+    *,
+    element: Element | None = None,
+    region: tuple[int, int, int, int] | None = None,
+) -> Screenshot:
+    """Capture pixels from the screen.
+
+    With no arguments, captures the full primary display. Pass ``element``
+    to capture the pixels under an element's current bounds, or ``region``
+    as ``(x, y, width, height)`` to capture an explicit rectangle in logical
+    screen coordinates. Passing both raises ``ValueError``.
+    """
 
 # ── Test helpers ─────────────────────────────────────────────────────────────
 

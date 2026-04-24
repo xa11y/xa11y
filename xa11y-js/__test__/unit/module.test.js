@@ -14,7 +14,6 @@ const {
   InputSim,
   Locator,
   Screenshot,
-  Screenshotter,
   Subscription,
   XA11yError,
   PermissionDeniedError,
@@ -25,7 +24,7 @@ const {
   PlatformError,
   inputSim,
   locator,
-  screenshotter,
+  screenshot,
 } = xa11y;
 
 test('exports the public API surface', () => {
@@ -35,11 +34,10 @@ test('exports the public API surface', () => {
   assert.equal(typeof InputSim, 'function');
   assert.equal(typeof Locator, 'function');
   assert.equal(typeof Screenshot, 'function');
-  assert.equal(typeof Screenshotter, 'function');
   assert.equal(typeof Subscription, 'function');
   assert.equal(typeof inputSim, 'function');
   assert.equal(typeof locator, 'function');
-  assert.equal(typeof screenshotter, 'function');
+  assert.equal(typeof screenshot, 'function');
 });
 
 test('Subscription extends EventEmitter', () => {

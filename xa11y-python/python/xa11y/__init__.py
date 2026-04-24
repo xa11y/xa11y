@@ -23,14 +23,13 @@ from xa11y._native import (
     PlatformError,
     Rect,
     Screenshot,
-    Screenshotter,
     SelectorNotMatchedError,
     Subscription,
     TimeoutError,
     XA11yError,
     input_sim,
     locator,
-    screenshotter,
+    screenshot,
 )
 
 __all__ = [
@@ -48,12 +47,11 @@ __all__ = [
     "PlatformError",
     "Rect",
     "Screenshot",
-    "Screenshotter",
     "SelectorNotMatchedError",
     "Subscription",
     "TimeoutError",
     "XA11yError",
     "input_sim",
     "locator",
-    "screenshotter",
+    "screenshot",
 ]

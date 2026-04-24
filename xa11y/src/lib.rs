@@ -34,7 +34,7 @@ pub use xa11y_core::{
 
 // Re-export screenshot surface.
 pub use xa11y_core::screenshot;
-pub use xa11y_core::{Screenshot, ScreenshotProvider, Screenshotter};
+pub use xa11y_core::{Screenshot, ScreenshotProvider};
 
 // Implementation details used by platform backends and Python bindings.
 #[doc(hidden)]
@@ -119,43 +119,79 @@ pub fn input_sim() -> Result<InputSim> {
     }
 }
 
-/// Build a [`Screenshotter`] backed by the platform's native capture API
-/// (ScreenCaptureKit on macOS, X11 `GetImage` or xdg-desktop-portal on Linux,
-/// stubbed on Windows).
-///
-/// Returns:
-/// - [`Error::PermissionDenied`] on macOS if Screen Recording permission
-///   hasn't been granted (or on Linux if the Wayland portal denies consent).
-/// - [`Error::Unsupported`] on Linux if neither `DISPLAY` nor `WAYLAND_DISPLAY`
-///   is set, and on Windows until a backend ships.
-///
-/// `Screenshotter` is cheap to clone — construct one and share it.
-pub fn screenshotter() -> Result<Screenshotter> {
+// ── Screenshot entry points ────────────────────────────────────────────
+//
+// Three bare functions instead of a factory + handle. The platform backend
+// (ScreenCaptureKit on macOS, X11 `GetImage` or xdg-desktop-portal on Linux,
+// GDI on Windows) is initialised lazily on first call and memoized in a
+// `OnceLock`, so repeated captures reuse the same backend without paying
+// construction cost per call.
+//
+// All three return:
+// - [`Error::PermissionDenied`] on macOS if Screen Recording is not granted
+//   (or on Linux if the Wayland portal denies consent).
+// - [`Error::Unsupported`] on Linux if neither `DISPLAY` nor `WAYLAND_DISPLAY`
+//   is set, and on older Windows contexts where `BitBlt` is unavailable.
+
+static SCREENSHOT_BACKEND: OnceLock<std::result::Result<Arc<dyn ScreenshotProvider>, String>> =
+    OnceLock::new();
+
+fn screenshot_backend() -> Result<Arc<dyn ScreenshotProvider>> {
+    SCREENSHOT_BACKEND
+        .get_or_init(create_screenshot_backend)
+        .as_ref()
+        .cloned()
+        .map_err(|msg| Error::Platform {
+            code: -1,
+            message: msg.clone(),
+        })
+}
+
+fn create_screenshot_backend() -> std::result::Result<Arc<dyn ScreenshotProvider>, String> {
     #[cfg(target_os = "macos")]
     {
-        let backend = xa11y_macos::MacOSScreenshot::new()?;
-        Ok(Screenshotter::new(Arc::new(backend)))
+        xa11y_macos::MacOSScreenshot::new()
+            .map(|b| Arc::new(b) as Arc<dyn ScreenshotProvider>)
+            .map_err(|e| format!("{e}"))
     }
     #[cfg(target_os = "windows")]
     {
-        let backend = xa11y_windows::WindowsScreenshot::new()?;
-        Ok(Screenshotter::new(Arc::new(backend)))
+        xa11y_windows::WindowsScreenshot::new()
+            .map(|b| Arc::new(b) as Arc<dyn ScreenshotProvider>)
+            .map_err(|e| format!("{e}"))
     }
     #[cfg(target_os = "linux")]
     {
-        let backend = xa11y_linux::LinuxScreenshot::new()?;
-        Ok(Screenshotter::new(Arc::new(backend)))
+        xa11y_linux::LinuxScreenshot::new()
+            .map(|b| Arc::new(b) as Arc<dyn ScreenshotProvider>)
+            .map_err(|e| format!("{e}"))
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
-        Err(Error::Platform {
-            code: -1,
-            message: format!(
-                "Screenshot not available on platform: {}",
-                std::env::consts::OS
-            ),
-        })
+        Err(format!(
+            "Screenshot not available on platform: {}",
+            std::env::consts::OS
+        ))
     }
+}
+
+/// Capture the full primary display.
+pub fn screenshot() -> Result<Screenshot> {
+    screenshot_backend()?.capture_full()
+}
+
+/// Capture an explicit sub-rectangle of the screen.
+pub fn screenshot_region(rect: Rect) -> Result<Screenshot> {
+    screenshot_backend()?.capture_region(rect)
+}
+
+/// Capture the pixels under an element's current bounds.
+///
+/// Returns [`Error::NoElementBounds`] if the element has no bounds. The target
+/// window is **not** raised or activated — see the `screenshot` module docs.
+pub fn screenshot_element(element: &Element) -> Result<Screenshot> {
+    let rect = element.bounds.ok_or(Error::NoElementBounds)?;
+    screenshot_backend()?.capture_region(rect)
 }
 
 fn create_provider_boxed() -> Result<Box<dyn Provider>> {
