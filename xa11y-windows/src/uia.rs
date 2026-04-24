@@ -227,7 +227,6 @@ impl WindowsProvider {
             root.FindAllBuildCache(TreeScope_Subtree, &true_cond, &self.batch_request)
         })
     }
-
 }
 
 // ── Safe UIA helpers ────────────────────────────────────────────────────────

@@ -1721,7 +1721,6 @@ impl MacOSProvider {
         }
         results
     }
-
 }
 
 impl Provider for MacOSProvider {
