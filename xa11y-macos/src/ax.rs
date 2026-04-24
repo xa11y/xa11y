@@ -1267,7 +1267,7 @@ impl MacOSProvider {
     /// CGWindowListCopyWindowInfo. Without this permission, the list
     /// contains only system chrome (layer != 0). With it, app windows
     /// (layer 0) are included.
-    fn has_screen_recording_permission() -> bool {
+    pub(crate) fn has_screen_recording_permission() -> bool {
         let info = unsafe { safe_cg_window_list_copy(0, 0) };
         if info.is_null() {
             return false;

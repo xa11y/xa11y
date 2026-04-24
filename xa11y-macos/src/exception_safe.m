@@ -6,7 +6,11 @@
 // aborts on foreign exceptions in extern "C" functions.
 
 #import <ApplicationServices/ApplicationServices.h>
+#import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
+#import <ScreenCaptureKit/ScreenCaptureKit.h>
+#include <stdlib.h>
+#include <string.h>
 
 // ── Attribute Access ─────────────────────────────────────────────────────────
 
@@ -351,6 +355,171 @@ CFTypeRef safe_ax_value_create_cf_range(CFIndex location, CFIndex length) {
         return AXValueCreate(kAXValueCFRangeType, &range);
     } @catch (NSException *e) {
         return NULL;
+    }
+}
+
+// ── Screen Capture (ScreenCaptureKit) ────────────────────────────────────────
+
+// Capture the primary display (or a sub-rect in logical screen points) into an
+// RGBA8 buffer. The buffer is malloc'd and ownership transfers to the caller,
+// who must free it via `safe_cg_free_pixels`.
+//
+// Uses ScreenCaptureKit's SCScreenshotManager. CGDisplayCreateImage family was
+// obsoleted in macOS 15.0; SCK is the only supported path forward.
+//
+// `use_rect`: 0 = full display, non-zero = use rect_x/y/w/h (logical points,
+//   in global screen space — same coords as Element.bounds).
+// `out_pixels`: on success, points to `(*out_width) * (*out_height) * 4` bytes
+//   of RGBA8888 data (R, G, B, A per pixel; row-major; tightly packed).
+// `out_scale`: ratio of physical image pixels to logical input points
+//   (1.0 on standard displays, 2.0 on typical Retina).
+//
+// Returns 0 on success; negative value on failure:
+//   -1  SCShareableContent query failed / no displays
+//   -2  SCScreenshotManager returned no image
+//   -3  pixel buffer allocation failed
+//   -4  bitmap context creation failed
+//   -5  requested rect has zero / negative dimensions
+//   -9999 ObjC exception
+int safe_cg_capture_rgba(
+    int use_rect,
+    double rect_x, double rect_y, double rect_w, double rect_h,
+    uint8_t **out_pixels,
+    uint32_t *out_width,
+    uint32_t *out_height,
+    double *out_scale
+) {
+    @try {
+        if (out_pixels) *out_pixels = NULL;
+        if (out_width) *out_width = 0;
+        if (out_height) *out_height = 0;
+        if (out_scale) *out_scale = 1.0;
+
+        if (use_rect && (rect_w <= 0.0 || rect_h <= 0.0)) {
+            return -5;
+        }
+
+        // Step 1: fetch shareable content (async → sync via semaphore).
+        __block SCShareableContent *content = nil;
+        __block NSError *contentError = nil;
+        dispatch_semaphore_t sem1 = dispatch_semaphore_create(0);
+        [SCShareableContent getShareableContentWithCompletionHandler:
+            ^(SCShareableContent *c, NSError *e) {
+                content = c;
+                contentError = e;
+                dispatch_semaphore_signal(sem1);
+            }];
+        dispatch_semaphore_wait(sem1, DISPATCH_TIME_FOREVER);
+        if (content == nil || content.displays.count == 0) {
+            if (contentError) {
+                NSLog(@"xa11y SCShareableContent error: %@", contentError);
+            }
+            return -1;
+        }
+
+        SCDisplay *display = content.displays[0];
+        CGRect logical_bounds = display.frame;
+        double disp_scale = (logical_bounds.size.width > 0.0)
+            ? ((double)display.width / (double)logical_bounds.size.width)
+            : 1.0;
+
+        // Step 2: build the capture configuration.
+        double src_x = use_rect ? rect_x : logical_bounds.origin.x;
+        double src_y = use_rect ? rect_y : logical_bounds.origin.y;
+        double src_w = use_rect ? rect_w : logical_bounds.size.width;
+        double src_h = use_rect ? rect_h : logical_bounds.size.height;
+
+        size_t phys_w = (size_t)(src_w * disp_scale + 0.5);
+        size_t phys_h = (size_t)(src_h * disp_scale + 0.5);
+        if (phys_w == 0 || phys_h == 0) return -5;
+
+        SCContentFilter *filter = [[SCContentFilter alloc]
+            initWithDisplay:display excludingWindows:@[]];
+        SCStreamConfiguration *config = [[SCStreamConfiguration alloc] init];
+        config.width = phys_w;
+        config.height = phys_h;
+        config.pixelFormat = 'BGRA';   // kCVPixelFormatType_32BGRA
+        config.colorSpaceName = kCGColorSpaceSRGB;
+        config.showsCursor = NO;
+        if (use_rect) {
+            // SCK sourceRect is in the display's local (logical) coordinates.
+            config.sourceRect = CGRectMake(
+                src_x - logical_bounds.origin.x,
+                src_y - logical_bounds.origin.y,
+                src_w, src_h
+            );
+            config.destinationRect = CGRectMake(0, 0, (CGFloat)phys_w, (CGFloat)phys_h);
+        }
+
+        // Step 3: capture one image (async → sync via semaphore).
+        __block CGImageRef image = NULL;
+        __block NSError *captureError = nil;
+        dispatch_semaphore_t sem2 = dispatch_semaphore_create(0);
+        [SCScreenshotManager
+            captureImageWithFilter:filter
+                    configuration:config
+                completionHandler:^(CGImageRef img, NSError *e) {
+                    captureError = e;
+                    if (img) {
+                        image = CGImageRetain(img);
+                    }
+                    dispatch_semaphore_signal(sem2);
+                }];
+        dispatch_semaphore_wait(sem2, DISPATCH_TIME_FOREVER);
+        if (image == NULL) {
+            if (captureError) {
+                NSLog(@"xa11y SCScreenshotManager error: %@", captureError);
+            }
+            return -2;
+        }
+
+        size_t w = CGImageGetWidth(image);
+        size_t h = CGImageGetHeight(image);
+        if (w == 0 || h == 0) {
+            CGImageRelease(image);
+            return -2;
+        }
+
+        // Step 4: blit into a fresh RGBA8 buffer.
+        size_t row_bytes = w * 4;
+        size_t buf_size = row_bytes * h;
+        uint8_t *buf = (uint8_t *)malloc(buf_size);
+        if (buf == NULL) {
+            CGImageRelease(image);
+            return -3;
+        }
+        memset(buf, 0, buf_size);
+
+        CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+        // RGBA8888 big-endian — R, G, B, A in memory order.
+        CGContextRef ctx = CGBitmapContextCreate(
+            buf, w, h, 8, row_bytes, cs,
+            kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big
+        );
+        CGColorSpaceRelease(cs);
+        if (ctx == NULL) {
+            free(buf);
+            CGImageRelease(image);
+            return -4;
+        }
+        CGContextDrawImage(ctx, CGRectMake(0, 0, (CGFloat)w, (CGFloat)h), image);
+        CGContextRelease(ctx);
+        CGImageRelease(image);
+
+        *out_pixels = buf;
+        *out_width = (uint32_t)w;
+        *out_height = (uint32_t)h;
+        *out_scale = disp_scale;
+        return 0;
+    } @catch (NSException *e) {
+        return -9999;
+    }
+}
+
+// Release a buffer returned from `safe_cg_capture_rgba`.
+void safe_cg_free_pixels(uint8_t *pixels) {
+    if (pixels != NULL) {
+        free(pixels);
     }
 }
 

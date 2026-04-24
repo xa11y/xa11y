@@ -4,11 +4,15 @@
 mod ax;
 #[cfg(target_os = "macos")]
 mod input;
+#[cfg(target_os = "macos")]
+mod screenshot;
 
 #[cfg(target_os = "macos")]
 pub use ax::MacOSProvider;
 #[cfg(target_os = "macos")]
 pub use input::MacOSInputProvider;
+#[cfg(target_os = "macos")]
+pub use screenshot::MacOSScreenshot;
 
 #[cfg(not(target_os = "macos"))]
 mod stub {
@@ -35,6 +39,26 @@ mod stub {
                 code: -1,
                 message: "macOS input backend only available on macOS".to_string(),
             })
+        }
+    }
+
+    pub struct MacOSScreenshot;
+
+    impl MacOSScreenshot {
+        pub fn new() -> Result<Self> {
+            Err(Error::Platform {
+                code: -1,
+                message: "macOS screenshot backend only available on macOS".to_string(),
+            })
+        }
+    }
+
+    impl ScreenshotProvider for MacOSScreenshot {
+        fn capture_full(&self) -> Result<Screenshot> {
+            unreachable!()
+        }
+        fn capture_region(&self, _: Rect) -> Result<Screenshot> {
+            unreachable!()
         }
     }
 
@@ -127,7 +151,7 @@ mod stub {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub use stub::{MacOSInputProvider, MacOSProvider};
+pub use stub::{MacOSInputProvider, MacOSProvider, MacOSScreenshot};
 
 #[cfg(test)]
 mod tests {

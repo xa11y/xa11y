@@ -32,6 +32,10 @@ pub use xa11y_core::{
     InputSim, IntoPoint, Key, Keyboard, Mouse, MouseButton, Point, ScrollDelta,
 };
 
+// Re-export screenshot surface.
+pub use xa11y_core::screenshot;
+pub use xa11y_core::{Screenshot, ScreenshotProvider, Screenshotter};
+
 // Implementation details used by platform backends and Python bindings.
 #[doc(hidden)]
 pub use xa11y_core::{CancelHandle, EventReceiver, Provider, RecvStatus, Selector};
@@ -109,6 +113,45 @@ pub fn input_sim() -> Result<InputSim> {
             code: -1,
             message: format!(
                 "Input simulation not available on platform: {}",
+                std::env::consts::OS
+            ),
+        })
+    }
+}
+
+/// Build a [`Screenshotter`] backed by the platform's native capture API
+/// (ScreenCaptureKit on macOS, X11 `GetImage` or xdg-desktop-portal on Linux,
+/// stubbed on Windows).
+///
+/// Returns:
+/// - [`Error::PermissionDenied`] on macOS if Screen Recording permission
+///   hasn't been granted (or on Linux if the Wayland portal denies consent).
+/// - [`Error::Unsupported`] on Linux if neither `DISPLAY` nor `WAYLAND_DISPLAY`
+///   is set, and on Windows until a backend ships.
+///
+/// `Screenshotter` is cheap to clone — construct one and share it.
+pub fn screenshotter() -> Result<Screenshotter> {
+    #[cfg(target_os = "macos")]
+    {
+        let backend = xa11y_macos::MacOSScreenshot::new()?;
+        Ok(Screenshotter::new(Arc::new(backend)))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let backend = xa11y_windows::WindowsScreenshot::new()?;
+        Ok(Screenshotter::new(Arc::new(backend)))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let backend = xa11y_linux::LinuxScreenshot::new()?;
+        Ok(Screenshotter::new(Arc::new(backend)))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        Err(Error::Platform {
+            code: -1,
+            message: format!(
+                "Screenshot not available on platform: {}",
                 std::env::consts::OS
             ),
         })

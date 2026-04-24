@@ -1,0 +1,23 @@
+FROM xa11y-base
+
+# Headless Wayland + xdg-desktop-portal for the Screenshot portal path.
+# We use sway (wlroots-based) as the compositor because it supports true
+# headless output (WLR_BACKENDS=headless) and pairs with xdg-desktop-portal-wlr,
+# which implements org.freedesktop.portal.Screenshot for wlroots compositors.
+#
+# GNOME/KDE portal backends assume a full desktop session and are not
+# reasonable inside a CI-sized container; wlr is the minimal working option.
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+        sway xdg-desktop-portal xdg-desktop-portal-wlr \
+        xdg-desktop-portal-gtk \
+        wayland-protocols libwayland-dev libwayland-client0 \
+        grim \
+        pipewire pipewire-pulse wireplumber \
+    && rm -rf /var/lib/apt/lists/*
+
+# sway expects /run/user/<uid> for XDG_RUNTIME_DIR; create it at image time
+# and rely on the script to chmod 700 and own it at container start-up.
+RUN mkdir -p /run/user/0 && chmod 700 /run/user/0
