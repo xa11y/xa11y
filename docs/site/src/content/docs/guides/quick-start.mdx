@@ -21,6 +21,13 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
 
     Requires Python 3.9+. Pre-built wheels are available for Linux (x86_64, aarch64), macOS (x86_64, aarch64), and Windows (x86_64).
   </TabItem>
+  <TabItem label="JavaScript">
+    ```bash
+    npm install @crowecawcaw/xa11y
+    ```
+
+    Requires Node.js 18+. Pre-built native binaries are published for Linux (x86_64, aarch64), macOS (x86_64, aarch64), and Windows (x86_64).
+  </TabItem>
 </Tabs>
 
 ## Platform setup
@@ -118,6 +125,45 @@ After changing permissions, restart your terminal for them to take effect. `App:
     # List all running apps
     for app in xa11y.App.list():
         print(f"{app.name} (pid: {app.pid})")
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    import { App } from '@crowecawcaw/xa11y';
+
+    // Connect to the Calculator app
+    // (throws PermissionDeniedError if accessibility is not enabled)
+    const calc = await App.byName('Calculator');
+
+    // Navigate the tree
+    for (const window of await calc.children()) {
+        console.log(`${window.role}: ${window.name}`);
+    }
+
+    // Find all buttons via locator
+    const buttons = await calc.locator('button').elements();
+    console.log(`Found ${buttons.length} buttons`);
+
+    // Read properties from a specific element
+    const btn = await calc.locator("button[name='=']").element();
+    console.log(`role=${btn.role} name=${btn.name}`);
+
+    // Locators re-resolve on every call,
+    // so they always target the current UI state
+    await calc.locator("button[name='7']").press();
+
+    // Type into a text field
+    await calc.locator("text_field[name='Input']").typeText('42');
+
+    // Wait for UI changes before continuing
+    const result = calc.locator("static_text[name='Result']");
+    await result.waitVisible(5);
+    console.log(`Result: ${(await result.element()).value}`);
+
+    // List all running apps
+    for (const app of await App.list()) {
+        console.log(`${app.name} (pid: ${app.pid})`);
+    }
     ```
   </TabItem>
 </Tabs>

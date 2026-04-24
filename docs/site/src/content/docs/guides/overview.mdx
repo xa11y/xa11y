@@ -3,7 +3,7 @@ title: Overview
 description: What xa11y is, how it works, and how it compares to other tools.
 ---
 
-**xa11y** is a cross-platform library for reading accessibility trees, taking actions, and listening to accessibility event streams.
+**xa11y** is a cross-platform library for reading accessibility trees, taking actions, listening to accessibility event streams, synthesising low-level input, and capturing screenshots.
 
 ## What is desktop accessibility?
 
@@ -41,6 +41,14 @@ actions: press, focus
 ### Actions
 
 Accessibility APIs let you interact with elements: press buttons, type into fields, toggle checkboxes, expand menus, scroll, and more. xa11y exposes all of these through a unified action API.
+
+### Input simulation
+
+For the small set of gestures with no accessibility equivalent — drag-and-drop, scroll wheels, global shortcuts — xa11y also ships an [`InputSim`](/guides/input/) façade that synthesises OS-level pointer and keyboard events. Input simulation lives in its own surface (`xa11y::input_sim()` / `xa11y.input_sim()` / `inputSim()`) and never falls back from an accessibility action automatically — prefer `locator.press()` and `locator.type_text()` whenever they work.
+
+### Screenshots
+
+xa11y can capture pixel-level snapshots of the full screen, a region, or the pixels under an accessibility element. Useful for attaching visual evidence to test failures or feeding vision-language models the same frame the agent is reasoning about. See the [Screenshots guide](/guides/screenshots/).
 
 ### Events
 

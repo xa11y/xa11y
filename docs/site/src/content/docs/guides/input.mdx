@@ -1,0 +1,293 @@
+---
+title: Input Simulation
+description: Synthesise OS-level pointer and keyboard events from Rust, Python, or JavaScript.
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+xa11y can drive a target application in two distinct ways:
+
+- **Accessibility actions** — `locator.press()`, `locator.type_text()`, `locator.toggle()`, etc. These call the platform accessibility API directly. They work even when the target window is not focused, are deterministic, and are the preferred way to drive a UI.
+- **Input simulation** — `InputSim` generates OS-level pointer and keyboard events at the system event layer (CGEvent on macOS, SendInput on Windows, XTest on X11).
+
+**Prefer accessibility actions wherever possible.** Reach for input simulation only for gestures that have no accessibility equivalent: drag-and-drop, scroll wheels, global shortcuts, or tests that must exercise the event loop itself.
+
+The two mechanisms are not bridged. A failed accessibility action never falls back to input simulation, and input simulation never inspects the accessibility tree for you. If you want to click an element with synthesised input, you compute its bounds via the a11y API and hand a point or `Element` to `InputSim`.
+
+## When to use which
+
+| Scenario | Mechanism |
+| --- | --- |
+| Press a button, toggle a checkbox, expand a menu | **Accessibility action** (`locator.press()`, `locator.toggle()`, `locator.expand()`) |
+| Type text into a focused field with IME support | **Accessibility action** (`locator.type_text()`) |
+| Drag-and-drop between two elements | **Input simulation** (`mouse.drag`) |
+| Scroll a list with the wheel | **Input simulation** (`mouse.scroll`) |
+| Global shortcut without a focused element | **Input simulation** (`keyboard.chord`) |
+| Click at a fixed pixel coordinate | **Input simulation** (`mouse.click((x, y))`) |
+
+## Permissions
+
+| Platform | Requirement |
+| --- | --- |
+| macOS | Accessibility + Input Monitoring for the terminal/IDE running your code |
+| Windows | None for normal user sessions |
+| Linux (X11) | `XTest` extension enabled on the X server |
+| Linux (Wayland) | Not supported — returns `Unsupported` |
+
+On macOS, input simulation usually also requires the target window to be foregrounded. Activate the window explicitly before synthesising input.
+
+## Basic usage
+
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    ```rust
+    use xa11y::*;
+
+    fn main() -> Result<()> {
+        let sim = input_sim()?;
+
+        // Click at a screen coordinate
+        sim.mouse().click(Point::new(400, 300))?;
+
+        // Click at the centre of an element's current bounds
+        let app = App::by_name("Finder")?;
+        let button = app.locator("button[name='New Folder']").element()?;
+        sim.mouse().click(&button)?;
+
+        // Type text into whatever has keyboard focus
+        sim.keyboard().type_text("Hello, world!")?;
+
+        // Keyboard shortcut — Cmd/Ctrl+S
+        sim.keyboard().chord(Key::Char('s'), &[Key::Meta])?;
+
+        Ok(())
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import xa11y
+
+    sim = xa11y.input_sim()
+
+    # Click at a screen coordinate
+    sim.click((400, 300))
+
+    # Click at the centre of an element's current bounds
+    app = xa11y.App.by_name("Finder")
+    button = app.locator("button[name='New Folder']").element()
+    sim.click(button)
+
+    # Type text into whatever has keyboard focus
+    sim.type_text("Hello, world!")
+
+    # Keyboard shortcut — Cmd/Ctrl+S
+    sim.chord("s", ["Meta"])
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    import { inputSim, App } from '@crowecawcaw/xa11y';
+
+    const sim = inputSim();
+
+    // Click at a screen coordinate
+    await sim.click([400, 300]);
+
+    // Click at the centre of an element's current bounds
+    const app = await App.byName('Finder');
+    const button = await app.locator("button[name='New Folder']").element();
+    await sim.click(button);
+
+    // Type text into whatever has keyboard focus
+    await sim.typeText('Hello, world!');
+
+    // Keyboard shortcut — Cmd/Ctrl+S
+    await sim.chord('s', ['Meta']);
+    ```
+  </TabItem>
+</Tabs>
+
+## Targets
+
+Every pointer method accepts either a screen-space point or an `Element`:
+
+- **Point** — absolute screen coordinates in the platform's native coordinate space (points on macOS, physical pixels on Windows and Linux). Origin is the top-left of the primary display; negative values are valid on multi-monitor setups.
+- **Element** — uses the centre of the element's `bounds` at the time of the call. `InputSim` does not re-read the accessibility tree for you — re-fetch via a locator first if the UI may have moved.
+
+In Rust, additional anchors are available via `ClickOptions.anchor` (`Anchor::TopLeft`, `Anchor::Offset { dx, dy }`, etc.).
+
+## Mouse
+
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    ```rust
+    let m = sim.mouse();
+
+    m.click((100, 100))?;                   // left click
+    m.double_click(&element)?;              // double click
+    m.right_click((100, 100))?;             // right click
+    m.move_to((200, 200))?;                 // move without clicking
+    m.drag((50, 50), (200, 200))?;          // left-drag with 150ms duration
+    m.scroll((400, 300), ScrollDelta::vertical(-3))?;  // 3 ticks down
+
+    // Shift-click with explicit options
+    m.click_with(
+        ClickTarget::from(&element),
+        ClickOptions {
+            held: vec![Key::Shift],
+            anchor: Anchor::TopLeft,
+            ..Default::default()
+        },
+    )?;
+
+    // Slow drag for apps that need more frames
+    m.drag_with(
+        (50, 50),
+        (200, 200),
+        DragOptions {
+            duration: Duration::from_millis(500),
+            ..Default::default()
+        },
+    )?;
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    sim.click((100, 100))                   # left click
+    sim.double_click(element)               # double click
+    sim.right_click((100, 100))             # right click
+    sim.move_to((200, 200))                 # move without clicking
+    sim.drag((50, 50), (200, 200))          # left-drag
+    sim.scroll((400, 300), dy=-3)           # 3 ticks down
+    sim.scroll((400, 300), dx=2, dy=0)      # 2 ticks right
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    await sim.click([100, 100]);            // left click
+    await sim.doubleClick(element);         // double click
+    await sim.rightClick([100, 100]);       // right click
+    await sim.moveTo([200, 200]);           // move without clicking
+    await sim.drag([50, 50], [200, 200]);   // left-drag
+    await sim.scroll([400, 300], 0, -3);    // dx=0, dy=-3 (3 ticks down)
+    ```
+  </TabItem>
+</Tabs>
+
+Scroll: positive `dx` scrolls right, positive `dy` scrolls content down (moves the viewport up), in platform "ticks" (typically one notch of a physical scroll wheel).
+
+## Keyboard
+
+Modifier keys (`Shift`, `Ctrl`, `Alt`, `Meta`) are ordinary keys — pass them alongside character keys. `Meta` is the platform's "command" modifier: Cmd on macOS, Win on Windows, Super on Linux.
+
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    ```rust
+    let k = sim.keyboard();
+
+    // Tap a single key
+    k.press(Key::Enter)?;
+    k.press(Key::Char('a'))?;
+
+    // Shortcuts — modifiers are just keys held during the tap
+    k.chord(Key::Char('a'), &[Key::Meta])?;              // Cmd/Ctrl+A
+    k.chord(Key::Char('z'), &[Key::Meta, Key::Shift])?;  // Cmd/Ctrl+Shift+Z
+
+    // Uppercase letters — hold Shift explicitly
+    k.chord(Key::Char('a'), &[Key::Shift])?;             // 'A'
+
+    // Hold and release manually
+    k.down(Key::Shift)?;
+    k.press(Key::Char('a'))?;
+    k.press(Key::Char('b'))?;
+    k.up(Key::Shift)?;
+
+    // Type literal text (handles case and IME for you)
+    k.type_text("Hello, world!")?;
+    ```
+
+    `Key::Char` rejects ASCII uppercase letters at the API boundary to prevent the common bug where `chord(Key::Char('K'), &[Key::Meta])` is read as "Cmd+K" but would mean "Cmd+Shift+K" under auto-shift semantics. For arbitrary text, call `type_text`.
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    # Tap a single key
+    sim.press("Enter")
+    sim.press("a")
+
+    # Shortcuts — modifiers are just keys listed in `held`
+    sim.chord("a", ["Meta"])            # Cmd/Ctrl+A
+    sim.chord("z", ["Meta", "Shift"])   # Cmd/Ctrl+Shift+Z
+
+    # Type literal text (handles case and IME for you)
+    sim.type_text("Hello, world!")
+    ```
+
+    Key names: single printable characters are literal (`"a"`, `"7"`, `";"`); named keys use their Pascal name (`"Enter"`, `"Escape"`, `"ArrowUp"`, `"F5"`); modifiers are `"Shift"`, `"Ctrl"`, `"Alt"`, `"Meta"`. Aliases: `"Control"`, `"Option"`, `"Cmd"`/`"Command"`, `"Esc"`, `"Up"`/`"Down"`/`"Left"`/`"Right"`.
+
+    Uppercase letters are rejected by `press`/`chord` — pass `"a"` with `"Shift"` held, or use `type_text` for arbitrary text.
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    // Tap a single key
+    await sim.press('Enter');
+    await sim.press('a');
+
+    // Shortcuts — modifiers are just keys listed in `held`
+    await sim.chord('a', ['Meta']);            // Cmd/Ctrl+A
+    await sim.chord('z', ['Meta', 'Shift']);   // Cmd/Ctrl+Shift+Z
+
+    // Type literal text (handles case and IME for you)
+    await sim.typeText('Hello, world!');
+    ```
+
+    Key names match the Python binding: literal characters, Pascal-cased named keys (`'Enter'`, `'ArrowUp'`, `'F5'`), modifiers `'Shift'` / `'Ctrl'` / `'Alt'` / `'Meta'`.
+  </TabItem>
+</Tabs>
+
+## Example: drag-and-drop
+
+Drag-and-drop has no accessibility equivalent on most platforms. Resolve both endpoints via the a11y tree first, then synthesise the drag.
+
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    ```rust
+    let app = App::by_name("Finder")?;
+    let source = app.locator("list_item[name='notes.txt']").element()?;
+    let target = app.locator("list_item[name='Archive']").element()?;
+
+    let sim = input_sim()?;
+    sim.mouse().drag(&source, &target)?;
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    app = xa11y.App.by_name("Finder")
+    source = app.locator("list_item[name='notes.txt']").element()
+    target = app.locator("list_item[name='Archive']").element()
+
+    sim = xa11y.input_sim()
+    sim.drag(source, target)
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    const app = await App.byName('Finder');
+    const source = await app.locator("list_item[name='notes.txt']").element();
+    const target = await app.locator("list_item[name='Archive']").element();
+
+    const sim = inputSim();
+    await sim.drag(source, target);
+    ```
+  </TabItem>
+</Tabs>
+
+## Error handling
+
+| Error | When |
+| --- | --- |
+| `PermissionDenied` | OS denied the synthesis permission (macOS Input Monitoring, etc.) |
+| `Unsupported` | Platform has no backend for the operation (e.g. Linux on Wayland) |
+| `NoElementBounds` | Target `Element` has no bounds — re-fetch it or anchor on a point |
+| `InvalidActionData` | Uppercase `Char` key, malformed key name, or bad target tuple |
+| `Platform` | Raw OS failure (FFI return code etc.) |

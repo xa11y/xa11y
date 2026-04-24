@@ -1,0 +1,207 @@
+---
+title: Screenshots
+description: Capture the screen, a region, or the pixels under an accessibility element.
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+xa11y can capture pixel-level snapshots of the screen alongside its accessibility APIs. This is useful for attaching screenshots to test failures, feeding vision-language models with the same frame the agent is reasoning about, or visually diffing a region around a specific control.
+
+Three entry points:
+
+- **Full screen** — capture the entire primary display.
+- **Region** — capture an explicit rectangle in logical screen coordinates.
+- **Element** — capture the pixels under an accessibility element's current bounds.
+
+Screenshots are decoupled from the accessibility and input layers. The target window is **not** raised or activated before capture — whatever pixels are at the requested coordinates are returned, including any occluding windows. Bring the target to the foreground yourself if you need a clean capture.
+
+## Permissions
+
+| Platform | Requirement |
+| --- | --- |
+| macOS | Screen & System Audio Recording for the terminal/IDE |
+| Windows | None for normal user sessions |
+| Linux (X11) | `DISPLAY` set to a reachable X server |
+| Linux (Wayland) | `xdg-desktop-portal` with screenshot support (user consent dialog may appear) |
+
+## Capturing
+
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    ```rust
+    use xa11y::*;
+
+    fn main() -> Result<()> {
+        // Full primary display
+        let shot = screenshot()?;
+        shot.save_png("full.png")?;
+
+        // Explicit region
+        let shot = screenshot_region(Rect { x: 0, y: 0, width: 400, height: 300 })?;
+        shot.save_png("corner.png")?;
+
+        // Pixels under an accessibility element
+        let app = App::by_name("Calculator")?;
+        let display = app.locator("static_text[name='Result']").element()?;
+        let shot = screenshot_element(&display)?;
+        shot.save_png("result.png")?;
+
+        Ok(())
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import xa11y
+
+    # Full primary display
+    shot = xa11y.screenshot()
+    shot.save_png("full.png")
+
+    # Explicit region: (x, y, width, height)
+    shot = xa11y.screenshot(region=(0, 0, 400, 300))
+    shot.save_png("corner.png")
+
+    # Pixels under an accessibility element
+    app = xa11y.App.by_name("Calculator")
+    display = app.locator("static_text[name='Result']").element()
+    shot = xa11y.screenshot(element=display)
+    shot.save_png("result.png")
+    ```
+
+    Passing both `element` and `region` raises `ValueError`.
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    import { screenshot, App } from '@crowecawcaw/xa11y';
+
+    // Full primary display
+    const full = await screenshot();
+    await full.savePng('full.png');
+
+    // Explicit region: { x, y, width, height }
+    const region = await screenshot({ region: { x: 0, y: 0, width: 400, height: 300 } });
+    await region.savePng('corner.png');
+
+    // Pixels under an accessibility element
+    const app = await App.byName('Calculator');
+    const display = await app.locator("static_text[name='Result']").element();
+    const elShot = await screenshot({ element: display });
+    await elShot.savePng('result.png');
+    ```
+
+    Passing both `element` and `region` throws `InvalidActionDataError`.
+  </TabItem>
+</Tabs>
+
+## Working with the pixel buffer
+
+A `Screenshot` carries raw RGBA8 pixels along with dimensions and a scale factor. `width` and `height` are **physical** (device) pixels — the same resolution the compositor renders at — so on HiDPI displays they exceed the logical bounds passed in. `scale` records the physical-to-logical ratio (1.0 on standard displays, 2.0 on typical Retina, 1.5 / 1.75 / 2.0 on common Windows and Linux HiDPI configurations). `pixels.len()` equals `width * height * 4`.
+
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    ```rust
+    let shot = screenshot()?;
+    println!("{} x {} @ {}x", shot.width, shot.height, shot.scale);
+
+    // Encode as PNG bytes (e.g. to upload or embed)
+    let png_bytes: Vec<u8> = shot.to_png()?;
+
+    // Or write directly to disk
+    shot.save_png("out.png")?;
+
+    // Raw RGBA for custom processing
+    let rgba: &[u8] = &shot.pixels;
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    shot = xa11y.screenshot()
+    print(f"{shot.width} x {shot.height} @ {shot.scale}x")
+
+    # Encode as PNG bytes (e.g. to upload or embed)
+    png_bytes: bytes = shot.to_png()
+
+    # Or write directly to disk (accepts str, bytes, or os.PathLike)
+    shot.save_png("out.png")
+
+    # Raw RGBA for custom processing
+    rgba: bytes = shot.pixels
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    const shot = await screenshot();
+    console.log(`${shot.width} x ${shot.height} @ ${shot.scale}x`);
+
+    // Encode as PNG bytes (e.g. to upload or embed)
+    const pngBytes = await shot.toPng();          // Buffer
+
+    // Or write directly to disk
+    await shot.savePng('out.png');
+
+    // Raw RGBA for custom processing
+    const rgba = shot.pixels;                     // Buffer
+    ```
+  </TabItem>
+</Tabs>
+
+## Example: screenshot on test failure
+
+A common pattern is to capture the full screen (or the app under test) whenever an assertion fails, and attach it to the test report.
+
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    ```rust
+    fn capture_on_fail(name: &str, test: impl FnOnce() -> Result<()>) -> Result<()> {
+        match test() {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if let Ok(shot) = screenshot() {
+                    let _ = shot.save_png(format!("target/failures/{name}.png"));
+                }
+                Err(e)
+            }
+        }
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import pytest
+
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_runtest_makereport(item, call):
+        outcome = yield
+        report = outcome.get_result()
+        if report.when == "call" and report.failed:
+            try:
+                xa11y.screenshot().save_png(f"artifacts/{item.name}.png")
+            except xa11y.XA11yError:
+                pass
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    import { screenshot } from '@crowecawcaw/xa11y';
+
+    afterEach(async function () {
+      if (this.currentTest?.state === 'failed') {
+        try {
+          const shot = await screenshot();
+          await shot.savePng(`artifacts/${this.currentTest.title}.png`);
+        } catch { /* capture failure shouldn't mask the test failure */ }
+      }
+    });
+    ```
+  </TabItem>
+</Tabs>
+
+## Error handling
+
+| Error | When |
+| --- | --- |
+| `PermissionDenied` | macOS Screen Recording not granted, or Wayland portal denied consent |
+| `Unsupported` | No capture backend available for the session (no `DISPLAY`, no working Wayland portal, etc.) |
+| `NoElementBounds` | The element passed to `screenshot_element` has no bounds |
+| `Platform` | Raw OS / FFI failure during capture or PNG encode |
