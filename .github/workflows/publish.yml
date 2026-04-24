@@ -408,11 +408,18 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Required to call the GitHub Models inference API with GITHUB_TOKEN.
+      models: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v6
         with:
           ref: main
           fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
 
       - name: Get version from Cargo.toml
         id: version
@@ -421,28 +428,41 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Generate release notes
+      # Ask an LLM (via GitHub's free Models inference endpoint, authenticated
+      # with GITHUB_TOKEN) to turn commit messages + PR descriptions since the
+      # previous tag into structured, customer-facing release notes. The model
+      # is forced to return its answer through an `emit_release_notes` tool
+      # call so we get validated JSON rather than free-form prose.
+      - name: Generate release notes (LLM)
         id: notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
-          TAG="v${{ steps.version.outputs.version }}"
-          # Find the previous tag
-          PREV_TAG=$(git tag --sort=-v:refname | grep -A1 "^${TAG}$" | tail -1)
-          if [ "$PREV_TAG" = "$TAG" ] || [ -z "$PREV_TAG" ]; then
-            # First release or no previous tag
-            echo "body=Initial release of xa11y v${{ steps.version.outputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            # Generate changelog from commits between tags
+          set -euo pipefail
+          TAG="${{ steps.version.outputs.tag }}"
+          NOTES_FILE="$RUNNER_TEMP/release_notes.md"
+          if ! node .github/scripts/generate-release-notes.mjs "$TAG" > "$NOTES_FILE"; then
+            echo "LLM release-note generation failed; falling back to plain git log." >&2
+            PREV_TAG=$(git tag --sort=-v:refname | grep -A1 "^${TAG}$" | tail -1 || true)
             {
-              echo 'body<<RELEASE_EOF'
               echo "## What's Changed"
               echo ""
-              git log "${PREV_TAG}..${TAG}" --pretty=format:"- %s" --no-merges
-              echo ""
-              echo ""
-              echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${TAG}"
-              echo 'RELEASE_EOF'
-            } >> "$GITHUB_OUTPUT"
+              if [ -n "$PREV_TAG" ] && [ "$PREV_TAG" != "$TAG" ]; then
+                git log "${PREV_TAG}..${TAG}" --pretty=format:"- %s" --no-merges
+                echo ""
+                echo ""
+                echo "**Full Changelog**: https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...${TAG}"
+              else
+                echo "Initial release of xa11y ${TAG}"
+              fi
+            } > "$NOTES_FILE"
           fi
+          echo "notes-file=$NOTES_FILE" >> "$GITHUB_OUTPUT"
+          echo "----- release notes -----"
+          cat "$NOTES_FILE"
+          echo "-------------------------"
 
       - name: Create GitHub Release
         env:
@@ -450,5 +470,5 @@ jobs:
         run: |
           gh release create "${{ steps.version.outputs.tag }}" \
             --title "xa11y ${{ steps.version.outputs.tag }}" \
-            --notes "${{ steps.notes.outputs.body }}" \
+            --notes-file "${{ steps.notes.outputs.notes-file }}" \
             --verify-tag
