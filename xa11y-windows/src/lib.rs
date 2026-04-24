@@ -10,10 +10,14 @@ mod input;
 #[cfg(target_os = "windows")]
 mod uia;
 
+mod screenshot;
+
 #[cfg(target_os = "windows")]
 pub use input::WindowsInputProvider;
 #[cfg(target_os = "windows")]
 pub use uia::WindowsProvider;
+
+pub use screenshot::WindowsScreenshot;
 
 #[cfg(not(target_os = "windows"))]
 mod stub;
