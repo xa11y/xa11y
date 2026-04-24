@@ -175,14 +175,24 @@ def test_chord_reports_modifier(tauri_input_app, sim):
 
 
 def test_platform_meta_chord(tauri_input_app, sim):
-    """Cmd/Ctrl+A should fire with the platform 'meta' modifier held."""
+    """Cmd/Win/Super+A should fire the platform's 'command' key held.
+
+    The browser surfaces this differently per platform:
+      - macOS: Cmd → KeyboardEvent.metaKey (`mods=meta`)
+      - Windows: Win → KeyboardEvent.metaKey (`mods=meta`)
+      - Linux: Super → KeyboardEvent.key == 'Super' (WebKit-GTK doesn't
+        route Super into the metaKey flag, so we check for the key name
+        on the keydown/keyup events instead).
+    """
     _clear_log(tauri_input_app)
     _focus_typed_field(tauri_input_app)
     sim.type_text("hello")
     _clear_log(tauri_input_app)
     sim.chord("a", ["Meta"])
     log = _wait_for_log(tauri_input_app, lambda t: "keyup" in t and "key=a" in t)
-    assert "meta" in log
+    assert "meta" in log or "Super" in log or "Meta" in log, (
+        f"expected platform command modifier in log, got:\n{log}"
+    )
 
 
 # ── Typing ─────────────────────────────────────────────────────────────────
