@@ -18,6 +18,8 @@ pub mod codes {
     pub const INVALID_SELECTOR: &str = "XA11Y_INVALID_SELECTOR";
     pub const INVALID_ACTION_DATA: &str = "XA11Y_INVALID_ACTION_DATA";
     pub const PLATFORM: &str = "XA11Y_PLATFORM";
+    pub const NO_ELEMENT_BOUNDS: &str = "XA11Y_NO_ELEMENT_BOUNDS";
+    pub const UNSUPPORTED: &str = "XA11Y_UNSUPPORTED";
 }
 
 /// Convert an `xa11y::Error` into a `napi::Error`. The `reason` field doubles
@@ -60,6 +62,13 @@ pub fn map_err(e: xa11y::Error) -> Error {
             codes::PLATFORM,
             format!("Platform error ({code}): {message}"),
         ),
+        xa11y::Error::NoElementBounds => (
+            codes::NO_ELEMENT_BOUNDS,
+            "Element has no bounds; cannot compute a screen point".to_string(),
+        ),
+        xa11y::Error::Unsupported { feature } => {
+            (codes::UNSUPPORTED, format!("Unsupported: {feature}"))
+        }
     };
 
     // Encode the tag at the start of the message so the JS wrapper can split

@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>xa11y-tauri-test-app · input events</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 16px; }
+    fieldset { margin-bottom: 16px; padding: 12px; }
+    legend { font-weight: bold; }
+    .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+    #hit-target {
+      width: 300px;
+      height: 160px;
+      border: 2px dashed #888;
+      background: #f5f5f5;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      user-select: none;
+      outline: none;
+      font: inherit;
+      cursor: default;
+    }
+    #hit-target:focus { border-color: #0078d7; background: #eef6ff; }
+    #event-log { width: 520px; height: 220px; font-family: ui-monospace, monospace; white-space: pre; }
+    #typed-text { width: 300px; }
+    .last { font-family: ui-monospace, monospace; color: #333; }
+    a { color: #0078d7; }
+  </style>
+</head>
+<body>
+
+  <p>
+    <button id="back-nav"
+            aria-label="Back to widgets"
+            onclick="window.location.href='index.html'">
+      widgets
+    </button>
+  </p>
+
+  <h1>Input event reporter</h1>
+  <p>Drive mouse/keyboard events via <code>xa11y::InputSim</code> and read the
+    log via the a11y tree. Each event is one line.</p>
+
+  <!-- Hit target — captures mouse events -->
+  <fieldset>
+    <legend>Hit target</legend>
+    <div class="row">
+      <button id="hit-target"
+              type="button"
+              aria-label="Hit target">Click / scroll / drag here</button>
+    </div>
+    <div class="last" id="last-mouse" aria-label="Last mouse">last mouse: (none)</div>
+  </fieldset>
+
+  <!-- Typed text — captures type_text() output -->
+  <fieldset>
+    <legend>Typed text</legend>
+    <div class="row">
+      <label for="typed-text">Typed text</label>
+      <input type="text" id="typed-text" aria-label="Typed text" />
+    </div>
+    <div class="last" id="last-key" aria-label="Last key">last key: (none)</div>
+  </fieldset>
+
+  <!-- Event log — what integ tests assert against -->
+  <fieldset>
+    <legend>Event log</legend>
+    <div class="row">
+      <textarea id="event-log" aria-label="Event log" readonly></textarea>
+    </div>
+    <div class="row">
+      <button id="clear-log" aria-label="Clear log">Clear log</button>
+      <span class="last" id="event-count" aria-label="Event count">events: 0</span>
+    </div>
+  </fieldset>
+
+  <script>
+    'use strict';
+
+    const hit = document.getElementById('hit-target');
+    const log = document.getElementById('event-log');
+    const lastMouse = document.getElementById('last-mouse');
+    const lastKey = document.getElementById('last-key');
+    const eventCount = document.getElementById('event-count');
+    const clearBtn = document.getElementById('clear-log');
+    const typedField = document.getElementById('typed-text');
+
+    let count = 0;
+
+    function mods(e) {
+      const m = [];
+      if (e.shiftKey) m.push('shift');
+      if (e.ctrlKey) m.push('ctrl');
+      if (e.altKey) m.push('alt');
+      if (e.metaKey) m.push('meta');
+      return m.length ? m.join(',') : '-';
+    }
+
+    function button(e) {
+      // MouseEvent.button: 0 = left, 1 = middle, 2 = right.
+      return ['left', 'middle', 'right', 'x1', 'x2'][e.button] ?? String(e.button);
+    }
+
+    function append(line) {
+      count += 1;
+      // Prepend so most recent is visible at top without scrolling, and cap
+      // at 200 lines so the log stays readable and the a11y value field
+      // doesn't balloon.
+      const lines = log.value ? log.value.split('\n') : [];
+      lines.unshift(line);
+      if (lines.length > 200) lines.length = 200;
+      log.value = lines.join('\n');
+      eventCount.textContent = `events: ${count}`;
+    }
+
+    // ── Mouse events (captured on the hit target) ────────────────────────
+
+    // `offsetX/Y` on MouseEvent is relative to the target's padding box, which
+    // is what we want for assertions that are independent of screen position.
+    function describeMouse(kind, e) {
+      return `${kind} x=${e.offsetX} y=${e.offsetY} button=${button(e)} mods=${mods(e)} detail=${e.detail}`;
+    }
+
+    for (const kind of ['mousedown', 'mouseup', 'click', 'dblclick', 'contextmenu']) {
+      hit.addEventListener(kind, (e) => {
+        const line = describeMouse(kind, e);
+        append(line);
+        lastMouse.textContent = 'last mouse: ' + line;
+        // Keep the native context-menu from interrupting the test flow.
+        if (kind === 'contextmenu') e.preventDefault();
+      });
+    }
+
+    // Mouse move only when a button is held (drag). Raw moves would flood
+    // the log and aren't what the tests assert against.
+    hit.addEventListener('mousemove', (e) => {
+      if (e.buttons === 0) return;
+      append(`mousemove x=${e.offsetX} y=${e.offsetY} buttons=${e.buttons} mods=${mods(e)}`);
+    });
+
+    hit.addEventListener('wheel', (e) => {
+      const line = `wheel x=${e.offsetX} y=${e.offsetY} dx=${e.deltaX} dy=${e.deltaY} mode=${e.deltaMode}`;
+      append(line);
+      lastMouse.textContent = 'last mouse: ' + line;
+    }, { passive: true });
+
+    // ── Keyboard events (captured on window — any focus) ─────────────────
+
+    // Attached to `window` so chord presses (e.g. Cmd+A in the typed-text
+    // field) are logged regardless of which element has focus. Capture phase
+    // avoids losing events that the focused control preventDefault()s.
+    for (const kind of ['keydown', 'keyup']) {
+      window.addEventListener(kind, (e) => {
+        const line = `${kind} key=${e.key} code=${e.code} mods=${mods(e)} repeat=${e.repeat}`;
+        append(line);
+        lastKey.textContent = 'last key: ' + line;
+      }, true);
+    }
+
+    // ── Clear button ─────────────────────────────────────────────────────
+
+    clearBtn.addEventListener('click', (e) => {
+      // The click on the Clear button itself would otherwise be logged
+      // before we wipe — the stopPropagation keeps the log clean, then
+      // reset the count too.
+      e.stopPropagation();
+      log.value = '';
+      count = 0;
+      eventCount.textContent = 'events: 0';
+      lastMouse.textContent = 'last mouse: (none)';
+      lastKey.textContent = 'last key: (none)';
+      // Typed text clears too so type_text tests start fresh.
+      typedField.value = '';
+    });
+  </script>
+</body>
+</html>

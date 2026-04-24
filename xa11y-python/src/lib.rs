@@ -57,6 +57,12 @@ fn to_py_err(e: xa11y::Error) -> PyErr {
         xa11y::Error::Platform { code, message } => {
             PlatformError::new_err(format!("Platform error ({code}): {message}"))
         }
+        xa11y::Error::NoElementBounds => {
+            PyValueError::new_err("Element has no bounds; cannot compute a screen point")
+        }
+        xa11y::Error::Unsupported { feature } => {
+            ActionNotSupportedError::new_err(format!("Unsupported: {feature}"))
+        }
     }
 }
 
@@ -950,6 +956,147 @@ impl App {
     }
 }
 
+// ── Input simulation ────────────────────────────────────────────────────────
+
+/// Input-simulation façade. Constructed via [`input_sim()`][input_sim_fn].
+///
+/// Methods accept targets as either a `(x, y)` tuple or an `Element` (uses
+/// centre bounds). `Key` values are Python strings — see [`_parse_key`] for
+/// the grammar; short version: printable characters are literal
+/// (`"a"`, `"7"`, `";"`), named keys use their Pascal name (`"Enter"`,
+/// `"ArrowUp"`, `"F5"`), modifiers are `"Shift"`, `"Ctrl"`, `"Alt"`, `"Meta"`.
+#[pyclass]
+struct InputSim {
+    inner: xa11y::InputSim,
+}
+
+#[pymethods]
+impl InputSim {
+    /// Left-click at `target` once.
+    fn click(&self, target: Bound<'_, PyAny>) -> PyResult<()> {
+        let pt = parse_target(&target)?;
+        self.inner.mouse().click(pt).map_err(to_py_err)
+    }
+
+    /// Left double-click at `target`.
+    fn double_click(&self, target: Bound<'_, PyAny>) -> PyResult<()> {
+        let pt = parse_target(&target)?;
+        self.inner.mouse().double_click(pt).map_err(to_py_err)
+    }
+
+    /// Right-click at `target`.
+    fn right_click(&self, target: Bound<'_, PyAny>) -> PyResult<()> {
+        let pt = parse_target(&target)?;
+        self.inner.mouse().right_click(pt).map_err(to_py_err)
+    }
+
+    /// Move the pointer to `target` without pressing any button.
+    fn move_to(&self, target: Bound<'_, PyAny>) -> PyResult<()> {
+        let pt = parse_target(&target)?;
+        self.inner.mouse().move_to(pt).map_err(to_py_err)
+    }
+
+    /// Left-drag from `start` to `end`. Default duration 150 ms.
+    fn drag(&self, start: Bound<'_, PyAny>, end: Bound<'_, PyAny>) -> PyResult<()> {
+        let from = parse_target(&start)?;
+        let to = parse_target(&end)?;
+        self.inner.mouse().drag(from, to).map_err(to_py_err)
+    }
+
+    /// Scroll at `target`. `dx` positive → scroll right, `dy` positive →
+    /// scroll content down.
+    #[pyo3(signature = (target, dx=0, dy=0))]
+    fn scroll(&self, target: Bound<'_, PyAny>, dx: i32, dy: i32) -> PyResult<()> {
+        let pt = parse_target(&target)?;
+        self.inner
+            .mouse()
+            .scroll(pt, xa11y::ScrollDelta::new(dx, dy))
+            .map_err(to_py_err)
+    }
+
+    /// Tap a key (press + release). See the class docstring for key names.
+    fn press(&self, key: &str) -> PyResult<()> {
+        let k = parse_key(key)?;
+        self.inner.keyboard().press(k).map_err(to_py_err)
+    }
+
+    /// Tap `key` while `held` (list of key names) are held.
+    #[pyo3(signature = (key, held=Vec::new()))]
+    fn chord(&self, key: &str, held: Vec<String>) -> PyResult<()> {
+        let k = parse_key(key)?;
+        let held: Result<Vec<_>, _> = held.iter().map(|s| parse_key(s)).collect();
+        self.inner.keyboard().chord(k, &held?).map_err(to_py_err)
+    }
+
+    /// Type literal text into the currently focused control.
+    fn type_text(&self, text: &str) -> PyResult<()> {
+        self.inner.keyboard().type_text(text).map_err(to_py_err)
+    }
+}
+
+/// Convert a Python target (`(int, int)` tuple or `Element`) to an
+/// [`xa11y::Point`]. Keeps the target-resolution cost explicit at the call
+/// site, matching the Rust [`IntoPoint`] contract.
+fn parse_target(target: &Bound<'_, PyAny>) -> PyResult<xa11y::Point> {
+    if let Ok(el) = target.downcast::<Element>() {
+        let element = el.borrow();
+        let (x, y, w, h) = element
+            .bounds_data
+            .ok_or_else(|| PyValueError::new_err("Element has no bounds"))?;
+        return Ok(xa11y::Point::new(x + (w as i32) / 2, y + (h as i32) / 2));
+    }
+    let tup: (i32, i32) = target
+        .extract()
+        .map_err(|_| PyTypeError::new_err("expected (int, int) tuple or Element for target"))?;
+    Ok(xa11y::Point::new(tup.0, tup.1))
+}
+
+/// Parse a key-name string into an [`xa11y::Key`]. Accepts:
+/// single chars (`"a"`, `"7"`), named modifiers (`"Shift"`, `"Ctrl"`,
+/// `"Alt"`, `"Meta"`), named keys (`"Enter"`, `"Tab"`, `"Escape"`,
+/// `"Backspace"`, `"Space"`, `"Delete"`, `"Insert"`, `"Home"`, `"End"`,
+/// `"PageUp"`, `"PageDown"`, `"ArrowUp/Down/Left/Right"`), and function
+/// keys `"F1"` through `"F24"`.
+fn parse_key(name: &str) -> PyResult<xa11y::Key> {
+    let k = match name {
+        "Shift" => xa11y::Key::Shift,
+        "Ctrl" | "Control" => xa11y::Key::Ctrl,
+        "Alt" | "Option" => xa11y::Key::Alt,
+        "Meta" | "Cmd" | "Command" | "Super" | "Win" => xa11y::Key::Meta,
+        "Enter" | "Return" => xa11y::Key::Enter,
+        "Escape" | "Esc" => xa11y::Key::Escape,
+        "Backspace" => xa11y::Key::Backspace,
+        "Tab" => xa11y::Key::Tab,
+        "Space" => xa11y::Key::Space,
+        "Delete" => xa11y::Key::Delete,
+        "Insert" => xa11y::Key::Insert,
+        "ArrowUp" | "Up" => xa11y::Key::ArrowUp,
+        "ArrowDown" | "Down" => xa11y::Key::ArrowDown,
+        "ArrowLeft" | "Left" => xa11y::Key::ArrowLeft,
+        "ArrowRight" | "Right" => xa11y::Key::ArrowRight,
+        "Home" => xa11y::Key::Home,
+        "End" => xa11y::Key::End,
+        "PageUp" => xa11y::Key::PageUp,
+        "PageDown" => xa11y::Key::PageDown,
+        s if s.starts_with('F') && s.len() >= 2 && s[1..].chars().all(|c| c.is_ascii_digit()) => {
+            let n: u8 = s[1..]
+                .parse()
+                .map_err(|_| PyValueError::new_err(format!("Invalid function key: {s}")))?;
+            xa11y::Key::F(n)
+        }
+        s if s.chars().count() == 1 => xa11y::Key::Char(s.chars().next().unwrap()),
+        _ => return Err(PyValueError::new_err(format!("Unknown key name: {name}"))),
+    };
+    Ok(k)
+}
+
+/// Construct an [`InputSim`] backed by the platform's native input path.
+#[pyfunction]
+fn input_sim() -> PyResult<InputSim> {
+    let sim = xa11y::input_sim().map_err(to_py_err)?;
+    Ok(InputSim { inner: sim })
+}
+
 // ── Module-level functions ──────────────────────────────────────────────────
 
 /// Create a top-level Locator.
@@ -970,6 +1117,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Element>()?;
     m.add_class::<Event>()?;
     m.add_class::<EventType>()?;
+    m.add_class::<InputSim>()?;
     m.add_class::<Locator>()?;
     m.add_class::<Rect>()?;
     m.add_class::<Subscription>()?;
@@ -1007,6 +1155,9 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Re-export as "locator" in Python
     let locator_fn_obj = m.getattr("locator_fn")?;
     m.setattr("locator", &locator_fn_obj)?;
+
+    // Input simulation factory
+    m.add_function(wrap_pyfunction!(input_sim, m)?)?;
 
     // CLI entry point
     m.add_function(wrap_pyfunction!(_cli_main, m)?)?;

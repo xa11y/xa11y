@@ -10,10 +10,16 @@ mod atspi;
 mod events;
 
 #[cfg(target_os = "linux")]
+mod input;
+
+#[cfg(target_os = "linux")]
 pub use atspi::LinuxProvider;
+
+#[cfg(target_os = "linux")]
+pub use input::LinuxInputProvider;
 
 #[cfg(not(target_os = "linux"))]
 mod stub;
 
 #[cfg(not(target_os = "linux"))]
-pub use stub::LinuxProvider;
+pub use stub::{LinuxInputProvider, LinuxProvider};

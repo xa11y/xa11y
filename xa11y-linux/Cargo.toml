@@ -13,3 +13,10 @@ serde_json = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 rayon = "1"
 zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
+# X11 + XTest for the input-simulation backend. Wayland is intentionally not
+# supported at this layer (callers get Error::Unsupported); libei/portal can
+# be added later behind a feature.
+x11rb = { version = "0.13", default-features = false, features = ["xtest"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+x11rb = { version = "0.13", default-features = false }

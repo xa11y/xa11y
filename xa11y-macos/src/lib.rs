@@ -2,12 +2,17 @@
 
 #[cfg(target_os = "macos")]
 mod ax;
+#[cfg(target_os = "macos")]
+mod input;
 
 #[cfg(target_os = "macos")]
 pub use ax::MacOSProvider;
+#[cfg(target_os = "macos")]
+pub use input::MacOSInputProvider;
 
 #[cfg(not(target_os = "macos"))]
 mod stub {
+    use xa11y_core::input::{InputProvider, Key, MouseButton, Point, ScrollDelta};
     use xa11y_core::*;
 
     pub struct MacOSProvider;
@@ -18,6 +23,45 @@ mod stub {
                 code: -1,
                 message: "macOS backend only available on macOS".to_string(),
             })
+        }
+    }
+
+    #[derive(Default)]
+    pub struct MacOSInputProvider;
+
+    impl MacOSInputProvider {
+        pub fn new() -> Result<Self> {
+            Err(Error::Platform {
+                code: -1,
+                message: "macOS input backend only available on macOS".to_string(),
+            })
+        }
+    }
+
+    impl InputProvider for MacOSInputProvider {
+        fn pointer_move(&self, _: Point) -> Result<()> {
+            unreachable!()
+        }
+        fn pointer_down(&self, _: MouseButton) -> Result<()> {
+            unreachable!()
+        }
+        fn pointer_up(&self, _: MouseButton) -> Result<()> {
+            unreachable!()
+        }
+        fn pointer_click(&self, _: Point, _: MouseButton, _: u32) -> Result<()> {
+            unreachable!()
+        }
+        fn pointer_scroll(&self, _: Point, _: ScrollDelta) -> Result<()> {
+            unreachable!()
+        }
+        fn key_down(&self, _: &Key) -> Result<()> {
+            unreachable!()
+        }
+        fn key_up(&self, _: &Key) -> Result<()> {
+            unreachable!()
+        }
+        fn type_text(&self, _: &str) -> Result<()> {
+            unreachable!()
         }
     }
 
@@ -83,7 +127,7 @@ mod stub {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub use stub::MacOSProvider;
+pub use stub::{MacOSInputProvider, MacOSProvider};
 
 #[cfg(test)]
 mod tests {

@@ -25,6 +25,13 @@ pub use xa11y_core::{
     Rect, Result, Role, StateFlag, StateSet, Subscription, SubscriptionIter, Toggled,
 };
 
+// Re-export input simulation surface.
+pub use xa11y_core::input;
+pub use xa11y_core::{
+    anchor_point, point_for, Anchor, ClickOptions, ClickTarget, DragOptions, InputProvider,
+    InputSim, IntoPoint, Key, Keyboard, Mouse, MouseButton, Point, ScrollDelta,
+};
+
 // Implementation details used by platform backends and Python bindings.
 #[doc(hidden)]
 pub use xa11y_core::{CancelHandle, EventReceiver, Provider, RecvStatus, Selector};
@@ -72,6 +79,40 @@ pub fn provider() -> Result<Arc<dyn Provider>> {
 #[cfg(feature = "testing")]
 pub fn create_provider() -> Result<Arc<dyn Provider>> {
     create_provider_boxed().map(Arc::from)
+}
+
+/// Build an [`InputSim`] backed by the platform's native input-synthesis API
+/// (CGEvent on macOS, SendInput on Windows, XTest on X11). Returns
+/// [`Error::Unsupported`] on a Wayland-only Linux session and
+/// [`Error::Platform`] on any other platform we don't ship a backend for.
+///
+/// `InputSim` is cheap to clone — construct one and share it.
+pub fn input_sim() -> Result<InputSim> {
+    #[cfg(target_os = "macos")]
+    {
+        let backend = xa11y_macos::MacOSInputProvider::new()?;
+        Ok(InputSim::new(Arc::new(backend)))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let backend = xa11y_windows::WindowsInputProvider::new()?;
+        Ok(InputSim::new(Arc::new(backend)))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let backend = xa11y_linux::LinuxInputProvider::new()?;
+        Ok(InputSim::new(Arc::new(backend)))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    {
+        Err(Error::Platform {
+            code: -1,
+            message: format!(
+                "Input simulation not available on platform: {}",
+                std::env::consts::OS
+            ),
+        })
+    }
 }
 
 fn create_provider_boxed() -> Result<Box<dyn Provider>> {

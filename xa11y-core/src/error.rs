@@ -46,6 +46,16 @@ pub enum Error {
     #[error("Invalid action data: {message}")]
     InvalidActionData { message: String },
 
+    /// The element has no bounds (e.g. an off-screen or virtual node), so a
+    /// screen point can't be computed for input simulation.
+    #[error("Element has no bounds")]
+    NoElementBounds,
+
+    /// The requested operation has no implementation on this platform/session
+    /// (e.g. pointer warp on Wayland without a portal grant).
+    #[error("Unsupported: {feature}")]
+    Unsupported { feature: String },
+
     /// A platform-specific error occurred.
     #[error("Platform error ({code}): {message}")]
     Platform { code: i64, message: String },
