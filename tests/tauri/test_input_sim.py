@@ -24,8 +24,8 @@ import time
 import pytest
 import xa11y
 
-HIT_TARGET = 'region[name="Hit target"]'
-EVENT_LOG = 'text_field[name="Event log"]'
+HIT_TARGET = 'button[name="Hit target"]'
+EVENT_LOG = 'text_area[name="Event log"]'
 TYPED_FIELD = 'text_field[name="Typed text"]'
 CLEAR_BUTTON = 'button[name="Clear log"]'
 

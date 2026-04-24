@@ -19,6 +19,8 @@
       justify-content: center;
       user-select: none;
       outline: none;
+      font: inherit;
+      cursor: default;
     }
     #hit-target:focus { border-color: #0078d7; background: #eef6ff; }
     #event-log { width: 520px; height: 220px; font-family: ui-monospace, monospace; white-space: pre; }
@@ -29,7 +31,13 @@
 </head>
 <body>
 
-  <p><a id="back-link" href="index.html">← widgets</a></p>
+  <p>
+    <button id="back-nav"
+            aria-label="Back to widgets"
+            onclick="window.location.href='index.html'">
+      widgets
+    </button>
+  </p>
 
   <h1>Input event reporter</h1>
   <p>Drive mouse/keyboard events via <code>xa11y::InputSim</code> and read the
@@ -39,10 +47,9 @@
   <fieldset>
     <legend>Hit target</legend>
     <div class="row">
-      <div id="hit-target"
-           tabindex="0"
-           role="region"
-           aria-label="Hit target">Click / scroll / drag here</div>
+      <button id="hit-target"
+              type="button"
+              aria-label="Hit target">Click / scroll / drag here</button>
     </div>
     <div class="last" id="last-mouse" aria-label="Last mouse">last mouse: (none)</div>
   </fieldset>

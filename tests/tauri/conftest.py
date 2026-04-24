@@ -60,11 +60,15 @@ def tauri_input_app():
         content_ready_selector='button[name="OK"]',
     )
     app = next(gen)
-    # Click the link to navigate to input-events.html, then wait for the
-    # hit target to appear in the a11y tree before handing off to tests.
-    app.locator('link[name="input events →"]').press()
+    # Navigate from the widgets page to input-events.html. The nav control
+    # is a button (not a raw <a>) so press() semantics are unambiguous on
+    # every OS's webview a11y bridge — Linux AT-SPI in particular surfaces
+    # <a> with varying roles depending on the WebKit version.
+    app.locator('button[name="Open input events page"]').press()
+    # The hit target is a button with aria-label="Hit target"; wait for it
+    # to appear in the a11y tree before handing off.
     for _ in range(50):
-        if app.locator('region[name="Hit target"]').exists():
+        if app.locator('button[name="Hit target"]').exists():
             break
         time.sleep(0.1)
     else:
