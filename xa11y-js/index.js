@@ -156,6 +156,8 @@ patchPrototypeMethods(native.App);
 patchPrototypeMethods(native.Element);
 patchPrototypeMethods(native.Locator);
 patchPrototypeMethods(native.Event);
+patchPrototypeMethods(native.InputSim);
+patchPrototypeMethods(native.Screenshot);
 
 // ── Locator.waitUntil (JS-side polling loop) ───────────────────────────────
 //
@@ -441,15 +443,56 @@ function locator(selector) {
   return wrap(native.locator)(selector);
 }
 
+/**
+ * Construct an `InputSim` backed by the platform's native input path.
+ * Errors are wrapped in typed `XA11yError` subclasses like every other
+ * entry point.
+ */
+function inputSim() {
+  return wrap(native.inputSim)();
+}
+
+/**
+ * Capture pixels from the screen.
+ *
+ * With no arguments, captures the full primary display. Pass `element` to
+ * capture the pixels under an element's current bounds, or `region` as
+ * `{x, y, width, height}` to capture an explicit rectangle in logical
+ * screen coordinates. Passing both throws `InvalidActionDataError`.
+ *
+ * @param {object} [options]
+ * @param {import('./native.js').Element} [options.element]
+ * @param {{x: number, y: number, width: number, height: number}} [options.region]
+ * @returns {Promise<import('./native.js').Screenshot>}
+ */
+function screenshot(options) {
+  if (options && options.element && options.region) {
+    throw new InvalidActionDataError(
+      'screenshot: pass either `element` or `region`, not both',
+    );
+  }
+  if (options && options.element) {
+    return wrap(native._screenshotElement)(options.element);
+  }
+  if (options && options.region) {
+    return wrap(native._screenshotRegion)(options.region);
+  }
+  return wrap(native._screenshot)();
+}
+
 // ── Re-exports ──────────────────────────────────────────────────────────────
 
 module.exports = {
   App,
   Element: native.Element,
   Event: native.Event,
+  InputSim: native.InputSim,
   Locator: native.Locator,
+  Screenshot: native.Screenshot,
   Subscription,
+  inputSim,
   locator,
+  screenshot,
 
   // Error classes
   XA11yError,

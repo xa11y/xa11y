@@ -7,23 +7,25 @@
 //!
 //! # What you get
 //!
-//! [`Screenshotter`] returns a [`Screenshot`] carrying raw RGBA8 pixels in
-//! **physical** (device) pixels — the same resolution the compositor renders
-//! at. On HiDPI displays that means pixel dimensions exceed the logical bounds
-//! you passed in; [`Screenshot::scale`] records the ratio. Call
-//! [`Screenshot::to_png`] or [`Screenshot::save_png`] to encode.
+//! The caller-facing entry points in the `xa11y` umbrella crate
+//! (`xa11y::screenshot()`, `xa11y::screenshot_region()`,
+//! `xa11y::screenshot_element()`) all return a [`Screenshot`] carrying raw
+//! RGBA8 pixels in **physical** (device) pixels — the same resolution the
+//! compositor renders at. On HiDPI displays that means pixel dimensions
+//! exceed the logical bounds you passed in; [`Screenshot::scale`] records
+//! the ratio. Call [`Screenshot::to_png`] or [`Screenshot::save_png`] to
+//! encode.
 //!
 //! # No auto-raise
 //!
 //! Capturing an element that is occluded or off-screen returns whatever pixels
 //! are at those coordinates — the target window is **not** raised or
 //! activated. If you need the element in the foreground, do that explicitly
-//! before calling [`Screenshotter::capture_element`].
+//! before calling `xa11y::screenshot_element`.
 
 use std::path::Path;
-use std::sync::Arc;
 
-use crate::element::{Element, Rect};
+use crate::element::Rect;
 use crate::error::{Error, Result};
 
 /// Platform backend trait for screen capture.
@@ -113,44 +115,9 @@ fn png_err(e: png::EncodingError) -> Error {
     }
 }
 
-/// Handle for capturing screenshots. Cheap to clone — shares a single backend.
-#[derive(Clone)]
-pub struct Screenshotter {
-    backend: Arc<dyn ScreenshotProvider>,
-}
-
-impl Screenshotter {
-    pub fn new(backend: Arc<dyn ScreenshotProvider>) -> Self {
-        Self { backend }
-    }
-
-    /// Access the underlying provider for composite sequences.
-    pub fn backend(&self) -> &Arc<dyn ScreenshotProvider> {
-        &self.backend
-    }
-
-    /// Capture the full primary display.
-    pub fn capture(&self) -> Result<Screenshot> {
-        self.backend.capture_full()
-    }
-
-    /// Capture an explicit sub-rectangle of the screen.
-    pub fn capture_region(&self, rect: Rect) -> Result<Screenshot> {
-        self.backend.capture_region(rect)
-    }
-
-    /// Capture the pixels under an element's current bounds.
-    ///
-    /// Returns [`Error::NoElementBounds`] if the element reports no bounds.
-    /// The target window is **not** raised or activated — see module docs.
-    pub fn capture_element(&self, element: &Element) -> Result<Screenshot> {
-        let rect = element.bounds.ok_or(Error::NoElementBounds)?;
-        self.backend.capture_region(rect)
-    }
-}
-
-impl std::fmt::Debug for Screenshotter {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Screenshotter").finish_non_exhaustive()
-    }
-}
+// The public entry points — `xa11y::screenshot()`, `screenshot_region()`,
+// `screenshot_element()` — live in the umbrella crate (`xa11y/src/lib.rs`)
+// so they can construct the platform-specific `ScreenshotProvider` backend
+// and memoize it across calls. Keep this file focused on the data (Screenshot)
+// and the backend trait (ScreenshotProvider); the umbrella crate composes
+// them into the caller-facing API.

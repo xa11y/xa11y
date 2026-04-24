@@ -6,15 +6,20 @@ import {
   App,
   Element,
   Event,
+  InputSim,
   Locator,
+  Screenshot,
   Subscription,
   XA11yError,
   SelectorNotMatchedError,
   TimeoutError,
+  inputSim,
+  screenshot,
   type AppLookupOptions,
   type CheckedState,
   type EventTypeName,
   type Rect,
+  type ScreenshotOptions,
   type SubscribeOptions,
   type WaitForEventOptions,
 } from '../../index.js';
@@ -107,6 +112,31 @@ async function checks() {
     }
   }
 
+  // ── InputSim ───────────────────────────────────────────────────────
+  const sim: InputSim = inputSim();
+  await sim.click([10, 20]);
+  await sim.click(el); // element target
+  await sim.doubleClick(el);
+  await sim.drag([0, 0], [100, 100]);
+  await sim.scroll([10, 10], 0, -3);
+  await sim.press('Enter');
+  await sim.chord('a', ['Shift']);
+  await sim.typeText('hello');
+
+  // ── screenshot ─────────────────────────────────────────────────────
+  const shot: Screenshot = await screenshot();
+  const _w: number = shot.width;
+  const _h: number = shot.height;
+  const _s: number = shot.scale;
+  const _px: Buffer = shot.pixels;
+  const _png: Buffer = shot.toPng();
+  shot.savePng('/tmp/out.png');
+  const shotOpts: ScreenshotOptions = {
+    region: { x: 0, y: 0, width: 10, height: 10 },
+  };
+  const _shot2: Screenshot = await screenshot(shotOpts);
+  const _shot3: Screenshot = await screenshot({ element: el });
+
   // Unused to silence noUnusedLocals
   void _app2;
   void apps;
@@ -116,6 +146,13 @@ async function checks() {
   void _role;
   void _name;
   void _bounds;
+  void _w;
+  void _h;
+  void _s;
+  void _px;
+  void _png;
+  void _shot2;
+  void _shot3;
 }
 
 void checks;

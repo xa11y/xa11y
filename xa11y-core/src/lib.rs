@@ -30,7 +30,7 @@ pub use input::{
 pub use locator::Locator;
 pub use provider::Provider;
 pub use role::{unknown_role, Role};
-pub use screenshot::{Screenshot, ScreenshotProvider, Screenshotter};
+pub use screenshot::{Screenshot, ScreenshotProvider};
 pub use selector::Selector;
 
 /// Maximum tree traversal depth for providers. Prevents stack overflow from
