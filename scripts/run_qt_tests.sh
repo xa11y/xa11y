@@ -92,39 +92,15 @@ fi
 
 export QT_ACCESSIBILITY=1
 
-# ── Set up Python venv ───────────────────────────────────────────────
+# ── Set up shared Python integ venv ──────────────────────────────────
+#
+# Sources `scripts/setup_python_integ_env.sh` which creates `.venv-test`,
+# installs maturin + shared test deps + the Qt-app requirements, and
+# builds the xa11y bindings (once per job — subsequent callers skip the
+# rebuild when `import xa11y` already works).
 
-VENV_DIR="$PROJECT_ROOT/.venv-qt-test"
-
-if [ ! -d "$VENV_DIR" ]; then
-    echo "Creating virtualenv at $VENV_DIR..."
-    python3 -m venv "$VENV_DIR"
-fi
-
-PIP="$VENV_DIR/bin/pip"
-PYTHON="$VENV_DIR/bin/python"
-PYTEST="$VENV_DIR/bin/pytest"
-
-if [[ "$(uname)" == MINGW* ]] || [[ "$(uname)" == MSYS* ]] || [[ "$OSTYPE" == "msys" ]]; then
-    PIP="$VENV_DIR/Scripts/pip.exe"
-    PYTHON="$VENV_DIR/Scripts/python.exe"
-    PYTEST="$VENV_DIR/Scripts/pytest.exe"
-fi
-
-echo "Installing dependencies..."
-"$PIP" install --quiet maturin
-"$PIP" install --quiet -r "$PROJECT_ROOT/tests/requirements.txt"
-"$PIP" install --quiet -r "$QT_APP_DIR/requirements.txt"
-
-# Generate README for xa11y-python (it's in .gitignore, maturin needs it)
-echo "Generating xa11y-python README..."
-cd "$PROJECT_ROOT"
-cargo xtask sync-readmes 2>&1
-
-# Build and install xa11y Python bindings
-echo "Building xa11y Python bindings..."
-cd "$PROJECT_ROOT/xa11y-python"
-"$PIP" install --quiet -e .
+# shellcheck source=setup_python_integ_env.sh
+source "$SCRIPT_DIR/setup_python_integ_env.sh" "$QT_APP_DIR/requirements.txt"
 
 cd "$PROJECT_ROOT"
 

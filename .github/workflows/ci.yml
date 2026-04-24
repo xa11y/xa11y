@@ -45,18 +45,23 @@ jobs:
           python-version: "3.12"
 
       - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            xvfb dbus dbus-x11 fluxbox \
-            at-spi2-core \
-            libxkbcommon-x11-0 libxkbcommon-x11-dev \
-            libxcursor1 libxrandr2 libxi6 \
-            libx11-xcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0 \
-            libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3 \
-            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 \
-            libxcb-image0 libxcb-render-util0 libxcb-xkb1 \
-            libgtk-4-dev gir1.2-gtk-4.0 libgirepository-2.0-dev libcairo2-dev \
+        # `awalsh128/cache-apt-pkgs-action` caches the .debs so re-runs on
+        # the same package-set finish in ~10s instead of the ~60s it takes
+        # to `apt-get update` + `install` 30 packages from scratch.
+        # Bump `version` to invalidate the cache when the package list changes.
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          version: 1
+          packages: >-
+            xvfb dbus dbus-x11 fluxbox
+            at-spi2-core
+            libxkbcommon-x11-0 libxkbcommon-x11-dev
+            libxcursor1 libxrandr2 libxi6
+            libx11-xcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0
+            libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1
+            libxcb-image0 libxcb-render-util0 libxcb-xkb1
+            libgtk-4-dev gir1.2-gtk-4.0 libgirepository-2.0-dev libcairo2-dev
             libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev libgtk-3-dev
 
       - name: Run unit tests
@@ -494,17 +499,20 @@ jobs:
 
       - name: Install system dependencies
         # Same list as the Linux unit-test job: xvfb + dbus + at-spi2 for
-        # accessibility, xcb/xkb/egl for winit's window backend.
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            xvfb dbus dbus-x11 fluxbox \
-            at-spi2-core \
-            libxkbcommon-x11-0 libxkbcommon-x11-dev \
-            libxcursor1 libxrandr2 libxi6 \
-            libx11-xcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0 \
-            libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3 \
-            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 \
+        # accessibility, xcb/xkb/egl for winit's window backend. Cached
+        # via `awalsh128/cache-apt-pkgs-action` — bump `version` to
+        # invalidate when the package list changes.
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          version: 1
+          packages: >-
+            xvfb dbus dbus-x11 fluxbox
+            at-spi2-core
+            libxkbcommon-x11-0 libxkbcommon-x11-dev
+            libxcursor1 libxrandr2 libxi6
+            libx11-xcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0
+            libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1
             libxcb-image0 libxcb-render-util0 libxcb-xkb1
 
       - name: Run JS integration tests
@@ -634,19 +642,23 @@ jobs:
           cache-dependency-path: xa11y-js/package-lock.json
 
       - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            xvfb dbus dbus-x11 fluxbox \
-            at-spi2-core \
-            libxkbcommon-x11-0 libxkbcommon-x11-dev \
-            libxcursor1 libxrandr2 libxi6 \
-            libx11-xcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0 \
-            libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3 \
-            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 \
-            libxcb-image0 libxcb-render-util0 libxcb-xkb1 \
-            libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
-            libdrm2 libgbm1 libxcomposite1 libxdamage1 libxfixes3 \
+        # Cached via `awalsh128/cache-apt-pkgs-action`; bump `version` to
+        # invalidate when the package list changes. Adds the Electron
+        # runtime deps (nss/atk/cups/…) on top of the base X/dbus/a11y set.
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          version: 1
+          packages: >-
+            xvfb dbus dbus-x11 fluxbox
+            at-spi2-core
+            libxkbcommon-x11-0 libxkbcommon-x11-dev
+            libxcursor1 libxrandr2 libxi6
+            libx11-xcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0
+            libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1
+            libxcb-image0 libxcb-render-util0 libxcb-xkb1
+            libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2
+            libdrm2 libgbm1 libxcomposite1 libxdamage1 libxfixes3
             libpango-1.0-0 libasound2t64
 
       - name: Run Electron integration tests
