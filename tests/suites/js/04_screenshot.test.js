@@ -22,8 +22,24 @@ const os = require('node:os');
 const path = require('node:path');
 
 const xa11y = require('../../../xa11y-js/index.js');
-const { ActionNotSupportedError, InvalidActionDataError, PermissionDeniedError } = xa11y;
+const {
+  ActionNotSupportedError,
+  InvalidActionDataError,
+  PermissionDeniedError,
+  PlatformError,
+} = xa11y;
 const { getApp, appConfig } = require('./helpers.js');
+
+// Known platform-error substrings that indicate the host can't capture the
+// screen at all (no Screen Recording grant on macOS GH runners, no working
+// X11 GetImage on a fresh Xvfb, etc.). These are environmental — the binding
+// surface is what we're testing, not screen-capture itself, so treat them
+// as a skip.
+const CAPTURE_UNAVAILABLE = [
+  'screenshotmanager returned no image',  // macOS without Screen Recording
+  'getimage',                              // X11 GetImage Match error on Xvfb
+  'no portal',                             // Wayland xdg-desktop-portal missing
+];
 
 async function tryCapture(fn) {
   try {
@@ -31,6 +47,12 @@ async function tryCapture(fn) {
   } catch (err) {
     if (err instanceof ActionNotSupportedError || err instanceof PermissionDeniedError) {
       return null;
+    }
+    if (err instanceof PlatformError) {
+      const msg = String(err.message || err).toLowerCase();
+      if (CAPTURE_UNAVAILABLE.some((needle) => msg.includes(needle))) {
+        return null;
+      }
     }
     throw err;
   }
