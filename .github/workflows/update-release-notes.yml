@@ -1,0 +1,88 @@
+name: Update release notes
+
+# Re-run the LLM release-note generator against an existing tag and
+# overwrite that release's notes. Useful when the generator failed during
+# the publish workflow (e.g. GitHub Models 403/429) and the release got
+# created with the plain git-log fallback.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag of the release to update (e.g. v0.7.0)"
+        required: true
+        type: string
+      since:
+        description: "Override the previous tag for the diff range (optional)"
+        required: false
+        type: string
+      dry_run:
+        description: "Render notes only, do not edit the release"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  update:
+    name: Regenerate notes for ${{ inputs.tag }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      models: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Need full history + tags so the script can resolve the previous
+          # tag and walk the commit range.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Verify tag exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "${{ inputs.tag }}" >/dev/null 2>&1; then
+            echo "::error::Release ${{ inputs.tag }} not found in this repo." >&2
+            exit 1
+          fi
+
+      - name: Generate release notes (LLM)
+        id: notes
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          NOTES_FILE="$RUNNER_TEMP/release_notes.md"
+          ARGS=("${{ inputs.tag }}")
+          if [ -n "${{ inputs.since }}" ]; then
+            ARGS+=(--since "${{ inputs.since }}")
+          fi
+          # No git-log fallback here on purpose: this workflow exists to
+          # *fix* a bad release, so a silent fallback to the same plain
+          # log we are trying to replace would defeat the point. Fail
+          # loudly instead and let the operator re-run after diagnosing.
+          node .github/scripts/generate-release-notes.mjs "${ARGS[@]}" > "$NOTES_FILE"
+          echo "notes-file=$NOTES_FILE" >> "$GITHUB_OUTPUT"
+          echo "----- release notes -----"
+          cat "$NOTES_FILE"
+          echo "-------------------------"
+
+      - name: Update GitHub Release
+        if: ${{ !inputs.dry_run }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "${{ inputs.tag }}" \
+            --notes-file "${{ steps.notes.outputs.notes-file }}"
+
+      - name: Dry-run summary
+        if: ${{ inputs.dry_run }}
+        run: |
+          echo "Dry run — release ${{ inputs.tag }} not modified." >&2

@@ -13,7 +13,7 @@ import { argv, env, exit, stderr, stdout } from "node:process";
 // Authenticates with the workflow's GITHUB_TOKEN — no separate API key needed.
 // See: https://docs.github.com/en/github-models/prototyping-with-ai-models
 const GITHUB_MODELS_URL = "https://models.github.ai/inference/chat/completions";
-const MODEL_ID = "openai/gpt-4o";
+const MODEL_ID = "openai/gpt-5-mini";
 
 const TOOL_DEFINITION = {
   type: "function",
@@ -212,6 +212,7 @@ async function invokeGithubModels(inputText, repoName, token) {
     },
   };
 
+  stderr.write(`POST ${GITHUB_MODELS_URL} (model=${MODEL_ID})\n`);
   const resp = await fetch(GITHUB_MODELS_URL, {
     method: "POST",
     headers: {
@@ -225,8 +226,26 @@ async function invokeGithubModels(inputText, repoName, token) {
 
   if (!resp.ok) {
     const detail = await resp.text();
+    // Surface status, rate-limit headers, and response body as separate
+    // stderr lines so the workflow log shows them even when the thrown
+    // Error message gets truncated or its newlines collapsed.
+    stderr.write(`GitHub Models error: ${resp.status} ${resp.statusText}\n`);
+    const interesting = [
+      "x-ratelimit-limit",
+      "x-ratelimit-remaining",
+      "x-ratelimit-reset",
+      "x-ratelimit-resource",
+      "retry-after",
+      "x-request-id",
+      "www-authenticate",
+    ];
+    for (const name of interesting) {
+      const value = resp.headers.get(name);
+      if (value) stderr.write(`  ${name}: ${value}\n`);
+    }
+    stderr.write(`Response body:\n${detail || "(empty)"}\n`);
     throw new Error(
-      `GitHub Models request failed: ${resp.status} ${resp.statusText}\n${detail}`,
+      `GitHub Models request failed: ${resp.status} ${resp.statusText} — ${detail.slice(0, 500) || "(empty body)"}`,
     );
   }
 
