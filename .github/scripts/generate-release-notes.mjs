@@ -13,7 +13,13 @@ import { argv, env, exit, stderr, stdout } from "node:process";
 // Authenticates with the workflow's GITHUB_TOKEN — no separate API key needed.
 // See: https://docs.github.com/en/github-models/prototyping-with-ai-models
 const GITHUB_MODELS_URL = "https://models.github.ai/inference/chat/completions";
-const MODEL_ID = "openai/gpt-5-mini";
+// Defaults to openai/gpt-4o-mini: long-standing on GitHub Models, Low
+// rate-limit tier (150 req/day, 8K in / 4K out on free), native tool
+// calling. Override via MODEL_ID env var to try alternatives without a
+// code change. Note: the catalog at models.github.ai/catalog/models
+// lists more models than the inference endpoint actually serves on the
+// free tier — a slug being in the catalog is not a guarantee.
+const MODEL_ID = env.MODEL_ID || "openai/gpt-4o-mini";
 
 // Per-commit caps. Kept tight because the GitHub Models free tier has
 // strict per-request input caps (e.g. 4000 tokens for gpt-5-mini), and
