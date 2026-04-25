@@ -331,6 +331,10 @@ def tauri_input_app(app_name, app):
 
     Module-scoped so the event log starts empty and focus state doesn't bleed
     in from widget tests. Skips automatically on non-Tauri apps.
+
+    Navigates back to the home page on teardown so that subsequent suites
+    (js, cli) and other test modules can rely on the OK / Submit buttons
+    being present.
     """
     import time
 
@@ -345,4 +349,15 @@ def tauri_input_app(app_name, app):
     else:
         pytest.fail("input-events page did not load within 5s")
 
-    yield app
+    try:
+        yield app
+    finally:
+        try:
+            app.locator('button[name="Back to widgets"]').press()
+            for _ in range(50):
+                if app.locator('button[name="OK"]').exists():
+                    break
+                time.sleep(0.1)
+        except Exception:
+            # Best-effort restoration — never fail the run on teardown.
+            pass

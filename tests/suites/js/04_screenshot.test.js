@@ -23,7 +23,7 @@ const path = require('node:path');
 
 const xa11y = require('../../../xa11y-js/index.js');
 const { ActionNotSupportedError, InvalidActionDataError, PermissionDeniedError } = xa11y;
-const { getApp } = require('./helpers.js');
+const { getApp, appConfig } = require('./helpers.js');
 
 async function tryCapture(fn) {
   try {
@@ -69,7 +69,14 @@ test('screenshot({ region }) respects scale', async (t) => {
 
 test('screenshot({ element }) uses the element bounds', async (t) => {
   const app = await getApp();
-  const button = await app.locator('button[name="Submit"]').element();
+  // Use whatever button this app considers primary (Submit on AccessKit,
+  // OK on Tauri/Cocoa/Qt/GTK/Electron) so we don't fail on schema mismatch.
+  const primary = appConfig.okButtonName || 'Submit';
+  const buttons = await app.locator(`button[name="${primary}"]`).elements();
+  if (buttons.length === 0) {
+    return t.skip(`primary button ${JSON.stringify(primary)} not found in this app`);
+  }
+  const button = buttons[0];
   if (!button.bounds || button.bounds.width === 0 || button.bounds.height === 0) {
     return t.skip('target element has no on-screen bounds (likely headless)');
   }

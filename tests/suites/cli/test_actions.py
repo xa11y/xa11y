@@ -36,6 +36,7 @@ def _assert_ok_or_unsupported(rc: int, stdout: str, stderr: str, action: str) ->
         lower = stderr.lower()
         tolerated = (
             "not supported" in lower
+            or "notsupported" in lower
             or "unsupported" in lower
             or "unknownobject" in lower
         )

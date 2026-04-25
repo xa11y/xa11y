@@ -23,10 +23,17 @@ def test_tree_output_is_non_empty(run_cli, app_pid):
 
 
 def test_tree_contains_window(run_cli, app_pid):
-    """The tree should contain at least one window element."""
+    """The tree should contain a top-level container.
+
+    Some toolkits expose the toplevel as ``window`` (Cocoa/Tauri/UIA) and
+    others as ``group`` (GTK4/AT-SPI) — accept either as evidence that we
+    walked into the app's tree at all.
+    """
     rc, stdout, stderr = run_cli("tree", "--pid", str(app_pid))
     assert rc == 0
-    assert "window" in stdout, f"expected 'window' in tree output:\n{stdout[:500]}"
+    assert "window" in stdout or "group" in stdout, (
+        f"expected 'window' or 'group' in tree output:\n{stdout[:500]}"
+    )
 
 
 def test_tree_contains_button(run_cli, app_pid):
