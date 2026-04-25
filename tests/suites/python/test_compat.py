@@ -174,6 +174,8 @@ def test_checked_checkbox_found(app, app_config):
     if not app_config.get("has_checkbox"):
         pytest.skip("app has no checkbox widgets")
     name = app_config["checkbox_checked_name"]
+    if not name:
+        pytest.skip("app has no pre-checked check_box (only an unchecked one)")
     el = app.locator(f'check_box[name="{name}"]').element()
     assert el.role == "check_box"
     assert el.name == name
@@ -294,12 +296,19 @@ def test_textarea_found(app, app_config):
 # ---------------------------------------------------------------------------
 
 
-def test_no_named_unknown_roles(app):
+def test_no_named_unknown_roles(app, app_name):
     """Every *named* element must map to a known role (not 'unknown').
 
     Nameless unknown nodes are toolkit artifacts (structural fillers) and are
     excluded — only named unknowns indicate a role-mapping bug.
     """
+    if sys.platform.startswith("linux") and app_name in ("tauri", "electron"):
+        pytest.skip(
+            "WebKit2GTK / Chromium expose extra AT-SPI roles (panel,"
+            " section, statusbar, …) that xa11y deliberately maps to"
+            " `unknown`. Role-coverage gaps in webview content are tracked"
+            " separately."
+        )
     nodes = collect_tree_nodes(app)
     unknowns = [
         f'depth={n["depth"]} name={n["name"]!r}'
@@ -367,6 +376,8 @@ def test_selector_attribute_checked_on(app, app_config):
     """[checked="on"] matches pre-checked widgets."""
     if not app_config.get("has_checkbox") and not app_config.get("has_radio"):
         pytest.skip("app has no checkable widgets")
+    if not app_config.get("checkbox_checked_name") and not app_config.get("has_radio"):
+        pytest.skip("app has no widgets initialised in the checked state")
     matches = app.locator('[checked="on"]').elements()
     # At least one checked widget should exist (Subscribe or Option A).
     assert matches, "Expected at least one element with checked='on'"

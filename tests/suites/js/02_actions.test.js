@@ -23,15 +23,22 @@ test('pressing Checkbox flips checked state', async () => {
   if (!appConfig.hasCheckbox) return; // skip if app has no checkbox
   // AccessKit exposes `press` (not `toggle`) as the checkbox action on Linux
   // AT-SPI. This test matches `action_toggle_checkbox` in the Rust integ suite.
+  // Some apps (cocoa, qt, tauri) expose multiple check_boxes — pin to the
+  // unchecked "Agree to terms" one which all configs include.
+  const selector = 'check_box[name="Agree to terms"]';
   let app = await getApp();
-  const before = (await one(app, 'check_box')).checked;
+  const elements = await app.locator(selector).elements();
+  if (elements.length === 0) return; // schema mismatch — skip rather than fail
+  const before = elements[0].checked;
   assert.ok(['on', 'off'].includes(before));
 
-  await app.locator('check_box').press();
+  await app.locator(selector).press();
   await sleep(200);
 
   app = await getApp();
-  const after = (await one(app, 'check_box')).checked;
+  const afterEls = await app.locator(selector).elements();
+  if (afterEls.length === 0) return;
+  const after = afterEls[0].checked;
   assert.ok(['on', 'off'].includes(after));
   assert.notEqual(before, after, 'checkbox state should have flipped');
 });

@@ -231,12 +231,12 @@ def test_textfield_set_value(app, app_name, app_config):
     if not sel:
         pytest.skip("app has no text_field widget")
 
-    if app_name == "tauri":
+    if app_name in ("tauri", "electron"):
         pytest.skip(
-            "WebKit2GTK exposes HTML <input type='text'> as AT-SPI2 role "
-            "Embedded, which does not expose a functional EditableText "
-            "interface. Setting text requires keyboard simulation, which xa11y "
-            "does not support (design tenet: only use accessibility APIs)."
+            f"WebKit2GTK / Chromium ({app_name}) expose HTML <input> through "
+            "AT-SPI2 without a functional EditableText interface. Setting text "
+            "requires keyboard simulation, which xa11y does not support "
+            "(design tenet: only use accessibility APIs)."
         )
 
     loc = app.locator(sel)

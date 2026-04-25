@@ -869,7 +869,17 @@ impl LinuxProvider {
             if child.path == "/org/a11y/atspi/null" {
                 continue;
             }
-            // Try Application.Id first
+            // Prefer D-Bus connection PID — it's authoritative for the
+            // process owning the bus connection. Application.Id is *not* a
+            // process pid: AT-SPI assigns it as a registry-local index
+            // (1, 2, 3, …) for some bridges (notably GTK4), so matching
+            // against Application.Id alone misses real processes.
+            if let Some(app_pid) = self.get_dbus_pid(&child.bus_name) {
+                if app_pid == pid {
+                    return Ok(child.clone());
+                }
+            }
+            // Fall back to Application.Id for adapters that do set it to pid.
             if let Ok(proxy) =
                 self.make_proxy(&child.bus_name, &child.path, "org.a11y.atspi.Application")
             {
@@ -877,12 +887,6 @@ impl LinuxProvider {
                     if app_pid as u32 == pid {
                         return Ok(child.clone());
                     }
-                }
-            }
-            // Fall back to D-Bus connection PID
-            if let Some(app_pid) = self.get_dbus_pid(&child.bus_name) {
-                if app_pid == pid {
-                    return Ok(child.clone());
                 }
             }
         }
@@ -938,31 +942,22 @@ impl LinuxProvider {
             })
     }
 
-    /// Get PID from Application interface, falling back to D-Bus connection PID.
+    /// Get the process PID for an AT-SPI accessible. Prefers the D-Bus
+    /// connection PID over `Application.Id`: the latter is a registry-local
+    /// index (1, 2, 3, …) on some bridges (e.g. GTK4), not a real pid, so
+    /// reading it first produces apps whose `pid` property doesn't match the
+    /// process the user launched.
     fn get_app_pid(&self, aref: &AccessibleRef) -> Option<u32> {
-        // Try Application.Id first
+        if let Some(pid) = self.get_dbus_pid(&aref.bus_name) {
+            return Some(pid);
+        }
+
+        // Fall back to Application.Id for adapters that set it to pid.
         if let Ok(proxy) = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Application")
         {
             if let Ok(pid) = proxy.get_property::<i32>("Id") {
                 if pid > 0 {
                     return Some(pid as u32);
-                }
-            }
-        }
-
-        // Fall back to D-Bus GetConnectionUnixProcessID
-        if let Ok(proxy) = self.make_proxy(
-            "org.freedesktop.DBus",
-            "/org/freedesktop/DBus",
-            "org.freedesktop.DBus",
-        ) {
-            if let Ok(reply) =
-                proxy.call_method("GetConnectionUnixProcessID", &(aref.bus_name.as_str(),))
-            {
-                if let Ok(pid) = reply.body().deserialize::<u32>() {
-                    if pid > 0 {
-                        return Some(pid);
-                    }
                 }
             }
         }
