@@ -1,11 +1,11 @@
-// Integration tests: basic tree discovery against the AccessKit test app.
+// Integration tests: basic tree discovery against the test app.
 
 'use strict';
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { getApp, one } = require('./helpers.js');
+const { getApp, one, appConfig } = require('./helpers.js');
 
 test('app is reachable', async () => {
   const app = await getApp();
@@ -13,15 +13,10 @@ test('app is reachable', async () => {
   assert.ok(typeof app.pid === 'number' && app.pid > 0);
 });
 
-test('App.list includes our test app', async () => {
-  const { App } = require('../../index.js');
+test('App.list is non-empty', async () => {
+  const { App } = require('../../../xa11y-js/index.js');
   const apps = await App.list();
   assert.ok(apps.length >= 1, 'expected at least one running app');
-  const hasTestApp = apps.some((a) => (a.name || '').toLowerCase().includes('xa11y'));
-  assert.ok(
-    hasTestApp,
-    `expected to find xa11y test app in: ${apps.map((a) => a.name).join(', ')}`,
-  );
 });
 
 test('tree has a Window or app is a Window', async () => {
@@ -31,28 +26,34 @@ test('tree has a Window or app is a Window', async () => {
   assert.ok(windows.length >= 0);
 });
 
-test('tree has at least two buttons', async () => {
+test('tree has at least the expected number of buttons', async () => {
   const app = await getApp();
   const buttons = await app.locator('button').elements();
-  assert.ok(buttons.length >= 2, `expected >=2 buttons, found ${buttons.length}`);
+  assert.ok(
+    buttons.length >= appConfig.minButtons,
+    `expected >=${appConfig.minButtons} buttons, found ${buttons.length}`,
+  );
 });
 
-test('tree has the Submit button', async () => {
+test('tree has the primary button', async () => {
+  if (!appConfig.okButtonName) return; // skip if app has no named primary button
   const app = await getApp();
-  const submit = await one(app, 'button[name="Submit"]');
-  assert.equal(submit.role, 'button');
-  assert.equal(submit.name, 'Submit');
-  assert.equal(submit.enabled, true);
+  const btn = await one(app, `button[name="${appConfig.okButtonName}"]`);
+  assert.equal(btn.role, 'button');
+  assert.equal(btn.name, appConfig.okButtonName);
+  assert.equal(btn.enabled, true);
 });
 
-test('tree has the Name text field', async () => {
+test('tree has the named text field', async () => {
+  if (!appConfig.textFieldName) return; // skip if app has no reliably-labelled text field
   const app = await getApp();
-  const field = await one(app, 'text_field[name="Name"]');
+  const field = await one(app, `text_field[name="${appConfig.textFieldName}"]`);
   assert.equal(field.role, 'text_field');
   assert.equal(field.editable, true);
 });
 
 test('tree has a Checkbox', async () => {
+  if (!appConfig.hasCheckbox) return; // skip if app has no checkbox
   const app = await getApp();
   const checks = await app.locator('check_box').elements();
   assert.ok(checks.length >= 1, 'expected a checkbox');

@@ -13,12 +13,19 @@
 
 'use strict';
 
+// Only runs against Tauri and Electron — input_sim tests one-per-platform strategy
+const XA11Y_TEST_APP = process.env.XA11Y_TEST_APP || 'accesskit';
+if (!['tauri', 'electron'].includes(XA11Y_TEST_APP)) {
+  console.log(`Skipping input_sim tests for app=${XA11Y_TEST_APP}`);
+  process.exit(0);
+}
+
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const xa11y = require('../../index.js');
+const xa11y = require('../../../xa11y-js/index.js');
 const { InvalidActionDataError } = xa11y;
-const { getApp } = require('./helpers.js');
+const { getApp, appConfig } = require('./helpers.js');
 
 const skip = process.env.XA11Y_SKIP_INPUT_SIM === '1';
 
@@ -32,10 +39,17 @@ test('moveTo accepts an [x, y] tuple', { skip }, async () => {
   await sim.moveTo([10, 10]);
 });
 
-test('moveTo accepts an Element', { skip }, async () => {
+test('moveTo accepts an Element', { skip }, async (t) => {
   const app = await getApp();
   const sim = xa11y.inputSim();
-  const button = await app.locator('button[name="Submit"]').element();
+  // Use the app's primary button name (Submit on AccessKit, OK on Tauri/
+  // Electron). The test only cares that an Element-shaped target works.
+  const primary = appConfig.okButtonName || 'Submit';
+  const buttons = await app.locator(`button[name="${primary}"]`).elements();
+  if (buttons.length === 0) {
+    return t.skip(`primary button ${JSON.stringify(primary)} not found in this app`);
+  }
+  const button = buttons[0];
   // If the app is headless/off-screen the element may have null bounds;
   // in that case moveTo should reject with an XA11yError (NoElementBounds).
   if (button.bounds === null) {

@@ -11,7 +11,7 @@ env:
   RUSTFLAGS: -Dwarnings
 
 jobs:
-  # ── Linux: unit tests + integration tests + Qt tests ─────────────
+  # ── Linux: unit tests + AccessKit Rust integ tests ────────────────
   linux:
     name: Linux
     runs-on: ubuntu-latest
@@ -31,14 +31,6 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
-
-      - name: Cache Tauri test app build
-        uses: actions/cache@v5
-        with:
-          path: test-apps/tauri/target
-          key: ${{ runner.os }}-tauri-app-${{ hashFiles('test-apps/tauri/Cargo.lock', 'test-apps/tauri/Cargo.toml', 'test-apps/tauri/build.rs', 'test-apps/tauri/tauri.conf.json', 'test-apps/tauri/src/**', 'test-apps/tauri/frontend/**') }}
-          restore-keys: |
-            ${{ runner.os }}-tauri-app-
 
       - uses: actions/setup-python@v6
         with:
@@ -70,15 +62,6 @@ jobs:
       - name: Run integration tests
         run: ./scripts/run_integ_tests.sh
 
-      - name: Run Qt integration tests
-        run: ./scripts/run_qt_tests.sh
-
-      - name: Run GTK integration tests
-        run: ./scripts/run_gtk_tests.sh
-
-      - name: Run Tauri integration tests
-        run: ./scripts/run_tauri_tests.sh
-
   # ── macOS: unit tests ──────────────────────────────────────────────
   macos:
     name: macOS
@@ -104,33 +87,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Cache Cocoa test app binary
-        uses: actions/cache@v5
-        with:
-          path: test-apps/cocoa/xa11y-cocoa-test-app
-          key: ${{ runner.os }}-cocoa-app-${{ hashFiles('test-apps/cocoa/main.swift', 'test-apps/cocoa/Makefile') }}
-
       - name: Run unit tests
         run: cargo test --workspace
-
-      - name: Grant accessibility TCC permission
-        run: |
-          # GitHub Actions macOS runners allow sudo writes to the system TCC
-          # database (SIP only covers /System/*). We use named columns so the
-          # INSERT works across macOS versions regardless of how many extra
-          # columns (e.g. boots_count, is_deleted on macOS 14+) the table has.
-          PYTHON_PATH=$(python3 -c "import sys; print(sys.executable)")
-          echo "Granting TCC kTCCServiceAccessibility to: $PYTHON_PATH"
-          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
-            "INSERT OR REPLACE INTO access(service,client,client_type,auth_value,auth_reason,auth_version,csreq,policy_id,indirect_object_identifier_type,indirect_object_identifier,indirect_object_code_identity,flags,last_modified) \
-             VALUES('kTCCServiceAccessibility','${PYTHON_PATH}',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));"
-          # Restart tccd so the new grant is picked up without waiting for the
-          # next natural reload cycle. launchctl stop triggers an auto-restart.
-          sudo launchctl stop com.apple.tccd 2>/dev/null || true
-          sleep 2
-
-      - name: Run Cocoa integration tests
-        run: ./scripts/run_cocoa_tests.sh
 
       # macOS Rust integration tests (including the AX-call-count regression
       # tests in `xa11y-macos/src/ax.rs`) are intentionally NOT wired into CI.
@@ -148,7 +106,7 @@ jobs:
       # limit prevents hangs but widgets aren't fully exposed.
       # Re-enable after fixing macOS provider tree building for Qt.
 
-  # ── Windows: unit tests + Qt tests ─────────────────────────────────
+  # ── Windows: unit tests + AccessKit Rust integ tests ───────────────
   windows:
     name: Windows
     runs-on: windows-latest
@@ -186,24 +144,213 @@ jobs:
         shell: pwsh
         run: .\scripts\run_integ_tests_windows.ps1
 
-      - name: Create virtualenv and install deps
+  # ── Compatibility integ matrix: one app × one OS × all language suites ──
+  #
+  # Each matrix cell starts the test app once, then runs the Python, JS, and
+  # CLI suites against it via tests/harness/launch.py. This replaces the old
+  # per-language per-app per-OS jobs (run_qt_tests.sh, run_gtk_tests.sh,
+  # run_tauri_tests.sh, run_cocoa_tests.sh, run_electron_tests.sh,
+  # js-integ, js-integ-macos, js-integ-windows, electron).
+  integ:
+    name: Integ (${{ matrix.app }}) on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest,  app: accesskit }
+          - { os: macos-latest,   app: accesskit }
+          - { os: windows-latest, app: accesskit }
+          - { os: ubuntu-latest,  app: qt }
+          - { os: ubuntu-latest,  app: gtk }
+          - { os: ubuntu-latest,  app: tauri }
+          - { os: ubuntu-latest,  app: electron }
+          - { os: macos-latest,   app: cocoa }
+          - { os: macos-latest,   app: tauri }
+          - { os: windows-latest, app: qt }
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-integ-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-integ-
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: xa11y-js/package-lock.json
+
+      # ── System dependencies (Linux only) ──────────────────────────
+      - name: Install system dependencies
+        # `awalsh128/cache-apt-pkgs-action` caches the .debs so re-runs on
+        # the same package-set finish in ~10s. Bump `version` to invalidate
+        # when the package list changes. Electron adds nss/atk/cups/drm/gbm
+        # on top of the base X/dbus/a11y set.
+        if: runner.os == 'Linux'
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          version: 1
+          packages: >-
+            xvfb dbus dbus-x11 fluxbox
+            at-spi2-core
+            libxkbcommon-x11-0 libxkbcommon-x11-dev
+            libxcursor1 libxrandr2 libxi6
+            libx11-xcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0
+            libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1
+            libxcb-image0 libxcb-render-util0 libxcb-xkb1
+            libgtk-4-dev gir1.2-gtk-4.0 libgirepository-2.0-dev libcairo2-dev
+            libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev libgtk-3-dev
+            libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2
+            libdrm2 libgbm1 libxcomposite1 libxdamage1 libxfixes3
+            libpango-1.0-0 libasound2t64
+
+      # ── Build Rust workspace (all workspace test-app binaries) ─────
+      - name: Build Rust workspace
+        run: cargo build --workspace
+
+      # ── Tauri app (not in workspace — has its own Cargo.lock) ──────
+      - name: Cache Tauri test app build
+        if: matrix.app == 'tauri'
+        uses: actions/cache@v5
+        with:
+          path: test-apps/tauri/target
+          key: ${{ runner.os }}-tauri-app-${{ hashFiles('test-apps/tauri/Cargo.lock', 'test-apps/tauri/Cargo.toml', 'test-apps/tauri/build.rs', 'test-apps/tauri/tauri.conf.json', 'test-apps/tauri/src/**', 'test-apps/tauri/frontend/**') }}
+          restore-keys: |
+            ${{ runner.os }}-tauri-app-
+
+      - name: Build Tauri test app
+        if: matrix.app == 'tauri'
+        run: cargo build --manifest-path test-apps/tauri/Cargo.toml
+
+      # ── Electron node_modules ──────────────────────────────────────
+      - name: Cache Electron node_modules
+        if: matrix.app == 'electron'
+        uses: actions/cache@v5
+        with:
+          path: test-apps/electron/node_modules
+          key: ${{ runner.os }}-electron-app-${{ hashFiles('test-apps/electron/package.json') }}
+          restore-keys: |
+            ${{ runner.os }}-electron-app-
+
+      - name: Install Electron node_modules
+        if: matrix.app == 'electron'
+        working-directory: test-apps/electron
+        run: npm install
+
+      # ── Build xa11y-python in a venv ──────────────────────────────
+      - name: Create virtualenv and install Python tools
+        if: runner.os != 'Windows'
+        run: |
+          python -m venv .venv-integ
+          .venv-integ/bin/pip install maturin
+          .venv-integ/bin/pip install -r tests/requirements.txt
+
+      - name: Create virtualenv and install Python tools (Windows)
+        if: runner.os == 'Windows'
         shell: bash
         run: |
-          python -m venv .venv-qt-test
-          .venv-qt-test/Scripts/pip.exe install maturin
-          .venv-qt-test/Scripts/pip.exe install -r tests/requirements.txt
-          .venv-qt-test/Scripts/pip.exe install -r test-apps/qt/requirements.txt
+          python -m venv .venv-integ
+          .venv-integ/Scripts/pip.exe install maturin
+          .venv-integ/Scripts/pip.exe install -r tests/requirements.txt
 
       - name: Build & install xa11y Python bindings
-        shell: bash
+        if: runner.os != 'Windows'
         working-directory: xa11y-python
-        run: ../.venv-qt-test/Scripts/pip.exe install -e .
+        run: ../.venv-integ/bin/pip install -e .
 
-      - name: Run Qt integration tests
+      - name: Build & install xa11y Python bindings (Windows)
+        if: runner.os == 'Windows'
+        working-directory: xa11y-python
         shell: bash
-        env:
-          QT_ACCESSIBILITY: "1"
-        run: .venv-qt-test/Scripts/pytest.exe tests/qt/ -v -s --timeout=15 --rootdir=.
+        run: ../.venv-integ/Scripts/pip.exe install -e .
+
+      # ── Build xa11y-js ─────────────────────────────────────────────
+      - name: Cache xa11y-js node_modules and native target
+        uses: actions/cache@v5
+        with:
+          path: |
+            xa11y-js/node_modules
+            xa11y-js/target
+          key: ${{ runner.os }}-xa11y-js-${{ hashFiles('xa11y-js/package-lock.json', 'xa11y-js/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-xa11y-js-
+
+      - name: Install xa11y-js dependencies and build
+        working-directory: xa11y-js
+        run: npm install && npm run build:debug
+
+      # ── App-specific Python requirements ──────────────────────────
+      - name: Install Qt Python requirements
+        if: matrix.app == 'qt' && runner.os != 'Windows'
+        run: .venv-integ/bin/pip install -r test-apps/qt/requirements.txt
+
+      - name: Install Qt Python requirements (Windows)
+        if: matrix.app == 'qt' && runner.os == 'Windows'
+        shell: bash
+        run: .venv-integ/Scripts/pip.exe install -r test-apps/qt/requirements.txt
+
+      - name: Install GTK Python requirements
+        if: matrix.app == 'gtk'
+        run: .venv-integ/bin/pip install -r test-apps/gtk/requirements.txt
+
+      # ── Grant TCC on macOS ─────────────────────────────────────────
+      - name: Grant accessibility TCC permission
+        if: runner.os == 'macOS'
+        run: |
+          # GitHub Actions macOS runners allow sudo writes to the system TCC
+          # database (SIP only covers /System/*). We use named columns so the
+          # INSERT works across macOS versions regardless of how many extra
+          # columns (e.g. boots_count, is_deleted on macOS 14+) the table has.
+          PYTHON_PATH=$(.venv-integ/bin/python -c "import sys; print(sys.executable)")
+          echo "Granting TCC kTCCServiceAccessibility to: $PYTHON_PATH"
+          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+            "INSERT OR REPLACE INTO access(service,client,client_type,auth_value,auth_reason,auth_version,csreq,policy_id,indirect_object_identifier_type,indirect_object_identifier,indirect_object_code_identity,flags,last_modified) \
+             VALUES('kTCCServiceAccessibility','${PYTHON_PATH}',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));"
+          # Restart tccd so the new grant is picked up without waiting for the
+          # next natural reload cycle. launchctl stop triggers an auto-restart.
+          sudo launchctl stop com.apple.tccd 2>/dev/null || true
+          sleep 2
+
+      # ── Cache Cocoa test app binary ────────────────────────────────
+      - name: Cache Cocoa test app binary
+        if: matrix.app == 'cocoa'
+        uses: actions/cache@v5
+        with:
+          path: test-apps/cocoa/xa11y-cocoa-test-app
+          key: ${{ runner.os }}-cocoa-app-${{ hashFiles('test-apps/cocoa/main.swift', 'test-apps/cocoa/Makefile') }}
+
+      # ── Run harness (Linux: wrapped in Xvfb + dbus-run-session) ───
+      - name: Run integration harness (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1280x1024x24 -ac &
+          dbus-run-session -- .venv-integ/bin/python tests/harness/launch.py ${{ matrix.app }} python js cli
+
+      - name: Run integration harness (macOS)
+        if: runner.os == 'macOS'
+        run: .venv-integ/bin/python tests/harness/launch.py ${{ matrix.app }} python js cli
+
+      - name: Run integration harness (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: .venv-integ/Scripts/python.exe tests/harness/launch.py ${{ matrix.app }} python js cli
 
   # ── Lint & format ──────────────────────────────────────────────────
   lint:
@@ -247,6 +394,9 @@ jobs:
 
       - name: Check bindings parity
         run: cargo xtask check-bindings-parity
+
+      - name: Check test coverage matrix
+        run: python tests/matrix_check.py
 
   # ── License check ─────────────────────────────────────────────────
   license-check:
@@ -467,203 +617,6 @@ jobs:
       - name: Run unit tests
         working-directory: xa11y-js
         run: npm test
-
-  # ── JS integration tests on Linux against the AccessKit test app ──
-  js-integ:
-    name: JS integration (Linux)
-    runs-on: ubuntu-latest
-    needs: js
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-            xa11y-js/target
-          key: ${{ runner.os }}-cargo-js-integ-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-js-integ-
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: xa11y-js/package-lock.json
-
-      - name: Install system dependencies
-        # Same list as the Linux unit-test job: xvfb + dbus + at-spi2 for
-        # accessibility, xcb/xkb/egl for winit's window backend. Cached
-        # via `awalsh128/cache-apt-pkgs-action` — bump `version` to
-        # invalidate when the package list changes.
-        uses: awalsh128/cache-apt-pkgs-action@v1
-        with:
-          version: 1
-          packages: >-
-            xvfb dbus dbus-x11 fluxbox
-            at-spi2-core
-            libxkbcommon-x11-0 libxkbcommon-x11-dev
-            libxcursor1 libxrandr2 libxi6
-            libx11-xcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0
-            libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3
-            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1
-            libxcb-image0 libxcb-render-util0 libxcb-xkb1
-
-      - name: Run JS integration tests
-        id: js_integ
-        run: ./scripts/run_js_tests.sh
-
-  # ── JS integration tests on macOS against the AccessKit test app ──
-  js-integ-macos:
-    name: JS integration (macOS)
-    runs-on: macos-latest
-    needs: js
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-            xa11y-js/target
-          key: ${{ runner.os }}-cargo-js-integ-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-js-integ-
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: xa11y-js/package-lock.json
-
-      - name: Grant accessibility TCC permission
-        run: |
-          # Grant kTCCServiceAccessibility to the node binary so that when
-          # node --test drives the xa11y JS bindings against the AccessKit
-          # test app, AXUIElement calls aren't blocked. Same SQL pattern as
-          # the `macos` job — SIP covers /System/* only on hosted runners.
-          NODE_PATH=$(which node)
-          echo "Granting TCC kTCCServiceAccessibility to: $NODE_PATH"
-          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
-            "INSERT OR REPLACE INTO access(service,client,client_type,auth_value,auth_reason,auth_version,csreq,policy_id,indirect_object_identifier_type,indirect_object_identifier,indirect_object_code_identity,flags,last_modified) \
-             VALUES('kTCCServiceAccessibility','${NODE_PATH}',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));"
-          sudo launchctl stop com.apple.tccd 2>/dev/null || true
-          sleep 2
-
-      - name: Run JS integration tests
-        id: js_integ
-        run: ./scripts/run_js_tests.sh
-
-  # ── JS integration tests on Windows against the AccessKit test app ──
-  js-integ-windows:
-    name: JS integration (Windows)
-    runs-on: windows-latest
-    needs: js
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-            xa11y-js/target
-          key: ${{ runner.os }}-cargo-js-integ-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-js-integ-
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: xa11y-js/package-lock.json
-
-      - name: Run JS integration tests
-        id: js_integ
-        # `shell: bash` on windows-latest routes to Git Bash, which provides
-        # the POSIX environment run_js_tests.sh expects. The script uses
-        # `timeout` which is shipped with Git Bash's coreutils on the
-        # hosted runner image — see task notes if that ever changes.
-        shell: bash
-        run: ./scripts/run_js_tests.sh
-
-  # ── Electron integration tests (Linux only; bug is Linux-specific) ──
-  electron:
-    name: Electron integration (Linux)
-    runs-on: ubuntu-latest
-    needs: js
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-            xa11y-js/target
-          key: ${{ runner.os }}-cargo-electron-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-electron-
-
-      - name: Cache Electron node_modules
-        uses: actions/cache@v5
-        with:
-          path: test-apps/electron/node_modules
-          key: ${{ runner.os }}-electron-app-${{ hashFiles('test-apps/electron/package.json') }}
-          restore-keys: |
-            ${{ runner.os }}-electron-app-
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: xa11y-js/package-lock.json
-
-      - name: Install system dependencies
-        # Cached via `awalsh128/cache-apt-pkgs-action`; bump `version` to
-        # invalidate when the package list changes. Adds the Electron
-        # runtime deps (nss/atk/cups/…) on top of the base X/dbus/a11y set.
-        uses: awalsh128/cache-apt-pkgs-action@v1
-        with:
-          version: 1
-          packages: >-
-            xvfb dbus dbus-x11 fluxbox
-            at-spi2-core
-            libxkbcommon-x11-0 libxkbcommon-x11-dev
-            libxcursor1 libxrandr2 libxi6
-            libx11-xcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0
-            libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3
-            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1
-            libxcb-image0 libxcb-render-util0 libxcb-xkb1
-            libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2
-            libdrm2 libgbm1 libxcomposite1 libxdamage1 libxfixes3
-            libpango-1.0-0 libasound2t64
-
-      - name: Run Electron integration tests
-        id: electron_integ
-        run: ./scripts/run_electron_tests.sh
 
   # ── Fuzz testing ───────────────────────────────────────────────────
   fuzz:
