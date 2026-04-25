@@ -293,7 +293,13 @@ def app(app_name: str) -> xa11y.App:
     pid_env = os.environ.get("XA11Y_TEST_APP_PID")
     if pid_env:
         pid = int(pid_env)
-        app_handle = xa11y.App.by_pid(pid)
+        try:
+            app_handle = xa11y.App.by_pid(pid, timeout=10.0)
+        except (xa11y.SelectorNotMatchedError, xa11y.PlatformError):
+            name = os.environ.get("XA11Y_TEST_APP_NAME")
+            if not name:
+                raise
+            app_handle = xa11y.App.by_name(name, timeout=10.0)
         yield app_handle
         return
 

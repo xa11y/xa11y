@@ -15,6 +15,25 @@ from tests.helpers import launch_test_app
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
+
+def _connect_to_running_app(xa11y, pid: int):
+    """Connect to a test app the harness already launched.
+
+    Tries ``App.by_pid`` first (most precise) with a generous timeout to
+    absorb AT-SPI registration delays on Linux, then falls back to
+    ``App.by_name`` using the harness-discovered ``XA11Y_TEST_APP_NAME`` —
+    on some toolkits the app exposes a name to AT-SPI before its pid lookup
+    becomes resolvable.
+    """
+    try:
+        return xa11y.App.by_pid(pid, timeout=10.0)
+    except (xa11y.SelectorNotMatchedError, xa11y.PlatformError):
+        name = os.environ.get("XA11Y_TEST_APP_NAME")
+        if not name:
+            raise
+        return xa11y.App.by_name(name, timeout=10.0)
+
+
 # ── Per-app launch configurations ────────────────────────────────────────────
 
 _TAURI_BINARY = str(
@@ -215,7 +234,7 @@ def app(app_name: str):
     pid_env = os.environ.get("XA11Y_TEST_APP_PID")
     if pid_env:
         pid = int(pid_env)
-        app_handle = xa11y.App.by_pid(pid)
+        app_handle = _connect_to_running_app(xa11y, pid)
         yield app_handle
         return
 

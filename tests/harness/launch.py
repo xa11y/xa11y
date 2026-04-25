@@ -330,11 +330,22 @@ def _find_cli_binary() -> str | None:
 # Suite runner
 # ---------------------------------------------------------------------------
 
-_SUITE_COMMANDS: dict[str, list[str]] = {
-    "python": [sys.executable, "-m", "pytest", "tests/suites/python/", "-v"],
-    "js": ["node", "--test", "tests/suites/js/"],
-    "cli": [sys.executable, "-m", "pytest", "tests/suites/cli/", "-v"],
-}
+def _suite_command(suite: str) -> list[str]:
+    """Build the command to run a suite. JS test files are listed explicitly
+    because Node's ``--test`` flag does not auto-discover files in a directory
+    on all supported versions.
+    """
+    if suite == "python":
+        return [sys.executable, "-m", "pytest", "tests/suites/python/", "-v"]
+    if suite == "cli":
+        return [sys.executable, "-m", "pytest", "tests/suites/cli/", "-v"]
+    if suite == "js":
+        js_files = sorted(
+            str(p.relative_to(PROJECT_ROOT))
+            for p in (PROJECT_ROOT / "tests" / "suites" / "js").glob("*.test.js")
+        )
+        return ["node", "--test", *js_files]
+    raise ValueError(f"Unknown suite: {suite!r}")
 
 
 def _run_suites(
@@ -351,9 +362,18 @@ def _run_suites(
 
     worst_rc = 0
 
+    # The accesskit test app exposes a different widget set than the shared
+    # python/cli test schemas (e.g. "Submit"/"Cancel" instead of "OK"). The
+    # primary coverage for accesskit is the Rust integ suite — skip the
+    # python/js/cli compat suites entirely for it.
+    accesskit_skip = {"python", "cli", "js"}
+
     for suite in suites:
-        if app == "accesskit" and suite == "python":
-            print(f"\nSkipping python suite for accesskit (Rust integ suite is primary)")
+        if app == "accesskit" and suite in accesskit_skip:
+            print(
+                f"\nSkipping {suite} suite for accesskit "
+                f"(Rust integ suite is primary; widget schema differs)"
+            )
             continue
 
         if suite == "cli":
@@ -368,7 +388,7 @@ def _run_suites(
         else:
             suite_env = env
 
-        cmd = _SUITE_COMMANDS[suite]
+        cmd = _suite_command(suite)
         print(f"\n=== Running {suite} suite against {app} ===\n")
         result = subprocess.run(cmd, env=suite_env, cwd=str(PROJECT_ROOT))
         rc = result.returncode
