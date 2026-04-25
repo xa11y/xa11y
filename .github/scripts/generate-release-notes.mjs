@@ -235,6 +235,55 @@ function buildSystemPrompt(repoName) {
   );
 }
 
+// Retry 5xx and 429 with exponential backoff. Don't retry other 4xx —
+// those are deterministic config errors (bad model, bad payload) and a
+// retry just wastes the daily quota.
+const RETRY_DELAYS_MS = [2000, 5000, 10000];
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function invokeGithubModelsOnce(payload, token) {
+  const resp = await fetch(GITHUB_MODELS_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/vnd.github+json",
+      "Content-Type": "application/json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (resp.ok) return { ok: true, body: await resp.json() };
+
+  const detail = await resp.text();
+  // Surface status, rate-limit headers, and response body as separate
+  // stderr lines so the workflow log shows them even when the thrown
+  // Error message gets truncated or its newlines collapsed.
+  stderr.write(`GitHub Models error: ${resp.status} ${resp.statusText}\n`);
+  const interesting = [
+    "x-ratelimit-limit",
+    "x-ratelimit-remaining",
+    "x-ratelimit-reset",
+    "x-ratelimit-resource",
+    "retry-after",
+    "x-request-id",
+    "www-authenticate",
+  ];
+  for (const name of interesting) {
+    const value = resp.headers.get(name);
+    if (value) stderr.write(`  ${name}: ${value}\n`);
+  }
+  stderr.write(`Response body:\n${detail || "(empty)"}\n`);
+  return {
+    ok: false,
+    status: resp.status,
+    statusText: resp.statusText,
+    detail,
+    retryAfter: Number(resp.headers.get("retry-after")) || null,
+  };
+}
+
 async function invokeGithubModels(inputText, repoName, token) {
   const payload = {
     model: MODEL_ID,
@@ -251,44 +300,34 @@ async function invokeGithubModels(inputText, repoName, token) {
     },
   };
 
-  stderr.write(`POST ${GITHUB_MODELS_URL} (model=${MODEL_ID})\n`);
-  const resp = await fetch(GITHUB_MODELS_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/vnd.github+json",
-      "Content-Type": "application/json",
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  if (!resp.ok) {
-    const detail = await resp.text();
-    // Surface status, rate-limit headers, and response body as separate
-    // stderr lines so the workflow log shows them even when the thrown
-    // Error message gets truncated or its newlines collapsed.
-    stderr.write(`GitHub Models error: ${resp.status} ${resp.statusText}\n`);
-    const interesting = [
-      "x-ratelimit-limit",
-      "x-ratelimit-remaining",
-      "x-ratelimit-reset",
-      "x-ratelimit-resource",
-      "retry-after",
-      "x-request-id",
-      "www-authenticate",
-    ];
-    for (const name of interesting) {
-      const value = resp.headers.get(name);
-      if (value) stderr.write(`  ${name}: ${value}\n`);
-    }
-    stderr.write(`Response body:\n${detail || "(empty)"}\n`);
-    throw new Error(
-      `GitHub Models request failed: ${resp.status} ${resp.statusText} — ${detail.slice(0, 500) || "(empty body)"}`,
+  let result;
+  for (let attempt = 0; attempt <= RETRY_DELAYS_MS.length; attempt++) {
+    stderr.write(
+      `POST ${GITHUB_MODELS_URL} (model=${MODEL_ID}, attempt ${attempt + 1}/${RETRY_DELAYS_MS.length + 1})\n`,
     );
+    try {
+      result = await invokeGithubModelsOnce(payload, token);
+    } catch (err) {
+      // Network-level failure (DNS, socket reset, fetch timeout). Retry
+      // these the same as a 5xx — they're almost always transient.
+      stderr.write(`Network error: ${err.message ?? err}\n`);
+      result = { ok: false, status: 0, statusText: "network error", detail: String(err.message ?? err), retryAfter: null };
+    }
+    if (result.ok) break;
+
+    const isTransient = result.status === 0 || result.status === 429 || result.status >= 500;
+    const hasRetriesLeft = attempt < RETRY_DELAYS_MS.length;
+    if (!isTransient || !hasRetriesLeft) {
+      throw new Error(
+        `GitHub Models request failed: ${result.status} ${result.statusText} — ${(result.detail ?? "").slice(0, 500) || "(empty body)"}`,
+      );
+    }
+    const delay = result.retryAfter ? result.retryAfter * 1000 : RETRY_DELAYS_MS[attempt];
+    stderr.write(`Transient ${result.status} — retrying in ${delay}ms.\n`);
+    await sleep(delay);
   }
 
-  const body = await resp.json();
+  const body = result.body;
   const choices = body.choices ?? [];
   if (choices.length === 0) {
     throw new Error(`No choices in response: ${JSON.stringify(body).slice(0, 1000)}`);
