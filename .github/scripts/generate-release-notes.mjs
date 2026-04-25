@@ -15,6 +15,16 @@ import { argv, env, exit, stderr, stdout } from "node:process";
 const GITHUB_MODELS_URL = "https://models.github.ai/inference/chat/completions";
 const MODEL_ID = "openai/gpt-5-mini";
 
+// Per-commit caps. Kept tight because the GitHub Models free tier has
+// strict per-request input caps (e.g. 4000 tokens for gpt-5-mini), and
+// we'd rather trim aggressively than overflow into a 413.
+const PR_DESCRIPTION_MAX_CHARS = 600;
+const COMMIT_BODY_MAX_CHARS = 200;
+// Per-batch budget for the user message (commit blocks). Leaves room
+// for the system prompt + tool definition + response. ~8K chars ≈ 2K
+// tokens, well under the 4K-token cap for the smallest free models.
+const BATCH_USER_CHAR_BUDGET = 8000;
+
 const TOOL_DEFINITION = {
   type: "function",
   function: {
@@ -164,25 +174,48 @@ function getPrDescriptions(commits) {
       continue; // non-existent PR number etc. — best-effort
     }
     const trimmed = result.trim();
-    if (trimmed) descriptions[pr] = trimmed.slice(0, 2000);
+    if (trimmed) descriptions[pr] = trimmed.slice(0, PR_DESCRIPTION_MAX_CHARS);
   }
   return descriptions;
 }
 
-function buildInputText(commits, prDescriptions) {
-  const lines = [];
-  for (const c of commits) {
-    const prMatch = c.subject.match(/#(\d+)/);
-    const prNum = prMatch?.[1];
-
-    lines.push(`COMMIT ${c.hash}: ${c.subject}`);
-    if (c.body) lines.push(`  Body: ${c.body.slice(0, 500)}`);
-    if (prNum && prDescriptions[prNum]) {
-      lines.push(`  PR #${prNum} description: ${prDescriptions[prNum].slice(0, 1500)}`);
-    }
-    lines.push("");
+function buildCommitBlock(commit, prDescriptions) {
+  const lines = [`COMMIT ${commit.hash}: ${commit.subject}`];
+  if (commit.body) {
+    lines.push(`  Body: ${commit.body.slice(0, COMMIT_BODY_MAX_CHARS)}`);
   }
+  const prMatch = commit.subject.match(/#(\d+)/);
+  const prNum = prMatch?.[1];
+  if (prNum && prDescriptions[prNum]) {
+    lines.push(`  PR #${prNum} description: ${prDescriptions[prNum]}`);
+  }
+  lines.push("");
   return lines.join("\n");
+}
+
+function buildInputText(commits, prDescriptions) {
+  return commits.map((c) => buildCommitBlock(c, prDescriptions)).join("");
+}
+
+// Greedily pack commit blocks into batches under BATCH_USER_CHAR_BUDGET.
+// A single oversize commit (rare, but possible if a PR description is
+// near the cap) gets its own batch.
+function chunkCommits(commits, prDescriptions) {
+  const batches = [];
+  let current = [];
+  let currentChars = 0;
+  for (const c of commits) {
+    const block = buildCommitBlock(c, prDescriptions);
+    if (currentChars + block.length > BATCH_USER_CHAR_BUDGET && current.length > 0) {
+      batches.push(current);
+      current = [];
+      currentChars = 0;
+    }
+    current.push(c);
+    currentChars += block.length;
+  }
+  if (current.length > 0) batches.push(current);
+  return batches;
 }
 
 function buildSystemPrompt(repoName) {
@@ -362,9 +395,16 @@ async function main() {
   const prDescriptions = getPrDescriptions(commits);
   stderr.write(`Fetched ${Object.keys(prDescriptions).length} PR descriptions.\n`);
 
-  const inputText = buildInputText(commits, prDescriptions);
+  const batches = chunkCommits(commits, prDescriptions);
+  stderr.write(
+    `Split into ${batches.length} batch(es) under ${BATCH_USER_CHAR_BUDGET}-char budget.\n`,
+  );
+
   if (args.dryRun) {
-    stdout.write(inputText + "\n");
+    batches.forEach((batch, i) => {
+      stdout.write(`\n===== batch ${i + 1}/${batches.length} (${batch.length} commits) =====\n`);
+      stdout.write(buildInputText(batch, prDescriptions));
+    });
     return;
   }
 
@@ -375,12 +415,22 @@ async function main() {
   }
 
   const repoName = args.repo ? args.repo.split("/").pop() : "xa11y";
-  const entries = await invokeGithubModels(inputText, repoName, token);
+  const allEntries = [];
+  for (let i = 0; i < batches.length; i++) {
+    const batch = batches[i];
+    const inputText = buildInputText(batch, prDescriptions);
+    stderr.write(
+      `Batch ${i + 1}/${batches.length}: ${batch.length} commits, ${inputText.length} chars.\n`,
+    );
+    const entries = await invokeGithubModels(inputText, repoName, token);
+    stderr.write(`Batch ${i + 1}/${batches.length}: model emitted ${entries.length} entries.\n`);
+    allEntries.push(...entries);
+  }
 
   if (args.json) {
-    stdout.write(JSON.stringify(entries, null, 2) + "\n");
+    stdout.write(JSON.stringify(allEntries, null, 2) + "\n");
   } else {
-    stdout.write(renderMarkdown(newTag, entries, args.repo, prevTag, newTag));
+    stdout.write(renderMarkdown(newTag, allEntries, args.repo, prevTag, newTag));
   }
 }
 
