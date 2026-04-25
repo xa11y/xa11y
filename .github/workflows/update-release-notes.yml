@@ -16,6 +16,10 @@ on:
         description: "Override the previous tag for the diff range (optional)"
         required: false
         type: string
+      model:
+        description: "Override the LLM model slug (e.g. openai/gpt-4o)"
+        required: false
+        type: string
       dry_run:
         description: "Render notes only, do not edit the release"
         required: false
@@ -57,6 +61,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          MODEL_ID: ${{ inputs.model }}
         run: |
           set -euo pipefail
           NOTES_FILE="$RUNNER_TEMP/release_notes.md"
