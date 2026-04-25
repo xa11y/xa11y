@@ -103,7 +103,7 @@ Writing style:
 - For features, explain what the user can now do.
 - For bug fixes, explain what was broken and that it's now fixed.
 - Keep descriptions concise — one or two sentences max.
-- Use the PR number as reference when available (e.g. "(#1234)"), otherwise use the short commit hash.
+- Put the PR number (e.g. "(#1234)") or short commit hash ONLY in the \`reference\` field. Never inline it inside the \`description\` text — the renderer appends the reference automatically, and inlining it produces duplicates like "(#1234) (#1234)".
 - Combine related commits into a single entry when they're part of the same feature/fix.
 - If there are no user-visible changes at all, call the tool with an empty entries array.
 - ALWAYS call the tool. Never respond with plain text.`;
@@ -368,8 +368,15 @@ function renderMarkdown(version, entries, repo, prevTag, newTag) {
     anySection = true;
     lines.push(`### ${title}`);
     for (const item of items) {
+      // Belt and braces: the system prompt tells the model to keep PR
+      // refs out of the description, but models occasionally inline them
+      // anyway and the renderer would then double them up. Strip any
+      // trailing parenthesised PR ref or commit hash before appending.
+      const description = String(item.description ?? "")
+        .replace(/\s*\((?:#\d+|`?[0-9a-f]{7,40}`?)\)\s*\.?\s*$/i, "")
+        .trim();
       const ref = item.reference ? ` ${item.reference}` : "";
-      lines.push(`- ${item.description}${ref}`);
+      lines.push(`- ${description}${ref}`);
     }
     lines.push("");
   }
