@@ -31,9 +31,8 @@ fn open_xa11y_evdev() -> Device {
     // CI runners), so retry for up to 5s.
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        match scan_for_xa11y() {
-            Ok(Some(dev)) => return dev,
-            Ok(None) | Err(_) => {}
+        if let Ok(Some(dev)) = scan_for_xa11y() {
+            return dev;
         }
         if Instant::now() >= deadline {
             // Diagnostics: dump what we actually saw under /dev/input
@@ -78,13 +77,10 @@ fn scan_for_xa11y() -> std::io::Result<Option<Device>> {
         if !name.starts_with("event") {
             continue;
         }
-        match Device::open(&path) {
-            Ok(dev) => {
-                if dev.name() == Some("xa11y virtual input") {
-                    return Ok(Some(dev));
-                }
+        if let Ok(dev) = Device::open(&path) {
+            if dev.name() == Some("xa11y virtual input") {
+                return Ok(Some(dev));
             }
-            Err(_) => continue,
         }
     }
     Ok(None)
