@@ -496,6 +496,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-python-
 
+      # xa11y-linux now links libxkbcommon for the Wayland input backend.
+      # The Python wheel embeds xa11y, so it pulls the .so dependency in
+      # transitively at link time on Linux.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
+
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -541,6 +547,11 @@ jobs:
           key: ${{ runner.os }}-cargo-docs-${{ hashFiles('xa11y-js/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-docs-
+
+      # napi build links xa11y-js → xa11y → xa11y-linux on the Linux
+      # docs runner; xa11y-linux now needs libxkbcommon at link time.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
 
       - uses: actions/setup-python@v6
         with:
@@ -607,6 +618,13 @@ jobs:
           key: ${{ runner.os }}-cargo-js-${{ hashFiles('xa11y-js/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-js-
+
+      # xa11y-js → xa11y → xa11y-linux requires libxkbcommon to link on
+      # Linux. macOS / Windows skip this — those runners don't pull
+      # xa11y-linux in.
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
 
       - uses: actions/setup-node@v6
         with:
