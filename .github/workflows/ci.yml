@@ -63,42 +63,65 @@ jobs:
         run: ./scripts/run_integ_tests.sh
 
   # ── Linux Wayland uinput: e2e input-sim coverage. Drives
-  #    LinuxInputProvider through its public API inside a container with
-  #    /dev/uinput bind-mounted, then reads events back via libevdev and
-  #    asserts the wire-level codes/values are correct. Compositor-
-  #    agnostic — the kernel uinput device works the same regardless of
-  #    Wayland session.
+  #    LinuxInputProvider through its public API on the runner, then
+  #    reads events back via libevdev and asserts the wire-level codes/
+  #    values are correct. Compositor-agnostic — the kernel uinput
+  #    device works the same regardless of Wayland session.
+  #
+  #    Runs directly on the runner (not in a container) because Docker's
+  #    /dev tmpfs isolation means udev's freshly-minted /dev/input/event*
+  #    nodes for our virtual device aren't visible inside a container,
+  #    even with --device /dev/uinput and -v /dev/input:/dev/input.
+  #    The Containerfile.wayland-uinput + xtask path is still useful for
+  #    developers running on non-Linux hosts.
   linux-wayland-uinput:
     name: Linux Wayland (uinput)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
-      - name: Build xa11y-base image
-        run: docker build -t xa11y-base -f Containerfile.base .
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Build xa11y-wayland-uinput image
-        run: docker build -t xa11y-wayland-uinput -f Containerfile.wayland-uinput .
+      - name: Cache cargo registry & build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-uinput-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-uinput-
+
+      - name: Install system dependencies
+        # libxkbcommon-dev: keysym → keycode lookup in the backend.
+        # libevdev-dev: event readback in the e2e test.
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libevdev-dev
 
       - name: Load uinput kernel module
         # GitHub-hosted Ubuntu runners build the uinput driver as a
-        # module and don't load it by default. Without this, /dev/uinput
-        # doesn't exist and the e2e tests fail at construction.
+        # module and don't load it by default.
         run: sudo modprobe uinput
 
+      - name: Grant access to /dev/uinput
+        # Host udev gives /dev/uinput mode 0660 root:input by default.
+        # Easiest way to let the cargo test process open it without
+        # spawning under sudo (which loses cargo's PATH/env): chmod the
+        # device. Equivalent to a usermod + relog on a developer box.
+        run: sudo chmod 0666 /dev/uinput
+
+      - name: Run unit + smoke tests
+        run: cargo test -p xa11y-linux --lib && cargo test -p xa11y-linux --test wayland_smoke
+
       - name: Run uinput e2e tests
-        # `--device /dev/uinput` lets the container open the kernel uinput
-        # node. The /dev/input/event* nodes the kernel creates afterwards
-        # are added by the *host's* udev, not visible inside the
-        # container's tmpfs /dev — bind-mount /dev/input from the host
-        # so the test's evdev reader can find them.
+        # The test creates a uinput device, host udev populates the
+        # /dev/input/eventN node, the test reads events back via evdev.
+        # --test-threads=1 because tests share the kernel uinput device.
         run: |
-          docker run --rm \
-            --device /dev/uinput \
-            -v /dev/input:/dev/input \
-            -v "$(pwd):/xa11y" \
-            xa11y-wayland-uinput \
-            bash /xa11y/scripts/run_wayland_uinput.sh
+          unset DISPLAY
+          cargo test -p xa11y-linux --test wayland_input_e2e -- \
+            --ignored --test-threads=1 --nocapture
 
   # ── macOS: unit tests ──────────────────────────────────────────────
   macos:
