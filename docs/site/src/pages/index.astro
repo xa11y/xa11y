@@ -6,7 +6,8 @@ import { resolve } from "node:path";
 
 const cargoToml = readFileSync(resolve("../../Cargo.toml"), "utf-8");
 const verMatch = cargoToml.match(/^version\s*=\s*"([^"]+)"/m);
-const version = verMatch ? `v${verMatch[1]}` : "v0.7.0";
+if (!verMatch) throw new Error("Could not find version in Cargo.toml");
+const version = `v${verMatch[1]}`;
 ---
 
 <!doctype html>
