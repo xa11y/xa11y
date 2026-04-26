@@ -111,6 +111,35 @@ jobs:
         # device. Equivalent to a usermod + relog on a developer box.
         run: sudo chmod 0666 /dev/uinput
 
+      - name: Probe input subsystem (baseline)
+        # Diagnostic: capture what the runner has under /dev/input *before*
+        # any test runs, plus whether systemd-udevd is alive. Helps
+        # disambiguate "udev isn't creating event nodes" from "we can't
+        # read them due to permissions".
+        run: |
+          echo "--- /dev/uinput ---"
+          ls -l /dev/uinput || true
+          echo "--- /dev/input (if any) ---"
+          ls -la /dev/input/ 2>/dev/null || echo "no /dev/input directory"
+          echo "--- /sys/class/input ---"
+          ls /sys/class/input/ 2>/dev/null || echo "no /sys/class/input"
+          echo "--- udev daemon ---"
+          systemctl status systemd-udevd --no-pager -l 2>&1 | head -10 || true
+          echo "--- groups ---"
+          id
+
+      - name: Pre-grant access to future event nodes via udev rule
+        # Default udev gives /dev/input/event* mode 0660 root:input.
+        # Add a rule that drops to mode 0666 so the unprivileged cargo
+        # test process can read events back from any newly-created event
+        # node (including the one our virtual device produces).
+        run: |
+          echo 'KERNEL=="event[0-9]*", MODE="0666"' | \
+            sudo tee /etc/udev/rules.d/99-xa11y-test.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --type=devices --subsystem-match=input || true
+          sudo udevadm settle
+
       - name: Run unit + smoke tests
         run: cargo test -p xa11y-linux --lib && cargo test -p xa11y-linux --test wayland_smoke
 

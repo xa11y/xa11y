@@ -14,6 +14,7 @@
 
 #![cfg(target_os = "linux")]
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -27,40 +28,71 @@ use xa11y_linux::LinuxInputProvider;
 fn open_xa11y_evdev() -> Device {
     // Give the kernel a moment to expose the new device under
     // `/dev/input/event*`. udev settling is much slower (200ms+ on cold
-    // CI runners), so retry for up to a second.
-    let deadline = Instant::now() + Duration::from_secs(2);
+    // CI runners), so retry for up to 5s.
+    let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if let Some(dev) = scan_for_xa11y() {
-            return dev;
+        match scan_for_xa11y() {
+            Ok(Some(dev)) => return dev,
+            Ok(None) | Err(_) => {}
         }
         if Instant::now() >= deadline {
+            // Diagnostics: dump what we actually saw under /dev/input
+            // and the closest device names. Catches the "udev didn't
+            // run" / "permissions wrong" / "container hides nodes"
+            // cases that have bitten us in CI.
+            let mut diag = String::new();
+            match std::fs::read_dir("/dev/input") {
+                Ok(rd) => {
+                    diag.push_str("/dev/input contents:\n");
+                    for entry in rd.flatten() {
+                        let path = entry.path();
+                        let meta = std::fs::metadata(&path)
+                            .map(|m| format!("mode={:o} ", m.permissions().mode()))
+                            .unwrap_or_default();
+                        let name = match Device::open(&path) {
+                            Ok(d) => d.name().unwrap_or("<unnamed>").to_string(),
+                            Err(e) => format!("<open: {e}>"),
+                        };
+                        diag.push_str(&format!(
+                            "  {} {} → {}\n",
+                            meta,
+                            path.display(),
+                            name
+                        ));
+                    }
+                }
+                Err(e) => diag.push_str(&format!("/dev/input: {e}\n")),
+            }
             panic!(
                 "could not find /dev/input/event* node named 'xa11y virtual input' \
-                 within 2s of LinuxInputProvider::new(); is the user in the `input` \
-                 group and `/dev/uinput` accessible?"
+                 within 5s of LinuxInputProvider::new(). diagnostics:\n{diag}"
             );
         }
-        std::thread::sleep(Duration::from_millis(50));
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
-fn scan_for_xa11y() -> Option<Device> {
-    for entry in std::fs::read_dir("/dev/input").ok()?.flatten() {
+fn scan_for_xa11y() -> std::io::Result<Option<Device>> {
+    for entry in std::fs::read_dir("/dev/input")? {
+        let entry = entry?;
         let path = entry.path();
-        let name = path.file_name()?.to_string_lossy().to_string();
+        let name = match path.file_name() {
+            Some(n) => n.to_string_lossy().to_string(),
+            None => continue,
+        };
         if !name.starts_with("event") {
             continue;
         }
         match Device::open(&path) {
             Ok(dev) => {
                 if dev.name() == Some("xa11y virtual input") {
-                    return Some(dev);
+                    return Ok(Some(dev));
                 }
             }
             Err(_) => continue,
         }
     }
-    None
+    Ok(None)
 }
 
 /// Drain the event stream for up to `timeout` and collect every event
