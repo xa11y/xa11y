@@ -18,7 +18,7 @@ COMMANDS:
     test-integ          Run integration tests (delegates to scripts/)
     test-integ-container  Run Linux X11 integration tests in container
     test-integ-wayland-container  Run Linux Wayland portal screenshot tests in container
-    test-integ-wayland-libei-container  Run Linux Wayland libei input tests in container
+    test-integ-wayland-uinput-container  Run Linux Wayland uinput input-sim e2e tests in container
     test-integ-input-smoke-container  Run Linux XTest input smoke in container
     test-qt             Run Qt (PySide6) integration tests
     test-gtk            Run GTK4 integration tests
@@ -53,7 +53,7 @@ fn main() -> ExitCode {
         "test-integ" => do_test_integ(rest),
         "test-integ-container" => do_test_integ_container(rest),
         "test-integ-wayland-container" => do_test_integ_wayland_container(),
-        "test-integ-wayland-libei-container" => do_test_integ_wayland_libei_container(),
+        "test-integ-wayland-uinput-container" => do_test_integ_wayland_uinput_container(),
         "test-integ-input-smoke-container" => do_test_integ_input_smoke_container(),
         "test-qt" => do_test_qt(),
         "test-gtk" => do_test_gtk(),
@@ -329,13 +329,13 @@ fn do_test_integ_wayland_container() -> bool {
     )
 }
 
-fn do_test_integ_wayland_libei_container() -> bool {
-    heading("Wayland libei input tests (container)");
+fn do_test_integ_wayland_uinput_container() -> bool {
+    heading("Wayland uinput input-sim e2e (container)");
     let root = project_root();
-    // Build the libei container image (extends xa11y-base with mutter +
-    // xdg-desktop-portal-gnome + libei) if it isn't already present.
+    // Build the uinput container image (extends xa11y-base with libevdev
+    // + libxkbcommon) if it isn't already present.
     let img_exists = std::process::Command::new("docker")
-        .args(["image", "inspect", "xa11y-wayland-libei"])
+        .args(["image", "inspect", "xa11y-wayland-uinput"])
         .current_dir(&root)
         .status()
         .map(|s| s.success())
@@ -346,9 +346,9 @@ fn do_test_integ_wayland_libei_container() -> bool {
             &[
                 "build",
                 "-t",
-                "xa11y-wayland-libei",
+                "xa11y-wayland-uinput",
                 "-f",
-                "Containerfile.wayland-libei",
+                "Containerfile.wayland-uinput",
                 ".",
             ],
             &root,
@@ -361,13 +361,15 @@ fn do_test_integ_wayland_libei_container() -> bool {
         &[
             "run",
             "--rm",
+            "--device",
+            "/dev/uinput",
             "-v",
             &format!("{}:/xa11y", root.display()),
             "-v",
             "xa11y-cargo-cache:/xa11y/target",
-            "xa11y-wayland-libei",
+            "xa11y-wayland-uinput",
             "bash",
-            "/xa11y/scripts/run_wayland_libei.sh",
+            "/xa11y/scripts/run_wayland_uinput.sh",
         ],
         &root,
     )

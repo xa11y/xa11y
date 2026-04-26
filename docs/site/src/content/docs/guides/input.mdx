@@ -31,12 +31,12 @@ The two mechanisms are not bridged. A failed accessibility action never falls ba
 | --- | --- |
 | macOS | Accessibility + Input Monitoring for the terminal/IDE running your code |
 | Windows | None for normal user sessions |
-| Linux (X11) | `XTest` extension enabled on the X server |
-| Linux (Wayland) | `xdg-desktop-portal` with the **RemoteDesktop** interface (libei). User consent prompt on first use; persisted thereafter when the portal supports `persist_mode=PERMANENT`. |
+| Linux (X11) | `XTest` extension enabled on the X server. Zero setup. |
+| Linux (Wayland / headless) | Membership in the `input` group (`sudo usermod -aG input $USER` then re-login). xa11y opens `/dev/uinput` and registers a virtual evdev keyboard+pointer — same mechanism used by `xdotool --using-uinput`, `ydotool`, `wtype`, Steam Input, and Wine. **The privilege grants global input read/write access** — comparable to macOS Input Monitoring. |
 
 On macOS, input simulation usually also requires the target window to be foregrounded. Activate the window explicitly before synthesising input.
 
-xa11y picks the Linux backend at runtime: if `DISPLAY` is set we drive XTest; otherwise `WAYLAND_DISPLAY` triggers the portal/libei path. There is no compile-time feature flag — both backends are always built into `xa11y-linux`.
+xa11y picks the Linux backend at runtime: if `DISPLAY` is set we drive XTest; otherwise we fall through to uinput. There is no compile-time feature flag — both backends are always built into `xa11y-linux`. The uinput path is compositor-agnostic, so it works on every Wayland desktop (GNOME, KDE Plasma, sway, Hyprland, Cosmic, weston) and also on headless Linux servers. Errors from a missing `input` group surface as `PermissionDenied` with an actionable message; a missing `uinput` kernel module surfaces as `Unsupported`.
 
 ## Basic usage
 

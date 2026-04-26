@@ -1,17 +1,20 @@
-//! Wayland session-detection smoke tests for [`xa11y_linux`].
+//! Session-detection smoke tests for [`xa11y_linux`].
 //!
-//! These exercise the environment-variable logic that picks a backend without
-//! requiring a real Wayland compositor or `xdg-desktop-portal`:
+//! These exercise the environment-variable logic that picks a backend
+//! without requiring a real Wayland compositor or `xdg-desktop-portal`:
 //!
-//! - Input sim on Wayland-only sessions reaches the portal RemoteDesktop
-//!   call (returning `Ok` on a real session, or `Error::Platform` when the
-//!   session bus / portal isn't available — but never `Unsupported`, which
-//!   the old X11-only backend used to return).
-//! - The screenshot provider construction picks the Wayland branch when only
+//! - Input sim falls through to the uinput backend when `DISPLAY` is
+//!   unset. The constructor either succeeds (the user is in `input` and
+//!   `/dev/uinput` is accessible — typical CI with `--device /dev/uinput`)
+//!   or surfaces `PermissionDenied`/`Unsupported`, but **never** the old
+//!   "no backend on Wayland" `Unsupported` that the libei-only backend
+//!   used to return.
+//! - The screenshot provider picks the Wayland branch when only
 //!   `WAYLAND_DISPLAY` is set, and the X11 branch when `DISPLAY` is set.
 //!
-//! Env mutation is serialised by `ENV_LOCK` and each test save/restore the
-//! prior values, so they're safe to run as part of `cargo test --workspace`.
+//! Env mutation is serialised by `ENV_LOCK` and each test save/restore
+//! the prior values, so they're safe to run as part of
+//! `cargo test --workspace`.
 
 #![cfg(target_os = "linux")]
 
@@ -53,37 +56,47 @@ fn scoped_env<F: FnOnce()>(display: Option<&str>, wayland: Option<&str>, f: F) {
 }
 
 #[test]
-fn input_provider_picks_wayland_branch() {
-    // The input-sim Wayland constructor reaches out to the session bus and
-    // the portal. Without those it must surface Error::Platform (or the
-    // PermissionDenied raised when a portal denies the request) — but it
-    // must *not* return Unsupported, which was the old X11-only behaviour.
+fn input_provider_falls_through_to_uinput_when_no_display() {
+    // Without DISPLAY, the constructor takes the uinput branch. The
+    // outcome depends on the host:
+    //   - Ok: /dev/uinput is open()-able (user is in `input` group, or
+    //     we're running as root in the e2e container with --device).
+    //   - PermissionDenied: `input` group missing — actionable error.
+    //   - Unsupported (with "uinput" in the feature string): kernel
+    //     module not loaded.
+    // The one outcome the old libei backend used to return — Unsupported
+    // because Wayland wasn't supported — must never come back now.
     scoped_env(None, Some("wayland-0"), || {
         match LinuxInputProvider::new() {
             Ok(_) => {}
-            Err(Error::Platform { message, .. }) => {
+            Err(Error::PermissionDenied { .. }) => {}
+            Err(Error::Unsupported { feature }) => {
                 assert!(
-                    message.contains("session bus")
-                        || message.contains("portal")
-                        || message.contains("ei"),
-                    "Wayland-branch error should come from the portal/EI path, got {message:?}"
+                    feature.contains("uinput"),
+                    "Unsupported must come from uinput probing, got {feature:?}"
                 );
             }
-            Err(Error::PermissionDenied { .. }) => {}
-            Err(Error::Unsupported { feature }) => panic!(
-                "Wayland input must no longer be Unsupported, got Unsupported {{ {feature:?} }}"
-            ),
-            Err(other) => panic!("unexpected error from Wayland-branch constructor: {other:?}"),
+            Err(Error::Platform { message, .. }) => {
+                assert!(
+                    message.contains("uinput"),
+                    "Platform error must come from uinput probing, got {message:?}"
+                );
+            }
+            Err(other) => panic!("unexpected error from uinput-branch constructor: {other:?}"),
         }
     });
 }
 
 #[test]
-fn input_provider_reports_unsupported_with_no_display() {
+fn input_provider_falls_through_to_uinput_with_no_envs() {
+    // Same as above but with WAYLAND_DISPLAY also unset. uinput doesn't
+    // care — Wayland is not a precondition for /dev/uinput.
     scoped_env(None, None, || match LinuxInputProvider::new() {
-        Err(Error::Unsupported { .. }) => {}
-        Err(other) => panic!("expected Error::Unsupported, got {other:?}"),
-        Ok(_) => panic!("expected Error::Unsupported, got Ok"),
+        Ok(_) => {}
+        Err(Error::PermissionDenied { .. }) => {}
+        Err(Error::Unsupported { feature }) => assert!(feature.contains("uinput")),
+        Err(Error::Platform { message, .. }) => assert!(message.contains("uinput")),
+        Err(other) => panic!("unexpected error: {other:?}"),
     });
 }
 

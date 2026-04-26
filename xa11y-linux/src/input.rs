@@ -4,14 +4,19 @@
 //! chosen at construction time based on the session environment:
 //!
 //! - **X11** (`DISPLAY` is set) — drives the XTest extension over `x11rb`.
-//! - **Wayland** (only `WAYLAND_DISPLAY` is set) — opens an
-//!   `org.freedesktop.portal.RemoteDesktop` session, receives an EI socket
-//!   from the portal, and emits events through libei via the [`reis`] crate.
-//!   See [`crate::wayland_input`] for the Wayland backend.
+//!   Zero setup required; matches what existing X11 users already have.
+//! - **Wayland / uinput** (anything else) — opens the kernel's
+//!   `/dev/uinput` device and registers a virtual evdev keyboard+pointer.
+//!   Compositor-agnostic — works on every Linux desktop (GNOME, KDE,
+//!   sway, Hyprland, Cosmic, weston) plus headless setups. Same mechanism
+//!   `xdotool --using-uinput`, `ydotool`, `wtype`, Steam, and Wine use.
+//!   Requires `input` group membership; surfaces an actionable
+//!   `Error::PermissionDenied` if the user isn't in the group. See
+//!   [`crate::wayland_input`].
 //!
-//! Routing matches [`crate::screenshot::LinuxScreenshot`]: if neither display
-//! type is set we return [`Error::Unsupported`]. There is no compile-time
-//! feature flag — both backends are always built on Linux.
+//! Routing prefers X11 when `DISPLAY` is set and falls back to uinput
+//! otherwise. There is no compile-time feature flag — both backends are
+//! always built on Linux.
 //!
 //! Key mapping on X11 goes keysym → keycode via `GetKeyboardMapping`, queried
 //! once at connect time. `Key::Char` for printable ASCII uses the codepoint
@@ -333,26 +338,23 @@ enum InputBackend {
 impl LinuxInputProvider {
     /// Choose a backend based on the session environment.
     ///
-    /// - `DISPLAY` set → X11 (XTest), regardless of `WAYLAND_DISPLAY`.
-    /// - Only `WAYLAND_DISPLAY` set → Wayland (libei via portal RemoteDesktop).
-    /// - Neither set → [`Error::Unsupported`].
+    /// - `DISPLAY` set → X11 (XTest).
+    /// - otherwise → uinput (works on Wayland and headless sessions).
+    ///   May return [`Error::PermissionDenied`] if the user isn't in the
+    ///   `input` group, or [`Error::Unsupported`] if the kernel `uinput`
+    ///   module isn't loaded.
     pub fn new() -> Result<Self> {
         let display_set = std::env::var_os("DISPLAY").is_some();
-        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
 
         if display_set {
             let x11 = X11InputBackend::new()?;
             Ok(Self {
                 backend: InputBackend::X11(Box::new(x11)),
             })
-        } else if wayland {
+        } else {
             let wl = WaylandInputBackend::new()?;
             Ok(Self {
                 backend: InputBackend::Wayland(Box::new(wl)),
-            })
-        } else {
-            Err(Error::Unsupported {
-                feature: "input simulation (no DISPLAY or WAYLAND_DISPLAY set)".into(),
             })
         }
     }
