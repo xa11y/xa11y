@@ -53,12 +53,7 @@ fn open_xa11y_evdev() -> Device {
                             Ok(d) => d.name().unwrap_or("<unnamed>").to_string(),
                             Err(e) => format!("<open: {e}>"),
                         };
-                        diag.push_str(&format!(
-                            "  {} {} → {}\n",
-                            meta,
-                            path.display(),
-                            name
-                        ));
+                        diag.push_str(&format!("  {} {} → {}\n", meta, path.display(), name));
                     }
                 }
                 Err(e) => diag.push_str(&format!("/dev/input: {e}\n")),
