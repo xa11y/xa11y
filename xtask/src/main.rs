@@ -363,6 +363,10 @@ fn do_test_integ_wayland_uinput_container() -> bool {
             "--rm",
             "--device",
             "/dev/uinput",
+            // Bind-mount /dev/input so the host-side udev-created
+            // event nodes for our new uinput device are visible.
+            "-v",
+            "/dev/input:/dev/input",
             "-v",
             &format!("{}:/xa11y", root.display()),
             "-v",

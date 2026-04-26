@@ -87,9 +87,15 @@ jobs:
         run: sudo modprobe uinput
 
       - name: Run uinput e2e tests
+        # `--device /dev/uinput` lets the container open the kernel uinput
+        # node. The /dev/input/event* nodes the kernel creates afterwards
+        # are added by the *host's* udev, not visible inside the
+        # container's tmpfs /dev — bind-mount /dev/input from the host
+        # so the test's evdev reader can find them.
         run: |
           docker run --rm \
             --device /dev/uinput \
+            -v /dev/input:/dev/input \
             -v "$(pwd):/xa11y" \
             xa11y-wayland-uinput \
             bash /xa11y/scripts/run_wayland_uinput.sh
