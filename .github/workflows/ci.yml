@@ -62,16 +62,17 @@ jobs:
       - name: Run integration tests
         run: ./scripts/run_integ_tests.sh
 
-  # ── Linux Wayland libei: end-to-end input simulation through the
-  #    GNOME RemoteDesktop portal. Heavier than the rest of the linux
-  #    job (boots mutter + xdg-desktop-portal-gnome inside a container)
-  #    so it lives separately. Soft-fail until the headless-consent
-  #    pre-grant path stabilises across portal versions; flip
-  #    continue-on-error off once it's been green for a few weeks.
+  # ── Linux Wayland libei: catches regressions in the libei container
+  #    packaging and confirms xa11y-linux links cleanly against the
+  #    `libei` / `libxkbcommon` / `libeis` system packages. The full
+  #    portal+libei e2e tests stay `#[ignore]`'d (they need a GDM-
+  #    managed GNOME session and aren't reproducible in stock CI
+  #    containers); developers run them via
+  #    `cargo xtask test-integ-wayland-libei-container` on machines
+  #    with a working portal stack.
   linux-wayland-libei:
     name: Linux Wayland (libei)
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v6
 
@@ -81,7 +82,7 @@ jobs:
       - name: Build xa11y-wayland-libei image
         run: docker build -t xa11y-wayland-libei -f Containerfile.wayland-libei .
 
-      - name: Run libei portal e2e tests
+      - name: Run libei build + unit tests
         run: |
           docker run --rm \
             -v "$(pwd):/xa11y" \
