@@ -1,6 +1,12 @@
 ---
 // Custom landing page — Graphite theme with lime accent
 // Overrides the Starlight splash page for the root URL
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+const cargoToml = readFileSync(resolve("../../Cargo.toml"), "utf-8");
+const verMatch = cargoToml.match(/^version\s*=\s*"([^"]+)"/m);
+const version = verMatch ? `v${verMatch[1].replace(/\.\d+$/, "")}` : "v0.7";
 ---
 
 <!doctype html>
@@ -292,7 +298,7 @@
 <body>
 
 <header class="topbar">
-  <a class="brand" href="/"><span class="glyph">x</span> xa11y <span class="ver">v0.6</span></a>
+  <a class="brand" href="/"><span class="glyph">x</span> xa11y <span class="ver">{version}</span></a>
   <nav class="nav">
     <a href="/guides/quick-start/">quick start</a>
     <a href="/guides/overview/">overview</a>
@@ -407,7 +413,7 @@
 
 <footer>
   <div>
-    <div class="brand" style="margin-bottom:12px;"><span class="glyph">x</span> xa11y <span class="ver">v0.6</span></div>
+    <div class="brand" style="margin-bottom:12px;"><span class="glyph">x</span> xa11y <span class="ver">{version}</span></div>
     <div style="color:var(--ink-muted); font-size:13px; line-height:1.55; max-width:34ch;">
       A unified API for accessibility trees on macOS, Windows and Linux. MIT-licensed, built in the open.
     </div>
