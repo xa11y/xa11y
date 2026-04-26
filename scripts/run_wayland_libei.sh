@@ -75,7 +75,43 @@ for _ in $(seq 1 25); do
     sleep 0.2
 done
 
-# 3. Portal frontend + GNOME backend.
+# 3. gnome-remote-desktop daemon — implements the RemoteDesktop backend
+# that xdg-desktop-portal-gnome delegates to. Without this running the
+# portal frontend logs `error: Could not connect` for the RemoteDesktop
+# interface and never registers it on the bus.
+GRD_BIN=""
+for cand in /usr/libexec/gnome-remote-desktop-daemon \
+            /usr/lib/x86_64-linux-gnu/gnome-remote-desktop-daemon \
+            /usr/lib/gnome-remote-desktop/gnome-remote-desktop-daemon; do
+    if [ -x "$cand" ]; then
+        GRD_BIN="$cand"
+        break
+    fi
+done
+if [ -z "$GRD_BIN" ]; then
+    GRD_BIN="$(command -v gnome-remote-desktop-daemon || true)"
+fi
+if [ -z "$GRD_BIN" ]; then
+    echo "WARN: gnome-remote-desktop-daemon binary not found; portal will lack RemoteDesktop"
+    dpkg -L gnome-remote-desktop 2>&1 | head -40 || true
+else
+    echo "Starting $GRD_BIN --headless"
+    "$GRD_BIN" --headless >/tmp/grd.log 2>&1 &
+    CLEANUP_PIDS+=($!)
+    # Wait for the daemon to claim its bus name. Without this the
+    # portal-gnome init races and skips RemoteDesktop registration.
+    for _ in $(seq 1 50); do
+        if dbus-send --session --print-reply --dest=org.gnome.RemoteDesktop \
+             /org/gnome/RemoteDesktop \
+             org.freedesktop.DBus.Introspectable.Introspect >/dev/null 2>&1; then
+            echo "OK: org.gnome.RemoteDesktop is on the bus."
+            break
+        fi
+        sleep 0.2
+    done
+fi
+
+# 4. Portal frontend + GNOME backend.
 mkdir -p /root/.config/xdg-desktop-portal
 cat > /root/.config/xdg-desktop-portal/GNOME-portals.conf <<'EOF'
 [preferred]
