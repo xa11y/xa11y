@@ -3,15 +3,15 @@
 //! These exercise the environment-variable logic that picks a backend without
 //! requiring a real Wayland compositor or `xdg-desktop-portal`:
 //!
-//! - Input sim on Wayland-only sessions returns `Error::Unsupported`
-//!   (per Tenet 1 — no silent fallback to keysym guessing or libei without an
-//!   explicit backend).
+//! - Input sim on Wayland-only sessions reaches the portal RemoteDesktop
+//!   call (returning `Ok` on a real session, or `Error::Platform` when the
+//!   session bus / portal isn't available — but never `Unsupported`, which
+//!   the old X11-only backend used to return).
 //! - The screenshot provider construction picks the Wayland branch when only
 //!   `WAYLAND_DISPLAY` is set, and the X11 branch when `DISPLAY` is set.
 //!
-//! Runs in a single-threaded section so env mutations don't race. Marked
-//! `#[ignore]` so the normal unit-test pass doesn't flip env vars on a
-//! developer workstation.
+//! Env mutation is serialised by `ENV_LOCK` and each test save/restore the
+//! prior values, so they're safe to run as part of `cargo test --workspace`.
 
 #![cfg(target_os = "linux")]
 
@@ -53,24 +53,32 @@ fn scoped_env<F: FnOnce()>(display: Option<&str>, wayland: Option<&str>, f: F) {
 }
 
 #[test]
-#[ignore]
-fn input_provider_reports_unsupported_on_wayland_only_session() {
+fn input_provider_picks_wayland_branch() {
+    // The input-sim Wayland constructor reaches out to the session bus and
+    // the portal. Without those it must surface Error::Platform (or the
+    // PermissionDenied raised when a portal denies the request) — but it
+    // must *not* return Unsupported, which was the old X11-only behaviour.
     scoped_env(None, Some("wayland-0"), || {
         match LinuxInputProvider::new() {
-            Err(Error::Unsupported { feature }) => {
+            Ok(_) => {}
+            Err(Error::Platform { message, .. }) => {
                 assert!(
-                    feature.contains("Wayland") || feature.contains("input simulation"),
-                    "feature string should name the missing capability; got {feature:?}"
+                    message.contains("session bus")
+                        || message.contains("portal")
+                        || message.contains("ei"),
+                    "Wayland-branch error should come from the portal/EI path, got {message:?}"
                 );
             }
-            Err(other) => panic!("expected Error::Unsupported, got {other:?}"),
-            Ok(_) => panic!("expected Error::Unsupported, got Ok"),
+            Err(Error::PermissionDenied { .. }) => {}
+            Err(Error::Unsupported { feature }) => panic!(
+                "Wayland input must no longer be Unsupported, got Unsupported {{ {feature:?} }}"
+            ),
+            Err(other) => panic!("unexpected error from Wayland-branch constructor: {other:?}"),
         }
     });
 }
 
 #[test]
-#[ignore]
 fn input_provider_reports_unsupported_with_no_display() {
     scoped_env(None, None, || match LinuxInputProvider::new() {
         Err(Error::Unsupported { .. }) => {}
@@ -80,7 +88,6 @@ fn input_provider_reports_unsupported_with_no_display() {
 }
 
 #[test]
-#[ignore]
 fn screenshot_constructor_picks_wayland_branch() {
     // Construction must succeed even when no portal is reachable yet — the
     // error only shows up at capture time. This mirrors the X11 branch, where
@@ -104,7 +111,6 @@ fn screenshot_constructor_picks_wayland_branch() {
 }
 
 #[test]
-#[ignore]
 fn screenshot_constructor_reports_unsupported_with_no_display() {
     scoped_env(None, None, || match LinuxScreenshot::new() {
         Err(Error::Unsupported { .. }) => {}

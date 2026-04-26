@@ -62,6 +62,32 @@ jobs:
       - name: Run integration tests
         run: ./scripts/run_integ_tests.sh
 
+  # ── Linux Wayland libei: end-to-end input simulation through the
+  #    GNOME RemoteDesktop portal. Heavier than the rest of the linux
+  #    job (boots mutter + xdg-desktop-portal-gnome inside a container)
+  #    so it lives separately. Soft-fail until the headless-consent
+  #    pre-grant path stabilises across portal versions; flip
+  #    continue-on-error off once it's been green for a few weeks.
+  linux-wayland-libei:
+    name: Linux Wayland (libei)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build xa11y-base image
+        run: docker build -t xa11y-base -f Containerfile.base .
+
+      - name: Build xa11y-wayland-libei image
+        run: docker build -t xa11y-wayland-libei -f Containerfile.wayland-libei .
+
+      - name: Run libei portal e2e tests
+        run: |
+          docker run --rm \
+            -v "$(pwd):/xa11y" \
+            xa11y-wayland-libei \
+            bash /xa11y/scripts/run_wayland_libei.sh
+
   # ── macOS: unit tests ──────────────────────────────────────────────
   macos:
     name: macOS

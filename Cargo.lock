@@ -1625,6 +1625,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "reis"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "827073dbe443c57fd72ae05491c6b94213218627ac6ac169850673b0cb7034f1"
+dependencies = [
+ "rustix 0.38.44",
+]
+
+[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2805,9 +2814,11 @@ version = "0.7.0"
 dependencies = [
  "png",
  "rayon",
+ "reis",
  "serde_json",
  "x11rb",
  "xa11y-core",
+ "xkbcommon",
  "zbus",
 ]
 
@@ -2846,6 +2857,17 @@ name = "xcursor"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bec9e4a500ca8864c5b47b8b482a73d62e4237670e5b5f1d6b9e3cae50f28f2b"
+
+[[package]]
+name = "xkbcommon"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8d66ca9352cbd4eecbbc40871d8a11b4ac8107cfc528a6e14d7c19c69d0e1ac9"
+dependencies = [
+ "libc",
+ "memmap2",
+ "xkeysym",
+]
 
 [[package]]
 name = "xkbcommon-dl"

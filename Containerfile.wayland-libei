@@ -1,0 +1,28 @@
+FROM xa11y-base
+
+# Headless Wayland + xdg-desktop-portal-gnome for the RemoteDesktop +
+# libei input-simulation path.
+#
+# Why GNOME and not sway here:
+#   xdg-desktop-portal-wlr (used by Containerfile.wayland) only implements
+#   Screenshot and ScreenCast — RemoteDesktop is not in its surface. The
+#   GNOME portal backend is the only one that ships RemoteDesktop in
+#   distro-packaged form, and it talks to mutter to grant the EIS socket
+#   that ConnectToEIS hands back to clients.
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+        mutter gnome-remote-desktop \
+        xdg-desktop-portal xdg-desktop-portal-gnome \
+        wayland-protocols libwayland-dev libwayland-client0 \
+        libxkbcommon-dev libxkbcommon0 \
+        libei-dev libei1 libeis1 \
+        pipewire pipewire-pulse wireplumber \
+        gsettings-desktop-schemas dbus-x11 \
+        sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# mutter expects /run/user/<uid> for XDG_RUNTIME_DIR; create it now and
+# the script chmods/owns it at startup.
+RUN mkdir -p /run/user/0 && chmod 700 /run/user/0

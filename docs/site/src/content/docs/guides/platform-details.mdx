@@ -117,6 +117,33 @@ The tri-state checked value (`Off` / `On` / `Mixed`) is derived differently:
 - **Linux:** Uses AT-SPI state bits — `Checked` (0x10) and `Mixed` (0x2000).
 - **Windows:** Reads `TogglePattern.CurrentToggleState` — 0 = Off, 1 = On, 2 = Indeterminate.
 
+### Linux: X11 vs Wayland
+
+xa11y supports both X11 and Wayland Linux sessions. The backend is selected at runtime — there is no compile-time feature flag.
+
+| Capability | X11 | Wayland |
+| --- | --- | --- |
+| Accessibility (AT-SPI2) | Same on both — D-Bus, no display-server dependency |
+| Input simulation | `XTest` extension over X11 | libei socket from `org.freedesktop.portal.RemoteDesktop` |
+| Screen capture | `GetImage` on the root window | PNG URI from `org.freedesktop.portal.Screenshot` |
+
+The selection rule is checked by `xa11y_linux::LinuxInputProvider::new` and `LinuxScreenshot::new`:
+
+- `DISPLAY` set → X11 (regardless of `WAYLAND_DISPLAY`).
+- Only `WAYLAND_DISPLAY` set → Wayland portal.
+- Neither set → `Unsupported`.
+
+#### Wayland portal consent
+
+Both portal calls are consent-gated:
+
+- **Screenshot** — the portal usually auto-approves for non-interactive callers (`interactive=false, modal=false`); xa11y passes both. wlroots compositors via `xdg-desktop-portal-wlr` and GNOME via `xdg-desktop-portal-gnome` both support this.
+- **RemoteDesktop (input)** — surfaces a one-time consent dialog the first time `LinuxInputProvider::new` runs. xa11y requests `persist_mode = PERMANENT (2)` so subsequent runs reuse the grant when the portal supports it. GNOME 45+ supports persistence; older portals re-prompt every session. Only `xdg-desktop-portal-gnome` (and KDE's portal) ships RemoteDesktop today — wlroots-based desktops can run input simulation only via X11 / XWayland.
+
+#### Coordinates and HiDPI
+
+Both X11 and Wayland coordinates are reported and accepted in physical pixels at scale 1.0 today. HiDPI scale is not surfaced through the existing `Screenshot.scale` field on Linux — it stays 1.0 — and `Point` arguments to input simulation are taken at face value.
+
 ### GTK press fallback (Linux)
 
 GTK 4 menu-button widgets (`GtkMenuButton`, `AdwMenuButton`, `AdwSplitButton`) present as an outer `push button` accessible that advertises `NActions = 0` wrapping an inner `toggle button` that carries the real `click` action. Calling `press()` on the outer would normally raise `ActionNotSupported`. When the owning application identifies itself as GTK via `Application.ToolkitName == "GTK"`, xa11y-linux instead walks a bounded slice of the outer's subtree (BFS, depth 3, actionable roles only, name must match) and invokes the single actionable descendant it finds. The fallback is strictly scoped: it only runs inside GTK apps, only when the widget's own Action interface is empty, and only when exactly one candidate matches — ambiguous subtrees still surface the original error.

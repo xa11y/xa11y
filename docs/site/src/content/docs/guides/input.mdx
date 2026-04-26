@@ -32,9 +32,11 @@ The two mechanisms are not bridged. A failed accessibility action never falls ba
 | macOS | Accessibility + Input Monitoring for the terminal/IDE running your code |
 | Windows | None for normal user sessions |
 | Linux (X11) | `XTest` extension enabled on the X server |
-| Linux (Wayland) | Not supported — returns `Unsupported` |
+| Linux (Wayland) | `xdg-desktop-portal` with the **RemoteDesktop** interface (libei). User consent prompt on first use; persisted thereafter when the portal supports `persist_mode=PERMANENT`. |
 
 On macOS, input simulation usually also requires the target window to be foregrounded. Activate the window explicitly before synthesising input.
+
+xa11y picks the Linux backend at runtime: if `DISPLAY` is set we drive XTest; otherwise `WAYLAND_DISPLAY` triggers the portal/libei path. There is no compile-time feature flag — both backends are always built into `xa11y-linux`.
 
 ## Basic usage
 
@@ -287,7 +289,7 @@ Drag-and-drop has no accessibility equivalent on most platforms. Resolve both en
 | Error | When |
 | --- | --- |
 | `PermissionDenied` | OS denied the synthesis permission (macOS Input Monitoring, etc.) |
-| `Unsupported` | Platform has no backend for the operation (e.g. Linux on Wayland) |
+| `Unsupported` | Platform has no backend for the operation (e.g. Linux session with neither `DISPLAY` nor `WAYLAND_DISPLAY` set) |
 | `NoElementBounds` | Target `Element` has no bounds — re-fetch it or anchor on a point |
 | `InvalidActionData` | Uppercase `Char` key, malformed key name, or bad target tuple |
 | `Platform` | Raw OS failure (FFI return code etc.) |
