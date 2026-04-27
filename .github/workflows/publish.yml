@@ -79,6 +79,12 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # `cargo publish` runs a verification build of each crate. xa11y-linux
+      # links libxkbcommon for the Wayland input backend, so the dev headers
+      # must be present on the runner.
+      - name: Install Linux system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
+
       # Publish crates in dependency order. On re-release (level=release),
       # versions may already exist on crates.io — skip those gracefully.
       - name: Publish all crates
@@ -130,11 +136,13 @@ jobs:
           manylinux: auto
           working-directory: xa11y-python
           before-script-linux: |
-            # Install dbus development headers for zbus compilation
+            # Install dev headers for transitive system deps:
+            #   - dbus     (zbus, AT-SPI2 transport)
+            #   - xkbcommon (Wayland input backend keysym lookup)
             if command -v yum &> /dev/null; then
-              yum install -y dbus-devel
+              yum install -y dbus-devel libxkbcommon-devel
             elif command -v apt-get &> /dev/null; then
-              apt-get update && apt-get install -y libdbus-1-dev
+              apt-get update && apt-get install -y libdbus-1-dev libxkbcommon-dev
             fi
 
       - uses: actions/upload-artifact@v7
@@ -261,7 +269,6 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - host: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            setup: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
           - host: macos-latest
             target: x86_64-apple-darwin
           - host: macos-latest
@@ -287,10 +294,31 @@ jobs:
         with:
           targets: ${{ matrix.settings.target }}
 
-      - name: Cross-compile setup
-        if: matrix.settings.setup
-        shell: bash
-        run: ${{ matrix.settings.setup }}
+      # xa11y-linux links libxkbcommon for the Wayland input backend; the
+      # Linux native bindings pull it in transitively.
+      - name: Install libxkbcommon (x86_64 Linux)
+        if: matrix.settings.target == 'x86_64-unknown-linux-gnu'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
+
+      # aarch64 Linux: cross-compile via gcc-aarch64-linux-gnu, plus arm64
+      # libxkbcommon from the Ubuntu Ports mirror via dpkg multiarch.
+      # archive.ubuntu.com doesn't host arm64, so the default DEB822 sources
+      # are restricted to amd64 to keep apt-get update from 404'ing.
+      - name: Set up arm64 cross toolchain + libxkbcommon
+        if: matrix.settings.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          codename=$(lsb_release -cs)
+          sudo dpkg --add-architecture arm64
+          sudo sed -i 's/^Architectures: .*/Architectures: amd64/' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+          sudo tee /etc/apt/sources.list.d/arm64-ports.sources >/dev/null <<EOF
+          Types: deb
+          URIs: http://ports.ubuntu.com/ubuntu-ports
+          Suites: ${codename} ${codename}-updates ${codename}-security
+          Components: main universe restricted multiverse
+          Architectures: arm64
+          EOF
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu libxkbcommon-dev:arm64
 
       - name: Install JS dev dependencies
         working-directory: xa11y-js
@@ -300,10 +328,15 @@ jobs:
         working-directory: xa11y-js
         shell: bash
         # Env vars for aarch64 Linux cross-compile. No-ops on other targets.
+        # PKG_CONFIG_* points the xkbcommon -sys build at the arm64 .pc file
+        # installed via the multiarch setup step.
         env:
           CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
           CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          PKG_CONFIG_ALLOW_CROSS: "1"
+          PKG_CONFIG_PATH_aarch64_unknown_linux_gnu: /usr/lib/aarch64-linux-gnu/pkgconfig
+          PKG_CONFIG_LIBDIR_aarch64_unknown_linux_gnu: /usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
         # Inline the build steps rather than `npm run build` because the
         # build script chains `napi build && patch-native-dts`, and `npm
         # run build -- --target X` appends the flag to the trailing node
