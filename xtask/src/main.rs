@@ -17,7 +17,8 @@ COMMANDS:
     test-js-integ       Run JS integration tests against the AccessKit test app
     test-integ          Run integration tests (delegates to scripts/)
     test-integ-container  Run Linux X11 integration tests in container
-    test-integ-wayland-container  Run Linux Wayland portal tests in container
+    test-integ-wayland-container  Run Linux Wayland portal screenshot tests in container
+    test-integ-wayland-uinput-container  Run Linux Wayland uinput input-sim e2e tests in container
     test-integ-input-smoke-container  Run Linux XTest input smoke in container
     test-qt             Run Qt (PySide6) integration tests
     test-gtk            Run GTK4 integration tests
@@ -52,6 +53,7 @@ fn main() -> ExitCode {
         "test-integ" => do_test_integ(rest),
         "test-integ-container" => do_test_integ_container(rest),
         "test-integ-wayland-container" => do_test_integ_wayland_container(),
+        "test-integ-wayland-uinput-container" => do_test_integ_wayland_uinput_container(),
         "test-integ-input-smoke-container" => do_test_integ_input_smoke_container(),
         "test-qt" => do_test_qt(),
         "test-gtk" => do_test_gtk(),
@@ -322,6 +324,56 @@ fn do_test_integ_wayland_container() -> bool {
             "xa11y-wayland",
             "bash",
             "/xa11y/scripts/run_wayland_portal.sh",
+        ],
+        &root,
+    )
+}
+
+fn do_test_integ_wayland_uinput_container() -> bool {
+    heading("Wayland uinput input-sim e2e (container)");
+    let root = project_root();
+    // Build the uinput container image (extends xa11y-base with libevdev
+    // + libxkbcommon) if it isn't already present.
+    let img_exists = std::process::Command::new("docker")
+        .args(["image", "inspect", "xa11y-wayland-uinput"])
+        .current_dir(&root)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !img_exists
+        && !run_in(
+            "docker",
+            &[
+                "build",
+                "-t",
+                "xa11y-wayland-uinput",
+                "-f",
+                "Containerfile.wayland-uinput",
+                ".",
+            ],
+            &root,
+        )
+    {
+        return false;
+    }
+    run_in(
+        "docker",
+        &[
+            "run",
+            "--rm",
+            "--device",
+            "/dev/uinput",
+            // Bind-mount /dev/input so the host-side udev-created
+            // event nodes for our new uinput device are visible.
+            "-v",
+            "/dev/input:/dev/input",
+            "-v",
+            &format!("{}:/xa11y", root.display()),
+            "-v",
+            "xa11y-cargo-cache:/xa11y/target",
+            "xa11y-wayland-uinput",
+            "bash",
+            "/xa11y/scripts/run_wayland_uinput.sh",
         ],
         &root,
     )

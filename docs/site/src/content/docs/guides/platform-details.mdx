@@ -117,6 +117,36 @@ The tri-state checked value (`Off` / `On` / `Mixed`) is derived differently:
 - **Linux:** Uses AT-SPI state bits — `Checked` (0x10) and `Mixed` (0x2000).
 - **Windows:** Reads `TogglePattern.CurrentToggleState` — 0 = Off, 1 = On, 2 = Indeterminate.
 
+### Linux: X11 vs Wayland
+
+xa11y supports both X11 and Wayland Linux sessions. Backends are selected at runtime — there is no compile-time feature flag.
+
+| Capability | X11 | Wayland |
+| --- | --- | --- |
+| Accessibility (AT-SPI2) | Same on both — D-Bus, no display-server dependency |
+| Input simulation | `XTest` extension (no setup) | `/dev/uinput` virtual evdev device (requires `input` group) |
+| Screen capture | `GetImage` on the root window | PNG URI from `org.freedesktop.portal.Screenshot` |
+
+The selection rule:
+
+- `DISPLAY` set → X11 (regardless of `WAYLAND_DISPLAY`).
+- Otherwise → Wayland: uinput for input, screenshot portal for capture.
+- Screenshot also returns `Unsupported` if neither `DISPLAY` nor `WAYLAND_DISPLAY` is set.
+
+#### Why uinput instead of libei + portal RemoteDesktop?
+
+`org.freedesktop.portal.RemoteDesktop` (libei) is the architecturally "correct" Wayland input-sim path and the future of structured input injection on Linux, but today it covers a strict subset of the ecosystem: only `xdg-desktop-portal-gnome` and `xdg-desktop-portal-kde` implement it, and neither has a usable headless mode without a session manager (GDM / SDDM). uinput goes through the kernel and is compositor-agnostic — it works on every Wayland desktop (GNOME, KDE Plasma, sway, Hyprland, Cosmic, weston) and on headless Linux servers, with the same code path. It is the same mechanism `xdotool --using-uinput`, `ydotool`, `wtype`, Steam Input, and Wine all use.
+
+The trade-off is that uinput requires the user to be in the `input` group, which grants global input read/write — comparable to macOS Input Monitoring. The portal model is more granular (per-app consent) but isn't broadly available yet. xa11y may add a libei backend later as an opt-in upgrade once the portal landscape stabilises.
+
+#### Wayland screenshot portal consent
+
+The Screenshot portal usually auto-approves for non-interactive callers (`interactive=false, modal=false`); xa11y passes both. wlroots compositors via `xdg-desktop-portal-wlr` and GNOME via `xdg-desktop-portal-gnome` both support this.
+
+#### Coordinates and HiDPI
+
+X11 and Wayland coordinates are accepted in physical pixels at scale 1.0 today. HiDPI scale is not surfaced through the existing `Screenshot.scale` field on Linux — it stays 1.0. `Point` arguments to input simulation are taken at face value, then mapped onto the uinput virtual coordinate range. Override the assumed screen size (default 1920×1080) with `XA11Y_SCREEN_WIDTH` / `XA11Y_SCREEN_HEIGHT` env vars if your setup differs.
+
 ### GTK press fallback (Linux)
 
 GTK 4 menu-button widgets (`GtkMenuButton`, `AdwMenuButton`, `AdwSplitButton`) present as an outer `push button` accessible that advertises `NActions = 0` wrapping an inner `toggle button` that carries the real `click` action. Calling `press()` on the outer would normally raise `ActionNotSupported`. When the owning application identifies itself as GTK via `Application.ToolkitName == "GTK"`, xa11y-linux instead walks a bounded slice of the outer's subtree (BFS, depth 3, actionable roles only, name must match) and invokes the single actionable descendant it finds. The fallback is strictly scoped: it only runs inside GTK apps, only when the widget's own Action interface is empty, and only when exactly one candidate matches — ambiguous subtrees still surface the original error.

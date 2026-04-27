@@ -1,0 +1,16 @@
+FROM xa11y-base
+
+# Container for Wayland input-sim e2e tests.
+#
+# The backend uses /dev/uinput, which is compositor-agnostic — we don't
+# need mutter, sway, or any portal infrastructure. Just the kernel uinput
+# device (mounted via `docker run --device /dev/uinput`) and libxkbcommon
+# for the keysym → keycode translation, plus libevdev so the test side
+# can read events back from /dev/input/event*.
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y \
+        libxkbcommon-dev libxkbcommon0 \
+        libevdev-dev libevdev2 \
+    && rm -rf /var/lib/apt/lists/*

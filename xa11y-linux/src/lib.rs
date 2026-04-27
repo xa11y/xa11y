@@ -1,7 +1,12 @@
-//! Linux accessibility backend using AT-SPI2 over D-Bus.
+//! Linux accessibility backend.
 //!
-//! This backend implements the `Provider` trait using the AT-SPI2 accessibility API.
-//! Requires `at-spi2-core` package and toolkit accessibility to be enabled.
+//! - AT-SPI2 introspection over D-Bus (`atspi`) — implements the core
+//!   `Provider` trait. Requires `at-spi2-core` and toolkit accessibility.
+//! - Input simulation (`input`, `wayland_input`) — XTest on X11 sessions,
+//!   libei via `org.freedesktop.portal.RemoteDesktop` on Wayland sessions.
+//!   Routing is at runtime via `DISPLAY` / `WAYLAND_DISPLAY`.
+//! - Screen capture (`screenshot`) — `GetImage` on X11, the Screenshot
+//!   portal on Wayland.
 
 #[cfg(target_os = "linux")]
 mod atspi;
@@ -11,6 +16,9 @@ mod events;
 
 #[cfg(target_os = "linux")]
 mod input;
+
+#[cfg(target_os = "linux")]
+mod wayland_input;
 
 #[cfg(target_os = "linux")]
 mod screenshot;

@@ -62,6 +62,96 @@ jobs:
       - name: Run integration tests
         run: ./scripts/run_integ_tests.sh
 
+  # ── Linux Wayland uinput: e2e input-sim coverage. Drives
+  #    LinuxInputProvider through its public API on the runner, then
+  #    reads events back via libevdev and asserts the wire-level codes/
+  #    values are correct. Compositor-agnostic — the kernel uinput
+  #    device works the same regardless of Wayland session.
+  #
+  #    Runs directly on the runner (not in a container) because Docker's
+  #    /dev tmpfs isolation means udev's freshly-minted /dev/input/event*
+  #    nodes for our virtual device aren't visible inside a container,
+  #    even with --device /dev/uinput and -v /dev/input:/dev/input.
+  #    The Containerfile.wayland-uinput + xtask path is still useful for
+  #    developers running on non-Linux hosts.
+  linux-wayland-uinput:
+    name: Linux Wayland (uinput)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-uinput-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-uinput-
+
+      - name: Install system dependencies
+        # libxkbcommon-dev: keysym → keycode lookup in the backend.
+        # libevdev-dev: event readback in the e2e test.
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libevdev-dev
+
+      - name: Load uinput kernel module
+        # GitHub-hosted Ubuntu runners build the uinput driver as a
+        # module and don't load it by default.
+        run: sudo modprobe uinput
+
+      - name: Grant access to /dev/uinput
+        # Host udev gives /dev/uinput mode 0660 root:input by default.
+        # Easiest way to let the cargo test process open it without
+        # spawning under sudo (which loses cargo's PATH/env): chmod the
+        # device. Equivalent to a usermod + relog on a developer box.
+        run: sudo chmod 0666 /dev/uinput
+
+      - name: Probe input subsystem (baseline)
+        # Diagnostic: capture what the runner has under /dev/input *before*
+        # any test runs, plus whether systemd-udevd is alive. Helps
+        # disambiguate "udev isn't creating event nodes" from "we can't
+        # read them due to permissions".
+        run: |
+          echo "--- /dev/uinput ---"
+          ls -l /dev/uinput || true
+          echo "--- /dev/input (if any) ---"
+          ls -la /dev/input/ 2>/dev/null || echo "no /dev/input directory"
+          echo "--- /sys/class/input ---"
+          ls /sys/class/input/ 2>/dev/null || echo "no /sys/class/input"
+          echo "--- udev daemon ---"
+          systemctl status systemd-udevd --no-pager -l 2>&1 | head -10 || true
+          echo "--- groups ---"
+          id
+
+      - name: Pre-grant access to future event nodes via udev rule
+        # Default udev gives /dev/input/event* mode 0660 root:input.
+        # Add a rule that drops to mode 0666 so the unprivileged cargo
+        # test process can read events back from any newly-created event
+        # node (including the one our virtual device produces).
+        run: |
+          echo 'KERNEL=="event[0-9]*", MODE="0666"' | \
+            sudo tee /etc/udev/rules.d/99-xa11y-test.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --type=devices --subsystem-match=input || true
+          sudo udevadm settle
+
+      - name: Run unit + smoke tests
+        run: cargo test -p xa11y-linux --lib && cargo test -p xa11y-linux --test wayland_smoke
+
+      - name: Run uinput e2e tests
+        # The test creates a uinput device, host udev populates the
+        # /dev/input/eventN node, the test reads events back via evdev.
+        # --test-threads=1 because tests share the kernel uinput device.
+        run: |
+          unset DISPLAY
+          cargo test -p xa11y-linux --test wayland_input_e2e -- \
+            --ignored --test-threads=1 --nocapture
+
   # ── macOS: unit tests ──────────────────────────────────────────────
   macos:
     name: macOS
@@ -470,6 +560,12 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-python-
 
+      # xa11y-linux now links libxkbcommon for the Wayland input backend.
+      # The Python wheel embeds xa11y, so it pulls the .so dependency in
+      # transitively at link time on Linux.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
+
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
@@ -515,6 +611,11 @@ jobs:
           key: ${{ runner.os }}-cargo-docs-${{ hashFiles('xa11y-js/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-docs-
+
+      # napi build links xa11y-js → xa11y → xa11y-linux on the Linux
+      # docs runner; xa11y-linux now needs libxkbcommon at link time.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
 
       - uses: actions/setup-python@v6
         with:
@@ -581,6 +682,13 @@ jobs:
           key: ${{ runner.os }}-cargo-js-${{ hashFiles('xa11y-js/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: |
             ${{ runner.os }}-cargo-js-
+
+      # xa11y-js → xa11y → xa11y-linux requires libxkbcommon to link on
+      # Linux. macOS / Windows skip this — those runners don't pull
+      # xa11y-linux in.
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
 
       - uses: actions/setup-node@v6
         with:

@@ -1,20 +1,29 @@
-//! Linux input-simulation backend using X11 + XTEST.
+//! Linux input-simulation backend.
 //!
-//! Connects to the X server on construction and drives the XTest extension
-//! (`fake_input`) for pointer motion, button events, scroll, and keyboard.
+//! Two implementations live behind a single [`LinuxInputProvider`] facade,
+//! chosen at construction time based on the session environment:
 //!
-//! **Wayland is not supported** at this layer. If `WAYLAND_DISPLAY` is set and
-//! `DISPLAY` is not, [`LinuxInputProvider::new`] returns [`Error::Unsupported`]
-//! — per Tenet 1 we refuse to fall back silently. A future backend based on
-//! `libei` / `org.freedesktop.portal.RemoteDesktop` can be added behind a
-//! feature flag.
+//! - **X11** (`DISPLAY` is set) — drives the XTest extension over `x11rb`.
+//!   Zero setup required; matches what existing X11 users already have.
+//! - **Wayland / uinput** (anything else) — opens the kernel's
+//!   `/dev/uinput` device and registers a virtual evdev keyboard+pointer.
+//!   Compositor-agnostic — works on every Linux desktop (GNOME, KDE,
+//!   sway, Hyprland, Cosmic, weston) plus headless setups. Same mechanism
+//!   `xdotool --using-uinput`, `ydotool`, `wtype`, Steam, and Wine use.
+//!   Requires `input` group membership; surfaces an actionable
+//!   `Error::PermissionDenied` if the user isn't in the group. See
+//!   [`crate::wayland_input`].
 //!
-//! Key mapping goes keysym → keycode via `GetKeyboardMapping`, which we query
-//! once at connect time and re-query when the server notifies us of a layout
-//! change. `Key::Char` for printable ASCII uses the codepoint as its keysym;
-//! [`Keyboard::type_text`](xa11y_core::input::Keyboard::type_text) looks up
-//! each character in the same keymap table and holds Shift when it appears in
-//! the shifted column.
+//! Routing prefers X11 when `DISPLAY` is set and falls back to uinput
+//! otherwise. There is no compile-time feature flag — both backends are
+//! always built on Linux.
+//!
+//! Key mapping on X11 goes keysym → keycode via `GetKeyboardMapping`, queried
+//! once at connect time. `Key::Char` for printable ASCII uses the codepoint
+//! as its keysym; [`Keyboard::type_text`](xa11y_core::input::Keyboard::type_text)
+//! looks up each character in the same keymap table and holds Shift when it
+//! appears in the shifted column. The Wayland backend does the same dance
+//! against an xkb keymap built from system defaults.
 
 use std::sync::{Mutex, RwLock};
 
@@ -29,12 +38,15 @@ use x11rb::rust_connection::RustConnection;
 use xa11y_core::input::{InputProvider, Key, MouseButton, Point, ScrollDelta};
 use xa11y_core::{Error, Result};
 
+use crate::wayland_input::WaylandInputBackend;
+
 // X11 keysyms — lifted from /usr/include/X11/keysymdef.h. Only the keysyms
 // named by [`Key`] plus the modifiers we need to hold for shifted text.
-const XK_SHIFT_L: u32 = 0xffe1;
-const XK_CONTROL_L: u32 = 0xffe3;
-const XK_ALT_L: u32 = 0xffe9;
-const XK_SUPER_L: u32 = 0xffeb;
+// Shared with the Wayland backend via `key_to_keysym`.
+pub(crate) const XK_SHIFT_L: u32 = 0xffe1;
+pub(crate) const XK_CONTROL_L: u32 = 0xffe3;
+pub(crate) const XK_ALT_L: u32 = 0xffe9;
+pub(crate) const XK_SUPER_L: u32 = 0xffeb;
 const XK_RETURN: u32 = 0xff0d;
 const XK_ESCAPE: u32 = 0xff1b;
 const XK_BACKSPACE: u32 = 0xff08;
@@ -51,6 +63,56 @@ const XK_PAGE_UP: u32 = 0xff55;
 const XK_PAGE_DOWN: u32 = 0xff56;
 const XK_F1: u32 = 0xffbe;
 // XK_F24 = 0xffd5; 1..=24 is contiguous starting at XK_F1.
+
+/// Resolve a [`Key`] to its X11 keysym.
+///
+/// Both the X11 and Wayland backends translate `Key` → keysym via this
+/// function. The Wayland path then looks the keysym up in an xkb keymap to
+/// get an evdev keycode; the X11 path looks it up in `GetKeyboardMapping`.
+pub(crate) fn key_to_keysym(key: &Key) -> Result<u32> {
+    let keysym = match key {
+        Key::Shift => XK_SHIFT_L,
+        Key::Ctrl => XK_CONTROL_L,
+        Key::Alt => XK_ALT_L,
+        Key::Meta => XK_SUPER_L,
+        Key::Enter => XK_RETURN,
+        Key::Escape => XK_ESCAPE,
+        Key::Backspace => XK_BACKSPACE,
+        Key::Tab => XK_TAB,
+        Key::Space => 0x0020,
+        Key::Delete => XK_DELETE,
+        Key::Insert => XK_INSERT,
+        Key::ArrowUp => XK_UP,
+        Key::ArrowDown => XK_DOWN,
+        Key::ArrowLeft => XK_LEFT,
+        Key::ArrowRight => XK_RIGHT,
+        Key::Home => XK_HOME,
+        Key::End => XK_END,
+        Key::PageUp => XK_PAGE_UP,
+        Key::PageDown => XK_PAGE_DOWN,
+        Key::F(n) => {
+            if *n < 1 || *n > 24 {
+                return Err(Error::InvalidActionData {
+                    message: format!("F{n} is out of range (1..=24)"),
+                });
+            }
+            XK_F1 + (*n as u32 - 1)
+        }
+        Key::Char(c) => char_keysym(*c),
+    };
+    Ok(keysym)
+}
+
+/// Convert a character to its X11 keysym. ASCII 0x20..=0x7e maps directly;
+/// everything above uses the Unicode plane (`0x01000000 | codepoint`).
+pub(crate) fn char_keysym(c: char) -> u32 {
+    let cp = c as u32;
+    if (0x20..=0x7e).contains(&cp) {
+        cp
+    } else {
+        0x0100_0000 | cp
+    }
+}
 
 /// Keymap snapshot built from `GetKeyboardMapping`. For each keysym we care
 /// about we store the keycode plus whether it lives in the shifted column
@@ -92,32 +154,16 @@ impl Keymap {
     }
 }
 
-/// XTest-backed [`InputProvider`].
-pub struct LinuxInputProvider {
+/// XTest-backed backend. Holds the X server connection and a keymap snapshot.
+pub(crate) struct X11InputBackend {
     /// Connection is `!Sync`; guard all server traffic with the mutex.
     conn: Mutex<RustConnection>,
     root: Window,
     keymap: RwLock<Keymap>,
 }
 
-impl LinuxInputProvider {
-    /// Connect to `$DISPLAY` and initialise XTest state.
-    ///
-    /// Returns [`Error::Unsupported`] if the session is Wayland-only
-    /// (`WAYLAND_DISPLAY` is set and `DISPLAY` is not). Returns
-    /// [`Error::Platform`] for any X protocol / connection failure.
-    pub fn new() -> Result<Self> {
-        let display_set = std::env::var_os("DISPLAY").is_some();
-        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
-        if !display_set {
-            let feature = if wayland {
-                "input simulation on Wayland (X11 DISPLAY not set)".to_string()
-            } else {
-                "input simulation (no X11 DISPLAY)".to_string()
-            };
-            return Err(Error::Unsupported { feature });
-        }
-
+impl X11InputBackend {
+    fn new() -> Result<Self> {
         let (conn, screen_num) = RustConnection::connect(None).map_err(platform)?;
         let setup = conn.setup().clone();
         let screen: &Screen = setup
@@ -189,75 +235,6 @@ impl LinuxInputProvider {
         self.send(type_, button, 0, 0)
     }
 
-    /// Resolve a [`Key`] to its X11 keysym, returning
-    /// [`Error::InvalidActionData`] for out-of-range `Key::F(n)`.
-    fn keysym_for(&self, key: &Key) -> Result<u32> {
-        let keysym = match key {
-            Key::Shift => XK_SHIFT_L,
-            Key::Ctrl => XK_CONTROL_L,
-            Key::Alt => XK_ALT_L,
-            Key::Meta => XK_SUPER_L,
-            Key::Enter => XK_RETURN,
-            Key::Escape => XK_ESCAPE,
-            Key::Backspace => XK_BACKSPACE,
-            Key::Tab => XK_TAB,
-            Key::Space => 0x0020,
-            Key::Delete => XK_DELETE,
-            Key::Insert => XK_INSERT,
-            Key::ArrowUp => XK_UP,
-            Key::ArrowDown => XK_DOWN,
-            Key::ArrowLeft => XK_LEFT,
-            Key::ArrowRight => XK_RIGHT,
-            Key::Home => XK_HOME,
-            Key::End => XK_END,
-            Key::PageUp => XK_PAGE_UP,
-            Key::PageDown => XK_PAGE_DOWN,
-            Key::F(n) => {
-                if *n < 1 || *n > 24 {
-                    return Err(Error::InvalidActionData {
-                        message: format!("F{n} is out of range (1..=24)"),
-                    });
-                }
-                XK_F1 + (*n as u32 - 1)
-            }
-            Key::Char(c) => char_keysym(*c),
-        };
-        Ok(keysym)
-    }
-}
-
-/// Convert a character to its X11 keysym. ASCII 0x20..=0x7e maps directly;
-/// everything above uses the Unicode plane (`0x01000000 | codepoint`).
-fn char_keysym(c: char) -> u32 {
-    let cp = c as u32;
-    if (0x20..=0x7e).contains(&cp) {
-        cp
-    } else {
-        0x0100_0000 | cp
-    }
-}
-
-fn platform<E: std::fmt::Display>(e: E) -> Error {
-    Error::Platform {
-        code: -1,
-        message: e.to_string(),
-    }
-}
-
-fn platform_msg(msg: &str) -> Error {
-    Error::Platform {
-        code: -1,
-        message: msg.to_string(),
-    }
-}
-
-/// Clamp an `i32` screen coordinate into the `i16` range that XTest takes.
-/// X11 coordinates are 16-bit; this matches how libX11 itself narrows them.
-fn clamp_coord(v: i32) -> i16 {
-    v.clamp(i16::MIN as i32, i16::MAX as i32) as i16
-}
-
-impl InputProvider for LinuxInputProvider {
     fn pointer_move(&self, to: Point) -> Result<()> {
         // detail=0 on MOTION_NOTIFY means absolute coordinates relative to root.
         self.send(MOTION_NOTIFY_EVENT, 0, clamp_coord(to.x), clamp_coord(to.y))
@@ -289,9 +266,7 @@ impl InputProvider for LinuxInputProvider {
         // X11 scroll-wheel convention: button 4 = up, 5 = down, 6 = left, 7 = right.
         // The input-sim contract: positive dy scrolls content down (viewport
         // up), which is the "wheel rolled toward the user" direction — that's
-        // button 5 on X11. Matches Windows' positive-delta / scroll-down
-        // mapping implicitly the other way around, but "positive dy moves
-        // content down" is the doc'd invariant.
+        // button 5 on X11.
         for _ in 0..delta.dy.abs() {
             let btn = if delta.dy > 0 { 5 } else { 4 };
             self.button_event(btn, true)?;
@@ -306,12 +281,12 @@ impl InputProvider for LinuxInputProvider {
     }
 
     fn key_down(&self, key: &Key) -> Result<()> {
-        let keysym = self.keysym_for(key)?;
+        let keysym = key_to_keysym(key)?;
         self.key_event(keysym, true)
     }
 
     fn key_up(&self, key: &Key) -> Result<()> {
-        let keysym = self.keysym_for(key)?;
+        let keysym = key_to_keysym(key)?;
         self.key_event(keysym, false)
     }
 
@@ -347,6 +322,120 @@ impl InputProvider for LinuxInputProvider {
         }
         Ok(())
     }
+}
+
+/// Public input provider for Linux. Dispatches to the X11 or Wayland backend
+/// chosen at construction.
+pub struct LinuxInputProvider {
+    backend: InputBackend,
+}
+
+enum InputBackend {
+    X11(Box<X11InputBackend>),
+    Wayland(Box<WaylandInputBackend>),
+}
+
+impl LinuxInputProvider {
+    /// Choose a backend based on the session environment.
+    ///
+    /// - `DISPLAY` set → X11 (XTest).
+    /// - otherwise → uinput (works on Wayland and headless sessions).
+    ///   May return [`Error::PermissionDenied`] if the user isn't in the
+    ///   `input` group, or [`Error::Unsupported`] if the kernel `uinput`
+    ///   module isn't loaded.
+    pub fn new() -> Result<Self> {
+        let display_set = std::env::var_os("DISPLAY").is_some();
+
+        if display_set {
+            let x11 = X11InputBackend::new()?;
+            Ok(Self {
+                backend: InputBackend::X11(Box::new(x11)),
+            })
+        } else {
+            let wl = WaylandInputBackend::new()?;
+            Ok(Self {
+                backend: InputBackend::Wayland(Box::new(wl)),
+            })
+        }
+    }
+}
+
+impl InputProvider for LinuxInputProvider {
+    fn pointer_move(&self, to: Point) -> Result<()> {
+        match &self.backend {
+            InputBackend::X11(x) => x.pointer_move(to),
+            InputBackend::Wayland(w) => w.pointer_move(to),
+        }
+    }
+
+    fn pointer_down(&self, button: MouseButton) -> Result<()> {
+        match &self.backend {
+            InputBackend::X11(x) => x.pointer_down(button),
+            InputBackend::Wayland(w) => w.pointer_down(button),
+        }
+    }
+
+    fn pointer_up(&self, button: MouseButton) -> Result<()> {
+        match &self.backend {
+            InputBackend::X11(x) => x.pointer_up(button),
+            InputBackend::Wayland(w) => w.pointer_up(button),
+        }
+    }
+
+    fn pointer_click(&self, at: Point, button: MouseButton, count: u32) -> Result<()> {
+        match &self.backend {
+            InputBackend::X11(x) => x.pointer_click(at, button, count),
+            InputBackend::Wayland(w) => w.pointer_click(at, button, count),
+        }
+    }
+
+    fn pointer_scroll(&self, at: Point, delta: ScrollDelta) -> Result<()> {
+        match &self.backend {
+            InputBackend::X11(x) => x.pointer_scroll(at, delta),
+            InputBackend::Wayland(w) => w.pointer_scroll(at, delta),
+        }
+    }
+
+    fn key_down(&self, key: &Key) -> Result<()> {
+        match &self.backend {
+            InputBackend::X11(x) => x.key_down(key),
+            InputBackend::Wayland(w) => w.key_down(key),
+        }
+    }
+
+    fn key_up(&self, key: &Key) -> Result<()> {
+        match &self.backend {
+            InputBackend::X11(x) => x.key_up(key),
+            InputBackend::Wayland(w) => w.key_up(key),
+        }
+    }
+
+    fn type_text(&self, text: &str) -> Result<()> {
+        match &self.backend {
+            InputBackend::X11(x) => x.type_text(text),
+            InputBackend::Wayland(w) => w.type_text(text),
+        }
+    }
+}
+
+pub(crate) fn platform<E: std::fmt::Display>(e: E) -> Error {
+    Error::Platform {
+        code: -1,
+        message: e.to_string(),
+    }
+}
+
+pub(crate) fn platform_msg(msg: &str) -> Error {
+    Error::Platform {
+        code: -1,
+        message: msg.to_string(),
+    }
+}
+
+/// Clamp an `i32` screen coordinate into the `i16` range that XTest takes.
+/// X11 coordinates are 16-bit; this matches how libX11 itself narrows them.
+fn clamp_coord(v: i32) -> i16 {
+    v.clamp(i16::MIN as i32, i16::MAX as i32) as i16
 }
 
 fn button_number(button: MouseButton) -> u8 {
