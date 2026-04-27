@@ -270,13 +270,17 @@ impl ScreenshotProvider for LinuxScreenshot {
 }
 
 fn decode_png_to_rgba(bytes: &[u8]) -> Result<Screenshot> {
-    let decoder = png::Decoder::new(bytes);
+    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     let mut reader = decoder.read_info().map_err(|e| Error::Platform {
         code: -1,
         message: format!("png decode header: {e}"),
     })?;
     let info = reader.info().clone();
-    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let buf_size = reader.output_buffer_size().ok_or_else(|| Error::Platform {
+        code: -1,
+        message: "png decode: output buffer size overflowed usize".to_string(),
+    })?;
+    let mut buf = vec![0u8; buf_size];
     let frame = reader.next_frame(&mut buf).map_err(|e| Error::Platform {
         code: -1,
         message: format!("png decode frame: {e}"),
