@@ -270,7 +270,7 @@ impl ScreenshotProvider for LinuxScreenshot {
 }
 
 fn decode_png_to_rgba(bytes: &[u8]) -> Result<Screenshot> {
-    let decoder = png::Decoder::new(bytes);
+    let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     let mut reader = decoder.read_info().map_err(|e| Error::Platform {
         code: -1,
         message: format!("png decode header: {e}"),
