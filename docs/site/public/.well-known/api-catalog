@@ -1,0 +1,19 @@
+{
+  "apis": [
+    {
+      "title": "xa11y Rust API",
+      "description": "Rust API reference for the xa11y accessibility library",
+      "humanUrl": "https://xa11y.dev/api/rust/reference/xa11y/"
+    },
+    {
+      "title": "xa11y Python API",
+      "description": "Python API reference for the xa11y accessibility library",
+      "humanUrl": "https://xa11y.dev/api/python/reference/api/xa11y/"
+    },
+    {
+      "title": "xa11y JavaScript API",
+      "description": "JavaScript API reference for the xa11y accessibility library",
+      "humanUrl": "https://xa11y.dev/api/javascript/"
+    }
+  ]
+}
