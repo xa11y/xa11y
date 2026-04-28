@@ -2,7 +2,7 @@
 
 User-agent: *
 Allow: /
-Content-Signal: ai-train=no, search=yes, ai-input=no
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
 
 User-agent: GPTBot
 User-agent: OAI-SearchBot
@@ -14,4 +14,4 @@ User-agent: Bytespider
 User-agent: CCBot
 User-agent: Applebot-Extended
 Allow: /
-Content-Signal: ai-train=no, search=yes, ai-input=no
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
