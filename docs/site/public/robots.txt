@@ -1,0 +1,17 @@
+# xa11y.dev — https://www.rfc-editor.org/rfc/rfc9309
+
+User-agent: *
+Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
+
+User-agent: GPTBot
+User-agent: OAI-SearchBot
+User-agent: Claude-Web
+User-agent: anthropic-ai
+User-agent: Google-Extended
+User-agent: Amazonbot
+User-agent: Bytespider
+User-agent: CCBot
+User-agent: Applebot-Extended
+Allow: /
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
