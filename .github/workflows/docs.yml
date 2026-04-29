@@ -52,6 +52,11 @@ jobs:
       - name: Install Sphinx
         run: pip install sphinx sphinx-rtd-theme sphinx-autoapi
 
+      # napi build links xa11y-js → xa11y → xa11y-linux on the Linux
+      # docs runner; xa11y-linux needs libxkbcommon at link time.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
+
       # The JS API doc generator reads xa11y-js/native.d.ts, which is
       # produced by napi-rs from the Rust source. Build + patch it here
       # so the generator has a fresh source of truth to read from.
