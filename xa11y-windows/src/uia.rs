@@ -18,6 +18,20 @@ use xa11y_core::{
 
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
 
+/// `EVENT_E_ALL_SUBSCRIBERS_FAILED` (0x80040201) — returned by UIA when an
+/// action fires a notification and all registered event subscribers fail to
+/// handle it. This means the UI action itself completed; only the notification
+/// layer had a transient failure. Certain providers (notably Qt's UIA backend
+/// for QTabBar items) propagate this error back through action methods like
+/// `Invoke()` and `Select()`, which is incorrect — callers should treat it as
+/// success. See: https://github.com/xa11y/xa11y/issues/169
+const EVENT_E_ALL_SUBSCRIBERS_FAILED: windows::core::HRESULT =
+    windows::core::HRESULT(0x80040201u32 as i32);
+
+fn is_event_subscriber_failure(e: &windows::core::Error) -> bool {
+    e.code() == EVENT_E_ALL_SUBSCRIBERS_FAILED
+}
+
 /// Initialize COM for UIA. Called once per WindowsProvider creation.
 /// Does not uninitialize on drop — COM lifetime is managed by the process.
 fn ensure_com_initialized() -> windows::core::Result<()> {
@@ -728,9 +742,15 @@ impl Provider for WindowsProvider {
         if let Ok(pattern) = unsafe {
             uia_element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
         } {
-            unsafe { pattern.Invoke() }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: "Invoke failed".to_string(),
+            unsafe { pattern.Invoke() }.or_else(|e| {
+                if is_event_subscriber_failure(&e) {
+                    Ok(())
+                } else {
+                    Err(Error::Platform {
+                        code: e.code().0 as i64,
+                        message: "Invoke failed".to_string(),
+                    })
+                }
             })?;
             return Ok(());
         }
@@ -738,9 +758,15 @@ impl Provider for WindowsProvider {
         if let Ok(pattern) = unsafe {
             uia_element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
         } {
-            unsafe { pattern.Toggle() }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: "Toggle failed".to_string(),
+            unsafe { pattern.Toggle() }.or_else(|e| {
+                if is_event_subscriber_failure(&e) {
+                    Ok(())
+                } else {
+                    Err(Error::Platform {
+                        code: e.code().0 as i64,
+                        message: "Toggle failed".to_string(),
+                    })
+                }
             })?;
             return Ok(());
         }
@@ -750,9 +776,15 @@ impl Provider for WindowsProvider {
                 UIA_SelectionItemPatternId,
             )
         } {
-            unsafe { pattern.Select() }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: "Select failed".to_string(),
+            unsafe { pattern.Select() }.or_else(|e| {
+                if is_event_subscriber_failure(&e) {
+                    Ok(())
+                } else {
+                    Err(Error::Platform {
+                        code: e.code().0 as i64,
+                        message: "Select failed".to_string(),
+                    })
+                }
             })?;
             return Ok(());
         }
@@ -816,9 +848,15 @@ impl Provider for WindowsProvider {
         if let Ok(pattern) = unsafe {
             uia_element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
         } {
-            unsafe { pattern.Toggle() }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: "Toggle failed".to_string(),
+            unsafe { pattern.Toggle() }.or_else(|e| {
+                if is_event_subscriber_failure(&e) {
+                    Ok(())
+                } else {
+                    Err(Error::Platform {
+                        code: e.code().0 as i64,
+                        message: "Toggle failed".to_string(),
+                    })
+                }
             })?;
             return Ok(());
         }
@@ -835,9 +873,15 @@ impl Provider for WindowsProvider {
                 UIA_SelectionItemPatternId,
             )
         } {
-            unsafe { pattern.Select() }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: "Select failed".to_string(),
+            unsafe { pattern.Select() }.or_else(|e| {
+                if is_event_subscriber_failure(&e) {
+                    Ok(())
+                } else {
+                    Err(Error::Platform {
+                        code: e.code().0 as i64,
+                        message: "Select failed".to_string(),
+                    })
+                }
             })?;
             return Ok(());
         }
@@ -2258,6 +2302,43 @@ mod tests {
         // pass 0; that path is covered by the actual handler wiring.
         for a in &apps {
             assert!(a.handle != 0, "provider-built handle should be non-zero");
+        }
+    }
+
+    // ── EVENT_E_ALL_SUBSCRIBERS_FAILED handling ─────────────────────────────
+
+    #[test]
+    fn event_e_all_subscribers_failed_constant_matches_sdk_value() {
+        // 0x80040201 is EVENT_E_ALL_SUBSCRIBERS_FAILED from <eventsys.h>.
+        // The constant value must be stable — it is part of the Windows ABI.
+        assert_eq!(EVENT_E_ALL_SUBSCRIBERS_FAILED.0, 0x80040201u32 as i32);
+    }
+
+    #[test]
+    fn is_event_subscriber_failure_recognises_0x80040201() {
+        // Construct the error the way the Windows crate does when a COM call
+        // returns this HRESULT: via HRESULT::ok() → Err(windows::core::Error).
+        let err = windows::core::HRESULT(0x80040201u32 as i32)
+            .ok()
+            .unwrap_err();
+        assert!(
+            is_event_subscriber_failure(&err),
+            "0x80040201 must be classified as an event-subscriber failure"
+        );
+    }
+
+    #[test]
+    fn is_event_subscriber_failure_passes_other_hresults() {
+        for &code in &[
+            0x80004005u32, // E_FAIL
+            0x80070057u32, // E_INVALIDARG
+            0x80004003u32, // E_POINTER
+        ] {
+            let err = windows::core::HRESULT(code as i32).ok().unwrap_err();
+            assert!(
+                !is_event_subscriber_failure(&err),
+                "HRESULT 0x{code:08X} must not be classified as an event-subscriber failure"
+            );
         }
     }
 }
