@@ -11,7 +11,7 @@ use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::*;
 
 use xa11y_core::{
-    selector::{matches_simple, Selector},
+    selector::{matches_simple, Combinator, Selector, SelectorSegment},
     CancelHandle, ElementData, Error, Event, EventKind, EventReceiver, Provider, Rect, Result,
     Role, StateFlag, StateSet, Subscription, Toggled,
 };
@@ -596,6 +596,76 @@ impl Provider for WindowsProvider {
             }
         }
         Ok(None)
+    }
+
+    /// Override the default `narrow_multi_segment` so that the Descendant
+    /// combinator uses `find_elements_in_tree` (tree-walking via `get_children`)
+    /// rather than `self.find_elements` (which would invoke `find_all_subtree`).
+    ///
+    /// `find_all_subtree` calls `FindAllBuildCache(TreeScope_Subtree)` with no
+    /// fallback. When the candidate element is a UIA *fragment element* (not the
+    /// HWND fragment root — e.g. a Qt QFormLayout virtual group), that COM call
+    /// can return an incomplete array, silently missing virtual child elements.
+    /// By routing through `get_children` → `uia_children`, we get the
+    /// `RawViewWalker` fallback that recovers those missing children.
+    fn narrow_multi_segment(
+        &self,
+        mut candidates: Vec<ElementData>,
+        segments: &[SelectorSegment],
+        max_depth: u32,
+        limit: Option<usize>,
+    ) -> Result<Vec<ElementData>> {
+        for segment in segments {
+            let mut next_candidates = Vec::new();
+            for candidate in &candidates {
+                match segment.combinator {
+                    Combinator::Child => {
+                        let children = self.get_children(Some(candidate))?;
+                        for child in children {
+                            if matches_simple(&child, &segment.simple) {
+                                next_candidates.push(child);
+                            }
+                        }
+                    }
+                    Combinator::Descendant => {
+                        // Use tree-walking so uia_children's RawViewWalker fallback
+                        // is available for UIA fragment elements (issue #168).
+                        let sub_selector = Selector {
+                            segments: vec![SelectorSegment {
+                                combinator: Combinator::Root,
+                                simple: segment.simple.clone(),
+                            }],
+                        };
+                        let mut sub_results = xa11y_core::selector::find_elements_in_tree(
+                            |el| self.get_children(el),
+                            Some(candidate),
+                            &sub_selector,
+                            None,
+                            Some(max_depth),
+                        )?;
+                        next_candidates.append(&mut sub_results);
+                    }
+                    Combinator::Root => unreachable!(),
+                }
+            }
+            let mut seen = std::collections::HashSet::new();
+            next_candidates.retain(|e| seen.insert(e.handle));
+            candidates = next_candidates;
+        }
+
+        if let Some(nth) = segments.last().and_then(|s| s.simple.nth) {
+            if nth <= candidates.len() {
+                candidates = vec![candidates.remove(nth - 1)];
+            } else {
+                candidates.clear();
+            }
+        }
+
+        if let Some(limit) = limit {
+            candidates.truncate(limit);
+        }
+
+        Ok(candidates)
     }
 
     fn find_elements(

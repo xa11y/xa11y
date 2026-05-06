@@ -857,6 +857,85 @@ fn locator_selector_getter() {
     assert_eq!(loc.selector(), "button > text_field");
 }
 
+// Regression test for issue #168: a descendant-combinator selector must find
+// elements nested inside virtual UIA fragment groups (e.g. Qt QFormLayout value
+// columns) that `FindAllBuildCache(TreeScope_Subtree)` may miss because it
+// returns nothing when rooted at a fragment element (not a fragment root).
+//
+// Tree: application > window > group["Outer"] > group["Inner"] > static_text["TestFarm"]
+// Selector: group[name="Outer"] static_text[name="TestFarm"]
+// The static_text is 2 hops deep from the outer group, so narrow_multi_segment
+// must recurse into children rather than relying solely on a single flat scan.
+#[test]
+fn locator_descendant_through_nested_groups() {
+    let children_map: Vec<Vec<usize>> = vec![
+        vec![1],  // 0: application
+        vec![2],  // 1: window
+        vec![3],  // 2: group "Outer"
+        vec![4],  // 3: group "Inner"
+        vec![],   // 4: static_text "TestFarm"
+    ];
+    let parent_map: Vec<Option<usize>> = vec![
+        None,
+        Some(0),
+        Some(1),
+        Some(2),
+        Some(3),
+    ];
+    let roles = [
+        Role::Application,
+        Role::Window,
+        Role::Group,
+        Role::Group,
+        Role::StaticText,
+    ];
+    let names = [
+        Some("Test App"),
+        Some("Window"),
+        Some("Outer"),
+        Some("Inner"),
+        Some("TestFarm"),
+    ];
+
+    let nodes: Vec<MockNode> = (0..5usize)
+        .map(|i| MockNode {
+            data: ElementData {
+                role: roles[i],
+                name: names[i].map(String::from),
+                value: None,
+                description: None,
+                bounds: None,
+                actions: vec![],
+                states: StateSet::default(),
+                numeric_value: None,
+                min_value: None,
+                max_value: None,
+                stable_id: None,
+                pid: Some(1234),
+                raw: std::collections::HashMap::new(),
+                handle: i as u64,
+            },
+            children: children_map[i].clone(),
+            parent: parent_map[i],
+        })
+        .collect();
+
+    let provider = Arc::new(MockProvider {
+        nodes,
+        last_action: std::sync::Mutex::new(None),
+    });
+    let app = App::by_name_with(provider as Arc<dyn Provider>, "Test App").unwrap();
+
+    let loc = app.locator(r#"group[name="Outer"] static_text[name="TestFarm"]"#);
+    assert!(
+        loc.exists().unwrap(),
+        "static_text nested inside two groups must be reachable via descendant combinator"
+    );
+    let el = loc.element().unwrap();
+    assert_eq!(el.role, Role::StaticText);
+    assert_eq!(el.name.as_deref(), Some("TestFarm"));
+}
+
 // ── Multi-app mock for system-root searches ──
 
 /// Build a mock with multiple apps at the top level.
