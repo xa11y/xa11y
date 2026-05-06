@@ -742,34 +742,32 @@ impl Provider for WindowsProvider {
         if let Ok(pattern) = unsafe {
             uia_element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
         } {
-            unsafe { pattern.Invoke() }
-                .or_else(|e| {
-                    if is_event_subscriber_failure(&e) {
-                        Ok(())
-                    } else {
-                        Err(Error::Platform {
-                            code: e.code().0 as i64,
-                            message: "Invoke failed".to_string(),
-                        })
-                    }
-                })?;
+            unsafe { pattern.Invoke() }.or_else(|e| {
+                if is_event_subscriber_failure(&e) {
+                    Ok(())
+                } else {
+                    Err(Error::Platform {
+                        code: e.code().0 as i64,
+                        message: "Invoke failed".to_string(),
+                    })
+                }
+            })?;
             return Ok(());
         }
         // Try TogglePattern (checkboxes, switches)
         if let Ok(pattern) = unsafe {
             uia_element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
         } {
-            unsafe { pattern.Toggle() }
-                .or_else(|e| {
-                    if is_event_subscriber_failure(&e) {
-                        Ok(())
-                    } else {
-                        Err(Error::Platform {
-                            code: e.code().0 as i64,
-                            message: "Toggle failed".to_string(),
-                        })
-                    }
-                })?;
+            unsafe { pattern.Toggle() }.or_else(|e| {
+                if is_event_subscriber_failure(&e) {
+                    Ok(())
+                } else {
+                    Err(Error::Platform {
+                        code: e.code().0 as i64,
+                        message: "Toggle failed".to_string(),
+                    })
+                }
+            })?;
             return Ok(());
         }
         // Try SelectionItemPattern (list items, radio buttons)
@@ -778,17 +776,16 @@ impl Provider for WindowsProvider {
                 UIA_SelectionItemPatternId,
             )
         } {
-            unsafe { pattern.Select() }
-                .or_else(|e| {
-                    if is_event_subscriber_failure(&e) {
-                        Ok(())
-                    } else {
-                        Err(Error::Platform {
-                            code: e.code().0 as i64,
-                            message: "Select failed".to_string(),
-                        })
-                    }
-                })?;
+            unsafe { pattern.Select() }.or_else(|e| {
+                if is_event_subscriber_failure(&e) {
+                    Ok(())
+                } else {
+                    Err(Error::Platform {
+                        code: e.code().0 as i64,
+                        message: "Select failed".to_string(),
+                    })
+                }
+            })?;
             return Ok(());
         }
         // Try ExpandCollapsePattern (combo boxes, tree items)
@@ -851,17 +848,16 @@ impl Provider for WindowsProvider {
         if let Ok(pattern) = unsafe {
             uia_element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
         } {
-            unsafe { pattern.Toggle() }
-                .or_else(|e| {
-                    if is_event_subscriber_failure(&e) {
-                        Ok(())
-                    } else {
-                        Err(Error::Platform {
-                            code: e.code().0 as i64,
-                            message: "Toggle failed".to_string(),
-                        })
-                    }
-                })?;
+            unsafe { pattern.Toggle() }.or_else(|e| {
+                if is_event_subscriber_failure(&e) {
+                    Ok(())
+                } else {
+                    Err(Error::Platform {
+                        code: e.code().0 as i64,
+                        message: "Toggle failed".to_string(),
+                    })
+                }
+            })?;
             return Ok(());
         }
         Err(Error::ActionNotSupported {
@@ -877,17 +873,16 @@ impl Provider for WindowsProvider {
                 UIA_SelectionItemPatternId,
             )
         } {
-            unsafe { pattern.Select() }
-                .or_else(|e| {
-                    if is_event_subscriber_failure(&e) {
-                        Ok(())
-                    } else {
-                        Err(Error::Platform {
-                            code: e.code().0 as i64,
-                            message: "Select failed".to_string(),
-                        })
-                    }
-                })?;
+            unsafe { pattern.Select() }.or_else(|e| {
+                if is_event_subscriber_failure(&e) {
+                    Ok(())
+                } else {
+                    Err(Error::Platform {
+                        code: e.code().0 as i64,
+                        message: "Select failed".to_string(),
+                    })
+                }
+            })?;
             return Ok(());
         }
         Err(Error::ActionNotSupported {
