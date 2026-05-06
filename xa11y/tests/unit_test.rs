@@ -869,19 +869,13 @@ fn locator_selector_getter() {
 #[test]
 fn locator_descendant_through_nested_groups() {
     let children_map: Vec<Vec<usize>> = vec![
-        vec![1],  // 0: application
-        vec![2],  // 1: window
-        vec![3],  // 2: group "Outer"
-        vec![4],  // 3: group "Inner"
-        vec![],   // 4: static_text "TestFarm"
+        vec![1], // 0: application
+        vec![2], // 1: window
+        vec![3], // 2: group "Outer"
+        vec![4], // 3: group "Inner"
+        vec![],  // 4: static_text "TestFarm"
     ];
-    let parent_map: Vec<Option<usize>> = vec![
-        None,
-        Some(0),
-        Some(1),
-        Some(2),
-        Some(3),
-    ];
+    let parent_map: Vec<Option<usize>> = vec![None, Some(0), Some(1), Some(2), Some(3)];
     let roles = [
         Role::Application,
         Role::Window,
