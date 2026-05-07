@@ -11,7 +11,7 @@ use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::*;
 
 use xa11y_core::{
-    selector::{matches_simple, Selector},
+    selector::{matches_simple, Combinator, Selector, SelectorSegment},
     CancelHandle, ElementData, Error, Event, EventKind, EventReceiver, Provider, Rect, Result,
     Role, StateFlag, StateSet, Subscription, Toggled,
 };
@@ -205,33 +205,21 @@ impl WindowsProvider {
     }
 
     /// Get direct UIA children of an element with properties pre-fetched.
-    /// Tries FindAllBuildCache first (works with AccessKit fragment roots),
-    /// falls back to RawViewWalker + BuildUpdatedCache for native elements.
+    /// batch_request uses raw view (TrueCondition), so FindAllBuildCache sees
+    /// all elements including virtual/fragment elements.
     fn uia_children(&self, element: &IUIAutomationElement) -> Vec<IUIAutomationElement> {
-        // Try FindAllBuildCache(Children) first — works with AccessKit virtual elements
-        if let Ok(true_cond) = unsafe { self.automation.CreateTrueCondition() } {
-            if let Ok(arr) = unsafe {
-                element.FindAllBuildCache(TreeScope_Children, &true_cond, &self.batch_request)
-            } {
-                let count = uia_len(&arr);
-                if count > 0 {
-                    return (0..count).filter_map(|i| uia_get(&arr, i)).collect();
-                }
-            }
+        let true_cond = match unsafe { self.automation.CreateTrueCondition() } {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        };
+        match unsafe {
+            element.FindAllBuildCache(TreeScope_Children, &true_cond, &self.batch_request)
+        } {
+            Ok(arr) => (0..uia_len(&arr))
+                .filter_map(|i| uia_get(&arr, i))
+                .collect(),
+            Err(_) => Vec::new(),
         }
-
-        // Fall back to RawViewWalker if FindAll found nothing
-        let mut children = Vec::new();
-        if let Ok(walker) = unsafe { self.automation.RawViewWalker() } {
-            let mut child = unsafe { walker.GetFirstChildElement(element) }.ok();
-            while let Some(ref child_el) = child {
-                // Populate snapshot so build_element_data can use Cached* accessors
-                let cached = self.populate_cache(child_el);
-                children.push(cached.as_ref().unwrap_or(child_el).clone());
-                child = unsafe { walker.GetNextSiblingElement(child_el) }.ok();
-            }
-        }
-        children
     }
 
     /// Fetch the entire subtree with all properties pre-fetched in one COM call.
@@ -406,6 +394,13 @@ fn create_batch_request(automation: &IUIAutomation) -> Result<IUIAutomationCache
             message: format!("AddProperty({:?}) failed: {e}", prop),
         })?;
     }
+
+    // Use raw view (TrueCondition) so FindAllBuildCache sees all UIA elements,
+    // including virtual/fragment elements from Qt, AccessKit, etc. that don't
+    // set IsControlElement=true and are silently excluded by the default
+    // Control View tree filter.
+    let raw_view = uia_call(|| unsafe { automation.CreateTrueCondition() })?;
+    uia_call(|| unsafe { request.SetTreeFilter(&raw_view) })?;
 
     Ok(request)
 }
@@ -596,6 +591,75 @@ impl Provider for WindowsProvider {
             }
         }
         Ok(None)
+    }
+
+    /// Override the default `narrow_multi_segment` so that the Descendant
+    /// combinator uses `find_elements_in_tree` (tree-walking via `get_children`)
+    /// rather than `self.find_elements` (which would invoke `find_all_subtree`).
+    ///
+    /// `find_all_subtree` calls `FindAllBuildCache(TreeScope_Subtree)`. When the
+    /// candidate element is a UIA *fragment element* (not the HWND fragment root
+    /// — e.g. a Qt QFormLayout virtual group), that call can return an incomplete
+    /// array due to provider-activation boundaries, regardless of the tree view
+    /// filter. Walking level-by-level via `get_children` avoids that problem.
+    fn narrow_multi_segment(
+        &self,
+        mut candidates: Vec<ElementData>,
+        segments: &[SelectorSegment],
+        max_depth: u32,
+        limit: Option<usize>,
+    ) -> Result<Vec<ElementData>> {
+        for segment in segments {
+            let mut next_candidates = Vec::new();
+            for candidate in &candidates {
+                match segment.combinator {
+                    Combinator::Child => {
+                        let children = self.get_children(Some(candidate))?;
+                        for child in children {
+                            if matches_simple(&child, &segment.simple) {
+                                next_candidates.push(child);
+                            }
+                        }
+                    }
+                    Combinator::Descendant => {
+                        // Walk level-by-level to avoid provider-activation boundary
+                        // issues with FindAllBuildCache(Subtree) on fragment elements.
+                        let sub_selector = Selector {
+                            segments: vec![SelectorSegment {
+                                combinator: Combinator::Root,
+                                simple: segment.simple.clone(),
+                            }],
+                        };
+                        let mut sub_results = xa11y_core::selector::find_elements_in_tree(
+                            |el| self.get_children(el),
+                            Some(candidate),
+                            &sub_selector,
+                            None,
+                            Some(max_depth),
+                        )?;
+                        next_candidates.append(&mut sub_results);
+                    }
+                    Combinator::Root => unreachable!(),
+                }
+            }
+            let mut seen = std::collections::HashSet::new();
+            next_candidates.retain(|e| seen.insert(e.handle));
+            candidates = next_candidates;
+        }
+
+        if let Some(nth) = segments.last().and_then(|s| s.simple.nth) {
+            if nth <= candidates.len() {
+                candidates = vec![candidates.remove(nth - 1)];
+            } else {
+                candidates.clear();
+            }
+        }
+
+        if let Some(limit) = limit {
+            candidates.truncate(limit);
+        }
+
+        Ok(candidates)
     }
 
     fn find_elements(
