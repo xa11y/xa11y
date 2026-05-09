@@ -195,7 +195,7 @@ fn build_tree_node(
     max_depth: Option<usize>,
     depth: usize,
 ) -> crate::error::Result<TreeNode> {
-    let children = if max_depth.map_or(true, |d| depth < d) {
+    let children = if max_depth.is_none_or(|d| depth < d) {
         element
             .children()?
             .into_iter()
