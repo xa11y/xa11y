@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QGroupBox,
     QHBoxLayout,
@@ -69,6 +70,7 @@ class TestWindow(QMainWindow):
         self._add_list(layout)
         self._add_tree(layout)
         self._add_dynamic(layout)
+        self._add_dialogs(layout)
 
         layout.addStretch()
         scroll.setWidget(content)
@@ -330,6 +332,33 @@ class TestWindow(QMainWindow):
         count = self.list_widget.count()
         if count > 0:
             self.list_widget.takeItem(count - 1)
+
+
+    def _add_dialogs(self, parent_layout: QVBoxLayout) -> None:
+        grp = QGroupBox("Dialogs")
+        grp.setAccessibleName("Dialogs")
+        lay = QVBoxLayout(grp)
+
+        open_btn = QPushButton("Open Dialog")
+        open_btn.setAccessibleName("Open Dialog")
+        open_btn.clicked.connect(self._open_sample_dialog)
+        lay.addWidget(open_btn)
+
+        parent_layout.addWidget(grp)
+
+    def _open_sample_dialog(self) -> None:
+        if not hasattr(self, "_sample_dialog"):
+            dlg = QDialog(self)
+            dlg.setWindowTitle("Sample Dialog")
+            dlg.setAccessibleName("Sample Dialog")
+            layout = QVBoxLayout(dlg)
+            close_btn = QPushButton("Close Dialog")
+            close_btn.setAccessibleName("Close Dialog")
+            close_btn.clicked.connect(dlg.close)
+            layout.addWidget(close_btn)
+            self._sample_dialog = dlg
+        self._sample_dialog.show()
+        self._sample_dialog.raise_()
 
 
 def main() -> None:

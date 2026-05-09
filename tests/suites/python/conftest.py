@@ -32,6 +32,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 # selectors differ for that toolkit. Tests use ``app_config`` to adapt.
 APP_CONFIGS: dict[str, dict] = {
     "qt": {
+        # Dialog
+        "dialog_button_name": "Open Dialog",
+        "dialog_name": "Sample Dialog",
         # Buttons
         "ok_button_name": "OK",
         "cancel_button_name": "Cancel",
@@ -67,6 +70,8 @@ APP_CONFIGS: dict[str, dict] = {
         "remove_item_button_name": "Remove Item",
     },
     "gtk": {
+        "dialog_button_name": None,
+        "dialog_name": None,
         "ok_button_name": "OK",
         "cancel_button_name": "Cancel",
         "ok_button_description": None,
@@ -93,6 +98,8 @@ APP_CONFIGS: dict[str, dict] = {
         "remove_item_button_name": None,
     },
     "cocoa": {
+        "dialog_button_name": None,
+        "dialog_name": None,
         "ok_button_name": "OK",
         "cancel_button_name": "Cancel",
         "ok_button_description": "Confirm the dialog",
@@ -118,6 +125,8 @@ APP_CONFIGS: dict[str, dict] = {
         "remove_item_button_name": "Remove Item",
     },
     "tauri": {
+        "dialog_button_name": None,
+        "dialog_name": None,
         "ok_button_name": "OK",
         "cancel_button_name": "Cancel",
         "ok_button_description": None,
@@ -143,6 +152,8 @@ APP_CONFIGS: dict[str, dict] = {
         "remove_item_button_name": "Remove Item",
     },
     "electron": {
+        "dialog_button_name": None,
+        "dialog_name": None,
         "ok_button_name": "OK",
         "cancel_button_name": "Cancel",
         "ok_button_description": None,
