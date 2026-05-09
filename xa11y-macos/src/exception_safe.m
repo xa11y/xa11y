@@ -119,6 +119,20 @@ AXUIElementRef safe_ax_create_application(int pid) {
     }
 }
 
+// Safe wrapper for AXUIElementSetMessagingTimeout.
+// Caps how long any AX call against `element` may block before returning
+// kAXErrorCannotComplete (-25204). Without a cap, AX calls into an
+// unresponsive target process block indefinitely — breaks `App.list()` and
+// any global tree walk if a single pid is wedged.
+// Returns the AX error code, or -9999 if an ObjC exception was thrown.
+int safe_ax_set_messaging_timeout(AXUIElementRef element, float timeout_seconds) {
+    @try {
+        return AXUIElementSetMessagingTimeout(element, timeout_seconds);
+    } @catch (NSException *e) {
+        return -9999;
+    }
+}
+
 // ── AXValue Extraction ──────────────────────────────────────────────────────
 
 // Safe wrapper for AXValueGetValue.

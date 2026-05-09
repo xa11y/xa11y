@@ -77,6 +77,7 @@ extern "C" {
         value: CFTypeRef,
     ) -> i32;
     fn safe_ax_create_application(pid: i32) -> AXUIElementRef;
+    fn safe_ax_set_messaging_timeout(element: AXUIElementRef, timeout_seconds: f32) -> i32;
     fn safe_ax_value_get_value(value: CFTypeRef, the_type: i32, value_ptr: *mut c_void) -> bool;
     fn safe_cg_window_list_copy(option: u32, relative_to: u32) -> CFArrayRef;
     fn safe_ax_observer_create(
@@ -158,6 +159,29 @@ impl Drop for AXElement {
             unsafe { safe_cf_release(self.0) };
         }
     }
+}
+
+/// Per-AX-element messaging timeout, in seconds. AX calls into an
+/// unresponsive target process block indefinitely by default, which wedges
+/// any global tree walk if a single pid is in a bad state (sandboxed,
+/// AX-API-disabled, hung). Apple exposes `AXUIElementSetMessagingTimeout`
+/// for exactly this case; we set it on every app element we create.
+///
+/// 0.5s is short enough that a global walk over ~30 apps with a couple
+/// of bad apples still completes in a few seconds, but generous enough
+/// that a healthy-but-slow app (large tree, busy main thread) still
+/// answers within one round-trip. Apple's default is 6 seconds, which is
+/// far too long for our use.
+const APP_MESSAGING_TIMEOUT_SECS: f32 = 0.5;
+
+/// Wrap `AXUIElementCreateApplication` and immediately apply the messaging
+/// timeout. Returns a null-checked `AXElement` ready for use.
+fn create_app_element(pid: i32) -> AXElement {
+    let ptr = unsafe { safe_ax_create_application(pid) };
+    if !ptr.is_null() {
+        unsafe { safe_ax_set_messaging_timeout(ptr, APP_MESSAGING_TIMEOUT_SECS) };
+    }
+    AXElement::from_owned(ptr)
 }
 
 // ── AX Call Counters (test-only) ──────────────────────────────────────────────
@@ -1727,20 +1751,25 @@ impl Provider for MacOSProvider {
     fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
         match element {
             None => {
-                // Top-level: list all GUI apps as application elements
+                // Top-level: list all GUI apps as application elements.
+                // Parallelised because each `build_element_data` is an AX
+                // round-trip whose worst-case is `APP_MESSAGING_TIMEOUT_SECS`
+                // when a target app's main thread is unresponsive — without
+                // rayon, one bad apple serialises the whole list.
                 let apps = Self::list_gui_apps();
-                let mut results = Vec::new();
-                for (pid, app_name) in &apps {
-                    let app_element =
-                        AXElement::from_owned(unsafe { safe_ax_create_application(*pid) });
-                    if app_element.is_null() {
-                        continue;
-                    }
-                    let mut data = self.build_element_data(&app_element, Some(*pid as u32));
-                    // Override name with the CGWindowList name (more reliable)
-                    data.name = Some(app_name.clone());
-                    results.push(data);
-                }
+                let results: Vec<ElementData> = apps
+                    .par_iter()
+                    .filter_map(|(pid, app_name)| {
+                        let app_element = create_app_element(*pid);
+                        if app_element.is_null() {
+                            return None;
+                        }
+                        let mut data = self.build_element_data(&app_element, Some(*pid as u32));
+                        // CGWindowList name is more reliable than AX's.
+                        data.name = Some(app_name.clone());
+                        Some(data)
+                    })
+                    .collect();
                 Ok(results)
             }
             Some(element_data) => {
@@ -1808,33 +1837,39 @@ impl Provider for MacOSProvider {
                     ))
                 ) {
                     let apps = Self::list_gui_apps();
-                    let mut matching: Vec<ElementData> = Vec::new();
-                    for (pid, app_name) in &apps {
-                        // Check name filters against CGWindowList name
-                        let name_matches = first.filters.iter().all(|f| {
-                            if f.attr != "name" {
-                                return true; // non-name filters checked after build
+                    // Parallelise the per-pid AX build. Each `build_element_data`
+                    // is an AX round-trip capped at `APP_MESSAGING_TIMEOUT_SECS`
+                    // on an unresponsive target, so a serial walk pays the
+                    // worst-case timeout for every wedged app. We drop the
+                    // early-break optimisation `phase1_limit` provided and
+                    // truncate after — the build itself is the only expensive
+                    // step, so the savings would be marginal compared to the
+                    // parallelism win.
+                    let mut matching: Vec<ElementData> = apps
+                        .par_iter()
+                        .filter_map(|(pid, app_name)| {
+                            // Check name filters against CGWindowList name
+                            let name_matches = first.filters.iter().all(|f| {
+                                if f.attr != "name" {
+                                    return true; // non-name filters checked after build
+                                }
+                                match_op(&f.op, &f.value, Some(app_name.as_str()))
+                            });
+                            if !name_matches {
+                                return None;
                             }
-                            match_op(&f.op, &f.value, Some(app_name.as_str()))
-                        });
-                        if !name_matches {
-                            continue;
-                        }
 
-                        let app_element =
-                            AXElement::from_owned(unsafe { safe_ax_create_application(*pid) });
-                        if app_element.is_null() {
-                            continue;
-                        }
-                        let mut data = self.build_element_data(&app_element, Some(*pid as u32));
-                        data.name = Some(app_name.clone());
-                        matching.push(data);
-
-                        if let Some(limit) = phase1_limit {
-                            if matching.len() >= limit {
-                                break;
+                            let app_element = create_app_element(*pid);
+                            if app_element.is_null() {
+                                return None;
                             }
-                        }
+                            let mut data = self.build_element_data(&app_element, Some(*pid as u32));
+                            data.name = Some(app_name.clone());
+                            Some(data)
+                        })
+                        .collect();
+                    if let Some(limit) = phase1_limit {
+                        matching.truncate(limit);
                     }
 
                     // Apply :nth
@@ -2301,6 +2336,9 @@ impl MacOSProvider {
                 selector: format!("application with pid:{}", pid),
             });
         }
+        // Cap how long any AX call against this app blocks. See
+        // `APP_MESSAGING_TIMEOUT_SECS` for rationale.
+        unsafe { safe_ax_set_messaging_timeout(app_element, APP_MESSAGING_TIMEOUT_SECS) };
 
         let notifications = [
             "AXFocusedUIElementChanged",
