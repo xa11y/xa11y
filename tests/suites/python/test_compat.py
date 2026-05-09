@@ -485,7 +485,7 @@ def test_element_dump_max_depth_zero_single_line(app, app_config):
     """dump(max_depth=0) produces exactly one non-empty line."""
     ok_name = app_config["ok_button_name"]
     text = app.locator(f'button[name="{ok_name}"]').element().dump(max_depth=0)
-    lines = [l for l in text.splitlines() if l.strip()]
+    lines = [line for line in text.splitlines() if line.strip()]
     assert len(lines) == 1
 
 

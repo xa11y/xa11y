@@ -64,7 +64,7 @@ def test_dump_is_indented(test_app):
 
 def test_dump_max_depth_zero_is_one_line(test_app):
     result = test_app.element().dump(max_depth=0)
-    lines = [l for l in result.splitlines() if l.strip()]
+    lines = [line for line in result.splitlines() if line.strip()]
     assert len(lines) == 1
     assert "application" in lines[0]
 

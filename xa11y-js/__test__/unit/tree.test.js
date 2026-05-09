@@ -21,7 +21,7 @@ test('tree() root has correct role and name', async () => {
   const node = await (await rootElement()).tree();
   assert.equal(node.role, 'application');
   assert.equal(node.name, 'TestApp');
-  assert.equal(node.value, null);
+  assert.equal(node.value, undefined);
 });
 
 test('tree() without max_depth includes all descendants', async () => {
