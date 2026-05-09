@@ -304,6 +304,9 @@ mod tests {
     #[test]
     #[ignore]
     fn role_dialog() {
+        // On Windows this exercises the AriaRole="dialog" path (AccessKit sets
+        // it). The UIA_IsDialogPropertyId path covers native frameworks such as
+        // Qt that don't populate AriaRole.
         let app = h::app_root();
         let dialogs = app.locator("dialog").elements().unwrap();
         assert!(!dialogs.is_empty(), "Dialog not found. App: {}", app);

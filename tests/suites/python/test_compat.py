@@ -396,3 +396,55 @@ def test_element_parent_roundtrip(app, app_config):
     p = ok.parent()
     assert p is not None
     assert p.role  # has a non-empty role string
+
+
+# ---------------------------------------------------------------------------
+# Dialog role
+# ---------------------------------------------------------------------------
+
+
+def test_dialog_role(app, app_config):
+    """A native toolkit dialog window must be reported with role 'dialog'.
+
+    On Windows, UIA maps all top-level windows to WindowControlTypeId and
+    xa11y distinguishes dialogs via UIA_IsDialogPropertyId (set by Qt) or
+    AriaRole="dialog" (set by web/AccessKit content). This test exercises
+    the native Qt path via QDialog, which does not set AriaRole.
+
+    The test skips for toolkits that do not expose a dialog button.
+    """
+    import time
+
+    btn_name = app_config.get("dialog_button_name")
+    if not btn_name:
+        pytest.skip("app config has no dialog_button_name")
+
+    dialog_name = app_config.get("dialog_name", "")
+
+    # Open the dialog.
+    app.locator(f'button[name="{btn_name}"]').press()
+
+    # Poll until the dialog appears (up to 5 s).
+    deadline = time.monotonic() + 5.0
+    dlg = None
+    while time.monotonic() < deadline:
+        candidates = app.locator("dialog").elements()
+        if dialog_name:
+            candidates = [c for c in candidates if c.name and dialog_name in c.name]
+        if candidates:
+            dlg = candidates[0]
+            break
+        time.sleep(0.1)
+
+    assert dlg is not None, (
+        f"No element with role 'dialog' found within 5 s after pressing "
+        f"'{btn_name}'. Platform: {sys.platform}. "
+        "On Windows this indicates UIA_IsDialogPropertyId is not being checked."
+    )
+    assert dlg.role == "dialog", f"Expected role 'dialog', got {dlg.role!r}"
+
+    # Close the dialog so it does not interfere with subsequent tests.
+    close_candidates = app.locator('button[name="Close Dialog"]').elements()
+    if close_candidates:
+        app.locator('button[name="Close Dialog"]').press()
+        time.sleep(0.1)
