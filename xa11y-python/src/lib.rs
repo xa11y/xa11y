@@ -151,6 +151,26 @@ fn make_py_element(
     )
 }
 
+fn tree_node_to_py(py: Python<'_>, node: &xa11y::TreeNode) -> PyResult<PyObject> {
+    let dict = PyDict::new(py);
+    dict.set_item("role", &node.role)?;
+    match &node.name {
+        Some(n) => dict.set_item("name", n)?,
+        None => dict.set_item("name", py.None())?,
+    }
+    match &node.value {
+        Some(v) => dict.set_item("value", v)?,
+        None => dict.set_item("value", py.None())?,
+    }
+    let children: Vec<PyObject> = node
+        .children
+        .iter()
+        .map(|child| tree_node_to_py(py, child))
+        .collect::<PyResult<_>>()?;
+    dict.set_item("children", children)?;
+    Ok(dict.into_any().unbind())
+}
+
 // ── Data Classes ────────────────────────────────────────────────────────────
 
 #[pyclass(frozen)]
@@ -278,6 +298,30 @@ impl Element {
             inner: std::sync::Mutex::new(Some(sub)),
             provider: self.provider.clone(),
         })
+    }
+
+    /// Capture the subtree rooted at this element as a recursive dict snapshot.
+    ///
+    /// Each dict has keys ``role``, ``name``, ``value``, and ``children``
+    /// (a list of dicts with the same shape). ``max_depth`` limits traversal:
+    /// ``0`` = only this node, ``1`` = node + direct children, ``None`` = full subtree.
+    #[pyo3(signature = (max_depth=None))]
+    fn tree(&self, py: Python<'_>, max_depth: Option<usize>) -> PyResult<PyObject> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        let node = py
+            .allow_threads(move || element.tree(max_depth))
+            .map_err(to_py_err)?;
+        tree_node_to_py(py, &node)
+    }
+
+    /// Render the subtree rooted at this element as an indented string.
+    ///
+    /// Returns the string without printing it. Same depth semantics as ``tree()``.
+    #[pyo3(signature = (max_depth=None))]
+    fn dump(&self, py: Python<'_>, max_depth: Option<usize>) -> PyResult<String> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.allow_threads(move || element.dump(max_depth))
+            .map_err(to_py_err)
     }
 
     #[getter]

@@ -1,7 +1,78 @@
-"""Tests for lazy navigation: children(), parent(), query via locator."""
+"""Tests for lazy navigation: children(), parent(), tree(), dump(), query via locator."""
 
 import pytest
 import xa11y
+
+# ── Element.tree() ───────────────────────────────────────────────────────────
+
+
+def test_tree_root_node(test_app):
+    node = test_app.element().tree()
+    assert node["role"] == "application"
+    assert node["name"] == "TestApp"
+    assert node["value"] is None
+
+
+def test_tree_full_subtree_has_descendants(test_app):
+    node = test_app.element().tree()
+    assert len(node["children"]) == 1
+    win = node["children"][0]
+    assert win["role"] == "window"
+    assert len(win["children"]) == 2
+
+
+def test_tree_max_depth_zero_no_children(test_app):
+    node = test_app.element().tree(max_depth=0)
+    assert node["role"] == "application"
+    assert node["children"] == []
+
+
+def test_tree_max_depth_one_stops_at_children(test_app):
+    node = test_app.element().tree(max_depth=1)
+    assert len(node["children"]) == 1
+    assert node["children"][0]["children"] == []
+
+
+def test_tree_value_included(test_app):
+    node = test_app.descendant("text_field").element().tree(max_depth=0)
+    assert node["value"] == "hello"
+
+
+def test_tree_leaf_has_empty_children(test_app):
+    node = test_app.descendant('button[name="Back"]').element().tree()
+    assert node["role"] == "button"
+    assert node["children"] == []
+
+
+# ── Element.dump() ───────────────────────────────────────────────────────────
+
+
+def test_dump_returns_string(test_app):
+    result = test_app.element().dump()
+    assert isinstance(result, str)
+
+
+def test_dump_contains_role_and_name(test_app):
+    result = test_app.element().dump()
+    assert 'application "TestApp"' in result
+
+
+def test_dump_is_indented(test_app):
+    result = test_app.element().dump()
+    assert '  window "Main Window"' in result
+
+
+def test_dump_max_depth_zero_is_one_line(test_app):
+    result = test_app.element().dump(max_depth=0)
+    lines = [line for line in result.splitlines() if line.strip()]
+    assert len(lines) == 1
+    assert "application" in lines[0]
+
+
+def test_dump_includes_value(test_app):
+    result = test_app.descendant("text_field").element().dump(max_depth=0)
+    assert 'value="hello"' in result
+
 
 # ── Root ─────────────────────────────────────────────────────────────────────
 

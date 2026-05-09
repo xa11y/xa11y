@@ -6,7 +6,7 @@ use napi::bindgen_prelude::{AsyncTask, Env, Task};
 
 use crate::map_err;
 use crate::subscription::NativeSubscription;
-use crate::types::{toggled_to_str, Rect};
+use crate::types::{toggled_to_str, Rect, TreeNode};
 
 /// A snapshot of a node in the accessibility tree.
 ///
@@ -228,6 +228,37 @@ impl Element {
             provider: self.provider.clone(),
         })
     }
+
+    /// Capture the subtree rooted at this element as a recursive snapshot.
+    ///
+    /// `maxDepth` limits traversal depth: `0` = only this node (no children),
+    /// `1` = node + direct children, and so on. Omit for the full subtree.
+    #[napi(
+        ts_args_type = "maxDepth?: number | null",
+        ts_return_type = "Promise<TreeNode>"
+    )]
+    pub fn tree(&self, max_depth: Option<u32>) -> AsyncTask<TreeTask> {
+        AsyncTask::new(TreeTask {
+            data: self.data.clone(),
+            provider: self.provider.clone(),
+            max_depth: max_depth.map(|d| d as usize),
+        })
+    }
+
+    /// Render the subtree rooted at this element as an indented string.
+    ///
+    /// Returns the string without printing it. Same depth semantics as `tree()`.
+    #[napi(
+        ts_args_type = "maxDepth?: number | null",
+        ts_return_type = "Promise<string>"
+    )]
+    pub fn dump(&self, max_depth: Option<u32>) -> AsyncTask<DumpTask> {
+        AsyncTask::new(DumpTask {
+            data: self.data.clone(),
+            provider: self.provider.clone(),
+            max_depth: max_depth.map(|d| d as usize),
+        })
+    }
 }
 
 // ── Task implementations ────────────────────────────────────────────────
@@ -288,5 +319,45 @@ impl Task for SubscribeTask {
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
         Ok(NativeSubscription::new(output, self.provider.clone()))
+    }
+}
+
+pub struct TreeTask {
+    data: xa11y::ElementData,
+    provider: Arc<dyn xa11y::Provider>,
+    max_depth: Option<usize>,
+}
+
+impl Task for TreeTask {
+    type Output = xa11y::TreeNode;
+    type JsValue = TreeNode;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        let element = xa11y::Element::new(self.data.clone(), self.provider.clone());
+        element.tree(self.max_depth).map_err(map_err)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output.into())
+    }
+}
+
+pub struct DumpTask {
+    data: xa11y::ElementData,
+    provider: Arc<dyn xa11y::Provider>,
+    max_depth: Option<usize>,
+}
+
+impl Task for DumpTask {
+    type Output = String;
+    type JsValue = String;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        let element = xa11y::Element::new(self.data.clone(), self.provider.clone());
+        element.dump(self.max_depth).map_err(map_err)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output)
     }
 }

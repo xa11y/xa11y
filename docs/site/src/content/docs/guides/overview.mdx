@@ -76,7 +76,7 @@ xa11y supports subscribing to these event streams per-app via `app.subscribe()`.
 xa11y is built around three core types:
 
 - **App** — entry point for interacting with an application. Construct via `App::by_name()`, `App::by_pid()`, or `App::list()`. An App provides three paths: `app.children()` for navigating the tree, `app.locator(selector)` for actions and waits, and `app.subscribe()` for event streams.
-- **Element** — a live handle to a node in the accessibility tree. Navigate with `children()` and `parent()` — each call queries the platform lazily. Read properties like `role`, `name`, `value`, `states`, `bounds`.
+- **Element** — a live handle to a node in the accessibility tree. Navigate with `children()` and `parent()` — each call queries the platform lazily. Read properties like `role`, `name`, `value`, `states`, `bounds`. Capture the subtree as a structured snapshot with `tree(max_depth)` or as an indented string with `dump(max_depth)`.
 - **Locator** — a lazy selector that re-resolves on every operation. Use for actions (`press()`, `set_value()`, and others), waits (`wait_visible()`, and others), and querying (`element()`, `elements()`). Inspired by [Playwright's Locator pattern](https://playwright.dev/docs/locators).
 - **Subscription** — live event stream from an app. Created via `app.subscribe()`. Pull events with `try_recv()`, `recv(timeout)`, `wait_for(predicate, timeout)`, or iterate with `iter()`. Drop to unsubscribe.
 - **Selector** — CSS-like query syntax used by Locator. Supports role matching, attribute filters, combinators, and nth selection.
@@ -175,6 +175,8 @@ xa11y is built around three core types:
 
 Element properties: `role`, `name`, `value`, `description`, `bounds`, `states`, `actions`, `numeric_value`, `min_value`, `max_value`, `stable_id`, `pid`.
 
+Element navigation and snapshots: `children()`, `parent()`, `tree(max_depth)`, `dump(max_depth)`.
+
 ### Elements are live
 
 Every call to `children()` or `parent()` queries the platform. There are no cached snapshots — you always see the latest tree state.
@@ -210,6 +212,49 @@ Every call to `children()` or `parent()` queries the platform. There are no cach
 </Tabs>
 
 To find specific elements, use a Locator (below) — it uses CSS-like selectors to find elements efficiently.
+
+### Subtree snapshots
+
+`element.tree(max_depth)` captures the subtree rooted at an element as a recursive data structure (`role`, `name`, `value`, `children`). `element.dump(max_depth)` formats the same snapshot as an indented string — useful for debugging and test diagnostics. Both accept an optional `max_depth` argument: `0` returns only the root node, `1` includes its direct children, and so on. Omit for the full subtree.
+
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    ```rust
+    let dialog = app.locator("dialog").element()?;
+    println!("{}", dialog.dump(Some(3))?);
+    // dialog "Settings"
+    //   group "General"
+    //     check_box "Enable notifications"
+    //     check_box "Start at login"
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    dialog = app.locator("dialog").element()
+    print(dialog.dump(max_depth=3))
+    # dialog "Settings"
+    #   group "General"
+    #     check_box "Enable notifications"
+    #     check_box "Start at login"
+
+    node = dialog.tree(max_depth=1)
+    # {"role": "dialog", "name": "Settings", "value": None, "children": [...]}
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    const dialog = await app.locator('dialog').element();
+    console.log(await dialog.dump(3));
+    // dialog "Settings"
+    //   group "General"
+    //     check_box "Enable notifications"
+    //     check_box "Start at login"
+
+    const node = await dialog.tree(1);
+    // { role: 'dialog', name: 'Settings', value: undefined, children: [...] }
+    ```
+  </TabItem>
+</Tabs>
 
 ## Taking actions
 
@@ -290,7 +335,7 @@ A `Locator` holds a selector and **re-resolves on every operation**. Create one 
 
 **Chaining:** `nth(n)`, `first()`, `child(selector)`, `descendant(selector)`.
 
-Both Element and Locator query the platform live. The difference is that Locator re-resolves its selector on every operation, making it resilient to UI changes between calls.
+Locator re-resolves its selector on every operation, making it resilient to UI changes between calls. To inspect element properties or traverse the subtree, call `.element()` first — `tree()` and `dump()` live on `Element`, not `Locator`.
 
 ## Selectors
 

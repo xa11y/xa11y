@@ -19,7 +19,7 @@ pub mod mock;
 
 // Re-export primary types at the crate root for convenience.
 pub use app::App;
-pub use element::{Element, ElementData, RawPlatformData, Rect, StateSet, Toggled};
+pub use element::{Element, ElementData, RawPlatformData, Rect, StateSet, Toggled, TreeNode};
 pub use error::{Error, Result};
 pub use event::{ElementState, Event, EventKind, StateFlag};
 pub use event_provider::{CancelHandle, EventReceiver, RecvStatus, Subscription, SubscriptionIter};

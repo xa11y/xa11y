@@ -169,6 +169,63 @@ impl Element {
     pub fn pid(&self) -> Option<u32> {
         self.data.pid
     }
+
+    /// Capture the subtree rooted at this element as a recursive snapshot.
+    ///
+    /// `max_depth` limits traversal depth: `0` = only this node (no children),
+    /// `1` = node + direct children, and so on. `None` traverses the full subtree.
+    pub fn tree(&self, max_depth: Option<usize>) -> crate::error::Result<TreeNode> {
+        build_tree_node(self, max_depth, 0)
+    }
+
+    /// Render the subtree rooted at this element as an indented string.
+    ///
+    /// Each line is `{indent}{role} "{name}" [value="{value}"]`. Returns the
+    /// string without printing it. Same depth semantics as [`Element::tree`].
+    pub fn dump(&self, max_depth: Option<usize>) -> crate::error::Result<String> {
+        let node = self.tree(max_depth)?;
+        let mut out = String::new();
+        write_tree_node(&node, 0, &mut out);
+        Ok(out)
+    }
+}
+
+fn build_tree_node(
+    element: &Element,
+    max_depth: Option<usize>,
+    depth: usize,
+) -> crate::error::Result<TreeNode> {
+    let children = if max_depth.is_none_or(|d| depth < d) {
+        element
+            .children()?
+            .into_iter()
+            .map(|child| build_tree_node(&child, max_depth, depth + 1))
+            .collect::<crate::error::Result<Vec<_>>>()?
+    } else {
+        vec![]
+    };
+    Ok(TreeNode {
+        role: element.data.role.to_snake_case().to_string(),
+        name: element.data.name.clone(),
+        value: element.data.value.clone(),
+        children,
+    })
+}
+
+fn write_tree_node(node: &TreeNode, depth: usize, out: &mut String) {
+    use fmt::Write as _;
+    let indent = "  ".repeat(depth);
+    write!(out, "{}{}", indent, node.role).unwrap();
+    if let Some(ref n) = node.name {
+        write!(out, " \"{}\"", n).unwrap();
+    }
+    if let Some(ref v) = node.value {
+        write!(out, " value=\"{}\"", v).unwrap();
+    }
+    out.push('\n');
+    for child in &node.children {
+        write_tree_node(child, depth + 1, out);
+    }
 }
 
 /// Boolean state flags for an element.
@@ -246,3 +303,16 @@ pub struct Rect {
 /// exactly as the platform reported it. Keys use `snake_case` naming. This is
 /// the escape hatch for consumers who need full platform fidelity.
 pub type RawPlatformData = HashMap<String, serde_json::Value>;
+
+/// A node in a recursive snapshot of the accessibility subtree.
+///
+/// Returned by [`Element::tree`] and [`Locator::tree`]. Each node carries the
+/// role, display name, and value of one element, plus its children recursively.
+/// `children` is empty when `max_depth` was reached or the element is a leaf.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TreeNode {
+    pub role: String,
+    pub name: Option<String>,
+    pub value: Option<String>,
+    pub children: Vec<TreeNode>,
+}

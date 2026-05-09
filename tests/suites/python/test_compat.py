@@ -448,3 +448,58 @@ def test_dialog_role(app, app_config):
     if close_candidates:
         app.locator('button[name="Close Dialog"]').press()
         time.sleep(0.1)
+
+
+# ---------------------------------------------------------------------------
+# tree() and dump()
+# ---------------------------------------------------------------------------
+
+
+def test_element_tree_snapshot(app, app_config):
+    """Element.tree() returns a dict snapshot with the expected shape."""
+    ok_name = app_config["ok_button_name"]
+    btn = app.locator(f'button[name="{ok_name}"]').element()
+    node = btn.tree(max_depth=0)
+    assert node["role"] == "button"
+    assert node["name"] == ok_name
+    assert node["children"] == []
+
+
+def test_element_tree_children_structure(app, app_config):
+    """tree(max_depth=1) includes children but not grandchildren."""
+    ok_name = app_config["ok_button_name"]
+    btn = app.locator(f'button[name="{ok_name}"]').element()
+    node = btn.tree(max_depth=1)
+    assert isinstance(node["children"], list)
+
+
+def test_element_dump_returns_string(app, app_config):
+    """Element.dump() returns a non-empty string containing the role."""
+    ok_name = app_config["ok_button_name"]
+    text = app.locator(f'button[name="{ok_name}"]').element().dump(max_depth=0)
+    assert isinstance(text, str)
+    assert "button" in text
+
+
+def test_element_dump_max_depth_zero_single_line(app, app_config):
+    """dump(max_depth=0) produces exactly one non-empty line."""
+    ok_name = app_config["ok_button_name"]
+    text = app.locator(f'button[name="{ok_name}"]').element().dump(max_depth=0)
+    lines = [line for line in text.splitlines() if line.strip()]
+    assert len(lines) == 1
+
+
+def test_locator_tree_shorthand(app, app_config):
+    """tree() via element() round-trip."""
+    ok_name = app_config["ok_button_name"]
+    node = app.locator(f'button[name="{ok_name}"]').element().tree(max_depth=0)
+    assert node["role"] == "button"
+    assert node["name"] == ok_name
+
+
+def test_locator_dump_shorthand(app, app_config):
+    """dump() via element() round-trip."""
+    ok_name = app_config["ok_button_name"]
+    text = app.locator(f'button[name="{ok_name}"]').element().dump(max_depth=0)
+    assert isinstance(text, str)
+    assert "button" in text
