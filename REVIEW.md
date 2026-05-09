@@ -9,6 +9,8 @@ Snapshot after PR #129. Resolved items are in `git log main`. This is the live l
 ### Linux: fast-path selector matcher gap
 `xa11y-linux/src/atspi.rs::matches_ref` only answers `role` / `name` / `value` / `description`. Selectors like `[enabled="true"]`, `[checked="on"]`, `[focused="true"]` silently return empty on Linux because the fast path filters elements out before a full `ElementData` is built. The delegation fix landed in PR #129 and was reverted as a side effect of the GTK debugging — see #132 for the related Linux refactor puzzle. Needs a proper fix: either extend `matches_ref` to answer state attrs directly from AT-SPI state flags, or re-land the fallthrough-to-full-build approach once the GTK issue is understood.
 
+**A1 update:** `matches_ref` now resolves normalized state attributes from AT-SPI `GetState` bits through the same `StateSet` formatting used by the slow selector path, so Linux fast-path selectors for `enabled`, `checked`, and `focused` no longer drop candidates before `ElementData` is built. Added Linux-only AT-SPI Python coverage in `tests/suites/python/atspi/` for `[enabled="true"]`, `[enabled="false"]`, `[checked="on"]`, and `[focused="true"]`. This does not change the unresolved `StaticProviderRef` delegation work tracked in #132.
+
 ---
 
 ## Umbrella crate
