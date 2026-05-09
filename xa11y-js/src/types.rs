@@ -1,4 +1,29 @@
-//! Small plain-data types exposed to JS: `Rect`, `EventKind`, etc.
+//! Small plain-data types exposed to JS: `Rect`, `TreeNode`, `EventKind`, etc.
+
+/// A node in a recursive snapshot of the accessibility subtree.
+///
+/// Returned by `Element.tree()` and `Locator.tree()`. Each node carries the
+/// role, display name, and value of one element, plus its children recursively.
+/// `children` is empty when `maxDepth` was reached or the element is a leaf.
+#[napi(object)]
+#[derive(Clone)]
+pub struct TreeNode {
+    pub role: String,
+    pub name: Option<String>,
+    pub value: Option<String>,
+    pub children: Vec<TreeNode>,
+}
+
+impl From<xa11y::TreeNode> for TreeNode {
+    fn from(n: xa11y::TreeNode) -> Self {
+        Self {
+            role: n.role,
+            name: n.name,
+            value: n.value,
+            children: n.children.into_iter().map(Into::into).collect(),
+        }
+    }
+}
 
 /// A bounding rectangle in screen coordinates.
 ///

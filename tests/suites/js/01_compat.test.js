@@ -60,6 +60,49 @@ test('tree has a Checkbox', async () => {
   assert.ok(['on', 'off'].includes(checks[0].checked));
 });
 
+test('element.tree() returns a snapshot with the expected shape', async () => {
+  if (!appConfig.okButtonName) return;
+  const app = await getApp();
+  const btn = await one(app, `button[name="${appConfig.okButtonName}"]`);
+  const node = await btn.tree(0);
+  assert.equal(node.role, 'button');
+  assert.equal(node.name, appConfig.okButtonName);
+  assert.deepEqual(node.children, []);
+});
+
+test('element.dump() returns a string containing the role', async () => {
+  if (!appConfig.okButtonName) return;
+  const app = await getApp();
+  const btn = await one(app, `button[name="${appConfig.okButtonName}"]`);
+  const text = await btn.dump(0);
+  assert.equal(typeof text, 'string');
+  assert.ok(text.includes('button'));
+});
+
+test('element.dump(0) produces exactly one non-empty line', async () => {
+  if (!appConfig.okButtonName) return;
+  const app = await getApp();
+  const btn = await one(app, `button[name="${appConfig.okButtonName}"]`);
+  const text = await btn.dump(0);
+  const lines = text.split('\n').filter((l) => l.trim());
+  assert.equal(lines.length, 1);
+});
+
+test('locator.tree() shorthand matches element().tree()', async () => {
+  if (!appConfig.okButtonName) return;
+  const app = await getApp();
+  const node = await app.locator(`button[name="${appConfig.okButtonName}"]`).tree(0);
+  assert.equal(node.role, 'button');
+  assert.equal(node.name, appConfig.okButtonName);
+});
+
+test('locator.dump() shorthand matches element().dump()', async () => {
+  if (!appConfig.okButtonName) return;
+  const app = await getApp();
+  const text = await app.locator(`button[name="${appConfig.okButtonName}"]`).dump(0);
+  assert.ok(text.includes('button'));
+});
+
 test('descendant selector returns multiple elements', async () => {
   const app = await getApp();
   const all = await app.locator('button').elements();
