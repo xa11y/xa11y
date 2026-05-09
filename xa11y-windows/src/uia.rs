@@ -250,6 +250,13 @@ fn uia_cached_bstr(element: &IUIAutomationElement, prop: UIA_PROPERTY_ID) -> Opt
         .filter(|s| !s.is_empty())
 }
 
+/// Read a VT_BOOL VARIANT property from the element's pre-fetched snapshot.
+fn uia_cached_bool(element: &IUIAutomationElement, prop: UIA_PROPERTY_ID) -> Option<bool> {
+    unsafe { element.GetCachedPropertyValue(prop) }
+        .ok()
+        .and_then(|v| variant_bool(&v))
+}
+
 /// Build an ElementData snapshot from a pre-fetched UIA element without
 /// retaining the live reference in the provider's handle cache.
 ///
@@ -280,6 +287,14 @@ fn build_snapshot_data(
                 "link" => role = Role::Link,
                 _ => {}
             }
+        }
+        // Native (non-ARIA) dialogs: UIA_IsDialogPropertyId is a first-class
+        // UIA property (Windows 10 1703+) that native frameworks such as Qt
+        // set without populating AriaRole. Only apply when AriaRole hasn't
+        // already resolved the role to Dialog.
+        if role == Role::Window && uia_cached_bool(element, UIA_IsDialogPropertyId).unwrap_or(false)
+        {
+            role = Role::Dialog;
         }
     }
 
@@ -409,6 +424,7 @@ fn create_batch_request(automation: &IUIAutomation) -> Result<IUIAutomationCache
 const BATCH_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     UIA_ControlTypePropertyId,
     UIA_AriaRolePropertyId,
+    UIA_IsDialogPropertyId,
     UIA_NamePropertyId,
     UIA_FullDescriptionPropertyId,
     UIA_HelpTextPropertyId,
@@ -2141,6 +2157,24 @@ mod tests {
         assert!(BATCH_PROPERTIES.contains(&UIA_BoundingRectanglePropertyId));
         assert!(BATCH_PROPERTIES.contains(&UIA_IsEnabledPropertyId));
         assert!(BATCH_PROPERTIES.contains(&UIA_ProcessIdPropertyId));
+    }
+
+    #[test]
+    fn batch_properties_includes_is_dialog() {
+        // UIA_IsDialogPropertyId must be pre-fetched so native (non-ARIA)
+        // dialogs — e.g. from Qt — are recognised as Role::Dialog rather
+        // than Role::Window on Windows.
+        assert!(
+            BATCH_PROPERTIES.contains(&UIA_IsDialogPropertyId),
+            "UIA_IsDialogPropertyId must be in BATCH_PROPERTIES for native dialog detection"
+        );
+    }
+
+    #[test]
+    fn window_control_type_maps_to_window_not_dialog() {
+        // map_uia_control_type alone always returns Window for WindowControlTypeId;
+        // the Dialog refinement is a separate step that reads IsDialog/AriaRole.
+        assert_eq!(map_uia_control_type(UIA_WindowControlTypeId), Role::Window);
     }
 
     #[test]
