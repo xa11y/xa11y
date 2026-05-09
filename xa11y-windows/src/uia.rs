@@ -11,7 +11,7 @@ use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::*;
 
 use xa11y_core::{
-    selector::{matches_simple, Combinator, Selector, SelectorSegment},
+    selector::{matches_simple, Selector},
     CancelHandle, ElementData, Error, Event, EventKind, EventReceiver, Provider, Rect, Result,
     Role, StateFlag, StateSet, Subscription, Toggled,
 };
@@ -609,75 +609,6 @@ impl Provider for WindowsProvider {
         Ok(None)
     }
 
-    /// Override the default `narrow_multi_segment` so that the Descendant
-    /// combinator uses `find_elements_in_tree` (tree-walking via `get_children`)
-    /// rather than `self.find_elements` (which would invoke `find_all_subtree`).
-    ///
-    /// `find_all_subtree` calls `FindAllBuildCache(TreeScope_Subtree)`. When the
-    /// candidate element is a UIA *fragment element* (not the HWND fragment root
-    /// — e.g. a Qt QFormLayout virtual group), that call can return an incomplete
-    /// array due to provider-activation boundaries, regardless of the tree view
-    /// filter. Walking level-by-level via `get_children` avoids that problem.
-    fn narrow_multi_segment(
-        &self,
-        mut candidates: Vec<ElementData>,
-        segments: &[SelectorSegment],
-        max_depth: u32,
-        limit: Option<usize>,
-    ) -> Result<Vec<ElementData>> {
-        for segment in segments {
-            let mut next_candidates = Vec::new();
-            for candidate in &candidates {
-                match segment.combinator {
-                    Combinator::Child => {
-                        let children = self.get_children(Some(candidate))?;
-                        for child in children {
-                            if matches_simple(&child, &segment.simple) {
-                                next_candidates.push(child);
-                            }
-                        }
-                    }
-                    Combinator::Descendant => {
-                        // Walk level-by-level to avoid provider-activation boundary
-                        // issues with FindAllBuildCache(Subtree) on fragment elements.
-                        let sub_selector = Selector {
-                            segments: vec![SelectorSegment {
-                                combinator: Combinator::Root,
-                                simple: segment.simple.clone(),
-                            }],
-                        };
-                        let mut sub_results = xa11y_core::selector::find_elements_in_tree(
-                            |el| self.get_children(el),
-                            Some(candidate),
-                            &sub_selector,
-                            None,
-                            Some(max_depth),
-                        )?;
-                        next_candidates.append(&mut sub_results);
-                    }
-                    Combinator::Root => unreachable!(),
-                }
-            }
-            let mut seen = std::collections::HashSet::new();
-            next_candidates.retain(|e| seen.insert(e.handle));
-            candidates = next_candidates;
-        }
-
-        if let Some(nth) = segments.last().and_then(|s| s.simple.nth) {
-            if nth <= candidates.len() {
-                candidates = vec![candidates.remove(nth - 1)];
-            } else {
-                candidates.clear();
-            }
-        }
-
-        if let Some(limit) = limit {
-            candidates.truncate(limit);
-        }
-
-        Ok(candidates)
-    }
-
     fn find_elements(
         &self,
         root: Option<&ElementData>,
@@ -760,6 +691,26 @@ impl Provider for WindowsProvider {
 
         let uia_root = self.get_cached(root_data.handle)?;
         let pid = root_data.pid;
+
+        // Fragment elements — virtual nodes inside a UIA provider, e.g. a Qt
+        // QFormLayout group — have a null NativeWindowHandle. Calling
+        // FindAllBuildCache(TreeScope_Subtree) on them can return an incomplete
+        // array due to provider-activation boundaries. Only fragment roots
+        // (HWND-backed window elements) reliably support the subtree call;
+        // fall back to level-by-level tree-walking for everything else.
+        let is_hwnd_root = unsafe { uia_root.CurrentNativeWindowHandle() }
+            .ok()
+            .map(|h| !h.0.is_null())
+            .unwrap_or(false);
+        if !is_hwnd_root {
+            return xa11y_core::selector::find_elements_in_tree(
+                |el| self.get_children(el),
+                root,
+                selector,
+                limit,
+                max_depth,
+            );
+        }
 
         let subtree = self.find_all_subtree(&uia_root)?;
         let count = uia_len(&subtree);
