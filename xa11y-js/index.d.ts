@@ -30,6 +30,7 @@ export {
   inputSim,
   locator,
   _makeTestLocator,
+  _makeTestActionProbe,
 } from './native.js';
 
 // Forward the narrowed types from native.d.ts.
