@@ -490,16 +490,16 @@ def test_element_dump_max_depth_zero_single_line(app, app_config):
 
 
 def test_locator_tree_shorthand(app, app_config):
-    """Locator.tree() is equivalent to .element().tree()."""
+    """tree() via element() round-trip."""
     ok_name = app_config["ok_button_name"]
-    node = app.locator(f'button[name="{ok_name}"]').tree(max_depth=0)
+    node = app.locator(f'button[name="{ok_name}"]').element().tree(max_depth=0)
     assert node["role"] == "button"
     assert node["name"] == ok_name
 
 
 def test_locator_dump_shorthand(app, app_config):
-    """Locator.dump() is equivalent to .element().dump()."""
+    """dump() via element() round-trip."""
     ok_name = app_config["ok_button_name"]
-    text = app.locator(f'button[name="{ok_name}"]').dump(max_depth=0)
+    text = app.locator(f'button[name="{ok_name}"]').element().dump(max_depth=0)
     assert isinstance(text, str)
     assert "button" in text

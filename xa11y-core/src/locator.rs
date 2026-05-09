@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::element::{Element, ElementData, TreeNode};
+use crate::element::{Element, ElementData};
 use crate::error::{Error, Result};
 use crate::event::ElementState;
 use crate::provider::Provider;
@@ -173,20 +173,6 @@ impl Locator {
             .into_iter()
             .map(|d| Element::new(d, Arc::clone(&self.provider)))
             .collect())
-    }
-
-    /// Capture the subtree rooted at the matched element as a recursive snapshot.
-    ///
-    /// Shorthand for `self.element()?.tree(max_depth)`.
-    pub fn tree(&self, max_depth: Option<usize>) -> Result<TreeNode> {
-        self.element()?.tree(max_depth)
-    }
-
-    /// Render the subtree rooted at the matched element as an indented string.
-    ///
-    /// Shorthand for `self.element()?.dump(max_depth)`.
-    pub fn dump(&self, max_depth: Option<usize>) -> Result<String> {
-        self.element()?.dump(max_depth)
     }
 
     // ── Auto-wait ──────────────────────────────────────────────────

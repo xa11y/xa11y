@@ -444,28 +444,6 @@ impl Locator {
             .collect()
     }
 
-    /// Capture the subtree rooted at the matched element as a recursive dict snapshot.
-    ///
-    /// Shorthand for ``self.element().tree(max_depth)``.
-    #[pyo3(signature = (max_depth=None))]
-    fn tree(&self, py: Python<'_>, max_depth: Option<usize>) -> PyResult<PyObject> {
-        let locator = self.inner.clone();
-        let node = py
-            .allow_threads(move || locator.tree(max_depth))
-            .map_err(to_py_err)?;
-        tree_node_to_py(py, &node)
-    }
-
-    /// Render the subtree rooted at the matched element as an indented string.
-    ///
-    /// Shorthand for ``self.element().dump(max_depth)``.
-    #[pyo3(signature = (max_depth=None))]
-    fn dump(&self, py: Python<'_>, max_depth: Option<usize>) -> PyResult<String> {
-        let locator = self.inner.clone();
-        py.allow_threads(move || locator.dump(max_depth))
-            .map_err(to_py_err)
-    }
-
     // ── Actions ──
 
     fn press(&self) -> PyResult<()> {

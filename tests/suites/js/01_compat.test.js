@@ -88,18 +88,18 @@ test('element.dump(0) produces exactly one non-empty line', async () => {
   assert.equal(lines.length, 1);
 });
 
-test('locator.tree() shorthand matches element().tree()', async () => {
+test('element().tree() returns snapshot via locator', async () => {
   if (!appConfig.okButtonName) return;
   const app = await getApp();
-  const node = await app.locator(`button[name="${appConfig.okButtonName}"]`).tree(0);
+  const node = await (await app.locator(`button[name="${appConfig.okButtonName}"]`).element()).tree(0);
   assert.equal(node.role, 'button');
   assert.equal(node.name, appConfig.okButtonName);
 });
 
-test('locator.dump() shorthand matches element().dump()', async () => {
+test('element().dump() returns string via locator', async () => {
   if (!appConfig.okButtonName) return;
   const app = await getApp();
-  const text = await app.locator(`button[name="${appConfig.okButtonName}"]`).dump(0);
+  const text = await (await app.locator(`button[name="${appConfig.okButtonName}"]`).element()).dump(0);
   assert.ok(text.includes('button'));
 });
 

@@ -87,16 +87,3 @@ test('dump() includes value for nodes that have one', async () => {
   assert.ok(text.includes('value="hello"'));
 });
 
-// ── Locator.tree() / Locator.dump() ────────────────────────────────────────
-
-test('locator.tree() shorthand returns correct snapshot', async () => {
-  const node = await root().descendant('window').tree(0);
-  assert.equal(node.role, 'window');
-  assert.equal(node.name, 'Main Window');
-  assert.deepEqual(node.children, []);
-});
-
-test('locator.dump() shorthand returns correct string', async () => {
-  const text = await root().descendant('window').dump(0);
-  assert.ok(text.includes('window "Main Window"'));
-});

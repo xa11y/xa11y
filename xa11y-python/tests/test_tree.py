@@ -74,21 +74,6 @@ def test_dump_includes_value(test_app):
     assert 'value="hello"' in result
 
 
-# ── Locator.tree() / Locator.dump() ─────────────────────────────────────────
-
-
-def test_locator_tree_shorthand(test_app):
-    node = test_app.descendant("window").tree(max_depth=0)
-    assert node["role"] == "window"
-    assert node["name"] == "Main Window"
-    assert node["children"] == []
-
-
-def test_locator_dump_shorthand(test_app):
-    result = test_app.descendant("window").dump(max_depth=0)
-    assert 'window "Main Window"' in result
-
-
 # ── Root ─────────────────────────────────────────────────────────────────────
 
 
