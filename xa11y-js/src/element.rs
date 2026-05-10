@@ -673,7 +673,9 @@ impl Task for ElementActionTask {
             ElementActionKind::Increment => element.increment(),
             ElementActionKind::Decrement => element.decrement(),
             ElementActionKind::SetValue => element.set_value(self.text.as_deref().unwrap_or("")),
-            ElementActionKind::SetNumericValue => element.set_numeric_value(self.num.unwrap_or(0.0)),
+            ElementActionKind::SetNumericValue => {
+                element.set_numeric_value(self.num.unwrap_or(0.0))
+            }
             ElementActionKind::TypeText => element.type_text(self.text.as_deref().unwrap_or("")),
             ElementActionKind::SelectText => {
                 let (s, e) = self.range.unwrap_or((0, 0));
