@@ -177,8 +177,10 @@ impl Locator {
 
     // ── Auto-wait ──────────────────────────────────────────────────
 
-    /// Poll until the element is attached, visible, and enabled, returning its data.
-    fn auto_wait(&self) -> Result<ElementData> {
+    /// Poll until the element is attached, visible, and enabled, returning a
+    /// live [`Element`] handle. Used by the action methods below to provide
+    /// resilience against transient unactionable states.
+    fn auto_wait(&self) -> Result<Element> {
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
 
@@ -189,7 +191,9 @@ impl Locator {
             }
 
             match self.resolve_data() {
-                Ok(data) if data.states.visible && data.states.enabled => return Ok(data),
+                Ok(data) if data.states.visible && data.states.enabled => {
+                    return Ok(Element::new(data, Arc::clone(&self.provider)));
+                }
                 Ok(_) | Err(Error::SelectorNotMatched { .. }) => {
                     // Not yet actionable — poll again
                 }
@@ -200,97 +204,89 @@ impl Locator {
         }
     }
 
-    // ── Common actions (auto-wait, then delegate to provider) ──────
+    // ── Actions ────────────────────────────────────────────────────
+    //
+    // Locator actions auto-wait for the element to be visible and enabled
+    // (re-resolving the selector on each poll), then delegate to the
+    // [`Element`] action of the same name. For snapshot-bound actions that
+    // do not re-resolve, capture an [`Element`] via [`Locator::element`]
+    // and call its action methods directly.
 
     /// Click / invoke the matched element.
     pub fn press(&self) -> Result<()> {
-        let el = self.auto_wait()?;
-        self.provider.press(&el)
+        self.auto_wait()?.press()
     }
 
     /// Set keyboard focus on the matched element.
     pub fn focus(&self) -> Result<()> {
-        let el = self.auto_wait()?;
-        self.provider.focus(&el)
+        self.auto_wait()?.focus()
     }
 
     /// Remove keyboard focus from the matched element.
     pub fn blur(&self) -> Result<()> {
-        let el = self.auto_wait()?;
-        self.provider.blur(&el)
+        self.auto_wait()?.blur()
     }
 
     /// Toggle the matched element (checkbox, switch).
     pub fn toggle(&self) -> Result<()> {
-        let el = self.auto_wait()?;
-        self.provider.toggle(&el)
+        self.auto_wait()?.toggle()
     }
 
     /// Select the matched element (list item, etc.).
     pub fn select(&self) -> Result<()> {
-        let el = self.auto_wait()?;
-        self.provider.select(&el)
+        self.auto_wait()?.select()
     }
 
     /// Expand the matched element.
     pub fn expand(&self) -> Result<()> {
-        let el = self.auto_wait()?;
-        self.provider.expand(&el)
+        self.auto_wait()?.expand()
     }
 
     /// Collapse the matched element.
     pub fn collapse(&self) -> Result<()> {
-        let el = self.auto_wait()?;
-        self.provider.collapse(&el)
+        self.auto_wait()?.collapse()
     }
 
     /// Show the context menu for the matched element.
     pub fn show_menu(&self) -> Result<()> {
-        let el = self.auto_wait()?;
-        self.provider.show_menu(&el)
+        self.auto_wait()?.show_menu()
     }
 
     /// Increment the matched element (slider, spinner).
     pub fn increment(&self) -> Result<()> {
-        let el = self.auto_wait()?;
-        self.provider.increment(&el)
+        self.auto_wait()?.increment()
     }
 
     /// Decrement the matched element (slider, spinner).
     pub fn decrement(&self) -> Result<()> {
-        let el = self.auto_wait()?;
-        self.provider.decrement(&el)
+        self.auto_wait()?.decrement()
     }
 
     /// Scroll the matched element into view.
     pub fn scroll_into_view(&self) -> Result<()> {
-        let el = self.auto_wait()?;
-        self.provider.scroll_into_view(&el)
+        self.auto_wait()?.scroll_into_view()
     }
-
-    // ── Typed operations (auto-wait, then delegate) ────────────────
 
     /// Set the text value of the matched element.
     pub fn set_value(&self, value: &str) -> Result<()> {
-        let el = self.auto_wait()?;
-        self.provider.set_value(&el, value)
+        self.auto_wait()?.set_value(value)
     }
 
     /// Set the numeric value of the matched element (slider, spinner).
     pub fn set_numeric_value(&self, value: f64) -> Result<()> {
+        // Validate up-front so callers fail fast on NaN/inf without burning
+        // the auto-wait timeout.
         if !value.is_finite() {
             return Err(Error::InvalidActionData {
                 message: format!("set_numeric_value requires a finite value, got {}", value),
             });
         }
-        let el = self.auto_wait()?;
-        self.provider.set_numeric_value(&el, value)
+        self.auto_wait()?.set_numeric_value(value)
     }
 
     /// Type text at the current cursor position on the matched element.
     pub fn type_text(&self, text: &str) -> Result<()> {
-        let el = self.auto_wait()?;
-        self.provider.type_text(&el, text)
+        self.auto_wait()?.type_text(text)
     }
 
     /// Select a text range within the matched element.
@@ -300,19 +296,15 @@ impl Locator {
                 message: format!("select_text start ({}) must be <= end ({})", start, end),
             });
         }
-        let el = self.auto_wait()?;
-        self.provider.set_text_selection(&el, start, end)
+        self.auto_wait()?.select_text(start, end)
     }
-
-    // ── Generic action escape hatch ────────────────────────────────
 
     /// Perform an action by name (with auto-wait).
     ///
     /// This is the escape hatch for platform-specific actions not covered
     /// by the named methods above. Also works for well-known action names.
     pub fn perform_action(&self, action: &str) -> Result<()> {
-        let el = self.auto_wait()?;
-        self.provider.perform_action(&el, action)
+        self.auto_wait()?.perform_action(action)
     }
 
     // ── Wait operations ─────────────────────────────────────────────

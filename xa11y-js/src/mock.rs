@@ -25,6 +25,68 @@ pub fn make_test_locator() -> Locator {
     ))
 }
 
+/// Test handle that pairs a mock `Locator` with read-access to the mock's
+/// action log. Lets JS unit tests assert that an action method dispatched
+/// to the expected provider call. Not part of the public API.
+#[napi(js_name = "_TestActionProbe")]
+#[allow(
+    dead_code,
+    reason = "Exported via napi-derive for JS unit tests; the lib-test clippy build doesn't see the JS-side consumer"
+)]
+pub struct TestActionProbe {
+    provider: Arc<xa11y::mock::MockProvider>,
+}
+
+#[napi]
+#[allow(
+    dead_code,
+    reason = "Exported via napi-derive for JS unit tests; the lib-test clippy build doesn't see the JS-side consumer"
+)]
+impl TestActionProbe {
+    /// A `Locator` rooted at the shared synthetic tree, backed by the same
+    /// provider whose action log this probe exposes.
+    #[napi]
+    pub fn locator(&self) -> Locator {
+        Locator::from_inner(xa11y::Locator::new(
+            self.provider.clone() as Arc<dyn xa11y::Provider>,
+            None,
+            "application",
+        ))
+    }
+
+    /// Action log entries recorded so far, as `[handle, action, data?]`
+    /// tuples. `data` is `null` for nullary actions, a stringified
+    /// argument otherwise (matches the core mock's record format).
+    #[napi(ts_return_type = "Array<[number, string, string | null]>")]
+    pub fn actions(&self) -> Vec<(u32, String, Option<String>)> {
+        self.provider
+            .actions()
+            .into_iter()
+            .map(|(h, a, d)| (h as u32, a, d))
+            .collect()
+    }
+
+    /// Clear the recorded action log.
+    #[napi]
+    pub fn clear(&self) {
+        self.provider.clear_actions();
+    }
+}
+
+/// Create a `_TestActionProbe` wrapping a fresh mock provider. Used by JS
+/// unit tests to verify that action methods dispatch to the expected
+/// provider call.
+#[napi(js_name = "_makeTestActionProbe")]
+#[allow(
+    dead_code,
+    reason = "Exported via napi-derive for JS unit tests; the lib-test clippy build doesn't see the JS-side consumer"
+)]
+pub fn make_test_action_probe() -> TestActionProbe {
+    TestActionProbe {
+        provider: xa11y::mock::build_provider(),
+    }
+}
+
 /// Create a `_NativeSubscription` whose backing channel has already been
 /// disconnected. Used by tests to verify the worker loop terminates cleanly
 /// on sender-drop rather than hanging.

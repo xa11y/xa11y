@@ -259,6 +259,204 @@ impl Element {
             max_depth: max_depth.map(|d| d as usize),
         })
     }
+
+    // ── Actions (act on the captured snapshot — do not re-resolve) ──────
+
+    /// Click / invoke this element. Acts on the captured snapshot — does
+    /// not re-resolve.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn press(&self) -> AsyncTask<ElementActionTask> {
+        AsyncTask::new(ElementActionTask::nullary(
+            self.data.clone(),
+            self.provider.clone(),
+            ElementActionKind::Press,
+        ))
+    }
+
+    /// Move keyboard focus to this element. Acts on the captured snapshot.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn focus(&self) -> AsyncTask<ElementActionTask> {
+        AsyncTask::new(ElementActionTask::nullary(
+            self.data.clone(),
+            self.provider.clone(),
+            ElementActionKind::Focus,
+        ))
+    }
+
+    /// Remove keyboard focus from this element. Acts on the captured
+    /// snapshot.
+    ///
+    /// Not supported on Linux or Windows — on those platforms this rejects
+    /// with `ActionNotSupportedError`.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn blur(&self) -> AsyncTask<ElementActionTask> {
+        AsyncTask::new(ElementActionTask::nullary(
+            self.data.clone(),
+            self.provider.clone(),
+            ElementActionKind::Blur,
+        ))
+    }
+
+    /// Toggle a two- or three-state control (checkbox, switch, toggle
+    /// button). Acts on the captured snapshot.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn toggle(&self) -> AsyncTask<ElementActionTask> {
+        AsyncTask::new(ElementActionTask::nullary(
+            self.data.clone(),
+            self.provider.clone(),
+            ElementActionKind::Toggle,
+        ))
+    }
+
+    /// Expand a disclosure, menu, or tree item. Acts on the captured
+    /// snapshot.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn expand(&self) -> AsyncTask<ElementActionTask> {
+        AsyncTask::new(ElementActionTask::nullary(
+            self.data.clone(),
+            self.provider.clone(),
+            ElementActionKind::Expand,
+        ))
+    }
+
+    /// Collapse a disclosure, menu, or tree item. Acts on the captured
+    /// snapshot.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn collapse(&self) -> AsyncTask<ElementActionTask> {
+        AsyncTask::new(ElementActionTask::nullary(
+            self.data.clone(),
+            self.provider.clone(),
+            ElementActionKind::Collapse,
+        ))
+    }
+
+    /// Select this element (list item, tab, row). Acts on the captured
+    /// snapshot.
+    #[napi(js_name = "select", ts_return_type = "Promise<void>")]
+    pub fn select_(&self) -> AsyncTask<ElementActionTask> {
+        AsyncTask::new(ElementActionTask::nullary(
+            self.data.clone(),
+            self.provider.clone(),
+            ElementActionKind::Select,
+        ))
+    }
+
+    /// Open this element's context menu. Acts on the captured snapshot.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn show_menu(&self) -> AsyncTask<ElementActionTask> {
+        AsyncTask::new(ElementActionTask::nullary(
+            self.data.clone(),
+            self.provider.clone(),
+            ElementActionKind::ShowMenu,
+        ))
+    }
+
+    /// Scroll this element into the visible area. Acts on the captured
+    /// snapshot.
+    ///
+    /// No-op on macOS — the macOS accessibility API has no equivalent. Uses
+    /// `Component.ScrollTo` on Linux and `ScrollItemPattern` on Windows.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn scroll_into_view(&self) -> AsyncTask<ElementActionTask> {
+        AsyncTask::new(ElementActionTask::nullary(
+            self.data.clone(),
+            self.provider.clone(),
+            ElementActionKind::ScrollIntoView,
+        ))
+    }
+
+    /// Increment a numeric value (slider, spin button) by its platform step.
+    /// Acts on the captured snapshot.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn increment(&self) -> AsyncTask<ElementActionTask> {
+        AsyncTask::new(ElementActionTask::nullary(
+            self.data.clone(),
+            self.provider.clone(),
+            ElementActionKind::Increment,
+        ))
+    }
+
+    /// Decrement a numeric value (slider, spin button) by its platform step.
+    /// Acts on the captured snapshot.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn decrement(&self) -> AsyncTask<ElementActionTask> {
+        AsyncTask::new(ElementActionTask::nullary(
+            self.data.clone(),
+            self.provider.clone(),
+            ElementActionKind::Decrement,
+        ))
+    }
+
+    /// Set the text value of this element. Replaces the entire value rather
+    /// than inserting at the caret — use `typeText` for insertion. Acts on
+    /// the captured snapshot.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn set_value(&self, value: String) -> AsyncTask<ElementActionTask> {
+        AsyncTask::new(ElementActionTask::with_text(
+            self.data.clone(),
+            self.provider.clone(),
+            ElementActionKind::SetValue,
+            value,
+        ))
+    }
+
+    /// Set the numeric value of this element (slider, spin button). Acts on
+    /// the captured snapshot.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn set_numeric_value(&self, value: f64) -> AsyncTask<ElementActionTask> {
+        AsyncTask::new(ElementActionTask::with_num(
+            self.data.clone(),
+            self.provider.clone(),
+            ElementActionKind::SetNumericValue,
+            value,
+        ))
+    }
+
+    /// Type `text` at the current caret position. Acts on the captured
+    /// snapshot.
+    ///
+    /// Uses the platform accessibility API — never simulates keyboard events.
+    /// For synthesised keystrokes (global shortcuts, drag gestures), use the
+    /// `InputSim` surface instead.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn type_text(&self, text: String) -> AsyncTask<ElementActionTask> {
+        AsyncTask::new(ElementActionTask::with_text(
+            self.data.clone(),
+            self.provider.clone(),
+            ElementActionKind::TypeText,
+            text,
+        ))
+    }
+
+    /// Select the text range from `start` to `end` (0-based character
+    /// offsets). Rejects with `InvalidActionDataError` if `start > end`.
+    /// Acts on the captured snapshot.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn select_text(&self, start: u32, end: u32) -> AsyncTask<ElementActionTask> {
+        AsyncTask::new(ElementActionTask::with_range(
+            self.data.clone(),
+            self.provider.clone(),
+            ElementActionKind::SelectText,
+            start,
+            end,
+        ))
+    }
+
+    /// Perform a custom action by its snake_case name. Acts on the captured
+    /// snapshot.
+    ///
+    /// Use this for actions the element advertises in its `actions` list
+    /// that don't have a dedicated method. Rejects with
+    /// `ActionNotSupportedError` if the element does not advertise `action`.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn perform_action(&self, action: String) -> AsyncTask<ElementActionTask> {
+        AsyncTask::new(ElementActionTask::with_text(
+            self.data.clone(),
+            self.provider.clone(),
+            ElementActionKind::PerformAction,
+            action,
+        ))
+    }
 }
 
 // ── Task implementations ────────────────────────────────────────────────
@@ -359,5 +557,136 @@ impl Task for DumpTask {
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
         Ok(output)
+    }
+}
+
+// ── Element action task ────────────────────────────────────────────────
+
+#[derive(Clone, Copy)]
+pub enum ElementActionKind {
+    Press,
+    Focus,
+    Blur,
+    Toggle,
+    Expand,
+    Collapse,
+    Select,
+    ShowMenu,
+    ScrollIntoView,
+    Increment,
+    Decrement,
+    SetValue,
+    SetNumericValue,
+    TypeText,
+    SelectText,
+    PerformAction,
+}
+
+pub struct ElementActionTask {
+    data: xa11y::ElementData,
+    provider: Arc<dyn xa11y::Provider>,
+    kind: ElementActionKind,
+    text: Option<String>,
+    num: Option<f64>,
+    range: Option<(u32, u32)>,
+}
+
+impl ElementActionTask {
+    fn nullary(
+        data: xa11y::ElementData,
+        provider: Arc<dyn xa11y::Provider>,
+        kind: ElementActionKind,
+    ) -> Self {
+        Self {
+            data,
+            provider,
+            kind,
+            text: None,
+            num: None,
+            range: None,
+        }
+    }
+    fn with_text(
+        data: xa11y::ElementData,
+        provider: Arc<dyn xa11y::Provider>,
+        kind: ElementActionKind,
+        text: String,
+    ) -> Self {
+        Self {
+            data,
+            provider,
+            kind,
+            text: Some(text),
+            num: None,
+            range: None,
+        }
+    }
+    fn with_num(
+        data: xa11y::ElementData,
+        provider: Arc<dyn xa11y::Provider>,
+        kind: ElementActionKind,
+        num: f64,
+    ) -> Self {
+        Self {
+            data,
+            provider,
+            kind,
+            text: None,
+            num: Some(num),
+            range: None,
+        }
+    }
+    fn with_range(
+        data: xa11y::ElementData,
+        provider: Arc<dyn xa11y::Provider>,
+        kind: ElementActionKind,
+        start: u32,
+        end: u32,
+    ) -> Self {
+        Self {
+            data,
+            provider,
+            kind,
+            text: None,
+            num: None,
+            range: Some((start, end)),
+        }
+    }
+}
+
+impl Task for ElementActionTask {
+    type Output = ();
+    type JsValue = ();
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        let element = xa11y::Element::new(self.data.clone(), self.provider.clone());
+        let r = match self.kind {
+            ElementActionKind::Press => element.press(),
+            ElementActionKind::Focus => element.focus(),
+            ElementActionKind::Blur => element.blur(),
+            ElementActionKind::Toggle => element.toggle(),
+            ElementActionKind::Expand => element.expand(),
+            ElementActionKind::Collapse => element.collapse(),
+            ElementActionKind::Select => element.select(),
+            ElementActionKind::ShowMenu => element.show_menu(),
+            ElementActionKind::ScrollIntoView => element.scroll_into_view(),
+            ElementActionKind::Increment => element.increment(),
+            ElementActionKind::Decrement => element.decrement(),
+            ElementActionKind::SetValue => element.set_value(self.text.as_deref().unwrap_or("")),
+            ElementActionKind::SetNumericValue => element.set_numeric_value(self.num.unwrap_or(0.0)),
+            ElementActionKind::TypeText => element.type_text(self.text.as_deref().unwrap_or("")),
+            ElementActionKind::SelectText => {
+                let (s, e) = self.range.unwrap_or((0, 0));
+                element.select_text(s, e)
+            }
+            ElementActionKind::PerformAction => {
+                element.perform_action(self.text.as_deref().unwrap_or(""))
+            }
+        };
+        r.map_err(map_err)
+    }
+
+    fn resolve(&mut self, _env: Env, _output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(())
     }
 }

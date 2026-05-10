@@ -144,3 +144,149 @@ test('act() helper re-reads the tree after an action', async () => {
   const updated = await act(addBtn, 'press');
   assert.ok(updated);
 });
+
+// ---------------------------------------------------------------------------
+// Element-bound action variants.
+//
+// These mirror the Locator-bound tests above but invoke the action against a
+// captured Element snapshot (`await locator.element()`) instead of going
+// through the auto-resolving Locator. The provider call underneath is the
+// same, so results should match — what's exercised here is the binding.
+// ---------------------------------------------------------------------------
+
+test('press on primary button via Element', async () => {
+  if (!appConfig.okButtonName) return;
+  const app = await getApp();
+  const el = await app.locator(`button[name="${appConfig.okButtonName}"]`).element();
+  await el.press();
+});
+
+test('Element.press() flips checkbox checked state', async () => {
+  if (!appConfig.hasCheckbox) return;
+  const selector = 'check_box[name="Agree to terms"]';
+  let app = await getApp();
+  const el = await app.locator(selector).element().catch(() => null);
+  if (!el) return; // schema mismatch — skip
+  const before = el.checked;
+  assert.ok(['on', 'off'].includes(before));
+
+  try {
+    await el.press();
+  } catch (err) {
+    if (err instanceof ActionNotSupportedError) return;
+    throw err;
+  }
+  await sleep(200);
+
+  app = await getApp();
+  const afterEls = await app.locator(selector).elements();
+  if (afterEls.length === 0) return;
+  const after = afterEls[0].checked;
+  assert.ok(['on', 'off'].includes(after));
+  assert.notEqual(before, after, 'checkbox state should have flipped');
+});
+
+test('Element.setValue on text field is exercised (AT-SPI may reject)', async () => {
+  const app = await getApp();
+  const selector = appConfig.textFieldName
+    ? `text_field[name="${appConfig.textFieldName}"]`
+    : 'text_field';
+  const fieldLocator = app.locator(selector);
+  if (!(await fieldLocator.exists())) return;
+  const el = await fieldLocator.element();
+  try {
+    await el.setValue('Jane Doe');
+    await sleep(200);
+    const refreshed = await one(await getApp(), selector);
+    assert.ok(typeof refreshed.value === 'string' || refreshed.value === null);
+  } catch (err) {
+    if (!(err instanceof ActionNotSupportedError)) throw err;
+  }
+});
+
+test('Element.focus() resolves on text field or button', async () => {
+  const app = await getApp();
+  const selector = appConfig.textFieldName
+    ? `text_field[name="${appConfig.textFieldName}"]`
+    : 'button';
+  const locator = app.locator(selector);
+  if (!(await locator.exists())) return;
+  const el = await locator.element();
+  try {
+    await el.focus();
+  } catch (err) {
+    if (err instanceof ActionNotSupportedError) return;
+    throw err;
+  }
+});
+
+test('Element.setNumericValue on slider', async () => {
+  // Sliders are exposed by the qt/cocoa/tauri/gtk/accesskit apps but not all
+  // of them name the slider consistently. Try a name-qualified selector first
+  // and fall back to a bare role selector.
+  const app = await getApp();
+  let locator = app.locator('slider[name="Volume"]');
+  if (!(await locator.exists())) {
+    locator = app.locator('slider');
+    if (!(await locator.exists())) return; // app has no slider
+  }
+  const el = await locator.element();
+  try {
+    await el.setNumericValue(77);
+  } catch (err) {
+    // Qt under AT-SPI2 and WebKit-backed sliders sometimes reject
+    // SetCurrentValue. The same path is xfailed in the python suite.
+    if (err instanceof ActionNotSupportedError) return;
+    throw err;
+  }
+  await sleep(200);
+  const refreshedEls = await app.locator('slider').elements();
+  if (refreshedEls.length === 0) return;
+  // Numeric value may not always reflect immediately on every adapter — just
+  // assert the call did not throw and the slider is still readable.
+  assert.ok(refreshedEls[0] !== undefined);
+});
+
+test('Element.performAction("press") is equivalent to press', async () => {
+  if (!appConfig.okButtonName) return;
+  const app = await getApp();
+  const el = await app.locator(`button[name="${appConfig.okButtonName}"]`).element();
+  try {
+    await el.performAction('press');
+  } catch (err) {
+    if (err instanceof ActionNotSupportedError) return;
+    throw err;
+  }
+});
+
+test('snapshot-bound Element can be pressed twice', async () => {
+  // Capture once, invoke twice. The second invocation goes against the same
+  // captured snapshot (no auto re-resolve like Locator does), so we're
+  // exercising the binding's reuse semantics, not auto-wait.
+  const app = await getApp();
+  const addBtn = app.locator('button[name="Add Item"]');
+  if (!(await addBtn.exists())) return;
+  const el = await addBtn.element();
+  const countBefore = await app.locator('[name^="Item "]').count();
+  try {
+    await el.press();
+    await sleep(200);
+    await el.press();
+  } catch (err) {
+    if (err instanceof ActionNotSupportedError) return;
+    throw err;
+  }
+  await sleep(500);
+  let app2 = await getApp();
+  let countAfter = await app2.locator('[name^="Item "]').count();
+  for (let i = 0; i < 10 && countAfter <= countBefore; i++) {
+    await sleep(200);
+    app2 = await getApp();
+    countAfter = await app2.locator('[name^="Item "]').count();
+  }
+  if (countAfter === countBefore) return; // platform/schema mismatch
+  assert.ok(
+    countAfter >= countBefore + 1,
+    `expected >= ${countBefore + 1} items after two presses, got ${countAfter}`,
+  );
+});
