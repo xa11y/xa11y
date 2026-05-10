@@ -247,3 +247,178 @@ def test_textfield_set_value(app, app_name, app_config):
     initial = app_config.get("textfield_initial_value") or "hello world"
     loc.set_value(initial)
     time.sleep(ACTION_SETTLE)
+
+
+# ---------------------------------------------------------------------------
+# Element-bound action variants
+#
+# Mirror the Locator-bound tests above but invoke the action against a
+# captured Element snapshot (``locator.element()``) rather than going through
+# the auto-resolving Locator. The provider call beneath is the same — what's
+# exercised here is the binding.
+# ---------------------------------------------------------------------------
+
+
+def test_button_press_via_element(app, app_config):
+    """Element.press() on a button does not raise."""
+    ok_name = app_config["ok_button_name"]
+    el = app.locator(f'button[name="{ok_name}"]').element()
+    el.press()
+    time.sleep(ACTION_SETTLE)
+
+
+def test_perform_action_press_via_element(app, app_config):
+    """Element.perform_action('press') is equivalent to press()."""
+    ok_name = app_config["ok_button_name"]
+    el = app.locator(f'button[name="{ok_name}"]').element()
+    el.perform_action("press")
+    time.sleep(ACTION_SETTLE)
+
+
+def test_button_focus_via_element(app, app_config):
+    """Element.focus() on a button is accepted without raising."""
+    ok_name = app_config["ok_button_name"]
+    el = app.locator(f'button[name="{ok_name}"]').element()
+    try:
+        el.focus()
+    except xa11y.ActionNotSupportedError:
+        pytest.xfail("focus() not exposed by this platform's AT bridge for buttons")
+    time.sleep(ACTION_SETTLE)
+
+
+def test_checkbox_toggle_via_element(app, app_name, app_config):
+    """Element.toggle() flips checked state on a captured snapshot."""
+    if not app_config.get("has_checkbox"):
+        pytest.skip("app has no checkbox widgets")
+    if app_name == "gtk":
+        pytest.skip(
+            "GTK4 Gtk.CheckButton does not expose AT-SPI2 Action interface "
+            "actions; toggle() requires 'toggle'/'click'/'activate'."
+        )
+    name = app_config["checkbox_unchecked_name"]
+    loc = app.locator(f'check_box[name="{name}"]')
+    el_before = loc.element()
+    before = el_before.checked
+    try:
+        el_before.toggle()
+    except xa11y.ActionNotSupportedError:
+        pytest.xfail("toggle() rejected by this platform's AT bridge for check_box")
+    time.sleep(ACTION_SETTLE)
+    after = loc.element().checked
+    assert before != after, f"toggle() did not change checked state: {before} == {after}"
+    # Restore — re-resolve a fresh snapshot for the second call.
+    loc.element().toggle()
+    time.sleep(ACTION_SETTLE)
+
+
+def test_checkbox_press_via_element(app, app_name, app_config):
+    """Element.press() on a checkbox flips checked state where supported."""
+    if not app_config.get("has_checkbox"):
+        pytest.skip("app has no checkbox widgets")
+    name = app_config["checkbox_unchecked_name"]
+    loc = app.locator(f'check_box[name="{name}"]')
+    el = loc.element()
+    before = el.checked
+    try:
+        el.press()
+    except xa11y.ActionNotSupportedError:
+        pytest.xfail("press() not exposed for check_box on this platform")
+    time.sleep(ACTION_SETTLE)
+    after = loc.element().checked
+    assert before != after, f"press() did not change checked state: {before} == {after}"
+    # Restore.
+    try:
+        loc.element().press()
+        time.sleep(ACTION_SETTLE)
+    except xa11y.ActionNotSupportedError:
+        pass
+
+
+@pytest.mark.xfail(
+    sys.platform == "linux" or (
+        sys.platform == "darwin"
+        and os.environ.get("XA11Y_TEST_APP") in ("tauri", "electron")
+    ),
+    reason=(
+        "Qt AT-SPI2 sliders: SetCurrentValue may be rejected on some Qt versions. "
+        "WebKit2GTK / WKWebView: SetCurrentValue not reliable for HTML range inputs."
+    ),
+    strict=False,
+)
+def test_slider_set_numeric_value_via_element(app, app_config):
+    """Element.set_numeric_value() writes a value to a slider snapshot."""
+    sel = app_config.get("slider_selector")
+    if not sel:
+        pytest.skip("app has no slider widget")
+    loc = app.locator(sel)
+    loc.element().set_numeric_value(77.0)
+    time.sleep(ACTION_SETTLE)
+    after = loc.element().numeric_value
+    assert after is not None
+    assert abs(after - 77.0) < 1.0, f"expected ~77.0, got {after}"
+    # Restore.
+    loc.element().set_numeric_value(50.0)
+    time.sleep(ACTION_SETTLE)
+
+
+def test_slider_increment_via_element(app, app_config):
+    """Element.increment() raises numeric_value on a slider snapshot."""
+    sel = app_config.get("slider_selector")
+    if not sel:
+        pytest.skip("app has no slider widget")
+    loc = app.locator(sel)
+    el = loc.element()
+    before = el.numeric_value
+    try:
+        el.increment()
+    except xa11y.ActionNotSupportedError:
+        pytest.xfail("increment() not exposed for slider on this platform")
+    time.sleep(ACTION_SETTLE)
+    after = loc.element().numeric_value
+    assert before is not None and after is not None
+    assert after != before, "increment() did not change the slider value"
+
+
+def test_textfield_set_value_via_element(app, app_name, app_config):
+    """Element.set_value() writes text to a text_field snapshot."""
+    sel = app_config.get("textfield_selector")
+    if not sel:
+        pytest.skip("app has no text_field widget")
+    if app_name in ("tauri", "electron"):
+        pytest.skip(
+            f"WebKit2GTK / Chromium ({app_name}) expose HTML <input> through "
+            "AT-SPI2 without a functional EditableText interface."
+        )
+    loc = app.locator(sel)
+    try:
+        loc.element().set_value("test input")
+    except xa11y.ActionNotSupportedError:
+        pytest.xfail("set_value() not exposed for text_field on this platform")
+    time.sleep(ACTION_SETTLE)
+    assert loc.element().value == "test input"
+    # Restore.
+    initial = app_config.get("textfield_initial_value") or "hello world"
+    loc.element().set_value(initial)
+    time.sleep(ACTION_SETTLE)
+
+
+def test_snapshot_bound_element_press_twice(app, app_config):
+    """A captured Element can be pressed multiple times against the snapshot.
+
+    Locators auto-re-resolve before each action; Elements act on the captured
+    node id. This verifies the binding accepts repeat invocation.
+    """
+    add_name = app_config.get("add_item_button_name")
+    if not add_name:
+        pytest.skip("app has no Add Item button")
+    add_btn = app.locator(f'button[name="{add_name}"]')
+    if not add_btn.exists():
+        pytest.skip("Add Item button not present in current tree")
+    el = add_btn.element()
+    try:
+        el.press()
+        time.sleep(ACTION_SETTLE)
+        el.press()
+    except xa11y.ActionNotSupportedError:
+        pytest.xfail("press() not exposed for button on this platform")
+    time.sleep(ACTION_SETTLE)

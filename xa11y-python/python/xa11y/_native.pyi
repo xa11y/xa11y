@@ -214,6 +214,38 @@ class Element:
         """Get parent element (lazy — each call queries the provider)."""
     def subscribe(self) -> Subscription:
         """Subscribe to accessibility events for this element (typically an app)."""
+    def press(self) -> None:
+        """Press (default activate) this element."""
+    def focus(self) -> None:
+        """Move keyboard focus to this element."""
+    def blur(self) -> None:
+        """Remove keyboard focus from this element."""
+    def toggle(self) -> None:
+        """Toggle this element's checked state."""
+    def expand(self) -> None:
+        """Expand this element (e.g. tree node, combo box)."""
+    def collapse(self) -> None:
+        """Collapse this element."""
+    def select(self) -> None:
+        """Select this element (e.g. list item, tab)."""
+    def show_menu(self) -> None:
+        """Show this element's context menu."""
+    def scroll_into_view(self) -> None:
+        """Scroll this element into view."""
+    def increment(self) -> None:
+        """Increment this element's value (e.g. slider, spinner)."""
+    def decrement(self) -> None:
+        """Decrement this element's value."""
+    def set_value(self, value: str) -> None:
+        """Replace this element's text value."""
+    def set_numeric_value(self, value: float) -> None:
+        """Set this element's numeric value."""
+    def type_text(self, text: str) -> None:
+        """Insert text at the current cursor position."""
+    def select_text(self, start: int, end: int) -> None:
+        """Select the text range from ``start`` to ``end`` (0-based offsets)."""
+    def perform_action(self, action: str) -> None:
+        """Perform an action by ``snake_case`` name."""
     def __repr__(self) -> str: ...
     def __str__(self) -> str: ...
 
@@ -393,3 +425,10 @@ def screenshot(
 
 def _make_test_locator() -> Locator: ...
 def _make_disconnected_subscription() -> Subscription: ...
+
+class _TestActionProbe:
+    def locator(self, selector: str) -> Locator: ...
+    def actions(self) -> list[list[object]]: ...
+    def clear(self) -> None: ...
+
+def _make_test_action_probe() -> _TestActionProbe: ...

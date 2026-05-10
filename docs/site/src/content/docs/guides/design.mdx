@@ -18,6 +18,8 @@ xa11y is a Rust workspace organised into a platform-independent core, three plat
 
 The public surface — `App`, `Element`, `Locator`, `Subscription`, `Selector` — is platform-agnostic. Each backend implements a small set of provider traits, and `xa11y-core` is responsible for everything that *can* be cross-platform: the selector parser, the locator engine, retry/wait loops, error mapping, and screenshot encoding.
 
+Actions (`press`, `set_value`, `type_text`, …) are exposed on both `Locator` and `Element`. `Locator` is the auto-waiting wrapper: it re-resolves its selector and waits for visible+enabled before dispatching. `Element` calls go straight through to the provider handle captured at fetch time — no re-resolution, no wait — and surface `ElementStale` if the handle is gone. Both shapes share a single underlying provider call, so action fidelity (tenet 3) is enforced in one place.
+
 ## Design tenets
 
 These four tenets are the firm defaults for every new piece of provider or binding code. They are restated verbatim in `CLAUDE.md` so reviewers and AI agents apply them consistently.

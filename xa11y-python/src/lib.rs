@@ -352,6 +352,108 @@ impl Element {
         Ok(dict.into_any().unbind())
     }
 
+    // ── Actions ──
+    //
+    // These act on the captured snapshot rather than re-resolving the selector
+    // (contrast with Locator, which re-queries the provider on every call).
+
+    /// Press (default activate) this element.
+    fn press(&self) -> PyResult<()> {
+        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
+            .press()
+            .map_err(to_py_err)
+    }
+    /// Move keyboard focus to this element.
+    fn focus(&self) -> PyResult<()> {
+        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
+            .focus()
+            .map_err(to_py_err)
+    }
+    /// Remove keyboard focus from this element.
+    fn blur(&self) -> PyResult<()> {
+        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
+            .blur()
+            .map_err(to_py_err)
+    }
+    /// Toggle this element's checked state.
+    fn toggle(&self) -> PyResult<()> {
+        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
+            .toggle()
+            .map_err(to_py_err)
+    }
+    /// Expand this element (e.g. tree node, combo box).
+    fn expand(&self) -> PyResult<()> {
+        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
+            .expand()
+            .map_err(to_py_err)
+    }
+    /// Collapse this element.
+    fn collapse(&self) -> PyResult<()> {
+        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
+            .collapse()
+            .map_err(to_py_err)
+    }
+    /// Select this element (e.g. list item, tab).
+    fn select(&self) -> PyResult<()> {
+        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
+            .select()
+            .map_err(to_py_err)
+    }
+    /// Show this element's context menu.
+    fn show_menu(&self) -> PyResult<()> {
+        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
+            .show_menu()
+            .map_err(to_py_err)
+    }
+    /// Scroll this element into view.
+    fn scroll_into_view(&self) -> PyResult<()> {
+        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
+            .scroll_into_view()
+            .map_err(to_py_err)
+    }
+    /// Increment this element's value (e.g. slider, spinner).
+    fn increment(&self) -> PyResult<()> {
+        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
+            .increment()
+            .map_err(to_py_err)
+    }
+    /// Decrement this element's value.
+    fn decrement(&self) -> PyResult<()> {
+        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
+            .decrement()
+            .map_err(to_py_err)
+    }
+    /// Replace this element's text value.
+    fn set_value(&self, value: &str) -> PyResult<()> {
+        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
+            .set_value(value)
+            .map_err(to_py_err)
+    }
+    /// Set this element's numeric value.
+    fn set_numeric_value(&self, value: f64) -> PyResult<()> {
+        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
+            .set_numeric_value(value)
+            .map_err(to_py_err)
+    }
+    /// Insert text at the current cursor position.
+    fn type_text(&self, text: &str) -> PyResult<()> {
+        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
+            .type_text(text)
+            .map_err(to_py_err)
+    }
+    /// Select the text range from `start` to `end` (0-based character offsets).
+    fn select_text(&self, start: u32, end: u32) -> PyResult<()> {
+        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
+            .select_text(start, end)
+            .map_err(to_py_err)
+    }
+    /// Perform an action by its ``snake_case`` name.
+    fn perform_action(&self, action: &str) -> PyResult<()> {
+        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
+            .perform_action(action)
+            .map_err(to_py_err)
+    }
+
     fn __repr__(&self) -> String {
         let mut parts = vec![format!("role='{}'", self.role)];
         if let Some(ref n) = self.name {
@@ -1303,6 +1405,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Test helpers
     m.add_function(wrap_pyfunction!(_make_test_locator, m)?)?;
     m.add_function(wrap_pyfunction!(_make_disconnected_subscription, m)?)?;
+    m.add_function(wrap_pyfunction!(_make_test_action_probe, m)?)?;
 
     Ok(())
 }
@@ -1338,6 +1441,61 @@ fn _make_test_locator() -> PyResult<Locator> {
 fn _make_disconnected_subscription() -> Subscription {
     Subscription {
         inner: std::sync::Mutex::new(Some(xa11y::mock::disconnected_subscription())),
+        provider: xa11y::mock::build_provider(),
+    }
+}
+
+/// Probe wrapping a single shared mock provider so tests can drive actions
+/// from a Python `Element` and then inspect the recorded action log.
+#[pyclass]
+struct TestActionProbe {
+    provider: Arc<xa11y::mock::MockProvider>,
+}
+
+#[pymethods]
+impl TestActionProbe {
+    /// Locator rooted at the mock test app, sharing this probe's provider.
+    fn locator(&self, selector: &str) -> Locator {
+        Locator {
+            inner: xa11y::Locator::new(
+                self.provider.clone() as Arc<dyn xa11y::Provider>,
+                None,
+                selector,
+            ),
+        }
+    }
+
+    /// Recorded action log: list of `(handle, action_name, optional_data)`.
+    fn actions(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let entries = self.provider.actions();
+        let list = PyList::empty(py);
+        for (handle, name, data) in entries {
+            let tup = PyList::empty(py);
+            tup.append(handle)?;
+            tup.append(name)?;
+            match data {
+                Some(s) => tup.append(s)?,
+                None => tup.append(py.None())?,
+            }
+            list.append(tup)?;
+        }
+        Ok(list.into_any().unbind())
+    }
+
+    /// Clear the action log.
+    fn clear(&self) {
+        self.provider.clear_actions();
+    }
+}
+
+/// Create a probe over the shared mock provider.
+///
+/// The returned probe exposes a `locator()` helper plus `actions()` /
+/// `clear()` for inspecting and resetting the action log recorded by the
+/// mock provider.
+#[pyfunction]
+fn _make_test_action_probe() -> TestActionProbe {
+    TestActionProbe {
         provider: xa11y::mock::build_provider(),
     }
 }

@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::error::Error;
 use crate::provider::Provider;
 use crate::role::Role;
 
@@ -188,6 +189,117 @@ impl Element {
         write_tree_node(&node, 0, &mut out);
         Ok(out)
     }
+
+    // ── Actions ─────────────────────────────────────────────────────
+    //
+    // Element actions invoke the platform via the captured provider handle —
+    // they do **not** re-resolve the selector. If the underlying element has
+    // been destroyed since this snapshot was taken, the provider returns a
+    // platform-specific "gone" error. For resilient retry-on-change semantics,
+    // use the equivalent method on [`crate::Locator`] instead.
+
+    /// Click / invoke this element via the accessibility action layer.
+    pub fn press(&self) -> crate::error::Result<()> {
+        self.provider.press(&self.data)
+    }
+
+    /// Set keyboard focus to this element.
+    pub fn focus(&self) -> crate::error::Result<()> {
+        self.provider.focus(&self.data)
+    }
+
+    /// Remove keyboard focus from this element.
+    pub fn blur(&self) -> crate::error::Result<()> {
+        self.provider.blur(&self.data)
+    }
+
+    /// Toggle a two- or three-state control (checkbox, switch).
+    pub fn toggle(&self) -> crate::error::Result<()> {
+        self.provider.toggle(&self.data)
+    }
+
+    /// Select this element (list item, tab, row).
+    pub fn select(&self) -> crate::error::Result<()> {
+        self.provider.select(&self.data)
+    }
+
+    /// Expand a disclosure, menu, combo box, or tree item.
+    pub fn expand(&self) -> crate::error::Result<()> {
+        self.provider.expand(&self.data)
+    }
+
+    /// Collapse an expanded element.
+    pub fn collapse(&self) -> crate::error::Result<()> {
+        self.provider.collapse(&self.data)
+    }
+
+    /// Open this element's context menu or dropdown.
+    pub fn show_menu(&self) -> crate::error::Result<()> {
+        self.provider.show_menu(&self.data)
+    }
+
+    /// Increment a numeric control (slider, spinner) by its platform step.
+    pub fn increment(&self) -> crate::error::Result<()> {
+        self.provider.increment(&self.data)
+    }
+
+    /// Decrement a numeric control (slider, spinner) by its platform step.
+    pub fn decrement(&self) -> crate::error::Result<()> {
+        self.provider.decrement(&self.data)
+    }
+
+    /// Scroll this element into the visible area.
+    ///
+    /// No-op on macOS — the macOS accessibility API has no equivalent.
+    pub fn scroll_into_view(&self) -> crate::error::Result<()> {
+        self.provider.scroll_into_view(&self.data)
+    }
+
+    /// Set the text value of this element. Replaces the entire value rather
+    /// than inserting at the caret — use [`Element::type_text`] for insertion.
+    pub fn set_value(&self, value: &str) -> crate::error::Result<()> {
+        self.provider.set_value(&self.data, value)
+    }
+
+    /// Set the numeric value of this element (slider, spinner).
+    ///
+    /// Returns [`Error::InvalidActionData`] if `value` is NaN or infinite.
+    pub fn set_numeric_value(&self, value: f64) -> crate::error::Result<()> {
+        if !value.is_finite() {
+            return Err(Error::InvalidActionData {
+                message: format!("set_numeric_value requires a finite value, got {}", value),
+            });
+        }
+        self.provider.set_numeric_value(&self.data, value)
+    }
+
+    /// Insert text at the current cursor position.
+    ///
+    /// Uses the platform accessibility API — never simulates keyboard events.
+    pub fn type_text(&self, text: &str) -> crate::error::Result<()> {
+        self.provider.type_text(&self.data, text)
+    }
+
+    /// Select the text range from `start` to `end` (0-based character offsets).
+    ///
+    /// Returns [`Error::InvalidActionData`] if `start > end`.
+    pub fn select_text(&self, start: u32, end: u32) -> crate::error::Result<()> {
+        if start > end {
+            return Err(Error::InvalidActionData {
+                message: format!("select_text start ({}) must be <= end ({})", start, end),
+            });
+        }
+        self.provider.set_text_selection(&self.data, start, end)
+    }
+
+    /// Perform an action by its `snake_case` name.
+    ///
+    /// Use this for actions the element advertises in its [`actions`](ElementData::actions)
+    /// list that don't have a dedicated method. Well-known names (`"press"`,
+    /// `"focus"`, etc.) also work — providers delegate to the named methods.
+    pub fn perform_action(&self, action: &str) -> crate::error::Result<()> {
+        self.provider.perform_action(&self.data, action)
+    }
 }
 
 fn build_tree_node(
@@ -315,4 +427,188 @@ pub struct TreeNode {
     pub name: Option<String>,
     pub value: Option<String>,
     pub children: Vec<TreeNode>,
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for `Element` action methods. Verifies each action records the
+    //! expected entry in the mock provider's action log and that validation
+    //! errors fire before the provider is ever called.
+
+    use super::*;
+    use crate::mock::{build_provider, MockProvider};
+    use crate::selector::Selector;
+
+    /// Resolve `selector` against the mock tree and return the first match
+    /// wrapped in an `Element`. Panics on no match — these are unit tests, not
+    /// production paths.
+    fn find_element(provider: &Arc<MockProvider>, selector: &str) -> Element {
+        let parsed = Selector::parse(selector).expect("selector must parse");
+        let provider_dyn: Arc<dyn Provider> = provider.clone();
+        let mut matches = provider_dyn
+            .find_elements(None, &parsed, Some(1), None)
+            .expect("find_elements must succeed");
+        let data = matches.pop().expect("selector matched no elements");
+        Element::new(data, provider_dyn)
+    }
+
+    fn last_action(provider: &Arc<MockProvider>) -> (u64, String, Option<String>) {
+        provider
+            .actions()
+            .last()
+            .cloned()
+            .expect("expected at least one recorded action")
+    }
+
+    #[test]
+    fn nullary_actions_record_correct_name() {
+        let provider = build_provider();
+        let cases = [
+            (r#"button[name="Back"]"#, "press" as &str),
+            (r#"button[name="Back"]"#, "focus"),
+            (r#"button[name="Back"]"#, "blur"),
+            (r#"check_box[name="Agree"]"#, "toggle"),
+            (r#"list_item[name="Item 1"]"#, "select"),
+            (r#"list[name="Items"]"#, "expand"),
+            (r#"list[name="Items"]"#, "collapse"),
+            (r#"button[name="Back"]"#, "show_menu"),
+            (r#"slider[name="Volume"]"#, "increment"),
+            (r#"slider[name="Volume"]"#, "decrement"),
+            (r#"button[name="Back"]"#, "scroll_into_view"),
+        ];
+        for (selector, action) in cases {
+            provider.clear_actions();
+            let el = find_element(&provider, selector);
+            match action {
+                "press" => el.press().unwrap(),
+                "focus" => el.focus().unwrap(),
+                "blur" => el.blur().unwrap(),
+                "toggle" => el.toggle().unwrap(),
+                "select" => el.select().unwrap(),
+                "expand" => el.expand().unwrap(),
+                "collapse" => el.collapse().unwrap(),
+                "show_menu" => el.show_menu().unwrap(),
+                "increment" => el.increment().unwrap(),
+                "decrement" => el.decrement().unwrap(),
+                "scroll_into_view" => el.scroll_into_view().unwrap(),
+                _ => unreachable!(),
+            }
+            let (handle, name, data) = last_action(&provider);
+            assert_eq!(
+                name, action,
+                "wrong action recorded for selector {selector}"
+            );
+            assert_eq!(data, None, "nullary action should not carry data");
+            assert_eq!(handle, el.data.handle);
+        }
+    }
+
+    #[test]
+    fn set_value_records_text_payload() {
+        let provider = build_provider();
+        let el = find_element(&provider, r#"text_field[name="Search"]"#);
+        el.set_value("world").unwrap();
+        let (handle, name, data) = last_action(&provider);
+        assert_eq!(handle, el.data.handle);
+        assert_eq!(name, "set_value");
+        assert_eq!(data.as_deref(), Some("world"));
+    }
+
+    #[test]
+    fn set_numeric_value_records_payload() {
+        let provider = build_provider();
+        let el = find_element(&provider, r#"slider[name="Volume"]"#);
+        el.set_numeric_value(42.0).unwrap();
+        let (_, name, data) = last_action(&provider);
+        assert_eq!(name, "set_numeric_value");
+        assert_eq!(data.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn set_numeric_value_rejects_non_finite() {
+        let provider = build_provider();
+        let el = find_element(&provider, r#"slider[name="Volume"]"#);
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(matches!(
+                el.set_numeric_value(bad),
+                Err(Error::InvalidActionData { .. })
+            ));
+        }
+        // None of the validation failures should have reached the provider.
+        assert!(provider.actions().is_empty());
+    }
+
+    #[test]
+    fn type_text_records_payload() {
+        let provider = build_provider();
+        let el = find_element(&provider, r#"text_field[name="Search"]"#);
+        el.type_text("abc").unwrap();
+        let (_, name, data) = last_action(&provider);
+        assert_eq!(name, "type_text");
+        assert_eq!(data.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn select_text_records_range() {
+        let provider = build_provider();
+        let el = find_element(&provider, r#"text_field[name="Search"]"#);
+        el.select_text(1, 4).unwrap();
+        let (_, name, data) = last_action(&provider);
+        assert_eq!(name, "set_text_selection");
+        assert_eq!(data.as_deref(), Some("1..4"));
+    }
+
+    #[test]
+    fn select_text_rejects_inverted_range() {
+        let provider = build_provider();
+        let el = find_element(&provider, r#"text_field[name="Search"]"#);
+        assert!(matches!(
+            el.select_text(5, 2),
+            Err(Error::InvalidActionData { .. })
+        ));
+        assert!(provider.actions().is_empty());
+    }
+
+    #[test]
+    fn perform_action_records_arbitrary_name() {
+        let provider = build_provider();
+        let el = find_element(&provider, r#"button[name="Back"]"#);
+        el.perform_action("raise").unwrap();
+        let (_, name, _) = last_action(&provider);
+        assert_eq!(name, "raise");
+    }
+
+    #[test]
+    fn locator_actions_desugar_to_element_actions() {
+        // Locator's auto-wait wraps the resolved data in an Element and calls
+        // its action — no duplication at the provider call site. This test
+        // pins that behavior: pressing via the Locator should record exactly
+        // the same entry as pressing via the Element it resolves to.
+        let provider = build_provider();
+        let provider_dyn: Arc<dyn Provider> = provider.clone();
+        let locator = crate::locator::Locator::new(provider_dyn, None, r#"button[name="Back"]"#);
+        locator.press().unwrap();
+        let (_, name, data) = last_action(&provider);
+        assert_eq!(name, "press");
+        assert_eq!(data, None);
+    }
+
+    #[test]
+    fn locator_validation_runs_before_auto_wait() {
+        // Locator validates payloads before entering its 5s auto-wait poll.
+        // We verify by passing invalid input against a never-matching selector:
+        // if validation fired first we get InvalidActionData immediately, not
+        // a Timeout 5 seconds later.
+        let provider = build_provider();
+        let provider_dyn: Arc<dyn Provider> = provider.clone();
+        let locator =
+            crate::locator::Locator::new(provider_dyn, None, r#"button[name="never-matches"]"#);
+        let started = std::time::Instant::now();
+        let err = locator.set_numeric_value(f64::NAN).unwrap_err();
+        assert!(matches!(err, Error::InvalidActionData { .. }));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "validation must short-circuit auto-wait",
+        );
+    }
 }

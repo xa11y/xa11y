@@ -76,8 +76,8 @@ xa11y supports subscribing to these event streams per-app via `app.subscribe()`.
 xa11y is built around three core types:
 
 - **App** — entry point for interacting with an application. Construct via `App::by_name()`, `App::by_pid()`, or `App::list()`. An App provides three paths: `app.children()` for navigating the tree, `app.locator(selector)` for actions and waits, and `app.subscribe()` for event streams.
-- **Element** — a live handle to a node in the accessibility tree. Navigate with `children()` and `parent()` — each call queries the platform lazily. Read properties like `role`, `name`, `value`, `states`, `bounds`. Capture the subtree as a structured snapshot with `tree(max_depth)` or as an indented string with `dump(max_depth)`.
-- **Locator** — a lazy selector that re-resolves on every operation. Use for actions (`press()`, `set_value()`, and others), waits (`wait_visible()`, and others), and querying (`element()`, `elements()`). Inspired by [Playwright's Locator pattern](https://playwright.dev/docs/locators).
+- **Element** — a live handle to a node in the accessibility tree. Navigate with `children()` and `parent()` — each call queries the platform lazily. Read properties like `role`, `name`, `value`, `states`, `bounds`. Capture the subtree as a structured snapshot with `tree(max_depth)` or as an indented string with `dump(max_depth)`. Actions (`press()`, `set_value()`, etc.) are available too, acting on the captured handle without re-resolution or auto-wait.
+- **Locator** — a lazy selector that re-resolves on every operation. Use for actions (`press()`, `set_value()`, and others), waits (`wait_visible()`, and others), and querying (`element()`, `elements()`). Auto-waits for visible+enabled before acting and is the recommended path for most code. Inspired by [Playwright's Locator pattern](https://playwright.dev/docs/locators).
 - **Subscription** — live event stream from an app. Created via `app.subscribe()`. Pull events with `try_recv()`, `recv(timeout)`, `wait_for(predicate, timeout)`, or iterate with `iter()`. Drop to unsubscribe.
 - **Selector** — CSS-like query syntax used by Locator. Supports role matching, attribute filters, combinators, and nth selection.
 
@@ -336,6 +336,53 @@ A `Locator` holds a selector and **re-resolves on every operation**. Create one 
 **Chaining:** `nth(n)`, `first()`, `child(selector)`, `descendant(selector)`.
 
 Locator re-resolves its selector on every operation, making it resilient to UI changes between calls. To inspect element properties or traverse the subtree, call `.element()` first — `tree()` and `dump()` live on `Element`, not `Locator`.
+
+### Element actions
+
+The same action verbs are also available directly on `Element`. A `Locator` re-resolves its selector and auto-waits for the element to be visible and enabled before acting; an `Element` acts on the snapshot you already captured, with no re-resolution and no auto-wait. If the underlying element has been destroyed since you fetched it, the call returns an `ElementStale` error.
+
+Reach for `Element` actions when you've already inspected an element — typically after `.dump()` or reading `.actions` — and want to act on that same instance. For everything else, use a `Locator`: it stays correct across UI changes and is the path most code should take.
+
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    ```rust
+    // Locator: re-resolves and auto-waits — robust for changing UIs.
+    calc.locator("button[name='Save']").press()?;
+
+    // Element: acts on the captured snapshot — useful when you've already
+    // inspected the element and want to act on the same instance.
+    let btn = calc.locator("button[name='Save']").element()?;
+    println!("{:?}", btn.actions);  // ["press", "focus"]
+    btn.press()?;
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    # Locator: re-resolves and auto-waits — robust for changing UIs.
+    calc.locator("button[name='Save']").press()
+
+    # Element: acts on the captured snapshot — useful when you've already
+    # inspected the element and want to act on the same instance.
+    btn = calc.locator("button[name='Save']").element()
+    print(btn.actions)  # ["press", "focus"]
+    btn.press()
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    // Locator: re-resolves and auto-waits — robust for changing UIs.
+    await calc.locator("button[name='Save']").press();
+
+    // Element: acts on the captured snapshot — useful when you've already
+    // inspected the element and want to act on the same instance.
+    const btn = await calc.locator("button[name='Save']").element();
+    console.log(btn.actions);  // ["press", "focus"]
+    await btn.press();
+    ```
+  </TabItem>
+</Tabs>
+
+**Recommended path: Locator.** Auto-wait and selector re-resolution make Locator resilient to tree changes between operations. Use `Element` actions only when you already hold the element and want to act on that exact instance.
 
 ## Selectors
 
