@@ -50,7 +50,7 @@ mod tests {
             // generic "click" action, not a separate "toggle" — so go
             // through press() to match the existing action_toggle_checkbox
             // integration test.
-            chk.provider().press(&chk).expect("press failed");
+            chk.press().expect("press failed");
             std::thread::sleep(std::time::Duration::from_millis(150));
         }
     }
@@ -158,7 +158,7 @@ mod tests {
             .expect("New button not found");
 
         let sub = app.subscribe().expect("subscribe");
-        target.provider().focus(&target).expect("focus failed");
+        target.focus().expect("focus failed");
 
         let event = sub
             .wait_for(
@@ -283,7 +283,7 @@ mod tests {
             .expect("Announce button not found");
 
         let sub = app.subscribe().expect("subscribe");
-        announce.provider().press(&announce).expect("press failed");
+        announce.press().expect("press failed");
 
         let event = sub
             .wait_for(
@@ -312,7 +312,7 @@ mod tests {
         let was_on = chk.states.checked == Some(Toggled::On);
 
         let sub = app.subscribe().expect("subscribe");
-        chk.provider().press(&chk).expect("press failed");
+        chk.press().expect("press failed");
 
         let event = sub
             .wait_for(

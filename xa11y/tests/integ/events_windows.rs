@@ -60,7 +60,7 @@ mod tests {
             .expect("check_box not found");
         let is_on = chk.states.checked == Some(Toggled::On);
         if is_on != want_on {
-            chk.provider().toggle(&chk).expect("toggle failed");
+            chk.toggle().expect("toggle failed");
             std::thread::sleep(std::time::Duration::from_millis(150));
         }
     }
@@ -167,7 +167,7 @@ mod tests {
             .expect("New toolbar button not found");
 
         let sub = app.subscribe().expect("subscribe");
-        target.provider().focus(&target).expect("focus failed");
+        target.focus().expect("focus failed");
 
         let event = sub
             .wait_for(
@@ -269,7 +269,7 @@ mod tests {
         let was_on = chk.states.checked == Some(Toggled::On);
 
         let sub = app.subscribe().expect("subscribe");
-        chk.provider().toggle(&chk).expect("toggle failed");
+        chk.toggle().expect("toggle failed");
 
         let event = sub
             .wait_for(
@@ -328,7 +328,7 @@ mod tests {
             .expect("check_box not found");
 
         let sub = app.subscribe().expect("subscribe");
-        chk.provider().toggle(&chk).expect("toggle failed");
+        chk.toggle().expect("toggle failed");
 
         let event = sub
             .wait_for(
@@ -385,7 +385,7 @@ mod tests {
             .expect("Announce button not found");
 
         let sub = app.subscribe().expect("subscribe");
-        btn.provider().press(&btn).expect("Announce press failed");
+        btn.press().expect("Announce press failed");
 
         let event = sub
             .wait_for(

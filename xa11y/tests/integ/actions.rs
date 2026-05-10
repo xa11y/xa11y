@@ -545,4 +545,82 @@ mod tests {
             Err(e) => println!("TypeText result: {}", e),
         }
     }
+
+    // ════════════════════════════════════════════════════════════════
+    // Element-shape Actions — exercise the new `element.press()` etc. API
+    // ════════════════════════════════════════════════════════════════
+    //
+    // These mirror a small slice of the dispatch tests above but go through
+    // the snapshot-bound `Element` action methods instead of the lower-level
+    // `provider().X(&data)` shape. They prove the new surface compiles and
+    // dispatches end-to-end. Locator-shape coverage is the recommended path
+    // (auto-wait, re-resolve) and stays exhaustive elsewhere.
+
+    #[test]
+    #[ignore]
+    fn action_press_via_element() {
+        let app = h::app_root();
+        let submit = h::named(&app, "Submit");
+        match submit.press() {
+            Ok(()) => println!("Submit pressed via element.press()"),
+            Err(e) => println!("Submit press result: {}", e),
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn action_set_value_via_element() {
+        let app = h::app_root();
+        let text = find_text_entry(&app);
+        match text.set_value("Jane Smith") {
+            Ok(()) => {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                let app2 = h::app_root();
+                let updated = app2
+                    .locator(r#"[value="Jane Smith"]"#)
+                    .elements()
+                    .unwrap_or_default();
+                if updated.is_empty() {
+                    println!(
+                        "set_value via element succeeded but value not reflected (adapter limitation)"
+                    );
+                }
+            }
+            Err(Error::TextValueNotSupported) => println!("TextValueNotSupported — OK"),
+            Err(e) => panic!("Unexpected error: {}", e),
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn action_perform_action_via_element() {
+        let app = h::app_root();
+        let submit = h::named(&app, "Submit");
+        // perform_action is the escape hatch for actions without a dedicated
+        // method; "press" is the canonical well-known name and should round-trip
+        // to the same provider call as element.press().
+        match submit.perform_action("press") {
+            Ok(()) => println!("perform_action(\"press\") succeeded"),
+            Err(e) => println!("perform_action result: {}", e),
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn action_set_numeric_value_via_element_rejects_nan() {
+        // The Element wrapper validates NaN/infinite up-front and must return
+        // InvalidActionData *without* dispatching to the provider. This is a
+        // pure-Rust validation path so it's safe to assert strictly even
+        // when the AccessKit app isn't running — but we keep it #[ignore]'d
+        // for consistency with the rest of this file.
+        let app = h::app_root();
+        let sliders = app.locator("slider").elements().unwrap();
+        assert!(!sliders.is_empty(), "No slider in test app");
+        let result = sliders[0].set_numeric_value(f64::NAN);
+        assert!(
+            matches!(result, Err(Error::InvalidActionData { .. })),
+            "set_numeric_value(NaN) should return InvalidActionData, got: {:?}",
+            result
+        );
+    }
 }
