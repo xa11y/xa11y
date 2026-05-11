@@ -35,7 +35,8 @@ pub fn make_test_locator() -> Locator {
 )]
 pub fn make_test_app() -> napi::Result<App> {
     let provider = xa11y::mock::build_provider() as Arc<dyn xa11y::Provider>;
-    let app = xa11y::App::by_name_with(provider, "TestApp").map_err(crate::map_err)?;
+    let app = xa11y::App::by_name_with(provider, "TestApp", std::time::Duration::ZERO)
+        .map_err(crate::map_err)?;
     Ok(App::from_core(app))
 }
 
