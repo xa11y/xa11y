@@ -1,3 +1,8 @@
+# Declared as its own workspace so `cargo`/`maturin` can build this crate
+# from anywhere (including nested checkouts like git worktrees), without
+# being captured by the parent workspace's relative-path `exclude` list.
+[workspace]
+
 [package]
 name = "xa11y-python"
 version = "0.7.1"

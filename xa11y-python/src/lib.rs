@@ -13,15 +13,38 @@ fn get_provider() -> PyResult<Arc<dyn xa11y::Provider>> {
 
 // ── Exceptions ──────────────────────────────────────────────────────────────
 
+// Exception class names are kept identical to the public `xa11y` package
+// names so tracebacks read `xa11y.TimeoutError: ...` rather than leaking the
+// `_native` private module path or an internal Rust-only name. The class's
+// `__module__` is patched to `"xa11y"` in `_native()` below. See issue #189.
 pyo3::create_exception!(_native, XA11yError, PyException);
 pyo3::create_exception!(_native, PermissionDeniedError, XA11yError);
 pyo3::create_exception!(_native, AccessibilityNotEnabledError, XA11yError);
 pyo3::create_exception!(_native, SelectorNotMatchedError, XA11yError);
 pyo3::create_exception!(_native, ActionNotSupportedError, XA11yError);
-pyo3::create_exception!(_native, XA11yTimeoutError, XA11yError);
+pyo3::create_exception!(_native, TimeoutError, XA11yError);
 pyo3::create_exception!(_native, InvalidSelectorError, XA11yError);
 pyo3::create_exception!(_native, InvalidActionDataError, XA11yError);
 pyo3::create_exception!(_native, PlatformError, XA11yError);
+
+/// Add an exception class to `m` and re-anchor its `__module__` to the
+/// public `xa11y` package.
+///
+/// `pyo3::create_exception!(_native, …)` bakes `__module__ = "_native"` into
+/// the heap type, which leaks the private submodule path into tracebacks
+/// (e.g. `_native.TimeoutError: …`). The documented surface is `xa11y`, so we
+/// patch `__module__` before exposing the type. This is purely cosmetic for
+/// `isinstance` checks — they're based on class identity, which is unchanged —
+/// but it keeps tracebacks honest about the public path. See issue #189.
+fn register_exception<E>(m: &Bound<'_, PyModule>, name: &str) -> PyResult<()>
+where
+    E: pyo3::type_object::PyTypeInfo,
+{
+    let ty = m.py().get_type::<E>();
+    ty.setattr("__module__", "xa11y")?;
+    m.add(name, ty)?;
+    Ok(())
+}
 
 fn to_py_err(e: xa11y::Error) -> PyErr {
     match e {
@@ -46,7 +69,7 @@ fn to_py_err(e: xa11y::Error) -> PyErr {
             ActionNotSupportedError::new_err("Text value not supported for this element")
         }
         xa11y::Error::Timeout { elapsed } => {
-            XA11yTimeoutError::new_err(format!("Timeout after {elapsed:.1?}"))
+            TimeoutError::new_err(format!("Timeout after {elapsed:.1?}"))
         }
         xa11y::Error::InvalidSelector { selector, message } => {
             InvalidSelectorError::new_err(format!("Invalid selector '{selector}': {message}"))
@@ -1359,33 +1382,15 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Screenshot>()?;
     m.add_class::<Subscription>()?;
 
-    m.add("XA11yError", m.py().get_type::<XA11yError>())?;
-    m.add(
-        "PermissionDeniedError",
-        m.py().get_type::<PermissionDeniedError>(),
-    )?;
-    m.add(
-        "AccessibilityNotEnabledError",
-        m.py().get_type::<AccessibilityNotEnabledError>(),
-    )?;
-    m.add(
-        "SelectorNotMatchedError",
-        m.py().get_type::<SelectorNotMatchedError>(),
-    )?;
-    m.add(
-        "ActionNotSupportedError",
-        m.py().get_type::<ActionNotSupportedError>(),
-    )?;
-    m.add("TimeoutError", m.py().get_type::<XA11yTimeoutError>())?;
-    m.add(
-        "InvalidSelectorError",
-        m.py().get_type::<InvalidSelectorError>(),
-    )?;
-    m.add(
-        "InvalidActionDataError",
-        m.py().get_type::<InvalidActionDataError>(),
-    )?;
-    m.add("PlatformError", m.py().get_type::<PlatformError>())?;
+    register_exception::<XA11yError>(m, "XA11yError")?;
+    register_exception::<PermissionDeniedError>(m, "PermissionDeniedError")?;
+    register_exception::<AccessibilityNotEnabledError>(m, "AccessibilityNotEnabledError")?;
+    register_exception::<SelectorNotMatchedError>(m, "SelectorNotMatchedError")?;
+    register_exception::<ActionNotSupportedError>(m, "ActionNotSupportedError")?;
+    register_exception::<TimeoutError>(m, "TimeoutError")?;
+    register_exception::<InvalidSelectorError>(m, "InvalidSelectorError")?;
+    register_exception::<InvalidActionDataError>(m, "InvalidActionDataError")?;
+    register_exception::<PlatformError>(m, "PlatformError")?;
 
     // Module-level locator function (renamed from "locator" to avoid Rust naming conflict)
     m.add_function(wrap_pyfunction!(locator_fn, m)?)?;

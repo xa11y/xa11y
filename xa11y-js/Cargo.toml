@@ -1,3 +1,8 @@
+# Declared as its own workspace so `cargo`/`napi build` can build this crate
+# from anywhere (including nested checkouts like git worktrees), without
+# being captured by the parent workspace's relative-path `exclude` list.
+[workspace]
+
 [package]
 name = "xa11y-js"
 version = "0.7.1"
