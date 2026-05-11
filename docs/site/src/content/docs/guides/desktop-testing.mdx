@@ -31,7 +31,7 @@ This test opens Calculator, performs `7 × 8`, and asserts the result is `56`.
 
     #[test]
     fn calculator_multiplication() -> Result<()> {
-        let calc = App::by_name("Calculator")?;
+        let calc = App::by_name("Calculator", std::time::Duration::from_secs(5))?;
         let timeout = Duration::from_secs(5);
 
         // Wait for the app to be ready

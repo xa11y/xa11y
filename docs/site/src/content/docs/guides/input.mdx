@@ -52,7 +52,7 @@ xa11y picks the Linux backend at runtime: if `DISPLAY` is set we drive XTest; ot
         sim.mouse().click(Point::new(400, 300))?;
 
         // Click at the centre of an element's current bounds
-        let app = App::by_name("Finder")?;
+        let app = App::by_name("Finder", std::time::Duration::from_secs(5))?;
         let button = app.locator("button[name='New Folder']").element()?;
         sim.mouse().click(&button)?;
 
@@ -254,7 +254,7 @@ Drag-and-drop has no accessibility equivalent on most platforms. Resolve both en
 <Tabs syncKey="lang">
   <TabItem label="Rust">
     ```rust
-    let app = App::by_name("Finder")?;
+    let app = App::by_name("Finder", std::time::Duration::from_secs(5))?;
     let source = app.locator("list_item[name='notes.txt']").element()?;
     let target = app.locator("list_item[name='Archive']").element()?;
 

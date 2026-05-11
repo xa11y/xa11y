@@ -6,9 +6,10 @@
 //! # Quick Start
 //!
 //! ```no_run
+//! use std::time::Duration;
 //! use xa11y::*;
 //!
-//! let app = App::by_name("Safari").expect("App not found");
+//! let app = App::by_name("Safari", Duration::from_secs(5)).expect("App not found");
 //!
 //! for child in app.children().unwrap() {
 //!     println!("{}: {:?}", child.role, child.name);
@@ -50,7 +51,7 @@ pub use xa11y_core::mock;
 #[doc(hidden)]
 pub mod cli;
 
-// Re-export the extension trait so `use xa11y::*` enables `App::by_name("Safari")`.
+// Re-export the extension trait so `use xa11y::*` enables `App::by_name(...)`.
 pub use app_ext::AppExt;
 
 // ── Internal singleton ──────────────────────────────────────────────────────
@@ -229,41 +230,33 @@ mod app_ext {
     ///
     /// # Example
     /// ```no_run
+    /// use std::time::Duration;
     /// use xa11y::*;
     ///
-    /// let app = App::by_name("Safari")?;
+    /// let app = App::by_name("Safari", Duration::from_secs(5))?;
     /// # Ok::<(), xa11y::Error>(())
     /// ```
     pub trait AppExt: Sized {
-        /// Find an application by exact name using the global singleton provider.
-        fn by_name(name: &str) -> Result<Self>;
-        /// Find an application by exact name, polling until it appears or
-        /// `timeout` elapses. See [`App::by_name_with_timeout`].
-        fn by_name_timeout(name: &str, timeout: Duration) -> Result<Self>;
-        /// Find an application by process ID using the global singleton provider.
-        fn by_pid(pid: u32) -> Result<Self>;
-        /// Find an application by process ID, polling until it appears or
-        /// `timeout` elapses. See [`App::by_pid_with_timeout`].
-        fn by_pid_timeout(pid: u32, timeout: Duration) -> Result<Self>;
+        /// Find an application by exact name using the global singleton
+        /// provider, polling until it appears or `timeout` elapses. Pass
+        /// `Duration::ZERO` for a single attempt with no waiting. See
+        /// [`App::by_name_with`] for retry semantics.
+        fn by_name(name: &str, timeout: Duration) -> Result<Self>;
+        /// Find an application by process ID using the global singleton
+        /// provider, polling until it appears or `timeout` elapses. See
+        /// [`by_name`](Self::by_name) for retry semantics.
+        fn by_pid(pid: u32, timeout: Duration) -> Result<Self>;
         /// List all running applications using the global singleton provider.
         fn list() -> Result<Vec<Self>>;
     }
 
     impl AppExt for App {
-        fn by_name(name: &str) -> Result<Self> {
-            App::by_name_with(provider()?, name)
+        fn by_name(name: &str, timeout: Duration) -> Result<Self> {
+            App::by_name_with(provider()?, name, timeout)
         }
 
-        fn by_name_timeout(name: &str, timeout: Duration) -> Result<Self> {
-            App::by_name_with_timeout(provider()?, name, timeout)
-        }
-
-        fn by_pid(pid: u32) -> Result<Self> {
-            App::by_pid_with(provider()?, pid)
-        }
-
-        fn by_pid_timeout(pid: u32, timeout: Duration) -> Result<Self> {
-            App::by_pid_with_timeout(provider()?, pid, timeout)
+        fn by_pid(pid: u32, timeout: Duration) -> Result<Self> {
+            App::by_pid_with(provider()?, pid, timeout)
         }
 
         fn list() -> Result<Vec<Self>> {

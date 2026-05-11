@@ -4,6 +4,7 @@
 //! permissions, using a mock provider with in-memory element data.
 
 use std::sync::Arc;
+use std::time::Duration;
 use xa11y::*;
 
 // ── Mock Provider ──
@@ -373,7 +374,7 @@ fn sample_provider() -> Arc<MockProvider> {
 
 fn sample_app() -> App {
     let p = sample_provider();
-    App::by_name_with(p as Arc<dyn Provider>, "Test App").unwrap()
+    App::by_name_with(p as Arc<dyn Provider>, "Test App", Duration::ZERO).unwrap()
 }
 
 fn sample_root() -> Element {
@@ -802,7 +803,12 @@ fn locator_basic_query() {
 #[test]
 fn locator_press_dispatches_action() {
     let p = sample_provider();
-    let app = App::by_name_with(Arc::clone(&p) as Arc<dyn Provider>, "Test App").unwrap();
+    let app = App::by_name_with(
+        Arc::clone(&p) as Arc<dyn Provider>,
+        "Test App",
+        Duration::ZERO,
+    )
+    .unwrap();
     let loc = app.locator(r#"window button[name="Submit"]"#);
     loc.press().unwrap();
     let (handle, action) = p.last_action.lock().unwrap().clone().unwrap();
@@ -918,7 +924,7 @@ fn locator_descendant_through_nested_groups() {
         nodes,
         last_action: std::sync::Mutex::new(None),
     });
-    let app = App::by_name_with(provider as Arc<dyn Provider>, "Test App").unwrap();
+    let app = App::by_name_with(provider as Arc<dyn Provider>, "Test App", Duration::ZERO).unwrap();
 
     let loc = app.locator(r#"group[name="Outer"] static_text[name="TestFarm"]"#);
     assert!(
@@ -1103,7 +1109,7 @@ impl Provider for MultiAppMockProvider {
 #[test]
 fn find_application_by_name_from_root() {
     let p = multi_app_provider();
-    let app = App::by_name_with(p as Arc<dyn Provider>, "App2").unwrap();
+    let app = App::by_name_with(p as Arc<dyn Provider>, "App2", Duration::ZERO).unwrap();
     assert_eq!(app.data.role, Role::Application);
     assert_eq!(app.name, "App2");
     assert_eq!(app.pid, Some(200));
@@ -1142,7 +1148,7 @@ fn find_button_across_apps() {
 #[test]
 fn find_with_limit_stops_early() {
     let p = multi_app_provider();
-    let app1 = App::by_name_with(p as Arc<dyn Provider>, "App1").unwrap();
+    let app1 = App::by_name_with(p as Arc<dyn Provider>, "App1", Duration::ZERO).unwrap();
     let first = app1.locator("button").first().element().unwrap();
     assert_eq!(first.name.as_deref(), Some("Btn1"));
 }
@@ -1151,7 +1157,7 @@ fn find_with_limit_stops_early() {
 fn find_multi_segment_across_apps() {
     // "window > button" — find buttons that are direct children of windows in App2
     let p = multi_app_provider();
-    let app2 = App::by_name_with(p as Arc<dyn Provider>, "App2").unwrap();
+    let app2 = App::by_name_with(p as Arc<dyn Provider>, "App2", Duration::ZERO).unwrap();
     let results = app2.locator("window > button").elements().unwrap();
     assert_eq!(results.len(), 2); // Btn2, Btn3
 }
@@ -1159,7 +1165,7 @@ fn find_multi_segment_across_apps() {
 #[test]
 fn app_locator_scopes_search() {
     let p = multi_app_provider();
-    let app2 = App::by_name_with(p as Arc<dyn Provider>, "App2").unwrap();
+    let app2 = App::by_name_with(p as Arc<dyn Provider>, "App2", Duration::ZERO).unwrap();
     // Scoped locator should only find buttons within App2
     let buttons = app2.locator("button").elements().unwrap();
     assert_eq!(buttons.len(), 2); // Btn2, Btn3
@@ -1169,7 +1175,7 @@ fn app_locator_scopes_search() {
 #[test]
 fn app_locator_does_not_find_sibling_app_elements() {
     let p = multi_app_provider();
-    let app1 = App::by_name_with(p as Arc<dyn Provider>, "App1").unwrap();
+    let app1 = App::by_name_with(p as Arc<dyn Provider>, "App1", Duration::ZERO).unwrap();
     // App1 only has Btn1
     let buttons = app1.locator("button").elements().unwrap();
     assert_eq!(buttons.len(), 1);
@@ -1179,7 +1185,7 @@ fn app_locator_does_not_find_sibling_app_elements() {
 #[test]
 fn locator_count_matches_elements_len() {
     let p = multi_app_provider();
-    let app1 = App::by_name_with(p as Arc<dyn Provider>, "App1").unwrap();
+    let app1 = App::by_name_with(p as Arc<dyn Provider>, "App1", Duration::ZERO).unwrap();
     let loc = app1.locator("button");
     assert_eq!(loc.count().unwrap(), loc.elements().unwrap().len());
 }
@@ -1187,7 +1193,7 @@ fn locator_count_matches_elements_len() {
 #[test]
 fn app_by_name_not_found() {
     let p = multi_app_provider();
-    let result = App::by_name_with(p as Arc<dyn Provider>, "NoSuchApp");
+    let result = App::by_name_with(p as Arc<dyn Provider>, "NoSuchApp", Duration::ZERO);
     assert!(result.is_err());
 }
 
@@ -1203,7 +1209,7 @@ fn locator_nth_out_of_range() {
 #[test]
 fn element_children_of_leaf_is_empty() {
     let p = multi_app_provider();
-    let app1 = App::by_name_with(p as Arc<dyn Provider>, "App1").unwrap();
+    let app1 = App::by_name_with(p as Arc<dyn Provider>, "App1", Duration::ZERO).unwrap();
     let btn = app1.locator("button").first().element().unwrap();
     assert!(btn.children().unwrap().is_empty());
 }
@@ -1224,7 +1230,7 @@ fn element_parent_of_top_level_is_none() {
 #[test]
 fn element_parent_navigates_up() {
     let p = multi_app_provider();
-    let app2 = App::by_name_with(p as Arc<dyn Provider>, "App2").unwrap();
+    let app2 = App::by_name_with(p as Arc<dyn Provider>, "App2", Duration::ZERO).unwrap();
     let btn = app2.locator(r#"button[name="Btn2"]"#).element().unwrap();
     let parent = btn.parent().unwrap().unwrap();
     assert_eq!(parent.role, Role::Window);
@@ -1235,10 +1241,12 @@ fn element_parent_navigates_up() {
 fn handle_preserved_through_find() {
     // Verify that handle IDs survive the find_elements pipeline
     let p = multi_app_provider();
-    let app1 = App::by_name_with(Arc::clone(&p) as Arc<dyn Provider>, "App1").unwrap();
+    let app1 =
+        App::by_name_with(Arc::clone(&p) as Arc<dyn Provider>, "App1", Duration::ZERO).unwrap();
     // handle should be non-default (we set it to the node index)
     assert_eq!(app1.data.handle, 0); // App1 is node index 0
-    let app2 = App::by_name_with(Arc::clone(&p) as Arc<dyn Provider>, "App2").unwrap();
+    let app2 =
+        App::by_name_with(Arc::clone(&p) as Arc<dyn Provider>, "App2", Duration::ZERO).unwrap();
     let btn = app2.locator(r#"button[name="Btn2"]"#).element().unwrap();
     assert_eq!(btn.handle, 5); // Btn2 is node index 5
 }
@@ -1357,14 +1365,14 @@ impl Provider for DelayedProvider {
 }
 
 #[test]
-fn by_name_with_timeout_polls_until_app_appears() {
+fn by_name_with_polls_until_app_appears() {
     let inner = multi_app_provider();
     // `by_name_with` issues two root lookups per attempt (application
     // selector, then window selector). Failing the first 3 root calls means
     // the first attempt fails entirely and the second attempt succeeds on
     // its first selector.
     let p = DelayedProvider::new(inner, 3);
-    let app = App::by_name_with_timeout(
+    let app = App::by_name_with(
         Arc::clone(&p) as Arc<dyn Provider>,
         "App1",
         std::time::Duration::from_secs(2),
@@ -1379,10 +1387,10 @@ fn by_name_with_timeout_polls_until_app_appears() {
 }
 
 #[test]
-fn by_name_with_timeout_zero_is_single_attempt() {
+fn by_name_with_zero_timeout_is_single_attempt() {
     let inner = multi_app_provider();
     let p = DelayedProvider::new(inner, 100); // never succeeds during the test
-    let result = App::by_name_with_timeout(
+    let result = App::by_name_with(
         Arc::clone(&p) as Arc<dyn Provider>,
         "App1",
         std::time::Duration::ZERO,
@@ -1397,11 +1405,11 @@ fn by_name_with_timeout_zero_is_single_attempt() {
 }
 
 #[test]
-fn by_name_with_timeout_short_circuits_on_non_retryable_error() {
+fn by_name_with_short_circuits_on_non_retryable_error() {
     let inner = multi_app_provider();
     let p = DelayedProvider::always_fail_permission(inner);
     let start = std::time::Instant::now();
-    let result = App::by_name_with_timeout(
+    let result = App::by_name_with(
         Arc::clone(&p) as Arc<dyn Provider>,
         "App1",
         std::time::Duration::from_secs(10),
@@ -1415,11 +1423,11 @@ fn by_name_with_timeout_short_circuits_on_non_retryable_error() {
 }
 
 #[test]
-fn by_pid_with_timeout_polls_until_app_appears() {
+fn by_pid_with_polls_until_app_appears() {
     let inner = multi_app_provider();
     let p = DelayedProvider::new(inner, 3);
     // App1 has pid 100 in multi_app_provider.
-    let app = App::by_pid_with_timeout(
+    let app = App::by_pid_with(
         Arc::clone(&p) as Arc<dyn Provider>,
         100,
         std::time::Duration::from_secs(2),

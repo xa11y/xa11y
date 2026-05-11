@@ -41,7 +41,7 @@ Screenshots are decoupled from the accessibility and input layers. The target wi
         shot.save_png("corner.png")?;
 
         // Pixels under an accessibility element
-        let app = App::by_name("Calculator")?;
+        let app = App::by_name("Calculator", std::time::Duration::from_secs(5))?;
         let display = app.locator("static_text[name='Result']").element()?;
         let shot = screenshot_element(&display)?;
         shot.save_png("result.png")?;

@@ -52,9 +52,11 @@ After changing permissions, restart your terminal for them to take effect. `App:
     use std::time::Duration;
 
     fn main() -> Result<()> {
-        // Connect to the Calculator app
+        // Connect to the Calculator app, polling up to 5 seconds for it to
+        // register with the platform's a11y API (pass Duration::ZERO for a
+        // single attempt with no waiting).
         // (returns PermissionDenied if accessibility is not enabled)
-        let calc = App::by_name("Calculator")?;
+        let calc = App::by_name("Calculator", Duration::from_secs(5))?;
 
         // Navigate the tree
         for window in calc.children()? {

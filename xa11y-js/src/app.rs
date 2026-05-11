@@ -37,9 +37,9 @@ impl App {
 /// Options for `App.byName` / `App.byPid`.
 #[napi(object)]
 pub struct AppLookupOptions {
-    /// If set, poll the accessibility API until the app appears or this
-    /// many milliseconds elapse. Useful when the app may not yet be
-    /// registered (e.g. just-launched). Only "not found" errors trigger a
+    /// Poll the accessibility API until the app appears or this many
+    /// milliseconds elapse. Defaults to 5000 (5 seconds) — pass `0` for a
+    /// single attempt with no waiting. Only "not found" errors trigger a
     /// retry; other errors fail fast.
     pub timeout: Option<u32>,
 }
@@ -48,10 +48,11 @@ pub struct AppLookupOptions {
 impl App {
     /// Find an application by exact name.
     ///
-    /// Pass `options.timeout` (ms) to poll the accessibility API until the
-    /// app appears. Useful when the app may not yet be registered (e.g.
-    /// just-launched). Only "not found" errors trigger a retry; permission
-    /// errors and the like fail fast.
+    /// Polls the accessibility API until the app appears or
+    /// `options.timeout` (ms) elapses. Defaults to 5000 (5 seconds) —
+    /// pass `{ timeout: 0 }` for a single attempt with no waiting. Only
+    /// "not found" errors trigger a retry; permission errors and the like
+    /// fail fast.
     ///
     /// Rejects with `PermissionDeniedError` if accessibility is not enabled,
     /// or `SelectorNotMatchedError` if no matching app is found.
@@ -128,11 +129,15 @@ impl App {
 
 // ── Tasks ──────────────────────────────────────────────────────────────
 
+/// 5-second default chosen to match the auto-wait timeout used elsewhere in
+/// the API (e.g. `Locator.wait_attached`).
+const DEFAULT_LOOKUP_TIMEOUT: Duration = Duration::from_millis(5000);
+
 fn timeout_from(options: Option<AppLookupOptions>) -> Duration {
-    options
-        .and_then(|o| o.timeout)
-        .map(|ms| Duration::from_millis(ms.into()))
-        .unwrap_or(Duration::ZERO)
+    match options.and_then(|o| o.timeout) {
+        Some(ms) => Duration::from_millis(ms.into()),
+        None => DEFAULT_LOOKUP_TIMEOUT,
+    }
 }
 
 pub struct FindByNameTask {
@@ -146,7 +151,7 @@ impl Task for FindByNameTask {
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
         let provider = crate::provider()?;
-        xa11y::App::by_name_with_timeout(provider, &self.name, self.timeout).map_err(map_err)
+        xa11y::App::by_name_with(provider, &self.name, self.timeout).map_err(map_err)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
@@ -165,7 +170,7 @@ impl Task for FindByPidTask {
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
         let provider = crate::provider()?;
-        xa11y::App::by_pid_with_timeout(provider, self.pid, self.timeout).map_err(map_err)
+        xa11y::App::by_pid_with(provider, self.pid, self.timeout).map_err(map_err)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {

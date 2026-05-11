@@ -46,9 +46,9 @@ export interface SubscribeOptions {
 export interface AppLookupOptions {
   /**
    * Poll the accessibility API until the app appears, up to this many
-   * milliseconds. Useful when the app may not yet be registered (e.g.
-   * just-launched). Only "not found" errors trigger a retry; permission
-   * errors and the like fail fast. Defaults to no polling (single attempt).
+   * milliseconds. Defaults to 5000 (5 seconds) — pass `0` for a single
+   * attempt with no waiting. Only "not found" errors trigger a retry;
+   * permission errors and the like fail fast.
    */
   timeout?: number;
 }

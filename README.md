@@ -17,9 +17,13 @@ Cross-platform accessibility library for reading and interacting with accessibil
 <!-- rust-only -->
 ```rust
 use xa11y::*;
+use std::time::Duration;
 
 fn main() -> Result<()> {
-    let safari = App::by_name("Safari")?;
+    // `by_name` polls for up to the given timeout. Useful when the app
+    // may not yet be registered with the a11y API. Pass `Duration::ZERO`
+    // for a single attempt with no waiting.
+    let safari = App::by_name("Safari", Duration::from_secs(5))?;
 
     // Find elements with CSS-like selectors
     let buttons = safari.locator("button[name='Submit']").elements()?;

@@ -16,9 +16,10 @@ use crate::selector::{chain_combinator, SelectorGroup};
 ///
 /// # Example
 /// ```ignore
+/// # use std::time::Duration;
 /// # use xa11y::*;
 /// # fn example() -> Result<()> {
-/// let app = App::by_name("MyApp")?;
+/// let app = App::by_name("MyApp", Duration::from_secs(5))?;
 /// let save_btn = app.locator(r#"button[name="Save"]"#);
 /// save_btn.press()?;
 /// # Ok(())
