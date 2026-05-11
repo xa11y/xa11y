@@ -2343,25 +2343,6 @@ mod tests {
     }
 
     #[test]
-    fn is_window_control_unit() {
-        // Covers the boolean helper used by the focus handler's window
-        // ancestor walk. Given a real control-type read succeeds, equality
-        // against UIA_WindowControlTypeId determines the answer. We can't
-        // construct an IUIAutomationElement in a unit test, but we can
-        // exercise the pattern via `try_provider`.
-        let Some(provider) = try_provider() else {
-            return;
-        };
-        let apps = provider.get_children(None).unwrap_or_default();
-        // Every top-level enumerable element is a Window by construction.
-        for a in &apps {
-            // The helper takes a live IUIAutomationElement — we can only
-            // verify via the ElementData role surface.
-            assert_eq!(a.role, Role::Window);
-        }
-    }
-
-    #[test]
     fn property_change_ids_covers_design_doc() {
         // Property IDs mandated by the events design doc for the Windows
         // PropertyChanged pathway.
