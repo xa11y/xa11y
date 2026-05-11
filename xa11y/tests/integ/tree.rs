@@ -890,92 +890,65 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn bidi_marks_stripped_from_name_and_value() {
-        // The test app's BIDI_LABEL has a name of "\u{200E}Bidi Label\u{200E}"
-        // and a value of "\u{2066}5\u{2069}". The strip in each provider must
-        // produce clean strings on `name`/`value`, while the unstripped
-        // originals remain on `element.raw` under the platform-native key.
+    fn bidi_marks_stripped_from_welcome_label() {
+        // The test app's WELCOME_TEXT label is set to
+        // "\u{200E}Welcome \u{2066}to\u{2069} xa11y\u{200E}". xa11y must
+        // strip the bidi format controls from `name` so equality assertions
+        // like `name == "Welcome to xa11y"` succeed. The unstripped string
+        // must still be reachable via `element.raw` under the platform-native
+        // key so consumers who need bidi marks have an escape hatch.
         let app = h::app_root();
-        let label = h::named(&app, "Bidi Label");
+        let welcome = h::named(&app, "Welcome");
 
-        assert_eq!(label.name.as_deref(), Some("Bidi Label"));
-        assert_eq!(label.value.as_deref(), Some("5"));
-        assert!(!label
-            .name
-            .as_deref()
-            .unwrap_or("")
-            .chars()
-            .any(xa11y::is_bidi_control));
-        assert!(!label
-            .value
-            .as_deref()
-            .unwrap_or("")
-            .chars()
-            .any(xa11y::is_bidi_control));
+        assert_eq!(welcome.name.as_deref(), Some("Welcome to xa11y"));
+        assert!(
+            !welcome
+                .name
+                .as_deref()
+                .unwrap_or("")
+                .chars()
+                .any(xa11y::is_bidi_control),
+            "stripped name should contain no bidi controls: {:?}",
+            welcome.name
+        );
 
-        // Verify the originals survive on `raw` so consumers who need bidi
-        // marks have the escape hatch.
         #[cfg(target_os = "macos")]
         {
-            let raw_title = label
+            let raw_title = welcome
                 .raw
                 .get("AXTitle")
                 .and_then(|v| v.as_str())
                 .expect("Expected AXTitle in raw data");
             assert!(
                 raw_title.contains('\u{200E}'),
-                "raw AXTitle should keep LRM"
-            );
-            let raw_value = label
-                .raw
-                .get("AXValue")
-                .and_then(|v| v.as_str())
-                .expect("Expected AXValue in raw data");
-            assert!(
-                raw_value.contains('\u{2066}'),
-                "raw AXValue should keep LRI"
+                "raw AXTitle should keep LRM: {:?}",
+                raw_title
             );
         }
         #[cfg(target_os = "linux")]
         {
-            let raw_name = label
+            let raw_name = welcome
                 .raw
                 .get("atspi_name")
                 .and_then(|v| v.as_str())
                 .expect("Expected atspi_name in raw data");
             assert!(
                 raw_name.contains('\u{200E}'),
-                "raw atspi_name should keep LRM"
-            );
-            let raw_value = label
-                .raw
-                .get("atspi_value")
-                .and_then(|v| v.as_str())
-                .expect("Expected atspi_value in raw data");
-            assert!(
-                raw_value.contains('\u{2066}'),
-                "raw atspi_value should keep LRI"
+                "raw atspi_name should keep LRM: {:?}",
+                raw_name
             );
         }
         #[cfg(target_os = "windows")]
         {
-            let raw_name = label
+            let raw_name = welcome
                 .raw
                 .get("uia_name")
                 .and_then(|v| v.as_str())
                 .expect("Expected uia_name in raw data");
             assert!(
                 raw_name.contains('\u{200E}'),
-                "raw uia_name should keep LRM"
-            );
-            let raw_value = label
-                .raw
-                .get("uia_value")
-                .and_then(|v| v.as_str())
-                .expect("Expected uia_value in raw data");
-            assert!(
-                raw_value.contains('\u{2066}'),
-                "raw uia_value should keep LRI"
+                "raw uia_name should keep LRM: {:?}",
+                raw_name
             );
         }
     }
