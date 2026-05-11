@@ -43,6 +43,67 @@ After changing permissions, restart your terminal for them to take effect. `App:
 
 **Windows** — No special permissions needed.
 
+## Discover the tree first
+
+Before writing selectors, dump the app's accessibility tree so you know the exact roles and names to target. Accessibility labels are often different from what's painted on screen, so don't guess.
+
+The fastest way is the CLI — it dumps the whole app in one command and works the same regardless of language:
+
+```bash
+xa11y apps                      # list running apps with PIDs
+xa11y tree --app Calculator     # full indented tree
+xa11y find "button" --app Calculator   # try a selector before using it
+```
+
+See the [CLI guide](/guides/cli/) for the full command reference.
+
+From code, `dump()` and `tree()` are available on `App`, `Locator`, and `Element` in every binding:
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+    ```python
+    import xa11y
+
+    calc = xa11y.App.by_name("Calculator")
+
+    print(calc.dump())              # full indented tree, rooted at the app
+    print(calc.dump(max_depth=2))   # limit depth
+    snapshot = calc.tree()          # same data as a nested dict
+
+    # Locators and elements also support dump() / tree()
+    print(calc.locator("group[name='Keypad']").dump())
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use xa11y::*;
+
+    let calc = App::by_name("Calculator")?;
+
+    println!("{}", calc.dump(None)?);            // full indented tree
+    println!("{}", calc.dump(Some(2))?);         // limit depth
+    let snapshot = calc.tree(None)?;             // same data as a TreeNode
+
+    // Locators and elements also support dump() / tree()
+    println!("{}", calc.locator("group[name='Keypad']").dump(None)?);
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    import { App } from '@crowecawcaw/xa11y';
+
+    const calc = await App.byName('Calculator');
+
+    console.log(await calc.dump());              // full indented tree
+    console.log(await calc.dump(2));             // limit depth
+    const snapshot = await calc.tree();          // same data as a nested object
+
+    // Locators and elements also support dump() / tree()
+    console.log(await calc.locator("group[name='Keypad']").dump());
+    ```
+  </TabItem>
+</Tabs>
+
 ## Example
 
 <Tabs syncKey="lang">

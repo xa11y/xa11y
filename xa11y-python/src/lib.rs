@@ -546,6 +546,35 @@ impl Locator {
             .collect()
     }
 
+    /// Capture the subtree rooted at the matched element as a recursive dict.
+    ///
+    /// Each dict has keys ``role``, ``name``, ``value``, and ``children``
+    /// (a list of dicts with the same shape). ``max_depth`` limits traversal:
+    /// ``0`` = only this node, ``1`` = node + direct children, ``None`` =
+    /// full subtree.
+    ///
+    /// Resolves the selector once; fails fast with
+    /// :class:`SelectorNotMatchedError` if no match — does not auto-wait.
+    #[pyo3(signature = (max_depth=None))]
+    fn tree(&self, py: Python<'_>, max_depth: Option<usize>) -> PyResult<PyObject> {
+        let locator = self.inner.clone();
+        let node = py
+            .allow_threads(move || locator.tree(max_depth))
+            .map_err(to_py_err)?;
+        tree_node_to_py(py, &node)
+    }
+
+    /// Render the subtree rooted at the matched element as an indented string.
+    ///
+    /// Returns the string without printing it. Same depth and resolution
+    /// semantics as :meth:`tree`.
+    #[pyo3(signature = (max_depth=None))]
+    fn dump(&self, py: Python<'_>, max_depth: Option<usize>) -> PyResult<String> {
+        let locator = self.inner.clone();
+        py.allow_threads(move || locator.dump(max_depth))
+            .map_err(to_py_err)
+    }
+
     // ── Actions ──
 
     fn press(&self) -> PyResult<()> {
@@ -1079,6 +1108,46 @@ impl App {
             .collect()
     }
 
+    /// Get an :class:`Element` handle for the application root.
+    ///
+    /// Useful for invoking Element-level methods (``children()``,
+    /// ``parent()``, etc.) without going through a locator.
+    fn as_element(&self, py: Python<'_>) -> PyResult<Py<Element>> {
+        make_py_element(py, &self.inner_data, self.provider.clone())
+    }
+
+    /// Capture this application's accessibility tree as a recursive dict snapshot.
+    ///
+    /// Each dict has keys ``role``, ``name``, ``value``, and ``children``
+    /// (a list of dicts with the same shape). ``max_depth`` limits traversal:
+    /// ``0`` = only the application node, ``1`` = application + direct
+    /// children (typically windows), ``None`` = full subtree.
+    ///
+    /// Equivalent to ``Element.tree(...)`` on the application's root element.
+    #[pyo3(signature = (max_depth=None))]
+    fn tree(&self, py: Python<'_>, max_depth: Option<usize>) -> PyResult<PyObject> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        let node = py
+            .allow_threads(move || element.tree(max_depth))
+            .map_err(to_py_err)?;
+        tree_node_to_py(py, &node)
+    }
+
+    /// Render this application's accessibility tree as an indented string.
+    ///
+    /// Returns the string without printing it. Same depth semantics as
+    /// ``tree()``. This is the primary inspection helper — call
+    /// ``print(app.dump())`` to discover the role and name of every element
+    /// in the app before writing selectors.
+    ///
+    /// For the same output from the shell, use ``xa11y tree --app NAME``.
+    #[pyo3(signature = (max_depth=None))]
+    fn dump(&self, py: Python<'_>, max_depth: Option<usize>) -> PyResult<String> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.allow_threads(move || element.dump(max_depth))
+            .map_err(to_py_err)
+    }
+
     fn __repr__(&self) -> String {
         match self.pid {
             Some(pid) => format!("App(name='{}', pid={})", self.name, pid),
@@ -1404,6 +1473,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Test helpers
     m.add_function(wrap_pyfunction!(_make_test_locator, m)?)?;
+    m.add_function(wrap_pyfunction!(_make_test_app, m)?)?;
     m.add_function(wrap_pyfunction!(_make_disconnected_subscription, m)?)?;
     m.add_function(wrap_pyfunction!(_make_test_action_probe, m)?)?;
 
@@ -1431,6 +1501,14 @@ fn _make_test_locator() -> PyResult<Locator> {
     Ok(Locator {
         inner: xa11y::Locator::new(provider as Arc<dyn xa11y::Provider>, None, "application"),
     })
+}
+
+/// Create a test App backed by the shared mock provider (resolves "TestApp").
+#[pyfunction]
+fn _make_test_app() -> PyResult<App> {
+    let provider = xa11y::mock::build_provider() as Arc<dyn xa11y::Provider>;
+    let app = xa11y::App::by_name_with(provider, "TestApp").map_err(to_py_err)?;
+    Ok(App::from_core(app))
 }
 
 /// Create a Subscription whose backing channel has already been disconnected.

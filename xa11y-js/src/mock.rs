@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use crate::app::App;
 use crate::locator::Locator;
 use crate::subscription::NativeSubscription;
 
@@ -23,6 +24,19 @@ pub fn make_test_locator() -> Locator {
         None,
         "application",
     ))
+}
+
+/// Create a mock `App` resolved against the shared synthetic tree
+/// (`TestApp`). Used only from the JS unit tests — not part of the public API.
+#[napi(js_name = "_makeTestApp")]
+#[allow(
+    dead_code,
+    reason = "Exported via napi-derive for JS unit tests; the lib-test clippy build doesn't see the JS-side consumer"
+)]
+pub fn make_test_app() -> napi::Result<App> {
+    let provider = xa11y::mock::build_provider() as Arc<dyn xa11y::Provider>;
+    let app = xa11y::App::by_name_with(provider, "TestApp").map_err(crate::map_err)?;
+    Ok(App::from_core(app))
 }
 
 /// Test handle that pairs a mock `Locator` with read-access to the mock's

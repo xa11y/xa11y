@@ -6,6 +6,7 @@ use napi::bindgen_prelude::{AsyncTask, Env, Task};
 
 use crate::element::Element;
 use crate::map_err;
+use crate::types::TreeNode;
 
 /// A resilient element reference that re-queries on each interaction.
 ///
@@ -106,6 +107,40 @@ impl Locator {
     pub fn elements(&self) -> AsyncTask<ElementsTask> {
         AsyncTask::new(ElementsTask {
             inner: self.inner.clone(),
+        })
+    }
+
+    /// Capture the subtree rooted at the matched element as a recursive
+    /// snapshot.
+    ///
+    /// `maxDepth` limits traversal depth: `0` = only this node (no children),
+    /// `1` = node + direct children, and so on. Omit for the full subtree.
+    ///
+    /// Resolves the selector once; rejects with `SelectorNotMatchedError`
+    /// if no match — does not auto-wait.
+    #[napi(
+        ts_args_type = "maxDepth?: number | null",
+        ts_return_type = "Promise<TreeNode>"
+    )]
+    pub fn tree(&self, max_depth: Option<u32>) -> AsyncTask<LocatorTreeTask> {
+        AsyncTask::new(LocatorTreeTask {
+            inner: self.inner.clone(),
+            max_depth: max_depth.map(|d| d as usize),
+        })
+    }
+
+    /// Render the subtree rooted at the matched element as an indented string.
+    ///
+    /// Returns the string without printing it. Same depth and resolution
+    /// semantics as `tree()`.
+    #[napi(
+        ts_args_type = "maxDepth?: number | null",
+        ts_return_type = "Promise<string>"
+    )]
+    pub fn dump(&self, max_depth: Option<u32>) -> AsyncTask<LocatorDumpTask> {
+        AsyncTask::new(LocatorDumpTask {
+            inner: self.inner.clone(),
+            max_depth: max_depth.map(|d| d as usize),
         })
     }
 
@@ -441,6 +476,36 @@ impl Task for ElementsTask {
                 Element::new(data, provider)
             })
             .collect())
+    }
+}
+
+pub struct LocatorTreeTask {
+    inner: xa11y::Locator,
+    max_depth: Option<usize>,
+}
+impl Task for LocatorTreeTask {
+    type Output = xa11y::TreeNode;
+    type JsValue = TreeNode;
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        self.inner.tree(self.max_depth).map_err(map_err)
+    }
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output.into())
+    }
+}
+
+pub struct LocatorDumpTask {
+    inner: xa11y::Locator,
+    max_depth: Option<usize>,
+}
+impl Task for LocatorDumpTask {
+    type Output = String;
+    type JsValue = String;
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        self.inner.dump(self.max_depth).map_err(map_err)
+    }
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(output)
     }
 }
 

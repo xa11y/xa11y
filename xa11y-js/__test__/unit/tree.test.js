@@ -5,7 +5,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { _makeTestLocator } = require('../../index.js');
+const { _makeTestApp, _makeTestLocator, SelectorNotMatchedError } = require('../../index.js');
 
 function root() {
   return _makeTestLocator();
@@ -13,6 +13,10 @@ function root() {
 
 async function rootElement() {
   return await root().element();
+}
+
+function mockApp() {
+  return _makeTestApp();
 }
 
 // ── Element.tree() ─────────────────────────────────────────────────────────
@@ -85,5 +89,95 @@ test('dump() includes value for nodes that have one', async () => {
   const textField = await root().descendant('text_field').element();
   const text = await textField.dump(0);
   assert.ok(text.includes('value="hello"'));
+});
+
+// ── App.tree() / App.dump() ────────────────────────────────────────────────
+
+test('App.tree() returns the application root', async () => {
+  const node = await mockApp().tree();
+  assert.equal(node.role, 'application');
+  assert.equal(node.name, 'TestApp');
+  assert.ok(node.children.length >= 1);
+});
+
+test('App.tree(0) returns only the application node', async () => {
+  const node = await mockApp().tree(0);
+  assert.equal(node.role, 'application');
+  assert.deepEqual(node.children, []);
+});
+
+test('App.tree(1) stops at direct children', async () => {
+  const node = await mockApp().tree(1);
+  assert.ok(node.children.length >= 1);
+  for (const child of node.children) {
+    assert.deepEqual(child.children, []);
+  }
+});
+
+test('App.dump() returns a string containing the application root', async () => {
+  const text = await mockApp().dump();
+  assert.equal(typeof text, 'string');
+  assert.ok(text.includes('application "TestApp"'));
+});
+
+test('App.dump(0) produces exactly one non-empty line', async () => {
+  const text = await mockApp().dump(0);
+  const lines = text.split('\n').filter((l) => l.trim());
+  assert.equal(lines.length, 1);
+});
+
+test('App.dump() matches Element.dump() on the app root', async () => {
+  const fromApp = await mockApp().dump();
+  const fromElement = await (await rootElement()).dump();
+  assert.equal(fromApp, fromElement);
+});
+
+// ── Locator.tree() / Locator.dump() ────────────────────────────────────────
+
+test('Locator.tree() returns the matched subtree', async () => {
+  const node = await root().tree();
+  assert.equal(node.role, 'application');
+  assert.equal(node.name, 'TestApp');
+});
+
+test('Locator.tree() scopes to the selector', async () => {
+  const node = await root().descendant('toolbar').tree();
+  assert.equal(node.role, 'toolbar');
+  assert.equal(node.children.length, 2);
+});
+
+test('Locator.tree(0) drops children', async () => {
+  const node = await root().descendant('toolbar').tree(0);
+  assert.equal(node.role, 'toolbar');
+  assert.deepEqual(node.children, []);
+});
+
+test('Locator.dump() returns a string of the matched subtree', async () => {
+  const text = await root().descendant('toolbar').dump();
+  assert.equal(typeof text, 'string');
+  assert.ok(text.includes('toolbar'));
+});
+
+test('Locator.dump(0) is one line', async () => {
+  const text = await root().descendant('toolbar').dump(0);
+  const lines = text.split('\n').filter((l) => l.trim());
+  assert.equal(lines.length, 1);
+});
+
+test('Locator.tree() rejects with SelectorNotMatchedError on miss', async () => {
+  await assert.rejects(
+    root().descendant('button[name="DoesNotExist"]').tree(),
+    SelectorNotMatchedError,
+  );
+});
+
+test('Locator.dump() fails fast on miss (no auto-wait)', async () => {
+  const start = process.hrtime.bigint();
+  await assert.rejects(
+    root().descendant('button[name="DoesNotExist"]').dump(),
+    SelectorNotMatchedError,
+  );
+  const elapsedMs = Number(process.hrtime.bigint() - start) / 1e6;
+  assert.ok(elapsedMs < 500, `dump should fail fast, took ${elapsedMs}ms`);
 });
 

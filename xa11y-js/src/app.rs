@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use napi::bindgen_prelude::{AsyncTask, Env, Task};
 
-use crate::element::Element;
+use crate::element::{DumpTask, Element, TreeTask};
 use crate::locator::Locator;
 use crate::map_err;
 use crate::subscription::NativeSubscription;
@@ -24,7 +24,7 @@ pub struct App {
 }
 
 impl App {
-    fn from_core(app: xa11y::App) -> Self {
+    pub(crate) fn from_core(app: xa11y::App) -> Self {
         Self {
             name: app.name.clone(),
             pid: app.pid,
@@ -116,6 +116,16 @@ impl App {
         })
     }
 
+    /// Get an `Element` handle for the application root.
+    ///
+    /// Useful for invoking Element-level methods (`children()`, `parent()`,
+    /// etc.) without going through a locator. Synchronous — the App already
+    /// holds the application's accessibility data.
+    #[napi]
+    pub fn as_element(&self) -> Element {
+        Element::new(self.data.clone(), self.provider.clone())
+    }
+
     /// Subscribe to accessibility events from this application.
     #[napi(ts_return_type = "Promise<_NativeSubscription>")]
     pub fn subscribe(&self) -> AsyncTask<AppSubscribeTask> {
@@ -123,6 +133,43 @@ impl App {
             data: self.data.clone(),
             provider: self.provider.clone(),
         })
+    }
+
+    /// Capture this application's accessibility tree as a recursive snapshot,
+    /// rooted at the application element.
+    ///
+    /// `maxDepth` limits traversal depth: `0` = only the application node,
+    /// `1` = application + direct children (typically windows), and so on.
+    /// Omit for the full subtree.
+    #[napi(
+        ts_args_type = "maxDepth?: number | null",
+        ts_return_type = "Promise<TreeNode>"
+    )]
+    pub fn tree(&self, max_depth: Option<u32>) -> AsyncTask<TreeTask> {
+        AsyncTask::new(TreeTask::new(
+            self.data.clone(),
+            self.provider.clone(),
+            max_depth.map(|d| d as usize),
+        ))
+    }
+
+    /// Render this application's accessibility tree as an indented string.
+    ///
+    /// Returns the string without printing it. The primary inspection helper
+    /// — call `console.log(await app.dump())` to discover the role and name
+    /// of every element in the app before writing selectors.
+    ///
+    /// For the same output from the shell, use `xa11y tree --app NAME`.
+    #[napi(
+        ts_args_type = "maxDepth?: number | null",
+        ts_return_type = "Promise<string>"
+    )]
+    pub fn dump(&self, max_depth: Option<u32>) -> AsyncTask<DumpTask> {
+        AsyncTask::new(DumpTask::new(
+            self.data.clone(),
+            self.provider.clone(),
+            max_depth.map(|d| d as usize),
+        ))
     }
 }
 

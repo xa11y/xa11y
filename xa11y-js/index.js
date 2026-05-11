@@ -507,6 +507,7 @@ module.exports = {
 
   // @internal -- used by unit tests
   _makeTestLocator: native._makeTestLocator,
+  _makeTestApp: native._makeTestApp,
   _makeTestActionProbe: native._makeTestActionProbe,
   _makeDisconnectedSubscription: native._makeDisconnectedSubscription,
   _Subscription: Subscription,

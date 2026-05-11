@@ -184,6 +184,21 @@ impl Locator {
             .collect())
     }
 
+    /// Capture the subtree rooted at the matched element as a recursive
+    /// snapshot. Resolves the selector once (no auto-wait — inspection ops
+    /// should fail fast on selector miss). See [`Element::tree`] for
+    /// `max_depth` semantics.
+    pub fn tree(&self, max_depth: Option<usize>) -> Result<crate::element::TreeNode> {
+        self.element()?.tree(max_depth)
+    }
+
+    /// Render the subtree rooted at the matched element as an indented
+    /// string. Resolves the selector once (no auto-wait). See
+    /// [`Element::dump`] for the output format.
+    pub fn dump(&self, max_depth: Option<usize>) -> Result<String> {
+        self.element()?.dump(max_depth)
+    }
+
     // ── Auto-wait ──────────────────────────────────────────────────
 
     /// Poll until the element is attached, visible, and enabled, returning a
@@ -418,10 +433,12 @@ impl Locator {
 mod tests {
     //! End-to-end tests for [`Locator`] against the in-memory mock provider.
     //!
-    //! These focus on the selector-group (comma alternation) behaviour:
-    //! - union, dedup, document order across clauses;
-    //! - `count()`, `elements()`, `nth()` and `element()` against groups;
-    //! - chained `.descendant()` / `.child()` distributing per clause.
+    //! Covers:
+    //! - selector-group (comma alternation): union, dedup, document order
+    //!   across clauses; `count()`, `elements()`, `nth()`, `element()`;
+    //!   chained `.descendant()` / `.child()` distributing per clause.
+    //! - tree/dump inspection helpers (subtree capture, depth limits,
+    //!   fail-fast on miss).
     //!
     //! The mock tree topology is documented on [`crate::mock`].
 
@@ -545,5 +562,69 @@ mod tests {
     fn group_exists_false_when_no_clause_matches() {
         let loc = root_locator(r#"button[name="Nope"], text_field[name="AlsoNope"]"#);
         assert!(!loc.exists().unwrap());
+    }
+
+    // ── tree() / dump() ─────────────────────────────────────────────
+
+    #[test]
+    fn locator_tree_returns_subtree_rooted_at_match() {
+        let node = root_locator("application")
+            .tree(None)
+            .expect("tree must succeed");
+        assert_eq!(node.role, "application");
+        assert_eq!(node.name.as_deref(), Some("TestApp"));
+        assert!(!node.children.is_empty());
+    }
+
+    #[test]
+    fn locator_tree_respects_max_depth() {
+        let node = root_locator("application")
+            .tree(Some(0))
+            .expect("tree must succeed");
+        assert!(node.children.is_empty(), "max_depth=0 should drop children");
+    }
+
+    #[test]
+    fn locator_dump_renders_selector_subtree() {
+        let s = root_locator("application")
+            .dump(None)
+            .expect("dump must succeed");
+        assert!(
+            s.contains(r#"application "TestApp""#),
+            "dump should render the matched root: {s}"
+        );
+    }
+
+    #[test]
+    fn locator_dump_max_depth_zero_is_one_line() {
+        let s = root_locator("application")
+            .dump(Some(0))
+            .expect("dump must succeed");
+        let non_empty: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(non_empty.len(), 1);
+    }
+
+    #[test]
+    fn locator_tree_no_match_returns_selector_not_matched() {
+        let err = root_locator(r#"button[name="DoesNotExist"]"#)
+            .tree(None)
+            .expect_err("tree must fail on miss");
+        assert!(
+            matches!(err, Error::SelectorNotMatched { .. }),
+            "expected SelectorNotMatched, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn locator_dump_does_not_auto_wait() {
+        // Locator dump/tree are inspection ops — they must fail fast, not poll.
+        let locator = root_locator(r#"button[name="DoesNotExist"]"#);
+        let start = std::time::Instant::now();
+        let _ = locator.dump(None);
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "dump should fail fast, took {elapsed:?}"
+        );
     }
 }
