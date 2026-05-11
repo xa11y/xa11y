@@ -1,6 +1,6 @@
 {
   "name": "@crowecawcaw/xa11y",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "description": "Cross-platform accessibility client library for Node.js",
   "keywords": [
     "accessibility",
