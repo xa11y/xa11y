@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::element::{Element, ElementData};
+use crate::element::{Element, ElementData, TreeNode};
 use crate::error::{Error, Result};
 use crate::event_provider::Subscription;
 use crate::locator::Locator;
@@ -205,6 +205,34 @@ impl App {
             .collect())
     }
 
+    /// Capture the application's accessibility tree as a recursive snapshot,
+    /// rooted at the application element.
+    ///
+    /// Equivalent to `self.as_element().tree(max_depth)`. See
+    /// [`Element::tree`] for `max_depth` semantics.
+    pub fn tree(&self, max_depth: Option<usize>) -> Result<TreeNode> {
+        self.as_element().tree(max_depth)
+    }
+
+    /// Render the application's accessibility tree as an indented string,
+    /// rooted at the application element.
+    ///
+    /// The primary inspection helper for figuring out the role/name of every
+    /// element in an app before writing selectors. Equivalent to
+    /// `self.as_element().dump(max_depth)`. See [`Element::dump`] for the
+    /// output format.
+    pub fn dump(&self, max_depth: Option<usize>) -> Result<String> {
+        self.as_element().dump(max_depth)
+    }
+
+    /// Get an [`Element`] handle for the application root.
+    ///
+    /// Useful when you want to use Element-level methods (e.g. `tree`,
+    /// `dump`, `children`) without going through a locator.
+    pub fn as_element(&self) -> Element {
+        Element::new(self.data.clone(), Arc::clone(&self.provider))
+    }
+
     /// Get the provider reference.
     pub fn provider(&self) -> &Arc<dyn Provider> {
         &self.provider
@@ -229,8 +257,69 @@ impl std::fmt::Debug for App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mock::build_provider;
     use crate::selector::{matches_simple, Combinator};
     use serde_json::json;
+
+    fn mock_app() -> App {
+        let provider: Arc<dyn Provider> = build_provider();
+        App::by_name_with(provider, "TestApp").expect("TestApp must exist in mock tree")
+    }
+
+    #[test]
+    fn app_tree_returns_application_root() {
+        let node = mock_app().tree(None).expect("tree must succeed");
+        assert_eq!(node.role, "application");
+        assert_eq!(node.name.as_deref(), Some("TestApp"));
+        assert!(
+            !node.children.is_empty(),
+            "TestApp must have at least one window child"
+        );
+    }
+
+    #[test]
+    fn app_tree_max_depth_zero_has_no_children() {
+        let node = mock_app().tree(Some(0)).expect("tree must succeed");
+        assert_eq!(node.role, "application");
+        assert!(node.children.is_empty());
+    }
+
+    #[test]
+    fn app_tree_max_depth_one_stops_at_direct_children() {
+        let node = mock_app().tree(Some(1)).expect("tree must succeed");
+        assert!(!node.children.is_empty());
+        for child in &node.children {
+            assert!(
+                child.children.is_empty(),
+                "max_depth=1 must stop after direct children"
+            );
+        }
+    }
+
+    #[test]
+    fn app_dump_contains_application_root() {
+        let s = mock_app().dump(None).expect("dump must succeed");
+        assert!(
+            s.contains(r#"application "TestApp""#),
+            "dump output should include the application root: {s}"
+        );
+    }
+
+    #[test]
+    fn app_dump_max_depth_zero_is_one_line() {
+        let s = mock_app().dump(Some(0)).expect("dump must succeed");
+        let non_empty: Vec<&str> = s.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(non_empty.len(), 1, "max_depth=0 should be a single line");
+        assert!(non_empty[0].contains("application"));
+    }
+
+    #[test]
+    fn app_as_element_is_root() {
+        let app = mock_app();
+        let el = app.as_element();
+        assert_eq!(el.data().role, Role::Application);
+        assert_eq!(el.data().name.as_deref(), Some("TestApp"));
+    }
 
     #[test]
     fn role_named_preserves_literal_name_with_special_chars() {

@@ -29,6 +29,7 @@ export {
   Screenshot,
   inputSim,
   locator,
+  _makeTestApp,
   _makeTestLocator,
 } from './native.js';
 

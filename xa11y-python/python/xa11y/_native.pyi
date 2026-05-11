@@ -146,6 +146,32 @@ class App:
         """Subscribe to accessibility events from this application."""
     def children(self) -> list[Element]:
         """Get direct children (typically windows) of this application."""
+    def as_element(self) -> Element:
+        """Get an :class:`Element` handle for the application root.
+
+        Useful for invoking Element-level methods (``children()``,
+        ``parent()``, etc.) without going through a locator.
+        """
+    def tree(self, max_depth: int | None = None) -> dict:
+        """Capture this application's accessibility tree as a recursive dict.
+
+        Each dict has keys ``role``, ``name``, ``value``, and ``children``
+        (a list of dicts with the same shape). ``max_depth`` limits traversal:
+        ``0`` = only the application node, ``1`` = application + direct
+        children (typically windows), ``None`` = full subtree.
+
+        Equivalent to ``Element.tree(...)`` on the application's root element.
+        """
+    def dump(self, max_depth: int | None = None) -> str:
+        """Render this application's accessibility tree as an indented string.
+
+        Returns the string without printing it. Same depth semantics as
+        :meth:`tree`. This is the primary inspection helper — call
+        ``print(app.dump())`` to discover the role and name of every element
+        in the app before writing selectors.
+
+        For the same output from the shell, use ``xa11y tree --app NAME``.
+        """
     def __repr__(self) -> str: ...
     def __str__(self) -> str: ...
 
@@ -212,6 +238,28 @@ class Element:
         """Get direct children (lazy — each call queries the provider)."""
     def parent(self) -> Element | None:
         """Get parent element (lazy — each call queries the provider)."""
+    def tree(self, max_depth: int | None = None) -> dict:
+        """Capture the subtree rooted at this element as a recursive dict snapshot.
+
+        Each dict has keys ``role``, ``name``, ``value``, and ``children``
+        (a list of dicts with the same shape). ``max_depth`` limits traversal:
+        ``0`` = only this node, ``1`` = node + direct children, ``None`` = full
+        subtree.
+
+        Use this when you need to inspect or analyze the tree programmatically.
+        For an indented human-readable string, see :meth:`dump`. For ad-hoc
+        exploration from the shell, see the ``xa11y tree`` CLI command.
+        """
+    def dump(self, max_depth: int | None = None) -> str:
+        """Render the subtree rooted at this element as an indented string.
+
+        Returns the string without printing. Same depth semantics as
+        :meth:`tree`. Useful as a first step when writing a test against an
+        unfamiliar app — call ``print(app.dump())`` to discover the role and
+        name of every element, then turn those into selectors.
+
+        For the same output from the shell, use ``xa11y tree --app NAME``.
+        """
     def subscribe(self) -> Subscription:
         """Subscribe to accessibility events for this element (typically an app)."""
     def press(self) -> None:
@@ -278,6 +326,23 @@ class Locator:
         """Get a single Element handle for the matched element."""
     def elements(self) -> list[Element]:
         """Get all matching elements."""
+    def tree(self, max_depth: int | None = None) -> dict:
+        """Capture the subtree rooted at the matched element as a recursive dict.
+
+        Each dict has keys ``role``, ``name``, ``value``, and ``children``
+        (a list of dicts with the same shape). ``max_depth`` limits traversal:
+        ``0`` = only this node, ``1`` = node + direct children, ``None`` =
+        full subtree.
+
+        Resolves the selector once; fails fast with
+        :class:`SelectorNotMatchedError` if no match — does not auto-wait.
+        """
+    def dump(self, max_depth: int | None = None) -> str:
+        """Render the subtree rooted at the matched element as an indented string.
+
+        Returns the string without printing it. Same depth and resolution
+        semantics as :meth:`tree`.
+        """
     def press(self) -> None:
         """Click / invoke the matched element."""
     def focus(self) -> None:

@@ -184,3 +184,98 @@ def test_query_no_match(test_app):
 def test_query_invalid_selector(test_app):
     with pytest.raises(xa11y.InvalidSelectorError):
         test_app.descendant("[[[invalid").elements()
+
+
+# ── App.tree() / App.dump() ─────────────────────────────────────────────────
+
+
+def test_app_tree_returns_application_root(mock_app):
+    node = mock_app.tree()
+    assert node["role"] == "application"
+    assert node["name"] == "TestApp"
+    assert len(node["children"]) >= 1
+
+
+def test_app_tree_max_depth_zero_no_children(mock_app):
+    node = mock_app.tree(max_depth=0)
+    assert node["role"] == "application"
+    assert node["children"] == []
+
+
+def test_app_tree_max_depth_one_stops_at_direct_children(mock_app):
+    node = mock_app.tree(max_depth=1)
+    assert len(node["children"]) >= 1
+    for child in node["children"]:
+        assert child["children"] == []
+
+
+def test_app_dump_returns_string(mock_app):
+    assert isinstance(mock_app.dump(), str)
+
+
+def test_app_dump_contains_application_root(mock_app):
+    text = mock_app.dump()
+    assert 'application "TestApp"' in text
+
+
+def test_app_dump_max_depth_zero_is_one_line(mock_app):
+    text = mock_app.dump(max_depth=0)
+    lines = [line for line in text.splitlines() if line.strip()]
+    assert len(lines) == 1
+    assert "application" in lines[0]
+
+
+def test_app_dump_matches_element_dump(mock_app, test_app):
+    """App.dump() must produce the same output as Element.dump() on the app root."""
+    assert mock_app.dump() == test_app.element().dump()
+
+
+# ── Locator.tree() / Locator.dump() ─────────────────────────────────────────
+
+
+def test_locator_tree_returns_subtree(test_app):
+    node = test_app.tree()
+    assert node["role"] == "application"
+    assert node["name"] == "TestApp"
+
+
+def test_locator_tree_scoped_to_selector(test_app):
+    node = test_app.descendant("toolbar").tree()
+    assert node["role"] == "toolbar"
+    assert len(node["children"]) == 2  # Back and Forward buttons
+
+
+def test_locator_tree_max_depth_zero_drops_children(test_app):
+    node = test_app.descendant("toolbar").tree(max_depth=0)
+    assert node["role"] == "toolbar"
+    assert node["children"] == []
+
+
+def test_locator_dump_returns_string(test_app):
+    assert isinstance(test_app.dump(), str)
+
+
+def test_locator_dump_contains_selector_root(test_app):
+    text = test_app.descendant("toolbar").dump()
+    assert "toolbar" in text
+
+
+def test_locator_dump_max_depth_zero_is_one_line(test_app):
+    text = test_app.descendant("toolbar").dump(max_depth=0)
+    lines = [line for line in text.splitlines() if line.strip()]
+    assert len(lines) == 1
+
+
+def test_locator_tree_no_match_raises(test_app):
+    with pytest.raises(xa11y.SelectorNotMatchedError):
+        test_app.descendant('button[name="DoesNotExist"]').tree()
+
+
+def test_locator_dump_no_match_raises_fast(test_app):
+    """Locator.dump() is inspection, not an action — it must fail fast, not auto-wait."""
+    import time
+
+    start = time.monotonic()
+    with pytest.raises(xa11y.SelectorNotMatchedError):
+        test_app.descendant('button[name="DoesNotExist"]').dump()
+    assert time.monotonic() - start < 0.5

@@ -526,6 +526,20 @@ pub struct TreeTask {
     max_depth: Option<usize>,
 }
 
+impl TreeTask {
+    pub fn new(
+        data: xa11y::ElementData,
+        provider: Arc<dyn xa11y::Provider>,
+        max_depth: Option<usize>,
+    ) -> Self {
+        Self {
+            data,
+            provider,
+            max_depth,
+        }
+    }
+}
+
 impl Task for TreeTask {
     type Output = xa11y::TreeNode;
     type JsValue = TreeNode;
@@ -544,6 +558,20 @@ pub struct DumpTask {
     data: xa11y::ElementData,
     provider: Arc<dyn xa11y::Provider>,
     max_depth: Option<usize>,
+}
+
+impl DumpTask {
+    pub fn new(
+        data: xa11y::ElementData,
+        provider: Arc<dyn xa11y::Provider>,
+        max_depth: Option<usize>,
+    ) -> Self {
+        Self {
+            data,
+            provider,
+            max_depth,
+        }
+    }
 }
 
 impl Task for DumpTask {
