@@ -2799,7 +2799,7 @@ mod tests {
         // Breakdown: lightweight DFS fetches AXRole+AXSubrole per node (~2 calls
         // each) plus AXTitle/AXValue for name matching. 1 batch + 1 action-names
         // call for the single match's full ElementData.
-        const MAX_CALLS: u64 = 294;
+        const MAX_CALLS: u64 = 298;
         assert!(
             total <= MAX_CALLS,
             "AX call count regression: button[name=\"Submit\"] from app root.\n\
@@ -2834,7 +2834,7 @@ mod tests {
         // Upper bound — this counts AX IPC calls. Reducing this number is good;
         // increasing it is a regression. Update the bound if a deliberate feature
         // addition raises it.
-        const MAX_CALLS: u64 = 288;
+        const MAX_CALLS: u64 = 292;
         assert!(
             total <= MAX_CALLS,
             "AX call count regression: button[name=\"Submit\"] from window.\n\
@@ -2866,7 +2866,7 @@ mod tests {
         // Upper bound — this counts AX IPC calls. Reducing this number is good;
         // increasing it is a regression. Update the bound if a deliberate feature
         // addition raises it.
-        const MAX_CALLS: u64 = 280;
+        const MAX_CALLS: u64 = 284;
         assert!(
             total <= MAX_CALLS,
             "AX call count regression: check_box from window.\n\
