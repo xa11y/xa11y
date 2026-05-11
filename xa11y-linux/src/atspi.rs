@@ -705,20 +705,38 @@ impl LinuxProvider {
             } else {
                 role_name
             };
-            {
-                let mut raw = HashMap::new();
-                raw.insert("atspi_role".into(), serde_json::Value::String(raw_role));
-                raw.insert(
-                    "bus_name".into(),
-                    serde_json::Value::String(aref.bus_name.clone()),
-                );
-                raw.insert(
-                    "object_path".into(),
-                    serde_json::Value::String(aref.path.clone()),
-                );
-                raw
+            let mut raw = HashMap::new();
+            raw.insert("atspi_role".into(), serde_json::Value::String(raw_role));
+            raw.insert(
+                "bus_name".into(),
+                serde_json::Value::String(aref.bus_name.clone()),
+            );
+            raw.insert(
+                "object_path".into(),
+                serde_json::Value::String(aref.path.clone()),
+            );
+            // Preserve unstripped originals so callers who need bidi marks can
+            // recover them after the strip below.
+            if let Some(ref n) = name {
+                raw.insert("atspi_name".into(), serde_json::Value::String(n.clone()));
             }
+            if let Some(ref v) = value {
+                raw.insert("atspi_value".into(), serde_json::Value::String(v.clone()));
+            }
+            if let Some(ref d) = description {
+                raw.insert(
+                    "atspi_description".into(),
+                    serde_json::Value::String(d.clone()),
+                );
+            }
+            raw
         };
+
+        // Strip Unicode bidi format controls. RTL apps on Linux embed LRM/RLM
+        // marks into reported strings; the originals are preserved in `raw`.
+        let name = xa11y_core::text::strip_bidi_opt(name);
+        let value = xa11y_core::text::strip_bidi_opt(value);
+        let description = xa11y_core::text::strip_bidi_opt(description);
 
         let handle = self.cache_element(aref.clone());
         if !action_index_map.is_empty() {

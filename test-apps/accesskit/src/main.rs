@@ -100,6 +100,11 @@ const REMOVE_ITEM_BTN: NodeId = NodeId(71);
 const ANNOUNCE_BTN: NodeId = NodeId(72);
 const ANNOUNCE_LIVE_REGION: NodeId = NodeId(73);
 
+// Bidi marks — label whose name and value contain Unicode bidi format
+// controls (LRM, RLM, isolates) so xa11y's bidi-strip behavior can be
+// covered end-to-end. See xa11y issue #188.
+const BIDI_LABEL: NodeId = NodeId(74);
+
 // Dynamic items start at NodeId(100) to leave room for future static nodes
 const DYNAMIC_ITEM_BASE: u64 = 100;
 
@@ -312,6 +317,7 @@ fn build_main_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
         MAIN_SEPARATOR,
         IMAGE_NODE,
         STATUS_TEXT,
+        BIDI_LABEL,
     ]);
     nodes.push((MAIN_PANEL, main_panel));
 
@@ -521,6 +527,15 @@ fn build_main_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
     status.set_label(&*state.status_text);
     status.set_value(&*state.status_text);
     nodes.push((STATUS_TEXT, status));
+
+    // Bidi label — name and value carry Unicode bidi format controls
+    // (LRM, RLM, LRI/RLI/PDI). xa11y strips these from `name`/`value` so
+    // equality assertions match the logical text; the unstripped originals
+    // remain on `element.raw` (see xa11y issue #188).
+    let mut bidi = Node::new(Role::Label);
+    bidi.set_label("\u{200E}Bidi Label\u{200E}");
+    bidi.set_value("\u{2066}5\u{2069}");
+    nodes.push((BIDI_LABEL, bidi));
 }
 
 fn build_lists_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {

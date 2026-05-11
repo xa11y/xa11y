@@ -356,8 +356,25 @@ fn build_snapshot_data(
         if let Some(ref cn) = class_name {
             raw.insert("class_name".into(), serde_json::Value::String(cn.clone()));
         }
+        // Preserve unstripped originals so callers who need bidi marks can
+        // recover them after the strip below.
+        if let Some(ref n) = name {
+            raw.insert("uia_name".into(), serde_json::Value::String(n.clone()));
+        }
+        if let Some(ref v) = value {
+            raw.insert("uia_value".into(), serde_json::Value::String(v.clone()));
+        }
+        if let Some(ref d) = description {
+            raw.insert("uia_help_text".into(), serde_json::Value::String(d.clone()));
+        }
         raw
     };
+
+    // Strip Unicode bidi format controls. RTL apps on Windows embed LRM/RLM
+    // marks into reported strings; the originals are preserved in `raw`.
+    let name = xa11y_core::text::strip_bidi_opt(name);
+    let value = xa11y_core::text::strip_bidi_opt(value);
+    let description = xa11y_core::text::strip_bidi_opt(description);
 
     let (numeric_value, min_value, max_value) = if matches!(
         role,

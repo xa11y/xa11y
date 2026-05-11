@@ -1571,6 +1571,14 @@ fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -
             _ => (None, None),
         };
 
+        // Strip Unicode bidi format controls (LRM, RLM, embeddings, isolates)
+        // from text fields. macOS inserts these for presentation; they break
+        // equality assertions like `el.value == "5"`. Originals remain in
+        // `raw` (`AXTitle`, `AXValue`, `AXDescription`, `AXHelp`).
+        let name = xa11y_core::text::strip_bidi_opt(name);
+        let value = xa11y_core::text::strip_bidi_opt(value);
+        let description = xa11y_core::text::strip_bidi_opt(description);
+
         ElementData {
             role,
             name,
