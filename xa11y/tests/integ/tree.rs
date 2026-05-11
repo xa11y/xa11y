@@ -890,31 +890,34 @@ mod tests {
 
     #[test]
     #[ignore]
-    fn bidi_marks_stripped_from_welcome_label() {
-        // The test app's WELCOME_TEXT label is set to
-        // "\u{200E}Welcome \u{2066}to\u{2069} xa11y\u{200E}". xa11y must
-        // strip the bidi format controls from `name` so equality assertions
-        // like `name == "Welcome to xa11y"` succeed. The unstripped string
-        // must still be reachable via `element.raw` under the platform-native
-        // key so consumers who need bidi marks have an escape hatch.
+    fn bidi_marks_stripped_from_submit_button() {
+        // The test app's Submit button label is set to
+        // "\u{200E}Sub\u{2066}m\u{2069}it\u{200E}". xa11y must strip the bidi
+        // format controls from `name` so equality assertions like
+        // `name == "Submit"` succeed. The unstripped string must still be
+        // reachable via `element.raw` under the platform-native key so
+        // consumers who need bidi marks have an escape hatch.
+        //
+        // Buttons are used (not Label) because Label name isn't reliably
+        // surfaced via AT-SPI/UIA on Linux/Windows.
         let app = h::app_root();
-        let welcome = h::named(&app, "Welcome");
+        let submit = h::named(&app, "Submit");
 
-        assert_eq!(welcome.name.as_deref(), Some("Welcome to xa11y"));
+        assert_eq!(submit.name.as_deref(), Some("Submit"));
         assert!(
-            !welcome
+            !submit
                 .name
                 .as_deref()
                 .unwrap_or("")
                 .chars()
                 .any(xa11y::is_bidi_control),
             "stripped name should contain no bidi controls: {:?}",
-            welcome.name
+            submit.name
         );
 
         #[cfg(target_os = "macos")]
         {
-            let raw_title = welcome
+            let raw_title = submit
                 .raw
                 .get("AXTitle")
                 .and_then(|v| v.as_str())
@@ -927,7 +930,7 @@ mod tests {
         }
         #[cfg(target_os = "linux")]
         {
-            let raw_name = welcome
+            let raw_name = submit
                 .raw
                 .get("atspi_name")
                 .and_then(|v| v.as_str())
@@ -940,7 +943,7 @@ mod tests {
         }
         #[cfg(target_os = "windows")]
         {
-            let raw_name = welcome
+            let raw_name = submit
                 .raw
                 .get("uia_name")
                 .and_then(|v| v.as_str())

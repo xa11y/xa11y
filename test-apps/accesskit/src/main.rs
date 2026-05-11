@@ -315,13 +315,9 @@ fn build_main_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
     ]);
     nodes.push((MAIN_PANEL, main_panel));
 
-    // Welcome text. The label is wrapped in Unicode bidi format controls
-    // (LRM at start, LRI…PDI around the substring, LRM at end) so the
-    // bidi-strip pipeline is exercised end-to-end on a Label's name. xa11y
-    // strips these from `name`; the original is kept on `element.raw` under
-    // the platform-native key. See issue #188.
+    // Welcome text
     let mut welcome = Node::new(Role::Label);
-    welcome.set_label("\u{200E}Welcome \u{2066}to\u{2069} xa11y\u{200E}");
+    welcome.set_label("Welcome to xa11y");
     nodes.push((WELCOME_TEXT, welcome));
 
     // Name row
@@ -353,8 +349,13 @@ fn build_main_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
     button_row.set_children(vec![SUBMIT_BTN, CANCEL_BTN]);
     nodes.push((BUTTON_ROW, button_row));
 
+    // Submit label is wrapped in Unicode bidi format controls (LRM start/end,
+    // LRI…PDI around an inner substring) so the xa11y bidi-strip pipeline is
+    // exercised end-to-end through a button — buttons have their name reliably
+    // exposed across AT-SPI/UIA/AX. After strip, `name == "Submit"` so every
+    // other test that looks up Submit by name keeps working. See issue #188.
     let mut submit = Node::new(Role::Button);
-    submit.set_label("Submit");
+    submit.set_label("\u{200E}Sub\u{2066}m\u{2069}it\u{200E}");
     submit.add_action(Action::Click);
     submit.add_action(Action::Focus);
     submit.set_bounds(Rect {
