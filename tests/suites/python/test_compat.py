@@ -457,8 +457,22 @@ def test_dialog_role(app, app_config):
 
 def test_element_tree_snapshot(app, app_config):
     """Element.tree() returns a dict snapshot with the expected shape."""
+    import time
+
     ok_name = app_config["ok_button_name"]
-    btn = app.locator(f'button[name="{ok_name}"]').element()
+    # Locator.element() resolves once with no auto-wait; on Windows the UIA
+    # tree can be transiently unsettled after a prior test closes a dialog,
+    # so poll briefly to keep this test focused on Element.tree() rather
+    # than on its own selector resolution timing.
+    deadline = time.monotonic() + 5.0
+    while True:
+        try:
+            btn = app.locator(f'button[name="{ok_name}"]').element()
+            break
+        except xa11y.SelectorNotMatchedError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
     node = btn.tree(max_depth=0)
     assert node["role"] == "button"
     assert node["name"] == ok_name
