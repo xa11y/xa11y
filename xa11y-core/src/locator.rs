@@ -5,7 +5,7 @@ use crate::element::{Element, ElementData};
 use crate::error::{Error, Result};
 use crate::event::ElementState;
 use crate::provider::Provider;
-use crate::selector::Selector;
+use crate::selector::{chain_combinator, SelectorGroup};
 
 /// A lazy element descriptor that re-resolves against a fresh accessibility
 /// tree on every operation.
@@ -77,18 +77,22 @@ impl Locator {
 
     /// Return a new Locator scoped to a direct child matching `child_selector`.
     ///
-    /// Appends ` > {child_selector}` to the current selector.
+    /// Appends ` > {child_selector}` to the current selector. If either side
+    /// is a comma-separated selector group, the combinator distributes over
+    /// every clause: e.g. `"a, b".child("c") => "a > c, b > c"`.
     pub fn child(mut self, child_selector: &str) -> Self {
-        self.selector = format!("{} > {}", self.selector, child_selector);
+        self.selector = chain_combinator(&self.selector, " > ", child_selector);
         self.nth = None;
         self
     }
 
     /// Return a new Locator scoped to a descendant matching `desc_selector`.
     ///
-    /// Appends ` {desc_selector}` to the current selector.
+    /// Appends ` {desc_selector}` to the current selector. If either side is
+    /// a comma-separated selector group, the combinator distributes over
+    /// every clause: e.g. `"a, b".descendant("c") => "a c, b c"`.
     pub fn descendant(mut self, desc_selector: &str) -> Self {
-        self.selector = format!("{} {}", self.selector, desc_selector);
+        self.selector = chain_combinator(&self.selector, " ", desc_selector);
         self.nth = None;
         self
     }
@@ -120,14 +124,19 @@ impl Locator {
 
     /// Resolve the selector to a single ElementData.
     fn resolve_data(&self) -> Result<ElementData> {
-        let selector = Selector::parse(&self.selector)?;
-        let matches = self.provider.find_elements(
-            self.root.as_ref(),
-            &selector,
-            // Fetch enough to satisfy nth
-            Some(self.nth.unwrap_or(0) + 1),
-            None,
-        )?;
+        let group = SelectorGroup::parse(&self.selector)?;
+        // For multi-clause groups we can't safely truncate at the provider
+        // call to `nth+1` — a low-priority clause's match might come
+        // *before* a high-priority clause's in document order, so we need
+        // the full union to apply `nth` correctly.
+        let provider_limit = if group.is_single() {
+            Some(self.nth.unwrap_or(0) + 1)
+        } else {
+            None
+        };
+        let matches =
+            self.provider
+                .find_elements_group(self.root.as_ref(), &group, provider_limit, None)?;
         let idx = self.nth.unwrap_or(0);
         matches
             .into_iter()
@@ -150,10 +159,10 @@ impl Locator {
 
     /// Count matching elements.
     pub fn count(&self) -> Result<usize> {
-        let selector = Selector::parse(&self.selector)?;
+        let group = SelectorGroup::parse(&self.selector)?;
         let matches = self
             .provider
-            .find_elements(self.root.as_ref(), &selector, None, None)?;
+            .find_elements_group(self.root.as_ref(), &group, None, None)?;
         Ok(matches.len())
     }
 
@@ -165,10 +174,10 @@ impl Locator {
 
     /// Get all matching elements.
     pub fn elements(&self) -> Result<Vec<Element>> {
-        let selector = Selector::parse(&self.selector)?;
+        let group = SelectorGroup::parse(&self.selector)?;
         let matches = self
             .provider
-            .find_elements(self.root.as_ref(), &selector, None, None)?;
+            .find_elements_group(self.root.as_ref(), &group, None, None)?;
         Ok(matches
             .into_iter()
             .map(|d| Element::new(d, Arc::clone(&self.provider)))
@@ -402,5 +411,139 @@ impl Locator {
 
             std::thread::sleep(poll_interval);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! End-to-end tests for [`Locator`] against the in-memory mock provider.
+    //!
+    //! These focus on the selector-group (comma alternation) behaviour:
+    //! - union, dedup, document order across clauses;
+    //! - `count()`, `elements()`, `nth()` and `element()` against groups;
+    //! - chained `.descendant()` / `.child()` distributing per clause.
+    //!
+    //! The mock tree topology is documented on [`crate::mock`].
+
+    use super::*;
+    use crate::mock::build_provider;
+
+    fn root_locator(selector: &str) -> Locator {
+        let provider = build_provider();
+        let provider_dyn: Arc<dyn Provider> = provider;
+        Locator::new(provider_dyn, None, selector)
+    }
+
+    fn names(elements: &[Element]) -> Vec<String> {
+        elements
+            .iter()
+            .map(|e| e.data().name.clone().unwrap_or_default())
+            .collect()
+    }
+
+    #[test]
+    fn group_count_returns_union_size_across_clauses() {
+        // Two non-overlapping clauses; count is the sum.
+        let loc = root_locator("check_box, slider");
+        assert_eq!(loc.count().unwrap(), 2);
+    }
+
+    #[test]
+    fn group_count_dedups_overlapping_clauses() {
+        // `button` matches "Back" and "Forward"; `[name="Back"]` overlaps
+        // with "Back". The union must dedupe to 2 unique elements.
+        let loc = root_locator(r#"button, [name="Back"]"#);
+        assert_eq!(loc.count().unwrap(), 2);
+    }
+
+    #[test]
+    fn group_elements_returned_in_document_order() {
+        // Mock tree DFS order through Navigation/Content:
+        //   Back, Forward (toolbar) → Search (text_field) → ... → Item 2.
+        // The result of `button, text_field` must interleave by document
+        // position, not group by clause.
+        let loc = root_locator("button, text_field");
+        let names = names(&loc.elements().unwrap());
+        assert_eq!(names, vec!["Back", "Forward", "Search"]);
+    }
+
+    #[test]
+    fn group_element_returns_first_match_in_document_order() {
+        // `text_field, button` would naively return Search first (the first
+        // text_field clause matches first by clause). Document order makes
+        // "Back" win.
+        let loc = root_locator("text_field, button");
+        let el = loc.element().expect("element must resolve");
+        assert_eq!(el.data().name.as_deref(), Some("Back"));
+    }
+
+    #[test]
+    fn group_nth_picks_across_full_union() {
+        // `.nth(2)` on the document-ordered union [Back, Forward, Search]
+        // must be "Forward", not the 2nd element of any single clause.
+        let loc = root_locator("button, text_field").nth(2);
+        let el = loc.element().unwrap();
+        assert_eq!(el.data().name.as_deref(), Some("Forward"));
+    }
+
+    #[test]
+    fn group_single_clause_behaves_identically() {
+        // Sanity: no-comma selectors are unaffected by SelectorGroup parsing.
+        let single = root_locator("button");
+        assert_eq!(single.count().unwrap(), 2);
+        assert_eq!(names(&single.elements().unwrap()), vec!["Back", "Forward"],);
+    }
+
+    #[test]
+    fn descendant_distributes_over_clauses() {
+        // `.descendant("button")` on a group of (toolbar, group) parents
+        // must apply to *both* parents. Direct child buttons exist only
+        // under "toolbar"; if distribution failed, we'd miss them. Inverse
+        // case is harder to construct in this fixture, but we verify the
+        // generated string round-trips and matches buttons under each
+        // clause's subtree.
+        let loc = root_locator("toolbar, group").descendant("button");
+        // After chaining, the stored selector must distribute per clause:
+        assert_eq!(loc.selector(), "toolbar button, group button");
+        // And resolve to the two buttons (both under toolbar; the group
+        // subtree has no buttons in this fixture).
+        let names = names(&loc.elements().unwrap());
+        assert_eq!(names, vec!["Back", "Forward"]);
+    }
+
+    #[test]
+    fn child_distributes_over_clauses() {
+        // `.child("button")` on a (toolbar, group) parent group should
+        // distribute the `>` combinator over each clause.
+        let loc = root_locator("toolbar, group").child("button");
+        assert_eq!(loc.selector(), "toolbar > button, group > button");
+        let names = names(&loc.elements().unwrap());
+        assert_eq!(names, vec!["Back", "Forward"]);
+    }
+
+    #[test]
+    fn descendant_after_group_then_another_group_cross_products() {
+        // Repeated chained navigation keeps distributing — and a group
+        // suffix multiplies clauses (cross product). Verify the stored
+        // selector form is what we expect; semantic resolution is covered
+        // by the other tests.
+        let loc = root_locator("toolbar, group").descendant("button, text_field");
+        assert_eq!(
+            loc.selector(),
+            "toolbar button, toolbar text_field, group button, group text_field",
+        );
+    }
+
+    #[test]
+    fn group_exists_true_when_any_clause_matches() {
+        // First clause matches nothing, second matches; existence is union.
+        let loc = root_locator(r#"button[name="Nope"], slider"#);
+        assert!(loc.exists().unwrap());
+    }
+
+    #[test]
+    fn group_exists_false_when_no_clause_matches() {
+        let loc = root_locator(r#"button[name="Nope"], text_field[name="AlsoNope"]"#);
+        assert!(!loc.exists().unwrap());
     }
 }

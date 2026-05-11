@@ -2,6 +2,7 @@
 //!
 //! Grammar:
 //! ```text
+//! group         := selector ("," selector)*
 //! selector      := simple_selector (combinator simple_selector)*
 //! combinator    := " "          // descendant (any depth)
 //!                | " > "       // direct child
@@ -14,8 +15,12 @@
 //! pseudo        := ":nth(" integer ")"
 //! integer       := [1-9][0-9]*
 //! ```
+//!
+//! A top-level comma separates an *alternation group*: the result is the
+//! union of each clause's matches, deduplicated by element identity and
+//! returned in document order. See [`SelectorGroup`].
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::element::{ElementData, Toggled};
 use crate::error::{Error, Result};
@@ -323,6 +328,122 @@ impl Selector {
     }
 }
 
+/// A comma-separated alternation of [`Selector`] clauses.
+///
+/// Mirrors CSS selector lists: matching produces the union of each clause's
+/// matches, deduplicated by element identity and returned in document order.
+/// A group with a single clause behaves identically to that lone selector.
+///
+/// Constructed from a string via [`SelectorGroup::parse`]. Commas inside
+/// quoted attribute values are not treated as separators.
+#[derive(Debug, Clone)]
+pub struct SelectorGroup {
+    /// Selector clauses, in source order.
+    pub clauses: Vec<Selector>,
+}
+
+impl SelectorGroup {
+    /// Parse a (possibly comma-separated) selector string into a group.
+    ///
+    /// Single-clause inputs round-trip exactly as if parsed via
+    /// [`Selector::parse`]; multi-clause inputs are split on top-level commas
+    /// (quoted attribute values are respected).
+    pub fn parse(input: &str) -> Result<Self> {
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return Err(Error::InvalidSelector {
+                selector: input.to_string(),
+                message: "empty selector".to_string(),
+            });
+        }
+        let parts = split_top_level_commas(trimmed);
+        let mut clauses = Vec::with_capacity(parts.len());
+        for part in parts {
+            let p = part.trim();
+            if p.is_empty() {
+                return Err(Error::InvalidSelector {
+                    selector: input.to_string(),
+                    message: "empty clause in selector group".to_string(),
+                });
+            }
+            clauses.push(Selector::parse(p)?);
+        }
+        // `split_top_level_commas` always returns at least one part, so the
+        // emptiness check above guarantees we have ≥1 clause here.
+        Ok(SelectorGroup { clauses })
+    }
+
+    /// True if the group has exactly one clause (no top-level comma).
+    pub fn is_single(&self) -> bool {
+        self.clauses.len() == 1
+    }
+}
+
+/// Split a selector string on top-level commas.
+///
+/// Commas inside quoted attribute values (single or double quotes) are
+/// treated as content, not separators. Returns one or more parts; whitespace
+/// trimming and emptiness checks are the caller's responsibility.
+///
+/// An unterminated quoted string is tolerated here — it falls through as one
+/// trailing part, and the eventual `Selector::parse` call will surface the
+/// real "unterminated string" error with the original input.
+pub fn split_top_level_commas(input: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    for ch in input.chars() {
+        match quote {
+            Some(q) if ch == q => {
+                quote = None;
+                current.push(ch);
+            }
+            Some(_) => {
+                current.push(ch);
+            }
+            None => {
+                if ch == '\'' || ch == '"' {
+                    quote = Some(ch);
+                    current.push(ch);
+                } else if ch == ',' {
+                    parts.push(std::mem::take(&mut current));
+                } else {
+                    current.push(ch);
+                }
+            }
+        }
+    }
+    parts.push(current);
+    parts
+}
+
+/// Distribute a `combinator + suffix` over each clause of `existing`.
+///
+/// Used by `Locator::descendant` / `Locator::child` so that chained
+/// navigation on a group locator applies to every clause:
+///
+/// ```text
+/// chain_combinator("a, b", " ", "c")          => "a c, b c"
+/// chain_combinator("x", " > ", "a, b")        => "x > a, x > b"
+/// chain_combinator("x, y", " > ", "a, b")     => "x > a, x > b, y > a, y > b"
+/// ```
+///
+/// Each clause is trimmed before being concatenated; the produced string is
+/// always re-parseable as a [`SelectorGroup`] when both inputs were.
+pub fn chain_combinator(existing: &str, combinator: &str, suffix: &str) -> String {
+    let existing_parts = split_top_level_commas(existing);
+    let suffix_parts = split_top_level_commas(suffix);
+    let mut out = Vec::with_capacity(existing_parts.len() * suffix_parts.len());
+    for ep in &existing_parts {
+        let ep = ep.trim();
+        for sp in &suffix_parts {
+            let sp = sp.trim();
+            out.push(format!("{}{}{}", ep, combinator, sp));
+        }
+    }
+    out.join(", ")
+}
+
 /// Check if an element matches a simple selector (no combinators).
 pub fn matches_simple(element: &ElementData, simple: &SimpleSelector) -> bool {
     // Check role
@@ -574,6 +695,151 @@ pub fn find_elements_in_tree(
     }
 
     Ok(candidates)
+}
+
+/// Multi-clause variant of [`find_elements_in_tree`].
+///
+/// Runs each clause in `group` independently, then returns the **union** of
+/// matches in **document order**, deduplicated by `ElementData.handle`. A
+/// single-clause group is forwarded straight to `find_elements_in_tree` with
+/// no extra traversal.
+///
+/// For multi-clause groups this performs one traversal per clause plus a
+/// second pass over the tree to recover document order (each clause's own
+/// result list is in DFS order, but DFS positions across clauses aren't
+/// comparable without a re-walk). The second walk short-circuits as soon as
+/// `limit` is hit or the entire union has been emitted.
+pub fn find_elements_in_tree_group<F>(
+    get_children_fn: F,
+    root: Option<&ElementData>,
+    group: &SelectorGroup,
+    limit: Option<usize>,
+    max_depth: Option<u32>,
+) -> Result<Vec<ElementData>>
+where
+    F: Fn(Option<&ElementData>) -> Result<Vec<ElementData>>,
+{
+    if group.clauses.len() == 1 {
+        return find_elements_in_tree(get_children_fn, root, &group.clauses[0], limit, max_depth);
+    }
+
+    // Run each clause independently. Re-borrow the closure for each inner
+    // call so the outer `get_children_fn` can still be used for the
+    // document-order merge below — `&F` implements `Fn` when `F` does, so
+    // we hand a shared borrow to `find_elements_in_tree` without moving the
+    // value.
+    let f = &get_children_fn;
+    let mut clause_results = Vec::with_capacity(group.clauses.len());
+    for clause in &group.clauses {
+        clause_results.push(find_elements_in_tree(f, root, clause, None, max_depth)?);
+    }
+    merge_clause_results_in_document_order(get_children_fn, root, clause_results, limit, max_depth)
+}
+
+/// Merge per-clause result lists into the union, deduped by element
+/// identity, in document order.
+///
+/// Each input vec is one clause's matches (in any order — typically DFS
+/// from that clause's own traversal). The merge walks the tree once via
+/// `get_children_fn`, emitting any element whose handle appears in the
+/// union, stopping early when `limit` is satisfied or every union member
+/// has been emitted.
+///
+/// `ElementData` snapshots are taken from the clause results (not the
+/// traversal), so the returned elements carry the attribute state the
+/// matcher actually saw — important if attributes drift between the
+/// per-clause walk and the merge walk.
+pub fn merge_clause_results_in_document_order<F>(
+    get_children_fn: F,
+    root: Option<&ElementData>,
+    clause_results: Vec<Vec<ElementData>>,
+    limit: Option<usize>,
+    max_depth: Option<u32>,
+) -> Result<Vec<ElementData>>
+where
+    F: Fn(Option<&ElementData>) -> Result<Vec<ElementData>>,
+{
+    let mut snapshots: HashMap<u64, ElementData> = HashMap::new();
+    for results in clause_results {
+        for e in results {
+            snapshots.entry(e.handle).or_insert(e);
+        }
+    }
+    if snapshots.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let max_depth = max_depth.unwrap_or(crate::MAX_TREE_DEPTH);
+    let mut session = DocOrderEmit {
+        snapshots: &snapshots,
+        emitted: HashSet::new(),
+        out: Vec::with_capacity(snapshots.len().min(limit.unwrap_or(usize::MAX))),
+        max_depth,
+        limit,
+    };
+    emit_in_document_order(&get_children_fn, root, &mut session, 0)?;
+    Ok(session.out)
+}
+
+/// Per-call state bundled together so [`emit_in_document_order`] stays
+/// under the `too_many_arguments` clippy threshold and so the read-only
+/// (`snapshots`, `max_depth`, `limit`) and write (`emitted`, `out`) halves
+/// of the walk live in one place.
+struct DocOrderEmit<'a> {
+    snapshots: &'a HashMap<u64, ElementData>,
+    emitted: HashSet<u64>,
+    out: Vec<ElementData>,
+    max_depth: u32,
+    limit: Option<usize>,
+}
+
+impl DocOrderEmit<'_> {
+    /// True if we've hit `limit` (when set).
+    fn at_limit(&self) -> bool {
+        self.limit.is_some_and(|l| self.out.len() >= l)
+    }
+}
+
+/// DFS-walk the tree and emit each handle in `session.snapshots` exactly
+/// once, in document order, stopping once `limit` is hit or every handle
+/// has been emitted.
+fn emit_in_document_order(
+    get_children_fn: &impl Fn(Option<&ElementData>) -> Result<Vec<ElementData>>,
+    root: Option<&ElementData>,
+    session: &mut DocOrderEmit<'_>,
+    depth: u32,
+) -> Result<()> {
+    if depth > session.max_depth {
+        return Ok(());
+    }
+    if session.at_limit() {
+        return Ok(());
+    }
+    if session.emitted.len() == session.snapshots.len() {
+        // Every winning handle has been emitted — no need to keep walking.
+        return Ok(());
+    }
+    let children = get_children_fn(root)?;
+    for child in children {
+        if let Some(snap) = session.snapshots.get(&child.handle) {
+            // A handle that appears multiple times in the tree (rare, but
+            // some Qt providers expose the same node via different parents)
+            // is still emitted only once — `emitted` tracks that.
+            if session.emitted.insert(child.handle) {
+                // Prefer the snapshot captured by clause matching — it
+                // carries the attribute state the matcher actually saw.
+                session.out.push(snap.clone());
+                if session.at_limit() {
+                    return Ok(());
+                }
+            }
+        }
+        emit_in_document_order(get_children_fn, Some(&child), session, depth + 1)?;
+        if session.at_limit() {
+            return Ok(());
+        }
+    }
+    Ok(())
 }
 
 /// Apply a `:nth(N)` (1-based) filter to a candidate list, collapsing it to
@@ -1239,5 +1505,386 @@ mod tests {
 
         el.states.checked = None;
         assert!(!matches_simple(&el, &sel.segments[0].simple));
+    }
+
+    // ── SelectorGroup / comma alternation ───────────────────────────────────
+
+    #[test]
+    fn split_top_level_commas_basic() {
+        assert_eq!(split_top_level_commas("a"), vec!["a".to_string()]);
+        assert_eq!(
+            split_top_level_commas("a,b"),
+            vec!["a".to_string(), "b".to_string()],
+        );
+        assert_eq!(
+            split_top_level_commas("a , b"),
+            vec!["a ".to_string(), " b".to_string()],
+        );
+    }
+
+    #[test]
+    fn split_top_level_commas_ignores_quoted_commas() {
+        // Commas inside quoted attribute values must NOT split the group.
+        assert_eq!(
+            split_top_level_commas(r#"[name="a,b"]"#),
+            vec![r#"[name="a,b"]"#.to_string()],
+        );
+        assert_eq!(
+            split_top_level_commas(r#"[name='a,b'], button"#),
+            vec![r#"[name='a,b']"#.to_string(), " button".to_string()],
+        );
+    }
+
+    #[test]
+    fn parse_group_single_clause_matches_selector_parse() {
+        // Single-clause groups must produce one clause whose AST equals what
+        // `Selector::parse` returns. This is the "existing single-pattern
+        // selectors keep working unchanged" guarantee.
+        let group = SelectorGroup::parse("button").unwrap();
+        assert_eq!(group.clauses.len(), 1);
+        assert!(group.is_single());
+        assert!(matches!(
+            group.clauses[0].segments[0].simple.role,
+            Some(RoleMatch::Normalized(Role::Button))
+        ));
+    }
+
+    #[test]
+    fn parse_group_two_clauses() {
+        let group = SelectorGroup::parse(r#"button[name="All Clear"], button[name="Clear"]"#)
+            .expect("group parses");
+        assert_eq!(group.clauses.len(), 2);
+        assert!(!group.is_single());
+        assert_eq!(
+            group.clauses[0].segments[0].simple.filters[0].value,
+            "All Clear"
+        );
+        assert_eq!(
+            group.clauses[1].segments[0].simple.filters[0].value,
+            "Clear"
+        );
+    }
+
+    #[test]
+    fn parse_group_whitespace_tolerance() {
+        // Both `a,b` and `a , b` (and the asymmetric variants) must parse to
+        // the same shape.
+        for input in &["a,b", "a ,b", "a, b", "a , b", "a  ,  b"] {
+            let group = SelectorGroup::parse(input).expect("parses");
+            assert_eq!(group.clauses.len(), 2, "input: {input:?}");
+            assert!(matches!(
+                group.clauses[0].segments[0].simple.role,
+                Some(RoleMatch::Platform(ref s)) if s == "a"
+            ));
+            assert!(matches!(
+                group.clauses[1].segments[0].simple.role,
+                Some(RoleMatch::Platform(ref s)) if s == "b"
+            ));
+        }
+    }
+
+    #[test]
+    fn parse_group_combinator_per_clause() {
+        // `window button, dialog button` should parse as two independent
+        // selectors, each with its own combinator chain — NOT as one selector
+        // containing a stray comma.
+        let group = SelectorGroup::parse("window button, dialog button").unwrap();
+        assert_eq!(group.clauses.len(), 2);
+        assert_eq!(group.clauses[0].segments.len(), 2);
+        assert_eq!(group.clauses[1].segments.len(), 2);
+        assert!(matches!(
+            group.clauses[0].segments[0].simple.role,
+            Some(RoleMatch::Normalized(Role::Window))
+        ));
+        assert!(matches!(
+            group.clauses[1].segments[0].simple.role,
+            Some(RoleMatch::Normalized(Role::Dialog))
+        ));
+        assert_eq!(
+            group.clauses[0].segments[1].combinator,
+            Combinator::Descendant
+        );
+        assert_eq!(
+            group.clauses[1].segments[1].combinator,
+            Combinator::Descendant
+        );
+    }
+
+    #[test]
+    fn parse_group_mixed_attribute_clauses() {
+        // Different attribute filters per clause must parse independently —
+        // makes sure the `[...]` machinery doesn't carry state across commas.
+        let group =
+            SelectorGroup::parse(r#"button[name="OK"], text_field[name*="search"]"#).unwrap();
+        assert_eq!(group.clauses.len(), 2);
+        assert_eq!(
+            group.clauses[0].segments[0].simple.filters[0].op,
+            MatchOp::Exact
+        );
+        assert_eq!(
+            group.clauses[1].segments[0].simple.filters[0].op,
+            MatchOp::Contains
+        );
+    }
+
+    #[test]
+    fn parse_group_quoted_comma_kept_in_value() {
+        // `[name="a,b"]` must reach the matcher with its comma intact.
+        let group = SelectorGroup::parse(r#"[name="a,b"]"#).unwrap();
+        assert_eq!(group.clauses.len(), 1);
+        assert_eq!(group.clauses[0].segments[0].simple.filters[0].value, "a,b");
+    }
+
+    #[test]
+    fn parse_group_large_count() {
+        // Eight clauses: covers "large group counts" from the issue without
+        // turning the test into a stress benchmark.
+        let input = (1..=8)
+            .map(|i| format!(r#"button[name="b{i}"]"#))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let group = SelectorGroup::parse(&input).unwrap();
+        assert_eq!(group.clauses.len(), 8);
+        for (i, clause) in group.clauses.iter().enumerate() {
+            assert_eq!(
+                clause.segments[0].simple.filters[0].value,
+                format!("b{}", i + 1)
+            );
+        }
+    }
+
+    #[test]
+    fn parse_group_empty_error() {
+        // Trailing, leading, double, and whitespace-only commas all surface
+        // as "empty clause" rather than silently producing fewer clauses.
+        for input in &[",a", "a,", ",,", "a,,b", "  ,  ", " , "] {
+            assert!(
+                SelectorGroup::parse(input).is_err(),
+                "expected parse error for {input:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn parse_group_propagates_clause_errors() {
+        // A malformed clause must surface as an Err, not silently drop.
+        assert!(SelectorGroup::parse("button, :nth(0)").is_err());
+        assert!(SelectorGroup::parse("button, foo[unterminated=").is_err());
+    }
+
+    #[test]
+    fn chain_combinator_distributes_left_side() {
+        assert_eq!(chain_combinator("a, b", " ", "c"), "a c, b c");
+        assert_eq!(chain_combinator("a, b", " > ", "c"), "a > c, b > c");
+        assert_eq!(chain_combinator("a", " ", "c"), "a c");
+    }
+
+    #[test]
+    fn chain_combinator_cross_products_groups() {
+        // Both sides are groups → cross product, keeping `a, b → x, y` in
+        // left-major order.
+        assert_eq!(chain_combinator("a, b", " ", "x, y"), "a x, a y, b x, b y",);
+    }
+
+    #[test]
+    fn chain_combinator_ignores_commas_in_quotes() {
+        // Quoted commas on either side must not cause a split.
+        assert_eq!(
+            chain_combinator(r#"[name="a,b"]"#, " ", "c"),
+            r#"[name="a,b"] c"#,
+        );
+        assert_eq!(
+            chain_combinator("p", " > ", r#"[name="a,b"]"#),
+            r#"p > [name="a,b"]"#,
+        );
+    }
+
+    // ── find_elements_in_tree_group ────────────────────────────────────────
+
+    /// Mini tree fixture for group-matching tests.
+    ///
+    /// Shape (DFS order, names in []):
+    /// ```text
+    /// root (application)
+    ///   ├── toolbar [T]
+    ///   │   ├── button [Clear]
+    ///   │   ├── text_field [Search]
+    ///   │   └── button [Save]
+    ///   └── dialog [D]
+    ///       ├── button [Cancel]
+    ///       └── text_field [Password]
+    /// ```
+    struct GroupRow {
+        handle: u64,
+        role: Role,
+        name: &'static str,
+        parent: Option<u64>,
+    }
+
+    fn group_fixture() -> Vec<GroupRow> {
+        vec![
+            GroupRow {
+                handle: 0,
+                role: Role::Application,
+                name: "root",
+                parent: None,
+            },
+            GroupRow {
+                handle: 1,
+                role: Role::Toolbar,
+                name: "T",
+                parent: Some(0),
+            },
+            GroupRow {
+                handle: 2,
+                role: Role::Button,
+                name: "Clear",
+                parent: Some(1),
+            },
+            GroupRow {
+                handle: 3,
+                role: Role::TextField,
+                name: "Search",
+                parent: Some(1),
+            },
+            GroupRow {
+                handle: 4,
+                role: Role::Button,
+                name: "Save",
+                parent: Some(1),
+            },
+            GroupRow {
+                handle: 5,
+                role: Role::Dialog,
+                name: "D",
+                parent: Some(0),
+            },
+            GroupRow {
+                handle: 6,
+                role: Role::Button,
+                name: "Cancel",
+                parent: Some(5),
+            },
+            GroupRow {
+                handle: 7,
+                role: Role::TextField,
+                name: "Password",
+                parent: Some(5),
+            },
+        ]
+    }
+
+    fn group_get_children(
+        tree: &[GroupRow],
+    ) -> impl Fn(Option<&ElementData>) -> Result<Vec<ElementData>> + '_ {
+        let make_data = |row: &GroupRow| ElementData {
+            role: row.role,
+            name: Some(row.name.to_string()),
+            value: None,
+            description: None,
+            bounds: None,
+            actions: vec![],
+            states: crate::element::StateSet::default(),
+            numeric_value: None,
+            min_value: None,
+            max_value: None,
+            stable_id: None,
+            pid: Some(1),
+            raw: std::collections::HashMap::new(),
+            handle: row.handle,
+        };
+        move |parent: Option<&ElementData>| -> Result<Vec<ElementData>> {
+            let parent_handle = parent.map(|e| e.handle);
+            Ok(tree
+                .iter()
+                .filter(|row| row.parent == parent_handle)
+                .map(make_data)
+                .collect())
+        }
+    }
+
+    fn names(elements: &[ElementData]) -> Vec<String> {
+        elements
+            .iter()
+            .map(|e| e.name.clone().unwrap_or_default())
+            .collect()
+    }
+
+    #[test]
+    fn group_match_union_in_document_order() {
+        let tree = group_fixture();
+        let group = SelectorGroup::parse("button, text_field").unwrap();
+        let results =
+            find_elements_in_tree_group(group_get_children(&tree), None, &group, None, None)
+                .unwrap();
+        // Document order is DFS: Clear, Search, Save, Cancel, Password.
+        // NOT [all buttons, then all text_fields] — that would be the naive
+        // concat order this test guards against.
+        assert_eq!(
+            names(&results),
+            vec!["Clear", "Search", "Save", "Cancel", "Password"],
+        );
+    }
+
+    #[test]
+    fn group_match_dedup_overlapping_clauses() {
+        // Both clauses match the same element (`Clear`). The union must
+        // include it exactly once.
+        let tree = group_fixture();
+        let group = SelectorGroup::parse(r#"button[name="Clear"], button[name*="lea"]"#).unwrap();
+        let results =
+            find_elements_in_tree_group(group_get_children(&tree), None, &group, None, None)
+                .unwrap();
+        assert_eq!(names(&results), vec!["Clear"]);
+    }
+
+    #[test]
+    fn group_match_combinator_per_clause() {
+        // `toolbar button, dialog button` — each clause has its own
+        // combinator chain. Result: buttons under toolbar OR under dialog,
+        // in document order.
+        let tree = group_fixture();
+        let group = SelectorGroup::parse("toolbar button, dialog button").unwrap();
+        let results =
+            find_elements_in_tree_group(group_get_children(&tree), None, &group, None, None)
+                .unwrap();
+        assert_eq!(names(&results), vec!["Clear", "Save", "Cancel"]);
+    }
+
+    #[test]
+    fn group_match_limit_truncates_in_document_order() {
+        let tree = group_fixture();
+        let group = SelectorGroup::parse("button, text_field").unwrap();
+        let results =
+            find_elements_in_tree_group(group_get_children(&tree), None, &group, Some(2), None)
+                .unwrap();
+        assert_eq!(names(&results), vec!["Clear", "Search"]);
+    }
+
+    #[test]
+    fn group_match_single_clause_matches_single_path() {
+        // A 1-clause group must produce identical output to find_elements_in_tree.
+        let tree = group_fixture();
+        let sel_single = Selector::parse("button").unwrap();
+        let group_single = SelectorGroup::parse("button").unwrap();
+
+        let via_single =
+            find_elements_in_tree(group_get_children(&tree), None, &sel_single, None, None)
+                .unwrap();
+        let via_group =
+            find_elements_in_tree_group(group_get_children(&tree), None, &group_single, None, None)
+                .unwrap();
+        assert_eq!(names(&via_single), names(&via_group));
+    }
+
+    #[test]
+    fn group_match_no_matches_returns_empty() {
+        // None of the clauses match — result is empty, not an error.
+        let tree = group_fixture();
+        let group = SelectorGroup::parse(r#"button[name="Nope"], slider"#).unwrap();
+        let results =
+            find_elements_in_tree_group(group_get_children(&tree), None, &group, None, None)
+                .unwrap();
+        assert!(results.is_empty());
     }
 }

@@ -1,7 +1,7 @@
 use crate::element::ElementData;
 use crate::error::Result;
 use crate::event_provider::Subscription;
-use crate::selector::{matches_simple, Combinator, Selector, SelectorSegment};
+use crate::selector::{matches_simple, Combinator, Selector, SelectorGroup, SelectorSegment};
 
 /// Platform backend trait for accessibility tree access.
 ///
@@ -52,6 +52,40 @@ pub trait Provider: Send + Sync {
             |el| self.get_children(el),
             root,
             selector,
+            limit,
+            max_depth,
+        )
+    }
+
+    /// Search for elements matching any clause of a comma-separated selector
+    /// group.
+    ///
+    /// Forwards to [`find_elements`](Self::find_elements) once per clause and
+    /// merges results into the union, deduplicated by element identity and
+    /// returned in document order. Single-clause groups short-circuit to a
+    /// straight `find_elements` call, so providers that override the
+    /// optimized single-clause path keep their fast path.
+    fn find_elements_group(
+        &self,
+        root: Option<&ElementData>,
+        group: &SelectorGroup,
+        limit: Option<usize>,
+        max_depth: Option<u32>,
+    ) -> Result<Vec<ElementData>> {
+        if group.clauses.len() == 1 {
+            return self.find_elements(root, &group.clauses[0], limit, max_depth);
+        }
+        // Each clause goes through the provider's own (possibly optimized)
+        // `find_elements`. The merge below walks once more via
+        // `get_children` to recover document order across clauses.
+        let mut clause_results = Vec::with_capacity(group.clauses.len());
+        for clause in &group.clauses {
+            clause_results.push(self.find_elements(root, clause, None, max_depth)?);
+        }
+        crate::selector::merge_clause_results_in_document_order(
+            |el| self.get_children(el),
+            root,
+            clause_results,
             limit,
             max_depth,
         )
@@ -210,6 +244,15 @@ impl<T: Provider + ?Sized> Provider for &T {
         max_depth: Option<u32>,
     ) -> Result<Vec<ElementData>> {
         (**self).find_elements(root, selector, limit, max_depth)
+    }
+    fn find_elements_group(
+        &self,
+        root: Option<&ElementData>,
+        group: &SelectorGroup,
+        limit: Option<usize>,
+        max_depth: Option<u32>,
+    ) -> Result<Vec<ElementData>> {
+        (**self).find_elements_group(root, group, limit, max_depth)
     }
     fn narrow_multi_segment(
         &self,

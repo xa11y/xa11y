@@ -389,14 +389,15 @@ Reach for `Element` actions when you've already inspected an element — typical
 xa11y uses a CSS-like selector syntax to find elements. Selectors are used by `app.locator(selector)` to target elements for actions, waits, and queries.
 
 ```
-button                           # by role
-button[name='Submit']            # role + exact name match
-text_field[name^='Search']       # starts-with (case-insensitive)
-text_field[name*='email']        # contains (case-insensitive)
-button[name$='Cancel']           # ends-with (case-insensitive)
-group > button                   # direct child combinator
-window button[name='OK']         # descendant (any depth)
-button:nth(2)                    # 2nd match (1-based)
+button                              # by role
+button[name='Submit']               # role + exact name match
+text_field[name^='Search']          # starts-with (case-insensitive)
+text_field[name*='email']           # contains (case-insensitive)
+button[name$='Cancel']              # ends-with (case-insensitive)
+group > button                      # direct child combinator
+window button[name='OK']            # descendant (any depth)
+button:nth(2)                       # 2nd match (1-based)
+button[name='Play'], button[name='Pause']  # alternation — see below
 ```
 
 **Supported attributes:** `name`, `value`, `description`, `role`.
@@ -404,6 +405,8 @@ button:nth(2)                    # 2nd match (1-based)
 **Operators:** `=` (exact, case-sensitive), `*=` (contains), `^=` (starts-with), `$=` (ends-with). Substring operators are case-insensitive.
 
 **Roles use `snake_case`:** `button`, `text_field`, `check_box`, `radio_button`, `menu_item`, `tab_group`, `static_text`, `combo_box`, `list_item`, `table_row`, `table_cell`, `scroll_bar`, `progress_bar`, `tree_item`, `web_area`, `split_group`, `spin_button`, etc.
+
+**Selector groups (alternation):** A top-level comma separates alternation clauses, just like CSS selector lists. The result is the union of each clause's matches, deduplicated by element identity and returned in document order. Each clause is parsed independently, so combinators apply per clause: `window button, dialog button` means "buttons under a window *or* buttons under a dialog." Chained `descendant()` / `child()` calls on a group locator distribute over every clause — `locator("toolbar, dialog").descendant("button")` is equivalent to `locator("toolbar button, dialog button")`. Commas inside quoted attribute values (`[name='a,b']`) are not separators.
 
 ## Events
 
