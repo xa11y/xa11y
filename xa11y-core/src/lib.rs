@@ -31,7 +31,7 @@ pub use locator::Locator;
 pub use provider::Provider;
 pub use role::{unknown_role, Role};
 pub use screenshot::{Screenshot, ScreenshotProvider};
-pub use selector::Selector;
+pub use selector::{Selector, SelectorGroup};
 
 /// Maximum tree traversal depth for providers. Prevents stack overflow from
 /// circular accessibility trees (e.g. Qt/PySide6 apps where the application

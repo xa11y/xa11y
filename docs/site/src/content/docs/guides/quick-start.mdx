@@ -170,15 +170,43 @@ After changing permissions, restart your terminal for them to take effect. `App:
 
 ## Selector syntax
 
-| Pattern                        | Meaning                          |
-| ------------------------------ | -------------------------------- |
-| `button`                       | Elements with role `Button`      |
-| `button[name='OK']`            | Button named exactly "OK"        |
-| `textfield[name^='Search']`    | Text field whose name starts with "Search" |
-| `textfield[name*='email']`     | Text field whose name contains "email" |
-| `group > button`               | Buttons that are direct children of a group |
-| `window button[name='OK']`     | Button named "OK" anywhere inside a window |
-| `button:nth(2)`                | The 2nd button match             |
+| Pattern                                    | Meaning                          |
+| ------------------------------------------ | -------------------------------- |
+| `button`                                   | Elements with role `Button`      |
+| `button[name='OK']`                        | Button named exactly "OK"        |
+| `textfield[name^='Search']`                | Text field whose name starts with "Search" |
+| `textfield[name*='email']`                 | Text field whose name contains "email" |
+| `group > button`                           | Buttons that are direct children of a group |
+| `window button[name='OK']`                 | Button named "OK" anywhere inside a window |
+| `button:nth(2)`                            | The 2nd button match             |
+| `button[name='All Clear'], button[name='Clear']` | Either button — see *Selector groups* below |
+
+### Selector groups (alternation)
+
+A top-level comma separates *alternation clauses*: the result is the union
+of each clause's matches, deduplicated by element identity and returned in
+document order — the same semantics CSS uses for selector lists. This is
+useful when the label of an element changes with state and you want one
+locator that handles every variant:
+
+```python
+# macOS Calculator's leftmost button is "All Clear" when the display is 0
+# and "Clear" once you've typed anything — match either.
+app.locator("button[name='All Clear'], button[name='Clear']").press()
+```
+
+Each clause is parsed independently, so combinators apply per clause:
+`window button, dialog button` reads as "(window > > button) or (dialog > >
+button)", not as a stray comma inside one selector. Chained
+[`descendant()`](/api/rust/) and [`child()`](/api/rust/) calls on a group
+locator distribute over every clause:
+
+```python
+# Equivalent to: "toolbar button, dialog button"
+app.locator("toolbar, dialog").descendant("button")
+```
+
+Commas inside quoted attribute values (`[name='a,b']`) are not separators.
 
 ## Next steps
 
