@@ -263,7 +263,8 @@ mod tests {
 
     fn mock_app() -> App {
         let provider: Arc<dyn Provider> = build_provider();
-        App::by_name_with(provider, "TestApp").expect("TestApp must exist in mock tree")
+        App::by_name_with(provider, "TestApp", Duration::ZERO)
+            .expect("TestApp must exist in mock tree")
     }
 
     #[test]

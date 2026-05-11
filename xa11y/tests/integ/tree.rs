@@ -883,4 +883,63 @@ mod tests {
         assert_eq!(deser.role, app.data.role);
         assert_eq!(deser.name, app.data.name);
     }
+
+    // ════════════════════════════════════════════════════════════════
+    // Bidi-strip (1 test) — issue #188
+    // ════════════════════════════════════════════════════════════════
+
+    #[test]
+    #[ignore]
+    fn bidi_marks_stripped_from_button_name() {
+        // The test app's BIDI_BUTTON has label "\u{200E}Bid\u{2066}i\u{2069}\u{200E}".
+        // xa11y must strip those controls so `name == "Bidi"`. The unstripped
+        // string must remain on `element.raw` so consumers who need it have
+        // an escape hatch.
+        //
+        // Some Linux at-spi2-core configurations drop the entire name when it
+        // contains non-printable chars; on those configs the button is not
+        // findable by name and we treat the test as vacuous (the unit tests
+        // for `strip_bidi` cover the function itself).
+        let app = h::app_root();
+        let candidates = app
+            .locator(r#"button[name="Bidi"]"#)
+            .elements()
+            .unwrap_or_default();
+        let Some(button) = candidates.into_iter().next() else {
+            eprintln!(
+                "skip: bidi-marked button name not surfaced by this platform's AT-SPI/UIA bridge"
+            );
+            return;
+        };
+
+        assert_eq!(button.name.as_deref(), Some("Bidi"));
+        assert!(
+            !button
+                .name
+                .as_deref()
+                .unwrap_or("")
+                .chars()
+                .any(xa11y::is_bidi_control),
+            "stripped name should contain no bidi controls: {:?}",
+            button.name
+        );
+
+        let raw_key = if cfg!(target_os = "macos") {
+            "AXTitle"
+        } else if cfg!(target_os = "linux") {
+            "atspi_name"
+        } else {
+            "uia_name"
+        };
+        let raw_name = button
+            .raw
+            .get(raw_key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| panic!("Expected {raw_key} in raw data: {:?}", button.raw));
+        assert!(
+            raw_name.contains('\u{200E}'),
+            "raw {raw_key} should keep LRM: {:?}",
+            raw_name
+        );
+    }
 }

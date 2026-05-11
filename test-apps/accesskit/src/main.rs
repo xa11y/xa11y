@@ -100,6 +100,14 @@ const REMOVE_ITEM_BTN: NodeId = NodeId(71);
 const ANNOUNCE_BTN: NodeId = NodeId(72);
 const ANNOUNCE_LIVE_REGION: NodeId = NodeId(73);
 
+// Bidi-marks button — name carries Unicode bidi format controls so the
+// xa11y bidi-strip pipeline can be exercised end-to-end. Kept on its own
+// (instead of bidi-marking Submit) because some Linux AT-SPI configurations
+// drop the name entirely when it contains non-printable controls; using a
+// dedicated button means that platform quirk doesn't take other tests with
+// it. See issue #188.
+const BIDI_BUTTON: NodeId = NodeId(74);
+
 // Dynamic items start at NodeId(100) to leave room for future static nodes
 const DYNAMIC_ITEM_BASE: u64 = 100;
 
@@ -346,7 +354,7 @@ fn build_main_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
     // Button row
     let mut button_row = Node::new(Role::GenericContainer);
     button_row.set_label("Button Row");
-    button_row.set_children(vec![SUBMIT_BTN, CANCEL_BTN]);
+    button_row.set_children(vec![SUBMIT_BTN, CANCEL_BTN, BIDI_BUTTON]);
     nodes.push((BUTTON_ROW, button_row));
 
     let mut submit = Node::new(Role::Button);
@@ -375,6 +383,20 @@ fn build_main_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
         y1: 150.0,
     });
     nodes.push((CANCEL_BTN, cancel));
+
+    // Bidi-marks button — see BIDI_BUTTON comment near node-id constants.
+    // Dedicated so the bidi pipeline can be tested without Submit/Cancel
+    // becoming undiscoverable on Linux configs that drop bidi-marked names.
+    let mut bidi = Node::new(Role::Button);
+    bidi.set_label("\u{200E}Bid\u{2066}i\u{2069}\u{200E}");
+    bidi.add_action(Action::Click);
+    bidi.set_bounds(Rect {
+        x0: 200.0,
+        y0: 120.0,
+        x1: 260.0,
+        y1: 150.0,
+    });
+    nodes.push((BIDI_BUTTON, bidi));
 
     // Checkbox
     let mut checkbox = Node::new(Role::CheckBox);

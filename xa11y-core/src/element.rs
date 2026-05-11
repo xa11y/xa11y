@@ -19,13 +19,28 @@ pub struct ElementData {
     /// Element role
     pub role: Role,
 
-    /// Human-readable name (title, label)
+    /// Human-readable name (title, label).
+    ///
+    /// Stripped of Unicode bidi format controls (LRM, RLM, embeddings,
+    /// overrides, isolates) so equality assertions match the logical text.
+    /// The unstripped platform string is preserved in [`Self::raw`] under the
+    /// platform-native key (e.g. `AXTitle` on macOS, `atspi_name` on Linux,
+    /// `uia_name` on Windows). See [`crate::text::strip_bidi`].
     pub name: Option<String>,
 
-    /// Current value (text content, slider position, etc.)
+    /// Current value (text content, slider position, etc.).
+    ///
+    /// Stripped of Unicode bidi format controls. The unstripped platform
+    /// string is preserved in [`Self::raw`] (`AXValue` on macOS, `atspi_value`
+    /// on Linux, `uia_value` on Windows). See [`crate::text::strip_bidi`].
     pub value: Option<String>,
 
-    /// Supplementary description (tooltip, help text)
+    /// Supplementary description (tooltip, help text).
+    ///
+    /// Stripped of Unicode bidi format controls. The unstripped platform
+    /// string is preserved in [`Self::raw`] (`AXDescription`/`AXHelp` on
+    /// macOS, `atspi_description` on Linux, `uia_help_text` on Windows).
+    /// See [`crate::text::strip_bidi`].
     pub description: Option<String>,
 
     /// Bounding rectangle in screen pixels

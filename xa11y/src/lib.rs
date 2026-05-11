@@ -37,6 +37,11 @@ pub use xa11y_core::{
 pub use xa11y_core::screenshot;
 pub use xa11y_core::{Screenshot, ScreenshotProvider};
 
+// Re-export bidi text helpers (see `xa11y_core::text`). `name`, `value`, and
+// `description` on `ElementData` are stripped of bidi format controls; these
+// helpers let callers strip ad-hoc strings or check membership.
+pub use xa11y_core::{is_bidi_control, strip_bidi, strip_bidi_opt};
+
 // Implementation details used by platform backends and Python bindings.
 #[doc(hidden)]
 pub use xa11y_core::{CancelHandle, EventReceiver, Provider, RecvStatus, Selector};
