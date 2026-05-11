@@ -34,7 +34,7 @@ fn role_named(role: Role, name: &str) -> Selector {
     }
 }
 
-/// Polling interval shared by all `*_with_timeout` lookups.
+/// Polling interval shared by all timeout-bearing lookups.
 const LOOKUP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Run `attempt` repeatedly until it succeeds or `timeout` elapses, treating
@@ -82,83 +82,66 @@ impl App {
     /// singleton provider. Use this variant when you need to supply a specific
     /// provider (e.g. a mock in unit tests).
     ///
-    /// Returns [`Error::PermissionDenied`] if the platform provider was created
-    /// without required permissions.
-    pub fn by_name_with(provider: Arc<dyn Provider>, name: &str) -> Result<Self> {
-        // Try application role first (Linux/macOS), then window role (Windows —
-        // UIA has no Application node at the top level).
-        //
-        // Selectors are built directly from the AST so app names containing
-        // `"`, `]`, or other characters significant in the selector grammar
-        // don't break or require escaping.
-        //
-        // `find_elements` returns `Ok(vec![])` for "no match" and reserves
-        // `Err(_)` for real failures (permission denied, platform errors,
-        // malformed selectors). We only fall through on an empty result —
-        // real errors must propagate so callers can distinguish "app not
-        // found" from "accessibility is broken".
-        let app_selector = role_named(Role::Application, name);
-        let results = provider.find_elements(None, &app_selector, Some(1), Some(0))?;
-        if let Some(data) = results.into_iter().next() {
-            return Ok(Self::from_data(provider, data));
-        }
-        let win_selector = role_named(Role::Window, name);
-        let results = provider.find_elements(None, &win_selector, Some(1), Some(0))?;
-        let data = results
-            .into_iter()
-            .next()
-            .ok_or_else(|| Error::SelectorNotMatched {
-                selector: format!(r#"application[name="{}"]"#, name),
-            })?;
-        Ok(Self::from_data(provider, data))
-    }
-
-    /// Like [`by_name_with`](Self::by_name_with), but polls until the app
-    /// appears or `timeout` elapses.
-    ///
-    /// Useful when the app may not yet be registered with the platform
-    /// accessibility API (e.g. just-launched test apps). Only
+    /// Polls the accessibility API until the app appears or `timeout` elapses.
+    /// `Duration::ZERO` performs exactly one attempt (no waiting). Only
     /// [`Error::SelectorNotMatched`] triggers a retry; other errors
     /// (permission, parse, platform) short-circuit immediately.
-    ///
-    /// `Duration::ZERO` is equivalent to [`by_name_with`](Self::by_name_with).
-    pub fn by_name_with_timeout(
+    pub fn by_name_with(
         provider: Arc<dyn Provider>,
         name: &str,
         timeout: Duration,
     ) -> Result<Self> {
-        poll_lookup(timeout, || Self::by_name_with(Arc::clone(&provider), name))
+        poll_lookup(timeout, || {
+            // Try application role first (Linux/macOS), then window role
+            // (Windows — UIA has no Application node at the top level).
+            //
+            // Selectors are built directly from the AST so app names
+            // containing `"`, `]`, or other characters significant in the
+            // selector grammar don't break or require escaping.
+            //
+            // `find_elements` returns `Ok(vec![])` for "no match" and
+            // reserves `Err(_)` for real failures (permission denied,
+            // platform errors, malformed selectors). We only fall through on
+            // an empty result — real errors must propagate so callers can
+            // distinguish "app not found" from "accessibility is broken".
+            let app_selector = role_named(Role::Application, name);
+            let results = provider.find_elements(None, &app_selector, Some(1), Some(0))?;
+            if let Some(data) = results.into_iter().next() {
+                return Ok(Self::from_data(Arc::clone(&provider), data));
+            }
+            let win_selector = role_named(Role::Window, name);
+            let results = provider.find_elements(None, &win_selector, Some(1), Some(0))?;
+            let data = results
+                .into_iter()
+                .next()
+                .ok_or_else(|| Error::SelectorNotMatched {
+                    selector: format!(r#"application[name="{}"]"#, name),
+                })?;
+            Ok(Self::from_data(Arc::clone(&provider), data))
+        })
     }
 
     /// Find an application by process ID, using an explicit provider.
     ///
     /// Prefer `App::by_pid` from the `xa11y` crate which uses the global
-    /// singleton provider.
-    pub fn by_pid_with(provider: Arc<dyn Provider>, pid: u32) -> Result<Self> {
-        // Try application role first, then window role (Windows fallback).
-        // Propagate real errors; only fall through when the role yielded
-        // no matching element.
-        for role in ["application", "window"] {
-            let selector = Selector::parse(role)?;
-            let results = provider.find_elements(None, &selector, None, Some(0))?;
-            if let Some(data) = results.into_iter().find(|d| d.pid == Some(pid)) {
-                return Ok(Self::from_data(provider, data));
+    /// singleton provider. See [`by_name_with`](Self::by_name_with) for the
+    /// timeout / polling semantics.
+    pub fn by_pid_with(provider: Arc<dyn Provider>, pid: u32, timeout: Duration) -> Result<Self> {
+        poll_lookup(timeout, || {
+            // Try application role first, then window role (Windows
+            // fallback). Propagate real errors; only fall through when the
+            // role yielded no matching element.
+            for role in ["application", "window"] {
+                let selector = Selector::parse(role)?;
+                let results = provider.find_elements(None, &selector, None, Some(0))?;
+                if let Some(data) = results.into_iter().find(|d| d.pid == Some(pid)) {
+                    return Ok(Self::from_data(Arc::clone(&provider), data));
+                }
             }
-        }
-        Err(Error::SelectorNotMatched {
-            selector: format!("application with pid={}", pid),
+            Err(Error::SelectorNotMatched {
+                selector: format!("application with pid={}", pid),
+            })
         })
-    }
-
-    /// Like [`by_pid_with`](Self::by_pid_with), but polls until the app
-    /// appears or `timeout` elapses. See [`by_name_with_timeout`](Self::by_name_with_timeout)
-    /// for the retry semantics.
-    pub fn by_pid_with_timeout(
-        provider: Arc<dyn Provider>,
-        pid: u32,
-        timeout: Duration,
-    ) -> Result<Self> {
-        poll_lookup(timeout, || Self::by_pid_with(Arc::clone(&provider), pid))
     }
 
     /// List all running applications, using an explicit provider.
@@ -251,8 +234,9 @@ mod tests {
 
     #[test]
     fn role_named_preserves_literal_name_with_special_chars() {
-        // Regression for a selector-injection bug: `App::by_name_with` used
-        // `format!(r#"application[name="{}"]"#, name)` without escaping, so a
+        // Regression for a selector-injection bug: an earlier `by_name`
+        // implementation used `format!(r#"application[name="{}"]"#, name)`
+        // without escaping, so a
         // name containing `"` terminated the attribute value early and either
         // failed to parse or matched the wrong element. The AST-based builder
         // stores the literal name in the filter value.

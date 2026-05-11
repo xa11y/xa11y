@@ -296,9 +296,9 @@ pub(crate) fn parse_button(raw: &str) -> Result<MouseButton> {
 
 pub(crate) fn resolve_app(opts: &Opts) -> Result<App> {
     if let Some(name) = &opts.app {
-        App::by_name(name)
+        App::by_name(name, std::time::Duration::ZERO)
     } else if let Some(pid) = opts.pid {
-        App::by_pid(pid)
+        App::by_pid(pid, std::time::Duration::ZERO)
     } else {
         Err(Error::Platform {
             code: -1,

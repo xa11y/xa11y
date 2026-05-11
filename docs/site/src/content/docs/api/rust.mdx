@@ -11,8 +11,9 @@ cargo add xa11y
 
 ```rust
 use xa11y::*;
+use std::time::Duration;
 
-let safari = App::by_name("Safari")?;
+let safari = App::by_name("Safari", Duration::from_secs(5))?;
 
 for button in safari.locator("button").elements()? {
     println!("{:?}", button.name);

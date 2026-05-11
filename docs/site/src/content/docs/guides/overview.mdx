@@ -87,12 +87,16 @@ xa11y is built around three core types:
   <TabItem label="Rust">
     ```rust
     use xa11y::*;
+    use std::time::Duration;
 
-    // Connect by name (returns PermissionDenied if accessibility is not enabled)
-    let safari = App::by_name("Safari")?;
+    // Connect by name. The second argument is a polling timeout —
+    // useful when the app may not yet be registered with the a11y API.
+    // Pass `Duration::ZERO` for a single attempt with no waiting.
+    // (Returns PermissionDenied if accessibility is not enabled.)
+    let safari = App::by_name("Safari", Duration::from_secs(5))?;
 
     // Connect by PID
-    let app = App::by_pid(1234)?;
+    let app = App::by_pid(1234, Duration::from_secs(5))?;
 
     // List all running apps
     let all = App::list()?;
@@ -137,7 +141,7 @@ xa11y is built around three core types:
 <Tabs syncKey="lang">
   <TabItem label="Rust">
     ```rust
-    let calc = App::by_name("Calculator")?;
+    let calc = App::by_name("Calculator", Duration::from_secs(5))?;
     let windows = calc.children()?;
 
     let children = windows[0].children()?;
@@ -265,7 +269,7 @@ A `Locator` holds a selector and **re-resolves on every operation**. Create one 
 <Tabs syncKey="lang">
   <TabItem label="Rust">
     ```rust
-    let calc = App::by_name("Calculator")?;
+    let calc = App::by_name("Calculator", Duration::from_secs(5))?;
     let btn = calc.locator("button[name='=']");
 
     // Each call re-resolves the selector, finds the element, then acts
@@ -414,7 +418,7 @@ Subscribe to accessibility events from an app with `app.subscribe()`.
     The returned `Subscription` is a pull-based event stream — no filters or selectors, just all events for the app.
 
     ```rust
-    let calc = App::by_name("Calculator")?;
+    let calc = App::by_name("Calculator", Duration::from_secs(5))?;
     let sub = calc.subscribe()?;
 
     // Block until a specific event arrives

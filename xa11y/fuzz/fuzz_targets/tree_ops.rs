@@ -15,6 +15,7 @@
 mod mock;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
@@ -102,11 +103,12 @@ fuzz_target!(|input: FuzzInput| {
 
     // ── 4. App::by_name_with — exercises name-embedding in selector string ────
     //    Names containing '"' produce invalid selector strings; the method must
-    //    return Err, not panic.
-    let _ = App::by_name_with(Arc::clone(&provider), &input.app_name);
+    //    return Err, not panic. Fuzzing wants a single attempt per input —
+    //    `Duration::ZERO` skips the polling loop.
+    let _ = App::by_name_with(Arc::clone(&provider), &input.app_name, Duration::ZERO);
 
     // ── 5. App::by_pid_with ───────────────────────────────────────────────────
-    let _ = App::by_pid_with(Arc::clone(&provider), input.pid);
+    let _ = App::by_pid_with(Arc::clone(&provider), input.pid, Duration::ZERO);
 
     // ── 6. App::list_with → children, locator, serde ─────────────────────────
     let Ok(apps) = App::list_with(Arc::clone(&provider)) else {

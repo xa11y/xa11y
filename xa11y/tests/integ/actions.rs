@@ -393,7 +393,7 @@ mod tests {
     #[test]
     #[ignore]
     fn error_app_not_found() {
-        let result = App::by_name("nonexistent_app_12345");
+        let result = App::by_name("nonexistent_app_12345", std::time::Duration::ZERO);
         assert!(result.is_err());
         assert!(matches!(
             result.unwrap_err(),

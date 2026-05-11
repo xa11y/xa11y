@@ -974,16 +974,16 @@ impl Subscription {
 
 /// A running application — the entry point for accessibility queries.
 ///
-/// Convert an optional `timeout` in seconds (as exposed to Python) to a
-/// [`Duration`]. `None` and zero both mean "no polling, single attempt".
-/// Negative or non-finite values raise `ValueError`.
-fn timeout_from(timeout: Option<f64>) -> PyResult<Duration> {
-    match timeout {
-        None => Ok(Duration::ZERO),
-        Some(t) if t.is_finite() && t >= 0.0 => Ok(Duration::from_secs_f64(t)),
-        Some(t) => Err(PyValueError::new_err(format!(
-            "timeout must be a non-negative number of seconds, got {t}"
-        ))),
+/// Convert a `timeout` in seconds (as exposed to Python) to a [`Duration`].
+/// Zero means "no polling, single attempt". Negative or non-finite values
+/// raise `ValueError`.
+fn timeout_from(timeout: f64) -> PyResult<Duration> {
+    if timeout.is_finite() && timeout >= 0.0 {
+        Ok(Duration::from_secs_f64(timeout))
+    } else {
+        Err(PyValueError::new_err(format!(
+            "timeout must be a non-negative number of seconds, got {timeout}"
+        )))
     }
 }
 
@@ -1003,17 +1003,19 @@ struct App {
 impl App {
     /// Find an application by exact name.
     ///
-    /// If `timeout` is set (in seconds), poll the accessibility API until the
-    /// app appears or the timeout elapses. Useful when the app may not yet
-    /// be registered (e.g. just-launched). Only "not found" errors trigger a
-    /// retry; other errors fail fast.
+    /// Polls the accessibility API until the app appears or `timeout`
+    /// (in seconds) elapses. Defaults to 5 seconds — pass `timeout=0`
+    /// for a single attempt with no waiting. Only "not found" errors
+    /// trigger a retry; other errors fail fast.
     #[staticmethod]
-    #[pyo3(signature = (name, *, timeout=None))]
-    fn by_name(py: Python<'_>, name: &str, timeout: Option<f64>) -> PyResult<Self> {
-        let provider = get_provider()?;
+    #[pyo3(signature = (name, *, timeout=5.0))]
+    fn by_name(py: Python<'_>, name: &str, timeout: f64) -> PyResult<Self> {
+        // Validate `timeout` before touching the provider so callers get a
+        // crisp `ValueError` regardless of whether accessibility is set up.
         let timeout = timeout_from(timeout)?;
+        let provider = get_provider()?;
         let app = py
-            .allow_threads(move || xa11y::App::by_name_with_timeout(provider, name, timeout))
+            .allow_threads(move || xa11y::App::by_name_with(provider, name, timeout))
             .map_err(to_py_err)?;
         Ok(Self::from_core(app))
     }
@@ -1022,12 +1024,12 @@ impl App {
     ///
     /// See [`by_name`] for `timeout` semantics.
     #[staticmethod]
-    #[pyo3(signature = (pid, *, timeout=None))]
-    fn by_pid(py: Python<'_>, pid: u32, timeout: Option<f64>) -> PyResult<Self> {
-        let provider = get_provider()?;
+    #[pyo3(signature = (pid, *, timeout=5.0))]
+    fn by_pid(py: Python<'_>, pid: u32, timeout: f64) -> PyResult<Self> {
         let timeout = timeout_from(timeout)?;
+        let provider = get_provider()?;
         let app = py
-            .allow_threads(move || xa11y::App::by_pid_with_timeout(provider, pid, timeout))
+            .allow_threads(move || xa11y::App::by_pid_with(provider, pid, timeout))
             .map_err(to_py_err)?;
         Ok(Self::from_core(app))
     }
