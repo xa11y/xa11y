@@ -44,4 +44,15 @@ export default defineConfig({
       },
     }),
   ],
+  // Allow `?raw` imports from the repo-root `examples/` directory so the
+  // Desktop Testing page can embed the canonical runnable example sources
+  // directly. The CI `examples` job exercises those same files, so the
+  // versions shown in the docs cannot drift.
+  vite: {
+    server: {
+      fs: {
+        allow: ["../.."],
+      },
+    },
+  },
 });

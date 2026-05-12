@@ -2824,6 +2824,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "xa11y-example-end-to-end"
+version = "0.0.0"
+dependencies = [
+ "xa11y",
+]
+
+[[package]]
 name = "xa11y-fuzz"
 version = "0.8.0"
 dependencies = [

@@ -442,6 +442,149 @@ jobs:
         shell: bash
         run: .venv-integ/Scripts/python.exe tests/harness/launch.py ${{ matrix.app }} python js cli
 
+  # ── Published end-to-end examples (issue #192) ─────────────────────
+  #
+  # Each cell runs the four `examples/` files against the AccessKit test
+  # app on the target OS. The examples are self-contained: each one
+  # launches the app, polls for registration, exercises the public API,
+  # and tears the subprocess down. CI here guarantees they don't rot.
+  examples:
+    name: Examples on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-examples-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-examples-
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: xa11y-js/package-lock.json
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          version: 1
+          packages: >-
+            xvfb dbus dbus-x11 fluxbox
+            at-spi2-core
+            libxkbcommon-x11-0 libxkbcommon-x11-dev
+            libxcursor1 libxrandr2 libxi6
+            libx11-xcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0
+            libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1
+            libxcb-image0 libxcb-render-util0 libxcb-xkb1
+
+      # ── Build everything the examples need ───────────────────────────
+      - name: Build workspace (test app, CLI, Rust example)
+        run: cargo build --workspace
+
+      - name: Create virtualenv and install Python bindings
+        if: runner.os != 'Windows'
+        run: |
+          python -m venv .venv-examples
+          .venv-examples/bin/pip install maturin
+          .venv-examples/bin/pip install -e xa11y-python
+
+      - name: Create virtualenv and install Python bindings (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          python -m venv .venv-examples
+          .venv-examples/Scripts/pip.exe install maturin
+          .venv-examples/Scripts/pip.exe install -e xa11y-python
+
+      - name: Cache xa11y-js node_modules and native target
+        uses: actions/cache@v5
+        with:
+          path: |
+            xa11y-js/node_modules
+            xa11y-js/target
+          key: ${{ runner.os }}-xa11y-js-examples-${{ hashFiles('xa11y-js/package-lock.json', 'xa11y-js/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-xa11y-js-examples-
+
+      - name: Build xa11y-js bindings
+        working-directory: xa11y-js
+        run: npm install && npm run build:debug
+
+      # ── macOS: grant accessibility permission to the interpreters ────
+      - name: Grant accessibility TCC permission (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          PYTHON_PATH=$(.venv-examples/bin/python -c "import sys; print(sys.executable)")
+          NODE_PATH=$(command -v node)
+          CARGO_PATH=$(command -v cargo)
+          BASH_PATH=$(command -v bash)
+          for client in "$PYTHON_PATH" "$NODE_PATH" "$CARGO_PATH" "$BASH_PATH"; do
+            echo "Granting TCC kTCCServiceAccessibility to: $client"
+            sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+              "INSERT OR REPLACE INTO access(service,client,client_type,auth_value,auth_reason,auth_version,csreq,policy_id,indirect_object_identifier_type,indirect_object_identifier,indirect_object_code_identity,flags,last_modified) \
+               VALUES('kTCCServiceAccessibility','${client}',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));"
+          done
+          sudo launchctl stop com.apple.tccd 2>/dev/null || true
+          sleep 2
+
+      # ── Run all four examples ────────────────────────────────────────
+      # Linux wraps every run in Xvfb + dbus-run-session + the AT-SPI bridge
+      # setup that the existing integ harness uses (scripts/setup_linux_a11y.sh).
+      - name: Run examples (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1280x1024x24 -ac &
+          XVFB_PID=$!
+          trap "kill $XVFB_PID 2>/dev/null || true" EXIT
+          sleep 1
+          dbus-run-session -- bash -c '
+            set -euo pipefail
+            source scripts/setup_linux_a11y.sh
+            cargo run -p xa11y-example-end-to-end
+            .venv-examples/bin/python examples/python/end_to_end.py
+            node examples/js/end_to_end.mjs
+            bash examples/cli/end_to_end.sh
+          '
+
+      - name: Run examples (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cargo run -p xa11y-example-end-to-end
+          .venv-examples/bin/python examples/python/end_to_end.py
+          node examples/js/end_to_end.mjs
+          bash examples/cli/end_to_end.sh
+
+      - name: Run examples (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cargo run -p xa11y-example-end-to-end
+          .venv-examples/Scripts/python.exe examples/python/end_to_end.py
+          node examples/js/end_to_end.mjs
+          bash examples/cli/end_to_end.sh
+
   # ── Lint & format ──────────────────────────────────────────────────
   lint:
     name: Lint & Format
