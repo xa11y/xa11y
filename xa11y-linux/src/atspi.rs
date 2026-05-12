@@ -5,9 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use rayon::prelude::*;
-use xa11y_core::selector::{Combinator, SelectorSegment};
 use xa11y_core::{
-    ElementData, Error, Provider, Rect, Result, Role, Selector, StateSet, Subscription, Toggled,
+    ElementData, Error, Provider, Rect, Result, Role, StateSet, Subscription, Toggled,
 };
 use zbus::blocking::{Connection, Proxy};
 
@@ -1109,19 +1108,23 @@ impl LinuxProvider {
         true
     }
 
-    /// DFS collect AccessibleRefs matching a SimpleSelector without building
-    /// full ElementData. Only the attributes required by the selector are
-    /// fetched for each candidate.
+    /// ONE DFS over the subtree, evaluating each clause's first SimpleSelector
+    /// against every visited node. Emits `(clause_idx, AccessibleRef)` pairs
+    /// in document order; a node that matches multiple clauses is emitted
+    /// once per matching clause (the merge step in `find_elements_group`
+    /// collapses these by `(bus_name, path)` identity).
     ///
-    /// Children at each level are processed in parallel via rayon.
-    fn collect_matching_refs(
+    /// This is the "push-down to the platform query per group" core: a
+    /// selector group like `button, text_field` traverses the AT-SPI tree
+    /// exactly once regardless of clause count, instead of N separate walks.
+    fn collect_matching_refs_group(
         &self,
         parent: &AccessibleRef,
-        simple: &xa11y_core::selector::SimpleSelector,
+        clauses: &[&xa11y_core::selector::SimpleSelector],
         depth: u32,
         max_depth: u32,
         limit: Option<usize>,
-    ) -> Result<Vec<AccessibleRef>> {
+    ) -> Result<Vec<(usize, AccessibleRef)>> {
         if depth > max_depth {
             return Ok(vec![]);
         }
@@ -1174,7 +1177,11 @@ impl LinuxProvider {
             self.check_chromium_a11y_enabled(parent, None)?;
         }
 
-        // Process each child subtree in parallel: check match + recurse.
+        // Process each child subtree in parallel: check match against every
+        // clause + recurse. Tagging each match with `clause_idx` lets the
+        // caller route phase-2 narrowing to the right clause without
+        // re-running the first-segment match.
+        //
         // We deliberately swallow transient sibling errors here — a single
         // flaky D-Bus call on one child shouldn't fail the whole locator
         // query (the rest of this file is similarly tolerant via
@@ -1182,14 +1189,20 @@ impl LinuxProvider {
         // transient error: it's the signal that a Chromium renderer bridge
         // isn't initialised, and callers need to see it. So we propagate
         // that variant specifically and keep tolerating everything else.
-        let per_child: Vec<(Vec<AccessibleRef>, Option<Error>)> = to_search
+        // Per-child batches: matches collected during that child's subtree
+        // walk, plus the first AccessibilityNotEnabled error (if any).
+        type ChildBatch = (Vec<(usize, AccessibleRef)>, Option<Error>);
+        let per_child: Vec<ChildBatch> = to_search
             .par_iter()
             .map(|child| {
-                let mut child_results = Vec::new();
-                if self.matches_ref(child, simple) {
-                    child_results.push(child.clone());
+                let mut child_results: Vec<(usize, AccessibleRef)> = Vec::new();
+                for (idx, simple) in clauses.iter().enumerate() {
+                    if self.matches_ref(child, simple) {
+                        child_results.push((idx, child.clone()));
+                    }
                 }
-                match self.collect_matching_refs(child, simple, depth + 1, max_depth, limit) {
+                match self.collect_matching_refs_group(child, clauses, depth + 1, max_depth, limit)
+                {
                     Ok(sub) => {
                         child_results.extend(sub);
                         (child_results, None)
@@ -1204,6 +1217,13 @@ impl LinuxProvider {
         // error seen wins — any child subtree raising it means the whole
         // query is untrustworthy, so surface it rather than return partial
         // data.
+        //
+        // Note: `limit` is the *caller's* outer limit; for a multi-clause
+        // group it must not be applied per-clause (a low-priority clause's
+        // hit could come before a high-priority clause's in doc order, so
+        // truncating mid-walk would drop legitimate matches). Callers pass
+        // `None` for multi-clause queries and apply the limit after the
+        // cross-clause merge.
         let mut results = Vec::new();
         for (batch, maybe_err) in per_child {
             if let Some(err) = maybe_err {
@@ -1226,38 +1246,9 @@ impl Provider for LinuxProvider {
     fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
         match element {
             None => {
-                // Top-level: list all AT-SPI application elements
-                let registry = AccessibleRef {
-                    bus_name: "org.a11y.atspi.Registry".to_string(),
-                    path: "/org/a11y/atspi/accessible/root".to_string(),
-                };
-                let children = self.get_atspi_children(&registry)?;
-
-                // Filter valid children first, then build in parallel
-                let valid: Vec<(&AccessibleRef, String)> = children
-                    .iter()
-                    .filter(|c| c.path != "/org/a11y/atspi/null")
-                    .filter_map(|c| {
-                        let name = self.get_name(c).unwrap_or_default();
-                        if name.is_empty() {
-                            None
-                        } else {
-                            Some((c, name))
-                        }
-                    })
-                    .collect();
-
-                let results: Vec<ElementData> = valid
-                    .par_iter()
-                    .map(|(child, app_name)| {
-                        let pid = self.get_app_pid(child);
-                        let mut data = self.build_element_data(child, pid);
-                        data.name = Some(app_name.clone());
-                        data
-                    })
-                    .collect();
-
-                Ok(results)
+                // Top-level: delegate to `list_apps()`, the canonical
+                // discovery primitive.
+                self.list_apps()
             }
             Some(element_data) => {
                 let aref = self.get_cached(element_data.handle)?;
@@ -1309,162 +1300,158 @@ impl Provider for LinuxProvider {
         }
     }
 
-    fn find_elements(
+    fn find_elements_group(
         &self,
-        root: Option<&ElementData>,
-        selector: &Selector,
+        root: &ElementData,
+        group: &xa11y_core::selector::SelectorGroup,
         limit: Option<usize>,
         max_depth: Option<u32>,
     ) -> Result<Vec<ElementData>> {
-        if selector.segments.is_empty() {
+        if group.clauses.is_empty() {
+            return Ok(vec![]);
+        }
+        // Reject any clause with zero segments early — `clause.segments[0]`
+        // below would otherwise panic.
+        if group.clauses.iter().any(|c| c.segments.is_empty()) {
             return Ok(vec![]);
         }
 
+        // ONE AT-SPI walk that evaluates every clause's first SimpleSelector
+        // against each visited node, then per-clause phase-2 narrowing on
+        // the small candidate sets that fall out. Dedup uses
+        // `(bus_name, path)` — the only AT-SPI identifier that's stable
+        // across the per-clause narrowings (handles are minted fresh on
+        // each `build_element_data` call).
+        //
+        // App discovery is handled separately by `list_apps()` — `root` is
+        // always present here.
         let max_depth_val = max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH);
 
-        // Phase 1: lightweight ref-based search for first segment.
-        // Only the attributes the selector needs are fetched per candidate.
-        let first = &selector.segments[0].simple;
+        let firsts: Vec<&xa11y_core::selector::SimpleSelector> = group
+            .clauses
+            .iter()
+            .map(|c| &c.segments[0].simple)
+            .collect();
 
-        let phase1_limit = if selector.segments.len() == 1 {
-            limit
+        let start_ref = self.get_cached(root.handle)?;
+
+        // ── Phase-1 limit short-circuit ───────────────────────────
+        // When there's exactly one clause, propagate the user's `limit`
+        // (adjusted for `:nth`) to the AT-SPI walk so e.g.
+        // `app.locator("button").first()` stops at the first match. With
+        // multiple clauses, phase-1 hits for clause N might come before
+        // clause M's in doc order, so we need the union before truncating.
+        // (Critical on Electron-scale apps where this prevents 50k-node
+        // walks.)
+        let phase1_limit = if group.clauses.len() == 1 {
+            let clause = &group.clauses[0];
+            let first = firsts[0];
+            let outer = if clause.segments.len() == 1 {
+                limit
+            } else {
+                None
+            };
+            match (outer, first.nth) {
+                (Some(l), Some(n)) => Some(l.max(n)),
+                (_, Some(n)) => Some(n),
+                (l, None) => l,
+            }
         } else {
             None
         };
-        let phase1_limit = match (phase1_limit, first.nth) {
-            (Some(l), Some(n)) => Some(l.max(n)),
-            (_, Some(n)) => Some(n),
-            (l, None) => l,
-        };
 
-        // Applications are always direct children of the registry root
-        let phase1_depth = if root.is_none()
-            && matches!(
-                first.role,
-                Some(xa11y_core::selector::RoleMatch::Normalized(
-                    Role::Application
-                ))
-            ) {
-            0
-        } else {
-            max_depth_val
-        };
+        let phase1: Vec<(usize, AccessibleRef)> =
+            self.collect_matching_refs_group(&start_ref, &firsts, 0, max_depth_val, phase1_limit)?;
 
-        let start_ref = match root {
-            None => AccessibleRef {
-                bus_name: "org.a11y.atspi.Registry".to_string(),
-                path: "/org/a11y/atspi/accessible/root".to_string(),
-            },
-            Some(el) => self.get_cached(el.handle)?,
-        };
+        let pid_from_root = root.pid;
 
-        let mut matching_refs =
-            self.collect_matching_refs(&start_ref, first, 0, phase1_depth, phase1_limit)?;
+        // Bucket phase-1 hits by clause so each clause's tail can narrow
+        // independently. `walk_pos` preserves the doc-order rank from the
+        // single walk for the final merge.
+        let mut by_clause: Vec<Vec<(usize, AccessibleRef)>> =
+            (0..group.clauses.len()).map(|_| Vec::new()).collect();
+        for (walk_pos, (clause_idx, aref)) in phase1.into_iter().enumerate() {
+            by_clause[clause_idx].push((walk_pos, aref));
+        }
 
-        let pid_from_root = root.and_then(|r| r.pid);
-
-        // Single-segment: build ElementData only for matches, apply nth/limit
-        if selector.segments.len() == 1 {
-            if let Some(nth) = first.nth {
-                if nth <= matching_refs.len() {
-                    let aref = &matching_refs[nth - 1];
-                    let pid = if root.is_none() {
-                        self.get_app_pid(aref)
-                            .or_else(|| self.get_dbus_pid(&aref.bus_name))
-                    } else {
-                        pid_from_root
-                    };
-                    return Ok(vec![self.build_element_data(aref, pid)]);
-                } else {
-                    return Ok(vec![]);
-                }
+        // For each clause, build ElementData for its phase-1 hits, then
+        // narrow through any trailing segments. Single-segment clauses
+        // skip phase 2 entirely.
+        //
+        // Each narrowed result keeps a (walk_pos, ElementData) pair: the
+        // walk_pos of its phase-1 ancestor is the doc-order anchor we use
+        // to merge across clauses at the end.
+        let mut merged: Vec<(usize, ElementData)> = Vec::new();
+        for (clause_idx, hits) in by_clause.into_iter().enumerate() {
+            if hits.is_empty() {
+                continue;
             }
-
-            if let Some(limit) = limit {
-                matching_refs.truncate(limit);
-            }
-
-            let is_root_search = root.is_none();
-            return Ok(matching_refs
+            let clause = &group.clauses[clause_idx];
+            // Build ElementData for this clause's phase-1 hits in parallel.
+            let phase1_data: Vec<(usize, ElementData)> = hits
                 .par_iter()
-                .map(|aref| {
-                    let pid = if is_root_search {
-                        self.get_app_pid(aref)
-                            .or_else(|| self.get_dbus_pid(&aref.bus_name))
-                    } else {
-                        pid_from_root
-                    };
-                    self.build_element_data(aref, pid)
+                .map(|(pos, aref)| {
+                    // `root` is always present now, so the PID comes from
+                    // the root element. No need to re-resolve via
+                    // `get_app_pid` / `get_dbus_pid`.
+                    (*pos, self.build_element_data(aref, pid_from_root))
                 })
-                .collect());
-        }
+                .collect();
 
-        // Multi-segment: build ElementData for phase 1 matches, then narrow
-        // using standard matching on the (small) candidate set.
-        let is_root_search = root.is_none();
-        let mut candidates: Vec<ElementData> = matching_refs
-            .par_iter()
-            .map(|aref| {
-                let pid = if is_root_search {
-                    self.get_app_pid(aref)
-                        .or_else(|| self.get_dbus_pid(&aref.bus_name))
-                } else {
-                    pid_from_root
-                };
-                self.build_element_data(aref, pid)
-            })
-            .collect();
+            if clause.segments.len() == 1 {
+                // Apply :nth on the first segment (per-clause, then merged).
+                let mut candidates = phase1_data;
+                if let Some(nth) = clause.segments[0].simple.nth {
+                    if nth <= candidates.len() {
+                        let kept = candidates.remove(nth - 1);
+                        candidates.clear();
+                        candidates.push(kept);
+                    } else {
+                        candidates.clear();
+                    }
+                }
+                merged.extend(candidates);
+                continue;
+            }
 
-        for segment in &selector.segments[1..] {
-            let mut next_candidates = Vec::new();
-            for candidate in &candidates {
-                match segment.combinator {
-                    Combinator::Child => {
-                        let children = self.get_children(Some(candidate))?;
-                        for child in children {
-                            if xa11y_core::selector::matches_simple(&child, &segment.simple) {
-                                next_candidates.push(child);
-                            }
-                        }
-                    }
-                    Combinator::Descendant => {
-                        let sub_selector = Selector {
-                            segments: vec![SelectorSegment {
-                                combinator: Combinator::Root,
-                                simple: segment.simple.clone(),
-                            }],
-                        };
-                        let mut sub_results = xa11y_core::selector::find_elements_in_tree(
-                            |el| self.get_children(el),
-                            Some(candidate),
-                            &sub_selector,
-                            None,
-                            Some(max_depth_val),
-                        )?;
-                        next_candidates.append(&mut sub_results);
-                    }
-                    Combinator::Root => unreachable!(),
+            // Multi-segment narrowing: re-use the trait helper. Each
+            // narrowed result is anchored at the phase-1 ancestor's
+            // walk_pos so the final sort puts it in doc order against
+            // other clauses.
+            for (anchor_pos, head) in phase1_data {
+                let narrowed = self.narrow_multi_segment(
+                    vec![head],
+                    &clause.segments[1..],
+                    max_depth_val,
+                    None,
+                )?;
+                for n in narrowed {
+                    merged.push((anchor_pos, n));
                 }
             }
-            let mut seen = HashSet::new();
-            next_candidates.retain(|e| seen.insert(e.handle));
-            candidates = next_candidates;
         }
 
-        // Apply :nth on last segment
-        if let Some(nth) = selector.segments.last().and_then(|s| s.simple.nth) {
-            if nth <= candidates.len() {
-                candidates = vec![candidates.remove(nth - 1)];
-            } else {
-                candidates.clear();
+        // Doc-order merge: stable sort by walk position. Within the same
+        // walk position multiple clauses can have emitted the same node —
+        // dedup by AT-SPI identity (`(bus_name, path)`) keeps the first.
+        merged.sort_by_key(|(pos, _)| *pos);
+        let mut seen: HashSet<(String, String)> = HashSet::new();
+        let mut out: Vec<ElementData> = Vec::with_capacity(merged.len());
+        for (_, data) in merged {
+            // Use the cached AccessibleRef for identity, not the (handle).
+            // Handle is freshly minted per `build_element_data` call so it
+            // would never collide here.
+            if let Ok(aref) = self.get_cached(data.handle) {
+                if !seen.insert((aref.bus_name.clone(), aref.path.clone())) {
+                    continue;
+                }
             }
+            out.push(data);
         }
-
-        if let Some(limit) = limit {
-            candidates.truncate(limit);
+        if let Some(l) = limit {
+            out.truncate(l);
         }
-
-        Ok(candidates)
+        Ok(out)
     }
 
     fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
@@ -1476,6 +1463,46 @@ impl Provider for LinuxProvider {
             }
             None => Ok(None),
         }
+    }
+
+    /// Enumerate top-level applications by listing direct children of the
+    /// AT-SPI registry root — every running accessibility-enabled app
+    /// registers a child accessible there. Apps with empty names are
+    /// filtered out (toolkits sometimes register transient/system
+    /// accessibles before the real app appears). PID resolution uses the
+    /// AT-SPI `Application` interface, falling back to the D-Bus owner.
+    fn list_apps(&self) -> Result<Vec<ElementData>> {
+        let registry = AccessibleRef {
+            bus_name: "org.a11y.atspi.Registry".to_string(),
+            path: "/org/a11y/atspi/accessible/root".to_string(),
+        };
+        let children = self.get_atspi_children(&registry)?;
+
+        // Filter valid children first, then build in parallel
+        let valid: Vec<(&AccessibleRef, String)> = children
+            .iter()
+            .filter(|c| c.path != "/org/a11y/atspi/null")
+            .filter_map(|c| {
+                let name = self.get_name(c).unwrap_or_default();
+                if name.is_empty() {
+                    None
+                } else {
+                    Some((c, name))
+                }
+            })
+            .collect();
+
+        let results: Vec<ElementData> = valid
+            .par_iter()
+            .map(|(child, app_name)| {
+                let pid = self.get_app_pid(child);
+                let mut data = self.build_element_data(child, pid);
+                data.name = Some(app_name.clone());
+                data
+            })
+            .collect();
+
+        Ok(results)
     }
 
     fn press(&self, element: &ElementData) -> Result<()> {

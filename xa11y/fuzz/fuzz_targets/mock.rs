@@ -157,6 +157,13 @@ impl Provider for FuzzProvider {
         Ok(self.nodes[idx].parent.map(|i| self.nodes[i].data.clone()))
     }
 
+    fn list_apps(&self) -> Result<Vec<ElementData>> {
+        if self.nodes.is_empty() {
+            return Ok(vec![]);
+        }
+        Ok(vec![self.nodes[0].data.clone()])
+    }
+
     fn press(&self, _: &ElementData) -> Result<()> { Ok(()) }
     fn focus(&self, _: &ElementData) -> Result<()> { Ok(()) }
     fn blur(&self, _: &ElementData) -> Result<()> { Ok(()) }

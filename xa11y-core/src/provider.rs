@@ -31,61 +31,83 @@ pub trait Provider: Send + Sync {
     /// Returns `None` for top-level (application) elements.
     fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>>;
 
+    /// Enumerate top-level applications visible to this provider.
+    ///
+    /// Backends return one `ElementData` per application — typically with
+    /// `role=Application`, but Windows returns `role=Window` for top-level
+    /// HWNDs because UIA exposes applications as their top-level window.
+    /// This is the dedicated discovery primitive: it replaces the previous
+    /// `find_elements(None, application_selector, .., depth=0)` idiom and
+    /// lets each backend batch the platform-specific enumeration (CGWindowList
+    /// on macOS, the AT-SPI registry on Linux, UIA's desktop root on Windows)
+    /// in one place.
+    ///
+    /// Required: every `Provider` implements this explicitly. There's no
+    /// default impl — discovery and subtree search have different cost
+    /// profiles, and silently routing app discovery through `get_children`
+    /// would hide the difference from implementors.
+    fn list_apps(&self) -> Result<Vec<ElementData>>;
+
     /// Search for elements matching a selector.
     ///
     /// The selector is already parsed by the core — providers match against it
     /// during traversal and can prune subtrees that can't match.
     ///
-    /// If `root` is `None`, searches from the system root (all applications).
+    /// `root` is the subtree root to search under (always present; use
+    /// [`list_apps`](Self::list_apps) to discover application roots first).
     /// If `limit` is `Some(n)`, stops after finding `n` matches.
     /// If `max_depth` is `Some(d)`, does not descend deeper than `d` levels.
     ///
-    /// The default implementation traverses via [`get_children`](Self::get_children).
+    /// This is a thin convenience wrapper that re-uses
+    /// [`find_elements_group`](Self::find_elements_group) with a single-clause
+    /// group. Backends do **not** override this method — they override
+    /// `find_elements_group`, and the single-clause case runs through the
+    /// same native code path as multi-clause queries.
     fn find_elements(
         &self,
-        root: Option<&ElementData>,
+        root: &ElementData,
         selector: &Selector,
         limit: Option<usize>,
         max_depth: Option<u32>,
     ) -> Result<Vec<ElementData>> {
-        crate::selector::find_elements_in_tree(
-            |el| self.get_children(el),
-            root,
-            selector,
-            limit,
-            max_depth,
-        )
+        let group = SelectorGroup {
+            clauses: vec![selector.clone()],
+        };
+        self.find_elements_group(root, &group, limit, max_depth)
     }
 
     /// Search for elements matching any clause of a comma-separated selector
-    /// group.
+    /// group, scoped to `root`'s subtree.
     ///
-    /// Forwards to [`find_elements`](Self::find_elements) once per clause and
-    /// merges results into the union, deduplicated by element identity and
-    /// returned in document order. Single-clause groups short-circuit to a
-    /// straight `find_elements` call, so providers that override the
-    /// optimized single-clause path keep their fast path.
+    /// This is the **primary search primitive** each backend should override.
+    /// A native implementation performs ONE platform-level subtree query/walk
+    /// (e.g. `FindAllBuildCache(TreeScope_Subtree)` on Windows, one DFS over
+    /// AT-SPI children on Linux, one AX walk on macOS) and evaluates every
+    /// clause inline against each visited element. This avoids the
+    /// per-clause-walk perf cliff and also keeps the cross-clause dedup
+    /// correct: because everything happens inside one call, each platform
+    /// node is visited once and platform identity is stable.
+    ///
+    /// `root` is non-optional: app discovery now goes through
+    /// [`list_apps`](Self::list_apps) and any rootless multi-app search is
+    /// performed by the caller (e.g. `Locator`) by enumerating apps and
+    /// invoking this method per app.
+    ///
+    /// The default implementation traverses via [`get_children`](Self::get_children)
+    /// and uses tree-path identity for cross-clause merging. It's the
+    /// fallback for backends that haven't shipped a native override yet —
+    /// the same path the test/mock provider exercises.
     fn find_elements_group(
         &self,
-        root: Option<&ElementData>,
+        root: &ElementData,
         group: &SelectorGroup,
         limit: Option<usize>,
         max_depth: Option<u32>,
     ) -> Result<Vec<ElementData>> {
-        if group.clauses.len() == 1 {
-            return self.find_elements(root, &group.clauses[0], limit, max_depth);
-        }
-        // Each clause goes through the provider's own (possibly optimized)
-        // `find_elements`. The merge below walks once more via
-        // `get_children` to recover document order across clauses.
-        let mut clause_results = Vec::with_capacity(group.clauses.len());
-        for clause in &group.clauses {
-            clause_results.push(self.find_elements(root, clause, None, max_depth)?);
-        }
-        crate::selector::merge_clause_results_in_document_order(
+        crate::selector::find_elements_in_tree_group(
             |el| self.get_children(el),
-            root,
-            clause_results,
+            Some(root),
+            group,
             limit,
             max_depth,
         )
@@ -119,12 +141,8 @@ pub trait Provider: Send + Sync {
                                 simple: segment.simple.clone(),
                             }],
                         };
-                        let mut sub_results = self.find_elements(
-                            Some(candidate),
-                            &sub_selector,
-                            None,
-                            Some(max_depth),
-                        )?;
+                        let mut sub_results =
+                            self.find_elements(candidate, &sub_selector, None, Some(max_depth))?;
                         next_candidates.append(&mut sub_results);
                     }
                     Combinator::Root => unreachable!(),
@@ -236,9 +254,12 @@ impl<T: Provider + ?Sized> Provider for &T {
     fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
         (**self).get_parent(element)
     }
+    fn list_apps(&self) -> Result<Vec<ElementData>> {
+        (**self).list_apps()
+    }
     fn find_elements(
         &self,
-        root: Option<&ElementData>,
+        root: &ElementData,
         selector: &Selector,
         limit: Option<usize>,
         max_depth: Option<u32>,
@@ -247,7 +268,7 @@ impl<T: Provider + ?Sized> Provider for &T {
     }
     fn find_elements_group(
         &self,
-        root: Option<&ElementData>,
+        root: &ElementData,
         group: &SelectorGroup,
         limit: Option<usize>,
         max_depth: Option<u32>,

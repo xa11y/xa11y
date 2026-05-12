@@ -61,6 +61,9 @@ impl Provider for WindowsProvider {
     fn get_parent(&self, _: &ElementData) -> Result<Option<ElementData>> {
         unreachable!()
     }
+    fn list_apps(&self) -> Result<Vec<ElementData>> {
+        unreachable!()
+    }
     fn press(&self, _: &ElementData) -> Result<()> {
         unreachable!()
     }

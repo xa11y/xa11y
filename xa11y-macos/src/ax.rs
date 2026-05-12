@@ -11,9 +11,11 @@ use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
 use rayon::prelude::*;
 
+#[cfg(test)]
+use xa11y_core::Selector;
 use xa11y_core::{
     CancelHandle, ElementData, Error, Event, EventKind, EventReceiver, Provider, Rect, Result,
-    Role, Selector, StateFlag, StateSet, Subscription, Toggled,
+    Role, StateFlag, StateSet, Subscription, Toggled,
 };
 
 // ── FFI Declarations ──────────────────────────────────────────────────────────
@@ -1651,32 +1653,41 @@ impl MacOSProvider {
         )
     }
 
-    /// Parallel DFS collecting AXElements matching a SimpleSelector without
-    /// building full ElementData. At each level, children are processed in
-    /// parallel using rayon — each child's role check and recursive subtree
-    /// search happen concurrently across threads.
+    /// Parallel DFS over the AX subtree, evaluating every clause's first
+    /// `SimpleSelector` against each visited element. Emits
+    /// `(clause_idx, AXElement)` pairs in document order. An element that
+    /// matches multiple clauses is emitted once per matching clause — the
+    /// caller deduplicates by `AXUIElement` pointer identity at merge time.
+    ///
+    /// At each level, children are processed in parallel using rayon —
+    /// each child's role check and recursive subtree search happen
+    /// concurrently across threads.
+    ///
+    /// `limit` here is the *outer* limit; for groups with more than one
+    /// clause it must be passed as `None` because cross-clause doc-order
+    /// can promote later-clause hits ahead of earlier ones.
     #[allow(clippy::too_many_arguments)] // recursive DFS with parent context
-    fn collect_matching_ax(
+    fn collect_matching_ax_group(
         &self,
         parent: &AXElement,
         parent_role: Role,
         parent_name: Option<&str>,
-        simple: &SimpleSelector,
+        clauses: &[&SimpleSelector],
         depth: u32,
         max_depth: u32,
         limit: Option<usize>,
-    ) -> Vec<AXElement> {
+    ) -> Vec<(usize, AXElement)> {
         if depth > max_depth {
             return vec![];
         }
 
         let children = ax_children(parent.as_ptr());
 
-        // Process children in parallel: check match + recurse.
-        let per_child_results: Vec<Vec<AXElement>> = children
+        // Process children in parallel: check each clause + recurse.
+        let per_child_results: Vec<Vec<(usize, AXElement)>> = children
             .par_iter()
             .map(|child| {
-                let mut child_results = Vec::new();
+                let mut child_results: Vec<(usize, AXElement)> = Vec::new();
 
                 // Fetch role+subrole once — used for filter, match, and recursion.
                 let role_str = ax_string(child.as_ptr(), "AXRole").unwrap_or_default();
@@ -1694,17 +1705,19 @@ impl MacOSProvider {
 
                 let child_role = map_ax_role(&role_str, subrole_str.as_deref());
 
-                if matches_ax_with_role(child.as_ptr(), simple, Some(child_role)) {
-                    child_results.push(child.clone());
+                for (idx, simple) in clauses.iter().enumerate() {
+                    if matches_ax_with_role(child.as_ptr(), simple, Some(child_role)) {
+                        child_results.push((idx, child.clone()));
+                    }
                 }
 
                 // Recurse into subtree.
                 let child_name = ax_string(child.as_ptr(), "AXTitle");
-                let sub = self.collect_matching_ax(
+                let sub = self.collect_matching_ax_group(
                     child,
                     child_role,
                     child_name.as_deref(),
-                    simple,
+                    clauses,
                     depth + 1,
                     max_depth,
                     limit,
@@ -1735,21 +1748,10 @@ impl Provider for MacOSProvider {
     fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
         match element {
             None => {
-                // Top-level: list all GUI apps as application elements
-                let apps = Self::list_gui_apps();
-                let mut results = Vec::new();
-                for (pid, app_name) in &apps {
-                    let app_element =
-                        AXElement::from_owned(unsafe { safe_ax_create_application(*pid) });
-                    if app_element.is_null() {
-                        continue;
-                    }
-                    let mut data = self.build_element_data(&app_element, Some(*pid as u32));
-                    // Override name with the CGWindowList name (more reliable)
-                    data.name = Some(app_name.clone());
-                    results.push(data);
-                }
-                Ok(results)
+                // Top-level: list all GUI apps as application elements.
+                // Delegated to `list_apps()` so the discovery primitive has
+                // a single canonical implementation.
+                self.list_apps()
             }
             Some(element_data) => {
                 let ax = self.get_cached(element_data.handle)?;
@@ -1775,152 +1777,160 @@ impl Provider for MacOSProvider {
         }
     }
 
-    fn find_elements(
+    fn find_elements_group(
         &self,
-        root: Option<&ElementData>,
-        selector: &Selector,
+        root: &ElementData,
+        group: &xa11y_core::selector::SelectorGroup,
         limit: Option<usize>,
         max_depth: Option<u32>,
     ) -> Result<Vec<ElementData>> {
-        if selector.segments.is_empty() {
+        if group.clauses.is_empty() {
+            return Ok(vec![]);
+        }
+        // Reject any clause with zero segments early — `clause.segments[0]`
+        // below would otherwise panic.
+        if group.clauses.iter().any(|c| c.segments.is_empty()) {
             return Ok(vec![]);
         }
 
+        // ONE AX walk that evaluates every clause's first SimpleSelector
+        // inline. Each match is tagged with its clause index; per-clause
+        // phase-2 narrowing follows. The cross-clause merge deduplicates by
+        // AXUIElement pointer identity — that's the only identifier stable
+        // across narrowings within a single call (handles are minted fresh
+        // on every `build_element_data`).
+        //
+        // App discovery is handled separately by `list_apps()` — `root` is
+        // always present here.
         let max_depth_val = max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH);
 
-        // Phase 1: lightweight AXElement-based search for first segment.
-        // Only the attributes the selector needs are fetched per candidate.
-        let first = &selector.segments[0].simple;
-
-        let phase1_limit = if selector.segments.len() == 1 {
-            limit
-        } else {
-            None
-        };
-        let phase1_limit = match (phase1_limit, first.nth) {
-            (Some(l), Some(n)) => Some(l.max(n)),
-            (_, Some(n)) => Some(n),
-            (l, None) => l,
-        };
-
-        let root_data = match root {
-            Some(el) => el,
-            None => {
-                // Searching from system root for applications. Use
-                // CGWindowList (no AX calls) to filter apps by name, then
-                // only build full ElementData for matches.
-                if matches!(
-                    first.role,
-                    Some(xa11y_core::selector::RoleMatch::Normalized(
-                        Role::Application
-                    ))
-                ) {
-                    let apps = Self::list_gui_apps();
-                    let mut matching: Vec<ElementData> = Vec::new();
-                    for (pid, app_name) in &apps {
-                        // Check name filters against CGWindowList name
-                        let name_matches = first.filters.iter().all(|f| {
-                            if f.attr != "name" {
-                                return true; // non-name filters checked after build
-                            }
-                            match_op(&f.op, &f.value, Some(app_name.as_str()))
-                        });
-                        if !name_matches {
-                            continue;
-                        }
-
-                        let app_element =
-                            AXElement::from_owned(unsafe { safe_ax_create_application(*pid) });
-                        if app_element.is_null() {
-                            continue;
-                        }
-                        let mut data = self.build_element_data(&app_element, Some(*pid as u32));
-                        data.name = Some(app_name.clone());
-                        matching.push(data);
-
-                        if let Some(limit) = phase1_limit {
-                            if matching.len() >= limit {
-                                break;
-                            }
-                        }
-                    }
-
-                    // Apply :nth
-                    if let Some(nth) = first.nth {
-                        if nth <= matching.len() {
-                            matching = vec![matching.remove(nth - 1)];
-                        } else {
-                            matching.clear();
-                        }
-                    }
-
-                    if selector.segments.len() == 1 {
-                        if let Some(limit) = limit {
-                            matching.truncate(limit);
-                        }
-                        return Ok(matching);
-                    }
-
-                    return self.narrow_multi_segment(
-                        matching,
-                        &selector.segments[1..],
-                        max_depth_val,
-                        limit,
-                    );
-                }
-
-                // Non-application root search — fall back to default impl.
-                return xa11y_core::selector::find_elements_in_tree(
-                    |el| self.get_children(el),
-                    root,
-                    selector,
-                    limit,
-                    max_depth,
-                );
-            }
-        };
+        let root_data = root;
 
         let root_ax = self.get_cached(root_data.handle)?;
 
-        let mut matching_ax = self.collect_matching_ax(
+        let firsts: Vec<&SimpleSelector> = group
+            .clauses
+            .iter()
+            .map(|c| &c.segments[0].simple)
+            .collect();
+
+        // N=1 phase-1 limit short-circuit: when there's exactly one clause,
+        // propagate the user's `limit` (adjusted for `:nth`) to the AX walk
+        // so e.g. `app.locator("button").first()` stops at the first match.
+        // For N>=2, phase-1 must collect the full union before truncating
+        // because cross-clause doc-order can promote later-clause hits
+        // ahead of earlier ones.
+        let phase1_walk_limit = if group.clauses.len() == 1 {
+            let clause = &group.clauses[0];
+            let first = firsts[0];
+            let outer = if clause.segments.len() == 1 {
+                limit
+            } else {
+                None
+            };
+            match (outer, first.nth) {
+                (Some(l), Some(n)) => Some(l.max(n)),
+                (_, Some(n)) => Some(n),
+                (l, None) => l,
+            }
+        } else {
+            None
+        };
+
+        let phase1: Vec<(usize, AXElement)> = self.collect_matching_ax_group(
             &root_ax,
             root_data.role,
             root_data.name.as_deref(),
-            first,
+            &firsts,
             0,
             max_depth_val,
-            phase1_limit,
+            phase1_walk_limit,
         );
 
-        // Single-segment: build ElementData only for matches, apply nth/limit
-        if selector.segments.len() == 1 {
-            if let Some(nth) = first.nth {
-                if nth <= matching_ax.len() {
-                    let ax = &matching_ax[nth - 1];
-                    return Ok(vec![self.build_element_data(ax, root_data.pid)]);
-                } else {
-                    return Ok(vec![]);
-                }
-            }
-
-            if let Some(limit) = limit {
-                matching_ax.truncate(limit);
-            }
-
-            return Ok(matching_ax
-                .iter()
-                .map(|ax| self.build_element_data(ax, root_data.pid))
-                .collect());
+        // Bucket phase-1 hits by clause + their doc-order walk position.
+        let mut by_clause: Vec<Vec<(usize, AXElement)>> =
+            (0..group.clauses.len()).map(|_| Vec::new()).collect();
+        for (walk_pos, (clause_idx, ax)) in phase1.into_iter().enumerate() {
+            by_clause[clause_idx].push((walk_pos, ax));
         }
 
-        // Multi-segment: build ElementData for phase 1 matches, then narrow
-        // using standard matching on the (small) candidate set.
-        let candidates: Vec<ElementData> = matching_ax
-            .iter()
-            .map(|ax| self.build_element_data(ax, root_data.pid))
-            .collect();
+        let mut merged: Vec<(usize, AXUIElementRef, ElementData)> = Vec::new();
+        for (clause_idx, hits) in by_clause.into_iter().enumerate() {
+            if hits.is_empty() {
+                continue;
+            }
+            let clause = &group.clauses[clause_idx];
+            let first = &clause.segments[0].simple;
 
-        self.narrow_multi_segment(candidates, &selector.segments[1..], max_depth_val, limit)
+            // Build ElementData for this clause's phase-1 hits.
+            let mut phase1_data: Vec<(usize, AXUIElementRef, ElementData)> = hits
+                .iter()
+                .map(|(pos, ax)| {
+                    (
+                        *pos,
+                        ax.as_ptr(),
+                        self.build_element_data(ax, root_data.pid),
+                    )
+                })
+                .collect();
+
+            if clause.segments.len() == 1 {
+                // Per-clause `:nth` and limit handling — but we can't apply
+                // outer limit here (cross-clause merge can re-order).
+                if let Some(nth) = first.nth {
+                    if nth <= phase1_data.len() {
+                        let kept = phase1_data.remove(nth - 1);
+                        phase1_data.clear();
+                        phase1_data.push(kept);
+                    } else {
+                        phase1_data.clear();
+                    }
+                }
+                merged.extend(phase1_data);
+                continue;
+            }
+
+            // Multi-segment narrowing per clause. We anchor each narrowed
+            // descendant at its phase-1 ancestor's walk_pos so the doc-order
+            // sort puts cross-clause results in the right global order.
+            for (anchor_pos, _anchor_ptr, head) in phase1_data {
+                let narrowed = self.narrow_multi_segment(
+                    vec![head],
+                    &clause.segments[1..],
+                    max_depth_val,
+                    None,
+                )?;
+                for n in narrowed {
+                    // Anchor identity is for dedup vs other clauses' phase-1
+                    // hits; for phase-2 outputs we use the narrowed element's
+                    // own AXUIElement pointer (resolved via the cache).
+                    let ptr = self
+                        .get_cached(n.handle)
+                        .map(|ax| ax.as_ptr())
+                        .unwrap_or(std::ptr::null());
+                    merged.push((anchor_pos, ptr, n));
+                }
+            }
+        }
+
+        // Stable sort by walk position keeps doc-order; dedup by
+        // AXUIElement pointer identity ensures `X, X` collapses correctly.
+        merged.sort_by_key(|(pos, _, _)| *pos);
+        let mut seen: HashSet<usize> = HashSet::new();
+        let mut out: Vec<ElementData> = Vec::with_capacity(merged.len());
+        for (_, ptr, data) in merged {
+            // Null pointers (resolution failures) can't be sensibly deduped;
+            // treat each null as its own key so we keep the element.
+            let key = ptr as usize;
+            if key != 0 && !seen.insert(key) {
+                continue;
+            }
+            out.push(data);
+        }
+        if let Some(l) = limit {
+            out.truncate(l);
+        }
+        Ok(out)
     }
 
     fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
@@ -1936,6 +1946,26 @@ impl Provider for MacOSProvider {
             }
             None => Ok(None),
         }
+    }
+
+    /// Enumerate top-level applications via CGWindowList — the canonical
+    /// macOS app discovery primitive. For each GUI app we synthesise an
+    /// `AXUIElement` via `AXUIElementCreateApplication(pid)` and build
+    /// full `ElementData`, overriding the AX-reported name with the
+    /// CGWindowList name (which is more consistent across launches).
+    fn list_apps(&self) -> Result<Vec<ElementData>> {
+        let apps = Self::list_gui_apps();
+        let mut results = Vec::new();
+        for (pid, app_name) in &apps {
+            let app_element = AXElement::from_owned(unsafe { safe_ax_create_application(*pid) });
+            if app_element.is_null() {
+                continue;
+            }
+            let mut data = self.build_element_data(&app_element, Some(*pid as u32));
+            data.name = Some(app_name.clone());
+            results.push(data);
+        }
+        Ok(results)
     }
 
     // ── Common actions ──────────────────────────────────────────────
@@ -2747,16 +2777,12 @@ mod tests {
     // Run via: cargo xtask test-integ (which also runs these)
     // ════════════════════════════════════════════════════════════════
 
-    /// Find the test app's root ElementData via find_elements (same path
-    /// as App::by_name, which is known to work).
+    /// Find the test app's root ElementData via `list_apps` — same
+    /// discovery path as `App::by_name`, which is known to work.
     fn find_test_app(provider: &MacOSProvider) -> ElementData {
-        let selector = Selector::parse("application[name=\"xa11y-test-app\"]").unwrap();
-        let results = provider
-            .find_elements(None, &selector, Some(1), Some(0))
-            .unwrap();
-        results
-            .into_iter()
-            .next()
+        let apps = provider.list_apps().unwrap();
+        apps.into_iter()
+            .find(|d| d.name.as_deref() == Some("xa11y-test-app"))
             .expect("xa11y-test-app not found — is it running?")
     }
 
@@ -2782,7 +2808,7 @@ mod tests {
         ax_counters::reset_all();
         let selector = Selector::parse("button[name=\"Submit\"]").unwrap();
         let results = provider
-            .find_elements(Some(&app), &selector, Some(1), None)
+            .find_elements(&app, &selector, Some(1), None)
             .unwrap();
         let (copy_attr, copy_multi, copy_actions) = ax_counters::snapshot();
         let total = ax_counters::total();
@@ -2821,7 +2847,7 @@ mod tests {
         ax_counters::reset_all();
         let selector = Selector::parse("button[name=\"Submit\"]").unwrap();
         let results = provider
-            .find_elements(Some(&window), &selector, Some(1), None)
+            .find_elements(&window, &selector, Some(1), None)
             .unwrap();
         let (copy_attr, copy_multi, copy_actions) = ax_counters::snapshot();
         let total = ax_counters::total();
@@ -2856,7 +2882,7 @@ mod tests {
         ax_counters::reset_all();
         let selector = Selector::parse("check_box").unwrap();
         let results = provider
-            .find_elements(Some(&window), &selector, None, None)
+            .find_elements(&window, &selector, None, None)
             .unwrap();
         let (copy_attr, copy_multi, copy_actions) = ax_counters::snapshot();
         let total = ax_counters::total();

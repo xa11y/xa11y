@@ -5,7 +5,7 @@ use crate::element::{Element, ElementData};
 use crate::error::{Error, Result};
 use crate::event::ElementState;
 use crate::provider::Provider;
-use crate::selector::{chain_combinator, SelectorGroup};
+use crate::selector::{chain_combinator, matches_simple, SelectorGroup};
 
 /// A lazy element descriptor that re-resolves against a fresh accessibility
 /// tree on every operation.
@@ -123,6 +123,93 @@ impl Locator {
 
     // ── Internal resolution ─────────────────────────────────────────
 
+    /// Resolve `group` to a flat, doc-order, deduped list of matches.
+    ///
+    /// When `self.root.is_some()`, this delegates straight to
+    /// `Provider::find_elements_group`. When `self.root.is_none()`, the
+    /// `Provider` trait no longer supports a rootless search — discovery and
+    /// search are now separate primitives. We replicate the legacy
+    /// "search across all apps" semantics here:
+    ///
+    /// 1. Enumerate apps via `Provider::list_apps()`.
+    /// 2. For each app, in app-enumeration order:
+    ///    a. If any clause's first segment matches the app element itself,
+    ///    include the app (single-segment clauses) or run that clause's
+    ///    remaining segments anchored at the app (multi-segment). This
+    ///    preserves the prior semantics of `find_elements(None, …)`, where
+    ///    `get_children(None)` returned the app and a search rooted at the
+    ///    system root matched it.
+    ///    b. Run `find_elements_group(&app, group, …)` to collect descendant
+    ///    matches inside the app's subtree.
+    /// 3. Dedup by `ElementData.handle` and apply the outer limit.
+    fn resolve_group(
+        &self,
+        group: &SelectorGroup,
+        limit: Option<usize>,
+    ) -> Result<Vec<ElementData>> {
+        if let Some(root) = self.root.as_ref() {
+            return self.provider.find_elements_group(root, group, limit, None);
+        }
+
+        // Rootless: search across all apps. We can't push the outer `limit`
+        // down to each per-app call because matches from a later app would
+        // be wrongly excluded; truncate after the merge instead. (Scoped
+        // searches via the single-app fast path above still get phase-1
+        // limit pushdown inside the native backend.)
+        let apps = self.provider.list_apps()?;
+        let mut out: Vec<ElementData> = Vec::new();
+        let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for app in &apps {
+            // (2a) The app element itself may match the selector — e.g.
+            // `application` or `application button`. `find_elements_group`
+            // only emits *descendants* of its root, so we test the app
+            // against each clause separately.
+            for clause in &group.clauses {
+                let first = match clause.segments.first() {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if !matches_simple(app, &first.simple) {
+                    continue;
+                }
+                if clause.segments.len() == 1 {
+                    if seen.insert(app.handle) {
+                        out.push(app.clone());
+                    }
+                    continue;
+                }
+                // Multi-segment: app is a phase-1 anchor; narrow through
+                // the remaining segments. This mirrors the
+                // `find_elements_in_tree`-style phase-1/phase-2 split, but
+                // anchored at the app rather than a candidate from a walk.
+                let max_depth_val = crate::MAX_TREE_DEPTH;
+                let narrowed = self.provider.narrow_multi_segment(
+                    vec![app.clone()],
+                    &clause.segments[1..],
+                    max_depth_val,
+                    None,
+                )?;
+                for d in narrowed {
+                    if seen.insert(d.handle) {
+                        out.push(d);
+                    }
+                }
+            }
+
+            // (2b) Descendant matches inside the app's subtree.
+            let per_app = self.provider.find_elements_group(app, group, None, None)?;
+            for d in per_app {
+                if seen.insert(d.handle) {
+                    out.push(d);
+                }
+            }
+        }
+        if let Some(l) = limit {
+            out.truncate(l);
+        }
+        Ok(out)
+    }
+
     /// Resolve the selector to a single ElementData.
     fn resolve_data(&self) -> Result<ElementData> {
         let group = SelectorGroup::parse(&self.selector)?;
@@ -135,9 +222,7 @@ impl Locator {
         } else {
             None
         };
-        let matches =
-            self.provider
-                .find_elements_group(self.root.as_ref(), &group, provider_limit, None)?;
+        let matches = self.resolve_group(&group, provider_limit)?;
         let idx = self.nth.unwrap_or(0);
         matches
             .into_iter()
@@ -161,9 +246,7 @@ impl Locator {
     /// Count matching elements.
     pub fn count(&self) -> Result<usize> {
         let group = SelectorGroup::parse(&self.selector)?;
-        let matches = self
-            .provider
-            .find_elements_group(self.root.as_ref(), &group, None, None)?;
+        let matches = self.resolve_group(&group, None)?;
         Ok(matches.len())
     }
 
@@ -176,9 +259,7 @@ impl Locator {
     /// Get all matching elements.
     pub fn elements(&self) -> Result<Vec<Element>> {
         let group = SelectorGroup::parse(&self.selector)?;
-        let matches = self
-            .provider
-            .find_elements_group(self.root.as_ref(), &group, None, None)?;
+        let matches = self.resolve_group(&group, None)?;
         Ok(matches
             .into_iter()
             .map(|d| Element::new(d, Arc::clone(&self.provider)))
@@ -565,6 +646,48 @@ mod tests {
         assert!(!loc.exists().unwrap());
     }
 
+    // ── Rootless search across apps ─────────────────────────────────
+
+    #[test]
+    fn rootless_group_matches_match_app_scoped_search() {
+        // `Locator::new(provider, None, …)` enumerates apps via
+        // `list_apps()` and unions per-app searches. For a single-app
+        // mock tree, the result must equal what `App::locator(…)` would
+        // produce (modulo the `application` root which only the rootless
+        // search can match, since app-scoped searches walk descendants).
+        let provider = build_provider();
+        let provider_dyn: Arc<dyn Provider> = provider;
+        let rootless = Locator::new(provider_dyn.clone(), None, "button, text_field");
+        let app_root = provider_dyn
+            .list_apps()
+            .expect("list_apps must succeed")
+            .into_iter()
+            .next()
+            .expect("mock provider must expose an application root");
+        let scoped = Locator::new(provider_dyn, Some(app_root), "button, text_field");
+        assert_eq!(
+            names(&rootless.elements().unwrap()),
+            vec!["Back", "Forward", "Search"]
+        );
+        assert_eq!(
+            names(&rootless.elements().unwrap()),
+            names(&scoped.elements().unwrap())
+        );
+    }
+
+    #[test]
+    fn list_apps_returns_mock_application_root() {
+        // The mock provider's `list_apps` must surface the single
+        // top-level Application element — the discovery primitive that
+        // `App::list_with` / `App::by_name_with` now use.
+        let provider = build_provider();
+        let provider_dyn: Arc<dyn Provider> = provider;
+        let apps = provider_dyn.list_apps().expect("list_apps must succeed");
+        assert_eq!(apps.len(), 1, "mock tree has exactly one application");
+        assert_eq!(apps[0].role, crate::role::Role::Application);
+        assert_eq!(apps[0].name.as_deref(), Some("TestApp"));
+    }
+
     // ── tree() / dump() ─────────────────────────────────────────────
 
     #[test]
@@ -626,6 +749,227 @@ mod tests {
         assert!(
             elapsed < Duration::from_millis(500),
             "dump should fail fast, took {elapsed:?}"
+        );
+    }
+
+    // ── Fresh-handle regression tests ───────────────────────────────────
+    //
+    // Real platform providers (Windows/UIA, macOS/AX, Linux/AT-SPI2) allocate
+    // a fresh `handle` for every element returned by every `get_children`
+    // call — see e.g. `WindowsProvider::cache_element`. The doc-order merge
+    // for multi-clause `SelectorGroup`s used to identify elements by handle
+    // to dedup the per-clause walks against a re-walk of the tree, which
+    // missed every lookup on real providers and returned 0 results. These
+    // tests wrap the standard `MockProvider` with a per-call handle-rewriter
+    // so the failure mode is reproducible without a real platform backend.
+
+    /// Wraps a `MockProvider`-like child source and rewrites every returned
+    /// `ElementData.handle` to a fresh atomic-incremented value. A backing
+    /// map remembers what the freshly-minted handle pointed to so subsequent
+    /// `get_children(Some(parent))` calls can look up the original mock-side
+    /// handle and delegate.
+    struct FreshHandleProvider {
+        inner: Arc<crate::mock::MockProvider>,
+        next: std::sync::atomic::AtomicU64,
+        // Map from freshly-minted handle → the inner provider's stable handle.
+        rewrite: std::sync::Mutex<std::collections::HashMap<u64, u64>>,
+    }
+
+    impl FreshHandleProvider {
+        fn wrap(inner: Arc<crate::mock::MockProvider>) -> Arc<dyn Provider> {
+            Arc::new(FreshHandleProvider {
+                inner,
+                next: std::sync::atomic::AtomicU64::new(1_000_000),
+                rewrite: std::sync::Mutex::new(std::collections::HashMap::new()),
+            })
+        }
+
+        fn translate(&self, fresh: u64) -> u64 {
+            self.rewrite
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&fresh)
+                .copied()
+                // Top-level calls pass through verbatim; only freshly-minted
+                // child handles need translation back to the inner mock's
+                // stable handle.
+                .unwrap_or(fresh)
+        }
+    }
+
+    impl Provider for FreshHandleProvider {
+        fn list_apps(&self) -> Result<Vec<crate::element::ElementData>> {
+            // App discovery routes through `get_children(None)` here so the
+            // freshly-minted handles flow through the same rewriter that
+            // `get_children` uses — keeping the "no handle is ever reused
+            // across calls" simulation honest for the list_apps path too.
+            self.get_children(None)
+        }
+
+        fn get_children(
+            &self,
+            parent: Option<&crate::element::ElementData>,
+        ) -> Result<Vec<crate::element::ElementData>> {
+            let translated = parent.map(|p| {
+                let inner = self.translate(p.handle);
+                let mut clone = p.clone();
+                clone.handle = inner;
+                clone
+            });
+            let children = self.inner.get_children(translated.as_ref())?;
+            let mut out = Vec::with_capacity(children.len());
+            for mut child in children {
+                let inner_handle = child.handle;
+                let fresh = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.rewrite
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(fresh, inner_handle);
+                child.handle = fresh;
+                out.push(child);
+            }
+            Ok(out)
+        }
+
+        fn get_parent(
+            &self,
+            element: &crate::element::ElementData,
+        ) -> Result<Option<crate::element::ElementData>> {
+            let mut clone = element.clone();
+            clone.handle = self.translate(element.handle);
+            self.inner.get_parent(&clone)
+        }
+
+        // Action methods: irrelevant to selector resolution — delegate verbatim.
+        fn press(&self, e: &crate::element::ElementData) -> Result<()> {
+            self.inner.press(e)
+        }
+        fn focus(&self, e: &crate::element::ElementData) -> Result<()> {
+            self.inner.focus(e)
+        }
+        fn blur(&self, e: &crate::element::ElementData) -> Result<()> {
+            self.inner.blur(e)
+        }
+        fn toggle(&self, e: &crate::element::ElementData) -> Result<()> {
+            self.inner.toggle(e)
+        }
+        fn select(&self, e: &crate::element::ElementData) -> Result<()> {
+            self.inner.select(e)
+        }
+        fn expand(&self, e: &crate::element::ElementData) -> Result<()> {
+            self.inner.expand(e)
+        }
+        fn collapse(&self, e: &crate::element::ElementData) -> Result<()> {
+            self.inner.collapse(e)
+        }
+        fn show_menu(&self, e: &crate::element::ElementData) -> Result<()> {
+            self.inner.show_menu(e)
+        }
+        fn increment(&self, e: &crate::element::ElementData) -> Result<()> {
+            self.inner.increment(e)
+        }
+        fn decrement(&self, e: &crate::element::ElementData) -> Result<()> {
+            self.inner.decrement(e)
+        }
+        fn scroll_into_view(&self, e: &crate::element::ElementData) -> Result<()> {
+            self.inner.scroll_into_view(e)
+        }
+        fn set_value(&self, e: &crate::element::ElementData, v: &str) -> Result<()> {
+            self.inner.set_value(e, v)
+        }
+        fn set_numeric_value(&self, e: &crate::element::ElementData, v: f64) -> Result<()> {
+            self.inner.set_numeric_value(e, v)
+        }
+        fn type_text(&self, e: &crate::element::ElementData, t: &str) -> Result<()> {
+            self.inner.type_text(e, t)
+        }
+        fn set_text_selection(
+            &self,
+            e: &crate::element::ElementData,
+            start: u32,
+            end: u32,
+        ) -> Result<()> {
+            self.inner.set_text_selection(e, start, end)
+        }
+        fn perform_action(&self, e: &crate::element::ElementData, action: &str) -> Result<()> {
+            self.inner.perform_action(e, action)
+        }
+        fn subscribe(
+            &self,
+            e: &crate::element::ElementData,
+        ) -> Result<crate::event_provider::Subscription> {
+            self.inner.subscribe(e)
+        }
+    }
+
+    fn root_locator_fresh_handles(selector: &str) -> Locator {
+        let inner = build_provider();
+        let provider = FreshHandleProvider::wrap(inner);
+        Locator::new(provider, None, selector)
+    }
+
+    #[test]
+    fn group_fresh_handles_elements_in_document_order() {
+        // Regression: pre-fix, this returned 0 elements because the doc-order
+        // merge looked elements up by handle in a HashMap, and the per-clause
+        // walks vs. the merge walk produced disjoint handle sets.
+        let loc = root_locator_fresh_handles("button, text_field");
+        assert_eq!(
+            names(&loc.elements().unwrap()),
+            vec!["Back", "Forward", "Search"],
+        );
+    }
+
+    #[test]
+    fn group_fresh_handles_count_matches_stable_handles() {
+        // The count via fresh-handle provider must equal the count via the
+        // stable-handle mock — both should yield 2 (Back + Forward) for a
+        // dedup-overlapping group.
+        let stable = root_locator(r#"button, [name="Back"]"#);
+        let fresh = root_locator_fresh_handles(r#"button, [name="Back"]"#);
+        assert_eq!(stable.count().unwrap(), fresh.count().unwrap());
+        assert_eq!(fresh.count().unwrap(), 2);
+    }
+
+    #[test]
+    fn group_fresh_handles_exists_true_when_any_clause_matches() {
+        let loc = root_locator_fresh_handles(r#"button[name="Nope"], slider"#);
+        assert!(loc.exists().unwrap());
+    }
+
+    #[test]
+    fn group_fresh_handles_nth_picks_across_full_union() {
+        // `.nth(2)` on `button, text_field` over the fresh-handle provider
+        // must still return "Forward" — the 2nd of [Back, Forward, Search]
+        // in document order. Pre-fix, .nth(2) returned a "selector not
+        // matched" error because the underlying group resolution returned
+        // an empty union.
+        let loc = root_locator_fresh_handles("button, text_field").nth(2);
+        let el = loc.element().unwrap();
+        assert_eq!(el.data().name.as_deref(), Some("Forward"));
+    }
+
+    #[test]
+    fn group_fresh_handles_descendant_chain_resolves() {
+        // `.descendant("button")` on the (toolbar, group) group locator,
+        // run through the fresh-handle provider. Pre-fix, this chained
+        // selector returned 0 results.
+        let loc = root_locator_fresh_handles("toolbar, group").descendant("button");
+        assert_eq!(loc.selector(), "toolbar button, group button");
+        assert_eq!(names(&loc.elements().unwrap()), vec!["Back", "Forward"]);
+    }
+
+    #[test]
+    fn group_fresh_handles_three_clauses_doc_order() {
+        // Three-clause group over a fresh-handle provider — guards the
+        // bug-fix's invariant that the BTreeMap-by-path merge handles >2
+        // clauses correctly.
+        let loc = root_locator_fresh_handles("toolbar, slider, check_box");
+        // Document order through Navigation/Content: Navigation (toolbar),
+        // then Agree (check_box), then Volume (slider).
+        assert_eq!(
+            names(&loc.elements().unwrap()),
+            vec!["Navigation", "Agree", "Volume"]
         );
     }
 }
