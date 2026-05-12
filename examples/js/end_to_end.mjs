@@ -25,9 +25,10 @@
 
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -41,9 +42,12 @@ const BINARY = resolve(
   isWindows ? 'xa11y-test-app.exe' : 'xa11y-test-app',
 );
 
-// Import the locally-built JS bindings without forcing a global install.
-const xa11yUrl = pathToFileURL(resolve(REPO_ROOT, 'xa11y-js', 'index.js')).href;
-const xa11y = await import(xa11yUrl);
+// Load the locally-built CJS JS bindings via createRequire. Dynamic `import()`
+// on a CJS module exposes named exports through Node's static-analysis
+// heuristic, which can miss some class exports; createRequire returns the
+// full `module.exports` object so destructuring is reliable.
+const require = createRequire(import.meta.url);
+const xa11y = require(resolve(REPO_ROOT, 'xa11y-js', 'index.js'));
 const { App, SelectorNotMatchedError, PlatformError, TimeoutError, ActionNotSupportedError } = xa11y;
 
 const STARTUP_TIMEOUT_MS = 30_000;
