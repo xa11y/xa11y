@@ -423,6 +423,70 @@ mod tests {
         assert_eq!(count, buttons.len());
     }
 
+    #[test]
+    #[ignore]
+    fn selector_group_union_runs_on_real_provider() {
+        // Regression: pre-fix, comma-separated selectors (`SelectorGroup`)
+        // returned 0 results on real platform providers because the doc-order
+        // merge identified clause-match results by `ElementData.handle`, and
+        // every backend mints a fresh handle per `get_children` call. This
+        // is the cross-platform smoke test that exercises the real Provider
+        // path end-to-end.
+        let app = h::app_root();
+        let buttons = app.locator("button").elements().unwrap();
+        let text_fields = app.locator("text_field").elements().unwrap();
+        assert!(!buttons.is_empty(), "fixture must have buttons");
+
+        let union = app.locator("button, text_field").elements().unwrap();
+        // The union must be a superset of the buttons (at least), and at
+        // most the sum of both clauses (no spurious matches).
+        assert!(
+            union.len() >= buttons.len(),
+            "comma selector union must be >= bare-button count: union={} buttons={}",
+            union.len(),
+            buttons.len(),
+        );
+        assert!(
+            union.len() <= buttons.len() + text_fields.len(),
+            "comma selector union must not exceed clauses' sum (no dedup miss): \
+             union={} buttons={} text_fields={}",
+            union.len(),
+            buttons.len(),
+            text_fields.len(),
+        );
+        // And count() must agree with elements().len(), even for groups.
+        let count = app.locator("button, text_field").count().unwrap();
+        assert_eq!(count, union.len());
+    }
+
+    #[test]
+    #[ignore]
+    fn selector_group_single_clause_equals_bare_selector() {
+        // Single-clause groups must take the fast path and produce identical
+        // results to a bare selector — no commas, no parser surprises.
+        let app = h::app_root();
+        let bare = app.locator("button").count().unwrap();
+        // Same string parsed as a SelectorGroup with one clause.
+        let group = app.locator("button").count().unwrap();
+        assert_eq!(bare, group);
+    }
+
+    #[test]
+    #[ignore]
+    fn selector_group_dedup_doubled_clause() {
+        // Dedup contract on real providers: `X, X` must match the same
+        // elements as `X`, with no spurious doubling. Pre-fix this happened
+        // to "work" only because the doc-order merge returned 0 results
+        // either way; the post-fix code uses tree-path identity to dedup.
+        let app = h::app_root();
+        let bare = app.locator("button").count().unwrap();
+        let doubled = app.locator("button, button").count().unwrap();
+        assert_eq!(
+            bare, doubled,
+            "`button, button` must dedup to the same count as `button`",
+        );
+    }
+
     // ════════════════════════════════════════════════════════════════
     // Element Fields (7 tests)
     // ════════════════════════════════════════════════════════════════

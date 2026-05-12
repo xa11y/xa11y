@@ -628,4 +628,217 @@ mod tests {
             "dump should fail fast, took {elapsed:?}"
         );
     }
+
+    // ── Fresh-handle regression tests ───────────────────────────────────
+    //
+    // Real platform providers (Windows/UIA, macOS/AX, Linux/AT-SPI2) allocate
+    // a fresh `handle` for every element returned by every `get_children`
+    // call — see e.g. `WindowsProvider::cache_element`. The doc-order merge
+    // for multi-clause `SelectorGroup`s used to identify elements by handle
+    // to dedup the per-clause walks against a re-walk of the tree, which
+    // missed every lookup on real providers and returned 0 results. These
+    // tests wrap the standard `MockProvider` with a per-call handle-rewriter
+    // so the failure mode is reproducible without a real platform backend.
+
+    /// Wraps a `MockProvider`-like child source and rewrites every returned
+    /// `ElementData.handle` to a fresh atomic-incremented value. A backing
+    /// map remembers what the freshly-minted handle pointed to so subsequent
+    /// `get_children(Some(parent))` calls can look up the original mock-side
+    /// handle and delegate.
+    struct FreshHandleProvider {
+        inner: Arc<crate::mock::MockProvider>,
+        next: std::sync::atomic::AtomicU64,
+        // Map from freshly-minted handle → the inner provider's stable handle.
+        rewrite: std::sync::Mutex<std::collections::HashMap<u64, u64>>,
+    }
+
+    impl FreshHandleProvider {
+        fn wrap(inner: Arc<crate::mock::MockProvider>) -> Arc<dyn Provider> {
+            Arc::new(FreshHandleProvider {
+                inner,
+                next: std::sync::atomic::AtomicU64::new(1_000_000),
+                rewrite: std::sync::Mutex::new(std::collections::HashMap::new()),
+            })
+        }
+
+        fn translate(&self, fresh: u64) -> u64 {
+            self.rewrite
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&fresh)
+                .copied()
+                // Top-level calls pass through verbatim; only freshly-minted
+                // child handles need translation back to the inner mock's
+                // stable handle.
+                .unwrap_or(fresh)
+        }
+    }
+
+    impl Provider for FreshHandleProvider {
+        fn get_children(
+            &self,
+            parent: Option<&crate::element::ElementData>,
+        ) -> Result<Vec<crate::element::ElementData>> {
+            let translated = parent.map(|p| {
+                let inner = self.translate(p.handle);
+                let mut clone = p.clone();
+                clone.handle = inner;
+                clone
+            });
+            let children = self.inner.get_children(translated.as_ref())?;
+            let mut out = Vec::with_capacity(children.len());
+            for mut child in children {
+                let inner_handle = child.handle;
+                let fresh = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                self.rewrite
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(fresh, inner_handle);
+                child.handle = fresh;
+                out.push(child);
+            }
+            Ok(out)
+        }
+
+        fn get_parent(
+            &self,
+            element: &crate::element::ElementData,
+        ) -> Result<Option<crate::element::ElementData>> {
+            let mut clone = element.clone();
+            clone.handle = self.translate(element.handle);
+            self.inner.get_parent(&clone)
+        }
+
+        // Action methods: irrelevant to selector resolution — delegate verbatim.
+        fn press(&self, e: &crate::element::ElementData) -> Result<()> {
+            self.inner.press(e)
+        }
+        fn focus(&self, e: &crate::element::ElementData) -> Result<()> {
+            self.inner.focus(e)
+        }
+        fn blur(&self, e: &crate::element::ElementData) -> Result<()> {
+            self.inner.blur(e)
+        }
+        fn toggle(&self, e: &crate::element::ElementData) -> Result<()> {
+            self.inner.toggle(e)
+        }
+        fn select(&self, e: &crate::element::ElementData) -> Result<()> {
+            self.inner.select(e)
+        }
+        fn expand(&self, e: &crate::element::ElementData) -> Result<()> {
+            self.inner.expand(e)
+        }
+        fn collapse(&self, e: &crate::element::ElementData) -> Result<()> {
+            self.inner.collapse(e)
+        }
+        fn show_menu(&self, e: &crate::element::ElementData) -> Result<()> {
+            self.inner.show_menu(e)
+        }
+        fn increment(&self, e: &crate::element::ElementData) -> Result<()> {
+            self.inner.increment(e)
+        }
+        fn decrement(&self, e: &crate::element::ElementData) -> Result<()> {
+            self.inner.decrement(e)
+        }
+        fn scroll_into_view(&self, e: &crate::element::ElementData) -> Result<()> {
+            self.inner.scroll_into_view(e)
+        }
+        fn set_value(&self, e: &crate::element::ElementData, v: &str) -> Result<()> {
+            self.inner.set_value(e, v)
+        }
+        fn set_numeric_value(&self, e: &crate::element::ElementData, v: f64) -> Result<()> {
+            self.inner.set_numeric_value(e, v)
+        }
+        fn type_text(&self, e: &crate::element::ElementData, t: &str) -> Result<()> {
+            self.inner.type_text(e, t)
+        }
+        fn set_text_selection(
+            &self,
+            e: &crate::element::ElementData,
+            start: u32,
+            end: u32,
+        ) -> Result<()> {
+            self.inner.set_text_selection(e, start, end)
+        }
+        fn perform_action(&self, e: &crate::element::ElementData, action: &str) -> Result<()> {
+            self.inner.perform_action(e, action)
+        }
+        fn subscribe(
+            &self,
+            e: &crate::element::ElementData,
+        ) -> Result<crate::event_provider::Subscription> {
+            self.inner.subscribe(e)
+        }
+    }
+
+    fn root_locator_fresh_handles(selector: &str) -> Locator {
+        let inner = build_provider();
+        let provider = FreshHandleProvider::wrap(inner);
+        Locator::new(provider, None, selector)
+    }
+
+    #[test]
+    fn group_fresh_handles_elements_in_document_order() {
+        // Regression: pre-fix, this returned 0 elements because the doc-order
+        // merge looked elements up by handle in a HashMap, and the per-clause
+        // walks vs. the merge walk produced disjoint handle sets.
+        let loc = root_locator_fresh_handles("button, text_field");
+        assert_eq!(
+            names(&loc.elements().unwrap()),
+            vec!["Back", "Forward", "Search"],
+        );
+    }
+
+    #[test]
+    fn group_fresh_handles_count_matches_stable_handles() {
+        // The count via fresh-handle provider must equal the count via the
+        // stable-handle mock — both should yield 2 (Back + Forward) for a
+        // dedup-overlapping group.
+        let stable = root_locator(r#"button, [name="Back"]"#);
+        let fresh = root_locator_fresh_handles(r#"button, [name="Back"]"#);
+        assert_eq!(stable.count().unwrap(), fresh.count().unwrap());
+        assert_eq!(fresh.count().unwrap(), 2);
+    }
+
+    #[test]
+    fn group_fresh_handles_exists_true_when_any_clause_matches() {
+        let loc = root_locator_fresh_handles(r#"button[name="Nope"], slider"#);
+        assert!(loc.exists().unwrap());
+    }
+
+    #[test]
+    fn group_fresh_handles_nth_picks_across_full_union() {
+        // `.nth(2)` on `button, text_field` over the fresh-handle provider
+        // must still return "Forward" — the 2nd of [Back, Forward, Search]
+        // in document order. Pre-fix, .nth(2) returned a "selector not
+        // matched" error because the underlying group resolution returned
+        // an empty union.
+        let loc = root_locator_fresh_handles("button, text_field").nth(2);
+        let el = loc.element().unwrap();
+        assert_eq!(el.data().name.as_deref(), Some("Forward"));
+    }
+
+    #[test]
+    fn group_fresh_handles_descendant_chain_resolves() {
+        // `.descendant("button")` on the (toolbar, group) group locator,
+        // run through the fresh-handle provider. Pre-fix, this chained
+        // selector returned 0 results.
+        let loc = root_locator_fresh_handles("toolbar, group").descendant("button");
+        assert_eq!(loc.selector(), "toolbar button, group button");
+        assert_eq!(names(&loc.elements().unwrap()), vec!["Back", "Forward"]);
+    }
+
+    #[test]
+    fn group_fresh_handles_three_clauses_doc_order() {
+        // Three-clause group over a fresh-handle provider — guards the
+        // bug-fix's invariant that the BTreeMap-by-path merge handles >2
+        // clauses correctly.
+        let loc = root_locator_fresh_handles("toolbar, slider, check_box");
+        // Document order through Navigation/Content: Navigation (toolbar),
+        // then Agree (check_box), then Volume (slider).
+        assert_eq!(
+            names(&loc.elements().unwrap()),
+            vec!["Navigation", "Agree", "Volume"]
+        );
+    }
 }

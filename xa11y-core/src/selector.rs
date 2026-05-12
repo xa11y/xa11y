@@ -20,7 +20,7 @@
 //! union of each clause's matches, deduplicated by element identity and
 //! returned in document order. See [`SelectorGroup`].
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::element::{ElementData, Toggled};
 use crate::error::{Error, Result};
@@ -700,15 +700,17 @@ pub fn find_elements_in_tree(
 /// Multi-clause variant of [`find_elements_in_tree`].
 ///
 /// Runs each clause in `group` independently, then returns the **union** of
-/// matches in **document order**, deduplicated by `ElementData.handle`. A
-/// single-clause group is forwarded straight to `find_elements_in_tree` with
-/// no extra traversal.
+/// matches in **document order**, deduplicated by tree position. A single-
+/// clause group is forwarded straight to `find_elements_in_tree` with no
+/// extra work.
 ///
-/// For multi-clause groups this performs one traversal per clause plus a
-/// second pass over the tree to recover document order (each clause's own
-/// result list is in DFS order, but DFS positions across clauses aren't
-/// comparable without a re-walk). The second walk short-circuits as soon as
-/// `limit` is hit or the entire union has been emitted.
+/// Identity for dedup and ordering is the path-from-root (sequence of child
+/// indices). This is the only identifier that's stable across multiple
+/// `get_children_fn` walks — `ElementData.handle` is *not*, because every
+/// real platform backend (Windows/UIA, macOS/AX, Linux/AT-SPI2) allocates a
+/// fresh handle on each `cache_element` call, so the same logical node sees
+/// disjoint handle values across the per-clause walks. Identifying by path
+/// keeps the union correct without requiring providers to stabilise handles.
 pub fn find_elements_in_tree_group<F>(
     get_children_fn: F,
     root: Option<&ElementData>,
@@ -723,121 +725,181 @@ where
         return find_elements_in_tree(get_children_fn, root, &group.clauses[0], limit, max_depth);
     }
 
-    // Run each clause independently. Re-borrow the closure for each inner
-    // call so the outer `get_children_fn` can still be used for the
-    // document-order merge below — `&F` implements `Fn` when `F` does, so
-    // we hand a shared borrow to `find_elements_in_tree` without moving the
-    // value.
+    // Run each clause via the path-tracking walker. The per-clause results
+    // are (path, snapshot) pairs where `path` is the sequence of child
+    // indices from `root` to the matched node — stable across walks because
+    // it's derived purely from `get_children_fn`'s iteration order, not from
+    // any platform-allocated identity.
     let f = &get_children_fn;
-    let mut clause_results = Vec::with_capacity(group.clauses.len());
+    let mut by_path: std::collections::BTreeMap<Vec<u32>, ElementData> =
+        std::collections::BTreeMap::new();
     for clause in &group.clauses {
-        clause_results.push(find_elements_in_tree(f, root, clause, None, max_depth)?);
+        let clause_results = find_elements_in_tree_with_paths(f, root, clause, max_depth)?;
+        for (path, data) in clause_results {
+            // First clause that matched at this path wins the snapshot —
+            // matches `find_elements_in_tree`'s first-write-wins on the
+            // single-clause path, and means later clauses' state-drifted
+            // re-reads of the same node don't shadow earlier ones.
+            by_path.entry(path).or_insert(data);
+        }
     }
-    merge_clause_results_in_document_order(get_children_fn, root, clause_results, limit, max_depth)
+
+    // BTreeMap iteration is sorted by key. Comparing `Vec<u32>` paths
+    // lexicographically is the same as document order from DFS traversal,
+    // so this is the cheapest way to recover the cross-clause merge order.
+    let mut out: Vec<ElementData> = by_path.into_values().collect();
+    if let Some(l) = limit {
+        out.truncate(l);
+    }
+    Ok(out)
 }
 
-/// Merge per-clause result lists into the union, deduped by element
-/// identity, in document order.
+/// Path-tracking variant of [`find_elements_in_tree`].
 ///
-/// Each input vec is one clause's matches (in any order — typically DFS
-/// from that clause's own traversal). The merge walks the tree once via
-/// `get_children_fn`, emitting any element whose handle appears in the
-/// union, stopping early when `limit` is satisfied or every union member
-/// has been emitted.
+/// Mirrors `find_elements_in_tree`'s phase-1 + phase-2 structure exactly,
+/// but every result carries the sequence of child indices from `root` to
+/// the matched node. The path is the canonical document-order identifier:
+/// stable across walks of the same `get_children_fn` and orderable
+/// lexicographically.
 ///
-/// `ElementData` snapshots are taken from the clause results (not the
-/// traversal), so the returned elements carry the attribute state the
-/// matcher actually saw — important if attributes drift between the
-/// per-clause walk and the merge walk.
-pub fn merge_clause_results_in_document_order<F>(
+/// Used by [`find_elements_in_tree_group`] to merge per-clause matches
+/// without relying on platform-allocated `handle` stability.
+pub fn find_elements_in_tree_with_paths<F>(
     get_children_fn: F,
     root: Option<&ElementData>,
-    clause_results: Vec<Vec<ElementData>>,
-    limit: Option<usize>,
+    selector: &Selector,
     max_depth: Option<u32>,
-) -> Result<Vec<ElementData>>
+) -> Result<Vec<(Vec<u32>, ElementData)>>
 where
     F: Fn(Option<&ElementData>) -> Result<Vec<ElementData>>,
 {
-    let mut snapshots: HashMap<u64, ElementData> = HashMap::new();
-    for results in clause_results {
-        for e in results {
-            snapshots.entry(e.handle).or_insert(e);
-        }
-    }
-    if snapshots.is_empty() {
+    if selector.segments.is_empty() {
         return Ok(vec![]);
     }
 
     let max_depth = max_depth.unwrap_or(crate::MAX_TREE_DEPTH);
-    let mut session = DocOrderEmit {
-        snapshots: &snapshots,
-        emitted: HashSet::new(),
-        out: Vec::with_capacity(snapshots.len().min(limit.unwrap_or(usize::MAX))),
-        max_depth,
-        limit,
+    let first = &selector.segments[0].simple;
+
+    // Phase 1: collect all matches for the first segment (DFS from root).
+    let phase1_depth = if root.is_none()
+        && matches!(
+            first.role,
+            Some(RoleMatch::Normalized(crate::role::Role::Application))
+        ) {
+        0
+    } else {
+        max_depth
     };
-    emit_in_document_order(&get_children_fn, root, &mut session, 0)?;
-    Ok(session.out)
+
+    let mut candidates: Vec<(Vec<u32>, ElementData)> = Vec::new();
+    let mut path_scratch = Vec::new();
+    collect_matching_with_paths(
+        &get_children_fn,
+        root,
+        first,
+        0,
+        phase1_depth,
+        &mut path_scratch,
+        &mut candidates,
+    )?;
+    apply_nth_paths(&mut candidates, first.nth);
+
+    // Phase 2: narrow through remaining segments. Each phase-2 descendant's
+    // path extends its phase-1 ancestor's path — so the resulting paths are
+    // still rooted at the original `root`.
+    for segment in &selector.segments[1..] {
+        let mut next: Vec<(Vec<u32>, ElementData)> = Vec::new();
+        for (cand_path, candidate) in &candidates {
+            match segment.combinator {
+                Combinator::Child => {
+                    let children = get_children_fn(Some(candidate))?;
+                    for (i, child) in children.into_iter().enumerate() {
+                        if matches_simple(&child, &segment.simple) {
+                            let mut p = cand_path.clone();
+                            p.push(i as u32);
+                            next.push((p, child));
+                        }
+                    }
+                }
+                Combinator::Descendant => {
+                    let mut sub: Vec<(Vec<u32>, ElementData)> = Vec::new();
+                    let mut sub_path = Vec::new();
+                    collect_matching_with_paths(
+                        &get_children_fn,
+                        Some(candidate),
+                        &segment.simple,
+                        0,
+                        max_depth,
+                        &mut sub_path,
+                        &mut sub,
+                    )?;
+                    for (sp, se) in sub {
+                        let mut p = cand_path.clone();
+                        p.extend(sp);
+                        next.push((p, se));
+                    }
+                }
+                Combinator::Root => unreachable!(),
+            }
+        }
+        // Dedup by path, preserving order — same shape as
+        // `find_elements_in_tree`'s handle-based dedup but stable across
+        // walks because paths are derived from traversal order.
+        let mut seen = HashSet::new();
+        next.retain(|(p, _)| seen.insert(p.clone()));
+        candidates = next;
+        apply_nth_paths(&mut candidates, segment.simple.nth);
+    }
+
+    Ok(candidates)
 }
 
-/// Per-call state bundled together so [`emit_in_document_order`] stays
-/// under the `too_many_arguments` clippy threshold and so the read-only
-/// (`snapshots`, `max_depth`, `limit`) and write (`emitted`, `out`) halves
-/// of the walk live in one place.
-struct DocOrderEmit<'a> {
-    snapshots: &'a HashMap<u64, ElementData>,
-    emitted: HashSet<u64>,
-    out: Vec<ElementData>,
-    max_depth: u32,
-    limit: Option<usize>,
-}
-
-impl DocOrderEmit<'_> {
-    /// True if we've hit `limit` (when set).
-    fn at_limit(&self) -> bool {
-        self.limit.is_some_and(|l| self.out.len() >= l)
+/// `apply_nth` for path-tagged candidates. Identical 1-based semantics to
+/// the plain version, including the "fewer-than-N → empty" rule.
+fn apply_nth_paths(candidates: &mut Vec<(Vec<u32>, ElementData)>, nth: Option<usize>) {
+    let Some(n) = nth else { return };
+    if n <= candidates.len() {
+        let kept = candidates.remove(n - 1);
+        candidates.clear();
+        candidates.push(kept);
+    } else {
+        candidates.clear();
     }
 }
 
-/// DFS-walk the tree and emit each handle in `session.snapshots` exactly
-/// once, in document order, stopping once `limit` is hit or every handle
-/// has been emitted.
-fn emit_in_document_order(
+/// DFS variant of [`collect_matching`] that tags each match with its path
+/// (sequence of child indices from the original walk root).
+///
+/// `path` is a scratch buffer pushed/popped at each level so the caller can
+/// share one allocation across the whole walk.
+fn collect_matching_with_paths(
     get_children_fn: &impl Fn(Option<&ElementData>) -> Result<Vec<ElementData>>,
     root: Option<&ElementData>,
-    session: &mut DocOrderEmit<'_>,
+    simple: &SimpleSelector,
     depth: u32,
+    max_depth: u32,
+    path: &mut Vec<u32>,
+    results: &mut Vec<(Vec<u32>, ElementData)>,
 ) -> Result<()> {
-    if depth > session.max_depth {
-        return Ok(());
-    }
-    if session.at_limit() {
-        return Ok(());
-    }
-    if session.emitted.len() == session.snapshots.len() {
-        // Every winning handle has been emitted — no need to keep walking.
+    if depth > max_depth {
         return Ok(());
     }
     let children = get_children_fn(root)?;
-    for child in children {
-        if let Some(snap) = session.snapshots.get(&child.handle) {
-            // A handle that appears multiple times in the tree (rare, but
-            // some Qt providers expose the same node via different parents)
-            // is still emitted only once — `emitted` tracks that.
-            if session.emitted.insert(child.handle) {
-                // Prefer the snapshot captured by clause matching — it
-                // carries the attribute state the matcher actually saw.
-                session.out.push(snap.clone());
-                if session.at_limit() {
-                    return Ok(());
-                }
-            }
+    for (i, child) in children.into_iter().enumerate() {
+        path.push(i as u32);
+        if matches_simple(&child, simple) {
+            results.push((path.clone(), child.clone()));
         }
-        emit_in_document_order(get_children_fn, Some(&child), session, depth + 1)?;
-        if session.at_limit() {
-            return Ok(());
-        }
+        collect_matching_with_paths(
+            get_children_fn,
+            Some(&child),
+            simple,
+            depth + 1,
+            max_depth,
+            path,
+            results,
+        )?;
+        path.pop();
     }
     Ok(())
 }
@@ -1886,5 +1948,451 @@ mod tests {
             find_elements_in_tree_group(group_get_children(&tree), None, &group, None, None)
                 .unwrap();
         assert!(results.is_empty());
+    }
+
+    /// `get_children` closure that mimics how real platform providers behave:
+    /// each call allocates a fresh handle for every returned element, even for
+    /// the same logical node. The Windows, macOS, and Linux backends all do
+    /// this (each `cache_element` bumps a `NEXT_HANDLE` atomic), so two walks
+    /// of the same tree see entirely disjoint handle values for the same
+    /// nodes.
+    ///
+    /// The fixture identifies parents internally by name (stable across calls)
+    /// while the returned `ElementData.handle` is freshly minted every time —
+    /// this is exactly the shape that surfaced as "comma selector returned 0
+    /// results when it should have matched" in real usage.
+    fn fresh_handle_get_children(
+        tree: &[GroupRow],
+    ) -> impl Fn(Option<&ElementData>) -> Result<Vec<ElementData>> + '_ {
+        let next = std::cell::RefCell::new(1_000_000u64);
+        // Map from freshly-minted handle → stable row name, so subsequent calls
+        // can find the parent's row by handle even though row.handle ≠ the
+        // freshly-minted handle we previously returned.
+        let by_handle: std::cell::RefCell<std::collections::HashMap<u64, &'static str>> =
+            std::cell::RefCell::new(std::collections::HashMap::new());
+
+        move |parent: Option<&ElementData>| -> Result<Vec<ElementData>> {
+            let parent_row_handle = match parent {
+                None => None,
+                Some(p) => {
+                    let name = by_handle.borrow().get(&p.handle).copied().or_else(|| {
+                        tree.iter()
+                            .find(|r| Some(r.name) == p.name.as_deref())
+                            .map(|r| r.name)
+                    });
+                    name.and_then(|n| tree.iter().find(|r| r.name == n).map(|r| r.handle))
+                }
+            };
+            let mut out = Vec::new();
+            for row in tree.iter().filter(|r| r.parent == parent_row_handle) {
+                let fresh = {
+                    let mut n = next.borrow_mut();
+                    let v = *n;
+                    *n += 1;
+                    v
+                };
+                by_handle.borrow_mut().insert(fresh, row.name);
+                out.push(ElementData {
+                    role: row.role,
+                    name: Some(row.name.to_string()),
+                    value: None,
+                    description: None,
+                    bounds: None,
+                    actions: vec![],
+                    states: crate::element::StateSet::default(),
+                    numeric_value: None,
+                    min_value: None,
+                    max_value: None,
+                    stable_id: None,
+                    pid: Some(1),
+                    raw: std::collections::HashMap::new(),
+                    handle: fresh,
+                });
+            }
+            Ok(out)
+        }
+    }
+
+    #[test]
+    fn group_match_works_with_fresh_handles_per_walk() {
+        // Regression: the doc-order merge previously identified clause-match
+        // results by `ElementData.handle` and re-walked the tree to recover
+        // document order, looking up visited nodes by that same handle. On
+        // every real platform backend `get_children` allocates a fresh handle
+        // for each returned element on every call, so the re-walk's handles
+        // never matched the per-clause walks' handles — the lookup missed
+        // every time and the function returned 0 results.
+        //
+        // This test pins the fix: a fresh-handle `get_children` (one new
+        // handle per element per call) must still yield the full document-
+        // order union.
+        let tree = group_fixture();
+        let group = SelectorGroup::parse("button, text_field").unwrap();
+        let results =
+            find_elements_in_tree_group(fresh_handle_get_children(&tree), None, &group, None, None)
+                .unwrap();
+        assert_eq!(
+            names(&results),
+            vec!["Clear", "Search", "Save", "Cancel", "Password"],
+            "comma selector must work when get_children allocates fresh handles",
+        );
+    }
+
+    #[test]
+    fn group_match_fresh_handles_combinator_per_clause() {
+        // Same fresh-handle regression for multi-segment clauses: `toolbar
+        // button, dialog button` runs two clauses, each with a Descendant
+        // combinator. Pre-fix, this returned 0 results on real providers.
+        let tree = group_fixture();
+        let group = SelectorGroup::parse("toolbar button, dialog button").unwrap();
+        let results =
+            find_elements_in_tree_group(fresh_handle_get_children(&tree), None, &group, None, None)
+                .unwrap();
+        assert_eq!(names(&results), vec!["Clear", "Save", "Cancel"]);
+    }
+
+    #[test]
+    fn group_match_fresh_handles_overlapping_clauses_dedup() {
+        // Fresh-handle dedup: two clauses both match the same node. The
+        // result must include it exactly once, even though each clause walk
+        // mints a different handle for it.
+        let tree = group_fixture();
+        let group = SelectorGroup::parse(r#"button[name="Clear"], button[name*="lea"]"#).unwrap();
+        let results =
+            find_elements_in_tree_group(fresh_handle_get_children(&tree), None, &group, None, None)
+                .unwrap();
+        assert_eq!(names(&results), vec!["Clear"]);
+    }
+
+    #[test]
+    fn group_match_fresh_handles_limit_truncates_in_document_order() {
+        // Limit must still apply in document order, not in clause order.
+        let tree = group_fixture();
+        let group = SelectorGroup::parse("button, text_field").unwrap();
+        let results = find_elements_in_tree_group(
+            fresh_handle_get_children(&tree),
+            None,
+            &group,
+            Some(2),
+            None,
+        )
+        .unwrap();
+        assert_eq!(names(&results), vec!["Clear", "Search"]);
+    }
+
+    // ── SelectorGroup parsing — additional edge cases ──────────────────────
+
+    #[test]
+    fn split_top_level_commas_unicode_around_commas() {
+        // Multi-byte chars adjacent to commas must not throw off the byte
+        // accounting — `split_top_level_commas` iterates `chars()` so this
+        // is just a sanity check that the contract holds for non-ASCII.
+        assert_eq!(
+            split_top_level_commas("café,naïve"),
+            vec!["café".to_string(), "naïve".to_string()],
+        );
+    }
+
+    #[test]
+    fn split_top_level_commas_nested_quotes() {
+        // A single-quoted value containing a double quote, followed by a
+        // double-quoted value containing a single quote — quotes must close
+        // against their own delimiter, not the opposite type.
+        assert_eq!(
+            split_top_level_commas(r#"[name='a"b,c'], [name="x'y,z"]"#),
+            vec![
+                r#"[name='a"b,c']"#.to_string(),
+                r#" [name="x'y,z"]"#.to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn parse_group_attribute_only_clauses() {
+        // Clauses with no role (attribute filters only) must parse correctly
+        // on both sides of the comma.
+        let group = SelectorGroup::parse(r#"[name="A"], [name="B"]"#).unwrap();
+        assert_eq!(group.clauses.len(), 2);
+        assert!(group.clauses[0].segments[0].simple.role.is_none());
+        assert!(group.clauses[1].segments[0].simple.role.is_none());
+        assert_eq!(group.clauses[0].segments[0].simple.filters[0].value, "A");
+        assert_eq!(group.clauses[1].segments[0].simple.filters[0].value, "B");
+    }
+
+    #[test]
+    fn parse_group_role_only_then_attribute_only() {
+        // Mixing role-only and attribute-only clauses: each clause must
+        // parse independently.
+        let group = SelectorGroup::parse(r#"button, [name="X"]"#).unwrap();
+        assert_eq!(group.clauses.len(), 2);
+        assert!(matches!(
+            group.clauses[0].segments[0].simple.role,
+            Some(RoleMatch::Normalized(Role::Button))
+        ));
+        assert!(group.clauses[1].segments[0].simple.role.is_none());
+    }
+
+    #[test]
+    fn parse_group_multiple_quoted_commas_in_one_clause() {
+        // Two attribute filters in the same clause, both containing commas.
+        // The clause must not be split, and both values must survive parsing.
+        let group =
+            SelectorGroup::parse(r#"button[name="a,b"][description="x,y"], slider"#).unwrap();
+        assert_eq!(group.clauses.len(), 2);
+        assert_eq!(group.clauses[0].segments[0].simple.filters.len(), 2);
+        assert_eq!(group.clauses[0].segments[0].simple.filters[0].value, "a,b");
+        assert_eq!(group.clauses[0].segments[0].simple.filters[1].value, "x,y");
+        assert!(matches!(
+            group.clauses[1].segments[0].simple.role,
+            Some(RoleMatch::Normalized(Role::Slider))
+        ));
+    }
+
+    #[test]
+    fn parse_group_nth_per_clause() {
+        // `:nth(N)` is per-clause; both clauses must parse with their own
+        // nth values.
+        let group = SelectorGroup::parse("button:nth(1), text_field:nth(2)").unwrap();
+        assert_eq!(group.clauses.len(), 2);
+        assert_eq!(group.clauses[0].segments[0].simple.nth, Some(1));
+        assert_eq!(group.clauses[1].segments[0].simple.nth, Some(2));
+    }
+
+    #[test]
+    fn parse_group_unterminated_quote_propagates_error() {
+        // An unterminated quoted value inside one clause must surface as a
+        // parse error from that clause — the unterminated string makes
+        // `split_top_level_commas` swallow the rest of the input as one
+        // tail clause, which then fails `Selector::parse`.
+        let err = SelectorGroup::parse(r#"button, [name="oops"#);
+        assert!(err.is_err(), "unterminated quote must error: {err:?}");
+    }
+
+    #[test]
+    fn parse_group_trailing_whitespace_is_tolerated() {
+        // Surrounding whitespace on the whole input is trimmed; per-clause
+        // whitespace also trims. None of this should produce empty clauses.
+        let group = SelectorGroup::parse("   button  ,   text_field   ").unwrap();
+        assert_eq!(group.clauses.len(), 2);
+        assert!(matches!(
+            group.clauses[0].segments[0].simple.role,
+            Some(RoleMatch::Normalized(Role::Button))
+        ));
+        assert!(matches!(
+            group.clauses[1].segments[0].simple.role,
+            Some(RoleMatch::Normalized(Role::TextField))
+        ));
+    }
+
+    #[test]
+    fn chain_combinator_handles_trailing_whitespace() {
+        // `chain_combinator` must trim each clause when stitching, so trailing
+        // whitespace from prior chaining doesn't leak into the produced
+        // selector string and break later parses.
+        assert_eq!(chain_combinator("a , b ", " ", " c "), "a c, b c");
+    }
+
+    #[test]
+    fn chain_combinator_preserves_attribute_filters_in_groups() {
+        // Attribute filters survive the round-trip through chain_combinator
+        // — important because Locator::descendant / child use this when
+        // chaining off a group locator that has filters.
+        assert_eq!(
+            chain_combinator(r#"button[name="A"], button[name="B"]"#, " ", "label"),
+            r#"button[name="A"] label, button[name="B"] label"#,
+        );
+    }
+
+    #[test]
+    fn chain_combinator_round_trips_through_parser() {
+        // chain_combinator's docs promise its output re-parses as a
+        // SelectorGroup. Test that contract end-to-end so regressions in
+        // either side surface immediately.
+        let cases = &[
+            ("a, b", " ", "c"),
+            ("a, b", " > ", "c, d"),
+            (r#"[name="a,b"]"#, " ", "c"),
+            ("toolbar, group", " > ", r#"button[name="OK"]"#),
+        ];
+        for (existing, comb, suffix) in cases {
+            let stitched = chain_combinator(existing, comb, suffix);
+            SelectorGroup::parse(&stitched).unwrap_or_else(|e| {
+                panic!("chain_combinator output {stitched:?} must re-parse, got {e:?}")
+            });
+        }
+    }
+
+    // ── find_elements_in_tree_group — additional matching cases ────────────
+
+    #[test]
+    fn group_match_three_clauses_doc_order() {
+        // Three clauses, each matching a different role. Result must
+        // interleave by document position across all three.
+        let tree = group_fixture();
+        let group = SelectorGroup::parse("toolbar, dialog, button").unwrap();
+        let results =
+            find_elements_in_tree_group(group_get_children(&tree), None, &group, None, None)
+                .unwrap();
+        // DFS order: T(toolbar), Clear(button), Save(button), D(dialog), Cancel(button).
+        assert_eq!(names(&results), vec!["T", "Clear", "Save", "D", "Cancel"]);
+    }
+
+    #[test]
+    fn group_match_attribute_only_clauses_against_tree() {
+        // Attribute-only clauses (no role) — both clauses must traverse the
+        // full tree and match by attribute alone.
+        let tree = group_fixture();
+        let group = SelectorGroup::parse(r#"[name="Clear"], [name="Password"]"#).unwrap();
+        let results =
+            find_elements_in_tree_group(group_get_children(&tree), None, &group, None, None)
+                .unwrap();
+        assert_eq!(names(&results), vec!["Clear", "Password"]);
+    }
+
+    #[test]
+    fn group_match_with_scoped_root() {
+        // Scope the search to the toolbar subtree. Only descendants of the
+        // toolbar match — the dialog branch must be excluded entirely, even
+        // for clauses that would match nodes there at the root level.
+        let tree = group_fixture();
+        let toolbar = ElementData {
+            role: Role::Toolbar,
+            name: Some("T".to_string()),
+            value: None,
+            description: None,
+            bounds: None,
+            actions: vec![],
+            states: crate::element::StateSet::default(),
+            numeric_value: None,
+            min_value: None,
+            max_value: None,
+            stable_id: None,
+            pid: Some(1),
+            raw: std::collections::HashMap::new(),
+            handle: 1,
+        };
+        let group = SelectorGroup::parse("button, text_field").unwrap();
+        let results = find_elements_in_tree_group(
+            group_get_children(&tree),
+            Some(&toolbar),
+            &group,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            names(&results),
+            vec!["Clear", "Search", "Save"],
+            "scoped search must exclude dialog-subtree matches",
+        );
+    }
+
+    #[test]
+    fn group_match_max_depth_zero_returns_top_level_only() {
+        // max_depth=0 means we visit children of root but not grandchildren.
+        // From system root, this yields only the application node.
+        let tree = group_fixture();
+        let group = SelectorGroup::parse("application, toolbar").unwrap();
+        let results =
+            find_elements_in_tree_group(group_get_children(&tree), None, &group, None, Some(0))
+                .unwrap();
+        // Only "root" (application) is at depth 0 here; toolbar is deeper.
+        assert_eq!(names(&results), vec!["root"]);
+    }
+
+    #[test]
+    fn group_match_empty_group_clauses_returns_empty() {
+        // Defensive: a group whose every clause has zero matches yields an
+        // empty Vec, never an error.
+        let tree = group_fixture();
+        let group =
+            SelectorGroup::parse(r#"button[name="ZZZ"], dialog[name="QQQ"], slider"#).unwrap();
+        let results =
+            find_elements_in_tree_group(group_get_children(&tree), None, &group, None, None)
+                .unwrap();
+        assert!(results.is_empty());
+    }
+
+    // ── find_elements_in_tree_with_paths — path identity contract ──────────
+
+    #[test]
+    fn paths_match_dfs_indices_from_root() {
+        // Paths are the sole stable identity used to dedup multi-clause
+        // groups. Lock the contract: a single-segment clause matching `button`
+        // against the fixture must produce paths that correspond to the
+        // DFS-position of each match.
+        //
+        // Tree (DFS):
+        //   root(0) → toolbar(1) → Clear(2), Search(3), Save(4)
+        //          → dialog(5)  → Cancel(6), Password(7)
+        // Buttons live at:
+        //   Clear  = root/toolbar[0]/button[0] → path [0, 0, 0]
+        //   Save   = root/toolbar[0]/button[2] → path [0, 0, 2]
+        //   Cancel = root/dialog[1]/button[0]  → path [0, 1, 0]
+        let tree = group_fixture();
+        let sel = Selector::parse("button").unwrap();
+        let paths_and_data =
+            find_elements_in_tree_with_paths(group_get_children(&tree), None, &sel, None).unwrap();
+        let just_paths: Vec<Vec<u32>> = paths_and_data.iter().map(|(p, _)| p.clone()).collect();
+        let just_names: Vec<String> = paths_and_data
+            .iter()
+            .map(|(_, e)| e.name.clone().unwrap_or_default())
+            .collect();
+        assert_eq!(just_names, vec!["Clear", "Save", "Cancel"]);
+        assert_eq!(
+            just_paths,
+            vec![vec![0, 0, 0], vec![0, 0, 2], vec![0, 1, 0]],
+        );
+    }
+
+    #[test]
+    fn paths_are_stable_across_repeated_walks() {
+        // Running the same selector twice through `find_elements_in_tree_with_paths`
+        // must produce identical paths — this is the invariant the doc-order
+        // merge depends on. (The mock here uses stable handles, but the
+        // assertion is about path stability, which holds regardless of handle
+        // semantics.)
+        let tree = group_fixture();
+        let sel = Selector::parse("button").unwrap();
+        let a =
+            find_elements_in_tree_with_paths(group_get_children(&tree), None, &sel, None).unwrap();
+        let b =
+            find_elements_in_tree_with_paths(group_get_children(&tree), None, &sel, None).unwrap();
+        let a_paths: Vec<Vec<u32>> = a.iter().map(|(p, _)| p.clone()).collect();
+        let b_paths: Vec<Vec<u32>> = b.iter().map(|(p, _)| p.clone()).collect();
+        assert_eq!(a_paths, b_paths, "paths must be stable across walks");
+        assert_eq!(a_paths.len(), 3, "expected 3 button matches in fixture");
+    }
+
+    #[test]
+    fn paths_with_combinator_chain_extend_through_phase2() {
+        // For multi-segment selectors, the phase-2 path must extend the
+        // phase-1 candidate's path with the descendants' offsets. A
+        // `toolbar > button` selector should produce paths rooted in the
+        // toolbar's path, not in the button's local walk.
+        let tree = group_fixture();
+        let sel = Selector::parse("toolbar > button").unwrap();
+        let results =
+            find_elements_in_tree_with_paths(group_get_children(&tree), None, &sel, None).unwrap();
+        let paths: Vec<Vec<u32>> = results.iter().map(|(p, _)| p.clone()).collect();
+        // Toolbar is at root/[0]/[0] (path [0,0]); its button children at
+        // offsets 0 and 2 (Clear, Save). So:
+        //   Clear → [0, 0, 0]
+        //   Save  → [0, 0, 2]
+        assert_eq!(paths, vec![vec![0, 0, 0], vec![0, 0, 2]]);
+    }
+
+    #[test]
+    fn group_match_clause_with_no_role_and_filter() {
+        // A clause that's just `[name*="..."]` (no role) — exercised against
+        // the tree to confirm filter-only matching is intact in groups.
+        let tree = group_fixture();
+        let group = SelectorGroup::parse(r#"[name*="ear"], [name*="ass"]"#).unwrap();
+        let results =
+            find_elements_in_tree_group(group_get_children(&tree), None, &group, None, None)
+                .unwrap();
+        // "Clear" (contains "ear"), "Search" (contains "ear"), "Password"
+        // (contains "ass"). Doc order: Clear, Search, Password.
+        assert_eq!(names(&results), vec!["Clear", "Search", "Password"]);
     }
 }

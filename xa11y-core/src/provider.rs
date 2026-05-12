@@ -60,11 +60,13 @@ pub trait Provider: Send + Sync {
     /// Search for elements matching any clause of a comma-separated selector
     /// group.
     ///
-    /// Forwards to [`find_elements`](Self::find_elements) once per clause and
-    /// merges results into the union, deduplicated by element identity and
-    /// returned in document order. Single-clause groups short-circuit to a
-    /// straight `find_elements` call, so providers that override the
-    /// optimized single-clause path keep their fast path.
+    /// Single-clause groups short-circuit to [`find_elements`](Self::find_elements)
+    /// so providers that override the optimized single-clause path keep
+    /// their fast path. Multi-clause groups bypass per-clause `find_elements`
+    /// and walk via [`get_children`](Self::get_children) with path tracking,
+    /// because the cross-clause merge must identify elements by something
+    /// stable across walks — and platform `handle` values are not (every
+    /// backend mints a fresh handle per `get_children` call).
     fn find_elements_group(
         &self,
         root: Option<&ElementData>,
@@ -75,17 +77,10 @@ pub trait Provider: Send + Sync {
         if group.clauses.len() == 1 {
             return self.find_elements(root, &group.clauses[0], limit, max_depth);
         }
-        // Each clause goes through the provider's own (possibly optimized)
-        // `find_elements`. The merge below walks once more via
-        // `get_children` to recover document order across clauses.
-        let mut clause_results = Vec::with_capacity(group.clauses.len());
-        for clause in &group.clauses {
-            clause_results.push(self.find_elements(root, clause, None, max_depth)?);
-        }
-        crate::selector::merge_clause_results_in_document_order(
+        crate::selector::find_elements_in_tree_group(
             |el| self.get_children(el),
             root,
-            clause_results,
+            group,
             limit,
             max_depth,
         )

@@ -44,7 +44,7 @@ pub use xa11y_core::{is_bidi_control, strip_bidi, strip_bidi_opt};
 
 // Implementation details used by platform backends and Python bindings.
 #[doc(hidden)]
-pub use xa11y_core::{CancelHandle, EventReceiver, Provider, RecvStatus, Selector};
+pub use xa11y_core::{CancelHandle, EventReceiver, Provider, RecvStatus, Selector, SelectorGroup};
 
 /// Shared in-memory mock Provider — re-exported from `xa11y-core` when the
 /// `test-support` feature is enabled. Used by language-binding tests so
