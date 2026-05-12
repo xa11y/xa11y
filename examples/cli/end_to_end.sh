@@ -42,21 +42,31 @@ else
     exit 1
 fi
 
-# 1. Launch the test app in the background and ensure it's torn down on exit.
+# 1. Launch the test app in the background. We capture $! as a best-effort
+#    cleanup target, but on Git Bash for Windows that's the subshell pid, not
+#    the .exe's pid — so we re-discover the real pid via `xa11y apps` below.
 "$APP_BIN" >/dev/null 2>&1 &
-APP_PID=$!
+LAUNCHER_PID=$!
+APP_PID=""
 cleanup() {
-    kill "$APP_PID" 2>/dev/null || true
-    wait "$APP_PID" 2>/dev/null || true
+    [ -n "$APP_PID" ] && kill "$APP_PID" 2>/dev/null || true
+    kill "$LAUNCHER_PID" 2>/dev/null || true
+    wait "$LAUNCHER_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-# 2. Poll until the accessibility API registers the app. `xa11y apps` lists
-#    everything it can see; grep for our PID.
+# 2. Poll `xa11y apps` for the test app by name. The Linux/macOS process name
+#    is "xa11y-test-app"; the Windows UIA window title is "xa11y Test App".
 DEADLINE=$(( $(date +%s) + 30 ))
-until "$CLI" apps 2>/dev/null | awk -v pid="$APP_PID" '$1 == pid { found=1 } END { exit !found }'; do
+while :; do
+    APP_PID=$("$CLI" apps 2>/dev/null | awk -F'\t' '
+        $2 == "xa11y-test-app" || $2 == "xa11y Test App" { print $1; exit }
+    ')
+    if [ -n "$APP_PID" ]; then
+        break
+    fi
     if [ "$(date +%s)" -ge "$DEADLINE" ]; then
-        echo "Test app (pid=$APP_PID) did not register within 30s" >&2
+        echo "Test app did not register within 30s" >&2
         echo "--- xa11y apps ---" >&2
         "$CLI" apps >&2 || true
         exit 1

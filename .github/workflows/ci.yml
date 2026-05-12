@@ -530,16 +530,22 @@ jobs:
         working-directory: xa11y-js
         run: npm install && npm run build:debug
 
-      # ── macOS: grant accessibility permission to the interpreters ────
+      # ── macOS: grant accessibility permission to the binaries that call AX ───
+      # TCC fingerprints by the *spawned* binary's path, not its parent. Each
+      # example's reader-of-the-AX-tree gets a grant:
+      #   * the Rust example binary (cargo run is just the spawner)
+      #   * the Python interpreter inside the venv
+      #   * node (used directly to launch the JS example)
+      #   * the xa11y CLI binary (bash spawns it from end_to_end.sh)
       - name: Grant accessibility TCC permission (macOS)
         if: runner.os == 'macOS'
         shell: bash
         run: |
           PYTHON_PATH=$(.venv-examples/bin/python -c "import sys; print(sys.executable)")
           NODE_PATH=$(command -v node)
-          CARGO_PATH=$(command -v cargo)
-          BASH_PATH=$(command -v bash)
-          for client in "$PYTHON_PATH" "$NODE_PATH" "$CARGO_PATH" "$BASH_PATH"; do
+          RUST_BIN="$PWD/target/debug/xa11y-example-end-to-end"
+          CLI_BIN="$PWD/target/debug/xa11y"
+          for client in "$PYTHON_PATH" "$NODE_PATH" "$RUST_BIN" "$CLI_BIN"; do
             echo "Granting TCC kTCCServiceAccessibility to: $client"
             sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
               "INSERT OR REPLACE INTO access(service,client,client_type,auth_value,auth_reason,auth_version,csreq,policy_id,indirect_object_identifier_type,indirect_object_identifier,indirect_object_code_identity,flags,last_modified) \
@@ -553,6 +559,8 @@ jobs:
       # setup that the existing integ harness uses (scripts/setup_linux_a11y.sh).
       - name: Run examples (Linux)
         if: runner.os == 'Linux'
+        env:
+          RUST_BACKTRACE: "1"
         run: |
           export DISPLAY=:99
           Xvfb :99 -screen 0 1280x1024x24 -ac &
@@ -562,28 +570,34 @@ jobs:
           dbus-run-session -- bash -c '
             set -euo pipefail
             source scripts/setup_linux_a11y.sh
-            cargo run -p xa11y-example-end-to-end
-            .venv-examples/bin/python examples/python/end_to_end.py
-            node examples/js/end_to_end.mjs
-            bash examples/cli/end_to_end.sh
+            echo "::group::Rust example"   ; cargo run -p xa11y-example-end-to-end          ; echo "::endgroup::"
+            echo "::group::Python example" ; .venv-examples/bin/python -u examples/python/end_to_end.py ; echo "::endgroup::"
+            echo "::group::JS example"     ; node examples/js/end_to_end.mjs                ; echo "::endgroup::"
+            echo "::group::CLI example"    ; bash examples/cli/end_to_end.sh                ; echo "::endgroup::"
           '
 
       - name: Run examples (macOS)
         if: runner.os == 'macOS'
+        env:
+          RUST_BACKTRACE: "1"
         run: |
-          cargo run -p xa11y-example-end-to-end
-          .venv-examples/bin/python examples/python/end_to_end.py
-          node examples/js/end_to_end.mjs
-          bash examples/cli/end_to_end.sh
+          set -e
+          echo "::group::Rust example"   ; cargo run -p xa11y-example-end-to-end          ; echo "::endgroup::"
+          echo "::group::Python example" ; .venv-examples/bin/python -u examples/python/end_to_end.py ; echo "::endgroup::"
+          echo "::group::JS example"     ; node examples/js/end_to_end.mjs                ; echo "::endgroup::"
+          echo "::group::CLI example"    ; bash examples/cli/end_to_end.sh                ; echo "::endgroup::"
 
       - name: Run examples (Windows)
         if: runner.os == 'Windows'
         shell: bash
+        env:
+          RUST_BACKTRACE: "1"
         run: |
-          cargo run -p xa11y-example-end-to-end
-          .venv-examples/Scripts/python.exe examples/python/end_to_end.py
-          node examples/js/end_to_end.mjs
-          bash examples/cli/end_to_end.sh
+          set -e
+          echo "::group::Rust example"   ; cargo run -p xa11y-example-end-to-end          ; echo "::endgroup::"
+          echo "::group::Python example" ; .venv-examples/Scripts/python.exe -u examples/python/end_to_end.py ; echo "::endgroup::"
+          echo "::group::JS example"     ; node examples/js/end_to_end.mjs                ; echo "::endgroup::"
+          echo "::group::CLI example"    ; bash examples/cli/end_to_end.sh                ; echo "::endgroup::"
 
   # ── Lint & format ──────────────────────────────────────────────────
   lint:
