@@ -11,12 +11,12 @@ use core_foundation::number::CFNumber;
 use core_foundation::string::CFString;
 use rayon::prelude::*;
 
+#[cfg(test)]
+use xa11y_core::Selector;
 use xa11y_core::{
     CancelHandle, ElementData, Error, Event, EventKind, EventReceiver, Provider, Rect, Result,
     Role, StateFlag, StateSet, Subscription, Toggled,
 };
-#[cfg(test)]
-use xa11y_core::Selector;
 
 // ── FFI Declarations ──────────────────────────────────────────────────────────
 
@@ -1742,28 +1742,16 @@ impl MacOSProvider {
         }
         results
     }
-
 }
 
 impl Provider for MacOSProvider {
     fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
         match element {
             None => {
-                // Top-level: list all GUI apps as application elements
-                let apps = Self::list_gui_apps();
-                let mut results = Vec::new();
-                for (pid, app_name) in &apps {
-                    let app_element =
-                        AXElement::from_owned(unsafe { safe_ax_create_application(*pid) });
-                    if app_element.is_null() {
-                        continue;
-                    }
-                    let mut data = self.build_element_data(&app_element, Some(*pid as u32));
-                    // Override name with the CGWindowList name (more reliable)
-                    data.name = Some(app_name.clone());
-                    results.push(data);
-                }
-                Ok(results)
+                // Top-level: list all GUI apps as application elements.
+                // Delegated to `list_apps()` so the discovery primitive has
+                // a single canonical implementation.
+                self.list_apps()
             }
             Some(element_data) => {
                 let ax = self.get_cached(element_data.handle)?;
@@ -1791,7 +1779,7 @@ impl Provider for MacOSProvider {
 
     fn find_elements_group(
         &self,
-        root: Option<&ElementData>,
+        root: &ElementData,
         group: &xa11y_core::selector::SelectorGroup,
         limit: Option<usize>,
         max_depth: Option<u32>,
@@ -1811,110 +1799,12 @@ impl Provider for MacOSProvider {
         // AXUIElement pointer identity — that's the only identifier stable
         // across narrowings within a single call (handles are minted fresh
         // on every `build_element_data`).
+        //
+        // App discovery is handled separately by `list_apps()` — `root` is
+        // always present here.
         let max_depth_val = max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH);
 
-        // ── N=1 CGWindowList shortcut ────────────────────────────
-        // Single clause + system root + first segment matches
-        // `Role::Application`: skip the AX walk entirely and use
-        // CGWindowList (no AX calls) to enumerate apps, then build full
-        // ElementData only for matches. Multi-clause groups can mix
-        // `application` with non-app clauses, which would still need the
-        // full AX walk — so this shortcut intentionally only fires for
-        // N=1.
-        if group.clauses.len() == 1 && root.is_none() {
-            let clause = &group.clauses[0];
-            let first = &clause.segments[0].simple;
-            if matches!(
-                first.role,
-                Some(xa11y_core::selector::RoleMatch::Normalized(
-                    Role::Application
-                ))
-            ) {
-                // N=1 phase-1 limit: propagate the user's `limit` (adjusted
-                // for `:nth`) so the iteration stops at the first match.
-                let outer = if clause.segments.len() == 1 {
-                    limit
-                } else {
-                    None
-                };
-                let phase1_limit = match (outer, first.nth) {
-                    (Some(l), Some(n)) => Some(l.max(n)),
-                    (_, Some(n)) => Some(n),
-                    (l, None) => l,
-                };
-
-                let apps = Self::list_gui_apps();
-                let mut matching: Vec<ElementData> = Vec::new();
-                for (pid, app_name) in &apps {
-                    // Check name filters against CGWindowList name
-                    let name_matches = first.filters.iter().all(|f| {
-                        if f.attr != "name" {
-                            return true; // non-name filters checked after build
-                        }
-                        match_op(&f.op, &f.value, Some(app_name.as_str()))
-                    });
-                    if !name_matches {
-                        continue;
-                    }
-
-                    let app_element =
-                        AXElement::from_owned(unsafe { safe_ax_create_application(*pid) });
-                    if app_element.is_null() {
-                        continue;
-                    }
-                    let mut data = self.build_element_data(&app_element, Some(*pid as u32));
-                    data.name = Some(app_name.clone());
-                    matching.push(data);
-
-                    if let Some(cap) = phase1_limit {
-                        if matching.len() >= cap {
-                            break;
-                        }
-                    }
-                }
-
-                // Apply :nth
-                if let Some(nth) = first.nth {
-                    if nth <= matching.len() {
-                        matching = vec![matching.remove(nth - 1)];
-                    } else {
-                        matching.clear();
-                    }
-                }
-
-                if clause.segments.len() == 1 {
-                    if let Some(l) = limit {
-                        matching.truncate(l);
-                    }
-                    return Ok(matching);
-                }
-
-                return self.narrow_multi_segment(
-                    matching,
-                    &clause.segments[1..],
-                    max_depth_val,
-                    limit,
-                );
-            }
-        }
-
-        // Non-application root or multi-clause at the system root: the
-        // CGWindowList shortcut doesn't generalise (mixing `application`
-        // with non-app clauses needs the full AX walk anyway), so fall
-        // through to the default tree-walking implementation. This still
-        // goes through ONE walk per query.
-        let root_data = match root {
-            Some(el) => el,
-            None => {
-                return xa11y_core::selector::find_elements_in_tree_group(
-                    |el| self.get_children(el),
-                    root,
-                    group,
-                    limit,
-                    max_depth,
-                );
-            }
-        };
+        let root_data = root;
 
         let root_ax = self.get_cached(root_data.handle)?;
 
@@ -2056,6 +1946,26 @@ impl Provider for MacOSProvider {
             }
             None => Ok(None),
         }
+    }
+
+    /// Enumerate top-level applications via CGWindowList — the canonical
+    /// macOS app discovery primitive. For each GUI app we synthesise an
+    /// `AXUIElement` via `AXUIElementCreateApplication(pid)` and build
+    /// full `ElementData`, overriding the AX-reported name with the
+    /// CGWindowList name (which is more consistent across launches).
+    fn list_apps(&self) -> Result<Vec<ElementData>> {
+        let apps = Self::list_gui_apps();
+        let mut results = Vec::new();
+        for (pid, app_name) in &apps {
+            let app_element = AXElement::from_owned(unsafe { safe_ax_create_application(*pid) });
+            if app_element.is_null() {
+                continue;
+            }
+            let mut data = self.build_element_data(&app_element, Some(*pid as u32));
+            data.name = Some(app_name.clone());
+            results.push(data);
+        }
+        Ok(results)
     }
 
     // ── Common actions ──────────────────────────────────────────────
@@ -2867,16 +2777,12 @@ mod tests {
     // Run via: cargo xtask test-integ (which also runs these)
     // ════════════════════════════════════════════════════════════════
 
-    /// Find the test app's root ElementData via find_elements (same path
-    /// as App::by_name, which is known to work).
+    /// Find the test app's root ElementData via `list_apps` — same
+    /// discovery path as `App::by_name`, which is known to work.
     fn find_test_app(provider: &MacOSProvider) -> ElementData {
-        let selector = Selector::parse("application[name=\"xa11y-test-app\"]").unwrap();
-        let results = provider
-            .find_elements(None, &selector, Some(1), Some(0))
-            .unwrap();
-        results
-            .into_iter()
-            .next()
+        let apps = provider.list_apps().unwrap();
+        apps.into_iter()
+            .find(|d| d.name.as_deref() == Some("xa11y-test-app"))
             .expect("xa11y-test-app not found — is it running?")
     }
 
@@ -2902,7 +2808,7 @@ mod tests {
         ax_counters::reset_all();
         let selector = Selector::parse("button[name=\"Submit\"]").unwrap();
         let results = provider
-            .find_elements(Some(&app), &selector, Some(1), None)
+            .find_elements(&app, &selector, Some(1), None)
             .unwrap();
         let (copy_attr, copy_multi, copy_actions) = ax_counters::snapshot();
         let total = ax_counters::total();
@@ -2941,7 +2847,7 @@ mod tests {
         ax_counters::reset_all();
         let selector = Selector::parse("button[name=\"Submit\"]").unwrap();
         let results = provider
-            .find_elements(Some(&window), &selector, Some(1), None)
+            .find_elements(&window, &selector, Some(1), None)
             .unwrap();
         let (copy_attr, copy_multi, copy_actions) = ax_counters::snapshot();
         let total = ax_counters::total();
@@ -2976,7 +2882,7 @@ mod tests {
         ax_counters::reset_all();
         let selector = Selector::parse("check_box").unwrap();
         let results = provider
-            .find_elements(Some(&window), &selector, None, None)
+            .find_elements(&window, &selector, None, None)
             .unwrap();
         let (copy_attr, copy_multi, copy_actions) = ax_counters::snapshot();
         let total = ax_counters::total();

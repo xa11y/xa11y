@@ -460,8 +460,14 @@ mod tests {
     fn find_element(provider: &Arc<MockProvider>, selector: &str) -> Element {
         let parsed = Selector::parse(selector).expect("selector must parse");
         let provider_dyn: Arc<dyn Provider> = provider.clone();
+        let root = provider_dyn
+            .list_apps()
+            .expect("list_apps must succeed")
+            .into_iter()
+            .next()
+            .expect("mock provider must expose an application root");
         let mut matches = provider_dyn
-            .find_elements(None, &parsed, Some(1), None)
+            .find_elements(&root, &parsed, Some(1), None)
             .expect("find_elements must succeed");
         let data = matches.pop().expect("selector matched no elements");
         Element::new(data, provider_dyn)

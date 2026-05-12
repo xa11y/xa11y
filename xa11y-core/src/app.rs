@@ -6,33 +6,6 @@ use crate::error::{Error, Result};
 use crate::event_provider::Subscription;
 use crate::locator::Locator;
 use crate::provider::Provider;
-use crate::role::Role;
-use crate::selector::{
-    AttrFilter, Combinator, MatchOp, RoleMatch, Selector, SelectorSegment, SimpleSelector,
-};
-
-/// Build a single-segment selector that matches `role` with an exact-name filter.
-///
-/// Constructed directly from the selector AST rather than via string
-/// interpolation, so an application name containing characters that are
-/// special in the selector grammar (`"`, `]`, `\`) still produces a
-/// well-formed selector that matches the literal name.
-fn role_named(role: Role, name: &str) -> Selector {
-    Selector {
-        segments: vec![SelectorSegment {
-            combinator: Combinator::Root,
-            simple: SimpleSelector {
-                role: Some(RoleMatch::Normalized(role)),
-                filters: vec![AttrFilter {
-                    attr: "name".to_string(),
-                    op: MatchOp::Exact,
-                    value: name.to_string(),
-                }],
-                nth: None,
-            },
-        }],
-    }
-}
 
 /// Polling interval shared by all timeout-bearing lookups.
 const LOOKUP_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -92,28 +65,21 @@ impl App {
         timeout: Duration,
     ) -> Result<Self> {
         poll_lookup(timeout, || {
-            // Try application role first (Linux/macOS), then window role
-            // (Windows — UIA has no Application node at the top level).
+            // Discovery is platform-specific (CGWindowList on macOS, AT-SPI
+            // registry on Linux, UIA desktop root on Windows) and returns
+            // top-level apps as `role=Application` everywhere except Windows,
+            // which reports `role=Window`. The role detail no longer matters
+            // here — `list_apps()` is the canonical enumeration primitive
+            // and we filter by name in Rust, so app names containing `"`,
+            // `]`, or other characters significant in the selector grammar
+            // don't need escaping.
             //
-            // Selectors are built directly from the AST so app names
-            // containing `"`, `]`, or other characters significant in the
-            // selector grammar don't break or require escaping.
-            //
-            // `find_elements` returns `Ok(vec![])` for "no match" and
-            // reserves `Err(_)` for real failures (permission denied,
-            // platform errors, malformed selectors). We only fall through on
-            // an empty result — real errors must propagate so callers can
-            // distinguish "app not found" from "accessibility is broken".
-            let app_selector = role_named(Role::Application, name);
-            let results = provider.find_elements(None, &app_selector, Some(1), Some(0))?;
-            if let Some(data) = results.into_iter().next() {
-                return Ok(Self::from_data(Arc::clone(&provider), data));
-            }
-            let win_selector = role_named(Role::Window, name);
-            let results = provider.find_elements(None, &win_selector, Some(1), Some(0))?;
-            let data = results
+            // Errors from `list_apps()` propagate so callers can distinguish
+            // "app not found" from "accessibility is broken".
+            let apps = provider.list_apps()?;
+            let data = apps
                 .into_iter()
-                .next()
+                .find(|d| d.name.as_deref() == Some(name))
                 .ok_or_else(|| Error::SelectorNotMatched {
                     selector: format!(r#"application[name="{}"]"#, name),
                 })?;
@@ -128,19 +94,14 @@ impl App {
     /// timeout / polling semantics.
     pub fn by_pid_with(provider: Arc<dyn Provider>, pid: u32, timeout: Duration) -> Result<Self> {
         poll_lookup(timeout, || {
-            // Try application role first, then window role (Windows
-            // fallback). Propagate real errors; only fall through when the
-            // role yielded no matching element.
-            for role in ["application", "window"] {
-                let selector = Selector::parse(role)?;
-                let results = provider.find_elements(None, &selector, None, Some(0))?;
-                if let Some(data) = results.into_iter().find(|d| d.pid == Some(pid)) {
-                    return Ok(Self::from_data(Arc::clone(&provider), data));
-                }
-            }
-            Err(Error::SelectorNotMatched {
-                selector: format!("application with pid={}", pid),
-            })
+            let apps = provider.list_apps()?;
+            let data = apps
+                .into_iter()
+                .find(|d| d.pid == Some(pid))
+                .ok_or_else(|| Error::SelectorNotMatched {
+                    selector: format!("application with pid={}", pid),
+                })?;
+            Ok(Self::from_data(Arc::clone(&provider), data))
         })
     }
 
@@ -149,26 +110,15 @@ impl App {
     /// Prefer `App::list` from the `xa11y` crate which uses the global
     /// singleton provider.
     pub fn list_with(provider: Arc<dyn Provider>) -> Result<Vec<Self>> {
-        // Collect application role elements (Linux/macOS), then add window
-        // role elements (Windows fallback) for any not already found by PID.
-        // Real errors from either lookup propagate to the caller.
-        let mut apps = Vec::new();
-        let mut seen_pids = std::collections::HashSet::new();
-
-        for role in ["application", "window"] {
-            let selector = Selector::parse(role)?;
-            let results = provider.find_elements(None, &selector, None, Some(0))?;
-            for d in results {
-                if let Some(pid) = d.pid {
-                    if !seen_pids.insert(pid) {
-                        continue; // already found via application role
-                    }
-                }
-                apps.push(Self::from_data(Arc::clone(&provider), d));
-            }
-        }
-
-        Ok(apps)
+        // `list_apps()` is the platform-specific discovery primitive — it
+        // already handles the per-OS app/window split (Linux/macOS return
+        // `Application` elements; Windows returns top-level `Window`
+        // elements), so we just wrap each entry.
+        let datas = provider.list_apps()?;
+        Ok(datas
+            .into_iter()
+            .map(|d| Self::from_data(Arc::clone(&provider), d))
+            .collect())
     }
 
     fn from_data(provider: Arc<dyn Provider>, data: ElementData) -> Self {
@@ -258,8 +208,7 @@ impl std::fmt::Debug for App {
 mod tests {
     use super::*;
     use crate::mock::build_provider;
-    use crate::selector::{matches_simple, Combinator};
-    use serde_json::json;
+    use crate::role::Role;
 
     fn mock_app() -> App {
         let provider: Arc<dyn Provider> = build_provider();
@@ -320,49 +269,5 @@ mod tests {
         let el = app.as_element();
         assert_eq!(el.data().role, Role::Application);
         assert_eq!(el.data().name.as_deref(), Some("TestApp"));
-    }
-
-    #[test]
-    fn role_named_preserves_literal_name_with_special_chars() {
-        // Regression for a selector-injection bug: an earlier `by_name`
-        // implementation used `format!(r#"application[name="{}"]"#, name)`
-        // without escaping, so a
-        // name containing `"` terminated the attribute value early and either
-        // failed to parse or matched the wrong element. The AST-based builder
-        // stores the literal name in the filter value.
-        let name = r#"My "Weird" App ]["#;
-        let sel = role_named(Role::Application, name);
-        assert_eq!(sel.segments.len(), 1);
-        assert_eq!(sel.segments[0].combinator, Combinator::Root);
-        let simple = &sel.segments[0].simple;
-        assert_eq!(simple.filters.len(), 1);
-        assert_eq!(simple.filters[0].attr, "name");
-        assert_eq!(simple.filters[0].value, name);
-    }
-
-    #[test]
-    fn role_named_matches_element_with_quoted_name() {
-        // End-to-end: the constructed selector actually matches an element
-        // whose name contains the special chars. Build a minimal ElementData
-        // and verify `matches_simple`.
-        let name = r#"Name"With"Quote"#;
-        let data = ElementData {
-            role: Role::Application,
-            name: Some(name.to_string()),
-            value: None,
-            description: None,
-            bounds: None,
-            actions: vec![],
-            states: crate::element::StateSet::default(),
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: None,
-            pid: Some(1),
-            raw: std::collections::HashMap::from([("app_name".to_string(), json!(name))]),
-            handle: 0,
-        };
-        let sel = role_named(Role::Application, name);
-        assert!(matches_simple(&data, &sel.segments[0].simple));
     }
 }

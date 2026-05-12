@@ -667,6 +667,16 @@ impl Provider for WindowsProvider {
         Ok(None)
     }
 
+    /// Enumerate top-level applications. UIA exposes apps as top-level
+    /// `Window` control-type elements under the desktop root — there's no
+    /// dedicated `Application` accessible — so we list the desktop's
+    /// direct window children, one per PID. This is the canonical app
+    /// discovery primitive (replaces the old
+    /// `find_elements(None, "application"/"window", …, depth=0)` idiom).
+    fn list_apps(&self) -> Result<Vec<ElementData>> {
+        self.get_children(None)
+    }
+
     /// Override the default `narrow_multi_segment` so that the Descendant
     /// combinator uses `find_elements_in_tree` (tree-walking via `get_children`)
     /// rather than `self.find_elements` (which would invoke `find_all_subtree`).
@@ -738,7 +748,7 @@ impl Provider for WindowsProvider {
 
     fn find_elements_group(
         &self,
-        root: Option<&ElementData>,
+        root: &ElementData,
         group: &xa11y_core::selector::SelectorGroup,
         limit: Option<usize>,
         max_depth: Option<u32>,
@@ -755,20 +765,13 @@ impl Provider for WindowsProvider {
 
         let max_depth_val = max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH);
 
-        // ── Single-clause optimizations ───────────────────────────
-        // Two N=1-only optimizations are hoisted from the legacy
-        // `find_elements_single` body into this unified path:
-        //   1. **Phase-1 limit short-circuit**: when there's exactly one
-        //      clause, propagate the user's `limit` (adjusted for `:nth`)
-        //      to the subtree walk so e.g. `app.locator("button").first()`
-        //      stops at the first match. With multiple clauses, phase-1
-        //      must collect the full union before truncating because
-        //      cross-clause doc-order can promote later-clause hits ahead
-        //      of earlier ones.
-        //   2. **App-search depth shortcut**: handled by the
-        //      `all_application_first` branch below — the get_children
-        //      shortcut only walks the registry root's direct children
-        //      regardless of N.
+        // ── Phase-1 limit short-circuit ───────────────────────────
+        // When there's exactly one clause, propagate the user's `limit`
+        // (adjusted for `:nth`) to the subtree walk so e.g.
+        // `app.locator("button").first()` stops at the first match. With
+        // multiple clauses, phase-1 must collect the full union before
+        // truncating because cross-clause doc-order can promote later-clause
+        // hits ahead of earlier ones.
         let phase1_limit = if group.clauses.len() == 1 {
             let first = &group.clauses[0].segments[0].simple;
             let outer = if group.clauses[0].segments.len() == 1 {
@@ -785,108 +788,11 @@ impl Provider for WindowsProvider {
             None
         };
 
-        // ── Application-search special case ────────────────────────
-        // If every clause's first segment targets the `application` role at
-        // the system root, we can satisfy the whole group from the desktop
-        // root's direct children (no FindAllBuildCache subtree walk).
-        // Mixed groups (some `application`, some not) at the system root
-        // fall through to the default tree-walking group impl — the
-        // CGWindowList-style shortcut doesn't extend cleanly.
-        let all_application_first = group.clauses.iter().all(|c| {
-            matches!(
-                c.segments.first().map(|s| &s.simple.role),
-                Some(Some(xa11y_core::selector::RoleMatch::Normalized(
-                    Role::Application
-                )))
-            )
-        });
-        if root.is_none() && all_application_first {
-            let apps = self.get_children(None)?;
-            // Run each clause's first-segment match against the (small) app
-            // list, then per-clause phase-2 narrowing as needed. Doc-order is
-            // app-list order; dedup is by `(pid, name)` (the only stable key
-            // for an application root across phase-2 walks).
-            let mut by_clause: Vec<Vec<(usize, ElementData)>> =
-                (0..group.clauses.len()).map(|_| Vec::new()).collect();
-            for (walk_pos, app) in apps.iter().enumerate() {
-                for (idx, clause) in group.clauses.iter().enumerate() {
-                    if matches_simple(app, &clause.segments[0].simple) {
-                        by_clause[idx].push((walk_pos, app.clone()));
-                    }
-                }
-            }
-            let mut merged: Vec<(usize, ElementData)> = Vec::new();
-            for (idx, hits) in by_clause.into_iter().enumerate() {
-                if hits.is_empty() {
-                    continue;
-                }
-                let clause = &group.clauses[idx];
-                if clause.segments.len() == 1 {
-                    // Per-clause `:nth`.
-                    let mut hits = hits;
-                    if let Some(nth) = clause.segments[0].simple.nth {
-                        if nth <= hits.len() {
-                            let kept = hits.remove(nth - 1);
-                            hits.clear();
-                            hits.push(kept);
-                        } else {
-                            hits.clear();
-                        }
-                    }
-                    merged.extend(hits);
-                    continue;
-                }
-                for (pos, head) in hits {
-                    let narrowed = self.narrow_multi_segment(
-                        vec![head],
-                        &clause.segments[1..],
-                        max_depth_val,
-                        None,
-                    )?;
-                    for n in narrowed {
-                        merged.push((pos, n));
-                    }
-                }
-            }
-            merged.sort_by_key(|(pos, _)| *pos);
-            let mut seen: HashSet<u64> = HashSet::new();
-            let mut out: Vec<ElementData> = Vec::with_capacity(merged.len());
-            for (_, data) in merged {
-                // Dedup by handle is sufficient *here* because every
-                // phase-1 candidate originated from the same `get_children`
-                // call (one handle per app). Phase-2 narrowings cache fresh
-                // handles, but those are descendant elements, never another
-                // application.
-                if !seen.insert(data.handle) {
-                    continue;
-                }
-                out.push(data);
-            }
-            if let Some(l) = limit {
-                out.truncate(l);
-            }
-            return Ok(out);
-        }
-
         // ── Subtree group walk ─────────────────────────────────────
-        // Non-application root or scoped query: do ONE
-        // `FindAllBuildCache(TreeScope_Subtree)` and evaluate every clause's
-        // first segment against each subtree element.
-        let root_data = match root {
-            Some(el) => el,
-            None => {
-                // System-root + non-application multi-clause: fall back to
-                // the core tree-walking group impl (still ONE walk thanks
-                // to path-based dedup).
-                return xa11y_core::selector::find_elements_in_tree_group(
-                    |el| self.get_children(el),
-                    root,
-                    group,
-                    limit,
-                    max_depth,
-                );
-            }
-        };
+        // Do ONE `FindAllBuildCache(TreeScope_Subtree)` and evaluate every
+        // clause's first segment against each subtree element. App
+        // discovery is handled separately by `list_apps()`.
+        let root_data = root;
 
         let uia_root = self.get_cached(root_data.handle)?;
         let pid = root_data.pid;
@@ -901,7 +807,7 @@ impl Provider for WindowsProvider {
         if !is_hwnd_root {
             return xa11y_core::selector::find_elements_in_tree_group(
                 |el| self.get_children(el),
-                root,
+                Some(root),
                 group,
                 limit,
                 max_depth,
@@ -2414,9 +2320,15 @@ mod tests {
         let Some(provider) = try_provider() else {
             return;
         };
+        // `find_elements` now requires a root; grab any top-level app from
+        // the discovery primitive. If no app is present (headless CI),
+        // skip — the empty-selector check needs a real subtree to walk.
+        let Some(root) = provider.list_apps().unwrap_or_default().into_iter().next() else {
+            return;
+        };
         let empty_selector = Selector { segments: vec![] };
         let result = provider
-            .find_elements(None, &empty_selector, None, None)
+            .find_elements(&root, &empty_selector, None, None)
             .unwrap();
         assert!(result.is_empty());
     }

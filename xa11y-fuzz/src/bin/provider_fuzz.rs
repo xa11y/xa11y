@@ -181,12 +181,16 @@ mod provider_fuzz {
             if self.app_element.is_some() {
                 return;
             }
-            let sel = Selector::parse(r#"application[name*="xa11y"]"#).unwrap();
-            match self.provider.find_elements(None, &sel, Some(1), None) {
-                Ok(matches) if !matches.is_empty() => {
-                    self.app_element = Some(matches.into_iter().next().unwrap());
-                }
-                Ok(_) => self.log("ensure_app: no match"),
+            // App discovery now goes through `list_apps()`; filter by name
+            // substring in Rust.
+            match self.provider.list_apps() {
+                Ok(apps) => match apps
+                    .into_iter()
+                    .find(|d| d.name.as_deref().is_some_and(|n| n.contains("xa11y")))
+                {
+                    Some(app) => self.app_element = Some(app),
+                    None => self.log("ensure_app: no match"),
+                },
                 Err(e) => self.log(&format!("ensure_app failed: {}", e)),
             }
         }
@@ -240,7 +244,13 @@ mod provider_fuzz {
 
     fn op_find_elements(state: &mut FuzzState) {
         state.ensure_app();
-        let app = state.app_element.clone();
+        // `find_elements` now requires a non-optional root; scope the
+        // search to the test app's subtree. If the app isn't available
+        // (caller hasn't launched it yet), skip this op.
+        let app = match state.app_element.clone() {
+            Some(a) => a,
+            None => return,
+        };
         let selector_str = random_selector(&mut state.rng);
         state.log(&format!("find_elements(\"{}\")", selector_str));
         let selector = match Selector::parse(&selector_str) {
@@ -252,7 +262,7 @@ mod provider_fuzz {
         };
         match state
             .provider
-            .find_elements(app.as_ref(), &selector, Some(10), None)
+            .find_elements(&app, &selector, Some(10), None)
         {
             Ok(results) => {
                 state.log(&format!("  -> {} matches", results.len()));
@@ -278,10 +288,7 @@ mod provider_fuzz {
 
         // Find some elements to act on
         let sel = Selector::parse("button").unwrap();
-        let elements = match state
-            .provider
-            .find_elements(Some(&app), &sel, Some(20), None)
-        {
+        let elements = match state.provider.find_elements(&app, &sel, Some(20), None) {
             Ok(e) => e,
             Err(_) => return,
         };
@@ -354,12 +361,14 @@ mod provider_fuzz {
         // Provider creation checks permissions (fails early if denied).
         let provider = create_provider().expect("Failed to create provider");
 
-        // Find the test app
-        let sel = Selector::parse(r#"application[name*="xa11y"]"#).unwrap();
+        // Find the test app via `list_apps()` + name-substring filter.
         let mut app_element = None;
         for attempt in 0..10 {
-            if let Ok(matches) = provider.find_elements(None, &sel, Some(1), None) {
-                if let Some(app) = matches.into_iter().next() {
+            if let Ok(apps) = provider.list_apps() {
+                if let Some(app) = apps
+                    .into_iter()
+                    .find(|d| d.name.as_deref().is_some_and(|n| n.contains("xa11y")))
+                {
                     eprintln!(
                         "Test app:   {} (PID {:?})",
                         app.name.as_deref().unwrap_or("?"),

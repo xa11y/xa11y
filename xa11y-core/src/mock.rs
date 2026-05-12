@@ -126,6 +126,15 @@ impl Provider for MockProvider {
         Ok(self.nodes[idx].parent.map(|i| self.nodes[i].data.clone()))
     }
 
+    fn list_apps(&self) -> Result<Vec<ElementData>> {
+        // The mock tree's root is a single Application node; expose it as
+        // the lone "app" so Locator's rootless path enumerates it.
+        if self.nodes.is_empty() {
+            return Ok(vec![]);
+        }
+        Ok(vec![self.nodes[0].data.clone()])
+    }
+
     fn press(&self, el: &ElementData) -> Result<()> {
         self.record(el, "press", None)
     }

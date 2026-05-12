@@ -5,7 +5,7 @@ use crate::element::{Element, ElementData};
 use crate::error::{Error, Result};
 use crate::event::ElementState;
 use crate::provider::Provider;
-use crate::selector::{chain_combinator, SelectorGroup};
+use crate::selector::{chain_combinator, matches_simple, SelectorGroup};
 
 /// A lazy element descriptor that re-resolves against a fresh accessibility
 /// tree on every operation.
@@ -123,6 +123,93 @@ impl Locator {
 
     // ── Internal resolution ─────────────────────────────────────────
 
+    /// Resolve `group` to a flat, doc-order, deduped list of matches.
+    ///
+    /// When `self.root.is_some()`, this delegates straight to
+    /// `Provider::find_elements_group`. When `self.root.is_none()`, the
+    /// `Provider` trait no longer supports a rootless search — discovery and
+    /// search are now separate primitives. We replicate the legacy
+    /// "search across all apps" semantics here:
+    ///
+    /// 1. Enumerate apps via `Provider::list_apps()`.
+    /// 2. For each app, in app-enumeration order:
+    ///    a. If any clause's first segment matches the app element itself,
+    ///    include the app (single-segment clauses) or run that clause's
+    ///    remaining segments anchored at the app (multi-segment). This
+    ///    preserves the prior semantics of `find_elements(None, …)`, where
+    ///    `get_children(None)` returned the app and a search rooted at the
+    ///    system root matched it.
+    ///    b. Run `find_elements_group(&app, group, …)` to collect descendant
+    ///    matches inside the app's subtree.
+    /// 3. Dedup by `ElementData.handle` and apply the outer limit.
+    fn resolve_group(
+        &self,
+        group: &SelectorGroup,
+        limit: Option<usize>,
+    ) -> Result<Vec<ElementData>> {
+        if let Some(root) = self.root.as_ref() {
+            return self.provider.find_elements_group(root, group, limit, None);
+        }
+
+        // Rootless: search across all apps. We can't push the outer `limit`
+        // down to each per-app call because matches from a later app would
+        // be wrongly excluded; truncate after the merge instead. (Scoped
+        // searches via the single-app fast path above still get phase-1
+        // limit pushdown inside the native backend.)
+        let apps = self.provider.list_apps()?;
+        let mut out: Vec<ElementData> = Vec::new();
+        let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for app in &apps {
+            // (2a) The app element itself may match the selector — e.g.
+            // `application` or `application button`. `find_elements_group`
+            // only emits *descendants* of its root, so we test the app
+            // against each clause separately.
+            for clause in &group.clauses {
+                let first = match clause.segments.first() {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if !matches_simple(app, &first.simple) {
+                    continue;
+                }
+                if clause.segments.len() == 1 {
+                    if seen.insert(app.handle) {
+                        out.push(app.clone());
+                    }
+                    continue;
+                }
+                // Multi-segment: app is a phase-1 anchor; narrow through
+                // the remaining segments. This mirrors the
+                // `find_elements_in_tree`-style phase-1/phase-2 split, but
+                // anchored at the app rather than a candidate from a walk.
+                let max_depth_val = crate::MAX_TREE_DEPTH;
+                let narrowed = self.provider.narrow_multi_segment(
+                    vec![app.clone()],
+                    &clause.segments[1..],
+                    max_depth_val,
+                    None,
+                )?;
+                for d in narrowed {
+                    if seen.insert(d.handle) {
+                        out.push(d);
+                    }
+                }
+            }
+
+            // (2b) Descendant matches inside the app's subtree.
+            let per_app = self.provider.find_elements_group(app, group, None, None)?;
+            for d in per_app {
+                if seen.insert(d.handle) {
+                    out.push(d);
+                }
+            }
+        }
+        if let Some(l) = limit {
+            out.truncate(l);
+        }
+        Ok(out)
+    }
+
     /// Resolve the selector to a single ElementData.
     fn resolve_data(&self) -> Result<ElementData> {
         let group = SelectorGroup::parse(&self.selector)?;
@@ -135,9 +222,7 @@ impl Locator {
         } else {
             None
         };
-        let matches =
-            self.provider
-                .find_elements_group(self.root.as_ref(), &group, provider_limit, None)?;
+        let matches = self.resolve_group(&group, provider_limit)?;
         let idx = self.nth.unwrap_or(0);
         matches
             .into_iter()
@@ -161,9 +246,7 @@ impl Locator {
     /// Count matching elements.
     pub fn count(&self) -> Result<usize> {
         let group = SelectorGroup::parse(&self.selector)?;
-        let matches = self
-            .provider
-            .find_elements_group(self.root.as_ref(), &group, None, None)?;
+        let matches = self.resolve_group(&group, None)?;
         Ok(matches.len())
     }
 
@@ -176,9 +259,7 @@ impl Locator {
     /// Get all matching elements.
     pub fn elements(&self) -> Result<Vec<Element>> {
         let group = SelectorGroup::parse(&self.selector)?;
-        let matches = self
-            .provider
-            .find_elements_group(self.root.as_ref(), &group, None, None)?;
+        let matches = self.resolve_group(&group, None)?;
         Ok(matches
             .into_iter()
             .map(|d| Element::new(d, Arc::clone(&self.provider)))
@@ -563,6 +644,48 @@ mod tests {
     fn group_exists_false_when_no_clause_matches() {
         let loc = root_locator(r#"button[name="Nope"], text_field[name="AlsoNope"]"#);
         assert!(!loc.exists().unwrap());
+    }
+
+    // ── Rootless search across apps ─────────────────────────────────
+
+    #[test]
+    fn rootless_group_matches_match_app_scoped_search() {
+        // `Locator::new(provider, None, …)` enumerates apps via
+        // `list_apps()` and unions per-app searches. For a single-app
+        // mock tree, the result must equal what `App::locator(…)` would
+        // produce (modulo the `application` root which only the rootless
+        // search can match, since app-scoped searches walk descendants).
+        let provider = build_provider();
+        let provider_dyn: Arc<dyn Provider> = provider;
+        let rootless = Locator::new(provider_dyn.clone(), None, "button, text_field");
+        let app_root = provider_dyn
+            .list_apps()
+            .expect("list_apps must succeed")
+            .into_iter()
+            .next()
+            .expect("mock provider must expose an application root");
+        let scoped = Locator::new(provider_dyn, Some(app_root), "button, text_field");
+        assert_eq!(
+            names(&rootless.elements().unwrap()),
+            vec!["Back", "Forward", "Search"]
+        );
+        assert_eq!(
+            names(&rootless.elements().unwrap()),
+            names(&scoped.elements().unwrap())
+        );
+    }
+
+    #[test]
+    fn list_apps_returns_mock_application_root() {
+        // The mock provider's `list_apps` must surface the single
+        // top-level Application element — the discovery primitive that
+        // `App::list_with` / `App::by_name_with` now use.
+        let provider = build_provider();
+        let provider_dyn: Arc<dyn Provider> = provider;
+        let apps = provider_dyn.list_apps().expect("list_apps must succeed");
+        assert_eq!(apps.len(), 1, "mock tree has exactly one application");
+        assert_eq!(apps[0].role, crate::role::Role::Application);
+        assert_eq!(apps[0].name.as_deref(), Some("TestApp"));
     }
 
     // ── tree() / dump() ─────────────────────────────────────────────

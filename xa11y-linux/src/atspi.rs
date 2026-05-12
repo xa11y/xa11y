@@ -1240,45 +1240,15 @@ impl LinuxProvider {
         }
         Ok(results)
     }
-
 }
 
 impl Provider for LinuxProvider {
     fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
         match element {
             None => {
-                // Top-level: list all AT-SPI application elements
-                let registry = AccessibleRef {
-                    bus_name: "org.a11y.atspi.Registry".to_string(),
-                    path: "/org/a11y/atspi/accessible/root".to_string(),
-                };
-                let children = self.get_atspi_children(&registry)?;
-
-                // Filter valid children first, then build in parallel
-                let valid: Vec<(&AccessibleRef, String)> = children
-                    .iter()
-                    .filter(|c| c.path != "/org/a11y/atspi/null")
-                    .filter_map(|c| {
-                        let name = self.get_name(c).unwrap_or_default();
-                        if name.is_empty() {
-                            None
-                        } else {
-                            Some((c, name))
-                        }
-                    })
-                    .collect();
-
-                let results: Vec<ElementData> = valid
-                    .par_iter()
-                    .map(|(child, app_name)| {
-                        let pid = self.get_app_pid(child);
-                        let mut data = self.build_element_data(child, pid);
-                        data.name = Some(app_name.clone());
-                        data
-                    })
-                    .collect();
-
-                Ok(results)
+                // Top-level: delegate to `list_apps()`, the canonical
+                // discovery primitive.
+                self.list_apps()
             }
             Some(element_data) => {
                 let aref = self.get_cached(element_data.handle)?;
@@ -1332,7 +1302,7 @@ impl Provider for LinuxProvider {
 
     fn find_elements_group(
         &self,
-        root: Option<&ElementData>,
+        root: &ElementData,
         group: &xa11y_core::selector::SelectorGroup,
         limit: Option<usize>,
         max_depth: Option<u32>,
@@ -1352,6 +1322,9 @@ impl Provider for LinuxProvider {
         // `(bus_name, path)` — the only AT-SPI identifier that's stable
         // across the per-clause narrowings (handles are minted fresh on
         // each `build_element_data` call).
+        //
+        // App discovery is handled separately by `list_apps()` — `root` is
+        // always present here.
         let max_depth_val = max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH);
 
         let firsts: Vec<&xa11y_core::selector::SimpleSelector> = group
@@ -1360,33 +1333,17 @@ impl Provider for LinuxProvider {
             .map(|c| &c.segments[0].simple)
             .collect();
 
-        let start_ref = match root {
-            None => AccessibleRef {
-                bus_name: "org.a11y.atspi.Registry".to_string(),
-                path: "/org/a11y/atspi/accessible/root".to_string(),
-            },
-            Some(el) => self.get_cached(el.handle)?,
-        };
+        let start_ref = self.get_cached(root.handle)?;
 
-        // ── Single-clause optimizations ───────────────────────────
-        // Two N=1-only optimizations are hoisted from the legacy
-        // `find_elements_single` body:
-        //
-        //   1. **Phase-1 limit short-circuit**: when there's exactly one
-        //      clause, propagate the user's `limit` (adjusted for `:nth`)
-        //      to the AT-SPI walk so e.g. `app.locator("button").first()`
-        //      stops at the first match. With multiple clauses, phase-1
-        //      hits for clause N might come before clause M's in doc
-        //      order, so we need the union before truncating. (Critical
-        //      on Electron-scale apps where this prevents 50k-node walks.)
-        //
-        //   2. **App-search depth shortcut**: when there's exactly one
-        //      clause AND `root.is_none()` AND the clause's first segment
-        //      matches `Role::Application`, applications are always
-        //      direct children of the registry root, so phase-1 depth is
-        //      0. Multi-clause groups can mix `application` with non-app
-        //      clauses, which need the full walk.
-        let (phase1_limit, phase1_depth) = if group.clauses.len() == 1 {
+        // ── Phase-1 limit short-circuit ───────────────────────────
+        // When there's exactly one clause, propagate the user's `limit`
+        // (adjusted for `:nth`) to the AT-SPI walk so e.g.
+        // `app.locator("button").first()` stops at the first match. With
+        // multiple clauses, phase-1 hits for clause N might come before
+        // clause M's in doc order, so we need the union before truncating.
+        // (Critical on Electron-scale apps where this prevents 50k-node
+        // walks.)
+        let phase1_limit = if group.clauses.len() == 1 {
             let clause = &group.clauses[0];
             let first = firsts[0];
             let outer = if clause.segments.len() == 1 {
@@ -1394,32 +1351,19 @@ impl Provider for LinuxProvider {
             } else {
                 None
             };
-            let p1_limit = match (outer, first.nth) {
+            match (outer, first.nth) {
                 (Some(l), Some(n)) => Some(l.max(n)),
                 (_, Some(n)) => Some(n),
                 (l, None) => l,
-            };
-            let p1_depth = if root.is_none()
-                && matches!(
-                    first.role,
-                    Some(xa11y_core::selector::RoleMatch::Normalized(
-                        Role::Application
-                    ))
-                ) {
-                0
-            } else {
-                max_depth_val
-            };
-            (p1_limit, p1_depth)
+            }
         } else {
-            (None, max_depth_val)
+            None
         };
 
         let phase1: Vec<(usize, AccessibleRef)> =
-            self.collect_matching_refs_group(&start_ref, &firsts, 0, phase1_depth, phase1_limit)?;
+            self.collect_matching_refs_group(&start_ref, &firsts, 0, max_depth_val, phase1_limit)?;
 
-        let pid_from_root = root.and_then(|r| r.pid);
-        let is_root_search = root.is_none();
+        let pid_from_root = root.pid;
 
         // Bucket phase-1 hits by clause so each clause's tail can narrow
         // independently. `walk_pos` preserves the doc-order rank from the
@@ -1447,13 +1391,10 @@ impl Provider for LinuxProvider {
             let phase1_data: Vec<(usize, ElementData)> = hits
                 .par_iter()
                 .map(|(pos, aref)| {
-                    let pid = if is_root_search {
-                        self.get_app_pid(aref)
-                            .or_else(|| self.get_dbus_pid(&aref.bus_name))
-                    } else {
-                        pid_from_root
-                    };
-                    (*pos, self.build_element_data(aref, pid))
+                    // `root` is always present now, so the PID comes from
+                    // the root element. No need to re-resolve via
+                    // `get_app_pid` / `get_dbus_pid`.
+                    (*pos, self.build_element_data(aref, pid_from_root))
                 })
                 .collect();
 
@@ -1522,6 +1463,46 @@ impl Provider for LinuxProvider {
             }
             None => Ok(None),
         }
+    }
+
+    /// Enumerate top-level applications by listing direct children of the
+    /// AT-SPI registry root — every running accessibility-enabled app
+    /// registers a child accessible there. Apps with empty names are
+    /// filtered out (toolkits sometimes register transient/system
+    /// accessibles before the real app appears). PID resolution uses the
+    /// AT-SPI `Application` interface, falling back to the D-Bus owner.
+    fn list_apps(&self) -> Result<Vec<ElementData>> {
+        let registry = AccessibleRef {
+            bus_name: "org.a11y.atspi.Registry".to_string(),
+            path: "/org/a11y/atspi/accessible/root".to_string(),
+        };
+        let children = self.get_atspi_children(&registry)?;
+
+        // Filter valid children first, then build in parallel
+        let valid: Vec<(&AccessibleRef, String)> = children
+            .iter()
+            .filter(|c| c.path != "/org/a11y/atspi/null")
+            .filter_map(|c| {
+                let name = self.get_name(c).unwrap_or_default();
+                if name.is_empty() {
+                    None
+                } else {
+                    Some((c, name))
+                }
+            })
+            .collect();
+
+        let results: Vec<ElementData> = valid
+            .par_iter()
+            .map(|(child, app_name)| {
+                let pid = self.get_app_pid(child);
+                let mut data = self.build_element_data(child, pid);
+                data.name = Some(app_name.clone());
+                data
+            })
+            .collect();
+
+        Ok(results)
     }
 
     fn press(&self, element: &ElementData) -> Result<()> {
