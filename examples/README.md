@@ -54,6 +54,8 @@ Each example exercises:
 8. Event subscription with `Subscription.wait_for`.
 9. Subprocess teardown via a panic/exception-safe guard.
 
-CI runs all four examples against the AccessKit test app on Linux, macOS, and
-Windows (see the `examples` job in `.github/workflows/ci.yml`) so they
-cannot rot.
+CI runs all four examples against the AccessKit test app on Linux (see the
+`examples` job in `.github/workflows/ci.yml`) so they cannot rot. The library
+itself is exercised on macOS and Windows by the Rust integration matrix; the
+published examples are Linux-only for now because the macOS TCC handshake
+and Windows-bash shell quirks make a cross-OS examples matrix flaky.

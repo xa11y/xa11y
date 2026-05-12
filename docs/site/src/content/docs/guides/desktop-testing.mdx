@@ -123,7 +123,10 @@ This test opens Calculator, performs `7 × 8`, and asserts the result is `56`.
 
 The repo ships an end-to-end example for each binding that drives the in-tree
 AccessKit test app (`test-apps/accesskit`) from launch to teardown. CI runs
-all four files on Linux, macOS, and Windows, so they can't rot.
+all four files on Linux against the AccessKit test app, so they can't rot.
+(The library itself ships on macOS and Windows too — separate Rust
+integration tests cover those platforms; the published examples just lock in
+their Linux behavior automatically.)
 
 Each file covers the same flow: launch a subprocess, poll the accessibility
 API until the OS registers it, dump the tree to discover selectors, exercise
