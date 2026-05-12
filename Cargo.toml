@@ -8,6 +8,7 @@ members = [
     "test-apps/accesskit",
     "xa11y-fuzz",
     "xtask",
+    "examples/rust",
 ]
 exclude = [
     "xa11y-python",

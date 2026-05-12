@@ -442,6 +442,109 @@ jobs:
         shell: bash
         run: .venv-integ/Scripts/python.exe tests/harness/launch.py ${{ matrix.app }} python js cli
 
+  # ── Published end-to-end examples (issue #192) ─────────────────────
+  #
+  # Runs the four `examples/` files against the AccessKit test app on
+  # Linux. The examples are self-contained: each one launches the app,
+  # polls for registration, exercises the public API, and tears the
+  # subprocess down. CI here guarantees they don't rot.
+  #
+  # Linux-only for now — macOS TCC and Windows shell quirks make the
+  # cross-OS matrix flaky enough to be noise in this PR. The Rust
+  # integ matrix already covers AccessKit on macOS and Windows.
+  examples:
+    name: Examples on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry & build
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-examples-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-examples-
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: xa11y-js/package-lock.json
+
+      - name: Install system dependencies
+        uses: awalsh128/cache-apt-pkgs-action@v1
+        with:
+          version: 1
+          packages: >-
+            xvfb dbus dbus-x11 fluxbox
+            at-spi2-core
+            libxkbcommon-x11-0 libxkbcommon-x11-dev
+            libxcursor1 libxrandr2 libxi6
+            libx11-xcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0
+            libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3
+            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1
+            libxcb-image0 libxcb-render-util0 libxcb-xkb1
+
+      # ── Build everything the examples need ───────────────────────────
+      - name: Build workspace (test app, CLI, Rust example)
+        run: cargo build --workspace
+
+      - name: Create virtualenv and install Python bindings
+        run: |
+          python -m venv .venv-examples
+          .venv-examples/bin/pip install maturin
+          .venv-examples/bin/pip install -e xa11y-python
+
+      - name: Cache xa11y-js node_modules and native target
+        uses: actions/cache@v5
+        with:
+          path: |
+            xa11y-js/node_modules
+            xa11y-js/target
+          key: ${{ runner.os }}-xa11y-js-examples-${{ hashFiles('xa11y-js/package-lock.json', 'xa11y-js/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-xa11y-js-examples-
+
+      - name: Build xa11y-js bindings
+        working-directory: xa11y-js
+        run: npm install && npm run build:debug
+
+      # ── Run all four examples ────────────────────────────────────────
+      # Wraps every run in Xvfb + dbus-run-session + the AT-SPI bridge setup
+      # that the existing integ harness uses (scripts/setup_linux_a11y.sh).
+      - name: Run examples
+        env:
+          RUST_BACKTRACE: "1"
+        run: |
+          export DISPLAY=:99
+          Xvfb :99 -screen 0 1280x1024x24 -ac &
+          XVFB_PID=$!
+          trap "kill $XVFB_PID 2>/dev/null || true" EXIT
+          sleep 1
+          dbus-run-session -- bash -c '
+            set -euo pipefail
+            source scripts/setup_linux_a11y.sh
+            echo "::group::Rust example"   ; cargo run -p xa11y-example-end-to-end          ; echo "::endgroup::"
+            echo "::group::Python example" ; .venv-examples/bin/python -u examples/python/end_to_end.py ; echo "::endgroup::"
+            echo "::group::JS example"     ; node examples/js/end_to_end.mjs                ; echo "::endgroup::"
+            echo "::group::CLI example"    ; bash examples/cli/end_to_end.sh                ; echo "::endgroup::"
+          '
+
   # ── Lint & format ──────────────────────────────────────────────────
   lint:
     name: Lint & Format

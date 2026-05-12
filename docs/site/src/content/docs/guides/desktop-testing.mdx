@@ -3,7 +3,11 @@ title: Desktop Testing
 description: Using xa11y to write integration tests for desktop applications.
 ---
 
-import { Tabs, TabItem } from "@astrojs/starlight/components";
+import { Code, Tabs, TabItem } from "@astrojs/starlight/components";
+import pythonExample from "../../../../../../examples/python/end_to_end.py?raw";
+import jsExample from "../../../../../../examples/js/end_to_end.mjs?raw";
+import rustExample from "../../../../../../examples/rust/src/main.rs?raw";
+import cliExample from "../../../../../../examples/cli/end_to_end.sh?raw";
 
 xa11y's Locator pattern makes it natural to write integration tests for desktop apps — find elements, interact with them, wait for changes, and assert on the result. If you've used Playwright for web testing, the workflow is familiar.
 
@@ -112,6 +116,50 @@ This test opens Calculator, performs `7 × 8`, and asserts the result is `56`.
         assert.equal((await result.element()).value, '56');
     });
     ```
+  </TabItem>
+</Tabs>
+
+## Full runnable example
+
+The repo ships an end-to-end example for each binding that drives the in-tree
+AccessKit test app (`test-apps/accesskit`) from launch to teardown. CI runs
+all four files on Linux against the AccessKit test app, so they can't rot.
+(The library itself ships on macOS and Windows too — separate Rust
+integration tests cover those platforms; the published examples just lock in
+their Linux behavior automatically.)
+
+Each file covers the same flow: launch a subprocess, poll the accessibility
+API until the OS registers it, dump the tree to discover selectors, exercise
+the locator + wait + action surface, subscribe to events, and tear the
+subprocess down cleanly.
+
+To run from a fresh checkout:
+
+```bash
+cargo build -p xa11y-test-app -p xa11y
+# pick your language:
+cargo run -p xa11y-example-end-to-end                 # Rust
+python examples/python/end_to_end.py                  # Python  (after `pip install -e xa11y-python`)
+node   examples/js/end_to_end.mjs                     # JavaScript  (after `cd xa11y-js && npm install && npm run build:debug`)
+bash   examples/cli/end_to_end.sh                     # CLI (xa11y binary)
+```
+
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    Full source: [`examples/rust/src/main.rs`](https://github.com/xa11y/xa11y/blob/main/examples/rust/src/main.rs)
+    <Code code={rustExample} lang="rust" />
+  </TabItem>
+  <TabItem label="Python">
+    Full source: [`examples/python/end_to_end.py`](https://github.com/xa11y/xa11y/blob/main/examples/python/end_to_end.py)
+    <Code code={pythonExample} lang="python" />
+  </TabItem>
+  <TabItem label="JavaScript">
+    Full source: [`examples/js/end_to_end.mjs`](https://github.com/xa11y/xa11y/blob/main/examples/js/end_to_end.mjs)
+    <Code code={jsExample} lang="js" />
+  </TabItem>
+  <TabItem label="CLI">
+    Full source: [`examples/cli/end_to_end.sh`](https://github.com/xa11y/xa11y/blob/main/examples/cli/end_to_end.sh)
+    <Code code={cliExample} lang="bash" />
   </TabItem>
 </Tabs>
 
