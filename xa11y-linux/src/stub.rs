@@ -91,6 +91,10 @@ impl Provider for LinuxProvider {
         Err(unavailable())
     }
 
+    fn list_apps(&self) -> Result<Vec<ElementData>> {
+        Err(unavailable())
+    }
+
     fn press(&self, _: &ElementData) -> Result<()> {
         Err(unavailable())
     }
