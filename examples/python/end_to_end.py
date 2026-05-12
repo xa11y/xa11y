@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import xa11y
@@ -38,19 +37,6 @@ import xa11y
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BINARY = REPO_ROOT / "target" / "debug" / ("xa11y-test-app.exe" if sys.platform == "win32" else "xa11y-test-app")
 STARTUP_TIMEOUT = 30.0
-
-
-def wait_for_registration(pid: int) -> xa11y.App:
-    """Poll the accessibility API until the app with ``pid`` appears."""
-    deadline = time.monotonic() + STARTUP_TIMEOUT
-    last_error: Exception | None = None
-    while time.monotonic() < deadline:
-        try:
-            return xa11y.App.by_pid(pid, timeout=1.0)
-        except (xa11y.SelectorNotMatchedError, xa11y.PlatformError) as err:
-            last_error = err
-            time.sleep(0.2)
-    raise RuntimeError(f"Test app (pid={pid}) did not register within {STARTUP_TIMEOUT}s: {last_error}")
 
 
 def main() -> int:
@@ -61,10 +47,10 @@ def main() -> int:
     #    that a CI run never leaks processes between attempts.
     proc = subprocess.Popen([str(BINARY)])
     try:
-        # 2. Wait for the accessibility API to expose the app. Polling by PID
-        #    is the most precise way; ``App.by_name`` is the alternative for
-        #    apps you didn't launch yourself.
-        app = wait_for_registration(proc.pid)
+        # 2. Wait for the accessibility API to expose the app. ``by_pid`` polls
+        #    internally until the timeout elapses; ``App.by_name`` is the
+        #    alternative for apps you didn't launch yourself.
+        app = xa11y.App.by_pid(proc.pid, timeout=STARTUP_TIMEOUT)
         print(f"App registered: {app.name} (pid={app.pid})")
 
         # 3. Dump the tree once to discover the role/name of every element.
