@@ -1320,7 +1320,11 @@ impl Provider for DelayedProvider {
         self.inner.get_parent(element)
     }
     fn list_apps(&self) -> Result<Vec<ElementData>> {
-        self.inner.list_apps()
+        // Route through our own `get_children(None)` so the root-call counter
+        // and the `succeed_after` / `always_fail_permission` hooks still fire
+        // — `App::*_with` calls `list_apps` now, not `find_elements(None, …)`,
+        // and these polling tests rely on observing those calls.
+        self.get_children(None)
     }
     fn press(&self, e: &ElementData) -> Result<()> {
         self.inner.press(e)
