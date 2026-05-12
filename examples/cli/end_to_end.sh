@@ -98,10 +98,10 @@ echo "press OK"
 #    Some platform providers (e.g. Linux AT-SPI on AccessKit) don't implement
 #    EditableText and return ActionNotSupported. Surface it explicitly rather
 #    than failing the example.
-if "$CLI" action set_value 'text_field[name="Name"]' --pid "$APP_PID" --value "Ada Lovelace"; then
-    echo "set_value OK"
+if "$CLI" action set-value 'text_field[name="Name"]' --pid "$APP_PID" --value "Ada Lovelace"; then
+    echo "set-value OK"
 else
-    echo "note: set_value not supported by this provider (e.g. Linux AT-SPI on AccessKit)"
+    echo "note: set-value not supported by this provider (e.g. Linux AT-SPI on AccessKit)"
 fi
 
 # 7. Action: toggle the checkbox via the `press` semantic verb. (Toggle on

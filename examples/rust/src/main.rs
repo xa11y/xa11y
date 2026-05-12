@@ -139,7 +139,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Err(Error::TextValueNotSupported) => {
-            println!("note: set_value not supported by this provider (e.g. Linux AT-SPI on AccessKit)");
+            println!(
+                "note: set_value not supported by this provider (e.g. Linux AT-SPI on AccessKit)"
+            );
         }
         Err(e) => return Err(e.into()),
     }
