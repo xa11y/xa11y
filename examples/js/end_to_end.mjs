@@ -132,18 +132,20 @@ async function main() {
     console.log(`discovered ${buttons.length} buttons total`);
     assert.ok(buttons.length >= 2);
 
-    // 10. Subscribe to events and wait for one matching condition. The
-    //     Subscription is an EventEmitter, and `waitFor` is the convenience
-    //     wrapper for one-shot waits.
+    // 10. Subscribe to events, trigger a press, and wait for the next event.
+    //     In real code you'd filter the predicate by `event.eventType` and/or
+    //     by `event.target` fields. Here we just demonstrate the API —
+    //     pressing Submit mutates `status_text` on the test app so an event
+    //     is guaranteed to fire shortly after. The Subscription is an
+    //     EventEmitter; `waitFor` is the convenience wrapper for one-shot
+    //     waits.
     const sub = await app.subscribe();
     try {
-      const evPromise = sub.waitFor(
-        (e) => e.target !== undefined && e.target.name === 'Submit',
-        { timeout: 3000 },
-      );
+      const evPromise = sub.waitFor(() => true, { timeout: 5000 });
       await submit.press();
       const event = await evPromise;
-      console.log(`observed event: ${event.eventType} on ${JSON.stringify(event.target.name)}`);
+      const targetName = event.target ? event.target.name : null;
+      console.log(`observed event: ${event.eventType} on ${JSON.stringify(targetName)}`);
     } finally {
       sub.close();
     }

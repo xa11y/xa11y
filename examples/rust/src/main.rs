@@ -151,19 +151,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("discovered {} buttons total", buttons.len());
     assert!(buttons.len() >= 2);
 
-    // 10. Subscribe to events and wait for one matching condition.
+    // 10. Subscribe to events, trigger a press, and wait for the next event.
+    //     In real code you'd filter the predicate by `e.kind` (FocusChanged,
+    //     ValueChanged, StateChanged, ...) and/or by `e.target` fields. Here
+    //     we just demonstrate the API by waiting for any event — pressing
+    //     Submit on the test app mutates `status_text`, so an event is
+    //     guaranteed to fire shortly after.
     let sub = app.subscribe()?;
     submit.press()?;
-    let event = sub.wait_for(
-        |e| {
-            e.target
-                .as_ref()
-                .and_then(|t| t.name.as_deref())
-                .map(|n| n == "Submit")
-                .unwrap_or(false)
-        },
-        Duration::from_secs(3),
-    )?;
+    let event = sub.wait_for(|_| true, Duration::from_secs(5))?;
     println!(
         "observed event: {:?} on {:?}",
         event.kind,

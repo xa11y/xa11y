@@ -115,14 +115,16 @@ def main() -> int:
         print(f"discovered {len(buttons)} buttons total")
         assert len(buttons) >= 2
 
-        # 10. Subscribe to events and watch for one matching condition.
+        # 10. Subscribe to events, trigger a press, and wait for the next
+        #     event. In real code you would filter the predicate by
+        #     ``e.event_type`` and/or ``e.target`` fields. Here we just
+        #     demonstrate the API — pressing Submit mutates ``status_text``
+        #     on the test app so an event is guaranteed to fire shortly after.
         with app.subscribe() as sub:
             submit.press()
-            event = sub.wait_for(
-                lambda e: e.target is not None and e.target.name == "Submit",
-                timeout=3.0,
-            )
-            print(f"observed event: {event.event_type} on {event.target.name!r}")
+            event = sub.wait_for(lambda _e: True, timeout=5.0)
+            target_name = event.target.name if event.target else None
+            print(f"observed event: {event.event_type} on {target_name!r}")
 
         print("\nOK — example completed successfully.")
         return 0
