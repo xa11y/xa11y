@@ -55,6 +55,10 @@ impl Provider for MockProvider {
         Ok(self.nodes[idx].parent.map(|i| self.nodes[i].data.clone()))
     }
 
+    fn list_apps(&self) -> Result<Vec<ElementData>> {
+        self.get_children(None)
+    }
+
     fn press(&self, element: &ElementData) -> Result<()> {
         *self.last_action.lock().unwrap() = Some((element.handle, "press".to_string()));
         Ok(())
@@ -1047,6 +1051,10 @@ impl Provider for MultiAppMockProvider {
         Ok(self.nodes[idx].parent.map(|i| self.nodes[i].data.clone()))
     }
 
+    fn list_apps(&self) -> Result<Vec<ElementData>> {
+        self.get_children(None)
+    }
+
     fn press(&self, _: &ElementData) -> Result<()> {
         Ok(())
     }
@@ -1310,6 +1318,9 @@ impl Provider for DelayedProvider {
     }
     fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
         self.inner.get_parent(element)
+    }
+    fn list_apps(&self) -> Result<Vec<ElementData>> {
+        self.inner.list_apps()
     }
     fn press(&self, e: &ElementData) -> Result<()> {
         self.inner.press(e)

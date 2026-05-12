@@ -798,6 +798,14 @@ mod tests {
     }
 
     impl Provider for FreshHandleProvider {
+        fn list_apps(&self) -> Result<Vec<crate::element::ElementData>> {
+            // App discovery routes through `get_children(None)` here so the
+            // freshly-minted handles flow through the same rewriter that
+            // `get_children` uses — keeping the "no handle is ever reused
+            // across calls" simulation honest for the list_apps path too.
+            self.get_children(None)
+        }
+
         fn get_children(
             &self,
             parent: Option<&crate::element::ElementData>,

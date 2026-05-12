@@ -33,21 +33,20 @@ pub trait Provider: Send + Sync {
 
     /// Enumerate top-level applications visible to this provider.
     ///
-    /// Backends should return one `ElementData` per application — typically
-    /// with `role=Application`, but Windows returns `role=Window` for
-    /// top-level HWNDs because UIA exposes applications as their top-level
-    /// window. This is the dedicated discovery primitive: it replaces the
-    /// previous `find_elements(None, application_selector, .., depth=0)`
-    /// idiom and lets each backend batch the platform-specific enumeration
-    /// (CGWindowList on macOS, the AT-SPI registry on Linux, UIA's desktop
-    /// root on Windows) in one place.
+    /// Backends return one `ElementData` per application — typically with
+    /// `role=Application`, but Windows returns `role=Window` for top-level
+    /// HWNDs because UIA exposes applications as their top-level window.
+    /// This is the dedicated discovery primitive: it replaces the previous
+    /// `find_elements(None, application_selector, .., depth=0)` idiom and
+    /// lets each backend batch the platform-specific enumeration (CGWindowList
+    /// on macOS, the AT-SPI registry on Linux, UIA's desktop root on Windows)
+    /// in one place.
     ///
-    /// The default impl delegates to `get_children(None)` so out-of-tree
-    /// providers (and the mock) continue to work without an explicit
-    /// override.
-    fn list_apps(&self) -> Result<Vec<ElementData>> {
-        self.get_children(None)
-    }
+    /// Required: every `Provider` implements this explicitly. There's no
+    /// default impl — discovery and subtree search have different cost
+    /// profiles, and silently routing app discovery through `get_children`
+    /// would hide the difference from implementors.
+    fn list_apps(&self) -> Result<Vec<ElementData>>;
 
     /// Search for elements matching a selector.
     ///
