@@ -40,7 +40,11 @@ pub trait Provider: Send + Sync {
     /// If `limit` is `Some(n)`, stops after finding `n` matches.
     /// If `max_depth` is `Some(d)`, does not descend deeper than `d` levels.
     ///
-    /// The default implementation traverses via [`get_children`](Self::get_children).
+    /// This is a thin convenience wrapper that re-uses
+    /// [`find_elements_group`](Self::find_elements_group) with a single-clause
+    /// group. Backends do **not** override this method — they override
+    /// `find_elements_group`, and the single-clause case runs through the
+    /// same native code path as multi-clause queries.
     fn find_elements(
         &self,
         root: Option<&ElementData>,
@@ -48,25 +52,28 @@ pub trait Provider: Send + Sync {
         limit: Option<usize>,
         max_depth: Option<u32>,
     ) -> Result<Vec<ElementData>> {
-        crate::selector::find_elements_in_tree(
-            |el| self.get_children(el),
-            root,
-            selector,
-            limit,
-            max_depth,
-        )
+        let group = SelectorGroup {
+            clauses: vec![selector.clone()],
+        };
+        self.find_elements_group(root, &group, limit, max_depth)
     }
 
     /// Search for elements matching any clause of a comma-separated selector
     /// group.
     ///
-    /// Single-clause groups short-circuit to [`find_elements`](Self::find_elements)
-    /// so providers that override the optimized single-clause path keep
-    /// their fast path. Multi-clause groups bypass per-clause `find_elements`
-    /// and walk via [`get_children`](Self::get_children) with path tracking,
-    /// because the cross-clause merge must identify elements by something
-    /// stable across walks — and platform `handle` values are not (every
-    /// backend mints a fresh handle per `get_children` call).
+    /// This is the **primary search primitive** each backend should override.
+    /// A native implementation performs ONE platform-level subtree query/walk
+    /// (e.g. `FindAllBuildCache(TreeScope_Subtree)` on Windows, one DFS over
+    /// AT-SPI children on Linux, one AX walk on macOS) and evaluates every
+    /// clause inline against each visited element. This avoids the
+    /// per-clause-walk perf cliff and also keeps the cross-clause dedup
+    /// correct: because everything happens inside one call, each platform
+    /// node is visited once and platform identity is stable.
+    ///
+    /// The default implementation traverses via [`get_children`](Self::get_children)
+    /// and uses tree-path identity for cross-clause merging. It's the
+    /// fallback for backends that haven't shipped a native override yet —
+    /// the same path the test/mock provider exercises.
     fn find_elements_group(
         &self,
         root: Option<&ElementData>,
@@ -74,9 +81,6 @@ pub trait Provider: Send + Sync {
         limit: Option<usize>,
         max_depth: Option<u32>,
     ) -> Result<Vec<ElementData>> {
-        if group.clauses.len() == 1 {
-            return self.find_elements(root, &group.clauses[0], limit, max_depth);
-        }
         crate::selector::find_elements_in_tree_group(
             |el| self.get_children(el),
             root,

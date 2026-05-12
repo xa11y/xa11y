@@ -229,6 +229,198 @@ impl WindowsProvider {
             root.FindAllBuildCache(TreeScope_Subtree, &true_cond, &self.batch_request)
         })
     }
+
+    /// Single-clause search fast path — the original pre-group `find_elements`
+    /// body. Kept as an inherent method so `find_elements_group` can dispatch
+    /// to it for the common `clauses.len() == 1` case without round-tripping
+    /// through the trait method.
+    fn find_elements_single(
+        &self,
+        root: Option<&ElementData>,
+        selector: &Selector,
+        limit: Option<usize>,
+        max_depth: Option<u32>,
+    ) -> Result<Vec<ElementData>> {
+        if selector.segments.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let max_depth_val = max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH);
+        let first = &selector.segments[0].simple;
+
+        let phase1_limit = if selector.segments.len() == 1 {
+            limit
+        } else {
+            None
+        };
+        let phase1_limit = match (phase1_limit, first.nth) {
+            (Some(l), Some(n)) => Some(l.max(n)),
+            (_, Some(n)) => Some(n),
+            (l, None) => l,
+        };
+
+        // Applications are always direct children of the desktop root
+        if root.is_none()
+            && matches!(
+                first.role,
+                Some(xa11y_core::selector::RoleMatch::Normalized(
+                    Role::Application
+                ))
+            )
+        {
+            let mut matching = self.get_children(None)?;
+
+            // Filter by selector attributes (name etc.)
+            matching.retain(|el| matches_simple(el, first));
+
+            if let Some(nth) = first.nth {
+                if nth <= matching.len() {
+                    matching = vec![matching.remove(nth - 1)];
+                } else {
+                    matching.clear();
+                }
+            }
+
+            if selector.segments.len() == 1 {
+                if let Some(limit) = limit {
+                    matching.truncate(limit);
+                }
+                return Ok(matching);
+            }
+
+            return self.narrow_multi_segment(
+                matching,
+                &selector.segments[1..],
+                max_depth_val,
+                limit,
+            );
+        }
+
+        // For non-root searches, use FindAll(TreeScope_Subtree) with
+        // TrueCondition to fetch the entire subtree in one COM call, then filter
+        // client-side with matches_simple.
+        let root_data = match root {
+            Some(el) => el,
+            None => {
+                // Searching from system root with a non-Application selector.
+                // Fall back to the default tree-walking implementation.
+                return xa11y_core::selector::find_elements_in_tree(
+                    |el| self.get_children(el),
+                    root,
+                    selector,
+                    limit,
+                    max_depth,
+                );
+            }
+        };
+
+        let uia_root = self.get_cached(root_data.handle)?;
+        let pid = root_data.pid;
+
+        // Fragment elements — virtual nodes inside a UIA provider, e.g. a Qt
+        // QFormLayout group — have a null NativeWindowHandle. Calling
+        // FindAllBuildCache(TreeScope_Subtree) on them can return an incomplete
+        // array due to provider-activation boundaries. Only fragment roots
+        // (HWND-backed window elements) reliably support the subtree call;
+        // fall back to level-by-level tree-walking for everything else.
+        let is_hwnd_root = unsafe { uia_root.CurrentNativeWindowHandle() }
+            .ok()
+            .map(|h| !h.0.is_null())
+            .unwrap_or(false);
+        if !is_hwnd_root {
+            return xa11y_core::selector::find_elements_in_tree(
+                |el| self.get_children(el),
+                root,
+                selector,
+                limit,
+                max_depth,
+            );
+        }
+
+        let subtree = self.find_all_subtree(&uia_root)?;
+        let count = uia_len(&subtree);
+        let mut matching = Vec::new();
+
+        for i in 0..count {
+            let el = match uia_get(&subtree, i) {
+                Some(el) => el,
+                None => continue,
+            };
+
+            let data = self.build_element_data(&el, pid);
+
+            if !matches_simple(&data, first) {
+                continue;
+            }
+
+            matching.push(data);
+
+            if let Some(limit) = phase1_limit {
+                if matching.len() >= limit {
+                    break;
+                }
+            }
+        }
+
+        // Apply :nth
+        if let Some(nth) = first.nth {
+            if nth <= matching.len() {
+                matching = vec![matching.remove(nth - 1)];
+            } else {
+                matching.clear();
+            }
+        }
+
+        if selector.segments.len() == 1 {
+            if let Some(limit) = limit {
+                matching.truncate(limit);
+            }
+            return Ok(matching);
+        }
+
+        self.narrow_multi_segment(matching, &selector.segments[1..], max_depth_val, limit)
+    }
+
+    /// Extract a UIA element's RuntimeId as a `Vec<i32>` for use as a stable
+    /// cross-call identity key. `GetRuntimeId` returns a SAFEARRAY of i32 that
+    /// uniquely identifies an element within the UIA tree session — the only
+    /// identifier safe to use for dedup across `narrow_multi_segment` walks
+    /// within a single `find_elements_group` call.
+    ///
+    /// Returns `None` if the COM call fails or the SAFEARRAY shape isn't what
+    /// UIA documents (1D, VT_I4). Callers treat `None` as "untracked" — the
+    /// element falls through dedup, which is harmless because untracked
+    /// duplicates would only over-report, never under-report.
+    fn runtime_id_key(element: &IUIAutomationElement) -> Option<Vec<i32>> {
+        use windows::Win32::System::Com::SAFEARRAY;
+        use windows::Win32::System::Ole::{SafeArrayAccessData, SafeArrayUnaccessData};
+
+        let sa: *mut SAFEARRAY = match unsafe { element.GetRuntimeId() } {
+            Ok(p) if !p.is_null() => p,
+            _ => return None,
+        };
+
+        // Safety: GetRuntimeId hands us ownership of a SAFEARRAY*. We must
+        // free it via SafeArrayDestroy when done, otherwise we leak. Lock
+        // the data via SafeArrayAccessData, copy out the i32s, unlock,
+        // destroy.
+        let result = unsafe {
+            let mut data_ptr: *mut core::ffi::c_void = core::ptr::null_mut();
+            if SafeArrayAccessData(sa, &mut data_ptr as *mut _).is_err() {
+                let _ = windows::Win32::System::Ole::SafeArrayDestroy(sa);
+                return None;
+            }
+            // SAFEARRAY of i32 — rgsabound[0].cElements is the count.
+            let bounds = (*sa).rgsabound.as_ptr();
+            let count = (*bounds).cElements as usize;
+            let slice = std::slice::from_raw_parts(data_ptr as *const i32, count);
+            let v = slice.to_vec();
+            let _ = SafeArrayUnaccessData(sa);
+            let _ = windows::Win32::System::Ole::SafeArrayDestroy(sa);
+            v
+        };
+        Some(result)
+    }
 }
 
 // ── Safe UIA helpers ────────────────────────────────────────────────────────
@@ -702,73 +894,125 @@ impl Provider for WindowsProvider {
         limit: Option<usize>,
         max_depth: Option<u32>,
     ) -> Result<Vec<ElementData>> {
-        if selector.segments.is_empty() {
+        // Trait default would wrap into a single-clause SelectorGroup and
+        // call `find_elements_group`. Skip that allocation for callers
+        // (`App::list`, fuzzer, …) that already hold a bare `Selector`.
+        self.find_elements_single(root, selector, limit, max_depth)
+    }
+
+    fn find_elements_group(
+        &self,
+        root: Option<&ElementData>,
+        group: &xa11y_core::selector::SelectorGroup,
+        limit: Option<usize>,
+        max_depth: Option<u32>,
+    ) -> Result<Vec<ElementData>> {
+        if group.clauses.is_empty() {
             return Ok(vec![]);
+        }
+        if group.clauses.len() == 1 {
+            return self.find_elements_single(root, &group.clauses[0], limit, max_depth);
         }
 
         let max_depth_val = max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH);
-        let first = &selector.segments[0].simple;
 
-        let phase1_limit = if selector.segments.len() == 1 {
-            limit
-        } else {
-            None
-        };
-        let phase1_limit = match (phase1_limit, first.nth) {
-            (Some(l), Some(n)) => Some(l.max(n)),
-            (_, Some(n)) => Some(n),
-            (l, None) => l,
-        };
-
-        // Applications are always direct children of the desktop root
-        if root.is_none()
-            && matches!(
-                first.role,
-                Some(xa11y_core::selector::RoleMatch::Normalized(
+        // ── Application-search special case ────────────────────────
+        // If every clause's first segment targets the `application` role at
+        // the system root, we can satisfy the whole group from the desktop
+        // root's direct children (no FindAllBuildCache subtree walk).
+        // Mixed groups (some `application`, some not) at the system root
+        // fall through to the default tree-walking group impl — the
+        // CGWindowList-style shortcut doesn't extend cleanly.
+        let all_application_first = group.clauses.iter().all(|c| {
+            matches!(
+                c.segments.first().map(|s| &s.simple.role),
+                Some(Some(xa11y_core::selector::RoleMatch::Normalized(
                     Role::Application
-                ))
+                )))
             )
-        {
-            let mut matching = self.get_children(None)?;
-
-            // Filter by selector attributes (name etc.)
-            matching.retain(|el| matches_simple(el, first));
-
-            if let Some(nth) = first.nth {
-                if nth <= matching.len() {
-                    matching = vec![matching.remove(nth - 1)];
-                } else {
-                    matching.clear();
+        });
+        if root.is_none() && all_application_first {
+            let apps = self.get_children(None)?;
+            // Run each clause's first-segment match against the (small) app
+            // list, then per-clause phase-2 narrowing as needed. Doc-order is
+            // app-list order; dedup is by `(pid, name)` (the only stable key
+            // for an application root across phase-2 walks).
+            let mut by_clause: Vec<Vec<(usize, ElementData)>> =
+                (0..group.clauses.len()).map(|_| Vec::new()).collect();
+            for (walk_pos, app) in apps.iter().enumerate() {
+                for (idx, clause) in group.clauses.iter().enumerate() {
+                    if matches_simple(app, &clause.segments[0].simple) {
+                        by_clause[idx].push((walk_pos, app.clone()));
+                    }
                 }
             }
-
-            if selector.segments.len() == 1 {
-                if let Some(limit) = limit {
-                    matching.truncate(limit);
+            let mut merged: Vec<(usize, ElementData)> = Vec::new();
+            for (idx, hits) in by_clause.into_iter().enumerate() {
+                if hits.is_empty() {
+                    continue;
                 }
-                return Ok(matching);
+                let clause = &group.clauses[idx];
+                if clause.segments.len() == 1 {
+                    // Per-clause `:nth`.
+                    let mut hits = hits;
+                    if let Some(nth) = clause.segments[0].simple.nth {
+                        if nth <= hits.len() {
+                            let kept = hits.remove(nth - 1);
+                            hits.clear();
+                            hits.push(kept);
+                        } else {
+                            hits.clear();
+                        }
+                    }
+                    merged.extend(hits);
+                    continue;
+                }
+                for (pos, head) in hits {
+                    let narrowed = self.narrow_multi_segment(
+                        vec![head],
+                        &clause.segments[1..],
+                        max_depth_val,
+                        None,
+                    )?;
+                    for n in narrowed {
+                        merged.push((pos, n));
+                    }
+                }
             }
-
-            return self.narrow_multi_segment(
-                matching,
-                &selector.segments[1..],
-                max_depth_val,
-                limit,
-            );
+            merged.sort_by_key(|(pos, _)| *pos);
+            let mut seen: HashSet<u64> = HashSet::new();
+            let mut out: Vec<ElementData> = Vec::with_capacity(merged.len());
+            for (_, data) in merged {
+                // Dedup by handle is sufficient *here* because every
+                // phase-1 candidate originated from the same `get_children`
+                // call (one handle per app). Phase-2 narrowings cache fresh
+                // handles, but those are descendant elements, never another
+                // application.
+                if !seen.insert(data.handle) {
+                    continue;
+                }
+                out.push(data);
+            }
+            if let Some(l) = limit {
+                out.truncate(l);
+            }
+            return Ok(out);
         }
 
-        // For non-root searches, use FindAll(TreeScope_Subtree) with
-        // TrueCondition to fetch the entire subtree in one COM call, then filter
-        // client-side with matches_simple.
+        // ── Subtree group walk ─────────────────────────────────────
+        // Non-application root or scoped query: do ONE
+        // `FindAllBuildCache(TreeScope_Subtree)` and evaluate every clause's
+        // first segment against each subtree element.
         let root_data = match root {
             Some(el) => el,
             None => {
-                // Searching from system root with a non-Application selector.
-                // Fall back to the default tree-walking implementation.
-                return xa11y_core::selector::find_elements_in_tree(
+                // System-root + non-application multi-clause: fall back to
+                // the core tree-walking group impl (still ONE walk thanks
+                // to path-based dedup).
+                return xa11y_core::selector::find_elements_in_tree_group(
                     |el| self.get_children(el),
                     root,
-                    selector,
+                    group,
                     limit,
                     max_depth,
                 );
@@ -778,68 +1022,141 @@ impl Provider for WindowsProvider {
         let uia_root = self.get_cached(root_data.handle)?;
         let pid = root_data.pid;
 
-        // Fragment elements — virtual nodes inside a UIA provider, e.g. a Qt
-        // QFormLayout group — have a null NativeWindowHandle. Calling
-        // FindAllBuildCache(TreeScope_Subtree) on them can return an incomplete
-        // array due to provider-activation boundaries. Only fragment roots
-        // (HWND-backed window elements) reliably support the subtree call;
-        // fall back to level-by-level tree-walking for everything else.
+        // Fragment elements (no HWND) don't support reliable
+        // `TreeScope_Subtree` traversal. Fall through to the path-based
+        // default which goes level-by-level through `get_children`.
         let is_hwnd_root = unsafe { uia_root.CurrentNativeWindowHandle() }
             .ok()
             .map(|h| !h.0.is_null())
             .unwrap_or(false);
         if !is_hwnd_root {
-            return xa11y_core::selector::find_elements_in_tree(
+            return xa11y_core::selector::find_elements_in_tree_group(
                 |el| self.get_children(el),
                 root,
-                selector,
+                group,
                 limit,
                 max_depth,
             );
         }
 
+        // One COM call fetches the whole subtree in doc order.
         let subtree = self.find_all_subtree(&uia_root)?;
         let count = uia_len(&subtree);
-        let mut matching = Vec::new();
+
+        // Single-pass: visit every subtree element once and check every
+        // clause's first segment. Per-element results carry the array
+        // index, which is the natural doc-order rank.
+        //
+        // For all-single-segment groups this is the entire computation —
+        // phase 2 is a no-op. For groups with multi-segment clauses we
+        // collect the phase-1 (cached_uia, clause_idx, pos) triples and
+        // narrow each one after the walk.
+        let any_multi_segment = group.clauses.iter().any(|c| c.segments.len() > 1);
+
+        let mut by_clause: Vec<Vec<(usize, ElementData, Option<IUIAutomationElement>)>> =
+            (0..group.clauses.len()).map(|_| Vec::new()).collect();
 
         for i in 0..count {
             let el = match uia_get(&subtree, i) {
                 Some(el) => el,
                 None => continue,
             };
-
+            // Build ElementData once; reuse for every clause check. The
+            // handle assigned here is stable for the rest of this call.
             let data = self.build_element_data(&el, pid);
 
-            if !matches_simple(&data, first) {
-                continue;
-            }
-
-            matching.push(data);
-
-            if let Some(limit) = phase1_limit {
-                if matching.len() >= limit {
-                    break;
+            for (idx, clause) in group.clauses.iter().enumerate() {
+                if matches_simple(&data, &clause.segments[0].simple) {
+                    // Keep the live UIA element alongside the ElementData
+                    // only when we'll need it for narrowing — saves a clone
+                    // per match on the hot all-single-segment path.
+                    let live = if any_multi_segment && clause.segments.len() > 1 {
+                        Some(el.clone())
+                    } else {
+                        None
+                    };
+                    by_clause[idx].push((i as usize, data.clone(), live));
                 }
             }
         }
 
-        // Apply :nth
-        if let Some(nth) = first.nth {
-            if nth <= matching.len() {
-                matching = vec![matching.remove(nth - 1)];
-            } else {
-                matching.clear();
+        // Per-clause phase-2 narrowing (skipped for single-segment clauses).
+        // Each narrowed result keeps its phase-1 ancestor's walk position
+        // for the global doc-order merge.
+        let mut merged: Vec<(usize, ElementData)> = Vec::new();
+        for (clause_idx, hits) in by_clause.into_iter().enumerate() {
+            if hits.is_empty() {
+                continue;
+            }
+            let clause = &group.clauses[clause_idx];
+            if clause.segments.len() == 1 {
+                // Apply per-clause `:nth` before merging.
+                let mut hits: Vec<(usize, ElementData)> =
+                    hits.into_iter().map(|(p, d, _)| (p, d)).collect();
+                if let Some(nth) = clause.segments[0].simple.nth {
+                    if nth <= hits.len() {
+                        let kept = hits.remove(nth - 1);
+                        hits.clear();
+                        hits.push(kept);
+                    } else {
+                        hits.clear();
+                    }
+                }
+                merged.extend(hits);
+                continue;
+            }
+
+            for (anchor_pos, head, _live) in hits {
+                let narrowed = self.narrow_multi_segment(
+                    vec![head],
+                    &clause.segments[1..],
+                    max_depth_val,
+                    None,
+                )?;
+                for n in narrowed {
+                    merged.push((anchor_pos, n));
+                }
             }
         }
 
-        if selector.segments.len() == 1 {
-            if let Some(limit) = limit {
-                matching.truncate(limit);
+        // Stable sort by walk position keeps doc-order; dedup by UIA
+        // RuntimeId so descendants reached via multiple phase-1 anchors
+        // (or matched by multiple clauses) collapse to one result.
+        merged.sort_by_key(|(pos, _)| *pos);
+        let mut seen_rt: HashSet<Vec<i32>> = HashSet::new();
+        let mut seen_handle: HashSet<u64> = HashSet::new();
+        let mut out: Vec<ElementData> = Vec::with_capacity(merged.len());
+        for (_, data) in merged {
+            // Primary identity: RuntimeId. Cheap to fetch from the cached
+            // element and stable across narrowings within this call.
+            let key = self
+                .get_cached(data.handle)
+                .ok()
+                .and_then(|el| Self::runtime_id_key(&el));
+            match key {
+                Some(rt) => {
+                    if !seen_rt.insert(rt) {
+                        continue;
+                    }
+                }
+                None => {
+                    // Fall back to handle dedup if RuntimeId is unavailable.
+                    // Handle uniqueness across the call is weaker than
+                    // RuntimeId (the same physical element rebuilt in phase
+                    // 2 gets a fresh handle), but it's better than nothing
+                    // — over-counting beats under-counting on the rare path
+                    // where the COM call fails.
+                    if !seen_handle.insert(data.handle) {
+                        continue;
+                    }
+                }
             }
-            return Ok(matching);
+            out.push(data);
         }
-
-        self.narrow_multi_segment(matching, &selector.segments[1..], max_depth_val, limit)
+        if let Some(l) = limit {
+            out.truncate(l);
+        }
+        Ok(out)
     }
 
     #[allow(non_upper_case_globals)]

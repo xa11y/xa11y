@@ -1666,17 +1666,53 @@ impl MacOSProvider {
         max_depth: u32,
         limit: Option<usize>,
     ) -> Vec<AXElement> {
+        // Single-clause delegates to the group walker, then drops the clause
+        // index. Keeps the AX walk in exactly one code path.
+        let clauses = [simple];
+        let group = self.collect_matching_ax_group(
+            parent,
+            parent_role,
+            parent_name,
+            &clauses,
+            depth,
+            max_depth,
+            limit,
+        );
+        group.into_iter().map(|(_, ax)| ax).collect()
+    }
+
+    /// Multi-clause variant of [`collect_matching_ax`]: ONE AX walk over the
+    /// subtree, evaluating every clause's first SimpleSelector against each
+    /// visited element. Emits `(clause_idx, AXElement)` pairs in document
+    /// order. An element that matches multiple clauses is emitted once per
+    /// matching clause — the caller deduplicates by `AXUIElement` pointer
+    /// identity at merge time.
+    ///
+    /// `limit` here is the *outer* limit; for groups with more than one
+    /// clause it must be passed as `None` because cross-clause doc-order
+    /// can promote later-clause hits ahead of earlier ones.
+    #[allow(clippy::too_many_arguments)] // mirrors `collect_matching_ax` shape
+    fn collect_matching_ax_group(
+        &self,
+        parent: &AXElement,
+        parent_role: Role,
+        parent_name: Option<&str>,
+        clauses: &[&SimpleSelector],
+        depth: u32,
+        max_depth: u32,
+        limit: Option<usize>,
+    ) -> Vec<(usize, AXElement)> {
         if depth > max_depth {
             return vec![];
         }
 
         let children = ax_children(parent.as_ptr());
 
-        // Process children in parallel: check match + recurse.
-        let per_child_results: Vec<Vec<AXElement>> = children
+        // Process children in parallel: check each clause + recurse.
+        let per_child_results: Vec<Vec<(usize, AXElement)>> = children
             .par_iter()
             .map(|child| {
-                let mut child_results = Vec::new();
+                let mut child_results: Vec<(usize, AXElement)> = Vec::new();
 
                 // Fetch role+subrole once — used for filter, match, and recursion.
                 let role_str = ax_string(child.as_ptr(), "AXRole").unwrap_or_default();
@@ -1694,17 +1730,19 @@ impl MacOSProvider {
 
                 let child_role = map_ax_role(&role_str, subrole_str.as_deref());
 
-                if matches_ax_with_role(child.as_ptr(), simple, Some(child_role)) {
-                    child_results.push(child.clone());
+                for (idx, simple) in clauses.iter().enumerate() {
+                    if matches_ax_with_role(child.as_ptr(), simple, Some(child_role)) {
+                        child_results.push((idx, child.clone()));
+                    }
                 }
 
                 // Recurse into subtree.
                 let child_name = ax_string(child.as_ptr(), "AXTitle");
-                let sub = self.collect_matching_ax(
+                let sub = self.collect_matching_ax_group(
                     child,
                     child_role,
                     child_name.as_deref(),
-                    simple,
+                    clauses,
                     depth + 1,
                     max_depth,
                     limit,
@@ -1729,53 +1767,12 @@ impl MacOSProvider {
         }
         results
     }
-}
 
-impl Provider for MacOSProvider {
-    fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
-        match element {
-            None => {
-                // Top-level: list all GUI apps as application elements
-                let apps = Self::list_gui_apps();
-                let mut results = Vec::new();
-                for (pid, app_name) in &apps {
-                    let app_element =
-                        AXElement::from_owned(unsafe { safe_ax_create_application(*pid) });
-                    if app_element.is_null() {
-                        continue;
-                    }
-                    let mut data = self.build_element_data(&app_element, Some(*pid as u32));
-                    // Override name with the CGWindowList name (more reliable)
-                    data.name = Some(app_name.clone());
-                    results.push(data);
-                }
-                Ok(results)
-            }
-            Some(element_data) => {
-                let ax = self.get_cached(element_data.handle)?;
-                let role = element_data.role;
-                let name = element_data.name.as_deref();
-
-                let ax_children_list = ax_children(ax.as_ptr());
-
-                // Filter first (cheap string checks), then build ElementData
-                // in parallel (each build_element_data is an IPC round-trip).
-                let filtered: Vec<&AXElement> = ax_children_list
-                    .iter()
-                    .filter(|child| !Self::should_filter_child(role, name, child))
-                    .collect();
-
-                let results: Vec<ElementData> = filtered
-                    .par_iter()
-                    .map(|child| self.build_element_data(child, element_data.pid))
-                    .collect();
-
-                Ok(results)
-            }
-        }
-    }
-
-    fn find_elements(
+    /// Single-clause fast path: the original pre-group `find_elements` impl.
+    /// Kept as an inherent method so `find_elements_group` can dispatch to
+    /// it for `clauses.len() == 1` without wrapping through the trait
+    /// method (which would re-allocate a single-clause `SelectorGroup`).
+    fn find_elements_single(
         &self,
         root: Option<&ElementData>,
         selector: &Selector,
@@ -1921,6 +1918,214 @@ impl Provider for MacOSProvider {
             .collect();
 
         self.narrow_multi_segment(candidates, &selector.segments[1..], max_depth_val, limit)
+    }
+}
+
+impl Provider for MacOSProvider {
+    fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
+        match element {
+            None => {
+                // Top-level: list all GUI apps as application elements
+                let apps = Self::list_gui_apps();
+                let mut results = Vec::new();
+                for (pid, app_name) in &apps {
+                    let app_element =
+                        AXElement::from_owned(unsafe { safe_ax_create_application(*pid) });
+                    if app_element.is_null() {
+                        continue;
+                    }
+                    let mut data = self.build_element_data(&app_element, Some(*pid as u32));
+                    // Override name with the CGWindowList name (more reliable)
+                    data.name = Some(app_name.clone());
+                    results.push(data);
+                }
+                Ok(results)
+            }
+            Some(element_data) => {
+                let ax = self.get_cached(element_data.handle)?;
+                let role = element_data.role;
+                let name = element_data.name.as_deref();
+
+                let ax_children_list = ax_children(ax.as_ptr());
+
+                // Filter first (cheap string checks), then build ElementData
+                // in parallel (each build_element_data is an IPC round-trip).
+                let filtered: Vec<&AXElement> = ax_children_list
+                    .iter()
+                    .filter(|child| !Self::should_filter_child(role, name, child))
+                    .collect();
+
+                let results: Vec<ElementData> = filtered
+                    .par_iter()
+                    .map(|child| self.build_element_data(child, element_data.pid))
+                    .collect();
+
+                Ok(results)
+            }
+        }
+    }
+
+    fn find_elements(
+        &self,
+        root: Option<&ElementData>,
+        selector: &Selector,
+        limit: Option<usize>,
+        max_depth: Option<u32>,
+    ) -> Result<Vec<ElementData>> {
+        // Route through the per-backend single-clause helper rather than
+        // wrapping into a `SelectorGroup` first — the trait's default
+        // `find_elements` does the wrap, but providing this override
+        // skips the redundant allocation when callers (e.g. `App::list`)
+        // already have a bare `Selector`.
+        self.find_elements_single(root, selector, limit, max_depth)
+    }
+
+    fn find_elements_group(
+        &self,
+        root: Option<&ElementData>,
+        group: &xa11y_core::selector::SelectorGroup,
+        limit: Option<usize>,
+        max_depth: Option<u32>,
+    ) -> Result<Vec<ElementData>> {
+        if group.clauses.is_empty() {
+            return Ok(vec![]);
+        }
+        if group.clauses.len() == 1 {
+            return self.find_elements_single(root, &group.clauses[0], limit, max_depth);
+        }
+
+        // Multi-clause: ONE AX walk that evaluates every clause's first
+        // SimpleSelector inline. Each match is tagged with its clause index;
+        // per-clause phase-2 narrowing follows. The cross-clause merge
+        // deduplicates by AXUIElement pointer identity — that's the only
+        // identifier stable across narrowings within a single call (handles
+        // are minted fresh on every `build_element_data`).
+        let max_depth_val = max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH);
+
+        // The root-of-system + `application` shortcut from the single-clause
+        // path doesn't generalise here (mixing `application` with non-app
+        // clauses needs the full AX walk anyway), so for now system-root
+        // multi-clause queries fall through to the default tree-walking
+        // implementation. This still goes through ONE walk per query (the
+        // default `find_elements_in_tree_group`), it just doesn't get the
+        // CGWindowList optimization.
+        let root_data = match root {
+            Some(el) => el,
+            None => {
+                return xa11y_core::selector::find_elements_in_tree_group(
+                    |el| self.get_children(el),
+                    root,
+                    group,
+                    limit,
+                    max_depth,
+                );
+            }
+        };
+
+        let root_ax = self.get_cached(root_data.handle)?;
+
+        let firsts: Vec<&SimpleSelector> = group
+            .clauses
+            .iter()
+            .map(|c| &c.segments[0].simple)
+            .collect();
+
+        // One AX walk for the whole group; no phase-1 limit (see comment in
+        // Linux impl) — the merge needs the full union before applying limit.
+        let phase1: Vec<(usize, AXElement)> = self.collect_matching_ax_group(
+            &root_ax,
+            root_data.role,
+            root_data.name.as_deref(),
+            &firsts,
+            0,
+            max_depth_val,
+            None,
+        );
+
+        // Bucket phase-1 hits by clause + their doc-order walk position.
+        let mut by_clause: Vec<Vec<(usize, AXElement)>> =
+            (0..group.clauses.len()).map(|_| Vec::new()).collect();
+        for (walk_pos, (clause_idx, ax)) in phase1.into_iter().enumerate() {
+            by_clause[clause_idx].push((walk_pos, ax));
+        }
+
+        let mut merged: Vec<(usize, AXUIElementRef, ElementData)> = Vec::new();
+        for (clause_idx, hits) in by_clause.into_iter().enumerate() {
+            if hits.is_empty() {
+                continue;
+            }
+            let clause = &group.clauses[clause_idx];
+            let first = &clause.segments[0].simple;
+
+            // Build ElementData for this clause's phase-1 hits.
+            let mut phase1_data: Vec<(usize, AXUIElementRef, ElementData)> = hits
+                .iter()
+                .map(|(pos, ax)| {
+                    (
+                        *pos,
+                        ax.as_ptr(),
+                        self.build_element_data(ax, root_data.pid),
+                    )
+                })
+                .collect();
+
+            if clause.segments.len() == 1 {
+                // Per-clause `:nth` and limit handling — but we can't apply
+                // outer limit here (cross-clause merge can re-order).
+                if let Some(nth) = first.nth {
+                    if nth <= phase1_data.len() {
+                        let kept = phase1_data.remove(nth - 1);
+                        phase1_data.clear();
+                        phase1_data.push(kept);
+                    } else {
+                        phase1_data.clear();
+                    }
+                }
+                merged.extend(phase1_data);
+                continue;
+            }
+
+            // Multi-segment narrowing per clause. We anchor each narrowed
+            // descendant at its phase-1 ancestor's walk_pos so the doc-order
+            // sort puts cross-clause results in the right global order.
+            for (anchor_pos, _anchor_ptr, head) in phase1_data {
+                let narrowed = self.narrow_multi_segment(
+                    vec![head],
+                    &clause.segments[1..],
+                    max_depth_val,
+                    None,
+                )?;
+                for n in narrowed {
+                    // Anchor identity is for dedup vs other clauses' phase-1
+                    // hits; for phase-2 outputs we use the narrowed element's
+                    // own AXUIElement pointer (resolved via the cache).
+                    let ptr = self
+                        .get_cached(n.handle)
+                        .map(|ax| ax.as_ptr())
+                        .unwrap_or(std::ptr::null());
+                    merged.push((anchor_pos, ptr, n));
+                }
+            }
+        }
+
+        // Stable sort by walk position keeps doc-order; dedup by
+        // AXUIElement pointer identity ensures `X, X` collapses correctly.
+        merged.sort_by_key(|(pos, _, _)| *pos);
+        let mut seen: HashSet<usize> = HashSet::new();
+        let mut out: Vec<ElementData> = Vec::with_capacity(merged.len());
+        for (_, ptr, data) in merged {
+            // Null pointers (resolution failures) can't be sensibly deduped;
+            // treat each null as its own key so we keep the element.
+            let key = ptr as usize;
+            if key != 0 && !seen.insert(key) {
+                continue;
+            }
+            out.push(data);
+        }
+        if let Some(l) = limit {
+            out.truncate(l);
+        }
+        Ok(out)
     }
 
     fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
