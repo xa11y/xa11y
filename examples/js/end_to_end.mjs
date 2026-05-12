@@ -44,7 +44,7 @@ const BINARY = resolve(
 // Import the locally-built JS bindings without forcing a global install.
 const xa11yUrl = pathToFileURL(resolve(REPO_ROOT, 'xa11y-js', 'index.js')).href;
 const xa11y = await import(xa11yUrl);
-const { App, SelectorNotMatchedError, PlatformError, TimeoutError } = xa11y;
+const { App, SelectorNotMatchedError, PlatformError, TimeoutError, ActionNotSupportedError } = xa11y;
 
 const STARTUP_TIMEOUT_MS = 30_000;
 
@@ -102,18 +102,28 @@ async function main() {
     // 7. Drive a text input. `waitUntil` polls until the predicate is true —
     //    preferable to a fixed sleep. Timeout is milliseconds, mirroring
     //    other Node APIs.
+    //
+    //    Some platform providers don't implement editable-text writes for
+    //    every widget (e.g. Linux AT-SPI's AccessKit bridge doesn't expose
+    //    `EditableText` — surfaced as `ActionNotSupportedError`). Real apps
+    //    usually expose it via Qt/GTK; the test app here is pure AccessKit,
+    //    so we tolerate the error explicitly rather than swallowing it.
     const nameField = app.locator('text_field[name="Name"]');
-    await nameField.setValue('Ada Lovelace');
     try {
-      await nameField.waitUntil((el) => el !== undefined && el.value === 'Ada Lovelace', {
-        timeout: 2000,
-      });
+      await nameField.setValue('Ada Lovelace');
+      try {
+        await nameField.waitUntil((el) => el !== undefined && el.value === 'Ada Lovelace', {
+          timeout: 2000,
+        });
+      } catch (err) {
+        if (!(err instanceof TimeoutError)) throw err;
+        // Some providers accept setValue but don't echo it back through the
+        // tree; the call still went through.
+        console.log('note: text value not echoed back via accessibility (adapter quirk)');
+      }
     } catch (err) {
-      if (!(err instanceof TimeoutError)) throw err;
-      // Some Linux AT-SPI adapters don't echo set_value back through the
-      // tree; the call still went through. Print so the example is
-      // transparent rather than silently passing.
-      console.log('note: text value not echoed back via accessibility (adapter quirk)');
+      if (!(err instanceof ActionNotSupportedError)) throw err;
+      console.log('note: setValue not supported by this provider (e.g. Linux AT-SPI on AccessKit)');
     }
 
     // 8. Toggle the checkbox via the `press` semantic verb and confirm the

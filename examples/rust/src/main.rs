@@ -117,20 +117,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 6. Press the primary button.
     submit.press()?;
 
-    // 7. Drive a text input. `wait_until` polls until the predicate is true
-    //    — preferable to a fixed `thread::sleep`. Some Linux AT-SPI adapters
-    //    don't echo `set_value` back through the tree, so we tolerate the
-    //    timeout transparently.
+    // 7. Drive a text input. `wait_until` polls until the predicate is
+    //    true — preferable to a fixed `thread::sleep`.
+    //
+    //    Some platform providers don't implement editable-text writes for
+    //    every widget (e.g. Linux AT-SPI's AccessKit bridge doesn't expose
+    //    `EditableText`). Real apps usually expose it via Qt/GTK; the test
+    //    app here is pure AccessKit, so we tolerate the error explicitly
+    //    rather than swallowing it silently.
     let name_field = app.locator(r#"text_field[name="Name"]"#);
-    name_field.set_value("Ada Lovelace")?;
-    let wait_result = name_field.wait_until(
-        |el| el.and_then(|d| d.value.as_deref()) == Some("Ada Lovelace"),
-        Duration::from_secs(2),
-    );
-    if let Err(Error::Timeout { .. }) = wait_result {
-        println!("note: text value not echoed back via accessibility (adapter quirk)");
-    } else {
-        wait_result?;
+    match name_field.set_value("Ada Lovelace") {
+        Ok(()) => {
+            let wait_result = name_field.wait_until(
+                |el| el.and_then(|d| d.value.as_deref()) == Some("Ada Lovelace"),
+                Duration::from_secs(2),
+            );
+            if let Err(Error::Timeout { .. }) = wait_result {
+                println!("note: text value not echoed back via accessibility (adapter quirk)");
+            } else {
+                wait_result?;
+            }
+        }
+        Err(Error::TextValueNotSupported) => {
+            println!("note: set_value not supported by this provider (e.g. Linux AT-SPI on AccessKit)");
+        }
+        Err(e) => return Err(e.into()),
     }
 
     // 8. Toggle the checkbox via the `press` semantic verb and confirm the

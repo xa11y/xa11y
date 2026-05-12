@@ -95,8 +95,14 @@ echo "--- xa11y find 'button' --pid $APP_PID ---"
 echo "press OK"
 
 # 6. Action: set the value of a text field. --value supplies the new content.
-"$CLI" action set_value 'text_field[name="Name"]' --pid "$APP_PID" --value "Ada Lovelace"
-echo "set_value OK"
+#    Some platform providers (e.g. Linux AT-SPI on AccessKit) don't implement
+#    EditableText and return ActionNotSupported. Surface it explicitly rather
+#    than failing the example.
+if "$CLI" action set_value 'text_field[name="Name"]' --pid "$APP_PID" --value "Ada Lovelace"; then
+    echo "set_value OK"
+else
+    echo "note: set_value not supported by this provider (e.g. Linux AT-SPI on AccessKit)"
+fi
 
 # 7. Action: toggle the checkbox via the `press` semantic verb. (Toggle on
 #    web/AT-SPI checkboxes is exposed as press on this widget.)

@@ -89,18 +89,28 @@ def main() -> int:
 
         # 7. Drive a text input. ``wait_until`` polls until the predicate is
         #    true — preferable to a fixed ``time.sleep``.
+        #
+        #    Some platform providers don't implement editable-text writes for
+        #    every widget (e.g. Linux AT-SPI's AccessKit bridge doesn't expose
+        #    ``EditableText`` — surfaced as ``ActionNotSupportedError``).
+        #    Real apps usually expose it via Qt/GTK; the test app here is
+        #    pure AccessKit, so we tolerate the error explicitly rather than
+        #    swallowing it silently.
         name_field = app.locator('text_field[name="Name"]')
-        name_field.set_value("Ada Lovelace")
         try:
-            name_field.wait_until(
-                lambda el: el is not None and el.value == "Ada Lovelace",
-                timeout=2.0,
-            )
-        except xa11y.TimeoutError:
-            # Some Linux AT-SPI adapters don't echo set_value back through the
-            # tree; the call still went through. Print so the example is
-            # transparent rather than silently passing.
-            print("note: text value not echoed back via accessibility (adapter quirk)")
+            name_field.set_value("Ada Lovelace")
+        except xa11y.ActionNotSupportedError:
+            print("note: set_value not supported by this provider (e.g. Linux AT-SPI on AccessKit)")
+        else:
+            try:
+                name_field.wait_until(
+                    lambda el: el is not None and el.value == "Ada Lovelace",
+                    timeout=2.0,
+                )
+            except xa11y.TimeoutError:
+                # Some providers accept set_value but don't echo it back
+                # through the tree. The call still went through.
+                print("note: text value not echoed back via accessibility (adapter quirk)")
 
         # 8. Toggle the checkbox via the ``press`` semantic verb and confirm
         #    the new state with ``wait_until``.
