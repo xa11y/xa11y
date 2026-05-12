@@ -13,8 +13,10 @@ use rayon::prelude::*;
 
 use xa11y_core::{
     CancelHandle, ElementData, Error, Event, EventKind, EventReceiver, Provider, Rect, Result,
-    Role, Selector, StateFlag, StateSet, Subscription, Toggled,
+    Role, StateFlag, StateSet, Subscription, Toggled,
 };
+#[cfg(test)]
+use xa11y_core::Selector;
 
 // ── FFI Declarations ──────────────────────────────────────────────────────────
 
@@ -1651,47 +1653,20 @@ impl MacOSProvider {
         )
     }
 
-    /// Parallel DFS collecting AXElements matching a SimpleSelector without
-    /// building full ElementData. At each level, children are processed in
-    /// parallel using rayon — each child's role check and recursive subtree
-    /// search happen concurrently across threads.
-    #[allow(clippy::too_many_arguments)] // recursive DFS with parent context
-    fn collect_matching_ax(
-        &self,
-        parent: &AXElement,
-        parent_role: Role,
-        parent_name: Option<&str>,
-        simple: &SimpleSelector,
-        depth: u32,
-        max_depth: u32,
-        limit: Option<usize>,
-    ) -> Vec<AXElement> {
-        // Single-clause delegates to the group walker, then drops the clause
-        // index. Keeps the AX walk in exactly one code path.
-        let clauses = [simple];
-        let group = self.collect_matching_ax_group(
-            parent,
-            parent_role,
-            parent_name,
-            &clauses,
-            depth,
-            max_depth,
-            limit,
-        );
-        group.into_iter().map(|(_, ax)| ax).collect()
-    }
-
-    /// Multi-clause variant of [`collect_matching_ax`]: ONE AX walk over the
-    /// subtree, evaluating every clause's first SimpleSelector against each
-    /// visited element. Emits `(clause_idx, AXElement)` pairs in document
-    /// order. An element that matches multiple clauses is emitted once per
-    /// matching clause — the caller deduplicates by `AXUIElement` pointer
-    /// identity at merge time.
+    /// Parallel DFS over the AX subtree, evaluating every clause's first
+    /// `SimpleSelector` against each visited element. Emits
+    /// `(clause_idx, AXElement)` pairs in document order. An element that
+    /// matches multiple clauses is emitted once per matching clause — the
+    /// caller deduplicates by `AXUIElement` pointer identity at merge time.
+    ///
+    /// At each level, children are processed in parallel using rayon —
+    /// each child's role check and recursive subtree search happen
+    /// concurrently across threads.
     ///
     /// `limit` here is the *outer* limit; for groups with more than one
     /// clause it must be passed as `None` because cross-clause doc-order
     /// can promote later-clause hits ahead of earlier ones.
-    #[allow(clippy::too_many_arguments)] // mirrors `collect_matching_ax` shape
+    #[allow(clippy::too_many_arguments)] // recursive DFS with parent context
     fn collect_matching_ax_group(
         &self,
         parent: &AXElement,
@@ -1768,157 +1743,6 @@ impl MacOSProvider {
         results
     }
 
-    /// Single-clause fast path: the original pre-group `find_elements` impl.
-    /// Kept as an inherent method so `find_elements_group` can dispatch to
-    /// it for `clauses.len() == 1` without wrapping through the trait
-    /// method (which would re-allocate a single-clause `SelectorGroup`).
-    fn find_elements_single(
-        &self,
-        root: Option<&ElementData>,
-        selector: &Selector,
-        limit: Option<usize>,
-        max_depth: Option<u32>,
-    ) -> Result<Vec<ElementData>> {
-        if selector.segments.is_empty() {
-            return Ok(vec![]);
-        }
-
-        let max_depth_val = max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH);
-
-        // Phase 1: lightweight AXElement-based search for first segment.
-        // Only the attributes the selector needs are fetched per candidate.
-        let first = &selector.segments[0].simple;
-
-        let phase1_limit = if selector.segments.len() == 1 {
-            limit
-        } else {
-            None
-        };
-        let phase1_limit = match (phase1_limit, first.nth) {
-            (Some(l), Some(n)) => Some(l.max(n)),
-            (_, Some(n)) => Some(n),
-            (l, None) => l,
-        };
-
-        let root_data = match root {
-            Some(el) => el,
-            None => {
-                // Searching from system root for applications. Use
-                // CGWindowList (no AX calls) to filter apps by name, then
-                // only build full ElementData for matches.
-                if matches!(
-                    first.role,
-                    Some(xa11y_core::selector::RoleMatch::Normalized(
-                        Role::Application
-                    ))
-                ) {
-                    let apps = Self::list_gui_apps();
-                    let mut matching: Vec<ElementData> = Vec::new();
-                    for (pid, app_name) in &apps {
-                        // Check name filters against CGWindowList name
-                        let name_matches = first.filters.iter().all(|f| {
-                            if f.attr != "name" {
-                                return true; // non-name filters checked after build
-                            }
-                            match_op(&f.op, &f.value, Some(app_name.as_str()))
-                        });
-                        if !name_matches {
-                            continue;
-                        }
-
-                        let app_element =
-                            AXElement::from_owned(unsafe { safe_ax_create_application(*pid) });
-                        if app_element.is_null() {
-                            continue;
-                        }
-                        let mut data = self.build_element_data(&app_element, Some(*pid as u32));
-                        data.name = Some(app_name.clone());
-                        matching.push(data);
-
-                        if let Some(limit) = phase1_limit {
-                            if matching.len() >= limit {
-                                break;
-                            }
-                        }
-                    }
-
-                    // Apply :nth
-                    if let Some(nth) = first.nth {
-                        if nth <= matching.len() {
-                            matching = vec![matching.remove(nth - 1)];
-                        } else {
-                            matching.clear();
-                        }
-                    }
-
-                    if selector.segments.len() == 1 {
-                        if let Some(limit) = limit {
-                            matching.truncate(limit);
-                        }
-                        return Ok(matching);
-                    }
-
-                    return self.narrow_multi_segment(
-                        matching,
-                        &selector.segments[1..],
-                        max_depth_val,
-                        limit,
-                    );
-                }
-
-                // Non-application root search — fall back to default impl.
-                return xa11y_core::selector::find_elements_in_tree(
-                    |el| self.get_children(el),
-                    root,
-                    selector,
-                    limit,
-                    max_depth,
-                );
-            }
-        };
-
-        let root_ax = self.get_cached(root_data.handle)?;
-
-        let mut matching_ax = self.collect_matching_ax(
-            &root_ax,
-            root_data.role,
-            root_data.name.as_deref(),
-            first,
-            0,
-            max_depth_val,
-            phase1_limit,
-        );
-
-        // Single-segment: build ElementData only for matches, apply nth/limit
-        if selector.segments.len() == 1 {
-            if let Some(nth) = first.nth {
-                if nth <= matching_ax.len() {
-                    let ax = &matching_ax[nth - 1];
-                    return Ok(vec![self.build_element_data(ax, root_data.pid)]);
-                } else {
-                    return Ok(vec![]);
-                }
-            }
-
-            if let Some(limit) = limit {
-                matching_ax.truncate(limit);
-            }
-
-            return Ok(matching_ax
-                .iter()
-                .map(|ax| self.build_element_data(ax, root_data.pid))
-                .collect());
-        }
-
-        // Multi-segment: build ElementData for phase 1 matches, then narrow
-        // using standard matching on the (small) candidate set.
-        let candidates: Vec<ElementData> = matching_ax
-            .iter()
-            .map(|ax| self.build_element_data(ax, root_data.pid))
-            .collect();
-
-        self.narrow_multi_segment(candidates, &selector.segments[1..], max_depth_val, limit)
-    }
 }
 
 impl Provider for MacOSProvider {
@@ -1965,21 +1789,6 @@ impl Provider for MacOSProvider {
         }
     }
 
-    fn find_elements(
-        &self,
-        root: Option<&ElementData>,
-        selector: &Selector,
-        limit: Option<usize>,
-        max_depth: Option<u32>,
-    ) -> Result<Vec<ElementData>> {
-        // Route through the per-backend single-clause helper rather than
-        // wrapping into a `SelectorGroup` first — the trait's default
-        // `find_elements` does the wrap, but providing this override
-        // skips the redundant allocation when callers (e.g. `App::list`)
-        // already have a bare `Selector`.
-        self.find_elements_single(root, selector, limit, max_depth)
-    }
-
     fn find_elements_group(
         &self,
         root: Option<&ElementData>,
@@ -1990,25 +1799,110 @@ impl Provider for MacOSProvider {
         if group.clauses.is_empty() {
             return Ok(vec![]);
         }
-        if group.clauses.len() == 1 {
-            return self.find_elements_single(root, &group.clauses[0], limit, max_depth);
+        // Reject any clause with zero segments early — `clause.segments[0]`
+        // below would otherwise panic.
+        if group.clauses.iter().any(|c| c.segments.is_empty()) {
+            return Ok(vec![]);
         }
 
-        // Multi-clause: ONE AX walk that evaluates every clause's first
-        // SimpleSelector inline. Each match is tagged with its clause index;
-        // per-clause phase-2 narrowing follows. The cross-clause merge
-        // deduplicates by AXUIElement pointer identity — that's the only
-        // identifier stable across narrowings within a single call (handles
-        // are minted fresh on every `build_element_data`).
+        // ONE AX walk that evaluates every clause's first SimpleSelector
+        // inline. Each match is tagged with its clause index; per-clause
+        // phase-2 narrowing follows. The cross-clause merge deduplicates by
+        // AXUIElement pointer identity — that's the only identifier stable
+        // across narrowings within a single call (handles are minted fresh
+        // on every `build_element_data`).
         let max_depth_val = max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH);
 
-        // The root-of-system + `application` shortcut from the single-clause
-        // path doesn't generalise here (mixing `application` with non-app
-        // clauses needs the full AX walk anyway), so for now system-root
-        // multi-clause queries fall through to the default tree-walking
-        // implementation. This still goes through ONE walk per query (the
-        // default `find_elements_in_tree_group`), it just doesn't get the
-        // CGWindowList optimization.
+        // ── N=1 CGWindowList shortcut ────────────────────────────
+        // Single clause + system root + first segment matches
+        // `Role::Application`: skip the AX walk entirely and use
+        // CGWindowList (no AX calls) to enumerate apps, then build full
+        // ElementData only for matches. Multi-clause groups can mix
+        // `application` with non-app clauses, which would still need the
+        // full AX walk — so this shortcut intentionally only fires for
+        // N=1.
+        if group.clauses.len() == 1 && root.is_none() {
+            let clause = &group.clauses[0];
+            let first = &clause.segments[0].simple;
+            if matches!(
+                first.role,
+                Some(xa11y_core::selector::RoleMatch::Normalized(
+                    Role::Application
+                ))
+            ) {
+                // N=1 phase-1 limit: propagate the user's `limit` (adjusted
+                // for `:nth`) so the iteration stops at the first match.
+                let outer = if clause.segments.len() == 1 {
+                    limit
+                } else {
+                    None
+                };
+                let phase1_limit = match (outer, first.nth) {
+                    (Some(l), Some(n)) => Some(l.max(n)),
+                    (_, Some(n)) => Some(n),
+                    (l, None) => l,
+                };
+
+                let apps = Self::list_gui_apps();
+                let mut matching: Vec<ElementData> = Vec::new();
+                for (pid, app_name) in &apps {
+                    // Check name filters against CGWindowList name
+                    let name_matches = first.filters.iter().all(|f| {
+                        if f.attr != "name" {
+                            return true; // non-name filters checked after build
+                        }
+                        match_op(&f.op, &f.value, Some(app_name.as_str()))
+                    });
+                    if !name_matches {
+                        continue;
+                    }
+
+                    let app_element =
+                        AXElement::from_owned(unsafe { safe_ax_create_application(*pid) });
+                    if app_element.is_null() {
+                        continue;
+                    }
+                    let mut data = self.build_element_data(&app_element, Some(*pid as u32));
+                    data.name = Some(app_name.clone());
+                    matching.push(data);
+
+                    if let Some(cap) = phase1_limit {
+                        if matching.len() >= cap {
+                            break;
+                        }
+                    }
+                }
+
+                // Apply :nth
+                if let Some(nth) = first.nth {
+                    if nth <= matching.len() {
+                        matching = vec![matching.remove(nth - 1)];
+                    } else {
+                        matching.clear();
+                    }
+                }
+
+                if clause.segments.len() == 1 {
+                    if let Some(l) = limit {
+                        matching.truncate(l);
+                    }
+                    return Ok(matching);
+                }
+
+                return self.narrow_multi_segment(
+                    matching,
+                    &clause.segments[1..],
+                    max_depth_val,
+                    limit,
+                );
+            }
+        }
+
+        // Non-application root or multi-clause at the system root: the
+        // CGWindowList shortcut doesn't generalise (mixing `application`
+        // with non-app clauses needs the full AX walk anyway), so fall
+        // through to the default tree-walking implementation. This still
+        // goes through ONE walk per query.
         let root_data = match root {
             Some(el) => el,
             None => {
@@ -2030,8 +1924,29 @@ impl Provider for MacOSProvider {
             .map(|c| &c.segments[0].simple)
             .collect();
 
-        // One AX walk for the whole group; no phase-1 limit (see comment in
-        // Linux impl) — the merge needs the full union before applying limit.
+        // N=1 phase-1 limit short-circuit: when there's exactly one clause,
+        // propagate the user's `limit` (adjusted for `:nth`) to the AX walk
+        // so e.g. `app.locator("button").first()` stops at the first match.
+        // For N>=2, phase-1 must collect the full union before truncating
+        // because cross-clause doc-order can promote later-clause hits
+        // ahead of earlier ones.
+        let phase1_walk_limit = if group.clauses.len() == 1 {
+            let clause = &group.clauses[0];
+            let first = firsts[0];
+            let outer = if clause.segments.len() == 1 {
+                limit
+            } else {
+                None
+            };
+            match (outer, first.nth) {
+                (Some(l), Some(n)) => Some(l.max(n)),
+                (_, Some(n)) => Some(n),
+                (l, None) => l,
+            }
+        } else {
+            None
+        };
+
         let phase1: Vec<(usize, AXElement)> = self.collect_matching_ax_group(
             &root_ax,
             root_data.role,
@@ -2039,7 +1954,7 @@ impl Provider for MacOSProvider {
             &firsts,
             0,
             max_depth_val,
-            None,
+            phase1_walk_limit,
         );
 
         // Bucket phase-1 hits by clause + their doc-order walk position.

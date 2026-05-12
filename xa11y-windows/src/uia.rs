@@ -230,157 +230,6 @@ impl WindowsProvider {
         })
     }
 
-    /// Single-clause search fast path — the original pre-group `find_elements`
-    /// body. Kept as an inherent method so `find_elements_group` can dispatch
-    /// to it for the common `clauses.len() == 1` case without round-tripping
-    /// through the trait method.
-    fn find_elements_single(
-        &self,
-        root: Option<&ElementData>,
-        selector: &Selector,
-        limit: Option<usize>,
-        max_depth: Option<u32>,
-    ) -> Result<Vec<ElementData>> {
-        if selector.segments.is_empty() {
-            return Ok(vec![]);
-        }
-
-        let max_depth_val = max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH);
-        let first = &selector.segments[0].simple;
-
-        let phase1_limit = if selector.segments.len() == 1 {
-            limit
-        } else {
-            None
-        };
-        let phase1_limit = match (phase1_limit, first.nth) {
-            (Some(l), Some(n)) => Some(l.max(n)),
-            (_, Some(n)) => Some(n),
-            (l, None) => l,
-        };
-
-        // Applications are always direct children of the desktop root
-        if root.is_none()
-            && matches!(
-                first.role,
-                Some(xa11y_core::selector::RoleMatch::Normalized(
-                    Role::Application
-                ))
-            )
-        {
-            let mut matching = self.get_children(None)?;
-
-            // Filter by selector attributes (name etc.)
-            matching.retain(|el| matches_simple(el, first));
-
-            if let Some(nth) = first.nth {
-                if nth <= matching.len() {
-                    matching = vec![matching.remove(nth - 1)];
-                } else {
-                    matching.clear();
-                }
-            }
-
-            if selector.segments.len() == 1 {
-                if let Some(limit) = limit {
-                    matching.truncate(limit);
-                }
-                return Ok(matching);
-            }
-
-            return self.narrow_multi_segment(
-                matching,
-                &selector.segments[1..],
-                max_depth_val,
-                limit,
-            );
-        }
-
-        // For non-root searches, use FindAll(TreeScope_Subtree) with
-        // TrueCondition to fetch the entire subtree in one COM call, then filter
-        // client-side with matches_simple.
-        let root_data = match root {
-            Some(el) => el,
-            None => {
-                // Searching from system root with a non-Application selector.
-                // Fall back to the default tree-walking implementation.
-                return xa11y_core::selector::find_elements_in_tree(
-                    |el| self.get_children(el),
-                    root,
-                    selector,
-                    limit,
-                    max_depth,
-                );
-            }
-        };
-
-        let uia_root = self.get_cached(root_data.handle)?;
-        let pid = root_data.pid;
-
-        // Fragment elements — virtual nodes inside a UIA provider, e.g. a Qt
-        // QFormLayout group — have a null NativeWindowHandle. Calling
-        // FindAllBuildCache(TreeScope_Subtree) on them can return an incomplete
-        // array due to provider-activation boundaries. Only fragment roots
-        // (HWND-backed window elements) reliably support the subtree call;
-        // fall back to level-by-level tree-walking for everything else.
-        let is_hwnd_root = unsafe { uia_root.CurrentNativeWindowHandle() }
-            .ok()
-            .map(|h| !h.0.is_null())
-            .unwrap_or(false);
-        if !is_hwnd_root {
-            return xa11y_core::selector::find_elements_in_tree(
-                |el| self.get_children(el),
-                root,
-                selector,
-                limit,
-                max_depth,
-            );
-        }
-
-        let subtree = self.find_all_subtree(&uia_root)?;
-        let count = uia_len(&subtree);
-        let mut matching = Vec::new();
-
-        for i in 0..count {
-            let el = match uia_get(&subtree, i) {
-                Some(el) => el,
-                None => continue,
-            };
-
-            let data = self.build_element_data(&el, pid);
-
-            if !matches_simple(&data, first) {
-                continue;
-            }
-
-            matching.push(data);
-
-            if let Some(limit) = phase1_limit {
-                if matching.len() >= limit {
-                    break;
-                }
-            }
-        }
-
-        // Apply :nth
-        if let Some(nth) = first.nth {
-            if nth <= matching.len() {
-                matching = vec![matching.remove(nth - 1)];
-            } else {
-                matching.clear();
-            }
-        }
-
-        if selector.segments.len() == 1 {
-            if let Some(limit) = limit {
-                matching.truncate(limit);
-            }
-            return Ok(matching);
-        }
-
-        self.narrow_multi_segment(matching, &selector.segments[1..], max_depth_val, limit)
-    }
-
     /// Extract a UIA element's RuntimeId as a `Vec<i32>` for use as a stable
     /// cross-call identity key. `GetRuntimeId` returns a SAFEARRAY of i32 that
     /// uniquely identifies an element within the UIA tree session — the only
@@ -887,19 +736,6 @@ impl Provider for WindowsProvider {
         Ok(candidates)
     }
 
-    fn find_elements(
-        &self,
-        root: Option<&ElementData>,
-        selector: &Selector,
-        limit: Option<usize>,
-        max_depth: Option<u32>,
-    ) -> Result<Vec<ElementData>> {
-        // Trait default would wrap into a single-clause SelectorGroup and
-        // call `find_elements_group`. Skip that allocation for callers
-        // (`App::list`, fuzzer, …) that already hold a bare `Selector`.
-        self.find_elements_single(root, selector, limit, max_depth)
-    }
-
     fn find_elements_group(
         &self,
         root: Option<&ElementData>,
@@ -910,11 +746,44 @@ impl Provider for WindowsProvider {
         if group.clauses.is_empty() {
             return Ok(vec![]);
         }
-        if group.clauses.len() == 1 {
-            return self.find_elements_single(root, &group.clauses[0], limit, max_depth);
+        // Reject any clause with zero segments early — `clause.segments[0]`
+        // below would otherwise panic. The parser doesn't produce empty
+        // clauses, but be defensive against direct `SelectorGroup` builders.
+        if group.clauses.iter().any(|c| c.segments.is_empty()) {
+            return Ok(vec![]);
         }
 
         let max_depth_val = max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH);
+
+        // ── Single-clause optimizations ───────────────────────────
+        // Two N=1-only optimizations are hoisted from the legacy
+        // `find_elements_single` body into this unified path:
+        //   1. **Phase-1 limit short-circuit**: when there's exactly one
+        //      clause, propagate the user's `limit` (adjusted for `:nth`)
+        //      to the subtree walk so e.g. `app.locator("button").first()`
+        //      stops at the first match. With multiple clauses, phase-1
+        //      must collect the full union before truncating because
+        //      cross-clause doc-order can promote later-clause hits ahead
+        //      of earlier ones.
+        //   2. **App-search depth shortcut**: handled by the
+        //      `all_application_first` branch below — the get_children
+        //      shortcut only walks the registry root's direct children
+        //      regardless of N.
+        let phase1_limit = if group.clauses.len() == 1 {
+            let first = &group.clauses[0].segments[0].simple;
+            let outer = if group.clauses[0].segments.len() == 1 {
+                limit
+            } else {
+                None
+            };
+            match (outer, first.nth) {
+                (Some(l), Some(n)) => Some(l.max(n)),
+                (_, Some(n)) => Some(n),
+                (l, None) => l,
+            }
+        } else {
+            None
+        };
 
         // ── Application-search special case ────────────────────────
         // If every clause's first segment targets the `application` role at
@@ -1056,7 +925,7 @@ impl Provider for WindowsProvider {
         let mut by_clause: Vec<Vec<(usize, ElementData, Option<IUIAutomationElement>)>> =
             (0..group.clauses.len()).map(|_| Vec::new()).collect();
 
-        for i in 0..count {
+        'walk: for i in 0..count {
             let el = match uia_get(&subtree, i) {
                 Some(el) => el,
                 None => continue,
@@ -1076,6 +945,15 @@ impl Provider for WindowsProvider {
                         None
                     };
                     by_clause[idx].push((i as usize, data.clone(), live));
+                    // N=1 phase-1 limit short-circuit (see comment at the
+                    // top of this method). Only safe for single-clause
+                    // groups; otherwise cross-clause doc-order would be
+                    // wrong.
+                    if let Some(cap) = phase1_limit {
+                        if by_clause[idx].len() >= cap {
+                            break 'walk;
+                        }
+                    }
                 }
             }
         }

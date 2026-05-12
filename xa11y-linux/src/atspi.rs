@@ -5,9 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use rayon::prelude::*;
-use xa11y_core::selector::{Combinator, SelectorSegment};
 use xa11y_core::{
-    ElementData, Error, Provider, Rect, Result, Role, Selector, StateSet, Subscription, Toggled,
+    ElementData, Error, Provider, Rect, Result, Role, StateSet, Subscription, Toggled,
 };
 use zbus::blocking::{Connection, Proxy};
 
@@ -1109,34 +1108,11 @@ impl LinuxProvider {
         true
     }
 
-    /// DFS collect AccessibleRefs matching a SimpleSelector without building
-    /// full ElementData. Only the attributes required by the selector are
-    /// fetched for each candidate.
-    ///
-    /// Children at each level are processed in parallel via rayon.
-    fn collect_matching_refs(
-        &self,
-        parent: &AccessibleRef,
-        simple: &xa11y_core::selector::SimpleSelector,
-        depth: u32,
-        max_depth: u32,
-        limit: Option<usize>,
-    ) -> Result<Vec<AccessibleRef>> {
-        // Group-of-one delegates to the multi-clause variant, then drops the
-        // clause index. This keeps a single matcher path through the walk so
-        // single- and multi-clause queries trace identically.
-        let one = [simple];
-        let group_results =
-            self.collect_matching_refs_group(parent, &one, depth, max_depth, limit)?;
-        Ok(group_results.into_iter().map(|(_, r)| r).collect())
-    }
-
-    /// Multi-clause variant of [`collect_matching_refs`]: ONE DFS over the
-    /// subtree, evaluating each clause's first SimpleSelector against every
-    /// visited node. Emits `(clause_idx, AccessibleRef)` pairs in document
-    /// order; a node that matches multiple clauses is emitted once per
-    /// matching clause (the merge step in `find_elements_group` collapses
-    /// these by `(bus_name, path)` identity).
+    /// ONE DFS over the subtree, evaluating each clause's first SimpleSelector
+    /// against every visited node. Emits `(clause_idx, AccessibleRef)` pairs
+    /// in document order; a node that matches multiple clauses is emitted
+    /// once per matching clause (the merge step in `find_elements_group`
+    /// collapses these by `(bus_name, path)` identity).
     ///
     /// This is the "push-down to the platform query per group" core: a
     /// selector group like `button, text_field` traverses the AT-SPI tree
@@ -1265,167 +1241,6 @@ impl LinuxProvider {
         Ok(results)
     }
 
-    /// Single-clause fast path: the original pre-group `find_elements` impl.
-    /// Kept as an inherent method so `find_elements_group` can dispatch to
-    /// it for `clauses.len() == 1` without wrapping through the trait
-    /// method (which would just re-allocate a single-clause `SelectorGroup`).
-    fn find_elements_single(
-        &self,
-        root: Option<&ElementData>,
-        selector: &Selector,
-        limit: Option<usize>,
-        max_depth: Option<u32>,
-    ) -> Result<Vec<ElementData>> {
-        if selector.segments.is_empty() {
-            return Ok(vec![]);
-        }
-
-        let max_depth_val = max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH);
-
-        // Phase 1: lightweight ref-based search for first segment.
-        // Only the attributes the selector needs are fetched per candidate.
-        let first = &selector.segments[0].simple;
-
-        let phase1_limit = if selector.segments.len() == 1 {
-            limit
-        } else {
-            None
-        };
-        let phase1_limit = match (phase1_limit, first.nth) {
-            (Some(l), Some(n)) => Some(l.max(n)),
-            (_, Some(n)) => Some(n),
-            (l, None) => l,
-        };
-
-        // Applications are always direct children of the registry root
-        let phase1_depth = if root.is_none()
-            && matches!(
-                first.role,
-                Some(xa11y_core::selector::RoleMatch::Normalized(
-                    Role::Application
-                ))
-            ) {
-            0
-        } else {
-            max_depth_val
-        };
-
-        let start_ref = match root {
-            None => AccessibleRef {
-                bus_name: "org.a11y.atspi.Registry".to_string(),
-                path: "/org/a11y/atspi/accessible/root".to_string(),
-            },
-            Some(el) => self.get_cached(el.handle)?,
-        };
-
-        let mut matching_refs =
-            self.collect_matching_refs(&start_ref, first, 0, phase1_depth, phase1_limit)?;
-
-        let pid_from_root = root.and_then(|r| r.pid);
-
-        // Single-segment: build ElementData only for matches, apply nth/limit
-        if selector.segments.len() == 1 {
-            if let Some(nth) = first.nth {
-                if nth <= matching_refs.len() {
-                    let aref = &matching_refs[nth - 1];
-                    let pid = if root.is_none() {
-                        self.get_app_pid(aref)
-                            .or_else(|| self.get_dbus_pid(&aref.bus_name))
-                    } else {
-                        pid_from_root
-                    };
-                    return Ok(vec![self.build_element_data(aref, pid)]);
-                } else {
-                    return Ok(vec![]);
-                }
-            }
-
-            if let Some(limit) = limit {
-                matching_refs.truncate(limit);
-            }
-
-            let is_root_search = root.is_none();
-            return Ok(matching_refs
-                .par_iter()
-                .map(|aref| {
-                    let pid = if is_root_search {
-                        self.get_app_pid(aref)
-                            .or_else(|| self.get_dbus_pid(&aref.bus_name))
-                    } else {
-                        pid_from_root
-                    };
-                    self.build_element_data(aref, pid)
-                })
-                .collect());
-        }
-
-        // Multi-segment: build ElementData for phase 1 matches, then narrow
-        // using standard matching on the (small) candidate set.
-        let is_root_search = root.is_none();
-        let mut candidates: Vec<ElementData> = matching_refs
-            .par_iter()
-            .map(|aref| {
-                let pid = if is_root_search {
-                    self.get_app_pid(aref)
-                        .or_else(|| self.get_dbus_pid(&aref.bus_name))
-                } else {
-                    pid_from_root
-                };
-                self.build_element_data(aref, pid)
-            })
-            .collect();
-
-        for segment in &selector.segments[1..] {
-            let mut next_candidates = Vec::new();
-            for candidate in &candidates {
-                match segment.combinator {
-                    Combinator::Child => {
-                        let children = self.get_children(Some(candidate))?;
-                        for child in children {
-                            if xa11y_core::selector::matches_simple(&child, &segment.simple) {
-                                next_candidates.push(child);
-                            }
-                        }
-                    }
-                    Combinator::Descendant => {
-                        let sub_selector = Selector {
-                            segments: vec![SelectorSegment {
-                                combinator: Combinator::Root,
-                                simple: segment.simple.clone(),
-                            }],
-                        };
-                        let mut sub_results = xa11y_core::selector::find_elements_in_tree(
-                            |el| self.get_children(el),
-                            Some(candidate),
-                            &sub_selector,
-                            None,
-                            Some(max_depth_val),
-                        )?;
-                        next_candidates.append(&mut sub_results);
-                    }
-                    Combinator::Root => unreachable!(),
-                }
-            }
-            let mut seen = HashSet::new();
-            next_candidates.retain(|e| seen.insert(e.handle));
-            candidates = next_candidates;
-        }
-
-        // Apply :nth on last segment
-        if let Some(nth) = selector.segments.last().and_then(|s| s.simple.nth) {
-            if nth <= candidates.len() {
-                candidates = vec![candidates.remove(nth - 1)];
-            } else {
-                candidates.clear();
-            }
-        }
-
-        if let Some(limit) = limit {
-            candidates.truncate(limit);
-        }
-
-        Ok(candidates)
-    }
 }
 
 impl Provider for LinuxProvider {
@@ -1525,28 +1340,20 @@ impl Provider for LinuxProvider {
         if group.clauses.is_empty() {
             return Ok(vec![]);
         }
-        // Single-clause groups take a non-trivial fast path (the original
-        // `find_elements` impl) — separated for readability and so per-clause
-        // optimizations (phase-1 limit short-circuit) don't have to coexist
-        // with the multi-clause cross-merge logic.
-        if group.clauses.len() == 1 {
-            return self.find_elements_single(root, &group.clauses[0], limit, max_depth);
+        // Reject any clause with zero segments early — `clause.segments[0]`
+        // below would otherwise panic.
+        if group.clauses.iter().any(|c| c.segments.is_empty()) {
+            return Ok(vec![]);
         }
 
-        // Multi-clause: ONE AT-SPI walk that evaluates every clause's first
-        // SimpleSelector against each visited node, then per-clause phase-2
-        // narrowing on the small candidate sets that fall out. Dedup uses
+        // ONE AT-SPI walk that evaluates every clause's first SimpleSelector
+        // against each visited node, then per-clause phase-2 narrowing on
+        // the small candidate sets that fall out. Dedup uses
         // `(bus_name, path)` — the only AT-SPI identifier that's stable
-        // across the per-clause narrowings (handles are minted fresh on each
-        // `build_element_data` call).
+        // across the per-clause narrowings (handles are minted fresh on
+        // each `build_element_data` call).
         let max_depth_val = max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH);
 
-        // If ANY clause's first segment is `application`, we need the full
-        // tree depth (because the walk starts at the registry and an
-        // `application`-only clause expects depth=0). The conservative
-        // choice is `max_depth_val` for the whole walk; the
-        // `application`-as-first-segment optimization only fires for
-        // single-clause queries.
         let firsts: Vec<&xa11y_core::selector::SimpleSelector> = group
             .clauses
             .iter()
@@ -1561,10 +1368,55 @@ impl Provider for LinuxProvider {
             Some(el) => self.get_cached(el.handle)?,
         };
 
-        // No per-walk limit: phase-1 hits for clause N might come before
-        // clause M's in doc order, so we need the union before truncating.
+        // ── Single-clause optimizations ───────────────────────────
+        // Two N=1-only optimizations are hoisted from the legacy
+        // `find_elements_single` body:
+        //
+        //   1. **Phase-1 limit short-circuit**: when there's exactly one
+        //      clause, propagate the user's `limit` (adjusted for `:nth`)
+        //      to the AT-SPI walk so e.g. `app.locator("button").first()`
+        //      stops at the first match. With multiple clauses, phase-1
+        //      hits for clause N might come before clause M's in doc
+        //      order, so we need the union before truncating. (Critical
+        //      on Electron-scale apps where this prevents 50k-node walks.)
+        //
+        //   2. **App-search depth shortcut**: when there's exactly one
+        //      clause AND `root.is_none()` AND the clause's first segment
+        //      matches `Role::Application`, applications are always
+        //      direct children of the registry root, so phase-1 depth is
+        //      0. Multi-clause groups can mix `application` with non-app
+        //      clauses, which need the full walk.
+        let (phase1_limit, phase1_depth) = if group.clauses.len() == 1 {
+            let clause = &group.clauses[0];
+            let first = firsts[0];
+            let outer = if clause.segments.len() == 1 {
+                limit
+            } else {
+                None
+            };
+            let p1_limit = match (outer, first.nth) {
+                (Some(l), Some(n)) => Some(l.max(n)),
+                (_, Some(n)) => Some(n),
+                (l, None) => l,
+            };
+            let p1_depth = if root.is_none()
+                && matches!(
+                    first.role,
+                    Some(xa11y_core::selector::RoleMatch::Normalized(
+                        Role::Application
+                    ))
+                ) {
+                0
+            } else {
+                max_depth_val
+            };
+            (p1_limit, p1_depth)
+        } else {
+            (None, max_depth_val)
+        };
+
         let phase1: Vec<(usize, AccessibleRef)> =
-            self.collect_matching_refs_group(&start_ref, &firsts, 0, max_depth_val, None)?;
+            self.collect_matching_refs_group(&start_ref, &firsts, 0, phase1_depth, phase1_limit)?;
 
         let pid_from_root = root.and_then(|r| r.pid);
         let is_root_search = root.is_none();
@@ -1659,21 +1511,6 @@ impl Provider for LinuxProvider {
             out.truncate(l);
         }
         Ok(out)
-    }
-
-    fn find_elements(
-        &self,
-        root: Option<&ElementData>,
-        selector: &Selector,
-        limit: Option<usize>,
-        max_depth: Option<u32>,
-    ) -> Result<Vec<ElementData>> {
-        // Route through the group primitive so the optimization shape is
-        // identical for single- and multi-clause queries (one phase-1 walk
-        // either way). The trait's default `find_elements` wraps into a
-        // single-clause group, but overriding here avoids the extra
-        // allocation when `find_elements` is called directly from `App` etc.
-        self.find_elements_single(root, selector, limit, max_depth)
     }
 
     fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
