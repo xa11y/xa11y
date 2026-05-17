@@ -12,5 +12,5 @@ path = "src/main.rs"
 
 [dependencies]
 accesskit = "0.24"
-accesskit_winit = "0.32"
+accesskit_winit = "0.33"
 winit = "0.30"
