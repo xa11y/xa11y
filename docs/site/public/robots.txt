@@ -15,3 +15,5 @@ User-agent: CCBot
 User-agent: Applebot-Extended
 Allow: /
 Content-Signal: ai-train=yes, search=yes, ai-input=yes
+
+Sitemap: https://xa11y.dev/sitemap.xml
