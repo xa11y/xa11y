@@ -323,6 +323,27 @@ impl LinuxProvider {
         (bits & MULTI_LINE) != 0
     }
 
+    /// Resolve TextField vs TextArea using the MULTI_LINE state, regardless of
+    /// the coarse role we started with. Different toolkits expose text inputs
+    /// under different AT-SPI roles ("text", "textbox", "entry", "embedded",
+    /// numeric 61/78/79), and WebKitGTK has changed mapping between versions
+    /// (e.g. 2.50 → 2.52 swapped what role textarea reports). MULTI_LINE is
+    /// the cross-toolkit invariant, so we let it decide.
+    ///
+    /// For any other coarse role, returns it unchanged.
+    fn refine_text_role(&self, coarse: Role, aref: &AccessibleRef) -> Role {
+        match coarse {
+            Role::TextArea | Role::TextField => {
+                if self.is_multi_line(aref) {
+                    Role::TextArea
+                } else {
+                    Role::TextField
+                }
+            }
+            other => other,
+        }
+    }
+
     /// Get bounds via Component interface.
     /// Checks for Component support first to avoid GTK CRITICAL warnings
     /// on objects (e.g. TreeView cell renderers) that don't implement it.
@@ -606,11 +627,7 @@ impl LinuxProvider {
             } else {
                 map_atspi_role_number(role_num)
             };
-            if coarse == Role::TextArea && !self.is_multi_line(aref) {
-                Role::TextField
-            } else {
-                coarse
-            }
+            self.refine_text_role(coarse, aref)
         };
 
         // Fetch all independent properties in parallel.
@@ -998,12 +1015,7 @@ impl LinuxProvider {
             let role_num = self.get_role_number(aref).unwrap_or(0);
             map_atspi_role_number(role_num)
         };
-        // Refine TextArea → TextField for single-line text widgets.
-        if coarse == Role::TextArea && !self.is_multi_line(aref) {
-            Role::TextField
-        } else {
-            coarse
-        }
+        self.refine_text_role(coarse, aref)
     }
 
     /// Check if an accessible ref matches a simple selector, fetching only the
