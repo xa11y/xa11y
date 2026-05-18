@@ -20,6 +20,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          # Full history so generate_sitemap.py can use `git log` to set
+          # accurate <lastmod> values from each source file's commit time.
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
