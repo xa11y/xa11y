@@ -3,14 +3,15 @@
 
 Runs after the docs build pipeline has produced docs/site/dist/ containing:
   - Astro/Starlight HTML output (from `npm run build`)
-  - Rust API reference at api/rust/reference/ (from `cargo doc`)
   - Python API reference at api/python/reference/ (from `sphinx-build`)
 
 Walks dist/ for every relevant HTML file, filters out generated navigation
 and source-view pages, and writes dist/sitemap.xml. Because URLs come from
-the actual built output, adding a new MDX page, a new Rust item, or a new
-Python class picks up automatically on the next build — nothing is
-hardcoded.
+the actual built output, adding a new MDX page or a new Python class picks
+up automatically on the next build — nothing is hardcoded.
+
+Rust API reference is hosted on docs.rs and intentionally excluded from
+this sitemap; docs.rs publishes its own sitemap.
 """
 
 from __future__ import annotations
@@ -26,17 +27,12 @@ DIST = Path(__file__).resolve().parent / "site" / "dist"
 # Directory prefixes (relative to dist) whose HTML files should not be
 # advertised to search engines.
 EXCLUDE_DIR_PREFIXES = (
-    "api/rust/reference/src/",          # cargo doc source view
-    "api/rust/reference/implementors/", # cargo doc trait-impl shims
     "api/python/reference/_static/",
     "api/python/reference/_sources/",
 )
 
 # Filenames that are navigation / build-tooling, not real content.
 EXCLUDE_FILENAMES = {
-    "all.html",            # cargo doc "all items"
-    "help.html",           # cargo doc help overlay
-    "settings.html",       # cargo doc settings
     "search.html",         # sphinx search UI
     "genindex.html",       # sphinx generated index
     "py-modindex.html",    # sphinx module index

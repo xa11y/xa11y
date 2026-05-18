@@ -261,8 +261,8 @@ app.locator("button[name='All Clear'], button[name='Clear']").press()
 Each clause is parsed independently, so combinators apply per clause:
 `window button, dialog button` reads as "(window > > button) or (dialog > >
 button)", not as a stray comma inside one selector. Chained
-[`descendant()`](/api/rust/) and [`child()`](/api/rust/) calls on a group
-locator distribute over every clause:
+[`descendant()`](https://docs.rs/xa11y/) and [`child()`](https://docs.rs/xa11y/)
+calls on a group locator distribute over every clause:
 
 ```python
 # Equivalent to: "toolbar button, dialog button"
@@ -274,5 +274,5 @@ Commas inside quoted attribute values (`[name='a,b']`) are not separators.
 ## Next steps
 
 - [Overview](/guides/overview/) — concepts, architecture, and how xa11y compares to other tools
-- [Rust API Reference](/api/rust/) — full Rust API documentation
+- [Rust API Reference](https://docs.rs/xa11y/) — full Rust API documentation on docs.rs
 - [Python API Reference](/api/python/) — full Python API documentation

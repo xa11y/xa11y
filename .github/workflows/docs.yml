@@ -30,6 +30,9 @@ jobs:
             docs/site/package-lock.json
             xa11y-js/package-lock.json
 
+      # Rust toolchain is required by the `napi build` step below, which
+      # compiles xa11y-js's native binding to produce native.d.ts for the JS
+      # API doc generator. Rust API reference itself is hosted on docs.rs.
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
@@ -39,7 +42,6 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            target
             xa11y-js/target
           key: docs-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: docs-cargo-
@@ -86,22 +88,16 @@ jobs:
         working-directory: docs/site
         run: npm run build
 
-      - name: Generate Rust API docs
-        run: cargo doc -p xa11y --no-deps
-
       - name: Build Python API docs (Sphinx)
         working-directory: docs/python
         run: sphinx-build -b html . _build/html
-
-      - name: Copy Rust docs into site output
-        run: cp -r target/doc docs/site/dist/api/rust/reference
 
       - name: Copy Python docs into site output
         run: cp -r docs/python/_build/html docs/site/dist/api/python/reference
 
       # Run after every other doc source has been copied into dist/ so the
-      # sitemap reflects Starlight pages, Rust API items, and Python API
-      # items — all auto-discovered, none hardcoded.
+      # sitemap reflects Starlight pages and Python API items — all
+      # auto-discovered, none hardcoded.
       - name: Generate sitemap
         run: python docs/generate_sitemap.py
 

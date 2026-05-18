@@ -4,7 +4,7 @@
 Scans all .mdx files under docs/site/src/content/docs/ for internal links
 (markdown links starting with /) and validates that they resolve to either:
   - An existing content page (.mdx file)
-  - A known build-time asset path (e.g. /api/rust/reference/...)
+  - A known build-time asset path (e.g. /api/python/reference/...)
 
 Exit code 0 if all links are valid, 1 if any are broken.
 """
@@ -15,9 +15,8 @@ from pathlib import Path
 
 DOCS_DIR = Path(__file__).parent / "site" / "src" / "content" / "docs"
 
-# Paths served by build-time assets (cargo doc, sphinx), not content pages.
+# Paths served by build-time assets (sphinx), not content pages.
 ASSET_PATH_PREFIXES = [
-    "/api/rust/reference/",
     "/api/python/reference/",
 ]
 
