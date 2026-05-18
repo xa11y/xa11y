@@ -6,9 +6,9 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-xa11y.dev-blueviolet)](https://xa11y.dev)
 
-Cross-platform accessibility library for reading and interacting with accessibility trees. One API for macOS, Windows, and Linux.
+A Playwright-style API for driving native desktop apps on macOS, Windows, and Linux. Built for end-to-end tests, computer-use agents, and assistive tools.
 
-**Use cases:** UI testing, AI agent tooling, assistive technology, desktop automation.
+**Use cases:** end-to-end desktop testing, computer-use agents, MCP tools, assistive technology.
 
 **[Documentation](https://xa11y.dev)** | **[Rust API](https://docs.rs/xa11y)** | **[Python API](https://xa11y.dev/api/python/)**
 

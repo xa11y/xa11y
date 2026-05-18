@@ -8,7 +8,7 @@ export default defineConfig({
       title: "xa11y",
       customCss: ["./src/styles/custom.css"],
       description:
-        "Cross-platform accessibility library for reading and interacting with accessibility trees.",
+        "A Playwright-style API for desktop apps. Cross-platform UI automation, end-to-end testing, and accessibility tooling for native apps on macOS, Windows, and Linux.",
       social: [
         {
           icon: "github",
