@@ -33,7 +33,11 @@ export default defineConfig({
         {
           label: "API",
           items: [
-            { label: "Rust", link: "/api/rust/reference/xa11y/" },
+            {
+              label: "Rust",
+              link: "https://docs.rs/xa11y/",
+              attrs: { target: "_blank", rel: "noopener" },
+            },
             { label: "Python", link: "/api/python/reference/api/xa11y/" },
             { label: "JavaScript", link: "/api/javascript/" },
           ],
