@@ -416,6 +416,15 @@ jobs:
           # next natural reload cycle. launchctl stop triggers an auto-restart.
           sudo launchctl stop com.apple.tccd 2>/dev/null || true
           sleep 2
+          # The macos-latest runner image occasionally boots with the macOS
+          # Setup Assistant (or similar onboarding window) holding front-app
+          # focus. CGEventPost delivers synth events to whichever app is
+          # frontmost, so when this happens every input_sim assertion fails
+          # with an empty event log even though Tauri's window is visible.
+          # Dismiss the known offenders so the test app can take front.
+          for app in "Setup Assistant" "Notification Center" "Software Update"; do
+            sudo killall "$app" 2>/dev/null || true
+          done
 
       # ── Cache Cocoa test app binary ────────────────────────────────
       - name: Cache Cocoa test app binary

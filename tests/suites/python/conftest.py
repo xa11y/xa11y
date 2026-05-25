@@ -287,6 +287,151 @@ _LAUNCHERS = {
     "electron": _launch_electron,
 }
 
+
+# ---------------------------------------------------------------------------
+# Diagnostic capture for macOS input_sim flakes
+# ---------------------------------------------------------------------------
+#
+# When CGEvents fail to reach the Tauri WKWebView, every test in
+# test_input_sim.py fails identically with `assert 'mousedown' in ''`, which
+# tells us nothing about why. The hook below snapshots runtime state on the
+# first such failure (which macOS app is frontmost, hit-target bounds, event
+# log contents, plus a re-probe) and attaches it to the failure report — so
+# the next round of failures arrives with breadcrumbs in the CI log.
+#
+# This hook is what surfaced the Setup-Assistant-stealing-focus cause on
+# Actions runner images. Worth keeping for the next class of flake on the
+# same path.
+
+def _macos_frontmost_app() -> str:
+    """Return the name of the macOS frontmost application (or an error tag)."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events" to '
+             'get name of first application process whose frontmost is true'],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip() or "<empty>"
+        return f"<osascript rc={result.returncode}: {result.stderr.strip()}>"
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        return f"<error: {exc!r}>"
+
+
+def _macos_visible_processes() -> str:
+    """List names of all foreground-capable macOS processes."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["osascript", "-e",
+             'tell application "System Events" to '
+             'get name of (every application process whose visible is true)'],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip() or "<empty>"
+        return f"<osascript rc={result.returncode}: {result.stderr.strip()}>"
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        return f"<error: {exc!r}>"
+
+
+def _collect_macos_input_sim_diagnostics(app) -> str:
+    """Snapshot state useful for diagnosing CGEvent → WKWebView delivery flakes."""
+    import time
+    lines = ["macOS input_sim failure diagnostics:"]
+    lines.append(f"  frontmost: {_macos_frontmost_app()}")
+    lines.append(f"  visible processes: {_macos_visible_processes()}")
+
+    try:
+        lines.append(f"  app.pid: {app.pid}")
+        lines.append(f"  app.name: {app.name!r}")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"  app.{{pid,name}}: <error {exc!r}>")
+
+    try:
+        wb = app.locator('window').element().bounds
+        lines.append(
+            f"  window bounds: x={wb.x} y={wb.y} w={wb.width} h={wb.height}"
+            if wb else "  window bounds: <None>"
+        )
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"  window bounds: <error {exc!r}>")
+
+    try:
+        hb = app.locator('button[name="Hit target"]').element().bounds
+        if hb:
+            lines.append(
+                f"  hit_target bounds: x={hb.x} y={hb.y} w={hb.width} h={hb.height}"
+            )
+            lines.append(
+                f"  hit_target center: "
+                f"({hb.x + hb.width // 2}, {hb.y + hb.height // 2})"
+            )
+        else:
+            lines.append("  hit_target bounds: <None>")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"  hit_target: <error {exc!r}>")
+
+    try:
+        log_val = app.locator('text_area[name="Event log"]').element().value
+        lines.append(f"  event_log (len={len(log_val or '')}): {(log_val or '')!r}")
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"  event_log: <error {exc!r}>")
+
+    # Re-probe: post one fresh click and see if it lands now. Disambiguates
+    # "the test click happened to lose a race" from "the macOS session can't
+    # deliver CGEvents to this WKWebView at all".
+    try:
+        sim = xa11y.input_sim()
+        hb = app.locator('button[name="Hit target"]').element().bounds
+        if hb is None:
+            lines.append("  reprobe: <no bounds>")
+        else:
+            app.locator('button[name="Clear log"]').press()
+            time.sleep(0.2)
+            sim.click((hb.x + hb.width // 2, hb.y + hb.height // 2))
+            time.sleep(0.5)
+            log_after = app.locator('text_area[name="Event log"]').element().value or ""
+            lines.append(
+                f"  reprobe click → log (len={len(log_after)}): {log_after!r}"
+            )
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f"  reprobe: <error {exc!r}>")
+
+    return "\n".join(lines)
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_runtest_makereport(item, call):
+    outcome = yield
+    rep = outcome.get_result()
+    if (rep.when != "call" or not rep.failed
+            or sys.platform != "darwin"
+            or "test_input_sim" not in item.nodeid):
+        return
+    # Diagnostics are the same for every test in the module; emit once per
+    # session so the failure section doesn't repeat the snapshot N times.
+    session = item.session
+    if getattr(session, "_macos_input_sim_diag_emitted", False):
+        return
+    session._macos_input_sim_diag_emitted = True
+    try:
+        app_obj = item.funcargs.get("tauri_input_app") or item.funcargs.get("app")
+        if app_obj is None:
+            return
+        rep.sections.append(
+            ("macOS input_sim diagnostics",
+             _collect_macos_input_sim_diagnostics(app_obj))
+        )
+    except Exception as exc:  # noqa: BLE001
+        rep.sections.append(
+            ("macOS input_sim diagnostics",
+             f"<diagnostics collection raised: {exc!r}>")
+        )
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -347,17 +492,13 @@ def tauri_input_app(app_name, app):
     (js, cli) and other test modules can rely on the OK / Submit buttons
     being present.
     """
-    import time
-
     if app_name != "tauri":
         pytest.skip("tauri_input_app fixture is only available for the Tauri app")
 
     app.locator('button[name="Open input events page"]').press()
-    for _ in range(50):
-        if app.locator('button[name="Hit target"]').exists():
-            break
-        time.sleep(0.1)
-    else:
+    try:
+        app.locator('button[name="Hit target"]').wait_attached(timeout=5.0)
+    except xa11y.TimeoutError:
         pytest.fail("input-events page did not load within 5s")
 
     try:
@@ -365,10 +506,7 @@ def tauri_input_app(app_name, app):
     finally:
         try:
             app.locator('button[name="Back to widgets"]').press()
-            for _ in range(50):
-                if app.locator('button[name="OK"]').exists():
-                    break
-                time.sleep(0.1)
+            app.locator('button[name="OK"]').wait_attached(timeout=5.0)
         except Exception:
             # Best-effort restoration — never fail the run on teardown.
             pass
