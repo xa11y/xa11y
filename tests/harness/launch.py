@@ -378,17 +378,22 @@ def _run_suites(
 
     worst_rc = 0
 
-    # The accesskit test app exposes a different widget set than the shared
-    # python/cli test schemas (e.g. "Submit"/"Cancel" instead of "OK"). The
-    # primary coverage for accesskit is the Rust integ suite — skip the
-    # python/js/cli compat suites entirely for it.
-    accesskit_skip = {"python", "cli", "js"}
+    # Per-app suite skips. accesskit's widget schema differs from the shared
+    # python/cli/js fixtures (e.g. "Submit"/"Cancel" instead of "OK"), and its
+    # primary coverage is the Rust integ suite — skip all three harness
+    # suites. egui has no APP_CONFIG entry in tests/suites/js/helpers.js yet
+    # (tracked as `egui_js_suite` in tests/matrix.yaml); skip the JS suite
+    # while python/cli still run.
+    suite_skips_by_app = {
+        "accesskit": {"python", "cli", "js"},
+        "egui": {"js"},
+    }
 
     for suite in suites:
-        if app == "accesskit" and suite in accesskit_skip:
+        if suite in suite_skips_by_app.get(app, set()):
             print(
-                f"\nSkipping {suite} suite for accesskit "
-                f"(Rust integ suite is primary; widget schema differs)"
+                f"\nSkipping {suite} suite for {app} "
+                f"(see suite_skips_by_app in tests/harness/launch.py)"
             )
             continue
 
