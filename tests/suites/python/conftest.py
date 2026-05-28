@@ -204,19 +204,24 @@ APP_CONFIGS: dict[str, dict] = {
         "slider_initial_value": 50.0,
         "slider_min": 0.0,
         "slider_max": 100.0,
-        # Spin button — egui's `DragValue` exposes role `spin_button` but does
-        # not take a label, and the slider's editable value display also lands
-        # as a `spin_button` (named "Volume"). Disambiguate by max_value, which
-        # is unique to the Quantity field.
-        "spinbutton_selector": 'spin_button[max_value="999.0"]',
+        # Spin button — the egui app suppresses the slider's auxiliary
+        # DragValue (see `.show_value(false)` in test-apps/egui/src/main.rs),
+        # so the only remaining `spin_button` in the tree is the Quantity
+        # field. Use a role-only selector — macOS AccessKit doesn't expose
+        # AXMaxValue for SpinButton, so attribute-based matching on
+        # `max_value` would only work on Linux/Windows.
+        "spinbutton_selector": "spin_button",
         # Progress bar — `ProgressBar::text("75%")` becomes the AX name.
-        "progress_bar_selector": 'progress_bar',
+        "progress_bar_selector": "progress_bar",
         # Text field — egui's `TextEdit::singleline` does not set a name, so
         # match by role (only one in the app) and verify the initial value.
-        "textfield_selector": 'text_field',
+        "textfield_selector": "text_field",
         "textfield_initial_value": "hello world",
-        # Text area — same: only one text_area in the app.
-        "textarea_selector": 'text_area',
+        # Text area — egui uses Role::MultilineTextInput which AccessKit's
+        # macOS bridge maps to AXTextArea (xa11y `text_area`) but UIA on
+        # Windows collapses to UIA_EditControlTypeId (xa11y `text_field`,
+        # no distinct multiline role exists in UIA). Skip on Windows.
+        "textarea_selector": None if sys.platform == "win32" else "text_area",
         # Window name comes from `ViewportBuilder::with_title` but the
         # AT-SPI/UIA/AX layer reports the binary name; leave unchecked.
         "window_name_contains": None,

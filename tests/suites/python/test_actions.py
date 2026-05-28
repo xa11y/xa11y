@@ -417,6 +417,13 @@ def test_textfield_set_value_via_element(app, app_name, app_config):
             f"WebKit2GTK / Chromium ({app_name}) expose HTML <input> through "
             "AT-SPI2 without a functional EditableText interface."
         )
+    if app_name == "egui":
+        pytest.skip(
+            "egui's TextEdit does not implement AccessKit's SetValue "
+            "action (see test_textfield_set_value). On Linux the locator "
+            "form returns ActionNotSupportedError and xfails; on macOS/Windows "
+            "the call silently no-ops, so the assertion that follows fails."
+        )
     loc = app.locator(sel)
     try:
         loc.element().set_value("test input")

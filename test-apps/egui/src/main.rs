@@ -156,7 +156,21 @@ impl TestApp {
 
     fn range_group(&mut self, ui: &mut egui::Ui) {
         ui.heading("Range Controls");
-        ui.add(egui::Slider::new(&mut self.volume, 0.0..=100.0).text("Volume"));
+        // `show_value(false)` suppresses the auxiliary DragValue that egui
+        // pins next to the slider by default. With it on, there are TWO
+        // `spin_button` AccessKit nodes (one for the slider's value display,
+        // one for Quantity), which makes a role-only selector ambiguous and
+        // forces every compat test to rely on `max_value`. macOS doesn't
+        // expose AXMaxValue for the SpinButton role at all, so the selector
+        // `spin_button[max_value="999.0"]` was failing there — keep the
+        // slider widget intact, drop the redundant drag-value, and the
+        // remaining `spin_button` (Quantity) becomes uniquely addressable on
+        // every platform.
+        ui.add(
+            egui::Slider::new(&mut self.volume, 0.0..=100.0)
+                .text("Volume")
+                .show_value(false),
+        );
         ui.horizontal(|ui| {
             ui.label("Quantity");
             ui.add(egui::DragValue::new(&mut self.quantity).range(0..=999));
