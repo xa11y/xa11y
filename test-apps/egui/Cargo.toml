@@ -1,0 +1,24 @@
+[package]
+name = "xa11y-egui-test-app"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "egui test application for xa11y integration tests"
+publish = false
+
+[[bin]]
+name = "xa11y-egui-test-app"
+path = "src/main.rs"
+
+[dependencies]
+# Default features include `wgpu`, which on Linux CI would require the
+# Vulkan loader (libvulkan1) — not installed in the existing apt set. We
+# drop wgpu in favour of `glow` (OpenGL via Mesa/llvmpipe on Xvfb), which
+# also keeps build time and binary size down for what is just a test fixture.
+eframe = { version = "0.34", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+] }

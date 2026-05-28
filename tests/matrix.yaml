@@ -35,6 +35,15 @@ apps:
       Chromium-based. JS integ tests also exercise AccessibilityNotEnabledError detection
       (app launched without --force-renderer-accessibility).
 
+  egui:
+    platforms: [linux, macos, windows]
+    notes: >
+      Native Rust immediate-mode GUI via `eframe`. AccessKit drives the
+      cross-platform a11y tree (AT-SPI2 on Linux, AX on macOS, UIA on
+      Windows). Outside the Cargo workspace because the eframe dependency
+      tree (winit, glow, glutin, image, …) noticeably slows workspace-wide
+      builds; built explicitly by the `integ`/`test-egui` jobs.
+
 features:
   compat:
     description: "a11y API compatibility: tree structure, find, roles, widget discovery"
@@ -104,6 +113,11 @@ coverage:
     js: [compat, actions]
     cli: [compat, actions]
 
+  egui:
+    python: [compat, actions, events]
+    js: []  # JS suite not wired up for egui yet — see gaps.egui_js_suite
+    cli: [compat, actions]
+
 gaps:
   - id: accesskit_python_suite
     description: >
@@ -147,4 +161,14 @@ gaps:
       apps: [gtk]
       language: python
       features: [events]
+
+  - id: egui_js_suite
+    description: >
+      JS compat/actions suite not wired up for egui yet. Python + CLI cover the
+      compat surface across all three platforms; JS is a follow-up.
+    severity: low
+    workaround: "Python + CLI compat suites cover egui on Linux, macOS, and Windows"
+    affects:
+      apps: [egui]
+      language: js
 

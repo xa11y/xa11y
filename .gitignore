@@ -9,3 +9,10 @@ __pycache__/
 # the CI docs job from the source-of-truth type stubs (.pyi / .d.ts).
 docs/site/src/content/docs/api/python.mdx
 docs/site/src/content/docs/api/javascript.mdx
+
+# Per-test-app Cargo.lock files — these crates live outside the workspace
+# (Tauri, egui) so cargo regenerates a lockfile per build. Matching the
+# existing convention: not pinning lets CI track the latest semver-compatible
+# deps without churning a checked-in file.
+test-apps/tauri/Cargo.lock
+test-apps/egui/Cargo.lock

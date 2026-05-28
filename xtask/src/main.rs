@@ -25,7 +25,8 @@ COMMANDS:
     test-cocoa          Run Cocoa/AppKit integration tests (macOS only)
     test-tauri          Run Tauri integration tests
     test-electron       Run Electron integration tests (Linux only)
-    test-apps           Run all app integration test suites (qt, gtk, cocoa, tauri, electron)
+    test-egui           Run egui (eframe) integration tests
+    test-apps           Run all app integration test suites (qt, gtk, cocoa, tauri, electron, egui)
     test-compat [APP]   Run shared harness (python + js + cli suites) against APP (default: tauri)
     test-matrix-check   Validate the tests/matrix.yaml coverage index
     docs                Build documentation
@@ -60,6 +61,7 @@ fn main() -> ExitCode {
         "test-cocoa" => do_test_cocoa(),
         "test-tauri" => do_test_tauri(),
         "test-electron" => do_test_electron(),
+        "test-egui" => do_test_egui(),
         "test-apps" => do_test_apps(),
         "test-compat" => do_test_compat(rest),
         "test-matrix-check" => do_test_matrix_check(),
@@ -429,6 +431,12 @@ fn do_test_electron() -> bool {
     run_in("bash", &["scripts/run_electron_tests.sh"], &root)
 }
 
+fn do_test_egui() -> bool {
+    heading("egui integration tests");
+    let root = project_root();
+    run_in("bash", &["scripts/run_egui_tests.sh"], &root)
+}
+
 fn do_test_apps() -> bool {
     heading("All app integration tests");
     let mut ok = true;
@@ -445,6 +453,9 @@ fn do_test_apps() -> bool {
         ok = false;
     }
     if env::consts::OS == "linux" && !do_test_electron() {
+        ok = false;
+    }
+    if !do_test_egui() {
         ok = false;
     }
     ok

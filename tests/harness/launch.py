@@ -7,7 +7,7 @@ between language suites.
 CLI usage:
     python tests/harness/launch.py <app> [suite ...]
 
-    <app>     one of: qt, gtk, cocoa, tauri, electron, accesskit
+    <app>     one of: qt, gtk, cocoa, tauri, electron, accesskit, egui
     [suite]   optional subset: python js cli  (default: all applicable)
 
 Programmatic usage:
@@ -113,7 +113,23 @@ def _app_command(app: str) -> tuple[list[str], dict[str, str], list[str], str | 
             None,
         )
 
-    raise ValueError(f"Unknown app: {app!r}. Supported: qt, gtk, cocoa, tauri, electron, accesskit")
+    if app == "egui":
+        # The egui test app sits outside the Cargo workspace (its eframe
+        # dependency tree is heavy and slows workspace-wide builds). Build
+        # it explicitly via `cargo build --manifest-path test-apps/egui/Cargo.toml`.
+        binary = str(
+            PROJECT_ROOT / "test-apps" / "egui" / "target" / "debug" / "xa11y-egui-test-app"
+        )
+        return (
+            [binary],
+            {},
+            ["xa11y-egui-test-app"],
+            'button[name="OK"]',
+        )
+
+    raise ValueError(
+        f"Unknown app: {app!r}. Supported: qt, gtk, cocoa, tauri, electron, accesskit, egui"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -404,7 +420,7 @@ def _run_suites(
 # Public API
 # ---------------------------------------------------------------------------
 
-VALID_APPS = ("qt", "gtk", "cocoa", "tauri", "electron", "accesskit")
+VALID_APPS = ("qt", "gtk", "cocoa", "tauri", "electron", "accesskit", "egui")
 VALID_SUITES = ("python", "js", "cli")
 DEFAULT_SUITES = list(VALID_SUITES)
 

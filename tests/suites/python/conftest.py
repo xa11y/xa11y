@@ -178,6 +178,52 @@ APP_CONFIGS: dict[str, dict] = {
         "add_item_button_name": None,
         "remove_item_button_name": None,
     },
+    "egui": {
+        # egui has no native dialog primitive; tests that depend on opening a
+        # platform dialog skip when this is None.
+        "dialog_button_name": None,
+        "dialog_name": None,
+        # Buttons — egui sets the AccessKit name from the visible label.
+        "ok_button_name": "OK",
+        "cancel_button_name": "Cancel",
+        # `Response::on_hover_text` is a tooltip in egui; it does not push
+        # through to AccessKit's description, so the description check is
+        # skipped.
+        "ok_button_description": None,
+        # Checkboxes
+        "has_checkbox": True,
+        "checkbox_unchecked_name": "Agree to terms",
+        "checkbox_checked_name": "Subscribe",
+        # Radio buttons
+        "has_radio": True,
+        "radio_role": "radio_button",
+        "radio_a_name": "Option A",
+        "radio_b_name": "Option B",
+        # Slider — egui's `Slider::text("Volume")` becomes the AccessKit name.
+        "slider_selector": 'slider[name="Volume"]',
+        "slider_initial_value": 50.0,
+        "slider_min": 0.0,
+        "slider_max": 100.0,
+        # Spin button — egui's `DragValue` exposes role `spin_button` but does
+        # not take a label, and the slider's editable value display also lands
+        # as a `spin_button` (named "Volume"). Disambiguate by max_value, which
+        # is unique to the Quantity field.
+        "spinbutton_selector": 'spin_button[max_value="999.0"]',
+        # Progress bar — `ProgressBar::text("75%")` becomes the AX name.
+        "progress_bar_selector": 'progress_bar',
+        # Text field — egui's `TextEdit::singleline` does not set a name, so
+        # match by role (only one in the app) and verify the initial value.
+        "textfield_selector": 'text_field',
+        "textfield_initial_value": "hello world",
+        # Text area — same: only one text_area in the app.
+        "textarea_selector": 'text_area',
+        # Window name comes from `ViewportBuilder::with_title` but the
+        # AT-SPI/UIA/AX layer reports the binary name; leave unchecked.
+        "window_name_contains": None,
+        "submit_button_name": "Submit",
+        "add_item_button_name": "Add Item",
+        "remove_item_button_name": "Remove Item",
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -279,12 +325,40 @@ def _launch_electron() -> xa11y.App:
     )
 
 
+def _launch_egui() -> xa11y.App:
+    binary = str(
+        PROJECT_ROOT / "test-apps" / "egui" / "target" / "debug" / "xa11y-egui-test-app"
+    )
+    if not Path(binary).exists():
+        result = subprocess.run(
+            [
+                "cargo",
+                "build",
+                "--manifest-path",
+                str(PROJECT_ROOT / "test-apps" / "egui" / "Cargo.toml"),
+            ],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            pytest.fail(
+                f"Failed to build egui test app:\n{result.stdout}\n{result.stderr}"
+            )
+    yield from launch_test_app(
+        command=[binary],
+        app_names=["xa11y-egui-test-app"],
+        content_ready_selector='button[name="OK"]',
+    )
+
+
 _LAUNCHERS = {
     "qt": _launch_qt,
     "gtk": _launch_gtk,
     "cocoa": _launch_cocoa,
     "tauri": _launch_tauri,
     "electron": _launch_electron,
+    "egui": _launch_egui,
 }
 
 
