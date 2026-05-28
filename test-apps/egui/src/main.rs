@@ -221,10 +221,19 @@ impl TestApp {
 }
 
 fn main() -> eframe::Result {
+    // `with_active(true)` + `with_visible(true)` force the window to come up
+    // foreground+focused on creation. accesskit-winit's macOS bridge only
+    // publishes the AX tree once the host window has reported focus to winit,
+    // and on the macos-latest GitHub runner an unbundled binary doesn't always
+    // get a Focused event without an explicit activation request — matches the
+    // hand-rolled `WindowEvent::Focused(true)` poke the AccessKit + winit test
+    // app uses for the Xvfb path on Linux.
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(APP_TITLE)
-            .with_inner_size([520.0, 800.0]),
+            .with_inner_size([520.0, 800.0])
+            .with_active(true)
+            .with_visible(true),
         ..Default::default()
     };
     eframe::run_native(
