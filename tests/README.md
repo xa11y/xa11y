@@ -41,7 +41,7 @@ see Known Gaps.
 | App        | Platform(s)           | Python compat | Python actions | Python events | Python input_sim | Python screenshot | JS compat | JS actions | JS input_sim | JS screenshot | CLI |
 |------------|-----------------------|:-------------:|:--------------:|:-------------:|:----------------:|:-----------------:|:---------:|:----------:|:------------:|:-------------:|:---:|
 | accesskit  | linux, macos, windows | —¹            | —¹             | —¹            | —                | —                 | ✅        | ✅         | ✅²          | ✅²           | ❌  |
-| qt         | linux, windows        | ✅            | ✅             | ✅            | —                | —                 | ❌        | ❌         | —            | —             | ❌  |
+| qt         | linux, macos, windows | ✅            | ✅             | ✅            | —                | —                 | ❌        | ❌         | —            | —             | ❌  |
 | gtk        | linux                 | ✅            | ✅             | ❌³           | —                | —                 | ❌        | ❌         | —            | —             | ❌  |
 | cocoa      | macos                 | ✅            | ✅             | ✅            | —                | —                 | ❌        | ❌         | —            | —             | ❌  |
 | tauri      | linux, macos, windows | ✅            | ✅             | ✅            | ✅               | ✅                | ❌        | ❌         | —            | —             | ❌  |
@@ -52,8 +52,6 @@ see Known Gaps.
 2. JS input_sim and screenshot run against the AccessKit app for the `integ` suite, and against Electron for the `integ-electron` suite.
 3. GTK has no event subscription tests. Only widget/compat and actions are covered.
 
-**macOS Qt (⚠️ disabled):** Qt/PySide6 does not correctly nest child elements in its macOS AX tree. macOS Qt tests are omitted until the upstream issue is resolved. Qt is tested on Linux and Windows only.
-
 ---
 
 ## Known Gaps
@@ -61,7 +59,6 @@ see Known Gaps.
 | ID              | Description                                                                                  | Severity | Workaround                                               |
 |-----------------|----------------------------------------------------------------------------------------------|:--------:|----------------------------------------------------------|
 | `cli_integ`     | No CLI integration tests exist for any app. The `xa11y` binary is not exercised end-to-end against a live app in CI. | **high** | Unit tests in `xa11y-python/tests/test_cli.py` cover CLI error paths only. |
-| `macos_qt`      | Qt/PySide6 AX tree does not correctly nest child elements on macOS; macOS Qt tests are disabled. | medium | Qt tested on Linux and Windows only.               |
 | `js_app_coverage` | JS integ tests cover only the AccessKit app and Electron. No JS tests for Qt, GTK, Cocoa, or Tauri. | medium | Python suites cover those apps.                   |
 | `gtk_events`    | No event subscription tests for GTK. Only compat and actions are covered.                    | low      | GTK event subscription is exercised in the Rust integ suite via AT-SPI2. |
 
