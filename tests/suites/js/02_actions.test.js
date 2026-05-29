@@ -68,7 +68,10 @@ test('setValue on text field is exercised (AT-SPI may reject)', async () => {
     await sleep(200);
     // If the call succeeded, the value may or may not be reflected in the
     // next tree snapshot — this depends on the platform adapter.
-    const refreshed = await one(await getApp(), selector);
+    // Read back the first match. A platform may expose more than one
+    // text_field — egui's multiline Notes collapses to text_field under UIA,
+    // so there are two — and setValue acted on that same first match.
+    const [refreshed] = await (await getApp()).locator(selector).elements();
     assert.ok(typeof refreshed.value === 'string' || refreshed.value === null);
   } catch (err) {
     if (!(err instanceof ActionNotSupportedError)) throw err;
@@ -119,10 +122,15 @@ test('exists() is false for a nonexistent selector', async () => {
 
 test('auto-wait focus() resolves before returning', async () => {
   const app = await getApp();
-  // Use the named text field if available; fall back to any button.
+  // Prefer a named target: the named text field, else the primary button by
+  // name. A bare `button` selector resolves to the first button in document
+  // order, which on Windows is a non-client window caption control
+  // (Minimize/Maximize/Close) that UIA refuses to focus.
   const selector = appConfig.textFieldName
     ? `text_field[name="${appConfig.textFieldName}"]`
-    : 'button';
+    : appConfig.okButtonName
+      ? `button[name="${appConfig.okButtonName}"]`
+      : 'button';
   const locator = app.locator(selector);
   if (!(await locator.exists())) return;
   try {
@@ -197,7 +205,10 @@ test('Element.setValue on text field is exercised (AT-SPI may reject)', async ()
   try {
     await el.setValue('Jane Doe');
     await sleep(200);
-    const refreshed = await one(await getApp(), selector);
+    // Read back the first match. A platform may expose more than one
+    // text_field — egui's multiline Notes collapses to text_field under UIA,
+    // so there are two — and setValue acted on that same first match.
+    const [refreshed] = await (await getApp()).locator(selector).elements();
     assert.ok(typeof refreshed.value === 'string' || refreshed.value === null);
   } catch (err) {
     if (!(err instanceof ActionNotSupportedError)) throw err;
@@ -206,9 +217,15 @@ test('Element.setValue on text field is exercised (AT-SPI may reject)', async ()
 
 test('Element.focus() resolves on text field or button', async () => {
   const app = await getApp();
+  // Prefer a named target: the named text field, else the primary button by
+  // name. A bare `button` selector resolves to the first button in document
+  // order, which on Windows is a non-client window caption control
+  // (Minimize/Maximize/Close) that UIA refuses to focus.
   const selector = appConfig.textFieldName
     ? `text_field[name="${appConfig.textFieldName}"]`
-    : 'button';
+    : appConfig.okButtonName
+      ? `button[name="${appConfig.okButtonName}"]`
+      : 'button';
   const locator = app.locator(selector);
   if (!(await locator.exists())) return;
   const el = await locator.element();
