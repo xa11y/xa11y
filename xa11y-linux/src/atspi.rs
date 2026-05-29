@@ -1606,13 +1606,47 @@ impl Provider for LinuxProvider {
 
     fn toggle(&self, element: &ElementData) -> Result<()> {
         let target = self.get_cached(element.handle)?;
-        let index = self
-            .get_action_index(element.handle, "toggle")
-            .map_err(|_| Error::ActionNotSupported {
-                action: "toggle".to_string(),
-                role: element.role,
-            })?;
-        self.do_atspi_action_by_index(&target, index)
+        // Fast path: the widget exposes the literal AT-SPI action name "toggle"
+        // (or one of its toolkit aliases — "check" / "uncheck" — both
+        // canonicalised to "toggle" by map_atspi_action_name during cache
+        // population).
+        if let Ok(index) = self.get_action_index(element.handle, "toggle") {
+            return self.do_atspi_action_by_index(&target, index);
+        }
+        // Fallback for AccessKit-backed apps. accesskit_unix's AT-SPI bridge
+        // hard-codes the action name as "click" for every clickable node
+        // regardless of role — see platforms/atspi-common/src/node.rs in
+        // AccessKit. That means egui, eframe, winit-based apps, Bevy, Tauri
+        // (when using AccessKit) and any other AccessKit consumer never
+        // advertise "toggle" for CheckBox/RadioButton/Switch, even though
+        // activating those widgets via "click" is functionally a toggle on
+        // every platform. Without this fallback, xa11y.toggle() is
+        // unreachable on every AccessKit-on-Linux widget.
+        //
+        // This is tenet-3-consistent: the semantic verb `toggle` on a
+        // toggleable role means "activate this toggleable element," and on
+        // Linux the canonical AccessKit implementation of that is the same
+        // action node entry we'd dispatch for press(). It's the mirror image
+        // of the Windows `press` dispatch (uia.rs) which fans out to Invoke,
+        // Toggle, SelectionItem.Select, or ExpandCollapse depending on the
+        // element's primary-activation pattern.
+        //
+        // Narrowly scoped: only fires for toggleable primary-activation
+        // roles. Other roles still fail-fast with ActionNotSupported so a
+        // misuse of toggle() on, e.g., a Button does not silently dispatch
+        // press().
+        if matches!(
+            element.role,
+            Role::CheckBox | Role::RadioButton | Role::Switch
+        ) {
+            if let Ok(index) = self.get_action_index(element.handle, "press") {
+                return self.do_atspi_action_by_index(&target, index);
+            }
+        }
+        Err(Error::ActionNotSupported {
+            action: "toggle".to_string(),
+            role: element.role,
+        })
     }
 
     fn select(&self, element: &ElementData) -> Result<()> {

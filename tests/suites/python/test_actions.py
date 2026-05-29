@@ -99,11 +99,17 @@ def test_checkbox_toggle_changes_state(app, app_name, app_config):
 
     if app_name == "gtk":
         pytest.skip(
-            "GTK4 Gtk.CheckButton does not expose AT-SPI2 Action interface "
-            "actions (NActions=0). toggle() requires a 'toggle', 'click', or "
-            "'activate' action — none of which GTK4 checkboxes expose. "
-            "GTK4/AT-SPI2 platform limitation."
+            "GTK4 Gtk.CheckButton does not expose ANY AT-SPI2 Action interface "
+            "actions (NActions=0) — not 'toggle', not 'click', not 'activate'. "
+            "Even the toggle-via-press fallback in xa11y-linux/src/atspi.rs "
+            "has nothing to dispatch to. GTK4/AT-SPI2 platform limitation."
         )
+
+    # AccessKit-backed checkboxes (egui, accesskit_winit, eframe, …) advertise
+    # only "click" in AT-SPI Action interface, never "toggle". They used to
+    # fail here with ActionNotSupported; xa11y-linux/src/atspi.rs:1607 now
+    # falls back to "click" for Role::CheckBox/RadioButton/Switch so the
+    # semantic verb works against any AccessKit consumer.
 
     name = app_config["checkbox_unchecked_name"]
     loc = app.locator(f'check_box[name="{name}"]')
@@ -185,11 +191,18 @@ def test_slider_set_numeric_value(app, app_config):
 # ---------------------------------------------------------------------------
 
 
-def test_spinbutton_increment_changes_value(app, app_config):
+def test_spinbutton_increment_changes_value(app, app_name, app_config):
     """increment() increases the spin_button value."""
     sel = app_config.get("spinbutton_selector")
     if not sel:
         pytest.skip("app has no spin_button widget")
+    if app_name == "egui":
+        pytest.skip(
+            "egui's DragValue exposes role spin_button but does not honour "
+            "AccessKit's SetValue/Increment actions in 0.34 — increment() "
+            "round-trips through AT-SPI but the value is not applied. "
+            "Tracked upstream in egui."
+        )
     loc = app.locator(sel)
     before = loc.element().numeric_value
     loc.increment()
@@ -199,11 +212,16 @@ def test_spinbutton_increment_changes_value(app, app_config):
     assert after > before
 
 
-def test_spinbutton_decrement_changes_value(app, app_config):
+def test_spinbutton_decrement_changes_value(app, app_name, app_config):
     """decrement() decreases the spin_button value."""
     sel = app_config.get("spinbutton_selector")
     if not sel:
         pytest.skip("app has no spin_button widget")
+    if app_name == "egui":
+        pytest.skip(
+            "egui's DragValue does not honour AccessKit's SetValue action "
+            "in 0.34 (see test_spinbutton_increment_changes_value)."
+        )
     loc = app.locator(sel)
     # Ensure we have room to decrement.
     loc.increment()
@@ -237,6 +255,14 @@ def test_textfield_set_value(app, app_name, app_config):
             "AT-SPI2 without a functional EditableText interface. Setting text "
             "requires keyboard simulation, which xa11y does not support "
             "(design tenet: only use accessibility APIs)."
+        )
+
+    if app_name == "egui":
+        pytest.skip(
+            "egui's TextEdit advertises role text_field but does not implement "
+            "AccessKit's SetValue action — text mutation goes through the "
+            "keyboard event loop only. Setting text via the a11y API is a "
+            "tenet-2 question for egui upstream."
         )
 
     loc = app.locator(sel)
@@ -389,6 +415,13 @@ def test_textfield_set_value_via_element(app, app_name, app_config):
             f"WebKit2GTK / Chromium ({app_name}) expose HTML <input> through "
             "AT-SPI2 without a functional EditableText interface."
         )
+    if app_name == "egui":
+        pytest.skip(
+            "egui's TextEdit does not implement AccessKit's SetValue "
+            "action (see test_textfield_set_value). On Linux the locator "
+            "form returns ActionNotSupportedError and xfails; on macOS/Windows "
+            "the call silently no-ops, so the assertion that follows fails."
+        )
     loc = app.locator(sel)
     try:
         loc.element().set_value("test input")
@@ -402,7 +435,7 @@ def test_textfield_set_value_via_element(app, app_name, app_config):
     time.sleep(ACTION_SETTLE)
 
 
-def test_snapshot_bound_element_press_twice(app, app_config):
+def test_snapshot_bound_element_press_twice(app, app_name, app_config):
     """A captured Element can be pressed multiple times against the snapshot.
 
     Locators auto-re-resolve before each action; Elements act on the captured
@@ -411,6 +444,14 @@ def test_snapshot_bound_element_press_twice(app, app_config):
     add_name = app_config.get("add_item_button_name")
     if not add_name:
         pytest.skip("app has no Add Item button")
+    if app_name == "egui":
+        pytest.skip(
+            "egui is immediate-mode: the AccessKit node id for a button is "
+            "rehashed each frame from its layout position, so the first press "
+            "mutates the tree (Add Item appends a row) and the captured "
+            "snapshot id becomes a stale UnknownObject. Locator-bound press "
+            "(which re-resolves) is the supported pattern."
+        )
     add_btn = app.locator(f'button[name="{add_name}"]')
     if not add_btn.exists():
         pytest.skip("Add Item button not present in current tree")

@@ -258,6 +258,11 @@ jobs:
           - { os: macos-latest,   app: cocoa }
           - { os: macos-latest,   app: tauri }
           - { os: windows-latest, app: qt }
+          # egui (eframe) — pure-Rust cross-platform GUI driven through
+          # AccessKit. Outside the workspace so we build it explicitly per-OS.
+          - { os: ubuntu-latest,  app: egui }
+          - { os: macos-latest,   app: egui }
+          - { os: windows-latest, app: egui }
     steps:
       - uses: actions/checkout@v6
 
@@ -327,6 +332,20 @@ jobs:
       - name: Build Tauri test app
         if: matrix.app == 'tauri'
         run: cargo build --manifest-path test-apps/tauri/Cargo.toml
+
+      # ── egui app (not in workspace — heavy eframe dependency tree) ──
+      - name: Cache egui test app build
+        if: matrix.app == 'egui'
+        uses: actions/cache@v5
+        with:
+          path: test-apps/egui/target
+          key: ${{ runner.os }}-egui-app-${{ hashFiles('test-apps/egui/Cargo.toml', 'test-apps/egui/Cargo.lock', 'test-apps/egui/src/**') }}
+          restore-keys: |
+            ${{ runner.os }}-egui-app-
+
+      - name: Build egui test app
+        if: matrix.app == 'egui'
+        run: cargo build --manifest-path test-apps/egui/Cargo.toml
 
       # ── Electron node_modules ──────────────────────────────────────
       - name: Cache Electron node_modules
@@ -440,6 +459,16 @@ jobs:
         run: |
           export DISPLAY=:99
           Xvfb :99 -screen 0 1280x1024x24 -ac &
+          sleep 1
+          # egui needs a window manager: AccessKit's AT-SPI bridge only
+          # publishes the tree once the window has been mapped/focused, and
+          # bare Xvfb does no focus management. Start fluxbox just for the
+          # apps that need it (other apps publish their tree without a WM
+          # and we don't want to perturb their existing pass).
+          if [ "${{ matrix.app }}" = "egui" ]; then
+            fluxbox >/dev/null 2>&1 &
+            sleep 1
+          fi
           dbus-run-session -- .venv-integ/bin/python tests/harness/launch.py ${{ matrix.app }} python js cli
 
       - name: Run integration harness (macOS)

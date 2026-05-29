@@ -14,6 +14,11 @@ exclude = [
     "xa11y-python",
     "xa11y-js",
     "test-apps/tauri",  # Tauri requires platform-specific system deps (WebKit2GTK etc.)
+    # eframe pulls a large transitive tree (winit, glow, glutin, image, …)
+    # that doubles workspace-wide `cargo build` time and balloons Cargo.lock
+    # in unrelated PRs. Keep it out of the workspace and build only on the
+    # `integ`/`test-egui` jobs that actually need it. Mirrors the Tauri split.
+    "test-apps/egui",
 ]
 resolver = "2"
 

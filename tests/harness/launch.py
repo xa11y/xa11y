@@ -7,7 +7,7 @@ between language suites.
 CLI usage:
     python tests/harness/launch.py <app> [suite ...]
 
-    <app>     one of: qt, gtk, cocoa, tauri, electron, accesskit
+    <app>     one of: qt, gtk, cocoa, tauri, electron, accesskit, egui
     [suite]   optional subset: python js cli  (default: all applicable)
 
 Programmatic usage:
@@ -113,7 +113,23 @@ def _app_command(app: str) -> tuple[list[str], dict[str, str], list[str], str | 
             None,
         )
 
-    raise ValueError(f"Unknown app: {app!r}. Supported: qt, gtk, cocoa, tauri, electron, accesskit")
+    if app == "egui":
+        # The egui test app sits outside the Cargo workspace (its eframe
+        # dependency tree is heavy and slows workspace-wide builds). Build
+        # it explicitly via `cargo build --manifest-path test-apps/egui/Cargo.toml`.
+        binary = str(
+            PROJECT_ROOT / "test-apps" / "egui" / "target" / "debug" / "xa11y-egui-test-app"
+        )
+        return (
+            [binary],
+            {},
+            ["xa11y-egui-test-app"],
+            'button[name="OK"]',
+        )
+
+    raise ValueError(
+        f"Unknown app: {app!r}. Supported: qt, gtk, cocoa, tauri, electron, accesskit, egui"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -362,17 +378,22 @@ def _run_suites(
 
     worst_rc = 0
 
-    # The accesskit test app exposes a different widget set than the shared
-    # python/cli test schemas (e.g. "Submit"/"Cancel" instead of "OK"). The
-    # primary coverage for accesskit is the Rust integ suite — skip the
-    # python/js/cli compat suites entirely for it.
-    accesskit_skip = {"python", "cli", "js"}
+    # Per-app suite skips. accesskit's widget schema differs from the shared
+    # python/cli/js fixtures (e.g. "Submit"/"Cancel" instead of "OK"), and its
+    # primary coverage is the Rust integ suite — skip all three harness
+    # suites. egui has no APP_CONFIG entry in tests/suites/js/helpers.js yet
+    # (tracked as `egui_js_suite` in tests/matrix.yaml); skip the JS suite
+    # while python/cli still run.
+    suite_skips_by_app = {
+        "accesskit": {"python", "cli", "js"},
+        "egui": {"js"},
+    }
 
     for suite in suites:
-        if app == "accesskit" and suite in accesskit_skip:
+        if suite in suite_skips_by_app.get(app, set()):
             print(
-                f"\nSkipping {suite} suite for accesskit "
-                f"(Rust integ suite is primary; widget schema differs)"
+                f"\nSkipping {suite} suite for {app} "
+                f"(see suite_skips_by_app in tests/harness/launch.py)"
             )
             continue
 
@@ -404,7 +425,7 @@ def _run_suites(
 # Public API
 # ---------------------------------------------------------------------------
 
-VALID_APPS = ("qt", "gtk", "cocoa", "tauri", "electron", "accesskit")
+VALID_APPS = ("qt", "gtk", "cocoa", "tauri", "electron", "accesskit", "egui")
 VALID_SUITES = ("python", "js", "cli")
 DEFAULT_SUITES = list(VALID_SUITES)
 

@@ -244,6 +244,20 @@ def test_spinbutton_found(app, app_config):
     el = app.locator(sel).element()
     assert el.role == "spin_button"
     assert el.numeric_value is not None
+    # Range parity across backends. xa11y-linux + xa11y-windows populate
+    # min_value/max_value for every ranged role; xa11y-macos historically
+    # only did so for Role::Slider, which silently dropped the attributes
+    # for spin_button. This assertion seals the parity — if any backend
+    # regresses or gains a new ranged role without wiring min/max, the
+    # test surfaces it instead of just-working-with-None.
+    assert el.min_value is not None, (
+        f"spin_button {el.name!r} has numeric_value={el.numeric_value} "
+        f"but min_value is None — likely a provider range-attribute gap."
+    )
+    assert el.max_value is not None, (
+        f"spin_button {el.name!r} has numeric_value={el.numeric_value} "
+        f"but max_value is None — likely a provider range-attribute gap."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +272,12 @@ def test_progress_bar_found(app, app_config):
     el = app.locator(sel).element()
     assert el.role == "progress_bar"
     assert el.numeric_value is not None
+    # NOTE: not asserting min_value/max_value here because some platform AX
+    # bridges legitimately omit them when an app does not set explicit
+    # bounds (e.g. an HTML <progress> without `min`/`max` attributes). The
+    # spin_button parity check in test_spinbutton_found is the canonical
+    # seal for the cross-backend range-attribute gap that motivated this
+    # test — spin buttons always have a range, progress bars do not.
 
 
 # ---------------------------------------------------------------------------

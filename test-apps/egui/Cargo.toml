@@ -1,0 +1,36 @@
+[package]
+name = "xa11y-egui-test-app"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "egui test application for xa11y integration tests"
+publish = false
+
+[[bin]]
+name = "xa11y-egui-test-app"
+path = "src/main.rs"
+
+# Cross-platform renderer / windowing setup:
+#
+# * Linux CI uses Xvfb (no GPU + no Vulkan loader installed in the apt set),
+#   so wgpu can't initialise — we ship glow (OpenGL via Mesa llvmpipe) instead.
+#   The `wayland` and `x11` features get the Linux winit backend wired up.
+# * macOS and Windows runners have proper graphics stacks — eframe's default
+#   feature set (which selects wgpu = Metal on macOS, DX12 on Windows) is the
+#   well-trodden path there. Dropping x11/wayland on those targets also avoids
+#   pulling Linux-only deps into the build graph.
+[target.'cfg(target_os = "linux")'.dependencies]
+eframe = { version = "0.34", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "glow",
+    "wayland",
+    "x11",
+] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+eframe = { version = "0.34", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "wgpu",
+] }

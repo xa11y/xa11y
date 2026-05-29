@@ -40,6 +40,9 @@ _TAURI_BINARY = str(
     PROJECT_ROOT / "test-apps" / "tauri" / "target" / "debug" / "xa11y-tauri-test-app"
 )
 _ACCESSKIT_BINARY = str(PROJECT_ROOT / "target" / "debug" / "xa11y-test-app")
+_EGUI_BINARY = str(
+    PROJECT_ROOT / "test-apps" / "egui" / "target" / "debug" / "xa11y-egui-test-app"
+)
 
 
 def _launch_qt():
@@ -157,6 +160,30 @@ def _launch_accesskit():
     )
 
 
+def _launch_egui():
+    if not Path(_EGUI_BINARY).exists():
+        result = subprocess.run(
+            [
+                "cargo",
+                "build",
+                "--manifest-path",
+                str(PROJECT_ROOT / "test-apps" / "egui" / "Cargo.toml"),
+            ],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            pytest.fail(
+                f"Failed to build egui test app:\n{result.stdout}\n{result.stderr}"
+            )
+    yield from launch_test_app(
+        command=[_EGUI_BINARY],
+        app_names=["xa11y-egui-test-app"],
+        content_ready_selector='button[name="OK"]',
+    )
+
+
 _LAUNCHERS = {
     "qt": _launch_qt,
     "gtk": _launch_gtk,
@@ -164,6 +191,7 @@ _LAUNCHERS = {
     "tauri": _launch_tauri,
     "electron": _launch_electron,
     "accesskit": _launch_accesskit,
+    "egui": _launch_egui,
 }
 
 
