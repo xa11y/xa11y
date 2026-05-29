@@ -10,11 +10,7 @@ apps:
       JS integ tests also target this app for compat, actions, input_sim, and screenshot.
 
   qt:
-    platforms: [linux, windows]
-    unsupported:
-      macos:
-        reason: "Qt/PySide6 AX tree does not correctly nest child elements on macOS"
-        status: known_gap
+    platforms: [linux, macos, windows]
 
   gtk:
     platforms: [linux]
@@ -129,16 +125,6 @@ gaps:
     affects:
       apps: [accesskit]
       language: python
-
-  - id: macos_qt
-    description: >
-      Qt/PySide6 macOS AX tree does not correctly nest child elements; macOS Qt tests
-      are disabled.
-    severity: medium
-    workaround: "Qt tested on Linux and Windows only"
-    affects:
-      apps: [qt]
-      platforms: [macos]
 
   - id: js_input_sim_per_app
     description: >
