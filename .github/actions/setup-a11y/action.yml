@@ -1,0 +1,215 @@
+name: "Set up accessibility environment for xa11y"
+description: >-
+  Prepare a CI runner to drive accessibility tests with xa11y. On Linux it
+  installs the system libraries xa11y's targets need and (optionally) brings up
+  a headless display, a D-Bus session, and the AT-SPI bridge. On macOS it can
+  grant the Accessibility (TCC) permission the runner needs, or warns if it is
+  missing. On Windows it is a no-op (UI Automation works out of the box).
+
+# Usage (external consumer):
+#
+#   - uses: xa11y/xa11y/.github/actions/setup-a11y@main
+#     with:
+#       package-groups: base          # add 'gtk' / 'electron' if your app needs them
+#       extra-packages: my-app-deps    # any additional apt packages
+#   - run: pytest tests/               # DISPLAY / DBUS / AT-SPI are now live
+#
+# See docs: https://xa11y.dev/guides/ci/
+
+inputs:
+  package-groups:
+    description: >-
+      Space-separated apt package groups to install on Linux, defined in
+      apt-packages.txt. Available: base, gtk, electron. 'base' covers the
+      headless display + AT-SPI stack and is almost always what you want.
+    required: false
+    default: "base"
+  extra-packages:
+    description: "Additional apt packages to install on Linux (space-separated)."
+    required: false
+    default: ""
+  install-deps:
+    description: "Install system dependencies on Linux. Set to 'false' to skip apt entirely."
+    required: false
+    default: "true"
+  apt-cache-version:
+    description: "Cache-busting version passed to awalsh128/cache-apt-pkgs-action. Bump when the package set changes."
+    required: false
+    default: "1"
+  setup-display:
+    description: "Start Xvfb and export DISPLAY (Linux only)."
+    required: false
+    default: "true"
+  setup-atspi:
+    description: "Start a D-Bus session + AT-SPI bridge and export their env (Linux only)."
+    required: false
+    default: "true"
+  setup-window-manager:
+    description: >-
+      Start fluxbox (Linux only). Some toolkits (e.g. egui via AccessKit) only
+      publish their tree once a window manager has mapped/focused the window.
+    required: false
+    default: "false"
+  display:
+    description: "X display number to use for Xvfb (Linux only)."
+    required: false
+    default: ":99"
+  macos-tcc-client:
+    description: >-
+      Path to the binary that needs the Accessibility (TCC) permission on macOS
+      (e.g. the python interpreter running your tests). When set, the action
+      grants kTCCServiceAccessibility to it. When empty, the action prints a
+      warning instead — it cannot guess which process to grant.
+    required: false
+    default: ""
+
+runs:
+  using: "composite"
+  steps:
+    # ── Linux: resolve the package list from apt-packages.txt ──────────
+    - name: Resolve apt package list
+      id: pkgs
+      if: ${{ runner.os == 'Linux' && inputs.install-deps == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        file="${GITHUB_ACTION_PATH}/apt-packages.txt"
+        out=""
+        for group in ${{ inputs.package-groups }}; do
+          group_pkgs=$(awk -v want="$group" '
+            /^#[[:space:]]*\[.*\]$/ {
+              cur=$0; sub(/^#[[:space:]]*\[/,"",cur); sub(/\][[:space:]]*$/,"",cur); next
+            }
+            /^[[:space:]]*#/ { next }
+            /^[[:space:]]*$/ { next }
+            { if (cur==want) print }
+          ' "$file")
+          if [ -z "$group_pkgs" ]; then
+            echo "::error::setup-a11y: unknown package group '$group' (see apt-packages.txt)"
+            exit 1
+          fi
+          out="$out $group_pkgs"
+        done
+        out="$out ${{ inputs.extra-packages }}"
+        # Collapse newlines/runs of whitespace into single spaces.
+        out=$(echo $out | tr '\n' ' ' | tr -s ' ')
+        echo "Resolved apt packages: $out"
+        echo "packages=$out" >> "$GITHUB_OUTPUT"
+
+    - name: Install system dependencies
+      # cache-apt-pkgs-action caches the .debs so warm runs finish in ~10s
+      # instead of the ~60s a cold apt-get update + install of ~30 packages
+      # takes. Bump apt-cache-version when the package set changes.
+      if: ${{ runner.os == 'Linux' && inputs.install-deps == 'true' }}
+      uses: awalsh128/cache-apt-pkgs-action@v1
+      with:
+        version: ${{ inputs.apt-cache-version }}
+        packages: ${{ steps.pkgs.outputs.packages }}
+
+    # ── Linux: bring up display + D-Bus + AT-SPI ───────────────────────
+    # Done in one step so Xvfb, the session bus, and the AT-SPI daemons
+    # share a parent shell; the env they produce is exported to GITHUB_ENV
+    # so later job steps inherit it. Background daemons persist across steps.
+    - name: Start accessibility environment
+      if: ${{ runner.os == 'Linux' && (inputs.setup-display == 'true' || inputs.setup-atspi == 'true') }}
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        find_atspi_bin() {
+          local exe="$1"
+          if [ -x "/usr/libexec/$exe" ]; then echo "/usr/libexec/$exe"
+          elif command -v "$exe" >/dev/null 2>&1; then command -v "$exe"
+          fi
+        }
+
+        if [ "${{ inputs.setup-display }}" = "true" ]; then
+          echo "Starting Xvfb on ${{ inputs.display }}..."
+          Xvfb "${{ inputs.display }}" -screen 0 1280x1024x24 -ac &
+          export DISPLAY="${{ inputs.display }}"
+          echo "DISPLAY=${{ inputs.display }}" >> "$GITHUB_ENV"
+          sleep 1
+        fi
+
+        if [ "${{ inputs.setup-window-manager }}" = "true" ]; then
+          echo "Starting fluxbox..."
+          fluxbox >/dev/null 2>&1 &
+          sleep 1
+        fi
+
+        if [ "${{ inputs.setup-atspi }}" = "true" ]; then
+          # Use dbus-launch (not dbus-run-session) so the session bus
+          # daemonizes and survives into subsequent job steps.
+          if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
+            echo "Starting D-Bus session..."
+            eval "$(dbus-launch --sh-syntax)"
+            echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS" >> "$GITHUB_ENV"
+            echo "DBUS_SESSION_BUS_PID=$DBUS_SESSION_BUS_PID" >> "$GITHUB_ENV"
+          fi
+
+          export NO_AT_BRIDGE=0 AT_SPI_CLIENT=true ACCESSIBILITY_ENABLED=1
+          {
+            echo "NO_AT_BRIDGE=0"
+            echo "AT_SPI_CLIENT=true"
+            echo "ACCESSIBILITY_ENABLED=1"
+          } >> "$GITHUB_ENV"
+
+          bus_launcher=$(find_atspi_bin at-spi-bus-launcher)
+          if [ -n "${bus_launcher:-}" ]; then
+            "$bus_launcher" --launch-immediately &
+            sleep 1
+          else
+            echo "::warning::setup-a11y: at-spi-bus-launcher not found"
+          fi
+
+          registryd=$(find_atspi_bin at-spi2-registryd)
+          if [ -n "${registryd:-}" ]; then
+            "$registryd" &
+            sleep 1
+          else
+            echo "::warning::setup-a11y: at-spi2-registryd not found"
+          fi
+
+          # Flip the AT-SPI Status flags to enabled so clients see the tree.
+          # The daemons occasionally haven't registered the Status object yet
+          # at this instant; newer at-spi2-core also defaults these on. Ignore
+          # a transient failure here rather than fail setup.
+          for prop in IsEnabled ScreenReaderEnabled; do
+            dbus-send --session --print-reply --dest=org.a11y.Bus /org/a11y/bus \
+              org.freedesktop.DBus.Properties.Set \
+              string:org.a11y.Status string:"$prop" variant:boolean:true \
+              2>/dev/null || echo "setup-a11y: org.a11y.Status.$prop not set yet (continuing)"
+          done
+        fi
+
+        echo "Accessibility environment ready."
+
+    # ── macOS: grant or warn about the Accessibility (TCC) permission ──
+    - name: Configure macOS accessibility permission
+      if: ${{ runner.os == 'macOS' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        client="${{ inputs.macos-tcc-client }}"
+        if [ -z "$client" ]; then
+          echo "::warning::setup-a11y: macOS accessibility tests need the test process granted kTCCServiceAccessibility, but no 'macos-tcc-client' was provided. Trees will come back empty until the permission is granted. See https://xa11y.dev/guides/ci/#macos"
+          exit 0
+        fi
+        echo "Granting TCC kTCCServiceAccessibility to: $client"
+        # GitHub-hosted macOS runners allow sudo writes to the system TCC db
+        # (SIP only covers /System/*). Named columns keep the INSERT working
+        # across macOS versions regardless of extra columns.
+        sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
+          "INSERT OR REPLACE INTO access(service,client,client_type,auth_value,auth_reason,auth_version,csreq,policy_id,indirect_object_identifier_type,indirect_object_identifier,indirect_object_code_identity,flags,last_modified) \
+           VALUES('kTCCServiceAccessibility','${client}',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));"
+        # Restart tccd so the grant is picked up without waiting for the next
+        # natural reload cycle. launchctl stop triggers an auto-restart.
+        sudo launchctl stop com.apple.tccd 2>/dev/null || true
+        sleep 2
+
+    # ── Windows: nothing to do ─────────────────────────────────────────
+    - name: Windows accessibility note
+      if: ${{ runner.os == 'Windows' }}
+      shell: bash
+      run: |
+        echo "setup-a11y: no setup required on Windows — UI Automation is available by default."

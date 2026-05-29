@@ -37,24 +37,14 @@ jobs:
           python-version: "3.12"
 
       - name: Install system dependencies
-        # `awalsh128/cache-apt-pkgs-action` caches the .debs so re-runs on
-        # the same package-set finish in ~10s instead of the ~60s it takes
-        # to `apt-get update` + `install` 30 packages from scratch.
-        # Bump `version` to invalidate the cache when the package list changes.
-        uses: awalsh128/cache-apt-pkgs-action@v1
+        # Package list lives in .github/actions/setup-a11y/apt-packages.txt.
+        # run_integ_tests.sh brings up its own Xvfb + D-Bus + AT-SPI, so this
+        # is install-only here.
+        uses: ./.github/actions/setup-a11y
         with:
-          version: 1
-          packages: >-
-            xvfb dbus dbus-x11 fluxbox
-            at-spi2-core
-            libxkbcommon-x11-0 libxkbcommon-x11-dev
-            libxcursor1 libxrandr2 libxi6
-            libx11-xcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0
-            libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3
-            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1
-            libxcb-image0 libxcb-render-util0 libxcb-xkb1
-            libgtk-4-dev gir1.2-gtk-4.0 libgirepository-2.0-dev libcairo2-dev
-            libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev libgtk-3-dev
+          package-groups: base gtk
+          setup-display: "false"
+          setup-atspi: "false"
 
       - name: Run unit tests
         run: cargo test --workspace
@@ -291,29 +281,16 @@ jobs:
           cache-dependency-path: xa11y-js/package-lock.json
 
       # ── System dependencies (Linux only) ──────────────────────────
+      # Package list lives in .github/actions/setup-a11y/apt-packages.txt.
+      # The harness step below wraps the run in Xvfb + dbus-run-session, so
+      # this is install-only (electron group adds the Chromium runtime libs).
       - name: Install system dependencies
-        # `awalsh128/cache-apt-pkgs-action` caches the .debs so re-runs on
-        # the same package-set finish in ~10s. Bump `version` to invalidate
-        # when the package list changes. Electron adds nss/atk/cups/drm/gbm
-        # on top of the base X/dbus/a11y set.
         if: runner.os == 'Linux'
-        uses: awalsh128/cache-apt-pkgs-action@v1
+        uses: ./.github/actions/setup-a11y
         with:
-          version: 1
-          packages: >-
-            xvfb dbus dbus-x11 fluxbox
-            at-spi2-core
-            libxkbcommon-x11-0 libxkbcommon-x11-dev
-            libxcursor1 libxrandr2 libxi6
-            libx11-xcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0
-            libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3
-            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1
-            libxcb-image0 libxcb-render-util0 libxcb-xkb1
-            libgtk-4-dev gir1.2-gtk-4.0 libgirepository-2.0-dev libcairo2-dev
-            libwebkit2gtk-4.1-dev libssl-dev librsvg2-dev libgtk-3-dev
-            libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2
-            libdrm2 libgbm1 libxcomposite1 libxdamage1 libxfixes3
-            libpango-1.0-0 libasound2t64
+          package-groups: base gtk electron
+          setup-display: "false"
+          setup-atspi: "false"
 
       # ── Build Rust workspace (all workspace test-app binaries) ─────
       - name: Build Rust workspace
@@ -524,19 +501,15 @@ jobs:
           cache: npm
           cache-dependency-path: xa11y-js/package-lock.json
 
+      # Package list lives in .github/actions/setup-a11y/apt-packages.txt.
+      # The "Run examples" step sets up Xvfb + dbus-run-session itself, so
+      # this is install-only.
       - name: Install system dependencies
-        uses: awalsh128/cache-apt-pkgs-action@v1
+        uses: ./.github/actions/setup-a11y
         with:
-          version: 1
-          packages: >-
-            xvfb dbus dbus-x11 fluxbox
-            at-spi2-core
-            libxkbcommon-x11-0 libxkbcommon-x11-dev
-            libxcursor1 libxrandr2 libxi6
-            libx11-xcb1 libxcb-render0 libxcb-shape0 libxcb-xfixes0
-            libegl1 libglib2.0-0 libfontconfig1 libdbus-1-3
-            libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1
-            libxcb-image0 libxcb-render-util0 libxcb-xkb1
+          package-groups: base
+          setup-display: "false"
+          setup-atspi: "false"
 
       # ── Build everything the examples need ───────────────────────────
       - name: Build workspace (test app, CLI, Rust example)
