@@ -179,6 +179,40 @@ mod tests {
         assert!(!progress.is_empty(), "No progress bars found. App: {}", app);
     }
 
+    /// SpinButton / Slider / ProgressBar must expose `min_value` and
+    /// `max_value` when the underlying provider has set them. The previous
+    /// xa11y-macos match arm only populated min/max for `Role::Slider`, so
+    /// the SpinButton and ProgressBar attributes silently came back `None`
+    /// on macOS — undetected because `tree_has_progress_bar` /
+    /// `tree_has_slider_at_50` only check existence and value, not range.
+    /// This test seals the cross-platform parity.
+    #[test]
+    #[ignore]
+    fn ranged_widgets_expose_min_and_max() {
+        let app = h::app_root();
+        for role in ["slider", "spin_button", "progress_bar"] {
+            let elems = app.locator(role).elements().unwrap();
+            if elems.is_empty() {
+                continue; // Not every test app has every widget.
+            }
+            let el = &elems[0];
+            assert!(
+                el.min_value.is_some(),
+                "{role}: min_value should be Some after provider read, got None. \
+                 numeric_value={:?}, max_value={:?}",
+                el.numeric_value,
+                el.max_value
+            );
+            assert!(
+                el.max_value.is_some(),
+                "{role}: max_value should be Some after provider read, got None. \
+                 numeric_value={:?}, min_value={:?}",
+                el.numeric_value,
+                el.min_value
+            );
+        }
+    }
+
     #[test]
     #[ignore]
     fn tree_has_radio_buttons() {

@@ -69,6 +69,47 @@ mod tests {
         }
     }
 
+    /// Exercises the toggle()-via-press fallback against the AccessKit-backed
+    /// test app. accesskit_unix hard-codes the AT-SPI action name as "click"
+    /// regardless of role, so the literal "toggle" lookup misses for every
+    /// AccessKit consumer on Linux. On macOS/Windows the providers map
+    /// `toggle` to AXPress / TogglePattern natively. This test is the
+    /// regression seal for that fallback — without it, no Linux test ever
+    /// dispatched `toggle()` against a provider that advertises only `click`.
+    #[test]
+    #[ignore]
+    fn action_toggle_dispatches_to_click_when_toggle_unavailable() {
+        let app = h::app_root();
+        let cbs = app.locator("check_box").elements().unwrap();
+        assert!(!cbs.is_empty(), "No checkbox in test app");
+        let initial = cbs[0].states.checked;
+
+        // Drive the toggle via the semantic verb, not via "press". On Linux
+        // this exercises the action_indices["press"] fallback in atspi.rs
+        // because accesskit_unix never publishes "toggle" in action_indices.
+        h::try_act(&cbs[0], "toggle")
+            .unwrap_or_else(|e| panic!("toggle() should succeed via fallback: {e}"));
+
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        let app2 = h::app_root();
+        let cb2 = app2.locator("check_box").elements().unwrap();
+        assert!(!cb2.is_empty(), "Checkbox disappeared after toggle");
+        assert_ne!(
+            cb2[0].states.checked, initial,
+            "toggle() should flip checked state from {:?}",
+            initial
+        );
+
+        // Restore initial state. Subsequent tests (notably
+        // `thrash_toggle_checkbox_5_times`, which is order-sensitive across
+        // the test app's accumulated mutable state) assume each per-test
+        // checkbox flip is net-zero. Without this restore, `thrash`'s
+        // hardcoded "after 5 toggles from Off → On" assertion flips parity.
+        h::try_act(&cb2[0], "toggle")
+            .unwrap_or_else(|e| panic!("restore toggle should succeed: {e}"));
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+
     #[test]
     #[ignore]
     fn action_toggle_enables_cancel() {

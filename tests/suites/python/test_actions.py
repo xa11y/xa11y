@@ -99,19 +99,17 @@ def test_checkbox_toggle_changes_state(app, app_name, app_config):
 
     if app_name == "gtk":
         pytest.skip(
-            "GTK4 Gtk.CheckButton does not expose AT-SPI2 Action interface "
-            "actions (NActions=0). toggle() requires a 'toggle', 'click', or "
-            "'activate' action — none of which GTK4 checkboxes expose. "
-            "GTK4/AT-SPI2 platform limitation."
+            "GTK4 Gtk.CheckButton does not expose ANY AT-SPI2 Action interface "
+            "actions (NActions=0) — not 'toggle', not 'click', not 'activate'. "
+            "Even the toggle-via-press fallback in xa11y-linux/src/atspi.rs "
+            "has nothing to dispatch to. GTK4/AT-SPI2 platform limitation."
         )
 
-    if app_name == "egui":
-        pytest.skip(
-            "egui's AccessKit checkbox advertises a single 'press' action, "
-            "not 'toggle'. toggle() requires the explicit Toggle action on "
-            "Linux (AT-SPI ActionIface) and macOS (AXPress only when the "
-            "primary pattern is Toggle). egui limitation tracked upstream."
-        )
+    # AccessKit-backed checkboxes (egui, accesskit_winit, eframe, …) advertise
+    # only "click" in AT-SPI Action interface, never "toggle". They used to
+    # fail here with ActionNotSupported; xa11y-linux/src/atspi.rs:1607 now
+    # falls back to "click" for Role::CheckBox/RadioButton/Switch so the
+    # semantic verb works against any AccessKit consumer.
 
     name = app_config["checkbox_unchecked_name"]
     loc = app.locator(f'check_box[name="{name}"]')

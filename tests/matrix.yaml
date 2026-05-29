@@ -172,3 +172,28 @@ gaps:
       apps: [egui]
       language: js
 
+  - id: accesskit_python_compat_on_linux
+    description: >
+      tests/harness/launch.py skips the python/js/cli compat suites entirely
+      for the AccessKit test app (suite_skips_by_app["accesskit"]) on the
+      grounds that the Rust integ suite is canonical for accesskit. The
+      practical consequence is that no Python/CLI test runs against
+      AccessKit on Linux — which is the only place accesskit_unix's
+      hardcoded "click"-not-"toggle" AT-SPI action naming is the underlying
+      truth. PR #211 surfaced this when the toggle()-via-press fallback in
+      xa11y-linux/src/atspi.rs was missing for every AccessKit-on-Linux
+      provider (egui, accesskit_winit, eframe, bevy, …) and no compat
+      test had caught it. The fallback is now in place plus an
+      `action_toggle_dispatches_to_click_when_toggle_unavailable` Rust
+      integ test, but the broader compat-suite gap remains.
+    severity: medium
+    workaround: >
+      Rust integ suite covers compat/actions/events/screenshot against
+      AccessKit on all three OSes; the new Rust integ test exercises the
+      specific fallback. Wiring the Python/CLI suites against AccessKit
+      would mean an APP_CONFIGS entry that maps the schema (Submit/Cancel
+      vs OK/Cancel etc.) — out of scope for #211.
+    affects:
+      apps: [accesskit]
+      language: python
+

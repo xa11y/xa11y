@@ -1560,13 +1560,22 @@ fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -
         }
 
         let numeric_value = match role {
-            Role::Slider | Role::ProgressBar | Role::SpinButton => attrs.value_number,
+            Role::Slider | Role::ProgressBar | Role::SpinButton | Role::ScrollBar => {
+                attrs.value_number
+            }
             _ => None,
         };
 
         // Min/max still require individual calls (not in the batch set).
+        // Role list mirrors xa11y-linux (atspi.rs) and xa11y-windows (uia.rs)
+        // which both populate min/max for Slider | ProgressBar | ScrollBar |
+        // SpinButton. The previous list only covered Slider, which silently
+        // dropped min/max for the other three roles on macOS — egui's DragValue
+        // (Role::SpinButton) surfaced the gap because AccessKit's macOS bridge
+        // exposes kAXMinValue/kAXMaxValue unconditionally, we just never asked
+        // for them.
         let (min_value, max_value) = match role {
-            Role::Slider => (
+            Role::Slider | Role::ProgressBar | Role::ScrollBar | Role::SpinButton => (
                 ax_number_f64(element, "AXMinValue"),
                 ax_number_f64(element, "AXMaxValue"),
             ),
