@@ -40,7 +40,7 @@ see Known Gaps.
 
 | App        | Platform(s)           | Python compat | Python actions | Python events | Python input_sim | Python screenshot | JS compat | JS actions | JS input_sim | JS screenshot | CLI |
 |------------|-----------------------|:-------------:|:--------------:|:-------------:|:----------------:|:-----------------:|:---------:|:----------:|:------------:|:-------------:|:---:|
-| accesskit  | linux, macos, windows | —¹            | —¹             | —¹            | —                | —                 | ✅        | ✅         | ✅²          | ✅²           | ❌  |
+| accesskit  | linux, macos, windows | ✅¹           | ✅¹            | ⚠️¹           | —                | —                 | ✅        | ✅         | ✅²          | ✅²           | ❌  |
 | qt         | linux, macos, windows | ✅            | ✅             | ✅            | —                | —                 | ❌        | ❌         | —            | —             | ❌  |
 | gtk        | linux                 | ✅            | ✅             | ❌³           | —                | —                 | ❌        | ❌         | —            | —             | ❌  |
 | cocoa      | macos                 | ✅            | ✅             | ✅            | —                | —                 | ❌        | ❌         | —            | —             | ❌  |
@@ -48,7 +48,7 @@ see Known Gaps.
 | electron   | linux                 | ❌            | ❌             | ❌            | —                | —                 | ✅        | ✅         | ✅²          | ✅²           | ❌  |
 
 **Notes:**
-1. accesskit Python column is `—` because the primary coverage vehicle is the Rust integ suite in `xa11y/tests/integ/`. These are not duplicated in Python.
+1. The accesskit Python compat/actions suites run **on Linux only** (the harness gates this on `sys.platform`). Linux is where AccessKit's AT-SPI bridge — and its `"click"`-not-`"toggle"` action naming, which the toggle()-via-press fallback in `xa11y-linux/src/atspi.rs` depends on — is exercised. The events module also runs but its assertions are `xfail`-guarded (⚠️). On macOS/Windows the Rust integ suite in `xa11y/tests/integ/` stays the canonical AccessKit coverage, so Python is not duplicated there.
 2. JS input_sim and screenshot run against the AccessKit app for the `integ` suite, and against Electron for the `integ-electron` suite.
 3. GTK has no event subscription tests. Only widget/compat and actions are covered.
 
