@@ -11,7 +11,7 @@ const assert = require('node:assert/strict');
 
 const xa11y = require('../../../xa11y-js/index.js');
 const { ActionNotSupportedError, PlatformError } = xa11y;
-const { getApp, one, act, sleep, appConfig } = require('./helpers.js');
+const { getApp, act, sleep, appConfig } = require('./helpers.js');
 
 test('press on primary button succeeds', async () => {
   if (!appConfig.okButtonName) return; // skip if app has no named primary button
