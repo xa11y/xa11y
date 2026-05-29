@@ -90,7 +90,7 @@ coverage:
     cli: [compat, actions]
 
   gtk:
-    python: [compat, actions]  # NOTE: events not covered (see gaps.gtk_events)
+    python: [compat, actions, events]  # events: tests/suites/python/test_events_gtk.py
     js: [compat, actions]
     cli: [compat, actions]
 
@@ -136,17 +136,6 @@ gaps:
       apps: [qt, gtk, cocoa, tauri]
       language: js
       features: [input_sim, screenshot]
-
-  - id: gtk_events
-    description: >
-      No event subscription tests for GTK. Only compat and actions are covered in
-      the Python GTK suite.
-    severity: low
-    workaround: "GTK event subscription is exercised via AT-SPI2 in the Rust integ suite"
-    affects:
-      apps: [gtk]
-      language: python
-      features: [events]
 
   - id: accesskit_python_compat_on_linux
     description: >

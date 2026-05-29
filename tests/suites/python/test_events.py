@@ -10,8 +10,10 @@ than silent fallbacks, in accordance with the design tenets.
 Per-app notes:
 - Qt does not reliably emit events for programmatic accessibility actions
   across AT-SPI2 / UIA / AX — all Qt event tests are xfail.
-- GTK has no events test file (the GTK test app lacks buttons that mutate
-  state in event-observable ways).
+- GTK's value/state/name/structure events that GTK4 reliably emits are
+  asserted strictly in the dedicated ``test_events_gtk.py`` suite (GTK4's
+  AT-SPI2 bridge delivers ``Object:ValueChanged`` for range widgets). The
+  xfail-marked tests below stay xfail because Qt/Tauri share this file.
 - Cocoa (macOS) does emit AX notifications reliably; those tests run strictly.
 - Tauri (WebView) emits events on macOS; Linux/WebKit2GTK is less reliable.
 """
