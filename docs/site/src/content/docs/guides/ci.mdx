@@ -1,0 +1,141 @@
+---
+title: Testing in CI
+description: Run xa11y accessibility tests on GitHub Actions across Linux, macOS, and Windows.
+---
+
+xa11y drives the *real* accessibility tree of a running application, so the
+hard part of CI isn't xa11y — it's standing up an environment where an
+accessibility API is actually available. A bare CI runner usually has no
+display, no accessibility bus, and (on macOS) no permission to read other
+apps' trees. This guide covers what each platform needs and gives you a
+reusable GitHub Action so you don't have to wire it up by hand.
+
+## Why it's tricky
+
+Each platform exposes accessibility differently, and each has a precondition
+that fails silently if you miss it:
+
+| Platform | API | What CI is missing by default |
+| --- | --- | --- |
+| **Linux** | AT-SPI2 (D-Bus) | No display, no D-Bus session, AT-SPI bridge not running/enabled |
+| **macOS** | AXUIElement | The test process isn't granted the Accessibility (TCC) permission |
+| **Windows** | UI Automation | Nothing — UIA works on hosted runners out of the box |
+
+The failure mode is the same on Linux and macOS: queries return an **empty
+tree** rather than an error, so it looks like your app has no UI. The
+sections below show how to satisfy each precondition.
+
+## The `setup-a11y` action
+
+The quickest path is the composite action that ships in this repo. It
+installs the Linux system libraries, brings up a headless display + D-Bus +
+AT-SPI, and (on macOS) grants the Accessibility permission — then exports the
+environment so every later step in the job inherits it.
+
+```yaml title=".github/workflows/test.yml"
+jobs:
+  a11y-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Set up accessibility environment
+        uses: xa11y/xa11y/.github/actions/setup-a11y@main
+        with:
+          package-groups: base   # add 'gtk' / 'electron' for those toolkits
+          # extra-packages: my-app-runtime-deps
+
+      - run: pip install xa11y pytest
+      - run: pytest tests/        # DISPLAY, DBUS, and AT-SPI are live here
+```
+
+### Inputs
+
+| Input | Default | Description |
+| --- | --- | --- |
+| `package-groups` | `base` | Space-separated apt groups: `base`, `gtk`, `electron`. |
+| `extra-packages` | `""` | Extra apt packages your app needs. |
+| `install-deps` | `true` | Set `false` to skip apt entirely. |
+| `setup-display` | `true` | Start Xvfb and export `DISPLAY` (Linux). |
+| `setup-atspi` | `true` | Start D-Bus + AT-SPI and export their env (Linux). |
+| `setup-window-manager` | `false` | Start fluxbox — needed by toolkits (e.g. egui) that only publish their tree once a window is mapped/focused. |
+| `display` | `:99` | X display number for Xvfb. |
+| `macos-tcc-client` | `""` | Path to the binary to grant Accessibility (TCC) on macOS — e.g. your python interpreter. When empty, the action warns instead. |
+
+The Linux package set is defined once, in
+[`apt-packages.txt`](https://github.com/xa11y/xa11y/blob/main/.github/actions/setup-a11y/apt-packages.txt),
+grouped by purpose. Pick the groups your test app's toolkit needs:
+
+- **base** — headless display + AT-SPI stack. Always include this.
+- **gtk** — GTK3/4 + WebKitGTK (GTK apps, Tauri).
+- **electron** — Chromium/Electron runtime libraries.
+
+## macOS
+
+macOS won't let one process read another's accessibility tree unless it holds
+the **Accessibility** TCC permission. On a hosted runner you grant it to the
+process that runs your tests (often the python interpreter):
+
+```yaml
+- uses: actions/setup-python@v6
+  with:
+    python-version: "3.12"
+- name: Resolve python path
+  id: py
+  run: echo "path=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_OUTPUT"
+
+- uses: xa11y/xa11y/.github/actions/setup-a11y@main
+  with:
+    macos-tcc-client: ${{ steps.py.outputs.path }}
+```
+
+If you skip this, queries return an empty tree and the action prints a
+warning. Granting TCC writes to the system TCC database (allowed on hosted
+runners because SIP only protects `/System`) and restarts `tccd` so the grant
+takes effect immediately.
+
+## Windows
+
+Nothing to set up — UI Automation is available on hosted `windows-latest`
+runners, which have an interactive desktop session. Just run your tests.
+
+## Doing it without the action
+
+If you can't use the composite action, here's the underlying setup for Linux.
+This is exactly what the action automates:
+
+```bash
+# 1. Headless display
+export DISPLAY=:99
+Xvfb :99 -screen 0 1280x1024x24 -ac &
+sleep 1
+
+# 2. Run everything inside a D-Bus session
+dbus-run-session -- bash -c '
+  # 3. Start + enable the AT-SPI bridge
+  /usr/libexec/at-spi-bus-launcher --launch-immediately &
+  sleep 1
+  /usr/libexec/at-spi2-registryd &
+  sleep 1
+  dbus-send --session --dest=org.a11y.Bus /org/a11y/bus \
+    org.freedesktop.DBus.Properties.Set \
+    string:org.a11y.Status string:IsEnabled variant:boolean:true
+
+  # 4. Run your tests
+  pytest tests/
+'
+```
+
+## Troubleshooting
+
+| Symptom | Likely cause |
+| --- | --- |
+| Empty tree on **Linux** | AT-SPI bridge not running or `org.a11y.Status.IsEnabled` is false. Confirm `setup-atspi` ran. |
+| Empty tree on **macOS** | The test process wasn't granted Accessibility (TCC). Set `macos-tcc-client`. |
+| App not found by name on Linux | The app was launched via `cargo run`, which changes the AT-SPI process name. Run the built binary directly. |
+| Window never appears in the tree | The toolkit needs a window manager. Set `setup-window-manager: true`. |
+| `Xvfb` fails to start | The display number is taken. Set a different `display` (e.g. `:98`). |
+| Tests hang or flake on macOS | An onboarding window (Setup Assistant) holds front-app focus. Dismiss it before running input-driven tests. |
