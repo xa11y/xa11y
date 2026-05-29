@@ -60,6 +60,13 @@ const APP_CONFIG = {
     hasCheckbox: false,
     hasRadio: false,
   },
+  egui: {
+    okButtonName: 'OK',           // egui sets the AccessKit name from the visible label
+    textFieldName: null,          // egui's TextEdit::singleline does not set an AX name
+    minButtons: 2,                // "OK" + "Cancel"
+    hasCheckbox: true,
+    hasRadio: true,
+  },
 };
 
 // Candidate app names. `scripts/run_js_tests.sh` can pre-resolve the actual
@@ -75,6 +82,7 @@ const APP_NAMES_BY_APP = {
   cocoa: ['xa11y-cocoa-test-app'],
   tauri: ['xa11y-tauri-test-app'],
   electron: ['xa11y-electron-test-app', 'Electron', 'xa11y'],
+  egui: ['xa11y-egui-test-app'],
 };
 
 const appEnv = process.env.XA11Y_TEST_APP || 'accesskit';
