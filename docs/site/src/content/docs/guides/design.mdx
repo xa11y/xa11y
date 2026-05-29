@@ -89,14 +89,13 @@ The matrix below summarises which apps are exercised on which platforms and what
 | Test app    | Frameworks tested            | Platforms in CI       | Suites that target it      | Features covered                         |
 |-------------|------------------------------|-----------------------|----------------------------|------------------------------------------|
 | AccessKit   | Rust + winit + AccessKit     | Linux, macOS, Windows | Rust core integ, JS integ  | compat, actions, events, screenshot      |
-| Qt          | PySide6 (Qt 6)               | Linux, Windows¹       | Python integ               | compat, actions, events                  |
-| GTK         | GTK 4 (PyGObject)            | Linux                 | Python integ               | compat, actions²                         |
+| Qt          | PySide6 (Qt 6)               | Linux, macOS, Windows | Python integ               | compat, actions, events                  |
+| GTK         | GTK 4 (PyGObject)            | Linux                 | Python integ               | compat, actions¹                         |
 | Cocoa       | AppKit (Swift)               | macOS                 | Python integ               | compat, actions, events                  |
 | Tauri       | Tauri (Rust + HTML)          | Linux, macOS, Windows | Python integ               | compat, actions, events, input_sim, screenshot |
 | Electron    | Chromium + Node              | Linux                 | JS integ                   | compat, actions, AccessibilityNotEnabled detection |
 
-¹ macOS Qt is intentionally skipped — Qt/PySide6 does not correctly nest child elements in the macOS AX tree. Tracked as a known gap; tests re-enable once the upstream issue is resolved.
-² GTK event subscription is exercised through the Rust integ suite via AT-SPI2 rather than duplicated in the per-app Python suite.
+¹ GTK event subscription is exercised through the Rust integ suite via AT-SPI2 rather than duplicated in the per-app Python suite.
 
 ### CI matrix
 

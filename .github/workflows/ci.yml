@@ -191,10 +191,9 @@ jobs:
       # already has TCC. The ax_calls_* tests are #[ignore]d so they are
       # skipped by `cargo test --workspace`.
 
-      # Qt integration tests skipped: macOS AX tree for Qt apps has
-      # incomplete structure (nested AXApplication nodes). The depth
-      # limit prevents hangs but widgets aren't fully exposed.
-      # Re-enable after fixing macOS provider tree building for Qt.
+      # Qt-on-macOS compat/actions/events run in the `integ` matrix below
+      # (macos-latest × qt). The macOS AX tree exposes Qt widgets findably
+      # via the locator walk, so the suites pass without special handling.
 
   # ── Windows: unit tests + AccessKit Rust integ tests ───────────────
   windows:
@@ -257,6 +256,7 @@ jobs:
           - { os: ubuntu-latest,  app: electron }
           - { os: macos-latest,   app: cocoa }
           - { os: macos-latest,   app: tauri }
+          - { os: macos-latest,   app: qt }
           - { os: windows-latest, app: qt }
           # egui (eframe) — pure-Rust cross-platform GUI driven through
           # AccessKit. Outside the workspace so we build it explicitly per-OS.
