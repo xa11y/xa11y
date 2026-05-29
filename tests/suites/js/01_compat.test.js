@@ -105,10 +105,17 @@ test('element().dump() returns string via locator', async () => {
 
 test('descendant selector returns multiple elements', async () => {
   const app = await getApp();
-  const all = await app.locator('button').elements();
+  // Sample the flat count on both sides of the scoped query. The harness runs
+  // the suite files concurrently against a shared app, so a sibling test (e.g.
+  // "press on Add Item") can grow the tree between these reads. AccessKit-backed
+  // apps republish the whole subtree on such a mutation, which would otherwise
+  // let the descendant scope momentarily out-count a single flat sample.
+  const allBefore = await app.locator('button').elements();
   const byDescendant = await app.locator('window').descendant('button').elements();
+  const allAfter = await app.locator('button').elements();
+  const allMax = Math.max(allBefore.length, allAfter.length);
   // On platforms where the window node exists, the descendant scope should
   // match (at most) what the top-level query finds; on platforms without a
   // separate window node it may return fewer or zero — accept either.
-  assert.ok(byDescendant.length <= all.length);
+  assert.ok(byDescendant.length <= allMax);
 });

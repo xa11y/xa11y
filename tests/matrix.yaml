@@ -111,7 +111,7 @@ coverage:
 
   egui:
     python: [compat, actions, events]
-    js: []  # JS suite not wired up for egui yet — see gaps.egui_js_suite
+    js: [compat, actions]
     cli: [compat, actions]
 
 gaps:
@@ -147,16 +147,6 @@ gaps:
       apps: [gtk]
       language: python
       features: [events]
-
-  - id: egui_js_suite
-    description: >
-      JS compat/actions suite not wired up for egui yet. Python + CLI cover the
-      compat surface across all three platforms; JS is a follow-up.
-    severity: low
-    workaround: "Python + CLI compat suites cover egui on Linux, macOS, and Windows"
-    affects:
-      apps: [egui]
-      language: js
 
   - id: accesskit_python_compat_on_linux
     description: >
