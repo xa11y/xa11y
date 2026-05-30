@@ -1,0 +1,449 @@
+---
+title: Accessibility API Quirks
+description: A field guide to the platform-specific bugs, gotchas, and surprising behaviors of the desktop accessibility APIs — AT-SPI2 on Linux, AXUIElement on macOS, and UI Automation on Windows — plus the toolkits (Chromium, Electron, Qt, GTK, WebKit, AccessKit) layered on top of them.
+---
+
+Building anything on top of the desktop accessibility stack — a screen reader,
+a test framework, an automation tool, or an AI computer-use agent — means
+meeting three completely different APIs (Linux **AT-SPI2** over D-Bus, macOS
+**AXUIElement**, Windows **UI Automation**) and a long tail of toolkit-specific
+behavior on top of them. The APIs disagree on roles, actions, threading, and
+even on whether accessibility is *on*. Most of the surprises are undocumented,
+or documented only in a vendor's source tree.
+
+This page is a running catalog of those quirks, collected while building and
+testing [xa11y](/) against real applications across all three platforms. None
+of them are bugs in xa11y — they are inherent to the platform APIs and toolkits.
+We publish them here so the next person who hits an empty tree, a phantom error
+code, or a role that changed between OS releases can find the answer with a
+search instead of a week of bisecting.
+
+Each entry names the platform, the symptom, the verbatim error or flag where
+one exists, and a workaround.
+
+:::tip[Contributions welcome]
+Hit a quirk that isn't here? [Open an issue or PR](https://github.com/xa11y/xa11y/issues) —
+this list is meant to grow.
+:::
+
+## Accessibility is opt-in — and often silently off
+
+The single most common failure across every platform: the API connects, the
+app is found, but the tree is **empty or a bare skeleton**, with no error to
+tell you why. Accessibility is opt-in at the application *and* the OS-policy
+level, and the "off" state usually looks identical to "this app has no UI."
+
+### Linux: AT-SPI2 must be enabled on the bus
+
+The accessibility bridge is gated by a D-Bus property, `org.a11y.Status.IsEnabled`.
+If it is `false` (the default on a headless or freshly-booted session), toolkits
+never publish their trees. Turn it on:
+
+```bash
+dbus-send --session --dest=org.a11y.Bus /org/a11y/bus \
+  org.freedesktop.DBus.Properties.Set \
+  string:org.a11y.Status string:IsEnabled variant:boolean:true
+```
+
+You also need the bridge processes actually running:
+
+```bash
+/usr/libexec/at-spi-bus-launcher --launch-immediately &
+/usr/libexec/at-spi2-registryd &
+```
+
+To check whether a given app registered with AT-SPI2 at all:
+
+```bash
+busctl --user tree org.a11y.atspi.Registry | grep -i "<app-name>"
+```
+
+If the app's subtree is missing, the problem is the app's accessibility
+configuration, not your client.
+
+### Linux: Chromium and Electron ship the renderer bridge disabled
+
+Chromium-based apps (Google Chrome, Chromium, VS Code, Cursor, Slack, Discord,
+and every other Electron app) register with AT-SPI2 but expose **only an
+`application → frame` skeleton** until launched with `--force-renderer-accessibility`.
+Without it, `locator("button").count()` returns `0` even though buttons are
+plainly visible — and the only place this is documented is Chromium's own source
+tree.
+
+```bash
+google-chrome --force-renderer-accessibility
+code         --force-renderer-accessibility   # VS Code
+cursor       --force-renderer-accessibility
+```
+
+The environment variable `ACCESSIBILITY_ENABLED=1` has the same effect for some
+Chromium builds.
+
+Representative node counts on Ubuntu 24.04 + GNOME 46 (Wayland):
+
+| App     | Without flag | With flag |
+| ------- | -----------: | --------: |
+| VS Code |            1 |       140 |
+| Cursor  |            1 |       116 |
+| Chrome  |            1 |       210 |
+
+You can detect the condition programmatically: Chromium reports
+`Application.ToolkitName == "Chromium"`, so a Chromium/Electron frame that yields
+zero filtered children is almost certainly the renderer bridge being off rather
+than a bad selector.
+
+### Linux: Firefox needs an environment variable
+
+Firefox exposes its tree only when launched with `MOZ_ACCESSIBILITY_ATK2=1` set
+in the environment — the same class of issue as Chromium, with a different knob.
+
+```bash
+MOZ_ACCESSIBILITY_ATK2=1 firefox
+```
+
+Native GTK apps (Nautilus, GNOME Terminal, GNOME Calculator, gnome-text-editor)
+need no flag — their AT-SPI2 bridge is enabled by default.
+
+### macOS: the client process needs the Accessibility (TCC) permission
+
+macOS refuses to let one process read another's accessibility tree unless the
+*reading* process holds the **Accessibility** TCC permission
+(System Settings → Privacy & Security → Accessibility). Without it, queries
+return an **empty tree, not an error**.
+
+In CI you grant it by writing the system TCC database and restarting `tccd`. The
+critical gotcha: **TCC matches the resolved on-disk binary, not a symlink or a
+launcher**. A virtualenv `python` symlink, or a `cargo run` wrapper, will not
+inherit the grant — you must grant the real interpreter/binary path:
+
+```bash
+# resolve the real path first
+grant_tcc "$(.venv/bin/python -c 'import sys; print(sys.executable)')"
+```
+
+This also bites test runners that use content-addressed binary paths: macOS
+TCC grants "don't cope with cargo-hashed test-binary paths" — every rebuild
+produces a new hash and a new, ungranted binary.
+
+### macOS: web content needs accessibility turned on per-process
+
+Like Chromium on Linux, Chrome/Electron on macOS gate their renderer
+accessibility tree. Chrome honors `--force-renderer-accessibility`; WebKit/Safari
+content is exposed lazily and may require the `AXManualAccessibility` attribute to
+be set on the web area before the DOM is reflected into the AX tree.
+
+## Roles and the role enum disagree across platforms
+
+### macOS roles are open-ended strings, not an enum
+
+`AXRole` and `AXSubrole` are plain `CFString`s. `AXRoleConstants.h` lists ~50
+conventional roles, but **there is no closed enum** — apps and web content report
+arbitrary values. WebKit alone adds `"AXWebArea"`, `"AXLink"`, `"AXHeading"`, and
+many more that aren't in the SDK header. Any code that `switch`es over a fixed set
+of role strings will silently mishandle real-world content.
+
+### Windows: every top-level window is a `Window`, dialogs included
+
+UIA maps **all** top-level windows — ordinary windows and modal dialogs alike —
+to `UIA_WindowControlTypeId`. To tell a dialog apart you must read
+`UIA_IsDialogPropertyId` (Windows 10 1703+). Native frameworks such as Qt set
+`IsDialog` on a `QDialog` *without* populating `AriaRole`, so the same dialog
+reports as a dialog on macOS/Linux but as a plain window on Windows unless you
+check that property.
+
+`AriaRole`, conversely, is populated only by ARIA/web content (Electron,
+AccessKit) — never by native Win32/Qt/WPF apps — so you cannot rely on it for
+native role refinement.
+
+A nasty corollary: because *any* top-level window with `IsDialog=true` becomes a
+dialog, transient system popups — **UAC prompts, credential dialogs, Windows
+Update** — will flip a window's role out from under you. Desktop state is not
+deterministic.
+
+### Linux: roles are a 131-value C enum on the wire
+
+`AtspiRole` is a C enum (131 values) sent as a `u32`. Examples:
+`PUSH_BUTTON` (43), `CHECK_BOX` (7), `ENTRY` (79), `TEXT` (61), `FRAME` (23).
+States are a separate 64-bit bitfield (`AtspiStateType`), not properties —
+`ENABLED` (8), `FOCUSED` (12), `VISIBLE` (30), `EDITABLE` (7), `CHECKED` (4).
+
+### WebKitGTK changed the role it reports for `<textarea>` between releases
+
+WebKitGTK **2.52** changed which AT-SPI role it reports for an HTML `<textarea>`,
+breaking any selector keyed on the old role after a routine `libwebkit2gtk-4.1`
+upgrade (`2.50.4` → `2.52.3`). The portable fix is to never trust the toolkit's
+text role directly — derive single-line vs multi-line from the `MULTI_LINE`
+state bit, which is consistent across GTK (`GtkEntry`/`GtkTextView`),
+Qt (`QLineEdit`/`QPlainTextEdit`), and every WebKit version.
+
+## Action names and mechanisms are not standardized
+
+### Linux: AT-SPI action names differ by toolkit
+
+Actions are string-named via `org.a11y.atspi.Action`, and the names are **not
+standardized**. GTK calls its default-activate action `"click"`; Qt calls it
+`"Press"`. Chromium uses its own: `"doDefault"` (default activation, ~190
+elements in a single Chrome window) and `"showContextMenu"` (~230 elements). A
+client that looks for a hardcoded `"press"` will report `ActionNotSupported` on
+half the ecosystem unless it normalizes through an alias table.
+
+### Chromium on Linux exposes no `EditableText` interface — anywhere
+
+This is a big one for text input. **No Chromium element implements
+`org.a11y.atspi.EditableText` anywhere in its tree** (confirmed across 500+
+nodes). There is no accessibility path to set the value of a Chromium/Electron
+text field on Linux — attempts hit D-Bus `UnknownMethod` / `UnknownInterface`
+errors. The only options are keyboard synthesis (xdotool / ydotool / uinput) or
+a fix upstream in Chromium.
+
+### GTK menu buttons hide the real action on an inner widget
+
+`GtkMenuButton`, `AdwMenuButton`, and `AdwSplitButton` present an outer
+`push button` accessible that advertises `NActions = 0` — pressing it raises
+`ActionNotSupported` — wrapping an inner `toggle button` that carries the real
+`click` action. Every stock GNOME app ships these (Calculator, Text Editor,
+Characters, Baobab, Logs, Clocks), so "the button I can see has no press action"
+is a common, confusing result. The workaround is to walk a bounded slice of the
+outer widget's subtree (gated on `Application.ToolkitName == "GTK"`) and invoke
+the single actionable descendant.
+
+### GTK4 `CheckButton` reports `NActions = 0`
+
+A GTK4 `CheckButton` can report zero actions via the `Action` interface even
+though it is toggleable, so `toggle()` via `DoAction` is unavailable — toggling
+must go through the `press` path. AccessKit's AT-SPI bridge has the mirror-image
+quirk: it hardcodes the action name as **`"click"`, never `"toggle"`**.
+
+### macOS has no `AXToggle` — `AXPress` is the native toggle
+
+There is no `AXToggle` action. `AXPress` *is* the platform's toggle for
+checkboxes, switches, and radio buttons. Code expecting a dedicated toggle action
+on macOS will never find one.
+
+### macOS has no `ScrollIntoView` equivalent
+
+There is no AX action to scroll an element into view. On Linux this maps to
+`Component.ScrollTo`; on Windows to `ScrollItemPattern.ScrollIntoView`; on macOS
+it is a genuine no-op.
+
+### Numeric vs text values diverge
+
+- **Linux:** the `org.a11y.atspi.Value` interface is **`f64`-only**. Text values
+  require `EditableText`; if neither is present you get a "not supported" result.
+  WebKit sliders on Linux historically did not honor `Value.SetCurrentValue`.
+- **macOS:** `AXValue` is set directly for both text and numeric.
+- **Windows:** numeric goes through `RangeValuePattern`, text through
+  `ValuePattern` — and `type_text` is a non-atomic read-modify-write splice via
+  `TextPattern.GetSelection()` + `ValuePattern.SetValue()`.
+
+## Element references go stale — constantly
+
+### All three backends mint a fresh handle on every read
+
+Windows/UIA, macOS/AX, and Linux/AT-SPI2 each **mint a brand-new handle every
+time you cache or re-read an element**. You cannot use a handle's identity to
+dedup or compare elements across two queries — the same on-screen element returns
+disjoint handles, so naive identity-based dedup silently returns zero results.
+Key elements by a *stable* property instead: UIA `GetRuntimeId`, AT-SPI
+`(bus_name, object_path)`, or a structural tree path.
+
+### AccessKit republishes the whole subtree on any mutation
+
+AccessKit's AT-SPI bridge **regenerates the entire subtree (and all accessible
+object paths) on a structural mutation**. A snapshot captured before an action is
+invalidated the moment that action rebuilds the tree, so a second operation on
+the old reference surfaces a stale-object platform error. The robust pattern is
+to re-resolve the selector after every mutation rather than holding element
+handles.
+
+### UIA tree updates are asynchronous
+
+After an action that changes structure (closing a dialog, navigating), the UIA
+tree can take **longer than 100 ms** to settle. During that window a perfectly
+valid selector is transiently un-findable:
+
+```
+SelectorNotMatchedError: No element matched: button[name="OK"]
+```
+
+Poll/retry around structural changes rather than asserting immediately.
+
+## Phantom errors that aren't really errors
+
+### Windows: `EVENT_E_ALL_SUBSCRIBERS_FAILED (0x80040201)`
+
+Qt's UIA providers for `QTabBar`/`QTabWidget` raise automation events
+*synchronously* inside their `Invoke()` / `Select()` handlers. When no UIA event
+subscriber is active (typical on a CI runner with no screen reader), COM returns:
+
+```
+EVENT_E_ALL_SUBSCRIBERS_FAILED (0x80040201)
+```
+
+Qt propagates this back through the action call **even though the UI action
+itself completed successfully**. The same code can surface from
+`FindAllBuildCache` during a find. Treat `0x80040201` as success.
+
+### Windows: `FindAllBuildCache` silently drops fragment elements
+
+`FindAllBuildCache(TreeScope_Subtree)` rooted at a UIA fragment returns
+**incomplete** results, because the default Control View filter excludes any
+element that doesn't declare `IsControlElement=true`. Virtual/fragment providers
+(Qt, AccessKit) often don't, so they vanish. Pass a `TrueCondition` tree filter
+(Raw view) to see them.
+
+### Windows: `SetFocus` fails on disabled elements
+
+UIA `SetFocus` fails outright on a disabled element. Tests and automation should
+target an always-enabled element to verify focus behavior.
+
+### Windows: screenshots fail in Session 0 / disconnected RDP
+
+GDI `BitBlt` returns `ERROR_INVALID_HANDLE` in disconnected-RDP or Session-0
+contexts — there is no visible desktop to capture.
+
+## Threading and process model
+
+- **Windows UIA is COM, MTA-only.** Event handlers fire on a background MTA
+  thread (`CoInitializeEx(NULL, COINIT_MULTITHREADED)`). Use per-handler
+  `RemoveXxxEventHandler` — `RemoveAllEventHandlers` nukes every concurrent
+  subscription in the process.
+- **macOS AXObserver is CFRunLoop-bound.** Callbacks deliver a *live*
+  `AXUIElementRef` valid **only during the callback** — capture what you need
+  synchronously.
+- **Linux AT-SPI is D-Bus.** A dedicated accessibility bus (separate from the
+  session bus) carries all traffic; the registry daemon tracks apps and routes
+  events.
+
+## Memory safety: AX values can throw through your FFI
+
+On macOS, a misbehaving AX value's `-release` or `-getTypeID` can throw an
+`NSException`. If it unwinds through an `extern "C"` boundary it **aborts the
+process**. Worse, partial extraction paths can hit use-after-free / double-release
+(e.g. releasing a `CFNumber` and then reading its type-id). Any production AX
+client must wrap raw CoreFoundation / AX calls (`CFRetain`, `CFRelease`,
+`CFGetTypeID`, `CFNumberGetValue`, `CFArrayGetValueAtIndex`, …) in
+`@try`/`@catch` and treat every FFI return as fallible.
+
+## Events: every platform has gaps
+
+Push-based accessibility events are richer than polling, but each platform omits
+things the others deliver:
+
+- **Linux AT-SPI2 has no menu-open/close signal at all** — `MenuOpened` /
+  `MenuClosed` can never fire. Consumers must poll or watch structural changes.
+- **GTK4 sometimes skips `Focus:Focus`**, emitting only
+  `Object:StateChanged(focused, true)`. Listen for both.
+- **`StateChanged{Enabled}`** arrives as either `StateChanged(enabled, _)` or
+  `StateChanged(sensitive, _)` — AT-SPI2 still exposes both names.
+- **WebKit2GTK and Electron often omit `Text:TextChanged`** — you may have to
+  fall back to `ValueChanged` on text roles.
+- **macOS `AXValueChanged` carries no position or delta** — only the element.
+  There is no `AXTextChanged`-with-position notification; diffing old vs new text
+  is the only option.
+- **macOS scopes many notifications to element-level observers** — table
+  row/selection changes, `AXMenuItemSelected`, `AXCreated`/`AXMoved`/`AXResized`,
+  `AXLayoutChanged` are not delivered to an app-level observer.
+- **Windows UIA has no first-class window-activated event.** Inferring it from
+  focus changes is lossy: it misses alt-tab and tool windows, and fires spuriously
+  on in-app focus moves. Older/non-native apps (Java Swing, VB6, Adobe products,
+  some browsers) have incomplete UIA providers and may not fire events at all.
+
+## Performance: reading a tree is O(N) cross-process calls
+
+Two of the three platforms have no bulk-read API, so traversing a tree means a
+storm of IPC:
+
+| Platform | Per-node cost | Bulk subtree fetch? |
+| --- | --- | --- |
+| **Linux (AT-SPI2)** | 6–10 D-Bus round-trips per node | No — `GetChildren` returns references, you re-query each child. (`Cache.GetItems` exists but returns only a partial property set for the whole app.) |
+| **macOS (AX)** | 2–3 Mach IPC calls per node | No — but `AXUIElementCopyMultipleAttributeValues` batches one node's attributes into a single round-trip. |
+| **Windows (UIA)** | One call for a whole subtree | **Yes** — `IUIAutomationCacheRequest` + `FindAllBuildCache` fetches an entire subtree with chosen properties/patterns in one cross-process call. |
+
+The practical consequence on Linux and macOS: a naive full-tree walk of a
+complex app is slow enough to feel hung. Prefer narrow, combinator-constrained
+queries (`toolbar > button[name='Save']`) so the engine never descends subtrees
+it doesn't need.
+
+## Text and string surprises
+
+### Bidi control characters leak into reported strings
+
+Platforms — notably macOS for some LTR app configurations, and RTL apps
+everywhere — embed Unicode **bidirectional format controls** into the strings
+they report (`name`, `value`, `description`). These are invisible but break naive
+equality:
+
+```python
+el.value == "5"   # False — the value is actually "⁦" + "5" + "⁩"
+```
+
+The offenders are `U+200E` (LRM), `U+200F` (RLM), `U+202A..U+202E`
+(embeddings/overrides), and `U+2066..U+2069` (isolates). Strip them before
+comparing; keep ZWJ/ZWNJ, which are legitimate content.
+
+### at-spi2-core can drop names containing control characters
+
+Some `at-spi2-core` configurations drop an accessible's `Name` entirely when it
+contains non-printable control characters — so an element with a perfectly good
+visible label becomes undiscoverable by name. This is configuration-dependent
+(the same app can keep the name under a different at-spi2-core build), which makes
+it especially confusing.
+
+## Linux input simulation and Wayland
+
+Wayland has no standard accessibility-driven input path, and the architecturally
+"correct" route is not broadly available yet:
+
+- **`xdg-desktop-portal.RemoteDesktop` (libei)** is implemented today only by
+  `xdg-desktop-portal-gnome` and `-kde`, and needs a GDM/SDDM-managed session —
+  so there is **no working portal backend on wlroots compositors** (sway,
+  Hyprland) or headless servers.
+- **`/dev/uinput`** is the compositor-agnostic fallback (the same mechanism
+  `xdotool --using-uinput`, `ydotool`, `wtype`, Steam Input, and Wine use), but
+  it **requires `input` group membership**, which grants global input read/write —
+  comparable to macOS Input Monitoring:
+
+  ```bash
+  sudo usermod -aG input $USER   # then re-login
+  ```
+
+In containers, Docker's `/dev` tmpfs isolation hides host-created
+`/dev/input/event*` nodes even with `-v /dev/input:/dev/input`; a udev rule like
+`KERNEL=="event[0-9]*", MODE="0666"` is needed to expose them.
+
+## macOS focus and launch races
+
+- **`CGEventPost` (and OS focus) target whichever app is frontmost.** On a CI
+  runner an onboarding/background window — **Setup Assistant, Notification Center,
+  Software Update** — can hold the front slot and silently swallow every synthetic
+  event, leaving an empty event log. Claim frontmost for your target app before
+  driving input; don't assume your window has focus just because it's visible.
+- **`open -a` has a `-600` quit-then-relaunch race.** Re-launching an app that is
+  mid-quit fails with error `-600`; and "the process exists" does not mean "its
+  accessibility tree is ready" — poll for the tree, not just the PID.
+
+## Coordinate systems
+
+- **macOS reports points, not pixels.** On a Retina display 1 point = 2 physical
+  pixels — hit-testing against a screenshot taken in pixels will be off by the
+  scale factor.
+- **Windows / Linux report physical pixels**, and multi-monitor setups produce
+  **negative coordinates** for displays positioned left of or above the primary.
+
+## Further reading
+
+- [AT-SPI2 architecture](https://gnome.pages.gitlab.gnome.org/at-spi2-core/devel-docs/architecture.html) ·
+  [D-Bus interface specs](https://gnome.pages.gitlab.gnome.org/at-spi2-core/devel-docs/doc-org.a11y.atspi.Accessible.html) ·
+  [AtspiRole enum](https://docs.gtk.org/atspi2/enum.Role.html) ·
+  [AtspiStateType enum](https://gnome.pages.gitlab.gnome.org/at-spi2-core/libatspi/enum.StateType.html)
+- [macOS Accessibility API overview](https://developer.apple.com/documentation/accessibility/accessibility-api) ·
+  [AXRoleConstants.h](https://developer.apple.com/documentation/applicationservices/axroleconstants_h) ·
+  [AXAttributeConstants.h](https://developer.apple.com/documentation/applicationservices/axattributeconstants_h)
+- [UI Automation overview](https://learn.microsoft.com/en-us/windows/win32/winauto/entry-uiauto-win32) ·
+  [UIA_IsDialogPropertyId](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-automation-element-propids)
+- [AccessKit](https://accesskit.dev/)
+- xa11y's own [Platform Details](/guides/platform-details/) and
+  [Testing in CI](/guides/ci/) guides, and the
+  [running list of upstream issues](https://github.com/xa11y/xa11y/blob/main/external-issues.md)
+  we've filed or documented.
