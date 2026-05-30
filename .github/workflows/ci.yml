@@ -188,57 +188,6 @@ jobs:
         shell: pwsh
         run: .\scripts\run_integ_tests_windows.ps1
 
-  # ── Build the Rust workspace once per OS ───────────────────────────
-  #
-  # The 14 integ cells all need the same two workspace binaries — the xa11y
-  # CLI (every cell's `cli` suite) and the AccessKit test app. Building the
-  # workspace independently in each cell recompiled core + the dependency tree
-  # up to 14× per run. Instead we build it once per OS here and hand the
-  # binaries to the integ cells as an artifact, so the workspace is compiled
-  # three times per run (once per platform), not fourteen. sccache (wired into
-  # setup-rust) additionally dedups the remaining per-cell compiles — the
-  # Python extension and the JS native binding — across cells and runs.
-  build-workspace:
-    name: Build workspace (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Set up Rust
-        uses: ./.github/actions/setup-rust
-        with:
-          cache-key: integ
-
-      # Linux needs the build/link libraries (libxkbcommon et al.) the
-      # workspace's AccessKit/winit test app pulls in. No display or AT-SPI is
-      # needed — this job only compiles, it doesn't run anything.
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
-        uses: ./.github/actions/setup-a11y
-        with:
-          package-groups: base
-          setup-display: "false"
-          setup-atspi: "false"
-
-      - name: Build Rust workspace
-        run: cargo build --workspace
-
-      # Ship only the two binaries the integ cells consume. upload-artifact
-      # drops the executable bit (it's restored on download below).
-      - name: Upload workspace binaries
-        uses: actions/upload-artifact@v4
-        with:
-          name: workspace-bins-${{ matrix.os }}
-          path: |
-            target/debug/xa11y${{ runner.os == 'Windows' && '.exe' || '' }}
-            target/debug/xa11y-test-app${{ runner.os == 'Windows' && '.exe' || '' }}
-          if-no-files-found: error
-          retention-days: 1
-
   # ── Compatibility integ matrix: one app × one OS × all language suites ──
   #
   # Each matrix cell starts the test app once, then runs the Python, JS, and
@@ -247,12 +196,12 @@ jobs:
   # and CI share one code path. This replaced the old per-language per-app
   # per-OS jobs and their run_<app>_tests.sh scripts.
   #
-  # Cells consume the workspace binaries built once per OS by build-workspace
-  # rather than running `cargo build --workspace` themselves.
+  # Each cell builds the workspace itself; the shared sccache in setup-rust
+  # keeps that cheap (warm rustc cache reused across cells and runs) without
+  # serializing the matrix behind a build-once job.
   integ:
     name: Integ (${{ matrix.app }}) on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
-    needs: build-workspace
     strategy:
       fail-fast: false
       matrix:
@@ -308,19 +257,9 @@ jobs:
           package-groups: base gtk electron
           setup-window-manager: ${{ matrix.app == 'egui' }}
 
-      # ── Workspace binaries (xa11y CLI + AccessKit test app) ────────
-      # Built once per OS by the build-workspace job; downloaded here instead
-      # of recompiling the workspace in every cell. upload-artifact strips the
-      # executable bit, so restore it on Unix.
-      - name: Download workspace binaries
-        uses: actions/download-artifact@v4
-        with:
-          name: workspace-bins-${{ matrix.os }}
-          path: target/debug
-
-      - name: Restore executable bit (Unix)
-        if: runner.os != 'Windows'
-        run: chmod +x target/debug/xa11y target/debug/xa11y-test-app
+      # ── Build Rust workspace (all workspace test-app binaries) ─────
+      - name: Build Rust workspace
+        run: cargo build --workspace
 
       # ── Tauri app (not in workspace — has its own Cargo.lock) ──────
       - name: Cache Tauri test app build
