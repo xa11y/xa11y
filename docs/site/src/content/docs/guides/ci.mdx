@@ -1,19 +1,35 @@
 ---
 title: Testing in CI
-description: Run xa11y accessibility tests on GitHub Actions across Linux, macOS, and Windows.
+description: Run xa11y accessibility tests in CI across Linux, macOS, and Windows — a ready-made GitHub Actions setup plus the CI-agnostic steps it automates.
 ---
 
 xa11y drives the *real* accessibility tree of a running application, so the
 hard part of CI isn't xa11y — it's standing up an environment where an
 accessibility API is actually available. A bare CI runner usually has no
 display, no accessibility bus, and (on macOS) no permission to read other
-apps' trees. This guide covers what each platform needs and gives you a
-reusable GitHub Action so you don't have to wire it up by hand.
+apps' trees. This guide covers what each platform needs.
+
+The requirements themselves — a display, a D-Bus session, the AT-SPI bridge,
+the macOS Accessibility permission — are **generic to any CI system** (GitLab
+CI, CircleCI, Jenkins, a plain container, or your laptop). Only the
+[`setup-a11y` composite action](#the-setup-a11y-action-github-actions) and the
+YAML snippets are **GitHub Actions–specific**: they're a convenience wrapper
+so you don't have to wire the generic steps up by hand. If you're not on
+GitHub Actions, skip to [Doing it without the
+action](#doing-it-without-the-action-any-ci) for the same setup as plain
+shell commands.
+
+The examples below run tests with `pytest`, but xa11y exposes the same API
+from Python, JavaScript, Rust, and the `xa11y` CLI — substitute whichever test
+runner your suite uses. Nothing in the CI setup is tied to a particular
+language.
 
 ## Why it's tricky
 
-Each platform exposes accessibility differently, and each has a precondition
-that fails silently if you miss it:
+This section is CI-agnostic — it describes the underlying platform
+requirements, not anything specific to GitHub Actions. Each platform exposes
+accessibility differently, and each has a precondition that fails silently if
+you miss it:
 
 | Platform | API | What CI is missing by default |
 | --- | --- | --- |
@@ -25,9 +41,10 @@ The failure mode is the same on Linux and macOS: queries return an **empty
 tree** rather than an error, so it looks like your app has no UI. The
 sections below show how to satisfy each precondition.
 
-## The `setup-a11y` action
+## The `setup-a11y` action (GitHub Actions)
 
-The quickest path is the composite action that ships in this repo. It
+This section is **GitHub Actions–specific**. The quickest path on GitHub is
+the composite action that ships in this repo. It
 installs the Linux system libraries, brings up a headless display + D-Bus +
 AT-SPI, and (on macOS) grants the Accessibility permission — then exports the
 environment so every later step in the job inherits it.
@@ -76,8 +93,11 @@ grouped by purpose. Pick the groups your test app's toolkit needs:
 ## macOS
 
 macOS won't let one process read another's accessibility tree unless it holds
-the **Accessibility** TCC permission. On a hosted runner you grant it to the
-process that runs your tests (often the python interpreter):
+the **Accessibility** TCC permission — this is a macOS requirement, not a
+GitHub Actions one. On a hosted runner you grant it to whichever process runs
+your tests: the Python or Node interpreter, the `xa11y` CLI binary, or your
+own test harness. The GitHub Actions example below grants it to the Python
+interpreter:
 
 ```yaml
 - uses: actions/setup-python@v6
@@ -102,10 +122,11 @@ takes effect immediately.
 Nothing to set up — UI Automation is available on hosted `windows-latest`
 runners, which have an interactive desktop session. Just run your tests.
 
-## Doing it without the action
+## Doing it without the action (any CI)
 
-If you can't use the composite action, here's the underlying setup for Linux.
-This is exactly what the action automates:
+If you're not on GitHub Actions — or can't use the composite action — here's
+the underlying setup for Linux as plain shell commands. This is exactly what
+the action automates, and it works on any CI system or a local machine:
 
 ```bash
 # 1. Headless display
