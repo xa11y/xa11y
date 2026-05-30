@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main, master]
 
+# Cancel superseded runs on a branch/PR so rapid pushes don't pile up full
+# matrix runs. We never cancel pushes to main/master (release-relevant), only
+# in-progress PR runs that a newer commit has obsoleted.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
@@ -181,6 +188,57 @@ jobs:
         shell: pwsh
         run: .\scripts\run_integ_tests_windows.ps1
 
+  # ── Build the Rust workspace once per OS ───────────────────────────
+  #
+  # The 14 integ cells all need the same two workspace binaries — the xa11y
+  # CLI (every cell's `cli` suite) and the AccessKit test app. Building the
+  # workspace independently in each cell recompiled core + the dependency tree
+  # up to 14× per run. Instead we build it once per OS here and hand the
+  # binaries to the integ cells as an artifact, so the workspace is compiled
+  # three times per run (once per platform), not fourteen. sccache (wired into
+  # setup-rust) additionally dedups the remaining per-cell compiles — the
+  # Python extension and the JS native binding — across cells and runs.
+  build-workspace:
+    name: Build workspace (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          cache-key: integ
+
+      # Linux needs the build/link libraries (libxkbcommon et al.) the
+      # workspace's AccessKit/winit test app pulls in. No display or AT-SPI is
+      # needed — this job only compiles, it doesn't run anything.
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/setup-a11y
+        with:
+          package-groups: base
+          setup-display: "false"
+          setup-atspi: "false"
+
+      - name: Build Rust workspace
+        run: cargo build --workspace
+
+      # Ship only the two binaries the integ cells consume. upload-artifact
+      # drops the executable bit (it's restored on download below).
+      - name: Upload workspace binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: workspace-bins-${{ matrix.os }}
+          path: |
+            target/debug/xa11y${{ runner.os == 'Windows' && '.exe' || '' }}
+            target/debug/xa11y-test-app${{ runner.os == 'Windows' && '.exe' || '' }}
+          if-no-files-found: error
+          retention-days: 1
+
   # ── Compatibility integ matrix: one app × one OS × all language suites ──
   #
   # Each matrix cell starts the test app once, then runs the Python, JS, and
@@ -188,16 +246,23 @@ jobs:
   # `cargo xtask test-<app>` uses locally (scripts/run_app_suite.sh), so local
   # and CI share one code path. This replaced the old per-language per-app
   # per-OS jobs and their run_<app>_tests.sh scripts.
+  #
+  # Cells consume the workspace binaries built once per OS by build-workspace
+  # rather than running `cargo build --workspace` themselves.
   integ:
     name: Integ (${{ matrix.app }}) on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    needs: build-workspace
     strategy:
       fail-fast: false
       matrix:
         include:
           - { os: ubuntu-latest,  app: accesskit }
-          - { os: macos-latest,   app: accesskit }
-          - { os: windows-latest, app: accesskit }
+          # AccessKit on macOS/Windows is covered by the Windows Rust integ
+          # job and the local macOS harness; those integ cells ran no language
+          # suites (cli+js are skipped for accesskit, and python is skipped off
+          # Linux — see suite_skips_by_app in tests/harness/launch.py), so they
+          # only burned a build with nothing to test. Dropped.
           - { os: ubuntu-latest,  app: qt }
           - { os: ubuntu-latest,  app: gtk }
           - { os: ubuntu-latest,  app: tauri }
@@ -243,9 +308,19 @@ jobs:
           package-groups: base gtk electron
           setup-window-manager: ${{ matrix.app == 'egui' }}
 
-      # ── Build Rust workspace (all workspace test-app binaries) ─────
-      - name: Build Rust workspace
-        run: cargo build --workspace
+      # ── Workspace binaries (xa11y CLI + AccessKit test app) ────────
+      # Built once per OS by the build-workspace job; downloaded here instead
+      # of recompiling the workspace in every cell. upload-artifact strips the
+      # executable bit, so restore it on Unix.
+      - name: Download workspace binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: workspace-bins-${{ matrix.os }}
+          path: target/debug
+
+      - name: Restore executable bit (Unix)
+        if: runner.os != 'Windows'
+        run: chmod +x target/debug/xa11y target/debug/xa11y-test-app
 
       # ── Tauri app (not in workspace — has its own Cargo.lock) ──────
       - name: Cache Tauri test app build
@@ -626,19 +701,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
+      # Shares the sccache compilation cache with the js/integ jobs that build
+      # the same xa11y-js native binding; rust-cache stores xa11y-js/target.
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            xa11y-js/target
-          key: ${{ runner.os }}-cargo-docs-${{ hashFiles('xa11y-js/Cargo.lock', '**/Cargo.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-docs-
+          cache-key: docs
+          workspaces: xa11y-js -> target
 
       # napi build links xa11y-js → xa11y → xa11y-linux on the Linux
       # docs runner; xa11y-linux now needs libxkbcommon at link time.
@@ -697,19 +766,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
+      # Shares the sccache compilation cache with the docs/integ jobs that
+      # build the same native binding; rust-cache stores xa11y-js/target.
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            xa11y-js/target
-          key: ${{ runner.os }}-cargo-js-${{ hashFiles('xa11y-js/Cargo.lock', '**/Cargo.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-js-
+          cache-key: js
+          workspaces: xa11y-js -> target
 
       # xa11y-js → xa11y → xa11y-linux requires libxkbcommon to link on
       # Linux. macOS / Windows skip this — those runners don't pull
@@ -772,10 +835,18 @@ jobs:
         with:
           toolchain: nightly
           cache-key: fuzz
-          cache-paths: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            xa11y/fuzz/target
+          # cargo-fuzz builds into xa11y/fuzz/target; rust-cache covers
+          # ~/.cargo (registry/git) automatically.
+          workspaces: xa11y/fuzz -> target
+
+      # Cache the cargo-fuzz binary so we don't recompile it from source every
+      # run (mirrors the cargo-deny cache in license-check).
+      - name: Cache cargo-fuzz binary
+        id: cache-cargo-fuzz
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/bin/cargo-fuzz
+          key: cargo-fuzz-${{ runner.os }}-${{ runner.arch }}
 
       # The fuzz binaries link xa11y → xa11y-linux, which needs libxkbcommon
       # at link time ([link] group). Without it the targets fail to link
@@ -788,6 +859,7 @@ jobs:
           setup-atspi: "false"
 
       - name: Install cargo-fuzz
+        if: steps.cache-cargo-fuzz.outputs.cache-hit != 'true'
         run: cargo install cargo-fuzz
 
       - name: Run fuzz targets
