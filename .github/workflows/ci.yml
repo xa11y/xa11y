@@ -759,7 +759,7 @@ jobs:
           cache-paths: |
             ~/.cargo/registry
             ~/.cargo/git
-            xa11y-fuzz/fuzz/target
+            xa11y/fuzz/target
 
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz
@@ -768,16 +768,19 @@ jobs:
         # A libFuzzer crash exits non-zero and writes a reproducer under
         # fuzz/artifacts/. We run every target even if an earlier one crashes
         # (so a single failure doesn't mask the others), then fail the job if
-        # any of them crashed. Previously this used `|| true`, which meant a
-        # genuine fuzz-discovered crash never failed CI — see Tenet 1 (no
-        # silent fallbacks): a crash is signal, not noise.
+        # any of them crashed. Previously this used `|| true`, which not only
+        # swallowed real crashes (Tenet 1) but had also masked the fact that
+        # this step was cd'ing into the wrong directory (xa11y-fuzz/fuzz, the
+        # live provider fuzzer, which has no cargo-fuzz project) and naming
+        # targets that don't exist (query, serde). The libFuzzer targets live
+        # in xa11y/fuzz and are tree_ops + selector.
         run: |
-          cd xa11y-fuzz/fuzz
+          cd xa11y/fuzz
           failed=""
-          for target in tree_ops selector query serde; do
+          for target in tree_ops selector; do
             echo "=== Fuzzing $target for 10s ==="
             if ! cargo +nightly fuzz run "$target" -- -max_total_time=10; then
-              echo "::error::fuzz target '$target' crashed (reproducer in xa11y-fuzz/fuzz/artifacts/$target/)"
+              echo "::error::fuzz target '$target' crashed (reproducer in xa11y/fuzz/artifacts/$target/)"
               failed="$failed $target"
             fi
           done
