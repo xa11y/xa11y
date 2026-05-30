@@ -78,7 +78,7 @@ require.cache[nativePath] = {
 };
 
 // Now pull the wrapper — it captures `NativeAppStub` as its parent.
-const { App, Subscription } = require('../../index.js');
+const { App, Subscription, SelectorNotMatchedError } = require('../../index.js');
 
 // ── Tests ──────────────────────────────────────────────────────────────────
 
@@ -140,6 +140,52 @@ test('App.list() rewires every returned instance (not just the first)', async ()
       `every element must be rewired (index ${i})`,
     );
   }
+});
+
+test('App.find() resolves with the first app matching the predicate', async () => {
+  const a = Object.assign(new NativeAppStub(), { name: 'Other', pid: 1 });
+  const b = Object.assign(new NativeAppStub(), { name: 'Target', pid: 42 });
+  NativeAppStub.__listReturn = [a, b];
+  const app = await App.find((x) => x.pid === 42);
+  assert.equal(app.pid, 42);
+  assert.strictEqual(
+    Object.getPrototypeOf(app),
+    App.prototype,
+    'find() result must carry the wrapper prototype',
+  );
+});
+
+test('App.find() supports an async predicate', async () => {
+  NativeAppStub.__listReturn = [Object.assign(new NativeAppStub(), { name: 'Target', pid: 7 })];
+  const app = await App.find(async (x) => x.name === 'Target');
+  assert.equal(app.name, 'Target');
+});
+
+test('App.find() rejects with SelectorNotMatchedError on timeout', async () => {
+  NativeAppStub.__listReturn = [Object.assign(new NativeAppStub(), { name: 'Nope', pid: 1 })];
+  await assert.rejects(
+    () => App.find(() => false, { timeout: 20 }),
+    (err) => err instanceof SelectorNotMatchedError,
+  );
+});
+
+test('App.find() rejects with AbortError when the signal is already aborted', async () => {
+  NativeAppStub.__listReturn = [];
+  await assert.rejects(
+    () => App.find(() => true, { signal: AbortSignal.abort() }),
+    (err) => err.name === 'AbortError',
+  );
+});
+
+test('App.find() propagates a predicate exception immediately (fail fast)', async () => {
+  // A falsy return means "keep polling"; a *thrown* predicate must abort the
+  // search and surface, not be swallowed as "no match".
+  NativeAppStub.__listReturn = [Object.assign(new NativeAppStub(), { name: 'X', pid: 1 })];
+  const boom = new Error('predicate blew up');
+  await assert.rejects(
+    () => App.find(() => { throw boom; }, { timeout: 30000 }),
+    (err) => err === boom,
+  );
 });
 
 test('subscribed apps from factories produce an EventEmitter Subscription', async () => {

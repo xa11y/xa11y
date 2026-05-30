@@ -31,22 +31,14 @@ use xa11y::*;
 /// Get the test app as an `App`, retrying briefly for registration.
 pub fn app_root() -> App {
     // On Linux/macOS, AT-SPI and AX report the process name ("xa11y-test-app").
-    // On Windows, UIA reports the window title ("xa11y Test App").
-    // Two candidate names to interleave, so we keep the manual loop (a
-    // single `by_name` with a long timeout per name would block on the
-    // wrong name for its full timeout before trying the right one).
+    // On Windows, UIA reports the window title ("xa11y Test App"). Match either
+    // candidate name in a single waited call — `App::find` polls internally, so
+    // we no longer interleave names by hand.
     let names = ["xa11y-test-app", "xa11y Test App"];
-    for attempt in 0..3 {
-        for name in &names {
-            if let Ok(app) = App::by_name(name, std::time::Duration::ZERO) {
-                return app;
-            }
-        }
-        if attempt < 2 {
-            std::thread::sleep(std::time::Duration::from_millis(200));
-        }
-    }
-    panic!("Could not find test app after retries (tried {:?})", names);
+    App::find(std::time::Duration::from_secs(2), |d| {
+        d.name.as_deref().is_some_and(|n| names.contains(&n))
+    })
+    .unwrap_or_else(|e| panic!("Could not find test app (tried {:?}): {e}", names))
 }
 
 /// Find exactly one element by selector within the app. Panics on failure.

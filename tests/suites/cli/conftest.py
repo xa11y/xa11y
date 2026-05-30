@@ -19,19 +19,18 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 def _connect_to_running_app(xa11y, pid: int):
     """Connect to a test app the harness already launched.
 
-    Tries ``App.by_pid`` first (most precise) with a generous timeout to
-    absorb AT-SPI registration delays on Linux, then falls back to
-    ``App.by_name`` using the harness-discovered ``XA11Y_TEST_APP_NAME`` —
-    on some toolkits the app exposes a name to AT-SPI before its pid lookup
-    becomes resolvable.
+    Matches the PID we were handed *or* the harness-discovered
+    ``XA11Y_TEST_APP_NAME`` in a single waited lookup. ``App.find`` polls the
+    accessibility API internally with a generous timeout to absorb AT-SPI
+    registration delays on Linux; matching either signal covers the case
+    where a toolkit exposes a name before its pid lookup becomes resolvable
+    (or vice versa), without a pid-then-name fallback chain.
     """
-    try:
-        return xa11y.App.by_pid(pid, timeout=10.0)
-    except (xa11y.SelectorNotMatchedError, xa11y.PlatformError):
-        name = os.environ.get("XA11Y_TEST_APP_NAME")
-        if not name:
-            raise
-        return xa11y.App.by_name(name, timeout=10.0)
+    name = os.environ.get("XA11Y_TEST_APP_NAME")
+    return xa11y.App.find(
+        lambda a: a.pid == pid or (name is not None and a.name == name),
+        timeout=10.0,
+    )
 
 
 # ── Per-app launch configurations ────────────────────────────────────────────
