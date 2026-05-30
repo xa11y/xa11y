@@ -261,6 +261,12 @@ mod app_ext {
         fn find<F>(timeout: Duration, predicate: F) -> Result<Self>
         where
             F: Fn(&ElementData) -> bool;
+        /// Like [`find`](Self::find), but with a fallible predicate:
+        /// `Ok(false)` keeps polling while `Err(_)` aborts and propagates.
+        /// See [`App::try_find_with`].
+        fn try_find<F>(timeout: Duration, predicate: F) -> Result<Self>
+        where
+            F: Fn(&ElementData) -> Result<bool>;
     }
 
     impl AppExt for App {
@@ -281,6 +287,13 @@ mod app_ext {
             F: Fn(&ElementData) -> bool,
         {
             App::find_with(provider()?, timeout, predicate)
+        }
+
+        fn try_find<F>(timeout: Duration, predicate: F) -> Result<Self>
+        where
+            F: Fn(&ElementData) -> Result<bool>,
+        {
+            App::try_find_with(provider()?, timeout, predicate)
         }
     }
 }

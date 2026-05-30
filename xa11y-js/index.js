@@ -382,7 +382,8 @@ class App extends native.App {
    * poll loop over `App.list()`, mirroring `Locator.waitUntil` — the
    * predicate runs as plain JS on the main thread, so it can use any logic.
    * Rejects with `SelectorNotMatchedError` if nothing matches before
-   * `timeout`.
+   * `timeout`. A falsy return keeps polling; if the predicate *throws*, the
+   * search aborts and that error propagates (it is not treated as no-match).
    *
    * @param {(app: App) => boolean | Promise<boolean>} predicate
    * @param {object} [options]

@@ -177,6 +177,17 @@ test('App.find() rejects with AbortError when the signal is already aborted', as
   );
 });
 
+test('App.find() propagates a predicate exception immediately (fail fast)', async () => {
+  // A falsy return means "keep polling"; a *thrown* predicate must abort the
+  // search and surface, not be swallowed as "no match".
+  NativeAppStub.__listReturn = [Object.assign(new NativeAppStub(), { name: 'X', pid: 1 })];
+  const boom = new Error('predicate blew up');
+  await assert.rejects(
+    () => App.find(() => { throw boom; }, { timeout: 30000 }),
+    (err) => err === boom,
+  );
+});
+
 test('subscribed apps from factories produce an EventEmitter Subscription', async () => {
   // End-to-end assertion of the consumer-observable bug: the value
   // returned by `.subscribe()` is an `EventEmitter`-based `Subscription`,

@@ -58,6 +58,9 @@ impl App {
     /// [`by_name_with`](Self::by_name_with): `Duration::ZERO` performs a
     /// single attempt, only [`Error::SelectorNotMatched`] triggers a retry,
     /// and a failing `list_apps()` short-circuits.
+    ///
+    /// For a predicate that can itself fail, see
+    /// [`try_find_with`](Self::try_find_with).
     pub fn find_with<F>(
         provider: Arc<dyn Provider>,
         timeout: Duration,
@@ -65,6 +68,25 @@ impl App {
     ) -> Result<Self>
     where
         F: Fn(&ElementData) -> bool,
+    {
+        Self::try_find_with(provider, timeout, move |d| Ok(predicate(d)))
+    }
+
+    /// Like [`find_with`](Self::find_with), but with a fallible predicate.
+    ///
+    /// The predicate's result drives the same retry contract the lookup uses
+    /// for the apps it enumerates: `Ok(false)` means "not this one, keep
+    /// polling", while `Err(_)` aborts the search immediately and propagates
+    /// — it is *not* treated as "no match". Language bindings use this so a
+    /// predicate exception fails fast instead of being silently swallowed and
+    /// surfacing later as a spurious timeout.
+    pub fn try_find_with<F>(
+        provider: Arc<dyn Provider>,
+        timeout: Duration,
+        predicate: F,
+    ) -> Result<Self>
+    where
+        F: Fn(&ElementData) -> Result<bool>,
     {
         Self::find_matching(provider, timeout, predicate, || {
             "application matching predicate".to_string()
@@ -81,7 +103,7 @@ impl App {
         describe: D,
     ) -> Result<Self>
     where
-        F: Fn(&ElementData) -> bool,
+        F: Fn(&ElementData) -> Result<bool>,
         D: Fn() -> String,
     {
         poll_lookup(timeout, || {
@@ -92,14 +114,18 @@ impl App {
             // significant in the selector grammar don't need escaping.
             //
             // Errors from `list_apps()` propagate so callers can distinguish
-            // "app not found" from "accessibility is broken".
+            // "app not found" from "accessibility is broken". A predicate
+            // error propagates for the same reason — `poll_lookup` only
+            // retries `SelectorNotMatched`, so anything else fails fast.
             let apps = provider.list_apps()?;
-            apps.into_iter()
-                .find(|d| predicate(d))
-                .map(|data| Self::from_data(Arc::clone(&provider), data))
-                .ok_or_else(|| Error::SelectorNotMatched {
-                    selector: describe(),
-                })
+            for data in apps {
+                if predicate(&data)? {
+                    return Ok(Self::from_data(Arc::clone(&provider), data));
+                }
+            }
+            Err(Error::SelectorNotMatched {
+                selector: describe(),
+            })
         })
     }
 
@@ -121,7 +147,7 @@ impl App {
         Self::find_matching(
             provider,
             timeout,
-            |d| d.name.as_deref() == Some(name),
+            |d| Ok(d.name.as_deref() == Some(name)),
             || format!(r#"application[name="{}"]"#, name),
         )
     }
@@ -135,7 +161,7 @@ impl App {
         Self::find_matching(
             provider,
             timeout,
-            |d| d.pid == Some(pid),
+            |d| Ok(d.pid == Some(pid)),
             || format!("application with pid={}", pid),
         )
     }
@@ -321,6 +347,37 @@ mod tests {
         let provider: Arc<dyn Provider> = build_provider();
         let err = App::find_with(provider, Duration::ZERO, |_| false)
             .expect_err("a never-true predicate must not match any app");
+        assert!(matches!(err, Error::SelectorNotMatched { .. }));
+    }
+
+    #[test]
+    fn try_find_with_propagates_predicate_error_and_fails_fast() {
+        let provider: Arc<dyn Provider> = build_provider();
+        // A generous timeout: if the predicate error were treated as "no
+        // match" the call would block for 30s. Returning immediately proves
+        // the error short-circuits the poll loop.
+        let start = Instant::now();
+        let err = App::try_find_with(provider, Duration::from_secs(30), |_| {
+            Err(Error::Platform {
+                code: 7,
+                message: "boom".to_string(),
+            })
+        })
+        .expect_err("a predicate error must propagate, not retry");
+        assert!(matches!(err, Error::Platform { code: 7, .. }));
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "predicate error must fail fast, not wait out the timeout"
+        );
+    }
+
+    #[test]
+    fn try_find_with_ok_false_keeps_polling_then_times_out() {
+        let provider: Arc<dyn Provider> = build_provider();
+        // `Ok(false)` is "not yet" — with a zero timeout that's one attempt
+        // and then a normal not-found result (no error propagation).
+        let err = App::try_find_with(provider, Duration::ZERO, |_| Ok(false))
+            .expect_err("an always-Ok(false) predicate must not match");
         assert!(matches!(err, Error::SelectorNotMatched { .. }));
     }
 }
