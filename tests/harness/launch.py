@@ -188,77 +188,56 @@ def _launch_app(
 
     import xa11y  # imported late so the module is optional for callers that don't need it
 
-    discovered_name: str | None = None
     deadline = time.monotonic() + STARTUP_TIMEOUT
-    last_err = None
 
-    while time.monotonic() < deadline:
+    # Discovery is a single waited call: `App.find` polls the accessibility
+    # API internally, so the harness no longer hand-rolls a retry loop. Match
+    # on the PID we just launched *or* any of the platform's candidate names
+    # (the process name on Linux/macOS, the window title on Windows) — matching
+    # either absorbs the per-platform registration races in one place.
+    def _is_test_app(candidate: "xa11y.App") -> bool:
+        return candidate.pid == proc.pid or candidate.name in app_names
+
+    try:
+        app = xa11y.App.find(_is_test_app, timeout=STARTUP_TIMEOUT)
+    except (xa11y.SelectorNotMatchedError, xa11y.PlatformError) as exc:
+        # Distinguish "app crashed on launch" from "app never registered".
         if proc.poll() is not None:
             out = proc.stdout.read().decode() if proc.stdout else ""
             err = proc.stderr.read().decode() if proc.stderr else ""
             raise RuntimeError(
                 f"Test app (pid={proc.pid}) exited early (code {proc.returncode}).\n"
                 f"stdout: {out}\nstderr: {err}"
-            )
-
-        # Try exact match first (fast path on Linux/macOS).
-        for name in app_names:
-            try:
-                xa11y.App.by_name(name)
-                discovered_name = name
-                break
-            except (xa11y.SelectorNotMatchedError, xa11y.PlatformError):
-                pass
-
-        # Fall back to PID-based lookup to avoid false matches against the
-        # harness's own Python process when substring matching.
-        if discovered_name is None:
-            try:
-                xa11y.App.by_pid(proc.pid)
-                discovered_name = app_names[0]
-            except (xa11y.SelectorNotMatchedError, xa11y.PlatformError) as exc:
-                last_err = exc
-
-        if discovered_name is not None:
-            break
-
-        time.sleep(0.5)
-
-    if discovered_name is None:
+            ) from exc
         try:
-            all_apps = xa11y.App.list()
-            app_list = [(a.name, a.pid) for a in all_apps]
+            app_list = [(a.name, a.pid) for a in xa11y.App.list()]
         except Exception:
             app_list = "<failed to list>"
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        _kill_app(proc)
         out = proc.stdout.read().decode() if proc.stdout else ""
         err = proc.stderr.read().decode() if proc.stderr else ""
         raise RuntimeError(
             f"Test app (pid={proc.pid}) not found after {STARTUP_TIMEOUT}s.\n"
-            f"Last error: {last_err}\n"
+            f"Last error: {exc}\n"
             f"Available apps: {app_list}\n"
             f"stdout: {out}\nstderr: {err}"
-        )
+        ) from exc
 
+    discovered_name = app.name or app_names[0]
     print(f"Test app visible: {discovered_name!r} (pid={proc.pid})")
 
-    # Wait for content to be ready if a selector was specified.
+    # Wait for content to be ready if a selector was specified — again one
+    # library call (`wait_attached`) rather than a manual poll loop.
     if content_ready_selector is not None:
         print(f"Waiting for content: {content_ready_selector!r}")
-        content_ready = False
-        while time.monotonic() < deadline:
-            try:
-                xa11y.App.by_pid(proc.pid).locator(content_ready_selector).element()
-                content_ready = True
-                break
-            except (xa11y.SelectorNotMatchedError, xa11y.PlatformError):
-                time.sleep(0.5)
-        if not content_ready:
-            print(f"WARNING: content selector {content_ready_selector!r} not ready after timeout; proceeding anyway")
+        remaining = max(deadline - time.monotonic(), 1.0)
+        try:
+            app.locator(content_ready_selector).wait_attached(timeout=remaining)
+        except (xa11y.SelectorNotMatchedError, xa11y.TimeoutError, xa11y.PlatformError):
+            print(
+                f"WARNING: content selector {content_ready_selector!r} not ready "
+                f"after timeout; proceeding anyway"
+            )
 
     return proc, discovered_name
 
