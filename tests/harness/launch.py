@@ -378,12 +378,24 @@ def _run_suites(
 
     worst_rc = 0
 
-    # Per-app suite skips. accesskit's widget schema differs from the shared
-    # python/cli/js fixtures (e.g. "Submit"/"Cancel" instead of "OK"), and its
-    # primary coverage is the Rust integ suite — skip all three harness
-    # suites.
+    # Per-app suite skips. The AccessKit app's widget schema differs from the
+    # shared OK-button fixtures, so the CLI and JS suites (which have their own
+    # AccessKit coverage) stay skipped for it.
+    #
+    # The Python suite IS wired up for AccessKit (full APP_CONFIGS entry:
+    # Submit/Cancel schema, single checkbox, no dialog), but only on Linux.
+    # Linux is the one platform where AccessKit's AT-SPI bridge
+    # (accesskit_unix) is exercised, and where its hardcoded
+    # "click"-not-"toggle" action naming makes the toggle()-via-press fallback
+    # in xa11y-linux/src/atspi.rs load-bearing — exactly the gap that went
+    # uncaught before (see tests/matrix.yaml accesskit_python_compat_on_linux).
+    # On macOS/Windows the Rust integ suite remains the canonical AccessKit
+    # coverage, so the Python suite is skipped there.
+    accesskit_skips = {"cli", "js"}
+    if sys.platform != "linux":
+        accesskit_skips.add("python")
     suite_skips_by_app = {
-        "accesskit": {"python", "cli", "js"},
+        "accesskit": accesskit_skips,
     }
 
     for suite in suites:

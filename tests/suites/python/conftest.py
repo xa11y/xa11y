@@ -178,6 +178,63 @@ APP_CONFIGS: dict[str, dict] = {
         "add_item_button_name": None,
         "remove_item_button_name": None,
     },
+    "accesskit": {
+        # The AccessKit test app (test-apps/accesskit/src/main.rs) is the
+        # canonical AccessKit-on-AT-SPI target on Linux. Its widget schema
+        # differs from the shared toolkit fixtures: buttons are Submit/Cancel
+        # (no OK), there is a single checkbox, and there is no native dialog.
+        "dialog_button_name": None,
+        "dialog_name": None,
+        # Buttons — the app uses "Submit"/"Cancel" rather than "OK"/"Cancel".
+        # The shared button tests treat ``ok_button_name`` as "the primary
+        # activation button", so Submit fills that role here.
+        "ok_button_name": "Submit",
+        "cancel_button_name": "Cancel",
+        # Submit advertises no description in the AccessKit tree.
+        "ok_button_description": None,
+        # In the AccessKit app, pressing Submit does NOT enable Cancel — the
+        # checkbox toggle is what flips ``cancel_enabled`` (see handle_action
+        # in test-apps/accesskit/src/main.rs). Tell the shared button test not
+        # to assert the OK→Cancel-enable coupling that other toolkits provide.
+        "ok_press_enables_cancel": False,
+        # Checkboxes — a single checkbox labelled "I agree to terms",
+        # initially unchecked. There is no pre-checked checkbox.
+        "has_checkbox": True,
+        "checkbox_unchecked_name": "I agree to terms",
+        "checkbox_checked_name": None,
+        # Radio buttons — Role::RadioButton, "Option A"/"Option B".
+        "has_radio": True,
+        "radio_role": "radio_button",
+        "radio_a_name": "Option A",
+        "radio_b_name": "Option B",
+        # Slider — "Volume", numeric range 0..100.
+        "slider_selector": 'slider[name="Volume"]',
+        "slider_initial_value": 50.0,
+        "slider_min": 0.0,
+        "slider_max": 100.0,
+        # Spin button — "Quantity", numeric range 0..100.
+        "spinbutton_selector": 'spin_button[name="Quantity"]',
+        # Progress bar — labelled "75%" (ProgressIndicator value 0.75).
+        "progress_bar_selector": 'progress_bar[name="75%"]',
+        # Text field — "Name". The app sets the value to "John Doe", but
+        # accesskit_unix does not surface a Role::TextInput's value through the
+        # AT-SPI Text/EditableText interface, so xa11y reads it back as None
+        # and set_value() raises TextValueNotSupported. This is the same
+        # adapter limitation the Rust integ test `action_set_value_text`
+        # tolerates. Leave the initial value unchecked and mark the field
+        # non-settable so the action tests skip rather than fail.
+        "textfield_selector": 'text_field[name="Name"]',
+        "textfield_initial_value": None,
+        "textfield_settable": False,
+        # The AccessKit app has no multiline text area.
+        "textarea_selector": None,
+        # Window name comes from the winit window title but AT-SPI reports the
+        # binary name; leave unchecked.
+        "window_name_contains": None,
+        "submit_button_name": "Submit",
+        "add_item_button_name": "Add Item",
+        "remove_item_button_name": "Remove Item",
+    },
     "egui": {
         # egui has no native dialog primitive; tests that depend on opening a
         # platform dialog skip when this is None.
@@ -330,6 +387,27 @@ def _launch_electron() -> xa11y.App:
     )
 
 
+def _launch_accesskit() -> xa11y.App:
+    # Built as part of the Cargo workspace (`cargo build -p xa11y-test-app`);
+    # the binary lands in the workspace target dir.
+    binary = str(PROJECT_ROOT / "target" / "debug" / "xa11y-test-app")
+    if not Path(binary).exists():
+        result = subprocess.run(
+            ["cargo", "build", "-p", "xa11y-test-app"],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            pytest.fail(
+                f"Failed to build AccessKit test app:\n{result.stdout}\n{result.stderr}"
+            )
+    yield from launch_test_app(
+        command=[binary, "--headless"],
+        app_names=["xa11y-test-app", "xa11y Test App"],
+    )
+
+
 def _launch_egui() -> xa11y.App:
     binary = str(
         PROJECT_ROOT / "test-apps" / "egui" / "target" / "debug" / "xa11y-egui-test-app"
@@ -363,6 +441,7 @@ _LAUNCHERS = {
     "cocoa": _launch_cocoa,
     "tauri": _launch_tauri,
     "electron": _launch_electron,
+    "accesskit": _launch_accesskit,
     "egui": _launch_egui,
 }
 

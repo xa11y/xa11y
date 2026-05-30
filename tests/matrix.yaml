@@ -80,7 +80,11 @@ rust_core:
 # coverage[app][language] = list of features covered, or [] for none.
 coverage:
   accesskit:
-    python: []          # intentional: Rust integ suite is the primary vehicle (see gaps.accesskit_python_suite)
+    # Python compat/actions run against the AccessKit app on Linux only (the
+    # harness gates this on sys.platform). The events module also runs but its
+    # assertions are xfail-guarded. On macOS/Windows the Rust integ suite stays
+    # the canonical AccessKit coverage. See note below.
+    python: [compat, actions, events]
     js: [compat, actions, input_sim, screenshot]
     cli: [compat, actions]  # CLI is Rust — natural to test against the Rust test app
 
@@ -115,13 +119,17 @@ coverage:
     cli: [compat, actions]
 
 gaps:
-  - id: accesskit_python_suite
+  - id: accesskit_python_suite_non_linux
     description: >
-      No Python compat suite for the AccessKit app. The Rust integ suite in
-      xa11y/tests/integ/ is the primary coverage vehicle; duplicating it in Python
-      would add noise without signal. CLI is covered (CLI is Rust — natural fit).
+      The Python compat/actions suite now runs against the AccessKit app on
+      Linux (tests/harness/launch.py wires it up there; see APP_CONFIGS
+      "accesskit" in tests/suites/python/conftest.py). It is intentionally NOT
+      run on macOS or Windows: AccessKit's AX/UIA bridges are already covered
+      canonically by the Rust integ suite in xa11y/tests/integ/, and the
+      Linux AT-SPI bridge (accesskit_unix) is the one with behaviour the
+      Python suite uniquely guards (the "click"-not-"toggle" action naming).
     severity: low
-    workaround: "Rust integ suite (cargo xtask test-integ) covers compat, actions, events, screenshot"
+    workaround: "Rust integ suite (cargo xtask test-integ) covers compat, actions, events, screenshot on macOS/Windows"
     affects:
       apps: [accesskit]
       language: python
@@ -148,28 +156,13 @@ gaps:
       language: python
       features: [events]
 
-  - id: accesskit_python_compat_on_linux
-    description: >
-      tests/harness/launch.py skips the python/js/cli compat suites entirely
-      for the AccessKit test app (suite_skips_by_app["accesskit"]) on the
-      grounds that the Rust integ suite is canonical for accesskit. The
-      practical consequence is that no Python/CLI test runs against
-      AccessKit on Linux — which is the only place accesskit_unix's
-      hardcoded "click"-not-"toggle" AT-SPI action naming is the underlying
-      truth. PR #211 surfaced this when the toggle()-via-press fallback in
-      xa11y-linux/src/atspi.rs was missing for every AccessKit-on-Linux
-      provider (egui, accesskit_winit, eframe, bevy, …) and no compat
-      test had caught it. The fallback is now in place plus an
-      `action_toggle_dispatches_to_click_when_toggle_unavailable` Rust
-      integ test, but the broader compat-suite gap remains.
-    severity: medium
-    workaround: >
-      Rust integ suite covers compat/actions/events/screenshot against
-      AccessKit on all three OSes; the new Rust integ test exercises the
-      specific fallback. Wiring the Python/CLI suites against AccessKit
-      would mean an APP_CONFIGS entry that maps the schema (Submit/Cancel
-      vs OK/Cancel etc.) — out of scope for #211.
-    affects:
-      apps: [accesskit]
-      language: python
+# Resolved gaps (kept here briefly for provenance):
+#   accesskit_python_compat_on_linux — the Python compat/actions suite now
+#   runs against the AccessKit app on Linux via tests/harness/launch.py, with
+#   an APP_CONFIGS "accesskit" entry mapping the Submit/Cancel schema. This
+#   exercises accesskit_unix's "click"-not-"toggle" action naming and the
+#   toggle()-via-press fallback in xa11y-linux/src/atspi.rs end-to-end through
+#   the bindings (test_checkbox_toggle_changes_state / _via_element /
+#   test_checkbox_press_via_element). The remaining (intentional) non-coverage
+#   on macOS/Windows is tracked as accesskit_python_suite_non_linux above.
 
