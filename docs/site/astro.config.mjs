@@ -28,6 +28,10 @@ export default defineConfig({
             { label: "Input Simulation", slug: "guides/input" },
             { label: "Screenshots", slug: "guides/screenshots" },
             { label: "Platform Details", slug: "guides/platform-details" },
+            {
+              label: "Accessibility Quirks",
+              slug: "guides/accessibility-quirks",
+            },
             { label: "Architecture & Design", slug: "guides/design" },
           ],
         },
