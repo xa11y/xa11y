@@ -18,19 +18,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
 
       - uses: actions/setup-python@v6
         with:
@@ -70,19 +59,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-uinput-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-uinput-
+          cache-key: uinput
 
       - name: Install system dependencies
         # libxkbcommon-dev: keysym → keycode lookup in the backend.
@@ -149,19 +129,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
 
       - uses: actions/setup-python@v6
         with:
@@ -192,19 +161,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
 
       - uses: actions/setup-python@v6
         with:
@@ -226,10 +184,10 @@ jobs:
   # ── Compatibility integ matrix: one app × one OS × all language suites ──
   #
   # Each matrix cell starts the test app once, then runs the Python, JS, and
-  # CLI suites against it via tests/harness/launch.py. This replaces the old
-  # per-language per-app per-OS jobs (run_qt_tests.sh, run_gtk_tests.sh,
-  # run_tauri_tests.sh, run_cocoa_tests.sh, run_electron_tests.sh,
-  # js-integ, js-integ-macos, js-integ-windows, electron).
+  # CLI suites against it via tests/harness/launch.py — the same entry point
+  # `cargo xtask test-<app>` uses locally (scripts/run_app_suite.sh), so local
+  # and CI share one code path. This replaced the old per-language per-app
+  # per-OS jobs and their run_<app>_tests.sh scripts.
   integ:
     name: Integ (${{ matrix.app }}) on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -256,19 +214,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-integ-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-integ-
+          cache-key: integ
 
       - uses: actions/setup-python@v6
         with:
@@ -280,17 +229,19 @@ jobs:
           cache: npm
           cache-dependency-path: xa11y-js/package-lock.json
 
-      # ── System dependencies (Linux only) ──────────────────────────
-      # Package list lives in .github/actions/setup-a11y/apt-packages.txt.
-      # The harness step below wraps the run in Xvfb + dbus-run-session, so
-      # this is install-only (electron group adds the Chromium runtime libs).
-      - name: Install system dependencies
+      # ── Accessibility environment (Linux only) ─────────────────────
+      # Install the package set AND bring up Xvfb + D-Bus + AT-SPI (and a
+      # window manager for egui, whose AccessKit bridge only publishes its
+      # tree once the window is focused). The daemons persist into the later
+      # harness step, and the action exports XA11Y_A11Y_READY so launch.py
+      # skips starting a second copy. Package list:
+      # .github/actions/setup-a11y/apt-packages.txt.
+      - name: Set up accessibility environment
         if: runner.os == 'Linux'
         uses: ./.github/actions/setup-a11y
         with:
           package-groups: base gtk electron
-          setup-display: "false"
-          setup-atspi: "false"
+          setup-window-manager: ${{ matrix.app == 'egui' }}
 
       # ── Build Rust workspace (all workspace test-app binaries) ─────
       - name: Build Rust workspace
@@ -396,28 +347,28 @@ jobs:
         run: .venv-integ/bin/pip install -r test-apps/gtk/requirements.txt
 
       # ── Grant TCC on macOS ─────────────────────────────────────────
+      # The grant must target the *resolved* interpreter (TCC matches the real
+      # on-disk binary, not the venv symlink), so compute it first, then let
+      # setup-a11y perform the grant via its macos-tcc-client path — the same
+      # sqlite write lives in scripts/grant_macos_tcc.sh for local use.
+      - name: Resolve venv python for TCC grant
+        if: runner.os == 'macOS'
+        run: echo "TCC_CLIENT=$(.venv-integ/bin/python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+
       - name: Grant accessibility TCC permission
         if: runner.os == 'macOS'
+        uses: ./.github/actions/setup-a11y
+        with:
+          macos-tcc-client: ${{ env.TCC_CLIENT }}
+
+      # Front-app focus management is input_sim-specific, NOT generic a11y
+      # setup, so it stays out of setup-a11y: CGEventPost delivers to whichever
+      # app is frontmost, and the runner image occasionally boots with Setup
+      # Assistant holding focus, making every input_sim assertion read an empty
+      # event log. Dismiss the known offenders so the test app can take front.
+      - name: Dismiss front-most onboarding windows (macOS)
+        if: runner.os == 'macOS'
         run: |
-          # GitHub Actions macOS runners allow sudo writes to the system TCC
-          # database (SIP only covers /System/*). We use named columns so the
-          # INSERT works across macOS versions regardless of how many extra
-          # columns (e.g. boots_count, is_deleted on macOS 14+) the table has.
-          PYTHON_PATH=$(.venv-integ/bin/python -c "import sys; print(sys.executable)")
-          echo "Granting TCC kTCCServiceAccessibility to: $PYTHON_PATH"
-          sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
-            "INSERT OR REPLACE INTO access(service,client,client_type,auth_value,auth_reason,auth_version,csreq,policy_id,indirect_object_identifier_type,indirect_object_identifier,indirect_object_code_identity,flags,last_modified) \
-             VALUES('kTCCServiceAccessibility','${PYTHON_PATH}',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));"
-          # Restart tccd so the new grant is picked up without waiting for the
-          # next natural reload cycle. launchctl stop triggers an auto-restart.
-          sudo launchctl stop com.apple.tccd 2>/dev/null || true
-          sleep 2
-          # The macos-latest runner image occasionally boots with the macOS
-          # Setup Assistant (or similar onboarding window) holding front-app
-          # focus. CGEventPost delivers synth events to whichever app is
-          # frontmost, so when this happens every input_sim assertion fails
-          # with an empty event log even though Tauri's window is visible.
-          # Dismiss the known offenders so the test app can take front.
           for app in "Setup Assistant" "Notification Center" "Software Update"; do
             sudo killall "$app" 2>/dev/null || true
           done
@@ -430,23 +381,13 @@ jobs:
           path: test-apps/cocoa/xa11y-cocoa-test-app
           key: ${{ runner.os }}-cocoa-app-${{ hashFiles('test-apps/cocoa/main.swift', 'test-apps/cocoa/Makefile') }}
 
-      # ── Run harness (Linux: wrapped in Xvfb + dbus-run-session) ───
+      # ── Run harness ───────────────────────────────────────────────
+      # On Linux, DISPLAY / D-Bus / AT-SPI (+ the egui window manager) were
+      # already brought up by the setup-a11y step above, and XA11Y_A11Y_READY
+      # tells launch.py not to start a second AT-SPI stack.
       - name: Run integration harness (Linux)
         if: runner.os == 'Linux'
-        run: |
-          export DISPLAY=:99
-          Xvfb :99 -screen 0 1280x1024x24 -ac &
-          sleep 1
-          # egui needs a window manager: AccessKit's AT-SPI bridge only
-          # publishes the tree once the window has been mapped/focused, and
-          # bare Xvfb does no focus management. Start fluxbox just for the
-          # apps that need it (other apps publish their tree without a WM
-          # and we don't want to perturb their existing pass).
-          if [ "${{ matrix.app }}" = "egui" ]; then
-            fluxbox >/dev/null 2>&1 &
-            sleep 1
-          fi
-          dbus-run-session -- .venv-integ/bin/python tests/harness/launch.py ${{ matrix.app }} python js cli
+        run: .venv-integ/bin/python tests/harness/launch.py ${{ matrix.app }} python js cli
 
       - name: Run integration harness (macOS)
         if: runner.os == 'macOS'
@@ -477,19 +418,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-examples-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-examples-
+          cache-key: examples
 
       - uses: actions/setup-python@v6
         with:
@@ -501,15 +433,14 @@ jobs:
           cache: npm
           cache-dependency-path: xa11y-js/package-lock.json
 
-      # Package list lives in .github/actions/setup-a11y/apt-packages.txt.
-      # The "Run examples" step sets up Xvfb + dbus-run-session itself, so
-      # this is install-only.
-      - name: Install system dependencies
+      # Install the package set AND bring up Xvfb + D-Bus + AT-SPI, which
+      # persist into the "Run examples" step (and export DISPLAY/DBUS to
+      # GITHUB_ENV). Package list:
+      # .github/actions/setup-a11y/apt-packages.txt.
+      - name: Set up accessibility environment
         uses: ./.github/actions/setup-a11y
         with:
           package-groups: base
-          setup-display: "false"
-          setup-atspi: "false"
 
       # ── Build everything the examples need ───────────────────────────
       - name: Build workspace (test app, CLI, Rust example)
@@ -536,25 +467,17 @@ jobs:
         run: npm install && npm run build:debug
 
       # ── Run all four examples ────────────────────────────────────────
-      # Wraps every run in Xvfb + dbus-run-session + the AT-SPI bridge setup
-      # that the existing integ harness uses (scripts/setup_linux_a11y.sh).
+      # DISPLAY / D-Bus / AT-SPI were brought up by the setup-a11y step above
+      # and persist here, so each example can launch the test app and connect.
       - name: Run examples
         env:
           RUST_BACKTRACE: "1"
         run: |
-          export DISPLAY=:99
-          Xvfb :99 -screen 0 1280x1024x24 -ac &
-          XVFB_PID=$!
-          trap "kill $XVFB_PID 2>/dev/null || true" EXIT
-          sleep 1
-          dbus-run-session -- bash -c '
-            set -euo pipefail
-            source scripts/setup_linux_a11y.sh
-            echo "::group::Rust example"   ; cargo run -p xa11y-example-end-to-end          ; echo "::endgroup::"
-            echo "::group::Python example" ; .venv-examples/bin/python -u examples/python/end_to_end.py ; echo "::endgroup::"
-            echo "::group::JS example"     ; node examples/js/end_to_end.mjs                ; echo "::endgroup::"
-            echo "::group::CLI example"    ; bash examples/cli/end_to_end.sh                ; echo "::endgroup::"
-          '
+          set -euo pipefail
+          echo "::group::Rust example"   ; cargo run -p xa11y-example-end-to-end          ; echo "::endgroup::"
+          echo "::group::Python example" ; .venv-examples/bin/python -u examples/python/end_to_end.py ; echo "::endgroup::"
+          echo "::group::JS example"     ; node examples/js/end_to_end.mjs                ; echo "::endgroup::"
+          echo "::group::CLI example"    ; bash examples/cli/end_to_end.sh                ; echo "::endgroup::"
 
   # ── Lint & format ──────────────────────────────────────────────────
   lint:
@@ -563,21 +486,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
         with:
           components: clippy, rustfmt
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-lint-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-lint-
+          cache-key: lint
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -630,21 +543,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
         with:
           targets: x86_64-apple-darwin,aarch64-apple-darwin,x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-cross-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-cross-
+          cache-key: cross
 
       - name: Check xa11y-core compiles for all targets
         run: |
@@ -660,25 +563,20 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-python-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-python-
+          cache-key: python
 
-      # xa11y-linux now links libxkbcommon for the Wayland input backend.
-      # The Python wheel embeds xa11y, so it pulls the .so dependency in
-      # transitively at link time on Linux.
+      # xa11y-linux links libxkbcommon for the Wayland input backend; the
+      # Python wheel embeds xa11y and pulls the .so in transitively at link
+      # time. Installed from the shared package list ([link] group).
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
+        uses: ./.github/actions/setup-a11y
+        with:
+          package-groups: link
+          setup-display: "false"
+          setup-atspi: "false"
 
       - uses: actions/setup-python@v6
         with:
@@ -800,9 +698,15 @@ jobs:
       # xa11y-js → xa11y → xa11y-linux requires libxkbcommon to link on
       # Linux. macOS / Windows skip this — those runners don't pull
       # xa11y-linux in.
+      # libxkbcommon-dev (xa11y-linux Wayland input backend) via the shared
+      # package list. The action no-ops the apt step off Linux.
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
+        uses: ./.github/actions/setup-a11y
+        with:
+          package-groups: link
+          setup-display: "false"
+          setup-atspi: "false"
 
       - uses: actions/setup-node@v6
         with:
@@ -847,27 +751,37 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
+      - name: Set up Rust (nightly)
+        uses: ./.github/actions/setup-rust
+        with:
+          toolchain: nightly
+          cache-key: fuzz
+          cache-paths: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            xa11y-fuzz/fuzz/target
 
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz
 
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            xa11y-fuzz/fuzz/target
-          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-fuzz-
-
       - name: Run fuzz targets
+        # A libFuzzer crash exits non-zero and writes a reproducer under
+        # fuzz/artifacts/. We run every target even if an earlier one crashes
+        # (so a single failure doesn't mask the others), then fail the job if
+        # any of them crashed. Previously this used `|| true`, which meant a
+        # genuine fuzz-discovered crash never failed CI — see Tenet 1 (no
+        # silent fallbacks): a crash is signal, not noise.
         run: |
           cd xa11y-fuzz/fuzz
+          failed=""
           for target in tree_ops selector query serde; do
             echo "=== Fuzzing $target for 10s ==="
-            cargo +nightly fuzz run $target -- -max_total_time=10 || true
+            if ! cargo +nightly fuzz run "$target" -- -max_total_time=10; then
+              echo "::error::fuzz target '$target' crashed (reproducer in xa11y-fuzz/fuzz/artifacts/$target/)"
+              failed="$failed $target"
+            fi
           done
+          if [ -n "$failed" ]; then
+            echo "Fuzz targets crashed:$failed"
+            exit 1
+          fi

@@ -1,11 +1,43 @@
 version: 2
 updates:
+  # ── Rust ───────────────────────────────────────────────────────────
   - package-ecosystem: "cargo"
     directory: "/"
     schedule:
       interval: "weekly"
 
+  # ── GitHub Actions ─────────────────────────────────────────────────
   - package-ecosystem: "github-actions"
     directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # ── npm ────────────────────────────────────────────────────────────
+  # JS bindings, the docs site, and the Electron test app each carry their
+  # own lockfile, so Dependabot needs an entry per directory.
+  - package-ecosystem: "npm"
+    directory: "/xa11y-js"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "npm"
+    directory: "/docs/site"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "npm"
+    directory: "/test-apps/electron"
+    schedule:
+      interval: "weekly"
+
+  # ── Python ─────────────────────────────────────────────────────────
+  # Shared integration-test requirements and the Python bindings package.
+  - package-ecosystem: "pip"
+    directory: "/tests"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "pip"
+    directory: "/xa11y-python"
     schedule:
       interval: "weekly"

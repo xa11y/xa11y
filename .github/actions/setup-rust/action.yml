@@ -1,0 +1,66 @@
+name: "Set up Rust toolchain + cargo cache"
+description: >-
+  Install a Rust toolchain (via dtolnay/rust-toolchain) and restore the cargo
+  registry/git/build cache (via actions/cache). Wraps the boilerplate that was
+  copy-pasted into every Rust job in ci.yml so the toolchain version, cache
+  paths, and cache-key scheme live in one place.
+
+# Internal helper — not intended for external consumers (those use
+# setup-a11y). The cache `path` and `key` scheme mirror what the ci.yml jobs
+# used before this action existed, so the cache stays warm across the switch.
+
+inputs:
+  toolchain:
+    description: "Rust toolchain to install (stable, nightly, or a version)."
+    required: false
+    default: "stable"
+  components:
+    description: "Comma-separated rustup components (e.g. 'clippy, rustfmt')."
+    required: false
+    default: ""
+  targets:
+    description: "Comma-separated extra target triples to install."
+    required: false
+    default: ""
+  cache-key:
+    description: >-
+      Job-specific discriminator folded into the cache key (e.g. 'lint',
+      'integ', 'cross'). Keeps each job's cache separate, matching the
+      pre-existing per-job keys. Leave empty for the default workspace cache.
+    required: false
+    default: ""
+  cache-paths:
+    description: >-
+      Newline-separated paths to cache. Defaults to the cargo registry/git
+      plus the workspace `target` dir. Override for crates that build into a
+      different target dir (e.g. xa11y-js/target).
+    required: false
+    default: |
+      ~/.cargo/registry
+      ~/.cargo/git
+      target
+  cache:
+    description: "Set to 'false' to install the toolchain without restoring a cache."
+    required: false
+    default: "true"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: ${{ inputs.components }}
+        targets: ${{ inputs.targets }}
+
+    - name: Cache cargo registry & build
+      if: ${{ inputs.cache == 'true' }}
+      uses: actions/cache@v5
+      with:
+        path: ${{ inputs.cache-paths }}
+        # ${{ runner.os }}-cargo[-<key>]-<lockhash> — identical to the inline
+        # blocks this replaced, so existing caches are still hit.
+        key: ${{ runner.os }}-cargo${{ inputs.cache-key != '' && format('-{0}', inputs.cache-key) || '' }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo${{ inputs.cache-key != '' && format('-{0}', inputs.cache-key) || '' }}-

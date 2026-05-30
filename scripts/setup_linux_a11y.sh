@@ -65,6 +65,11 @@ dbus-send --session --print-reply --dest=org.a11y.Bus /org/a11y/bus \
     string:org.a11y.Status string:ScreenReaderEnabled variant:boolean:true \
     2>/dev/null || true
 
+# Signal to downstream tooling (notably tests/harness/launch.py) that the
+# AT-SPI environment is already up, so it doesn't start a second copy of the
+# daemons. Mirrors XA11Y_A11Y_READY exported by the setup-a11y CI action.
+export XA11Y_A11Y_READY=1
+
 # Mode 1: `... -- cmd args` — exec the command.
 if [ $# -gt 0 ] && [ "$1" = "--" ]; then
     shift

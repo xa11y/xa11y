@@ -117,6 +117,28 @@ warning. Granting TCC writes to the system TCC database (allowed on hosted
 runners because SIP only protects `/System`) and restarts `tccd` so the grant
 takes effect immediately.
 
+### Granting TCC without the action
+
+Outside GitHub Actions — a different CI system, or a local headless run — use
+the standalone helper [`scripts/grant_macos_tcc.sh`](https://github.com/xa11y/xa11y/blob/main/scripts/grant_macos_tcc.sh).
+Pass it the **resolved** interpreter path (TCC matches the real on-disk
+binary, not a venv symlink):
+
+```bash
+scripts/grant_macos_tcc.sh "$(.venv/bin/python -c 'import sys; print(sys.executable)')"
+```
+
+:::note[Why the same grant exists in two places]
+The `setup-a11y` action carries its own inline copy of this sqlite write
+rather than calling the script. That's structural, not an oversight: a
+composite action consumed by an external repo as
+`xa11y/xa11y/.github/actions/setup-a11y@main` only receives the action's own
+directory — it doesn't get a checkout of the rest of the repo, so it can't
+reach `scripts/`. The action must be self-contained to work for external
+consumers; the script serves the contexts the action can't (local dev, other
+CI). Keep the two in sync — each side says so in a comment.
+:::
+
 ## Windows
 
 Nothing to set up — UI Automation is available on hosted `windows-latest`
