@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [main, master]
 
+# Cancel superseded runs on a branch/PR so rapid pushes don't pile up full
+# matrix runs. We never cancel pushes to main/master (release-relevant), only
+# in-progress PR runs that a newer commit has obsoleted.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -Dwarnings
@@ -188,6 +195,10 @@ jobs:
   # `cargo xtask test-<app>` uses locally (scripts/run_app_suite.sh), so local
   # and CI share one code path. This replaced the old per-language per-app
   # per-OS jobs and their run_<app>_tests.sh scripts.
+  #
+  # Each cell builds the workspace itself; the shared sccache in setup-rust
+  # keeps that cheap (warm rustc cache reused across cells and runs) without
+  # serializing the matrix behind a build-once job.
   integ:
     name: Integ (${{ matrix.app }}) on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
@@ -196,8 +207,11 @@ jobs:
       matrix:
         include:
           - { os: ubuntu-latest,  app: accesskit }
-          - { os: macos-latest,   app: accesskit }
-          - { os: windows-latest, app: accesskit }
+          # AccessKit on macOS/Windows is covered by the Windows Rust integ
+          # job and the local macOS harness; those integ cells ran no language
+          # suites (cli+js are skipped for accesskit, and python is skipped off
+          # Linux — see suite_skips_by_app in tests/harness/launch.py), so they
+          # only burned a build with nothing to test. Dropped.
           - { os: ubuntu-latest,  app: qt }
           - { os: ubuntu-latest,  app: gtk }
           - { os: ubuntu-latest,  app: tauri }
@@ -622,19 +636,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
+      # Shares the sccache compilation cache with the js/integ jobs that build
+      # the same xa11y-js native binding; rust-cache stores xa11y-js/target.
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            xa11y-js/target
-          key: ${{ runner.os }}-cargo-docs-${{ hashFiles('xa11y-js/Cargo.lock', '**/Cargo.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-docs-
+          cache-key: docs
+          workspaces: xa11y-js -> target
 
       # napi build links xa11y-js → xa11y → xa11y-linux on the Linux
       # docs runner; xa11y-linux now needs libxkbcommon at link time.
@@ -693,19 +701,13 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry & build
-        uses: actions/cache@v5
+      # Shares the sccache compilation cache with the docs/integ jobs that
+      # build the same native binding; rust-cache stores xa11y-js/target.
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            xa11y-js/target
-          key: ${{ runner.os }}-cargo-js-${{ hashFiles('xa11y-js/Cargo.lock', '**/Cargo.toml') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-js-
+          cache-key: js
+          workspaces: xa11y-js -> target
 
       # xa11y-js → xa11y → xa11y-linux requires libxkbcommon to link on
       # Linux. macOS / Windows skip this — those runners don't pull
@@ -768,10 +770,18 @@ jobs:
         with:
           toolchain: nightly
           cache-key: fuzz
-          cache-paths: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            xa11y/fuzz/target
+          # cargo-fuzz builds into xa11y/fuzz/target; rust-cache covers
+          # ~/.cargo (registry/git) automatically.
+          workspaces: xa11y/fuzz -> target
+
+      # Cache the cargo-fuzz binary so we don't recompile it from source every
+      # run (mirrors the cargo-deny cache in license-check).
+      - name: Cache cargo-fuzz binary
+        id: cache-cargo-fuzz
+        uses: actions/cache@v5
+        with:
+          path: ~/.cargo/bin/cargo-fuzz
+          key: cargo-fuzz-${{ runner.os }}-${{ runner.arch }}
 
       # The fuzz binaries link xa11y → xa11y-linux, which needs libxkbcommon
       # at link time ([link] group). Without it the targets fail to link
@@ -784,6 +794,7 @@ jobs:
           setup-atspi: "false"
 
       - name: Install cargo-fuzz
+        if: steps.cache-cargo-fuzz.outputs.cache-hit != 'true'
         run: cargo install cargo-fuzz
 
       - name: Run fuzz targets

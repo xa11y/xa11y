@@ -1,13 +1,25 @@
 name: "Set up Rust toolchain + cargo cache"
 description: >-
-  Install a Rust toolchain (via dtolnay/rust-toolchain) and restore the cargo
-  registry/git/build cache (via actions/cache). Wraps the boilerplate that was
-  copy-pasted into every Rust job in ci.yml so the toolchain version, cache
-  paths, and cache-key scheme live in one place.
+  Install a Rust toolchain (via dtolnay/rust-toolchain), wire up a shared
+  sccache compilation cache (GitHub Actions backend, shared across every job
+  and run), and restore the cargo registry/build cache (via Swatinem/rust-cache).
+  Wraps the boilerplate that was copy-pasted into every Rust job in ci.yml so
+  the toolchain version and cache scheme live in one place.
 
 # Internal helper — not intended for external consumers (those use
-# setup-a11y). The cache `path` and `key` scheme mirror what the ci.yml jobs
-# used before this action existed, so the cache stays warm across the switch.
+# setup-a11y).
+#
+# Two complementary caches are layered here:
+#   * sccache (RUSTC_WRAPPER) caches individual rustc invocations in the GHA
+#     cache backend, *shared across every job and run*. This is what stops the
+#     14 integ cells + unit jobs + bindings from each recompiling xa11y core
+#     and its dependency tree from scratch.
+#   * Swatinem/rust-cache caches ~/.cargo (registry/git) and the target dir,
+#     scoped per job via the cache-key discriminator, so crate downloads and
+#     final link artifacts survive between runs.
+# CARGO_INCREMENTAL=0 is required for sccache to cache effectively (incremental
+# compilation units aren't cacheable); the shared rustc cache more than makes
+# up for the loss.
 
 inputs:
   toolchain:
@@ -24,21 +36,18 @@ inputs:
     default: ""
   cache-key:
     description: >-
-      Job-specific discriminator folded into the cache key (e.g. 'lint',
-      'integ', 'cross'). Keeps each job's cache separate, matching the
-      pre-existing per-job keys. Leave empty for the default workspace cache.
+      Job-specific discriminator folded into the rust-cache key (e.g. 'lint',
+      'integ', 'cross'). Keeps each job's target cache separate. Leave empty
+      for the default workspace cache.
     required: false
     default: ""
-  cache-paths:
+  workspaces:
     description: >-
-      Newline-separated paths to cache. Defaults to the cargo registry/git
-      plus the workspace `target` dir. Override for crates that build into a
-      different target dir (e.g. xa11y-js/target).
+      Newline-separated `path -> target-dir` entries passed to
+      Swatinem/rust-cache. Defaults to the workspace root. Override for crates
+      that build into a different location (e.g. 'xa11y/fuzz -> target').
     required: false
-    default: |
-      ~/.cargo/registry
-      ~/.cargo/git
-      target
+    default: ". -> target"
   cache:
     description: "Set to 'false' to install the toolchain without restoring a cache."
     required: false
@@ -54,13 +63,24 @@ runs:
         components: ${{ inputs.components }}
         targets: ${{ inputs.targets }}
 
-    - name: Cache cargo registry & build
+    - name: Set up sccache
+      uses: mozilla-actions/sccache-action@v0.0.10
+
+    - name: Enable sccache (shared rustc cache) + disable incremental
+      shell: bash
+      run: |
+        {
+          echo "SCCACHE_GHA_ENABLED=true"
+          echo "RUSTC_WRAPPER=sccache"
+          echo "CARGO_INCREMENTAL=0"
+        } >> "$GITHUB_ENV"
+
+    - name: Cache cargo registry & build (Swatinem/rust-cache)
       if: ${{ inputs.cache == 'true' }}
-      uses: actions/cache@v5
+      uses: Swatinem/rust-cache@v2
       with:
-        path: ${{ inputs.cache-paths }}
-        # ${{ runner.os }}-cargo[-<key>]-<lockhash> — identical to the inline
-        # blocks this replaced, so existing caches are still hit.
-        key: ${{ runner.os }}-cargo${{ inputs.cache-key != '' && format('-{0}', inputs.cache-key) || '' }}-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo${{ inputs.cache-key != '' && format('-{0}', inputs.cache-key) || '' }}-
+        # Folded into rust-cache's auto key (job id + os + rustc + lockfiles),
+        # mirroring the old per-job ${{ runner.os }}-cargo-<key> scheme.
+        key: ${{ inputs.cache-key }}
+        workspaces: ${{ inputs.workspaces }}
+        cache-on-failure: "true"
