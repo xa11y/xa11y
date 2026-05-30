@@ -761,6 +761,16 @@ jobs:
             ~/.cargo/git
             xa11y/fuzz/target
 
+      # The fuzz binaries link xa11y → xa11y-linux, which needs libxkbcommon
+      # at link time ([link] group). Without it the targets fail to link
+      # (rust-lld: unable to find -lxkbcommon) before any fuzzing happens.
+      - name: Install link dependencies
+        uses: ./.github/actions/setup-a11y
+        with:
+          package-groups: link
+          setup-display: "false"
+          setup-atspi: "false"
+
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz
 
