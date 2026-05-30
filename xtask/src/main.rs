@@ -20,13 +20,13 @@ COMMANDS:
     test-integ-wayland-container  Run Linux Wayland portal screenshot tests in container
     test-integ-wayland-uinput-container  Run Linux Wayland uinput input-sim e2e tests in container
     test-integ-input-smoke-container  Run Linux XTest input smoke in container
-    test-qt             Run Qt (PySide6) integration tests
-    test-gtk            Run GTK4 integration tests
-    test-cocoa          Run Cocoa/AppKit integration tests (macOS only)
-    test-tauri          Run Tauri integration tests
-    test-electron       Run Electron integration tests (Linux only)
-    test-egui           Run egui (eframe) integration tests
-    test-apps           Run all app integration test suites (qt, gtk, cocoa, tauri, electron, egui)
+    test-qt [SUITE..]   Run Qt (PySide6) integration tests (default suites: python js cli)
+    test-gtk [SUITE..]  Run GTK4 integration tests
+    test-cocoa [SUITE..]  Run Cocoa/AppKit integration tests (macOS only)
+    test-tauri [SUITE..]  Run Tauri integration tests
+    test-electron [SUITE..]  Run Electron integration tests (Linux only)
+    test-egui [SUITE..]  Run egui (eframe) integration tests
+    test-apps           Run the Python suite for every app (qt, gtk, cocoa, tauri, electron, egui)
     test-compat [APP]   Run shared harness (python + js + cli suites) against APP (default: tauri)
     test-matrix-check   Validate the tests/matrix.yaml coverage index
     docs                Build documentation
@@ -56,12 +56,12 @@ fn main() -> ExitCode {
         "test-integ-wayland-container" => do_test_integ_wayland_container(),
         "test-integ-wayland-uinput-container" => do_test_integ_wayland_uinput_container(),
         "test-integ-input-smoke-container" => do_test_integ_input_smoke_container(),
-        "test-qt" => do_test_qt(),
-        "test-gtk" => do_test_gtk(),
-        "test-cocoa" => do_test_cocoa(),
-        "test-tauri" => do_test_tauri(),
-        "test-electron" => do_test_electron(),
-        "test-egui" => do_test_egui(),
+        "test-qt" => do_test_qt(rest),
+        "test-gtk" => do_test_gtk(rest),
+        "test-cocoa" => do_test_cocoa(rest),
+        "test-tauri" => do_test_tauri(rest),
+        "test-electron" => do_test_electron(rest),
+        "test-egui" => do_test_egui(rest),
         "test-apps" => do_test_apps(),
         "test-compat" => do_test_compat(rest),
         "test-matrix-check" => do_test_matrix_check(),
@@ -401,61 +401,64 @@ fn do_test_integ_input_smoke_container() -> bool {
     )
 }
 
-fn do_test_qt() -> bool {
-    heading("Qt integration tests (PySide6)");
+// The per-app test commands all funnel through the same shared runner
+// (scripts/run_app_suite.sh), which sets up the environment, builds the app,
+// and hands off to tests/harness/launch.py — the same harness CI invokes. Any
+// trailing args are passed through as the suite list (default: python js cli).
+fn do_test_app_suite(app: &str, suites: &[String], label: &str) -> bool {
+    heading(label);
     let root = project_root();
-    run_in("bash", &["scripts/run_qt_tests.sh"], &root)
+    let mut args = vec!["scripts/run_app_suite.sh", app];
+    args.extend(suites.iter().map(|s| s.as_str()));
+    run_in("bash", &args, &root)
 }
 
-fn do_test_gtk() -> bool {
-    heading("GTK4 integration tests");
-    let root = project_root();
-    run_in("bash", &["scripts/run_gtk_tests.sh"], &root)
+fn do_test_qt(rest: &[String]) -> bool {
+    do_test_app_suite("qt", rest, "Qt integration tests (PySide6)")
 }
 
-fn do_test_cocoa() -> bool {
-    heading("Cocoa/AppKit integration tests");
-    let root = project_root();
-    run_in("bash", &["scripts/run_cocoa_tests.sh"], &root)
+fn do_test_gtk(rest: &[String]) -> bool {
+    do_test_app_suite("gtk", rest, "GTK4 integration tests")
 }
 
-fn do_test_tauri() -> bool {
-    heading("Tauri integration tests");
-    let root = project_root();
-    run_in("bash", &["scripts/run_tauri_tests.sh"], &root)
+fn do_test_cocoa(rest: &[String]) -> bool {
+    do_test_app_suite("cocoa", rest, "Cocoa/AppKit integration tests")
 }
 
-fn do_test_electron() -> bool {
-    heading("Electron integration tests");
-    let root = project_root();
-    run_in("bash", &["scripts/run_electron_tests.sh"], &root)
+fn do_test_tauri(rest: &[String]) -> bool {
+    do_test_app_suite("tauri", rest, "Tauri integration tests")
 }
 
-fn do_test_egui() -> bool {
-    heading("egui integration tests");
-    let root = project_root();
-    run_in("bash", &["scripts/run_egui_tests.sh"], &root)
+fn do_test_electron(rest: &[String]) -> bool {
+    do_test_app_suite("electron", rest, "Electron integration tests")
+}
+
+fn do_test_egui(rest: &[String]) -> bool {
+    do_test_app_suite("egui", rest, "egui integration tests")
 }
 
 fn do_test_apps() -> bool {
     heading("All app integration tests");
+    // Run the Python suite for each app (the historical `test-apps` scope).
+    // Use the per-app commands directly for js/cli coverage on one app.
+    let py = [String::from("python")];
     let mut ok = true;
-    if !do_test_qt() {
+    if !do_test_qt(&py) {
         ok = false;
     }
-    if !do_test_gtk() {
+    if !do_test_gtk(&py) {
         ok = false;
     }
-    if env::consts::OS == "macos" && !do_test_cocoa() {
+    if env::consts::OS == "macos" && !do_test_cocoa(&py) {
         ok = false;
     }
-    if !do_test_tauri() {
+    if !do_test_tauri(&py) {
         ok = false;
     }
-    if env::consts::OS == "linux" && !do_test_electron() {
+    if env::consts::OS == "linux" && !do_test_electron(&py) {
         ok = false;
     }
-    if !do_test_egui() {
+    if !do_test_egui(&py) {
         ok = false;
     }
     ok

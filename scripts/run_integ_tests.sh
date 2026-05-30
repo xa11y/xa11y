@@ -47,50 +47,12 @@ sleep 1
 export DISPLAY="$XVFB_DISPLAY"
 echo "DISPLAY=$DISPLAY"
 
-# 2. Start AT-SPI2 bus launcher and registryd
-echo "Starting AT-SPI2 infrastructure..."
-
-# Enable AT-SPI
-export NO_AT_BRIDGE=0
-export AT_SPI_CLIENT=true
-export ACCESSIBILITY_ENABLED=1
-
-# The AT-SPI bus launcher creates a separate accessibility bus
-if command -v /usr/libexec/at-spi-bus-launcher &>/dev/null; then
-    /usr/libexec/at-spi-bus-launcher --launch-immediately &
-    CLEANUP_PIDS+=($!)
-elif command -v at-spi-bus-launcher &>/dev/null; then
-    at-spi-bus-launcher --launch-immediately &
-    CLEANUP_PIDS+=($!)
-else
-    echo "WARNING: at-spi-bus-launcher not found, AT-SPI2 may not work"
-fi
-
-sleep 1
-
-# Start the registry daemon
-if command -v /usr/libexec/at-spi2-registryd &>/dev/null; then
-    /usr/libexec/at-spi2-registryd &
-    CLEANUP_PIDS+=($!)
-elif command -v at-spi2-registryd &>/dev/null; then
-    at-spi2-registryd &
-    CLEANUP_PIDS+=($!)
-else
-    echo "WARNING: at-spi2-registryd not found"
-fi
-
-sleep 1
-
-# 2b. Enable accessibility on the AT-SPI bus (required for apps to register)
-echo "Enabling AT-SPI accessibility..."
-dbus-send --session --print-reply --dest=org.a11y.Bus /org/a11y/bus \
-    org.freedesktop.DBus.Properties.Set \
-    string:org.a11y.Status string:IsEnabled variant:boolean:true \
-    2>/dev/null || true
-dbus-send --session --print-reply --dest=org.a11y.Bus /org/a11y/bus \
-    org.freedesktop.DBus.Properties.Set \
-    string:org.a11y.Status string:ScreenReaderEnabled variant:boolean:true \
-    2>/dev/null || true
+# 2. Start AT-SPI2 (bus launcher + registryd) and flip the Status flags.
+#    Single source of truth — shared with the per-app harness and the
+#    setup-a11y CI action. The daemons it backgrounds live for the rest of
+#    this dbus-run-session, which exits when the script does.
+# shellcheck source=setup_linux_a11y.sh
+source "$(cd "$(dirname "$0")" && pwd)/setup_linux_a11y.sh"
 
 # 3. Build everything
 echo "Building workspace..."

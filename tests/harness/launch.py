@@ -136,73 +136,28 @@ def _app_command(app: str) -> tuple[list[str], dict[str, str], list[str], str | 
 # Linux accessibility setup
 # ---------------------------------------------------------------------------
 
-def _find_atspi_binary(*candidates: str) -> str | None:
-    """Return the first candidate that exists, or None."""
-    import shutil
-    for candidate in candidates:
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-        found = shutil.which(candidate)
-        if found:
-            return found
-    return None
-
-
 def _setup_linux_a11y() -> None:
     """Spawn AT-SPI2 infrastructure and enable accessibility on Linux.
 
-    Mirrors the setup done in scripts/run_qt_tests.sh.
-    Only called when DBUS_SESSION_BUS_ADDRESS is set (i.e. a D-Bus session
-    is available).
+    Delegates to scripts/setup_linux_a11y.sh — the single source of truth for
+    AT-SPI bring-up, shared with the standalone shell harnesses and the
+    setup-a11y CI action. The daemons it backgrounds survive past the script's
+    own exit, so they stay up for the suites we launch afterwards.
+
+    Only called when a D-Bus session exists and the environment hasn't already
+    been prepared (XA11Y_A11Y_READY). When CI's setup-a11y action — or a
+    wrapping `source scripts/setup_linux_a11y.sh` — already brought AT-SPI up,
+    we skip this so we don't start a second copy of the daemons.
     """
+    # These three flags must live in *our* process env (and our children's), so
+    # set them here rather than relying on the sourced script's exports, which
+    # wouldn't propagate back across the subprocess boundary.
     os.environ["NO_AT_BRIDGE"] = "0"
     os.environ["AT_SPI_CLIENT"] = "true"
     os.environ["ACCESSIBILITY_ENABLED"] = "1"
 
-    launcher = _find_atspi_binary(
-        "/usr/libexec/at-spi-bus-launcher", "at-spi-bus-launcher"
-    )
-    if launcher:
-        subprocess.Popen(
-            [launcher, "--launch-immediately"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    else:
-        print("WARNING: at-spi-bus-launcher not found, AT-SPI2 may not work")
-    time.sleep(1)
-
-    registryd = _find_atspi_binary(
-        "/usr/libexec/at-spi2-registryd", "at-spi2-registryd"
-    )
-    if registryd:
-        subprocess.Popen(
-            [registryd],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    else:
-        print("WARNING: at-spi2-registryd not found")
-    time.sleep(1)
-
-    subprocess.run(
-        [
-            "dbus-send", "--session", "--print-reply",
-            "--dest=org.a11y.Bus", "/org/a11y/bus",
-            "org.freedesktop.DBus.Properties.Set",
-            "string:org.a11y.Status", "string:IsEnabled", "variant:boolean:true",
-        ],
-        check=False,
-    )
-    subprocess.run(
-        [
-            "dbus-send", "--session", "--print-reply",
-            "--dest=org.a11y.Bus", "/org/a11y/bus",
-            "org.freedesktop.DBus.Properties.Set",
-            "string:org.a11y.Status", "string:ScreenReaderEnabled", "variant:boolean:true",
-        ],
-        check=False,
-    )
+    script = PROJECT_ROOT / "scripts" / "setup_linux_a11y.sh"
+    subprocess.run(["bash", str(script)], check=False)
 
 
 # ---------------------------------------------------------------------------
@@ -457,7 +412,11 @@ def run(app_name: str, suites: Sequence[str] | None = None) -> int:
         if s not in VALID_SUITES:
             raise ValueError(f"Unknown suite {s!r}. Valid suites: {', '.join(VALID_SUITES)}")
 
-    if sys.platform == "linux" and os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+    if (
+        sys.platform == "linux"
+        and os.environ.get("DBUS_SESSION_BUS_ADDRESS")
+        and not os.environ.get("XA11Y_A11Y_READY")
+    ):
         _setup_linux_a11y()
 
     proc: subprocess.Popen[bytes] | None = None
