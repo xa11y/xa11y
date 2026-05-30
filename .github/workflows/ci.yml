@@ -381,6 +381,22 @@ jobs:
           path: test-apps/cocoa/xa11y-cocoa-test-app
           key: ${{ runner.os }}-cocoa-app-${{ hashFiles('test-apps/cocoa/main.swift', 'test-apps/cocoa/Makefile') }}
 
+      # ── Build Cocoa test app (Swift, macOS-only) ───────────────────
+      # The Cocoa app is NOT part of the Cargo workspace, so the "Build Rust
+      # workspace" step above doesn't produce it, and launch.py — unlike
+      # run_app_suite.sh — never builds it. Without this step the binary only
+      # ever exists when restored from the cache above, so the first time that
+      # entry is evicted the harness has nothing to launch and the job dies.
+      # Build only on a cache miss (mirrors the `[ ! -f ... ]` guard in
+      # scripts/run_app_suite.sh) so a cache hit short-circuits the swiftc run,
+      # and so the post-job cache save always has a binary to store.
+      - name: Build Cocoa test app
+        if: matrix.app == 'cocoa'
+        run: |
+          if [ ! -f test-apps/cocoa/xa11y-cocoa-test-app ]; then
+            make -C test-apps/cocoa build
+          fi
+
       # ── Run harness ───────────────────────────────────────────────
       # On Linux, DISPLAY / D-Bus / AT-SPI (+ the egui window manager) were
       # already brought up by the setup-a11y step above, and XA11Y_A11Y_READY
