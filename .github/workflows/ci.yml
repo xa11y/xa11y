@@ -361,17 +361,13 @@ jobs:
         with:
           macos-tcc-client: ${{ env.TCC_CLIENT }}
 
-      # Front-app focus management is input_sim-specific, NOT generic a11y
-      # setup, so it stays out of setup-a11y: CGEventPost delivers to whichever
-      # app is frontmost, and the runner image occasionally boots with Setup
-      # Assistant holding focus, making every input_sim assertion read an empty
-      # event log. Dismiss the known offenders so the test app can take front.
-      - name: Dismiss front-most onboarding windows (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          for app in "Setup Assistant" "Notification Center" "Software Update"; do
-            sudo killall "$app" 2>/dev/null || true
-          done
+      # Front-most focus on macOS is claimed at app-launch time, not here: the
+      # harness actively activates the test app and polls until it is verified
+      # frontmost (tests.helpers.ensure_macos_frontmost), replacing the old
+      # hardcoded `killall` list of focus-stealing onboarding processes. That
+      # name-based approach rotted whenever GitHub rolled a new runner image
+      # with a different offender (issue #230); the active-claim approach is
+      # runner-image-agnostic and names whatever grabbed focus on failure.
 
       # ── Cache Cocoa test app binary ────────────────────────────────
       - name: Cache Cocoa test app binary

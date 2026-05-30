@@ -20,6 +20,83 @@ import pytest
 import xa11y
 
 STARTUP_TIMEOUT = 30  # seconds
+FRONTMOST_TIMEOUT = 10  # seconds
+
+
+def _osascript(script: str, timeout: float = 5.0) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["osascript", "-e", script],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+
+def _macos_frontmost() -> tuple[int | None, str]:
+    """Return (unix pid, name) of the current macOS frontmost app process."""
+    try:
+        result = _osascript(
+            'tell application "System Events" to tell '
+            "(first application process whose frontmost is true) "
+            'to return (unix id as text) & "\t" & name'
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        return None, f"<osascript error: {exc!r}>"
+    if result.returncode != 0:
+        return None, f"<rc={result.returncode}: {result.stderr.strip()}>"
+    pid_str, _, name = result.stdout.strip().partition("\t")
+    try:
+        return int(pid_str), name or "<unknown>"
+    except ValueError:
+        return None, result.stdout.strip() or "<empty>"
+
+
+def ensure_macos_frontmost(
+    pid: int, *, timeout: float = FRONTMOST_TIMEOUT
+) -> tuple[bool, str]:
+    """Make process ``pid`` the frontmost macOS app and verify it stuck.
+
+    On macOS ``CGEventPost`` (input_sim) and OS-level focus both target
+    whichever app is frontmost. Runner images occasionally boot with an
+    onboarding or background process holding the front slot (Setup Assistant,
+    Notification Center, Software Update, …), which silently misdirects every
+    synthetic event so the test reads an empty event log.
+
+    Rather than maintain a hardcoded kill-list of offenders — which rots every
+    time GitHub rolls a new runner image — actively claim the front via System
+    Events and poll until our PID is verified frontmost. This is
+    runner-image-agnostic: it doesn't matter *what* grabbed focus, we take it
+    back, and on failure we name the offender so CI points straight at it.
+
+    No-op on non-macOS. Returns ``(ok, detail)``.
+    """
+    if sys.platform != "darwin":
+        return True, "not macOS"
+
+    activate = (
+        'tell application "System Events" to set frontmost of '
+        f"(first process whose unix id is {pid}) to true"
+    )
+    deadline = time.monotonic() + timeout
+    front_pid: int | None = None
+    front_name = "<unknown>"
+    while time.monotonic() < deadline:
+        try:
+            _osascript(activate)
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass  # transient — retry until the deadline
+        front_pid, front_name = _macos_frontmost()
+        if front_pid == pid:
+            return True, f"frontmost (pid={pid})"
+        time.sleep(0.3)
+
+    return False, (
+        f"test app (pid={pid}) is not frontmost after {timeout:.0f}s; frontmost "
+        f"is {front_name!r} (pid={front_pid}). On macOS CGEventPost delivers "
+        f"synthetic events to the frontmost app, so input_sim and OS-focus tests "
+        f"cannot run reliably. A runner-image process grabbed the front slot — "
+        f"see https://github.com/xa11y/xa11y/issues/230."
+    )
 
 
 def launch_test_app(
@@ -28,6 +105,7 @@ def launch_test_app(
     env_overrides: dict[str, str] | None = None,
     startup_timeout: int = STARTUP_TIMEOUT,
     content_ready_selector: str | None = None,
+    require_frontmost: bool = False,
 ) -> Generator[xa11y.App, None, None]:
     """Launch a test app and yield its xa11y App handle.
 
@@ -39,6 +117,11 @@ def launch_test_app(
         content_ready_selector: If set, keep polling until this selector matches
             within the app's tree (useful for WebView apps where UI content
             loads asynchronously after the app window appears).
+        require_frontmost: On macOS, actively bring the app to the front and
+            verify it before yielding (see ensure_macos_frontmost). Set this for
+            apps with a real, activatable window whose tests depend on holding
+            the frontmost slot (input_sim via CGEventPost, OS-focus assertions).
+            No-op off macOS.
 
     Yields:
         The xa11y App for the running application.
@@ -127,6 +210,13 @@ def launch_test_app(
                 f"Content not ready: selector {content_ready_selector!r} "
                 f"not found after {startup_timeout}s."
             )
+
+    if require_frontmost and sys.platform == "darwin":
+        ok, detail = ensure_macos_frontmost(app.pid)
+        if not ok:
+            proc.terminate()
+            proc.wait(timeout=5)
+            pytest.fail(detail)
 
     yield app
 

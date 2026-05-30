@@ -34,6 +34,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 STARTUP_TIMEOUT = 30  # seconds
 
+# Apps with a real, activatable macOS window whose tests depend on holding the
+# frontmost slot — input_sim delivers CGEvents to the frontmost app, and focus
+# assertions read OS focus state. We actively claim the front before tests run
+# (see tests.helpers.ensure_macos_frontmost) instead of reactively killing a
+# hardcoded list of focus-stealing onboarding processes (issue #230). Excluded:
+# cocoa (--headless, accessory app — can't be frontmost) and accesskit
+# (synthesises its own focus events; its macOS coverage is the Rust integ
+# suite, and the Python harness skips all its suites on macOS anyway).
+_MACOS_FRONTMOST_APPS = {"tauri", "qt", "electron", "egui"}
+
 
 # ---------------------------------------------------------------------------
 # App definitions
@@ -259,6 +269,21 @@ def _launch_app(
                 time.sleep(0.5)
         if not content_ready:
             print(f"WARNING: content selector {content_ready_selector!r} not ready after timeout; proceeding anyway")
+
+    # macOS: claim the frontmost slot before handing the app to the suites, so
+    # input_sim/focus tests aren't silently misdirected to whatever onboarding
+    # process the runner image booted with (issue #230).
+    if sys.platform == "darwin" and app in _MACOS_FRONTMOST_APPS:
+        if str(PROJECT_ROOT) not in sys.path:
+            sys.path.insert(0, str(PROJECT_ROOT))
+        from tests.helpers import ensure_macos_frontmost
+
+        print(f"Ensuring test app (pid={proc.pid}) is frontmost (macOS)...")
+        ok, detail = ensure_macos_frontmost(proc.pid)
+        if not ok:
+            _kill_app(proc)
+            raise RuntimeError(detail)
+        print("Test app is frontmost.")
 
     return proc, discovered_name
 
