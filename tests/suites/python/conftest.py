@@ -300,6 +300,7 @@ def _launch_qt() -> xa11y.App:
         command=[sys.executable, script, "--pid-file", pid_file],
         app_names=["xa11y-qt-test-app", "xa11y", "python3", "python", "Python", "app.py"],
         env_overrides={"QT_ACCESSIBILITY": "1"},
+        require_frontmost=True,
     )
 
 
@@ -358,6 +359,7 @@ def _launch_tauri() -> xa11y.App:
         command=[binary],
         app_names=["xa11y-tauri-test-app"],
         content_ready_selector='button[name="OK"]',
+        require_frontmost=True,
     )
 
 
@@ -384,6 +386,7 @@ def _launch_electron() -> xa11y.App:
         command=[str(node_modules_electron), main_js, "--force-renderer-accessibility"],
         app_names=["xa11y-electron-test-app", "Electron", "xa11y"],
         content_ready_selector='button[name="OK"]',
+        require_frontmost=True,
     )
 
 
@@ -432,6 +435,7 @@ def _launch_egui() -> xa11y.App:
         command=[binary],
         app_names=["xa11y-egui-test-app"],
         content_ready_selector='button[name="OK"]',
+        require_frontmost=True,
     )
 
 
