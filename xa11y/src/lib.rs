@@ -227,7 +227,7 @@ fn create_provider_boxed() -> Result<Box<dyn Provider>> {
 mod app_ext {
     use std::time::Duration;
 
-    use super::{provider, App, Result};
+    use super::{provider, App, ElementData, Result};
 
     /// Extension trait that adds singleton-based constructors to [`App`].
     ///
@@ -253,6 +253,14 @@ mod app_ext {
         fn by_pid(pid: u32, timeout: Duration) -> Result<Self>;
         /// List all running applications using the global singleton provider.
         fn list() -> Result<Vec<Self>>;
+        /// Find an application matching `predicate` using the global
+        /// singleton provider, polling until one appears or `timeout`
+        /// elapses. `predicate` runs against each running app's
+        /// [`ElementData`] on every poll. See [`App::find_with`] for
+        /// match / timeout semantics.
+        fn find<F>(timeout: Duration, predicate: F) -> Result<Self>
+        where
+            F: Fn(&ElementData) -> bool;
     }
 
     impl AppExt for App {
@@ -266,6 +274,13 @@ mod app_ext {
 
         fn list() -> Result<Vec<Self>> {
             App::list_with(provider()?)
+        }
+
+        fn find<F>(timeout: Duration, predicate: F) -> Result<Self>
+        where
+            F: Fn(&ElementData) -> bool,
+        {
+            App::find_with(provider()?, timeout, predicate)
         }
     }
 }

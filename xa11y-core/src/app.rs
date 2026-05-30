@@ -49,6 +49,60 @@ pub struct App {
 }
 
 impl App {
+    /// Find an application matching `predicate`, using an explicit provider.
+    ///
+    /// Prefer `App::find` from the `xa11y` crate which uses the global
+    /// singleton provider. `predicate` runs against each running app's
+    /// [`ElementData`] on every poll; the first match in enumeration order
+    /// wins. Timeout / polling semantics match
+    /// [`by_name_with`](Self::by_name_with): `Duration::ZERO` performs a
+    /// single attempt, only [`Error::SelectorNotMatched`] triggers a retry,
+    /// and a failing `list_apps()` short-circuits.
+    pub fn find_with<F>(
+        provider: Arc<dyn Provider>,
+        timeout: Duration,
+        predicate: F,
+    ) -> Result<Self>
+    where
+        F: Fn(&ElementData) -> bool,
+    {
+        Self::find_matching(provider, timeout, predicate, || {
+            "application matching predicate".to_string()
+        })
+    }
+
+    /// Shared predicate-based discovery loop. `describe` supplies the
+    /// [`Error::SelectorNotMatched`] selector string so name/pid lookups keep
+    /// their specific, actionable error messages while sharing one match loop.
+    fn find_matching<F, D>(
+        provider: Arc<dyn Provider>,
+        timeout: Duration,
+        predicate: F,
+        describe: D,
+    ) -> Result<Self>
+    where
+        F: Fn(&ElementData) -> bool,
+        D: Fn() -> String,
+    {
+        poll_lookup(timeout, || {
+            // Discovery is platform-specific (CGWindowList on macOS, AT-SPI
+            // registry on Linux, UIA desktop root on Windows). `list_apps()`
+            // is the canonical enumeration primitive and we filter in Rust,
+            // so app names containing `"`, `]`, or other characters
+            // significant in the selector grammar don't need escaping.
+            //
+            // Errors from `list_apps()` propagate so callers can distinguish
+            // "app not found" from "accessibility is broken".
+            let apps = provider.list_apps()?;
+            apps.into_iter()
+                .find(|d| predicate(d))
+                .map(|data| Self::from_data(Arc::clone(&provider), data))
+                .ok_or_else(|| Error::SelectorNotMatched {
+                    selector: describe(),
+                })
+        })
+    }
+
     /// Find an application by exact name, using an explicit provider.
     ///
     /// Prefer `App::by_name` from the `xa11y` crate which uses the global
@@ -64,27 +118,12 @@ impl App {
         name: &str,
         timeout: Duration,
     ) -> Result<Self> {
-        poll_lookup(timeout, || {
-            // Discovery is platform-specific (CGWindowList on macOS, AT-SPI
-            // registry on Linux, UIA desktop root on Windows) and returns
-            // top-level apps as `role=Application` everywhere except Windows,
-            // which reports `role=Window`. The role detail no longer matters
-            // here — `list_apps()` is the canonical enumeration primitive
-            // and we filter by name in Rust, so app names containing `"`,
-            // `]`, or other characters significant in the selector grammar
-            // don't need escaping.
-            //
-            // Errors from `list_apps()` propagate so callers can distinguish
-            // "app not found" from "accessibility is broken".
-            let apps = provider.list_apps()?;
-            let data = apps
-                .into_iter()
-                .find(|d| d.name.as_deref() == Some(name))
-                .ok_or_else(|| Error::SelectorNotMatched {
-                    selector: format!(r#"application[name="{}"]"#, name),
-                })?;
-            Ok(Self::from_data(Arc::clone(&provider), data))
-        })
+        Self::find_matching(
+            provider,
+            timeout,
+            |d| d.name.as_deref() == Some(name),
+            || format!(r#"application[name="{}"]"#, name),
+        )
     }
 
     /// Find an application by process ID, using an explicit provider.
@@ -93,16 +132,12 @@ impl App {
     /// singleton provider. See [`by_name_with`](Self::by_name_with) for the
     /// timeout / polling semantics.
     pub fn by_pid_with(provider: Arc<dyn Provider>, pid: u32, timeout: Duration) -> Result<Self> {
-        poll_lookup(timeout, || {
-            let apps = provider.list_apps()?;
-            let data = apps
-                .into_iter()
-                .find(|d| d.pid == Some(pid))
-                .ok_or_else(|| Error::SelectorNotMatched {
-                    selector: format!("application with pid={}", pid),
-                })?;
-            Ok(Self::from_data(Arc::clone(&provider), data))
-        })
+        Self::find_matching(
+            provider,
+            timeout,
+            |d| d.pid == Some(pid),
+            || format!("application with pid={}", pid),
+        )
     }
 
     /// List all running applications, using an explicit provider.
@@ -269,5 +304,23 @@ mod tests {
         let el = app.as_element();
         assert_eq!(el.data().role, Role::Application);
         assert_eq!(el.data().name.as_deref(), Some("TestApp"));
+    }
+
+    #[test]
+    fn find_with_matches_by_predicate() {
+        let provider: Arc<dyn Provider> = build_provider();
+        let app = App::find_with(provider, Duration::ZERO, |d| {
+            d.name.as_deref() == Some("TestApp")
+        })
+        .expect("predicate must match TestApp in mock tree");
+        assert_eq!(app.name, "TestApp");
+    }
+
+    #[test]
+    fn find_with_no_match_returns_selector_not_matched() {
+        let provider: Arc<dyn Provider> = build_provider();
+        let err = App::find_with(provider, Duration::ZERO, |_| false)
+            .expect_err("a never-true predicate must not match any app");
+        assert!(matches!(err, Error::SelectorNotMatched { .. }));
     }
 }

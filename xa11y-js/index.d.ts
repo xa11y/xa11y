@@ -70,6 +70,16 @@ export interface WaitUntilOptions {
   signal?: AbortSignal;
 }
 
+export interface FindOptions {
+  /**
+   * Timeout in milliseconds. Default: 5000. Rejects with
+   * `SelectorNotMatchedError` if no application matches in time.
+   */
+  timeout?: number;
+  /** Abort signal for cancellation. Rejects with `AbortError`. */
+  signal?: AbortSignal;
+}
+
 // Add `waitUntil` to the napi-generated `Locator` class via interface merging.
 // The method is attached to `native.Locator.prototype` in index.js.
 declare module './native.js' {
@@ -151,6 +161,26 @@ export declare class App {
   static byPid(pid: number, options?: AppLookupOptions): Promise<App>;
   /** List all running applications with an accessibility tree. */
   static list(): Promise<App[]>;
+  /**
+   * Find an application matching `predicate`, polling until one appears or
+   * the timeout elapses.
+   *
+   * The predicate receives each running `App` on every poll (it may be
+   * async); the first for which it returns truthy resolves the promise.
+   * Rejects with `SelectorNotMatchedError` if nothing matches in time.
+   *
+   * @example
+   * ```ts
+   * const app = await App.find(
+   *   (a) => a.pid === pid || ['my-app', 'My App'].includes(a.name),
+   *   { timeout: 30000 },
+   * );
+   * ```
+   */
+  static find(
+    predicate: (app: App) => boolean | Promise<boolean>,
+    options?: FindOptions,
+  ): Promise<App>;
 
   get name(): string;
   get pid(): number | null;

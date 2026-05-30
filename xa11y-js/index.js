@@ -374,6 +374,69 @@ class App extends native.App {
   }
 
   /**
+   * Find an application matching `predicate`, polling until one appears or
+   * the timeout elapses.
+   *
+   * `predicate` receives each running `App` on every poll (it may be async);
+   * the first for which it returns truthy is returned. This is a JS-side
+   * poll loop over `App.list()`, mirroring `Locator.waitUntil` — the
+   * predicate runs as plain JS on the main thread, so it can use any logic.
+   * Rejects with `SelectorNotMatchedError` if nothing matches before
+   * `timeout`.
+   *
+   * @param {(app: App) => boolean | Promise<boolean>} predicate
+   * @param {object} [options]
+   * @param {number} [options.timeout=5000] - Timeout in milliseconds
+   * @param {AbortSignal} [options.signal] - Abort signal for cancellation
+   * @returns {Promise<App>}
+   * @example
+   * ```js
+   * const app = await App.find(
+   *   (a) => a.pid === pid || ['my-app', 'My App'].includes(a.name),
+   *   { timeout: 30000 },
+   * );
+   * ```
+   */
+  static async find(predicate, options = {}) {
+    const { timeout = 5000, signal } = options;
+    const deadline = Date.now() + timeout;
+
+    if (signal && signal.aborted) {
+      throw new DOMException('The operation was aborted', 'AbortError');
+    }
+
+    while (true) {
+      const apps = await App.list();
+      for (const app of apps) {
+        if (await predicate(app)) return app;
+      }
+
+      if (signal && signal.aborted) {
+        throw new DOMException('The operation was aborted', 'AbortError');
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        throw new SelectorNotMatchedError(
+          `No application matched predicate after ${timeout}ms`,
+        );
+      }
+
+      await new Promise((resolve, reject) => {
+        const delay = Math.min(50, remaining);
+        const timer = setTimeout(() => {
+          if (signal) signal.removeEventListener('abort', onAbort);
+          resolve();
+        }, delay);
+        const onAbort = () => {
+          clearTimeout(timer);
+          reject(new DOMException('The operation was aborted', 'AbortError'));
+        };
+        if (signal) signal.addEventListener('abort', onAbort, { once: true });
+      });
+    }
+  }
+
+  /**
    * Subscribe to accessibility events from this application.
    *
    * @param {object} [opts]

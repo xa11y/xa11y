@@ -1096,6 +1096,42 @@ impl App {
         Ok(apps.into_iter().map(Self::from_core).collect())
     }
 
+    /// Find an application matching `predicate`.
+    ///
+    /// `predicate` is called with an `App` for each running application on
+    /// every poll; the first for which it returns truthy is returned. Polls
+    /// until a match appears or `timeout` (in seconds) elapses — see
+    /// `by_name` for timeout semantics.
+    ///
+    /// ```python
+    /// app = xa11y.App.find(
+    ///     lambda a: a.pid == pid or a.name in ("my-app", "My App"),
+    ///     timeout=30.0,
+    /// )
+    /// ```
+    #[staticmethod]
+    #[pyo3(signature = (predicate, *, timeout=5.0))]
+    fn find(predicate: PyObject, timeout: f64) -> PyResult<Self> {
+        let timeout = timeout_from(timeout)?;
+        let provider = get_provider()?;
+        // The predicate is Python, so the poll loop must hold the GIL to call
+        // it (mirrors `Locator.wait_until`). `find_with` runs the same poll
+        // loop as `by_name` / `by_pid`.
+        let app = xa11y::App::find_with(provider.clone(), timeout, |data| {
+            Python::with_gil(|py| -> bool {
+                match Py::new(py, App::from_data(data, provider.clone())) {
+                    Ok(app) => predicate
+                        .call1(py, (app,))
+                        .and_then(|r| r.extract::<bool>(py))
+                        .unwrap_or(false),
+                    Err(_) => false,
+                }
+            })
+        })
+        .map_err(to_py_err)?;
+        Ok(Self::from_core(app))
+    }
+
     /// Create a Locator scoped to this application's accessibility tree.
     fn locator(&self, selector: &str) -> Locator {
         Locator {
@@ -1192,6 +1228,17 @@ impl App {
             pid: app.pid,
             provider: app.provider().clone(),
             inner_data: app.data.clone(),
+        }
+    }
+
+    /// Build a Python `App` view from raw element data — used to hand the
+    /// `find` predicate an `App` (with `.name` / `.pid`) per candidate.
+    fn from_data(data: &xa11y::ElementData, provider: Arc<dyn xa11y::Provider>) -> Self {
+        Self {
+            name: data.name.clone().unwrap_or_default(),
+            pid: data.pid,
+            provider,
+            inner_data: data.clone(),
         }
     }
 }
