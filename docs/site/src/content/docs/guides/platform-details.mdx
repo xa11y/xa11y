@@ -123,7 +123,7 @@ xa11y supports both X11 and Wayland Linux sessions. Backends are selected at run
 
 | Capability | X11 | Wayland |
 | --- | --- | --- |
-| Accessibility (AT-SPI2) | Same on both — D-Bus, no display-server dependency |
+| Accessibility (AT-SPI2) | D-Bus — no display-server dependency | D-Bus — no display-server dependency |
 | Input simulation | `XTest` extension (no setup) | `/dev/uinput` virtual evdev device (requires `input` group) |
 | Screen capture | `GetImage` on the root window | PNG URI from `org.freedesktop.portal.Screenshot` |
 
