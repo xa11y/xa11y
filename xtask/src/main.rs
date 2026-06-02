@@ -495,6 +495,12 @@ fn do_docs() -> bool {
         return false;
     }
 
+    heading("Check doc tables");
+    let tables_ok = run_in("python", &["docs/check_tables.py"], &root);
+    if !tables_ok {
+        return false;
+    }
+
     heading("Generate Python API docs");
     let gen_ok = run_in("python", &["docs/generate_python_api.py"], &root);
     if !gen_ok {

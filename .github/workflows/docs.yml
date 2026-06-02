@@ -83,6 +83,9 @@ jobs:
         working-directory: xa11y-js
         run: node scripts/patch-native-dts.mjs
 
+      - name: Check doc tables
+        run: python docs/check_tables.py
+
       - name: Generate Python API docs
         run: python docs/generate_python_api.py
 
