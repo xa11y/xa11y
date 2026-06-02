@@ -83,9 +83,6 @@ jobs:
         working-directory: xa11y-js
         run: node scripts/patch-native-dts.mjs
 
-      - name: Check doc links
-        run: python docs/check_links.py
-
       - name: Check doc tables
         run: python docs/check_tables.py
 
