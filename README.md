@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-xa11y.dev-blueviolet)](https://xa11y.dev)
 
-A Playwright-style API for driving native desktop apps on macOS, Windows, and Linux. Built for end-to-end tests, computer-use agents, and assistive tools.
+A Playwright-style library for driving native desktop apps on macOS, Windows, and Linux. Built for end-to-end tests, computer-use agents, and assistive tools.
 
 **Use cases:** end-to-end desktop testing, computer-use agents, MCP tools, assistive technology.
 
