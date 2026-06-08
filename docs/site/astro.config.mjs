@@ -8,7 +8,7 @@ export default defineConfig({
       title: "xa11y",
       customCss: ["./src/styles/custom.css"],
       description:
-        "A Playwright-style API for desktop apps. Cross-platform UI automation, end-to-end testing, and accessibility tooling for native apps on macOS, Windows, and Linux.",
+        "A Playwright-style library for desktop apps. Cross-platform UI automation, end-to-end testing, and accessibility tooling for native apps on macOS, Windows, and Linux.",
       social: [
         {
           icon: "github",
