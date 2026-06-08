@@ -3,6 +3,14 @@ import starlight from "@astrojs/starlight";
 
 export default defineConfig({
   site: "https://xa11y.dev",
+  // Astro 6.4 made `markdown.gfm` an opt-in flag whose default is supplied
+  // internally by the markdown processor, but `@astrojs/mdx` still gates
+  // `remark-gfm` on this value being truthy. Without it, GFM tables in our
+  // `.mdx` docs render as raw paragraphs (see issue #247). Set it explicitly
+  // so tables, strikethrough, and task lists render in the MDX pipeline.
+  markdown: {
+    gfm: true,
+  },
   integrations: [
     starlight({
       title: "xa11y",

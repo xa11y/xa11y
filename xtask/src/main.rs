@@ -519,7 +519,20 @@ fn do_docs() -> bool {
     if !install_ok {
         return false;
     }
-    run_in("npm", &["run", "build"], &site_dir)
+    let build_ok = run_in("npm", &["run", "build"], &site_dir);
+    if !build_ok {
+        return false;
+    }
+
+    // Source well-formedness can't catch a toolchain regression that
+    // drops every table from the rendered HTML (issue #247), so verify
+    // the built pages actually contain the <table> elements.
+    heading("Check rendered doc tables");
+    run_in(
+        "python",
+        &["docs/check_tables.py", "--rendered", "docs/site/dist"],
+        &root,
+    )
 }
 
 fn do_coverage() -> bool {

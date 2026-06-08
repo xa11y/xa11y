@@ -693,6 +693,9 @@ jobs:
         working-directory: docs/site
         run: npm run build
 
+      - name: Check rendered doc tables
+        run: python docs/check_tables.py --rendered docs/site/dist
+
   # ── JavaScript bindings ───────────────────────────────────────────
   js:
     name: JS bindings (${{ matrix.os }})
