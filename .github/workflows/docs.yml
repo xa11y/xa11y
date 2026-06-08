@@ -100,6 +100,9 @@ jobs:
         working-directory: docs/site
         run: npm run build
 
+      - name: Check rendered doc tables
+        run: python docs/check_tables.py --rendered docs/site/dist
+
       - name: Build Python API docs (Sphinx)
         working-directory: docs/python
         run: sphinx-build -b html . _build/html
