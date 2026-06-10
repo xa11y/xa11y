@@ -78,6 +78,11 @@ extern "C" {
         attribute: CFStringRef,
         value: CFTypeRef,
     ) -> i32;
+    fn safe_ax_is_attribute_settable(
+        element: AXUIElementRef,
+        attribute: CFStringRef,
+        settable: *mut bool,
+    ) -> i32;
     fn safe_ax_create_application(pid: i32) -> AXUIElementRef;
     fn safe_ax_value_get_value(value: CFTypeRef, the_type: i32, value_ptr: *mut c_void) -> bool;
     fn safe_cg_window_list_copy(option: u32, relative_to: u32) -> CFArrayRef;
@@ -862,6 +867,33 @@ fn perform_ax_action(
 }
 
 /// Set a boolean attribute. Used for Focus, Blur, Select, Expand, Collapse.
+/// Check whether `attr_name` is settable on the element.
+///
+/// Used to surface `ActionNotSupported` for attribute-backed semantic verbs
+/// (`expand` / `collapse`): every AX bridge (AppKit, AccessKit, Qt) accepts
+/// `AXUIElementSetAttributeValue` for an attribute the element does not
+/// support and silently no-ops, so a plain "set and check the error code"
+/// can never report unsupported. Matches the AT-SPI2 backend (missing action
+/// index) and the UIA backend (missing ExpandCollapse pattern).
+fn is_attr_settable(el_ptr: AXUIElementRef, attr_name: &str) -> Result<bool> {
+    let attr = CFString::new(attr_name);
+    let mut settable = false;
+    let err = unsafe {
+        safe_ax_is_attribute_settable(
+            el_ptr,
+            attr.as_concrete_TypeRef() as CFTypeRef,
+            &mut settable,
+        )
+    };
+    if err != AX_ERROR_SUCCESS {
+        return Err(Error::Platform {
+            code: err as i64,
+            message: format!("IsAttributeSettable({attr_name}) failed"),
+        });
+    }
+    Ok(settable)
+}
+
 fn set_bool_attr(
     el_ptr: AXUIElementRef,
     attr_name: &str,
@@ -2035,11 +2067,27 @@ impl Provider for MacOSProvider {
 
     fn expand(&self, element: &ElementData) -> Result<()> {
         let ax = self.get_cached(element.handle)?;
+        // Setting AXExpanded on an element that doesn't support it succeeds
+        // and silently no-ops in every bridge — check settability first so
+        // unsupported expand surfaces as ActionNotSupported (tenet 1).
+        if !is_attr_settable(ax.as_ptr(), "AXExpanded")? {
+            return Err(Error::ActionNotSupported {
+                action: "expand".to_string(),
+                role: element.role,
+            });
+        }
         set_bool_attr(ax.as_ptr(), "AXExpanded", true, "expand", element.role)
     }
 
     fn collapse(&self, element: &ElementData) -> Result<()> {
         let ax = self.get_cached(element.handle)?;
+        // See expand(): unsupported AXExpanded sets are silent no-ops.
+        if !is_attr_settable(ax.as_ptr(), "AXExpanded")? {
+            return Err(Error::ActionNotSupported {
+                action: "collapse".to_string(),
+                role: element.role,
+            });
+        }
         set_bool_attr(ax.as_ptr(), "AXExpanded", false, "collapse", element.role)
     }
 

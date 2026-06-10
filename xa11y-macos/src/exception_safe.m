@@ -9,6 +9,7 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -91,6 +92,24 @@ int safe_ax_set_attribute_value(
     @try {
         return AXUIElementSetAttributeValue(element, attribute, value);
     } @catch (NSException *e) {
+        return -9999;
+    }
+}
+
+// Safe wrapper for AXUIElementIsAttributeSettable. Converts the MacTypes
+// Boolean out-param to a C99 bool so the Rust side can use `*mut bool`.
+int safe_ax_is_attribute_settable(
+    AXUIElementRef element,
+    CFStringRef attribute,
+    bool *outSettable
+) {
+    Boolean settable = false;
+    @try {
+        AXError err = AXUIElementIsAttributeSettable(element, attribute, &settable);
+        *outSettable = (settable != 0);
+        return err;
+    } @catch (NSException *e) {
+        *outSettable = false;
         return -9999;
     }
 }
