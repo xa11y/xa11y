@@ -309,6 +309,16 @@ int safe_ax_observer_add_notification(AXObserverRef observer, AXUIElementRef ele
     }
 }
 
+// Remove a notification from an AXObserver.
+int safe_ax_observer_remove_notification(AXObserverRef observer, AXUIElementRef element,
+                                          CFStringRef notification) {
+    @try {
+        return AXObserverRemoveNotification(observer, element, notification);
+    } @catch (NSException *e) {
+        return -9999;
+    }
+}
+
 // Get the RunLoop source for an AXObserver.
 CFRunLoopSourceRef safe_ax_observer_get_run_loop_source(AXObserverRef observer) {
     @try {

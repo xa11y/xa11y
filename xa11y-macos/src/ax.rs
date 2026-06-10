@@ -92,6 +92,11 @@ extern "C" {
         notification: CFStringRef,
         refcon: *mut c_void,
     ) -> i32;
+    fn safe_ax_observer_remove_notification(
+        observer: CFTypeRef,
+        element: AXUIElementRef,
+        notification: CFStringRef,
+    ) -> i32;
     fn safe_ax_observer_get_run_loop_source(observer: CFTypeRef) -> CFTypeRef;
     fn safe_cf_run_loop_add_source(source: CFTypeRef);
     fn safe_cf_run_loop_get_current() -> CFTypeRef;
@@ -2368,9 +2373,13 @@ impl MacOSProvider {
             "AXAnnouncementRequested",
         ];
 
-        for notif in &notifications {
+        // Register every notification, failing the whole subscribe on the
+        // first error (tenet 1): a partially-registered observer would
+        // silently never deliver the missing event kinds. Mirrors the
+        // Windows backend's AddAutomationEventHandler rollback.
+        for (idx, notif) in notifications.iter().enumerate() {
             let name = CFString::new(notif);
-            let _ = unsafe {
+            let err = unsafe {
                 safe_ax_observer_add_notification(
                     observer,
                     app_element,
@@ -2378,6 +2387,37 @@ impl MacOSProvider {
                     ctx_ptr,
                 )
             };
+            if err != AX_ERROR_SUCCESS {
+                // Roll back the notifications registered so far so the
+                // observer holds no registrations referencing `ctx_ptr`
+                // when we free it below. Removal results are deliberately
+                // ignored: this is already an error path and the original
+                // registration failure is the error we surface.
+                for added in &notifications[..idx] {
+                    let added_name = CFString::new(added);
+                    let _ = unsafe {
+                        safe_ax_observer_remove_notification(
+                            observer,
+                            app_element,
+                            added_name.as_concrete_TypeRef() as CFTypeRef,
+                        )
+                    };
+                }
+                // Release everything this function owns so far: `app_element`
+                // (released after the loop on the success path), `observer`,
+                // and the leaked `ObserverContext` box. We return before the
+                // success-path release / CancelHandle ownership transfer, so
+                // nothing is double-released.
+                unsafe {
+                    safe_cf_release(app_element);
+                    safe_cf_release(observer);
+                    drop(Box::from_raw(ctx_ptr as *mut ObserverContext));
+                }
+                return Err(Error::Platform {
+                    code: err as i64,
+                    message: format!("AXObserverAddNotification({notif}) failed"),
+                });
+            }
         }
 
         unsafe { safe_cf_release(app_element) };
