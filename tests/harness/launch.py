@@ -22,7 +22,9 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Sequence
 
@@ -323,6 +325,44 @@ def _suite_command(suite: str) -> list[str]:
     raise ValueError(f"Unknown suite: {suite!r}")
 
 
+def _check_pytest_ran_tests(suite: str, junit_path: Path) -> int:
+    """Guard against a matrix cell silently running zero tests.
+
+    pytest exits 5 when it *collects* nothing, which already fails the cell.
+    The subtler gap: a run where every collected test was skipped exits 0 and
+    looks green while covering nothing. Parse the junit report and require at
+    least one executed (non-skipped) test.
+
+    Returns 0 when the suite really executed tests, 1 otherwise.
+    """
+    try:
+        root = ET.parse(junit_path).getroot()
+    except (ET.ParseError, OSError) as exc:
+        print(
+            f"ERROR: {suite} suite produced no readable junit report "
+            f"({exc}); cannot verify that any tests ran."
+        )
+        return 1
+
+    total = skipped = 0
+    # The root is <testsuites> (or a bare <testsuite>); iter() covers both.
+    for ts in root.iter("testsuite"):
+        total += int(ts.get("tests", 0))
+        skipped += int(ts.get("skipped", 0))
+
+    if total == 0:
+        print(f"ERROR: {suite} suite reported zero collected tests.")
+        return 1
+    if skipped >= total:
+        print(
+            f"ERROR: {suite} suite skipped all {total} collected tests — "
+            f"this matrix cell exercised nothing."
+        )
+        return 1
+    print(f"{suite} suite executed {total - skipped} tests ({skipped} skipped).")
+    return 0
+
+
 def _run_suites(
     app: str,
     suites: list[str],
@@ -378,9 +418,23 @@ def _run_suites(
             suite_env = env
 
         cmd = _suite_command(suite)
+
+        # pytest-based suites get a junit report so we can verify the cell
+        # actually executed tests (see _check_pytest_ran_tests).
+        junit_path: Path | None = None
+        if suite in ("python", "cli"):
+            fd, junit_name = tempfile.mkstemp(prefix=f"xa11y-{suite}-junit-", suffix=".xml")
+            os.close(fd)
+            junit_path = Path(junit_name)
+            cmd = [*cmd, f"--junitxml={junit_path}"]
+
         print(f"\n=== Running {suite} suite against {app} ===\n")
         result = subprocess.run(cmd, env=suite_env, cwd=str(PROJECT_ROOT))
         rc = result.returncode
+        if junit_path is not None:
+            if rc == 0:
+                rc = _check_pytest_ran_tests(suite, junit_path)
+            junit_path.unlink(missing_ok=True)
         if rc != 0:
             print(f"\n--- {suite} suite exited with code {rc} ---")
         if rc > worst_rc:
