@@ -82,9 +82,30 @@ pub fn try_act(element: &Element, action: &str) -> Result<()> {
     element.provider().perform_action(element, action)
 }
 
-/// Perform an action on an element, wait briefly, then re-read the app root.
+/// Post-action settle time, read from `XA11Y_TEST_SETTLE_MS` (default 100 ms).
+///
+/// Panics on an unparsable value rather than silently falling back — a typo'd
+/// override should fail the run, not quietly change timing behaviour.
+fn settle_duration() -> std::time::Duration {
+    let ms = match std::env::var("XA11Y_TEST_SETTLE_MS") {
+        Ok(v) => v
+            .parse()
+            .unwrap_or_else(|e| panic!("XA11Y_TEST_SETTLE_MS={v:?} is not a valid u64: {e}")),
+        Err(std::env::VarError::NotPresent) => 100,
+        Err(e) => panic!("XA11Y_TEST_SETTLE_MS is not valid unicode: {e}"),
+    };
+    std::time::Duration::from_millis(ms)
+}
+
+/// Perform an action on an element, wait briefly for the app to settle, then
+/// re-read the app root.
+///
+/// The settle time defaults to 100 ms and can be overridden via the
+/// `XA11Y_TEST_SETTLE_MS` environment variable (in milliseconds) — raise it
+/// on slow machines/CI runners where the action isn't reflected in the
+/// re-read tree within the default window.
 pub fn act(element: &Element, action: &str) -> App {
     try_act(element, action).unwrap_or_else(|e| panic!("Action '{}' failed: {}", action, e));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    std::thread::sleep(settle_duration());
     app_root()
 }

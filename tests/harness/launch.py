@@ -34,7 +34,9 @@ from typing import Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
-STARTUP_TIMEOUT = 30  # seconds
+# Overall app-startup / content-readiness deadline, in seconds. Overridable
+# for slow machines and loaded CI runners (matches tests/helpers.py).
+STARTUP_TIMEOUT = float(os.environ.get("XA11Y_TEST_STARTUP_TIMEOUT", "30"))
 
 # Apps with a real, activatable macOS window whose tests depend on holding the
 # frontmost slot — input_sim delivers CGEvents to the frontmost app, and focus
