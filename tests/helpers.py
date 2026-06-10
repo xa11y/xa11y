@@ -19,8 +19,16 @@ from typing import Generator
 import pytest
 import xa11y
 
-STARTUP_TIMEOUT = 30  # seconds
+# Overall app-startup / content-readiness deadline, in seconds. Overridable
+# for slow machines and loaded CI runners.
+STARTUP_TIMEOUT = float(os.environ.get("XA11Y_TEST_STARTUP_TIMEOUT", "30"))
 FRONTMOST_TIMEOUT = 10  # seconds
+
+# Poll backoff: start fast so a quickly-ready app is noticed quickly, double
+# on each miss to avoid hammering the accessibility bus, and cap the interval
+# so deadline overshoot stays modest.
+_POLL_INITIAL = 0.1  # seconds
+_POLL_CAP = 1.0  # seconds
 
 
 def _osascript(script: str, timeout: float = 5.0) -> subprocess.CompletedProcess:
@@ -80,6 +88,7 @@ def ensure_macos_frontmost(
     deadline = time.monotonic() + timeout
     front_pid: int | None = None
     front_name = "<unknown>"
+    delay = _POLL_INITIAL
     while time.monotonic() < deadline:
         try:
             _osascript(activate)
@@ -88,7 +97,8 @@ def ensure_macos_frontmost(
         front_pid, front_name = _macos_frontmost()
         if front_pid == pid:
             return True, f"frontmost (pid={pid})"
-        time.sleep(0.3)
+        time.sleep(delay)
+        delay = min(delay * 2, _POLL_CAP)
 
     return False, (
         f"test app (pid={pid}) is not frontmost after {timeout:.0f}s; frontmost "
@@ -103,7 +113,7 @@ def launch_test_app(
     command: list[str],
     app_names: list[str],
     env_overrides: dict[str, str] | None = None,
-    startup_timeout: int = STARTUP_TIMEOUT,
+    startup_timeout: float = STARTUP_TIMEOUT,
     content_ready_selector: str | None = None,
     require_frontmost: bool = False,
 ) -> Generator[xa11y.App, None, None]:
@@ -140,6 +150,7 @@ def launch_test_app(
     app = None
     deadline = time.monotonic() + startup_timeout
     last_err = None
+    delay = _POLL_INITIAL
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             out = proc.stdout.read().decode() if proc.stdout else ""
@@ -175,7 +186,8 @@ def launch_test_app(
         if app is not None:
             break
 
-        time.sleep(0.5)
+        time.sleep(delay)
+        delay = min(delay * 2, _POLL_CAP)
 
     if app is None:
         try:
@@ -196,13 +208,15 @@ def launch_test_app(
 
     if content_ready_selector is not None:
         content_deadline = time.monotonic() + startup_timeout
+        delay = _POLL_INITIAL
         while time.monotonic() < content_deadline:
             try:
                 app.locator(content_ready_selector).element()
                 break
             except (xa11y.SelectorNotMatchedError, xa11y.PlatformError,
                     xa11y.TimeoutError):
-                time.sleep(0.5)
+                time.sleep(delay)
+                delay = min(delay * 2, _POLL_CAP)
         else:
             proc.terminate()
             proc.wait(timeout=5)

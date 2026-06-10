@@ -7,7 +7,7 @@ apps:
     notes: >
       Core Rust test app (winit + AccessKit). The primary coverage vehicle is the
       Rust integ suite in xa11y/tests/integ/, not the per-app compat matrix.
-      JS integ tests also target this app for compat, actions, input_sim, and screenshot.
+      JS integ tests also target this app for compat and actions.
 
   qt:
     platforms: [linux, macos, windows]
@@ -53,21 +53,27 @@ features:
     description: "event subscription and state change detection"
     per_app: true
 
+  errors:
+    description: "error paths: invalid selectors, selector misses, wait timeouts, unsupported actions"
+    per_app: true
+
   input_sim:
     description: "input simulation: click, double-click, right-click, drag, key press, chord, type, scroll"
     per_app: false
-    tested_on: [tauri, accesskit]
+    tested_on: [tauri, electron]
     notes: >
       Tests platform input APIs, not a11y compatibility. Covered once per platform.
-      Python: Tauri app (end-to-end with event log). JS: AccessKit app (smoke tests).
+      Python: Tauri app (end-to-end with event log). JS: Tauri + Electron apps
+      (smoke tests; see the app gate in tests/suites/js/03_input_sim.test.js).
 
   screenshot:
     description: "window and element screenshots; PNG save"
     per_app: false
-    tested_on: [tauri, accesskit]
+    tested_on: [tauri, electron]
     notes: >
       Tests platform screenshot APIs. Covered once per platform.
-      Python: Tauri app. JS: AccessKit app.
+      Python: Tauri app. JS: Tauri + Electron apps. Rust: AccessKit app
+      (rust_core).
 
 # rust_core is the xa11y/tests/integ/ suite — separate from per-app compat suites.
 rust_core:
@@ -84,37 +90,39 @@ coverage:
     # harness gates this on sys.platform). The events module also runs but its
     # assertions are xfail-guarded. On macOS/Windows the Rust integ suite stays
     # the canonical AccessKit coverage. See note below.
-    python: [compat, actions, events]
-    js: [compat, actions, input_sim, screenshot]
+    python: [compat, actions, events, errors]
+    # JS input_sim/screenshot are gated to Tauri + Electron in the test files
+    # (one-per-renderer-family strategy); they self-skip for AccessKit.
+    js: [compat, actions]
     cli: [compat, actions]  # CLI is Rust — natural to test against the Rust test app
 
   qt:
-    python: [compat, actions, events]
+    python: [compat, actions, events, errors]
     js: [compat, actions]
     cli: [compat, actions]
 
   gtk:
-    python: [compat, actions]  # NOTE: events not covered (see gaps.gtk_events)
+    python: [compat, actions, events, errors]
     js: [compat, actions]
     cli: [compat, actions]
 
   cocoa:
-    python: [compat, actions, events]
+    python: [compat, actions, events, errors]
     js: [compat, actions]
     cli: [compat, actions]
 
   tauri:
-    python: [compat, actions, events, input_sim, screenshot]
-    js: [compat, actions]
+    python: [compat, actions, events, errors, input_sim, screenshot]
+    js: [compat, actions, input_sim, screenshot]
     cli: [compat, actions, input_sim, screenshot]
 
   electron:
-    python: [compat, actions]
-    js: [compat, actions]
+    python: [compat, actions, errors]
+    js: [compat, actions, input_sim, screenshot]
     cli: [compat, actions]
 
   egui:
-    python: [compat, actions, events]
+    python: [compat, actions, events, errors]
     js: [compat, actions]
     cli: [compat, actions]
 
@@ -136,27 +144,25 @@ gaps:
 
   - id: js_input_sim_per_app
     description: >
-      JS input_sim and screenshot tests run only against AccessKit and Electron.
-      Not per-app by design — tests platform input/screenshot APIs, not a11y compat.
+      JS input_sim and screenshot tests run only against Tauri and Electron
+      (the app gate at the top of tests/suites/js/03_input_sim.test.js and
+      04_screenshot.test.js). Not per-app by design — tests platform
+      input/screenshot APIs, not a11y compat.
     severity: low
-    workaround: "Python covers input_sim+screenshot on Tauri; JS covers on AccessKit+Electron"
+    workaround: "Python covers input_sim+screenshot on Tauri; JS covers on Tauri+Electron"
     affects:
-      apps: [qt, gtk, cocoa, tauri]
+      apps: [qt, gtk, cocoa]
       language: js
       features: [input_sim, screenshot]
 
-  - id: gtk_events
-    description: >
-      No event subscription tests for GTK. Only compat and actions are covered in
-      the Python GTK suite.
-    severity: low
-    workaround: "GTK event subscription is exercised via AT-SPI2 in the Rust integ suite"
-    affects:
-      apps: [gtk]
-      language: python
-      features: [events]
-
 # Resolved gaps (kept here briefly for provenance):
+#   gtk_events — the GTK test app now exposes the Dynamic widget group
+#   (Status label + Submit / Add Item / Remove Item buttons in
+#   test-apps/gtk/app.py), so the shared Python event suite runs against GTK
+#   instead of skipping on a missing Submit button. Behavioural event
+#   assertions remain xfail(strict=False) where AT-SPI2 emission is known to
+#   be unreliable, matching the other toolkits.
+#
 #   accesskit_python_compat_on_linux — the Python compat/actions suite now
 #   runs against the AccessKit app on Linux via tests/harness/launch.py, with
 #   an APP_CONFIGS "accesskit" entry mapping the Submit/Cancel schema. This

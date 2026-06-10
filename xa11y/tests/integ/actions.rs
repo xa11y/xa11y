@@ -94,20 +94,27 @@ mod tests {
         let app2 = h::app_root();
         let cb2 = app2.locator("check_box").elements().unwrap();
         assert!(!cb2.is_empty(), "Checkbox disappeared after toggle");
-        assert_ne!(
-            cb2[0].states.checked, initial,
-            "toggle() should flip checked state from {:?}",
-            initial
-        );
+        let after_toggle = cb2[0].states.checked;
 
-        // Restore initial state. Subsequent tests (notably
-        // `thrash_toggle_checkbox_5_times`, which is order-sensitive across
-        // the test app's accumulated mutable state) assume each per-test
-        // checkbox flip is net-zero. Without this restore, `thrash`'s
-        // hardcoded "after 5 toggles from Off → On" assertion flips parity.
+        // Restore initial state *before* the behavioural assertion, so a
+        // failed assertion doesn't leave the checkbox flipped. Subsequent
+        // tests (notably `thrash_toggle_checkbox_5_times`, which is
+        // order-sensitive across the test app's accumulated mutable state)
+        // assume each per-test checkbox flip is net-zero. If toggle() didn't
+        // flip the state (the assertion below fails), this second toggle is
+        // equally a no-op, so the net-zero assumption still holds. The
+        // remaining hole — a panic between the two toggles — would need a
+        // reset hook in the test app (or a baseline-aware thrash assertion)
+        // to close properly.
         h::try_act(&cb2[0], "toggle")
             .unwrap_or_else(|e| panic!("restore toggle should succeed: {e}"));
         std::thread::sleep(std::time::Duration::from_millis(150));
+
+        assert_ne!(
+            after_toggle, initial,
+            "toggle() should flip checked state from {:?}",
+            initial
+        );
     }
 
     #[test]

@@ -1558,7 +1558,13 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// Runs the Rust CLI implementation with the given args (excluding program name).
 #[pyfunction]
 fn _cli_main(args: Vec<String>) -> PyResult<()> {
-    xa11y::cli::run(&args).map_err(to_py_err)
+    xa11y::cli::run(&args).map_err(|e| match e {
+        // Underlying xa11y errors keep their typed Python exceptions.
+        xa11y::cli::CliError::Xa11y(inner) => to_py_err(inner),
+        // Usage / not-found errors are CLI-level; Display carries the full
+        // human-readable message (including the "usage error: " prefix).
+        other => XA11yError::new_err(other.to_string()),
+    })
 }
 
 // ── Test helpers ────────────────────────────────────────────────────────────

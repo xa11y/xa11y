@@ -5,7 +5,10 @@
 //! * `tree` — tree structure, role coverage, tree methods, element fields,
 //!   stateset fields, selector queries, serialization, provider operations.
 //! * `actions` — action dispatch, new actions (Blur/SetTextSelection/TypeText),
-//!   complex/stress scenarios, error paths.
+//!   complex/stress scenarios, action error paths.
+//! * `errors` — error paths on the query/wait surface: selector misses,
+//!   invalid selectors, `wait_*` timeouts, auto-wait timeouts, unknown
+//!   actions, invalid action data.
 //! * `events_{macos,windows,linux}` — platform-specific event subscription
 //!   end-to-end tests. The `#[cfg(target_os = "…")]` gate lives on the
 //!   module declaration below so individual tests don't need it.
@@ -14,6 +17,7 @@
 //! are reached from submodule tests via `use crate::integ as h;`.
 
 pub mod actions;
+pub mod errors;
 pub mod screenshot;
 pub mod tree;
 
@@ -78,9 +82,30 @@ pub fn try_act(element: &Element, action: &str) -> Result<()> {
     element.provider().perform_action(element, action)
 }
 
-/// Perform an action on an element, wait briefly, then re-read the app root.
+/// Post-action settle time, read from `XA11Y_TEST_SETTLE_MS` (default 100 ms).
+///
+/// Panics on an unparsable value rather than silently falling back — a typo'd
+/// override should fail the run, not quietly change timing behaviour.
+fn settle_duration() -> std::time::Duration {
+    let ms = match std::env::var("XA11Y_TEST_SETTLE_MS") {
+        Ok(v) => v
+            .parse()
+            .unwrap_or_else(|e| panic!("XA11Y_TEST_SETTLE_MS={v:?} is not a valid u64: {e}")),
+        Err(std::env::VarError::NotPresent) => 100,
+        Err(e) => panic!("XA11Y_TEST_SETTLE_MS is not valid unicode: {e}"),
+    };
+    std::time::Duration::from_millis(ms)
+}
+
+/// Perform an action on an element, wait briefly for the app to settle, then
+/// re-read the app root.
+///
+/// The settle time defaults to 100 ms and can be overridden via the
+/// `XA11Y_TEST_SETTLE_MS` environment variable (in milliseconds) — raise it
+/// on slow machines/CI runners where the action isn't reflected in the
+/// re-read tree within the default window.
 pub fn act(element: &Element, action: &str) -> App {
     try_act(element, action).unwrap_or_else(|e| panic!("Action '{}' failed: {}", action, e));
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    std::thread::sleep(settle_duration());
     app_root()
 }

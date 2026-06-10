@@ -61,10 +61,19 @@ impl Locator {
         self
     }
 
-    /// Return a new Locator that selects the nth match (1-based).
+    /// Return a new Locator that selects the nth match (**1-based**, like the
+    /// selector grammar's `:nth(N)` pseudo-class): `nth(1)` is the first
+    /// match, `nth(2)` the second, and so on.
     ///
     /// # Panics
-    /// Panics if `n` is 0. Use `.first()` or `.nth(1)` for the first match.
+    ///
+    /// Panics if `n` is 0 — there is no zeroth match in 1-based indexing.
+    /// Use [`first()`](Self::first) or `nth(1)` for the first match.
+    ///
+    /// This is a deliberate API decision: changing the signature to return
+    /// `Result` would be a breaking change, so the 0 case stays a panic and
+    /// is documented here instead. Language bindings validate `n` before
+    /// calling, so they surface this as a normal error rather than a panic.
     pub fn nth(mut self, n: usize) -> Self {
         assert!(n > 0, "Locator::nth() is 1-based, got 0");
         self.nth = Some(n - 1); // store 0-based internally

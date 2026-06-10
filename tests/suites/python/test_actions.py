@@ -211,6 +211,13 @@ def test_spinbutton_increment_changes_value(app, app_name, app_config):
             "round-trips through AT-SPI but the value is not applied. "
             "Tracked upstream in egui."
         )
+    if app_name == "tauri":
+        pytest.skip(
+            "WebKit's a11y bridge accepts increment()/decrement() on HTML "
+            "number inputs but never applies the value change (observed on "
+            "both AT-SPI2 and AX in CI). The spinbutton stays wired in "
+            "conftest for role/discovery coverage."
+        )
     loc = app.locator(sel)
     before = loc.element().numeric_value
     loc.increment()
@@ -229,6 +236,11 @@ def test_spinbutton_decrement_changes_value(app, app_name, app_config):
         pytest.skip(
             "egui's DragValue does not honour AccessKit's SetValue action "
             "in 0.34 (see test_spinbutton_increment_changes_value)."
+        )
+    if app_name == "tauri":
+        pytest.skip(
+            "WebKit's a11y bridge never applies increment()/decrement() on "
+            "HTML number inputs (see test_spinbutton_increment_changes_value)."
         )
     loc = app.locator(sel)
     # Ensure we have room to decrement.

@@ -28,6 +28,35 @@ from tests.helpers import launch_test_app
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
+
+class _Unsupported(str):
+    """A falsy reason string marking a widget the toolkit genuinely can't expose.
+
+    ``APP_CONFIGS`` fields carry three kinds of value:
+
+    - a real selector/name      → the widget exists; tests use it.
+    - ``unsupported("reason")`` → the *toolkit* cannot expose this widget;
+      tests skip, and the value documents why.
+    - ``None`` (plus a comment) → the test app simply hasn't been instrumented
+      for it yet (the toolkit could support it) — a parity gap to fix, not a
+      permanent skip.
+
+    Instances are falsy, so the existing ``if not value: pytest.skip(...)``
+    checks in the suites treat them exactly like ``None`` — but a bare ``None``
+    no longer ambiguously means both "can't" and "didn't bother".
+    """
+
+    __slots__ = ()
+
+    def __bool__(self) -> bool:
+        return False
+
+
+def unsupported(reason: str) -> _Unsupported:
+    """Mark an APP_CONFIGS field as genuinely unsupported by the toolkit."""
+    return _Unsupported(reason)
+
+
 # Per-app configuration dict. Each entry describes how widget names and
 # selectors differ for that toolkit. Tests use ``app_config`` to adapt.
 APP_CONFIGS: dict[str, dict] = {
@@ -70,10 +99,13 @@ APP_CONFIGS: dict[str, dict] = {
         "remove_item_button_name": "Remove Item",
     },
     "gtk": {
-        "dialog_button_name": None,
-        "dialog_name": None,
+        # Dialog — a Gtk.Window constructed with the DIALOG accessible role.
+        "dialog_button_name": "Open Dialog",
+        "dialog_name": "Sample Dialog",
         "ok_button_name": "OK",
         "cancel_button_name": "Cancel",
+        # Not asserted: the app sets a tooltip, but GTK4's tooltip→AT-SPI
+        # description mapping is not verified for this suite yet.
         "ok_button_description": None,
         "has_checkbox": True,
         "checkbox_unchecked_name": "Agree to terms",
@@ -92,12 +124,15 @@ APP_CONFIGS: dict[str, dict] = {
         "textfield_selector": "text_field",
         "textfield_initial_value": "hello world",
         "textarea_selector": "text_area",
-        "window_name_contains": None,
-        "submit_button_name": None,   # GTK test app has no Submit button
-        "add_item_button_name": None,
-        "remove_item_button_name": None,
+        "window_name_contains": None,  # not asserted for GTK
+        # Dynamic buttons for event tests (Dynamic group in app.py).
+        "submit_button_name": "Submit",
+        "add_item_button_name": "Add Item",
+        "remove_item_button_name": "Remove Item",
     },
     "cocoa": {
+        # Not instrumented yet: AppKit supports dialogs (NSPanel/NSAlert) but
+        # the Cocoa test app has no dialog-opening button.
         "dialog_button_name": None,
         "dialog_name": None,
         "ok_button_name": "OK",
@@ -119,16 +154,20 @@ APP_CONFIGS: dict[str, dict] = {
         "textfield_selector": 'text_field[name="Search"]',
         "textfield_initial_value": "hello world",
         "textarea_selector": 'text_area[name="Notes"]',
-        "window_name_contains": None,
+        "window_name_contains": None,  # not asserted for Cocoa
         "submit_button_name": "Submit",
         "add_item_button_name": "Add Item",
         "remove_item_button_name": "Remove Item",
     },
     "tauri": {
+        # Not instrumented yet: the webview could expose an ARIA dialog, but
+        # the Tauri test page has no dialog-opening button.
         "dialog_button_name": None,
         "dialog_name": None,
         "ok_button_name": "OK",
         "cancel_button_name": "Cancel",
+        # Not asserted: the OK button sets `title=`, but the webview bridges'
+        # title→description mapping is not verified for this suite yet.
         "ok_button_description": None,
         "has_checkbox": True,
         "checkbox_unchecked_name": "Agree to terms",
@@ -141,40 +180,49 @@ APP_CONFIGS: dict[str, dict] = {
         "slider_initial_value": 50.0,
         "slider_min": 0.0,
         "slider_max": 100.0,
-        "spinbutton_selector": None,  # Tauri test app has no spin_button
+        # Spin button — <input type="number" role="spinbutton"> ("Quantity")
+        # in test-apps/tauri/frontend/index.html.
+        "spinbutton_selector": 'spin_button[name="Quantity"]',
         "progress_bar_selector": 'progress_bar[name="Progress"]',
         "textfield_selector": 'text_field[name="Search"]',
         "textfield_initial_value": "hello world",
         "textarea_selector": 'text_area[name="Notes"]',
-        "window_name_contains": None,
+        "window_name_contains": None,  # not asserted for Tauri
         "submit_button_name": "Submit",
         "add_item_button_name": "Add Item",
         "remove_item_button_name": "Remove Item",
     },
     "electron": {
+        # Not instrumented yet: Chromium could expose an ARIA dialog, but the
+        # Electron test page has no dialog-opening button.
         "dialog_button_name": None,
         "dialog_name": None,
         "ok_button_name": "OK",
         "cancel_button_name": "Cancel",
-        "ok_button_description": None,
+        "ok_button_description": None,  # not asserted for Electron
         "has_checkbox": True,
         "checkbox_unchecked_name": "Agree to terms",
-        "checkbox_checked_name": None,  # Electron test app has only one checkbox
+        # Not instrumented yet: the Electron test app has only one checkbox.
+        "checkbox_checked_name": None,
+        # Not instrumented yet: the Electron test app has no radio buttons.
         "has_radio": False,
         "radio_role": None,
         "radio_a_name": None,
         "radio_b_name": None,
-        "slider_selector": None,       # Electron test app has no slider
-        "slider_initial_value": None,
-        "slider_min": None,
-        "slider_max": None,
-        "spinbutton_selector": None,   # Electron test app has no spin_button
-        "progress_bar_selector": None, # Electron test app has no progress_bar
+        # Range controls — markup mirrors the Tauri test app.
+        "slider_selector": 'slider[name="Volume"]',
+        "slider_initial_value": 50.0,
+        "slider_min": 0.0,
+        "slider_max": 100.0,
+        "spinbutton_selector": 'spin_button[name="Quantity"]',
+        "progress_bar_selector": 'progress_bar[name="Progress"]',
         "textfield_selector": 'text_field[name="Search"]',
         "textfield_initial_value": "hello world",
-        "textarea_selector": None,     # Electron test app has no text_area
-        "window_name_contains": None,
-        "submit_button_name": None,    # Electron test app has no Submit button
+        "textarea_selector": 'text_area[name="Notes"]',
+        "window_name_contains": None,  # not asserted for Electron
+        # Not instrumented yet: no Dynamic (Submit / Add Item / Remove Item)
+        # group in the Electron test app, so event tests skip.
+        "submit_button_name": None,
         "add_item_button_name": None,
         "remove_item_button_name": None,
     },
@@ -183,8 +231,12 @@ APP_CONFIGS: dict[str, dict] = {
         # canonical AccessKit-on-AT-SPI target on Linux. Its widget schema
         # differs from the shared toolkit fixtures: buttons are Submit/Cancel
         # (no OK), there is a single checkbox, and there is no native dialog.
-        "dialog_button_name": None,
-        "dialog_name": None,
+        "dialog_button_name": unsupported(
+            "the AccessKit/winit test app has no native dialog primitive"
+        ),
+        "dialog_name": unsupported(
+            "the AccessKit/winit test app has no native dialog primitive"
+        ),
         # Buttons — the app uses "Submit"/"Cancel" rather than "OK"/"Cancel".
         # The shared button tests treat ``ok_button_name`` as "the primary
         # activation button", so Submit fills that role here.
@@ -237,16 +289,19 @@ APP_CONFIGS: dict[str, dict] = {
     },
     "egui": {
         # egui has no native dialog primitive; tests that depend on opening a
-        # platform dialog skip when this is None.
-        "dialog_button_name": None,
-        "dialog_name": None,
+        # platform dialog skip.
+        "dialog_button_name": unsupported("egui has no native dialog primitive"),
+        "dialog_name": unsupported("egui has no native dialog primitive"),
         # Buttons — egui sets the AccessKit name from the visible label.
         "ok_button_name": "OK",
         "cancel_button_name": "Cancel",
         # `Response::on_hover_text` is a tooltip in egui; it does not push
         # through to AccessKit's description, so the description check is
         # skipped.
-        "ok_button_description": None,
+        "ok_button_description": unsupported(
+            "egui tooltips (on_hover_text) do not push through to the "
+            "AccessKit description"
+        ),
         # Checkboxes
         "has_checkbox": True,
         "checkbox_unchecked_name": "Agree to terms",

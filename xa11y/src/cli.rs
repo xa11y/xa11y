@@ -7,11 +7,69 @@ use std::time::Duration;
 
 use crate::*;
 
+/// CLI-level error, separating usage mistakes from operation failures so the
+/// binary can map them to distinct exit codes.
+///
+/// Exit code contract (implemented in `bin/xa11y.rs`, documented in the CLI
+/// help text):
+/// - `0` — success
+/// - `1` — operation failed (app not found, no selector match, platform error)
+/// - `2` — usage / argument error (unknown flag value, missing or invalid argument)
+#[derive(Debug)]
+pub enum CliError {
+    /// Invalid command-line usage — exit code 2.
+    Usage(String),
+    /// `find` matched no elements — exit code 1. Kept distinct from `Usage`
+    /// so scripts can tell "ran fine but found nothing" from a bad invocation.
+    NotFound(String),
+    /// An underlying xa11y operation failed — exit code 1.
+    Xa11y(Error),
+}
+
+impl CliError {
+    /// Process exit code for this error. See the contract on [`CliError`].
+    pub fn exit_code(&self) -> i32 {
+        match self {
+            CliError::Usage(_) => 2,
+            CliError::NotFound(_) | CliError::Xa11y(_) => 1,
+        }
+    }
+}
+
+impl std::fmt::Display for CliError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CliError::Usage(msg) => write!(f, "usage error: {msg}"),
+            CliError::NotFound(msg) => write!(f, "{msg}"),
+            CliError::Xa11y(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for CliError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            CliError::Xa11y(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<Error> for CliError {
+    fn from(e: Error) -> Self {
+        CliError::Xa11y(e)
+    }
+}
+
+/// Result alias for CLI operations.
+pub type CliResult<T> = std::result::Result<T, CliError>;
+
 /// Run the CLI with the given arguments (excluding the program name).
 ///
 /// Returns `Ok(())` on success, or an `Err` with a human-readable message
-/// on failure. The caller is responsible for printing the error and exiting.
-pub fn run(args: &[String]) -> Result<()> {
+/// on failure. The caller is responsible for printing the error and exiting
+/// with [`CliError::exit_code`].
+pub fn run(args: &[String]) -> CliResult<()> {
     match args.first().map(|s| s.as_str()) {
         Some("apps") => cmd_apps(),
         Some("tree") => cmd_tree(&args[1..]),
@@ -68,13 +126,19 @@ Compose a11y + input/screenshot via `find -o bounds|center`:
 Actions: press, focus, blur, toggle, expand, collapse, select, show-menu,
   scroll-into-view, increment, decrement,
   set-value (requires --value), type-text (requires --value),
-  select-text (requires --value START,END)"
+  select-text (requires --value START,END)
+
+Exit codes:
+  0  success
+  1  operation failed (app not found, no selector match, platform error)
+  2  usage error (unknown flag value, missing or invalid argument)"
     );
 }
 
 // ── Argument helpers ────────────────────────────────────────────────────────
 
-#[derive(Default)]
+// Debug is needed so tests can `expect_err` on `parse_opts` results.
+#[derive(Debug, Default)]
 pub(crate) struct Opts {
     pub app: Option<String>,
     pub pid: Option<u32>,
@@ -95,12 +159,39 @@ pub(crate) struct Opts {
     pub output_format: Option<String>,
 }
 
+/// Fetch the value for a flag at `args[i]`, erroring if the flag is trailing
+/// with no value (previously silently treated as absent — tenet 1).
+fn flag_value<'a>(args: &'a [String], i: usize, flag: &str) -> CliResult<&'a str> {
+    args.get(i)
+        .map(|s| s.as_str())
+        .ok_or_else(|| CliError::Usage(format!("{flag} requires a value")))
+}
+
+/// Fetch and parse the value for a flag at `args[i]`, erroring with a clear
+/// message if the value doesn't parse (previously `--pid abc` was silently
+/// treated as absent — tenet 1).
+fn flag_value_parsed<T: std::str::FromStr>(
+    args: &[String],
+    i: usize,
+    flag: &str,
+    expected: &str,
+) -> CliResult<T> {
+    let raw = flag_value(args, i, flag)?;
+    raw.parse().map_err(|_| {
+        CliError::Usage(format!(
+            "invalid {flag} value '{raw}' (expected {expected})"
+        ))
+    })
+}
+
 /// Parse known flags from a slice, returning the parsed Opts and the
 /// remaining positional arguments.
 ///
 /// Unknown flags are left in the positional output (so downstream callers
-/// see them and can surface a sensible error) rather than swallowed.
-pub(crate) fn parse_opts(args: &[String]) -> (Opts, Vec<String>) {
+/// see them and can surface a sensible error) rather than swallowed. Known
+/// flags require a value: a trailing flag or an unparsable numeric value is
+/// a usage error, not a silently-absent option.
+pub(crate) fn parse_opts(args: &[String]) -> CliResult<(Opts, Vec<String>)> {
     let mut opts = Opts::default();
     let mut positional = Vec::new();
     let mut i = 0;
@@ -108,123 +199,126 @@ pub(crate) fn parse_opts(args: &[String]) -> (Opts, Vec<String>) {
         match args[i].as_str() {
             "--app" => {
                 i += 1;
-                opts.app = args.get(i).cloned();
+                opts.app = Some(flag_value(args, i, "--app")?.to_string());
             }
             "--pid" => {
                 i += 1;
-                opts.pid = args.get(i).and_then(|s| s.parse().ok());
+                opts.pid = Some(flag_value_parsed(
+                    args,
+                    i,
+                    "--pid",
+                    "an integer process id",
+                )?);
             }
             "--value" => {
                 i += 1;
-                opts.value = args.get(i).cloned();
+                opts.value = Some(flag_value(args, i, "--value")?.to_string());
             }
             "--at" => {
                 i += 1;
-                opts.at = args.get(i).cloned();
+                opts.at = Some(flag_value(args, i, "--at")?.to_string());
             }
             "--from" => {
                 i += 1;
-                opts.from = args.get(i).cloned();
+                opts.from = Some(flag_value(args, i, "--from")?.to_string());
             }
             "--to" => {
                 i += 1;
-                opts.to = args.get(i).cloned();
+                opts.to = Some(flag_value(args, i, "--to")?.to_string());
             }
             "--button" => {
                 i += 1;
-                opts.button = args.get(i).cloned();
+                opts.button = Some(flag_value(args, i, "--button")?.to_string());
             }
             "--count" => {
                 i += 1;
-                opts.count = args.get(i).and_then(|s| s.parse().ok());
+                opts.count = Some(flag_value_parsed(args, i, "--count", "a positive integer")?);
             }
             "--held" => {
                 i += 1;
-                opts.held = args.get(i).cloned();
+                opts.held = Some(flag_value(args, i, "--held")?.to_string());
             }
             "--dx" => {
                 i += 1;
-                opts.dx = args.get(i).and_then(|s| s.parse().ok());
+                opts.dx = Some(flag_value_parsed(args, i, "--dx", "an integer")?);
             }
             "--dy" => {
                 i += 1;
-                opts.dy = args.get(i).and_then(|s| s.parse().ok());
+                opts.dy = Some(flag_value_parsed(args, i, "--dy", "an integer")?);
             }
             "--duration-ms" => {
                 i += 1;
-                opts.duration_ms = args.get(i).and_then(|s| s.parse().ok());
+                opts.duration_ms = Some(flag_value_parsed(
+                    args,
+                    i,
+                    "--duration-ms",
+                    "milliseconds as an integer",
+                )?);
             }
             "--region" => {
                 i += 1;
-                opts.region = args.get(i).cloned();
+                opts.region = Some(flag_value(args, i, "--region")?.to_string());
             }
             "--out" => {
                 i += 1;
-                opts.out = args.get(i).cloned();
+                opts.out = Some(flag_value(args, i, "--out")?.to_string());
             }
             "-o" => {
                 i += 1;
-                opts.output_format = args.get(i).cloned();
+                opts.output_format = Some(flag_value(args, i, "-o")?.to_string());
             }
             other => positional.push(other.to_string()),
         }
         i += 1;
     }
-    (opts, positional)
+    Ok((opts, positional))
 }
 
 // ── Parsers for complex flag values ─────────────────────────────────────────
 
-fn missing(what: &str) -> Error {
-    Error::Platform {
-        code: -1,
-        message: format!("missing {what}"),
-    }
+fn missing(what: &str) -> CliError {
+    CliError::Usage(format!("missing {what}"))
 }
 
-pub(crate) fn parse_point_arg(s: &str, ctx: &str) -> Result<Point> {
+pub(crate) fn parse_point_arg(s: &str, ctx: &str) -> CliResult<Point> {
     let parts: Vec<&str> = s.split(',').collect();
     if parts.len() != 2 {
-        return Err(Error::Platform {
-            code: -1,
-            message: format!("{ctx} must be X,Y (got: {s})"),
-        });
+        return Err(CliError::Usage(format!("{ctx} must be X,Y (got: {s})")));
     }
-    let x: i32 = parts[0].trim().parse().map_err(|_| Error::Platform {
-        code: -1,
-        message: format!("invalid X in {ctx}: {}", parts[0]),
-    })?;
-    let y: i32 = parts[1].trim().parse().map_err(|_| Error::Platform {
-        code: -1,
-        message: format!("invalid Y in {ctx}: {}", parts[1]),
-    })?;
+    let x: i32 = parts[0]
+        .trim()
+        .parse()
+        .map_err(|_| CliError::Usage(format!("invalid X in {ctx}: {}", parts[0])))?;
+    let y: i32 = parts[1]
+        .trim()
+        .parse()
+        .map_err(|_| CliError::Usage(format!("invalid Y in {ctx}: {}", parts[1])))?;
     Ok(Point::new(x, y))
 }
 
-pub(crate) fn parse_region_arg(s: &str) -> Result<Rect> {
+pub(crate) fn parse_region_arg(s: &str) -> CliResult<Rect> {
     let parts: Vec<&str> = s.split(',').collect();
     if parts.len() != 4 {
-        return Err(Error::Platform {
-            code: -1,
-            message: format!("--region must be X,Y,W,H (got: {s})"),
-        });
+        return Err(CliError::Usage(format!(
+            "--region must be X,Y,W,H (got: {s})"
+        )));
     }
-    let x: i32 = parts[0].trim().parse().map_err(|_| Error::Platform {
-        code: -1,
-        message: format!("invalid X in --region: {}", parts[0]),
-    })?;
-    let y: i32 = parts[1].trim().parse().map_err(|_| Error::Platform {
-        code: -1,
-        message: format!("invalid Y in --region: {}", parts[1]),
-    })?;
-    let width: u32 = parts[2].trim().parse().map_err(|_| Error::Platform {
-        code: -1,
-        message: format!("invalid W in --region: {}", parts[2]),
-    })?;
-    let height: u32 = parts[3].trim().parse().map_err(|_| Error::Platform {
-        code: -1,
-        message: format!("invalid H in --region: {}", parts[3]),
-    })?;
+    let x: i32 = parts[0]
+        .trim()
+        .parse()
+        .map_err(|_| CliError::Usage(format!("invalid X in --region: {}", parts[0])))?;
+    let y: i32 = parts[1]
+        .trim()
+        .parse()
+        .map_err(|_| CliError::Usage(format!("invalid Y in --region: {}", parts[1])))?;
+    let width: u32 = parts[2]
+        .trim()
+        .parse()
+        .map_err(|_| CliError::Usage(format!("invalid W in --region: {}", parts[2])))?;
+    let height: u32 = parts[3]
+        .trim()
+        .parse()
+        .map_err(|_| CliError::Usage(format!("invalid H in --region: {}", parts[3])))?;
     Ok(Rect {
         x,
         y,
@@ -238,7 +332,7 @@ pub(crate) fn parse_region_arg(s: &str) -> Result<Rect> {
 /// `"Option"`, `"Meta"`/`"Cmd"`/`"Command"`/`"Super"`/`"Win"`), named keys
 /// (`"Enter"`, `"Tab"`, `"Escape"`, `"ArrowUp/Down/Left/Right"`, …), and
 /// function keys (`"F1"` … `"F24"`). Mirrors the Python bindings.
-pub(crate) fn parse_key_name(name: &str) -> Result<Key> {
+pub(crate) fn parse_key_name(name: &str) -> CliResult<Key> {
     let k = match name {
         "Shift" => Key::Shift,
         "Ctrl" | "Control" => Key::Ctrl,
@@ -260,22 +354,20 @@ pub(crate) fn parse_key_name(name: &str) -> Result<Key> {
         "PageUp" => Key::PageUp,
         "PageDown" => Key::PageDown,
         s if s.starts_with('F') && s.len() >= 2 && s[1..].chars().all(|c| c.is_ascii_digit()) => {
-            let n: u8 = s[1..].parse().map_err(|_| Error::InvalidActionData {
-                message: format!("invalid function key: {s}"),
-            })?;
+            let n: u8 = s[1..]
+                .parse()
+                .map_err(|_| CliError::Usage(format!("invalid function key: {s}")))?;
             Key::F(n)
         }
         s if s.chars().count() == 1 => Key::Char(s.chars().next().unwrap()),
         _ => {
-            return Err(Error::InvalidActionData {
-                message: format!("unknown key name: {name}"),
-            });
+            return Err(CliError::Usage(format!("unknown key name: {name}")));
         }
     };
     Ok(k)
 }
 
-pub(crate) fn parse_held(raw: Option<&str>) -> Result<Vec<Key>> {
+pub(crate) fn parse_held(raw: Option<&str>) -> CliResult<Vec<Key>> {
     match raw {
         None => Ok(Vec::new()),
         Some("") => Ok(Vec::new()),
@@ -283,27 +375,24 @@ pub(crate) fn parse_held(raw: Option<&str>) -> Result<Vec<Key>> {
     }
 }
 
-pub(crate) fn parse_button(raw: &str) -> Result<MouseButton> {
+pub(crate) fn parse_button(raw: &str) -> CliResult<MouseButton> {
     match raw {
         "left" => Ok(MouseButton::Left),
         "right" => Ok(MouseButton::Right),
         "middle" => Ok(MouseButton::Middle),
-        other => Err(Error::InvalidActionData {
-            message: format!("unknown button: {other} (expected left|right|middle)"),
-        }),
+        other => Err(CliError::Usage(format!(
+            "unknown button: {other} (expected left|right|middle)"
+        ))),
     }
 }
 
-pub(crate) fn resolve_app(opts: &Opts) -> Result<App> {
+pub(crate) fn resolve_app(opts: &Opts) -> CliResult<App> {
     if let Some(name) = &opts.app {
-        App::by_name(name, std::time::Duration::ZERO)
+        Ok(App::by_name(name, std::time::Duration::ZERO)?)
     } else if let Some(pid) = opts.pid {
-        App::by_pid(pid, std::time::Duration::ZERO)
+        Ok(App::by_pid(pid, std::time::Duration::ZERO)?)
     } else {
-        Err(Error::Platform {
-            code: -1,
-            message: "specify --app NAME or --pid PID".into(),
-        })
+        Err(CliError::Usage("specify --app NAME or --pid PID".into()))
     }
 }
 
@@ -448,7 +537,7 @@ fn print_tree_recursive(el: &Element, prefix: &str, is_last: bool, is_root: bool
 
 // ── Commands ────────────────────────────────────────────────────────────────
 
-fn cmd_apps() -> Result<()> {
+fn cmd_apps() -> CliResult<()> {
     let apps = App::list()?;
     if apps.is_empty() {
         println!("No applications found.");
@@ -461,29 +550,28 @@ fn cmd_apps() -> Result<()> {
     Ok(())
 }
 
-fn cmd_tree(args: &[String]) -> Result<()> {
-    let (opts, _pos) = parse_opts(args);
+fn cmd_tree(args: &[String]) -> CliResult<()> {
+    let (opts, _pos) = parse_opts(args)?;
     let app = resolve_app(&opts)?;
     let root_el = Element::new(app.data.clone(), app.provider().clone());
     print_tree_recursive(&root_el, "", true, true);
     Ok(())
 }
 
-fn cmd_find(args: &[String]) -> Result<()> {
-    let (opts, positional) = parse_opts(args);
-    let selector = positional.first().ok_or(Error::Platform {
-        code: -1,
-        message: "usage: xa11y find SELECTOR [--app NAME | --pid PID] [-o pretty|bounds|center]"
-            .into(),
+fn cmd_find(args: &[String]) -> CliResult<()> {
+    let (opts, positional) = parse_opts(args)?;
+    let selector = positional.first().ok_or_else(|| {
+        CliError::Usage(
+            "usage: xa11y find SELECTOR [--app NAME | --pid PID] [-o pretty|bounds|center]".into(),
+        )
     })?;
 
     let app = resolve_app(&opts)?;
     let elements = app.locator(selector).elements()?;
     if elements.is_empty() {
-        return Err(Error::Platform {
-            code: 1,
-            message: format!("no elements matched selector: {selector}"),
-        });
+        return Err(CliError::NotFound(format!(
+            "no elements matched selector: {selector}"
+        )));
     }
     let fmt = opts.output_format.as_deref().unwrap_or("pretty");
     match fmt {
@@ -499,26 +587,38 @@ fn cmd_find(args: &[String]) -> Result<()> {
         }
         "bounds" => {
             for el in &elements {
-                if let Some(line) = format_bounds_opt(el) {
-                    println!("{line}");
+                match format_bounds_opt(el) {
+                    Some(line) => println!("{line}"),
+                    None => warn_skipped_no_bounds(el),
                 }
             }
         }
         "center" => {
             for el in &elements {
-                if let Some(line) = format_center_opt(el) {
-                    println!("{line}");
+                match format_center_opt(el) {
+                    Some(line) => println!("{line}"),
+                    None => warn_skipped_no_bounds(el),
                 }
             }
         }
         other => {
-            return Err(Error::Platform {
-                code: -1,
-                message: format!("unknown -o format: {other} (expected pretty|bounds|center)"),
-            });
+            return Err(CliError::Usage(format!(
+                "unknown -o format: {other} (expected pretty|bounds|center)"
+            )));
         }
     }
     Ok(())
+}
+
+/// Tell the user (on stderr) that a matched element was omitted from
+/// `-o bounds` / `-o center` output because it has no bounds, so the line
+/// count stays explicable against the match count.
+fn warn_skipped_no_bounds(el: &ElementData) {
+    eprintln!(
+        "warning: skipping {} \"{}\": element has no bounds",
+        el.role.to_snake_case(),
+        el.name.as_deref().unwrap_or("(unnamed)")
+    );
 }
 
 /// Format an element's bounds as `X,Y,W,H` — the input to `--region`.
@@ -553,14 +653,12 @@ fn format_center_opt(el: &ElementData) -> Option<String> {
     Some(format!("{cx},{cy}"))
 }
 
-fn cmd_action(args: &[String]) -> Result<()> {
-    let (opts, positional) = parse_opts(args);
+fn cmd_action(args: &[String]) -> CliResult<()> {
+    let (opts, positional) = parse_opts(args)?;
     if positional.len() < 2 {
-        return Err(Error::Platform {
-            code: -1,
-            message: "usage: xa11y action ACTION SELECTOR [--app NAME | --pid PID] [--value V]"
-                .into(),
-        });
+        return Err(CliError::Usage(
+            "usage: xa11y action ACTION SELECTOR [--app NAME | --pid PID] [--value V]".into(),
+        ));
     }
     let action_name = &positional[0];
     let selector = &positional[1];
@@ -582,54 +680,42 @@ fn cmd_action(args: &[String]) -> Result<()> {
         "increment" => locator.increment()?,
         "decrement" => locator.decrement()?,
         "set-value" => {
-            let v = value.ok_or(Error::Platform {
-                code: -1,
-                message: "set-value requires --value".into(),
-            })?;
+            let v = value.ok_or_else(|| CliError::Usage("set-value requires --value".into()))?;
             locator.set_value(&v)?;
         }
         "type-text" => {
-            let v = value.ok_or(Error::Platform {
-                code: -1,
-                message: "type-text requires --value".into(),
-            })?;
+            let v = value.ok_or_else(|| CliError::Usage("type-text requires --value".into()))?;
             locator.type_text(&v)?;
         }
         "select-text" => {
-            let v = value.ok_or(Error::Platform {
-                code: -1,
-                message: "select-text requires --value START,END".into(),
-            })?;
+            let v = value
+                .ok_or_else(|| CliError::Usage("select-text requires --value START,END".into()))?;
             let parts: Vec<&str> = v.split(',').collect();
             if parts.len() != 2 {
-                return Err(Error::Platform {
-                    code: -1,
-                    message: "select-text --value must be START,END (e.g. 0,5)".into(),
-                });
+                return Err(CliError::Usage(
+                    "select-text --value must be START,END (e.g. 0,5)".into(),
+                ));
             }
-            let start: u32 = parts[0].trim().parse().map_err(|_| Error::Platform {
-                code: -1,
-                message: "invalid START in select-text --value".into(),
-            })?;
-            let end: u32 = parts[1].trim().parse().map_err(|_| Error::Platform {
-                code: -1,
-                message: "invalid END in select-text --value".into(),
-            })?;
+            let start: u32 = parts[0]
+                .trim()
+                .parse()
+                .map_err(|_| CliError::Usage("invalid START in select-text --value".into()))?;
+            let end: u32 = parts[1]
+                .trim()
+                .parse()
+                .map_err(|_| CliError::Usage("invalid END in select-text --value".into()))?;
             locator.select_text(start, end)?;
         }
         other => {
-            return Err(Error::Platform {
-                code: -1,
-                message: format!("unknown action: {other}"),
-            });
+            return Err(CliError::Usage(format!("unknown action: {other}")));
         }
     }
     println!("ok");
     Ok(())
 }
 
-fn cmd_events(args: &[String]) -> Result<()> {
-    let (opts, _pos) = parse_opts(args);
+fn cmd_events(args: &[String]) -> CliResult<()> {
+    let (opts, _pos) = parse_opts(args)?;
     let app = resolve_app(&opts)?;
     let sub = app.subscribe()?;
     eprintln!(
@@ -650,9 +736,31 @@ fn cmd_events(args: &[String]) -> Result<()> {
             })
             .unwrap_or_else(|| "-".into());
         let detail = format_event_detail(&event);
-        println!("[{:?}] {target_str}{detail}", event.kind);
+        println!("[{}] {target_str}{detail}", format_event_kind(&event.kind));
     }
     Ok(())
+}
+
+/// Human-readable name for an event kind, matching the snake_case style the
+/// rest of the CLI output uses for roles (e.g. `focus_changed`, not the Rust
+/// debug form `FocusChanged`).
+pub(crate) fn format_event_kind(kind: &EventKind) -> &'static str {
+    match kind {
+        EventKind::FocusChanged => "focus_changed",
+        EventKind::ValueChanged => "value_changed",
+        EventKind::NameChanged => "name_changed",
+        EventKind::StateChanged { .. } => "state_changed",
+        EventKind::StructureChanged => "structure_changed",
+        EventKind::WindowOpened => "window_opened",
+        EventKind::WindowClosed => "window_closed",
+        EventKind::WindowActivated => "window_activated",
+        EventKind::WindowDeactivated => "window_deactivated",
+        EventKind::SelectionChanged => "selection_changed",
+        EventKind::MenuOpened => "menu_opened",
+        EventKind::MenuClosed => "menu_closed",
+        EventKind::TextChanged => "text_changed",
+        EventKind::Announcement => "announcement",
+    }
 }
 
 pub(crate) fn format_event_detail(event: &Event) -> String {
@@ -665,8 +773,8 @@ pub(crate) fn format_event_detail(event: &Event) -> String {
 
 // ── Input simulation ────────────────────────────────────────────────────────
 
-fn cmd_click(args: &[String]) -> Result<()> {
-    let (opts, _pos) = parse_opts(args);
+fn cmd_click(args: &[String]) -> CliResult<()> {
+    let (opts, _pos) = parse_opts(args)?;
     let at = parse_point_arg(
         opts.at.as_deref().ok_or_else(|| missing("--at X,Y"))?,
         "--at",
@@ -681,7 +789,7 @@ fn cmd_click(args: &[String]) -> Result<()> {
 
 /// Translate parsed flags into [`ClickOptions`]. Extracted so the flag
 /// → options mapping is unit-testable without a live input backend.
-pub(crate) fn build_click_options(opts: &Opts) -> Result<ClickOptions> {
+pub(crate) fn build_click_options(opts: &Opts) -> CliResult<ClickOptions> {
     let button = opts
         .button
         .as_deref()
@@ -698,8 +806,8 @@ pub(crate) fn build_click_options(opts: &Opts) -> Result<ClickOptions> {
     })
 }
 
-fn cmd_move(args: &[String]) -> Result<()> {
-    let (opts, _pos) = parse_opts(args);
+fn cmd_move(args: &[String]) -> CliResult<()> {
+    let (opts, _pos) = parse_opts(args)?;
     let at = parse_point_arg(
         opts.at.as_deref().ok_or_else(|| missing("--at X,Y"))?,
         "--at",
@@ -710,8 +818,8 @@ fn cmd_move(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn cmd_drag(args: &[String]) -> Result<()> {
-    let (opts, _pos) = parse_opts(args);
+fn cmd_drag(args: &[String]) -> CliResult<()> {
+    let (opts, _pos) = parse_opts(args)?;
     let from = parse_point_arg(
         opts.from.as_deref().ok_or_else(|| missing("--from X,Y"))?,
         "--from",
@@ -730,7 +838,7 @@ fn cmd_drag(args: &[String]) -> Result<()> {
 
 /// Translate parsed flags into [`DragOptions`]. Extracted so the flag
 /// → options mapping is unit-testable without a live input backend.
-pub(crate) fn build_drag_options(opts: &Opts) -> Result<DragOptions> {
+pub(crate) fn build_drag_options(opts: &Opts) -> CliResult<DragOptions> {
     let button = opts
         .button
         .as_deref()
@@ -746,8 +854,8 @@ pub(crate) fn build_drag_options(opts: &Opts) -> Result<DragOptions> {
     })
 }
 
-fn cmd_scroll(args: &[String]) -> Result<()> {
-    let (opts, _pos) = parse_opts(args);
+fn cmd_scroll(args: &[String]) -> CliResult<()> {
+    let (opts, _pos) = parse_opts(args)?;
     let at = parse_point_arg(
         opts.at.as_deref().ok_or_else(|| missing("--at X,Y"))?,
         "--at",
@@ -760,12 +868,11 @@ fn cmd_scroll(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn cmd_key(args: &[String]) -> Result<()> {
-    let (opts, positional) = parse_opts(args);
-    let name = positional.first().ok_or(Error::Platform {
-        code: -1,
-        message: "usage: xa11y key KEY [--held K,K]".into(),
-    })?;
+fn cmd_key(args: &[String]) -> CliResult<()> {
+    let (opts, positional) = parse_opts(args)?;
+    let name = positional
+        .first()
+        .ok_or_else(|| CliError::Usage("usage: xa11y key KEY [--held K,K]".into()))?;
     let key = parse_key_name(name)?;
     let held = parse_held(opts.held.as_deref())?;
     let sim = crate::input_sim()?;
@@ -778,12 +885,11 @@ fn cmd_key(args: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn cmd_type(args: &[String]) -> Result<()> {
-    let (_opts, positional) = parse_opts(args);
-    let text = positional.first().ok_or(Error::Platform {
-        code: -1,
-        message: "usage: xa11y type TEXT".into(),
-    })?;
+fn cmd_type(args: &[String]) -> CliResult<()> {
+    let (_opts, positional) = parse_opts(args)?;
+    let text = positional
+        .first()
+        .ok_or_else(|| CliError::Usage("usage: xa11y type TEXT".into()))?;
     let sim = crate::input_sim()?;
     sim.keyboard().type_text(text)?;
     println!("ok");
@@ -792,8 +898,8 @@ fn cmd_type(args: &[String]) -> Result<()> {
 
 // ── Screenshot ──────────────────────────────────────────────────────────────
 
-fn cmd_screenshot(args: &[String]) -> Result<()> {
-    let (opts, _pos) = parse_opts(args);
+fn cmd_screenshot(args: &[String]) -> CliResult<()> {
+    let (opts, _pos) = parse_opts(args)?;
     let out = opts
         .out
         .as_deref()
@@ -842,7 +948,7 @@ mod tests {
     #[test]
     fn parse_opts_app_flag() {
         let args = strs(&["--app", "Safari"]);
-        let (opts, pos) = parse_opts(&args);
+        let (opts, pos) = parse_opts(&args).expect("flags must parse");
         assert_eq!(opts.app.as_deref(), Some("Safari"));
         assert!(opts.pid.is_none());
         assert!(pos.is_empty());
@@ -851,7 +957,7 @@ mod tests {
     #[test]
     fn parse_opts_pid_flag() {
         let args = strs(&["--pid", "1234"]);
-        let (opts, pos) = parse_opts(&args);
+        let (opts, pos) = parse_opts(&args).expect("flags must parse");
         assert_eq!(opts.pid, Some(1234));
         assert!(opts.app.is_none());
         assert!(pos.is_empty());
@@ -860,7 +966,7 @@ mod tests {
     #[test]
     fn parse_opts_positional_and_flags() {
         let args = strs(&["button[name='OK']", "--app", "MyApp"]);
-        let (opts, pos) = parse_opts(&args);
+        let (opts, pos) = parse_opts(&args).expect("flags must parse");
         assert_eq!(opts.app.as_deref(), Some("MyApp"));
         assert_eq!(pos, vec![s("button[name='OK']")]);
     }
@@ -868,7 +974,7 @@ mod tests {
     #[test]
     fn parse_opts_multiple_positional() {
         let args = strs(&["press", "button", "--app", "Test"]);
-        let (opts, pos) = parse_opts(&args);
+        let (opts, pos) = parse_opts(&args).expect("flags must parse");
         assert_eq!(opts.app.as_deref(), Some("Test"));
         assert_eq!(pos, vec![s("press"), s("button")]);
     }
@@ -876,7 +982,7 @@ mod tests {
     #[test]
     fn parse_opts_empty() {
         let args: Vec<String> = vec![];
-        let (opts, pos) = parse_opts(&args);
+        let (opts, pos) = parse_opts(&args).expect("flags must parse");
         assert!(opts.app.is_none());
         assert!(opts.pid.is_none());
         assert!(pos.is_empty());
@@ -885,7 +991,7 @@ mod tests {
     #[test]
     fn parse_opts_value_flag() {
         let args = strs(&["--value", "hello"]);
-        let (opts, pos) = parse_opts(&args);
+        let (opts, pos) = parse_opts(&args).expect("flags must parse");
         assert_eq!(opts.value.as_deref(), Some("hello"));
         assert!(pos.is_empty());
     }
@@ -897,17 +1003,88 @@ mod tests {
         // positional list of ["action", "--value", "text", "selector"],
         // and the CLI mistook "--value" for the selector.
         let args = strs(&["set-value", "--value", "hello", "button[name='OK']"]);
-        let (opts, pos) = parse_opts(&args);
+        let (opts, pos) = parse_opts(&args).expect("flags must parse");
         assert_eq!(opts.value.as_deref(), Some("hello"));
         assert_eq!(pos, vec![s("set-value"), s("button[name='OK']")]);
     }
 
     #[test]
-    fn parse_opts_value_missing_trailing_arg() {
+    fn parse_opts_value_missing_trailing_arg_errors() {
+        // A trailing flag with no value used to silently produce None; it is
+        // now a usage error (tenet 1).
         let args = strs(&["--value"]);
-        let (opts, pos) = parse_opts(&args);
-        assert!(opts.value.is_none());
-        assert!(pos.is_empty());
+        let err = parse_opts(&args).expect_err("trailing --value must be a usage error");
+        assert!(matches!(err, CliError::Usage(_)));
+        assert!(format!("{err}").contains("--value requires a value"));
+    }
+
+    #[test]
+    fn parse_opts_trailing_app_flag_errors() {
+        let args = strs(&["tree", "--app"]);
+        let err = parse_opts(&args).expect_err("trailing --app must be a usage error");
+        assert!(matches!(err, CliError::Usage(_)));
+        assert!(format!("{err}").contains("--app requires a value"));
+    }
+
+    #[test]
+    fn parse_opts_non_numeric_pid_errors() {
+        // `--pid abc` used to be silently treated as absent (tenet 1).
+        let args = strs(&["--pid", "abc"]);
+        let err = parse_opts(&args).expect_err("non-numeric --pid must be a usage error");
+        assert!(matches!(err, CliError::Usage(_)));
+        let msg = format!("{err}");
+        assert!(msg.contains("--pid"), "message must name the flag: {msg}");
+        assert!(
+            msg.contains("abc"),
+            "message must echo the bad value: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_opts_non_numeric_count_errors() {
+        let args = strs(&["--count", "two"]);
+        let err = parse_opts(&args).expect_err("non-numeric --count must be a usage error");
+        assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    #[test]
+    fn parse_opts_non_numeric_duration_errors() {
+        let args = strs(&["--duration-ms", "fast"]);
+        let err = parse_opts(&args).expect_err("non-numeric --duration-ms must be a usage error");
+        assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    // ── Exit-code contract ──────────────────────────────────────────────────
+
+    #[test]
+    fn exit_code_usage_is_2() {
+        assert_eq!(CliError::Usage("bad flag".into()).exit_code(), 2);
+    }
+
+    #[test]
+    fn exit_code_not_found_is_1() {
+        assert_eq!(CliError::NotFound("no match".into()).exit_code(), 1);
+    }
+
+    #[test]
+    fn exit_code_xa11y_error_is_1() {
+        let e = CliError::Xa11y(Error::NoElementBounds);
+        assert_eq!(e.exit_code(), 1);
+    }
+
+    #[test]
+    fn usage_error_displays_with_prefix() {
+        let e = CliError::Usage("specify --app NAME or --pid PID".into());
+        assert_eq!(
+            format!("{e}"),
+            "usage error: specify --app NAME or --pid PID"
+        );
+    }
+
+    #[test]
+    fn not_found_error_displays_message_verbatim() {
+        let e = CliError::NotFound("no elements matched selector: button".into());
+        assert_eq!(format!("{e}"), "no elements matched selector: button");
     }
 
     // ── Format element ──────────────────────────────────────────────────────
@@ -1058,6 +1235,19 @@ mod tests {
     }
 
     #[test]
+    fn format_event_kind_is_snake_case_not_debug() {
+        assert_eq!(format_event_kind(&EventKind::FocusChanged), "focus_changed");
+        assert_eq!(
+            format_event_kind(&EventKind::StateChanged {
+                flag: StateFlag::Checked,
+                value: true,
+            }),
+            "state_changed"
+        );
+        assert_eq!(format_event_kind(&EventKind::Announcement), "announcement");
+    }
+
+    #[test]
     fn format_event_detail_empty() {
         let event = Event {
             kind: EventKind::FocusChanged,
@@ -1072,9 +1262,10 @@ mod tests {
     // ── resolve_app error ───────────────────────────────────────────────────
 
     #[test]
-    fn resolve_app_no_flags_is_error() {
+    fn resolve_app_no_flags_is_usage_error() {
         let opts = Opts::default();
         let err = resolve_app(&opts).unwrap_err();
+        assert!(matches!(err, CliError::Usage(_)));
         let msg = format!("{err}");
         assert!(msg.contains("--app") || msg.contains("--pid"));
     }
@@ -1084,7 +1275,7 @@ mod tests {
     #[test]
     fn parse_opts_at_flag() {
         let args = strs(&["--at", "100,200"]);
-        let (opts, pos) = parse_opts(&args);
+        let (opts, pos) = parse_opts(&args).expect("flags must parse");
         assert_eq!(opts.at.as_deref(), Some("100,200"));
         assert!(pos.is_empty());
     }
@@ -1092,7 +1283,7 @@ mod tests {
     #[test]
     fn parse_opts_from_to_flags() {
         let args = strs(&["--from", "1,2", "--to", "3,4"]);
-        let (opts, _) = parse_opts(&args);
+        let (opts, _) = parse_opts(&args).expect("flags must parse");
         assert_eq!(opts.from.as_deref(), Some("1,2"));
         assert_eq!(opts.to.as_deref(), Some("3,4"));
     }
@@ -1100,7 +1291,7 @@ mod tests {
     #[test]
     fn parse_opts_button_count_held() {
         let args = strs(&["--button", "right", "--count", "2", "--held", "Shift,Meta"]);
-        let (opts, _) = parse_opts(&args);
+        let (opts, _) = parse_opts(&args).expect("flags must parse");
         assert_eq!(opts.button.as_deref(), Some("right"));
         assert_eq!(opts.count, Some(2));
         assert_eq!(opts.held.as_deref(), Some("Shift,Meta"));
@@ -1109,7 +1300,7 @@ mod tests {
     #[test]
     fn parse_opts_scroll_deltas() {
         let args = strs(&["--dx", "-3", "--dy", "5"]);
-        let (opts, _) = parse_opts(&args);
+        let (opts, _) = parse_opts(&args).expect("flags must parse");
         assert_eq!(opts.dx, Some(-3));
         assert_eq!(opts.dy, Some(5));
     }
@@ -1124,7 +1315,7 @@ mod tests {
             "--out",
             "shot.png",
         ]);
-        let (opts, _) = parse_opts(&args);
+        let (opts, _) = parse_opts(&args).expect("flags must parse");
         assert_eq!(opts.duration_ms, Some(250));
         assert_eq!(opts.region.as_deref(), Some("10,20,30,40"));
         assert_eq!(opts.out.as_deref(), Some("shot.png"));
@@ -1133,7 +1324,7 @@ mod tests {
     #[test]
     fn parse_opts_output_format() {
         let args = strs(&["-o", "bounds"]);
-        let (opts, _) = parse_opts(&args);
+        let (opts, _) = parse_opts(&args).expect("flags must parse");
         assert_eq!(opts.output_format.as_deref(), Some("bounds"));
     }
 
@@ -1344,7 +1535,7 @@ mod tests {
     #[test]
     fn build_click_options_from_parsed_args() {
         let args = strs(&["--button", "right", "--count", "3", "--held", "Shift,Meta"]);
-        let (opts, _) = parse_opts(&args);
+        let (opts, _) = parse_opts(&args).expect("flags must parse");
         let co = build_click_options(&opts).unwrap();
         assert!(matches!(co.button, MouseButton::Right));
         assert_eq!(co.count, 3);
@@ -1356,14 +1547,14 @@ mod tests {
     #[test]
     fn build_click_options_bad_button_errors() {
         let args = strs(&["--button", "nope"]);
-        let (opts, _) = parse_opts(&args);
+        let (opts, _) = parse_opts(&args).expect("flags must parse");
         assert!(build_click_options(&opts).is_err());
     }
 
     #[test]
     fn build_click_options_bad_held_errors() {
         let args = strs(&["--held", "NotAKey"]);
-        let (opts, _) = parse_opts(&args);
+        let (opts, _) = parse_opts(&args).expect("flags must parse");
         assert!(build_click_options(&opts).is_err());
     }
 
@@ -1386,7 +1577,7 @@ mod tests {
             "--duration-ms",
             "500",
         ]);
-        let (opts, _) = parse_opts(&args);
+        let (opts, _) = parse_opts(&args).expect("flags must parse");
         let d = build_drag_options(&opts).unwrap();
         assert!(matches!(d.button, MouseButton::Middle));
         assert_eq!(d.held.len(), 1);
