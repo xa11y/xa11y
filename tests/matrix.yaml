@@ -53,6 +53,10 @@ features:
     description: "event subscription and state change detection"
     per_app: true
 
+  errors:
+    description: "error paths: invalid selectors, selector misses, wait timeouts, unsupported actions"
+    per_app: true
+
   input_sim:
     description: "input simulation: click, double-click, right-click, drag, key press, chord, type, scroll"
     per_app: false
@@ -84,37 +88,37 @@ coverage:
     # harness gates this on sys.platform). The events module also runs but its
     # assertions are xfail-guarded. On macOS/Windows the Rust integ suite stays
     # the canonical AccessKit coverage. See note below.
-    python: [compat, actions, events]
+    python: [compat, actions, events, errors]
     js: [compat, actions, input_sim, screenshot]
     cli: [compat, actions]  # CLI is Rust — natural to test against the Rust test app
 
   qt:
-    python: [compat, actions, events]
+    python: [compat, actions, events, errors]
     js: [compat, actions]
     cli: [compat, actions]
 
   gtk:
-    python: [compat, actions]  # NOTE: events not covered (see gaps.gtk_events)
+    python: [compat, actions, errors]  # NOTE: events not covered (see gaps.gtk_events)
     js: [compat, actions]
     cli: [compat, actions]
 
   cocoa:
-    python: [compat, actions, events]
+    python: [compat, actions, events, errors]
     js: [compat, actions]
     cli: [compat, actions]
 
   tauri:
-    python: [compat, actions, events, input_sim, screenshot]
+    python: [compat, actions, events, errors, input_sim, screenshot]
     js: [compat, actions]
     cli: [compat, actions, input_sim, screenshot]
 
   electron:
-    python: [compat, actions]
+    python: [compat, actions, errors]
     js: [compat, actions]
     cli: [compat, actions]
 
   egui:
-    python: [compat, actions, events]
+    python: [compat, actions, events, errors]
     js: [compat, actions]
     cli: [compat, actions]
 

@@ -5,7 +5,10 @@
 //! * `tree` — tree structure, role coverage, tree methods, element fields,
 //!   stateset fields, selector queries, serialization, provider operations.
 //! * `actions` — action dispatch, new actions (Blur/SetTextSelection/TypeText),
-//!   complex/stress scenarios, error paths.
+//!   complex/stress scenarios, action error paths.
+//! * `errors` — error paths on the query/wait surface: selector misses,
+//!   invalid selectors, `wait_*` timeouts, auto-wait timeouts, unknown
+//!   actions, invalid action data.
 //! * `events_{macos,windows,linux}` — platform-specific event subscription
 //!   end-to-end tests. The `#[cfg(target_os = "…")]` gate lives on the
 //!   module declaration below so individual tests don't need it.
@@ -14,6 +17,7 @@
 //! are reached from submodule tests via `use crate::integ as h;`.
 
 pub mod actions;
+pub mod errors;
 pub mod screenshot;
 pub mod tree;
 

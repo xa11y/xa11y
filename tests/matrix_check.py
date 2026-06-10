@@ -47,6 +47,7 @@ FEATURE_FILES: dict[str, dict[str, list[str]]] = {
         "compat": ["test_compat.py"],
         "actions": ["test_actions.py"],
         "events": ["test_events.py"],
+        "errors": ["test_errors.py"],
         "input_sim": ["test_input_sim.py"],
         "screenshot": ["test_screenshot.py"],
     },
