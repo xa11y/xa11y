@@ -17,7 +17,9 @@ with blanket markers, in accordance with the design tenets:
 Per-app notes:
 - Qt does not reliably emit events for programmatic accessibility actions
   across AT-SPI2 / UIA / AX — Qt event-delivery tests are skipped.
-- GTK has no event coverage in the matrix (see gaps.gtk_events).
+- GTK exposes the same Dynamic widget group as Qt (Submit / Add Item /
+  Remove Item in test-apps/gtk/app.py), so these tests run against it too
+  (non-strict xfail: AT-SPI2 delivery is not yet verified either way).
 - Cocoa (macOS) does emit AX notifications reliably; those tests run strictly
   (except NameChanged, which AppKit only emits with an explicit
   NSAccessibilityPostNotification the test app does not make).

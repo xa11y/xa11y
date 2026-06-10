@@ -167,6 +167,37 @@ class TestWindow(Gtk.ApplicationWindow):
             self.list_box.append(row)
         list_group.append(self.list_box)
 
+        # ── Dynamic widgets (event tests) ────────────────────────────
+        # These mutate on click so the event suite can observe:
+        #   - NameChanged  (Submit → status label text change)
+        #   - StructureChanged  (Add/Remove Item → list row add/remove)
+        dyn_group = self._make_group("Dynamic")
+        box.append(dyn_group)
+
+        self.status_label = Gtk.Label(label="Status: Ready")
+        dyn_group.append(self.status_label)
+
+        self.submit_button = Gtk.Button(label="Submit")
+        self.submit_button.connect("clicked", self._on_submit_clicked)
+        dyn_group.append(self.submit_button)
+
+        self.add_item_button = Gtk.Button(label="Add Item")
+        self.add_item_button.connect("clicked", self._on_add_item_clicked)
+        dyn_group.append(self.add_item_button)
+
+        self.remove_item_button = Gtk.Button(label="Remove Item")
+        self.remove_item_button.connect("clicked", self._on_remove_item_clicked)
+        dyn_group.append(self.remove_item_button)
+
+        # ── Dialog ───────────────────────────────────────────────────
+        dlg_group = self._make_group("Dialogs")
+        box.append(dlg_group)
+
+        self.open_dialog_button = Gtk.Button(label="Open Dialog")
+        self.open_dialog_button.connect("clicked", self._on_open_dialog_clicked)
+        dlg_group.append(self.open_dialog_button)
+        self._sample_dialog: Gtk.Window | None = None
+
     def _make_group(self, name: str) -> Gtk.Box:
         inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         inner.set_margin_top(8)
@@ -177,6 +208,66 @@ class TestWindow(Gtk.ApplicationWindow):
 
     def _on_ok_clicked(self, _btn: Gtk.Button) -> None:
         self.cancel_button.set_sensitive(True)
+
+    # ── Dynamic widget handlers ──────────────────────────────────────
+
+    def _list_rows(self) -> list[Gtk.ListBoxRow]:
+        rows: list[Gtk.ListBoxRow] = []
+        index = 0
+        while (row := self.list_box.get_row_at_index(index)) is not None:
+            rows.append(row)
+            index += 1
+        return rows
+
+    def _on_submit_clicked(self, _btn: Gtk.Button) -> None:
+        current = self.status_label.get_text()
+        new = "Status: Submitted" if current != "Status: Submitted" else "Status: Ready"
+        # Gtk.Label's accessible name follows its text automatically.
+        self.status_label.set_text(new)
+
+    def _on_add_item_clicked(self, _btn: Gtk.Button) -> None:
+        new_index = len(self._list_rows()) + 1
+        row = Gtk.ListBoxRow()
+        row.set_child(Gtk.Label(label=f"Item {new_index}"))
+        self.list_box.append(row)
+
+    def _on_remove_item_clicked(self, _btn: Gtk.Button) -> None:
+        rows = self._list_rows()
+        if rows:
+            self.list_box.remove(rows[-1])
+
+    # ── Dialog handlers ──────────────────────────────────────────────
+
+    def _on_open_dialog_clicked(self, _btn: Gtk.Button) -> None:
+        if self._sample_dialog is None:
+            # Gtk.Dialog is deprecated since GTK 4.10; a plain Gtk.Window
+            # constructed with the (construct-only) DIALOG accessible role
+            # exposes AT-SPI role "dialog" the same way. The window title
+            # becomes its accessible name.
+            dlg = Gtk.Window(
+                accessible_role=Gtk.AccessibleRole.DIALOG,
+                title="Sample Dialog",
+            )
+            dlg.set_transient_for(self)
+            dlg.set_default_size(300, 120)
+            content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+            content.set_margin_top(16)
+            content.set_margin_bottom(16)
+            content.set_margin_start(16)
+            content.set_margin_end(16)
+            close_btn = Gtk.Button(label="Close Dialog")
+            close_btn.connect("clicked", lambda _b: dlg.set_visible(False))
+            content.append(close_btn)
+            dlg.set_child(content)
+            # Hide instead of destroy so the dialog can be reopened by a
+            # later test within the same app session.
+            dlg.connect("close-request", self._on_dialog_close_request)
+            self._sample_dialog = dlg
+        self._sample_dialog.present()
+
+    def _on_dialog_close_request(self, dlg: Gtk.Window) -> bool:
+        dlg.set_visible(False)
+        return True  # stop the default destroy handler
 
 
 def main() -> None:

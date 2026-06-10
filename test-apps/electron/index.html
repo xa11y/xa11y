@@ -11,5 +11,53 @@
   <label for="entry">Search</label>
   <input id="entry" type="text" aria-label="Search" value="hello world">
   <label><input id="agree" type="checkbox"> Agree to terms</label>
+
+  <!-- Range controls (markup mirrors test-apps/tauri/frontend/index.html so
+       the cross-app selectors in tests/suites/python/conftest.py line up) -->
+  <div>
+    <label for="volume-slider">Volume</label>
+    <input
+      type="range"
+      id="volume-slider"
+      aria-label="Volume"
+      min="0" max="100" value="50"
+      aria-valuemin="0" aria-valuemax="100" aria-valuenow="50"
+    >
+  </div>
+  <div>
+    <label for="quantity-spin">Quantity</label>
+    <input
+      type="number"
+      id="quantity-spin"
+      aria-label="Quantity"
+      role="spinbutton"
+      min="0" max="999" value="42"
+      aria-valuemin="0" aria-valuemax="999" aria-valuenow="42"
+    >
+  </div>
+  <div>
+    <label>Progress</label>
+    <progress id="progress-bar" aria-label="Progress" value="75" max="100">75%</progress>
+  </div>
+
+  <!-- Text area -->
+  <div>
+    <label for="notes-area">Notes</label>
+    <textarea id="notes-area" aria-label="Notes">Line 1
+Line 2
+Line 3</textarea>
+  </div>
+
+  <script>
+    // Keep aria-valuenow in sync so AT-SPI value reads track user changes.
+    const slider = document.getElementById('volume-slider');
+    slider.addEventListener('input', () => {
+      slider.setAttribute('aria-valuenow', slider.value);
+    });
+    const spin = document.getElementById('quantity-spin');
+    spin.addEventListener('input', () => {
+      spin.setAttribute('aria-valuenow', spin.value);
+    });
+  </script>
 </body>
 </html>
