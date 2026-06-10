@@ -78,15 +78,36 @@ pub struct AttrFilter {
 /// element's `raw` platform-data map at match time.
 pub type AttrName = String;
 
+/// Comparison operator for an attribute filter.
+///
+/// # Case-insensitivity limitations
+///
+/// The case-insensitive operators (`Contains`, `StartsWith`, `EndsWith`)
+/// compare via [`str::to_lowercase`]: ASCII plus the *simple* Unicode
+/// lowercase mapping — **not** full Unicode case folding. Notable
+/// consequences:
+///
+/// - Turkish/Azerbaijani dotted/dotless I: `"I"` lowercases to `"i"`, never
+///   to `"ı"`, so `"ı"` does not match a filter value of `"I"`.
+/// - German sharp S: `"ß"` does not match `"SS"` (full case folding would
+///   equate them).
+/// - Other multi-character and locale-dependent foldings are likewise not
+///   applied.
+///
+/// For names that differ only in such edge cases, use the case-sensitive
+/// `Exact` operator with the precise string instead.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MatchOp {
     /// Exact match (case-sensitive)
     Exact,
-    /// Substring match (case-insensitive)
+    /// Substring match (case-insensitive; see the enum docs for the
+    /// lowercase-mapping limitations)
     Contains,
-    /// Starts-with match (case-insensitive)
+    /// Starts-with match (case-insensitive; see the enum docs for the
+    /// lowercase-mapping limitations)
     StartsWith,
-    /// Ends-with match (case-insensitive)
+    /// Ends-with match (case-insensitive; see the enum docs for the
+    /// lowercase-mapping limitations)
     EndsWith,
 }
 
@@ -562,6 +583,11 @@ fn number_to_string(v: Option<f64>) -> Option<String> {
 }
 
 /// Test whether `actual` matches `expected` according to the given `MatchOp`.
+///
+/// Case-insensitive operators lowercase both sides with
+/// [`str::to_lowercase`] — ASCII plus the simple Unicode lowercase mapping
+/// only, **not** full case folding (e.g. Turkish `ı`/`I` and German `ß`/`SS`
+/// do not match). See [`MatchOp`] for details.
 pub fn match_op(op: &MatchOp, expected: &str, actual: Option<&str>) -> bool {
     match op {
         MatchOp::Exact => actual == Some(expected),

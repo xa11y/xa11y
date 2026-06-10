@@ -139,11 +139,33 @@ impl App {
     /// `Duration::ZERO` performs exactly one attempt (no waiting). Only
     /// [`Error::SelectorNotMatched`] triggers a retry; other errors
     /// (permission, parse, platform) short-circuit immediately.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidSelector`] if `name` contains a double quote
+    /// (`"`). The not-found diagnostic for this lookup is the selector string
+    /// `application[name="<name>"]`, and the selector grammar has no escape
+    /// sequence for quotes inside attribute values, so such a name cannot be
+    /// represented — rather than emitting a malformed selector, the lookup is
+    /// rejected up front. Use [`find_with`](Self::find_with) with a name
+    /// predicate to locate apps whose names contain double quotes.
     pub fn by_name_with(
         provider: Arc<dyn Provider>,
         name: &str,
         timeout: Duration,
     ) -> Result<Self> {
+        // The selector grammar's attribute values (`"..."` / `'...'`) have no
+        // escape support (see `selector.rs`), so a name containing `"` would
+        // interpolate into a malformed `application[name="..."]` selector
+        // string below. Surface that clearly instead of producing it.
+        if name.contains('"') {
+            return Err(Error::InvalidSelector {
+                selector: name.to_string(),
+                message: "app name contains a double quote, which cannot be escaped in the \
+                          selector grammar; use App::find_with with a name predicate instead"
+                    .to_string(),
+            });
+        }
         Self::find_matching(
             provider,
             timeout,
@@ -330,6 +352,32 @@ mod tests {
         let el = app.as_element();
         assert_eq!(el.data().role, Role::Application);
         assert_eq!(el.data().name.as_deref(), Some("TestApp"));
+    }
+
+    #[test]
+    fn by_name_with_rejects_double_quote_in_name() {
+        // The selector grammar has no escape sequence for quotes inside
+        // attribute values, so a name containing `"` cannot be represented
+        // in the `application[name="..."]` diagnostic selector. The lookup
+        // must fail clearly up front instead of emitting a malformed
+        // selector (tenet 1: no silent fallback to a broken string).
+        let provider: Arc<dyn Provider> = build_provider();
+        let err = App::by_name_with(provider, r#"My "Quoted" App"#, Duration::ZERO)
+            .expect_err("names containing '\"' must be rejected");
+        match err {
+            Error::InvalidSelector { selector, message } => {
+                assert_eq!(selector, r#"My "Quoted" App"#);
+                assert!(
+                    message.contains("double quote"),
+                    "message must explain the quote limitation: {message}"
+                );
+                assert!(
+                    message.contains("find_with"),
+                    "message must point at the predicate-based alternative: {message}"
+                );
+            }
+            other => panic!("expected InvalidSelector, got: {other:?}"),
+        }
     }
 
     #[test]
