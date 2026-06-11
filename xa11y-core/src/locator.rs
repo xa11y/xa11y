@@ -10,27 +10,6 @@ use crate::selector::{
     SimpleSelector,
 };
 
-/// A lazy element descriptor that re-resolves against a fresh accessibility
-/// tree on every operation.
-///
-/// Inspired by Playwright's `Locator` pattern: a Locator never holds a live
-/// reference to a UI element. Instead, it stores a selector and resolves it
-/// on demand, making it immune to staleness.
-///
-/// # Example
-/// ```ignore
-/// # use std::time::Duration;
-/// # use xa11y::*;
-/// # fn example() -> Result<()> {
-/// let app = App::by_name("MyApp", Duration::from_secs(5))?;
-/// let save_btn = app.locator(r#"button[name="Save"]"#);
-/// save_btn.press()?;
-/// # Ok(())
-/// # }
-/// ```
-/// Default auto-wait timeout for Locator action methods (5 seconds).
-const DEFAULT_ACTION_TIMEOUT: Duration = Duration::from_secs(5);
-
 // ── Diagnosis bounds (tenet 6) ──────────────────────────────────────
 //
 // Diagnosis collection runs only on the failure path, after a wait has
@@ -93,6 +72,24 @@ fn state_label(state: ElementState) -> &'static str {
     }
 }
 
+/// A lazy element descriptor that re-resolves against a fresh accessibility
+/// tree on every operation.
+///
+/// Inspired by Playwright's `Locator` pattern: a Locator never holds a live
+/// reference to a UI element. Instead, it stores a selector and resolves it
+/// on demand, making it immune to staleness.
+///
+/// # Example
+/// ```ignore
+/// # use std::time::Duration;
+/// # use xa11y::*;
+/// # fn example() -> Result<()> {
+/// let app = App::by_name("MyApp", Duration::from_secs(5))?;
+/// let save_btn = app.locator(r#"button[name="Save"]"#);
+/// save_btn.press()?;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone)]
 pub struct Locator {
     provider: Arc<dyn Provider>,
@@ -101,8 +98,10 @@ pub struct Locator {
     selector: String,
     /// Which match to select (0-based). `None` means first match.
     nth: Option<usize>,
-    /// Timeout for auto-wait before action methods.
-    timeout: Duration,
+    /// Timeout for auto-wait before action methods. `None` means "resolve
+    /// the process-wide default at use time" (see [`crate::config`]), so
+    /// `set_default_timeout` affects locators created before it was called.
+    timeout: Option<Duration>,
 }
 
 impl Locator {
@@ -116,13 +115,15 @@ impl Locator {
             root,
             selector: selector.to_string(),
             nth: None,
-            timeout: DEFAULT_ACTION_TIMEOUT,
+            timeout: None,
         }
     }
 
-    /// Return a new Locator with a custom auto-wait timeout for action methods.
+    /// Return a new Locator with a custom auto-wait timeout for action
+    /// methods. Takes precedence over the process-wide default set via
+    /// [`crate::config::set_default_timeout`] / `XA11Y_DEFAULT_TIMEOUT`.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
+        self.timeout = Some(timeout);
         self
     }
 
@@ -521,6 +522,16 @@ impl Locator {
 
     // ── Auto-wait ──────────────────────────────────────────────────
 
+    /// Effective auto-wait timeout: the explicit [`with_timeout`] value if
+    /// set, otherwise the process-wide default (resolved at use time so
+    /// [`crate::config::set_default_timeout`] affects existing locators).
+    fn effective_timeout(&self) -> Result<Duration> {
+        match self.timeout {
+            Some(t) => Ok(t),
+            None => crate::config::default_timeout(),
+        }
+    }
+
     /// Poll until the element is attached, visible, and enabled, returning a
     /// live [`Element`] handle. Used by the action methods below to provide
     /// resilience against transient unactionable states.
@@ -528,40 +539,41 @@ impl Locator {
     /// `action` names the calling action for the timeout diagnosis, so a
     /// failed `press()` reports *what* was being attempted and what the
     /// last poll observed.
+    ///
+    /// Always performs at least one attempt before checking the deadline, so
+    /// `Duration::ZERO` means "single attempt, no polling" — the same
+    /// contract as `poll_lookup` in `app.rs`.
     fn auto_wait(&self, action: &str) -> Result<Element> {
+        let timeout = self.effective_timeout()?;
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
-        // Most recent poll's observation, for the timeout diagnosis.
-        let mut last_seen: Option<ElementData> = None;
         let mut ever_matched = false;
 
         loop {
-            let elapsed = start.elapsed();
-            if elapsed >= self.timeout {
-                return Err(self.diagnose_timeout(
-                    elapsed,
-                    format!("{action} target actionable (visible && enabled)"),
-                    last_seen.as_ref(),
-                    ever_matched,
-                ));
-            }
-
-            match self.resolve_data() {
+            // This poll's observation, for the timeout diagnosis.
+            let observed = match self.resolve_data() {
                 Ok(data) if data.states.visible && data.states.enabled => {
                     return Ok(Element::new(data, Arc::clone(&self.provider)));
                 }
                 Ok(data) => {
                     // Matched but not yet actionable — poll again.
                     ever_matched = true;
-                    last_seen = Some(data);
+                    Some(data)
                 }
-                Err(Error::SelectorNotMatched { .. }) => {
-                    // Not yet present — poll again.
-                    last_seen = None;
-                }
+                // Not yet present — poll again.
+                Err(Error::SelectorNotMatched { .. }) => None,
                 Err(e) => return Err(e),
-            }
+            };
 
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                return Err(self.diagnose_timeout(
+                    elapsed,
+                    format!("{action} target actionable (visible && enabled)"),
+                    observed.as_ref(),
+                    ever_matched,
+                ));
+            }
             std::thread::sleep(poll_interval);
         }
     }
@@ -742,6 +754,9 @@ impl Locator {
     ///
     /// `condition` names what is being waited for; on timeout it is embedded
     /// in the error's [`Diagnosis`] together with the last observation.
+    ///
+    /// Always evaluates the predicate at least once before checking the
+    /// deadline, so `Duration::ZERO` means "single check, no polling".
     fn poll_until(
         &self,
         predicate: impl Fn(Option<&ElementData>) -> bool,
@@ -750,21 +765,10 @@ impl Locator {
     ) -> Result<Option<Element>> {
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
-        // Most recent poll's observation, for the timeout diagnosis.
-        let mut last_seen: Option<ElementData> = None;
         let mut ever_matched = false;
 
         loop {
-            let elapsed = start.elapsed();
-            if elapsed >= timeout {
-                return Err(self.diagnose_timeout(
-                    elapsed,
-                    condition.to_string(),
-                    last_seen.as_ref(),
-                    ever_matched,
-                ));
-            }
-
+            // This poll's observation, for the timeout diagnosis.
             let matched = match self.resolve_data() {
                 Ok(data) => Some(data),
                 Err(Error::SelectorNotMatched { .. }) => None,
@@ -778,7 +782,15 @@ impl Locator {
                 return Ok(matched.map(|data| Element::new(data, Arc::clone(&self.provider))));
             }
 
-            last_seen = matched;
+            let elapsed = start.elapsed();
+            if elapsed >= timeout {
+                return Err(self.diagnose_timeout(
+                    elapsed,
+                    condition.to_string(),
+                    matched.as_ref(),
+                    ever_matched,
+                ));
+            }
             std::thread::sleep(poll_interval);
         }
     }
@@ -917,6 +929,46 @@ mod tests {
     fn group_exists_false_when_no_clause_matches() {
         let loc = root_locator(r#"button[name="Nope"], text_field[name="AlsoNope"]"#);
         assert!(!loc.exists().unwrap());
+    }
+
+    // ── Auto-wait / wait timeout semantics ──────────────────────────
+
+    #[test]
+    fn auto_wait_zero_timeout_performs_single_attempt() {
+        // `Duration::ZERO` must still perform exactly one resolve attempt
+        // (attempt-then-check, matching `poll_lookup` in app.rs) — a visible,
+        // enabled element is acted on immediately, not failed with Timeout.
+        let loc = root_locator(r#"button[name="Back"]"#).with_timeout(Duration::ZERO);
+        loc.press()
+            .expect("zero timeout must still allow one successful attempt");
+    }
+
+    #[test]
+    fn auto_wait_zero_timeout_fails_fast_on_missing_element() {
+        let loc = root_locator(r#"button[name="DoesNotExist"]"#).with_timeout(Duration::ZERO);
+        let start = std::time::Instant::now();
+        let err = loc.press().expect_err("press must time out on a miss");
+        assert!(matches!(err, Error::Timeout { .. }), "got {err:?}");
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "zero timeout must not poll; took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn wait_visible_zero_timeout_performs_single_check() {
+        let el = root_locator(r#"button[name="Back"]"#)
+            .wait_visible(Duration::ZERO)
+            .expect("zero timeout must still allow one successful check");
+        assert_eq!(el.data().name.as_deref(), Some("Back"));
+    }
+
+    #[test]
+    fn wait_detached_zero_timeout_succeeds_when_already_absent() {
+        root_locator(r#"button[name="DoesNotExist"]"#)
+            .wait_detached(Duration::ZERO)
+            .expect("an absent element is already detached");
     }
 
     // ── Rootless search across apps ─────────────────────────────────

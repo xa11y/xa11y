@@ -47,9 +47,10 @@ export interface SubscribeOptions {
 export interface AppLookupOptions {
   /**
    * Poll the accessibility API until the app appears, up to this many
-   * milliseconds. Defaults to 5000 (5 seconds) — pass `0` for a single
-   * attempt with no waiting. Only "not found" errors trigger a retry;
-   * permission errors and the like fail fast.
+   * milliseconds. Defaults to the process-wide default timeout (see
+   * {@link setDefaultTimeout}; 5000ms unless overridden) — pass `0` for a
+   * single attempt with no waiting. Only "not found" errors trigger a
+   * retry; permission errors and the like fail fast.
    */
   timeout?: number;
 }
@@ -64,7 +65,10 @@ export interface WaitForEventOptions {
 }
 
 export interface WaitUntilOptions {
-  /** Timeout in milliseconds. Default: 5000. Rejects with `TimeoutError`. */
+  /**
+   * Timeout in milliseconds. Defaults to the process-wide default timeout
+   * (see {@link setDefaultTimeout}). Rejects with `TimeoutError`.
+   */
   timeout?: number;
   /** Abort signal for cancellation. Rejects with `AbortError`. */
   signal?: AbortSignal;
@@ -72,7 +76,8 @@ export interface WaitUntilOptions {
 
 export interface FindOptions {
   /**
-   * Timeout in milliseconds. Default: 5000. Rejects with
+   * Timeout in milliseconds. Defaults to the process-wide default timeout
+   * (see {@link setDefaultTimeout}). Rejects with
    * `SelectorNotMatchedError` if no application matches in time.
    */
   timeout?: number;
@@ -248,6 +253,28 @@ export interface ScreenshotOptions {
  * ```
  */
 export declare function screenshot(options?: ScreenshotOptions): Promise<Screenshot>;
+
+/**
+ * Set the process-wide default timeout, in seconds.
+ *
+ * Becomes the default for every auto-waiting action method, `wait*` call,
+ * and app lookup (`App.byName` / `App.byPid` / `App.find`) that doesn't
+ * pass an explicit timeout. An explicit per-call timeout always wins. Takes
+ * precedence over the `XA11Y_DEFAULT_TIMEOUT` environment variable
+ * (seconds, read once on first use).
+ *
+ * Pass `0` for "single attempt, no polling" semantics; negative or
+ * non-finite values throw.
+ */
+export declare function setDefaultTimeout(seconds: number): void;
+
+/**
+ * Get the effective process-wide default timeout, in seconds.
+ *
+ * Resolution order: the {@link setDefaultTimeout} value, else the
+ * `XA11Y_DEFAULT_TIMEOUT` environment variable, else the built-in 5.
+ */
+export declare function getDefaultTimeout(): number;
 
 // ── JS-only: typed error hierarchy ─────────────────────────────────────────
 

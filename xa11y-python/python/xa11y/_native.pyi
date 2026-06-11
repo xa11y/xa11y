@@ -181,16 +181,19 @@ class App:
     @property
     def pid(self) -> int | None: ...
     @staticmethod
-    def by_name(name: str, *, timeout: float = 5.0) -> App:
+    def by_name(name: str, *, timeout: float | None = None) -> App:
         """Find an application by exact name.
 
         Polls the accessibility API until the app appears or ``timeout``
-        (seconds) elapses. Defaults to 5 seconds — pass ``timeout=0`` for a
-        single attempt with no waiting. Only "not found" errors trigger a
-        retry; other errors fail fast.
+        (seconds) elapses. ``timeout=None`` (the default) uses the
+        process-wide default timeout — 5 seconds unless overridden via
+        :func:`set_default_timeout` or the ``XA11Y_DEFAULT_TIMEOUT``
+        environment variable. Pass ``timeout=0`` for a single attempt with
+        no waiting. Only "not found" errors trigger a retry; other errors
+        fail fast.
         """
     @staticmethod
-    def by_pid(pid: int, *, timeout: float = 5.0) -> App:
+    def by_pid(pid: int, *, timeout: float | None = None) -> App:
         """Find an application by process ID.
 
         This is the supported way to *wait* for a freshly launched process
@@ -203,6 +206,16 @@ class App:
         instead of filtering app enumeration, so an app whose window is
         still unnamed mid-startup is found as soon as the accessibility API
         can reach it. See ``by_name`` for ``timeout`` semantics.
+        """
+    @staticmethod
+    def find(predicate: Callable[[App], bool], *, timeout: float | None = None) -> App:
+        """Find an application matching ``predicate``.
+
+        ``predicate`` is called with an :class:`App` for each running
+        application on every poll; the first for which it returns truthy is
+        returned. A falsy return means "not this one, keep polling"; if the
+        predicate *raises*, the search aborts immediately and that exception
+        propagates. See ``by_name`` for ``timeout`` semantics.
         """
     @staticmethod
     def list() -> list[App]:
@@ -376,7 +389,11 @@ class Locator:
 
     Locators never hold a live reference to a UI element. Instead, they store
     a selector and resolve it on demand, making them immune to staleness.
-    Action methods auto-wait for the element to appear before acting.
+    Action methods auto-wait for the element to appear before acting, using
+    the process-wide default timeout (5 seconds unless overridden via
+    :func:`set_default_timeout` or the ``XA11Y_DEFAULT_TIMEOUT`` environment
+    variable). ``wait_*`` methods use the same default when no explicit
+    ``timeout=`` is passed.
     """
 
     @property
@@ -447,23 +464,31 @@ class Locator:
         """Select a text range within the matched element (0-based offsets)."""
     def perform_action(self, action: str) -> None:
         """Perform an action by snake_case name."""
-    def wait_visible(self, timeout: float = 5.0) -> Element:
-        """Wait until the element is visible, polling the provider."""
-    def wait_attached(self, timeout: float = 5.0) -> Element:
+    def wait_visible(self, timeout: float | None = None) -> Element:
+        """Wait until the element is visible, polling the provider.
+
+        ``timeout=None`` (the default) uses the process-wide default timeout
+        — see :func:`set_default_timeout`. Applies to all ``wait_*`` methods.
+        """
+    def wait_attached(self, timeout: float | None = None) -> Element:
         """Wait until the element exists in the tree."""
-    def wait_detached(self, timeout: float = 5.0) -> None:
+    def wait_detached(self, timeout: float | None = None) -> None:
         """Wait until the element is removed from the tree."""
-    def wait_enabled(self, timeout: float = 5.0) -> Element:
+    def wait_enabled(self, timeout: float | None = None) -> Element:
         """Wait until the element is enabled."""
-    def wait_hidden(self, timeout: float = 5.0) -> None:
+    def wait_hidden(self, timeout: float | None = None) -> None:
         """Wait until the element is hidden or removed."""
-    def wait_disabled(self, timeout: float = 5.0) -> Element:
+    def wait_disabled(self, timeout: float | None = None) -> Element:
         """Wait until the element is disabled."""
-    def wait_focused(self, timeout: float = 5.0) -> Element:
+    def wait_focused(self, timeout: float | None = None) -> Element:
         """Wait until the element has keyboard focus."""
-    def wait_unfocused(self, timeout: float = 5.0) -> Element:
+    def wait_unfocused(self, timeout: float | None = None) -> Element:
         """Wait until the element does not have keyboard focus."""
-    def wait_until(self, predicate: Callable[[Element | None], bool], timeout: float = 5.0) -> None:
+    def wait_until(
+        self,
+        predicate: Callable[[Element | None], bool],
+        timeout: float | None = None,
+    ) -> None:
         """Wait until an arbitrary predicate is satisfied.
 
         A predicate that *raises* aborts the wait immediately and propagates
@@ -546,6 +571,27 @@ class Screenshot:
 
 def locator(selector: str) -> Locator:
     """Create a top-level Locator searching from the system root."""
+
+def set_default_timeout(timeout: float) -> None:
+    """Set the process-wide default timeout, in seconds.
+
+    Becomes the default for every auto-waiting action method, ``wait_*``
+    call, and app lookup (``App.by_name`` / ``App.by_pid`` / ``App.find``)
+    that doesn't pass an explicit ``timeout=``. An explicit per-call
+    ``timeout=`` always wins. Takes precedence over the
+    ``XA11Y_DEFAULT_TIMEOUT`` environment variable (seconds, read once at
+    import).
+
+    Pass ``0`` for "single attempt, no polling" semantics. Raises
+    ``ValueError`` for negative or non-finite values.
+    """
+
+def get_default_timeout() -> float:
+    """Get the effective process-wide default timeout, in seconds.
+
+    Resolution order: the :func:`set_default_timeout` value, else the
+    ``XA11Y_DEFAULT_TIMEOUT`` environment variable, else the built-in 5.0.
+    """
 
 def input_sim() -> InputSim:
     """Construct an ``InputSim`` backed by the platform's native input path."""

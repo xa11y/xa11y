@@ -27,9 +27,11 @@ from xa11y._native import (
     Subscription,
     TimeoutError,
     XA11yError,
+    get_default_timeout,
     input_sim,
     locator,
     screenshot,
+    set_default_timeout,
 )
 
 __all__ = [
@@ -51,7 +53,9 @@ __all__ = [
     "Subscription",
     "TimeoutError",
     "XA11yError",
+    "get_default_timeout",
     "input_sim",
     "locator",
     "screenshot",
+    "set_default_timeout",
 ]

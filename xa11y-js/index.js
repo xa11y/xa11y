@@ -122,6 +122,10 @@ const CODE_TO_CLASS = {
   XA11Y_PLATFORM: PlatformError,
   XA11Y_NO_ELEMENT_BOUNDS: InvalidActionDataError,
   XA11Y_UNSUPPORTED: ActionNotSupportedError,
+  // Invalid process-wide configuration (e.g. a malformed
+  // XA11Y_DEFAULT_TIMEOUT environment variable) -- an invalid-value error,
+  // same family as a bad per-call timeout argument.
+  XA11Y_INVALID_CONFIG: InvalidActionDataError,
 };
 
 /**
@@ -217,7 +221,9 @@ Object.defineProperty(native.Locator.prototype, 'waitUntil', {
   configurable: true,
   writable: true,
   value: async function waitUntil(predicate, opts = {}) {
-    const { timeout = 5000, signal } = opts;
+    // Default resolves from the process-wide setting (setDefaultTimeout /
+    // XA11Y_DEFAULT_TIMEOUT, else 5s); an explicit opts.timeout wins.
+    const { timeout = native.getDefaultTimeout() * 1000, signal } = opts;
     const deadline = Date.now() + timeout;
 
     if (signal && signal.aborted) {
@@ -444,7 +450,7 @@ class App extends native.App {
    *
    * @param {(app: App) => boolean | Promise<boolean>} predicate
    * @param {object} [options]
-   * @param {number} [options.timeout=5000] - Timeout in milliseconds
+   * @param {number} [options.timeout] - Timeout in milliseconds; defaults to the process-wide default timeout (see `setDefaultTimeout`)
    * @param {AbortSignal} [options.signal] - Abort signal for cancellation
    * @returns {Promise<App>}
    * @example
@@ -456,7 +462,9 @@ class App extends native.App {
    * ```
    */
   static async find(predicate, options = {}) {
-    const { timeout = 5000, signal } = options;
+    // Default resolves from the process-wide setting (setDefaultTimeout /
+    // XA11Y_DEFAULT_TIMEOUT, else 5s); an explicit options.timeout wins.
+    const { timeout = native.getDefaultTimeout() * 1000, signal } = options;
     const deadline = Date.now() + timeout;
 
     if (signal && signal.aborted) {
@@ -565,6 +573,34 @@ function locator(selector) {
 }
 
 /**
+ * Set the process-wide default timeout, in seconds.
+ *
+ * Becomes the default for every auto-waiting action method, `wait*` call,
+ * and app lookup (`App.byName` / `App.byPid`) that doesn't pass an explicit
+ * timeout. An explicit per-call timeout always wins. Takes precedence over
+ * the `XA11Y_DEFAULT_TIMEOUT` environment variable. Pass `0` for "single
+ * attempt, no polling" semantics; negative or non-finite values throw.
+ *
+ * @param {number} seconds
+ */
+function setDefaultTimeout(seconds) {
+  return wrap(native.setDefaultTimeout)(seconds);
+}
+
+/**
+ * Get the effective process-wide default timeout, in seconds.
+ *
+ * Resolution order: the `setDefaultTimeout()` value, else the
+ * `XA11Y_DEFAULT_TIMEOUT` environment variable (seconds, read once on first
+ * use), else the built-in 5.
+ *
+ * @returns {number}
+ */
+function getDefaultTimeout() {
+  return wrap(native.getDefaultTimeout)();
+}
+
+/**
  * Construct an `InputSim` backed by the platform's native input path.
  * Errors are wrapped in typed `XA11yError` subclasses like every other
  * entry point.
@@ -611,9 +647,11 @@ module.exports = {
   Locator: native.Locator,
   Screenshot: native.Screenshot,
   Subscription,
+  getDefaultTimeout,
   inputSim,
   locator,
   screenshot,
+  setDefaultTimeout,
 
   // Error classes
   XA11yError,

@@ -1,4 +1,5 @@
 pub mod app;
+pub mod config;
 pub mod element;
 pub mod error;
 pub mod event;
@@ -20,6 +21,7 @@ pub mod mock;
 
 // Re-export primary types at the crate root for convenience.
 pub use app::App;
+pub use config::{default_timeout, set_default_timeout, DEFAULT_TIMEOUT_ENV_VAR};
 pub use element::{Element, ElementData, RawPlatformData, Rect, StateSet, Toggled, TreeNode};
 pub use error::{Diagnosis, Error, Result};
 pub use event::{ElementState, Event, EventKind, StateFlag};

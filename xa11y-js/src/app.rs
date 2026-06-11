@@ -38,9 +38,11 @@ impl App {
 #[napi(object)]
 pub struct AppLookupOptions {
     /// Poll the accessibility API until the app appears or this many
-    /// milliseconds elapse. Defaults to 5000 (5 seconds) — pass `0` for a
-    /// single attempt with no waiting. Only "not found" errors trigger a
-    /// retry; other errors fail fast.
+    /// milliseconds elapse. When omitted, the process-wide default applies —
+    /// 5000ms (5 seconds) unless overridden via `setDefaultTimeout()` or the
+    /// `XA11Y_DEFAULT_TIMEOUT` environment variable. Pass `0` for a single
+    /// attempt with no waiting. Only "not found" errors trigger a retry;
+    /// other errors fail fast.
     pub timeout: Option<u32>,
 }
 
@@ -49,10 +51,11 @@ impl App {
     /// Find an application by exact name.
     ///
     /// Polls the accessibility API until the app appears or
-    /// `options.timeout` (ms) elapses. Defaults to 5000 (5 seconds) —
-    /// pass `{ timeout: 0 }` for a single attempt with no waiting. Only
-    /// "not found" errors trigger a retry; permission errors and the like
-    /// fail fast.
+    /// `options.timeout` (ms) elapses. When omitted, the process-wide
+    /// default applies — 5 seconds unless overridden via
+    /// `setDefaultTimeout()` / `XA11Y_DEFAULT_TIMEOUT`. Pass `{ timeout: 0 }`
+    /// for a single attempt with no waiting. Only "not found" errors trigger
+    /// a retry; permission errors and the like fail fast.
     ///
     /// Rejects with `PermissionDeniedError` if accessibility is not enabled,
     /// or `SelectorNotMatchedError` if no matching app is found.
@@ -60,7 +63,7 @@ impl App {
     pub fn by_name(name: String, options: Option<AppLookupOptions>) -> AsyncTask<FindByNameTask> {
         AsyncTask::new(FindByNameTask {
             name,
-            timeout: timeout_from(options),
+            timeout_ms: options.and_then(|o| o.timeout),
         })
     }
 
@@ -71,7 +74,7 @@ impl App {
     pub fn by_pid(pid: u32, options: Option<AppLookupOptions>) -> AsyncTask<FindByPidTask> {
         AsyncTask::new(FindByPidTask {
             pid,
-            timeout: timeout_from(options),
+            timeout_ms: options.and_then(|o| o.timeout),
         })
     }
 
@@ -176,20 +179,20 @@ impl App {
 
 // ── Tasks ──────────────────────────────────────────────────────────────
 
-/// 5-second default chosen to match the auto-wait timeout used elsewhere in
-/// the API (e.g. `Locator.wait_attached`).
-const DEFAULT_LOOKUP_TIMEOUT: Duration = Duration::from_millis(5000);
-
-fn timeout_from(options: Option<AppLookupOptions>) -> Duration {
-    match options.and_then(|o| o.timeout) {
-        Some(ms) => Duration::from_millis(ms.into()),
-        None => DEFAULT_LOOKUP_TIMEOUT,
+/// Resolve the optional lookup timeout (ms): an explicit value wins; `None`
+/// falls back to the process-wide default (`setDefaultTimeout()` /
+/// `XA11Y_DEFAULT_TIMEOUT`, else 5 seconds) — matching the auto-wait
+/// timeout used elsewhere in the API (e.g. `Locator.waitAttached`).
+fn effective_timeout_ms(timeout_ms: Option<u32>) -> napi::Result<Duration> {
+    match timeout_ms {
+        Some(ms) => Ok(Duration::from_millis(ms.into())),
+        None => xa11y::default_timeout().map_err(map_err),
     }
 }
 
 pub struct FindByNameTask {
     name: String,
-    timeout: Duration,
+    timeout_ms: Option<u32>,
 }
 
 impl Task for FindByNameTask {
@@ -197,8 +200,9 @@ impl Task for FindByNameTask {
     type JsValue = App;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
+        let timeout = effective_timeout_ms(self.timeout_ms)?;
         let provider = crate::provider()?;
-        xa11y::App::by_name_with(provider, &self.name, self.timeout).map_err(map_err)
+        xa11y::App::by_name_with(provider, &self.name, timeout).map_err(map_err)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
@@ -208,7 +212,7 @@ impl Task for FindByNameTask {
 
 pub struct FindByPidTask {
     pid: u32,
-    timeout: Duration,
+    timeout_ms: Option<u32>,
 }
 
 impl Task for FindByPidTask {
@@ -216,8 +220,9 @@ impl Task for FindByPidTask {
     type JsValue = App;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
+        let timeout = effective_timeout_ms(self.timeout_ms)?;
         let provider = crate::provider()?;
-        xa11y::App::by_pid_with(provider, self.pid, self.timeout).map_err(map_err)
+        xa11y::App::by_pid_with(provider, self.pid, timeout).map_err(map_err)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
