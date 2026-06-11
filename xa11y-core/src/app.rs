@@ -177,15 +177,30 @@ impl App {
     /// Find an application by process ID, using an explicit provider.
     ///
     /// Prefer `App::by_pid` from the `xa11y` crate which uses the global
-    /// singleton provider. See [`by_name_with`](Self::by_name_with) for the
-    /// timeout / polling semantics.
+    /// singleton provider.
+    ///
+    /// This is the supported way to **wait for a freshly launched process to
+    /// surface** in the accessibility tree: the lookup polls
+    /// [`Provider::app_by_pid`] until the application becomes reachable or
+    /// `timeout` elapses, covering the window between process spawn and the
+    /// platform bridge registering the app (slow CI runners, toolkits that
+    /// initialise accessibility lazily). There is no need to hand-roll a
+    /// poll over [`list_with`](Self::list_with).
+    ///
+    /// Timeout / polling semantics match [`by_name_with`](Self::by_name_with):
+    /// `Duration::ZERO` performs exactly one attempt, only
+    /// [`Error::SelectorNotMatched`] ("not reachable yet") triggers a retry,
+    /// and permission / platform errors short-circuit immediately.
+    ///
+    /// Where the platform supports it (macOS AX, Windows UIA), the provider
+    /// attaches to the process directly instead of filtering app enumeration,
+    /// so an app whose window is still unnamed mid-startup is found as soon
+    /// as the accessibility API can reach it.
     pub fn by_pid_with(provider: Arc<dyn Provider>, pid: u32, timeout: Duration) -> Result<Self> {
-        Self::find_matching(
-            provider,
-            timeout,
-            |d| Ok(d.pid == Some(pid)),
-            || format!("application with pid={}", pid),
-        )
+        poll_lookup(timeout, || {
+            let data = provider.app_by_pid(pid)?;
+            Ok(Self::from_data(Arc::clone(&provider), data))
+        })
     }
 
     /// List all running applications, using an explicit provider.

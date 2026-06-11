@@ -1451,3 +1451,257 @@ fn by_pid_with_polls_until_app_appears() {
     assert_eq!(app.pid, Some(100));
     assert!(p.root_call_count() > 2);
 }
+
+// ── Provider::app_by_pid routing ─────────────────────────────────────────────
+
+/// Wrapper whose `app_by_pid` override is injected by the test, mimicking a
+/// backend with a PID-direct attach path (macOS AX / Windows UIA).
+/// `list_apps` deliberately returns an empty list so a lookup that wrongly
+/// routes through enumeration can never match.
+struct AppByPidOverrideProvider {
+    inner: Arc<dyn Provider>,
+    app_by_pid_calls: std::sync::atomic::AtomicUsize,
+    on_app_by_pid: Box<dyn Fn(u32) -> Result<ElementData> + Send + Sync>,
+}
+
+impl Provider for AppByPidOverrideProvider {
+    fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
+        self.inner.get_children(element)
+    }
+    fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
+        self.inner.get_parent(element)
+    }
+    fn list_apps(&self) -> Result<Vec<ElementData>> {
+        Ok(vec![])
+    }
+    fn app_by_pid(&self, pid: u32) -> Result<ElementData> {
+        self.app_by_pid_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        (self.on_app_by_pid)(pid)
+    }
+    fn press(&self, e: &ElementData) -> Result<()> {
+        self.inner.press(e)
+    }
+    fn focus(&self, e: &ElementData) -> Result<()> {
+        self.inner.focus(e)
+    }
+    fn blur(&self, e: &ElementData) -> Result<()> {
+        self.inner.blur(e)
+    }
+    fn toggle(&self, e: &ElementData) -> Result<()> {
+        self.inner.toggle(e)
+    }
+    fn select(&self, e: &ElementData) -> Result<()> {
+        self.inner.select(e)
+    }
+    fn expand(&self, e: &ElementData) -> Result<()> {
+        self.inner.expand(e)
+    }
+    fn collapse(&self, e: &ElementData) -> Result<()> {
+        self.inner.collapse(e)
+    }
+    fn show_menu(&self, e: &ElementData) -> Result<()> {
+        self.inner.show_menu(e)
+    }
+    fn increment(&self, e: &ElementData) -> Result<()> {
+        self.inner.increment(e)
+    }
+    fn decrement(&self, e: &ElementData) -> Result<()> {
+        self.inner.decrement(e)
+    }
+    fn scroll_into_view(&self, e: &ElementData) -> Result<()> {
+        self.inner.scroll_into_view(e)
+    }
+    fn set_value(&self, e: &ElementData, v: &str) -> Result<()> {
+        self.inner.set_value(e, v)
+    }
+    fn set_numeric_value(&self, e: &ElementData, v: f64) -> Result<()> {
+        self.inner.set_numeric_value(e, v)
+    }
+    fn type_text(&self, e: &ElementData, t: &str) -> Result<()> {
+        self.inner.type_text(e, t)
+    }
+    fn set_text_selection(&self, e: &ElementData, s: u32, en: u32) -> Result<()> {
+        self.inner.set_text_selection(e, s, en)
+    }
+    fn perform_action(&self, e: &ElementData, a: &str) -> Result<()> {
+        self.inner.perform_action(e, a)
+    }
+    fn subscribe(&self, e: &ElementData) -> Result<Subscription> {
+        self.inner.subscribe(e)
+    }
+}
+
+#[test]
+fn by_pid_with_routes_through_provider_app_by_pid() {
+    let inner = multi_app_provider();
+    let app1 = inner.list_apps().expect("mock list_apps")[0].clone();
+    assert_eq!(app1.pid, Some(100), "fixture: App1 has pid 100");
+    let p = Arc::new(AppByPidOverrideProvider {
+        inner,
+        app_by_pid_calls: std::sync::atomic::AtomicUsize::new(0),
+        on_app_by_pid: Box::new(move |pid| {
+            if pid == 100 {
+                Ok(app1.clone())
+            } else {
+                Err(Error::SelectorNotMatched {
+                    selector: format!("application with pid={pid}"),
+                })
+            }
+        }),
+    });
+    // list_apps returns nothing, so success proves the lookup consulted the
+    // provider's app_by_pid override rather than filtering enumeration.
+    let app = App::by_pid_with(
+        Arc::clone(&p) as Arc<dyn Provider>,
+        100,
+        std::time::Duration::ZERO,
+    )
+    .expect("PID-direct override should resolve the app");
+    assert_eq!(app.pid, Some(100));
+    assert_eq!(
+        p.app_by_pid_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
+#[test]
+fn by_pid_with_short_circuits_on_app_by_pid_platform_error() {
+    let p = Arc::new(AppByPidOverrideProvider {
+        inner: multi_app_provider(),
+        app_by_pid_calls: std::sync::atomic::AtomicUsize::new(0),
+        on_app_by_pid: Box::new(|_| {
+            Err(Error::Platform {
+                code: -25211,
+                message: "accessibility API disabled".to_string(),
+            })
+        }),
+    });
+    let start = std::time::Instant::now();
+    let result = App::by_pid_with(
+        Arc::clone(&p) as Arc<dyn Provider>,
+        100,
+        std::time::Duration::from_secs(10),
+    );
+    assert!(matches!(result, Err(Error::Platform { .. })));
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(1),
+        "platform error must fail fast, took {:?}",
+        start.elapsed()
+    );
+    assert_eq!(
+        p.app_by_pid_calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "non-retryable error must not be retried"
+    );
+}
+
+/// Wrapper that adds a "ghost" app with no resolvable pid to the inner
+/// provider's enumeration — models the AT-SPI bridge quirk where an app's
+/// pid can't be determined.
+struct GhostAppProvider {
+    inner: Arc<dyn Provider>,
+}
+
+impl Provider for GhostAppProvider {
+    fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
+        self.inner.get_children(element)
+    }
+    fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
+        self.inner.get_parent(element)
+    }
+    fn list_apps(&self) -> Result<Vec<ElementData>> {
+        let mut apps = self.inner.list_apps()?;
+        let mut ghost = apps[0].clone();
+        ghost.name = Some("Ghost".to_string());
+        ghost.pid = None;
+        apps.push(ghost);
+        Ok(apps)
+    }
+    fn press(&self, e: &ElementData) -> Result<()> {
+        self.inner.press(e)
+    }
+    fn focus(&self, e: &ElementData) -> Result<()> {
+        self.inner.focus(e)
+    }
+    fn blur(&self, e: &ElementData) -> Result<()> {
+        self.inner.blur(e)
+    }
+    fn toggle(&self, e: &ElementData) -> Result<()> {
+        self.inner.toggle(e)
+    }
+    fn select(&self, e: &ElementData) -> Result<()> {
+        self.inner.select(e)
+    }
+    fn expand(&self, e: &ElementData) -> Result<()> {
+        self.inner.expand(e)
+    }
+    fn collapse(&self, e: &ElementData) -> Result<()> {
+        self.inner.collapse(e)
+    }
+    fn show_menu(&self, e: &ElementData) -> Result<()> {
+        self.inner.show_menu(e)
+    }
+    fn increment(&self, e: &ElementData) -> Result<()> {
+        self.inner.increment(e)
+    }
+    fn decrement(&self, e: &ElementData) -> Result<()> {
+        self.inner.decrement(e)
+    }
+    fn scroll_into_view(&self, e: &ElementData) -> Result<()> {
+        self.inner.scroll_into_view(e)
+    }
+    fn set_value(&self, e: &ElementData, v: &str) -> Result<()> {
+        self.inner.set_value(e, v)
+    }
+    fn set_numeric_value(&self, e: &ElementData, v: f64) -> Result<()> {
+        self.inner.set_numeric_value(e, v)
+    }
+    fn type_text(&self, e: &ElementData, t: &str) -> Result<()> {
+        self.inner.type_text(e, t)
+    }
+    fn set_text_selection(&self, e: &ElementData, s: u32, en: u32) -> Result<()> {
+        self.inner.set_text_selection(e, s, en)
+    }
+    fn perform_action(&self, e: &ElementData, a: &str) -> Result<()> {
+        self.inner.perform_action(e, a)
+    }
+    fn subscribe(&self, e: &ElementData) -> Result<Subscription> {
+        self.inner.subscribe(e)
+    }
+}
+
+#[test]
+fn by_pid_timeout_reports_enumeration_diagnostics() {
+    // The default app_by_pid goes through list_apps; on a miss, the error
+    // must say how many apps were visible and how many had no resolvable
+    // pid, so a CI timeout is diagnosable from the message alone.
+    let p = Arc::new(GhostAppProvider {
+        inner: multi_app_provider(),
+    });
+    let err = match App::by_pid_with(
+        Arc::clone(&p) as Arc<dyn Provider>,
+        999,
+        std::time::Duration::ZERO,
+    ) {
+        Ok(_) => panic!("lookup for an unknown pid must fail"),
+        Err(e) => e,
+    };
+    match err {
+        Error::SelectorNotMatched { selector } => {
+            assert!(
+                selector.contains("pid=999"),
+                "diagnostic should name the pid, got: {selector}"
+            );
+            assert!(
+                selector.contains("3 running apps"),
+                "diagnostic should report enumeration size, got: {selector}"
+            );
+            assert!(
+                selector.contains("1 without a resolvable pid"),
+                "diagnostic should count unresolved pids, got: {selector}"
+            );
+        }
+        other => panic!("expected SelectorNotMatched, got {other:?}"),
+    }
+}
