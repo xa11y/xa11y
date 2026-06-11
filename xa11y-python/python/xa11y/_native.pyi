@@ -136,10 +136,27 @@ class App:
         """
     @staticmethod
     def by_pid(pid: int, *, timeout: float = 5.0) -> App:
-        """Find an application by process ID. See ``by_name`` for ``timeout``."""
+        """Find an application by process ID.
+
+        This is the supported way to *wait* for a freshly launched process
+        to surface in the accessibility tree: the lookup polls until the app
+        becomes reachable through the platform bridge or ``timeout``
+        (seconds) elapses, covering the gap between the process starting and
+        its accessibility registration completing. There is no need to
+        hand-roll a poll over ``App.list()``. Where the platform supports it
+        (macOS AX, Windows UIA), the lookup attaches to the process directly
+        instead of filtering app enumeration, so an app whose window is
+        still unnamed mid-startup is found as soon as the accessibility API
+        can reach it. See ``by_name`` for ``timeout`` semantics.
+        """
     @staticmethod
     def list() -> list[App]:
-        """List all running applications."""
+        """List all running applications.
+
+        Single enumeration, no polling. To wait for an app that is still
+        starting up, use ``by_pid`` / ``by_name`` / ``find`` with a
+        ``timeout`` instead of polling this in a loop.
+        """
     def locator(self, selector: str) -> Locator:
         """Create a Locator scoped to this application's accessibility tree."""
     def subscribe(self) -> Subscription:

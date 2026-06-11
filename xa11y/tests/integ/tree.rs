@@ -11,7 +11,7 @@ mod tests {
     use xa11y::*;
 
     // ════════════════════════════════════════════════════════════════
-    // Provider Operations (2 tests)
+    // Provider Operations (4 tests)
     // ════════════════════════════════════════════════════════════════
 
     #[test]
@@ -34,6 +34,37 @@ mod tests {
             "apps should include the test app. Apps: {:?}",
             apps.iter().map(|a| &a.name).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    #[ignore]
+    fn app_by_pid_attaches_to_running_app() {
+        // Exercises each backend's PID-direct attach path (AX on macOS, UIA
+        // ProcessId search on Windows, AT-SPI registry match on Linux).
+        let app = h::app_root();
+        let pid = app.pid.expect("test app should report a pid");
+        let by_pid = App::by_pid(pid, std::time::Duration::from_secs(2))
+            .unwrap_or_else(|e| panic!("by_pid({pid}) failed for a running app: {e}"));
+        assert_eq!(by_pid.pid, Some(pid));
+    }
+
+    #[test]
+    #[ignore]
+    fn app_by_pid_unknown_pid_is_selector_not_matched() {
+        // A pid that can't belong to a running process: not-attached must
+        // surface as SelectorNotMatched (the retryable "not found" signal),
+        // never as a platform error, and the diagnostic must name the pid.
+        let result = App::by_pid(999_999_999, std::time::Duration::ZERO);
+        match result {
+            Ok(_) => panic!("by_pid for a nonexistent process must fail"),
+            Err(Error::SelectorNotMatched { selector }) => {
+                assert!(
+                    selector.contains("pid=999999999"),
+                    "diagnostic should name the pid, got: {selector}"
+                );
+            }
+            Err(e) => panic!("expected SelectorNotMatched, got: {e}"),
+        }
     }
 
     // ════════════════════════════════════════════════════════════════

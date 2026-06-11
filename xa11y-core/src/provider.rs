@@ -1,5 +1,5 @@
 use crate::element::ElementData;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::event_provider::Subscription;
 use crate::selector::{matches_simple, Combinator, Selector, SelectorGroup, SelectorSegment};
 
@@ -47,6 +47,39 @@ pub trait Provider: Send + Sync {
     /// profiles, and silently routing app discovery through `get_children`
     /// would hide the difference from implementors.
     fn list_apps(&self) -> Result<Vec<ElementData>>;
+
+    /// Find the application owning process `pid` — one attempt, no polling.
+    ///
+    /// This is the single-shot discovery primitive behind `App::by_pid`; the
+    /// core's lookup loop owns the retry/timeout policy. Returns
+    /// [`Error::SelectorNotMatched`] when no accessible application for `pid`
+    /// exists *yet* — the signal the poll loop retries on — and any other
+    /// error when the lookup itself failed (permissions, platform API
+    /// failure), which short-circuits the poll.
+    ///
+    /// The default implementation filters [`list_apps`](Self::list_apps) by
+    /// `pid`, and its not-matched error carries enumeration diagnostics (how
+    /// many apps were visible and how many had no resolvable pid) so a
+    /// timeout on an opaque CI runner says *why* the app was invisible.
+    /// Backends override this where the platform supports reaching a process
+    /// directly (`AXUIElementCreateApplication` on macOS, a UIA `ProcessId`
+    /// property search on Windows): direct attach is immune to enumeration
+    /// blind spots such as top-level windows that are still unnamed while the
+    /// app starts up.
+    fn app_by_pid(&self, pid: u32) -> Result<ElementData> {
+        let apps = self.list_apps()?;
+        let total = apps.len();
+        let unresolved = apps.iter().filter(|a| a.pid.is_none()).count();
+        if let Some(data) = apps.into_iter().find(|a| a.pid == Some(pid)) {
+            return Ok(data);
+        }
+        Err(Error::SelectorNotMatched {
+            selector: format!(
+                "application with pid={pid} (enumerated {total} running apps, \
+                 {unresolved} without a resolvable pid)"
+            ),
+        })
+    }
 
     /// Search for elements matching a selector.
     ///
@@ -256,6 +289,13 @@ impl<T: Provider + ?Sized> Provider for &T {
     }
     fn list_apps(&self) -> Result<Vec<ElementData>> {
         (**self).list_apps()
+    }
+    // Delegated explicitly (despite having a default impl) so a concrete
+    // provider's PID-direct override isn't bypassed when it's used through a
+    // shared reference — the default body on `&T` would re-route through
+    // `list_apps` and silently lose the override.
+    fn app_by_pid(&self, pid: u32) -> Result<ElementData> {
+        (**self).app_by_pid(pid)
     }
     fn find_elements(
         &self,

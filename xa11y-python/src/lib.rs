@@ -1074,6 +1074,19 @@ impl App {
 
     /// Find an application by process ID.
     ///
+    /// This is the supported way to *wait* for a freshly launched process to
+    /// surface in the accessibility tree: the lookup polls until the app
+    /// becomes reachable through the platform bridge or `timeout` (in
+    /// seconds) elapses, covering the gap between the process starting and
+    /// its accessibility registration completing (slow CI runners, toolkits
+    /// that initialise accessibility lazily). There is no need to hand-roll
+    /// a poll over `App.list()`.
+    ///
+    /// Where the platform supports it (macOS AX, Windows UIA), the lookup
+    /// attaches to the process directly instead of filtering app
+    /// enumeration, so an app whose window is still unnamed mid-startup is
+    /// found as soon as the accessibility API can reach it.
+    ///
     /// See [`by_name`] for `timeout` semantics.
     #[staticmethod]
     #[pyo3(signature = (pid, *, timeout=5.0))]
@@ -1087,6 +1100,10 @@ impl App {
     }
 
     /// List all running applications.
+    ///
+    /// Single enumeration, no polling. To wait for an app that is still
+    /// starting up, use `by_pid` / `by_name` / `find` with a `timeout`
+    /// instead of polling this in a loop.
     #[staticmethod]
     fn list(py: Python<'_>) -> PyResult<Vec<Self>> {
         let provider = get_provider()?;

@@ -248,8 +248,14 @@ mod app_ext {
         /// [`App::by_name_with`] for retry semantics.
         fn by_name(name: &str, timeout: Duration) -> Result<Self>;
         /// Find an application by process ID using the global singleton
-        /// provider, polling until it appears or `timeout` elapses. See
-        /// [`by_name`](Self::by_name) for retry semantics.
+        /// provider, polling until it appears or `timeout` elapses.
+        ///
+        /// This is the supported way to wait for a freshly launched process
+        /// to surface in the accessibility tree — the poll covers the window
+        /// between process spawn and the platform bridge registering the
+        /// app, so callers don't need a hand-rolled loop over
+        /// [`list`](Self::list). See [`App::by_pid_with`] for the full
+        /// contract and [`by_name`](Self::by_name) for retry semantics.
         fn by_pid(pid: u32, timeout: Duration) -> Result<Self>;
         /// List all running applications using the global singleton provider.
         fn list() -> Result<Vec<Self>>;

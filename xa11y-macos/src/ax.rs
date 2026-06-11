@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use core_foundation::base::TCFType;
 use core_foundation::number::CFNumber;
@@ -27,7 +27,11 @@ type CFArrayRef = *const c_void;
 type CFIndex = isize;
 
 const AX_ERROR_SUCCESS: i32 = 0;
+const AX_ERROR_INVALID_UI_ELEMENT: i32 = -25202;
+const AX_ERROR_CANNOT_COMPLETE: i32 = -25204;
 const AX_ERROR_ACTION_UNSUPPORTED: i32 = -25206;
+const AX_ERROR_NOT_IMPLEMENTED: i32 = -25208;
+const AX_ERROR_NO_VALUE: i32 = -25212;
 const AX_VALUE_CGPOINT: i32 = 1;
 const AX_VALUE_CGSIZE: i32 = 2;
 const CF_NUMBER_FLOAT64: i32 = 13;
@@ -2014,6 +2018,75 @@ impl Provider for MacOSProvider {
         Ok(results)
     }
 
+    /// Attach to an application directly by pid via
+    /// `AXUIElementCreateApplication` — no window enumeration involved.
+    ///
+    /// `list_apps()` discovers apps through CGWindowList, which only sees
+    /// processes that already own a window with a non-empty owner name (and
+    /// needs Screen Recording permission to read names). During app startup
+    /// none of that holds yet, so a freshly launched process can be
+    /// AX-reachable while still invisible to enumeration. Direct attach
+    /// avoids that blind spot entirely.
+    ///
+    /// `AXUIElementCreateApplication` succeeds for *any* pid without checking
+    /// the process, so reachability is probed by reading `AXRole`. AXError
+    /// codes that mean "not reachable (yet)" — the process is still
+    /// launching, has exited, or doesn't implement the AX API — map to
+    /// `SelectorNotMatched` so the core poll loop keeps retrying until its
+    /// deadline; anything else is a genuine platform failure and
+    /// short-circuits.
+    fn app_by_pid(&self, pid: u32) -> Result<ElementData> {
+        let app_element = AXElement::from_owned(unsafe { safe_ax_create_application(pid as i32) });
+        if app_element.is_null() {
+            return Err(Error::SelectorNotMatched {
+                selector: format!(
+                    "application with pid={pid} (AXUIElementCreateApplication returned NULL)"
+                ),
+            });
+        }
+        let attr = CFString::new("AXRole");
+        let mut value: CFTypeRef = std::ptr::null();
+        let err = ffi_copy_attribute_value(
+            app_element.as_ptr(),
+            attr.as_concrete_TypeRef() as CFTypeRef,
+            &mut value,
+        );
+        match err {
+            AX_ERROR_SUCCESS => {
+                if !value.is_null() {
+                    unsafe { safe_cf_release(value) };
+                }
+                let mut data = self.build_element_data(&app_element, Some(pid));
+                // Keep `name` consistent with `list_apps()`, which overrides
+                // the AX-reported name with the CGWindowList owner name. A
+                // pre-window process has no CGWindowList entry yet; the
+                // AX-reported name from build_element_data then stands.
+                if let Some((_, name)) = Self::list_gui_apps()
+                    .into_iter()
+                    .find(|(p, _)| *p == pid as i32)
+                {
+                    data.name = Some(name);
+                }
+                Ok(data)
+            }
+            AX_ERROR_CANNOT_COMPLETE
+            | AX_ERROR_INVALID_UI_ELEMENT
+            | AX_ERROR_NOT_IMPLEMENTED
+            | AX_ERROR_NO_VALUE => Err(Error::SelectorNotMatched {
+                selector: format!(
+                    "application with pid={pid} (AX attach probe returned AXError {err}: \
+                     process not yet AX-reachable, exited, or has no accessibility bridge)"
+                ),
+            }),
+            _ => Err(Error::Platform {
+                code: err as i64,
+                message: format!(
+                    "AXUIElementCopyAttributeValue(AXRole) failed while attaching to pid {pid}"
+                ),
+            }),
+        }
+    }
+
     // ── Common actions ──────────────────────────────────────────────
 
     fn press(&self, element: &ElementData) -> Result<()> {
@@ -2370,6 +2443,53 @@ unsafe extern "C" fn ax_observer_callback(
     }
 }
 
+/// How long `subscribe()` keeps retrying transient `AXObserverAddNotification`
+/// failures while the target app finishes launching, and the pause between
+/// attempts. Cold CI runners can enumerate an app that still answers
+/// `kAXErrorCannotComplete` for a moment; 2s comfortably covers that window
+/// without masking a genuinely broken target for long.
+const SUBSCRIBE_REGISTER_RETRY_BUDGET: Duration = Duration::from_secs(2);
+const SUBSCRIBE_REGISTER_RETRY_INTERVAL: Duration = Duration::from_millis(100);
+
+/// One pass of `AXObserverAddNotification` over `notifications`. On the first
+/// failure, rolls back the registrations made so far — so the observer holds
+/// no registrations referencing `ctx_ptr` when the caller frees it — and
+/// returns the failing AXError together with the notification name. Removal
+/// results during rollback are deliberately ignored: this is already an error
+/// path and the registration failure is the error the caller acts on.
+fn register_notifications(
+    observer: CFTypeRef,
+    app_element: AXUIElementRef,
+    ctx_ptr: *mut c_void,
+    notifications: &[&'static str],
+) -> std::result::Result<(), (i32, &'static str)> {
+    for (idx, notif) in notifications.iter().enumerate() {
+        let name = CFString::new(notif);
+        let err = unsafe {
+            safe_ax_observer_add_notification(
+                observer,
+                app_element,
+                name.as_concrete_TypeRef() as CFTypeRef,
+                ctx_ptr,
+            )
+        };
+        if err != AX_ERROR_SUCCESS {
+            for added in &notifications[..idx] {
+                let added_name = CFString::new(added);
+                let _ = unsafe {
+                    safe_ax_observer_remove_notification(
+                        observer,
+                        app_element,
+                        added_name.as_concrete_TypeRef() as CFTypeRef,
+                    )
+                };
+            }
+            return Err((err, notif));
+        }
+    }
+    Ok(())
+}
+
 impl MacOSProvider {
     fn subscribe_impl(&self, pid: i32, app_name: String) -> Result<Subscription> {
         let (tx, rx) = std::sync::mpsc::channel();
@@ -2422,49 +2542,46 @@ impl MacOSProvider {
         ];
 
         // Register every notification, failing the whole subscribe on the
-        // first error (tenet 1): a partially-registered observer would
-        // silently never deliver the missing event kinds. Mirrors the
+        // first persistent error (tenet 1): a partially-registered observer
+        // would silently never deliver the missing event kinds. Mirrors the
         // Windows backend's AddAutomationEventHandler rollback.
-        for (idx, notif) in notifications.iter().enumerate() {
-            let name = CFString::new(notif);
-            let err = unsafe {
-                safe_ax_observer_add_notification(
-                    observer,
-                    app_element,
-                    name.as_concrete_TypeRef() as CFTypeRef,
-                    ctx_ptr,
-                )
-            };
-            if err != AX_ERROR_SUCCESS {
-                // Roll back the notifications registered so far so the
-                // observer holds no registrations referencing `ctx_ptr`
-                // when we free it below. Removal results are deliberately
-                // ignored: this is already an error path and the original
-                // registration failure is the error we surface.
-                for added in &notifications[..idx] {
-                    let added_name = CFString::new(added);
-                    let _ = unsafe {
-                        safe_ax_observer_remove_notification(
-                            observer,
-                            app_element,
-                            added_name.as_concrete_TypeRef() as CFTypeRef,
-                        )
-                    };
+        //
+        // A freshly launched app can be enumerable yet still answer
+        // kAXErrorCannotComplete / kAXErrorInvalidUIElement while its AX
+        // bridge finishes initialising (cold CI runners especially). Those
+        // codes are transient "not ready yet" signals, so registration is
+        // retried as a whole — each failed attempt rolls back its partial
+        // registrations inside `register_notifications` — until
+        // SUBSCRIBE_REGISTER_RETRY_BUDGET elapses. This is an explicit,
+        // bounded retry of the same mechanism, not a fallback: on exhaustion
+        // the original AXError is surfaced unchanged.
+        let retry_start = Instant::now();
+        loop {
+            match register_notifications(observer, app_element, ctx_ptr, &notifications) {
+                Ok(()) => break,
+                Err((err, _))
+                    if matches!(err, AX_ERROR_CANNOT_COMPLETE | AX_ERROR_INVALID_UI_ELEMENT)
+                        && retry_start.elapsed() < SUBSCRIBE_REGISTER_RETRY_BUDGET =>
+                {
+                    std::thread::sleep(SUBSCRIBE_REGISTER_RETRY_INTERVAL);
                 }
-                // Release everything this function owns so far: `app_element`
-                // (released after the loop on the success path), `observer`,
-                // and the leaked `ObserverContext` box. We return before the
-                // success-path release / CancelHandle ownership transfer, so
-                // nothing is double-released.
-                unsafe {
-                    safe_cf_release(app_element);
-                    safe_cf_release(observer);
-                    drop(Box::from_raw(ctx_ptr as *mut ObserverContext));
+                Err((err, notif)) => {
+                    // Release everything this function owns so far:
+                    // `app_element` (released after the loop on the success
+                    // path), `observer`, and the leaked `ObserverContext`
+                    // box. We return before the success-path release /
+                    // CancelHandle ownership transfer, so nothing is
+                    // double-released.
+                    unsafe {
+                        safe_cf_release(app_element);
+                        safe_cf_release(observer);
+                        drop(Box::from_raw(ctx_ptr as *mut ObserverContext));
+                    }
+                    return Err(Error::Platform {
+                        code: err as i64,
+                        message: format!("AXObserverAddNotification({notif}) failed"),
+                    });
                 }
-                return Err(Error::Platform {
-                    code: err as i64,
-                    message: format!("AXObserverAddNotification({notif}) failed"),
-                });
             }
         }
 

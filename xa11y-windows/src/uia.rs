@@ -705,6 +705,54 @@ impl Provider for WindowsProvider {
         self.get_children(None)
     }
 
+    /// Attach to an application directly by pid via a UIA `ProcessId`
+    /// property search over the desktop root's children.
+    ///
+    /// `list_apps()` enumerates desktop-root children of control type
+    /// `Window` and skips windows whose name is still empty — which is
+    /// exactly the state a freshly launched app's top-level window is in
+    /// while the process boots. Matching on the pid property alone closes
+    /// that blind spot: any top-level element owned by the process counts,
+    /// named or not.
+    fn app_by_pid(&self, pid: u32) -> Result<ElementData> {
+        let root = uia_call(|| unsafe { self.automation.GetRootElement() })?;
+        let condition = uia_call(|| unsafe {
+            self.automation
+                .CreatePropertyCondition(UIA_ProcessIdPropertyId, &VARIANT::from(pid as i32))
+        })?;
+        // FindFirstBuildCache returns S_OK with a null element when nothing
+        // matches; windows-rs surfaces that null as an `Err` carrying the
+        // S_OK HRESULT. That case is "process not in the UIA tree yet" —
+        // SelectorNotMatched, so the core poll loop retries — while a
+        // failing HRESULT is a genuine UIA error and short-circuits.
+        let el = match unsafe {
+            root.FindFirstBuildCache(TreeScope_Children, &condition, &self.batch_request)
+        } {
+            Ok(el) => el,
+            Err(e) if e.code().is_ok() => {
+                return Err(Error::SelectorNotMatched {
+                    selector: format!(
+                        "application with pid={pid} (no top-level UIA element owned by the \
+                         process yet)"
+                    ),
+                });
+            }
+            Err(e) => {
+                return Err(Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("FindFirstBuildCache(ProcessId={pid}) failed: {e}"),
+                });
+            }
+        };
+        // Mirror get_children(None): re-acquire via HWND to activate
+        // AccessKit's UIA provider, then repopulate the property snapshot.
+        let el = self
+            .reacquire_via_hwnd(&el)
+            .and_then(|e| self.populate_cache(&e).map_err(|_| ()))
+            .unwrap_or(el);
+        Ok(self.build_element_data(&el, Some(pid)))
+    }
+
     /// Override the default `narrow_multi_segment` so that the Descendant
     /// combinator uses `find_elements_in_tree` (tree-walking via `get_children`)
     /// rather than `self.find_elements` (which would invoke `find_all_subtree`).

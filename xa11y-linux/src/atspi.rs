@@ -987,10 +987,15 @@ impl LinuxProvider {
         }
 
         // Fall back to Application.Id for adapters that set it to pid.
+        // Require that a process with that id actually exists — a registry
+        // index from a misbehaving bridge usually names a long-dead or absurd
+        // pid. This is only a cheap sanity filter: a low index can still
+        // collide with a real process (1 = init), which is why the D-Bus
+        // connection pid above is authoritative whenever available.
         if let Ok(proxy) = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Application")
         {
             if let Ok(pid) = proxy.get_property::<i32>("Id") {
-                if pid > 0 {
+                if pid > 0 && std::path::Path::new(&format!("/proc/{pid}")).exists() {
                     return Some(pid as u32);
                 }
             }
@@ -1515,6 +1520,50 @@ impl Provider for LinuxProvider {
             .collect();
 
         Ok(results)
+    }
+
+    /// Find an application by pid directly against the AT-SPI registry.
+    ///
+    /// Differs from filtering `list_apps()` in two ways that matter for a
+    /// freshly launched process:
+    ///
+    /// * No empty-name filter — toolkits can register on the bus before the
+    ///   app name is set, and a pid match is precise enough on its own.
+    /// * The not-matched error reports how many registry entries were
+    ///   examined and how many had no resolvable pid (the misreported-pid
+    ///   bridge quirk `get_app_pid` documents), so a timeout on CI says why
+    ///   the app was invisible instead of just "not found".
+    fn app_by_pid(&self, pid: u32) -> Result<ElementData> {
+        let registry = AccessibleRef {
+            bus_name: "org.a11y.atspi.Registry".to_string(),
+            path: "/org/a11y/atspi/accessible/root".to_string(),
+        };
+        let children = self.get_atspi_children(&registry)?;
+
+        let mut total = 0usize;
+        let mut unresolved = 0usize;
+        for child in children.iter().filter(|c| c.path != "/org/a11y/atspi/null") {
+            total += 1;
+            match self.get_app_pid(child) {
+                Some(p) if p == pid => {
+                    let mut data = self.build_element_data(child, Some(p));
+                    // Mirror list_apps: prefer the registry-reported name.
+                    let name = self.get_name(child).unwrap_or_default();
+                    if !name.is_empty() {
+                        data.name = Some(name);
+                    }
+                    return Ok(data);
+                }
+                Some(_) => {}
+                None => unresolved += 1,
+            }
+        }
+        Err(Error::SelectorNotMatched {
+            selector: format!(
+                "application with pid={pid} ({total} AT-SPI registry entries examined, \
+                 {unresolved} without a resolvable pid)"
+            ),
+        })
     }
 
     fn press(&self, element: &ElementData) -> Result<()> {
