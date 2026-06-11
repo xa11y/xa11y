@@ -274,12 +274,40 @@ impl WindowsProvider {
 
 // ── Safe UIA helpers ────────────────────────────────────────────────────────
 
+/// Maximum number of attempts for a UIA call that keeps failing with
+/// `EVENT_E_ALL_SUBSCRIBERS_FAILED`, and the delay between attempts.
+const EVENT_SUBSCRIBER_FAILURE_ATTEMPTS: u32 = 3;
+const EVENT_SUBSCRIBER_FAILURE_RETRY_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(50);
+
 /// Wrap a UIA COM call, mapping the error to xa11y Error::Platform.
-fn uia_call<T>(f: impl FnOnce() -> windows::core::Result<T>) -> Result<T> {
-    f().map_err(|e| Error::Platform {
-        code: e.code().0 as i64,
-        message: e.to_string(),
-    })
+///
+/// `EVENT_E_ALL_SUBSCRIBERS_FAILED` (0x80040201) is transient (see the
+/// constant's doc above): some providers (notably Qt's UIA backend) surface
+/// it from query calls like `FindAllBuildCache` even though only the
+/// notification layer hiccupped. The action paths (`press`/`toggle`/`select`)
+/// can swallow it outright because the action already completed (#169); a
+/// query needs a value, so the call is retried a few times before the error
+/// is propagated. Any other error is returned immediately — this is a retry
+/// of one classified-transient HRESULT, not a fallback (tenet 1).
+/// See: https://github.com/xa11y/xa11y/issues/257
+fn uia_call<T>(f: impl Fn() -> windows::core::Result<T>) -> Result<T> {
+    let mut attempts_left = EVENT_SUBSCRIBER_FAILURE_ATTEMPTS;
+    loop {
+        attempts_left -= 1;
+        match f() {
+            Ok(v) => return Ok(v),
+            Err(e) if is_event_subscriber_failure(&e) && attempts_left > 0 => {
+                std::thread::sleep(EVENT_SUBSCRIBER_FAILURE_RETRY_DELAY);
+            }
+            Err(e) => {
+                return Err(Error::Platform {
+                    code: e.code().0 as i64,
+                    message: e.to_string(),
+                })
+            }
+        }
+    }
 }
 
 /// Read a BSTR VARIANT property from the element's pre-fetched snapshot.
@@ -2562,6 +2590,78 @@ mod tests {
                 !is_event_subscriber_failure(&err),
                 "HRESULT 0x{code:08X} must not be classified as an event-subscriber failure"
             );
+        }
+    }
+
+    // ── uia_call retry behaviour (issue #257) ───────────────────────────────
+
+    fn subscriber_failure() -> windows::core::Error {
+        EVENT_E_ALL_SUBSCRIBERS_FAILED.ok().unwrap_err()
+    }
+
+    #[test]
+    fn uia_call_success_calls_once() {
+        let calls = std::cell::Cell::new(0u32);
+        let result = uia_call(|| {
+            calls.set(calls.get() + 1);
+            Ok(42)
+        });
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn uia_call_retries_event_subscriber_failure_then_succeeds() {
+        // Two transient 0x80040201 failures, then success — the query path
+        // must ride out the same Qt-UIA hiccup the action path tolerates.
+        let calls = std::cell::Cell::new(0u32);
+        let result = uia_call(|| {
+            calls.set(calls.get() + 1);
+            if calls.get() < EVENT_SUBSCRIBER_FAILURE_ATTEMPTS {
+                Err(subscriber_failure())
+            } else {
+                Ok("tree")
+            }
+        });
+        assert_eq!(result.unwrap(), "tree");
+        assert_eq!(calls.get(), EVENT_SUBSCRIBER_FAILURE_ATTEMPTS);
+    }
+
+    #[test]
+    fn uia_call_propagates_persistent_event_subscriber_failure() {
+        // If every attempt fails with 0x80040201, the error must still
+        // surface (no infinite retry, no silent swallow on the read path —
+        // unlike an action, a query has no value to return).
+        let calls = std::cell::Cell::new(0u32);
+        let result: Result<()> = uia_call(|| {
+            calls.set(calls.get() + 1);
+            Err(subscriber_failure())
+        });
+        assert_eq!(calls.get(), EVENT_SUBSCRIBER_FAILURE_ATTEMPTS);
+        match result {
+            Err(Error::Platform { code, .. }) => {
+                assert_eq!(code, EVENT_E_ALL_SUBSCRIBERS_FAILED.0 as i64);
+            }
+            other => panic!("expected Error::Platform, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn uia_call_does_not_retry_other_errors() {
+        let calls = std::cell::Cell::new(0u32);
+        let e_fail = windows::core::HRESULT(0x80004005u32 as i32);
+        let result: Result<()> = uia_call(|| {
+            calls.set(calls.get() + 1);
+            Err(e_fail.ok().unwrap_err())
+        });
+        assert_eq!(
+            calls.get(),
+            1,
+            "non-transient errors must fail on the first attempt"
+        );
+        match result {
+            Err(Error::Platform { code, .. }) => assert_eq!(code, e_fail.0 as i64),
+            other => panic!("expected Error::Platform, got {other:?}"),
         }
     }
 }
