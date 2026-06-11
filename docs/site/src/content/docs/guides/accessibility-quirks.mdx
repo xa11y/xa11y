@@ -282,7 +282,9 @@ EVENT_E_ALL_SUBSCRIBERS_FAILED (0x80040201)
 
 Qt propagates this back through the action call **even though the UI action
 itself completed successfully**. The same code can surface from
-`FindAllBuildCache` during a find. Treat `0x80040201` as success.
+`FindAllBuildCache` during a find. xa11y treats `0x80040201` as success on
+action calls (`press`/`toggle`/`select`), and on query calls — where a value is
+still needed — retries the call a few times before giving up.
 
 ### Windows: `FindAllBuildCache` silently drops fragment elements
 
