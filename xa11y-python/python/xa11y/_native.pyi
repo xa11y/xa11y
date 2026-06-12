@@ -131,6 +131,7 @@ class EventType:
     MENU_CLOSED: str
     ALERT: str
     TEXT_CHANGED: str
+    ANNOUNCEMENT: str
 
 # ── Event ────────────────────────────────────────────────────────────────────
 
@@ -145,6 +146,18 @@ class Event:
     def app_pid(self) -> int: ...
     @property
     def target(self) -> Element | None: ...
+    @property
+    def state_flag(self) -> str | None:
+        """For ``state_changed`` events: the flag that changed (e.g. ``'checked'``).
+
+        ``None`` for other event types.
+        """
+    @property
+    def state_value(self) -> bool | None:
+        """For ``state_changed`` events: the new boolean value of the flag.
+
+        ``None`` for other event types.
+        """
     def __repr__(self) -> str: ...
 
 # ── Subscription ─────────────────────────────────────────────────────────────
@@ -215,7 +228,17 @@ class App:
         application on every poll; the first for which it returns truthy is
         returned. A falsy return means "not this one, keep polling"; if the
         predicate *raises*, the search aborts immediately and that exception
-        propagates. See ``by_name`` for ``timeout`` semantics.
+        propagates. See ``by_name`` for ``timeout`` semantics. There is no
+        need to hand-roll a poll over ``App.list()``.
+
+        Use this when neither a name nor a PID alone identifies the target
+        — e.g. a Qt dialog that registers as its own accessibility
+        application sharing the host process's PID::
+
+            app = xa11y.App.find(
+                lambda a: a.pid == pid and a.name.startswith("My Dialog"),
+                timeout=30.0,
+            )
         """
     @staticmethod
     def list() -> list[App]:
@@ -304,7 +327,16 @@ class Element:
     @property
     def focused(self) -> bool: ...
     @property
-    def checked(self) -> str | None: ...
+    def checked(self) -> str | None:
+        """Tri-state toggle value: ``'on'``, ``'off'``, ``'mixed'``, or ``None``.
+
+        ``None`` means the element has no checked state (it is not a
+        checkbox / radio button / toggle). These four are the only possible
+        values. Compare against them explicitly — ``bool(element.checked)``
+        is ``True`` for *every* non-``None`` value, including ``'off'``::
+
+            is_checked = element.checked == "on"
+        """
     @property
     def selected(self) -> bool: ...
     @property

@@ -41,6 +41,41 @@ xa11y::set_default_timeout(Duration::from_secs(30));   // Rust
 
 Or set the `XA11Y_DEFAULT_TIMEOUT` environment variable (seconds, read once at startup). Resolution order: an explicit per-call `timeout=` always wins, then the programmatic `set_default_timeout()` value, then the environment variable, then the built-in 5 seconds. A timeout of `0` means a single attempt with no polling.
 
+Because Locator *actions* (`press()`, `set_value()`, `toggle()`, …) already auto-wait for the target to be visible and enabled, a short `wait_visible()` immediately before an action is redundant — pass a per-call `timeout=` when one step needs a longer window, or raise the default once when the whole suite does.
+
+The same rule applies to *finding* things: every entry point that can race app startup has a polling form built in, so a hand-rolled `while`/`sleep` loop is never needed. Built-in polling also releases the host language's runtime lock while it waits (Python threads keep running during a 60s `wait_visible`) and produces a structured diagnosis on timeout — what it waited for, what it last observed, and near-miss candidates (see [Errors & Diagnosis](/guides/errors/)). A manual loop gets none of that.
+
+## Attaching to the app under test
+
+The usual test flow is: launch the app as a subprocess, then attach by PID — `App.by_pid` polls until the OS registers the process with the accessibility API:
+
+```python
+proc = subprocess.Popen([app_path])
+app = xa11y.App.by_pid(proc.pid, timeout=60.0)
+```
+
+Two situations need more than a PID:
+
+- **The UI registers as more than one accessibility app.** Some toolkits register top-level windows as *separate* accessibility applications sharing the host PID — on Windows UIA, a Qt dialog can appear as its own app rather than under the main window's tree (see [Accessibility API Quirks](/guides/accessibility-quirks/)). Match it with a predicate instead of polling `App.list()` by hand:
+
+  ```python
+  dialog_app = xa11y.App.find(
+      lambda a: a.pid == proc.pid and a.name.startswith("My Dialog"),
+      timeout=60.0,
+  )
+  ```
+
+- **The element belongs to an app you can't predict.** Message boxes and system popups are sometimes hosted by a different app than the one showing them. A locator created with the module-level `xa11y.locator()` searches from the system root — every running app — so you can wait for the popup without knowing its owner:
+
+  ```python
+  popup_text = xa11y.locator("static_text[name^='Saved the submission']")
+  popup = popup_text.wait_visible(timeout=10.0)
+  # scope follow-up actions to whichever app the popup landed in
+  xa11y.App.by_pid(popup.pid).locator("button[name='OK']").press()
+  ```
+
+  System-root searches visit every app's tree, so keep the selector specific and prefer app-scoped locators everywhere else.
+
 ## Example: testing a calculator
 
 This test opens Calculator, performs `7 × 8`, and asserts the result is `56`.

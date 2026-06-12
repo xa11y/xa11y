@@ -167,6 +167,17 @@ deterministic.
 States are a separate 64-bit bitfield (`AtspiStateType`), not properties —
 `ENABLED` (8), `FOCUSED` (12), `VISIBLE` (30), `EDITABLE` (7), `CHECKED` (4).
 
+### Qt tabs: `tab` on Windows, `radio_button` on macOS
+
+Qt's accessibility bridges map a `QTabBar` tab to different roles per
+platform: Windows UIA reports `tab` (inside a `tab_group`), while the macOS
+AX bridge reports `radio_button`. A selector that should work on both
+platforms has to match either:
+
+```python
+dialog.descendant("tab[name='Settings'], radio_button[name='Settings']").press()
+```
+
 ### WebKitGTK changed the role it reports for `<textarea>` between releases
 
 WebKitGTK **2.52** changed which AT-SPI role it reports for an HTML `<textarea>`,
@@ -175,6 +186,49 @@ upgrade (`2.50.4` → `2.52.3`). The portable fix is to never trust the toolkit'
 text role directly — derive single-line vs multi-line from the `MULTI_LINE`
 state bit, which is consistent across GTK (`GtkEntry`/`GtkTextView`),
 Qt (`QLineEdit`/`QPlainTextEdit`), and every WebKit version.
+
+## One process, several "applications"
+
+### Windows: Qt registers dialogs as separate UIA apps
+
+A `QDialog` opened inside a host process (e.g. a Qt submitter dialog inside
+a C++ DCC application) can register with UIA as its **own top-level
+"application"**, sharing the host's PID but living outside the host app's
+element tree. Searching the host app for the dialog finds nothing — you
+must attach to the dialog's own app. Predicate-based discovery handles this
+without hand-rolling an enumeration loop:
+
+```python
+dialog_app = xa11y.App.find(
+    lambda a: a.pid == proc.pid and a.name.startswith("My Submitter"),
+    timeout=60.0,
+)
+```
+
+On macOS AX the same dialog is an ordinary child window of the host app —
+so dialog discovery is one of the few places where platform-specific code
+is legitimately required.
+
+Two corollaries, both confirmed against live trees:
+
+- **The dialog's accessible name is the `QApplication` display name, not
+  `windowTitle()`.** Both the UIA "app" and the dialog window inside it
+  surface `QGuiApplication::applicationDisplayName()` (typically the app
+  name + version), so match on a name *prefix* rather than the window
+  title you see in the title bar.
+- **Child popups may be hosted elsewhere.** A `QMessageBox` shown from such
+  a dialog can land in the *host* application's tree, not the dialog's UIA
+  app. When the owner is unpredictable, search from the system root
+  (module-level `xa11y.locator(...)`) and wait for the popup's body text.
+
+### Qt forms don't label their fields
+
+`QFormLayout` does not propagate a row's label to the field's accessible
+name. In practice sibling widgets surface with the enclosing group's name
+(e.g. three spin boxes all named `"Job Properties"`) or with an empty name.
+Selectors can't disambiguate by name alone — pin the widget with
+`.nth(n)` (1-based, tree order) or scope to a parent `group` first, and
+re-verify the indices when the form's layout changes.
 
 ## Action names and mechanisms are not standardized
 
@@ -235,6 +289,28 @@ it is a genuine no-op.
 - **Windows:** numeric goes through `RangeValuePattern`, text through
   `ValuePattern` — and `type_text` is a non-atomic read-modify-write splice via
   `TextPattern.GetSelection()` + `ValuePattern.SetValue()`.
+
+### Qt spin boxes step — they don't set
+
+Setting a Qt `QSpinBox` / `QDoubleSpinBox` value through the accessibility
+API does not work on either Windows or macOS: depending on the platform and
+call, the set either raises or **reports success without changing the
+value**. The reliable cross-platform pattern is to *step* with
+`increment()` / `decrement()` and read the value back after each step —
+and don't trust a fixed step count, because a single `increment()` can
+occasionally advance the value by more than one:
+
+```python
+spin = dialog.descendant("spin_button[name='Priority']")
+current = int(spin.element().value)
+while current != target:
+    spin.increment() if current < target else spin.decrement()
+    current = int(spin.element().value)
+```
+
+(Bound the loop in real code so an out-of-range target can't spin forever.)
+Text fields and checkboxes are unaffected — `set_value()` and `toggle()`
+work on Qt as expected.
 
 ## Element references go stale — constantly
 
