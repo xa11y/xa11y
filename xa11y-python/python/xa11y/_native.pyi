@@ -23,13 +23,68 @@ class AccessibilityNotEnabledError(XA11yError):
     """
 
 class SelectorNotMatchedError(XA11yError):
-    """No element in the tree matched the given selector."""
+    """No element in the tree matched the given selector.
+
+    Carries a structured diagnosis (tenet 6) so the failure is
+    understandable without re-running it under manual tree dumps. All
+    attributes are always present (``None`` / ``[]`` when not applicable);
+    the same content is rendered into the exception message.
+    """
+
+    selector: str | None
+    """The selector that failed to match."""
+    condition: str | None
+    """What the operation was waiting for / trying to find, if known."""
+    last_observed: str | None
+    """What the failing operation last observed (e.g. ``'selector matched
+    2 element(s); nth(5) requested'``)."""
+    candidates: list[str]
+    """Bounded near-miss candidates, e.g. same-role elements with different
+    names, or the running applications for app lookups."""
+    scope: str | None
+    """Bounded rendering of the search scope: a depth-limited tree dump for
+    scoped locators, or the application list for rootless ones."""
+    elapsed: float | None
+    """Always ``None`` for this class (present for attribute parity with
+    :class:`TimeoutError`)."""
 
 class ActionNotSupportedError(XA11yError):
     """The requested action is not supported on the target element."""
 
 class TimeoutError(XA11yError):
-    """An operation exceeded its timeout."""
+    """An operation exceeded its timeout.
+
+    Carries a structured diagnosis (tenet 6): what the wait was for
+    (``condition`` + ``selector``), what it last observed, and — when the
+    selector never matched — bounded scope context (``candidates`` +
+    ``scope``). All attributes are always present (``None`` / ``[]`` when
+    not applicable); the same content is rendered into the message, e.g.::
+
+        Timeout after 60.0s; waiting for: visible; selector:
+        dialog[name^="Submit"]; last observed: selector never matched;
+        candidates: window "Untitled — MyApp"
+        search scope (bounded):
+        ...
+    """
+
+    elapsed: float | None
+    """Wall-clock seconds the operation waited before giving up."""
+    condition: str | None
+    """What the wait was for: ``'visible'``, ``'attached'``, ``'press
+    target actionable (visible && enabled)'``, ``'event matching
+    predicate'``, ``'custom predicate'``, ..."""
+    selector: str | None
+    """The selector being resolved, when the wait had one."""
+    last_observed: str | None
+    """The last poll's observation: ``'matched button "Export"
+    (visible=false, enabled=true, focused=false)'`` vs ``'selector never
+    matched'``."""
+    candidates: list[str]
+    """Bounded near-miss candidates (same role, different attributes).
+    Collected only when the selector never matched during the wait."""
+    scope: str | None
+    """Bounded rendering of the search scope. Collected only when the
+    selector never matched during the wait."""
 
 class InvalidSelectorError(XA11yError):
     """The selector string has invalid syntax."""
@@ -409,7 +464,12 @@ class Locator:
     def wait_unfocused(self, timeout: float = 5.0) -> Element:
         """Wait until the element does not have keyboard focus."""
     def wait_until(self, predicate: Callable[[Element | None], bool], timeout: float = 5.0) -> None:
-        """Wait until an arbitrary predicate is satisfied."""
+        """Wait until an arbitrary predicate is satisfied.
+
+        A predicate that *raises* aborts the wait immediately and propagates
+        the exception — it is not swallowed as "not yet" (which would
+        resurface later as a misleading timeout). Mirrors ``App.find``.
+        """
     def __repr__(self) -> str: ...
 
 # ── InputSim ─────────────────────────────────────────────────────────────────

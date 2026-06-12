@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::element::{Element, ElementData, TreeNode};
-use crate::error::{Error, Result};
+use crate::error::{Diagnosis, Error, Result};
 use crate::event_provider::Subscription;
 use crate::locator::Locator;
 use crate::provider::Provider;
@@ -10,14 +10,23 @@ use crate::provider::Provider;
 /// Polling interval shared by all timeout-bearing lookups.
 const LOOKUP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Maximum number of running applications listed in a lookup-failure
+/// diagnosis. Bounded per tenet 6 — diagnostics must not grow with an
+/// unbounded environment.
+const DIAG_APP_LIST_LIMIT: usize = 20;
+
 /// Run `attempt` repeatedly until it succeeds or `timeout` elapses, treating
 /// `SelectorNotMatched` as a "not yet" signal. All other errors short-circuit.
 ///
 /// `Duration::ZERO` performs exactly one attempt — identical to a non-polling
-/// call. On timeout, returns the last `SelectorNotMatched` error.
-fn poll_lookup<F>(timeout: Duration, mut attempt: F) -> Result<App>
+/// call. On timeout, returns the last `SelectorNotMatched` error enriched
+/// with `diagnose()`'s context. `diagnose` runs only on that terminal
+/// failure (tenet 6: enrich at the terminal site, keep the retry signal
+/// cheap).
+fn poll_lookup<F, D>(timeout: Duration, mut attempt: F, diagnose: D) -> Result<App>
 where
     F: FnMut() -> Result<App>,
+    D: FnOnce() -> Diagnosis,
 {
     let start = Instant::now();
     loop {
@@ -25,12 +34,64 @@ where
             Ok(app) => return Ok(app),
             Err(e @ Error::SelectorNotMatched { .. }) => {
                 if start.elapsed() >= timeout {
-                    return Err(e);
+                    return Err(merge_diagnosis(e, diagnose()));
                 }
             }
             Err(e) => return Err(e),
         }
         std::thread::sleep(LOOKUP_POLL_INTERVAL);
+    }
+}
+
+/// Merge terminal-site context into an error that may already carry a cheap
+/// diagnosis from its construction site (e.g. the enumeration counts that
+/// `Provider::app_by_pid` records). Fields already present win — they
+/// describe the actual failing attempt.
+fn merge_diagnosis(err: Error, extra: Diagnosis) -> Error {
+    let mut d = err.diagnosis().cloned().unwrap_or_default();
+    if d.condition.is_none() {
+        d.condition = extra.condition;
+    }
+    if d.last_observed.is_none() {
+        d.last_observed = extra.last_observed;
+    }
+    if d.candidates.is_empty() {
+        d.candidates = extra.candidates;
+    }
+    if d.scope.is_none() {
+        d.scope = extra.scope;
+    }
+    err.diagnose(d)
+}
+
+/// Bounded "what *is* running" snapshot for application-lookup failures:
+/// the candidate list a consumer would otherwise produce by hand-logging
+/// `App::list()` around the failure.
+fn running_apps_diagnosis(provider: &Arc<dyn Provider>) -> Diagnosis {
+    let candidates = match provider.list_apps() {
+        Ok(apps) => {
+            let total = apps.len();
+            let mut out: Vec<String> = apps
+                .iter()
+                .take(DIAG_APP_LIST_LIMIT)
+                .map(|a| {
+                    let pid = a.pid.map(|p| format!(" (pid={p})")).unwrap_or_default();
+                    format!("\"{}\"{pid}", a.name.clone().unwrap_or_default())
+                })
+                .collect();
+            if total > DIAG_APP_LIST_LIMIT {
+                out.push(format!("… (+{} more)", total - DIAG_APP_LIST_LIMIT));
+            }
+            out
+        }
+        // Surface the collection failure inside the diagnosis instead of
+        // dropping it (tenet 1) — the original lookup error still wins.
+        Err(e) => vec![format!("(application enumeration failed: {e})")],
+    };
+    Diagnosis {
+        condition: Some("application discovery".to_string()),
+        candidates,
+        ..Diagnosis::default()
     }
 }
 
@@ -106,27 +167,30 @@ impl App {
         F: Fn(&ElementData) -> Result<bool>,
         D: Fn() -> String,
     {
-        poll_lookup(timeout, || {
-            // Discovery is platform-specific (CGWindowList on macOS, AT-SPI
-            // registry on Linux, UIA desktop root on Windows). `list_apps()`
-            // is the canonical enumeration primitive and we filter in Rust,
-            // so app names containing `"`, `]`, or other characters
-            // significant in the selector grammar don't need escaping.
-            //
-            // Errors from `list_apps()` propagate so callers can distinguish
-            // "app not found" from "accessibility is broken". A predicate
-            // error propagates for the same reason — `poll_lookup` only
-            // retries `SelectorNotMatched`, so anything else fails fast.
-            let apps = provider.list_apps()?;
-            for data in apps {
-                if predicate(&data)? {
-                    return Ok(Self::from_data(Arc::clone(&provider), data));
+        let diag_provider = Arc::clone(&provider);
+        poll_lookup(
+            timeout,
+            || {
+                // Discovery is platform-specific (CGWindowList on macOS, AT-SPI
+                // registry on Linux, UIA desktop root on Windows). `list_apps()`
+                // is the canonical enumeration primitive and we filter in Rust,
+                // so app names containing `"`, `]`, or other characters
+                // significant in the selector grammar don't need escaping.
+                //
+                // Errors from `list_apps()` propagate so callers can distinguish
+                // "app not found" from "accessibility is broken". A predicate
+                // error propagates for the same reason — `poll_lookup` only
+                // retries `SelectorNotMatched`, so anything else fails fast.
+                let apps = provider.list_apps()?;
+                for data in apps {
+                    if predicate(&data)? {
+                        return Ok(Self::from_data(Arc::clone(&provider), data));
+                    }
                 }
-            }
-            Err(Error::SelectorNotMatched {
-                selector: describe(),
-            })
-        })
+                Err(Error::selector_not_matched(describe()))
+            },
+            || running_apps_diagnosis(&diag_provider),
+        )
     }
 
     /// Find an application by exact name, using an explicit provider.
@@ -197,10 +261,15 @@ impl App {
     /// so an app whose window is still unnamed mid-startup is found as soon
     /// as the accessibility API can reach it.
     pub fn by_pid_with(provider: Arc<dyn Provider>, pid: u32, timeout: Duration) -> Result<Self> {
-        poll_lookup(timeout, || {
-            let data = provider.app_by_pid(pid)?;
-            Ok(Self::from_data(Arc::clone(&provider), data))
-        })
+        let diag_provider = Arc::clone(&provider);
+        poll_lookup(
+            timeout,
+            || {
+                let data = provider.app_by_pid(pid)?;
+                Ok(Self::from_data(Arc::clone(&provider), data))
+            },
+            || running_apps_diagnosis(&diag_provider),
+        )
     }
 
     /// List all running applications, using an explicit provider.

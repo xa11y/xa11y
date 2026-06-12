@@ -22,8 +22,9 @@ use std::sync::{Arc, OnceLock};
 
 // Re-export public types.
 pub use xa11y_core::{
-    App, Element, ElementData, ElementState, Error, Event, EventKind, Locator, RawPlatformData,
-    Rect, Result, Role, StateFlag, StateSet, Subscription, SubscriptionIter, Toggled, TreeNode,
+    App, Diagnosis, Element, ElementData, ElementState, Error, Event, EventKind, Locator,
+    RawPlatformData, Rect, Result, Role, StateFlag, StateSet, Subscription, SubscriptionIter,
+    Toggled, TreeNode,
 };
 
 // Re-export input simulation surface.

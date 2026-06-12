@@ -44,6 +44,23 @@ Integration tests use shared helpers from `xa11y/tests/integ/mod.rs`:
    - **Tests** may use `.expect("...")` with a descriptive message when failure would indicate a broken test fixture.
    - If you add a new `.unwrap()`, a reviewer should be able to point at an invariant one line above that proves it can't panic.
 
+5. **Blocking calls release the host runtime's lock.** In language bindings, any call that can block, sleep, or poll — waits, auto-waiting actions, attach/discovery loops, event receives — must release the host runtime's global lock (Python's GIL, or the platform equivalent) for the duration of the block. A wait that holds the GIL freezes every other thread in the consumer's process for up to the full timeout, and forces consumers into architectural workarounds (e.g. moving an in-process mock server into a separate process).
+
+   **Anti-patterns that violate this tenet:**
+   - A binding method that calls a core wait/poll loop directly instead of inside `py.allow_threads` (or the platform equivalent).
+   - Holding the lock across a whole poll loop because one step needs it. The only legitimate reason to hold the lock is calling back into the host language (e.g. a Python predicate in `wait_until` / `App.find`) — reacquire it per callback, never for the loop.
+   - Treating this as an optimization. A missing `allow_threads` on a blocking path is a correctness bug, not a style choice.
+
+   Enforced for Python by `xa11y-python/tests/test_gil_release.py`, which asserts that a background thread keeps making progress while a native wait blocks.
+
+6. **Errors carry their own diagnosis.** An error must contain enough context to understand the failure without re-running it under extra logging. If a consumer would need to wrap a call in `try/except` just to print surrounding state — which selector, what condition, what the tree looked like — that state belongs in the error itself. The structured carrier for this context is `Diagnosis` in `xa11y-core/src/error.rs`; new failure paths attach one at the *terminal* failure site (see the module docs there for the pattern).
+
+   **Anti-patterns that violate this tenet:**
+   - A timeout that reports only the duration. `Timeout after 60.0s` is a bug; it must say what it was waiting for (selector + condition) and what it last observed (e.g. "matched but visible=false" vs. "never matched").
+   - "Not found"-class errors that echo only the input. They should describe where they searched and what they *did* find (near-miss candidates, enumeration counts, a bounded snapshot of the search scope).
+   - Rich context that exists only in the message string. Bindings expose it as structured fields (exception attributes in Python, error properties in JS) so harnesses can act on it programmatically, not parse prose.
+   - Unbounded diagnostics. Context is collected on the failure path only and is size-bounded (depth-limited tree snapshots, truncated candidate lists) — rich errors must never slow the success path or emit megabyte messages. In particular, never attach an expensive `Diagnosis` to an error that poll loops use as a retry signal; enrich at the point where the error actually reaches the user.
+
 ### Breaking a tenet
 
 These tenets are firm defaults, not absolutes. If a situation genuinely requires breaking one:

@@ -79,10 +79,25 @@ mod tests {
             .locator(NO_MATCH)
             .wait_attached(Duration::from_millis(500))
         {
-            Err(Error::Timeout { elapsed }) => {
+            Err(err @ Error::Timeout { .. }) => {
+                let Error::Timeout { elapsed, .. } = &err else {
+                    unreachable!()
+                };
                 assert!(
-                    elapsed >= Duration::from_millis(500),
+                    *elapsed >= Duration::from_millis(500),
                     "Timeout::elapsed should cover the full wait, got {elapsed:?}"
+                );
+                // Tenet 6: the timeout must say what it was waiting for and
+                // what it observed, on every platform provider.
+                let d = err
+                    .diagnosis()
+                    .expect("wait timeout must carry a diagnosis");
+                assert_eq!(d.condition.as_deref(), Some("attached"));
+                assert_eq!(d.selector.as_deref(), Some(NO_MATCH));
+                assert_eq!(d.last_observed.as_deref(), Some("selector never matched"));
+                assert!(
+                    d.scope.is_some(),
+                    "a never-matched wait should include a bounded scope snapshot"
                 );
             }
             Err(e) => panic!("expected Timeout, got: {e}"),

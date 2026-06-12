@@ -198,3 +198,70 @@ def test_no_internal_timeout_alias_leaks():
     callers should only reach the class via `xa11y.TimeoutError`."""
     assert not hasattr(xa11y, "XA11yTimeoutError")
     assert not hasattr(_native, "XA11yTimeoutError")
+
+
+# ── Structured diagnosis (tenet 6) ───────────────────────────────────────────
+#
+# Timeouts and selector misses carry structured fields — `condition`,
+# `selector`, `last_observed`, `candidates`, `scope` (plus `elapsed` on
+# timeouts) — so a test harness never needs to wrap a call in try/except just
+# to print the tree. The same content is rendered into the message.
+
+
+def test_timeout_diagnosis_attributes_never_matched(test_app):
+    with pytest.raises(xa11y.TimeoutError) as exc_info:
+        test_app.descendant('button[name="Nope"]').wait_visible(timeout=0.3)
+    e = exc_info.value
+    assert e.condition == "visible"
+    assert e.selector == 'application button[name="Nope"]'
+    assert e.last_observed == "selector never matched"
+    # Near-miss candidates: same-role elements from the mock tree.
+    assert 'button "Back"' in e.candidates
+    assert 'button "Forward"' in e.candidates
+    # Rootless locator: scope lists the running applications.
+    assert "TestApp" in e.scope
+    assert isinstance(e.elapsed, float) and e.elapsed >= 0.3
+
+
+def test_timeout_diagnosis_attributes_matched_wrong_state(test_app):
+    # static_text "Status" exists but is invisible in the mock tree.
+    with pytest.raises(xa11y.TimeoutError) as exc_info:
+        test_app.descendant('static_text[name="Status"]').wait_visible(timeout=0.3)
+    e = exc_info.value
+    assert 'static_text "Status"' in e.last_observed
+    assert "visible=false" in e.last_observed
+    # A matched element needs no candidate/scope sweep.
+    assert e.candidates == []
+    assert e.scope is None
+
+
+def test_timeout_message_renders_diagnosis(test_app):
+    """The message alone must be enough to understand the failure — no
+    `print(app.dump())` wrapper required."""
+    with pytest.raises(xa11y.TimeoutError) as exc_info:
+        test_app.descendant('button[name="Nope"]').wait_visible(timeout=0.3)
+    msg = str(exc_info.value)
+    assert "waiting for: visible" in msg
+    assert 'button[name="Nope"]' in msg
+    assert "selector never matched" in msg
+    assert 'button "Back"' in msg
+
+
+def test_selector_not_matched_diagnosis_attributes(test_app):
+    with pytest.raises(xa11y.SelectorNotMatchedError) as exc_info:
+        test_app.descendant('button[name="Nope"]').element()
+    e = exc_info.value
+    assert e.selector == 'application button[name="Nope"]'
+    assert 'button "Back"' in e.candidates
+    assert "TestApp" in e.scope
+    assert e.elapsed is None
+
+
+def test_diagnosis_attributes_always_present(test_app):
+    """Attributes exist (as None / []) even on paths that produce no
+    diagnosis content, so consumers never need hasattr guards."""
+    with pytest.raises(xa11y.TimeoutError) as exc_info:
+        test_app.descendant("button").wait_detached(timeout=0.05)
+    e = exc_info.value
+    for attr in ("condition", "selector", "last_observed", "candidates", "scope", "elapsed"):
+        assert hasattr(e, attr), f"missing diagnosis attribute {attr!r}"

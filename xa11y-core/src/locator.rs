@@ -2,10 +2,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::element::{Element, ElementData};
-use crate::error::{Error, Result};
+use crate::error::{Diagnosis, Error, Result};
 use crate::event::ElementState;
 use crate::provider::Provider;
-use crate::selector::{chain_combinator, matches_simple, SelectorGroup};
+use crate::selector::{
+    chain_combinator, matches_simple, Combinator, Selector, SelectorGroup, SelectorSegment,
+    SimpleSelector,
+};
 
 /// A lazy element descriptor that re-resolves against a fresh accessibility
 /// tree on every operation.
@@ -27,6 +30,68 @@ use crate::selector::{chain_combinator, matches_simple, SelectorGroup};
 /// ```
 /// Default auto-wait timeout for Locator action methods (5 seconds).
 const DEFAULT_ACTION_TIMEOUT: Duration = Duration::from_secs(5);
+
+// ── Diagnosis bounds (tenet 6) ──────────────────────────────────────
+//
+// Diagnosis collection runs only on the failure path, after a wait has
+// already burned its timeout or a fail-fast query missed — but it must stay
+// size-bounded so a miss against a huge tree doesn't produce a megabyte
+// error message or a multi-second stall on top of the failure.
+
+/// Maximum number of same-role near-miss candidates listed in a diagnosis.
+const DIAG_CANDIDATE_LIMIT: usize = 8;
+/// Maximum tree depth captured for the scope snapshot in a diagnosis.
+const DIAG_SCOPE_MAX_DEPTH: usize = 5;
+/// Maximum number of lines (tree dump) or entries (application list) kept in
+/// the scope snapshot; the remainder is summarized as a truncation marker.
+const DIAG_SCOPE_MAX_LINES: usize = 40;
+
+/// Short element rendering for candidate lists: `button "Export"`.
+fn short_describe(data: &ElementData) -> String {
+    match &data.name {
+        Some(n) => format!("{} \"{n}\"", data.role.to_snake_case()),
+        None => format!("{} (unnamed)", data.role.to_snake_case()),
+    }
+}
+
+/// Element rendering for `last observed` clauses, including the states the
+/// wait conditions are defined over.
+fn describe_observed(data: &ElementData) -> String {
+    format!(
+        "matched {} (visible={}, enabled={}, focused={})",
+        short_describe(data),
+        data.states.visible,
+        data.states.enabled,
+        data.states.focused
+    )
+}
+
+/// Cap a multi-line string at `max_lines`, appending a truncation marker
+/// that says how much was dropped.
+fn truncate_lines(s: &str, max_lines: usize) -> String {
+    let mut lines = s.lines();
+    let kept: Vec<&str> = lines.by_ref().take(max_lines).collect();
+    let remaining = lines.count();
+    if remaining == 0 {
+        kept.join("\n")
+    } else {
+        format!("{}\n… (+{remaining} more lines truncated)", kept.join("\n"))
+    }
+}
+
+/// Human label for a wait condition, used in timeout diagnoses.
+fn state_label(state: ElementState) -> &'static str {
+    match state {
+        ElementState::Attached => "attached",
+        ElementState::Detached => "detached",
+        ElementState::Visible => "visible",
+        ElementState::Hidden => "hidden",
+        ElementState::Enabled => "enabled",
+        ElementState::Disabled => "disabled",
+        ElementState::Focused => "focused",
+        ElementState::Unfocused => "unfocused",
+    }
+}
 
 #[derive(Clone)]
 pub struct Locator {
@@ -233,12 +298,166 @@ impl Locator {
         };
         let matches = self.resolve_group(&group, provider_limit)?;
         let idx = self.nth.unwrap_or(0);
-        matches
-            .into_iter()
-            .nth(idx)
-            .ok_or_else(|| Error::SelectorNotMatched {
-                selector: self.selector.clone(),
-            })
+        let total = matches.len();
+        matches.into_iter().nth(idx).ok_or_else(|| {
+            let err = Error::selector_not_matched(self.selector.clone());
+            if total > 0 {
+                // The selector itself matched but not enough times for `nth`.
+                // This is exact even under limit pushdown: the limit is
+                // `idx + 1`, and we only get here when fewer were returned.
+                err.diagnose(Diagnosis {
+                    last_observed: Some(format!(
+                        "selector matched {total} element(s); nth({}) requested",
+                        idx + 1
+                    )),
+                    ..Diagnosis::default()
+                })
+            } else {
+                // Bare miss: poll loops use this as their retry signal, so
+                // it stays cheap. Terminal sites enrich via `enrich_miss`.
+                err
+            }
+        })
+    }
+
+    // ── Diagnosis collection (tenet 6, failure path only) ───────────
+
+    /// Attach bounded scope context (same-role candidates + scope snapshot)
+    /// to a `SelectorNotMatched` that is about to reach the caller. Other
+    /// errors pass through unchanged.
+    fn enrich_miss(&self, err: Error) -> Error {
+        match err {
+            Error::SelectorNotMatched {
+                selector,
+                diagnosis,
+            } => {
+                let mut d = diagnosis.map(|b| *b).unwrap_or_default();
+                self.fill_miss_context(&mut d);
+                Error::selector_not_matched(selector).diagnose(d)
+            }
+            other => other,
+        }
+    }
+
+    /// Populate the expensive miss-context fields of a diagnosis (candidate
+    /// list, scope snapshot) if they are not already set.
+    fn fill_miss_context(&self, d: &mut Diagnosis) {
+        if d.candidates.is_empty() {
+            d.candidates = self.role_candidates();
+        }
+        if d.scope.is_none() {
+            d.scope = Some(self.scope_summary());
+        }
+    }
+
+    /// Near-miss candidates: elements in scope whose role matches the
+    /// selector's target role (last segment of the first clause) regardless
+    /// of attribute filters. Bounded by [`DIAG_CANDIDATE_LIMIT`].
+    ///
+    /// A failure to *collect* candidates is recorded as a candidate entry
+    /// rather than dropped, so the original error keeps surfacing while the
+    /// collection failure stays visible (tenet 1: no silent fallbacks).
+    fn role_candidates(&self) -> Vec<String> {
+        let Ok(group) = SelectorGroup::parse(&self.selector) else {
+            // Unparseable selectors fail earlier with `InvalidSelector`;
+            // a miss can't be reached without a parsed selector.
+            return Vec::new();
+        };
+        let role = group
+            .clauses
+            .first()
+            .and_then(|c| c.segments.last())
+            .and_then(|s| s.simple.role.clone());
+        let Some(role) = role else {
+            // Role-less selectors (pure attribute filters) have no
+            // meaningful "same role" candidate set.
+            return Vec::new();
+        };
+        let role_only = SelectorGroup {
+            clauses: vec![Selector {
+                segments: vec![SelectorSegment {
+                    combinator: Combinator::Root,
+                    simple: SimpleSelector {
+                        role: Some(role),
+                        filters: Vec::new(),
+                        nth: None,
+                    },
+                }],
+            }],
+        };
+        match self.resolve_group(&role_only, Some(DIAG_CANDIDATE_LIMIT)) {
+            Ok(matches) => matches.iter().map(short_describe).collect(),
+            Err(e) => vec![format!("(candidate search failed: {e})")],
+        }
+    }
+
+    /// Bounded rendering of the search scope: a depth-limited, line-capped
+    /// dump of the scope root, or the application list for rootless
+    /// locators. Collection failures are recorded in place of the snapshot.
+    fn scope_summary(&self) -> String {
+        match self.root.as_ref() {
+            Some(root) => {
+                let el = Element::new(root.clone(), Arc::clone(&self.provider));
+                match el.dump(Some(DIAG_SCOPE_MAX_DEPTH)) {
+                    Ok(dump) => truncate_lines(&dump, DIAG_SCOPE_MAX_LINES),
+                    Err(e) => format!("(scope dump failed: {e})"),
+                }
+            }
+            None => match self.provider.list_apps() {
+                Ok(apps) => {
+                    let total = apps.len();
+                    let mut lines: Vec<String> = apps
+                        .iter()
+                        .take(DIAG_SCOPE_MAX_LINES)
+                        .map(|a| {
+                            let pid = a.pid.map(|p| format!(" (pid={p})")).unwrap_or_default();
+                            format!(
+                                "application \"{}\"{pid}",
+                                a.name.clone().unwrap_or_default()
+                            )
+                        })
+                        .collect();
+                    if total > DIAG_SCOPE_MAX_LINES {
+                        lines.push(format!(
+                            "… (+{} more applications)",
+                            total - DIAG_SCOPE_MAX_LINES
+                        ));
+                    }
+                    lines.join("\n")
+                }
+                Err(e) => format!("(application enumeration failed: {e})"),
+            },
+        }
+    }
+
+    /// Build the diagnosed timeout error shared by `auto_wait` and
+    /// `poll_until`. `last` is the most recent poll's observation; the
+    /// expensive miss context is collected only when the selector never
+    /// matched during the entire wait.
+    fn diagnose_timeout(
+        &self,
+        elapsed: Duration,
+        condition: String,
+        last: Option<&ElementData>,
+        ever_matched: bool,
+    ) -> Error {
+        let mut d = Diagnosis {
+            condition: Some(condition),
+            selector: Some(self.selector.clone()),
+            ..Diagnosis::default()
+        };
+        match last {
+            Some(data) => d.last_observed = Some(describe_observed(data)),
+            None if ever_matched => {
+                d.last_observed =
+                    Some("selector matched earlier in the wait but no longer matches".to_string());
+            }
+            None => {
+                d.last_observed = Some("selector never matched".to_string());
+                self.fill_miss_context(&mut d);
+            }
+        }
+        Error::timeout(elapsed).diagnose(d)
     }
 
     // ── Queries (each re-queries the provider) ─────────────────────
@@ -260,9 +479,19 @@ impl Locator {
     }
 
     /// Get a single [`Element`] handle.
+    ///
+    /// Fails fast with [`Error::SelectorNotMatched`] on a miss; the error
+    /// carries a bounded [`Diagnosis`] of the search scope (same-role
+    /// candidates and a depth-limited scope snapshot) so the caller doesn't
+    /// need to re-run the failure under manual tree dumps.
     pub fn element(&self) -> Result<Element> {
-        let data = self.resolve_data()?;
-        Ok(Element::new(data, Arc::clone(&self.provider)))
+        match self.resolve_data() {
+            Ok(data) => Ok(Element::new(data, Arc::clone(&self.provider))),
+            // Terminal site: this miss reaches the caller, so spend the
+            // bounded diagnosis cost here (not in `resolve_data`, which
+            // poll loops call on every tick).
+            Err(e) => Err(self.enrich_miss(e)),
+        }
     }
 
     /// Get all matching elements.
@@ -295,22 +524,40 @@ impl Locator {
     /// Poll until the element is attached, visible, and enabled, returning a
     /// live [`Element`] handle. Used by the action methods below to provide
     /// resilience against transient unactionable states.
-    fn auto_wait(&self) -> Result<Element> {
+    ///
+    /// `action` names the calling action for the timeout diagnosis, so a
+    /// failed `press()` reports *what* was being attempted and what the
+    /// last poll observed.
+    fn auto_wait(&self, action: &str) -> Result<Element> {
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
+        // Most recent poll's observation, for the timeout diagnosis.
+        let mut last_seen: Option<ElementData> = None;
+        let mut ever_matched = false;
 
         loop {
             let elapsed = start.elapsed();
             if elapsed >= self.timeout {
-                return Err(Error::Timeout { elapsed });
+                return Err(self.diagnose_timeout(
+                    elapsed,
+                    format!("{action} target actionable (visible && enabled)"),
+                    last_seen.as_ref(),
+                    ever_matched,
+                ));
             }
 
             match self.resolve_data() {
                 Ok(data) if data.states.visible && data.states.enabled => {
                     return Ok(Element::new(data, Arc::clone(&self.provider)));
                 }
-                Ok(_) | Err(Error::SelectorNotMatched { .. }) => {
-                    // Not yet actionable — poll again
+                Ok(data) => {
+                    // Matched but not yet actionable — poll again.
+                    ever_matched = true;
+                    last_seen = Some(data);
+                }
+                Err(Error::SelectorNotMatched { .. }) => {
+                    // Not yet present — poll again.
+                    last_seen = None;
                 }
                 Err(e) => return Err(e),
             }
@@ -329,62 +576,62 @@ impl Locator {
 
     /// Click / invoke the matched element.
     pub fn press(&self) -> Result<()> {
-        self.auto_wait()?.press()
+        self.auto_wait("press")?.press()
     }
 
     /// Set keyboard focus on the matched element.
     pub fn focus(&self) -> Result<()> {
-        self.auto_wait()?.focus()
+        self.auto_wait("focus")?.focus()
     }
 
     /// Remove keyboard focus from the matched element.
     pub fn blur(&self) -> Result<()> {
-        self.auto_wait()?.blur()
+        self.auto_wait("blur")?.blur()
     }
 
     /// Toggle the matched element (checkbox, switch).
     pub fn toggle(&self) -> Result<()> {
-        self.auto_wait()?.toggle()
+        self.auto_wait("toggle")?.toggle()
     }
 
     /// Select the matched element (list item, etc.).
     pub fn select(&self) -> Result<()> {
-        self.auto_wait()?.select()
+        self.auto_wait("select")?.select()
     }
 
     /// Expand the matched element.
     pub fn expand(&self) -> Result<()> {
-        self.auto_wait()?.expand()
+        self.auto_wait("expand")?.expand()
     }
 
     /// Collapse the matched element.
     pub fn collapse(&self) -> Result<()> {
-        self.auto_wait()?.collapse()
+        self.auto_wait("collapse")?.collapse()
     }
 
     /// Show the context menu for the matched element.
     pub fn show_menu(&self) -> Result<()> {
-        self.auto_wait()?.show_menu()
+        self.auto_wait("show_menu")?.show_menu()
     }
 
     /// Increment the matched element (slider, spinner).
     pub fn increment(&self) -> Result<()> {
-        self.auto_wait()?.increment()
+        self.auto_wait("increment")?.increment()
     }
 
     /// Decrement the matched element (slider, spinner).
     pub fn decrement(&self) -> Result<()> {
-        self.auto_wait()?.decrement()
+        self.auto_wait("decrement")?.decrement()
     }
 
     /// Scroll the matched element into view.
     pub fn scroll_into_view(&self) -> Result<()> {
-        self.auto_wait()?.scroll_into_view()
+        self.auto_wait("scroll_into_view")?.scroll_into_view()
     }
 
     /// Set the text value of the matched element.
     pub fn set_value(&self, value: &str) -> Result<()> {
-        self.auto_wait()?.set_value(value)
+        self.auto_wait("set_value")?.set_value(value)
     }
 
     /// Set the numeric value of the matched element (slider, spinner).
@@ -396,12 +643,13 @@ impl Locator {
                 message: format!("set_numeric_value requires a finite value, got {}", value),
             });
         }
-        self.auto_wait()?.set_numeric_value(value)
+        self.auto_wait("set_numeric_value")?
+            .set_numeric_value(value)
     }
 
     /// Type text at the current cursor position on the matched element.
     pub fn type_text(&self, text: &str) -> Result<()> {
-        self.auto_wait()?.type_text(text)
+        self.auto_wait("type_text")?.type_text(text)
     }
 
     /// Select a text range within the matched element.
@@ -411,7 +659,7 @@ impl Locator {
                 message: format!("select_text start ({}) must be <= end ({})", start, end),
             });
         }
-        self.auto_wait()?.select_text(start, end)
+        self.auto_wait("select_text")?.select_text(start, end)
     }
 
     /// Perform an action by name (with auto-wait).
@@ -419,7 +667,7 @@ impl Locator {
     /// This is the escape hatch for platform-specific actions not covered
     /// by the named methods above. Also works for well-known action names.
     pub fn perform_action(&self, action: &str) -> Result<()> {
-        self.auto_wait()?.perform_action(action)
+        self.auto_wait("perform_action")?.perform_action(action)
     }
 
     // ── Wait operations ─────────────────────────────────────────────
@@ -478,7 +726,7 @@ impl Locator {
         state: ElementState,
         timeout: Duration,
     ) -> Result<Option<Element>> {
-        self.poll_until(|element| state.is_met(element), timeout)
+        self.poll_until(|element| state.is_met(element), timeout, state_label(state))
     }
 
     /// Wait until an arbitrary predicate is satisfied, polling at ~100 ms intervals.
@@ -487,22 +735,34 @@ impl Locator {
         predicate: impl Fn(Option<&ElementData>) -> bool,
         timeout: Duration,
     ) -> Result<Option<Element>> {
-        self.poll_until(&predicate, timeout)
+        self.poll_until(&predicate, timeout, "custom predicate")
     }
 
     /// Core polling loop shared by `wait_for_state` and `wait_until`.
+    ///
+    /// `condition` names what is being waited for; on timeout it is embedded
+    /// in the error's [`Diagnosis`] together with the last observation.
     fn poll_until(
         &self,
         predicate: impl Fn(Option<&ElementData>) -> bool,
         timeout: Duration,
+        condition: &str,
     ) -> Result<Option<Element>> {
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
+        // Most recent poll's observation, for the timeout diagnosis.
+        let mut last_seen: Option<ElementData> = None;
+        let mut ever_matched = false;
 
         loop {
             let elapsed = start.elapsed();
             if elapsed >= timeout {
-                return Err(Error::Timeout { elapsed });
+                return Err(self.diagnose_timeout(
+                    elapsed,
+                    condition.to_string(),
+                    last_seen.as_ref(),
+                    ever_matched,
+                ));
             }
 
             let matched = match self.resolve_data() {
@@ -510,11 +770,15 @@ impl Locator {
                 Err(Error::SelectorNotMatched { .. }) => None,
                 Err(e) => return Err(e),
             };
+            if matched.is_some() {
+                ever_matched = true;
+            }
 
             if predicate(matched.as_ref()) {
                 return Ok(matched.map(|data| Element::new(data, Arc::clone(&self.provider))));
             }
 
+            last_seen = matched;
             std::thread::sleep(poll_interval);
         }
     }
@@ -980,5 +1244,139 @@ mod tests {
             names(&loc.elements().unwrap()),
             vec!["Navigation", "Agree", "Volume"]
         );
+    }
+
+    // ── Error diagnosis (tenet 6) ────────────────────────────────────
+    //
+    // Failure-path errors must carry what the operation was waiting for,
+    // what it last observed, and bounded scope context — without the caller
+    // wrapping the call in manual tree dumps.
+
+    /// Short wait that exceeds at least one 100 ms poll tick.
+    const SHORT_WAIT: Duration = Duration::from_millis(250);
+
+    #[test]
+    fn wait_visible_timeout_diagnosis_never_matched() {
+        let loc = root_locator(r#"button[name="DoesNotExist"]"#);
+        let err = loc
+            .wait_visible(SHORT_WAIT)
+            .expect_err("missing selector must time out");
+        let d = err.diagnosis().expect("timeout must carry a diagnosis");
+        assert_eq!(d.condition.as_deref(), Some("visible"));
+        assert_eq!(
+            d.selector.as_deref(),
+            Some(r#"button[name="DoesNotExist"]"#)
+        );
+        assert_eq!(d.last_observed.as_deref(), Some("selector never matched"));
+        // Same-role candidates: the mock tree's two buttons.
+        assert_eq!(
+            d.candidates,
+            vec![r#"button "Back""#, r#"button "Forward""#]
+        );
+        // Scope for a rootless locator is the application list.
+        assert!(
+            d.scope.as_deref().unwrap_or_default().contains("TestApp"),
+            "scope should list running applications, got: {:?}",
+            d.scope
+        );
+        // And everything must render into the message — the consumer's
+        // first contact with the diagnosis is the exception text.
+        let msg = format!("{err}");
+        assert!(msg.contains("waiting for: visible"), "{msg}");
+        assert!(msg.contains("selector never matched"), "{msg}");
+        assert!(msg.contains(r#"button "Back""#), "{msg}");
+    }
+
+    #[test]
+    fn wait_visible_timeout_diagnosis_matched_but_invisible() {
+        // static_text "Status" exists but visible=false: the diagnosis must
+        // distinguish "matched in the wrong state" from "never matched".
+        let loc = root_locator(r#"static_text[name="Status"]"#);
+        let err = loc
+            .wait_visible(SHORT_WAIT)
+            .expect_err("invisible element must time out");
+        let d = err.diagnosis().expect("timeout must carry a diagnosis");
+        let last = d.last_observed.as_deref().unwrap_or_default();
+        assert!(
+            last.contains(r#"static_text "Status""#) && last.contains("visible=false"),
+            "last observed should describe the matched element's state, got: {last}"
+        );
+        // A matched element needs no candidate/scope sweep.
+        assert!(d.candidates.is_empty(), "{:?}", d.candidates);
+        assert!(d.scope.is_none(), "{:?}", d.scope);
+    }
+
+    #[test]
+    fn action_timeout_diagnosis_names_action_and_blocking_state() {
+        // button "Forward" is disabled: press() must time out with a
+        // diagnosis naming the attempted action and enabled=false.
+        let loc = root_locator(r#"button[name="Forward"]"#).with_timeout(SHORT_WAIT);
+        let err = loc.press().expect_err("disabled button must time out");
+        let d = err.diagnosis().expect("timeout must carry a diagnosis");
+        assert_eq!(
+            d.condition.as_deref(),
+            Some("press target actionable (visible && enabled)")
+        );
+        let last = d.last_observed.as_deref().unwrap_or_default();
+        assert!(
+            last.contains("enabled=false"),
+            "last observed should expose the blocking state, got: {last}"
+        );
+    }
+
+    #[test]
+    fn element_miss_diagnosis_includes_candidates_and_scope_dump() {
+        // Scoped miss: the scope snapshot is a depth-limited dump of the
+        // search root, so the caller doesn't need print(app.dump()).
+        let provider = build_provider();
+        let provider_dyn: Arc<dyn Provider> = provider;
+        let app_root = provider_dyn.list_apps().expect("list_apps")[0].clone();
+        let loc = Locator::new(provider_dyn, Some(app_root), r#"button[name="Exprot"]"#);
+        let err = loc.element().expect_err("miss must fail fast");
+        assert!(matches!(err, Error::SelectorNotMatched { .. }), "{err:?}");
+        let d = err
+            .diagnosis()
+            .expect("terminal miss must carry a diagnosis");
+        assert_eq!(
+            d.candidates,
+            vec![r#"button "Back""#, r#"button "Forward""#]
+        );
+        let scope = d.scope.as_deref().expect("miss must include scope");
+        assert!(
+            scope.contains("window") && scope.contains("Main Window"),
+            "scope should be a tree dump of the search root, got: {scope}"
+        );
+    }
+
+    #[test]
+    fn nth_miss_diagnosis_reports_match_count() {
+        let loc = root_locator("button").nth(5);
+        let err = loc.element().expect_err("nth(5) of 2 buttons must miss");
+        let d = err.diagnosis().expect("nth miss must carry a diagnosis");
+        assert_eq!(
+            d.last_observed.as_deref(),
+            Some("selector matched 2 element(s); nth(5) requested")
+        );
+    }
+
+    #[test]
+    fn exists_stays_cheap_and_unenriched() {
+        // exists() consumes the miss as a boolean — it must not pay the
+        // diagnosis cost, and must keep returning Ok(false).
+        let loc = root_locator(r#"button[name="DoesNotExist"]"#);
+        assert!(!loc.exists().unwrap());
+    }
+
+    #[test]
+    fn truncate_lines_caps_and_counts() {
+        let text = (0..10)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let capped = truncate_lines(&text, 3);
+        assert!(capped.starts_with("line0\nline1\nline2\n"), "{capped}");
+        assert!(capped.ends_with("… (+7 more lines truncated)"), "{capped}");
+        // Under the cap: unchanged, no marker.
+        assert_eq!(truncate_lines("a\nb", 3), "a\nb");
     }
 }

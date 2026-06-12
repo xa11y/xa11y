@@ -530,9 +530,7 @@ fn error_display() {
     };
     assert!(format!("{}", err).contains("Permission denied"));
 
-    let err = Error::SelectorNotMatched {
-        selector: "button[name=\"Submit\"]".to_string(),
-    };
+    let err = Error::selector_not_matched("button[name=\"Submit\"]");
     assert!(format!("{}", err).contains("Submit"));
 
     let err = Error::ElementStale {
@@ -1544,9 +1542,9 @@ fn by_pid_with_routes_through_provider_app_by_pid() {
             if pid == 100 {
                 Ok(app1.clone())
             } else {
-                Err(Error::SelectorNotMatched {
-                    selector: format!("application with pid={pid}"),
-                })
+                Err(Error::selector_not_matched(format!(
+                    "application with pid={pid}"
+                )))
             }
         }),
     });
@@ -1687,21 +1685,34 @@ fn by_pid_timeout_reports_enumeration_diagnostics() {
         Ok(_) => panic!("lookup for an unknown pid must fail"),
         Err(e) => e,
     };
-    match err {
-        Error::SelectorNotMatched { selector } => {
+    match &err {
+        Error::SelectorNotMatched { selector, .. } => {
             assert!(
                 selector.contains("pid=999"),
                 "diagnostic should name the pid, got: {selector}"
             );
-            assert!(
-                selector.contains("3 running apps"),
-                "diagnostic should report enumeration size, got: {selector}"
-            );
-            assert!(
-                selector.contains("1 without a resolvable pid"),
-                "diagnostic should count unresolved pids, got: {selector}"
-            );
         }
         other => panic!("expected SelectorNotMatched, got {other:?}"),
     }
+    // The enumeration counts are structured diagnosis fields now (tenet 6),
+    // and the rendered message must still carry them so a CI timeout is
+    // diagnosable from the message alone.
+    let diagnosis = err.diagnosis().expect("by_pid miss must carry a diagnosis");
+    let last = diagnosis
+        .last_observed
+        .as_deref()
+        .expect("diagnosis must record what enumeration observed");
+    assert!(
+        last.contains("3 running apps"),
+        "diagnosis should report enumeration size, got: {last}"
+    );
+    assert!(
+        last.contains("1 without a resolvable pid"),
+        "diagnosis should count unresolved pids, got: {last}"
+    );
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("3 running apps") && msg.contains("1 without a resolvable pid"),
+        "rendered message should include the diagnosis, got: {msg}"
+    );
 }

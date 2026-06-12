@@ -53,6 +53,15 @@ class SelectorNotMatchedError extends XA11yError {
   constructor(message) {
     super(message);
     this.name = 'SelectorNotMatchedError';
+    // Structured diagnosis (tenet 6) — populated from the native payload in
+    // `toTypedError`. Defaults keep every field present so consumers never
+    // need existence checks.
+    /** @type {string | null} */ this.selector = null;
+    /** @type {string | null} */ this.condition = null;
+    /** @type {string | null} */ this.lastObserved = null;
+    /** @type {string[]} */ this.candidates = [];
+    /** @type {string | null} */ this.scope = null;
+    /** @type {number | null} */ this.elapsedMs = null;
   }
 }
 
@@ -67,6 +76,15 @@ class TimeoutError extends XA11yError {
   constructor(message) {
     super(message);
     this.name = 'TimeoutError';
+    // Structured diagnosis (tenet 6) — populated from the native payload in
+    // `toTypedError`. Defaults keep every field present so consumers never
+    // need existence checks.
+    /** @type {string | null} */ this.selector = null;
+    /** @type {string | null} */ this.condition = null;
+    /** @type {string | null} */ this.lastObserved = null;
+    /** @type {string[]} */ this.candidates = [];
+    /** @type {string | null} */ this.scope = null;
+    /** @type {number | null} */ this.elapsedMs = null;
   }
 }
 
@@ -106,17 +124,47 @@ const CODE_TO_CLASS = {
   XA11Y_UNSUPPORTED: ActionNotSupportedError,
 };
 
+/**
+ * Separator between the human-readable message and the JSON diagnosis
+ * payload in native error reasons. Mirrors `DIAGNOSIS_SEP` in
+ * `src/errors.rs`.
+ */
+const DIAGNOSIS_SEP = '\u001f';
+
 /** Convert any thrown value into a typed xa11y error if it carries our tag. */
 function toTypedError(err) {
   if (!(err instanceof Error) || typeof err.message !== 'string') return err;
-  const colon = err.message.indexOf(':');
+  // Split off the structured diagnosis payload, if present.
+  let message = err.message;
+  let diagnosis = null;
+  const sep = message.indexOf(DIAGNOSIS_SEP);
+  if (sep >= 0) {
+    try {
+      diagnosis = JSON.parse(message.slice(sep + 1));
+      message = message.slice(0, sep);
+    } catch {
+      // Malformed payload: keep the full original message rather than
+      // silently dropping bytes from the error (the message still renders
+      // the same content in prose).
+      diagnosis = null;
+    }
+  }
+  const colon = message.indexOf(':');
   if (colon < 0) return err;
-  const tag = err.message.slice(0, colon);
+  const tag = message.slice(0, colon);
   const Cls = CODE_TO_CLASS[tag];
   if (!Cls) return err;
-  const detail = err.message.slice(colon + 2);
+  const detail = message.slice(colon + 2);
   const typed = new Cls(detail);
   typed.stack = err.stack;
+  if (diagnosis && typeof diagnosis === 'object') {
+    typed.selector = diagnosis.selector ?? null;
+    typed.condition = diagnosis.condition ?? null;
+    typed.lastObserved = diagnosis.lastObserved ?? null;
+    typed.candidates = Array.isArray(diagnosis.candidates) ? diagnosis.candidates : [];
+    typed.scope = diagnosis.scope ?? null;
+    typed.elapsedMs = diagnosis.elapsedMs ?? null;
+  }
   return typed;
 }
 

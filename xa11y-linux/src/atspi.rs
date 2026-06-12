@@ -1558,12 +1558,17 @@ impl Provider for LinuxProvider {
                 None => unresolved += 1,
             }
         }
-        Err(Error::SelectorNotMatched {
-            selector: format!(
-                "application with pid={pid} ({total} AT-SPI registry entries examined, \
-                 {unresolved} without a resolvable pid)"
+        Err(
+            Error::selector_not_matched(format!("application[pid={pid}]")).diagnose(
+                xa11y_core::Diagnosis {
+                    last_observed: Some(format!(
+                        "{total} AT-SPI registry entries examined, {unresolved} without a \
+                         resolvable pid"
+                    )),
+                    ..Default::default()
+                },
             ),
-        })
+        )
     }
 
     fn press(&self, element: &ElementData) -> Result<()> {

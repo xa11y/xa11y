@@ -730,12 +730,16 @@ impl Provider for WindowsProvider {
         } {
             Ok(el) => el,
             Err(e) if e.code().is_ok() => {
-                return Err(Error::SelectorNotMatched {
-                    selector: format!(
-                        "application with pid={pid} (no top-level UIA element owned by the \
-                         process yet)"
+                return Err(
+                    Error::selector_not_matched(format!("application[pid={pid}]")).diagnose(
+                        xa11y_core::Diagnosis {
+                            last_observed: Some(
+                                "no top-level UIA element owned by the process yet".to_string(),
+                            ),
+                            ..Default::default()
+                        },
                     ),
-                });
+                );
             }
             Err(e) => {
                 return Err(Error::Platform {

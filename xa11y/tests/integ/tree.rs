@@ -57,7 +57,7 @@ mod tests {
         let result = App::by_pid(999_999_999, std::time::Duration::ZERO);
         match result {
             Ok(_) => panic!("by_pid for a nonexistent process must fail"),
-            Err(Error::SelectorNotMatched { selector }) => {
+            Err(Error::SelectorNotMatched { selector, .. }) => {
                 assert!(
                     selector.contains("pid=999999999"),
                     "diagnostic should name the pid, got: {selector}"
