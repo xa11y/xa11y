@@ -115,23 +115,27 @@ class Rect:
 # ── EventType ────────────────────────────────────────────────────────────────
 
 class EventType:
-    """Accessibility event type constants."""
+    """Accessibility event type constants.
 
-    FOCUS_CHANGED: str
-    VALUE_CHANGED: str
-    NAME_CHANGED: str
-    STATE_CHANGED: str
-    STRUCTURE_CHANGED: str
-    WINDOW_OPENED: str
-    WINDOW_CLOSED: str
-    WINDOW_ACTIVATED: str
-    WINDOW_DEACTIVATED: str
-    SELECTION_CHANGED: str
-    MENU_OPENED: str
-    MENU_CLOSED: str
-    ALERT: str
-    TEXT_CHANGED: str
-    ANNOUNCEMENT: str
+    Each constant's value is the string carried in :attr:`Event.event_type`,
+    so handlers can compare against the constant or the literal string
+    interchangeably.
+    """
+
+    FOCUS_CHANGED: str = "focus_changed"
+    VALUE_CHANGED: str = "value_changed"
+    NAME_CHANGED: str = "name_changed"
+    STATE_CHANGED: str = "state_changed"
+    STRUCTURE_CHANGED: str = "structure_changed"
+    WINDOW_OPENED: str = "window_opened"
+    WINDOW_CLOSED: str = "window_closed"
+    WINDOW_ACTIVATED: str = "window_activated"
+    WINDOW_DEACTIVATED: str = "window_deactivated"
+    SELECTION_CHANGED: str = "selection_changed"
+    MENU_OPENED: str = "menu_opened"
+    MENU_CLOSED: str = "menu_closed"
+    TEXT_CHANGED: str = "text_changed"
+    ANNOUNCEMENT: str = "announcement"
 
 # ── Event ────────────────────────────────────────────────────────────────────
 

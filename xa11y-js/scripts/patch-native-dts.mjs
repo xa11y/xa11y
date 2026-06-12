@@ -44,8 +44,8 @@ export type EventTypeName =
   | 'selectionChanged'
   | 'menuOpened'
   | 'menuClosed'
-  | 'alert'
-  | 'textChanged';
+  | 'textChanged'
+  | 'announcement';
 
 `;
 

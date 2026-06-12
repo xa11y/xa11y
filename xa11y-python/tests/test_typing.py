@@ -98,6 +98,58 @@ def test_stub_methods_all_exist_at_runtime():
     assert not stale, f"stub declares members the native module lacks: {sorted(stale)}"
 
 
+def _stub_class_constants(tree: ast.Module) -> dict[str, dict[str, object]]:
+    """Map each stub class name to its constants: class-body assignments
+    that carry a literal value (e.g. ``FOCUS_CHANGED: str = "focus_changed"``).
+
+    Annotation-only declarations (``selector: str | None``) describe
+    *instance* attributes set at runtime and are excluded — they have no
+    class-level counterpart to compare against.
+    """
+    constants: dict[str, dict[str, object]] = {}
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        values: dict[str, object] = {}
+        for item in node.body:
+            if (
+                isinstance(item, ast.AnnAssign)
+                and isinstance(item.target, ast.Name)
+                and isinstance(item.value, ast.Constant)
+            ):
+                values[item.target.id] = item.value.value
+            elif isinstance(item, ast.Assign) and isinstance(item.value, ast.Constant):
+                for target in item.targets:
+                    if isinstance(target, ast.Name):
+                        values[target.id] = item.value.value
+        if values:
+            constants[node.name] = values
+    return constants
+
+
+def test_stub_constants_match_runtime_values():
+    """Every constant the stub declares with a value (e.g. the EventType
+    strings) must exist on the native class with that exact value — catches
+    both stale constants (EventType.ALERT once outlived its runtime
+    counterpart) and value drift."""
+    constants = _stub_class_constants(_load_stub_tree())
+    problems: list[str] = []
+    for cls_name, values in constants.items():
+        runtime_cls = getattr(_native, cls_name, None)
+        if runtime_cls is None:
+            problems.append(f"{cls_name}: class missing from native module")
+            continue
+        for name, expected in values.items():
+            if not hasattr(runtime_cls, name):
+                problems.append(f"{cls_name}.{name}: missing from native module")
+            elif getattr(runtime_cls, name) != expected:
+                problems.append(
+                    f"{cls_name}.{name}: stub says {expected!r}, "
+                    f"native has {getattr(runtime_cls, name)!r}"
+                )
+    assert not problems, f"stub constants out of sync with native module: {problems}"
+
+
 def test_stub_covers_module_level_names():
     """Public module-level classes/functions must match between the native
     module and the stub, in both directions."""

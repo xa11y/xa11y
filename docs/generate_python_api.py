@@ -265,6 +265,67 @@ def _escape_table_pipe(text: str) -> str:
     return text.replace("|", "\\|")
 
 
+def _collect_class_attributes(
+    cls: ast.ClassDef,
+) -> list[tuple[str, str, str | None, str]]:
+    """Collect class-body attribute declarations as (name, annotation,
+    literal value or None, doc).
+
+    Supports the stub's attribute-docstring convention: a string literal
+    expression immediately following the declaration documents it.
+    """
+    attrs: list[tuple[str, str, str | None, str]] = []
+    body = cls.body
+    for i, item in enumerate(body):
+        name: str | None = None
+        annotation = ""
+        value: str | None = None
+        if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+            name = item.target.id
+            annotation = _unparse_annotation(item.annotation)
+            if item.value is not None:
+                value = ast.unparse(item.value)
+        elif isinstance(item, ast.Assign) and len(item.targets) == 1:
+            target = item.targets[0]
+            if isinstance(target, ast.Name):
+                name = target.id
+                value = ast.unparse(item.value)
+        if name is None or not _should_include(name):
+            continue
+        doc = ""
+        if i + 1 < len(body):
+            nxt = body[i + 1]
+            if (
+                isinstance(nxt, ast.Expr)
+                and isinstance(nxt.value, ast.Constant)
+                and isinstance(nxt.value.value, str)
+            ):
+                doc = textwrap.dedent(nxt.value.value).strip().split("\n")[0]
+        attrs.append((name, annotation, value, doc))
+    return attrs
+
+
+def _render_attributes_table(attrs: list[tuple[str, str, str | None, str]]) -> str:
+    """Render class attributes. Constants (all carry literal values) get a
+    Value column; plain attribute declarations get a Type column."""
+    all_constants = all(value is not None for _, _, value, _ in attrs)
+    if all_constants:
+        lines = [
+            "| Constant | Value | Description |",
+            "| -------- | ----- | ----------- |",
+        ]
+        for name, _, value, doc in attrs:
+            lines.append(f"| `{name}` | `{_escape_table_pipe(value or '')}` | {doc} |")
+    else:
+        lines = [
+            "| Attribute | Type | Description |",
+            "| --------- | ---- | ----------- |",
+        ]
+        for name, annotation, _, doc in attrs:
+            lines.append(f"| `{name}` | `{_escape_table_pipe(annotation)}` | {doc} |")
+    return "\n".join(lines)
+
+
 def _render_properties_table(members: list[ast.FunctionDef]) -> str:
     lines = [
         "| Property | Type | Description |",
@@ -387,6 +448,14 @@ def _render_class(cls: ast.ClassDef) -> str:
             else:
                 methods.append(item)
 
+    attributes = _collect_class_attributes(cls)
+    if attributes:
+        all_constants = all(value is not None for _, _, value, _ in attributes)
+        lines.append("#### Constants" if all_constants else "#### Attributes")
+        lines.append("")
+        lines.append(_render_attributes_table(attributes))
+        lines.append("")
+
     if properties:
         lines.append("#### Properties")
         lines.append("")
@@ -405,23 +474,17 @@ def _render_class(cls: ast.ClassDef) -> str:
                         "These methods accept a selector string or a `Node` as *target*:"
                     )
                     lines.append("")
-                    lines.append(
-                        _render_methods_table(group_methods)
-                    )
+                    lines.append(_render_methods_table(group_methods))
                 else:
                     lines.append(
-                        _render_methods_table(
-                            group_methods, category_label=label
-                        )
+                        _render_methods_table(group_methods, category_label=label)
                     )
                 lines.append("")
     elif cls.name == "Locator" and methods:
         groups = _categorize_locator_methods(methods)
         for label, group_methods in groups.items():
             if group_methods:
-                lines.append(
-                    _render_methods_table(group_methods, category_label=label)
-                )
+                lines.append(_render_methods_table(group_methods, category_label=label))
                 lines.append("")
     elif cls.name == "Provider" and methods:
         lines.append("#### Methods")
@@ -482,7 +545,8 @@ def generate() -> str:
     # Main classes (Provider, Tree, Node, Locator)
     class_order = ["Provider", "Tree", "Node", "Locator"]
     ordered_main = sorted(
-        main_classes, key=lambda c: class_order.index(c.name) if c.name in class_order else 99
+        main_classes,
+        key=lambda c: class_order.index(c.name) if c.name in class_order else 99,
     )
 
     if ordered_main:
