@@ -488,14 +488,8 @@ fn do_test_matrix_check() -> bool {
 }
 
 fn do_docs() -> bool {
-    heading("Check doc links");
-    let root = project_root();
-    let links_ok = run_in("python", &["docs/check_links.py"], &root);
-    if !links_ok {
-        return false;
-    }
-
     heading("Check doc tables");
+    let root = project_root();
     let tables_ok = run_in("python", &["docs/check_tables.py"], &root);
     if !tables_ok {
         return false;
@@ -510,6 +504,14 @@ fn do_docs() -> bool {
     heading("Generate JavaScript API docs");
     let gen_js_ok = run_in("python", &["docs/generate_js_api.py"], &root);
     if !gen_js_ok {
+        return false;
+    }
+
+    // After generation, so links into the generated API pages resolve on a
+    // fresh checkout (e.g. /api/python/ from quick-start.mdx).
+    heading("Check doc links");
+    let links_ok = run_in("python", &["docs/check_links.py"], &root);
+    if !links_ok {
         return false;
     }
 
