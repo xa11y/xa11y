@@ -182,3 +182,28 @@ def test_wait_enabled_timeout(test_app):
 def test_wait_detached_timeout(test_app):
     with pytest.raises(xa11y.TimeoutError):
         test_app.descendant('button[name="Back"]').wait_detached(timeout=0.3)
+
+
+# ── wait_until predicate error propagation ───────────────────────────────────
+
+
+def test_wait_until_predicate_exception_propagates(test_app):
+    """A raising predicate aborts the wait immediately with the original
+    exception — it must not be swallowed as "not yet" and resurface as a
+    misleading TimeoutError (mirrors App.find)."""
+    import time as _time
+
+    def boom(_el):
+        raise ValueError("boom")
+
+    start = _time.monotonic()
+    with pytest.raises(ValueError, match="boom"):
+        test_app.wait_until(boom, timeout=5.0)
+    assert _time.monotonic() - start < 2.0, "predicate exception should fail fast"
+
+
+def test_wait_until_predicate_false_times_out(test_app):
+    with pytest.raises(xa11y.TimeoutError) as exc_info:
+        test_app.wait_until(lambda _el: False, timeout=0.3)
+    # The custom predicate's timeout still carries a diagnosis.
+    assert exc_info.value.condition == "custom predicate"

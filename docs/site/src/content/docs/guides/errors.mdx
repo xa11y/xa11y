@@ -1,0 +1,156 @@
+---
+title: Errors & Diagnosis
+description: xa11y errors carry their own diagnosis — selectors, wait conditions, last observations, and bounded scope snapshots.
+---
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+xa11y errors are designed so you never have to re-run a failure under extra
+logging to understand it. A timeout tells you *what it was waiting for* and
+*what it last saw*; a selector miss tells you *what was actually there*. The
+same information is available two ways:
+
+- **Rendered into the message** — the exception text alone is enough to
+  diagnose a CI failure from the log.
+- **As structured fields** — exception attributes in Python, error
+  properties in JavaScript, and the [`Diagnosis`] struct in Rust — so
+  harnesses can act on them programmatically instead of parsing prose.
+
+## Anatomy of a timeout
+
+A failed `wait_visible(timeout=60)` renders like this:
+
+```text
+xa11y.TimeoutError: Timeout after 60.0s; waiting for: visible; selector:
+dialog[name^="Submit to AWS Deadline Cloud"]; last observed: selector never
+matched; candidates: window "Untitled — Cinema 4D"
+search scope (bounded):
+application "Cinema 4D" (pid=4242)
+application "Finder" (pid=512)
+…
+```
+
+Reading it back:
+
+- **`waiting for`** — the wait condition: `visible`, `attached`,
+  `enabled`, … for the `wait_*` methods; `press target actionable
+  (visible && enabled)` for an auto-waiting action; `event matching
+  predicate` for event waits; `custom predicate` for `wait_until`.
+- **`selector`** — the full selector the locator was resolving.
+- **`last observed`** — the final poll's observation. This is the key
+  distinction when debugging:
+  - `selector never matched` — the element was never there (wrong selector,
+    wrong window, app not ready).
+  - `matched button "Export" (visible=false, enabled=true, focused=false)`
+    — the element *was* there, but in the wrong state. No candidate or
+    scope sweep is attached in this case; the states tell the story.
+  - `selector matched 2 element(s); nth(5) requested` — an `nth()` index
+    out of range.
+- **`candidates`** — near-misses: elements with the selector's target role
+  but different attributes. A typo like `button[name="Exprot"]` lists
+  `button "Export"` right in the error.
+- **`search scope (bounded)`** — a depth-limited, line-capped snapshot of
+  where the search happened: a tree dump for scoped locators, the running
+  application list for rootless ones and app lookups. This replaces the
+  `print(app.dump())` wrapper you'd otherwise write around the failing call.
+
+Selector misses from fail-fast calls (`element()`, `tree()`, `dump()`)
+carry the same context on `SelectorNotMatchedError`.
+
+Diagnosis collection is **bounded and failure-path-only**: candidate lists
+and snapshots are truncated (a miss against a huge tree cannot produce a
+megabyte message), and nothing is collected unless the operation has
+already failed.
+
+## Structured access
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+    ```python
+    import xa11y
+
+    try:
+        dialog.wait_visible(timeout=60)
+    except xa11y.TimeoutError as e:
+        e.condition      # "visible"
+        e.selector       # 'dialog[name^="Submit"]'
+        e.last_observed  # 'selector never matched'
+        e.candidates     # ['window "Untitled — Cinema 4D"', ...]
+        e.scope          # bounded tree dump / app list (str)
+        e.elapsed        # 60.0  (seconds, float)
+    ```
+
+    Every attribute is always present (`None` / `[]` when not applicable),
+    so no `hasattr` guards are needed. `SelectorNotMatchedError` exposes
+    the same fields (`elapsed` is always `None` there).
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    const { TimeoutError } = require('xa11y');
+
+    try {
+      await dialog.waitVisible(60);
+    } catch (e) {
+      if (e instanceof TimeoutError) {
+        e.condition;    // 'visible'
+        e.selector;     // 'dialog[name^="Submit"]'
+        e.lastObserved; // 'selector never matched'
+        e.candidates;   // ['window "Untitled — Cinema 4D"', ...]
+        e.scope;        // bounded tree dump / app list (string)
+        e.elapsedMs;    // 60000
+      }
+    }
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use std::time::Duration;
+    use xa11y::{Diagnosis, Error};
+
+    match dialog.wait_visible(Duration::from_secs(60)) {
+        Err(e @ Error::Timeout { .. }) => {
+            if let Some(d) = e.diagnosis() {
+                let _ = (&d.condition, &d.selector, &d.last_observed,
+                         &d.candidates, &d.scope);
+            }
+        }
+        other => { /* ... */ }
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+## App lookups
+
+`App.by_pid` / `App.by_name` / `App.find` timeouts list what *is* running,
+so an attach failure on an opaque CI runner is diagnosable from the message:
+
+```text
+xa11y.SelectorNotMatchedError: No element matched selector:
+application[pid=4242]; waiting for: application discovery; last observed:
+enumerated 12 running apps, 1 without a resolvable pid; candidates:
+"Finder" (pid=512), "Terminal" (pid=890), …
+```
+
+## Event waits
+
+`Subscription.wait_for` timeouts report how many non-matching events
+arrived, and distinguish a quiet stream from a disconnected one:
+
+```text
+Timeout after 5.0s; waiting for: event matching predicate; last observed:
+event source disconnected after 3 non-matching event(s) — no further
+events will arrive
+```
+
+## For contributors
+
+This behavior is governed by design tenet 6 (*errors carry their own
+diagnosis*) in `AGENTS.md`. The structured carrier is the `Diagnosis`
+struct in `xa11y-core/src/error.rs`; its module docs describe the pattern —
+enrich at the terminal failure site, keep poll-loop retry signals cheap,
+bound every payload, and never let diagnosis collection mask the original
+error. New failure paths should attach a `Diagnosis` rather than
+interpolating context into ad-hoc message strings.
+
+[`Diagnosis`]: https://docs.rs/xa11y/latest/xa11y/struct.Diagnosis.html

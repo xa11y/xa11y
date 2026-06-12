@@ -2038,11 +2038,16 @@ impl Provider for MacOSProvider {
     fn app_by_pid(&self, pid: u32) -> Result<ElementData> {
         let app_element = AXElement::from_owned(unsafe { safe_ax_create_application(pid as i32) });
         if app_element.is_null() {
-            return Err(Error::SelectorNotMatched {
-                selector: format!(
-                    "application with pid={pid} (AXUIElementCreateApplication returned NULL)"
+            return Err(
+                Error::selector_not_matched(format!("application[pid={pid}]")).diagnose(
+                    xa11y_core::Diagnosis {
+                        last_observed: Some(
+                            "AXUIElementCreateApplication returned NULL".to_string(),
+                        ),
+                        ..Default::default()
+                    },
                 ),
-            });
+            );
         }
         let attr = CFString::new("AXRole");
         let mut value: CFTypeRef = std::ptr::null();
@@ -2072,12 +2077,16 @@ impl Provider for MacOSProvider {
             AX_ERROR_CANNOT_COMPLETE
             | AX_ERROR_INVALID_UI_ELEMENT
             | AX_ERROR_NOT_IMPLEMENTED
-            | AX_ERROR_NO_VALUE => Err(Error::SelectorNotMatched {
-                selector: format!(
-                    "application with pid={pid} (AX attach probe returned AXError {err}: \
-                     process not yet AX-reachable, exited, or has no accessibility bridge)"
-                ),
-            }),
+            | AX_ERROR_NO_VALUE => Err(Error::selector_not_matched(format!(
+                "application[pid={pid}]"
+            ))
+            .diagnose(xa11y_core::Diagnosis {
+                last_observed: Some(format!(
+                    "AX attach probe returned AXError {err}: process not yet AX-reachable, \
+                     exited, or has no accessibility bridge"
+                )),
+                ..Default::default()
+            })),
             _ => Err(Error::Platform {
                 code: err as i64,
                 message: format!(
@@ -2517,9 +2526,17 @@ impl MacOSProvider {
                 safe_cf_release(observer);
                 drop(Box::from_raw(ctx_ptr as *mut ObserverContext));
             }
-            return Err(Error::SelectorNotMatched {
-                selector: format!("application with pid:{}", pid),
-            });
+            return Err(
+                Error::selector_not_matched(format!("application[pid={pid}]")).diagnose(
+                    xa11y_core::Diagnosis {
+                        last_observed: Some(
+                            "AXUIElementCreateApplication returned NULL while subscribing"
+                                .to_string(),
+                        ),
+                        ..Default::default()
+                    },
+                ),
+            );
         }
 
         let notifications = [

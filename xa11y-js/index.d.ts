@@ -267,14 +267,55 @@ export class PermissionDeniedError extends XA11yError {}
  */
 export class AccessibilityNotEnabledError extends XA11yError {}
 
-/** No element matched the selector (also used for stale elements). */
-export class SelectorNotMatchedError extends XA11yError {}
+/**
+ * No element matched the selector (also used for stale elements).
+ *
+ * Carries a structured diagnosis so the failure is understandable without
+ * re-running it under manual tree dumps. Every field is always present
+ * (`null` / `[]` when not applicable); the same content is rendered into
+ * the message.
+ */
+export class SelectorNotMatchedError extends XA11yError {
+  /** The selector that failed to match. */
+  selector: string | null;
+  /** What the operation was waiting for / trying to find, if known. */
+  condition: string | null;
+  /** What the failing operation last observed. */
+  lastObserved: string | null;
+  /** Bounded near-miss candidates (e.g. same-role elements). */
+  candidates: string[];
+  /** Bounded rendering of the search scope (tree dump or app list). */
+  scope: string | null;
+  /** Always `null` for this class (parity with {@link TimeoutError}). */
+  elapsedMs: number | null;
+}
 
 /** The requested action is not supported on the target element. */
 export class ActionNotSupportedError extends XA11yError {}
 
-/** An operation exceeded its timeout. */
-export class TimeoutError extends XA11yError {}
+/**
+ * An operation exceeded its timeout.
+ *
+ * Carries a structured diagnosis: what the wait was for (`condition` +
+ * `selector`), what it last observed, and — when the selector never
+ * matched — bounded scope context (`candidates` + `scope`). Every field is
+ * always present (`null` / `[]` when not applicable); the same content is
+ * rendered into the message.
+ */
+export class TimeoutError extends XA11yError {
+  /** Wall-clock milliseconds the operation waited before giving up. */
+  elapsedMs: number | null;
+  /** What the wait was for: `'visible'`, `'attached'`, `'press target actionable (visible && enabled)'`, ... */
+  condition: string | null;
+  /** The selector being resolved, when the wait had one. */
+  selector: string | null;
+  /** The last poll's observation (matched-with-states vs never matched). */
+  lastObserved: string | null;
+  /** Bounded near-miss candidates; collected only when the selector never matched. */
+  candidates: string[];
+  /** Bounded rendering of the search scope; collected only when the selector never matched. */
+  scope: string | null;
+}
 
 /** The selector string has invalid syntax. */
 export class InvalidSelectorError extends XA11yError {}

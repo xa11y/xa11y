@@ -32,6 +32,7 @@ export default defineConfig({
             { label: "Overview", slug: "guides/overview" },
             { label: "CLI", slug: "guides/cli" },
             { label: "Desktop Testing", slug: "guides/desktop-testing" },
+            { label: "Errors & Diagnosis", slug: "guides/errors" },
             { label: "Testing in CI", slug: "guides/ci" },
             { label: "Input Simulation", slug: "guides/input" },
             { label: "Screenshots", slug: "guides/screenshots" },

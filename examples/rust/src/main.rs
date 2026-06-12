@@ -70,9 +70,7 @@ fn wait_for_registration(pid: u32) -> Result<App, Error> {
             }
         }
     }
-    Err(last.unwrap_or(Error::Timeout {
-        elapsed: STARTUP_TIMEOUT,
-    }))
+    Err(last.unwrap_or_else(|| Error::timeout(STARTUP_TIMEOUT)))
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

@@ -46,6 +46,38 @@ where
     Ok(())
 }
 
+/// Attach the structured diagnosis fields (tenet 6) as attributes on an
+/// exception instance, so harnesses can read `e.selector`, `e.condition`,
+/// `e.last_observed`, `e.candidates`, `e.scope` (and `e.elapsed` on
+/// timeouts) instead of parsing the message. Every attribute is always set
+/// (`None` / `[]` when absent) so consumers don't need `hasattr` guards.
+fn attach_diagnosis_attrs(
+    err: PyErr,
+    selector: Option<String>,
+    elapsed_secs: Option<f64>,
+    diagnosis: Option<&xa11y::Diagnosis>,
+) -> PyErr {
+    Python::with_gil(|py| {
+        let value = err.value(py);
+        // Best-effort by design: the rendered message already carries the
+        // same content, and replacing the original exception with an
+        // attribute-setting failure would mask the real error.
+        let _ = value.setattr("selector", selector);
+        let _ = value.setattr("elapsed", elapsed_secs);
+        let _ = value.setattr("condition", diagnosis.and_then(|d| d.condition.clone()));
+        let _ = value.setattr(
+            "last_observed",
+            diagnosis.and_then(|d| d.last_observed.clone()),
+        );
+        let _ = value.setattr(
+            "candidates",
+            diagnosis.map(|d| d.candidates.clone()).unwrap_or_default(),
+        );
+        let _ = value.setattr("scope", diagnosis.and_then(|d| d.scope.clone()));
+    });
+    err
+}
+
 fn to_py_err(e: xa11y::Error) -> PyErr {
     match e {
         xa11y::Error::PermissionDenied { instructions } => {
@@ -56,11 +88,22 @@ fn to_py_err(e: xa11y::Error) -> PyErr {
                 "Accessibility not enabled for {app}: {instructions}"
             ))
         }
-        xa11y::Error::SelectorNotMatched { selector } => {
-            SelectorNotMatchedError::new_err(format!("No element matched: {selector}"))
+        xa11y::Error::SelectorNotMatched {
+            selector,
+            diagnosis,
+        } => {
+            // Reassemble so Display renders the diagnosis suffix into the
+            // message; the same fields are exposed as attributes below.
+            let err = xa11y::Error::SelectorNotMatched {
+                selector: selector.clone(),
+                diagnosis,
+            };
+            let py_err = SelectorNotMatchedError::new_err(err.to_string());
+            attach_diagnosis_attrs(py_err, Some(selector), None, err.diagnosis())
         }
         xa11y::Error::ElementStale { selector } => {
-            SelectorNotMatchedError::new_err(format!("Element stale: {selector}"))
+            let py_err = SelectorNotMatchedError::new_err(format!("Element stale: {selector}"));
+            attach_diagnosis_attrs(py_err, Some(selector), None, None)
         }
         xa11y::Error::ActionNotSupported { action, role } => {
             ActionNotSupportedError::new_err(format!("{action} not supported on {role}"))
@@ -68,8 +111,16 @@ fn to_py_err(e: xa11y::Error) -> PyErr {
         xa11y::Error::TextValueNotSupported => {
             ActionNotSupportedError::new_err("Text value not supported for this element")
         }
-        xa11y::Error::Timeout { elapsed } => {
-            TimeoutError::new_err(format!("Timeout after {elapsed:.1?}"))
+        xa11y::Error::Timeout { elapsed, diagnosis } => {
+            let err = xa11y::Error::Timeout { elapsed, diagnosis };
+            let py_err = TimeoutError::new_err(err.to_string());
+            let selector = err.diagnosis().and_then(|d| d.selector.clone());
+            attach_diagnosis_attrs(
+                py_err,
+                selector,
+                Some(elapsed.as_secs_f64()),
+                err.diagnosis(),
+            )
         }
         xa11y::Error::InvalidSelector { selector, message } => {
             InvalidSelectorError::new_err(format!("Invalid selector '{selector}': {message}"))
@@ -381,99 +432,96 @@ impl Element {
     // (contrast with Locator, which re-queries the provider on every call).
 
     /// Press (default activate) this element.
-    fn press(&self) -> PyResult<()> {
-        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
-            .press()
-            .map_err(to_py_err)
+    fn press(&self, py: Python<'_>) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.allow_threads(move || element.press()).map_err(to_py_err)
     }
     /// Move keyboard focus to this element.
-    fn focus(&self) -> PyResult<()> {
-        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
-            .focus()
-            .map_err(to_py_err)
+    fn focus(&self, py: Python<'_>) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.allow_threads(move || element.focus()).map_err(to_py_err)
     }
     /// Remove keyboard focus from this element.
-    fn blur(&self) -> PyResult<()> {
-        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
-            .blur()
-            .map_err(to_py_err)
+    fn blur(&self, py: Python<'_>) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.allow_threads(move || element.blur()).map_err(to_py_err)
     }
     /// Toggle this element's checked state.
-    fn toggle(&self) -> PyResult<()> {
-        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
-            .toggle()
+    fn toggle(&self, py: Python<'_>) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.allow_threads(move || element.toggle())
             .map_err(to_py_err)
     }
     /// Expand this element (e.g. tree node, combo box).
-    fn expand(&self) -> PyResult<()> {
-        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
-            .expand()
+    fn expand(&self, py: Python<'_>) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.allow_threads(move || element.expand())
             .map_err(to_py_err)
     }
     /// Collapse this element.
-    fn collapse(&self) -> PyResult<()> {
-        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
-            .collapse()
+    fn collapse(&self, py: Python<'_>) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.allow_threads(move || element.collapse())
             .map_err(to_py_err)
     }
     /// Select this element (e.g. list item, tab).
-    fn select(&self) -> PyResult<()> {
-        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
-            .select()
+    fn select(&self, py: Python<'_>) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.allow_threads(move || element.select())
             .map_err(to_py_err)
     }
     /// Show this element's context menu.
-    fn show_menu(&self) -> PyResult<()> {
-        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
-            .show_menu()
+    fn show_menu(&self, py: Python<'_>) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.allow_threads(move || element.show_menu())
             .map_err(to_py_err)
     }
     /// Scroll this element into view.
-    fn scroll_into_view(&self) -> PyResult<()> {
-        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
-            .scroll_into_view()
+    fn scroll_into_view(&self, py: Python<'_>) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.allow_threads(move || element.scroll_into_view())
             .map_err(to_py_err)
     }
     /// Increment this element's value (e.g. slider, spinner).
-    fn increment(&self) -> PyResult<()> {
-        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
-            .increment()
+    fn increment(&self, py: Python<'_>) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.allow_threads(move || element.increment())
             .map_err(to_py_err)
     }
     /// Decrement this element's value.
-    fn decrement(&self) -> PyResult<()> {
-        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
-            .decrement()
+    fn decrement(&self, py: Python<'_>) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.allow_threads(move || element.decrement())
             .map_err(to_py_err)
     }
     /// Replace this element's text value.
-    fn set_value(&self, value: &str) -> PyResult<()> {
-        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
-            .set_value(value)
+    fn set_value(&self, py: Python<'_>, value: &str) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.allow_threads(move || element.set_value(value))
             .map_err(to_py_err)
     }
     /// Set this element's numeric value.
-    fn set_numeric_value(&self, value: f64) -> PyResult<()> {
-        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
-            .set_numeric_value(value)
+    fn set_numeric_value(&self, py: Python<'_>, value: f64) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.allow_threads(move || element.set_numeric_value(value))
             .map_err(to_py_err)
     }
     /// Insert text at the current cursor position.
-    fn type_text(&self, text: &str) -> PyResult<()> {
-        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
-            .type_text(text)
+    fn type_text(&self, py: Python<'_>, text: &str) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.allow_threads(move || element.type_text(text))
             .map_err(to_py_err)
     }
     /// Select the text range from `start` to `end` (0-based character offsets).
-    fn select_text(&self, start: u32, end: u32) -> PyResult<()> {
-        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
-            .select_text(start, end)
+    fn select_text(&self, py: Python<'_>, start: u32, end: u32) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.allow_threads(move || element.select_text(start, end))
             .map_err(to_py_err)
     }
     /// Perform an action by its ``snake_case`` name.
-    fn perform_action(&self, action: &str) -> PyResult<()> {
-        xa11y::Element::new(self.inner_data.clone(), self.provider.clone())
-            .perform_action(action)
+    fn perform_action(&self, py: Python<'_>, action: &str) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.allow_threads(move || element.perform_action(action))
             .map_err(to_py_err)
     }
 
@@ -549,21 +597,29 @@ impl Locator {
 
     // ── Queries ──
 
-    fn exists(&self) -> PyResult<bool> {
-        self.inner.exists().map_err(to_py_err)
+    fn exists(&self, py: Python<'_>) -> PyResult<bool> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || inner.exists()).map_err(to_py_err)
     }
 
-    fn count(&self) -> PyResult<usize> {
-        self.inner.count().map_err(to_py_err)
+    fn count(&self, py: Python<'_>) -> PyResult<usize> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || inner.count()).map_err(to_py_err)
     }
 
     fn element(&self, py: Python<'_>) -> PyResult<Py<Element>> {
-        let el = self.inner.element().map_err(to_py_err)?;
+        let inner = self.inner.clone();
+        let el = py
+            .allow_threads(move || inner.element())
+            .map_err(to_py_err)?;
         make_py_element(py, el.data(), el.provider().clone())
     }
 
     fn elements(&self, py: Python<'_>) -> PyResult<Vec<Py<Element>>> {
-        let els = self.inner.elements().map_err(to_py_err)?;
+        let inner = self.inner.clone();
+        let els = py
+            .allow_threads(move || inner.elements())
+            .map_err(to_py_err)?;
         els.iter()
             .map(|el| make_py_element(py, el.data(), el.provider().clone()))
             .collect()
@@ -600,149 +656,206 @@ impl Locator {
 
     // ── Actions ──
 
-    fn press(&self) -> PyResult<()> {
-        self.inner.press().map_err(to_py_err)
+    fn press(&self, py: Python<'_>) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || inner.press()).map_err(to_py_err)
     }
-    fn focus(&self) -> PyResult<()> {
-        self.inner.focus().map_err(to_py_err)
+    fn focus(&self, py: Python<'_>) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || inner.focus()).map_err(to_py_err)
     }
-    fn blur(&self) -> PyResult<()> {
-        self.inner.blur().map_err(to_py_err)
+    fn blur(&self, py: Python<'_>) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || inner.blur()).map_err(to_py_err)
     }
-    fn toggle(&self) -> PyResult<()> {
-        self.inner.toggle().map_err(to_py_err)
+    fn toggle(&self, py: Python<'_>) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || inner.toggle()).map_err(to_py_err)
     }
-    fn expand(&self) -> PyResult<()> {
-        self.inner.expand().map_err(to_py_err)
+    fn expand(&self, py: Python<'_>) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || inner.expand()).map_err(to_py_err)
     }
-    fn collapse(&self) -> PyResult<()> {
-        self.inner.collapse().map_err(to_py_err)
+    fn collapse(&self, py: Python<'_>) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || inner.collapse())
+            .map_err(to_py_err)
     }
-    fn select(&self) -> PyResult<()> {
-        self.inner.select().map_err(to_py_err)
+    fn select(&self, py: Python<'_>) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || inner.select()).map_err(to_py_err)
     }
-    fn show_menu(&self) -> PyResult<()> {
-        self.inner.show_menu().map_err(to_py_err)
+    fn show_menu(&self, py: Python<'_>) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || inner.show_menu())
+            .map_err(to_py_err)
     }
-    fn scroll_into_view(&self) -> PyResult<()> {
-        self.inner.scroll_into_view().map_err(to_py_err)
+    fn scroll_into_view(&self, py: Python<'_>) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || inner.scroll_into_view())
+            .map_err(to_py_err)
     }
-    fn increment(&self) -> PyResult<()> {
-        self.inner.increment().map_err(to_py_err)
+    fn increment(&self, py: Python<'_>) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || inner.increment())
+            .map_err(to_py_err)
     }
-    fn decrement(&self) -> PyResult<()> {
-        self.inner.decrement().map_err(to_py_err)
+    fn decrement(&self, py: Python<'_>) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || inner.decrement())
+            .map_err(to_py_err)
     }
-    fn set_value(&self, value: &str) -> PyResult<()> {
-        self.inner.set_value(value).map_err(to_py_err)
+    fn set_value(&self, py: Python<'_>, value: &str) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || inner.set_value(value))
+            .map_err(to_py_err)
     }
-    fn set_numeric_value(&self, value: f64) -> PyResult<()> {
-        self.inner.set_numeric_value(value).map_err(to_py_err)
+    fn set_numeric_value(&self, py: Python<'_>, value: f64) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || inner.set_numeric_value(value))
+            .map_err(to_py_err)
     }
-    fn type_text(&self, text: &str) -> PyResult<()> {
-        self.inner.type_text(text).map_err(to_py_err)
+    fn type_text(&self, py: Python<'_>, text: &str) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || inner.type_text(text))
+            .map_err(to_py_err)
     }
-    fn select_text(&self, start: u32, end: u32) -> PyResult<()> {
-        self.inner.select_text(start, end).map_err(to_py_err)
+    fn select_text(&self, py: Python<'_>, start: u32, end: u32) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || inner.select_text(start, end))
+            .map_err(to_py_err)
     }
-    fn perform_action(&self, action: &str) -> PyResult<()> {
-        self.inner.perform_action(action).map_err(to_py_err)
+    fn perform_action(&self, py: Python<'_>, action: &str) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || inner.perform_action(action))
+            .map_err(to_py_err)
     }
 
     // ── Wait operations ──
 
     #[pyo3(signature = (timeout=5.0))]
     fn wait_visible(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Element>> {
-        let el = self
-            .inner
-            .wait_visible(Duration::from_secs_f64(timeout))
+        let inner = self.inner.clone();
+        let el = py
+            .allow_threads(move || inner.wait_visible(Duration::from_secs_f64(timeout)))
             .map_err(to_py_err)?;
         make_py_element(py, el.data(), el.provider().clone())
     }
 
     #[pyo3(signature = (timeout=5.0))]
     fn wait_attached(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Element>> {
-        let el = self
-            .inner
-            .wait_attached(Duration::from_secs_f64(timeout))
+        let inner = self.inner.clone();
+        let el = py
+            .allow_threads(move || inner.wait_attached(Duration::from_secs_f64(timeout)))
             .map_err(to_py_err)?;
         make_py_element(py, el.data(), el.provider().clone())
     }
 
     #[pyo3(signature = (timeout=5.0))]
-    fn wait_detached(&self, timeout: f64) -> PyResult<()> {
-        self.inner
-            .wait_detached(Duration::from_secs_f64(timeout))
+    fn wait_detached(&self, py: Python<'_>, timeout: f64) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || inner.wait_detached(Duration::from_secs_f64(timeout)))
             .map_err(to_py_err)
     }
 
     #[pyo3(signature = (timeout=5.0))]
     fn wait_enabled(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Element>> {
-        let el = self
-            .inner
-            .wait_enabled(Duration::from_secs_f64(timeout))
+        let inner = self.inner.clone();
+        let el = py
+            .allow_threads(move || inner.wait_enabled(Duration::from_secs_f64(timeout)))
             .map_err(to_py_err)?;
         make_py_element(py, el.data(), el.provider().clone())
     }
 
     #[pyo3(signature = (timeout=5.0))]
-    fn wait_hidden(&self, timeout: f64) -> PyResult<()> {
-        self.inner
-            .wait_hidden(Duration::from_secs_f64(timeout))
+    fn wait_hidden(&self, py: Python<'_>, timeout: f64) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.allow_threads(move || inner.wait_hidden(Duration::from_secs_f64(timeout)))
             .map_err(to_py_err)
     }
 
     #[pyo3(signature = (timeout=5.0))]
     fn wait_disabled(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Element>> {
-        let el = self
-            .inner
-            .wait_disabled(Duration::from_secs_f64(timeout))
+        let inner = self.inner.clone();
+        let el = py
+            .allow_threads(move || inner.wait_disabled(Duration::from_secs_f64(timeout)))
             .map_err(to_py_err)?;
         make_py_element(py, el.data(), el.provider().clone())
     }
 
     #[pyo3(signature = (timeout=5.0))]
     fn wait_focused(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Element>> {
-        let el = self
-            .inner
-            .wait_focused(Duration::from_secs_f64(timeout))
+        let inner = self.inner.clone();
+        let el = py
+            .allow_threads(move || inner.wait_focused(Duration::from_secs_f64(timeout)))
             .map_err(to_py_err)?;
         make_py_element(py, el.data(), el.provider().clone())
     }
 
     #[pyo3(signature = (timeout=5.0))]
     fn wait_unfocused(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Element>> {
-        let el = self
-            .inner
-            .wait_unfocused(Duration::from_secs_f64(timeout))
+        let inner = self.inner.clone();
+        let el = py
+            .allow_threads(move || inner.wait_unfocused(Duration::from_secs_f64(timeout)))
             .map_err(to_py_err)?;
         make_py_element(py, el.data(), el.provider().clone())
     }
 
     /// Wait until an arbitrary Python predicate is satisfied.
+    ///
+    /// A predicate that *raises* aborts the wait immediately and propagates
+    /// the exception — it is not swallowed as "not yet" (which would
+    /// resurface later as a misleading timeout). Mirrors `App.find`.
     #[pyo3(signature = (predicate, timeout=5.0))]
-    fn wait_until(&self, predicate: PyObject, timeout: f64) -> PyResult<()> {
+    fn wait_until(&self, py: Python<'_>, predicate: PyObject, timeout: f64) -> PyResult<()> {
         let provider = self.inner.provider().clone();
-        self.inner
-            .wait_until(
+        let inner = self.inner.clone();
+        // The poll loop runs with the GIL released (tenet 5); the predicate
+        // closure reacquires it per call. A raised predicate exception is
+        // stashed here and re-raised below. The closure reports `true` after
+        // stashing so the core loop terminates on this tick instead of
+        // burning the remaining timeout; the stash check after the loop
+        // takes precedence over the loop's own result.
+        let pred_err: std::sync::Mutex<Option<PyErr>> = std::sync::Mutex::new(None);
+        let result = py.allow_threads(|| {
+            inner.wait_until(
                 |element_data: Option<&xa11y::ElementData>| {
                     Python::with_gil(|py| -> bool {
+                        let mut stash = pred_err.lock().unwrap_or_else(|e| e.into_inner());
+                        if stash.is_some() {
+                            return true;
+                        }
                         let arg: PyObject = match element_data {
                             Some(data) => match make_py_element(py, data, provider.clone()) {
                                 Ok(el) => el.into_any(),
-                                Err(_) => py.None(),
+                                Err(e) => {
+                                    *stash = Some(e);
+                                    return true;
+                                }
                             },
                             None => py.None(),
                         };
-                        predicate
+                        match predicate
                             .call1(py, (arg,))
                             .and_then(|r| r.extract::<bool>(py))
-                            .unwrap_or(false)
+                        {
+                            Ok(matched) => matched,
+                            Err(e) => {
+                                *stash = Some(e);
+                                true
+                            }
+                        }
                     })
                 },
                 Duration::from_secs_f64(timeout),
             )
-            .map_err(to_py_err)?;
+        });
+        // A stashed predicate error takes precedence — re-raise the exact
+        // Python exception the predicate threw rather than a timeout.
+        if let Some(e) = pred_err.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            return Err(e);
+        }
+        result.map_err(to_py_err)?;
         Ok(())
     }
 
@@ -922,13 +1035,18 @@ impl Subscription {
     fn wait_for(&self, py: Python<'_>, predicate: PyObject, timeout: f64) -> PyResult<Event> {
         let dur = Duration::from_secs_f64(timeout);
         let start = std::time::Instant::now();
+        let mut seen: usize = 0;
 
         loop {
             let remaining = dur.saturating_sub(start.elapsed());
             if remaining.is_zero() {
-                return Err(to_py_err(xa11y::Error::Timeout {
-                    elapsed: start.elapsed(),
-                }));
+                return Err(to_py_err(xa11y::Error::timeout(start.elapsed()).diagnose(
+                    xa11y::Diagnosis {
+                        condition: Some("event matching predicate".to_string()),
+                        last_observed: Some(format!("{seen} event(s) received, none matched")),
+                        ..Default::default()
+                    },
+                )));
             }
             let poll = remaining.min(Duration::from_millis(50));
             let provider = self.provider.clone();
@@ -958,6 +1076,7 @@ impl Subscription {
             if matched {
                 return Ok(py_event);
             }
+            seen += 1;
         }
     }
 

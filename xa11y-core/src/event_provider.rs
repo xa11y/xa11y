@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::error::{Error, Result};
+use crate::error::{Diagnosis, Error, Result};
 use crate::event::Event;
 
 /// A live event subscription. Drop to unsubscribe.
@@ -28,9 +28,12 @@ impl Subscription {
 
     /// Block until an event arrives or the timeout expires.
     pub fn recv(&self, timeout: Duration) -> Result<Event> {
-        self.rx
-            .recv_timeout(timeout)
-            .ok_or(Error::Timeout { elapsed: timeout })
+        self.rx.recv_timeout(timeout).ok_or_else(|| {
+            Error::timeout(timeout).diagnose(Diagnosis {
+                condition: Some("any accessibility event".to_string()),
+                ..Diagnosis::default()
+            })
+        })
     }
 
     /// Block until an event arrives, the timeout expires, or the event source
@@ -49,12 +52,15 @@ impl Subscription {
     /// burning the remainder of the timeout in a dead poll loop is pointless.
     pub fn wait_for(&self, predicate: impl Fn(&Event) -> bool, timeout: Duration) -> Result<Event> {
         let start = std::time::Instant::now();
+        let mut seen: usize = 0;
         loop {
             let remaining = timeout.saturating_sub(start.elapsed());
             if remaining.is_zero() {
-                return Err(Error::Timeout {
-                    elapsed: start.elapsed(),
-                });
+                return Err(Error::timeout(start.elapsed()).diagnose(Diagnosis {
+                    condition: Some("event matching predicate".to_string()),
+                    last_observed: Some(format!("{seen} event(s) received, none matched")),
+                    ..Diagnosis::default()
+                }));
             }
             // Poll with short recv timeouts so we can re-check the deadline,
             // and break out early on disconnect instead of polling a dead
@@ -65,12 +71,18 @@ impl Subscription {
                     if predicate(&event) {
                         return Ok(*event);
                     }
+                    seen += 1;
                 }
                 RecvStatus::Timeout => continue,
                 RecvStatus::Disconnected => {
-                    return Err(Error::Timeout {
-                        elapsed: start.elapsed(),
-                    });
+                    return Err(Error::timeout(start.elapsed()).diagnose(Diagnosis {
+                        condition: Some("event matching predicate".to_string()),
+                        last_observed: Some(format!(
+                            "event source disconnected after {seen} non-matching event(s) — \
+                             no further events will arrive"
+                        )),
+                        ..Diagnosis::default()
+                    }));
                 }
             }
         }

@@ -73,12 +73,21 @@ pub trait Provider: Send + Sync {
         if let Some(data) = apps.into_iter().find(|a| a.pid == Some(pid)) {
             return Ok(data);
         }
-        Err(Error::SelectorNotMatched {
-            selector: format!(
-                "application with pid={pid} (enumerated {total} running apps, \
-                 {unresolved} without a resolvable pid)"
+        // The enumeration counts are structured diagnosis fields (tenet 6),
+        // not prose baked into the selector — bindings expose them as
+        // attributes, and `App::by_pid_with` merges in the full candidate
+        // list at its terminal failure site. Cheap to build (two counters),
+        // so attaching it per poll tick is fine.
+        Err(
+            Error::selector_not_matched(format!("application[pid={pid}]")).diagnose(
+                crate::error::Diagnosis {
+                    last_observed: Some(format!(
+                        "enumerated {total} running apps, {unresolved} without a resolvable pid"
+                    )),
+                    ..Default::default()
+                },
             ),
-        })
+        )
     }
 
     /// Search for elements matching a selector.
