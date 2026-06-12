@@ -21,13 +21,15 @@ ASSET_PATH_PREFIXES = [
 ]
 
 # Regex for markdown links: [text](/path/) and HTML href="/path/"
-MARKDOWN_LINK = re.compile(r'\]\((/[^)]+)\)')
+MARKDOWN_LINK = re.compile(r"\]\((/[^)]+)\)")
 HTML_HREF = re.compile(r'href="(/[^"]+)"')
 
 
 def slug_to_file(slug: str) -> Path:
     """Convert a Starlight content slug like /guides/overview/ to a file path."""
     slug = slug.strip("/")
+    if not slug:
+        return DOCS_DIR / "index.mdx"
     return DOCS_DIR / f"{slug}.mdx"
 
 
@@ -54,6 +56,9 @@ def validate_link(link: str) -> str | None:
     # Allow anchor-only links
     if link.startswith("#"):
         return None
+
+    # Resolve against the page path; in-page fragments aren't validated
+    link = link.split("#", 1)[0]
 
     # Allow known asset paths
     for prefix in ASSET_PATH_PREFIXES:

@@ -1669,8 +1669,10 @@ fn screenshot(
 // ── Module-level functions ──────────────────────────────────────────────────
 
 /// Create a top-level Locator.
+// The Rust fn is named locator_fn to avoid clashing with the Locator type;
+// pyo3 registers it under the public name "locator".
 #[pyfunction]
-#[pyo3(signature = (selector))]
+#[pyo3(name = "locator", signature = (selector))]
 fn locator_fn(selector: &str) -> PyResult<Locator> {
     let provider = get_provider()?;
     Ok(Locator {
@@ -1733,11 +1735,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     register_exception::<InvalidActionDataError>(m, "InvalidActionDataError")?;
     register_exception::<PlatformError>(m, "PlatformError")?;
 
-    // Module-level locator function (renamed from "locator" to avoid Rust naming conflict)
+    // Module-level locator function (registered as "locator" via #[pyo3(name)])
     m.add_function(wrap_pyfunction!(locator_fn, m)?)?;
-    // Re-export as "locator" in Python
-    let locator_fn_obj = m.getattr("locator_fn")?;
-    m.setattr("locator", &locator_fn_obj)?;
 
     // Process-wide default timeout knobs
     m.add_function(wrap_pyfunction!(set_default_timeout, m)?)?;

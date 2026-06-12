@@ -92,6 +92,10 @@ jobs:
       - name: Generate JavaScript API docs
         run: python docs/generate_js_api.py
 
+      # After generation, so links into the generated API pages resolve.
+      - name: Check doc links
+        run: python docs/check_links.py
+
       - name: Install npm dependencies
         working-directory: docs/site
         run: npm ci

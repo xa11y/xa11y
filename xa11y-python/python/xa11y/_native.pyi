@@ -115,22 +115,27 @@ class Rect:
 # ── EventType ────────────────────────────────────────────────────────────────
 
 class EventType:
-    """Accessibility event type constants."""
+    """Accessibility event type constants.
 
-    FOCUS_CHANGED: str
-    VALUE_CHANGED: str
-    NAME_CHANGED: str
-    STATE_CHANGED: str
-    STRUCTURE_CHANGED: str
-    WINDOW_OPENED: str
-    WINDOW_CLOSED: str
-    WINDOW_ACTIVATED: str
-    WINDOW_DEACTIVATED: str
-    SELECTION_CHANGED: str
-    MENU_OPENED: str
-    MENU_CLOSED: str
-    ALERT: str
-    TEXT_CHANGED: str
+    Each constant's value is the string carried in :attr:`Event.event_type`,
+    so handlers can compare against the constant or the literal string
+    interchangeably.
+    """
+
+    FOCUS_CHANGED: str = "focus_changed"
+    VALUE_CHANGED: str = "value_changed"
+    NAME_CHANGED: str = "name_changed"
+    STATE_CHANGED: str = "state_changed"
+    STRUCTURE_CHANGED: str = "structure_changed"
+    WINDOW_OPENED: str = "window_opened"
+    WINDOW_CLOSED: str = "window_closed"
+    WINDOW_ACTIVATED: str = "window_activated"
+    WINDOW_DEACTIVATED: str = "window_deactivated"
+    SELECTION_CHANGED: str = "selection_changed"
+    MENU_OPENED: str = "menu_opened"
+    MENU_CLOSED: str = "menu_closed"
+    TEXT_CHANGED: str = "text_changed"
+    ANNOUNCEMENT: str = "announcement"
 
 # ── Event ────────────────────────────────────────────────────────────────────
 
@@ -145,6 +150,18 @@ class Event:
     def app_pid(self) -> int: ...
     @property
     def target(self) -> Element | None: ...
+    @property
+    def state_flag(self) -> str | None:
+        """For ``state_changed`` events: the flag that changed (e.g. ``'checked'``).
+
+        ``None`` for other event types.
+        """
+    @property
+    def state_value(self) -> bool | None:
+        """For ``state_changed`` events: the new boolean value of the flag.
+
+        ``None`` for other event types.
+        """
     def __repr__(self) -> str: ...
 
 # ── Subscription ─────────────────────────────────────────────────────────────
@@ -215,7 +232,17 @@ class App:
         application on every poll; the first for which it returns truthy is
         returned. A falsy return means "not this one, keep polling"; if the
         predicate *raises*, the search aborts immediately and that exception
-        propagates. See ``by_name`` for ``timeout`` semantics.
+        propagates. See ``by_name`` for ``timeout`` semantics. There is no
+        need to hand-roll a poll over ``App.list()``.
+
+        Use this when neither a name nor a PID alone identifies the target
+        — e.g. a Qt dialog that registers as its own accessibility
+        application sharing the host process's PID::
+
+            app = xa11y.App.find(
+                lambda a: a.pid == pid and a.name.startswith("My Dialog"),
+                timeout=30.0,
+            )
         """
     @staticmethod
     def list() -> list[App]:
@@ -304,7 +331,16 @@ class Element:
     @property
     def focused(self) -> bool: ...
     @property
-    def checked(self) -> str | None: ...
+    def checked(self) -> str | None:
+        """Tri-state toggle value: ``'on'``, ``'off'``, ``'mixed'``, or ``None``.
+
+        ``None`` means the element has no checked state (it is not a
+        checkbox / radio button / toggle). These four are the only possible
+        values. Compare against them explicitly — ``bool(element.checked)``
+        is ``True`` for *every* non-``None`` value, including ``'off'``::
+
+            is_checked = element.checked == "on"
+        """
     @property
     def selected(self) -> bool: ...
     @property

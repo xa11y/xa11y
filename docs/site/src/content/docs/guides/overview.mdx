@@ -75,7 +75,7 @@ xa11y supports subscribing to these event streams per-app via `app.subscribe()`.
 
 xa11y is built around three core types:
 
-- **App** — entry point for interacting with an application. Construct via `App::by_name()`, `App::by_pid()`, or `App::list()`. An App provides three paths: `app.children()` for navigating the tree, `app.locator(selector)` for actions and waits, and `app.subscribe()` for event streams.
+- **App** — entry point for interacting with an application. Construct via `App::by_name()`, `App::by_pid()`, `App::find()` (predicate-based discovery), or `App::list()`. An App provides three paths: `app.children()` for navigating the tree, `app.locator(selector)` for actions and waits, and `app.subscribe()` for event streams.
 - **Element** — a live handle to a node in the accessibility tree. Navigate with `children()` and `parent()` — each call queries the platform lazily. Read properties like `role`, `name`, `value`, `states`, `bounds`. Capture the subtree as a structured snapshot with `tree(max_depth)` or as an indented string with `dump(max_depth)`. Actions (`press()`, `set_value()`, etc.) are available too, acting on the captured handle without re-resolution or auto-wait.
 - **Locator** — a lazy selector that re-resolves on every operation. Use for actions (`press()`, `set_value()`, and others), waits (`wait_visible()`, and others), and querying (`element()`, `elements()`). Auto-waits for visible+enabled before acting and is the recommended path for most code. Inspired by [Playwright's Locator pattern](https://playwright.dev/docs/locators).
 - **Subscription** — live event stream from an app. Created via `app.subscribe()`. Pull events with `try_recv()`, `recv(timeout)`, `wait_for(predicate, timeout)`, or iterate with `iter()`. Drop to unsubscribe.
@@ -98,7 +98,13 @@ xa11y is built around three core types:
     // Connect by PID
     let app = App::by_pid(1234, Duration::from_secs(5))?;
 
-    // List all running apps
+    // Connect by predicate — polls until some running app matches.
+    // Use when neither name nor PID alone identifies the target.
+    let app = App::find(Duration::from_secs(5), |a| {
+        a.pid == Some(1234) && a.name.as_deref().unwrap_or("").starts_with("My App")
+    })?;
+
+    // List all running apps (single enumeration, no polling)
     let all = App::list()?;
     ```
   </TabItem>
@@ -112,7 +118,11 @@ xa11y is built around three core types:
     # Connect by PID
     app = xa11y.App.by_pid(1234)
 
-    # List all running apps
+    # Connect by predicate — polls until some running app matches.
+    # Use when neither name nor PID alone identifies the target.
+    app = xa11y.App.find(lambda a: a.pid == 1234 and a.name.startswith("My App"))
+
+    # List all running apps (single enumeration, no polling)
     all_apps = xa11y.App.list()
     ```
   </TabItem>
@@ -126,7 +136,14 @@ xa11y is built around three core types:
     // Connect by PID
     const app = await App.byPid(1234);
 
-    // List all running apps
+    // Connect by predicate — polls until some running app matches.
+    // Use when neither name nor PID alone identifies the target.
+    const app2 = await App.find(
+      (a) => a.pid === 1234 && a.name.startsWith('My App'),
+      { timeout: 5000 },
+    );
+
+    // List all running apps (single enumeration, no polling)
     const all = await App.list();
     ```
   </TabItem>
