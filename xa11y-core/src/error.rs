@@ -181,6 +181,11 @@ pub enum Error {
     #[error("Invalid action data: {message}")]
     InvalidActionData { message: String },
 
+    /// Process-wide configuration is invalid (e.g. an unparsable
+    /// `XA11Y_DEFAULT_TIMEOUT` environment variable).
+    #[error("Invalid configuration: {message}")]
+    InvalidConfig { message: String },
+
     /// The element has no bounds (e.g. an off-screen or virtual node), so a
     /// screen point can't be computed for input simulation.
     #[error("Element has no bounds")]

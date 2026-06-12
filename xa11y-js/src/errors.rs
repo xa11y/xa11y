@@ -23,6 +23,7 @@ pub mod codes {
     pub const TIMEOUT: &str = "XA11Y_TIMEOUT";
     pub const INVALID_SELECTOR: &str = "XA11Y_INVALID_SELECTOR";
     pub const INVALID_ACTION_DATA: &str = "XA11Y_INVALID_ACTION_DATA";
+    pub const INVALID_CONFIG: &str = "XA11Y_INVALID_CONFIG";
     pub const PLATFORM: &str = "XA11Y_PLATFORM";
     pub const NO_ELEMENT_BOUNDS: &str = "XA11Y_NO_ELEMENT_BOUNDS";
     pub const UNSUPPORTED: &str = "XA11Y_UNSUPPORTED";
@@ -87,6 +88,10 @@ pub fn map_err(e: xa11y::Error) -> Error {
         xa11y::Error::InvalidActionData { message } => (
             codes::INVALID_ACTION_DATA,
             format!("Invalid action data: {message}"),
+        ),
+        xa11y::Error::InvalidConfig { message } => (
+            codes::INVALID_CONFIG,
+            format!("Invalid configuration: {message}"),
         ),
         xa11y::Error::Platform { code, message } => (
             codes::PLATFORM,

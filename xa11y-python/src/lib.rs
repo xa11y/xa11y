@@ -128,6 +128,12 @@ fn to_py_err(e: xa11y::Error) -> PyErr {
         xa11y::Error::InvalidActionData { message } => {
             InvalidActionDataError::new_err(format!("Invalid action data: {message}"))
         }
+        // Config errors are value errors (e.g. an unparsable
+        // XA11Y_DEFAULT_TIMEOUT), matching the ValueError raised for an
+        // invalid per-call timeout argument.
+        xa11y::Error::InvalidConfig { message } => {
+            PyValueError::new_err(format!("Invalid configuration: {message}"))
+        }
         xa11y::Error::Platform { code, message } => {
             PlatformError::new_err(format!("Platform error ({code}): {message}"))
         }
@@ -732,71 +738,84 @@ impl Locator {
     }
 
     // ── Wait operations ──
+    //
+    // `timeout=None` (the default) resolves to the process-wide default —
+    // 5 seconds unless overridden via `set_default_timeout()` or the
+    // `XA11Y_DEFAULT_TIMEOUT` environment variable. An explicit per-call
+    // `timeout=` always wins.
 
-    #[pyo3(signature = (timeout=5.0))]
-    fn wait_visible(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Element>> {
+    #[pyo3(signature = (timeout=None))]
+    fn wait_visible(&self, py: Python<'_>, timeout: Option<f64>) -> PyResult<Py<Element>> {
+        let timeout = effective_timeout(timeout)?;
         let inner = self.inner.clone();
         let el = py
-            .allow_threads(move || inner.wait_visible(Duration::from_secs_f64(timeout)))
+            .allow_threads(move || inner.wait_visible(timeout))
             .map_err(to_py_err)?;
         make_py_element(py, el.data(), el.provider().clone())
     }
 
-    #[pyo3(signature = (timeout=5.0))]
-    fn wait_attached(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Element>> {
+    #[pyo3(signature = (timeout=None))]
+    fn wait_attached(&self, py: Python<'_>, timeout: Option<f64>) -> PyResult<Py<Element>> {
+        let timeout = effective_timeout(timeout)?;
         let inner = self.inner.clone();
         let el = py
-            .allow_threads(move || inner.wait_attached(Duration::from_secs_f64(timeout)))
+            .allow_threads(move || inner.wait_attached(timeout))
             .map_err(to_py_err)?;
         make_py_element(py, el.data(), el.provider().clone())
     }
 
-    #[pyo3(signature = (timeout=5.0))]
-    fn wait_detached(&self, py: Python<'_>, timeout: f64) -> PyResult<()> {
+    #[pyo3(signature = (timeout=None))]
+    fn wait_detached(&self, py: Python<'_>, timeout: Option<f64>) -> PyResult<()> {
+        let timeout = effective_timeout(timeout)?;
         let inner = self.inner.clone();
-        py.allow_threads(move || inner.wait_detached(Duration::from_secs_f64(timeout)))
+        py.allow_threads(move || inner.wait_detached(timeout))
             .map_err(to_py_err)
     }
 
-    #[pyo3(signature = (timeout=5.0))]
-    fn wait_enabled(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Element>> {
+    #[pyo3(signature = (timeout=None))]
+    fn wait_enabled(&self, py: Python<'_>, timeout: Option<f64>) -> PyResult<Py<Element>> {
+        let timeout = effective_timeout(timeout)?;
         let inner = self.inner.clone();
         let el = py
-            .allow_threads(move || inner.wait_enabled(Duration::from_secs_f64(timeout)))
+            .allow_threads(move || inner.wait_enabled(timeout))
             .map_err(to_py_err)?;
         make_py_element(py, el.data(), el.provider().clone())
     }
 
-    #[pyo3(signature = (timeout=5.0))]
-    fn wait_hidden(&self, py: Python<'_>, timeout: f64) -> PyResult<()> {
+    #[pyo3(signature = (timeout=None))]
+    fn wait_hidden(&self, py: Python<'_>, timeout: Option<f64>) -> PyResult<()> {
+        let timeout = effective_timeout(timeout)?;
         let inner = self.inner.clone();
-        py.allow_threads(move || inner.wait_hidden(Duration::from_secs_f64(timeout)))
+        py.allow_threads(move || inner.wait_hidden(timeout))
             .map_err(to_py_err)
     }
 
-    #[pyo3(signature = (timeout=5.0))]
-    fn wait_disabled(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Element>> {
+    #[pyo3(signature = (timeout=None))]
+    fn wait_disabled(&self, py: Python<'_>, timeout: Option<f64>) -> PyResult<Py<Element>> {
+        let timeout = effective_timeout(timeout)?;
         let inner = self.inner.clone();
         let el = py
-            .allow_threads(move || inner.wait_disabled(Duration::from_secs_f64(timeout)))
+            .allow_threads(move || inner.wait_disabled(timeout))
             .map_err(to_py_err)?;
         make_py_element(py, el.data(), el.provider().clone())
     }
 
-    #[pyo3(signature = (timeout=5.0))]
-    fn wait_focused(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Element>> {
+    #[pyo3(signature = (timeout=None))]
+    fn wait_focused(&self, py: Python<'_>, timeout: Option<f64>) -> PyResult<Py<Element>> {
+        let timeout = effective_timeout(timeout)?;
         let inner = self.inner.clone();
         let el = py
-            .allow_threads(move || inner.wait_focused(Duration::from_secs_f64(timeout)))
+            .allow_threads(move || inner.wait_focused(timeout))
             .map_err(to_py_err)?;
         make_py_element(py, el.data(), el.provider().clone())
     }
 
-    #[pyo3(signature = (timeout=5.0))]
-    fn wait_unfocused(&self, py: Python<'_>, timeout: f64) -> PyResult<Py<Element>> {
+    #[pyo3(signature = (timeout=None))]
+    fn wait_unfocused(&self, py: Python<'_>, timeout: Option<f64>) -> PyResult<Py<Element>> {
+        let timeout = effective_timeout(timeout)?;
         let inner = self.inner.clone();
         let el = py
-            .allow_threads(move || inner.wait_unfocused(Duration::from_secs_f64(timeout)))
+            .allow_threads(move || inner.wait_unfocused(timeout))
             .map_err(to_py_err)?;
         make_py_element(py, el.data(), el.provider().clone())
     }
@@ -806,8 +825,14 @@ impl Locator {
     /// A predicate that *raises* aborts the wait immediately and propagates
     /// the exception — it is not swallowed as "not yet" (which would
     /// resurface later as a misleading timeout). Mirrors `App.find`.
-    #[pyo3(signature = (predicate, timeout=5.0))]
-    fn wait_until(&self, py: Python<'_>, predicate: PyObject, timeout: f64) -> PyResult<()> {
+    #[pyo3(signature = (predicate, timeout=None))]
+    fn wait_until(
+        &self,
+        py: Python<'_>,
+        predicate: PyObject,
+        timeout: Option<f64>,
+    ) -> PyResult<()> {
+        let timeout = effective_timeout(timeout)?;
         let provider = self.inner.provider().clone();
         let inner = self.inner.clone();
         // The poll loop runs with the GIL released (tenet 5); the predicate
@@ -847,7 +872,7 @@ impl Locator {
                         }
                     })
                 },
-                Duration::from_secs_f64(timeout),
+                timeout,
             )
         });
         // A stashed predicate error takes precedence — re-raise the exact
@@ -1158,6 +1183,16 @@ fn timeout_from(timeout: f64) -> PyResult<Duration> {
     }
 }
 
+/// Resolve an optional per-call `timeout` (seconds) to a [`Duration`]: an
+/// explicit value wins; `None` falls back to the process-wide default (see
+/// `set_default_timeout` / the `XA11Y_DEFAULT_TIMEOUT` environment variable).
+fn effective_timeout(timeout: Option<f64>) -> PyResult<Duration> {
+    match timeout {
+        Some(secs) => timeout_from(secs),
+        None => xa11y::default_timeout().map_err(to_py_err),
+    }
+}
+
 /// `App` is **not** an `Element`. It represents the application as a whole
 /// and provides a `locator()` to search its accessibility tree.
 #[pyclass(frozen)]
@@ -1175,15 +1210,17 @@ impl App {
     /// Find an application by exact name.
     ///
     /// Polls the accessibility API until the app appears or `timeout`
-    /// (in seconds) elapses. Defaults to 5 seconds — pass `timeout=0`
-    /// for a single attempt with no waiting. Only "not found" errors
-    /// trigger a retry; other errors fail fast.
+    /// (in seconds) elapses. Defaults to the process-wide default timeout
+    /// (5 seconds unless overridden via `set_default_timeout()` /
+    /// `XA11Y_DEFAULT_TIMEOUT`) — pass `timeout=0` for a single attempt
+    /// with no waiting. Only "not found" errors trigger a retry; other
+    /// errors fail fast.
     #[staticmethod]
-    #[pyo3(signature = (name, *, timeout=5.0))]
-    fn by_name(py: Python<'_>, name: &str, timeout: f64) -> PyResult<Self> {
+    #[pyo3(signature = (name, *, timeout=None))]
+    fn by_name(py: Python<'_>, name: &str, timeout: Option<f64>) -> PyResult<Self> {
         // Validate `timeout` before touching the provider so callers get a
         // crisp `ValueError` regardless of whether accessibility is set up.
-        let timeout = timeout_from(timeout)?;
+        let timeout = effective_timeout(timeout)?;
         let provider = get_provider()?;
         let app = py
             .allow_threads(move || xa11y::App::by_name_with(provider, name, timeout))
@@ -1208,9 +1245,9 @@ impl App {
     ///
     /// See [`by_name`] for `timeout` semantics.
     #[staticmethod]
-    #[pyo3(signature = (pid, *, timeout=5.0))]
-    fn by_pid(py: Python<'_>, pid: u32, timeout: f64) -> PyResult<Self> {
-        let timeout = timeout_from(timeout)?;
+    #[pyo3(signature = (pid, *, timeout=None))]
+    fn by_pid(py: Python<'_>, pid: u32, timeout: Option<f64>) -> PyResult<Self> {
+        let timeout = effective_timeout(timeout)?;
         let provider = get_provider()?;
         let app = py
             .allow_threads(move || xa11y::App::by_pid_with(provider, pid, timeout))
@@ -1250,9 +1287,9 @@ impl App {
     /// )
     /// ```
     #[staticmethod]
-    #[pyo3(signature = (predicate, *, timeout=5.0))]
-    fn find(predicate: PyObject, timeout: f64) -> PyResult<Self> {
-        let timeout = timeout_from(timeout)?;
+    #[pyo3(signature = (predicate, *, timeout=None))]
+    fn find(predicate: PyObject, timeout: Option<f64>) -> PyResult<Self> {
+        let timeout = effective_timeout(timeout)?;
         let provider = get_provider()?;
         // The predicate is Python, so the poll loop must hold the GIL to call
         // it (mirrors `Locator.wait_until`). We route through `try_find_with`
@@ -1641,10 +1678,41 @@ fn locator_fn(selector: &str) -> PyResult<Locator> {
     })
 }
 
+/// Set the process-wide default timeout, in seconds.
+///
+/// Becomes the default for every auto-waiting action method, `wait_*` call,
+/// and app lookup (`App.by_name` / `App.by_pid` / `App.find`) that doesn't
+/// pass an explicit `timeout=`. An explicit per-call `timeout=` always wins.
+/// Takes precedence over the `XA11Y_DEFAULT_TIMEOUT` environment variable.
+///
+/// Pass `0` for "single attempt, no polling" semantics. Raises `ValueError`
+/// for negative or non-finite values.
+#[pyfunction]
+fn set_default_timeout(timeout: f64) -> PyResult<()> {
+    xa11y::set_default_timeout(timeout_from(timeout)?);
+    Ok(())
+}
+
+/// Get the effective process-wide default timeout, in seconds.
+///
+/// Resolution order: `set_default_timeout()` value, else the
+/// `XA11Y_DEFAULT_TIMEOUT` environment variable (read once at import), else
+/// the built-in 5.0.
+#[pyfunction]
+fn get_default_timeout() -> PyResult<f64> {
+    Ok(xa11y::default_timeout().map_err(to_py_err)?.as_secs_f64())
+}
+
 // ── Module definition ───────────────────────────────────────────────────────
 
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // Read and validate XA11Y_DEFAULT_TIMEOUT now, so a malformed value
+    // fails `import xa11y` with a clear ValueError instead of surfacing on
+    // the first auto-wait (tenet 1: no silent fallback to the built-in
+    // default).
+    xa11y::default_timeout().map_err(to_py_err)?;
+
     m.add_class::<App>()?;
     m.add_class::<Element>()?;
     m.add_class::<Event>()?;
@@ -1670,6 +1738,10 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Re-export as "locator" in Python
     let locator_fn_obj = m.getattr("locator_fn")?;
     m.setattr("locator", &locator_fn_obj)?;
+
+    // Process-wide default timeout knobs
+    m.add_function(wrap_pyfunction!(set_default_timeout, m)?)?;
+    m.add_function(wrap_pyfunction!(get_default_timeout, m)?)?;
 
     // Input simulation factory
     m.add_function(wrap_pyfunction!(input_sim, m)?)?;

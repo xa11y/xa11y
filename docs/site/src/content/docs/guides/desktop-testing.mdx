@@ -23,6 +23,24 @@ Desktop UIs update asynchronously. After pressing a button, the result might not
 
 Always use waits instead of sleeping — they're faster (resolve as soon as the condition is met) and more reliable (won't flake on slow machines).
 
+### The default timeout
+
+Auto-waiting action methods (`press()`, `set_value()`, …), the `wait_*()` family, and app lookup (`App.by_name` / `App.by_pid`) all share one process-wide default timeout: **5 seconds**. When that's too tight — cold CI runners are the classic case — raise it once instead of threading `timeout=` through every call site:
+
+```python
+xa11y.set_default_timeout(30.0)        # Python (seconds)
+```
+
+```js
+setDefaultTimeout(30);                 // JavaScript (seconds)
+```
+
+```rust
+xa11y::set_default_timeout(Duration::from_secs(30));   // Rust
+```
+
+Or set the `XA11Y_DEFAULT_TIMEOUT` environment variable (seconds, read once at startup). Resolution order: an explicit per-call `timeout=` always wins, then the programmatic `set_default_timeout()` value, then the environment variable, then the built-in 5 seconds. A timeout of `0` means a single attempt with no polling.
+
 ## Example: testing a calculator
 
 This test opens Calculator, performs `7 × 8`, and asserts the result is `56`.
@@ -188,4 +206,4 @@ See the [Overview](/guides/overview/#cli) for the full CLI reference.
 - **Be specific with selectors.** `button[name='7']` is better than `button` — it won't break when the UI adds more buttons.
 - **Use locators, not elements, for interactions.** Locators re-resolve their selector on every operation, making them resilient to UI changes.
 - **Prefer `wait_until` for complex assertions.** Instead of sleeping then asserting, combine the wait and the condition — the test passes as soon as the UI is ready.
-- **Keep timeouts generous in CI.** CI machines are slower. Use 5–10 seconds for waits even if your local machine resolves in milliseconds.
+- **Keep timeouts generous in CI.** CI machines are slower. Use 5–10 seconds for waits even if your local machine resolves in milliseconds — or raise the process-wide default once with `set_default_timeout()` / `XA11Y_DEFAULT_TIMEOUT` instead of touching every call site.

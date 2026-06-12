@@ -31,7 +31,7 @@ rust_only = [
     { method = "Subscription::new", reason = "Internal Rust constructor; bindings create Subscriptions via App.subscribe() / Element.subscribe()." },
 
     # ── Wait / event-loop idiom differences ───────────────────────────────
-    { method = "Locator::with_timeout", reason = "Rust Locator uses builder-set default timeout; Python uses per-call timeout parameters on every wait_* / action method instead." },
+    { method = "Locator::with_timeout", reason = "Rust-only builder for a per-locator timeout override; Python uses per-call timeout parameters on every wait_* method plus the process-wide set_default_timeout() instead." },
     { method = "Locator::wait_for_state", reason = "Rust generic state-enum wait; Python exposes specific wait_visible/wait_enabled/etc. plus predicate-based wait_until." },
     { method = "Subscription::recv_status", reason = "Rust explicit disconnected-vs-timeout polling variant; Python uses predicate-based wait_for over typed Event receiver." },
     { method = "Subscription::iter", reason = "Python exposes __iter__/__next__ context-manager idiom instead of an explicit blocking iterator." },
@@ -98,7 +98,7 @@ rust_only = [
     { method = "Subscription::new", reason = "Internal Rust constructor; bindings create Subscriptions via App.subscribe() / Element.subscribe()." },
 
     # ── Wait / event-loop idiom differences ───────────────────────────────
-    { method = "Locator::with_timeout", reason = "Rust Locator uses builder-set default timeout; JS uses per-call timeout option on every wait* / action method instead." },
+    { method = "Locator::with_timeout", reason = "Rust-only builder for a per-locator timeout override; JS uses per-call timeout options on every wait* method plus the process-wide setDefaultTimeout() instead." },
     { method = "Locator::wait_for_state", reason = "Rust generic state-enum wait; JS exposes specific wait* helpers plus predicate-based waitUntil." },
     { method = "Subscription::recv_status", reason = "Rust explicit disconnected-vs-timeout polling variant; JS uses predicate-based waitFor and EventEmitter model over blocking recv." },
     { method = "Subscription::try_recv", reason = "JS exposes async EventEmitter + `start`/`drain` worker pattern instead of blocking recv/try_recv." },

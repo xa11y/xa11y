@@ -1,7 +1,5 @@
 //! JS `Locator` class: resilient element reference with auto-wait.
 
-use std::time::Duration;
-
 use napi::bindgen_prelude::{AsyncTask, Env, Task};
 
 use crate::element::Element;
@@ -13,7 +11,9 @@ use crate::types::TreeNode;
 /// Locators never hold a live reference to a UI element. Instead, they
 /// store a selector and resolve it on demand, making them immune to
 /// staleness. Action methods (`press`, `typeText`, `toggle`, …) auto-wait
-/// for the element to appear (up to 5 seconds by default) before acting.
+/// for the element to appear before acting, up to the process-wide default
+/// timeout — 5 seconds unless overridden via `setDefaultTimeout()` or the
+/// `XA11Y_DEFAULT_TIMEOUT` environment variable.
 ///
 /// Locators are cheap to clone — the chaining methods (`child`, `descendant`,
 /// `nth`, `first`) return new locators rather than mutating in place.
@@ -301,9 +301,12 @@ impl Locator {
     // ── Waits ──────────────────────────────────────────────────────────
     //
     // Each wait polls the provider until its condition is satisfied or
-    // `timeoutSeconds` elapses (default: 5s). Waits that expect the element
-    // to be present resolve with the matched `Element`; waits that expect it
-    // to be gone resolve with `undefined`.
+    // `timeoutSeconds` elapses. When `timeoutSeconds` is omitted, the
+    // process-wide default applies — 5s unless overridden via
+    // `setDefaultTimeout()` or the `XA11Y_DEFAULT_TIMEOUT` environment
+    // variable. Waits that expect the element to be present resolve with the
+    // matched `Element`; waits that expect it to be gone resolve with
+    // `undefined`.
 
     /// Wait for a matching element to become visible.
     /// Rejects with `TimeoutError` if still hidden after `timeoutSeconds`.
@@ -315,7 +318,7 @@ impl Locator {
         AsyncTask::new(WaitTask::returning(
             self.inner.clone(),
             WaitKind::Visible,
-            timeout_seconds.unwrap_or(5.0),
+            timeout_seconds,
         ))
     }
 
@@ -329,7 +332,7 @@ impl Locator {
         AsyncTask::new(WaitTask::returning(
             self.inner.clone(),
             WaitKind::Attached,
-            timeout_seconds.unwrap_or(5.0),
+            timeout_seconds,
         ))
     }
 
@@ -342,7 +345,7 @@ impl Locator {
         AsyncTask::new(WaitTask::absent(
             self.inner.clone(),
             WaitKind::Detached,
-            timeout_seconds.unwrap_or(5.0),
+            timeout_seconds,
         ))
     }
 
@@ -355,7 +358,7 @@ impl Locator {
         AsyncTask::new(WaitTask::returning(
             self.inner.clone(),
             WaitKind::Enabled,
-            timeout_seconds.unwrap_or(5.0),
+            timeout_seconds,
         ))
     }
 
@@ -368,7 +371,7 @@ impl Locator {
         AsyncTask::new(WaitTask::absent(
             self.inner.clone(),
             WaitKind::Hidden,
-            timeout_seconds.unwrap_or(5.0),
+            timeout_seconds,
         ))
     }
 
@@ -381,7 +384,7 @@ impl Locator {
         AsyncTask::new(WaitTask::returning(
             self.inner.clone(),
             WaitKind::Disabled,
-            timeout_seconds.unwrap_or(5.0),
+            timeout_seconds,
         ))
     }
 
@@ -394,7 +397,7 @@ impl Locator {
         AsyncTask::new(WaitTask::returning(
             self.inner.clone(),
             WaitKind::Focused,
-            timeout_seconds.unwrap_or(5.0),
+            timeout_seconds,
         ))
     }
 
@@ -407,7 +410,7 @@ impl Locator {
         AsyncTask::new(WaitTask::returning(
             self.inner.clone(),
             WaitKind::Unfocused,
-            timeout_seconds.unwrap_or(5.0),
+            timeout_seconds,
         ))
     }
 }
@@ -631,7 +634,10 @@ pub enum WaitKind {
 pub struct WaitTask {
     inner: xa11y::Locator,
     kind: WaitKind,
-    timeout: Duration,
+    /// Explicit timeout in seconds; `None` resolves to the process-wide
+    /// default in `compute` (validation happens there too, so a negative
+    /// value rejects the promise instead of panicking).
+    timeout_seconds: Option<f64>,
     /// Whether the JS caller expects the resolved value to be an Element or
     /// undefined. Absent-state waits (Detached/Hidden) always resolve to
     /// undefined.
@@ -639,19 +645,19 @@ pub struct WaitTask {
 }
 
 impl WaitTask {
-    fn returning(inner: xa11y::Locator, kind: WaitKind, secs: f64) -> Self {
+    fn returning(inner: xa11y::Locator, kind: WaitKind, timeout_seconds: Option<f64>) -> Self {
         Self {
             inner,
             kind,
-            timeout: Duration::from_secs_f64(secs),
+            timeout_seconds,
             returns_element: true,
         }
     }
-    fn absent(inner: xa11y::Locator, kind: WaitKind, secs: f64) -> Self {
+    fn absent(inner: xa11y::Locator, kind: WaitKind, timeout_seconds: Option<f64>) -> Self {
         Self {
             inner,
             kind,
-            timeout: Duration::from_secs_f64(secs),
+            timeout_seconds,
             returns_element: false,
         }
     }
@@ -662,15 +668,16 @@ impl Task for WaitTask {
     type JsValue = Option<Element>;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
+        let timeout = crate::effective_timeout_secs(self.timeout_seconds)?;
         let r = match self.kind {
-            WaitKind::Visible => self.inner.wait_visible(self.timeout).map(Some),
-            WaitKind::Attached => self.inner.wait_attached(self.timeout).map(Some),
-            WaitKind::Detached => self.inner.wait_detached(self.timeout).map(|_| None),
-            WaitKind::Enabled => self.inner.wait_enabled(self.timeout).map(Some),
-            WaitKind::Hidden => self.inner.wait_hidden(self.timeout).map(|_| None),
-            WaitKind::Disabled => self.inner.wait_disabled(self.timeout).map(Some),
-            WaitKind::Focused => self.inner.wait_focused(self.timeout).map(Some),
-            WaitKind::Unfocused => self.inner.wait_unfocused(self.timeout).map(Some),
+            WaitKind::Visible => self.inner.wait_visible(timeout).map(Some),
+            WaitKind::Attached => self.inner.wait_attached(timeout).map(Some),
+            WaitKind::Detached => self.inner.wait_detached(timeout).map(|_| None),
+            WaitKind::Enabled => self.inner.wait_enabled(timeout).map(Some),
+            WaitKind::Hidden => self.inner.wait_hidden(timeout).map(|_| None),
+            WaitKind::Disabled => self.inner.wait_disabled(timeout).map(Some),
+            WaitKind::Focused => self.inner.wait_focused(timeout).map(Some),
+            WaitKind::Unfocused => self.inner.wait_unfocused(timeout).map(Some),
         };
         r.map_err(map_err)
     }

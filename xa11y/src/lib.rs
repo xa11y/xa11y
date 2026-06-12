@@ -27,6 +27,13 @@ pub use xa11y_core::{
     Toggled, TreeNode,
 };
 
+// Re-export the process-wide default-timeout configuration (see
+// `xa11y_core::config`): the default for every auto-wait / `wait_*` call
+// that doesn't pass an explicit timeout. `set_default_timeout` overrides the
+// `XA11Y_DEFAULT_TIMEOUT` environment variable, which overrides the built-in
+// 5 seconds.
+pub use xa11y_core::{default_timeout, set_default_timeout, DEFAULT_TIMEOUT_ENV_VAR};
+
 // Re-export input simulation surface.
 pub use xa11y_core::input;
 pub use xa11y_core::{
