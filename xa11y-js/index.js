@@ -236,9 +236,18 @@ Object.defineProperty(native.Locator.prototype, 'waitUntil', {
       }
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
-        throw new TimeoutError(
+        const err = new TimeoutError(
           `Timeout after ${timeout}ms waiting for predicate on '${this.selector}'`,
         );
+        // Mirror the structured diagnosis fields native timeouts carry
+        // (tenet 6); `el` is the final poll's observation.
+        err.condition = 'custom predicate';
+        err.selector = this.selector;
+        err.lastObserved = el
+          ? `matched ${el.role}${el.name ? ` "${el.name}"` : ''}`
+          : 'selector never matched';
+        err.elapsedMs = timeout;
+        throw err;
       }
 
       await new Promise((resolve, reject) => {
