@@ -273,7 +273,7 @@ jobs:
 
       - name: Build Tauri test app
         if: matrix.app == 'tauri'
-        run: cargo build --manifest-path test-apps/tauri/Cargo.toml
+        run: cargo build --manifest-path test-apps/tauri/Cargo.toml --locked
 
       # ── egui app (not in workspace — heavy eframe dependency tree) ──
       - name: Cache egui test app build
@@ -287,7 +287,7 @@ jobs:
 
       - name: Build egui test app
         if: matrix.app == 'egui'
-        run: cargo build --manifest-path test-apps/egui/Cargo.toml
+        run: cargo build --manifest-path test-apps/egui/Cargo.toml --locked
 
       # ── Electron node_modules ──────────────────────────────────────
       - name: Cache Electron node_modules
