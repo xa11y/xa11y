@@ -6,6 +6,20 @@ updates:
     schedule:
       interval: "weekly"
 
+  # The Tauri and egui test apps are excluded from the workspace, so they
+  # carry their own committed lockfiles. Give each its own cargo entry so
+  # Dependabot proposes (and CI tests) their updates instead of CI silently
+  # re-resolving — and breaking — on an unpinned transitive release.
+  - package-ecosystem: "cargo"
+    directory: "/test-apps/tauri"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "cargo"
+    directory: "/test-apps/egui"
+    schedule:
+      interval: "weekly"
+
   # ── GitHub Actions ─────────────────────────────────────────────────
   - package-ecosystem: "github-actions"
     directory: "/"
