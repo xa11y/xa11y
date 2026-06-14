@@ -1,5 +1,10 @@
 # xa11y test coverage matrix
 # Each entry lists covered features, [] for none, or unsupported: {reason: "..."}
+#
+# MAINTENANCE: This file is the authoritative coverage index, and the public
+# "How xa11y Is Tested" page (docs/site/src/content/docs/guides/testing.mdx)
+# summarizes it — the test-app/platform table and the CI matrix description.
+# If you add/remove an app, platform, or feature here, update that page too.
 
 apps:
   accesskit:

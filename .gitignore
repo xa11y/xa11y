@@ -10,9 +10,11 @@ __pycache__/
 docs/site/src/content/docs/api/python.mdx
 docs/site/src/content/docs/api/javascript.mdx
 
-# Per-test-app Cargo.lock files — these crates live outside the workspace
-# (Tauri, egui) so cargo regenerates a lockfile per build. Matching the
-# existing convention: not pinning lets CI track the latest semver-compatible
-# deps without churning a checked-in file.
-test-apps/tauri/Cargo.lock
-test-apps/egui/Cargo.lock
+# NOTE: test-apps/tauri/Cargo.lock and test-apps/egui/Cargo.lock are
+# intentionally committed. These crates are binaries (test applications), and
+# Cargo's guidance is to commit lockfiles for binaries so builds are
+# reproducible. They live outside the workspace, so they carry their own
+# lockfiles rather than sharing the root one; Dependabot keeps them updated via
+# the per-directory cargo entries in .github/dependabot.yml. Leaving them
+# unpinned previously let an incompatible transitive release (alloc-no-stdlib
+# 3.0.0 via brotli) break CI on every PR.
