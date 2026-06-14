@@ -42,6 +42,7 @@ export default defineConfig({
               slug: "guides/accessibility-quirks",
             },
             { label: "Architecture & Design", slug: "guides/design" },
+            { label: "Testing & Quality", slug: "guides/testing" },
           ],
         },
         {
