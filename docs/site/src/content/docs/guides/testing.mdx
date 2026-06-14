@@ -1,0 +1,111 @@
+---
+title: How xa11y Is Tested
+description: The xa11y test suite — 700+ automated tests run against real GUI toolkits on Linux, macOS, and Windows, plus fuzzing and a set of enforced correctness tenets.
+---
+
+xa11y drives the *real* accessibility tree of a running application. There is
+no way to mock that meaningfully, so the library is verified the same way it is
+used: by launching real GUI apps built on real toolkits and asserting against
+the trees their platform accessibility APIs actually expose. This page is a map
+of that test suite — what runs, against what, and where.
+
+If you are deciding whether to depend on xa11y, this is the page that answers
+"how do I know it works?"
+
+## The suite at a glance
+
+The library carries **700+ automated tests** spanning Rust, Python,
+JavaScript, and the CLI. Roughly:
+
+| Suite | Approx. tests | Location | What it covers |
+| --- | --- | --- | --- |
+| Rust unit | ~60 | `xa11y/tests/unit_test.rs` | Selector engine, locators, roles, state sets, error mapping, serialization (against an in-memory mock provider) |
+| Rust integration | ~150 | `xa11y/tests/integ/` | Live tree reads, action dispatch, events, screenshots against a running app |
+| Python binding unit | ~240 | `xa11y-python/tests/` | The PyO3 surface — types, actions, exceptions, GIL release, subscriptions |
+| Python integration | ~100 | `tests/suites/python/` | Per-app compat, actions, events, errors, input simulation, screenshots |
+| CLI integration | ~30 | `tests/suites/cli/` | The `xa11y` CLI end-to-end against running apps |
+| JavaScript unit | ~115 | `xa11y-js/__test__/unit/` | The napi-rs binding surface |
+| JavaScript integration | ~40 | `tests/suites/js/` | Per-app compat, actions, input simulation, screenshots |
+
+Counts are approximate and grow over time; the figures above are meant to
+convey shape, not a frozen total. The authoritative coverage index — which app
+is tested in which language for which feature — lives in
+[`tests/matrix.yaml`](https://github.com/xa11y/xa11y/blob/main/tests/matrix.yaml).
+
+## Tested against real toolkits, not stubs
+
+The integration suites run against a fleet of small test apps, each built on a
+genuinely different GUI toolkit, and each launched as a real process whose
+accessibility tree xa11y reads through the platform API. This is the part that
+matters: a passing test means xa11y handled a real AT-SPI2, AXUIElement, or
+UI Automation tree, not a fixture shaped to match the code.
+
+| Test app | Toolkit | Linux | macOS | Windows |
+| --- | --- | :---: | :---: | :---: |
+| `accesskit` | Rust + winit (AccessKit) | ✓ | ✓ | ✓ |
+| `qt` | PySide6 (Qt) | ✓ | ✓ | ✓ |
+| `gtk` | GTK4 (PyGObject) | ✓ | — | — |
+| `cocoa` | Swift / AppKit | — | ✓ | — |
+| `tauri` | Rust + WebView | ✓ | ✓ | ✓ |
+| `electron` | Chromium / Node | ✓ | — | — |
+| `egui` | Rust immediate-mode (eframe) | ✓ | ✓ | ✓ |
+
+Across those rows, xa11y is exercised against all three platform accessibility
+backends — **AT-SPI2** on Linux, **AXUIElement** on macOS, and **UI
+Automation** on Windows — and against toolkits that report their trees in
+meaningfully different ways (retained-mode native widgets, immediate-mode
+GUIs, and two distinct web renderers). The toolkit-specific quirks this
+surfaces are documented in [Accessibility Quirks](/guides/accessibility-quirks/).
+
+## One suite, every binding
+
+The per-app integration tests aren't duplicated per language. Python, JavaScript,
+and the CLI run the *same* feature suites — compat, actions, events, errors,
+input simulation, screenshots — against the *same* running app, driven by a
+shared harness (`tests/harness/launch.py`). That means binding parity isn't
+asserted by hand; it's proven by every binding passing identical scenarios
+against an identical target.
+
+## The CI matrix
+
+Every push runs the suites across operating systems and toolkits in GitHub
+Actions ([`.github/workflows/ci.yml`](https://github.com/xa11y/xa11y/blob/main/.github/workflows/ci.yml)).
+The `integ` job alone is a matrix of a dozen OS × app cells (e.g.
+`ubuntu × {accesskit, qt, gtk, tauri, electron, egui}`,
+`macos × {cocoa, tauri, qt, egui}`, `windows × {qt, egui}`), each standing up
+a headless display, accessibility bus, and the app under test before running
+the Python, JS, and CLI suites against it. Alongside it run the Rust unit and
+integration jobs per OS, a Wayland/uinput input job, bindings builds and
+typechecks, cross-compile checks, license auditing, docs build with link
+checking, and the fuzzers below.
+
+## Fuzzing and robustness
+
+The selector engine and tree operations are continuously fuzzed with libFuzzer
+targets in [`xa11y/fuzz/`](https://github.com/xa11y/xa11y/tree/main/xa11y/fuzz)
+(run on every CI push), and a separate live provider fuzzer
+([`xa11y-fuzz/`](https://github.com/xa11y/xa11y/tree/main/xa11y-fuzz)) stress-tests
+the provider interface against a running app with randomized action sequences.
+
+## Correctness is a stated discipline
+
+The breadth above is backed by a small set of firm engineering tenets that
+every new piece of provider or binding code is held to — **no silent
+fallbacks**, **action fidelity** (an advertised action invokes the real
+platform action, never a substitute), **errors that carry their own
+diagnosis**, and **blocking calls that release the host runtime's lock**. These
+are written out in full, with anti-patterns, in
+[Architecture & Design](/guides/design/#design-tenets) and restated verbatim in
+the repo's `CLAUDE.md` so human reviewers and automated ones apply them
+identically.
+
+## Missing a toolkit you care about?
+
+The test-app fleet is deliberately chosen so that each app covers an
+accessibility surface the others don't. If you work with a common UI framework
+that's **meaningfully different** from everything in the table above — a
+different accessibility implementation, a renderer family not yet represented,
+a platform combination we don't exercise — that's a coverage gap worth closing.
+Please [open an issue](https://github.com/xa11y/xa11y/issues/new) describing the
+framework and how its accessibility tree differs; new test-app coverage is very
+welcome.
