@@ -33,10 +33,10 @@ jobs:
           python-version: "3.12"
 
       - name: Install system dependencies
-        # Package list lives in .github/actions/setup-a11y/apt-packages.txt.
+        # Package list lives in the xa11y/setup-a11y repo (apt-packages.txt).
         # run_integ_tests.sh brings up its own Xvfb + D-Bus + AT-SPI, so this
         # is install-only here.
-        uses: ./.github/actions/setup-a11y
+        uses: xa11y/setup-a11y@v1
         with:
           package-groups: base gtk
           setup-display: "false"
@@ -249,10 +249,10 @@ jobs:
       # tree once the window is focused). The daemons persist into the later
       # harness step, and the action exports XA11Y_A11Y_READY so launch.py
       # skips starting a second copy. Package list:
-      # .github/actions/setup-a11y/apt-packages.txt.
+      # xa11y/setup-a11y repo (apt-packages.txt).
       - name: Set up accessibility environment
         if: runner.os == 'Linux'
-        uses: ./.github/actions/setup-a11y
+        uses: xa11y/setup-a11y@v1
         with:
           package-groups: base gtk electron
           setup-window-manager: ${{ matrix.app == 'egui' }}
@@ -371,7 +371,7 @@ jobs:
 
       - name: Grant accessibility TCC permission
         if: runner.os == 'macOS'
-        uses: ./.github/actions/setup-a11y
+        uses: xa11y/setup-a11y@v1
         with:
           macos-tcc-client: ${{ env.TCC_CLIENT }}
 
@@ -462,9 +462,9 @@ jobs:
       # Install the package set AND bring up Xvfb + D-Bus + AT-SPI, which
       # persist into the "Run examples" step (and export DISPLAY/DBUS to
       # GITHUB_ENV). Package list:
-      # .github/actions/setup-a11y/apt-packages.txt.
+      # xa11y/setup-a11y repo (apt-packages.txt).
       - name: Set up accessibility environment
-        uses: ./.github/actions/setup-a11y
+        uses: xa11y/setup-a11y@v1
         with:
           package-groups: base
 
@@ -598,7 +598,7 @@ jobs:
       # Python wheel embeds xa11y and pulls the .so in transitively at link
       # time. Installed from the shared package list ([link] group).
       - name: Install system dependencies
-        uses: ./.github/actions/setup-a11y
+        uses: xa11y/setup-a11y@v1
         with:
           package-groups: link
           setup-display: "false"
@@ -726,7 +726,7 @@ jobs:
       # package list. The action no-ops the apt step off Linux.
       - name: Install Linux system dependencies
         if: runner.os == 'Linux'
-        uses: ./.github/actions/setup-a11y
+        uses: xa11y/setup-a11y@v1
         with:
           package-groups: link
           setup-display: "false"
@@ -797,7 +797,7 @@ jobs:
       # at link time ([link] group). Without it the targets fail to link
       # (rust-lld: unable to find -lxkbcommon) before any fuzzing happens.
       - name: Install link dependencies
-        uses: ./.github/actions/setup-a11y
+        uses: xa11y/setup-a11y@v1
         with:
           package-groups: link
           setup-display: "false"

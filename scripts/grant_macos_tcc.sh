@@ -26,16 +26,17 @@
 #     corporate Mac the sqlite write will fail — use System Settings instead.
 #
 # ── Why this lives in scripts/ and is ALSO duplicated inside the
-#    .github/actions/setup-a11y composite action ──────────────────────────
+#    xa11y/setup-a11y composite action ───────────────────────────────────────
 #
-# The setup-a11y action carries its own inline copy of this exact sqlite
-# INSERT (see its "Configure macOS accessibility permission" step). That looks
-# like a Tenet-1 duplication, but it's structural, not accidental:
+# The setup-a11y action (published from the xa11y/setup-a11y repo) carries its
+# own inline copy of this exact sqlite INSERT (see its "Configure macOS
+# accessibility permission" step). That looks like a Tenet-1 duplication, but
+# it's structural, not accidental:
 #
-#   * A composite action consumed by an EXTERNAL repo as
-#       uses: xa11y/xa11y/.github/actions/setup-a11y@main
+#   * A composite action consumed as
+#       uses: xa11y/setup-a11y@v1
 #     only receives the action's own directory via $GITHUB_ACTION_PATH. It
-#     does NOT get a checkout of the rest of this repo, so it cannot
+#     does NOT get a checkout of this repo, so it cannot
 #     `bash scripts/grant_macos_tcc.sh` — that file simply isn't there for an
 #     external consumer.
 #   * Making the action self-contained (inline copy) is therefore required for
@@ -46,7 +47,7 @@
 #
 # So there are intentionally two copies — the action's inline one and this
 # one — and they must be kept in sync. When you change the INSERT here, mirror
-# it in .github/actions/setup-a11y/action.yml.
+# it in the xa11y/setup-a11y repo's action.yml.
 
 set -euo pipefail
 

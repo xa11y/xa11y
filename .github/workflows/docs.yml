@@ -62,7 +62,7 @@ jobs:
       # runner; xa11y-linux needs libxkbcommon at link time. Installed from
       # the shared package list ([link] group).
       - name: Install system dependencies
-        uses: ./.github/actions/setup-a11y
+        uses: xa11y/setup-a11y@v1
         with:
           package-groups: link
           setup-display: "false"

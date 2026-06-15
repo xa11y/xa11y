@@ -44,7 +44,7 @@ sections below show how to satisfy each precondition.
 ## The `setup-a11y` action (GitHub Actions)
 
 This section is **GitHub Actions–specific**. The quickest path on GitHub is
-the composite action that ships in this repo. It
+the [`xa11y/setup-a11y`](https://github.com/xa11y/setup-a11y) action. It
 installs the Linux system libraries, brings up a headless display + D-Bus +
 AT-SPI, and (on macOS) grants the Accessibility permission — then exports the
 environment so every later step in the job inherits it.
@@ -60,7 +60,7 @@ jobs:
           python-version: "3.12"
 
       - name: Set up accessibility environment
-        uses: xa11y/xa11y/.github/actions/setup-a11y@main
+        uses: xa11y/setup-a11y@v1
         with:
           package-groups: base   # add 'gtk' / 'electron' for those toolkits
           # extra-packages: my-app-runtime-deps
@@ -83,7 +83,7 @@ jobs:
 | `macos-tcc-client` | `""` | Path to the binary to grant Accessibility (TCC) on macOS — e.g. your python interpreter. When empty, the action warns instead. |
 
 The Linux package set is defined once, in
-[`apt-packages.txt`](https://github.com/xa11y/xa11y/blob/main/.github/actions/setup-a11y/apt-packages.txt),
+[`apt-packages.txt`](https://github.com/xa11y/setup-a11y/blob/v1/apt-packages.txt),
 grouped by purpose. Pick the groups your test app's toolkit needs:
 
 - **base** — headless display + AT-SPI stack. Always include this.
@@ -107,7 +107,7 @@ interpreter:
   id: py
   run: echo "path=$(python -c 'import sys; print(sys.executable)')" >> "$GITHUB_OUTPUT"
 
-- uses: xa11y/xa11y/.github/actions/setup-a11y@main
+- uses: xa11y/setup-a11y@v1
   with:
     macos-tcc-client: ${{ steps.py.outputs.path }}
 ```
@@ -129,14 +129,14 @@ scripts/grant_macos_tcc.sh "$(.venv/bin/python -c 'import sys; print(sys.executa
 ```
 
 :::note[Why the same grant exists in two places]
-The `setup-a11y` action carries its own inline copy of this sqlite write
-rather than calling the script. That's structural, not an oversight: a
-composite action consumed by an external repo as
-`xa11y/xa11y/.github/actions/setup-a11y@main` only receives the action's own
-directory — it doesn't get a checkout of the rest of the repo, so it can't
-reach `scripts/`. The action must be self-contained to work for external
-consumers; the script serves the contexts the action can't (local dev, other
-CI). Keep the two in sync — each side says so in a comment.
+The `setup-a11y` action (in its own [`xa11y/setup-a11y`](https://github.com/xa11y/setup-a11y)
+repo) carries its own inline copy of this sqlite write rather than calling the
+script. That's structural, not an oversight: a composite action consumed as
+`xa11y/setup-a11y@v1` only receives the action's own directory — it doesn't get
+a checkout of this repo, so it can't reach `scripts/`. The action must be
+self-contained to work for external consumers; the script serves the contexts
+the action can't (local dev, other CI). Keep the two in sync — each side says
+so in a comment.
 :::
 
 ## Windows
