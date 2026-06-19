@@ -1324,6 +1324,19 @@ impl App {
         }
     }
 
+    /// Whether this application currently holds the foreground / input focus.
+    ///
+    /// Mirrors ``Element.focused`` one level up: an application is ``focused``
+    /// when it is the foreground app. Populated for apps obtained via
+    /// ``App.list()`` and the predicate finders (``App.find()`` — where it is
+    /// also visible to the predicate, so ``App.find(lambda a: a.focused)``
+    /// selects the foreground app). A point-in-time snapshot taken when the
+    /// ``App`` was resolved.
+    #[getter]
+    fn focused(&self) -> bool {
+        self.inner_data.states.focused
+    }
+
     /// Create a Locator scoped to this application's accessibility tree.
     fn locator(&self, selector: &str) -> Locator {
         Locator {
@@ -1793,8 +1806,13 @@ fn _make_test_locator() -> PyResult<Locator> {
 #[pyfunction]
 fn _make_test_app() -> PyResult<App> {
     let provider = xa11y::mock::build_provider() as Arc<dyn xa11y::Provider>;
-    let app = xa11y::App::by_name_with(provider, "TestApp", std::time::Duration::ZERO)
-        .map_err(to_py_err)?;
+    // Resolve via the predicate finder (not `by_name_with`) so the returned
+    // app is foreground-tagged — the mock reports its root as the focused app,
+    // letting `App.focused` tests observe a `True` value.
+    let app = xa11y::App::find_with(provider, std::time::Duration::ZERO, |d| {
+        d.name.as_deref() == Some("TestApp")
+    })
+    .map_err(to_py_err)?;
     Ok(App::from_core(app))
 }
 

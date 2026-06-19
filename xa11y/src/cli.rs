@@ -543,9 +543,13 @@ fn cmd_apps() -> CliResult<()> {
         println!("No applications found.");
         return Ok(());
     }
+    // Mark the foreground application with `*` so the currently focused app
+    // is visible at a glance (App::list tags it via the platform's foreground
+    // query).
     for app in &apps {
         let pid_str = app.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
-        println!("{}\t{}", pid_str, app.name);
+        let marker = if app.focused() { "*" } else { " " };
+        println!("{}\t{}\t{}", marker, pid_str, app.name);
     }
     Ok(())
 }

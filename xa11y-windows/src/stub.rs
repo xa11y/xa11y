@@ -64,6 +64,9 @@ impl Provider for WindowsProvider {
     fn list_apps(&self) -> Result<Vec<ElementData>> {
         unreachable!()
     }
+    fn focused_app(&self) -> Result<ElementData> {
+        unreachable!()
+    }
     fn press(&self, _: &ElementData) -> Result<()> {
         unreachable!()
     }

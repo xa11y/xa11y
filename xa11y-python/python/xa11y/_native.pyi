@@ -197,6 +197,16 @@ class App:
     def name(self) -> str: ...
     @property
     def pid(self) -> int | None: ...
+    @property
+    def focused(self) -> bool:
+        """Whether this application currently holds the foreground / input focus.
+
+        Mirrors :attr:`Element.focused` one level up: an application is
+        ``focused`` when it is the foreground app. Populated for apps obtained
+        via :meth:`list` and :meth:`find` (where it is also visible to the
+        predicate, so ``App.find(lambda a: a.focused)`` selects the foreground
+        app). A point-in-time snapshot taken when the ``App`` was resolved.
+        """
     @staticmethod
     def by_name(name: str, *, timeout: float | None = None) -> App:
         """Find an application by exact name.

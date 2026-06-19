@@ -9,6 +9,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT};
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::*;
+use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
 
 use xa11y_core::{
     selector::{matches_simple, Combinator, Selector, SelectorSegment},
@@ -755,6 +756,31 @@ impl Provider for WindowsProvider {
             .and_then(|e| self.populate_cache(&e).map_err(|_| ()))
             .unwrap_or(el);
         Ok(self.build_element_data(&el, Some(pid)))
+    }
+
+    /// Identify the foreground application via `GetForegroundWindow` +
+    /// `ElementFromHandle` — the canonical Win32 foreground query mapped into
+    /// the UIA tree. UIA exposes apps as top-level `Window` elements (see
+    /// [`list_apps`](Self::list_apps)), and the foreground HWND is exactly such
+    /// a top-level window, so the resolved element's pid lines up with a
+    /// `list_apps` entry for the core to tag.
+    ///
+    /// A NULL foreground window (nothing active — e.g. the desktop has focus,
+    /// or during a fast app switch) maps to [`Error::SelectorNotMatched`]
+    /// ("nothing focused"); a failing `ElementFromHandle` is a genuine UIA
+    /// error and propagates.
+    fn focused_app(&self) -> Result<ElementData> {
+        let hwnd = unsafe { GetForegroundWindow() };
+        if hwnd.0.is_null() {
+            return Err(Error::selector_not_matched("focused application"));
+        }
+        let el = uia_call(|| unsafe { self.automation.ElementFromHandle(hwnd) })?;
+        let pid = unsafe { el.CurrentProcessId() }.unwrap_or(0) as u32;
+        let pid_opt = (pid != 0).then_some(pid);
+        // Populate the snapshot so build_element_data's Cached* reads work,
+        // falling back to the live element if caching fails.
+        let el = self.populate_cache(&el).unwrap_or(el);
+        Ok(self.build_element_data(&el, pid_opt))
     }
 
     /// Override the default `narrow_multi_segment` so that the Descendant

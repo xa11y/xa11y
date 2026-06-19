@@ -49,3 +49,18 @@ def test_by_name_zero_timeout_validates():
     except xa11y.XA11yError:
         # Any xa11y-level error is fine — proves the call reached the lookup.
         pass
+
+
+def test_app_focused_is_bool(mock_app):
+    # The mock provider reports its application root as the foreground app,
+    # so an app resolved through the finder carries `focused=True`. The flag
+    # must be a plain bool (mirrors `Element.focused`).
+    assert isinstance(mock_app.focused, bool)
+    assert mock_app.focused is True
+
+
+def test_app_focused_matches_element_focused_shape(mock_app):
+    # `App.focused` is the application-level analogue of `Element.focused`:
+    # both are read-only boolean properties. Assigning must fail.
+    with pytest.raises(AttributeError):
+        mock_app.focused = True

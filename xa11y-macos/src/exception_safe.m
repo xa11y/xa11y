@@ -138,6 +138,34 @@ AXUIElementRef safe_ax_create_application(int pid) {
     }
 }
 
+// ── System-Wide Element / Focused Application ────────────────────────────────
+
+// Safe wrapper for AXUIElementCreateSystemWide.
+// The system-wide element is the entry point for global attributes such as
+// kAXFocusedApplicationAttribute. Returns NULL if an ObjC exception was thrown.
+AXUIElementRef safe_ax_create_system_wide(void) {
+    @try {
+        return AXUIElementCreateSystemWide();
+    } @catch (NSException *e) {
+        return NULL;
+    }
+}
+
+// Safe wrapper for AXUIElementGetPid. Writes the owning process id of
+// `element` to `*outPid`. Returns the AX error code, or -9999 if an ObjC
+// exception was thrown.
+int safe_ax_get_pid(AXUIElementRef element, int *outPid) {
+    @try {
+        pid_t pid = 0;
+        AXError err = AXUIElementGetPid(element, &pid);
+        *outPid = (int)pid;
+        return err;
+    } @catch (NSException *e) {
+        *outPid = 0;
+        return -9999;
+    }
+}
+
 // ── AXValue Extraction ──────────────────────────────────────────────────────
 
 // Safe wrapper for AXValueGetValue.

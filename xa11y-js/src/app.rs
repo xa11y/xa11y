@@ -97,6 +97,17 @@ impl App {
         self.pid
     }
 
+    /// Whether this application currently holds the foreground / input focus.
+    ///
+    /// Mirrors `Element.focused` one level up: an application is `focused` when
+    /// it is the foreground app. Populated for apps obtained via
+    /// {@link App.list}. A point-in-time snapshot taken when the `App` was
+    /// resolved.
+    #[napi(getter)]
+    pub fn focused(&self) -> bool {
+        self.data.states.focused
+    }
+
     /// Create a `Locator` scoped to this application's accessibility tree.
     ///
     /// The locator re-resolves `selector` on every operation, so it always

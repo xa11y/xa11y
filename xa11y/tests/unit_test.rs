@@ -59,6 +59,10 @@ impl Provider for MockProvider {
         self.get_children(None)
     }
 
+    fn focused_app(&self) -> Result<ElementData> {
+        Err(Error::selector_not_matched("focused application"))
+    }
+
     fn press(&self, element: &ElementData) -> Result<()> {
         *self.last_action.lock().unwrap() = Some((element.handle, "press".to_string()));
         Ok(())
@@ -1053,6 +1057,10 @@ impl Provider for MultiAppMockProvider {
         self.get_children(None)
     }
 
+    fn focused_app(&self) -> Result<ElementData> {
+        Err(Error::selector_not_matched("focused application"))
+    }
+
     fn press(&self, _: &ElementData) -> Result<()> {
         Ok(())
     }
@@ -1324,6 +1332,9 @@ impl Provider for DelayedProvider {
         // and these polling tests rely on observing those calls.
         self.get_children(None)
     }
+    fn focused_app(&self) -> Result<ElementData> {
+        Err(Error::selector_not_matched("focused application"))
+    }
     fn press(&self, e: &ElementData) -> Result<()> {
         self.inner.press(e)
     }
@@ -1472,6 +1483,9 @@ impl Provider for AppByPidOverrideProvider {
     fn list_apps(&self) -> Result<Vec<ElementData>> {
         Ok(vec![])
     }
+    fn focused_app(&self) -> Result<ElementData> {
+        Err(Error::selector_not_matched("focused application"))
+    }
     fn app_by_pid(&self, pid: u32) -> Result<ElementData> {
         self.app_by_pid_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1615,6 +1629,9 @@ impl Provider for GhostAppProvider {
         ghost.pid = None;
         apps.push(ghost);
         Ok(apps)
+    }
+    fn focused_app(&self) -> Result<ElementData> {
+        Err(Error::selector_not_matched("focused application"))
     }
     fn press(&self, e: &ElementData) -> Result<()> {
         self.inner.press(e)

@@ -64,6 +64,30 @@ fn merge_diagnosis(err: Error, extra: Diagnosis) -> Error {
     err.diagnose(d)
 }
 
+/// Tag the foreground application within an enumerated app list.
+///
+/// Resolves the focused app's pid *once* via [`Provider::focused_app`] and
+/// sets [`StateSet::focused`](crate::element::StateSet::focused) on every
+/// entry whose pid matches, so `App::focused` reflects foreground status for
+/// apps obtained through `list`/`find` without a per-app focus query.
+///
+/// "Nothing is focused" ([`Error::SelectorNotMatched`]) is not an error here:
+/// it leaves every entry untagged (`focused = false`). Any other error is a
+/// genuine focus-resolution failure and propagates rather than being silently
+/// swallowed (tenet 1) — on every backend the focus query needs no more access
+/// than the enumeration that produced `apps`.
+fn tag_focused(provider: &Arc<dyn Provider>, apps: &mut [ElementData]) -> Result<()> {
+    let focused_pid = match provider.focused_app() {
+        Ok(data) => data.pid,
+        Err(Error::SelectorNotMatched { .. }) => None,
+        Err(e) => return Err(e),
+    };
+    for app in apps.iter_mut() {
+        app.states.focused = focused_pid.is_some() && app.pid == focused_pid;
+    }
+    Ok(())
+}
+
 /// Bounded "what *is* running" snapshot for application-lookup failures:
 /// the candidate list a consumer would otherwise produce by hand-logging
 /// `App::list()` around the failure.
@@ -149,19 +173,33 @@ impl App {
     where
         F: Fn(&ElementData) -> Result<bool>,
     {
-        Self::find_matching(provider, timeout, predicate, || {
-            "application matching predicate".to_string()
-        })
+        // Predicate finders tag the foreground app so the predicate can match
+        // on `focused` (e.g. `find(|a| a.focused)`) and matched apps carry
+        // correct foreground state.
+        Self::find_matching(
+            provider,
+            timeout,
+            predicate,
+            || "application matching predicate".to_string(),
+            true,
+        )
     }
 
     /// Shared predicate-based discovery loop. `describe` supplies the
     /// [`Error::SelectorNotMatched`] selector string so name/pid lookups keep
     /// their specific, actionable error messages while sharing one match loop.
+    ///
+    /// `tag_focus` controls whether each poll resolves the foreground app and
+    /// tags it onto the enumerated candidates. The predicate finders enable it
+    /// (so `focused` is visible to the predicate); `by_name` disables it — a
+    /// name lookup neither needs foreground state nor should pay the per-tick
+    /// focus query (and shouldn't gain a focus-resolution failure mode).
     fn find_matching<F, D>(
         provider: Arc<dyn Provider>,
         timeout: Duration,
         predicate: F,
         describe: D,
+        tag_focus: bool,
     ) -> Result<Self>
     where
         F: Fn(&ElementData) -> Result<bool>,
@@ -181,7 +219,10 @@ impl App {
                 // "app not found" from "accessibility is broken". A predicate
                 // error propagates for the same reason — `poll_lookup` only
                 // retries `SelectorNotMatched`, so anything else fails fast.
-                let apps = provider.list_apps()?;
+                let mut apps = provider.list_apps()?;
+                if tag_focus {
+                    tag_focused(&provider, &mut apps)?;
+                }
                 for data in apps {
                     if predicate(&data)? {
                         return Ok(Self::from_data(Arc::clone(&provider), data));
@@ -230,11 +271,16 @@ impl App {
                     .to_string(),
             });
         }
+        // `tag_focus = false`: a name lookup doesn't need foreground state, so
+        // it skips the per-tick focus query (apps from `by_name` therefore
+        // report `focused() == false` — use `list`/`find` to query foreground
+        // status).
         Self::find_matching(
             provider,
             timeout,
             |d| Ok(d.name.as_deref() == Some(name)),
             || format!(r#"application[name="{}"]"#, name),
+            false,
         )
     }
 
@@ -281,7 +327,10 @@ impl App {
         // already handles the per-OS app/window split (Linux/macOS return
         // `Application` elements; Windows returns top-level `Window`
         // elements), so we just wrap each entry.
-        let datas = provider.list_apps()?;
+        let mut datas = provider.list_apps()?;
+        // Mark the foreground app (one focus query) so `App::focused` is
+        // populated across the returned list without an extra call per app.
+        tag_focused(&provider, &mut datas)?;
         Ok(datas
             .into_iter()
             .map(|d| Self::from_data(Arc::clone(&provider), d))
@@ -350,6 +399,23 @@ impl App {
         Element::new(self.data.clone(), Arc::clone(&self.provider))
     }
 
+    /// Whether this application currently holds the foreground / input focus.
+    ///
+    /// Mirrors [`StateSet::focused`](crate::element::StateSet::focused) one
+    /// level up: just as an element is `focused` when it has input focus, an
+    /// application is `focused` when it is the foreground app.
+    ///
+    /// Populated when the `App` is obtained via [`list_with`](Self::list_with)
+    /// or the predicate finders ([`find_with`](Self::find_with) /
+    /// [`try_find_with`](Self::try_find_with) — where it is also visible to the
+    /// predicate, so `find(|a| a.focused())` selects the foreground app). The
+    /// value is a point-in-time snapshot taken when the `App` was resolved.
+    /// Apps obtained directly via [`by_pid_with`](Self::by_pid_with) carry the
+    /// platform's raw app-element focus state instead (typically `false`).
+    pub fn focused(&self) -> bool {
+        self.data.states.focused
+    }
+
     /// Get the provider reference.
     pub fn provider(&self) -> &Arc<dyn Provider> {
         &self.provider
@@ -381,6 +447,103 @@ mod tests {
         let provider: Arc<dyn Provider> = build_provider();
         App::by_name_with(provider, "TestApp", Duration::ZERO)
             .expect("TestApp must exist in mock tree")
+    }
+
+    /// What [`FocusModeProvider`] reports from `focused_app`.
+    enum FocusMode {
+        /// No application currently holds focus.
+        None,
+        /// Focus resolution hit a genuine platform failure.
+        Error,
+    }
+
+    /// Wraps the standard mock provider but overrides `focused_app` so the
+    /// foreground-tagging error paths can be exercised. Everything else
+    /// delegates to the inner mock.
+    struct FocusModeProvider {
+        inner: Arc<crate::mock::MockProvider>,
+        mode: FocusMode,
+    }
+
+    impl FocusModeProvider {
+        fn new(mode: FocusMode) -> Self {
+            Self {
+                inner: build_provider(),
+                mode,
+            }
+        }
+    }
+
+    impl Provider for FocusModeProvider {
+        fn focused_app(&self) -> Result<ElementData> {
+            match self.mode {
+                FocusMode::None => Err(Error::selector_not_matched("focused application")),
+                FocusMode::Error => Err(Error::Platform {
+                    code: 99,
+                    message: "focus query failed".to_string(),
+                }),
+            }
+        }
+        fn get_children(&self, e: Option<&ElementData>) -> Result<Vec<ElementData>> {
+            self.inner.get_children(e)
+        }
+        fn get_parent(&self, e: &ElementData) -> Result<Option<ElementData>> {
+            self.inner.get_parent(e)
+        }
+        fn list_apps(&self) -> Result<Vec<ElementData>> {
+            self.inner.list_apps()
+        }
+        fn press(&self, e: &ElementData) -> Result<()> {
+            self.inner.press(e)
+        }
+        fn focus(&self, e: &ElementData) -> Result<()> {
+            self.inner.focus(e)
+        }
+        fn blur(&self, e: &ElementData) -> Result<()> {
+            self.inner.blur(e)
+        }
+        fn toggle(&self, e: &ElementData) -> Result<()> {
+            self.inner.toggle(e)
+        }
+        fn select(&self, e: &ElementData) -> Result<()> {
+            self.inner.select(e)
+        }
+        fn expand(&self, e: &ElementData) -> Result<()> {
+            self.inner.expand(e)
+        }
+        fn collapse(&self, e: &ElementData) -> Result<()> {
+            self.inner.collapse(e)
+        }
+        fn show_menu(&self, e: &ElementData) -> Result<()> {
+            self.inner.show_menu(e)
+        }
+        fn increment(&self, e: &ElementData) -> Result<()> {
+            self.inner.increment(e)
+        }
+        fn decrement(&self, e: &ElementData) -> Result<()> {
+            self.inner.decrement(e)
+        }
+        fn scroll_into_view(&self, e: &ElementData) -> Result<()> {
+            self.inner.scroll_into_view(e)
+        }
+        fn set_value(&self, e: &ElementData, v: &str) -> Result<()> {
+            self.inner.set_value(e, v)
+        }
+        fn set_numeric_value(&self, e: &ElementData, v: f64) -> Result<()> {
+            self.inner.set_numeric_value(e, v)
+        }
+        fn type_text(&self, e: &ElementData, t: &str) -> Result<()> {
+            self.inner.type_text(e, t)
+        }
+        fn set_text_selection(&self, e: &ElementData, s: u32, end: u32) -> Result<()> {
+            self.inner.set_text_selection(e, s, end)
+        }
+        fn perform_action(&self, e: &ElementData, a: &str) -> Result<()> {
+            self.inner.perform_action(e, a)
+        }
+        fn subscribe(&self, e: &ElementData) -> Result<Subscription> {
+            self.inner.subscribe(e)
+        }
     }
 
     #[test]
@@ -501,6 +664,53 @@ mod tests {
             start.elapsed() < Duration::from_secs(1),
             "predicate error must fail fast, not wait out the timeout"
         );
+    }
+
+    #[test]
+    fn list_with_tags_foreground_app_as_focused() {
+        // MockProvider::focused_app reports the application root (pid 1234) as
+        // foreground, so the lone listed app must come back `focused()`.
+        let provider: Arc<dyn Provider> = build_provider();
+        let apps = App::list_with(provider).expect("list must succeed");
+        assert_eq!(apps.len(), 1);
+        assert!(
+            apps[0].focused(),
+            "the foreground app must be tagged focused by list_with"
+        );
+    }
+
+    #[test]
+    fn find_with_predicate_sees_focused_flag() {
+        // The predicate runs against the tagged ElementData, so selecting on
+        // `focused` must match the foreground app.
+        let provider: Arc<dyn Provider> = build_provider();
+        let app = App::find_with(provider, Duration::ZERO, |d| d.states.focused)
+            .expect("the foreground app must be findable via the focused flag");
+        assert_eq!(app.name, "TestApp");
+        assert!(app.focused());
+    }
+
+    #[test]
+    fn list_with_leaves_apps_untagged_when_nothing_focused() {
+        // A provider whose `focused_app` reports "nothing focused"
+        // (SelectorNotMatched) must not fail enumeration — every app stays
+        // unfocused rather than the error propagating.
+        let provider: Arc<dyn Provider> = Arc::new(FocusModeProvider::new(FocusMode::None));
+        let apps = App::list_with(provider).expect("list must succeed with no focused app");
+        assert_eq!(apps.len(), 1);
+        assert!(
+            !apps[0].focused(),
+            "no app should be focused when focused_app reports none"
+        );
+    }
+
+    #[test]
+    fn list_with_propagates_real_focus_errors() {
+        // A genuine focus-resolution failure (not "nothing focused") must
+        // surface, not be silently swallowed (tenet 1).
+        let provider: Arc<dyn Provider> = Arc::new(FocusModeProvider::new(FocusMode::Error));
+        let err = App::list_with(provider).expect_err("a real focus error must propagate");
+        assert!(matches!(err, Error::Platform { code: 99, .. }));
     }
 
     #[test]
