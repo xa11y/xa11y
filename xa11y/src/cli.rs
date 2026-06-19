@@ -543,13 +543,14 @@ fn cmd_apps() -> CliResult<()> {
         println!("No applications found.");
         return Ok(());
     }
-    // Mark the foreground application with `*` so the currently focused app
-    // is visible at a glance (App::list tags it via the platform's foreground
-    // query).
+    // Columns are `pid\tname`; the foreground app gets a trailing `focused`
+    // field (App::list tags it via the platform's foreground query). Keeping
+    // pid/name as columns 1-2 preserves the output contract for scripts that
+    // parse `xa11y apps` by column position.
     for app in &apps {
         let pid_str = app.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
-        let marker = if app.focused() { "*" } else { " " };
-        println!("{}\t{}\t{}", marker, pid_str, app.name);
+        let focused = if app.focused() { "\tfocused" } else { "" };
+        println!("{}\t{}{}", pid_str, app.name, focused);
     }
     Ok(())
 }
