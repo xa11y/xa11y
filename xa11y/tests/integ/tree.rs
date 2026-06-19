@@ -67,6 +67,46 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore]
+    fn focused_app_is_tagged_in_list() {
+        // The test app keeps itself host-focused (it synthesises
+        // `WindowEvent::Focused(true)` so it reports active even under the
+        // headless Xvfb harness), so it must surface as the foreground app:
+        // its entry in `App::list()` carries `focused() == true`. Exercises
+        // each backend's foreground query (AXFocusedApplication on macOS,
+        // GetForegroundWindow on Windows, the active AT-SPI window on Linux).
+        let app = h::app_root();
+        let apps = App::list().expect("App::list must succeed");
+        let me = apps
+            .iter()
+            .find(|a| a.pid == app.pid)
+            .unwrap_or_else(|| panic!("test app (pid={:?}) must appear in App::list()", app.pid));
+        assert!(
+            me.focused(),
+            "the test app should be the foreground app. Apps: {:?}",
+            apps.iter()
+                .map(|a| (&a.name, a.focused()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn find_by_focused_resolves_foreground_app() {
+        // `App::find(|d| d.states.focused)` selects the foreground app — the
+        // predicate sees the foreground flag the core tags onto each candidate
+        // before evaluating it.
+        let app = h::app_root();
+        let focused = App::find(std::time::Duration::from_secs(2), |d| d.states.focused)
+            .expect("find(|a| a.focused) must resolve the foreground app");
+        assert_eq!(
+            focused.pid, app.pid,
+            "the focused app must be the test app, got {:?}",
+            focused.name
+        );
+    }
+
     // ════════════════════════════════════════════════════════════════
     // Tree Structure — Element Discovery (14 tests)
     // ════════════════════════════════════════════════════════════════

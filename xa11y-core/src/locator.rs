@@ -1131,6 +1131,13 @@ mod tests {
             self.get_children(None)
         }
 
+        fn focused_app(&self) -> Result<crate::element::ElementData> {
+            // Handle freshness is irrelevant to focus resolution in this test
+            // double; defer to the inner provider's notion of the foreground
+            // app unchanged.
+            self.inner.focused_app()
+        }
+
         fn get_children(
             &self,
             parent: Option<&crate::element::ElementData>,

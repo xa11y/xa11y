@@ -88,6 +88,8 @@ extern "C" {
         settable: *mut bool,
     ) -> i32;
     fn safe_ax_create_application(pid: i32) -> AXUIElementRef;
+    fn safe_ax_create_system_wide() -> AXUIElementRef;
+    fn safe_ax_get_pid(element: AXUIElementRef, out_pid: *mut i32) -> i32;
     fn safe_ax_value_get_value(value: CFTypeRef, the_type: i32, value_ptr: *mut c_void) -> bool;
     fn safe_cg_window_list_copy(option: u32, relative_to: u32) -> CFArrayRef;
     fn safe_ax_observer_create(
@@ -2094,6 +2096,67 @@ impl Provider for MacOSProvider {
                 ),
             }),
         }
+    }
+
+    /// Identify the frontmost application via the system-wide AX element's
+    /// `AXFocusedApplication` attribute — the canonical macOS foreground-app
+    /// query, equivalent to `NSWorkspace.frontmostApplication` but staying
+    /// entirely within the AX API we already use.
+    ///
+    /// We read the focused application element, resolve its pid via
+    /// `AXUIElementGetPid` (so the core can tag the matching `list_apps`
+    /// entry), and override the name with the CGWindowList owner name for
+    /// consistency with `list_apps`.
+    ///
+    /// When nothing is frontmost the attribute is absent / NULL — that maps to
+    /// [`Error::SelectorNotMatched`] ("nothing focused"), which the core reads
+    /// as "no app is foreground" rather than a failure. A NULL system-wide
+    /// element is a genuine platform failure and propagates.
+    fn focused_app(&self) -> Result<ElementData> {
+        let system_wide = AXElement::from_owned(unsafe { safe_ax_create_system_wide() });
+        if system_wide.is_null() {
+            return Err(Error::Platform {
+                code: -1,
+                message: "AXUIElementCreateSystemWide returned NULL".to_string(),
+            });
+        }
+
+        let attr = CFString::new("AXFocusedApplication");
+        let mut value: CFTypeRef = std::ptr::null();
+        let err = ffi_copy_attribute_value(
+            system_wide.as_ptr(),
+            attr.as_concrete_TypeRef() as CFTypeRef,
+            &mut value,
+        );
+        if err != AX_ERROR_SUCCESS || value.is_null() {
+            // No frontmost application (or the attribute is unavailable, e.g.
+            // focus rests on the login window / screen saver). Treat as
+            // "nothing focused" so the core leaves apps untagged.
+            return Err(Error::selector_not_matched("focused application"));
+        }
+
+        // `AXFocusedApplication` returns a +1-retained AXUIElement; take
+        // ownership so it's released on drop.
+        let app_element = AXElement::from_owned(value as AXUIElementRef);
+
+        let mut pid: i32 = 0;
+        let pid_err = unsafe { safe_ax_get_pid(app_element.as_ptr(), &mut pid) };
+        let pid_opt = if pid_err == AX_ERROR_SUCCESS && pid > 0 {
+            Some(pid as u32)
+        } else {
+            None
+        };
+
+        let mut data = self.build_element_data(&app_element, pid_opt);
+        if let Some(p) = pid_opt {
+            if let Some((_, name)) = Self::list_gui_apps()
+                .into_iter()
+                .find(|(gp, _)| *gp == p as i32)
+            {
+                data.name = Some(name);
+            }
+        }
+        Ok(data)
     }
 
     // ── Common actions ──────────────────────────────────────────────

@@ -95,6 +95,10 @@ impl Provider for LinuxProvider {
         Err(unavailable())
     }
 
+    fn focused_app(&self) -> Result<ElementData> {
+        Err(unavailable())
+    }
+
     fn press(&self, _: &ElementData) -> Result<()> {
         Err(unavailable())
     }

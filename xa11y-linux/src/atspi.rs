@@ -821,18 +821,24 @@ impl LinuxProvider {
         }))
     }
 
-    /// Parse AT-SPI2 state bitfield into xa11y StateSet.
-    fn parse_states(&self, aref: &AccessibleRef, role: Role) -> StateSet {
+    /// Fetch an accessible's AT-SPI2 state bitfield as a single `u64`.
+    ///
+    /// AT-SPI2 returns states as two `u32`s (low/high words); collapse them
+    /// into one mask so callers can test bit positions directly.
+    fn state_bits(&self, aref: &AccessibleRef) -> u64 {
         let state_bits = self.get_state(aref).unwrap_or_default();
-
-        // AT-SPI2 states are a bitfield across two u32s
-        let bits: u64 = if state_bits.len() >= 2 {
+        if state_bits.len() >= 2 {
             (state_bits[0] as u64) | ((state_bits[1] as u64) << 32)
         } else if state_bits.len() == 1 {
             state_bits[0] as u64
         } else {
             0
-        };
+        }
+    }
+
+    /// Parse AT-SPI2 state bitfield into xa11y StateSet.
+    fn parse_states(&self, aref: &AccessibleRef, role: Role) -> StateSet {
+        let bits = self.state_bits(aref);
 
         // AT-SPI2 state bit positions (AtspiStateType enum values)
         const BUSY: u64 = 1 << 3;
@@ -1569,6 +1575,53 @@ impl Provider for LinuxProvider {
                 },
             ),
         )
+    }
+
+    /// Identify the foreground application via the active top-level window.
+    ///
+    /// AT-SPI has no registry-level "focused application" call, and the
+    /// `Application` accessibles themselves don't carry an active/focused
+    /// state across toolkits. The portable signal is the `ACTIVE` state
+    /// (`AtspiStateType::ACTIVE`) set on the foreground *window* (frame): we
+    /// enumerate each registered application's top-level children and return
+    /// the first application that owns a window reporting `ACTIVE`.
+    ///
+    /// Returns [`Error::SelectorNotMatched`] when no window is active (no app
+    /// has the foreground — e.g. focus is on the shell or a non-AT-SPI
+    /// surface). The core reads that as "nothing focused", not a failure.
+    fn focused_app(&self) -> Result<ElementData> {
+        // AtspiStateType::ACTIVE = 1 → bit position 1.
+        const ACTIVE: u64 = 1 << 1;
+
+        let registry = AccessibleRef {
+            bus_name: "org.a11y.atspi.Registry".to_string(),
+            path: "/org/a11y/atspi/accessible/root".to_string(),
+        };
+        let apps = self.get_atspi_children(&registry)?;
+
+        for app in apps.iter().filter(|c| c.path != "/org/a11y/atspi/null") {
+            let windows = match self.get_atspi_children(app) {
+                Ok(w) => w,
+                // A single app failing to enumerate its windows shouldn't abort
+                // the whole foreground probe — skip it and keep scanning.
+                Err(_) => continue,
+            };
+            let has_active_window = windows
+                .iter()
+                .filter(|w| w.path != "/org/a11y/atspi/null")
+                .any(|w| self.state_bits(w) & ACTIVE != 0);
+            if has_active_window {
+                let pid = self.get_app_pid(app);
+                let mut data = self.build_element_data(app, pid);
+                let name = self.get_name(app).unwrap_or_default();
+                if !name.is_empty() {
+                    data.name = Some(name);
+                }
+                return Ok(data);
+            }
+        }
+
+        Err(Error::selector_not_matched("focused application"))
     }
 
     fn press(&self, element: &ElementData) -> Result<()> {

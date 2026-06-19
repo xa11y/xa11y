@@ -90,6 +90,30 @@ pub trait Provider: Send + Sync {
         )
     }
 
+    /// Identify the application that currently holds the system foreground /
+    /// input focus — one attempt, no polling.
+    ///
+    /// Each backend uses its platform's canonical foreground mechanism: the
+    /// system-wide `AXUIElement`'s focused-application attribute (macOS),
+    /// `GetForegroundWindow` + `ElementFromHandle` (Windows), and the focused
+    /// element's `Application` ancestor in the AT-SPI registry (Linux). The
+    /// returned `ElementData` has the same shape [`list_apps`](Self::list_apps)
+    /// produces for that app — in particular its `pid` lines up — so the core
+    /// can tag the foreground entry within an enumeration by pid.
+    ///
+    /// Returns [`Error::SelectorNotMatched`] when no application currently
+    /// holds focus (e.g. focus rests on the desktop / shell, or the screen is
+    /// locked). That is a legitimate state, not a failure: the core treats it
+    /// as "nothing is foreground" — every listed app stays untagged — rather
+    /// than surfacing an error. Any other error (permission, platform API
+    /// failure) is a real failure and propagates.
+    ///
+    /// Required: every `Provider` implements this explicitly. Like
+    /// [`list_apps`](Self::list_apps) there is no default impl — there is no
+    /// portable way to derive the foreground app, so a silent no-op default
+    /// would hide an unimplemented backend (tenet 1).
+    fn focused_app(&self) -> Result<ElementData>;
+
     /// Search for elements matching a selector.
     ///
     /// The selector is already parsed by the core — providers match against it
@@ -305,6 +329,9 @@ impl<T: Provider + ?Sized> Provider for &T {
     // `list_apps` and silently lose the override.
     fn app_by_pid(&self, pid: u32) -> Result<ElementData> {
         (**self).app_by_pid(pid)
+    }
+    fn focused_app(&self) -> Result<ElementData> {
+        (**self).focused_app()
     }
     fn find_elements(
         &self,

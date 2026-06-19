@@ -1433,7 +1433,7 @@ checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
 
 [[package]]
 name = "xa11y"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "serde_json",
  "xa11y-core",
@@ -1444,7 +1444,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-core"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "png",
  "serde",
@@ -1455,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-linux"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "evdev",
  "png",
@@ -1469,7 +1469,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-macos"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "cc",
  "core-foundation",
@@ -1480,7 +1480,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-python"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "pyo3",
  "serde_json",
@@ -1489,7 +1489,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-windows"
-version = "0.8.2"
+version = "0.9.0"
 dependencies = [
  "serde_json",
  "windows",

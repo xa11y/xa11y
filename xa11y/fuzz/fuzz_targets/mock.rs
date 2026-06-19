@@ -164,6 +164,13 @@ impl Provider for FuzzProvider {
         Ok(vec![self.nodes[0].data.clone()])
     }
 
+    fn focused_app(&self) -> Result<ElementData> {
+        if self.nodes.is_empty() {
+            return Err(Error::selector_not_matched("focused application"));
+        }
+        Ok(self.nodes[0].data.clone())
+    }
+
     fn press(&self, _: &ElementData) -> Result<()> { Ok(()) }
     fn focus(&self, _: &ElementData) -> Result<()> { Ok(()) }
     fn blur(&self, _: &ElementData) -> Result<()> { Ok(()) }
