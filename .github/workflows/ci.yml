@@ -23,7 +23,7 @@ jobs:
     name: Linux
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Rust
         uses: ./.github/actions/setup-rust
@@ -64,7 +64,7 @@ jobs:
     name: Linux Wayland (uinput)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Rust
         uses: ./.github/actions/setup-rust
@@ -134,7 +134,7 @@ jobs:
     name: macOS
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Rust
         uses: ./.github/actions/setup-rust
@@ -166,7 +166,7 @@ jobs:
     name: Windows
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Rust
         uses: ./.github/actions/setup-rust
@@ -226,7 +226,7 @@ jobs:
           - { os: macos-latest,   app: egui }
           - { os: windows-latest, app: egui }
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Rust
         uses: ./.github/actions/setup-rust
@@ -442,7 +442,7 @@ jobs:
       matrix:
         os: [ubuntu-latest]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Rust
         uses: ./.github/actions/setup-rust
@@ -510,7 +510,7 @@ jobs:
     name: Lint & Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Rust
         uses: ./.github/actions/setup-rust
@@ -546,7 +546,7 @@ jobs:
     name: License Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Cache cargo-deny binary
         id: cache-cargo-deny
@@ -567,7 +567,7 @@ jobs:
     name: Cross-compile check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Rust
         uses: ./.github/actions/setup-rust
@@ -587,7 +587,7 @@ jobs:
     name: Python bindings
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Rust
         uses: ./.github/actions/setup-rust
@@ -634,7 +634,7 @@ jobs:
     name: Docs build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # Shares the sccache compilation cache with the js/integ jobs that build
       # the same xa11y-js native binding; rust-cache stores xa11y-js/target.
@@ -709,7 +709,7 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # Shares the sccache compilation cache with the docs/integ jobs that
       # build the same native binding; rust-cache stores xa11y-js/target.
@@ -773,7 +773,7 @@ jobs:
     name: Fuzz (10s per target)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Set up Rust (nightly)
         uses: ./.github/actions/setup-rust

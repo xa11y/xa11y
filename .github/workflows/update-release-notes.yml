@@ -35,7 +35,7 @@ jobs:
       models: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # Need full history + tags so the script can resolve the previous
           # tag and walk the commit range.
