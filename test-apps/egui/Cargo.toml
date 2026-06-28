@@ -20,7 +20,7 @@ path = "src/main.rs"
 #   well-trodden path there. Dropping x11/wayland on those targets also avoids
 #   pulling Linux-only deps into the build graph.
 [target.'cfg(target_os = "linux")'.dependencies]
-eframe = { version = "0.34", default-features = false, features = [
+eframe = { version = "0.35", default-features = false, features = [
     "accesskit",
     "default_fonts",
     "glow",
@@ -29,7 +29,7 @@ eframe = { version = "0.34", default-features = false, features = [
 ] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-eframe = { version = "0.34", default-features = false, features = [
+eframe = { version = "0.35", default-features = false, features = [
     "accesskit",
     "default_fonts",
     "wgpu",
