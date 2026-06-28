@@ -264,7 +264,7 @@ jobs:
       # ── Tauri app (not in workspace — has its own Cargo.lock) ──────
       - name: Cache Tauri test app build
         if: matrix.app == 'tauri'
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: test-apps/tauri/target
           key: ${{ runner.os }}-tauri-app-${{ hashFiles('test-apps/tauri/Cargo.lock', 'test-apps/tauri/Cargo.toml', 'test-apps/tauri/build.rs', 'test-apps/tauri/tauri.conf.json', 'test-apps/tauri/src/**', 'test-apps/tauri/frontend/**') }}
@@ -278,7 +278,7 @@ jobs:
       # ── egui app (not in workspace — heavy eframe dependency tree) ──
       - name: Cache egui test app build
         if: matrix.app == 'egui'
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: test-apps/egui/target
           key: ${{ runner.os }}-egui-app-${{ hashFiles('test-apps/egui/Cargo.toml', 'test-apps/egui/Cargo.lock', 'test-apps/egui/src/**') }}
@@ -292,7 +292,7 @@ jobs:
       # ── Electron node_modules ──────────────────────────────────────
       - name: Cache Electron node_modules
         if: matrix.app == 'electron'
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: test-apps/electron/node_modules
           key: ${{ runner.os }}-electron-app-${{ hashFiles('test-apps/electron/package.json') }}
@@ -333,7 +333,7 @@ jobs:
 
       # ── Build xa11y-js ─────────────────────────────────────────────
       - name: Cache xa11y-js node_modules and native target
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             xa11y-js/node_modules
@@ -386,7 +386,7 @@ jobs:
       # ── Cache Cocoa test app binary ────────────────────────────────
       - name: Cache Cocoa test app binary
         if: matrix.app == 'cocoa'
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: test-apps/cocoa/xa11y-cocoa-test-app
           key: ${{ runner.os }}-cocoa-app-${{ hashFiles('test-apps/cocoa/main.swift', 'test-apps/cocoa/Makefile') }}
@@ -479,7 +479,7 @@ jobs:
           .venv-examples/bin/pip install -e xa11y-python
 
       - name: Cache xa11y-js node_modules and native target
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: |
             xa11y-js/node_modules
@@ -550,7 +550,7 @@ jobs:
 
       - name: Cache cargo-deny binary
         id: cache-cargo-deny
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/cargo-deny
           key: cargo-deny-${{ runner.os }}-${{ runner.arch }}
@@ -788,7 +788,7 @@ jobs:
       # run (mirrors the cargo-deny cache in license-check).
       - name: Cache cargo-fuzz binary
         id: cache-cargo-fuzz
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/cargo-fuzz
           key: cargo-fuzz-${{ runner.os }}-${{ runner.arch }}
