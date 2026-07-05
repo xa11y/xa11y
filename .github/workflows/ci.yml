@@ -39,6 +39,13 @@ jobs:
         uses: xa11y/setup-a11y@v1
         with:
           package-groups: base gtk
+          # Bumped 2->3 to evict a poisoned apt-package cache: a partial
+          # save left the `base gtk` entry with a manifest but no .deb
+          # payload, so warm restores installed 0 packages and the build
+          # failed to link libxkbcommon (rust-lld: unable to find
+          # -lxkbcommon). A new version mints a fresh cache key. Kept in
+          # sync across every setup-a11y call below.
+          apt-cache-version: "3"
           setup-display: "false"
           setup-atspi: "false"
 
@@ -255,6 +262,7 @@ jobs:
         uses: xa11y/setup-a11y@v1
         with:
           package-groups: base gtk electron
+          apt-cache-version: "3"
           setup-window-manager: ${{ matrix.app == 'egui' }}
 
       # ── Build Rust workspace (all workspace test-app binaries) ─────
@@ -467,6 +475,7 @@ jobs:
         uses: xa11y/setup-a11y@v1
         with:
           package-groups: base
+          apt-cache-version: "3"
 
       # ── Build everything the examples need ───────────────────────────
       - name: Build workspace (test app, CLI, Rust example)
@@ -601,6 +610,7 @@ jobs:
         uses: xa11y/setup-a11y@v1
         with:
           package-groups: link
+          apt-cache-version: "3"
           setup-display: "false"
           setup-atspi: "false"
 
@@ -729,6 +739,7 @@ jobs:
         uses: xa11y/setup-a11y@v1
         with:
           package-groups: link
+          apt-cache-version: "3"
           setup-display: "false"
           setup-atspi: "false"
 
@@ -800,6 +811,7 @@ jobs:
         uses: xa11y/setup-a11y@v1
         with:
           package-groups: link
+          apt-cache-version: "3"
           setup-display: "false"
           setup-atspi: "false"
 
