@@ -259,7 +259,7 @@ impl ScreenshotProvider for LinuxScreenshot {
         // Captured pixels are physical; stamp the physical-to-logical ratio so
         // callers can map logical bounds onto them. `capture_*` produce the
         // raw pixels; the scale is metadata applied here. See `crate::scale`.
-        let scale = crate::scale::display_scale();
+        let scale = crate::scale::screenshot_scale();
         let mut shot = match &self.backend {
             Backend::X11(x) => self.capture_x11(&x.conn, x.root, x.root_width, x.root_height, None),
             Backend::Wayland { conn } => self.capture_wayland(conn, None),
@@ -271,7 +271,7 @@ impl ScreenshotProvider for LinuxScreenshot {
     fn capture_region(&self, rect: Rect) -> Result<Screenshot> {
         // `rect` is logical (matching `Element::bounds`); convert to the
         // physical pixels the X server / portal image work in.
-        let scale = crate::scale::display_scale();
+        let scale = crate::scale::screenshot_scale();
         let phys = rect.to_physical(scale);
         let mut shot = match &self.backend {
             Backend::X11(x) => {

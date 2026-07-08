@@ -367,7 +367,7 @@ impl LinuxInputProvider {
     /// virtual range is mapped against the physical screen size. No-op at
     /// scale 1.0. See `crate::scale`.
     fn to_physical(&self, p: Point) -> Point {
-        p.to_physical(crate::scale::display_scale())
+        p.to_physical(crate::scale::coordinate_scale())
     }
 }
 

@@ -371,7 +371,7 @@ impl LinuxProvider {
                 width: w.max(0) as u32,
                 height: h.max(0) as u32,
             }
-            .to_logical(crate::scale::display_scale()),
+            .to_logical(crate::scale::coordinate_scale()),
         )
     }
 

@@ -1,68 +1,85 @@
 //! Best-effort HiDPI scale detection for Linux, shared by the AT-SPI provider,
-//! the screenshot backend, and the input backend so they agree on one factor.
+//! the screenshot backend, and the input backend.
 //!
-//! # What "scale" means here
+//! # Two scales, because two coordinate spaces
 //!
 //! The cross-platform contract (see `xa11y_core`) is that `Element::bounds` and
 //! input `Point`s are **logical** (device-independent) coordinates, and
-//! `Screenshot::scale` is the physical-to-logical ratio. To honor that on Linux
-//! we need the display's UI scale factor.
+//! `Screenshot::scale` is the physical-to-logical ratio. Reaching that on Linux
+//! needs the display scale — but *where* the scale applies differs by display
+//! server, so this module exposes two functions:
 //!
-//! # Why this is X11-integer-only
+//! - [`coordinate_scale`] — the factor relating AT-SPI bounds / input points to
+//!   logical coordinates. Non-`1.0` **only on a pure-X11 session** with integer
+//!   scaling, read from `Xft.dpi` in the X `RESOURCE_MANAGER` (the same signal
+//!   GTK/Qt use). On X11, AT-SPI `GetExtents(screen)` and XTest are in physical
+//!   pixels, so bounds are divided by this and input points multiplied by it.
+//!   On Wayland it is `1.0`: AT-SPI coordinates are already logical, and the
+//!   uinput backend maps its virtual absolute range onto the compositor's
+//!   logical pointer space — so no coordinate scaling is applied there.
 //!
-//! On a **pure X11 session** with **integer** UI scaling (the GNOME
-//! "scaling-factor", `GDK_SCALE`, Qt auto-scale case), toolkits render an app
-//! at N× its logical size in physical pixels, and AT-SPI's
-//! `GetExtents(screen)` reports those physical pixels. The X server's
-//! `GetImage` (our screenshot) and XTest pointer warp are in the same physical
-//! pixel space. So dividing AT-SPI bounds by N yields logical coordinates that
-//! match macOS/Windows, and the screenshot/input backends multiply back by N.
-//! The desktop environment advertises N as `Xft.dpi = 96 × N` in the X
-//! `RESOURCE_MANAGER`, which is exactly what GTK and Qt read — so we read it
-//! too.
+//! - [`screenshot_scale`] — the physical-to-logical ratio of *captured pixels*.
+//!   On X11 this equals [`coordinate_scale`]. On **Wayland** it comes from a
+//!   live `wl_output` query, because the Screenshot portal returns physical
+//!   pixels while bounds/regions are logical: the region must be scaled up to
+//!   crop correctly, and the honest ratio is reported on the `Screenshot`.
 //!
-//! Everything else deliberately falls back to `1.0` (physical == logical,
-//! internally consistent, matching the prior behavior):
+//! # Caveats (documented, not silently guessed)
 //!
-//! - **Wayland / XWayland** (`WAYLAND_DISPLAY` set): the Screenshot portal
-//!   returns composited pixels and AT-SPI coordinate semantics under a Wayland
-//!   compositor are not reliably reconcilable without a direct `wl_output`
-//!   scale query, which the portal path does not give us.
-//! - **Fractional X11 scaling** (e.g. `Xft.dpi` of 120 or 144): GTK's X11
-//!   window scale is integer-only, so a non-integer `Xft.dpi` scales fonts but
-//!   not the coordinate space; treating it as a coordinate scale would corrupt
-//!   bounds. We report `1.0` rather than guess.
+//! - **Fractional X11 scaling** (e.g. `Xft.dpi` 120/144): GTK's X11 window
+//!   scale is integer-only, so a fractional `Xft.dpi` scales fonts, not the
+//!   coordinate space. [`coordinate_scale`] returns `1.0` for non-integer DPI.
+//! - **Fractional Wayland scaling**: `wl_output.scale` is the integer buffer
+//!   scale, so a 1.5× output reports `2`. Exact fractional detection needs
+//!   `xdg-output` (logical size vs. physical mode); that is a future refinement.
+//!   Integer Wayland scaling (the common 2× case) is exact.
 //!
 //! Reporting `1.0` never breaks capture/input round-trips (bounds and pixels
-//! stay in the same physical space); it only means `scale` is not upscaled and
-//! bounds are physical on those configurations.
+//! stay in the same space); it only means bounds are physical and scale is not
+//! upscaled on those configurations.
 
 #![cfg(target_os = "linux")]
 
 use std::sync::OnceLock;
 
-use x11rb::connection::Connection;
+use wayland_client::protocol::{wl_output, wl_registry};
+use wayland_client::{Connection, Dispatch, QueueHandle};
+use x11rb::connection::Connection as _;
 use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _};
 use x11rb::rust_connection::RustConnection;
 
-/// Windows-style "100%" DPI baseline: `scale = dpi / 96`.
+/// "100%" DPI baseline: `scale = dpi / 96`.
 const BASE_DPI: f64 = 96.0;
-/// Largest integer scale we will honor; guards against a garbage `Xft.dpi`.
+/// Largest integer scale we will honor; guards against a garbage reading.
 const MAX_SCALE: i64 = 8;
 /// How close `dpi / 96` must be to an integer to be treated as integer scaling.
 const INTEGER_EPS: f64 = 0.05;
 
-static SCALE: OnceLock<f64> = OnceLock::new();
-
-/// The process-wide display scale (physical/logical). Detected once, then
-/// cached. Returns `1.0` on anything but a pure-X11 integer-scaled session —
-/// see the module docs.
-pub fn display_scale() -> f64 {
-    *SCALE.get_or_init(detect_scale)
+/// The scale relating AT-SPI bounds and input points to logical coordinates.
+/// Detected once, then cached. `1.0` on anything but a pure-X11 integer-scaled
+/// session — see the module docs.
+pub fn coordinate_scale() -> f64 {
+    static SCALE: OnceLock<f64> = OnceLock::new();
+    *SCALE.get_or_init(detect_x11_scale)
 }
 
-fn detect_scale() -> f64 {
-    // Any Wayland involvement (native or XWayland) is out of scope; stay 1.0.
+/// The physical-to-logical ratio of captured pixels. Equals
+/// [`coordinate_scale`] on X11; on Wayland it comes from a `wl_output` query.
+/// Detected once, then cached.
+pub fn screenshot_scale() -> f64 {
+    static SCALE: OnceLock<f64> = OnceLock::new();
+    *SCALE.get_or_init(|| {
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            wayland_output_scale().unwrap_or(1.0)
+        } else {
+            coordinate_scale()
+        }
+    })
+}
+
+/// X11 `Xft.dpi`-derived integer scale. `1.0` under Wayland (coordinates are
+/// logical there) or when there is no X display.
+fn detect_x11_scale() -> f64 {
     if std::env::var_os("WAYLAND_DISPLAY").is_some() {
         return 1.0;
     }
@@ -101,8 +118,7 @@ fn read_xft_dpi() -> Option<f64> {
 }
 
 /// Parse `Xft.dpi:<whitespace><number>` out of an xrdb `RESOURCE_MANAGER`
-/// dump. Returns the DPI value, or `None` if the resource is absent or
-/// unparseable. Pure — unit-tested without an X server.
+/// dump. Pure — unit-tested without an X server.
 fn parse_xft_dpi(resources: &str) -> Option<f64> {
     for line in resources.lines() {
         let line = line.trim();
@@ -114,8 +130,8 @@ fn parse_xft_dpi(resources: &str) -> Option<f64> {
 }
 
 /// Map an `Xft.dpi` value to a coordinate scale, honoring **integer** scales
-/// only. `dpi / 96` is snapped to the nearest integer when it lands within
-/// [`INTEGER_EPS`]; otherwise (fractional or out-of-range) we return `1.0`.
+/// only. `dpi / 96` is snapped to the nearest integer when within
+/// [`INTEGER_EPS`]; otherwise (fractional or out-of-range) returns `1.0`.
 /// Pure — unit-tested.
 fn scale_from_dpi(dpi: f64) -> f64 {
     if !dpi.is_finite() || dpi <= 0.0 {
@@ -127,6 +143,78 @@ fn scale_from_dpi(dpi: f64) -> f64 {
         nearest
     } else {
         1.0
+    }
+}
+
+/// Collects the largest integer `wl_output.scale` advertised by the compositor.
+#[derive(Default)]
+struct OutputScales {
+    max_scale: i32,
+}
+
+impl Dispatch<wl_registry::WlRegistry, ()> for OutputScales {
+    fn event(
+        _state: &mut Self,
+        registry: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _data: &(),
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        if let wl_registry::Event::Global {
+            name,
+            interface,
+            version,
+        } = event
+        {
+            // The `scale` event exists since wl_output v2; bind at most v2 so
+            // we don't need to handle the newer name/description events.
+            if interface == "wl_output" && version >= 2 {
+                registry.bind::<wl_output::WlOutput, (), Self>(name, 2, qh, ());
+            }
+        }
+    }
+}
+
+impl Dispatch<wl_output::WlOutput, ()> for OutputScales {
+    fn event(
+        state: &mut Self,
+        _output: &wl_output::WlOutput,
+        event: wl_output::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        if let wl_output::Event::Scale { factor } = event {
+            state.max_scale = state.max_scale.max(factor);
+        }
+    }
+}
+
+/// Query the live Wayland output scale via `wl_output`. Returns the largest
+/// integer scale across outputs, or `None` on any failure (no compositor, no
+/// `scale` event) so the caller degrades to `1.0`.
+///
+/// Only meaningful on a Wayland session; guarded by the `WAYLAND_DISPLAY` check
+/// in [`screenshot_scale`].
+fn wayland_output_scale() -> Option<f64> {
+    let conn = Connection::connect_to_env().ok()?;
+    let display = conn.display();
+    let mut queue = conn.new_event_queue::<OutputScales>();
+    let qh = queue.handle();
+    display.get_registry(&qh, ());
+
+    let mut state = OutputScales::default();
+    // First roundtrip delivers the registry globals and binds each output;
+    // the second delivers each output's geometry/mode/scale burst.
+    queue.roundtrip(&mut state).ok()?;
+    queue.roundtrip(&mut state).ok()?;
+
+    let s = state.max_scale as i64;
+    if (1..=MAX_SCALE).contains(&s) {
+        Some(s as f64)
+    } else {
+        None
     }
 }
 
