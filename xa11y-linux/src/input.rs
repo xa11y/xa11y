@@ -360,8 +360,20 @@ impl LinuxInputProvider {
     }
 }
 
+impl LinuxInputProvider {
+    /// Convert a logical target point (the cross-platform contract, same space
+    /// as `Element::bounds`) to the physical device pixels both backends
+    /// expect: XTest warps to physical root coordinates, and the uinput
+    /// virtual range is mapped against the physical screen size. No-op at
+    /// scale 1.0. See `crate::scale`.
+    fn to_physical(&self, p: Point) -> Point {
+        p.to_physical(crate::scale::display_scale())
+    }
+}
+
 impl InputProvider for LinuxInputProvider {
     fn pointer_move(&self, to: Point) -> Result<()> {
+        let to = self.to_physical(to);
         match &self.backend {
             InputBackend::X11(x) => x.pointer_move(to),
             InputBackend::Wayland(w) => w.pointer_move(to),
@@ -383,6 +395,7 @@ impl InputProvider for LinuxInputProvider {
     }
 
     fn pointer_click(&self, at: Point, button: MouseButton, count: u32) -> Result<()> {
+        let at = self.to_physical(at);
         match &self.backend {
             InputBackend::X11(x) => x.pointer_click(at, button, count),
             InputBackend::Wayland(w) => w.pointer_click(at, button, count),
@@ -390,6 +403,7 @@ impl InputProvider for LinuxInputProvider {
     }
 
     fn pointer_scroll(&self, at: Point, delta: ScrollDelta) -> Result<()> {
+        let at = self.to_physical(at);
         match &self.backend {
             InputBackend::X11(x) => x.pointer_scroll(at, delta),
             InputBackend::Wayland(w) => w.pointer_scroll(at, delta),

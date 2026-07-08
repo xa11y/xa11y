@@ -21,6 +21,9 @@ mod input;
 mod wayland_input;
 
 #[cfg(target_os = "linux")]
+mod scale;
+
+#[cfg(target_os = "linux")]
 mod screenshot;
 
 #[cfg(target_os = "linux")]

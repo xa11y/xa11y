@@ -7,9 +7,12 @@
 //! implementation) and captures the full screen only — regions are cropped
 //! client-side from the full capture.
 //!
-//! Scale factor is reported as 1.0 on both paths: X11 has no canonical way to
-//! read the user's HiDPI scale from the wire protocol (it's in Xft.dpi / XRDB
-//! or the compositor), and the portal returns already-composited pixels.
+//! Captured pixels are physical on both paths. `Screenshot::scale` carries the
+//! physical-to-logical ratio detected by [`crate::scale`]: an integer factor on
+//! a pure-X11 integer-scaled session (read from `Xft.dpi`), and `1.0`
+//! elsewhere (Wayland, fractional, or unknown). `capture_region` receives a
+//! **logical** rectangle (matching `Element::bounds`) and converts it to
+//! physical before reading pixels.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -253,19 +256,31 @@ impl LinuxScreenshot {
 
 impl ScreenshotProvider for LinuxScreenshot {
     fn capture_full(&self) -> Result<Screenshot> {
-        match &self.backend {
+        // Captured pixels are physical; stamp the physical-to-logical ratio so
+        // callers can map logical bounds onto them. `capture_*` produce the
+        // raw pixels; the scale is metadata applied here. See `crate::scale`.
+        let scale = crate::scale::display_scale();
+        let mut shot = match &self.backend {
             Backend::X11(x) => self.capture_x11(&x.conn, x.root, x.root_width, x.root_height, None),
             Backend::Wayland { conn } => self.capture_wayland(conn, None),
-        }
+        }?;
+        shot.scale = scale as f32;
+        Ok(shot)
     }
 
     fn capture_region(&self, rect: Rect) -> Result<Screenshot> {
-        match &self.backend {
+        // `rect` is logical (matching `Element::bounds`); convert to the
+        // physical pixels the X server / portal image work in.
+        let scale = crate::scale::display_scale();
+        let phys = rect.to_physical(scale);
+        let mut shot = match &self.backend {
             Backend::X11(x) => {
-                self.capture_x11(&x.conn, x.root, x.root_width, x.root_height, Some(rect))
+                self.capture_x11(&x.conn, x.root, x.root_width, x.root_height, Some(phys))
             }
-            Backend::Wayland { conn } => self.capture_wayland(conn, Some(rect)),
-        }
+            Backend::Wayland { conn } => self.capture_wayland(conn, Some(phys)),
+        }?;
+        shot.scale = scale as f32;
+        Ok(shot)
     }
 }
 
