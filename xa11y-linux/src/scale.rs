@@ -19,10 +19,13 @@
 //!   logical pointer space — so no coordinate scaling is applied there.
 //!
 //! - [`screenshot_scale`] — the physical-to-logical ratio of *captured pixels*.
-//!   On X11 this equals [`coordinate_scale`]. On **Wayland** it comes from a
-//!   live `wl_output` query, because the Screenshot portal returns physical
-//!   pixels while bounds/regions are logical: the region must be scaled up to
-//!   crop correctly, and the honest ratio is reported on the `Screenshot`.
+//!   On X11 this equals [`coordinate_scale`]. On a **pure-Wayland** session it
+//!   comes from a live `wl_output` query, because the Screenshot portal returns
+//!   physical pixels while bounds/regions are logical: the region must be scaled
+//!   up to crop correctly, and the honest ratio is reported on the `Screenshot`.
+//!   Session classification (which source to use) mirrors the capture backend
+//!   selection — **X11 wins when `DISPLAY` is set**, so an XWayland session
+//!   (both env vars set) uses the X11 scale, matching its X11 capture backend.
 //!
 //! # Caveats (documented, not silently guessed)
 //!
@@ -68,17 +71,57 @@ pub fn coordinate_scale() -> f64 {
 }
 
 /// The physical-to-logical ratio of captured pixels. Equals
-/// [`coordinate_scale`] on X11; on Wayland it comes from a `wl_output` query.
-/// Detected once, then cached.
+/// [`coordinate_scale`] on X11; on a pure-Wayland session it comes from a
+/// `wl_output` query. Detected once, then cached.
+///
+/// The session is classified by [`scale_source`], which mirrors the backend
+/// selection in `screenshot::LinuxScreenshot::new` / `input`: **X11 wins when
+/// `DISPLAY` is set.** This matters because an XWayland session exposes *both*
+/// `DISPLAY` and `WAYLAND_DISPLAY`, and on it the capture goes through the X11
+/// backend. Keying the scale off `WAYLAND_DISPLAY` first (as an earlier version
+/// did) would apply a Wayland output ratio to X11-captured pixels — a region
+/// scaled by e.g. 2× against an unscaled `GetImage`, cropping the wrong area.
 pub fn screenshot_scale() -> f64 {
     static SCALE: OnceLock<f64> = OnceLock::new();
     *SCALE.get_or_init(|| {
-        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-            wayland_output_scale().unwrap_or(1.0)
-        } else {
-            coordinate_scale()
+        match scale_source(
+            std::env::var_os("DISPLAY").is_some(),
+            std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        ) {
+            // X11 (incl. XWayland): the capture backend is X11, so the scale
+            // must be the X11 coordinate scale — `1.0` under XWayland (where
+            // `detect_x11_scale` fails closed) so bounds/pixels stay in one
+            // space, or the `Xft.dpi` integer scale on a pure-X11 HiDPI session.
+            ScaleSource::X11 => coordinate_scale(),
+            // Pure Wayland: the portal returns physical pixels; the honest
+            // ratio comes from the live output geometry.
+            ScaleSource::Wayland => wayland_output_scale().unwrap_or(1.0),
+            ScaleSource::Headless => 1.0,
         }
     })
+}
+
+/// Which scale source the screenshot layer must use for a given session.
+#[derive(Debug, PartialEq, Eq)]
+enum ScaleSource {
+    X11,
+    Wayland,
+    Headless,
+}
+
+/// Classify the session for scale selection. **Must** match the backend
+/// selection in `screenshot`/`input` (X11 preferred when `DISPLAY` is set) so
+/// the reported/applied scale always matches the backend that captures the
+/// pixels. Pure — unit-tested. See [`screenshot_scale`] for why the order
+/// matters on XWayland.
+fn scale_source(display_set: bool, wayland_set: bool) -> ScaleSource {
+    if display_set {
+        ScaleSource::X11
+    } else if wayland_set {
+        ScaleSource::Wayland
+    } else {
+        ScaleSource::Headless
+    }
 }
 
 /// X11 `Xft.dpi`-derived integer scale. `1.0` under Wayland (coordinates are
@@ -340,7 +383,21 @@ fn sane_scale(s: f64) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{combine_wayland_scale, parse_xft_dpi, scale_from_dpi};
+    use super::{combine_wayland_scale, parse_xft_dpi, scale_from_dpi, scale_source, ScaleSource};
+
+    #[test]
+    fn scale_source_mirrors_backend_selection() {
+        // XWayland exposes BOTH env vars; the capture backend is X11, so the
+        // scale source must be X11 too — not Wayland. This is the regression
+        // the split predicate caused.
+        assert_eq!(scale_source(true, true), ScaleSource::X11);
+        // Pure X11.
+        assert_eq!(scale_source(true, false), ScaleSource::X11);
+        // Pure Wayland (no X display).
+        assert_eq!(scale_source(false, true), ScaleSource::Wayland);
+        // Headless / neither.
+        assert_eq!(scale_source(false, false), ScaleSource::Headless);
+    }
 
     #[test]
     fn parse_extracts_dpi_line() {
