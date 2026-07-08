@@ -36,3 +36,7 @@ wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 x11rb = { version = "0.13", default-features = false }
+# Mock Wayland compositor for the wl_output / xdg-output scale test: drives
+# the real client dispatch code over a socket, hermetically (no compositor).
+wayland-server = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "server", "unstable"] }

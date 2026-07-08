@@ -272,6 +272,12 @@ impl Dispatch<zxdg_output_v1::ZxdgOutputV1, ()> for OutputInfo {
 /// in [`screenshot_scale`].
 fn wayland_output_scale() -> Option<f64> {
     let conn = Connection::connect_to_env().ok()?;
+    wayland_output_scale_from_conn(conn)
+}
+
+/// The protocol body of [`wayland_output_scale`], split out so a mock
+/// compositor can drive it over an explicit connection in tests.
+fn wayland_output_scale_from_conn(conn: Connection) -> Option<f64> {
     let display = conn.display();
     let mut queue = conn.new_event_queue::<OutputInfo>();
     let qh = queue.handle();
@@ -426,5 +432,168 @@ mod tests {
     fn out_of_range_ratio_is_rejected() {
         // Degenerate logical width → absurd ratio → None (fail closed).
         assert_eq!(combine_wayland_scale(1, Some(1920), Some(1), 0), None);
+    }
+}
+
+/// End-to-end test of the live Wayland client path against a hermetic mock
+/// compositor. No real compositor is needed — a `wayland-server` instance on a
+/// background thread advertises one output with a physical 1920×1080 mode and
+/// an `xdg-output` logical size of 1280×720, so the client must compute the
+/// exact fractional scale 1920/1280 = 1.5 (the case `wl_output.scale`, which
+/// reports the integer 2, gets wrong). This exercises the real registry walk,
+/// binds, `get_xdg_output`, event handling, and roundtrip sequencing.
+#[cfg(test)]
+mod wayland_mock_tests {
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    use wayland_client::Connection;
+    use wayland_protocols::xdg::xdg_output::zv1::server::{
+        zxdg_output_manager_v1::{self, ZxdgOutputManagerV1},
+        zxdg_output_v1::{self, ZxdgOutputV1},
+    };
+    use wayland_server::protocol::wl_output::{self, WlOutput};
+    use wayland_server::{backend::ClientData, Dispatch, Display, DisplayHandle, GlobalDispatch};
+
+    const PHYSICAL_WIDTH: i32 = 1920;
+    const LOGICAL_WIDTH: i32 = 1280; // 1920 / 1280 = 1.5
+
+    struct MockServer;
+    struct ClientState;
+    impl ClientData for ClientState {}
+
+    impl GlobalDispatch<WlOutput, ()> for MockServer {
+        fn bind(
+            _state: &mut Self,
+            _handle: &DisplayHandle,
+            _client: &wayland_server::Client,
+            resource: wayland_server::New<WlOutput>,
+            _global_data: &(),
+            data_init: &mut wayland_server::DataInit<'_, Self>,
+        ) {
+            let output = data_init.init(resource, ());
+            output.geometry(
+                0,
+                0,
+                340,
+                190,
+                wl_output::Subpixel::Unknown,
+                "xa11y".into(),
+                "mock".into(),
+                wl_output::Transform::Normal,
+            );
+            output.mode(wl_output::Mode::Current, PHYSICAL_WIDTH, 1080, 60_000);
+            // The rounded integer buffer scale the client must NOT rely on.
+            output.scale(2);
+            output.done();
+        }
+    }
+    impl Dispatch<WlOutput, ()> for MockServer {
+        fn request(
+            _state: &mut Self,
+            _client: &wayland_server::Client,
+            _resource: &WlOutput,
+            _request: wl_output::Request,
+            _data: &(),
+            _dh: &DisplayHandle,
+            _init: &mut wayland_server::DataInit<'_, Self>,
+        ) {
+        }
+    }
+
+    impl GlobalDispatch<ZxdgOutputManagerV1, ()> for MockServer {
+        fn bind(
+            _state: &mut Self,
+            _handle: &DisplayHandle,
+            _client: &wayland_server::Client,
+            resource: wayland_server::New<ZxdgOutputManagerV1>,
+            _global_data: &(),
+            data_init: &mut wayland_server::DataInit<'_, Self>,
+        ) {
+            data_init.init(resource, ());
+        }
+    }
+    impl Dispatch<ZxdgOutputManagerV1, ()> for MockServer {
+        fn request(
+            _state: &mut Self,
+            _client: &wayland_server::Client,
+            _resource: &ZxdgOutputManagerV1,
+            request: zxdg_output_manager_v1::Request,
+            _data: &(),
+            _dh: &DisplayHandle,
+            data_init: &mut wayland_server::DataInit<'_, Self>,
+        ) {
+            if let zxdg_output_manager_v1::Request::GetXdgOutput { id, .. } = request {
+                let xdg = data_init.init(id, ());
+                xdg.logical_position(0, 0);
+                xdg.logical_size(LOGICAL_WIDTH, 720);
+                xdg.done();
+            }
+        }
+    }
+    impl Dispatch<ZxdgOutputV1, ()> for MockServer {
+        fn request(
+            _state: &mut Self,
+            _client: &wayland_server::Client,
+            _resource: &ZxdgOutputV1,
+            _request: zxdg_output_v1::Request,
+            _data: &(),
+            _dh: &DisplayHandle,
+            _init: &mut wayland_server::DataInit<'_, Self>,
+        ) {
+        }
+    }
+
+    #[test]
+    fn fractional_scale_from_mock_compositor() {
+        let sock_path =
+            std::env::temp_dir().join(format!("xa11y-mock-wl-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&sock_path);
+        let listener = UnixListener::bind(&sock_path).expect("bind mock socket");
+        listener.set_nonblocking(true).expect("nonblocking");
+
+        let mut display: Display<MockServer> = Display::new().expect("server display");
+        let mut dh = display.handle();
+        dh.create_global::<MockServer, WlOutput, ()>(4, ());
+        dh.create_global::<MockServer, ZxdgOutputManagerV1, ()>(3, ());
+
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let server_shutdown = Arc::clone(&shutdown);
+        let server = thread::spawn(move || {
+            let mut state = MockServer;
+            loop {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        dh.insert_client(stream, Arc::new(ClientState))
+                            .expect("insert client");
+                    }
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(e) => panic!("mock accept: {e}"),
+                }
+                display.dispatch_clients(&mut state).expect("dispatch");
+                display.flush_clients().expect("flush");
+                if server_shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        });
+
+        let stream = UnixStream::connect(&sock_path).expect("connect mock socket");
+        let conn = Connection::from_socket(stream).expect("client connection");
+        let scale = super::wayland_output_scale_from_conn(conn);
+
+        shutdown.store(true, Ordering::Relaxed);
+        server.join().expect("join server");
+        let _ = std::fs::remove_file(&sock_path);
+
+        assert_eq!(
+            scale,
+            Some(1.5),
+            "client must derive 1.5 from mode {PHYSICAL_WIDTH} / logical {LOGICAL_WIDTH}"
+        );
     }
 }
