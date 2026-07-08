@@ -2863,6 +2863,7 @@ dependencies = [
  "rayon",
  "serde_json",
  "wayland-client",
+ "wayland-protocols",
  "x11rb",
  "xa11y-core",
  "xkbcommon",
