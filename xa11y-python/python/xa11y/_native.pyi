@@ -99,7 +99,12 @@ class PlatformError(XA11yError):
 # ── Data Classes ─────────────────────────────────────────────────────────────
 
 class Rect:
-    """A bounding rectangle in screen coordinates (pixels)."""
+    """A bounding rectangle in logical screen coordinates (device-independent
+    points) on every platform, origin at the top-left of the primary display.
+
+    Same coordinate space as ``screenshot(region=...)`` and input targets, so
+    bounds pass straight through. To index into a captured image multiply by
+    the screenshot's ``scale`` (``physical = logical * scale``)."""
 
     @property
     def x(self) -> int: ...
@@ -548,8 +553,10 @@ class Locator:
 class InputSim:
     """Input-simulation façade for synthesised pointer and keyboard events.
 
-    Targets are either a ``(x, y)`` tuple in screen pixels, or an ``Element``
-    (uses its bounds centre). Key values are strings: printable characters
+    Targets are either a ``(x, y)`` tuple in logical screen coordinates (same
+    space as ``Element.bounds``), or an ``Element`` (uses its bounds centre);
+    each backend converts to physical device pixels at the OS boundary. Key
+    values are strings: printable characters
     are literal (``"a"``, ``"7"``, ``";"``); named keys use their Pascal name
     (``"Enter"``, ``"ArrowUp"``, ``"F5"``); modifiers are ``"Shift"``,
     ``"Ctrl"``, ``"Alt"``, ``"Meta"``.

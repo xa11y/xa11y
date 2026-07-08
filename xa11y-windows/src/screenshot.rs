@@ -9,17 +9,20 @@
 //!
 //! # DPI
 //!
-//! The process is switched to Per-Monitor-V2 DPI awareness on first
-//! [`WindowsScreenshot::new`] so the captured coordinates match the physical
-//! pixels UIA reports for element bounds. If a higher awareness has already
+//! Per-Monitor-V2 DPI awareness is set once, eagerly, via
+//! [`crate::dpi::ensure_process_dpi_aware`] — the same shared init the UIA
+//! provider calls — so it is established before the first UIA bounds read
+//! regardless of call order (issue #300). If a higher awareness has already
 //! been set (for example by a host application), the call is a no-op and we
 //! keep the existing awareness — we never downgrade.
 //!
-//! `Screenshot::scale` is reported as 1.0 because with Per-Monitor-V2
-//! awareness the bounds we take in are already physical pixels, so no
-//! further upscaling is needed. Multi-monitor setups with mixed DPI still
-//! work: the virtual desktop spans all monitors, and `BitBlt` composites
-//! through DWM at each monitor's native DPI.
+//! Regions are captured in **physical** pixels. `capture_region` receives a
+//! rectangle in **logical** coordinates (the cross-platform contract, matching
+//! `Element::bounds`) and converts it to physical using the DPI of the monitor
+//! under its origin; the resulting [`Screenshot::scale`] carries the
+//! physical-to-logical ratio so callers can map logical bounds onto captured
+//! pixels. Multi-monitor setups with mixed DPI are handled per-monitor; see
+//! [`crate::dpi`] for the boundary-straddling caveat.
 //!
 //! # Active session required
 //!
@@ -62,10 +65,6 @@ use windows::Win32::Graphics::Gdi::{
     HGDIOBJ, SRCCOPY,
 };
 #[cfg(target_os = "windows")]
-use windows::Win32::UI::HiDpi::{
-    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
-};
-#[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
@@ -73,13 +72,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 #[cfg(target_os = "windows")]
 impl WindowsScreenshot {
     pub fn new() -> Result<Self> {
-        // Best-effort: succeeds on first call, returns ERROR_ACCESS_DENIED on
-        // subsequent calls (or if the awareness is pinned by manifest). Either
-        // outcome is fine — we only care that awareness is at least
-        // Per-Monitor-V2 before we read pixels.
-        unsafe {
-            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        }
+        // Ensure Per-Monitor-V2 awareness is set before we read pixels. This
+        // is the same shared, once-only init the UIA provider calls, so
+        // awareness is established regardless of whether the consumer touches
+        // the a11y tree or a screenshot first (issue #300).
+        crate::dpi::ensure_process_dpi_aware();
         Ok(Self)
     }
 }
@@ -87,6 +84,8 @@ impl WindowsScreenshot {
 #[cfg(target_os = "windows")]
 impl ScreenshotProvider for WindowsScreenshot {
     fn capture_full(&self) -> Result<Screenshot> {
+        // With Per-Monitor-V2 awareness the virtual-screen metrics are already
+        // physical pixels, so no logical->physical conversion is needed here.
         let vx = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
         let vy = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
         let vw = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
@@ -97,34 +96,45 @@ impl ScreenshotProvider for WindowsScreenshot {
                 message: format!("virtual screen has non-positive size: {vw}x{vh}"),
             });
         }
-        capture_rect(vx, vy, vw, vh)
+        // Report the scale of the monitor at the virtual-desktop origin. The
+        // full capture may span mixed-DPI monitors; `scale` is a single scalar
+        // by contract, so we report the origin monitor's factor.
+        let scale = crate::dpi::scale_for_physical_point(vx, vy) as f32;
+        capture_rect(vx, vy, vw, vh, scale)
     }
 
     fn capture_region(&self, rect: Rect) -> Result<Screenshot> {
-        if rect.width == 0 || rect.height == 0 {
+        // `rect` arrives in logical coordinates (the cross-platform contract,
+        // matching `Element::bounds`). Convert to the physical pixels BitBlt
+        // works in, using the DPI of the monitor under the rect's origin.
+        let scale = crate::dpi::scale_for_logical_point(rect.x, rect.y);
+        let phys = rect.to_physical(scale);
+        if phys.width == 0 || phys.height == 0 {
             return Err(Error::Platform {
                 code: -1,
                 message: "zero-sized capture rect".into(),
             });
         }
-        let w = i32::try_from(rect.width).map_err(|_| Error::Platform {
+        let w = i32::try_from(phys.width).map_err(|_| Error::Platform {
             code: -1,
             message: "rect width out of i32 range".into(),
         })?;
-        let h = i32::try_from(rect.height).map_err(|_| Error::Platform {
+        let h = i32::try_from(phys.height).map_err(|_| Error::Platform {
             code: -1,
             message: "rect height out of i32 range".into(),
         })?;
-        capture_rect(rect.x, rect.y, w, h)
+        capture_rect(phys.x, phys.y, w, h, scale as f32)
     }
 }
 
 /// BitBlt a rectangle of the virtual desktop into an RGBA8 `Screenshot`.
 ///
-/// `x`/`y` are virtual-screen coordinates (may be negative on multi-monitor
-/// setups); `w`/`h` are positive pixel dimensions.
+/// `x`/`y` are **physical** virtual-screen coordinates (may be negative on
+/// multi-monitor setups); `w`/`h` are positive physical pixel dimensions.
+/// `scale` is the physical-to-logical ratio recorded on the returned
+/// `Screenshot` so callers can map logical bounds to captured pixels.
 #[cfg(target_os = "windows")]
-fn capture_rect(x: i32, y: i32, w: i32, h: i32) -> Result<Screenshot> {
+fn capture_rect(x: i32, y: i32, w: i32, h: i32, scale: f32) -> Result<Screenshot> {
     let width = w as u32;
     let height = h as u32;
 
@@ -224,7 +234,7 @@ fn capture_rect(x: i32, y: i32, w: i32, h: i32) -> Result<Screenshot> {
         width,
         height,
         pixels,
-        scale: 1.0,
+        scale,
     })
 }
 
