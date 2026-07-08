@@ -27,6 +27,16 @@ evdev = "0.13"
 # `keysym_for(Key)` mapping is reused; we then translate that keysym to
 # an evdev keycode through the system's default xkb keymap.
 xkbcommon = "0.9"
+# wayland-client + the xdg-output protocol to query the live output scale so
+# the screenshot backend can report an honest HiDPI scale on Wayland sessions.
+# xdg-output's logical_size vs wl_output's physical mode yields the exact
+# scale, including fractional (e.g. 1.5x).
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 x11rb = { version = "0.13", default-features = false }
+# Mock Wayland compositor for the wl_output / xdg-output scale test: drives
+# the real client dispatch code over a socket, hermetically (no compositor).
+wayland-server = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "server", "unstable"] }

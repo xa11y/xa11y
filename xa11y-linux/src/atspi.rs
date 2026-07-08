@@ -360,12 +360,19 @@ impl LinuxProvider {
         if w <= 0 && h <= 0 {
             return None;
         }
-        Some(Rect {
-            x,
-            y,
-            width: w.max(0) as u32,
-            height: h.max(0) as u32,
-        })
+        // AT-SPI screen extents are physical device pixels. Convert to logical
+        // coordinates (the cross-platform contract, same space as the
+        // screenshot/input layers) using the detected display scale. On the
+        // common 1.0 case this is a no-op. See `crate::scale`.
+        Some(
+            Rect {
+                x,
+                y,
+                width: w.max(0) as u32,
+                height: h.max(0) as u32,
+            }
+            .to_logical(crate::scale::coordinate_scale()),
+        )
     }
 
     /// Get available actions via Action interface, returning both the action list
