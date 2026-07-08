@@ -114,7 +114,7 @@ xa11y picks the Linux backend at runtime: if `DISPLAY` is set we drive XTest; ot
 
 Every pointer method accepts either a screen-space point or an `Element`:
 
-- **Point** — absolute screen coordinates in the platform's native coordinate space (points on macOS, physical pixels on Windows and Linux). Origin is the top-left of the primary display; negative values are valid on multi-monitor setups.
+- **Point** — absolute screen coordinates in logical (device-independent) units: points on macOS, DIPs on Windows, and logical pixels on Linux (physical where the HiDPI scale can't be read reliably — see [platform details](/guides/platform-details/#coordinates-and-hidpi)). Origin is the top-left of the primary display; negative values are valid on multi-monitor setups.
 - **Element** — uses the centre of the element's `bounds` at the time of the call. `InputSim` does not re-read the accessibility tree for you — re-fetch via a locator first if the UI may have moved.
 
 In Rust, additional anchors are available via `ClickOptions.anchor` (`Anchor::TopLeft`, `Anchor::Offset { dx, dy }`, etc.).
