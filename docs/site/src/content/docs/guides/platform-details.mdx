@@ -96,12 +96,12 @@ Inserts text via the accessibility API — never simulates keyboard events.
 
 ### Coordinates
 
-All platforms report bounds as **logical** (device-independent) screen coordinates with origin at the top-left of the primary display, and `Screenshot.scale` carries the physical-to-logical ratio for mapping bounds onto captured pixels. Note:
+All platforms report bounds as logical (device-independent) screen coordinates with origin at the top-left of the primary display, and `Screenshot.scale` carries the physical-to-logical ratio for mapping bounds onto captured pixels. Note:
 
-- **macOS** reports in **points** — its native logical unit. On Retina displays, 1 point = 2 physical pixels.
+- **macOS** reports in points — its native logical unit. On Retina displays, 1 point = 2 physical pixels.
 - **Windows** reports device-independent pixels (DIPs); `scale` is the display's DPI scaling (e.g. `1.5` at 150%).
 - **Linux** reports logical pixels where the HiDPI scale is reliably detectable, and falls back to physical at scale `1.0` otherwise — see [Coordinates and HiDPI](/guides/platform-details/#coordinates-and-hidpi) for exactly when.
-- Multi-monitor setups can produce **negative coordinates** for displays positioned left of or above the primary.
+- Multi-monitor setups can produce negative coordinates for displays positioned left of or above the primary.
 
 ### Name resolution
 
@@ -147,12 +147,12 @@ The Screenshot portal usually auto-approves for non-interactive callers (`intera
 
 #### Coordinates and HiDPI
 
-`Element.bounds` and input `Point`s are **logical** (device-independent) coordinates, matching the cross-platform contract, and `Screenshot.scale` reports the physical-to-logical ratio. The scale is detected best-effort and is **exact** where it can be read reliably:
+`Element.bounds` and input `Point`s are logical (device-independent) coordinates, matching the cross-platform contract, and `Screenshot.scale` reports the physical-to-logical ratio. The scale is detected best-effort and is exact where it can be read reliably:
 
 - **Pure X11, integer scaling** — read from `Xft.dpi` in the X `RESOURCE_MANAGER` (the same signal GTK/Qt use). AT-SPI extents and `XTest` are physical, so bounds are divided and input points multiplied by it.
-- **Single-output Wayland, integer *or* fractional** — the exact ratio `physical_mode / logical_size` from `xdg-output` (e.g. `1920 / 1280 = 1.5`), not the rounded `wl_output.scale`.
+- **Single-output Wayland, integer or fractional** — the exact ratio `physical_mode / logical_size` from `xdg-output` (e.g. `1920 / 1280 = 1.5`), not the rounded `wl_output.scale`.
 
-Every other configuration **fails closed to `1.0`** — never wrong data. There, bounds stay physical and the scale is not upscaled, but capture and input round-trips remain correct because bounds and pixels stay in the same space:
+Every other configuration fails closed to `1.0` — never wrong data. There, bounds stay physical and the scale is not upscaled, but capture and input round-trips remain correct because bounds and pixels stay in the same space:
 
 - **Fractional X11** — GTK's X11 window scale is integer-only, so a fractional `Xft.dpi` scales fonts, not the coordinate space.
 - **Multi-monitor mixed-DPI Wayland** — a single scalar can't represent per-monitor scales, so it falls back to the largest integer `wl_output.scale` (the Windows backend has the same limitation).
