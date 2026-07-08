@@ -96,10 +96,12 @@ Inserts text via the accessibility API — never simulates keyboard events.
 
 ### Coordinates
 
-All platforms report bounds as screen coordinates with origin at the top-left of the primary display. Note:
+All platforms report bounds as **logical** (device-independent) screen coordinates with origin at the top-left of the primary display, and `Screenshot.scale` carries the physical-to-logical ratio for mapping bounds onto captured pixels. Note:
 
-- **macOS** reports in **points**, not pixels. On Retina displays, 1 point = 2 physical pixels.
-- **Windows / Linux** report in physical pixels. Multi-monitor setups can produce negative coordinates for displays to the left or above the primary.
+- **macOS** reports in **points** — its native logical unit. On Retina displays, 1 point = 2 physical pixels.
+- **Windows** reports device-independent pixels (DIPs); `scale` is the display's DPI scaling (e.g. `1.5` at 150%).
+- **Linux** reports logical pixels where the HiDPI scale is reliably detectable, and falls back to physical at scale `1.0` otherwise — see [Coordinates and HiDPI](/guides/platform-details/#coordinates-and-hidpi) for exactly when.
+- Multi-monitor setups can produce **negative coordinates** for displays positioned left of or above the primary.
 
 ### Name resolution
 
@@ -145,7 +147,18 @@ The Screenshot portal usually auto-approves for non-interactive callers (`intera
 
 #### Coordinates and HiDPI
 
-X11 and Wayland coordinates are accepted in physical pixels at scale 1.0 today. HiDPI scale is not surfaced through the existing `Screenshot.scale` field on Linux — it stays 1.0. `Point` arguments to input simulation are taken at face value, then mapped onto the uinput virtual coordinate range. Override the assumed screen size (default 1920×1080) with `XA11Y_SCREEN_WIDTH` / `XA11Y_SCREEN_HEIGHT` env vars if your setup differs.
+`Element.bounds` and input `Point`s are **logical** (device-independent) coordinates, matching the cross-platform contract, and `Screenshot.scale` reports the physical-to-logical ratio. The scale is detected best-effort and is **exact** where it can be read reliably:
+
+- **Pure X11, integer scaling** — read from `Xft.dpi` in the X `RESOURCE_MANAGER` (the same signal GTK/Qt use). AT-SPI extents and `XTest` are physical, so bounds are divided and input points multiplied by it.
+- **Single-output Wayland, integer *or* fractional** — the exact ratio `physical_mode / logical_size` from `xdg-output` (e.g. `1920 / 1280 = 1.5`), not the rounded `wl_output.scale`.
+
+Every other configuration **fails closed to `1.0`** — never wrong data. There, bounds stay physical and the scale is not upscaled, but capture and input round-trips remain correct because bounds and pixels stay in the same space:
+
+- **Fractional X11** — GTK's X11 window scale is integer-only, so a fractional `Xft.dpi` scales fonts, not the coordinate space.
+- **Multi-monitor mixed-DPI Wayland** — a single scalar can't represent per-monitor scales, so it falls back to the largest integer `wl_output.scale` (the Windows backend has the same limitation).
+- **XWayland** (both `DISPLAY` and `WAYLAND_DISPLAY` set) — capture runs through the X11 backend, so the reported scale follows the X11 source and stays `1.0`, consistent with that backend.
+
+`Point` arguments to input simulation, after the logical→physical conversion, are mapped onto the uinput virtual coordinate range. Override the assumed screen size (default 1920×1080) with `XA11Y_SCREEN_WIDTH` / `XA11Y_SCREEN_HEIGHT` env vars if your setup differs.
 
 ### GTK press fallback (Linux)
 
