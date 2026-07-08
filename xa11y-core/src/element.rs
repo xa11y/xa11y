@@ -43,7 +43,17 @@ pub struct ElementData {
     /// See [`crate::text::strip_bidi`].
     pub description: Option<String>,
 
-    /// Bounding rectangle in screen pixels
+    /// Bounding rectangle in **logical** screen coordinates
+    /// (device-independent points), origin at the top-left of the primary
+    /// display. This is the same coordinate space accepted by
+    /// [`crate::ScreenshotProvider::capture_region`] and by the input layer's
+    /// [`crate::input::Point`], so bounds can be fed directly to
+    /// `screenshot_element` / `click` without conversion.
+    ///
+    /// To map to physical device pixels (e.g. to index into a captured image),
+    /// multiply by the [`crate::Screenshot::scale`] reported for that display:
+    /// `physical = logical × scale`. See [`Rect::to_physical`] /
+    /// [`Rect::to_logical`].
     pub bounds: Option<Rect>,
 
     /// Available actions reported by the platform.
@@ -422,6 +432,183 @@ pub struct Rect {
     pub y: i32,
     pub width: u32,
     pub height: u32,
+}
+
+impl Rect {
+    /// Convert a **logical** rectangle to **physical** device pixels by
+    /// multiplying every component by `scale` (the physical-to-logical ratio,
+    /// e.g. `1.5` at 150% or `2.0` on a typical Retina display).
+    ///
+    /// This is the inverse of [`Rect::to_logical`]. Each field is rounded to
+    /// the nearest integer independently; for a single rectangle the position
+    /// and size therefore round separately, which can differ by 1px from
+    /// scaling the far edge — acceptable for capture/hit-test use where a 1px
+    /// slack is expected on fractional scales.
+    ///
+    /// A non-finite or non-positive `scale` is treated as `1.0` (identity):
+    /// callers on platforms without a known scale factor pass `1.0`, and a
+    /// bogus value must never produce garbage coordinates.
+    #[must_use]
+    pub fn to_physical(self, scale: f64) -> Rect {
+        let s = sane_scale(scale);
+        Rect {
+            x: scale_i32(self.x, s),
+            y: scale_i32(self.y, s),
+            width: scale_u32(self.width, s),
+            height: scale_u32(self.height, s),
+        }
+    }
+
+    /// Convert a **physical** rectangle (device pixels) to **logical**
+    /// coordinates by dividing every component by `scale`. Inverse of
+    /// [`Rect::to_physical`]. See that method for rounding and `scale`
+    /// validity semantics.
+    #[must_use]
+    pub fn to_logical(self, scale: f64) -> Rect {
+        self.to_physical(1.0 / sane_scale(scale))
+    }
+}
+
+/// Clamp a scale factor to a usable positive, finite value. Non-finite or
+/// non-positive inputs collapse to `1.0` so a bad platform reading degrades
+/// to identity rather than producing nonsense coordinates.
+pub(crate) fn sane_scale(scale: f64) -> f64 {
+    if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    }
+}
+
+fn scale_i32(v: i32, scale: f64) -> i32 {
+    (f64::from(v) * scale).round() as i32
+}
+
+fn scale_u32(v: u32, scale: f64) -> u32 {
+    let scaled = (f64::from(v) * scale).round();
+    if scaled < 0.0 {
+        0
+    } else {
+        scaled as u32
+    }
+}
+
+#[cfg(test)]
+mod rect_scale_tests {
+    use super::Rect;
+
+    const R: Rect = Rect {
+        x: 100,
+        y: 200,
+        width: 300,
+        height: 40,
+    };
+
+    #[test]
+    fn scale_one_is_identity() {
+        assert_eq!(R.to_physical(1.0), R);
+        assert_eq!(R.to_logical(1.0), R);
+    }
+
+    #[test]
+    fn to_physical_multiplies_all_fields() {
+        assert_eq!(
+            R.to_physical(2.0),
+            Rect {
+                x: 200,
+                y: 400,
+                width: 600,
+                height: 80
+            }
+        );
+    }
+
+    #[test]
+    fn to_logical_divides_all_fields() {
+        // Physical bounds on a 150% display -> logical points.
+        let physical = Rect {
+            x: 150,
+            y: 300,
+            width: 450,
+            height: 60,
+        };
+        assert_eq!(
+            physical.to_logical(1.5),
+            Rect {
+                x: 100,
+                y: 200,
+                width: 300,
+                height: 40
+            }
+        );
+    }
+
+    #[test]
+    fn round_trip_preserves_within_one_px() {
+        for &scale in &[1.25_f64, 1.5, 1.75, 2.0] {
+            let back = R.to_physical(scale).to_logical(scale);
+            assert!((back.x - R.x).abs() <= 1, "x drift at {scale}");
+            assert!((back.y - R.y).abs() <= 1, "y drift at {scale}");
+            assert!(
+                (back.width as i64 - R.width as i64).abs() <= 1,
+                "w drift at {scale}"
+            );
+            assert!(
+                (back.height as i64 - R.height as i64).abs() <= 1,
+                "h drift at {scale}"
+            );
+        }
+    }
+
+    #[test]
+    fn negative_origin_scales_correctly() {
+        // Multi-monitor: a window on a display left of the primary.
+        let r = Rect {
+            x: -1920,
+            y: -100,
+            width: 200,
+            height: 100,
+        };
+        assert_eq!(
+            r.to_physical(2.0),
+            Rect {
+                x: -3840,
+                y: -200,
+                width: 400,
+                height: 200
+            }
+        );
+    }
+
+    #[test]
+    fn fractional_scale_rounds_to_nearest() {
+        let r = Rect {
+            x: 3,
+            y: 3,
+            width: 5,
+            height: 5,
+        };
+        // 3 * 1.5 = 4.5 -> 5 (round half away from zero via f64::round);
+        // 5 * 1.5 = 7.5 -> 8.
+        assert_eq!(
+            r.to_physical(1.5),
+            Rect {
+                x: 5,
+                y: 5,
+                width: 8,
+                height: 8
+            }
+        );
+    }
+
+    #[test]
+    fn bad_scale_degrades_to_identity() {
+        assert_eq!(R.to_physical(0.0), R);
+        assert_eq!(R.to_physical(-2.0), R);
+        assert_eq!(R.to_physical(f64::NAN), R);
+        assert_eq!(R.to_physical(f64::INFINITY), R);
+        assert_eq!(R.to_logical(0.0), R);
+    }
 }
 
 /// Platform-specific raw data attached to every element.

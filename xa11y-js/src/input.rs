@@ -14,8 +14,10 @@ use crate::map_err;
 /// Synthesises OS-level pointer and keyboard events.
 ///
 /// Constructed via the module-level `inputSim()` function. Targets are
-/// either an `[x, y]` tuple in screen pixels, or an `Element` (centred on
-/// its bounds). Key values are strings: printable characters are literal
+/// either an `[x, y]` tuple in logical screen coordinates (same space as
+/// `Element.bounds`), or an `Element` (centred on its bounds). Each backend
+/// converts to physical device pixels at the OS boundary. Key values are
+/// strings: printable characters are literal
 /// (`"a"`, `"7"`, `";"`); named keys use their Pascal name (`"Enter"`,
 /// `"ArrowUp"`, `"F5"`); modifiers are `"Shift"`, `"Ctrl"`, `"Alt"`,
 /// `"Meta"`.

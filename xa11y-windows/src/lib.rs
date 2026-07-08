@@ -6,6 +6,8 @@
 mod splice;
 
 #[cfg(target_os = "windows")]
+mod dpi;
+#[cfg(target_os = "windows")]
 mod input;
 #[cfg(target_os = "windows")]
 mod uia;

@@ -43,12 +43,19 @@ use crate::error::{Error, Result};
 
 // ── Geometry ────────────────────────────────────────────────────────
 
-/// A 2D point in screen coordinates.
+/// A 2D point in **logical** screen coordinates (device-independent points).
 ///
-/// Coordinates are integer screen pixels in the platform's native coordinate
-/// space. On macOS this is points (the OS handles HiDPI scaling for input
-/// events); on Windows and Linux this is physical pixels. Origin is top-left
-/// of the primary display; negative values are valid on multi-monitor setups.
+/// This is the same coordinate space as [`crate::element::Rect`] in
+/// `Element::bounds`, so anchor points computed from an element's bounds are
+/// already in the right space. Origin is top-left of the primary display;
+/// negative values are valid on multi-monitor setups.
+///
+/// Each [`InputProvider`] converts logical points to whatever its OS input API
+/// requires at the FFI boundary: macOS uses points natively (identity), while
+/// Windows and Linux multiply by the target display's scale factor to reach
+/// physical device pixels before dispatching the event. Consumers never see
+/// physical pixels here — a point that lands on an element's centre is
+/// `anchor_point(&element.bounds, Anchor::Center)`, unscaled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Point {
     pub x: i32,
@@ -58,6 +65,26 @@ pub struct Point {
 impl Point {
     pub const fn new(x: i32, y: i32) -> Self {
         Self { x, y }
+    }
+
+    /// Convert this **logical** point to **physical** device pixels by
+    /// multiplying by `scale` (the physical-to-logical ratio). Used by input
+    /// backends at the OS boundary. A non-finite or non-positive `scale`
+    /// collapses to `1.0` (identity) — see [`crate::element::Rect::to_physical`].
+    #[must_use]
+    pub fn to_physical(self, scale: f64) -> Point {
+        let s = crate::element::sane_scale(scale);
+        Point {
+            x: (f64::from(self.x) * s).round() as i32,
+            y: (f64::from(self.y) * s).round() as i32,
+        }
+    }
+
+    /// Convert this **physical** point to **logical** coordinates by dividing
+    /// by `scale`. Inverse of [`Point::to_physical`].
+    #[must_use]
+    pub fn to_logical(self, scale: f64) -> Point {
+        self.to_physical(1.0 / crate::element::sane_scale(scale))
     }
 }
 
@@ -671,5 +698,52 @@ where
         (Err(e), _) => Err(e),
         (Ok(()), Some(e)) => Err(e),
         (Ok(()), None) => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod point_scale_tests {
+    use super::{anchor_point, Anchor, Point};
+    use crate::element::Rect;
+
+    #[test]
+    fn scale_one_is_identity() {
+        let p = Point::new(100, -50);
+        assert_eq!(p.to_physical(1.0), p);
+        assert_eq!(p.to_logical(1.0), p);
+    }
+
+    #[test]
+    fn logical_to_physical_scales() {
+        assert_eq!(Point::new(100, 200).to_physical(1.5), Point::new(150, 300));
+        assert_eq!(Point::new(-40, 10).to_physical(2.0), Point::new(-80, 20));
+    }
+
+    #[test]
+    fn physical_to_logical_is_inverse() {
+        assert_eq!(Point::new(150, 300).to_logical(1.5), Point::new(100, 200));
+    }
+
+    #[test]
+    fn bad_scale_degrades_to_identity() {
+        let p = Point::new(7, 9);
+        assert_eq!(p.to_physical(0.0), p);
+        assert_eq!(p.to_physical(f64::NAN), p);
+    }
+
+    #[test]
+    fn anchor_center_of_logical_bounds_scales_to_physical() {
+        // A button whose logical bounds are 200x40 at (100, 100). Its centre
+        // is (200, 120) logically; on a 2x display the physical pixel is
+        // (400, 240) — what an input backend would feed to the OS.
+        let bounds = Rect {
+            x: 100,
+            y: 100,
+            width: 200,
+            height: 40,
+        };
+        let center = anchor_point(&bounds, Anchor::Center);
+        assert_eq!(center, Point::new(200, 120));
+        assert_eq!(center.to_physical(2.0), Point::new(400, 240));
     }
 }

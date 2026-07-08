@@ -25,11 +25,13 @@ impl From<xa11y::TreeNode> for TreeNode {
     }
 }
 
-/// A bounding rectangle in screen coordinates.
+/// A bounding rectangle in **logical** screen coordinates
+/// (device-independent points) on every platform. Origin is the top-left of
+/// the primary display; negative `x` / `y` are valid on multi-monitor setups.
 ///
-/// Coordinates use the platform's native coordinate space: points on macOS,
-/// physical pixels on Windows and Linux. Origin is the top-left of the
-/// primary display; negative `x` / `y` are valid on multi-monitor setups.
+/// This is the same space accepted by `screenshotRegion` and the input layer,
+/// so bounds can be passed straight through. To map onto captured pixels,
+/// multiply by the screenshot's `scale` (`physical = logical × scale`).
 #[napi(object)]
 #[derive(Clone)]
 pub struct Rect {

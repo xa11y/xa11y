@@ -82,4 +82,66 @@ mod tests {
         let bytes = shot.to_png().expect("PNG encode");
         assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
     }
+
+    /// Contract guard for issue #300: `Element::bounds` are **logical**
+    /// coordinates and `Screenshot::scale` is the honest physical-to-logical
+    /// ratio, so a region captured from those logical bounds must contain
+    /// `bounds × scale` physical pixels.
+    ///
+    /// Under the old Windows model (physical bounds, `scale` hard-coded to
+    /// 1.0) this invariant only held by accident at 100% DPI; on a scaled
+    /// display the reported scale disagreed with the bounds. This test encodes
+    /// the relationship directly. On 100%-DPI CI runners `scale == 1.0`, but
+    /// the equation is still exercised end-to-end through every backend.
+    #[test]
+    #[ignore]
+    fn region_from_logical_bounds_matches_scale() {
+        let app = h::app_root();
+        let button = h::named(&app, "Submit");
+
+        let Some(bounds) = button.bounds else {
+            eprintln!("skipping: element has no bounds (likely headless)");
+            return;
+        };
+        if bounds.width == 0 || bounds.height == 0 {
+            eprintln!("skipping: element bounds are zero-sized");
+            return;
+        }
+
+        // Capture the exact logical rect (not via screenshot_element) to prove
+        // that a caller passing logical bounds straight to screenshot_region
+        // gets pixels back at the reported scale.
+        let shot = match xa11y::screenshot_region(bounds) {
+            Ok(s) => s,
+            Err(xa11y::Error::Unsupported { feature }) => {
+                eprintln!("skipping: {feature}");
+                return;
+            }
+            Err(e) => panic!("region capture: {e}"),
+        };
+
+        assert!(
+            shot.scale.is_finite() && shot.scale > 0.0,
+            "scale must be a positive, finite ratio, got {}",
+            shot.scale
+        );
+        let expected_w = (bounds.width as f32 * shot.scale).round() as i64;
+        let expected_h = (bounds.height as f32 * shot.scale).round() as i64;
+        assert!(
+            (shot.width as i64 - expected_w).abs() <= 1,
+            "region width {} != logical {} × scale {} (= {})",
+            shot.width,
+            bounds.width,
+            shot.scale,
+            expected_w
+        );
+        assert!(
+            (shot.height as i64 - expected_h).abs() <= 1,
+            "region height {} != logical {} × scale {} (= {})",
+            shot.height,
+            bounds.height,
+            shot.scale,
+            expected_h
+        );
+    }
 }

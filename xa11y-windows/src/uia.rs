@@ -62,6 +62,11 @@ unsafe impl Sync for WindowsProvider {}
 
 impl WindowsProvider {
     pub fn new() -> Result<Self> {
+        // Establish Per-Monitor-V2 DPI awareness before the first bounds read
+        // so UIA reports coordinates in a stable (physical) space that we can
+        // convert to logical. Shared once-only init with the screenshot
+        // backend — see `crate::dpi` and issue #300.
+        crate::dpi::ensure_process_dpi_aware();
         ensure_com_initialized().map_err(|e| Error::Platform {
             code: e.code().0 as i64,
             message: format!("COM initialization failed: {}", e),
@@ -390,12 +395,21 @@ fn build_snapshot_data(
             if width == 0 && height == 0 {
                 None
             } else {
-                Some(Rect {
-                    x: r.left,
-                    y: r.top,
-                    width,
-                    height,
-                })
+                // Under Per-Monitor-V2 awareness UIA reports physical pixels.
+                // Convert to logical coordinates so `Element::bounds` matches
+                // the cross-platform contract (logical points, same space as
+                // the screenshot/input layers). Scale is the DPI of the
+                // monitor the element sits on.
+                let scale = crate::dpi::scale_for_physical_point(r.left, r.top);
+                Some(
+                    Rect {
+                        x: r.left,
+                        y: r.top,
+                        width,
+                        height,
+                    }
+                    .to_logical(scale),
+                )
             }
         });
 

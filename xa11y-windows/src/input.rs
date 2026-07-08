@@ -46,6 +46,11 @@ pub struct WindowsInputProvider {
 
 impl WindowsInputProvider {
     pub fn new() -> Result<Self> {
+        // Match the provider/screenshot backends' DPI awareness so the
+        // logical->physical conversion in `pointer_move` and the virtual-screen
+        // metrics in `to_absolute` agree, even if input is the first subsystem
+        // constructed. Shared once-only init — see `crate::dpi`.
+        crate::dpi::ensure_process_dpi_aware();
         Ok(Self::default())
     }
 
@@ -271,7 +276,14 @@ fn button_down_up(button: MouseButton) -> (u32, u32) {
 
 impl InputProvider for WindowsInputProvider {
     fn pointer_move(&self, to: Point) -> Result<()> {
-        let (ax, ay) = to_absolute(to.x, to.y);
+        // `to` is in logical coordinates (the cross-platform contract, same
+        // space as `Element::bounds`). SendInput's absolute normalization runs
+        // against the physical virtual-desktop metrics (we are Per-Monitor-V2
+        // aware), so convert logical -> physical first using the DPI of the
+        // monitor under the point.
+        let scale = crate::dpi::scale_for_logical_point(to.x, to.y);
+        let phys = to.to_physical(scale);
+        let (ax, ay) = to_absolute(phys.x, phys.y);
         let input = mouse_input(
             MOUSEEVENTF_MOVE.0 | MOUSEEVENTF_ABSOLUTE.0 | MOUSEEVENTF_VIRTUALDESK.0,
             ax,
