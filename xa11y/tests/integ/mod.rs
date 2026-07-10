@@ -6,6 +6,9 @@
 //!   stateset fields, selector queries, serialization, provider operations.
 //! * `actions` — action dispatch, new actions (Blur/SetTextSelection/TypeText),
 //!   complex/stress scenarios, action error paths.
+//! * `multi_window` — multi-window scenarios: opening a second top-level
+//!   window, the `active` state following window focus, and the #304/#305
+//!   foreground/enumeration behaviour with two windows of one process.
 //! * `errors` — error paths on the query/wait surface: selector misses,
 //!   invalid selectors, `wait_*` timeouts, auto-wait timeouts, unknown
 //!   actions, invalid action data.
@@ -18,6 +21,7 @@
 
 pub mod actions;
 pub mod errors;
+pub mod multi_window;
 pub mod screenshot;
 pub mod tree;
 
