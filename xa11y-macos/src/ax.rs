@@ -1537,19 +1537,28 @@ fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -
                 | Role::Switch
         ) || attrs.focused.is_some();
 
-        let states = StateSet {
-            enabled: attrs.enabled.unwrap_or(true),
-            visible: !attrs.hidden.unwrap_or(false),
-            focused: attrs.focused.unwrap_or(false),
-            focusable,
-            modal: attrs.modal.unwrap_or(false),
-            checked,
-            selected: attrs.selected.unwrap_or(false),
-            expanded: attrs.expanded,
-            editable: matches!(role, Role::TextField | Role::TextArea),
-            required: false,
-            busy: false,
-        };
+        // `AXMain` marks the app's main (active) window. Only window-like
+        // elements (Window / Dialog / Sheet — the latter maps to `Role::Dialog`)
+        // carry it, so gate on role to avoid an extra AX IPC round-trip for
+        // every non-window element. `ax_bool` routes through the exception-safe
+        // wrappers and owns its CFRelease; a missing / error / non-boolean
+        // attribute yields `false`, matching how the other state reads degrade.
+        let active = matches!(role, Role::Window | Role::Dialog)
+            && ax_bool(element, "AXMain").unwrap_or(false);
+
+        let mut states = StateSet::default();
+        states.enabled = attrs.enabled.unwrap_or(true);
+        states.visible = !attrs.hidden.unwrap_or(false);
+        states.focused = attrs.focused.unwrap_or(false);
+        states.active = active;
+        states.focusable = focusable;
+        states.modal = attrs.modal.unwrap_or(false);
+        states.checked = checked;
+        states.selected = attrs.selected.unwrap_or(false);
+        states.expanded = attrs.expanded;
+        states.editable = matches!(role, Role::TextField | Role::TextArea);
+        states.required = false;
+        states.busy = false;
 
         let bounds = match (attrs.position, attrs.size) {
             (Some((x, y)), Some((w, h))) if w > 0.0 || h > 0.0 => Some(Rect {

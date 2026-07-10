@@ -19,6 +19,7 @@ use winit::{
 };
 
 const WINDOW_TITLE: &str = "xa11y Test App";
+const DIALOG_TITLE: &str = "xa11y Test Dialog";
 
 // ── Node IDs ──────────────────────────────────────────────────────────────────
 const WINDOW: NodeId = NodeId(0);
@@ -108,8 +109,20 @@ const ANNOUNCE_LIVE_REGION: NodeId = NodeId(73);
 // it. See issue #188.
 const BIDI_BUTTON: NodeId = NodeId(74);
 
+// "Open Dialog" button — opens a second top-level winit window (see
+// `Application::open_dialog`). Exercises the multi-window scenario the
+// #304/#305 foreground/active-window changes exist for.
+const OPEN_DIALOG_BTN: NodeId = NodeId(75);
+
 // Dynamic items start at NodeId(100) to leave room for future static nodes
 const DYNAMIC_ITEM_BASE: u64 = 100;
+
+// ── Dialog window node IDs ──────────────────────────────────────────────────
+// The dialog is a *separate* winit window with its own AccessKit `Adapter`,
+// hence its own independent tree — these IDs share no namespace with the main
+// window's nodes above.
+const DIALOG_ROOT: NodeId = NodeId(0);
+const CLOSE_DIALOG_BTN: NodeId = NodeId(1);
 
 // ── Application State ─────────────────────────────────────────────────────────
 
@@ -354,7 +367,7 @@ fn build_main_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
     // Button row
     let mut button_row = Node::new(Role::GenericContainer);
     button_row.set_label("Button Row");
-    button_row.set_children(vec![SUBMIT_BTN, CANCEL_BTN, BIDI_BUTTON]);
+    button_row.set_children(vec![SUBMIT_BTN, CANCEL_BTN, BIDI_BUTTON, OPEN_DIALOG_BTN]);
     nodes.push((BUTTON_ROW, button_row));
 
     let mut submit = Node::new(Role::Button);
@@ -397,6 +410,22 @@ fn build_main_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
         y1: 150.0,
     });
     nodes.push((BIDI_BUTTON, bidi));
+
+    // Open Dialog button — its Click action opens a second top-level window.
+    // The press is dispatched through the accessibility API (handled at the
+    // `Application` level in `user_event`, which needs the event loop to spawn
+    // a window), not via mouse input.
+    let mut open_dialog = Node::new(Role::Button);
+    open_dialog.set_label("Open Dialog");
+    open_dialog.add_action(Action::Click);
+    open_dialog.add_action(Action::Focus);
+    open_dialog.set_bounds(Rect {
+        x0: 200.0,
+        y0: 160.0,
+        x1: 300.0,
+        y1: 190.0,
+    });
+    nodes.push((OPEN_DIALOG_BTN, open_dialog));
 
     // Checkbox
     let mut checkbox = Node::new(Role::CheckBox);
@@ -733,6 +762,41 @@ fn build_extra_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
     nodes.push((SPLIT_GROUP_NODE, split_group));
 }
 
+// ── Dialog Tree Builder ─────────────────────────────────────────────────────
+
+/// Build the second (dialog) window's accessibility tree: a `Window` root
+/// titled `xa11y Test Dialog` with a single `Close Dialog` button. Stateless —
+/// the dialog has no mutable widgets, so it takes no `AppState`.
+fn build_dialog_tree() -> TreeUpdate {
+    let mut root = Node::new(Role::Window);
+    root.set_label(DIALOG_TITLE);
+    root.set_children(vec![CLOSE_DIALOG_BTN]);
+    root.set_bounds(Rect {
+        x0: 0.0,
+        y0: 0.0,
+        x1: 300.0,
+        y1: 150.0,
+    });
+
+    let mut close = Node::new(Role::Button);
+    close.set_label("Close Dialog");
+    close.add_action(Action::Click);
+    close.add_action(Action::Focus);
+    close.set_bounds(Rect {
+        x0: 20.0,
+        y0: 60.0,
+        x1: 120.0,
+        y1: 90.0,
+    });
+
+    TreeUpdate {
+        nodes: vec![(DIALOG_ROOT, root), (CLOSE_DIALOG_BTN, close)],
+        tree: Some(Tree::new(DIALOG_ROOT)),
+        tree_id: TreeId::ROOT,
+        focus: CLOSE_DIALOG_BTN,
+    }
+}
+
 // ── Action Handler ────────────────────────────────────────────────────────────
 
 fn handle_action(request: &ActionRequest, state: &mut AppState) -> bool {
@@ -884,9 +948,74 @@ struct WindowState {
     state: AppState,
 }
 
+/// The dialog window (opened by "Open Dialog"). Unlike the main window it has
+/// no mutable widgets, so it carries no `AppState` — its tree is stateless
+/// (`build_dialog_tree`).
+struct DialogState {
+    window: Window,
+    adapter: Adapter,
+}
+
 struct Application {
     proxy: EventLoopProxy<AccessKitEvent>,
-    window: Option<WindowState>,
+    main: Option<WindowState>,
+    /// The second top-level window, present only while the dialog is open.
+    dialog: Option<DialogState>,
+}
+
+impl Application {
+    /// Open the dialog as a second top-level window with its own AccessKit
+    /// adapter. Idempotent: pressing "Open Dialog" again while it is already
+    /// open is a no-op.
+    fn open_dialog(&mut self, event_loop: &ActiveEventLoop) {
+        if self.dialog.is_some() {
+            return;
+        }
+        let window_attributes = Window::default_attributes()
+            .with_title(DIALOG_TITLE)
+            .with_visible(false);
+        let window = event_loop
+            .create_window(window_attributes)
+            .expect("Failed to create dialog window");
+        let adapter = Adapter::with_event_loop_proxy(event_loop, &window, self.proxy.clone());
+        window.set_visible(true);
+        self.dialog = Some(DialogState { window, adapter });
+        // The dialog takes host focus; the main window yields it. This is what
+        // moves the AT-SPI ACTIVE state (AXMain / foreground HWND on the other
+        // platforms) from the main window onto the dialog.
+        self.sync_focus();
+    }
+
+    /// Close the dialog by dropping its `Window` + `Adapter`, which destroys
+    /// the winit window and tears down its AccessKit adapter (removing the
+    /// window from the accessibility tree). Focus returns to the main window.
+    fn close_dialog(&mut self) {
+        self.dialog = None;
+        self.sync_focus();
+    }
+
+    /// Synthesise host focus so exactly one top-level window is active: the
+    /// dialog when open, otherwise the main window.
+    ///
+    /// Under headless Xvfb (the integration-test harness) there is no window
+    /// manager, so winit never dispatches `WindowEvent::Focused` on its own.
+    /// AccessKit's AT-SPI bridge gates the window `ACTIVE` state and
+    /// focus-change notifications on the host being OS-focused, so we drive
+    /// `Focused` manually on each adapter. Re-asserted on every AccessKit
+    /// user-event boundary so winit's `Focused(false)` on window creation
+    /// can't clobber the flag.
+    fn sync_focus(&mut self) {
+        let dialog_open = self.dialog.is_some();
+        if let Some(main) = &mut self.main {
+            main.adapter
+                .process_event(&main.window, &WindowEvent::Focused(!dialog_open));
+        }
+        if let Some(dialog) = &mut self.dialog {
+            dialog
+                .adapter
+                .process_event(&dialog.window, &WindowEvent::Focused(true));
+        }
+    }
 }
 
 impl ApplicationHandler<AccessKitEvent> for Application {
@@ -903,69 +1032,112 @@ impl ApplicationHandler<AccessKitEvent> for Application {
 
         window.set_visible(true);
 
-        // Under headless Xvfb (the integration-test harness) there is no
-        // window manager, so winit never dispatches
-        // `WindowEvent::Focused(true)` to the adapter. AccessKit's AT-SPI
-        // bridge gates focus-change notifications (`focus_moved`, which
-        // fans out to `StateChanged(focused, _)` and `PropertyChange` via
-        // the tree diff) on the host being OS-focused — without this
-        // nudge `Tree::focus()` collapses to `None` on every diff and
-        // any focus transition is silently suppressed. Synthesise
-        // the event on startup, then re-assert it on every AccessKit
-        // user-event boundary in `user_event` (below) so that winit's
-        // `Focused(false)` on window creation doesn't clobber the flag.
+        // Synthesise host focus on startup — see `sync_focus` for why this is
+        // needed under headless Xvfb.
         adapter.process_event(&window, &WindowEvent::Focused(true));
 
-        self.window = Some(WindowState {
+        self.main = Some(WindowState {
             window,
             adapter,
             state: AppState::new(),
         });
     }
 
-    fn window_event(&mut self, _: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
-        let ws = match &mut self.window {
-            Some(ws) => ws,
-            None => return,
-        };
-        ws.adapter.process_event(&ws.window, &event);
-        if let WindowEvent::CloseRequested = event {
-            self.window = None;
+    fn window_event(&mut self, _: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+        // The app drives window focus itself via `sync_focus` (there is no
+        // window manager under headless Xvfb). The raw `Focused` events winit
+        // *does* deliver are unreliable: when the dialog window maps, the X
+        // server bounces focus to the root and emits a spurious
+        // `Focused(false)` on the dialog, which — if forwarded to the adapter —
+        // clears the active window with no later event to restore it. So
+        // swallow raw `Focused` events and re-assert the intended state
+        // instead. Every other event is forwarded to its window's adapter.
+        if let WindowEvent::Focused(_) = event {
+            self.sync_focus();
+            return;
+        }
+        // Route the raw winit event to whichever window owns it.
+        if self
+            .main
+            .as_ref()
+            .is_some_and(|m| m.window.id() == window_id)
+        {
+            let main = self.main.as_mut().unwrap();
+            main.adapter.process_event(&main.window, &event);
+            if let WindowEvent::CloseRequested = event {
+                // Closing the main window quits the app.
+                self.main = None;
+            }
+        } else if self
+            .dialog
+            .as_ref()
+            .is_some_and(|d| d.window.id() == window_id)
+        {
+            let dialog = self.dialog.as_mut().unwrap();
+            dialog.adapter.process_event(&dialog.window, &event);
+            if let WindowEvent::CloseRequested = event {
+                self.close_dialog();
+            }
         }
     }
 
-    fn user_event(&mut self, _: &ActiveEventLoop, user_event: AccessKitEvent) {
-        let ws = match &mut self.window {
-            Some(ws) => ws,
-            None => return,
-        };
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, user_event: AccessKitEvent) {
+        let window_id = user_event.window_id;
 
-        match user_event.window_event {
-            AccessKitWindowEvent::InitialTreeRequested => {
-                // Re-assert host focus on every boundary the app touches —
-                // cheap and idempotent when already true. See the rationale
-                // on the synthesised WindowEvent::Focused(true) in
-                // `resumed()`: under headless Xvfb winit never emits the
-                // event itself, and without `is_host_focused = true` the
-                // AT-SPI bridge's tree diff treats focus as perpetually
-                // None and silently suppresses focus_moved.
-                ws.adapter
-                    .process_event(&ws.window, &WindowEvent::Focused(true));
-                ws.adapter.update_if_active(|| build_tree(&ws.state));
-            }
-            AccessKitWindowEvent::ActionRequested(request) => {
-                ws.adapter
-                    .process_event(&ws.window, &WindowEvent::Focused(true));
-                if handle_action(&request, &mut ws.state) {
-                    ws.adapter.update_if_active(|| build_tree(&ws.state));
+        if self
+            .main
+            .as_ref()
+            .is_some_and(|m| m.window.id() == window_id)
+        {
+            match user_event.window_event {
+                AccessKitWindowEvent::InitialTreeRequested => {
+                    self.sync_focus();
+                    let main = self.main.as_mut().unwrap();
+                    main.adapter.update_if_active(|| build_tree(&main.state));
                 }
+                AccessKitWindowEvent::ActionRequested(request) => {
+                    // "Open Dialog" is handled at the Application level because
+                    // spawning a window needs the event loop; other actions
+                    // mutate the main window's AppState.
+                    if request.target_node == OPEN_DIALOG_BTN && request.action == Action::Click {
+                        self.open_dialog(event_loop);
+                        return;
+                    }
+                    let main = self.main.as_mut().unwrap();
+                    if handle_action(&request, &mut main.state) {
+                        main.adapter.update_if_active(|| build_tree(&main.state));
+                    }
+                    self.sync_focus();
+                }
+                AccessKitWindowEvent::AccessibilityDeactivated => {}
             }
-            AccessKitWindowEvent::AccessibilityDeactivated => {}
+        } else if self
+            .dialog
+            .as_ref()
+            .is_some_and(|d| d.window.id() == window_id)
+        {
+            match user_event.window_event {
+                AccessKitWindowEvent::InitialTreeRequested => {
+                    self.sync_focus();
+                    let dialog = self.dialog.as_mut().unwrap();
+                    dialog.adapter.update_if_active(build_dialog_tree);
+                }
+                AccessKitWindowEvent::ActionRequested(request) => {
+                    if request.target_node == CLOSE_DIALOG_BTN && request.action == Action::Click {
+                        self.close_dialog();
+                        return;
+                    }
+                    // Focus (or any other) action on a dialog widget: keep the
+                    // dialog the active window.
+                    self.sync_focus();
+                }
+                AccessKitWindowEvent::AccessibilityDeactivated => {}
+            }
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_none() {
+        if self.main.is_none() {
             event_loop.exit();
         }
     }
@@ -976,7 +1148,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proxy = event_loop.create_proxy();
     let mut app = Application {
         proxy,
-        window: None,
+        main: None,
+        dialog: None,
     };
     event_loop.run_app(&mut app)?;
     Ok(())

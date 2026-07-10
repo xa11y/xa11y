@@ -441,6 +441,9 @@ pub(crate) fn format_element_oneline(el: &ElementData) -> String {
     if el.states.focused {
         states.push("focused");
     }
+    if el.states.active {
+        states.push("active");
+    }
     if el.states.focusable {
         states.push("focusable");
     }
@@ -546,11 +549,12 @@ fn cmd_apps() -> CliResult<()> {
     // Columns are `pid\tname`; the foreground app gets a trailing `focused`
     // field (App::list tags it via the platform's foreground query). Keeping
     // pid/name as columns 1-2 preserves the output contract for scripts that
-    // parse `xa11y apps` by column position.
+    // parse `xa11y apps` by column position. The printed token stays `focused`
+    // (a stable, documented output contract); the API name is `is_foreground`.
     for app in &apps {
         let pid_str = app.pid.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
-        let focused = if app.focused() { "\tfocused" } else { "" };
-        println!("{}\t{}{}", pid_str, app.name, focused);
+        let foreground = if app.is_foreground() { "\tfocused" } else { "" };
+        println!("{}\t{}{}", pid_str, app.name, foreground);
     }
     Ok(())
 }

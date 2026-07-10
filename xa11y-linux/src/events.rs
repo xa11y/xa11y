@@ -655,6 +655,7 @@ fn bits_from_u32s(state_bits: &[u32]) -> u64 {
 
 fn states_from_bits(bits: u64, role: Role) -> StateSet {
     // Same bit positions as `LinuxProvider::parse_states` — kept in sync.
+    const ACTIVE: u64 = 1 << 1;
     const BUSY: u64 = 1 << 3;
     const CHECKED: u64 = 1 << 4;
     const EDITABLE: u64 = 1 << 7;
@@ -693,19 +694,22 @@ fn states_from_bits(bits: u64, role: Role) -> StateSet {
         None
     };
 
-    StateSet {
-        enabled,
-        visible,
-        focused: (bits & FOCUSED) != 0,
-        checked,
-        selected: (bits & SELECTED) != 0,
-        expanded,
-        editable: (bits & EDITABLE) != 0,
-        focusable: (bits & FOCUSABLE) != 0,
-        modal: (bits & MODAL) != 0,
-        required: (bits & REQUIRED) != 0,
-        busy: (bits & BUSY) != 0,
-    }
+    let mut states = StateSet::default();
+    states.enabled = enabled;
+    states.visible = visible;
+    states.focused = (bits & FOCUSED) != 0;
+    // AT-SPI `ACTIVE` = foreground window/frame; kept in sync with
+    // `LinuxProvider::parse_states`.
+    states.active = (bits & ACTIVE) != 0;
+    states.checked = checked;
+    states.selected = (bits & SELECTED) != 0;
+    states.expanded = expanded;
+    states.editable = (bits & EDITABLE) != 0;
+    states.focusable = (bits & FOCUSABLE) != 0;
+    states.modal = (bits & MODAL) != 0;
+    states.required = (bits & REQUIRED) != 0;
+    states.busy = (bits & BUSY) != 0;
+    states
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

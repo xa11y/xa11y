@@ -9,7 +9,7 @@
 //!
 //! ```text
 //! application "TestApp" (stable_id="app-root", desc="Test application")
-//! └── window "Main Window" (focused)
+//! └── window "Main Window" (focused, active)
 //!     ├── toolbar "Navigation"
 //!     │   ├── button "Back" (stable_id="btn-back", desc="Go back")
 //!     │   └── button "Forward" (disabled)
@@ -137,8 +137,8 @@ impl Provider for MockProvider {
 
     fn focused_app(&self) -> Result<ElementData> {
         // The mock has a single application root; treat it as the foreground
-        // app so `App::focused` / `find(|a| a.focused())` have something to
-        // resolve against in binding and core tests.
+        // app so `App::is_foreground` / `find(|a| a.focused())` have something
+        // to resolve against in binding and core tests.
         if self.nodes.is_empty() {
             return Err(Error::selector_not_matched("focused application"));
         }
@@ -247,8 +247,11 @@ pub fn build_provider() -> Arc<MockProvider> {
                 height: 600,
             }),
             vec![],
+            // The mock models the foreground app, so its main window is the
+            // active window — mirrors `focused_app` returning the app root.
             StateSet {
                 focused: true,
+                active: true,
                 ..StateSet::default()
             },
             None,

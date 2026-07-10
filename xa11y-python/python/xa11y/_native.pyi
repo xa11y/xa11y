@@ -203,14 +203,29 @@ class App:
     @property
     def pid(self) -> int | None: ...
     @property
-    def focused(self) -> bool:
-        """Whether this application currently holds the foreground / input focus.
+    def is_foreground(self) -> bool:
+        """Whether this application is the foreground application.
 
-        Mirrors :attr:`Element.focused` one level up: an application is
-        ``focused`` when it is the foreground app. Populated for apps obtained
-        via :meth:`list` and :meth:`find` (where it is also visible to the
-        predicate, so ``App.find(lambda a: a.focused)`` selects the foreground
-        app). A point-in-time snapshot taken when the ``App`` was resolved.
+        Named ``is_foreground`` because "focused" is reserved for element-level
+        keyboard focus (:attr:`Element.focused`) elsewhere in the API; this is
+        the foreground-*application* flag. Populated for apps obtained via
+        :meth:`list` and :meth:`find`. A point-in-time snapshot taken when the
+        ``App`` was resolved.
+
+        On Windows apps are top-level windows, so the foreground process can own
+        several entries; tagging is window-precise, so only the entry actually
+        in the foreground reports ``is_foreground`` — not every window of the
+        process. Use :meth:`foreground` to resolve the exact foreground window
+        directly.
+        """
+    @property
+    def focused(self) -> bool:
+        """Deprecated alias for :attr:`is_foreground`.
+
+        .. deprecated::
+            Use :attr:`is_foreground`. "focused" refers to element keyboard
+            focus elsewhere in the API; accessing this property emits a
+            :class:`DeprecationWarning`.
         """
     @staticmethod
     def by_name(name: str, *, timeout: float | None = None) -> App:
@@ -258,6 +273,16 @@ class App:
                 lambda a: a.pid == pid and a.name.startswith("My Dialog"),
                 timeout=30.0,
             )
+        """
+    @staticmethod
+    def foreground(*, timeout: float | None = None) -> App:
+        """Resolve the application that currently holds the system foreground.
+
+        Queries the platform's foreground mechanism directly, so it returns the
+        exact foreground window on Windows and stays reliable when an app shows
+        a modal dialog. "Nothing focused" retries until ``timeout``; see
+        ``by_name`` for ``timeout`` semantics. The returned app has
+        ``is_foreground == True``.
         """
     @staticmethod
     def list() -> list[App]:
@@ -345,6 +370,14 @@ class Element:
     def visible(self) -> bool: ...
     @property
     def focused(self) -> bool: ...
+    @property
+    def active(self) -> bool:
+        """Whether this element is the active (foreground) window.
+
+        The window that currently receives the user's input. Meaningful for
+        window-like elements (windows, dialogs); ``False`` elsewhere. Distinct
+        from :attr:`focused`, which is element-level keyboard focus.
+        """
     @property
     def checked(self) -> str | None:
         """Tri-state toggle value: ``'on'``, ``'off'``, ``'mixed'``, or ``None``.

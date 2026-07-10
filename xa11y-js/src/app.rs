@@ -78,6 +78,20 @@ impl App {
         })
     }
 
+    /// Resolve the application that currently holds the system foreground.
+    ///
+    /// Uses the platform's direct foreground query rather than enumerating and
+    /// tagging by pid, so on Windows it returns the exact foreground window and
+    /// stays reliable when an app shows a modal dialog. Polls while nothing
+    /// holds focus; see {@link App.byName} for the `options.timeout` behaviour.
+    /// The returned app has `isForeground === true`.
+    #[napi(ts_return_type = "Promise<App>")]
+    pub fn foreground(options: Option<AppLookupOptions>) -> AsyncTask<ForegroundTask> {
+        AsyncTask::new(ForegroundTask {
+            timeout_ms: options.and_then(|o| o.timeout),
+        })
+    }
+
     /// List all running applications with an accessibility tree.
     #[napi(ts_return_type = "Promise<App[]>")]
     pub fn list() -> AsyncTask<ListAppsTask> {
@@ -97,12 +111,28 @@ impl App {
         self.pid
     }
 
-    /// Whether this application currently holds the foreground / input focus.
+    /// Whether this application is the foreground application.
     ///
-    /// Mirrors `Element.focused` one level up: an application is `focused` when
-    /// it is the foreground app. Populated for apps obtained via
+    /// Named `isForeground` because "focused" is reserved for element-level
+    /// keyboard focus (`Element.focused`) elsewhere in the API; this is the
+    /// foreground-*application* flag. Populated for apps obtained via
     /// {@link App.list}. A point-in-time snapshot taken when the `App` was
     /// resolved.
+    ///
+    /// On Windows apps are top-level windows, so the foreground process can own
+    /// several entries; tagging is window-precise, so only the entry actually
+    /// in the foreground reports `isForeground` — not every window of the
+    /// process. Use {@link App.foreground} to resolve the exact foreground
+    /// window directly.
+    #[napi(getter)]
+    pub fn is_foreground(&self) -> bool {
+        self.data.states.focused
+    }
+
+    /// Whether this application is the foreground application.
+    ///
+    /// @deprecated Use {@link App.isForeground}. "focused" refers to element
+    /// keyboard focus elsewhere in the API.
     #[napi(getter)]
     pub fn focused(&self) -> bool {
         self.data.states.focused
@@ -234,6 +264,25 @@ impl Task for FindByPidTask {
         let timeout = effective_timeout_ms(self.timeout_ms)?;
         let provider = crate::provider()?;
         xa11y::App::by_pid_with(provider, self.pid, timeout).map_err(map_err)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(App::from_core(output))
+    }
+}
+
+pub struct ForegroundTask {
+    timeout_ms: Option<u32>,
+}
+
+impl Task for ForegroundTask {
+    type Output = xa11y::App;
+    type JsValue = App;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        let timeout = effective_timeout_ms(self.timeout_ms)?;
+        let provider = crate::provider()?;
+        xa11y::App::foreground_with(provider, timeout).map_err(map_err)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {

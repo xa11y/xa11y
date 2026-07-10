@@ -73,9 +73,10 @@ mod tests {
         // The test app keeps itself host-focused (it synthesises
         // `WindowEvent::Focused(true)` so it reports active even under the
         // headless Xvfb harness), so it must surface as the foreground app:
-        // its entry in `App::list()` carries `focused() == true`. Exercises
-        // each backend's foreground query (AXFocusedApplication on macOS,
-        // GetForegroundWindow on Windows, the active AT-SPI window on Linux).
+        // its entry in `App::list()` carries `is_foreground() == true`.
+        // Exercises each backend's foreground query (AXFocusedApplication on
+        // macOS, GetForegroundWindow on Windows, the active AT-SPI window on
+        // Linux).
         let app = h::app_root();
         let apps = App::list().expect("App::list must succeed");
         let me = apps
@@ -83,10 +84,10 @@ mod tests {
             .find(|a| a.pid == app.pid)
             .unwrap_or_else(|| panic!("test app (pid={:?}) must appear in App::list()", app.pid));
         assert!(
-            me.focused(),
+            me.is_foreground(),
             "the test app should be the foreground app. Apps: {:?}",
             apps.iter()
-                .map(|a| (&a.name, a.focused()))
+                .map(|a| (&a.name, a.is_foreground()))
                 .collect::<Vec<_>>()
         );
     }
@@ -104,6 +105,70 @@ mod tests {
             focused.pid, app.pid,
             "the focused app must be the test app, got {:?}",
             focused.name
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn foreground_resolves_test_app() {
+        // `App::foreground` queries the platform foreground mechanism directly
+        // (AXFocusedApplication on macOS, GetForegroundWindow on Windows, the
+        // active AT-SPI window on Linux) rather than enumerating and tagging by
+        // pid. The test app keeps itself host-focused (see
+        // `focused_app_is_tagged_in_list`), so the resolved app must be the
+        // test app and must report `is_foreground()`.
+        let app = h::app_root();
+        let foreground = App::foreground(std::time::Duration::from_secs(2))
+            .expect("App::foreground must resolve the host-focused test app");
+        assert_eq!(
+            foreground.pid, app.pid,
+            "the foreground app must be the test app, got {:?}",
+            foreground.name
+        );
+        assert!(
+            foreground.is_foreground(),
+            "the app returned by App::foreground must report is_foreground()"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn foreground_window_reports_active() {
+        // The test app keeps itself host-focused (see
+        // `focused_app_is_tagged_in_list`), so its top-level window is the
+        // active (foreground) window and must report `states.active == true`.
+        // Exercises each backend's window-level active mapping (the AT-SPI
+        // ACTIVE state on Linux, AXMain on macOS, the foreground HWND on
+        // Windows).
+        let app = h::app_root();
+        // On Windows (UIA) the app root IS the window, so check it directly.
+        // Elsewhere the window is a descendant element; a scoped locator only
+        // matches descendants of its root, so the state-attr selector below is
+        // exercised on the platforms where the window is nested.
+        if app.data.role == Role::Window {
+            assert!(
+                app.as_element().states.active,
+                "the foreground window (app root) must report active. App: {app}"
+            );
+            return;
+        }
+        let windows = app.locator("window").elements().unwrap();
+        assert!(
+            windows.iter().any(|w| w.states.active),
+            "the test app's foreground window must report active. Windows: {:?}",
+            windows
+                .iter()
+                .map(|w| (&w.name, w.states.active))
+                .collect::<Vec<_>>()
+        );
+        // The `active` state-attr selector must resolve the same window.
+        let matched = app
+            .locator(r#"window[active="true"]"#)
+            .elements()
+            .expect("window[active=\"true\"] selector must resolve");
+        assert!(
+            !matched.is_empty(),
+            "window[active=\"true\"] must match the foreground window. App: {app}"
         );
     }
 

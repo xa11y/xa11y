@@ -371,15 +371,29 @@ fn write_tree_node(node: &TreeNode, depth: usize, out: &mut String) {
 /// element's role, the backend uses the platform's reported value or defaults:
 /// - `enabled`: `true` (elements are enabled unless explicitly disabled)
 /// - `visible`: `true` (elements are visible unless explicitly hidden/offscreen)
-/// - `focused`, `focusable`, `modal`, `selected`, `editable`, `required`, `busy`: `false`
+/// - `focused`, `active`, `focusable`, `modal`, `selected`, `editable`, `required`, `busy`: `false`
 ///
 /// States that are inherently inapplicable use `Option`: `checked` is `None`
 /// for non-checkable elements, `expanded` is `None` for non-expandable elements.
+///
+/// More states may be added in compatible releases, so this struct is
+/// `#[non_exhaustive]`: construct it via [`StateSet::default()`] (or
+/// [`Default::default()`]) and set the fields you need. Struct-literal
+/// construction is reserved to `xa11y-core`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct StateSet {
     pub enabled: bool,
     pub visible: bool,
     pub focused: bool,
+    /// Whether this element is the active (foreground) window — the window that
+    /// currently receives the user's input. Only meaningful for window-like
+    /// elements (windows, dialogs); `false` elsewhere. Distinct from `focused`,
+    /// which is element-level keyboard focus. Platform mappings: the AT-SPI
+    /// `ACTIVE` state (Linux), `AXMain` (macOS), and the foreground `HWND`
+    /// (Windows).
+    #[serde(default)]
+    pub active: bool,
     /// None = not checkable
     pub checked: Option<Toggled>,
     pub selected: bool,
@@ -402,6 +416,7 @@ impl Default for StateSet {
             enabled: true,
             visible: true,
             focused: false,
+            active: false,
             checked: None,
             selected: false,
             expanded: None,

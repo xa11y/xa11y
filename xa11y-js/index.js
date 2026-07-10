@@ -426,6 +426,16 @@ class App extends native.App {
     }
   }
 
+  static async foreground(options) {
+    try {
+      const a = await native.App.foreground(options);
+      Object.setPrototypeOf(a, App.prototype);
+      return a;
+    } catch (err) {
+      throw toTypedError(err);
+    }
+  }
+
   static async list() {
     try {
       const apps = await native.App.list();

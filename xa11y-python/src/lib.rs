@@ -217,6 +217,7 @@ fn make_py_element(
             enabled: data.states.enabled,
             visible: data.states.visible,
             focused: data.states.focused,
+            active: data.states.active,
             checked,
             selected: data.states.selected,
             expanded: data.states.expanded,
@@ -316,6 +317,12 @@ struct Element {
     visible: bool,
     #[pyo3(get)]
     focused: bool,
+    /// Whether this element is the active (foreground) window — the window that
+    /// currently receives the user's input. Meaningful for window-like elements
+    /// (windows, dialogs); ``False`` elsewhere. Distinct from ``focused``, which
+    /// is element-level keyboard focus.
+    #[pyo3(get)]
+    active: bool,
     #[pyo3(get)]
     checked: Option<String>,
     #[pyo3(get)]
@@ -547,6 +554,9 @@ impl Element {
         }
         if self.focused {
             parts.push("focused=True".to_string());
+        }
+        if self.active {
+            parts.push("active=True".to_string());
         }
         format!("Element({})", parts.join(", "))
     }
@@ -1255,6 +1265,24 @@ impl App {
         Ok(Self::from_core(app))
     }
 
+    /// Resolve the application that currently holds the system foreground.
+    ///
+    /// Queries the platform's foreground mechanism directly, so it returns the
+    /// exact foreground window on Windows and stays reliable when an app shows
+    /// a modal dialog. "Nothing focused" retries until `timeout`; see
+    /// `by_name` for timeout semantics. The returned app has
+    /// `is_foreground == True`.
+    #[staticmethod]
+    #[pyo3(signature = (*, timeout=None))]
+    fn foreground(py: Python<'_>, timeout: Option<f64>) -> PyResult<Self> {
+        let timeout = effective_timeout(timeout)?;
+        let provider = get_provider()?;
+        let app = py
+            .allow_threads(move || xa11y::App::foreground_with(provider, timeout))
+            .map_err(to_py_err)?;
+        Ok(Self::from_core(app))
+    }
+
     /// List all running applications.
     ///
     /// Single enumeration, no polling. To wait for an app that is still
@@ -1324,17 +1352,38 @@ impl App {
         }
     }
 
-    /// Whether this application currently holds the foreground / input focus.
+    /// Whether this application is the foreground application.
     ///
-    /// Mirrors ``Element.focused`` one level up: an application is ``focused``
-    /// when it is the foreground app. Populated for apps obtained via
-    /// ``App.list()`` and the predicate finders (``App.find()`` — where it is
-    /// also visible to the predicate, so ``App.find(lambda a: a.focused)``
-    /// selects the foreground app). A point-in-time snapshot taken when the
-    /// ``App`` was resolved.
+    /// Named ``is_foreground`` because "focused" is reserved for element-level
+    /// keyboard focus (``Element.focused``) elsewhere in the API; this is the
+    /// foreground-*application* flag. Populated for apps obtained via
+    /// ``App.list()`` and the predicate finders (``App.find()``). A
+    /// point-in-time snapshot taken when the ``App`` was resolved.
+    ///
+    /// On Windows apps are top-level windows, so the foreground process can own
+    /// several entries; tagging is window-precise, so only the entry actually
+    /// in the foreground reports ``is_foreground`` — not every window of the
+    /// process. Use ``App.foreground()`` to resolve the exact foreground window
+    /// directly.
     #[getter]
-    fn focused(&self) -> bool {
+    fn is_foreground(&self) -> bool {
         self.inner_data.states.focused
+    }
+
+    /// Deprecated alias for :attr:`is_foreground` — "focused" refers to element
+    /// keyboard focus elsewhere in the API.
+    #[getter]
+    fn focused(&self, py: Python<'_>) -> PyResult<bool> {
+        // Emit a real DeprecationWarning pointing at the caller's access site.
+        // stacklevel 2 skips the (frame-less) native getter so the warning
+        // lands on the user's `app.focused` line rather than pyo3 internals.
+        PyErr::warn(
+            py,
+            &py.get_type::<PyDeprecationWarning>(),
+            pyo3::ffi::c_str!("App.focused is a deprecated alias for App.is_foreground; 'focused' refers to element keyboard focus elsewhere in the API"),
+            2,
+        )?;
+        Ok(self.inner_data.states.focused)
     }
 
     /// Create a Locator scoped to this application's accessibility tree.
@@ -1808,7 +1857,7 @@ fn _make_test_app() -> PyResult<App> {
     let provider = xa11y::mock::build_provider() as Arc<dyn xa11y::Provider>;
     // Resolve via the predicate finder (not `by_name_with`) so the returned
     // app is foreground-tagged — the mock reports its root as the focused app,
-    // letting `App.focused` tests observe a `True` value.
+    // letting `App.is_foreground` tests observe a `True` value.
     let app = xa11y::App::find_with(provider, std::time::Duration::ZERO, |d| {
         d.name.as_deref() == Some("TestApp")
     })

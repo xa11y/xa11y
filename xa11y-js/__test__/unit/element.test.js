@@ -45,6 +45,16 @@ test('children() re-queries the provider', async () => {
   assert.deepEqual(roles, ['group', 'toolbar']);
 });
 
+test('active reports the foreground window', async () => {
+  // The mock's main window models the foreground/active window; the
+  // application root is not a window and reports active=false.
+  const app = await rootElement();
+  assert.equal(app.active, false);
+  const [win] = await app.children();
+  assert.equal(win.role, 'window');
+  assert.equal(win.active, true);
+});
+
 test('parent() walks back up', async () => {
   const app = await rootElement();
   const [win] = await app.children();

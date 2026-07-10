@@ -164,6 +164,16 @@ export declare class App {
   static byName(name: string, options?: AppLookupOptions): Promise<App>;
   /** Find an application by process ID. */
   static byPid(pid: number, options?: AppLookupOptions): Promise<App>;
+  /**
+   * Resolve the application that currently holds the system foreground.
+   *
+   * Uses the platform's direct foreground query rather than enumerating and
+   * tagging by pid, so on Windows it returns the exact foreground window and
+   * stays reliable when an app shows a modal dialog. Polls while nothing holds
+   * focus; see `byName` for the `options.timeout` behaviour. The returned app
+   * has `isForeground === true`.
+   */
+  static foreground(options?: AppLookupOptions): Promise<App>;
   /** List all running applications with an accessibility tree. */
   static list(): Promise<App[]>;
   /**
@@ -189,6 +199,26 @@ export declare class App {
 
   get name(): string;
   get pid(): number | null;
+
+  /**
+   * Whether this application is the foreground application.
+   *
+   * Named `isForeground` because "focused" is reserved for element-level
+   * keyboard focus (`Element.focused`) elsewhere in the API. On Windows,
+   * where apps are top-level windows, tagging is window-precise: only the
+   * entry actually in the foreground reports `isForeground`, not every window
+   * of the process. Use {@link App.foreground} to resolve the exact
+   * foreground window directly.
+   */
+  get isForeground(): boolean;
+
+  /**
+   * Whether this application is the foreground application.
+   *
+   * @deprecated Use {@link App.isForeground}. "focused" refers to element
+   * keyboard focus elsewhere in the API.
+   */
+  get focused(): boolean;
 
   /** Create a `Locator` scoped to this application's accessibility tree. */
   locator(selector: string): Locator;

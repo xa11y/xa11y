@@ -35,8 +35,13 @@ pub fn make_test_locator() -> Locator {
 )]
 pub fn make_test_app() -> napi::Result<App> {
     let provider = xa11y::mock::build_provider() as Arc<dyn xa11y::Provider>;
-    let app = xa11y::App::by_name_with(provider, "TestApp", std::time::Duration::ZERO)
-        .map_err(crate::map_err)?;
+    // Resolve via the predicate finder (not `by_name_with`) so the returned
+    // app is foreground-tagged — the mock reports its root as the focused app,
+    // letting `App.isForeground` tests observe a `true` value.
+    let app = xa11y::App::find_with(provider, std::time::Duration::ZERO, |d| {
+        d.name.as_deref() == Some("TestApp")
+    })
+    .map_err(crate::map_err)?;
     Ok(App::from_core(app))
 }
 

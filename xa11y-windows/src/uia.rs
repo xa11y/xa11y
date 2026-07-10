@@ -537,6 +537,7 @@ const BATCH_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     UIA_IsOffscreenPropertyId,
     UIA_HasKeyboardFocusPropertyId,
     UIA_IsKeyboardFocusablePropertyId,
+    UIA_NativeWindowHandlePropertyId,
 ];
 
 /// Safe wrapper for IUIAutomationElementArray::Length.
@@ -646,14 +647,24 @@ impl Provider for WindowsProvider {
                 })?;
 
                 let mut results = Vec::new();
-                let mut seen_pids = HashSet::new();
 
                 for i in 0..uia_len(&found) {
                     let Some(el) = uia_get(&found, i) else {
                         continue;
                     };
                     let pid = unsafe { el.CachedProcessId() }.unwrap_or(0) as u32;
-                    if pid == 0 || !seen_pids.insert(pid) {
+                    // A process may own several top-level windows (e.g. a main
+                    // window plus a modal dialog) and each is returned as its
+                    // own entry. Deduping by pid silently dropped every window
+                    // after the first, hiding modals from `App::list`/`find`
+                    // (issue #304). The `pid == 0` skip still drops windows with
+                    // no resolvable owning process; the empty-name skip below
+                    // drops windows that are still unnamed mid-startup.
+                    // Each entry's `states.active` marks the actual foreground
+                    // window (HWND == GetForegroundWindow); that is what lets
+                    // the core's foreground tagging pick the right window when a
+                    // single process owns several top-level entries.
+                    if pid == 0 {
                         continue;
                     }
                     let name = unsafe { el.CachedName() }
@@ -712,9 +723,11 @@ impl Provider for WindowsProvider {
 
     /// Enumerate top-level applications. UIA exposes apps as top-level
     /// `Window` control-type elements under the desktop root — there's no
-    /// dedicated `Application` accessible — so we list the desktop's
-    /// direct window children, one per PID. This is the canonical app
-    /// discovery primitive (replaces the old
+    /// dedicated `Application` accessible — so we list the desktop's direct
+    /// named window children, one entry per top-level window. A process that
+    /// owns several top-level windows (e.g. an app showing a modal dialog)
+    /// therefore yields several entries, not one per PID (issue #304). This
+    /// is the canonical app discovery primitive (replaces the old
     /// `find_elements(None, "application"/"window", …, depth=0)` idiom).
     fn list_apps(&self) -> Result<Vec<ElementData>> {
         self.get_children(None)
@@ -1596,6 +1609,18 @@ fn parse_states(
         .unwrap_or(BOOL(0))
         .as_bool();
 
+    // Active: this element is the active (foreground) top-level window.
+    // `GetForegroundWindow` returns a top-level HWND; child controls have
+    // different (or null) HWNDs, so plain equality is exactly the
+    // "this is the foreground window" test — no role check needed.
+    // A missing/unreadable cached handle (e.g. an event-path snapshot where
+    // the cache was never populated) degrades to `active: false`, matching
+    // the other snapshot-default state reads above.
+    let active = match unsafe { element.CachedNativeWindowHandle() } {
+        Ok(hwnd) => !hwnd.0.is_null() && hwnd.0 == unsafe { GetForegroundWindow() }.0,
+        Err(_) => false,
+    };
+
     // Checked: from TogglePattern
     let checked = match role {
         Role::CheckBox | Role::RadioButton => {
@@ -1656,19 +1681,20 @@ fn parse_states(
 
     let focusable = unsafe { element.CachedIsKeyboardFocusable() }.unwrap_or(FALSE) == TRUE;
 
-    StateSet {
-        enabled,
-        visible,
-        focused,
-        focusable,
-        modal: false,
-        checked,
-        selected,
-        expanded,
-        editable,
-        required: false,
-        busy: false,
-    }
+    let mut states = StateSet::default();
+    states.enabled = enabled;
+    states.visible = visible;
+    states.focused = focused;
+    states.active = active;
+    states.focusable = focusable;
+    states.modal = false;
+    states.checked = checked;
+    states.selected = selected;
+    states.expanded = expanded;
+    states.editable = editable;
+    states.required = false;
+    states.busy = false;
+    states
 }
 
 /// Map UIA ControlTypeId to xa11y Role.
@@ -2330,6 +2356,21 @@ mod tests {
             assert!(app.pid.is_some(), "Top-level windows should have a PID");
             assert!(app.name.is_some(), "Top-level windows should have a name");
         }
+    }
+
+    #[test]
+    fn get_children_none_at_most_one_active() {
+        let Some(provider) = try_provider() else {
+            return;
+        };
+        let apps = provider.get_children(None).unwrap();
+        // At most one top-level window is the foreground (active) window.
+        // Zero is legal: the foreground window may be unnamed/filtered.
+        let active_count = apps.iter().filter(|a| a.states.active).count();
+        assert!(
+            active_count <= 1,
+            "At most one top-level window may be active, found {active_count}"
+        );
     }
 
     #[test]

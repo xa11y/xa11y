@@ -548,6 +548,7 @@ fn resolve_attr(element: &ElementData, name: &str) -> Option<String> {
         "enabled" => Some(element.states.enabled.to_string()),
         "visible" => Some(element.states.visible.to_string()),
         "focused" => Some(element.states.focused.to_string()),
+        "active" => Some(element.states.active.to_string()),
         "focusable" => Some(element.states.focusable.to_string()),
         "selected" => Some(element.states.selected.to_string()),
         "editable" => Some(element.states.editable.to_string()),
@@ -1495,12 +1496,22 @@ mod tests {
         assert_eq!(resolve_attr(&el, "enabled").as_deref(), Some("true"));
         assert_eq!(resolve_attr(&el, "visible").as_deref(), Some("true"));
         assert_eq!(resolve_attr(&el, "focused").as_deref(), Some("false"));
+        assert_eq!(resolve_attr(&el, "active").as_deref(), Some("false"));
         assert_eq!(resolve_attr(&el, "focusable").as_deref(), Some("false"));
         assert_eq!(resolve_attr(&el, "selected").as_deref(), Some("false"));
         assert_eq!(resolve_attr(&el, "editable").as_deref(), Some("false"));
         assert_eq!(resolve_attr(&el, "modal").as_deref(), Some("false"));
         assert_eq!(resolve_attr(&el, "required").as_deref(), Some("false"));
         assert_eq!(resolve_attr(&el, "busy").as_deref(), Some("false"));
+    }
+
+    #[test]
+    fn resolve_active_reflects_state() {
+        let mut el = element_default();
+        // Default StateSet has active=false.
+        assert_eq!(resolve_attr(&el, "active").as_deref(), Some("false"));
+        el.states.active = true;
+        assert_eq!(resolve_attr(&el, "active").as_deref(), Some("true"));
     }
 
     #[test]

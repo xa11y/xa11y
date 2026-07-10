@@ -35,7 +35,10 @@ pub trait Provider: Send + Sync {
     ///
     /// Backends return one `ElementData` per application — typically with
     /// `role=Application`, but Windows returns `role=Window` for top-level
-    /// HWNDs because UIA exposes applications as their top-level window.
+    /// HWNDs because UIA exposes applications as their top-level window. On
+    /// Windows a multi-window process therefore yields one entry per top-level
+    /// window (main window + modal dialog are separate entries; issue #304),
+    /// whereas macOS and Linux return one `Application` element per process.
     /// This is the dedicated discovery primitive: it replaces the previous
     /// `find_elements(None, application_selector, .., depth=0)` idiom and
     /// lets each backend batch the platform-specific enumeration (CGWindowList
