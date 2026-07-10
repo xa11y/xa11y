@@ -199,24 +199,24 @@ impl Provider for FuzzProvider {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 pub fn make_state(s: &FuzzStateSet) -> StateSet {
-    StateSet {
-        enabled: s.enabled,
-        visible: s.visible,
-        focused: s.focused,
-        active: false,
-        checked: s.checked.map(|v| match v % 3 {
-            0 => Toggled::Off,
-            1 => Toggled::On,
-            _ => Toggled::Mixed,
-        }),
-        selected: s.selected,
-        expanded: s.expanded,
-        editable: s.editable,
-        focusable: s.focusable,
-        modal: s.modal,
-        required: s.required,
-        busy: s.busy,
-    }
+    let mut state = StateSet::default();
+    state.enabled = s.enabled;
+    state.visible = s.visible;
+    state.focused = s.focused;
+    state.active = false;
+    state.checked = s.checked.map(|v| match v % 3 {
+        0 => Toggled::Off,
+        1 => Toggled::On,
+        _ => Toggled::Mixed,
+    });
+    state.selected = s.selected;
+    state.expanded = s.expanded;
+    state.editable = s.editable;
+    state.focusable = s.focusable;
+    state.modal = s.modal;
+    state.required = s.required;
+    state.busy = s.busy;
+    state
 }
 
 pub fn make_raw(r: &FuzzRawPlatform) -> std::collections::HashMap<String, serde_json::Value> {

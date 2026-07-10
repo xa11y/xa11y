@@ -1546,20 +1546,19 @@ fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -
         let active = matches!(role, Role::Window | Role::Dialog)
             && ax_bool(element, "AXMain").unwrap_or(false);
 
-        let states = StateSet {
-            enabled: attrs.enabled.unwrap_or(true),
-            visible: !attrs.hidden.unwrap_or(false),
-            focused: attrs.focused.unwrap_or(false),
-            active,
-            focusable,
-            modal: attrs.modal.unwrap_or(false),
-            checked,
-            selected: attrs.selected.unwrap_or(false),
-            expanded: attrs.expanded,
-            editable: matches!(role, Role::TextField | Role::TextArea),
-            required: false,
-            busy: false,
-        };
+        let mut states = StateSet::default();
+        states.enabled = attrs.enabled.unwrap_or(true);
+        states.visible = !attrs.hidden.unwrap_or(false);
+        states.focused = attrs.focused.unwrap_or(false);
+        states.active = active;
+        states.focusable = focusable;
+        states.modal = attrs.modal.unwrap_or(false);
+        states.checked = checked;
+        states.selected = attrs.selected.unwrap_or(false);
+        states.expanded = attrs.expanded;
+        states.editable = matches!(role, Role::TextField | Role::TextArea);
+        states.required = false;
+        states.busy = false;
 
         let bounds = match (attrs.position, attrs.size) {
             (Some((x, y)), Some((w, h))) if w > 0.0 || h > 0.0 => Some(Rect {

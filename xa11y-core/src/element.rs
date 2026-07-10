@@ -375,7 +375,13 @@ fn write_tree_node(node: &TreeNode, depth: usize, out: &mut String) {
 ///
 /// States that are inherently inapplicable use `Option`: `checked` is `None`
 /// for non-checkable elements, `expanded` is `None` for non-expandable elements.
+///
+/// More states may be added in compatible releases, so this struct is
+/// `#[non_exhaustive]`: construct it via [`StateSet::default()`] (or
+/// [`Default::default()`]) and set the fields you need. Struct-literal
+/// construction is reserved to `xa11y-core`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct StateSet {
     pub enabled: bool,
     pub visible: bool,

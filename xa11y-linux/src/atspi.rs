@@ -888,23 +888,22 @@ impl LinuxProvider {
             None
         };
 
-        StateSet {
-            enabled,
-            visible,
-            focused: (bits & FOCUSED) != 0,
-            // AT-SPI `ACTIVE` marks the foreground window/frame (see
-            // `focused_app`). Real value set here in phase 1 because the bit
-            // parse is trivial and already documented below.
-            active: (bits & ACTIVE) != 0,
-            checked,
-            selected: (bits & SELECTED) != 0,
-            expanded,
-            editable: (bits & EDITABLE) != 0,
-            focusable: (bits & FOCUSABLE) != 0,
-            modal: (bits & MODAL) != 0,
-            required: (bits & REQUIRED) != 0,
-            busy: (bits & BUSY) != 0,
-        }
+        let mut states = StateSet::default();
+        states.enabled = enabled;
+        states.visible = visible;
+        states.focused = (bits & FOCUSED) != 0;
+        // AT-SPI `ACTIVE` marks the foreground window/frame (see
+        // `focused_app`, which relies on the same bit).
+        states.active = (bits & ACTIVE) != 0;
+        states.checked = checked;
+        states.selected = (bits & SELECTED) != 0;
+        states.expanded = expanded;
+        states.editable = (bits & EDITABLE) != 0;
+        states.focusable = (bits & FOCUSABLE) != 0;
+        states.modal = (bits & MODAL) != 0;
+        states.required = (bits & REQUIRED) != 0;
+        states.busy = (bits & BUSY) != 0;
+        states
     }
 
     /// Find an application by PID.

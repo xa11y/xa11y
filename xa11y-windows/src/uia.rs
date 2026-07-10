@@ -1681,20 +1681,20 @@ fn parse_states(
 
     let focusable = unsafe { element.CachedIsKeyboardFocusable() }.unwrap_or(FALSE) == TRUE;
 
-    StateSet {
-        enabled,
-        visible,
-        focused,
-        active,
-        focusable,
-        modal: false,
-        checked,
-        selected,
-        expanded,
-        editable,
-        required: false,
-        busy: false,
-    }
+    let mut states = StateSet::default();
+    states.enabled = enabled;
+    states.visible = visible;
+    states.focused = focused;
+    states.active = active;
+    states.focusable = focusable;
+    states.modal = false;
+    states.checked = checked;
+    states.selected = selected;
+    states.expanded = expanded;
+    states.editable = editable;
+    states.required = false;
+    states.busy = false;
+    states
 }
 
 /// Map UIA ControlTypeId to xa11y Role.

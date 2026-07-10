@@ -210,10 +210,11 @@ fn sample_provider() -> Arc<MockProvider> {
                 height: 34,
             }),
             vec!["press".to_string(), "focus".to_string()],
-            StateSet {
-                enabled: true,
-                visible: true,
-                ..StateSet::default()
+            {
+                let mut s = StateSet::default();
+                s.enabled = true;
+                s.visible = true;
+                s
             },
             None,
             None,
@@ -231,11 +232,12 @@ fn sample_provider() -> Arc<MockProvider> {
                 height: 34,
             }),
             vec!["focus".to_string(), "set_value".to_string()],
-            StateSet {
-                enabled: true,
-                visible: true,
-                editable: true,
-                ..StateSet::default()
+            {
+                let mut s = StateSet::default();
+                s.enabled = true;
+                s.visible = true;
+                s.editable = true;
+                s
             },
             None,
             None,
@@ -277,10 +279,11 @@ fn sample_provider() -> Arc<MockProvider> {
             None,
             None,
             vec!["press".to_string(), "focus".to_string()],
-            StateSet {
-                enabled: true,
-                visible: true,
-                ..StateSet::default()
+            {
+                let mut s = StateSet::default();
+                s.enabled = true;
+                s.visible = true;
+                s
             },
             None,
             None,
@@ -293,10 +296,11 @@ fn sample_provider() -> Arc<MockProvider> {
             None,
             None,
             vec!["press".to_string(), "focus".to_string()],
-            StateSet {
-                enabled: false,
-                visible: true,
-                ..StateSet::default()
+            {
+                let mut s = StateSet::default();
+                s.enabled = false;
+                s.visible = true;
+                s
             },
             None,
             None,
@@ -309,11 +313,12 @@ fn sample_provider() -> Arc<MockProvider> {
             None,
             None,
             vec!["press".to_string()],
-            StateSet {
-                enabled: true,
-                visible: true,
-                checked: Some(Toggled::Off),
-                ..StateSet::default()
+            {
+                let mut s = StateSet::default();
+                s.enabled = true;
+                s.visible = true;
+                s.checked = Some(Toggled::Off);
+                s
             },
             None,
             None,
@@ -571,11 +576,12 @@ fn element_json_serialization() {
             height: 30,
         }),
         actions: vec!["press".to_string()],
-        states: StateSet {
-            enabled: true,
-            visible: true,
-            focused: true,
-            ..StateSet::default()
+        states: {
+            let mut s = StateSet::default();
+            s.enabled = true;
+            s.visible = true;
+            s.focused = true;
+            s
         },
         pid: None,
         stable_id: None,
