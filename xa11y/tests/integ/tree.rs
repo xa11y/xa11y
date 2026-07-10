@@ -107,6 +107,29 @@ mod tests {
         );
     }
 
+    #[test]
+    #[ignore]
+    fn foreground_resolves_test_app() {
+        // `App::foreground` queries the platform foreground mechanism directly
+        // (AXFocusedApplication on macOS, GetForegroundWindow on Windows, the
+        // active AT-SPI window on Linux) rather than enumerating and tagging by
+        // pid. The test app keeps itself host-focused (see
+        // `focused_app_is_tagged_in_list`), so the resolved app must be the
+        // test app and must report `focused()`.
+        let app = h::app_root();
+        let foreground = App::foreground(std::time::Duration::from_secs(2))
+            .expect("App::foreground must resolve the host-focused test app");
+        assert_eq!(
+            foreground.pid, app.pid,
+            "the foreground app must be the test app, got {:?}",
+            foreground.name
+        );
+        assert!(
+            foreground.focused(),
+            "the app returned by App::foreground must report focused()"
+        );
+    }
+
     // ════════════════════════════════════════════════════════════════
     // Tree Structure — Element Discovery (14 tests)
     // ════════════════════════════════════════════════════════════════

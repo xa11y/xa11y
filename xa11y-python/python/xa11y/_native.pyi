@@ -211,6 +211,10 @@ class App:
         via :meth:`list` and :meth:`find` (where it is also visible to the
         predicate, so ``App.find(lambda a: a.focused)`` selects the foreground
         app). A point-in-time snapshot taken when the ``App`` was resolved.
+
+        On Windows apps are top-level windows, so every top-level window of the
+        foreground process reports ``focused``; use :meth:`foreground` to
+        obtain the exact foreground window.
         """
     @staticmethod
     def by_name(name: str, *, timeout: float | None = None) -> App:
@@ -258,6 +262,16 @@ class App:
                 lambda a: a.pid == pid and a.name.startswith("My Dialog"),
                 timeout=30.0,
             )
+        """
+    @staticmethod
+    def foreground(*, timeout: float | None = None) -> App:
+        """Resolve the application that currently holds the system foreground.
+
+        Queries the platform's foreground mechanism directly, so it returns the
+        exact foreground window on Windows and stays reliable when an app shows
+        a modal dialog. "Nothing focused" retries until ``timeout``; see
+        ``by_name`` for ``timeout`` semantics. The returned app has
+        ``focused == True``.
         """
     @staticmethod
     def list() -> list[App]:

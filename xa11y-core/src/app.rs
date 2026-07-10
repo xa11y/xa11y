@@ -71,6 +71,13 @@ fn merge_diagnosis(err: Error, extra: Diagnosis) -> Error {
 /// entry whose pid matches, so `App::focused` reflects foreground status for
 /// apps obtained through `list`/`find` without a per-app focus query.
 ///
+/// Tagging is by pid, so *every* enumerated entry of the foreground process is
+/// tagged. On Windows — where apps are top-level windows, so one process can
+/// contribute several entries (a main window plus a modal dialog; issue #304)
+/// — that means each of the process's windows reports `focused`. When the
+/// exact foreground window matters, use [`App::foreground_with`] instead, which
+/// resolves it directly rather than tagging a whole process by pid.
+///
 /// "Nothing is focused" ([`Error::SelectorNotMatched`]) is not an error here:
 /// it leaves every entry untagged (`focused = false`). Any other error is a
 /// genuine focus-resolution failure and propagates rather than being silently
@@ -318,6 +325,43 @@ impl App {
         )
     }
 
+    /// Resolve the application that currently holds the system foreground,
+    /// using an explicit provider.
+    ///
+    /// Prefer `App::foreground` from the `xa11y` crate which uses the global
+    /// singleton provider.
+    ///
+    /// Identifies the foreground application via each platform's canonical
+    /// mechanism: the system-wide `AXUIElement`'s focused-application attribute
+    /// (macOS), `GetForegroundWindow` + `ElementFromHandle` (Windows), and the
+    /// focused element's `Application` ancestor in the AT-SPI registry (Linux).
+    /// Unlike [`find_with`](Self::find_with) with a `|d| d.states.focused`
+    /// predicate — which enumerates apps and tags foreground state by pid —
+    /// this calls the platform foreground query directly, so on Windows it
+    /// returns the *exact* foreground window even when the owning process holds
+    /// several top-level windows (the modal case; issues #304/#305).
+    ///
+    /// Timeout / polling semantics match [`by_name_with`](Self::by_name_with):
+    /// `Duration::ZERO` performs exactly one attempt, only
+    /// [`Error::SelectorNotMatched`] ("nothing currently holds focus" — focus
+    /// rests on the desktop / shell, or the screen is locked) triggers a retry,
+    /// and any other error short-circuits immediately. The returned `App`
+    /// always reports [`focused()`](Self::focused) `== true`.
+    pub fn foreground_with(provider: Arc<dyn Provider>, timeout: Duration) -> Result<Self> {
+        let diag_provider = Arc::clone(&provider);
+        poll_lookup(
+            timeout,
+            || {
+                let mut data = provider.focused_app()?;
+                // focused_app resolves the foreground app by definition; tag it
+                // so `App::focused()` agrees with how list/find populate the flag.
+                data.states.focused = true;
+                Ok(Self::from_data(Arc::clone(&provider), data))
+            },
+            || running_apps_diagnosis(&diag_provider),
+        )
+    }
+
     /// List all running applications, using an explicit provider.
     ///
     /// Prefer `App::list` from the `xa11y` crate which uses the global
@@ -412,6 +456,11 @@ impl App {
     /// value is a point-in-time snapshot taken when the `App` was resolved.
     /// Apps obtained directly via [`by_pid_with`](Self::by_pid_with) carry the
     /// platform's raw app-element focus state instead (typically `false`).
+    ///
+    /// On Windows apps are top-level windows, so tagging by pid means *every*
+    /// top-level window of the foreground process reports `focused`. Use
+    /// [`foreground_with`](Self::foreground_with) (or `App::foreground` from
+    /// the `xa11y` crate) to obtain the exact foreground window.
     pub fn focused(&self) -> bool {
         self.data.states.focused
     }
@@ -492,6 +541,110 @@ mod tests {
         }
         fn list_apps(&self) -> Result<Vec<ElementData>> {
             self.inner.list_apps()
+        }
+        fn press(&self, e: &ElementData) -> Result<()> {
+            self.inner.press(e)
+        }
+        fn focus(&self, e: &ElementData) -> Result<()> {
+            self.inner.focus(e)
+        }
+        fn blur(&self, e: &ElementData) -> Result<()> {
+            self.inner.blur(e)
+        }
+        fn toggle(&self, e: &ElementData) -> Result<()> {
+            self.inner.toggle(e)
+        }
+        fn select(&self, e: &ElementData) -> Result<()> {
+            self.inner.select(e)
+        }
+        fn expand(&self, e: &ElementData) -> Result<()> {
+            self.inner.expand(e)
+        }
+        fn collapse(&self, e: &ElementData) -> Result<()> {
+            self.inner.collapse(e)
+        }
+        fn show_menu(&self, e: &ElementData) -> Result<()> {
+            self.inner.show_menu(e)
+        }
+        fn increment(&self, e: &ElementData) -> Result<()> {
+            self.inner.increment(e)
+        }
+        fn decrement(&self, e: &ElementData) -> Result<()> {
+            self.inner.decrement(e)
+        }
+        fn scroll_into_view(&self, e: &ElementData) -> Result<()> {
+            self.inner.scroll_into_view(e)
+        }
+        fn set_value(&self, e: &ElementData, v: &str) -> Result<()> {
+            self.inner.set_value(e, v)
+        }
+        fn set_numeric_value(&self, e: &ElementData, v: f64) -> Result<()> {
+            self.inner.set_numeric_value(e, v)
+        }
+        fn type_text(&self, e: &ElementData, t: &str) -> Result<()> {
+            self.inner.type_text(e, t)
+        }
+        fn set_text_selection(&self, e: &ElementData, s: u32, end: u32) -> Result<()> {
+            self.inner.set_text_selection(e, s, end)
+        }
+        fn perform_action(&self, e: &ElementData, a: &str) -> Result<()> {
+            self.inner.perform_action(e, a)
+        }
+        fn subscribe(&self, e: &ElementData) -> Result<Subscription> {
+            self.inner.subscribe(e)
+        }
+    }
+
+    /// Provider modelling the Windows modal case (issue #304): one process
+    /// owning two top-level windows. `list_apps` returns both windows sharing
+    /// pid 42, and `focused_app` reports that pid as foreground. Everything
+    /// else delegates to the inner mock.
+    struct MultiWindowProvider {
+        inner: Arc<crate::mock::MockProvider>,
+    }
+
+    impl MultiWindowProvider {
+        fn new() -> Self {
+            Self {
+                inner: build_provider(),
+            }
+        }
+
+        /// A top-level window owned by the shared process (pid 42).
+        fn window(name: &str, handle: u64) -> ElementData {
+            ElementData {
+                role: Role::Window,
+                name: Some(name.to_string()),
+                value: None,
+                description: None,
+                bounds: None,
+                actions: vec![],
+                states: crate::element::StateSet::default(),
+                numeric_value: None,
+                min_value: None,
+                max_value: None,
+                stable_id: None,
+                pid: Some(42),
+                raw: Default::default(),
+                handle,
+            }
+        }
+    }
+
+    impl Provider for MultiWindowProvider {
+        fn list_apps(&self) -> Result<Vec<ElementData>> {
+            // Two top-level windows of the same process — a main window and a
+            // modal dialog. Both must survive enumeration (no pid dedup).
+            Ok(vec![Self::window("Main", 100), Self::window("Modal", 101)])
+        }
+        fn focused_app(&self) -> Result<ElementData> {
+            Ok(Self::window("Modal", 101))
+        }
+        fn get_children(&self, e: Option<&ElementData>) -> Result<Vec<ElementData>> {
+            self.inner.get_children(e)
+        }
+        fn get_parent(&self, e: &ElementData) -> Result<Option<ElementData>> {
+            self.inner.get_parent(e)
         }
         fn press(&self, e: &ElementData) -> Result<()> {
             self.inner.press(e)
@@ -721,5 +874,70 @@ mod tests {
         let err = App::try_find_with(provider, Duration::ZERO, |_| Ok(false))
             .expect_err("an always-Ok(false) predicate must not match");
         assert!(matches!(err, Error::SelectorNotMatched { .. }));
+    }
+
+    #[test]
+    fn list_with_keeps_all_windows_of_a_shared_pid() {
+        // Regression for issue #304: a process owning several top-level
+        // windows (main window + modal dialog) must surface every window in
+        // `App::list_with` — the old pid dedup silently dropped the modal.
+        // Both entries share pid 42, which `focused_app` reports as
+        // foreground, so both come back `focused()`.
+        let provider: Arc<dyn Provider> = Arc::new(MultiWindowProvider::new());
+        let apps = App::list_with(provider).expect("list must succeed");
+        assert_eq!(apps.len(), 2, "both windows of the shared pid must appear");
+        let names: Vec<&str> = apps.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            names.contains(&"Main"),
+            "main window must be listed: {names:?}"
+        );
+        assert!(
+            names.contains(&"Modal"),
+            "modal window must be listed: {names:?}"
+        );
+        assert!(
+            apps.iter().all(|a| a.focused()),
+            "every window of the foreground process must be tagged focused"
+        );
+    }
+
+    #[test]
+    fn foreground_with_resolves_and_tags_the_foreground_app() {
+        // The mock reports its application root (pid 1234) as the foreground
+        // app; `foreground_with` must return it and mark it `focused()`.
+        let provider: Arc<dyn Provider> = build_provider();
+        let app = App::foreground_with(provider, Duration::ZERO)
+            .expect("the mock's foreground app must resolve");
+        assert_eq!(app.name, "TestApp");
+        assert!(
+            app.focused(),
+            "the app returned by foreground_with must always be focused()"
+        );
+    }
+
+    #[test]
+    fn foreground_with_returns_selector_not_matched_when_nothing_focused() {
+        // "Nothing holds focus" is the retryable not-found signal; with a zero
+        // timeout that's one attempt and a plain SelectorNotMatched.
+        let provider: Arc<dyn Provider> = Arc::new(FocusModeProvider::new(FocusMode::None));
+        let err = App::foreground_with(provider, Duration::ZERO)
+            .expect_err("nothing focused must surface as not-matched");
+        assert!(matches!(err, Error::SelectorNotMatched { .. }));
+    }
+
+    #[test]
+    fn foreground_with_propagates_real_focus_errors_and_fails_fast() {
+        // A genuine foreground-query failure (not "nothing focused") must
+        // short-circuit the poll immediately rather than being retried until
+        // the timeout (mirrors `try_find_with_propagates_predicate_error_...`).
+        let provider: Arc<dyn Provider> = Arc::new(FocusModeProvider::new(FocusMode::Error));
+        let start = Instant::now();
+        let err = App::foreground_with(provider, Duration::from_secs(30))
+            .expect_err("a real focus error must propagate");
+        assert!(matches!(err, Error::Platform { code: 99, .. }));
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "a real focus error must fail fast, not wait out the timeout"
+        );
     }
 }

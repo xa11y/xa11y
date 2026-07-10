@@ -164,6 +164,16 @@ export declare class App {
   static byName(name: string, options?: AppLookupOptions): Promise<App>;
   /** Find an application by process ID. */
   static byPid(pid: number, options?: AppLookupOptions): Promise<App>;
+  /**
+   * Resolve the application that currently holds the system foreground.
+   *
+   * Uses the platform's direct foreground query rather than enumerating and
+   * tagging by pid, so on Windows it returns the exact foreground window and
+   * stays reliable when an app shows a modal dialog. Polls while nothing holds
+   * focus; see `byName` for the `options.timeout` behaviour. The returned app
+   * has `focused === true`.
+   */
+  static foreground(options?: AppLookupOptions): Promise<App>;
   /** List all running applications with an accessibility tree. */
   static list(): Promise<App[]>;
   /**

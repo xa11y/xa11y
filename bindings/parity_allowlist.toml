@@ -12,6 +12,7 @@ rust_only = [
     { method = "App::by_name_with_timeout", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
     { method = "App::by_pid_with", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
     { method = "App::by_pid_with_timeout", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "App::foreground_with", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
     { method = "App::list_with", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
     { method = "App::find_with", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection. Exposed to Python as `App.find`." },
     { method = "App::try_find_with", reason = "Fallible-predicate variant of `find_with`; binding `App.find` routes through it and re-raises predicate errors. `_with` variants are Rust-only plumbing for explicit provider injection." },
@@ -45,6 +46,7 @@ python_only = [
     # the `xa11y` umbrella crate, not on `xa11y_core::App`.
     { method = "App::by_name", reason = "Binding-level convenience over App::by_name_with using the singleton provider; mirrors `xa11y::AppExt::by_name`." },
     { method = "App::by_pid", reason = "Binding-level convenience over App::by_pid_with using the singleton provider; mirrors `xa11y::AppExt::by_pid`." },
+    { method = "App::foreground", reason = "Binding-level convenience over App::foreground_with using the singleton provider; mirrors `xa11y::AppExt::foreground`." },
     { method = "App::list", reason = "Binding-level convenience over App::list_with using the singleton provider; mirrors `xa11y::AppExt::list`." },
     { method = "App::find", reason = "Binding-level convenience over App::try_find_with/find_with using the singleton provider; mirrors `xa11y::AppExt::find`. Predicate-based waited discovery over App.list()." },
 
@@ -79,6 +81,7 @@ rust_only = [
     { method = "App::by_name_with_timeout", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
     { method = "App::by_pid_with", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
     { method = "App::by_pid_with_timeout", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "App::foreground_with", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
     { method = "App::list_with", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
     { method = "App::find_with", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection. Exposed to JS as `App.find`, implemented as a JS-side poll loop in index.js." },
     { method = "App::try_find_with", reason = "Fallible-predicate variant of `find_with`; the JS `App.find` poll loop propagates predicate errors directly. `_with` variants are Rust-only plumbing for explicit provider injection." },
@@ -111,6 +114,7 @@ js_only = [
     # etc. but live as static methods on the napi-generated App class.
     { method = "App::by_name", reason = "Binding-level convenience over App::by_name_with using the singleton provider; mirrors `xa11y::AppExt::by_name`." },
     { method = "App::by_pid", reason = "Binding-level convenience over App::by_pid_with using the singleton provider; mirrors `xa11y::AppExt::by_pid`." },
+    { method = "App::foreground", reason = "Binding-level convenience over App::foreground_with using the singleton provider; mirrors `xa11y::AppExt::foreground`." },
     { method = "App::list", reason = "Binding-level convenience over App::list_with using the singleton provider; mirrors `xa11y::AppExt::list`." },
     { method = "App::find", reason = "Binding-level convenience over App::try_find_with/find_with using the singleton provider; mirrors `xa11y::AppExt::find`. Implemented as a JS-side poll loop over App.list() in index.js, declared in index.d.ts." },
 

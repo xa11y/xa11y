@@ -51,6 +51,31 @@ def test_by_name_zero_timeout_validates():
         pass
 
 
+def test_foreground_rejects_negative_timeout():
+    with pytest.raises(ValueError, match="non-negative"):
+        xa11y.App.foreground(timeout=-1.0)
+
+
+def test_foreground_timeout_is_keyword_only():
+    # `foreground` takes only a keyword-only `timeout` (signature `(*, timeout=None)`).
+    # Passing a positional argument must raise TypeError.
+    with pytest.raises(TypeError):
+        xa11y.App.foreground(0.0)
+
+
+def test_foreground_zero_timeout_validates():
+    # 0.0 is a valid non-negative value — must not raise ValueError. (The
+    # downstream lookup may still raise if nothing holds focus, but not for
+    # the timeout argument.)
+    try:
+        xa11y.App.foreground(timeout=0.0)
+    except ValueError:
+        pytest.fail("timeout=0.0 must be accepted as a no-wait sentinel")
+    except xa11y.XA11yError:
+        # Any xa11y-level error is fine — proves the call reached the lookup.
+        pass
+
+
 def test_app_focused_is_bool(mock_app):
     # The mock provider reports its application root as the foreground app,
     # so an app resolved through the finder carries `focused=True`. The flag

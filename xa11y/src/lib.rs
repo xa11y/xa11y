@@ -265,6 +265,16 @@ mod app_ext {
         /// [`list`](Self::list). See [`App::by_pid_with`] for the full
         /// contract and [`by_name`](Self::by_name) for retry semantics.
         fn by_pid(pid: u32, timeout: Duration) -> Result<Self>;
+        /// Resolve the application that currently holds the system foreground,
+        /// using the global singleton provider, polling until one exists or
+        /// `timeout` elapses. Pass `Duration::ZERO` for a single attempt with
+        /// no waiting. Unlike [`find`](Self::find) with a `|d| d.states.focused`
+        /// predicate, this queries the platform foreground mechanism directly,
+        /// so on Windows it returns the exact foreground window even when the
+        /// process owns several top-level windows. See [`App::foreground_with`]
+        /// for the full contract and [`by_name`](Self::by_name) for retry
+        /// semantics.
+        fn foreground(timeout: Duration) -> Result<Self>;
         /// List all running applications using the global singleton provider.
         fn list() -> Result<Vec<Self>>;
         /// Find an application matching `predicate` using the global
@@ -290,6 +300,10 @@ mod app_ext {
 
         fn by_pid(pid: u32, timeout: Duration) -> Result<Self> {
             App::by_pid_with(provider()?, pid, timeout)
+        }
+
+        fn foreground(timeout: Duration) -> Result<Self> {
+            App::foreground_with(provider()?, timeout)
         }
 
         fn list() -> Result<Vec<Self>> {

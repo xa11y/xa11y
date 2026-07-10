@@ -646,14 +646,20 @@ impl Provider for WindowsProvider {
                 })?;
 
                 let mut results = Vec::new();
-                let mut seen_pids = HashSet::new();
 
                 for i in 0..uia_len(&found) {
                     let Some(el) = uia_get(&found, i) else {
                         continue;
                     };
                     let pid = unsafe { el.CachedProcessId() }.unwrap_or(0) as u32;
-                    if pid == 0 || !seen_pids.insert(pid) {
+                    // A process may own several top-level windows (e.g. a main
+                    // window plus a modal dialog) and each is returned as its
+                    // own entry. Deduping by pid silently dropped every window
+                    // after the first, hiding modals from `App::list`/`find`
+                    // (issue #304). The `pid == 0` skip still drops windows with
+                    // no resolvable owning process; the empty-name skip below
+                    // drops windows that are still unnamed mid-startup.
+                    if pid == 0 {
                         continue;
                     }
                     let name = unsafe { el.CachedName() }
@@ -712,9 +718,11 @@ impl Provider for WindowsProvider {
 
     /// Enumerate top-level applications. UIA exposes apps as top-level
     /// `Window` control-type elements under the desktop root — there's no
-    /// dedicated `Application` accessible — so we list the desktop's
-    /// direct window children, one per PID. This is the canonical app
-    /// discovery primitive (replaces the old
+    /// dedicated `Application` accessible — so we list the desktop's direct
+    /// named window children, one entry per top-level window. A process that
+    /// owns several top-level windows (e.g. an app showing a modal dialog)
+    /// therefore yields several entries, not one per PID (issue #304). This
+    /// is the canonical app discovery primitive (replaces the old
     /// `find_elements(None, "application"/"window", …, depth=0)` idiom).
     fn list_apps(&self) -> Result<Vec<ElementData>> {
         self.get_children(None)

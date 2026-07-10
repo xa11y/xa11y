@@ -78,6 +78,20 @@ impl App {
         })
     }
 
+    /// Resolve the application that currently holds the system foreground.
+    ///
+    /// Uses the platform's direct foreground query rather than enumerating and
+    /// tagging by pid, so on Windows it returns the exact foreground window and
+    /// stays reliable when an app shows a modal dialog. Polls while nothing
+    /// holds focus; see {@link App.byName} for the `options.timeout` behaviour.
+    /// The returned app has `focused === true`.
+    #[napi(ts_return_type = "Promise<App>")]
+    pub fn foreground(options: Option<AppLookupOptions>) -> AsyncTask<ForegroundTask> {
+        AsyncTask::new(ForegroundTask {
+            timeout_ms: options.and_then(|o| o.timeout),
+        })
+    }
+
     /// List all running applications with an accessibility tree.
     #[napi(ts_return_type = "Promise<App[]>")]
     pub fn list() -> AsyncTask<ListAppsTask> {
@@ -103,6 +117,10 @@ impl App {
     /// it is the foreground app. Populated for apps obtained via
     /// {@link App.list}. A point-in-time snapshot taken when the `App` was
     /// resolved.
+    ///
+    /// On Windows apps are top-level windows, so every top-level window of the
+    /// foreground process reports `focused`; use {@link App.foreground} to
+    /// obtain the exact foreground window.
     #[napi(getter)]
     pub fn focused(&self) -> bool {
         self.data.states.focused
@@ -234,6 +252,25 @@ impl Task for FindByPidTask {
         let timeout = effective_timeout_ms(self.timeout_ms)?;
         let provider = crate::provider()?;
         xa11y::App::by_pid_with(provider, self.pid, timeout).map_err(map_err)
+    }
+
+    fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {
+        Ok(App::from_core(output))
+    }
+}
+
+pub struct ForegroundTask {
+    timeout_ms: Option<u32>,
+}
+
+impl Task for ForegroundTask {
+    type Output = xa11y::App;
+    type JsValue = App;
+
+    fn compute(&mut self) -> napi::Result<Self::Output> {
+        let timeout = effective_timeout_ms(self.timeout_ms)?;
+        let provider = crate::provider()?;
+        xa11y::App::foreground_with(provider, timeout).map_err(map_err)
     }
 
     fn resolve(&mut self, _env: Env, output: Self::Output) -> napi::Result<Self::JsValue> {

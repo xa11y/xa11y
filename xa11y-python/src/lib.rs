@@ -1255,6 +1255,23 @@ impl App {
         Ok(Self::from_core(app))
     }
 
+    /// Resolve the application that currently holds the system foreground.
+    ///
+    /// Queries the platform's foreground mechanism directly, so it returns the
+    /// exact foreground window on Windows and stays reliable when an app shows
+    /// a modal dialog. "Nothing focused" retries until `timeout`; see
+    /// `by_name` for timeout semantics. The returned app has `focused == True`.
+    #[staticmethod]
+    #[pyo3(signature = (*, timeout=None))]
+    fn foreground(py: Python<'_>, timeout: Option<f64>) -> PyResult<Self> {
+        let timeout = effective_timeout(timeout)?;
+        let provider = get_provider()?;
+        let app = py
+            .allow_threads(move || xa11y::App::foreground_with(provider, timeout))
+            .map_err(to_py_err)?;
+        Ok(Self::from_core(app))
+    }
+
     /// List all running applications.
     ///
     /// Single enumeration, no polling. To wait for an app that is still
@@ -1332,6 +1349,10 @@ impl App {
     /// also visible to the predicate, so ``App.find(lambda a: a.focused)``
     /// selects the foreground app). A point-in-time snapshot taken when the
     /// ``App`` was resolved.
+    ///
+    /// On Windows apps are top-level windows, so every top-level window of the
+    /// foreground process reports ``focused``; use ``App.foreground()`` to
+    /// obtain the exact foreground window.
     #[getter]
     fn focused(&self) -> bool {
         self.inner_data.states.focused
