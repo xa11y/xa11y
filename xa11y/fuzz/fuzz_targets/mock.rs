@@ -203,6 +203,7 @@ pub fn make_state(s: &FuzzStateSet) -> StateSet {
         enabled: s.enabled,
         visible: s.visible,
         focused: s.focused,
+        active: false,
         checked: s.checked.map(|v| match v % 3 {
             0 => Toggled::Off,
             1 => Toggled::On,

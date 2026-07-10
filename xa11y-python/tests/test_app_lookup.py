@@ -76,16 +76,26 @@ def test_foreground_zero_timeout_validates():
         pass
 
 
-def test_app_focused_is_bool(mock_app):
+def test_app_is_foreground_is_bool(mock_app):
     # The mock provider reports its application root as the foreground app,
-    # so an app resolved through the finder carries `focused=True`. The flag
-    # must be a plain bool (mirrors `Element.focused`).
-    assert isinstance(mock_app.focused, bool)
-    assert mock_app.focused is True
+    # so an app resolved through the finder carries `is_foreground=True`. The
+    # flag must be a plain bool.
+    assert isinstance(mock_app.is_foreground, bool)
+    assert mock_app.is_foreground is True
 
 
-def test_app_focused_matches_element_focused_shape(mock_app):
-    # `App.focused` is the application-level analogue of `Element.focused`:
-    # both are read-only boolean properties. Assigning must fail.
+def test_app_is_foreground_matches_element_shape(mock_app):
+    # `App.is_foreground` is the application-level foreground flag: a read-only
+    # boolean property. Assigning must fail.
     with pytest.raises(AttributeError):
-        mock_app.focused = True
+        mock_app.is_foreground = True
+
+
+def test_app_focused_is_deprecated_alias(mock_app):
+    # `focused` is retained only as a deprecated alias for `is_foreground`; it
+    # must return the same value and emit a DeprecationWarning pointing at the
+    # access site.
+    with pytest.warns(DeprecationWarning):
+        value = mock_app.focused
+    assert value == mock_app.is_foreground
+    assert value is True

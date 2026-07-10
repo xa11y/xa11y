@@ -84,7 +84,7 @@ impl App {
     /// tagging by pid, so on Windows it returns the exact foreground window and
     /// stays reliable when an app shows a modal dialog. Polls while nothing
     /// holds focus; see {@link App.byName} for the `options.timeout` behaviour.
-    /// The returned app has `focused === true`.
+    /// The returned app has `isForeground === true`.
     #[napi(ts_return_type = "Promise<App>")]
     pub fn foreground(options: Option<AppLookupOptions>) -> AsyncTask<ForegroundTask> {
         AsyncTask::new(ForegroundTask {
@@ -111,16 +111,28 @@ impl App {
         self.pid
     }
 
-    /// Whether this application currently holds the foreground / input focus.
+    /// Whether this application is the foreground application.
     ///
-    /// Mirrors `Element.focused` one level up: an application is `focused` when
-    /// it is the foreground app. Populated for apps obtained via
+    /// Named `isForeground` because "focused" is reserved for element-level
+    /// keyboard focus (`Element.focused`) elsewhere in the API; this is the
+    /// foreground-*application* flag. Populated for apps obtained via
     /// {@link App.list}. A point-in-time snapshot taken when the `App` was
     /// resolved.
     ///
-    /// On Windows apps are top-level windows, so every top-level window of the
-    /// foreground process reports `focused`; use {@link App.foreground} to
-    /// obtain the exact foreground window.
+    /// On Windows apps are top-level windows, so the foreground process can own
+    /// several entries; tagging is window-precise, so only the entry actually
+    /// in the foreground reports `isForeground` — not every window of the
+    /// process. Use {@link App.foreground} to resolve the exact foreground
+    /// window directly.
+    #[napi(getter)]
+    pub fn is_foreground(&self) -> bool {
+        self.data.states.focused
+    }
+
+    /// Whether this application is the foreground application.
+    ///
+    /// @deprecated Use {@link App.isForeground}. "focused" refers to element
+    /// keyboard focus elsewhere in the API.
     #[napi(getter)]
     pub fn focused(&self) -> bool {
         self.data.states.focused

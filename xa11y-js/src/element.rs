@@ -143,6 +143,15 @@ impl Element {
         self.data.states.focused
     }
 
+    /// `true` if the element is the active (foreground) window — the window
+    /// that currently receives the user's input. Meaningful for window-like
+    /// elements (windows, dialogs); `false` elsewhere. Distinct from
+    /// `focused`, which is element-level keyboard focus.
+    #[napi(getter)]
+    pub fn active(&self) -> bool {
+        self.data.states.active
+    }
+
     /// Tri-state checked value for checkboxes, toggle buttons, and menu items:
     /// `"on"`, `"off"`, `"mixed"`, or `null` if the element is not toggleable.
     #[napi(getter)]

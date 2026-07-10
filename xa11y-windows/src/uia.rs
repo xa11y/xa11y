@@ -537,6 +537,7 @@ const BATCH_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     UIA_IsOffscreenPropertyId,
     UIA_HasKeyboardFocusPropertyId,
     UIA_IsKeyboardFocusablePropertyId,
+    UIA_NativeWindowHandlePropertyId,
 ];
 
 /// Safe wrapper for IUIAutomationElementArray::Length.
@@ -659,6 +660,10 @@ impl Provider for WindowsProvider {
                     // (issue #304). The `pid == 0` skip still drops windows with
                     // no resolvable owning process; the empty-name skip below
                     // drops windows that are still unnamed mid-startup.
+                    // Each entry's `states.active` marks the actual foreground
+                    // window (HWND == GetForegroundWindow); that is what lets
+                    // the core's foreground tagging pick the right window when a
+                    // single process owns several top-level entries.
                     if pid == 0 {
                         continue;
                     }
@@ -1604,6 +1609,18 @@ fn parse_states(
         .unwrap_or(BOOL(0))
         .as_bool();
 
+    // Active: this element is the active (foreground) top-level window.
+    // `GetForegroundWindow` returns a top-level HWND; child controls have
+    // different (or null) HWNDs, so plain equality is exactly the
+    // "this is the foreground window" test — no role check needed.
+    // A missing/unreadable cached handle (e.g. an event-path snapshot where
+    // the cache was never populated) degrades to `active: false`, matching
+    // the other snapshot-default state reads above.
+    let active = match unsafe { element.CachedNativeWindowHandle() } {
+        Ok(hwnd) => !hwnd.0.is_null() && hwnd.0 == unsafe { GetForegroundWindow() }.0,
+        Err(_) => false,
+    };
+
     // Checked: from TogglePattern
     let checked = match role {
         Role::CheckBox | Role::RadioButton => {
@@ -1668,6 +1685,7 @@ fn parse_states(
         enabled,
         visible,
         focused,
+        active,
         focusable,
         modal: false,
         checked,
@@ -2338,6 +2356,21 @@ mod tests {
             assert!(app.pid.is_some(), "Top-level windows should have a PID");
             assert!(app.name.is_some(), "Top-level windows should have a name");
         }
+    }
+
+    #[test]
+    fn get_children_none_at_most_one_active() {
+        let Some(provider) = try_provider() else {
+            return;
+        };
+        let apps = provider.get_children(None).unwrap();
+        // At most one top-level window is the foreground (active) window.
+        // Zero is legal: the foreground window may be unnamed/filtered.
+        let active_count = apps.iter().filter(|a| a.states.active).count();
+        assert!(
+            active_count <= 1,
+            "At most one top-level window may be active, found {active_count}"
+        );
     }
 
     #[test]

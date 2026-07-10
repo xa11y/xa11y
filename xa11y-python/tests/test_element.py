@@ -115,6 +115,15 @@ def test_focused(test_app):
     assert app.focused is False
 
 
+def test_active_window(test_app):
+    # The mock's main window models the foreground/active window; the
+    # application root is not a window and reports `active` False.
+    app = test_app.element()
+    window = app.children()[0]
+    assert window.active is True
+    assert app.active is False
+
+
 def test_checked_on(test_app):
     cb = test_app.descendant("check_box").elements()[0]
     assert cb.checked == "on"

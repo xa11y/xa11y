@@ -35,6 +35,10 @@ async function checks() {
   const _app3: App = await App.byName('Test', lookupOpts);
   const _app4: App = await App.byPid(1234, { timeout: 5_000 });
 
+  // App foreground getters are sync booleans; `focused` is the deprecated alias.
+  const _isForeground: boolean = app.isForeground;
+  const _appFocused: boolean = app.focused;
+
   // Locator instance methods return promises or locators.
   const loc: Locator = app.locator('button[name="OK"]');
   const _count: number = await loc.count();
@@ -48,6 +52,7 @@ async function checks() {
   const _role: string = el.role;
   const _name: string | null = el.name;
   const _bounds: Rect | null = el.bounds;
+  const _active: boolean = el.active;
 
   // Narrowed by patch-native-dts:
   const checked: CheckedState | null = el.checked;

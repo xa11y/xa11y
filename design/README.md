@@ -356,6 +356,7 @@ The full set of named attributes and their platform mappings:
 | `enabled` | bool | `AXEnabled` | `ENABLED` state bit | `IsEnabled` | Always reported; `true` unless explicitly disabled |
 | `visible` | bool | `!AXHidden` | `VISIBLE` state bit | `!IsOffscreen` | Always reported; `true` unless explicitly hidden |
 | `focused` | bool | `AXFocused` | `FOCUSED` state bit | `HasKeyboardFocus` | Whether element has keyboard focus |
+| `active` | bool | `AXMain` | `ACTIVE` state bit | Foreground `HWND` | Whether this is the active (foreground) window; meaningful for window-like elements |
 | `focusable` | bool | Computed from role/attributes | `FOCUSABLE` state bit | `IsKeyboardFocusable` | Whether element can receive focus |
 | `selected` | bool | `AXSelected` | `SELECTED` state bit | `SelectionItemPattern.IsSelected` | Whether element is selected |
 | `editable` | bool | Computed from role | `EDITABLE` state bit | `!ValuePattern.IsReadOnly` | Whether element's value can be edited |

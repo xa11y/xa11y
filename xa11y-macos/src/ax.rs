@@ -1537,10 +1537,20 @@ fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -
                 | Role::Switch
         ) || attrs.focused.is_some();
 
+        // `AXMain` marks the app's main (active) window. Only window-like
+        // elements (Window / Dialog / Sheet — the latter maps to `Role::Dialog`)
+        // carry it, so gate on role to avoid an extra AX IPC round-trip for
+        // every non-window element. `ax_bool` routes through the exception-safe
+        // wrappers and owns its CFRelease; a missing / error / non-boolean
+        // attribute yields `false`, matching how the other state reads degrade.
+        let active = matches!(role, Role::Window | Role::Dialog)
+            && ax_bool(element, "AXMain").unwrap_or(false);
+
         let states = StateSet {
             enabled: attrs.enabled.unwrap_or(true),
             visible: !attrs.hidden.unwrap_or(false),
             focused: attrs.focused.unwrap_or(false),
+            active,
             focusable,
             modal: attrs.modal.unwrap_or(false),
             checked,

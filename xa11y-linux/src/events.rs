@@ -655,6 +655,7 @@ fn bits_from_u32s(state_bits: &[u32]) -> u64 {
 
 fn states_from_bits(bits: u64, role: Role) -> StateSet {
     // Same bit positions as `LinuxProvider::parse_states` — kept in sync.
+    const ACTIVE: u64 = 1 << 1;
     const BUSY: u64 = 1 << 3;
     const CHECKED: u64 = 1 << 4;
     const EDITABLE: u64 = 1 << 7;
@@ -697,6 +698,9 @@ fn states_from_bits(bits: u64, role: Role) -> StateSet {
         enabled,
         visible,
         focused: (bits & FOCUSED) != 0,
+        // AT-SPI `ACTIVE` = foreground window/frame; kept in sync with
+        // `LinuxProvider::parse_states`.
+        active: (bits & ACTIVE) != 0,
         checked,
         selected: (bits & SELECTED) != 0,
         expanded,

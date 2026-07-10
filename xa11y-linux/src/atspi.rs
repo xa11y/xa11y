@@ -20,6 +20,7 @@ fn state_attr_to_string(name: &str, s: &StateSet) -> Option<String> {
         "enabled" => Some(s.enabled.to_string()),
         "visible" => Some(s.visible.to_string()),
         "focused" => Some(s.focused.to_string()),
+        "active" => Some(s.active.to_string()),
         "focusable" => Some(s.focusable.to_string()),
         "selected" => Some(s.selected.to_string()),
         "editable" => Some(s.editable.to_string()),
@@ -848,6 +849,7 @@ impl LinuxProvider {
         let bits = self.state_bits(aref);
 
         // AT-SPI2 state bit positions (AtspiStateType enum values)
+        const ACTIVE: u64 = 1 << 1;
         const BUSY: u64 = 1 << 3;
         const CHECKED: u64 = 1 << 4;
         const EDITABLE: u64 = 1 << 7;
@@ -890,6 +892,10 @@ impl LinuxProvider {
             enabled,
             visible,
             focused: (bits & FOCUSED) != 0,
+            // AT-SPI `ACTIVE` marks the foreground window/frame (see
+            // `focused_app`). Real value set here in phase 1 because the bit
+            // parse is trivial and already documented below.
+            active: (bits & ACTIVE) != 0,
             checked,
             selected: (bits & SELECTED) != 0,
             expanded,
@@ -1101,8 +1107,8 @@ impl LinuxProvider {
                 }
                 "value" => Some(self.get_value(aref)),
                 "description" => Some(self.get_description(aref).ok().filter(|s| !s.is_empty())),
-                "enabled" | "visible" | "focused" | "focusable" | "selected" | "editable"
-                | "modal" | "required" | "busy" | "expanded" | "checked" => {
+                "enabled" | "visible" | "focused" | "active" | "focusable" | "selected"
+                | "editable" | "modal" | "required" | "busy" | "expanded" | "checked" => {
                     let s = state_set.get_or_insert_with(|| {
                         // `parse_states` reads `checked` based on role; pass
                         // whatever we already resolved (Unknown is a no-op for

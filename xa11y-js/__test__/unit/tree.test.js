@@ -132,6 +132,22 @@ test('App.dump() matches Element.dump() on the app root', async () => {
   assert.equal(fromApp, fromElement);
 });
 
+// ── App.isForeground / App.focused ─────────────────────────────────────────
+
+test('App.isForeground is true for the mock foreground app', () => {
+  // The mock reports its root as the foreground app and `_makeTestApp`
+  // resolves it via the predicate finder, so the flag is tagged.
+  const app = mockApp();
+  assert.equal(typeof app.isForeground, 'boolean');
+  assert.equal(app.isForeground, true);
+});
+
+test('App.focused is a deprecated alias equal to isForeground', () => {
+  const app = mockApp();
+  assert.equal(app.focused, app.isForeground);
+  assert.equal(app.focused, true);
+});
+
 // ── Locator.tree() / Locator.dump() ────────────────────────────────────────
 
 test('Locator.tree() returns the matched subtree', async () => {
