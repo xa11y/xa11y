@@ -15,7 +15,7 @@ png = "0.18"
 rayon = "1"
 zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
 # X11 + XTest for the X11 input-simulation backend.
-x11rb = { version = "0.13", default-features = false, features = ["xtest"] }
+x11rb = { version = "0.14", default-features = false, features = ["xtest"] }
 # Wayland input-simulation backend: drive a /dev/uinput virtual evdev
 # device. Compositor-agnostic — works on every Wayland session (GNOME,
 # KDE, sway, Hyprland, Cosmic, weston) because the kernel exposes the
@@ -35,7 +35,7 @@ wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-x11rb = { version = "0.13", default-features = false }
+x11rb = { version = "0.14", default-features = false }
 # Mock Wayland compositor for the wl_output / xdg-output scale test: drives
 # the real client dispatch code over a socket, hermetically (no compositor).
 wayland-server = "0.31"
