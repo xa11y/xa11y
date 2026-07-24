@@ -196,6 +196,8 @@ xa11y is built around three core types:
 
 Element properties: `role`, `name`, `value`, `description`, `bounds`, `states`, `actions`, `numeric_value`, `min_value`, `max_value`, `stable_id`, `pid`.
 
+`stable_id` is stable across queries but **not guaranteed unique** — on macOS some toolkits (notably Qt) stamp one `AXIdentifier` across a whole subtree, and on Windows `AutomationId` is only unique among siblings. Don't use it as a map key, and expect `[stable_id="…"]` selectors to match several elements. See [`stable_id` is stable, not unique](/guides/platform-details/#stable_id-is-stable-not-unique).
+
 `name`, `value`, and `description` are stripped of Unicode bidi format controls (LRM, RLM, embeddings, isolates) so that equality assertions match the logical text. The unstripped platform string is preserved on `element.raw` under the platform-native key (`AXTitle`/`AXValue`/`AXDescription`/`AXHelp` on macOS, `atspi_name`/`atspi_value`/`atspi_description` on Linux, `uia_name`/`uia_value`/`uia_help_text` on Windows).
 
 Element navigation and snapshots: `children()`, `parent()`, `tree(max_depth)`, `dump(max_depth)`.

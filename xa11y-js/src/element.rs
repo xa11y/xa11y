@@ -79,6 +79,11 @@ impl Element {
 
     /// Platform-assigned identifier that is stable across queries for the
     /// same element. Not available on every platform / every widget.
+    ///
+    /// Stable, but **not guaranteed unique**: on macOS some toolkits (Qt)
+    /// stamp one `AXIdentifier` across an entire subtree, and on Windows
+    /// `AutomationId` is unique only among siblings. Don't use it as a map
+    /// key; expect `[stable_id="…"]` selectors to match several elements.
     #[napi(getter)]
     pub fn stable_id(&self) -> Option<String> {
         self.data.stable_id.clone()

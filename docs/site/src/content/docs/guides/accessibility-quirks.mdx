@@ -321,7 +321,37 @@ time you cache or re-read an element**. You cannot use a handle's identity to
 dedup or compare elements across two queries — the same on-screen element returns
 disjoint handles, so naive identity-based dedup silently returns zero results.
 Key elements by a *stable* property instead: UIA `GetRuntimeId`, AT-SPI
-`(bus_name, object_path)`, or a structural tree path.
+`(bus_name, object_path)`, or a structural tree path. Note that xa11y's
+`stable_id` is **not** one of these — see the next section.
+
+### `stable_id` is stable across time, not unique across elements
+
+`stable_id` surfaces the platform's own identifier (`AXIdentifier` on macOS,
+`AutomationId` on Windows, the D-Bus object path on Linux). The name promises
+persistence across re-reads — **not** that two different elements have
+different values:
+
+- **Linux** — the object path *is* the accessible's address, so it is unique
+  within the application.
+- **Windows** — UIA specifies `AutomationId` as unique **among siblings**, not
+  tree-wide. Elements under different parents may legitimately collide.
+- **macOS** — `AXIdentifier` carries no uniqueness guarantee at all, and Qt
+  stamps a single identifier across an entire subtree: every row, cell, and
+  header under a `QTableWidget` reports the *table's* id, so a 24-node subtree
+  shares one `stable_id`.
+
+The failure this causes is silent: a dict keyed by `stable_id` collapses two
+dozen cells into one entry, and `[stable_id="…"]` returns a table when you
+expected a cell. Narrow with a role and structure instead:
+
+```
+table[stable_id="…"] > table_row > table_cell[name="Alice"]
+```
+
+xa11y does not synthesize a tree-unique id by appending tree position: that
+value would change whenever a sibling is inserted, trading away the stability
+the field exists to provide. Stability and uniqueness are separate guarantees,
+and the platforms only hand you one at a time.
 
 ### AccessKit republishes the whole subtree on any mutation
 

@@ -119,6 +119,26 @@ The tri-state checked value (`Off` / `On` / `Mixed`) is derived differently:
 - **Linux:** Uses AT-SPI state bits — `Checked` (0x10) and `Mixed` (0x2000).
 - **Windows:** Reads `TogglePattern.CurrentToggleState` — 0 = Off, 1 = On, 2 = Indeterminate.
 
+### `stable_id` is stable, not unique
+
+`stable_id` promises persistence across queries — not that two elements have different values. The platform guarantees differ, and only Linux gives you real uniqueness:
+
+| Platform | Source | Uniqueness |
+|----------|--------|------------|
+| Linux | D-Bus `object_path` | Unique within the application — it is the accessible's address |
+| Windows | `AutomationId` | Unique **among siblings** only (per the UIA spec); elements under different parents may share one |
+| macOS | `AXIdentifier` | **No guarantee.** Some toolkits stamp one identifier across an entire subtree |
+
+The macOS case is the sharp one. Qt is the known offender: every node beneath a `QTableWidget` — rows, cells, headers — reports the *table's* `AXIdentifier`, so a 24-node subtree shares a single `stable_id`.
+
+Practical rules:
+
+- **Don't use `stable_id` as a map key or a de-duplication key.** On macOS that silently collapses many elements into one.
+- **Expect `[stable_id="…"]` to match more than one element.** Use `elements()` rather than `element()`, or narrow with a role and structure: `table[stable_id="…"] > table_row > table_cell[name="Alice"]`.
+- **For identity within one query**, prefer the tree position you navigated (`children()` / `parent()` from a known root) over an id lookup.
+
+xa11y deliberately does not synthesize a tree-unique id by appending tree position: that value would change whenever a sibling is inserted, trading away the stability the field exists to provide. If you need a unique key, derive one in your own code from whatever mix of role, name, and path suits your app — and expect it to be as fragile as the structure it encodes.
+
 ### Selected state
 
 Per-item selection (`selected` on rows, cells, list items) is read differently:

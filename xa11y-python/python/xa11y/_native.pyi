@@ -347,7 +347,20 @@ class Element:
     @property
     def max_value(self) -> float | None: ...
     @property
-    def stable_id(self) -> str | None: ...
+    def stable_id(self) -> str | None:
+        """Platform-assigned identifier, stable across queries.
+
+        Stable but **not guaranteed unique**. On macOS some toolkits (Qt)
+        report one ``AXIdentifier`` for an entire subtree — every row, cell,
+        and header under a table shares the table's id — and on Windows
+        ``AutomationId`` is unique only among siblings. Linux (the D-Bus
+        object path) is the one platform where it is unique per app.
+
+        So don't use it as a dict key or for de-duplication, and expect
+        ``[stable_id="..."]`` selectors to match more than one element::
+
+            cells = app.locator(f'table[stable_id="{tid}"] table_cell').elements()
+        """
     @property
     def pid(self) -> int | None: ...
     @property

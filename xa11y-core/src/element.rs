@@ -82,6 +82,34 @@ pub struct ElementData {
     /// - Linux: D-Bus `object_path`
     ///
     /// Not all elements have one.
+    ///
+    /// # Stable, but not necessarily unique
+    ///
+    /// The name is a promise about *time*, not about *identity*: the value
+    /// is meant to survive re-querying the same element, but nothing
+    /// guarantees that two different elements have different values. The
+    /// underlying platform guarantees differ:
+    ///
+    /// - **Linux** — the D-Bus object path is the accessible's address, so
+    ///   it is unique within an application.
+    /// - **Windows** — UIA specifies `AutomationId` as unique *among
+    ///   siblings*, not tree-wide. Two elements under different parents may
+    ///   legitimately share one.
+    /// - **macOS** — `AXIdentifier` carries no uniqueness guarantee at all,
+    ///   and some toolkits stamp one identifier across a whole subtree. Qt
+    ///   is the known case: every node under a `QTableWidget` (rows, cells,
+    ///   headers) reports the table's identifier, so a 24-node subtree
+    ///   shares a single `stable_id`.
+    ///
+    /// Consequences for callers: do not use `stable_id` as a map key or as
+    /// a de-duplication key, and expect `[stable_id="…"]` selectors to match
+    /// more than one element. To address one element unambiguously, combine
+    /// it with a role and/or a structural path (e.g.
+    /// `table[stable_id="…"] > table_row > table_cell[name="Alice"]`).
+    ///
+    /// Deriving a synthetic tree-unique id is deliberately *not* done here:
+    /// any position-derived suffix would change whenever a sibling is
+    /// inserted, trading away the stability this field exists to provide.
     pub stable_id: Option<String>,
 
     /// Process ID of the application that owns this element.
