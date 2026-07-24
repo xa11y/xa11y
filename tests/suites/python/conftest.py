@@ -91,6 +91,25 @@ APP_CONFIGS: dict[str, dict] = {
         "textfield_initial_value": None,  # Qt does not guarantee specific text
         # Text area
         "textarea_selector": '[name="Notes"]',
+        # Table — QTableWidget. Qt names each cell accessible from its item
+        # text on every platform (UIA DataItem+TableItem, AT-SPI table cell,
+        # AXCell), so cell names are asserted directly.
+        "table_selector": 'table[name="Users Table"]',
+        "table_min_cells": 4,
+        "table_cell_names": ["Alice", "Admin", "Bob", "User"],
+        "table_content_names": None,
+        # The app selects cell (0, 0); the "Alice" cell must report
+        # selected=true on every platform. On macOS Qt's bridge implements
+        # no per-element AXSelected — selection is derived from the table's
+        # AXSelectedChildren (see xa11y-macos container-selection probe).
+        "table_selected_cell_name": "Alice",
+        # Header cells are named on Windows (UIA HeaderItem), Linux (AT-SPI
+        # column header), and in webviews — but Qt's Cocoa bridge exposes no
+        # header objects at all (synthesized AXRows/AXColumns only, no
+        # AXHeader attribute), so header names are absent from the macOS AX
+        # tree entirely. Upstream Qt limitation, not an xa11y one — see
+        # https://github.com/mrexodia/xa11y-table-repro captures.
+        "table_header_names": (None if sys.platform == "darwin" else ["Name", "Role"]),
         # Window
         "window_name_contains": "xa11y-qt-test-app",
         # Dynamic buttons for event tests
@@ -124,6 +143,18 @@ APP_CONFIGS: dict[str, dict] = {
         "textfield_selector": "text_field",
         "textfield_initial_value": "hello world",
         "textarea_selector": "text_area",
+        # Table — Gtk.ColumnView (AT-SPI "tree table"); only one table in the
+        # app so a role selector suffices. GTK 4.14 names each "table cell"
+        # accessible from its child Gtk.Label (verified against a live
+        # AT-SPI session), so cell names are asserted directly.
+        "table_selector": "table",
+        "table_min_cells": 4,
+        "table_cell_names": ["Alice", "Admin", "Bob", "User"],
+        "table_content_names": None,
+        # The GTK table uses a NoSelection model — nothing is selected.
+        "table_selected_cell_name": None,
+        # ColumnView's header row is named from its column titles.
+        "table_header_names": ["Name", "Role"],
         "window_name_contains": None,  # not asserted for GTK
         # Dynamic buttons for event tests (Dynamic group in app.py).
         "submit_button_name": "Submit",
@@ -154,6 +185,20 @@ APP_CONFIGS: dict[str, dict] = {
         "textfield_selector": 'text_field[name="Search"]',
         "textfield_initial_value": "hello world",
         "textarea_selector": 'text_area[name="Notes"]',
+        # Table — multi-column cell-based NSTableView ("Users Table").
+        # AppKit exposes AXCell elements without a title; the text is the
+        # AXValue of the AXStaticText inside each cell, so content is
+        # asserted via descendants, not cell names.
+        "table_selector": 'table[name="Users Table"]',
+        "table_min_cells": 4,
+        "table_cell_names": None,
+        "table_content_names": ["Alice", "Admin", "Bob", "User"],
+        # Not instrumented yet: NSTableView selects rows, not cells; a
+        # row-selection assertion needs named rows to target.
+        "table_selected_cell_name": None,
+        # AppKit exposes the header as sort-button children under the
+        # table's header group, named from the column titles.
+        "table_header_names": ["Name", "Role"],
         "window_name_contains": None,  # not asserted for Cocoa
         "submit_button_name": "Submit",
         "add_item_button_name": "Add Item",
@@ -187,6 +232,29 @@ APP_CONFIGS: dict[str, dict] = {
         "textfield_selector": 'text_field[name="Search"]',
         "textfield_initial_value": "hello world",
         "textarea_selector": 'text_area[name="Notes"]',
+        # Table — HTML <table> with a <caption> (WebKit's data-table
+        # heuristic needs a caption/headers to expose the table at all, and
+        # <th> is out — see the page comment). Only one table in the app,
+        # found by role: WebKitGTK doesn't surface aria-label as the
+        # table's AT-SPI name (macOS WebKit does). The cross-platform role
+        # contract (table + table_cell) is asserted; cell text is NOT
+        # name-addressable in either WebKit port — WebKitGTK exposes it
+        # via the AT-SPI Text interface, macOS WebKit via text markers —
+        # so content assertions for webviews live in the Electron config,
+        # where Chromium names the text leaves.
+        "table_selector": "table",
+        "table_min_cells": 4,
+        "table_cell_names": None,
+        "table_content_names": None,
+        # Plain HTML tables have no selection.
+        "table_selected_cell_name": None,
+        # No header assertions: the Tauri page carries no <th> cells at all —
+        # under WebKitGTK with a window manager present, <th> triggers a
+        # continuous accessibility-tree invalidation churn that detaches the
+        # whole page from AT-SPI (see the comment in
+        # test-apps/tauri/frontend/index.html). Webview header coverage
+        # lives in the Electron config instead.
+        "table_header_names": None,
         "window_name_contains": None,  # not asserted for Tauri
         "submit_button_name": "Submit",
         "add_item_button_name": "Add Item",
@@ -219,6 +287,16 @@ APP_CONFIGS: dict[str, dict] = {
         "textfield_selector": 'text_field[name="Search"]',
         "textfield_initial_value": "hello world",
         "textarea_selector": 'text_area[name="Notes"]',
+        # Table — markup mirrors the Tauri test app; same descendant-based
+        # content assertion (Chromium's cell naming varies by platform).
+        "table_selector": 'table[name="Users Table"]',
+        "table_min_cells": 4,
+        "table_cell_names": None,
+        "table_content_names": ["Alice", "Admin", "Bob", "User"],
+        # Plain HTML tables have no selection.
+        "table_selected_cell_name": None,
+        # <th> header cells are named from their text content.
+        "table_header_names": ["Name", "Role"],
         "window_name_contains": None,  # not asserted for Electron
         # Not instrumented yet: no Dynamic (Submit / Add Item / Remove Item)
         # group in the Electron test app, so event tests skip.
@@ -280,6 +358,26 @@ APP_CONFIGS: dict[str, dict] = {
         "textfield_settable": False,
         # The AccessKit app has no multiline text area.
         "textarea_selector": None,
+        # Table — Role::Table "Users" with Role::Row / Role::Cell children.
+        # AccessKit sets each cell's name from its label on every adapter
+        # (on Windows via the structural DataItem disambiguation in
+        # xa11y-windows — AccessKit exposes cells as pattern-less DataItems).
+        "table_selector": 'table[name="Users"]',
+        "table_min_cells": 6,
+        "table_cell_names": [
+            "Alice",
+            "alice@test.com",
+            "Admin",
+            "Bob",
+            "bob@test.com",
+            "User",
+        ],
+        "table_content_names": None,
+        # Not instrumented yet: the AccessKit app sets no selection on its
+        # table cells.
+        "table_selected_cell_name": None,
+        # Not instrumented yet: the AccessKit app's table has no header row.
+        "table_header_names": None,
         # Window name comes from the winit window title but AT-SPI reports the
         # binary name; leave unchecked.
         "window_name_contains": None,
@@ -334,6 +432,17 @@ APP_CONFIGS: dict[str, dict] = {
         # Windows collapses to UIA_EditControlTypeId (xa11y `text_field`,
         # no distinct multiline role exists in UIA). Skip on Windows.
         "textarea_selector": None if sys.platform == "win32" else "text_area",
+        # Table — egui has no table widget with table accessibility
+        # semantics (egui::Grid and egui_extras' TableBuilder are layout
+        # only; they emit no AccessKit Table/Row/Cell roles).
+        "table_selector": unsupported(
+            "egui has no table widget that exposes AccessKit table semantics"
+        ),
+        "table_min_cells": 0,
+        "table_cell_names": None,
+        "table_content_names": None,
+        "table_selected_cell_name": None,
+        "table_header_names": None,
         # Window name comes from `ViewportBuilder::with_title` but the
         # AT-SPI/UIA/AX layer reports the binary name; leave unchecked.
         "window_name_contains": None,

@@ -26,8 +26,8 @@ xa11y normalizes platform-specific APIs into a unified interface. This page docu
 | `Tab` | *(subrole AXTabButton)* | page tab | TabItemControlType |
 | `TabGroup` | AXTabGroup | page tab list | TabControlType |
 | `Table` | AXTable | table, tree table | TableControlType, DataGridControlType |
-| `TableRow` | *(via AXRow)* | table row | DataItemControlType |
-| `TableCell` | AXCell | table cell, column/row header | HeaderItemControlType |
+| `TableRow` | *(via AXRow)* | table row | DataItemControlType *(no cell signal)* |
+| `TableCell` | AXCell | table cell, column/row header | HeaderItemControlType, DataItemControlType *(with TableItem pattern, or parent DataItem)* |
 | `Toolbar` | AXToolbar | tool bar | ToolBarControlType |
 | `ScrollBar` | AXScrollBar | scroll bar | ScrollBarControlType |
 | `Slider` | AXSlider | slider | SliderControlType |
@@ -118,6 +118,18 @@ The tri-state checked value (`Off` / `On` / `Mixed`) is derived differently:
 - **macOS:** Parses the `AXValue` attribute — `"0"` = Off, `"1"` = On, `"2"` = Mixed.
 - **Linux:** Uses AT-SPI state bits — `Checked` (0x10) and `Mixed` (0x2000).
 - **Windows:** Reads `TogglePattern.CurrentToggleState` — 0 = Off, 1 = On, 2 = Indeterminate.
+
+### Selected state
+
+Per-item selection (`selected` on rows, cells, list items) is read differently:
+
+- **macOS:** The per-element `AXSelected` attribute when present. Some bridges — notably Qt's — implement no per-element `AXSelected` and expose selection only through the container's `AXSelectedChildren`; for `table_cell` / `table_row` / `list_item` elements whose `AXSelected` attribute is absent, xa11y resolves `selected` by membership in the nearest ancestor's `AXSelectedChildren` (at most two hops: cell → row → table). Derived values appear in `states.selected` only — `raw` never gains a synthetic `AXSelected` key.
+- **Linux:** The AT-SPI `Selected` state bit.
+- **Windows:** `SelectionItemPattern.CurrentIsSelected`.
+
+### Table headers
+
+Header exposure varies by toolkit as well as platform. Windows surfaces header cells as `HeaderItem` elements and per-cell header relationships via the `TableItem` pattern; AT-SPI exposes `column header` / `row header` roles; AppKit tables expose a header group whose sort buttons carry the column titles. One known toolkit gap: **Qt tables on macOS expose no header objects at all** — Qt's Cocoa bridge synthesizes `AXRow`/`AXColumn` children only and implements no `AXHeader` attribute, so column titles are absent from the AX tree and xa11y cannot surface them. This is an upstream Qt limitation; use the platform-consistent `table table_cell` selectors for data, and avoid depending on header names for Qt apps on macOS.
 
 ### Linux: X11 vs Wayland
 

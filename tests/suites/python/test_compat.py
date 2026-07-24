@@ -316,18 +316,89 @@ def test_textarea_found(app, app_config):
 # ---------------------------------------------------------------------------
 
 
-def test_qt_table_data_items_are_cells(app, app_name):
-    """Qt's UIA DataItems implement TableItem and must normalize as cells."""
-    if app_name != "qt":
-        pytest.skip("native Qt table regression")
+def test_table_cells_normalize(app, app_config):
+    """Table contents must normalize to table_cell on every toolkit and OS.
 
-    table = app.locator('table[name="Users Table"]').element()
+    This is the cross-platform contract behind ``table table_cell``
+    selectors: Qt's UIA DataItem+TableItem cells, AccessKit's pattern-less
+    DataItem cells (disambiguated structurally on Windows), AT-SPI
+    "table cell", and AXCell must all surface as ``table_cell``.
+    """
+    selector = app_config.get("table_selector")
+    if not selector:
+        # unsupported() markers are falsy strings carrying the reason.
+        reason = str(selector) if isinstance(selector, str) else ""
+        pytest.skip(reason or "test app has no table widget")
+
+    table = app.locator(selector).element()
     assert table.role == "table"
-    for name in ("Alice", "Admin", "Bob", "User"):
-        cell = app.locator(
-            f'table[name="Users Table"] table_cell[name="{name}"]'
-        ).element()
+
+    cells = app.locator(f"{selector} table_cell").elements()
+    min_cells = app_config["table_min_cells"]
+    assert len(cells) >= min_cells, (
+        f"expected at least {min_cells} table_cell elements under "
+        f"{selector!r}, found {len(cells)}"
+    )
+
+    # Toolkits that name the cell accessible itself (Qt, AccessKit): the
+    # named element must be the cell, not a descendant.
+    for name in app_config.get("table_cell_names") or []:
+        cell = app.locator(f'{selector} table_cell[name*="{name}"]').element()
         assert cell.role == "table_cell"
+
+    # Toolkits where the text lives on a child accessible (GTK Labels,
+    # AppKit static text, webview text leaves): the content must at least be
+    # reachable somewhere under the table.
+    for name in app_config.get("table_content_names") or []:
+        assert app.locator(f'{selector} [name*="{name}"]').exists(), (
+            f"no element named {name!r} found under {selector!r}"
+        )
+
+
+def test_table_selected_cell_state(app, app_config):
+    """Per-cell selection state must survive every platform bridge.
+
+    The test app selects one cell programmatically; that cell must report
+    ``selected`` on Windows (UIA SelectionItem.IsSelected), Linux (AT-SPI
+    selected state), and macOS. On macOS, Qt exposes selection only through
+    the table's ``AXSelectedChildren`` (no per-element ``AXSelected``), so
+    this exercises xa11y-macos's container-selection derivation.
+    Regression for https://github.com/mrexodia/xa11y-table-repro.
+    """
+    selector = app_config.get("table_selector")
+    selected_name = app_config.get("table_selected_cell_name")
+    if not selector or not selected_name:
+        pytest.skip("test app has no table with a programmatic cell selection")
+
+    cell = app.locator(f'{selector} table_cell[name*="{selected_name}"]').element()
+    assert cell.selected, (
+        f"cell {selected_name!r} is programmatically selected in the app "
+        f"but reports selected={cell.selected}"
+    )
+    # A sibling cell must NOT leak the selected state.
+    for other in app.locator(f"{selector} table_cell").elements():
+        if other.name and selected_name not in other.name:
+            assert not other.selected, (
+                f"unselected cell {other.name!r} reports selected=True"
+            )
+
+
+def test_table_headers_exposed(app, app_config):
+    """Column header names must be reachable under the table.
+
+    Skipped where the toolkit genuinely exposes no header objects (e.g.
+    Qt's Cocoa bridge synthesizes AXRows/AXColumns only and implements no
+    AXHeader, so header names do not exist in the macOS AX tree at all).
+    """
+    selector = app_config.get("table_selector")
+    headers = app_config.get("table_header_names")
+    if not selector or not headers:
+        pytest.skip("test app exposes no named table headers on this platform")
+
+    for header in headers:
+        assert app.locator(f'{selector} [name*="{header}"]').exists(), (
+            f"header {header!r} not found under {selector!r}"
+        )
 
 
 # ---------------------------------------------------------------------------

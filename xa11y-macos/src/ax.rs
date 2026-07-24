@@ -122,6 +122,7 @@ extern "C" {
     fn safe_cf_array_get_count(arr: CFArrayRef) -> CFIndex;
     fn safe_cf_array_get_value(arr: CFArrayRef, idx: CFIndex) -> CFTypeRef;
     fn safe_cf_boolean_get_value(b: CFTypeRef) -> bool;
+    fn safe_cf_equal(a: CFTypeRef, b: CFTypeRef) -> bool;
     fn safe_cf_number_get_value(num: CFTypeRef, the_type: i32, value_ptr: *mut c_void) -> bool;
     fn safe_cf_dict_get_value(dict: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
     fn safe_cf_array_create(values: *const CFTypeRef, num_values: CFIndex) -> CFArrayRef;
@@ -398,6 +399,56 @@ fn ax_parent(element: AXUIElementRef) -> Option<AXElement> {
     let value = ax_attr(element, "AXParent")?;
     // AXParent returns an AXUIElement, which we own via copy attribute
     Some(AXElement::from_owned(value as AXUIElementRef))
+}
+
+/// Roles whose selection state may live on the container rather than on the
+/// element itself. Kept narrow so the container probe never fires for
+/// elements that simply have no selection concept.
+fn selection_can_come_from_container(role: Role) -> bool {
+    matches!(role, Role::TableCell | Role::TableRow | Role::ListItem)
+}
+
+/// Resolve selection for an element with no `AXSelected` attribute by
+/// membership in the nearest ancestor's `AXSelectedChildren`.
+///
+/// AppKit sets `AXSelected` directly on rows/cells, but some bridges expose
+/// selection only container-side: Qt's Cocoa bridge implements no
+/// per-element `AXSelected` at all and surfaces `QAccessibleSelectionInterface`
+/// as `AXSelectedChildren` on the table — two hops above a cell
+/// (cell → row → table). Membership is the platform's canonical reading of
+/// per-item selection in that case, not a substitute for it.
+///
+/// Walks at most `max_hops` ancestors and stops at the first that exposes
+/// `AXSelectedChildren`; an empty list there is a definitive "not selected".
+/// A chain with no such container yields `false`, matching how the other
+/// state attributes degrade when absent.
+fn container_selection_contains(element: AXUIElementRef, max_hops: usize) -> bool {
+    let mut current = match ax_parent(element) {
+        Some(p) => p,
+        None => return false,
+    };
+    for _ in 0..max_hops {
+        if let Some(list) = ax_attr(current.as_ptr(), "AXSelectedChildren") {
+            let contained = unsafe {
+                if safe_cf_get_type_id(list) == safe_cf_array_get_type_id() {
+                    let count = safe_cf_array_get_count(list);
+                    (0..count).any(|i| {
+                        let item = safe_cf_array_get_value(list, i);
+                        safe_cf_equal(item, element as CFTypeRef)
+                    })
+                } else {
+                    false
+                }
+            };
+            unsafe { safe_cf_release(list) };
+            return contained;
+        }
+        current = match ax_parent(current.as_ptr()) {
+            Some(p) => p,
+            None => return false,
+        };
+    }
+    false
 }
 
 fn ax_action_names(element: AXUIElementRef) -> Vec<String> {
@@ -1554,7 +1605,20 @@ fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -
         states.focusable = focusable;
         states.modal = attrs.modal.unwrap_or(false);
         states.checked = checked;
-        states.selected = attrs.selected.unwrap_or(false);
+        // `AXSelected` is the per-element attribute, but bridges like Qt's
+        // implement selection only container-side (AXSelectedChildren on the
+        // table). Probe the container only when the attribute is entirely
+        // absent AND the role is a selectable item — AppKit elements carry
+        // AXSelected directly, so they never pay for the probe. `raw` keeps
+        // only genuinely present platform attributes, so a derived value
+        // shows up in `states.selected` but adds no fake "AXSelected" key.
+        states.selected = match attrs.selected {
+            Some(s) => s,
+            None if selection_can_come_from_container(role) => {
+                container_selection_contains(element, 2)
+            }
+            None => false,
+        };
         states.expanded = attrs.expanded;
         states.editable = matches!(role, Role::TextField | Role::TextArea);
         states.required = false;
@@ -2788,6 +2852,31 @@ mod tests {
     fn ax_action_names_returns_empty_for_null_element() {
         let result = ax_action_names(std::ptr::null());
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn container_selection_probe_gated_to_selectable_item_roles() {
+        // Only roles that live inside AXSelectedChildren-style containers
+        // may trigger the (IPC-costly) ancestor probe.
+        for role in [Role::TableCell, Role::TableRow, Role::ListItem] {
+            assert!(selection_can_come_from_container(role), "{role:?}");
+        }
+        for role in [
+            Role::Button,
+            Role::Table,
+            Role::StaticText,
+            Role::Window,
+            Role::CheckBox,
+        ] {
+            assert!(!selection_can_come_from_container(role), "{role:?}");
+        }
+    }
+
+    #[test]
+    fn container_selection_contains_is_false_for_null_element() {
+        // A null element has no parent chain; the probe must degrade to
+        // "not selected" without touching AX APIs.
+        assert!(!container_selection_contains(std::ptr::null(), 2));
     }
 
     #[test]

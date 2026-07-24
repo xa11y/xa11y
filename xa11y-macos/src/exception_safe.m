@@ -251,6 +251,19 @@ Boolean safe_cf_boolean_get_value(CFTypeRef b) {
     }
 }
 
+// Safe CFEqual. AXUIElementRefs compare by underlying accessibility object,
+// which is what the container-selection membership check in ax.rs relies on.
+Boolean safe_cf_equal(CFTypeRef a, CFTypeRef b) {
+    @try {
+        if (a != NULL && b != NULL) {
+            return CFEqual(a, b);
+        }
+        return false;
+    } @catch (NSException *e) {
+        return false;
+    }
+}
+
 // Safe CFNumberGetValue.
 Boolean safe_cf_number_get_value(CFNumberRef num, CFNumberType type, void *valuePtr) {
     @try {
