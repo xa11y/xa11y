@@ -160,13 +160,26 @@ Line 3</textarea>
 
   <!-- Table: WebKit exposes <table> as AT-SPI "table" (AXTable on macOS)
        with "table cell" (AXCell) children, matching the cross-platform
-       table/table_cell contract. -->
+       table/table_cell contract.
+
+       Deliberately NO <th> header cells: under WebKitGTK 2.52 with a
+       window manager present (the CI setup), a table containing <th>
+       sends the web process's accessibility tree into a continuous
+       invalidation churn — every content accessible goes defunct
+       moments after being exposed, which takes the whole page out of
+       the AT-SPI tree and fails every suite test. Verified by bisecting
+       this file against a live harness run; <td>-only tables are
+       stable. The Electron page keeps its <th> row (Chromium is
+       unaffected), so header coverage for webviews lives there.
+
+       The <caption> is load-bearing: without headers, WebKit's layout-
+       table heuristic judges the table decorative and drops it from the
+       accessibility tree entirely; a caption marks it as a data table
+       (and names it on macOS). -->
   <fieldset>
     <legend>Table</legend>
     <table id="users-table" aria-label="Users Table">
-      <thead>
-        <tr><th>Name</th><th>Role</th></tr>
-      </thead>
+      <caption>Users Table</caption>
       <tbody>
         <tr><td>Alice</td><td>Admin</td></tr>
         <tr><td>Bob</td><td>User</td></tr>

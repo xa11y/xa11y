@@ -232,26 +232,29 @@ APP_CONFIGS: dict[str, dict] = {
         "textfield_selector": 'text_field[name="Search"]',
         "textfield_initial_value": "hello world",
         "textarea_selector": 'text_area[name="Notes"]',
-        # Table — HTML <table aria-label="Users Table">. Cell role
-        # normalization holds everywhere; content naming differs by engine:
-        # WebKitGTK names the text leaves (asserted via descendants), but
-        # WebKit on macOS exposes cell text only through its text-marker
-        # API — neither the AXCell nor a descendant carries the text as a
-        # name — so the content assertion is Linux-only.
-        "table_selector": 'table[name="Users Table"]',
+        # Table — HTML <table> with a <caption> (WebKit's data-table
+        # heuristic needs a caption/headers to expose the table at all, and
+        # <th> is out — see the page comment). Only one table in the app,
+        # found by role: WebKitGTK doesn't surface aria-label as the
+        # table's AT-SPI name (macOS WebKit does). The cross-platform role
+        # contract (table + table_cell) is asserted; cell text is NOT
+        # name-addressable in either WebKit port — WebKitGTK exposes it
+        # via the AT-SPI Text interface, macOS WebKit via text markers —
+        # so content assertions for webviews live in the Electron config,
+        # where Chromium names the text leaves.
+        "table_selector": "table",
         "table_min_cells": 4,
         "table_cell_names": None,
-        "table_content_names": (
-            None if sys.platform == "darwin" else ["Alice", "Admin", "Bob", "User"]
-        ),
+        "table_content_names": None,
         # Plain HTML tables have no selection.
         "table_selected_cell_name": None,
-        # <th> header cells are named from their text content on AT-SPI;
-        # on macOS WebKit header text is text-marker-only, like cell text
-        # above, so the assertion is Linux-only.
-        "table_header_names": (
-            None if sys.platform == "darwin" else ["Name", "Role"]
-        ),
+        # No header assertions: the Tauri page carries no <th> cells at all —
+        # under WebKitGTK with a window manager present, <th> triggers a
+        # continuous accessibility-tree invalidation churn that detaches the
+        # whole page from AT-SPI (see the comment in
+        # test-apps/tauri/frontend/index.html). Webview header coverage
+        # lives in the Electron config instead.
+        "table_header_names": None,
         "window_name_contains": None,  # not asserted for Tauri
         "submit_button_name": "Submit",
         "add_item_button_name": "Add Item",

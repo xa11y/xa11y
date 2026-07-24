@@ -2065,13 +2065,20 @@ pub(crate) fn map_atspi_role(role_name: &str) -> Role {
         "page tab list" => Role::TabGroup,
         "table" | "tree table" => Role::Table,
         "table row" => Role::TableRow,
-        "table cell" | "table column header" | "table row header" => Role::TableCell,
+        // Bare "column header"/"row header" are WebKit's <th> and GTK
+        // column-view headers; the "table …" pair is the classic toolkit one.
+        "table cell"
+        | "table column header"
+        | "table row header"
+        | "column header"
+        | "row header" => Role::TableCell,
         "tool bar" => Role::Toolbar,
         "scroll bar" => Role::ScrollBar,
         "slider" => Role::Slider,
         "image" | "icon" | "desktop icon" => Role::Image,
         "link" => Role::Link,
-        "panel" | "section" | "form" | "filler" | "viewport" | "scroll pane" => Role::Group,
+        "panel" | "section" | "form" | "filler" | "viewport" | "scroll pane" | "paragraph"
+        | "header" | "footer" | "grouping" | "block quote" => Role::Group,
         "progress bar" => Role::ProgressBar,
         "tree item" => Role::TreeItem,
         "document web" | "document frame" => Role::WebArea,
@@ -2089,9 +2096,13 @@ pub(crate) fn map_atspi_role(role_name: &str) -> Role {
 /// Values from atspi-common Role enum (repr(u32)).
 pub(crate) fn map_atspi_role_number(role: u32) -> Role {
     match role {
-        2 => Role::Alert,        // Alert
-        7 => Role::CheckBox,     // CheckBox
-        8 => Role::CheckBox,     // CheckMenuItem
+        2 => Role::Alert,    // Alert
+        7 => Role::CheckBox, // CheckBox
+        8 => Role::CheckBox, // CheckMenuItem
+        // Bare ColumnHeader/RowHeader (10/47): WebKit and GTK emit these for
+        // <th> / column-view header cells, distinct from the
+        // TableColumnHeader/TableRowHeader pair (57/58) below.
+        10 => Role::TableCell,   // ColumnHeader
         11 => Role::ComboBox,    // ComboBox
         16 => Role::Dialog,      // Dialog
         19 => Role::Dialog,      // FileChooser
@@ -2113,6 +2124,7 @@ pub(crate) fn map_atspi_role_number(role: u32) -> Role {
         43 => Role::Button,      // Button (push button)
         44 => Role::RadioButton, // RadioButton
         45 => Role::RadioButton, // RadioMenuItem
+        47 => Role::TableCell,   // RowHeader
         48 => Role::ScrollBar,   // ScrollBar
         49 => Role::Group,       // ScrollPane
         50 => Role::Separator,   // Separator
@@ -2131,10 +2143,18 @@ pub(crate) fn map_atspi_role_number(role: u32) -> Role {
         67 => Role::Unknown,     // Unknown
         68 => Role::Group,       // Viewport
         69 => Role::Window,      // Window
+        // Text-document containers WebKit emits for plain markup: a bare
+        // <p> (no ARIA naming) is Paragraph; header/footer/caption/block
+        // quote come from the matching HTML elements. Containers normalize
+        // to Group, caption to StaticText, mirroring the by-name map.
+        71 => Role::Group,       // Header
+        72 => Role::Group,       // Footer
+        73 => Role::Group,       // Paragraph
         75 => Role::Application, // Application
         78 => Role::TextArea, // Embedded — WebKit2GTK uses this for <input type="text"> and <textarea>;
         // multi-line refinement below downgrades single-line ones to TextField
         79 => Role::TextField,   // Entry
+        81 => Role::StaticText,  // Caption
         82 => Role::WebArea,     // DocumentFrame
         83 => Role::Heading,     // Heading
         85 => Role::Group,       // Section
@@ -2146,6 +2166,8 @@ pub(crate) fn map_atspi_role_number(role: u32) -> Role {
         95 => Role::WebArea,     // DocumentWeb
         97 => Role::List,        // WebKit2GTK uses this for <ul role="listbox">
         98 => Role::List,        // ListBox
+        99 => Role::Group,       // Grouping
+        105 => Role::Group,      // BlockQuote
         93 => Role::Tooltip,     // Tooltip
         101 => Role::Alert,      // Notification
         116 => Role::StaticText, // Static
