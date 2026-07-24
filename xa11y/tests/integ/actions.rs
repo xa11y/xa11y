@@ -321,23 +321,35 @@ mod tests {
     #[ignore]
     fn nesting_subtree_of_table() {
         let app = h::app_root();
-        let tables = app.locator("table").elements().unwrap();
-        if !tables.is_empty() {
-            // Table should contain rows and cells — use descendant combinator.
-            // On Windows, AccessKit exposes Cell as a DataItem without the
-            // TableItem pattern, so it remains a table_row. Providers such as
-            // Qt that expose TableItem on cell DataItems normalize as table_cell.
-            let cells = app.locator("table table_cell").elements().unwrap();
-            if cells.len() >= 2 {
-                return;
-            }
-            // Fall back to table_row children (Windows: cells appear as table_row)
-            let rows = app.locator("table table_row").elements().unwrap();
+        h::one(&app, "table");
+
+        // Rows and cells must normalize on every platform: AXRow/AXCell on
+        // macOS, "table row"/"table cell" on AT-SPI, and on Windows the
+        // DataItem disambiguation in xa11y-windows (AccessKit cells are
+        // pattern-less DataItems under a row DataItem, resolved by the
+        // structural parent probe).
+        let rows = app.locator("table table_row").elements().unwrap();
+        assert!(
+            rows.len() >= 2,
+            "Table should have at least 2 rows, found {}. App: {}",
+            rows.len(),
+            app
+        );
+        let cells = app.locator("table table_cell").elements().unwrap();
+        assert!(
+            cells.len() >= 6,
+            "Table should have at least 6 cells (2 rows x 3 columns), found {}. App: {}",
+            cells.len(),
+            app
+        );
+        for name in ["Alice", "Admin", "Bob", "User"] {
+            let matched = app
+                .locator(&format!(r#"table table_cell[name*="{name}"]"#))
+                .elements()
+                .unwrap();
             assert!(
-                rows.len() >= 2,
-                "Table should have at least 2 rows/cells, found {}. App: {}",
-                rows.len(),
-                app
+                !matched.is_empty(),
+                "No table_cell named {name:?}. App: {app}"
             );
         }
     }

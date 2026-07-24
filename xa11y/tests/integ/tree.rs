@@ -389,11 +389,11 @@ mod tests {
         let app = h::app_root();
         let tables = app.locator("table").elements().unwrap();
         let cells = app.locator("table_cell").elements().unwrap();
-        assert!(
-            !tables.is_empty() || !cells.is_empty(),
-            "Neither Table nor TableCell found. App: {}",
-            app
-        );
+        // Both must be present — cells misreported as rows (the pre-#321
+        // Windows DataItem mapping) made this silently degrade to
+        // tables-only.
+        assert!(!tables.is_empty(), "No Table found. App: {}", app);
+        assert!(!cells.is_empty(), "No TableCell found. App: {}", app);
     }
 
     // ════════════════════════════════════════════════════════════════

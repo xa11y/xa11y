@@ -158,6 +158,22 @@ Line 3</textarea>
     </ul>
   </fieldset>
 
+  <!-- Table: WebKit exposes <table> as AT-SPI "table" (AXTable on macOS)
+       with "table cell" (AXCell) children, matching the cross-platform
+       table/table_cell contract. -->
+  <fieldset>
+    <legend>Table</legend>
+    <table id="users-table" aria-label="Users Table">
+      <thead>
+        <tr><th>Name</th><th>Role</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Alice</td><td>Admin</td></tr>
+        <tr><td>Bob</td><td>User</td></tr>
+      </tbody>
+    </table>
+  </fieldset>
+
   <!--
     Dynamic widgets used by the event test suite. These mutate on click so
     NameChanged (Submit → status label) and StructureChanged (Add/Remove Item

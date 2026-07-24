@@ -16,7 +16,17 @@ import sys
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import GLib, Gtk  # noqa: E402
+from gi.repository import Gio, GLib, GObject, Gtk  # noqa: E402
+
+
+class UserItem(GObject.Object):
+    """Row model for the Users table (Gtk.ColumnView)."""
+
+    name = GObject.Property(type=str, default="")
+    role = GObject.Property(type=str, default="")
+
+    def __init__(self, name: str, role: str) -> None:
+        super().__init__(name=name, role=role)
 
 
 class TestWindow(Gtk.ApplicationWindow):
@@ -167,6 +177,22 @@ class TestWindow(Gtk.ApplicationWindow):
             self.list_box.append(row)
         list_group.append(self.list_box)
 
+        # ── Table ────────────────────────────────────────────────────
+        table_group = self._make_group("Table")
+        box.append(table_group)
+
+        # Only one table in the app — identified by role in tests.
+        # Gtk.ColumnView exposes AT-SPI role "tree table" (66) → xa11y
+        # table; its rows are "table row" and its cells "table cell",
+        # each cell named from its child Gtk.Label's text.
+        store = Gio.ListStore(item_type=UserItem)
+        store.append(UserItem("Alice", "Admin"))
+        store.append(UserItem("Bob", "User"))
+        self.users_table = Gtk.ColumnView(model=Gtk.NoSelection(model=store))
+        self.users_table.append_column(self._make_users_column("Name", "name"))
+        self.users_table.append_column(self._make_users_column("Role", "role"))
+        table_group.append(self.users_table)
+
         # ── Dynamic widgets (event tests) ────────────────────────────
         # These mutate on click so the event suite can observe:
         #   - NameChanged  (Submit → status label text change)
@@ -197,6 +223,19 @@ class TestWindow(Gtk.ApplicationWindow):
         self.open_dialog_button.connect("clicked", self._on_open_dialog_clicked)
         dlg_group.append(self.open_dialog_button)
         self._sample_dialog: Gtk.Window | None = None
+
+    def _make_users_column(self, title: str, attr: str) -> Gtk.ColumnViewColumn:
+        factory = Gtk.SignalListItemFactory()
+        factory.connect(
+            "setup", lambda _f, item: item.set_child(Gtk.Label(xalign=0))
+        )
+        factory.connect(
+            "bind",
+            lambda _f, item: item.get_child().set_label(
+                item.get_item().get_property(attr)
+            ),
+        )
+        return Gtk.ColumnViewColumn(title=title, factory=factory)
 
     def _make_group(self, name: str) -> Gtk.Box:
         inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)

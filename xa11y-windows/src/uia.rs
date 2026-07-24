@@ -52,6 +52,11 @@ pub struct WindowsProvider {
     /// Describes which properties and patterns to pre-fetch in bulk queries.
     /// Not a cache — each FindAllBuildCache call takes a fresh snapshot.
     batch_request: IUIAutomationCacheRequest,
+    /// Raw-view tree walker, created once. Snapshot builds use it to probe a
+    /// pattern-less `DataItem`'s parent (the cell-vs-row disambiguation in
+    /// `map_uia_role`); raw view matches `batch_request`'s TrueCondition so
+    /// the probe sees the same tree the traversal does.
+    raw_walker: IUIAutomationTreeWalker,
     /// UIA elements retained for action dispatch (keyed by handle ID).
     handle_cache: Mutex<HashMap<u64, IUIAutomationElement>>,
 }
@@ -83,10 +88,15 @@ impl WindowsProvider {
             message: format!("Failed to create IUIAutomation: {}", e),
         })?;
         let batch_request = create_batch_request(&automation)?;
+        let raw_walker = unsafe { automation.RawViewWalker() }.map_err(|e| Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("Failed to get RawViewWalker: {}", e),
+        })?;
 
         Ok(Self {
             automation,
             batch_request,
+            raw_walker,
             handle_cache: Mutex::new(HashMap::new()),
         })
     }
@@ -197,7 +207,7 @@ impl WindowsProvider {
     /// Every query takes a fresh snapshot — callers never see stale data.
     fn build_element_data(&self, element: &IUIAutomationElement, pid: Option<u32>) -> ElementData {
         let handle = self.cache_element(element.clone());
-        build_snapshot_data(element, pid, handle)
+        build_snapshot_data(element, pid, handle, Some(&self.raw_walker))
     }
 
     /// Populate a UIA element's snapshot so Cached* accessors work.
@@ -342,11 +352,18 @@ fn build_snapshot_data(
     element: &IUIAutomationElement,
     pid: Option<u32>,
     handle: u64,
+    walker: Option<&IUIAutomationTreeWalker>,
 ) -> ElementData {
     let control_type = unsafe { element.CachedControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
     let is_table_item = control_type == UIA_DataItemControlTypeId
         && uia_cached_bool(element, UIA_IsTableItemPatternAvailablePropertyId).unwrap_or(false);
-    let mut role = map_uia_role(control_type, is_table_item);
+    // The parent probe costs two live COM calls, so it only runs for the one
+    // ambiguous case: a DataItem that doesn't implement TableItem. All other
+    // control types resolve from the cached snapshot alone.
+    let parent_is_data_item = control_type == UIA_DataItemControlTypeId
+        && !is_table_item
+        && walker.and_then(|w| parent_control_type(w, element)) == Some(UIA_DataItemControlTypeId);
+    let mut role = map_uia_role(control_type, is_table_item, parent_is_data_item);
 
     // Refine role using AriaRole property for elements that UIA maps ambiguously
     // (e.g., Alert/Heading both become ControlType.Text, Dialog becomes Window)
@@ -1700,17 +1717,58 @@ fn parse_states(
     states
 }
 
-/// Map a UIA control type and its cell-specific pattern to an xa11y role.
+/// Map a UIA control type and its cell signals to an xa11y role.
 ///
-/// UIA uses `DataItem` for both row containers and individual cells. A
-/// `DataItem` that implements `TableItem` is a cell: the pattern supplies its
-/// row/column header relationships. Keep pattern-less DataItems as rows.
-fn map_uia_role(control_type: UIA_CONTROLTYPE_ID, is_table_item: bool) -> Role {
-    if control_type == UIA_DataItemControlTypeId && is_table_item {
+/// UIA uses `DataItem` for both row containers and individual cells. Two
+/// independent signals mark a `DataItem` as a cell:
+///
+/// - `is_table_item` — the element implements the `TableItem` pattern, which
+///   exists to supply a cell's row/column header relationships (Qt, WPF, and
+///   web grids expose cells this way). Read from the cached property batch.
+/// - `parent_is_data_item` — the element's raw-view parent is itself a
+///   `DataItem`. AccessKit's UIA adapter exposes `Cell`, `Row`, and both
+///   header roles as `DataItem` with no table patterns at all, so its cells
+///   are recognizable only structurally: rows sit under tables, cells under
+///   rows. No mainstream framework nests row `DataItem`s inside row
+///   `DataItem`s, so a `DataItem` under a `DataItem` is a cell. (A tree-grid
+///   that nested child-row DataItems directly under parent rows would
+///   misreport child rows as cells; no framework we cover does this — tree
+///   rows use `TreeItem`.)
+///
+/// The `GridItem` pattern is deliberately NOT a cell signal: UIA's DataItem
+/// spec allows list-style grid items (e.g. a file row in an Explorer details
+/// view) to implement `GridItem` while being rows, so its presence cannot
+/// distinguish cell from row. A pattern-less `DataItem` whose parent is not a
+/// row keeps mapping to `TableRow`.
+fn map_uia_role(
+    control_type: UIA_CONTROLTYPE_ID,
+    is_table_item: bool,
+    parent_is_data_item: bool,
+) -> Role {
+    if control_type == UIA_DataItemControlTypeId && (is_table_item || parent_is_data_item) {
         Role::TableCell
     } else {
         map_uia_control_type(control_type)
     }
+}
+
+/// Live (uncached) control type of `element`'s raw-view parent.
+///
+/// Deliberately not part of the cached batch: UIA cache requests cannot
+/// reach upward in the tree, so parent identity is only available via a
+/// walker round trip. Called only for pattern-less `DataItem`s (see
+/// `build_snapshot_data`).
+///
+/// Returns `None` when the element has no parent (desktop root) or the
+/// element vanished mid-walk; both leave the `DataItem` mapped as a row,
+/// identical to "parent is not a row" — this is a refinement probe, not a
+/// fallible operation whose error a caller could act on.
+fn parent_control_type(
+    walker: &IUIAutomationTreeWalker,
+    element: &IUIAutomationElement,
+) -> Option<UIA_CONTROLTYPE_ID> {
+    let parent = unsafe { walker.GetParentElement(element) }.ok()?;
+    unsafe { parent.CurrentControlType() }.ok()
 }
 
 /// Map UIA ControlTypeId to its coarse xa11y Role.
@@ -1800,7 +1858,19 @@ struct EventContext {
     sender: Mutex<std::sync::mpsc::Sender<Event>>,
     app_name: String,
     app_pid: u32,
+    /// Clone of the provider's raw-view walker, so event-target snapshots
+    /// resolve DataItem cells the same way tree traversal does. COM in MTA
+    /// serializes access via proxies (see `ComCallbackWrapper`), so sharing
+    /// the interface pointer with UIA callback threads is safe.
+    walker: IUIAutomationTreeWalker,
 }
+
+// The COM walker pointer keeps EventContext from auto-deriving Send/Sync
+// (it's shared via Arc with UIA's MTA callback threads). The same MTA proxy
+// guarantee behind `unsafe impl Send for WindowsProvider` covers it: every
+// dereference happens under MTA.
+unsafe impl Send for EventContext {}
+unsafe impl Sync for EventContext {}
 
 impl EventContext {
     fn emit(&self, kind: EventKind, target: Option<ElementData>) {
@@ -1843,7 +1913,7 @@ impl EventContext {
         } else {
             unsafe { sender.BuildUpdatedCache(cache) }.unwrap_or_else(|_| sender.clone())
         };
-        build_snapshot_data(&cached_element, Some(self.app_pid), 0)
+        build_snapshot_data(&cached_element, Some(self.app_pid), 0, Some(&self.walker))
     }
 }
 
@@ -2060,6 +2130,7 @@ impl WindowsProvider {
             sender: Mutex::new(tx),
             app_name,
             app_pid: pid,
+            walker: self.raw_walker.clone(),
         });
 
         // Dedicated cache request: ensures event handlers receive elements
@@ -2495,15 +2566,36 @@ mod tests {
 
     #[test]
     fn data_item_role_uses_table_item_pattern() {
+        // TableItem pattern marks a cell regardless of parent (Qt, WPF).
         assert_eq!(
-            map_uia_role(UIA_DataItemControlTypeId, true),
+            map_uia_role(UIA_DataItemControlTypeId, true, false),
             Role::TableCell
         );
+        // Neither signal: a row container.
         assert_eq!(
-            map_uia_role(UIA_DataItemControlTypeId, false),
+            map_uia_role(UIA_DataItemControlTypeId, false, false),
             Role::TableRow
         );
-        assert_eq!(map_uia_role(UIA_ButtonControlTypeId, true), Role::Button);
+        // Cell signals never leak onto other control types.
+        assert_eq!(
+            map_uia_role(UIA_ButtonControlTypeId, true, true),
+            Role::Button
+        );
+    }
+
+    #[test]
+    fn pattern_less_data_item_under_row_is_cell() {
+        // AccessKit exposes cells as pattern-less DataItems under a row
+        // DataItem — the structural signal alone must classify them.
+        assert_eq!(
+            map_uia_role(UIA_DataItemControlTypeId, false, true),
+            Role::TableCell
+        );
+        // Both signals agreeing is still a cell.
+        assert_eq!(
+            map_uia_role(UIA_DataItemControlTypeId, true, true),
+            Role::TableCell
+        );
     }
 
     #[test]

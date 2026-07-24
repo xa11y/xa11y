@@ -280,6 +280,12 @@ class TestWindow(QMainWindow):
         for row, values in enumerate((("Alice", "Admin"), ("Bob", "User"))):
             for column, value in enumerate(values):
                 self.users_table.setItem(row, column, QTableWidgetItem(value))
+        # Select a single cell so the suites can assert that per-cell
+        # selection state survives every platform bridge (UIA SelectionItem,
+        # AT-SPI selected state, AX container selection on macOS).
+        self.users_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectItems)
+        self.users_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.users_table.setCurrentCell(0, 0)
         self.users_table.setMaximumHeight(120)
         lay.addWidget(self.users_table)
 

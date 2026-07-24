@@ -48,6 +48,20 @@ Line 2
 Line 3</textarea>
   </div>
 
+  <!-- Table (markup mirrors test-apps/tauri/frontend/index.html; Chromium
+       exposes <table> as "table" with "table cell" children on AT-SPI) -->
+  <div>
+    <table id="users-table" aria-label="Users Table">
+      <thead>
+        <tr><th>Name</th><th>Role</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Alice</td><td>Admin</td></tr>
+        <tr><td>Bob</td><td>User</td></tr>
+      </tbody>
+    </table>
+  </div>
+
   <script>
     // Keep aria-valuenow in sync so AT-SPI value reads track user changes.
     const slider = document.getElementById('volume-slider');

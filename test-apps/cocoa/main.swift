@@ -49,11 +49,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         scroll.hasVerticalScroller = true
         scroll.autoresizingMask = [.width, .height]
 
-        let docView = NSView(frame: NSRect(x: 0, y: 0, width: 680, height: 1320))
+        let docView = NSView(frame: NSRect(x: 0, y: 0, width: 680, height: 1480))
         scroll.documentView = docView
         window.contentView = scroll
 
-        var y: CGFloat = 1160
+        var y: CGFloat = 1320
         func addSection(_ title: String) -> NSView {
             let box = NSBox(frame: NSRect(x: 12, y: y - 180, width: 656, height: 180))
             box.title = title
@@ -234,6 +234,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         tableScroll.documentView = listTable
         listBox.addSubview(tableScroll)
 
+        // ── Table (multi-column NSTableView → AXTable/AXRow/AXCell) ──────
+        // Distinct from the single-column "Items" list above: two columns
+        // with headers, so macOS exposes real AXCell children under each
+        // AXRow — the cross-platform table/table_row/table_cell shape.
+        let usersBox = NSBox(frame: NSRect(x: 12, y: y - 150, width: 656, height: 150))
+        usersBox.title = "Table"
+        docView.addSubview(usersBox)
+        y -= 160
+
+        let usersScroll = NSScrollView(frame: NSRect(x: 16, y: 10, width: 400, height: 120))
+        usersTable = NSTableView(frame: usersScroll.bounds)
+        usersTable.setAccessibilityLabel("Users Table")
+        let nameCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
+        nameCol.title = "Name"
+        usersTable.addTableColumn(nameCol)
+        let roleCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("role"))
+        roleCol.title = "Role"
+        usersTable.addTableColumn(roleCol)
+        usersTable.dataSource = self
+        usersScroll.documentView = usersTable
+        usersBox.addSubview(usersScroll)
+
         // ── Grid (NSGridView → AXGrid → table role) ──────────────────────
         let gridBox = NSBox(frame: NSRect(x: 12, y: y - 120, width: 656, height: 120))
         gridBox.title = "Grid"
@@ -335,17 +357,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var radioA: NSButton!
     var slider: NSSlider!
     var listTable: NSTableView!
+    var usersTable: NSTableView!
     var statusLabel: NSTextField!
     var rowCount: Int = 5
+    let users = [["Alice", "Admin"], ["Bob", "User"]]
 }
 
 // ── NSTableViewDataSource ─────────────────────────────────────────────────────
 
 extension AppDelegate: NSTableViewDataSource {
-    func numberOfRows(in _: NSTableView) -> Int { rowCount }
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        tableView === usersTable ? users.count : rowCount
+    }
 
     func tableView(_ tableView: NSTableView, objectValueFor column: NSTableColumn?, row: Int) -> Any? {
-        "Item \(row + 1)"
+        if tableView === usersTable {
+            let colIndex = column?.identifier.rawValue == "role" ? 1 : 0
+            return users[row][colIndex]
+        }
+        return "Item \(row + 1)"
     }
 }
 
