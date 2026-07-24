@@ -225,6 +225,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         y -= 160
 
         let tableScroll = NSScrollView(frame: NSRect(x: 16, y: 10, width: 400, height: 120))
+        // Deliberately cell-based (legacy NSCell, no delegate): this list
+        // covers the AX path where text hangs directly off AXRows with no
+        // AXCell layer. The view-based "Users Table" below covers the modern
+        // AXCell shape — keep both.
         listTable = NSTableView(frame: tableScroll.bounds)
         listTable.setAccessibilityLabel("Items")
         let col = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("item"))

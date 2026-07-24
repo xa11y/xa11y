@@ -354,6 +354,13 @@ def test_table_cells_normalize(app, app_config):
             f"no element named {name!r} found under {selector!r}"
         )
 
+    # Engines that expose cell text via the platform text interface rather
+    # than the accessible name (WebKitGTK): it must surface as the cell's
+    # value, so `table_cell[value*=...]` selectors stay usable.
+    for text in app_config.get("table_cell_values") or []:
+        cell = app.locator(f'{selector} table_cell[value*="{text}"]').element()
+        assert cell.role == "table_cell"
+
 
 def test_table_selected_cell_state(app, app_config):
     """Per-cell selection state must survive every platform bridge.
@@ -381,6 +388,30 @@ def test_table_selected_cell_state(app, app_config):
             assert not other.selected, (
                 f"unselected cell {other.name!r} reports selected=True"
             )
+
+
+def test_tree_has_no_unknown_roles(app, app_config):
+    """Opt-in guard: a fully-mapped toolkit's tree contains no unknown roles.
+
+    Unmapped platform roles silently degrade to ``unknown`` in non-strict
+    builds, which is exactly how the AT-SPI numeric/name map gaps (roles 10,
+    54, 64, 73, 110, ...) went unnoticed: the strict-roles build only runs
+    against the AccessKit app, while the diverse-toolkit matrix cells run
+    non-strict. Apps opt in via ``expect_no_unknown_roles`` once their tree
+    is verified clean; the failure message carries each element's raw
+    platform role so a regression points straight at the missing mapping.
+    """
+    if not app_config.get("expect_no_unknown_roles"):
+        pytest.skip("tree not asserted unknown-free for this app")
+
+    unknowns = app.locator("unknown").elements()
+    details = [
+        f"name={el.name!r} raw={el.raw!r}" for el in unknowns
+    ]
+    assert not unknowns, (
+        f"{len(unknowns)} element(s) with unmapped platform roles:\n  "
+        + "\n  ".join(details)
+    )
 
 
 def test_table_headers_exposed(app, app_config):

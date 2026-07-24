@@ -355,7 +355,8 @@ fn build_snapshot_data(
     walker: Option<&IUIAutomationTreeWalker>,
 ) -> ElementData {
     let control_type = unsafe { element.CachedControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
-    let is_table_item = control_type == UIA_DataItemControlTypeId
+    let is_table_item = (control_type == UIA_DataItemControlTypeId
+        || control_type == UIA_CustomControlTypeId)
         && uia_cached_bool(element, UIA_IsTableItemPatternAvailablePropertyId).unwrap_or(false);
     // The parent probe costs two live COM calls, so it only runs for the one
     // ambiguous case: a DataItem that doesn't implement TableItem. All other
@@ -1745,7 +1746,18 @@ fn map_uia_role(
     is_table_item: bool,
     parent_is_data_item: bool,
 ) -> Role {
-    if control_type == UIA_DataItemControlTypeId && (is_table_item || parent_is_data_item) {
+    // WPF and WinForms DataGrids expose their cells as Custom elements whose
+    // only table signal is the TableItem pattern — without this they'd map to
+    // Unknown. The structural parent signal stays DataItem-only: a custom
+    // widget embedded in a row is not a cell.
+    let is_cell = if control_type == UIA_DataItemControlTypeId {
+        is_table_item || parent_is_data_item
+    } else if control_type == UIA_CustomControlTypeId {
+        is_table_item
+    } else {
+        false
+    };
+    if is_cell {
         Role::TableCell
     } else {
         map_uia_control_type(control_type)
@@ -1814,6 +1826,8 @@ fn map_uia_control_type(control_type: UIA_CONTROLTYPE_ID) -> Role {
         UIA_ToolTipControlTypeId => Role::Tooltip,
         UIA_CalendarControlTypeId => Role::Group,
         UIA_CustomControlTypeId => Role::Unknown,
+        UIA_SemanticZoomControlTypeId => Role::Group,
+        UIA_AppBarControlTypeId => Role::Toolbar,
         _ => xa11y_core::unknown_role(&format!("UIA control type {}", control_type.0)),
     }
 }
@@ -2581,6 +2595,47 @@ mod tests {
             map_uia_role(UIA_ButtonControlTypeId, true, true),
             Role::Button
         );
+    }
+
+    #[test]
+    fn custom_control_with_table_item_pattern_is_cell() {
+        // WPF/WinForms DataGrid cells: ControlType.Custom + TableItem.
+        assert_eq!(
+            map_uia_role(UIA_CustomControlTypeId, true, false),
+            Role::TableCell
+        );
+        // Pattern-less Custom stays Unknown even under a row — an embedded
+        // custom widget inside a row is not a cell.
+        assert_eq!(
+            map_uia_role(UIA_CustomControlTypeId, false, true),
+            Role::Unknown
+        );
+        assert_eq!(
+            map_uia_role(UIA_CustomControlTypeId, false, false),
+            Role::Unknown
+        );
+    }
+
+    #[test]
+    fn control_type_map_covers_every_uia_control_type() {
+        // The complete UIA control-type range (50000..=50040). Every id must
+        // resolve without reaching the unknown_role catch-all (which panics
+        // under strict-roles); Custom (50025) is the one deliberate Unknown.
+        // Guards against the AT-SPI-style drift where common types were
+        // silently missing (SemanticZoom and AppBar were, before this test).
+        for id in 50000..=50040u32 {
+            let ct = UIA_CONTROLTYPE_ID(id as i32);
+            let role = map_uia_control_type(ct);
+            if ct == UIA_CustomControlTypeId {
+                assert_eq!(role, Role::Unknown);
+            } else {
+                assert_ne!(
+                    role,
+                    Role::Unknown,
+                    "UIA control type {id} has no explicit mapping"
+                );
+            }
+        }
     }
 
     #[test]

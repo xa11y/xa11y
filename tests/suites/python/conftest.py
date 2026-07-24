@@ -111,6 +111,8 @@ APP_CONFIGS: dict[str, dict] = {
         # https://github.com/mrexodia/xa11y-table-repro captures.
         "table_header_names": (None if sys.platform == "darwin" else ["Name", "Role"]),
         # Window
+        # Not yet verified unknown-free on all three OSes.
+        "expect_no_unknown_roles": False,
         "window_name_contains": "xa11y-qt-test-app",
         # Dynamic buttons for event tests
         "submit_button_name": "Submit",
@@ -155,6 +157,8 @@ APP_CONFIGS: dict[str, dict] = {
         "table_selected_cell_name": None,
         # ColumnView's header row is named from its column titles.
         "table_header_names": ["Name", "Role"],
+        # Verified clean against a live AT-SPI session.
+        "expect_no_unknown_roles": True,
         "window_name_contains": None,  # not asserted for GTK
         # Dynamic buttons for event tests (Dynamic group in app.py).
         "submit_button_name": "Submit",
@@ -199,6 +203,8 @@ APP_CONFIGS: dict[str, dict] = {
         # AppKit exposes the header as sort-button children under the
         # table's header group, named from the column titles.
         "table_header_names": ["Name", "Role"],
+        # Not yet verified unknown-free.
+        "expect_no_unknown_roles": False,
         "window_name_contains": None,  # not asserted for Cocoa
         "submit_button_name": "Submit",
         "add_item_button_name": "Add Item",
@@ -246,6 +252,12 @@ APP_CONFIGS: dict[str, dict] = {
         "table_min_cells": 4,
         "table_cell_names": None,
         "table_content_names": None,
+        # WebKitGTK exposes cell text through the AT-SPI Text interface,
+        # which xa11y surfaces as the cell's value; macOS WebKit has no
+        # equivalent (text markers only).
+        "table_cell_values": (
+            None if sys.platform == "darwin" else ["Alice", "Admin", "Bob", "User"]
+        ),
         # Plain HTML tables have no selection.
         "table_selected_cell_name": None,
         # No header assertions: the Tauri page carries no <th> cells at all —
@@ -255,6 +267,10 @@ APP_CONFIGS: dict[str, dict] = {
         # test-apps/tauri/frontend/index.html). Webview header coverage
         # lives in the Electron config instead.
         "table_header_names": None,
+        # WebKitGTK exposes two hidden spin-button arrow internals with the
+        # (deliberately unmapped) AT-SPI "arrow" role, so the tree is not
+        # unknown-free.
+        "expect_no_unknown_roles": False,
         "window_name_contains": None,  # not asserted for Tauri
         "submit_button_name": "Submit",
         "add_item_button_name": "Add Item",
@@ -297,6 +313,8 @@ APP_CONFIGS: dict[str, dict] = {
         "table_selected_cell_name": None,
         # <th> header cells are named from their text content.
         "table_header_names": ["Name", "Role"],
+        # Not yet verified unknown-free.
+        "expect_no_unknown_roles": False,
         "window_name_contains": None,  # not asserted for Electron
         # Not instrumented yet: no Dynamic (Submit / Add Item / Remove Item)
         # group in the Electron test app, so event tests skip.
@@ -378,6 +396,8 @@ APP_CONFIGS: dict[str, dict] = {
         "table_selected_cell_name": None,
         # Not instrumented yet: the AccessKit app's table has no header row.
         "table_header_names": None,
+        # Verified clean against a live AT-SPI session.
+        "expect_no_unknown_roles": True,
         # Window name comes from the winit window title but AT-SPI reports the
         # binary name; leave unchecked.
         "window_name_contains": None,
@@ -443,6 +463,8 @@ APP_CONFIGS: dict[str, dict] = {
         "table_content_names": None,
         "table_selected_cell_name": None,
         "table_header_names": None,
+        # Not yet verified unknown-free.
+        "expect_no_unknown_roles": False,
         # Window name comes from `ViewportBuilder::with_title` but the
         # AT-SPI/UIA/AX layer reports the binary name; leave unchecked.
         "window_name_contains": None,
