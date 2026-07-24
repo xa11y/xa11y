@@ -352,7 +352,7 @@ The full set of named attributes and their platform mappings:
 | `numeric_value` | float? | `AXValue` (as number) | `Value.CurrentValue` | `RangeValuePattern.Value` | For sliders, progress bars, spinners |
 | `min_value` | float? | `AXMinValue` | `Value.MinimumValue` | `RangeValuePattern.Minimum` | Minimum of numeric range |
 | `max_value` | float? | `AXMaxValue` | `Value.MaximumValue` | `RangeValuePattern.Maximum` | Maximum of numeric range |
-| `stable_id` | string? | `AXIdentifier` | D-Bus object path | `AutomationId` | Platform-assigned stable identifier |
+| `stable_id` | string? | `AXIdentifier` | D-Bus object path | `AutomationId` | Stable across queries, **not guaranteed unique** — unique per app on Linux, among siblings only on Windows, no guarantee on macOS (Qt stamps one id per subtree) |
 | `enabled` | bool | `AXEnabled` | `ENABLED` state bit | `IsEnabled` | Always reported; `true` unless explicitly disabled |
 | `visible` | bool | `!AXHidden` | `VISIBLE` state bit | `!IsOffscreen` | Always reported; `true` unless explicitly hidden |
 | `focused` | bool | `AXFocused` | `FOCUSED` state bit | `HasKeyboardFocus` | Whether element has keyboard focus |
