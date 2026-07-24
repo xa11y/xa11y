@@ -2042,7 +2042,7 @@ pub(crate) fn map_atspi_role(role_name: &str) -> Role {
         "application" => Role::Application,
         "window" | "frame" => Role::Window,
         "dialog" | "file chooser" => Role::Dialog,
-        "alert" | "notification" => Role::Alert,
+        "alert" | "notification" | "info bar" => Role::Alert,
         "push button" | "push button menu" => Role::Button,
         "toggle button" => Role::Switch,
         "check box" | "check menu item" => Role::CheckBox,
@@ -2052,13 +2052,15 @@ pub(crate) fn map_atspi_role(role_name: &str) -> Role {
         // "textbox" is the ARIA role name returned by WebKit2GTK for both
         // <input type="text"> and <textarea>.  Map to TextArea here so the
         // multi-line refinement below can downgrade single-line ones to TextField.
-        "text" | "textbox" => Role::TextArea,
+        // "embedded" is WebKit2GTK's numeric-path equivalent (role 78);
+        // "terminal" is VTE — text is reachable via the Text interface.
+        "text" | "textbox" | "embedded" | "terminal" => Role::TextArea,
         "label" | "static" | "caption" => Role::StaticText,
         "combo box" | "combobox" => Role::ComboBox,
         // "listbox" is the ARIA role name returned by WebKit2GTK for role="listbox".
         "list" | "list box" | "listbox" => Role::List,
         "list item" => Role::ListItem,
-        "menu" => Role::Menu,
+        "menu" | "popup menu" => Role::Menu,
         "menu item" | "tearoff menu item" => Role::MenuItem,
         "menu bar" => Role::MenuBar,
         "page tab" => Role::Tab,
@@ -2078,10 +2080,16 @@ pub(crate) fn map_atspi_role(role_name: &str) -> Role {
         "image" | "icon" | "desktop icon" => Role::Image,
         "link" => Role::Link,
         "panel" | "section" | "form" | "filler" | "viewport" | "scroll pane" | "paragraph"
-        | "header" | "footer" | "grouping" | "block quote" => Role::Group,
-        "progress bar" => Role::ProgressBar,
+        | "header" | "footer" | "grouping" | "block quote" | "redundant object" | "tree"
+        | "comment" | "title bar" | "calendar" => Role::Group,
+        "progress bar" | "level bar" => Role::ProgressBar,
         "tree item" => Role::TreeItem,
-        "document web" | "document frame" => Role::WebArea,
+        "document web"
+        | "document frame"
+        | "document spreadsheet"
+        | "document presentation"
+        | "document text"
+        | "document email" => Role::WebArea,
         "heading" => Role::Heading,
         "separator" => Role::Separator,
         "split pane" => Role::SplitGroup,
@@ -2097,6 +2105,7 @@ pub(crate) fn map_atspi_role(role_name: &str) -> Role {
 pub(crate) fn map_atspi_role_number(role: u32) -> Role {
     match role {
         2 => Role::Alert,    // Alert
+        5 => Role::Group,    // Calendar (mirrors UIA CalendarControlType)
         7 => Role::CheckBox, // CheckBox
         8 => Role::CheckBox, // CheckMenuItem
         // Bare ColumnHeader/RowHeader (10/47): WebKit and GTK emit these for
@@ -2104,6 +2113,7 @@ pub(crate) fn map_atspi_role_number(role: u32) -> Role {
         // TableColumnHeader/TableRowHeader pair (57/58) below.
         10 => Role::TableCell,   // ColumnHeader
         11 => Role::ComboBox,    // ComboBox
+        13 => Role::Image,       // DesktopIcon
         16 => Role::Dialog,      // Dialog
         19 => Role::Dialog,      // FileChooser
         20 => Role::Group,       // Filler
@@ -2120,6 +2130,7 @@ pub(crate) fn map_atspi_role_number(role: u32) -> Role {
         38 => Role::TabGroup,    // PageTabList
         39 => Role::Group,       // Panel
         40 => Role::TextField,   // PasswordText
+        41 => Role::Menu,        // PopupMenu
         42 => Role::ProgressBar, // ProgressBar
         43 => Role::Button,      // Button (push button)
         44 => Role::RadioButton, // RadioButton
@@ -2131,13 +2142,17 @@ pub(crate) fn map_atspi_role_number(role: u32) -> Role {
         51 => Role::Slider,      // Slider
         52 => Role::SpinButton,  // SpinButton
         53 => Role::SplitGroup,  // SplitPane
+        54 => Role::Status,      // StatusBar
         55 => Role::Table,       // Table
         56 => Role::TableCell,   // TableCell
         57 => Role::TableCell,   // TableColumnHeader
         58 => Role::TableCell,   // TableRowHeader
+        59 => Role::MenuItem,    // TearoffMenuItem
+        60 => Role::TextArea,    // Terminal (VTE and friends — text via the Text interface)
         61 => Role::TextArea,    // Text
         62 => Role::Switch,      // ToggleButton
         63 => Role::Toolbar,     // ToolBar
+        64 => Role::Tooltip,     // ToolTip
         65 => Role::Group,       // Tree
         66 => Role::Table,       // TreeTable
         67 => Role::Unknown,     // Unknown
@@ -2153,25 +2168,35 @@ pub(crate) fn map_atspi_role_number(role: u32) -> Role {
         75 => Role::Application, // Application
         78 => Role::TextArea, // Embedded — WebKit2GTK uses this for <input type="text"> and <textarea>;
         // multi-line refinement below downgrades single-line ones to TextField
-        79 => Role::TextField,   // Entry
-        81 => Role::StaticText,  // Caption
-        82 => Role::WebArea,     // DocumentFrame
-        83 => Role::Heading,     // Heading
-        85 => Role::Group,       // Section
-        86 => Role::Group,       // RedundantObject
-        87 => Role::Group,       // Form
-        88 => Role::Link,        // Link
-        90 => Role::TableRow,    // TableRow
-        91 => Role::TreeItem,    // TreeItem
-        95 => Role::WebArea,     // DocumentWeb
-        97 => Role::List,        // WebKit2GTK uses this for <ul role="listbox">
-        98 => Role::List,        // ListBox
-        99 => Role::Group,       // Grouping
-        105 => Role::Group,      // BlockQuote
-        93 => Role::Tooltip,     // Tooltip
-        101 => Role::Alert,      // Notification
-        116 => Role::StaticText, // Static
-        129 => Role::Button,     // PushButtonMenu
+        79 => Role::TextField,  // Entry
+        81 => Role::StaticText, // Caption
+        82 => Role::WebArea,    // DocumentFrame
+        83 => Role::Heading,    // Heading
+        85 => Role::Group,      // Section
+        86 => Role::Group,      // RedundantObject
+        87 => Role::Group,      // Form
+        88 => Role::Link,       // Link
+        90 => Role::TableRow,   // TableRow
+        91 => Role::TreeItem,   // TreeItem
+        // Document roots (92-96): LibreOffice exposes spreadsheet /
+        // presentation / text / email documents with these; all normalize to
+        // WebArea alongside DocumentFrame/DocumentWeb above.
+        92 => Role::WebArea,      // DocumentSpreadsheet
+        93 => Role::WebArea,      // DocumentPresentation
+        94 => Role::WebArea,      // DocumentText
+        95 => Role::WebArea,      // DocumentWeb
+        96 => Role::WebArea,      // DocumentEmail
+        97 => Role::Group,        // Comment (ARIA comment container)
+        98 => Role::List,         // ListBox — WebKit2GTK emits this for <ul role="listbox">
+        99 => Role::Group,        // Grouping
+        101 => Role::Alert,       // Notification
+        102 => Role::Alert,       // InfoBar (GtkInfoBar message strip)
+        103 => Role::ProgressBar, // LevelBar (GtkLevelBar)
+        104 => Role::Group,       // TitleBar (mirrors UIA TitleBar)
+        105 => Role::Group,       // BlockQuote
+        110 => Role::Navigation,  // Landmark
+        116 => Role::StaticText,  // Static
+        129 => Role::Button,      // PushButtonMenu
         _ => xa11y_core::unknown_role(&format!("AT-SPI role number {role}")),
     }
 }
@@ -2285,6 +2310,161 @@ mod tests {
         assert_eq!(map_atspi_role_number(43), Role::Button); // PushButton
         assert_eq!(map_atspi_role_number(7), Role::CheckBox);
         assert_eq!(map_atspi_role_number(67), Role::Unknown); // AT-SPI Unknown
+    }
+
+    /// The full AtspiRole enum (atspi 2.52) as (number, GetRoleName-style
+    /// name) pairs. The name form is the enum nick with dashes replaced by
+    /// spaces, which is what providers hand back over D-Bus.
+    const ATSPI_ROLE_ENUM: &[(u32, &str)] = &[
+        (0, "invalid"),
+        (1, "accelerator label"),
+        (2, "alert"),
+        (3, "animation"),
+        (4, "arrow"),
+        (5, "calendar"),
+        (6, "canvas"),
+        (7, "check box"),
+        (8, "check menu item"),
+        (9, "color chooser"),
+        (10, "column header"),
+        (11, "combo box"),
+        (12, "date editor"),
+        (13, "desktop icon"),
+        (14, "desktop frame"),
+        (15, "dial"),
+        (16, "dialog"),
+        (17, "directory pane"),
+        (18, "drawing area"),
+        (19, "file chooser"),
+        (20, "filler"),
+        (21, "focus traversable"),
+        (22, "font chooser"),
+        (23, "frame"),
+        (24, "glass pane"),
+        (25, "html container"),
+        (26, "icon"),
+        (27, "image"),
+        (28, "internal frame"),
+        (29, "label"),
+        (30, "layered pane"),
+        (31, "list"),
+        (32, "list item"),
+        (33, "menu"),
+        (34, "menu bar"),
+        (35, "menu item"),
+        (36, "option pane"),
+        (37, "page tab"),
+        (38, "page tab list"),
+        (39, "panel"),
+        (40, "password text"),
+        (41, "popup menu"),
+        (42, "progress bar"),
+        (43, "push button"),
+        (44, "radio button"),
+        (45, "radio menu item"),
+        (46, "root pane"),
+        (47, "row header"),
+        (48, "scroll bar"),
+        (49, "scroll pane"),
+        (50, "separator"),
+        (51, "slider"),
+        (52, "spin button"),
+        (53, "split pane"),
+        (54, "status bar"),
+        (55, "table"),
+        (56, "table cell"),
+        (57, "table column header"),
+        (58, "table row header"),
+        (59, "tearoff menu item"),
+        (60, "terminal"),
+        (61, "text"),
+        (62, "toggle button"),
+        (63, "tool bar"),
+        (64, "tool tip"),
+        (65, "tree"),
+        (66, "tree table"),
+        (67, "unknown"),
+        (68, "viewport"),
+        (69, "window"),
+        (70, "extended"),
+        (71, "header"),
+        (72, "footer"),
+        (73, "paragraph"),
+        (74, "ruler"),
+        (75, "application"),
+        (76, "autocomplete"),
+        (77, "editbar"),
+        (78, "embedded"),
+        (79, "entry"),
+        (80, "chart"),
+        (81, "caption"),
+        (82, "document frame"),
+        (83, "heading"),
+        (84, "page"),
+        (85, "section"),
+        (86, "redundant object"),
+        (87, "form"),
+        (88, "link"),
+        (89, "input method window"),
+        (90, "table row"),
+        (91, "tree item"),
+        (92, "document spreadsheet"),
+        (93, "document presentation"),
+        (94, "document text"),
+        (95, "document web"),
+        (96, "document email"),
+        (97, "comment"),
+        (98, "list box"),
+        (99, "grouping"),
+        (100, "image map"),
+        (101, "notification"),
+        (102, "info bar"),
+        (103, "level bar"),
+        (104, "title bar"),
+        (105, "block quote"),
+        (106, "audio"),
+        (107, "video"),
+        (108, "definition"),
+        (109, "article"),
+        (110, "landmark"),
+        (111, "log"),
+        (112, "marquee"),
+        (113, "math"),
+        (114, "rating"),
+        (115, "timer"),
+        (116, "static"),
+        (117, "math fraction"),
+        (118, "math root"),
+        (119, "subscript"),
+        (120, "superscript"),
+        (121, "description list"),
+        (122, "description term"),
+        (123, "description value"),
+        (124, "footnote"),
+        (125, "content deletion"),
+        (126, "content insertion"),
+        (127, "mark"),
+        (128, "suggestion"),
+        (129, "push button menu"),
+    ];
+
+    #[test]
+    fn numeric_and_name_role_maps_agree() {
+        // The provider resolves roles by number on some paths (resolve_role)
+        // and by name on others (build_element_data). If the two maps drift,
+        // the same element reports different roles depending on how it was
+        // reached — this happened for StatusBar (54, name-only), ToolTip
+        // (64, and 93 was mis-numbered as Tooltip), and Landmark (110).
+        // Sweep the whole enum so any future addition lands in both maps.
+        for &(num, name) in ATSPI_ROLE_ENUM {
+            let by_num = map_atspi_role_number(num);
+            let by_name = map_atspi_role(name);
+            assert_eq!(
+                by_num, by_name,
+                "AT-SPI role {num} ({name:?}) diverges: numeric map gives \
+                 {by_num:?}, name map gives {by_name:?}"
+            );
+        }
     }
 
     #[test]
