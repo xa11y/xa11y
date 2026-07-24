@@ -236,8 +236,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // ── Table (multi-column NSTableView → AXTable/AXRow/AXCell) ──────
         // Distinct from the single-column "Items" list above: two columns
-        // with headers, so macOS exposes real AXCell children under each
-        // AXRow — the cross-platform table/table_row/table_cell shape.
+        // with headers, and view-based (delegate returns NSTableCellView) —
+        // only view-based tables expose an AXCell layer under each AXRow;
+        // legacy cell-based (NSCell) tables put text straight under the row,
+        // which breaks the cross-platform table/table_row/table_cell shape.
         let usersBox = NSBox(frame: NSRect(x: 12, y: y - 150, width: 656, height: 150))
         usersBox.title = "Table"
         docView.addSubview(usersBox)
@@ -253,6 +255,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         roleCol.title = "Role"
         usersTable.addTableColumn(roleCol)
         usersTable.dataSource = self
+        usersTable.delegate = self
         usersScroll.documentView = usersTable
         usersBox.addSubview(usersScroll)
 
@@ -372,10 +375,28 @@ extension AppDelegate: NSTableViewDataSource {
 
     func tableView(_ tableView: NSTableView, objectValueFor column: NSTableColumn?, row: Int) -> Any? {
         if tableView === usersTable {
+            // Unused (the users table is view-based via the delegate below),
+            // but harmless to answer correctly.
             let colIndex = column?.identifier.rawValue == "role" ? 1 : 0
             return users[row][colIndex]
         }
         return "Item \(row + 1)"
+    }
+}
+
+// ── NSTableViewDelegate (view-based users table) ──────────────────────────────
+
+extension AppDelegate: NSTableViewDelegate {
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        guard tableView === usersTable, let column = tableColumn else { return nil }
+        let colIndex = column.identifier.rawValue == "role" ? 1 : 0
+        let text = NSTextField(labelWithString: users[row][colIndex])
+        let cell = NSTableCellView()
+        cell.addSubview(text)
+        cell.textField = text
+        text.frame = cell.bounds
+        text.autoresizingMask = [.width, .height]
+        return cell
     }
 }
 

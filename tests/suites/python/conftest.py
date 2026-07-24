@@ -232,17 +232,26 @@ APP_CONFIGS: dict[str, dict] = {
         "textfield_selector": 'text_field[name="Search"]',
         "textfield_initial_value": "hello world",
         "textarea_selector": 'text_area[name="Notes"]',
-        # Table — HTML <table aria-label="Users Table">. Whether the webview
-        # names the cell accessible itself or only the text leaf inside it
-        # varies by engine/platform, so content is asserted via descendants.
+        # Table — HTML <table aria-label="Users Table">. Cell role
+        # normalization holds everywhere; content naming differs by engine:
+        # WebKitGTK names the text leaves (asserted via descendants), but
+        # WebKit on macOS exposes cell text only through its text-marker
+        # API — neither the AXCell nor a descendant carries the text as a
+        # name — so the content assertion is Linux-only.
         "table_selector": 'table[name="Users Table"]',
         "table_min_cells": 4,
         "table_cell_names": None,
-        "table_content_names": ["Alice", "Admin", "Bob", "User"],
+        "table_content_names": (
+            None if sys.platform == "darwin" else ["Alice", "Admin", "Bob", "User"]
+        ),
         # Plain HTML tables have no selection.
         "table_selected_cell_name": None,
-        # <th> header cells are named from their text content.
-        "table_header_names": ["Name", "Role"],
+        # <th> header cells are named from their text content on AT-SPI;
+        # on macOS WebKit header text is text-marker-only, like cell text
+        # above, so the assertion is Linux-only.
+        "table_header_names": (
+            None if sys.platform == "darwin" else ["Name", "Role"]
+        ),
         "window_name_contains": None,  # not asserted for Tauri
         "submit_button_name": "Submit",
         "add_item_button_name": "Add Item",
