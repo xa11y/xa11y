@@ -187,6 +187,31 @@ def _launch_egui():
     )
 
 
+def _launch_winforms():
+    # `net8.0-windows` must track TargetFramework in
+    # test-apps/winforms/xa11y-winforms-test-app.csproj.
+    project_dir = PROJECT_ROOT / "test-apps" / "winforms"
+    binary = project_dir / "bin" / "Debug" / "net8.0-windows" / "xa11y-winforms-test-app.exe"
+    if not binary.exists():
+        if sys.platform != "win32":
+            pytest.skip("WinForms test app is Windows-only")
+        result = subprocess.run(
+            ["dotnet", "build", str(project_dir)],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            pytest.fail(
+                f"Failed to build WinForms test app:\n{result.stdout}\n{result.stderr}"
+            )
+    yield from launch_test_app(
+        command=[str(binary)],
+        app_names=["xa11y-winforms-test-app"],
+        content_ready_selector='button[name="OK"]',
+    )
+
+
 _LAUNCHERS = {
     "qt": _launch_qt,
     "gtk": _launch_gtk,
@@ -195,6 +220,7 @@ _LAUNCHERS = {
     "electron": _launch_electron,
     "accesskit": _launch_accesskit,
     "egui": _launch_egui,
+    "winforms": _launch_winforms,
 }
 
 

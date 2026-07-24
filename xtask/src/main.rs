@@ -26,7 +26,8 @@ COMMANDS:
     test-tauri [SUITE..]  Run Tauri integration tests
     test-electron [SUITE..]  Run Electron integration tests (Linux only)
     test-egui [SUITE..]  Run egui (eframe) integration tests
-    test-apps           Run the Python suite for every app (qt, gtk, cocoa, tauri, electron, egui)
+    test-winforms [SUITE..]  Run WinForms integration tests (Windows only)
+    test-apps           Run the Python suite for every app (qt, gtk, cocoa, tauri, electron, egui, winforms)
     test-compat [APP]   Run shared harness (python + js + cli suites) against APP (default: tauri)
     test-matrix-check   Validate the tests/matrix.yaml coverage index
     docs                Build documentation
@@ -62,6 +63,7 @@ fn main() -> ExitCode {
         "test-tauri" => do_test_tauri(rest),
         "test-electron" => do_test_electron(rest),
         "test-egui" => do_test_egui(rest),
+        "test-winforms" => do_test_winforms(rest),
         "test-apps" => do_test_apps(),
         "test-compat" => do_test_compat(rest),
         "test-matrix-check" => do_test_matrix_check(),
@@ -437,6 +439,10 @@ fn do_test_egui(rest: &[String]) -> bool {
     do_test_app_suite("egui", rest, "egui integration tests")
 }
 
+fn do_test_winforms(rest: &[String]) -> bool {
+    do_test_app_suite("winforms", rest, "WinForms integration tests")
+}
+
 fn do_test_apps() -> bool {
     heading("All app integration tests");
     // Run the Python suite for each app (the historical `test-apps` scope).
@@ -459,6 +465,9 @@ fn do_test_apps() -> bool {
         ok = false;
     }
     if !do_test_egui(&py) {
+        ok = false;
+    }
+    if env::consts::OS == "windows" && !do_test_winforms(&py) {
         ok = false;
     }
     ok

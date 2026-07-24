@@ -232,6 +232,11 @@ jobs:
           - { os: ubuntu-latest,  app: egui }
           - { os: macos-latest,   app: egui }
           - { os: windows-latest, app: egui }
+          # WinForms — the only Microsoft UI framework in the matrix. Windows
+          # coverage otherwise exercises third-party UIA bridges only, while
+          # the provider's DataItem row-vs-cell disambiguation exists for
+          # framework grids like DataGridView (issues #321, #322, #324).
+          - { os: windows-latest, app: winforms }
     steps:
       - uses: actions/checkout@v7
 
@@ -296,6 +301,11 @@ jobs:
       - name: Build egui test app
         if: matrix.app == 'egui'
         run: cargo build --manifest-path test-apps/egui/Cargo.toml --locked
+
+      # ── WinForms app (.NET SDK is preinstalled on windows-latest) ──
+      - name: Build WinForms test app
+        if: matrix.app == 'winforms'
+        run: dotnet build test-apps/winforms
 
       # ── Electron node_modules ──────────────────────────────────────
       - name: Cache Electron node_modules

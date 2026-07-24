@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>xa11y-winforms-test-app</AssemblyName>
+    <RootNamespace>Xa11y.TestApp.WinForms</RootNamespace>
+
+    <!-- Runners ship several .NET runtimes; roll forward so the app still
+         starts when only a newer major is installed. -->
+    <RollForward>LatestMajor</RollForward>
+
+    <!-- The accessible names asserted by the test suites are English. Keep
+         satellite resources to one language so a localized runner cannot
+         change framework-generated strings (e.g. DataGridView cell names). -->
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+
+    <!-- WinForms only *runs* on Windows, but it compiles anywhere. This lets
+         contributors on Linux/macOS `dotnet build` the app as a syntax check
+         without a Windows box. -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+  </PropertyGroup>
+
+</Project>

@@ -472,6 +472,98 @@ APP_CONFIGS: dict[str, dict] = {
         "add_item_button_name": "Add Item",
         "remove_item_button_name": "Remove Item",
     },
+    "winforms": {
+        # The first Microsoft UI framework in the matrix (issue #324). Every
+        # other Windows cell reaches UIA through a third-party bridge; this one
+        # exercises the WinForms provider, whose control types come from each
+        # AccessibleObject's Role via AccessibleRoleControlTypeMap.
+        #
+        # Windows-only: tests/harness/launch.py rejects it elsewhere.
+        #
+        # WinForms never sets UIA_IsDialogPropertyId, so a WinForms dialog
+        # reaches xa11y as a plain `window` — there is no signal to key the
+        # `dialog` role off, whatever the app does.
+        "dialog_button_name": unsupported(
+            "WinForms Forms do not set UIA_IsDialogPropertyId, so a dialog is "
+            "indistinguishable from any other top-level window"
+        ),
+        "dialog_name": unsupported(
+            "WinForms Forms do not set UIA_IsDialogPropertyId"
+        ),
+        "ok_button_name": "OK",
+        "cancel_button_name": "Cancel",
+        # Not asserted: the app sets AccessibleDescription on OK, but WinForms
+        # routes it to MSAA accDescription rather than UIA HelpText /
+        # FullDescription — the two properties xa11y reads as `description`.
+        "ok_button_description": None,
+        "has_checkbox": True,
+        "checkbox_unchecked_name": "Agree to terms",
+        "checkbox_checked_name": "Subscribe",
+        "has_radio": True,
+        "radio_role": "radio_button",
+        "radio_a_name": "Option A",
+        "radio_b_name": "Option B",
+        # TrackBar reports ControlType.Slider but its accessible object
+        # advertises only Value + LegacyIAccessible (see
+        # TrackBar.TrackBarAccessibleObject.IsPatternSupported upstream), never
+        # RangeValue — so xa11y reads no numeric_value/min_value/max_value and
+        # the whole slider group (compat, actions, events, errors) skips.
+        "slider_selector": unsupported(
+            "WinForms TrackBar exposes no UIA RangeValue pattern, so it has no "
+            "numeric value or range to assert"
+        ),
+        "slider_initial_value": None,
+        "slider_min": None,
+        "slider_max": None,
+        # Same story as the slider: UpDownBase.UpDownBaseAccessibleObject
+        # reports ControlType.Spinner but inherits the base pattern set, which
+        # is Invoke-only — no RangeValue, so numeric_value is None and the
+        # min/max parity assertion in test_spinbutton_found cannot hold.
+        "spinbutton_selector": unsupported(
+            "WinForms NumericUpDown exposes no UIA RangeValue pattern"
+        ),
+        # ProgressBar does implement RangeValue (Minimum/Maximum/RangeValue on
+        # ProgressBar.ProgressBarAccessibleObject), so this one is asserted.
+        "progress_bar_selector": 'progress_bar[name="Progress"]',
+        "textfield_selector": 'text_field[name="Search"]',
+        "textfield_initial_value": "hello world",
+        # UIA has no multiline-edit control type: a WinForms multiline TextBox
+        # is ControlType.Edit like any other, which xa11y maps to `text_field`.
+        # (Same UIA limitation the egui config notes on Windows.)
+        "textarea_selector": unsupported(
+            "UIA has no distinct multiline edit control type, so a multiline "
+            "WinForms TextBox is indistinguishable from a single-line one"
+        ),
+        # Table — DataGridView. The grid is ControlType.DataGrid and its cells
+        # are ControlType.DataItem + the TableItem pattern, which is the
+        # is_table_item branch of map_uia_role in xa11y-windows/src/uia.rs.
+        "table_selector": 'table[name="Users Table"]',
+        "table_min_cells": 4,
+        # Not asserted: DataGridViewCellAccessibleObject.Name is a synthesized
+        # "<column header> Row <n>" string (SR.DataGridView_AccDataGridViewCellName,
+        # plus sort status for sortable columns) — a framework-generated,
+        # localizable label, not the cell text.
+        "table_cell_names": None,
+        # No child accessibles under a grid cell, so nothing to reach by name.
+        "table_content_names": None,
+        # The cell text is the ValuePattern value (the cell's FormattedValue),
+        # which is how xa11y surfaces it — same shape as WebKitGTK's cells.
+        "table_cell_values": ["Alice", "Admin", "Bob", "User"],
+        # Not instrumented: the app selects cell (0, 0), but WinForms grid
+        # cells advertise no SelectionItem pattern (Legacy/Invoke/Value/
+        # TableItem/GridItem only), and SelectionItem is the sole source of
+        # `selected` on Windows — so nothing would report the selection.
+        "table_selected_cell_name": None,
+        # Column headers are ControlType.Header named from the column's
+        # HeaderText; test_table_headers_exposed matches on name, not role.
+        "table_header_names": ["Name", "Role"],
+        # Not yet verified unknown-free.
+        "expect_no_unknown_roles": False,
+        "window_name_contains": "xa11y-winforms-test-app",
+        "submit_button_name": "Submit",
+        "add_item_button_name": "Add Item",
+        "remove_item_button_name": "Remove Item",
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -625,6 +717,31 @@ def _launch_egui() -> xa11y.App:
     )
 
 
+def _launch_winforms() -> xa11y.App:
+    # `net8.0-windows` must track TargetFramework in
+    # test-apps/winforms/xa11y-winforms-test-app.csproj.
+    project_dir = PROJECT_ROOT / "test-apps" / "winforms"
+    binary = project_dir / "bin" / "Debug" / "net8.0-windows" / "xa11y-winforms-test-app.exe"
+    if not binary.exists():
+        if sys.platform != "win32":
+            pytest.skip("WinForms test app is Windows-only")
+        result = subprocess.run(
+            ["dotnet", "build", str(project_dir)],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            pytest.fail(
+                f"Failed to build WinForms test app:\n{result.stdout}\n{result.stderr}"
+            )
+    yield from launch_test_app(
+        command=[str(binary)],
+        app_names=["xa11y-winforms-test-app"],
+        content_ready_selector='button[name="OK"]',
+    )
+
+
 _LAUNCHERS = {
     "qt": _launch_qt,
     "gtk": _launch_gtk,
@@ -633,6 +750,7 @@ _LAUNCHERS = {
     "electron": _launch_electron,
     "accesskit": _launch_accesskit,
     "egui": _launch_egui,
+    "winforms": _launch_winforms,
 }
 
 

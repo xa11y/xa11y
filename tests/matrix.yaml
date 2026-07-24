@@ -45,6 +45,17 @@ apps:
       tree (winit, glow, glutin, image, …) noticeably slows workspace-wide
       builds; built explicitly by the `integ`/`test-egui` jobs.
 
+  winforms:
+    platforms: [windows]
+    notes: >
+      The only Microsoft UI framework in the matrix. Every other Windows cell
+      reaches UIA through a third-party bridge (Qt, AccessKit, Chromium,
+      WebView2), so the WinForms provider — and in particular the
+      DataGridView, whose cells are ControlType.DataItem + the TableItem
+      pattern — is what exercises the row-vs-cell disambiguation in
+      xa11y-windows against a framework grid. Built with `dotnet build`
+      (the .NET SDK is preinstalled on windows-latest runners).
+
 features:
   compat:
     description: "a11y API compatibility: tree structure, find, roles, widget discovery"
@@ -131,6 +142,11 @@ coverage:
     js: [compat, actions]
     cli: [compat, actions]
 
+  winforms:
+    python: [compat, actions, events, errors]
+    js: [compat, actions]
+    cli: [compat, actions]
+
 gaps:
   - id: accesskit_python_suite_non_linux
     description: >
@@ -159,6 +175,22 @@ gaps:
       apps: [qt, gtk, cocoa]
       language: js
       features: [input_sim, screenshot]
+
+  - id: uia_custom_table_cells_unit_only
+    description: >
+      xa11y-windows maps ControlType.Custom + the TableItem pattern to
+      table_cell (#323), the shape WPF's DataGrid uses for its cells. No app in
+      the matrix produces one: WinForms' DataGridView reports its cells as
+      ControlType.DataItem (DataGridViewCell.DataGridViewCellAccessibleObject
+      overrides ControlTypePropertyId), so the WinForms cell exercises the
+      DataItem branch of map_uia_role instead. Closing this needs the WPF test
+      app — step 2 of issue #324, gated on the .NET harness plumbing the
+      WinForms app introduced.
+    severity: low
+    workaround: "map_uia_role unit tests in xa11y-windows/src/uia.rs cover the Custom+TableItem branch"
+    affects:
+      apps: [winforms]
+      features: [compat]
 
 # Resolved gaps (kept here briefly for provenance):
 #   gtk_events — the GTK test app now exposes the Dynamic widget group
