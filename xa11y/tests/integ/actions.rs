@@ -324,8 +324,9 @@ mod tests {
         let tables = app.locator("table").elements().unwrap();
         if !tables.is_empty() {
             // Table should contain rows and cells — use descendant combinator.
-            // On Windows (UIA), AccessKit Cell maps to DataItem (table_row) since
-            // UIA has no distinct Cell control type for data grids.
+            // On Windows, AccessKit exposes Cell as a DataItem without the
+            // TableItem pattern, so it remains a table_row. Providers such as
+            // Qt that expose TableItem on cell DataItems normalize as table_cell.
             let cells = app.locator("table table_cell").elements().unwrap();
             if cells.len() >= 2 {
                 return;

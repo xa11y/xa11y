@@ -344,7 +344,9 @@ fn build_snapshot_data(
     handle: u64,
 ) -> ElementData {
     let control_type = unsafe { element.CachedControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
-    let mut role = map_uia_control_type(control_type);
+    let is_table_item = control_type == UIA_DataItemControlTypeId
+        && uia_cached_bool(element, UIA_IsTableItemPatternAvailablePropertyId).unwrap_or(false);
+    let mut role = map_uia_role(control_type, is_table_item);
 
     // Refine role using AriaRole property for elements that UIA maps ambiguously
     // (e.g., Alert/Heading both become ControlType.Text, Dialog becomes Window)
@@ -526,6 +528,7 @@ const BATCH_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     UIA_ControlTypePropertyId,
     UIA_AriaRolePropertyId,
     UIA_IsDialogPropertyId,
+    UIA_IsTableItemPatternAvailablePropertyId,
     UIA_NamePropertyId,
     UIA_FullDescriptionPropertyId,
     UIA_HelpTextPropertyId,
@@ -1697,7 +1700,20 @@ fn parse_states(
     states
 }
 
-/// Map UIA ControlTypeId to xa11y Role.
+/// Map a UIA control type and its cell-specific pattern to an xa11y role.
+///
+/// UIA uses `DataItem` for both row containers and individual cells. A
+/// `DataItem` that implements `TableItem` is a cell: the pattern supplies its
+/// row/column header relationships. Keep pattern-less DataItems as rows.
+fn map_uia_role(control_type: UIA_CONTROLTYPE_ID, is_table_item: bool) -> Role {
+    if control_type == UIA_DataItemControlTypeId && is_table_item {
+        Role::TableCell
+    } else {
+        map_uia_control_type(control_type)
+    }
+}
+
+/// Map UIA ControlTypeId to its coarse xa11y Role.
 #[allow(non_upper_case_globals)]
 fn map_uia_control_type(control_type: UIA_CONTROLTYPE_ID) -> Role {
     match control_type {
@@ -2467,6 +2483,27 @@ mod tests {
             BATCH_PROPERTIES.contains(&UIA_IsDialogPropertyId),
             "UIA_IsDialogPropertyId must be in BATCH_PROPERTIES for native dialog detection"
         );
+    }
+
+    #[test]
+    fn batch_properties_includes_is_table_item_pattern_available() {
+        assert!(
+            BATCH_PROPERTIES.contains(&UIA_IsTableItemPatternAvailablePropertyId),
+            "TableItem availability must be cached to distinguish DataItem cells from rows"
+        );
+    }
+
+    #[test]
+    fn data_item_role_uses_table_item_pattern() {
+        assert_eq!(
+            map_uia_role(UIA_DataItemControlTypeId, true),
+            Role::TableCell
+        );
+        assert_eq!(
+            map_uia_role(UIA_DataItemControlTypeId, false),
+            Role::TableRow
+        );
+        assert_eq!(map_uia_role(UIA_ButtonControlTypeId, true), Role::Button);
     }
 
     #[test]
