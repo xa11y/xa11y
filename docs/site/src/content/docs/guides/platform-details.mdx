@@ -176,6 +176,13 @@ Every other configuration fails closed to `1.0` — never wrong data. There, bou
 
 GTK 4 menu-button widgets (`GtkMenuButton`, `AdwMenuButton`, `AdwSplitButton`) present as an outer `push button` accessible that advertises `NActions = 0` wrapping an inner `toggle button` that carries the real `click` action. Calling `press()` on the outer would normally raise `ActionNotSupported`. When the owning application identifies itself as GTK via `Application.ToolkitName == "GTK"`, xa11y-linux instead walks a bounded slice of the outer's subtree (BFS, depth 3, actionable roles only, name must match) and invokes the single actionable descendant it finds. The fallback is strictly scoped: it only runs inside GTK apps, only when the widget's own Action interface is empty, and only when exactly one candidate matches — ambiguous subtrees still surface the original error.
 
+### WebKitGTK tables
+
+Two WebKitGTK behaviors affect `<table>` content (verified against WebKitGTK 2.52; both are engine behaviors, not xa11y ones):
+
+- **`<th>` cells can destabilize the whole page's tree.** With a window manager present, a table containing `<th>` header cells can send WebKit's accessibility tree into continuous invalidation churn — every content accessible goes defunct moments after being exposed, and the page effectively vanishes from AT-SPI. If a WebKitGTK-based app's tree keeps coming back empty or `unknown`, check for this (xa11y marks dead objects with `raw["atspi_defunct"]`).
+- **Layout-table heuristic.** A `<table>` without headers or a `<caption>` is judged decorative and dropped from the accessibility tree entirely. Cell text is exposed through the AT-SPI Text interface (surfaced as the cell's `value`), not as the accessible name — use `table_cell[value*="..."]` selectors for WebKitGTK content.
+
 ### Linux Electron and Chromium apps
 
 On Linux, Electron and Chromium-based apps ship with their AT-SPI2 bridge disabled by default for performance. xa11y will connect to the app but its tree will contain only the top-level window — `App.by_name("…").locator("button").count()` returns 0 even though buttons are visible on screen.

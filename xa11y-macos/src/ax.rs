@@ -986,6 +986,9 @@ fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
         Some("AXOutlineRow") => return Role::TreeItem,
         Some("AXHeading") => return Role::Heading,
         Some("AXSwitch") => return Role::Switch,
+        // WebKit exposes <nav>/role="navigation" as AXGroup with this
+        // subrole; matches AT-SPI's "navigation" landmark mapping.
+        Some("AXLandmarkNavigation") => return Role::Navigation,
         _ => {}
     }
 
@@ -1041,6 +1044,13 @@ fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
         "AXStatusBar" => Role::Status,
         "AXValueIndicator" => Role::ScrollThumb,
         "AXGrid" => Role::Table,
+        // Table-header sort buttons (view-based NSTableView headers).
+        "AXSortButton" => Role::Button,
+        // AppKit's help-tag tooltip role (AXToolTip above is the WebKit one).
+        "AXHelpTag" => Role::Tooltip,
+        // Transient floating container (NSPopover); a content group like its
+        // GTK popover counterpart, not a dialog.
+        "AXPopover" => Role::Group,
         "AXDockItem" => Role::Button,
         "AXGrowArea" => Role::ScrollThumb,
         "AXColorWell" | "AXRuler" | "AXMatte" => Role::Unknown,
@@ -2914,6 +2924,13 @@ mod tests {
 
     #[test]
     fn map_ax_role_covers_all_known_roles() {
+        assert_eq!(map_ax_role("AXSortButton", None), Role::Button);
+        assert_eq!(map_ax_role("AXHelpTag", None), Role::Tooltip);
+        assert_eq!(map_ax_role("AXPopover", None), Role::Group);
+        assert_eq!(
+            map_ax_role("AXGroup", Some("AXLandmarkNavigation")),
+            Role::Navigation
+        );
         assert_eq!(map_ax_role("AXWindow", Some("AXDialog")), Role::Dialog);
         assert_eq!(
             map_ax_role("AXGroup", Some("AXApplicationAlert")),

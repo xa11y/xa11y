@@ -643,7 +643,7 @@ impl LinuxProvider {
         let (
             ((mut name, value), description),
             (
-                (states, bounds),
+                ((states, state_bits), bounds),
                 ((actions, action_index_map), (numeric_value, min_value, max_value)),
             ),
         ) = rayon::join(
@@ -665,7 +665,7 @@ impl LinuxProvider {
                 rayon::join(
                     || {
                         rayon::join(
-                            || self.parse_states(aref, role),
+                            || self.parse_states_with_bits(aref, role),
                             || {
                                 if role != Role::Application {
                                     self.get_extents(aref)
@@ -752,6 +752,14 @@ impl LinuxProvider {
                     "atspi_description".into(),
                     serde_json::Value::String(d.clone()),
                 );
+            }
+            // DEFUNCT (bit 6) marks a dead accessible — the object was
+            // destroyed provider-side but a reference still resolves. It has
+            // no cross-platform StateSet field, but it's the key diagnostic
+            // for stale-reference bugs (e.g. a churning WebKit tree), so
+            // surface it whenever set.
+            if (state_bits & (1 << 6)) != 0 {
+                raw.insert("atspi_defunct".into(), serde_json::Value::Bool(true));
             }
             raw
         };
@@ -846,6 +854,13 @@ impl LinuxProvider {
 
     /// Parse AT-SPI2 state bitfield into xa11y StateSet.
     fn parse_states(&self, aref: &AccessibleRef, role: Role) -> StateSet {
+        self.parse_states_with_bits(aref, role).0
+    }
+
+    /// Like [`parse_states`], but also returns the raw AT-SPI state bitset so
+    /// callers can surface provider-only facts (notably DEFUNCT) that have no
+    /// cross-platform `StateSet` field.
+    fn parse_states_with_bits(&self, aref: &AccessibleRef, role: Role) -> (StateSet, u64) {
         let bits = self.state_bits(aref);
 
         // AT-SPI2 state bit positions (AtspiStateType enum values)
@@ -903,7 +918,7 @@ impl LinuxProvider {
         states.modal = (bits & MODAL) != 0;
         states.required = (bits & REQUIRED) != 0;
         states.busy = (bits & BUSY) != 0;
-        states
+        (states, bits)
     }
 
     /// Find an application by PID.
