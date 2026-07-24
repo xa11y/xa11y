@@ -33,6 +33,8 @@ from PySide6.QtWidgets import (
     QSlider,
     QSpinBox,
     QStatusBar,
+    QTableWidget,
+    QTableWidgetItem,
     QTextEdit,
     QToolBar,
     QTreeWidget,
@@ -68,6 +70,7 @@ class TestWindow(QMainWindow):
         self._add_input(layout)
         self._add_text(layout)
         self._add_list(layout)
+        self._add_table(layout)
         self._add_tree(layout)
         self._add_dynamic(layout)
         self._add_dialogs(layout)
@@ -262,6 +265,23 @@ class TestWindow(QMainWindow):
         for i in range(5):
             self.list_widget.addItem(f"Item {i + 1}")
         lay.addWidget(self.list_widget)
+
+        parent_layout.addWidget(grp)
+
+    def _add_table(self, parent_layout: QVBoxLayout) -> None:
+        grp = QGroupBox("Table")
+        grp.setAccessibleName("Table")
+        lay = QVBoxLayout(grp)
+
+        self.users_table = QTableWidget(2, 2)
+        self.users_table.setAccessibleName("Users Table")
+        self.users_table.setHorizontalHeaderLabels(["Name", "Role"])
+        self.users_table.setVerticalHeaderLabels(["Row 1", "Row 2"])
+        for row, values in enumerate((("Alice", "Admin"), ("Bob", "User"))):
+            for column, value in enumerate(values):
+                self.users_table.setItem(row, column, QTableWidgetItem(value))
+        self.users_table.setMaximumHeight(120)
+        lay.addWidget(self.users_table)
 
         parent_layout.addWidget(grp)
 

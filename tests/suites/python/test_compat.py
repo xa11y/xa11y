@@ -312,6 +312,25 @@ def test_textarea_found(app, app_config):
 
 
 # ---------------------------------------------------------------------------
+# Tables
+# ---------------------------------------------------------------------------
+
+
+def test_qt_table_data_items_are_cells(app, app_name):
+    """Qt's UIA DataItems implement TableItem and must normalize as cells."""
+    if app_name != "qt":
+        pytest.skip("native Qt table regression")
+
+    table = app.locator('table[name="Users Table"]').element()
+    assert table.role == "table"
+    for name in ("Alice", "Admin", "Bob", "User"):
+        cell = app.locator(
+            f'table[name="Users Table"] table_cell[name="{name}"]'
+        ).element()
+        assert cell.role == "table_cell"
+
+
+# ---------------------------------------------------------------------------
 # Tree structure quality
 # ---------------------------------------------------------------------------
 
