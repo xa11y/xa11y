@@ -9,7 +9,7 @@ use windows::Win32::Foundation::*;
 use windows::Win32::System::Com::{CoInitializeEx, COINIT};
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::*;
-use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, STATE_SYSTEM_SELECTED};
 
 use xa11y_core::{
     selector::{matches_simple, Combinator, Selector, SelectorSegment},
@@ -342,6 +342,13 @@ fn uia_cached_bool(element: &IUIAutomationElement, prop: UIA_PROPERTY_ID) -> Opt
         .and_then(|v| variant_bool(&v))
 }
 
+/// Read a VT_I4 VARIANT property from the element's pre-fetched snapshot.
+fn uia_cached_i32(element: &IUIAutomationElement, prop: UIA_PROPERTY_ID) -> Option<i32> {
+    unsafe { element.GetCachedPropertyValue(prop) }
+        .ok()
+        .and_then(|v| variant_i32(&v))
+}
+
 /// Build an ElementData snapshot from a pre-fetched UIA element without
 /// retaining the live reference in the provider's handle cache.
 ///
@@ -364,7 +371,20 @@ fn build_snapshot_data(
     let parent_is_data_item = control_type == UIA_DataItemControlTypeId
         && !is_table_item
         && walker.and_then(|w| parent_control_type(w, element)) == Some(UIA_DataItemControlTypeId);
-    let mut role = map_uia_role(control_type, is_table_item, parent_is_data_item);
+    // Only read for `Custom`, where it is the provider's sole role signal
+    // (see `map_msaa_role`); every other control type answers from the UIA
+    // control type alone.
+    let legacy_role = if control_type == UIA_CustomControlTypeId {
+        uia_cached_i32(element, UIA_LegacyIAccessibleRolePropertyId)
+    } else {
+        None
+    };
+    let mut role = map_uia_role(
+        control_type,
+        is_table_item,
+        parent_is_data_item,
+        legacy_role,
+    );
 
     // Refine role using AriaRole property for elements that UIA maps ambiguously
     // (e.g., Alert/Heading both become ControlType.Text, Dialog becomes Window)
@@ -559,6 +579,12 @@ const BATCH_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     UIA_HasKeyboardFocusPropertyId,
     UIA_IsKeyboardFocusablePropertyId,
     UIA_NativeWindowHandlePropertyId,
+    // MSAA state bitmask — the only place pre-SelectionItem frameworks report
+    // selection (see the `selected` derivation in `parse_states`).
+    UIA_LegacyIAccessibleStatePropertyId,
+    // MSAA role — the only role signal for providers that publish no UIA
+    // control type (see `map_msaa_role`).
+    UIA_LegacyIAccessibleRolePropertyId,
 ];
 
 /// Safe wrapper for IUIAutomationElementArray::Length.
@@ -1680,13 +1706,30 @@ fn parse_states(
         None
     };
 
-    // Selected: from SelectionItemPattern
-    let selected = if let Some(ref pattern) = patterns.selection_item {
-        unsafe { pattern.CurrentIsSelected() }
+    // Selected: SelectionItemPattern where the framework implements it,
+    // otherwise the MSAA selection bit.
+    //
+    // SelectionItem is the modern signal and stays authoritative. But a large
+    // class of Windows UI predates it and publishes selection *only* as
+    // `STATE_SYSTEM_SELECTED` on LegacyIAccessible.State: WinForms grids and
+    // lists (e.g. `DataGridViewCell.DataGridViewCellAccessibleObject`, whose
+    // pattern set is Legacy/Invoke/Value/TableItem/GridItem — no
+    // SelectionItem), and anything reaching UIA through the MSAA proxy.
+    // Reading only the pattern reported every such element as unselected,
+    // which is a wrong answer rather than a missing one (issue #324).
+    //
+    // This is a two-source read of the same fact, not a fallback chain: each
+    // source is consulted for the frameworks that implement it, and neither
+    // hides an error from the other (mirrors the container-selection
+    // derivation xa11y-macos does for Qt's AX bridge).
+    let selected = match patterns.selection_item {
+        Some(ref pattern) => unsafe { pattern.CurrentIsSelected() }
             .unwrap_or(BOOL(0))
-            .as_bool()
-    } else {
-        false
+            .as_bool(),
+        None => legacy_state_selected(uia_cached_i32(
+            element,
+            UIA_LegacyIAccessibleStatePropertyId,
+        )),
     };
 
     let editable = match role {
@@ -1718,6 +1761,15 @@ fn parse_states(
     states
 }
 
+/// True when an MSAA state bitmask has `STATE_SYSTEM_SELECTED` set.
+///
+/// `None` (the property is absent from the snapshot, or the provider does not
+/// implement LegacyIAccessible at all) means "no selection information", which
+/// is reported as not-selected — the same answer as an explicit clear bit.
+fn legacy_state_selected(state: Option<i32>) -> bool {
+    matches!(state, Some(s) if s as u32 & STATE_SYSTEM_SELECTED != 0)
+}
+
 /// Map a UIA control type and its cell signals to an xa11y role.
 ///
 /// UIA uses `DataItem` for both row containers and individual cells. Two
@@ -1741,10 +1793,15 @@ fn parse_states(
 /// view) to implement `GridItem` while being rows, so its presence cannot
 /// distinguish cell from row. A pattern-less `DataItem` whose parent is not a
 /// row keeps mapping to `TableRow`.
+///
+/// `legacy_role` is the element's MSAA `ROLE_SYSTEM_*` value from
+/// `LegacyIAccessible.Role`, consulted only for `ControlType.Custom` — see
+/// [`map_msaa_role`].
 fn map_uia_role(
     control_type: UIA_CONTROLTYPE_ID,
     is_table_item: bool,
     parent_is_data_item: bool,
+    legacy_role: Option<i32>,
 ) -> Role {
     // WPF and WinForms DataGrids expose their cells as Custom elements whose
     // only table signal is the TableItem pattern — without this they'd map to
@@ -1758,10 +1815,86 @@ fn map_uia_role(
         false
     };
     if is_cell {
-        Role::TableCell
-    } else {
-        map_uia_control_type(control_type)
+        return Role::TableCell;
     }
+
+    if control_type == UIA_CustomControlTypeId {
+        if let Some(role) = legacy_role.and_then(map_msaa_role) {
+            return role;
+        }
+    }
+
+    map_uia_control_type(control_type)
+}
+
+/// Map an MSAA `ROLE_SYSTEM_*` value to its xa11y role.
+///
+/// Consulted **only** when the UIA control type is `Custom`, which does not
+/// mean "custom widget" — it is what UIA reports when a provider publishes no
+/// `ControlType` at all. WinForms accessible objects that don't derive from
+/// `ControlAccessibleObject` do exactly that: a `DataGridView`'s rows
+/// (`DataGridViewRowAccessibleObject`) implement only LegacyIAccessible, so
+/// UIA reports `Custom` while MSAA still says `ROLE_SYSTEM_ROW`. Mapping from
+/// the sole role the provider *did* publish turns those into real roles
+/// instead of `unknown` (issue #324).
+///
+/// Deliberately not applied to unrecognized UIA control types: those are gaps
+/// in [`map_uia_control_type`] and must stay visible as `unknown_role` so the
+/// role-map drift tests keep catching them.
+///
+/// Returns `None` for MSAA roles with no clean xa11y equivalent (`Sound`,
+/// `Caret`, `Cursor`, `Animation`, …), leaving the element `unknown` rather
+/// than inventing a mapping.
+fn map_msaa_role(legacy_role: i32) -> Option<Role> {
+    let role = u32::try_from(legacy_role).ok()?;
+    let mapped = match role {
+        ROLE_SYSTEM_TITLEBAR => Role::Group,
+        ROLE_SYSTEM_MENUBAR => Role::MenuBar,
+        ROLE_SYSTEM_SCROLLBAR => Role::ScrollBar,
+        ROLE_SYSTEM_GRIP => Role::ScrollThumb,
+        ROLE_SYSTEM_WINDOW => Role::Window,
+        ROLE_SYSTEM_CLIENT => Role::Group,
+        ROLE_SYSTEM_MENUPOPUP => Role::Menu,
+        ROLE_SYSTEM_MENUITEM => Role::MenuItem,
+        ROLE_SYSTEM_TOOLTIP => Role::Tooltip,
+        ROLE_SYSTEM_APPLICATION => Role::Application,
+        ROLE_SYSTEM_DOCUMENT => Role::WebArea,
+        ROLE_SYSTEM_PANE => Role::Group,
+        ROLE_SYSTEM_DIALOG => Role::Dialog,
+        ROLE_SYSTEM_GROUPING => Role::Group,
+        ROLE_SYSTEM_SEPARATOR => Role::Separator,
+        ROLE_SYSTEM_TOOLBAR => Role::Toolbar,
+        ROLE_SYSTEM_STATUSBAR => Role::Status,
+        ROLE_SYSTEM_TABLE => Role::Table,
+        // Header cells: xa11y reports them as cells, matching the
+        // UIA_HeaderItemControlTypeId arm of `map_uia_control_type`.
+        ROLE_SYSTEM_COLUMNHEADER | ROLE_SYSTEM_ROWHEADER => Role::TableCell,
+        ROLE_SYSTEM_ROW => Role::TableRow,
+        ROLE_SYSTEM_CELL => Role::TableCell,
+        ROLE_SYSTEM_LINK => Role::Link,
+        ROLE_SYSTEM_LIST => Role::List,
+        ROLE_SYSTEM_LISTITEM => Role::ListItem,
+        ROLE_SYSTEM_OUTLINE => Role::List,
+        ROLE_SYSTEM_OUTLINEITEM => Role::TreeItem,
+        ROLE_SYSTEM_PAGETAB => Role::Tab,
+        ROLE_SYSTEM_PAGETABLIST => Role::TabGroup,
+        ROLE_SYSTEM_GRAPHIC => Role::Image,
+        ROLE_SYSTEM_STATICTEXT => Role::StaticText,
+        ROLE_SYSTEM_TEXT => Role::TextField,
+        ROLE_SYSTEM_PUSHBUTTON => Role::Button,
+        ROLE_SYSTEM_CHECKBUTTON => Role::CheckBox,
+        ROLE_SYSTEM_RADIOBUTTON => Role::RadioButton,
+        ROLE_SYSTEM_COMBOBOX | ROLE_SYSTEM_DROPLIST => Role::ComboBox,
+        ROLE_SYSTEM_PROGRESSBAR => Role::ProgressBar,
+        ROLE_SYSTEM_SLIDER => Role::Slider,
+        ROLE_SYSTEM_SPINBUTTON => Role::SpinButton,
+        ROLE_SYSTEM_BUTTONDROPDOWN | ROLE_SYSTEM_BUTTONMENU | ROLE_SYSTEM_SPLITBUTTON => {
+            Role::Button
+        }
+        ROLE_SYSTEM_ALERT => Role::Alert,
+        _ => return None,
+    };
+    Some(mapped)
 }
 
 /// Live (uncached) control type of `element`'s raw-view parent.
@@ -2571,6 +2704,155 @@ mod tests {
     }
 
     #[test]
+    fn batch_properties_includes_legacy_state() {
+        // The MSAA state bitmask is the only selection signal frameworks that
+        // predate SelectionItem publish (WinForms grids/lists, MSAA-proxied
+        // Win32). Without it cached, `parse_states` cannot see their
+        // selection at all.
+        assert!(
+            BATCH_PROPERTIES.contains(&UIA_LegacyIAccessibleStatePropertyId),
+            "LegacyIAccessible.State must be cached for MSAA-only selection"
+        );
+    }
+
+    #[test]
+    fn legacy_state_selected_reads_the_msaa_selection_bit() {
+        // STATE_SYSTEM_SELECTED (0x2) set, alone and alongside the bits a
+        // WinForms grid cell reports next to it (SELECTABLE 0x200000,
+        // FOCUSABLE 0x100000, FOCUSED 0x4, READONLY 0x40).
+        assert!(legacy_state_selected(Some(0x2)));
+        assert!(legacy_state_selected(Some(
+            0x2 | 0x4 | 0x40 | 0x100000 | 0x200000
+        )));
+        // Selectable and focused but not selected — the sibling cells in the
+        // same grid. This is the case that must not report `selected`.
+        assert!(!legacy_state_selected(Some(0x4 | 0x100000 | 0x200000)));
+        assert!(!legacy_state_selected(Some(0)));
+        // No LegacyIAccessible implementation, or the property missing from
+        // the snapshot: no selection information, so not selected.
+        assert!(!legacy_state_selected(None));
+    }
+
+    #[test]
+    fn custom_control_falls_back_to_the_msaa_role() {
+        // A WinForms DataGridView row: DataGridViewRowAccessibleObject derives
+        // from AccessibleObject (not ControlAccessibleObject), so it publishes
+        // no UIA ControlType — UIA reports Custom — while LegacyIAccessible
+        // still reports ROLE_SYSTEM_ROW. Without this the named rows ("Row 1",
+        // "Row 2", "Top Row") land in the tree as `unknown`.
+        assert_eq!(
+            map_uia_role(
+                UIA_CustomControlTypeId,
+                false,
+                false,
+                Some(ROLE_SYSTEM_ROW as i32)
+            ),
+            Role::TableRow
+        );
+        assert_eq!(
+            map_uia_role(
+                UIA_CustomControlTypeId,
+                false,
+                false,
+                Some(ROLE_SYSTEM_CELL as i32)
+            ),
+            Role::TableCell
+        );
+        // The TableItem pattern still wins: a Custom cell that advertises it
+        // is a cell whatever MSAA calls it.
+        assert_eq!(
+            map_uia_role(
+                UIA_CustomControlTypeId,
+                true,
+                false,
+                Some(ROLE_SYSTEM_ROW as i32)
+            ),
+            Role::TableCell
+        );
+        // An MSAA role with no clean equivalent leaves the element unknown
+        // rather than inventing a mapping.
+        assert_eq!(
+            map_uia_role(
+                UIA_CustomControlTypeId,
+                false,
+                false,
+                Some(ROLE_SYSTEM_SOUND as i32)
+            ),
+            Role::Unknown
+        );
+        // No LegacyIAccessible role at all: unchanged behaviour.
+        assert_eq!(
+            map_uia_role(UIA_CustomControlTypeId, false, false, None),
+            Role::Unknown
+        );
+    }
+
+    #[test]
+    fn msaa_role_refinement_is_scoped_to_custom() {
+        // A real UIA control type is authoritative — the MSAA role must never
+        // override it, even when the two disagree.
+        assert_eq!(
+            map_uia_role(
+                UIA_ButtonControlTypeId,
+                false,
+                false,
+                Some(ROLE_SYSTEM_ROW as i32)
+            ),
+            Role::Button
+        );
+        // An *unrecognized* control type stays an unknown_role so the
+        // role-map drift tests keep failing on real gaps in
+        // map_uia_control_type, rather than being papered over by MSAA.
+        let unmapped = UIA_CONTROLTYPE_ID(50041);
+        assert_eq!(
+            map_uia_role(unmapped, false, false, Some(ROLE_SYSTEM_ROW as i32)),
+            map_uia_control_type(unmapped)
+        );
+    }
+
+    #[test]
+    fn batch_properties_includes_legacy_role() {
+        assert!(
+            BATCH_PROPERTIES.contains(&UIA_LegacyIAccessibleRolePropertyId),
+            "LegacyIAccessible.Role must be cached to resolve ControlType.Custom elements"
+        );
+    }
+
+    #[test]
+    fn msaa_role_map_has_no_accidental_unknowns() {
+        // Every MSAA role we claim to map must produce a real role; roles we
+        // deliberately leave unmapped must return None (not Role::Unknown,
+        // which would be indistinguishable from a mapping bug).
+        for role in [
+            ROLE_SYSTEM_ROW,
+            ROLE_SYSTEM_CELL,
+            ROLE_SYSTEM_COLUMNHEADER,
+            ROLE_SYSTEM_ROWHEADER,
+            ROLE_SYSTEM_TABLE,
+            ROLE_SYSTEM_LIST,
+            ROLE_SYSTEM_LISTITEM,
+            ROLE_SYSTEM_PUSHBUTTON,
+            ROLE_SYSTEM_CHECKBUTTON,
+            ROLE_SYSTEM_RADIOBUTTON,
+            ROLE_SYSTEM_TEXT,
+            ROLE_SYSTEM_STATICTEXT,
+            ROLE_SYSTEM_WINDOW,
+            ROLE_SYSTEM_DIALOG,
+        ] {
+            let mapped = map_msaa_role(role as i32);
+            assert!(
+                matches!(mapped, Some(r) if r != Role::Unknown),
+                "MSAA role {role} should map to a concrete xa11y role, got {mapped:?}"
+            );
+        }
+        assert_eq!(map_msaa_role(ROLE_SYSTEM_CURSOR as i32), None);
+        // Negative / out-of-range values from a misbehaving provider are not
+        // roles — they must not panic or match a mapping.
+        assert_eq!(map_msaa_role(-1), None);
+        assert_eq!(map_msaa_role(i32::MAX), None);
+    }
+
+    #[test]
     fn batch_properties_includes_is_table_item_pattern_available() {
         assert!(
             BATCH_PROPERTIES.contains(&UIA_IsTableItemPatternAvailablePropertyId),
@@ -2582,17 +2864,17 @@ mod tests {
     fn data_item_role_uses_table_item_pattern() {
         // TableItem pattern marks a cell regardless of parent (Qt, WPF).
         assert_eq!(
-            map_uia_role(UIA_DataItemControlTypeId, true, false),
+            map_uia_role(UIA_DataItemControlTypeId, true, false, None),
             Role::TableCell
         );
         // Neither signal: a row container.
         assert_eq!(
-            map_uia_role(UIA_DataItemControlTypeId, false, false),
+            map_uia_role(UIA_DataItemControlTypeId, false, false, None),
             Role::TableRow
         );
         // Cell signals never leak onto other control types.
         assert_eq!(
-            map_uia_role(UIA_ButtonControlTypeId, true, true),
+            map_uia_role(UIA_ButtonControlTypeId, true, true, None),
             Role::Button
         );
     }
@@ -2601,17 +2883,17 @@ mod tests {
     fn custom_control_with_table_item_pattern_is_cell() {
         // WPF/WinForms DataGrid cells: ControlType.Custom + TableItem.
         assert_eq!(
-            map_uia_role(UIA_CustomControlTypeId, true, false),
+            map_uia_role(UIA_CustomControlTypeId, true, false, None),
             Role::TableCell
         );
         // Pattern-less Custom stays Unknown even under a row — an embedded
         // custom widget inside a row is not a cell.
         assert_eq!(
-            map_uia_role(UIA_CustomControlTypeId, false, true),
+            map_uia_role(UIA_CustomControlTypeId, false, true, None),
             Role::Unknown
         );
         assert_eq!(
-            map_uia_role(UIA_CustomControlTypeId, false, false),
+            map_uia_role(UIA_CustomControlTypeId, false, false, None),
             Role::Unknown
         );
     }
@@ -2643,12 +2925,12 @@ mod tests {
         // AccessKit exposes cells as pattern-less DataItems under a row
         // DataItem — the structural signal alone must classify them.
         assert_eq!(
-            map_uia_role(UIA_DataItemControlTypeId, false, true),
+            map_uia_role(UIA_DataItemControlTypeId, false, true, None),
             Role::TableCell
         );
         // Both signals agreeing is still a cell.
         assert_eq!(
-            map_uia_role(UIA_DataItemControlTypeId, true, true),
+            map_uia_role(UIA_DataItemControlTypeId, true, true, None),
             Role::TableCell
         );
     }

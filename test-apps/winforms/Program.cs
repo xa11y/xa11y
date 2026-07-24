@@ -109,12 +109,14 @@ internal sealed class TestForm : Form
     {
         base.OnLoad(e);
 
-        // Select a single cell so a future config can assert per-cell
-        // selection. Deferred to Load because CurrentCell needs the grid to be
-        // laid out. NOTE: WinForms grid cells expose no SelectionItem pattern,
-        // so xa11y reads selected=false for them today — see the
-        // `table_selected_cell_name` comment in the Python APP_CONFIGS.
+        // Select a single cell so the suites can assert per-cell selection.
+        // Deferred to Load because CurrentCell needs the grid laid out.
+        // WinForms grid cells expose no SelectionItem pattern — the selection
+        // reaches UIA only as the MSAA STATE_SYSTEM_SELECTED bit on
+        // LegacyIAccessible.State, which is the path xa11y-windows reads when
+        // SelectionItem is absent.
         _usersTable.CurrentCell = _usersTable.Rows[0].Cells[0];
+        _usersTable.Rows[0].Cells[0].Selected = true;
     }
 
     // ── Widget sections ──────────────────────────────────────────────────

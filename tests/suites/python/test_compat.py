@@ -366,27 +366,40 @@ def test_table_selected_cell_state(app, app_config):
     """Per-cell selection state must survive every platform bridge.
 
     The test app selects one cell programmatically; that cell must report
-    ``selected`` on Windows (UIA SelectionItem.IsSelected), Linux (AT-SPI
-    selected state), and macOS. On macOS, Qt exposes selection only through
-    the table's ``AXSelectedChildren`` (no per-element ``AXSelected``), so
-    this exercises xa11y-macos's container-selection derivation.
+    ``selected`` on Windows (UIA SelectionItem.IsSelected, or the MSAA
+    ``STATE_SYSTEM_SELECTED`` bit for frameworks that predate SelectionItem —
+    WinForms grids), Linux (AT-SPI selected state), and macOS. On macOS, Qt
+    exposes selection only through the table's ``AXSelectedChildren`` (no
+    per-element ``AXSelected``), so this exercises xa11y-macos's
+    container-selection derivation.
     Regression for https://github.com/mrexodia/xa11y-table-repro.
+
+    The selected cell is pinned by name where cells are name-addressable, and
+    by value otherwise — WinForms names its cells with a synthesized
+    "<column header> Row <n>" string, so ``table_selected_cell_value`` targets
+    the cell text instead (the same reason ``table_cell_values`` exists).
     """
     selector = app_config.get("table_selector")
     selected_name = app_config.get("table_selected_cell_name")
-    if not selector or not selected_name:
+    selected_value = app_config.get("table_selected_cell_value")
+    if not selector or not (selected_name or selected_value):
         pytest.skip("test app has no table with a programmatic cell selection")
 
-    cell = app.locator(f'{selector} table_cell[name*="{selected_name}"]').element()
+    attr, expected = (
+        ("name", selected_name) if selected_name else ("value", selected_value)
+    )
+
+    cell = app.locator(f'{selector} table_cell[{attr}*="{expected}"]').element()
     assert cell.selected, (
-        f"cell {selected_name!r} is programmatically selected in the app "
-        f"but reports selected={cell.selected}"
+        f"cell with {attr} {expected!r} is programmatically selected in the "
+        f"app but reports selected={cell.selected}"
     )
     # A sibling cell must NOT leak the selected state.
     for other in app.locator(f"{selector} table_cell").elements():
-        if other.name and selected_name not in other.name:
+        observed = getattr(other, attr)
+        if observed and expected not in observed:
             assert not other.selected, (
-                f"unselected cell {other.name!r} reports selected=True"
+                f"unselected cell ({attr}={observed!r}) reports selected=True"
             )
 
 

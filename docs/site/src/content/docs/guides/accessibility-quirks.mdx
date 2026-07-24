@@ -160,6 +160,31 @@ dialog, transient system popups — **UAC prompts, credential dialogs, Windows
 Update** — will flip a window's role out from under you. Desktop state is not
 deterministic.
 
+### Windows: `ControlType.Custom` often means "no control type at all"
+
+UIA's default value for the `ControlType` property is `Custom` (50025), so an
+element whose provider never publishes a control type is indistinguishable from
+a deliberately custom widget. WinForms hits this constantly: accessible objects
+that don't derive from `ControlAccessibleObject` — a `DataGridView`'s rows, for
+instance — implement only `LegacyIAccessible`, so UIA reports `Custom` even
+though MSAA still reports `ROLE_SYSTEM_ROW`.
+
+xa11y therefore reads `LegacyIAccessible.Role` for `Custom` elements and maps
+the MSAA role when it has a clean equivalent. This applies *only* to `Custom`:
+an unrecognized UIA control type stays `unknown`, so real gaps in the role map
+remain visible.
+
+### Windows: WinForms range controls have no `RangeValue` pattern
+
+A WinForms `TrackBar` reports `ControlType.Slider` and a `NumericUpDown`
+reports `ControlType.Spinner`, but neither implements `RangeValuePattern` —
+`TrackBar.TrackBarAccessibleObject` advertises `Value` and `LegacyIAccessible`
+only, and `UpDownBase.UpDownBaseAccessibleObject` inherits the Invoke-only base
+set. The current value is readable as a *string* through `ValuePattern`; the
+minimum and maximum are not exposed at all. So a control that looks like a
+slider in the tree can still have no numeric value and no range, and stepping
+it through the accessibility API is not possible.
+
 ### Linux: roles are a 131-value C enum on the wire
 
 `AtspiRole` is a C enum (131 values) sent as a `u32`. Examples:
@@ -289,6 +314,19 @@ it is a genuine no-op.
 - **Windows:** numeric goes through `RangeValuePattern`, text through
   `ValuePattern` — and `type_text` is a non-atomic read-modify-write splice via
   `TextPattern.GetSelection()` + `ValuePattern.SetValue()`.
+
+### Selection is reported through a different channel on every platform
+
+- **Windows:** `SelectionItemPattern.IsSelected` where the framework implements
+  it, but frameworks that predate the pattern publish selection *only* as the
+  MSAA `STATE_SYSTEM_SELECTED` bit on `LegacyIAccessible.State`. WinForms grid
+  cells are the common case: their pattern set is
+  Legacy/Invoke/Value/TableItem/GridItem — no `SelectionItem`. xa11y reads both.
+- **macOS:** per-element `AXSelected` where it exists; Qt's Cocoa bridge
+  implements no per-cell `AXSelected` at all and exposes the selection only
+  through the *container's* `AXSelectedChildren`, so xa11y derives cell
+  selection from the table.
+- **Linux:** the AT-SPI `SELECTED` state bit, set per element.
 
 ### Qt spin boxes step — they don't set
 

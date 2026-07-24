@@ -549,15 +549,22 @@ APP_CONFIGS: dict[str, dict] = {
         # The cell text is the ValuePattern value (the cell's FormattedValue),
         # which is how xa11y surfaces it — same shape as WebKitGTK's cells.
         "table_cell_values": ["Alice", "Admin", "Bob", "User"],
-        # Not instrumented: the app selects cell (0, 0), but WinForms grid
-        # cells advertise no SelectionItem pattern (Legacy/Invoke/Value/
-        # TableItem/GridItem only), and SelectionItem is the sole source of
-        # `selected` on Windows — so nothing would report the selection.
+        # The app selects cell (0, 0). WinForms grid cells advertise no
+        # SelectionItem pattern (Legacy/Invoke/Value/TableItem/GridItem only)
+        # and publish selection solely as the MSAA STATE_SYSTEM_SELECTED bit,
+        # which is what the LegacyIAccessible.State read in xa11y-windows's
+        # `parse_states` picks up. Pinned by value, not name, because the
+        # synthesized cell names are not addressable (see table_cell_names).
         "table_selected_cell_name": None,
+        "table_selected_cell_value": "Alice",
         # Column headers are ControlType.Header named from the column's
         # HeaderText; test_table_headers_exposed matches on name, not role.
         "table_header_names": ["Name", "Role"],
-        # Not yet verified unknown-free.
+        # The named unknowns this app first surfaced — the grid's "Top Row" /
+        # "Row 1" / "Row 2", which publish no UIA control type — now resolve
+        # through the MSAA role (see map_msaa_role in xa11y-windows). The
+        # nameless remainder of the tree is not verified clean yet, so the
+        # opt-in whole-tree guard stays off.
         "expect_no_unknown_roles": False,
         "window_name_contains": "xa11y-winforms-test-app",
         "submit_button_name": "Submit",
