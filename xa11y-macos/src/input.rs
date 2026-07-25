@@ -16,6 +16,7 @@
 //! synthesised against the active keyboard layout.
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 
 use core_foundation::base::{CFRelease, CFTypeRef};
@@ -97,6 +98,8 @@ unsafe extern "C" {
 
     fn CGEventSetFlags(event: CGEventRef, flags: u64);
 
+    fn CGEventGetFlags(event: CGEventRef) -> u64;
+
     fn CGEventKeyboardSetUnicodeString(event: CGEventRef, length: usize, chars: *const u16);
 }
 
@@ -110,6 +113,20 @@ unsafe extern "C" {
 #[derive(Default)]
 pub struct MacOSInputProvider {
     lock: Mutex<()>,
+    /// CGEventFlags for the modifier keys currently held via `key_down`.
+    ///
+    /// macOS stamps an event with modifier state **at creation time**, read
+    /// from the window server's combined state — and a *synthetic* key-down
+    /// does not update that state synchronously. Posting `key_down(Shift)`
+    /// and a click back-to-back, as core's `with_keys_held` does for
+    /// `Mouse::click_with`, therefore produced a click carrying no modifier
+    /// at all: by the time the window server caught up, the key-up had
+    /// already been posted.
+    ///
+    /// Tracking the held flags here and stamping them onto every event we
+    /// post makes the modifier deterministic, with no sleep to tune. It also
+    /// covers `drag_with(held: …)`, which reaches the same primitives.
+    held_flags: AtomicU64,
 }
 
 impl MacOSInputProvider {
@@ -125,6 +142,15 @@ impl MacOSInputProvider {
             });
         }
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
+        // Stamp any modifiers held via `key_down` onto this event. See
+        // `held_flags` for why the window server's own state can't be relied
+        // on here. OR rather than assign, so flags the event already carries
+        // (caps lock, a physically-held key) survive.
+        let held = self.held_flags.load(Ordering::SeqCst);
+        if held != 0 {
+            // SAFETY: `event` is a valid CGEventRef we just created.
+            unsafe { CGEventSetFlags(event, CGEventGetFlags(event) | held) };
+        }
         // SAFETY: `event` is a valid CGEventRef we just created; CGEventPost
         // takes an owned +0 borrow and does not consume it.
         unsafe {
@@ -132,18 +158,6 @@ impl MacOSInputProvider {
             CFRelease(event as CFTypeRef);
         }
         Ok(())
-    }
-
-    fn post_with_flags(&self, event: CGEventRef, flags: u64) -> Result<()> {
-        if event.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "CGEventCreate* returned NULL".to_string(),
-            });
-        }
-        // SAFETY: `event` is a valid CGEventRef.
-        unsafe { CGEventSetFlags(event, flags) };
-        self.post(event)
     }
 
     fn mouse_event(&self, ty: u32, at: Point, button: u32) -> Result<CGEventRef> {
@@ -408,20 +422,27 @@ impl InputProvider for MacOSInputProvider {
     fn key_down(&self, key: &Key) -> Result<()> {
         let vk = vk_for(key)?;
         let ev = self.keyboard_event(vk, true)?;
-        // Modifier keys posted as ordinary key-down don't set the event-flags
-        // bit that Cocoa inspects for "is Shift held". Apply the flag here so
-        // subsequent events in the same posting window see the modifier.
+        // Modifier keys posted as an ordinary key-down don't set the
+        // event-flags bit Cocoa inspects for "is Shift held". Record the flag
+        // *before* posting so this event carries it too, matching hardware —
+        // a real Shift key-down already reports shift as set. `post` stamps
+        // it onto this and every later event until `key_up` clears it.
         let flags = modifier_flag_for(key);
         if flags != 0 {
-            self.post_with_flags(ev, flags)
-        } else {
-            self.post(ev)
+            self.held_flags.fetch_or(flags, Ordering::SeqCst);
         }
+        self.post(ev)
     }
 
     fn key_up(&self, key: &Key) -> Result<()> {
         let vk = vk_for(key)?;
         let ev = self.keyboard_event(vk, false)?;
+        // Clear before posting, again matching hardware: a real Shift key-up
+        // reports the modifier as already released.
+        let flags = modifier_flag_for(key);
+        if flags != 0 {
+            self.held_flags.fetch_and(!flags, Ordering::SeqCst);
+        }
         self.post(ev)
     }
 
