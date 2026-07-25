@@ -126,6 +126,67 @@ rename = [
 
 A `rename` naming a member no longer present in its source is reported as stale, same as a stale `[types]` entry.
 
+## Binding Shape Conventions
+
+The parity check enforces that a core member is *present* in both bindings. It says nothing about what shape it takes. These are the conventions for that shape — follow them so a new binding method doesn't need its own debate.
+
+### Options structs fold into the primary verb
+
+Core's `*_with` variants (`Mouse::click_with`, `Mouse::drag_with`) do **not** get a second binding method. The option struct's fields become optional parameters of the primary verb:
+
+- **Python** — keyword-only: `click(target, *, button="left", count=1, held=None, anchor=None)`
+- **JS** — a trailing options object: `click(target, options?)`
+
+The primary verb then routes through the `_with` variant **unconditionally**, even when every option is defaulted. One code path means the plain call cannot drift from the optioned one, and `ClickOptions::default()` is by construction what the plain call used to pass. The `_with` method gets a `rust_only` entry naming the fold, and the option struct is classified `internal` with a matching reason.
+
+Two names for one operation is worse than one name with options — and a binding that exposes only the plain verb is the gap this convention exists to prevent.
+
+### Value enums cross as identically-spelled snake_case strings
+
+`Role` → `text_field`, `MouseButton` → `left`, `Anchor` → `top_left`. The **same spelling in both bindings** — do not camelCase them for JS. `Element.role` already returns `to_snake_case()`, and selectors are the same string in both languages.
+
+The exception is an enum *payload* flattened onto a struct at the boundary: `EventKind` surfaces as `event_type = "focus_changed"` in Python and `type = 'focusChanged'` in JS. Those follow the naming of the properties around them, not the value convention. If you are adding a value that a user writes as a literal, it is snake_case everywhere; if you are destructuring an enum into fields, it follows the host language.
+
+### Timing arguments use each language's own unit
+
+**Seconds in Python, milliseconds in JS** — `duration=0.15` vs `duration: 150`, matching `set_default_timeout(seconds)` and `timeout: 5000`. This is a deliberate split of the same kind as `event_type` / `type`: someone porting a script is already renaming, and a Python API in milliseconds would be the odd one out in its own binding. Say so in the docstring, as `InputSim.drag` does.
+
+### Polymorphic parameters beat method proliferation
+
+A parameter may accept more than one shape when the alternative is two methods: `target` takes a tuple/array **or** an `Element`; `anchor` takes a name **or** a `(dx, dy)` offset. Parse the union in the binding and hand core a single concrete type.
+
+### Parse arguments before the first OS call
+
+Every parse (`parse_key`, `parse_button`, `parse_anchor`, `parse_duration`) runs before any event is posted, so a bad argument can never leave a half-delivered gesture behind — no key pressed without a release. It also makes validation testable without an input backend, which is the only coverage available for `InputSim` off a real display.
+
+`parse_duration` is the pattern for numeric conversion: reject non-finite and negative values explicitly rather than letting `Duration::from_secs_f64` panic (tenet 4).
+
+### Primitives keep core's shape
+
+`mouse_down()` takes no target because `Mouse::down` takes none — the OS primitive presses wherever the pointer already is. Do not add convenience parameters a core primitive doesn't have; that is tenet 3 at the binding layer. Callers compose (`move_to` then `mouse_down`), exactly as they would in Rust.
+
+### Anchors resolve binding-side
+
+Neither binding's `Element` is a core `Element` (Python holds `ElementData`, JS holds its own struct), so `ClickTarget::Element` is not constructible without a provider round-trip. Call `xa11y::anchor_point(&rect, anchor)` in the binding and pass `ClickTarget::Point`. `ClickOptions.anchor` is therefore always inert by the time core sees it — that is expected, not a bug.
+
+### Python blocking calls release the GIL
+
+Any binding method that reaches an OS call goes inside `py.allow_threads`, with argument parsing done first (it needs the GIL). This is tenet 5, and it is not optional for input simulation: `drag(duration=...)` makes the block caller-controlled.
+
+## Type Declarations
+
+### `index.d.ts` shadows `native.d.ts`
+
+`package.json` points `types` at `index.d.ts`, so where it declares a class of its own — `App`, the EventEmitter `Subscription`, the error hierarchy — that declaration is **what consumers get**, and the napi class of the same name in `native.d.ts` is invisible to them. Adding a method to the Rust `App` therefore requires adding it to `index.d.ts` by hand; the generated declaration alone reaches nobody. (`App.asElement`, `tree` and `dump` shipped this way for several releases.)
+
+Interface declarations are the other case: `declare module './native.js' { interface Locator { ... } }` augments the generated class rather than shadowing it, and does merge.
+
+`xa11y-js/__test__/unit/typing.test.js` enforces both directions of this against the real runtime objects, and is the JS counterpart of `xa11y-python/tests/test_typing.py`. It scans the `.d.ts` rather than using the TypeScript compiler API, because `typescript` 7 is the native port and no longer ships one.
+
+### New string-valued parameters need a narrowing
+
+`native.d.ts` is generated, so a `MouseButton` parameter arrives as plain `string`. Add an entry to `xa11y-js/scripts/patch-native-dts.mjs` narrowing it to a literal union (`MouseButtonName`, `AnchorName`, …), and export the alias from `index.d.ts`. Each entry is a guarded substitution — `all: N` asserts the occurrence count, so a new call site that quietly picks up the wide type fails the build instead of shipping.
+
 ### Notes
 
 - `#[doc(hidden)]` items are not public API and never need an allowlist entry — rustdoc excludes them.

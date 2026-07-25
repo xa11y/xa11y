@@ -1498,6 +1498,13 @@ impl App {
 }
 
 // ── Input simulation ────────────────────────────────────────────────────────
+//
+// The worked example for "Binding Shape Conventions" in AGENTS.md: core's
+// `click_with` / `drag_with` folded into keyword-only arguments of `click` /
+// `drag`, enum values as identically-spelled snake_case strings in both
+// bindings, durations in seconds on the Python side, every argument parsed
+// before an OS event is posted, and each OS call inside `allow_threads`.
+// Read that section before adding a method here.
 
 /// Input-simulation façade. Constructed via [`input_sim()`][input_sim_fn].
 ///

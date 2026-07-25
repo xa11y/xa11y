@@ -4,6 +4,13 @@
 //! are either `[x, y]` tuples or `Element` instances, and keys are strings
 //! (`"a"`, `"Enter"`, `"ArrowUp"`, `"Shift"`, ...). See [`parse_key`] for
 //! the full grammar.
+//!
+//! This module is the worked example for "Binding Shape Conventions" in
+//! AGENTS.md — core's `click_with` / `drag_with` folded into the options
+//! object of `click` / `drag`, enum values as identically-spelled snake_case
+//! strings in both bindings, durations in milliseconds on the JS side, and
+//! every argument parsed before an OS event is posted. Read that section
+//! before adding a method here.
 
 use std::time::Duration;
 

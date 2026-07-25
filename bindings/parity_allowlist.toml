@@ -11,6 +11,12 @@
 #      unless listed below with a reason.
 #
 # `#[doc(hidden)]` items are not public API and never need an entry.
+#
+# This file records whether a member is *present* in each binding. What shape
+# it takes there — options folded into the primary verb, enum values as
+# snake_case strings, seconds in Python vs milliseconds in JS — is governed by
+# "Binding Shape Conventions" in AGENTS.md. Several reasons below are only
+# true because of those conventions; read them together.
 
 # ── Type classification ──────────────────────────────────────────────────
 
