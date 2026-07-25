@@ -34,8 +34,24 @@ export {
 } from './native.js';
 
 // Forward the narrowed types from native.d.ts.
-export type { CheckedState, EventTypeName, Rect } from './native.js';
-import type { Element, Event, EventTypeName, Locator, Rect, Screenshot } from './native.js';
+export type {
+  AnchorName,
+  CheckedState,
+  ClickOptions,
+  DragOptions,
+  EventTypeName,
+  MouseButtonName,
+  Rect,
+} from './native.js';
+import type {
+  Element,
+  Event,
+  EventTypeName,
+  Locator,
+  Rect,
+  Screenshot,
+  TreeNode,
+} from './native.js';
 
 // ── Options ───────────────────────────────────────────────────────────────
 
@@ -224,6 +240,36 @@ export declare class App {
   locator(selector: string): Locator;
   /** Get direct children (typically windows) of this application. */
   children(): Promise<Element[]>;
+
+  /**
+   * Get an `Element` handle for the application root.
+   *
+   * Useful for invoking Element-level methods (`children()`, `parent()`,
+   * etc.) without going through a locator. Synchronous — the App already
+   * holds the application's accessibility data.
+   */
+  asElement(): Element;
+
+  /**
+   * Capture this application's accessibility tree as a recursive snapshot,
+   * rooted at the application element.
+   *
+   * `maxDepth` limits traversal depth: `0` = only the application node,
+   * `1` = application + direct children (typically windows), and so on.
+   * Omit for the full subtree.
+   */
+  tree(maxDepth?: number | null): Promise<TreeNode>;
+
+  /**
+   * Render this application's accessibility tree as an indented string.
+   *
+   * Returns the string without printing it. The primary inspection helper
+   * — call `console.log(await app.dump())` to discover the role and name
+   * of every element in the app before writing selectors.
+   *
+   * For the same output from the shell, use `xa11y tree --app NAME`.
+   */
+  dump(maxDepth?: number | null): Promise<string>;
 
   /**
    * Subscribe to accessibility events from this application.

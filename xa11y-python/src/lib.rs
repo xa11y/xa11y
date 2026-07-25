@@ -1506,6 +1506,7 @@ impl App {
 /// the grammar; short version: printable characters are literal
 /// (`"a"`, `"7"`, `";"`), named keys use their Pascal name (`"Enter"`,
 /// `"ArrowUp"`, `"F5"`), modifiers are `"Shift"`, `"Ctrl"`, `"Alt"`, `"Meta"`.
+/// Mouse buttons are `"left"`, `"right"`, `"middle"`.
 #[pyclass]
 struct InputSim {
     inner: xa11y::InputSim,
@@ -1513,65 +1514,157 @@ struct InputSim {
 
 #[pymethods]
 impl InputSim {
-    /// Left-click at `target` once.
-    fn click(&self, target: Bound<'_, PyAny>) -> PyResult<()> {
-        let pt = parse_target(&target)?;
-        self.inner.mouse().click(pt).map_err(to_py_err)
+    /// Click at `target`.
+    ///
+    /// The keyword arguments are core's `ClickOptions`: `button` selects the
+    /// mouse button, `count` repeats the click (2 = double-click), `held`
+    /// lists keys held down for the duration, and `anchor` picks the point
+    /// inside an `Element`'s bounds. `anchor` is ignored when `target` is a
+    /// raw `(x, y)` tuple.
+    #[pyo3(signature = (target, *, button="left", count=1, held=None, anchor=None))]
+    fn click(
+        &self,
+        py: Python<'_>,
+        target: Bound<'_, PyAny>,
+        button: &str,
+        count: u32,
+        held: Option<Vec<String>>,
+        anchor: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let pt = parse_target_anchored(&target, parse_anchor(anchor.as_ref())?)?;
+        let opts = xa11y::ClickOptions {
+            button: parse_button(button)?,
+            count,
+            held: parse_keys(held)?,
+            ..Default::default()
+        };
+        py.allow_threads(move || {
+            self.inner
+                .mouse()
+                .click_with(xa11y::ClickTarget::Point(pt), opts)
+        })
+        .map_err(to_py_err)
     }
 
     /// Left double-click at `target`.
-    fn double_click(&self, target: Bound<'_, PyAny>) -> PyResult<()> {
+    fn double_click(&self, py: Python<'_>, target: Bound<'_, PyAny>) -> PyResult<()> {
         let pt = parse_target(&target)?;
-        self.inner.mouse().double_click(pt).map_err(to_py_err)
+        py.allow_threads(move || self.inner.mouse().double_click(pt))
+            .map_err(to_py_err)
     }
 
     /// Right-click at `target`.
-    fn right_click(&self, target: Bound<'_, PyAny>) -> PyResult<()> {
+    fn right_click(&self, py: Python<'_>, target: Bound<'_, PyAny>) -> PyResult<()> {
         let pt = parse_target(&target)?;
-        self.inner.mouse().right_click(pt).map_err(to_py_err)
+        py.allow_threads(move || self.inner.mouse().right_click(pt))
+            .map_err(to_py_err)
     }
 
     /// Move the pointer to `target` without pressing any button.
-    fn move_to(&self, target: Bound<'_, PyAny>) -> PyResult<()> {
+    fn move_to(&self, py: Python<'_>, target: Bound<'_, PyAny>) -> PyResult<()> {
         let pt = parse_target(&target)?;
-        self.inner.mouse().move_to(pt).map_err(to_py_err)
+        py.allow_threads(move || self.inner.mouse().move_to(pt))
+            .map_err(to_py_err)
     }
 
-    /// Left-drag from `start` to `end`. Default duration 150 ms.
-    fn drag(&self, start: Bound<'_, PyAny>, end: Bound<'_, PyAny>) -> PyResult<()> {
+    /// Press a mouse button at the current pointer location, without
+    /// releasing it. Pair with `mouse_up()`; for a whole click use `click()`.
+    ///
+    /// Takes no target: the button is pressed wherever the pointer already
+    /// is, matching the OS primitive. Call `move_to()` first to position it.
+    #[pyo3(signature = (button="left"))]
+    fn mouse_down(&self, py: Python<'_>, button: &str) -> PyResult<()> {
+        let b = parse_button(button)?;
+        py.allow_threads(move || self.inner.mouse().down(b))
+            .map_err(to_py_err)
+    }
+
+    /// Release a mouse button at the current pointer location.
+    #[pyo3(signature = (button="left"))]
+    fn mouse_up(&self, py: Python<'_>, button: &str) -> PyResult<()> {
+        let b = parse_button(button)?;
+        py.allow_threads(move || self.inner.mouse().up(b))
+            .map_err(to_py_err)
+    }
+
+    /// Drag from `start` to `end`.
+    ///
+    /// The keyword arguments are core's `DragOptions`: `button` selects the
+    /// button held during the drag, `held` lists keys held for its duration,
+    /// and `duration` is the total drag time **in seconds** (the unit every
+    /// other Python timing argument uses).
+    #[pyo3(signature = (start, end, *, button="left", held=None, duration=0.15))]
+    fn drag(
+        &self,
+        py: Python<'_>,
+        start: Bound<'_, PyAny>,
+        end: Bound<'_, PyAny>,
+        button: &str,
+        held: Option<Vec<String>>,
+        duration: f64,
+    ) -> PyResult<()> {
         let from = parse_target(&start)?;
         let to = parse_target(&end)?;
-        self.inner.mouse().drag(from, to).map_err(to_py_err)
+        let opts = xa11y::DragOptions {
+            button: parse_button(button)?,
+            held: parse_keys(held)?,
+            duration: parse_duration(duration)?,
+        };
+        py.allow_threads(move || self.inner.mouse().drag_with(from, to, opts))
+            .map_err(to_py_err)
     }
 
     /// Scroll at `target`. `dx` positive → scroll right, `dy` positive →
     /// scroll content down.
     #[pyo3(signature = (target, dx=0, dy=0))]
-    fn scroll(&self, target: Bound<'_, PyAny>, dx: i32, dy: i32) -> PyResult<()> {
+    fn scroll(&self, py: Python<'_>, target: Bound<'_, PyAny>, dx: i32, dy: i32) -> PyResult<()> {
         let pt = parse_target(&target)?;
-        self.inner
-            .mouse()
-            .scroll(pt, xa11y::ScrollDelta::new(dx, dy))
-            .map_err(to_py_err)
+        py.allow_threads(move || {
+            self.inner
+                .mouse()
+                .scroll(pt, xa11y::ScrollDelta::new(dx, dy))
+        })
+        .map_err(to_py_err)
     }
 
     /// Tap a key (press + release). See the class docstring for key names.
-    fn press(&self, key: &str) -> PyResult<()> {
+    fn press(&self, py: Python<'_>, key: &str) -> PyResult<()> {
         let k = parse_key(key)?;
-        self.inner.keyboard().press(k).map_err(to_py_err)
+        py.allow_threads(move || self.inner.keyboard().press(k))
+            .map_err(to_py_err)
     }
 
     /// Tap `key` while `held` (list of key names) are held.
     #[pyo3(signature = (key, held=Vec::new()))]
-    fn chord(&self, key: &str, held: Vec<String>) -> PyResult<()> {
+    fn chord(&self, py: Python<'_>, key: &str, held: Vec<String>) -> PyResult<()> {
         let k = parse_key(key)?;
-        let held: Result<Vec<_>, _> = held.iter().map(|s| parse_key(s)).collect();
-        self.inner.keyboard().chord(k, &held?).map_err(to_py_err)
+        let held: Vec<_> = held.iter().map(|s| parse_key(s)).collect::<PyResult<_>>()?;
+        py.allow_threads(move || self.inner.keyboard().chord(k, &held))
+            .map_err(to_py_err)
+    }
+
+    /// Press `key` without releasing it. Pair with `key_up()`.
+    ///
+    /// For a whole tap use `press()`; to hold modifiers around one tap use
+    /// `chord()`. This is the primitive for sequences neither expresses, such
+    /// as holding a key across several other actions.
+    fn key_down(&self, py: Python<'_>, key: &str) -> PyResult<()> {
+        let k = parse_key(key)?;
+        py.allow_threads(move || self.inner.keyboard().down(k))
+            .map_err(to_py_err)
+    }
+
+    /// Release a key previously pressed with `key_down()`.
+    fn key_up(&self, py: Python<'_>, key: &str) -> PyResult<()> {
+        let k = parse_key(key)?;
+        py.allow_threads(move || self.inner.keyboard().up(k))
+            .map_err(to_py_err)
     }
 
     /// Type literal text into the currently focused control.
-    fn type_text(&self, text: &str) -> PyResult<()> {
-        self.inner.keyboard().type_text(text).map_err(to_py_err)
+    fn type_text(&self, py: Python<'_>, text: &str) -> PyResult<()> {
+        py.allow_threads(move || self.inner.keyboard().type_text(text))
+            .map_err(to_py_err)
     }
 }
 
@@ -1579,17 +1672,99 @@ impl InputSim {
 /// [`xa11y::Point`]. Keeps the target-resolution cost explicit at the call
 /// site, matching the Rust [`IntoPoint`] contract.
 fn parse_target(target: &Bound<'_, PyAny>) -> PyResult<xa11y::Point> {
+    parse_target_anchored(target, xa11y::Anchor::Center)
+}
+
+/// [`parse_target`] with an explicit anchor for `Element` targets.
+///
+/// `anchor` is ignored for raw points, matching core's
+/// `ClickTarget::Point` arm.
+fn parse_target_anchored(
+    target: &Bound<'_, PyAny>,
+    anchor: xa11y::Anchor,
+) -> PyResult<xa11y::Point> {
     if let Ok(el) = target.downcast::<Element>() {
         let element = el.borrow();
-        let (x, y, w, h) = element
+        let (x, y, width, height) = element
             .bounds_data
             .ok_or_else(|| PyValueError::new_err("Element has no bounds"))?;
-        return Ok(xa11y::Point::new(x + (w as i32) / 2, y + (h as i32) / 2));
+        return Ok(xa11y::anchor_point(
+            &xa11y::Rect {
+                x,
+                y,
+                width,
+                height,
+            },
+            anchor,
+        ));
     }
     let tup: (i32, i32) = target
         .extract()
         .map_err(|_| PyTypeError::new_err("expected (int, int) tuple or Element for target"))?;
     Ok(xa11y::Point::new(tup.0, tup.1))
+}
+
+/// Parse an anchor: one of the named corners/centre as a string, or a
+/// `(dx, dy)` tuple for a pixel offset from the element's top-left.
+///
+/// The strings are identical in the JS binding — like key names and mouse
+/// buttons, input-layer string values are shared across bindings rather than
+/// spelled per-language.
+fn parse_anchor(anchor: Option<&Bound<'_, PyAny>>) -> PyResult<xa11y::Anchor> {
+    let Some(anchor) = anchor else {
+        return Ok(xa11y::Anchor::Center);
+    };
+    if let Ok(name) = anchor.extract::<String>() {
+        return match name.as_str() {
+            "center" => Ok(xa11y::Anchor::Center),
+            "top_left" => Ok(xa11y::Anchor::TopLeft),
+            "top_right" => Ok(xa11y::Anchor::TopRight),
+            "bottom_left" => Ok(xa11y::Anchor::BottomLeft),
+            "bottom_right" => Ok(xa11y::Anchor::BottomRight),
+            other => Err(PyValueError::new_err(format!(
+                "Unknown anchor: {other}. Expected \"center\", \"top_left\", \
+                 \"top_right\", \"bottom_left\", \"bottom_right\", or a (dx, dy) tuple"
+            ))),
+        };
+    }
+    let (dx, dy): (i32, i32) = anchor.extract().map_err(|_| {
+        PyTypeError::new_err(
+            "expected an anchor name (\"center\", \"top_left\", \"top_right\", \
+             \"bottom_left\", \"bottom_right\") or an (dx, dy) offset tuple",
+        )
+    })?;
+    Ok(xa11y::Anchor::Offset { dx, dy })
+}
+
+/// Parse a mouse-button name into an [`xa11y::MouseButton`].
+fn parse_button(name: &str) -> PyResult<xa11y::MouseButton> {
+    match name {
+        "left" => Ok(xa11y::MouseButton::Left),
+        "right" => Ok(xa11y::MouseButton::Right),
+        "middle" => Ok(xa11y::MouseButton::Middle),
+        other => Err(PyValueError::new_err(format!(
+            "Unknown mouse button: {other}. Expected \"left\", \"right\", or \"middle\""
+        ))),
+    }
+}
+
+/// Parse an optional list of key names, defaulting to "none held".
+fn parse_keys(keys: Option<Vec<String>>) -> PyResult<Vec<xa11y::Key>> {
+    keys.unwrap_or_default()
+        .iter()
+        .map(|s| parse_key(s))
+        .collect()
+}
+
+/// Convert a seconds float into a [`Duration`], rejecting values it cannot
+/// represent rather than panicking inside `Duration::from_secs_f64`.
+fn parse_duration(seconds: f64) -> PyResult<std::time::Duration> {
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(PyValueError::new_err(format!(
+            "duration must be a non-negative, finite number of seconds, got {seconds}"
+        )));
+    }
+    Ok(std::time::Duration::from_secs_f64(seconds))
 }
 
 /// Parse a key-name string into an [`xa11y::Key`]. Accepts:

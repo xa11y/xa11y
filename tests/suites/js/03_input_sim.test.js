@@ -96,3 +96,76 @@ test('typeText no-op on empty string', { skip }, async () => {
   const sim = xa11y.inputSim();
   await sim.typeText('');
 });
+
+// ── Half-press primitives ─────────────────────────────────────────────────
+//
+// `keyDown`/`keyUp` and `mouseDown`/`mouseUp` are the primitives that neither
+// `press` nor `click` can express: holding a key or button across other
+// actions. End-to-end assertions about what the webview received live in
+// tests/suites/python/test_input_sim.py; here we verify the JS surface is
+// callable and validates its arguments.
+
+test('keyDown/keyUp round-trip', { skip }, async () => {
+  const sim = xa11y.inputSim();
+  await sim.keyDown('Shift');
+  await sim.keyUp('Shift');
+});
+
+test('keyDown rejects an unknown key name', { skip }, async () => {
+  const sim = xa11y.inputSim();
+  await assert.rejects(
+    async () => sim.keyDown('NotARealKey'),
+    (err) => err instanceof InvalidActionDataError,
+  );
+});
+
+// No `mouseDown`/`mouseUp` round-trip here: a real button press lands
+// wherever the pointer happens to be and could disturb the app under test,
+// which is why this suite has never posted one. The end-to-end press/release
+// assertions live in the Python suite, aimed at the Tauri hit target.
+
+test('mouseDown rejects an unknown button name', { skip }, async () => {
+  const sim = xa11y.inputSim();
+  await assert.rejects(
+    async () => sim.mouseDown('scroll'),
+    (err) => err instanceof InvalidActionDataError,
+  );
+});
+
+// ── Options objects (core's ClickOptions / DragOptions) ───────────────────
+//
+// Validation only, for the same reason: every option here is parsed before
+// any OS event is posted, so these assert the surface without clicking
+// anything. The Python suite exercises the options end-to-end.
+
+test('click rejects an unknown button in its options', { skip }, async () => {
+  const sim = xa11y.inputSim();
+  await assert.rejects(
+    async () => sim.click([10, 10], { button: 'scroll' }),
+    (err) => err instanceof InvalidActionDataError,
+  );
+});
+
+test('drag rejects an unknown held key in its options', { skip }, async () => {
+  const sim = xa11y.inputSim();
+  await assert.rejects(
+    async () => sim.drag([10, 10], [20, 20], { held: ['NotARealKey'] }),
+    (err) => err instanceof InvalidActionDataError,
+  );
+});
+
+test('click rejects an unknown anchor', { skip }, async () => {
+  const sim = xa11y.inputSim();
+  await assert.rejects(
+    async () => sim.click([10, 10], { anchor: 'middle_left' }),
+    (err) => err instanceof InvalidActionDataError,
+  );
+});
+
+test('click rejects a malformed anchor offset', { skip }, async () => {
+  const sim = xa11y.inputSim();
+  await assert.rejects(
+    async () => sim.click([10, 10], { anchor: [1] }),
+    (err) => err instanceof InvalidActionDataError,
+  );
+});

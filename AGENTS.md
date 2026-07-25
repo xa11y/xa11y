@@ -96,6 +96,8 @@ The check enforces two rules, both configured in `bindings/parity_allowlist.toml
 
 2. **For `mirrored` types, members must match.** Every public core member must exist in both bindings, and every binding member must map to a core member — unless listed in `[python.rust_only]` / `[python.python_only]` (and the `[js.*]` equivalents) **with a reason**.
 
+   Those per-member entries are themselves checked for staleness: an entry naming a member that core (or the binding) no longer has excuses nothing while still reading as a live design decision, so it fails the check rather than accumulating.
+
 ### Flattening
 
 Some core types have no binding class of their own; their members surface on another type. Declare that with `[[types.flatten]]` rather than writing one allowlist entry per member:
@@ -107,7 +109,22 @@ from = ["ElementData", "StateSet"]
 reason = "Element derefs to ElementData; both bindings expose StateSet's booleans as getters on Element."
 ```
 
-Flattened members become **required** on the target binding type. Note that flattening merges by name, so two sources exposing the same member name (`Keyboard::down` and `Mouse::down`) collapse to one entry.
+Flattened members become **required** on the target binding type.
+
+Flattening merges by name, so two sources exposing the same member name would collapse into one required entry — quietly excusing the bindings from exposing one of them. The check **fails** on any such collision; disambiguate with `rename`:
+
+```toml
+[[types.flatten]]
+into = "InputSim"
+from = ["Keyboard", "Mouse"]
+reason = "Both bindings flatten the keyboard and mouse sub-APIs onto InputSim."
+rename = [
+    { member = "Keyboard::down", to = "key_down" },
+    { member = "Mouse::down", to = "mouse_down" },
+]
+```
+
+A `rename` naming a member no longer present in its source is reported as stale, same as a stale `[types]` entry.
 
 ### Notes
 

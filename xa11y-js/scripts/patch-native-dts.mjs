@@ -4,11 +4,12 @@
 // napi build.
 //
 // Responsibilities:
-//   1. Prepend shared type aliases (`CheckedState`, `EventTypeName`) that
-//      the Rust side can't express.
+//   1. Prepend shared type aliases (`CheckedState`, `EventTypeName`,
+//      `MouseButtonName`, `AnchorName`) that the Rust side can't express.
 //   2. Narrow `Element.checked: string | null` -> `CheckedState | null`.
 //   3. Narrow `Event.type: string` -> `EventTypeName`.
-//   4. Append a `;` to the napi-emitted `NativeSubscription` type alias
+//   4. Narrow the input layer's button and anchor strings.
+//   5. Append a `;` to the napi-emitted `NativeSubscription` type alias
 //      (napi-rs omits terminators, which confuses the docs generator's
 //      multi-line type-alias parser).
 //
@@ -47,11 +48,25 @@ export type EventTypeName =
   | 'textChanged'
   | 'announcement';
 
+/** Mouse buttons accepted by the input-simulation API. */
+export type MouseButtonName = 'left' | 'right' | 'middle';
+
+/** Named anchor points inside an element's bounds. */
+export type AnchorName =
+  | 'center'
+  | 'top_left'
+  | 'top_right'
+  | 'bottom_left'
+  | 'bottom_right';
+
 `;
 
 /**
  * List of narrowings. Each entry is a required substitution -- if `from`
  * doesn't appear, the script exits non-zero so the drift is caught in CI.
+ *
+ * `all: true` replaces every occurrence and asserts the expected count, so a
+ * new call site that quietly picks up the wide type is caught too.
  */
 const REPLACEMENTS = [
   {
@@ -63,6 +78,25 @@ const REPLACEMENTS = [
     name: 'Event.type -> EventTypeName',
     from: '  get type(): string\n',
     to: '  get type(): EventTypeName\n',
+  },
+  {
+    // `ClickOptions.button` and `DragOptions.button`.
+    name: 'click/drag options button -> MouseButtonName',
+    from: '  button?: string\n',
+    to: '  button?: MouseButtonName\n',
+    all: 2,
+  },
+  {
+    // `InputSim.mouseDown` and `InputSim.mouseUp`.
+    name: 'mouseDown/mouseUp button -> MouseButtonName',
+    from: '(button?: string | undefined | null): Promise<void>',
+    to: '(button?: MouseButtonName | undefined | null): Promise<void>',
+    all: 2,
+  },
+  {
+    name: 'ClickOptions.anchor -> AnchorName | [number, number]',
+    from: '  anchor?: string | Array<number>\n',
+    to: '  anchor?: AnchorName | [number, number]\n',
   },
   {
     // napi-rs emits this line without a trailing `;`. The docs generator
@@ -91,12 +125,24 @@ function patch() {
 
   const problems = [];
   let patched = source;
-  for (const { name, from, to } of REPLACEMENTS) {
-    if (!patched.includes(from)) {
+  for (const { name, from, to, all } of REPLACEMENTS) {
+    const parts = patched.split(from);
+    const found = parts.length - 1;
+    if (found === 0) {
       problems.push(`  - ${name}: pattern not found: ${JSON.stringify(from)}`);
       continue;
     }
-    patched = patched.replace(from, to);
+    if (all === undefined) {
+      patched = parts.shift() + to + parts.join(from);
+      continue;
+    }
+    if (found !== all) {
+      problems.push(
+        `  - ${name}: expected ${all} occurrence(s) of ${JSON.stringify(from)}, found ${found}`,
+      );
+      continue;
+    }
+    patched = parts.join(to);
   }
 
   if (problems.length > 0) {

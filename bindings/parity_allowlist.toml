@@ -37,6 +37,7 @@ opaque = [
     { type = "Toggled", reason = "Exposed as the string union 'on' | 'off' | 'mixed'." },
     { type = "Key", reason = "Keys cross the boundary as strings (`enter`, `ctrl+a`); the enum is a parsing detail." },
     { type = "MouseButton", reason = "Exposed as the strings 'left' | 'right' | 'middle'." },
+    { type = "Anchor", reason = "Exposed as the strings 'center' | 'top_left' | 'top_right' | 'bottom_left' | 'bottom_right', or an (dx, dy) / [dx, dy] offset pair for Anchor::Offset." },
     { type = "Rect", reason = "Python exposes a Rect class; JS returns a plain object literal typed in index.d.ts. Members are not mirrored uniformly, so they are covered by the per-binding type tests instead." },
     { type = "TreeNode", reason = "`tree()` returns nested plain data (dicts / objects), not a mirrored node class." },
 ]
@@ -55,7 +56,6 @@ internal = [
     { type = "SelectorSegment", reason = "Parsed selector representation; bindings pass strings." },
     { type = "SimpleSelector", reason = "Parsed selector representation; bindings pass strings." },
     { type = "AttrFilter", reason = "Parsed selector representation; bindings pass strings." },
-    { type = "Anchor", reason = "Parsed selector representation; bindings pass strings." },
     { type = "Combinator", reason = "Parsed selector representation; bindings pass strings." },
     { type = "MatchOp", reason = "Parsed selector representation; bindings pass strings." },
     { type = "RoleMatch", reason = "Parsed selector representation; bindings pass strings." },
@@ -76,8 +76,8 @@ internal = [
     # ── Input geometry / option structs: bindings take plain params ──
     { type = "Point", reason = "Bindings take plain x/y numbers." },
     { type = "ScrollDelta", reason = "Bindings take plain dx/dy numbers." },
-    { type = "ClickOptions", reason = "Builder struct for Mouse::click_with; bindings take keyword/optional params." },
-    { type = "DragOptions", reason = "Builder struct for Mouse::drag_with; bindings take keyword/optional params." },
+    { type = "ClickOptions", reason = "Options struct for Mouse::click_with; its fields are the optional params of the bindings' click() (Python keywords, JS options object)." },
+    { type = "DragOptions", reason = "Options struct for Mouse::drag_with; its fields are the optional params of the bindings' drag() (Python keywords, JS options object)." },
     { type = "ClickTarget", reason = "Internal click-target discriminator for the input backends." },
 ]
 
@@ -93,6 +93,16 @@ reason = "Element derefs to ElementData, and both bindings expose StateSet's boo
 into = "InputSim"
 from = ["Keyboard", "Mouse"]
 reason = "Both bindings flatten the keyboard and mouse sub-APIs onto InputSim (input_sim().click(), input_sim().type_text(), ...) instead of exposing sub-objects."
+# Flattening merges by name, so `Keyboard::down` and `Mouse::down` would
+# collapse into a single required `down` — quietly excusing the bindings from
+# exposing one of the two. The device prefix disambiguates them; the checker
+# fails on any undeclared collision.
+rename = [
+    { member = "Keyboard::down", to = "key_down" },
+    { member = "Keyboard::up", to = "key_up" },
+    { member = "Mouse::down", to = "mouse_down" },
+    { member = "Mouse::up", to = "mouse_up" },
+]
 
 # ── Python ───────────────────────────────────────────────────────────────
 
@@ -121,16 +131,25 @@ rust_only = [
     { method = "InputSim::new", reason = "Internal Rust constructor; bindings obtain an InputSim via the module-level input_sim()." },
 
     # Event field naming / representation.
-    { method = "Event::kind", reason = "Exposed to Python as the `event_type` string attribute rather than a nested EventKind object." },
+    #
+    # `kind` surfaces as `event_type` in Python and `type` in JS. The split is
+    # deliberate, not drift: each binding uses the name that reads naturally in
+    # its own language, exactly as the rest of the flattened EventKind payload
+    # does (`state_flag` / `stateFlag`). `type` shadows a Python builtin at
+    # every call site that destructures it, and `eventType` is redundant in JS
+    # where `EventEmitter` already frames the value as the event's type. Anyone
+    # porting a script between the two bindings is already renaming
+    # `state_flag` -> `stateFlag`; this rename travels with them.
+    { method = "Event::kind", reason = "Exposed to Python as the `event_type` string attribute rather than a nested EventKind object. Deliberately `event_type` here and `type` in JS — see the note above." },
     { method = "Event::timestamp", reason = "A std::time::Instant — monotonic and process-local, with no meaningful cross-language representation. Deliberately not exposed." },
 
-    # Input primitives not currently bound. These are real gaps, not design
-    # decisions: the bindings expose the composite verbs (click, drag) but
-    # not the low-level half-press primitives or the options-struct variants.
-    { method = "InputSim::down", reason = "GAP: low-level key/button press-without-release is not exposed to Python. Bindings expose only composite verbs (press, click)." },
-    { method = "InputSim::up", reason = "GAP: low-level key/button release is not exposed to Python. Bindings expose only composite verbs (press, click)." },
-    { method = "InputSim::click_with", reason = "GAP: the ClickOptions variant of click is not exposed to Python; only the plain click() is bound." },
-    { method = "InputSim::drag_with", reason = "GAP: the DragOptions variant of drag is not exposed to Python; only the plain drag() is bound." },
+    # Input option structs. `click()` / `drag()` route through `click_with` /
+    # `drag_with` in every case, with ClickOptions/DragOptions' fields as
+    # optional keyword arguments — so the options variants are bound, just not
+    # under a second method name. See the ClickOptions / DragOptions entries
+    # under [types].
+    { method = "InputSim::click_with", reason = "Folded into `click()`'s keyword arguments (button, count, held, anchor); `click()` calls Mouse::click_with unconditionally." },
+    { method = "InputSim::drag_with", reason = "Folded into `drag()`'s keyword arguments (button, held, duration); `drag()` calls Mouse::drag_with unconditionally." },
     { method = "InputSim::backend", reason = "Reports which platform input backend is active; diagnostic plumbing, not user API." },
     { method = "InputSim::point_for", reason = "Internal coordinate resolution helper used by the Rust input builders." },
     { method = "InputSim::keyboard", reason = "Sub-API accessor; bindings flatten keyboard methods onto InputSim directly." },
@@ -186,17 +205,17 @@ rust_only = [
     { method = "Subscription::new", reason = "Internal Rust constructor; bindings create Subscriptions via App.subscribe() / Element.subscribe()." },
     { method = "InputSim::new", reason = "Internal Rust constructor; bindings obtain an InputSim via the module-level inputSim()." },
 
-    # Event field naming / representation.
-    { method = "Event::kind", reason = "Exposed to JS as the `type` string property rather than a nested EventKind object." },
+    # Event field naming / representation. `type` here, `event_type` in
+    # Python — a deliberate split; the rationale is spelled out in full on the
+    # matching [python.rust_only] entry.
+    { method = "Event::kind", reason = "Exposed to JS as the `type` string property rather than a nested EventKind object. Deliberately `type` here and `event_type` in Python — see the note on the Python entry." },
     { method = "Event::timestamp", reason = "A std::time::Instant — monotonic and process-local, with no meaningful cross-language representation. Deliberately not exposed." },
 
-    # Input primitives not currently bound. These are real gaps, not design
-    # decisions: the bindings expose the composite verbs (click, drag) but
-    # not the low-level half-press primitives or the options-struct variants.
-    { method = "InputSim::down", reason = "GAP: low-level key/button press-without-release is not exposed to JS. Bindings expose only composite verbs (press, click)." },
-    { method = "InputSim::up", reason = "GAP: low-level key/button release is not exposed to JS. Bindings expose only composite verbs (press, click)." },
-    { method = "InputSim::click_with", reason = "GAP: the ClickOptions variant of click is not exposed to JS; only the plain click() is bound." },
-    { method = "InputSim::drag_with", reason = "GAP: the DragOptions variant of drag is not exposed to JS; only the plain drag() is bound." },
+    # Input option structs — folded into the options object of click() / drag()
+    # rather than exposed as second method names. See the ClickOptions /
+    # DragOptions entries under [types].
+    { method = "InputSim::click_with", reason = "Folded into `click(target, options)`'s options object (button, count, held, anchor); `click()` calls Mouse::click_with unconditionally." },
+    { method = "InputSim::drag_with", reason = "Folded into `drag(start, end, options)`'s options object (button, held, duration); `drag()` calls Mouse::drag_with unconditionally." },
     { method = "InputSim::backend", reason = "Reports which platform input backend is active; diagnostic plumbing, not user API." },
     { method = "InputSim::point_for", reason = "Internal coordinate resolution helper used by the Rust input builders." },
     { method = "InputSim::keyboard", reason = "Sub-API accessor; bindings flatten keyboard methods onto InputSim directly." },

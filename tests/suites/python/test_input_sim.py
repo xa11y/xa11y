@@ -74,6 +74,23 @@ def _clear_log(app: xa11y.App) -> None:
     _wait_for_log(app, lambda t: t == "", timeout=0.5)
 
 
+def _line(log: str, kind: str) -> str:
+    """Most recent log line of `kind` — the page prepends, newest first."""
+    for line in log.split("\n"):
+        if line.startswith(kind + " "):
+            return line
+    return ""
+
+
+def _field(line: str, key: str) -> str:
+    """Pull `key=value` out of one log line (`click x=12 y=8 button=left ...`)."""
+    for part in line.split():
+        name, _, value = part.partition("=")
+        if name == key:
+            return value
+    return ""
+
+
 def _focus_hit_target(app: xa11y.App) -> None:
     """Focus the hit target so keyboard events land on a meaningful element."""
     app.locator(HIT_TARGET).focus()
@@ -161,6 +178,109 @@ def test_drag_emits_mousemove_between_down_and_up(tauri_input_app, sim):
 
 
 # ---------------------------------------------------------------------------
+# Mouse: click/drag options (core's ClickOptions / DragOptions)
+# ---------------------------------------------------------------------------
+
+
+def test_click_with_button_option(tauri_input_app, sim):
+    _clear_log(tauri_input_app)
+    sim.click(_hit_center(tauri_input_app), button="right")
+    log = _wait_for_log(tauri_input_app, lambda t: "button=right" in t)
+    assert "button=right" in log
+
+
+def test_click_with_count_option_reports_dblclick(tauri_input_app, sim):
+    _clear_log(tauri_input_app)
+    sim.click(_hit_center(tauri_input_app), count=2)
+    log = _wait_for_log(tauri_input_app, lambda t: "dblclick" in t)
+    assert "dblclick" in log, f"expected dblclick in log, got:\n{log}"
+
+
+def test_click_with_held_modifier(tauri_input_app, sim):
+    _clear_log(tauri_input_app)
+    sim.click(_hit_center(tauri_input_app), held=["Shift"])
+    log = _wait_for_log(tauri_input_app, lambda t: "click " in t)
+    line = _line(log, "click")
+    assert "shift" in _field(line, "mods"), f"expected shift held, got:\n{log}"
+
+
+def test_click_anchor_offsets_from_element_top_left(tauri_input_app, sim):
+    """`anchor` lands the click inside the element, not at its centre.
+
+    The page logs `offsetX`/`offsetY` relative to the hit target, so an
+    8px offset anchor must report coordinates well inside the top-left
+    quadrant — which a centred click never would.
+    """
+    el = tauri_input_app.locator(HIT_TARGET).element()
+    r = el.bounds
+    assert r is not None, "hit target has no bounds"
+    _clear_log(tauri_input_app)
+    sim.click(el, anchor=(8, 8))
+    log = _wait_for_log(tauri_input_app, lambda t: "click " in t)
+    line = _line(log, "click")
+    x, y = int(_field(line, "x")), int(_field(line, "y"))
+    assert x < r.width // 2 and y < r.height // 2, (
+        f"anchored click landed at ({x}, {y}) in a {r.width}x{r.height} target:\n{log}"
+    )
+
+
+@pytest.mark.xfail(
+    sys.platform == "darwin",
+    reason="CGEvent drag/scroll do not reliably generate DOM mousedown/wheel events in WKWebView on macOS",
+    strict=False,
+)
+def test_mouse_down_and_up_report_press_and_release(tauri_input_app, sim):
+    """The half-press primitives, without a composite click wrapping them."""
+    _clear_log(tauri_input_app)
+    sim.move_to(_hit_center(tauri_input_app))
+    sim.mouse_down()
+    sim.mouse_up()
+    log = _wait_for_log(tauri_input_app, lambda t: "mouseup" in t and "mousedown" in t)
+    assert "mousedown" in log
+    assert "mouseup" in log
+
+
+@pytest.mark.xfail(
+    sys.platform == "darwin",
+    reason="CGEvent drag/scroll do not reliably generate DOM mousedown/wheel events in WKWebView on macOS",
+    strict=False,
+)
+def test_drag_with_duration_option(tauri_input_app, sim):
+    _clear_log(tauri_input_app)
+    el = tauri_input_app.locator(HIT_TARGET).element()
+    r = el.bounds
+    assert r is not None
+    start = (r.x + 20, r.y + 20)
+    end = (r.x + r.width - 20, r.y + r.height - 20)
+    sim.drag(start, end, duration=0.3)
+    log = _wait_for_log(tauri_input_app, lambda t: "mouseup" in t and "mousemove" in t)
+    assert "mousemove" in log
+
+
+# ---------------------------------------------------------------------------
+# Argument validation
+#
+# Each of these fails while parsing arguments, before any OS event is posted,
+# so they need the sim but not the app.
+# ---------------------------------------------------------------------------
+
+
+def test_unknown_mouse_button_rejected(sim):
+    with pytest.raises(ValueError, match="Unknown mouse button"):
+        sim.mouse_down(button="scroll")
+
+
+def test_unknown_anchor_rejected(sim):
+    with pytest.raises(ValueError, match="Unknown anchor"):
+        sim.click((0, 0), anchor="middle_left")
+
+
+def test_negative_drag_duration_rejected(sim):
+    with pytest.raises(ValueError, match="non-negative"):
+        sim.drag((0, 0), (10, 10), duration=-1.0)
+
+
+# ---------------------------------------------------------------------------
 # Keyboard
 # ---------------------------------------------------------------------------
 
@@ -181,6 +301,34 @@ def test_named_key_press(tauri_input_app, sim):
     sim.press("Enter")
     log = _wait_for_log(tauri_input_app, lambda t: "keyup" in t)
     assert "key=Enter" in log
+
+
+def test_key_down_and_up_report_keydown_keyup(tauri_input_app, sim):
+    """The half-press primitives, without `press` wrapping them."""
+    _clear_log(tauri_input_app)
+    _focus_hit_target(tauri_input_app)
+    sim.key_down("a")
+    sim.key_up("a")
+    log = _wait_for_log(tauri_input_app, lambda t: "keyup" in t and "keydown" in t)
+    assert "keydown" in log
+    assert "keyup" in log
+    assert "key=a" in log
+
+
+def test_key_down_held_across_a_click(tauri_input_app, sim):
+    """What the primitives exist for: holding a key across another action.
+
+    Neither `press` (tap) nor `chord` (hold around one tap) can express this.
+    """
+    _clear_log(tauri_input_app)
+    sim.key_down("Shift")
+    try:
+        sim.click(_hit_center(tauri_input_app))
+    finally:
+        sim.key_up("Shift")
+    log = _wait_for_log(tauri_input_app, lambda t: "click " in t)
+    line = _line(log, "click")
+    assert "shift" in _field(line, "mods"), f"expected shift still held, got:\n{log}"
 
 
 def test_chord_reports_modifier(tauri_input_app, sim):

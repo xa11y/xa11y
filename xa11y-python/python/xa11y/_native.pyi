@@ -4,6 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from types import TracebackType
+from typing import Literal
+
+# Input-layer string values. These spellings are identical in the JS binding —
+# like key names, they are shared across bindings rather than spelled
+# per-language.
+MouseButtonName = Literal["left", "right", "middle"]
+AnchorName = Literal["center", "top_left", "top_right", "bottom_left", "bottom_right"]
 
 # ── Exceptions ───────────────────────────────────────────────────────────────
 
@@ -600,20 +607,54 @@ class InputSim:
     (drag-and-drop, scroll wheels, global shortcuts).
     """
 
-    def click(self, target: tuple[int, int] | Element) -> None:
-        """Left-click once at ``target``."""
+    def click(
+        self,
+        target: tuple[int, int] | Element,
+        *,
+        button: MouseButtonName = "left",
+        count: int = 1,
+        held: list[str] | None = None,
+        anchor: AnchorName | tuple[int, int] | None = None,
+    ) -> None:
+        """Click at ``target``.
+
+        ``button`` selects the mouse button, ``count`` repeats the click
+        (``2`` = double-click), ``held`` lists keys held down for the
+        duration, and ``anchor`` picks the point inside an ``Element``'s
+        bounds — a named anchor or an ``(dx, dy)`` offset from its top-left
+        corner. ``anchor`` is ignored when ``target`` is a raw tuple.
+        """
     def double_click(self, target: tuple[int, int] | Element) -> None:
         """Left double-click at ``target``."""
     def right_click(self, target: tuple[int, int] | Element) -> None:
         """Right-click at ``target``."""
     def move_to(self, target: tuple[int, int] | Element) -> None:
         """Move the pointer to ``target`` without pressing any button."""
+    def mouse_down(self, button: MouseButtonName = "left") -> None:
+        """Press a mouse button at the current pointer location, without
+        releasing it.
+
+        Pair with :meth:`mouse_up`; for a whole click use :meth:`click`.
+        Takes no target — the button is pressed wherever the pointer already
+        is, so call :meth:`move_to` first to position it.
+        """
+    def mouse_up(self, button: MouseButtonName = "left") -> None:
+        """Release a mouse button at the current pointer location."""
     def drag(
         self,
         start: tuple[int, int] | Element,
         end: tuple[int, int] | Element,
+        *,
+        button: MouseButtonName = "left",
+        held: list[str] | None = None,
+        duration: float = 0.15,
     ) -> None:
-        """Left-drag from ``start`` to ``end``."""
+        """Drag from ``start`` to ``end``.
+
+        ``button`` selects the button held during the drag, ``held`` lists
+        keys held for its duration, and ``duration`` is the total drag time
+        in **seconds**.
+        """
     def scroll(
         self,
         target: tuple[int, int] | Element,
@@ -625,6 +666,15 @@ class InputSim:
         """Tap a key (press + release)."""
     def chord(self, key: str, held: list[str] = ...) -> None:
         """Tap ``key`` while the keys in ``held`` are held down."""
+    def key_down(self, key: str) -> None:
+        """Press ``key`` without releasing it. Pair with :meth:`key_up`.
+
+        For a whole tap use :meth:`press`; to hold modifiers around one tap
+        use :meth:`chord`. This is the primitive for sequences neither
+        expresses, such as holding a key across several other actions.
+        """
+    def key_up(self, key: str) -> None:
+        """Release a key previously pressed with :meth:`key_down`."""
     def type_text(self, text: str) -> None:
         """Type literal text into the currently focused control."""
 
