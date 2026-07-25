@@ -673,3 +673,216 @@ pub fn check(root: &Path) -> bool {
     }
     ok
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::{ApiSurface, ApiType, Member, TypeKind};
+
+    fn ty(name: &str, members: &[&str]) -> ApiType {
+        ApiType {
+            name: name.to_string(),
+            kind: TypeKind::Struct,
+            members: members.iter().map(|m| Member::method(*m, true)).collect(),
+        }
+    }
+
+    fn surface(types: &[ApiType]) -> ApiSurface {
+        types.iter().map(|t| (t.name.clone(), t.clone())).collect()
+    }
+
+    fn names(t: &ApiType) -> Vec<String> {
+        t.member_names().into_iter().collect()
+    }
+
+    fn flatten(from: &[&str], rename: &[(&str, &str)]) -> Flatten {
+        Flatten {
+            from: from.iter().map(|s| s.to_string()).collect(),
+            rename: rename
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    fn members_of(pairs: &[(&str, &[&str])]) -> BTreeMap<String, BTreeSet<String>> {
+        pairs
+            .iter()
+            .map(|(t, ms)| {
+                (
+                    (*t).to_string(),
+                    ms.iter().map(|m| (*m).to_string()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    fn allow(rust_only: &[&str], extra: &[&str]) -> LangAllow {
+        LangAllow {
+            rust_only: rust_only.iter().map(|s| s.to_string()).collect(),
+            extra: extra.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    // ── fold_flattened ──────────────────────────────────────────────────
+
+    #[test]
+    fn fold_without_flatten_is_the_base_type() {
+        let base = ty("InputSim", &["click"]);
+        let (effective, errs) = fold_flattened(&base, None, &surface(&[]));
+        assert!(errs.is_empty());
+        assert_eq!(names(&effective), ["click"]);
+    }
+
+    #[test]
+    fn fold_merges_source_members() {
+        let core = surface(&[ty("Keyboard", &["press"]), ty("Mouse", &["click"])]);
+        let (effective, errs) = fold_flattened(
+            &ty("InputSim", &["new"]),
+            Some(&flatten(&["Keyboard", "Mouse"], &[])),
+            &core,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+        assert_eq!(names(&effective), ["click", "new", "press"]);
+    }
+
+    /// The wrinkle this mechanism exists for: two sources contributing the
+    /// same name would collapse into one required member, quietly excusing
+    /// the bindings from exposing the other.
+    #[test]
+    fn undeclared_collision_is_reported() {
+        let core = surface(&[ty("Keyboard", &["down"]), ty("Mouse", &["down"])]);
+        let (_, errs) = fold_flattened(
+            &ty("InputSim", &[]),
+            Some(&flatten(&["Keyboard", "Mouse"], &[])),
+            &core,
+        );
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("Keyboard::down"), "{}", errs[0]);
+        assert!(errs[0].contains("Mouse::down"), "{}", errs[0]);
+        assert!(errs[0].contains("rename"), "{}", errs[0]);
+    }
+
+    #[test]
+    fn rename_disambiguates_a_collision() {
+        let core = surface(&[ty("Keyboard", &["down"]), ty("Mouse", &["down"])]);
+        let (effective, errs) = fold_flattened(
+            &ty("InputSim", &[]),
+            Some(&flatten(
+                &["Keyboard", "Mouse"],
+                &[
+                    ("Keyboard::down", "key_down"),
+                    ("Mouse::down", "mouse_down"),
+                ],
+            )),
+            &core,
+        );
+        assert!(errs.is_empty(), "{errs:?}");
+        assert_eq!(names(&effective), ["key_down", "mouse_down"]);
+    }
+
+    /// A rename that renames nothing excuses nothing while still reading as
+    /// a live design decision — same rot as a stale [types] entry.
+    #[test]
+    fn stale_rename_is_reported() {
+        let core = surface(&[ty("Mouse", &["click"])]);
+        let (_, errs) = fold_flattened(
+            &ty("InputSim", &[]),
+            Some(&flatten(&["Mouse"], &[("Mouse::gone", "mouse_gone")])),
+            &core,
+        );
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("Mouse::gone"), "{}", errs[0]);
+    }
+
+    #[test]
+    fn flatten_source_missing_from_core_is_reported() {
+        let (_, errs) = fold_flattened(
+            &ty("InputSim", &[]),
+            Some(&flatten(&["Ghost"], &[])),
+            &surface(&[]),
+        );
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("Ghost"), "{}", errs[0]);
+    }
+
+    // ── stale_member_entries ────────────────────────────────────────────
+
+    fn stale(rust_only: &[&str], extra: &[&str]) -> Vec<String> {
+        let core = members_of(&[("App", &["by_name_with", "provider"])]);
+        let binding = members_of(&[("App", &["by_name"])]);
+        stale_member_entries(
+            &allow(rust_only, extra),
+            &core,
+            &binding,
+            "Python",
+            "python",
+            "python_only",
+        )
+    }
+
+    #[test]
+    fn live_entries_are_not_reported() {
+        assert!(stale(&["App::by_name_with"], &["App::by_name"]).is_empty());
+    }
+
+    #[test]
+    fn rust_only_entry_for_a_missing_core_member_is_reported() {
+        let errs = stale(&["App::by_name_with_timeout"], &[]);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("by_name_with_timeout"), "{}", errs[0]);
+        assert!(errs[0].contains("xa11y-core"), "{}", errs[0]);
+    }
+
+    /// An entry on a type that isn't mirrored is never consulted, so it is
+    /// stale even though the member exists.
+    #[test]
+    fn entry_on_a_non_mirrored_type_is_reported() {
+        let errs = stale(&["Rect::x"], &[]);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("not a mirrored type"), "{}", errs[0]);
+    }
+
+    #[test]
+    fn language_only_entry_for_a_missing_binding_member_is_reported() {
+        let errs = stale(&[], &["App::gone"]);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("the Python binding"), "{}", errs[0]);
+        assert!(errs[0].contains("python_only"), "{}", errs[0]);
+    }
+
+    /// Unqualified entries excuse a name on every type, so they are stale
+    /// only when no mirrored type has it.
+    #[test]
+    fn unqualified_entries_match_any_type() {
+        assert!(stale(&[], &["by_name"]).is_empty());
+        assert_eq!(stale(&[], &["nowhere"]).len(), 1);
+    }
+
+    // ── Allowlist schema ────────────────────────────────────────────────
+
+    /// The real allowlist must parse, and its InputSim renames must survive
+    /// — they are what keeps `Keyboard::down` and `Mouse::down` from
+    /// collapsing into one required member.
+    #[test]
+    fn repo_allowlist_parses_with_its_renames() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask has a parent directory")
+            .join("bindings/parity_allowlist.toml");
+        let allow = parse_allowlist(&path).expect("the repo allowlist parses");
+        assert_eq!(allow.tiers.get("InputSim"), Some(&Tier::Mirrored));
+        let input = allow
+            .flatten
+            .get("InputSim")
+            .expect("InputSim has a flatten entry");
+        assert_eq!(
+            input.rename.get("Mouse::down").map(String::as_str),
+            Some("mouse_down")
+        );
+        assert_eq!(
+            input.rename.get("Keyboard::down").map(String::as_str),
+            Some("key_down")
+        );
+    }
+}
