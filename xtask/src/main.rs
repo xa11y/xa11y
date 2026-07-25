@@ -31,13 +31,14 @@ COMMANDS:
     test-apps           Run the Python suite for every app (qt, gtk, cocoa, tauri, electron, egui, winforms, wpf)
     test-compat [APP]   Run shared harness (python + js + cli suites) against APP (default: tauri)
     test-matrix-check   Validate the tests/matrix.yaml coverage index
+    test-harness        Unit-test the shared integ harness (tests/harness/)
     docs                Build documentation
     coverage            Generate code coverage report
     fuzz [ARGS..]       Run provider fuzzer (pass-through args)
     sync-readmes [--check]  Generate crates.io/PyPI READMEs from root README.md
     check-macos-ffi     Verify xa11y-macos/src/ax.rs only uses safe_* CF/AX wrappers
     check-bindings-parity  Verify Python/JS bindings mirror xa11y-core's public API
-    check               Run ALL pre-PR checks (fmt, lint, test, test-python, test-js, docs)
+    check               Run ALL pre-PR checks (fmt, lint, test, test-python, test-js, test-harness)
     help                Show this help
 ";
 
@@ -69,6 +70,7 @@ fn main() -> ExitCode {
         "test-apps" => do_test_apps(),
         "test-compat" => do_test_compat(rest),
         "test-matrix-check" => do_test_matrix_check(),
+        "test-harness" => do_test_harness(),
         "docs" => do_docs(),
         "coverage" => do_coverage(),
         "fuzz" => do_fuzz(rest),
@@ -503,6 +505,18 @@ fn do_test_matrix_check() -> bool {
     heading("Test coverage matrix check");
     let root = project_root();
     run_in("python", &["tests/matrix_check.py"], &root)
+}
+
+/// Unit-test the shared integration harness itself.
+///
+/// The harness decides which suites run in every CI matrix cell, so a bug in
+/// it is invisible: it just stops covering something and the cell stays green
+/// (issue #327). These tests never launch an app — plain pytest, no venv, no
+/// bindings required.
+fn do_test_harness() -> bool {
+    heading("Integ harness self-tests");
+    let root = project_root();
+    run_in("python", &["-m", "pytest", "tests/harness", "-v"], &root)
 }
 
 fn do_docs() -> bool {
@@ -1758,6 +1772,12 @@ fn do_check() -> bool {
     heading("PRE-PR CHECK: test-js");
     if !do_test_js() {
         eprintln!("!! JS unit tests failed.");
+        ok = false;
+    }
+
+    heading("PRE-PR CHECK: test-harness");
+    if !do_test_harness() {
+        eprintln!("!! Integ harness self-tests failed.");
         ok = false;
     }
 

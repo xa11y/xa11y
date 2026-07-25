@@ -22,45 +22,45 @@ accessibility-framework compatibility. Testing them against every app would be r
 The vehicle is the Tauri app (it runs on Linux, macOS, and Windows), which also has a
 dedicated event-log page for verifying synthesised pointer and keyboard events end-to-end.
 
-The JS integ suite additionally has smoke tests for input_sim and screenshot against the
-AccessKit app; these complement (not duplicate) the Tauri Python tests.
+The JS integ suite additionally has smoke tests for input_sim and screenshot; they gate
+themselves to the Tauri and Electron apps (see the top of
+`tests/suites/js/03_input_sim.test.js` and `04_screenshot.test.js`) and complement — not
+duplicate — the Tauri Python tests.
 
 ### Per-app compat tests verify a11y API surface compatibility
 
 These tests (find, tree navigation, roles, widget discovery, actions, events) confirm that
 each framework's accessibility API works correctly end-to-end with xa11y. They are written
-in Python (primary) and JS (partial coverage). CLI integration tests do not yet exist —
-see Known Gaps.
+in Python (primary), JS, and CLI (`tests/suites/cli/`, which drives the `xa11y`
+binary against the live app).
 
 ---
 
 ## Coverage Matrix
 
-`✅` = covered | `❌` = not covered (gap) | `⚠️` = partial or platform-limited
+The coverage index lives in [`matrix.yaml`](matrix.yaml) and is rendered — and
+validated — by:
 
-| App        | Platform(s)           | Python compat | Python actions | Python events | Python input_sim | Python screenshot | JS compat | JS actions | JS input_sim | JS screenshot | CLI |
-|------------|-----------------------|:-------------:|:--------------:|:-------------:|:----------------:|:-----------------:|:---------:|:----------:|:------------:|:-------------:|:---:|
-| accesskit  | linux, macos, windows | ✅¹           | ✅¹            | ⚠️¹           | —                | —                 | ✅        | ✅         | ✅²          | ✅²           | ❌  |
-| qt         | linux, macos, windows | ✅            | ✅             | ✅            | —                | —                 | ❌        | ❌         | —            | —             | ❌  |
-| gtk        | linux                 | ✅            | ✅             | ❌³           | —                | —                 | ❌        | ❌         | —            | —             | ❌  |
-| cocoa      | macos                 | ✅            | ✅             | ✅            | —                | —                 | ❌        | ❌         | —            | —             | ❌  |
-| tauri      | linux, macos, windows | ✅            | ✅             | ✅            | ✅               | ✅                | ❌        | ❌         | —            | —             | ❌  |
-| electron   | linux                 | ❌            | ❌             | ❌            | —                | —                 | ✅        | ✅         | ✅²          | ✅²           | ❌  |
+```bash
+python tests/matrix_check.py     # or: cargo xtask test-matrix-check
+```
 
-**Notes:**
-1. The accesskit Python compat/actions suites run **on Linux only** (the harness gates this on `sys.platform`). Linux is where AccessKit's AT-SPI bridge — and its `"click"`-not-`"toggle"` action naming, which the toggle()-via-press fallback in `xa11y-linux/src/atspi.rs` depends on — is exercised. The events module also runs but its assertions are `xfail`-guarded (⚠️). On macOS/Windows the Rust integ suite in `xa11y/tests/integ/` stays the canonical AccessKit coverage, so Python is not duplicated there.
-2. JS input_sim and screenshot run against the AccessKit app for the `integ` suite, and against Electron for the `integ-electron` suite.
-3. GTK has no event subscription tests. Only widget/compat and actions are covered.
+That command prints the per-app × per-language matrix, the documented gaps, and
+the platform exclusions, then checks two things CI enforces: that every empty
+cell has a matching documented gap, and that every claimed `(app, language,
+feature)` maps to a test file that actually exists.
 
----
+This README deliberately does **not** duplicate the table. It used to, and the
+copy rotted — it was still listing a `cli_integ` gap that no longer existed and
+omitting three test apps that had since landed.
 
-## Known Gaps
-
-| ID              | Description                                                                                  | Severity | Workaround                                               |
-|-----------------|----------------------------------------------------------------------------------------------|:--------:|----------------------------------------------------------|
-| `cli_integ`     | No CLI integration tests exist for any app. The `xa11y` binary is not exercised end-to-end against a live app in CI. | **high** | Unit tests in `xa11y-python/tests/test_cli.py` cover CLI error paths only. |
-| `js_app_coverage` | JS integ tests cover only the AccessKit app and Electron. No JS tests for Qt, GTK, Cocoa, or Tauri. | medium | Python suites cover those apps.                   |
-| `gtk_events`    | No event subscription tests for GTK. Only compat and actions are covered.                    | low      | GTK event subscription is exercised in the Rust integ suite via AT-SPI2. |
+> **A green matrix cell is not proof a suite ran.** `matrix_check.py` validates
+> claims against *test files on disk*, not against execution. What guarantees
+> execution is the harness: `tests/harness/launch.py` fails the run when a
+> requested suite cannot start, and prints a per-suite ledger at the end of
+> every cell saying whether each suite ran, was deliberately skipped
+> (`declared_suite_skips`), or did not run. See issue #327 for the four Windows
+> cells that claimed CLI coverage they had never once executed.
 
 ---
 
@@ -73,24 +73,32 @@ cargo xtask test-apps
 # Rust core suite (AccessKit app, fast-path)
 cargo xtask test-integ
 
-# Per-framework Python suites
+# Per-app suites. Each launches the app once and runs the python, js and cli
+# suites against it — the same tests/harness/launch.py entry point CI uses.
+# Pass an explicit suite list to narrow it, e.g. `cargo xtask test-qt python`.
 cargo xtask test-qt          # Qt/PySide6
 cargo xtask test-gtk         # GTK4
 cargo xtask test-cocoa       # Cocoa/AppKit (macOS only)
 cargo xtask test-tauri       # Tauri
+cargo xtask test-electron    # Electron (Linux only)
+cargo xtask test-egui        # egui/eframe
+cargo xtask test-winforms    # WinForms (Windows only)
+cargo xtask test-wpf         # WPF (Windows only)
 
-# JS integration tests (AccessKit app)
-cd xa11y-js && node --test __test__/integ/
-
-# JS Electron integration tests
-cd xa11y-js && node --test __test__/integ-electron/
+# Unit-test the harness itself (no app launched)
+cargo xtask test-harness
 
 # Linux integration tests via container
 cargo xtask test-integ-container
 
-# All pre-PR checks (fmt, lint, unit tests, Python bindings)
+# All pre-PR checks (fmt, lint, unit tests, Python bindings, harness)
 cargo xtask check
 ```
+
+The `cli` suite needs the `xa11y` binary (`cargo build -p xa11y`) and the `js`
+suite needs the built bindings; `scripts/run_app_suite.sh` builds both on
+demand. If the CLI binary is missing the harness **fails** rather than skipping
+— see the note under Coverage Matrix.
 
 CI configuration: see `.github/workflows/ci.yml`.
 
@@ -98,52 +106,40 @@ CI configuration: see `.github/workflows/ci.yml`.
 
 ## Test Layout
 
+The per-app suites are app-agnostic: one set of tests per language, parameterised
+by `XA11Y_TEST_APP`, rather than a directory per framework.
+
 ```
 tests/
   README.md            <- this file
   matrix.yaml          <- machine-readable coverage matrix
   matrix_check.py      <- CI validator (prints coverage summary; gaps must be documented)
   helpers.py           <- shared Python launch helpers (launch_test_app fixture)
-  qt/                  <- Qt/PySide6 Python integ tests
-    conftest.py
-    test_01_widgets.py     <- compat + actions
-    test_02_events.py      <- event subscription
-    test_03_a11y_tree.py   <- tree structure
-    test_04_widgets_extra.py
-  gtk/                 <- GTK4 Python integ tests
-    conftest.py
-    test_widgets.py        <- compat + actions (no events yet)
-  cocoa/               <- Cocoa/AppKit Python integ tests (macOS only)
-    conftest.py
-    test_01_widgets.py     <- compat + actions
-    test_02_events.py      <- event subscription
-    test_03_widgets_extra.py
-  tauri/               <- Tauri Python integ tests (all platforms)
-    conftest.py
-    test_01_widgets.py     <- compat + actions
-    test_02_events.py      <- event subscription
-    test_03_widgets_extra.py
-    test_input_sim.py      <- input simulation (one-per-platform)
-    test_screenshot.py     <- screenshot capture (one-per-platform)
+  harness/
+    launch.py          <- THE entry point: launches an app once, runs the
+                          requested suites against it, audits what actually ran
+    test_launch.py     <- unit tests for the harness (cargo xtask test-harness)
+  suites/
+    python/            <- Python integ suite (compat, actions, events, errors,
+                          input_sim, screenshot, foreground)
+    js/                <- JS integ suite (numbered NN_<feature>.test.js)
+    cli/               <- CLI integ suite — drives the `xa11y` binary
+                          (tree, find, actions, input_sim, screenshot)
 
 xa11y/tests/integ/     <- Rust core suite (AccessKit app, fast-path)
   mod.rs               <- shared helpers (app_tree, one, named, act)
   tree.rs              <- tree traversal + find
   actions.rs           <- press, toggle, focus, expand/collapse
+  errors.rs            <- error paths
+  multi_window.rs      <- multi-window traversal
   events_linux.rs      <- AT-SPI2 event subscription
   events_macos.rs      <- AX notification event subscription
   events_windows.rs    <- UIA event subscription
   screenshot.rs        <- screenshot capture
 
 xa11y-js/__test__/
-  integ/               <- JS integ tests (AccessKit app)
-    01_tree.test.js    <- compat
-    02_actions.test.js <- actions
-    03_input_sim.test.js
-    04_screenshot.test.js
-  integ-electron/      <- JS Electron integ tests
-    electron_a11y.test.js  <- compat + AccessibilityNotEnabled detection
   unit/                <- JS unit tests (no live app)
+  types/               <- TypeScript type tests
 
 xa11y-python/tests/    <- Python unit tests + CLI unit tests
   test_cli.py          <- CLI error-path unit tests (no live app)

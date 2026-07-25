@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -338,43 +339,90 @@ def _kill_app(proc: subprocess.Popen[bytes]) -> None:
 # CLI binary discovery
 # ---------------------------------------------------------------------------
 
-def _find_cli_binary() -> str | None:
-    """Return the path to the xa11y CLI binary, or None if not found."""
-    # Prefer the workspace debug build.
-    debug_bin = PROJECT_ROOT / "target" / "debug" / "xa11y"
-    if debug_bin.exists():
-        return str(debug_bin)
-    release_bin = PROJECT_ROOT / "target" / "release" / "xa11y"
-    if release_bin.exists():
-        return str(release_bin)
-    # Fall back to whatever is on PATH.
-    import shutil
+# `cargo build` emits `xa11y.exe` on Windows and bare `xa11y` everywhere else.
+# Probing without the suffix meant the CLI suite never once ran on a Windows
+# matrix cell (issue #327). `shutil.which` applies PATHEXT itself, so only the
+# explicit target/ probes below need the suffix.
+EXE_SUFFIX = ".exe" if sys.platform == "win32" else ""
+CLI_BINARY_NAME = f"xa11y{EXE_SUFFIX}"
+
+
+def cli_binary_candidates() -> list[Path]:
+    """The explicit build-output paths probed for the xa11y CLI, in order."""
+    return [
+        PROJECT_ROOT / "target" / "debug" / CLI_BINARY_NAME,
+        PROJECT_ROOT / "target" / "release" / CLI_BINARY_NAME,
+    ]
+
+
+def find_cli_binary() -> str | None:
+    """Return the path to the xa11y CLI binary, or None if not found.
+
+    Public because tests/suites/cli/conftest.py resolves the CLI through this
+    same function. It previously ran its own independent discovery, so the
+    binary the harness located had no effect on what the suite actually
+    executed — which is part of why the Windows suffix bug stayed invisible.
+    """
+    for candidate in cli_binary_candidates():
+        if candidate.is_file():
+            return str(candidate)
+    # Not a fallback in the tenet-1 sense: this is the last step of one
+    # tool-discovery probe, and coming up empty is a hard error at every call
+    # site (see cli_binary_not_found_message).
     return shutil.which("xa11y")
+
+
+def cli_binary_not_found_message() -> str:
+    """Explain exactly where the CLI was looked for and how to produce it."""
+    probed = "\n".join(f"  - {p}" for p in cli_binary_candidates())
+    return (
+        f"xa11y CLI binary ({CLI_BINARY_NAME}) not found. Probed:\n"
+        f"{probed}\n"
+        f"  - 'xa11y' on PATH\n"
+        f"Build it with: cargo build -p xa11y"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Suite runner
 # ---------------------------------------------------------------------------
 
-def _suite_command(suite: str) -> list[str]:
-    """Build the command to run a suite. JS test files are listed explicitly
-    because Node's ``--test`` flag does not auto-discover files in a directory
-    on all supported versions.
+def _suite_command(suite: str, report_path: Path) -> list[str]:
+    """Build the command to run a suite, writing a junit report to report_path.
+
+    Every suite reports in junit XML so the same "did this actually run
+    anything?" guard applies to all three (see _check_suite_ran_tests). JS test
+    files are listed explicitly because Node's ``--test`` flag does not
+    auto-discover files in a directory on all supported versions.
     """
     if suite == "python":
-        return [sys.executable, "-m", "pytest", "tests/suites/python/", "-v"]
+        return [
+            sys.executable, "-m", "pytest", "tests/suites/python/", "-v",
+            f"--junitxml={report_path}",
+        ]
     if suite == "cli":
-        return [sys.executable, "-m", "pytest", "tests/suites/cli/", "-v"]
+        return [
+            sys.executable, "-m", "pytest", "tests/suites/cli/", "-v",
+            f"--junitxml={report_path}",
+        ]
     if suite == "js":
         js_files = sorted(
             str(p.relative_to(PROJECT_ROOT))
             for p in (PROJECT_ROOT / "tests" / "suites" / "js").glob("*.test.js")
         )
-        return ["node", "--test", *js_files]
+        # Two reporters: `spec` keeps the human-readable log on stdout (the
+        # default reporter is replaced as soon as --test-reporter is passed),
+        # `junit` gives us the machine-readable copy to audit.
+        return [
+            "node", "--test",
+            "--test-reporter=spec", "--test-reporter-destination=stdout",
+            "--test-reporter=junit", f"--test-reporter-destination={report_path}",
+            *js_files,
+        ]
     raise ValueError(f"Unknown suite: {suite!r}")
 
 
-def _check_pytest_ran_tests(suite: str, junit_path: Path) -> int:
+def _check_suite_ran_tests(suite: str, report_path: Path) -> int:
     """Guard against a matrix cell silently running zero tests.
 
     pytest exits 5 when it *collects* nothing, which already fails the cell.
@@ -382,10 +430,16 @@ def _check_pytest_ran_tests(suite: str, junit_path: Path) -> int:
     looks green while covering nothing. Parse the junit report and require at
     least one executed (non-skipped) test.
 
+    Counting is done over ``<testcase>`` elements rather than the ``tests=`` /
+    ``skipped=`` attributes of ``<testsuite>``, because Node's junit reporter
+    emits top-level test cases as direct children of ``<testsuites>`` with no
+    enclosing ``<testsuite>`` at all. Per-case counting is correct for both
+    pytest's and Node's output.
+
     Returns 0 when the suite really executed tests, 1 otherwise.
     """
     try:
-        root = ET.parse(junit_path).getroot()
+        root = ET.parse(report_path).getroot()
     except (ET.ParseError, OSError) as exc:
         print(
             f"ERROR: {suite} suite produced no readable junit report "
@@ -393,11 +447,9 @@ def _check_pytest_ran_tests(suite: str, junit_path: Path) -> int:
         )
         return 1
 
-    total = skipped = 0
-    # The root is <testsuites> (or a bare <testsuite>); iter() covers both.
-    for ts in root.iter("testsuite"):
-        total += int(ts.get("tests", 0))
-        skipped += int(ts.get("skipped", 0))
+    cases = list(root.iter("testcase"))
+    total = len(cases)
+    skipped = sum(1 for case in cases if case.find("skipped") is not None)
 
     if total == 0:
         print(f"ERROR: {suite} suite reported zero collected tests.")
@@ -410,6 +462,59 @@ def _check_pytest_ran_tests(suite: str, junit_path: Path) -> int:
         return 1
     print(f"{suite} suite executed {total - skipped} tests ({skipped} skipped).")
     return 0
+
+
+def declared_suite_skips(app: str) -> set[str]:
+    """Suites this app deliberately does not run, by design.
+
+    A skip listed here is a *declared* one: it shows up in the end-of-run
+    ledger as an intentional exclusion. Anything else that fails to run is an
+    error, never a warning (issue #327).
+
+    The AccessKit app's widget schema differs from the shared OK-button
+    fixtures, so the CLI and JS suites (which have their own AccessKit
+    coverage) stay skipped for it.
+
+    The Python suite IS wired up for AccessKit (full APP_CONFIGS entry:
+    Submit/Cancel schema, single checkbox, no dialog), but only on Linux.
+    Linux is the one platform where AccessKit's AT-SPI bridge (accesskit_unix)
+    is exercised, and where its hardcoded "click"-not-"toggle" action naming
+    makes the toggle()-via-press fallback in xa11y-linux/src/atspi.rs
+    load-bearing — exactly the gap that went uncaught before (see
+    tests/matrix.yaml accesskit_python_compat_on_linux). On macOS/Windows the
+    Rust integ suite remains the canonical AccessKit coverage, so the Python
+    suite is skipped there.
+    """
+    if app != "accesskit":
+        return set()
+    skips = {"cli", "js"}
+    if sys.platform != "linux":
+        skips.add("python")
+    return skips
+
+
+# Ledger statuses, printed in the end-of-run recap.
+_RAN = "ran"
+_DECLARED_SKIP = "skipped (declared)"
+_DID_NOT_RUN = "DID NOT RUN"
+
+
+def _print_ledger(app: str, ledger: list[tuple[str, str, str]]) -> None:
+    """Print what each requested suite actually did.
+
+    The whole point of issue #327 is that "the CLI suite never ran" was
+    indistinguishable from "the CLI suite is not part of this cell". This
+    recap states the outcome of every requested suite explicitly, so a cell
+    that quietly stops covering something is visible in the log even before
+    the non-zero exit code lands.
+    """
+    width = max(len(name) for name, _, _ in ledger)
+    print(f"\n=== suite ledger for {app} ===")
+    for name, status, detail in ledger:
+        line = f"  {name:<{width}}  {status}"
+        if detail:
+            line += f" — {detail}"
+        print(line)
 
 
 def _run_suites(
@@ -425,69 +530,58 @@ def _run_suites(
     env["XA11Y_TEST_APP_NAME"] = discovered_name
 
     worst_rc = 0
+    ledger: list[tuple[str, str, str]] = []
 
-    # Per-app suite skips. The AccessKit app's widget schema differs from the
-    # shared OK-button fixtures, so the CLI and JS suites (which have their own
-    # AccessKit coverage) stay skipped for it.
-    #
-    # The Python suite IS wired up for AccessKit (full APP_CONFIGS entry:
-    # Submit/Cancel schema, single checkbox, no dialog), but only on Linux.
-    # Linux is the one platform where AccessKit's AT-SPI bridge
-    # (accesskit_unix) is exercised, and where its hardcoded
-    # "click"-not-"toggle" action naming makes the toggle()-via-press fallback
-    # in xa11y-linux/src/atspi.rs load-bearing — exactly the gap that went
-    # uncaught before (see tests/matrix.yaml accesskit_python_compat_on_linux).
-    # On macOS/Windows the Rust integ suite remains the canonical AccessKit
-    # coverage, so the Python suite is skipped there.
-    accesskit_skips = {"cli", "js"}
-    if sys.platform != "linux":
-        accesskit_skips.add("python")
-    suite_skips_by_app = {
-        "accesskit": accesskit_skips,
-    }
+    declared_skips = declared_suite_skips(app)
 
     for suite in suites:
-        if suite in suite_skips_by_app.get(app, set()):
+        if suite in declared_skips:
             print(
                 f"\nSkipping {suite} suite for {app} "
-                f"(see suite_skips_by_app in tests/harness/launch.py)"
+                f"(see declared_suite_skips in tests/harness/launch.py)"
             )
+            ledger.append((suite, _DECLARED_SKIP, f"declared for {app}"))
             continue
 
         if suite == "cli":
-            cli_bin = _find_cli_binary()
+            # A requested suite whose prerequisites are missing is an error,
+            # not a warning. This used to `continue` with a WARNING line, which
+            # is how the CLI suite went four Windows matrix cells and an
+            # unknown number of runs without ever executing (issue #327).
+            cli_bin = find_cli_binary()
             if cli_bin is None:
-                print(
-                    f"WARNING: xa11y CLI binary not found; skipping 'cli' suite. "
-                    f"Build it with: cargo build -p xa11y"
-                )
+                print(f"\nERROR: cannot run the cli suite against {app}.")
+                print(cli_binary_not_found_message())
+                ledger.append((suite, _DID_NOT_RUN, "xa11y CLI binary not found"))
+                worst_rc = max(worst_rc, 1)
                 continue
+            print(f"\nUsing xa11y CLI: {cli_bin}")
             suite_env = {**env, "XA11Y_CLI": cli_bin}
         else:
             suite_env = env
 
-        cmd = _suite_command(suite)
-
-        # pytest-based suites get a junit report so we can verify the cell
-        # actually executed tests (see _check_pytest_ran_tests).
-        junit_path: Path | None = None
-        if suite in ("python", "cli"):
-            fd, junit_name = tempfile.mkstemp(prefix=f"xa11y-{suite}-junit-", suffix=".xml")
-            os.close(fd)
-            junit_path = Path(junit_name)
-            cmd = [*cmd, f"--junitxml={junit_path}"]
+        fd, report_name = tempfile.mkstemp(prefix=f"xa11y-{suite}-junit-", suffix=".xml")
+        os.close(fd)
+        report_path = Path(report_name)
+        cmd = _suite_command(suite, report_path)
 
         print(f"\n=== Running {suite} suite against {app} ===\n")
         result = subprocess.run(cmd, env=suite_env, cwd=str(PROJECT_ROOT))
         rc = result.returncode
-        if junit_path is not None:
-            if rc == 0:
-                rc = _check_pytest_ran_tests(suite, junit_path)
-            junit_path.unlink(missing_ok=True)
+        if rc == 0:
+            rc = _check_suite_ran_tests(suite, report_path)
+        report_path.unlink(missing_ok=True)
+
         if rc != 0:
             print(f"\n--- {suite} suite exited with code {rc} ---")
+            ledger.append((suite, _RAN, f"failed (exit {rc})"))
+        else:
+            ledger.append((suite, _RAN, ""))
         if rc > worst_rc:
             worst_rc = rc
+
+    if ledger:
+        _print_ledger(app, ledger)
 
     return worst_rc
 

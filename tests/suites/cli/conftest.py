@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -11,6 +10,7 @@ from typing import Generator
 
 import pytest
 
+from tests.harness.launch import cli_binary_not_found_message, find_cli_binary
 from tests.helpers import launch_test_app
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent.parent
@@ -255,24 +255,28 @@ _LAUNCHERS = {
 def cli_bin() -> list[str]:
     """Return the command prefix to invoke the xa11y CLI.
 
-    Tries, in order:
-    1. An installed ``xa11y`` binary on PATH.
-    2. ``python -m xa11y._cli`` if the xa11y Python package is importable.
-    Falls back to skipping the entire session if neither is found.
+    ``XA11Y_CLI`` — set by tests/harness/launch.py — is authoritative when
+    present. Before issue #327 this fixture ran its own discovery and ignored
+    the harness's choice entirely, so under CI it silently exercised the
+    ``python -m xa11y._cli`` wrapper rather than the ``xa11y`` binary the
+    harness had located and the workspace build had just produced.
+
+    Standalone runs (no harness) fall back to the *same* discovery function the
+    harness uses, so both paths agree on what "the CLI" is. Not finding one is
+    a hard failure: a session-wide skip here is indistinguishable from "the CLI
+    is intentionally not covered", which is the exact failure mode this suite
+    is meant to catch.
     """
-    found = shutil.which("xa11y")
-    if found:
-        return [found]
+    from_env = os.environ.get("XA11Y_CLI")
+    if from_env:
+        if not Path(from_env).is_file():
+            pytest.fail(f"XA11Y_CLI points at a non-existent file: {from_env}")
+        return [from_env]
 
-    result = subprocess.run(
-        [sys.executable, "-c", "import xa11y; print('ok')"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode == 0:
-        return [sys.executable, "-m", "xa11y._cli"]
-
-    pytest.skip("xa11y CLI not found — install xa11y-python first")
+    found = find_cli_binary()
+    if found is None:
+        pytest.fail(cli_binary_not_found_message())
+    return [found]
 
 
 # ── run_cli helper ────────────────────────────────────────────────────────────
@@ -283,10 +287,16 @@ def run_cli(cli_bin: list[str]):
     """Return a callable that runs the CLI and returns (returncode, stdout, stderr)."""
 
     def _run(*args: str, **kwargs) -> tuple[int, str, str]:
+        # Decode as UTF-8 explicitly. The CLI writes UTF-8 (the tree formatter
+        # emits box-drawing connectors), but `text=True` alone decodes with the
+        # locale encoding — cp1252 on Windows runners — which silently turns
+        # those connectors into mojibake instead of failing loudly.
         result = subprocess.run(
             cli_bin + list(args),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=30,
             **kwargs,
         )

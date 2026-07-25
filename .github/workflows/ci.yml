@@ -217,7 +217,7 @@ jobs:
           # AccessKit on macOS/Windows is covered by the Windows Rust integ
           # job and the local macOS harness; those integ cells ran no language
           # suites (cli+js are skipped for accesskit, and python is skipped off
-          # Linux — see suite_skips_by_app in tests/harness/launch.py), so they
+          # Linux — see declared_suite_skips in tests/harness/launch.py), so they
           # only burned a build with nothing to test. Dropped.
           - { os: ubuntu-latest,  app: qt }
           - { os: ubuntu-latest,  app: gtk }
@@ -657,6 +657,14 @@ jobs:
       - name: Run tests
         working-directory: xa11y-python
         run: ../.venv/bin/pytest tests/ -v
+
+      # The shared integ harness (tests/harness/launch.py) decides which suites
+      # run in every `integ` matrix cell, so its bugs are invisible by
+      # construction — it stops covering something and the cell stays green
+      # (issue #327). Its self-tests launch no app and need no bindings, so
+      # they ride along in this job, which already has a venv with pytest.
+      - name: Run integ-harness self-tests
+        run: .venv/bin/pytest tests/harness -v
 
   # ── Docs build ──────────────────────────────────────────────────
   docs:
