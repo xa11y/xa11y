@@ -20,7 +20,7 @@ Integration tests use shared helpers from `xa11y/tests/integ/mod.rs`:
 
 ### Key coverage gaps to address
 
-- **WPF test app** — `test-apps/winforms` covers the DataItem+TableItem cell shape on a Microsoft framework, but WPF's `DataGrid` is what produces `ControlType.Custom` + `TableItem` cells, and that branch of `map_uia_role` in `xa11y-windows/src/uia.rs` is still unit-tested only. Step 2 of issue #324; the .NET build/launch plumbing already exists (`test-apps/winforms`, `tests/harness/launch.py`, the `winforms` `integ` matrix cell).
+- _(none currently)_ — the `ControlType.Custom` + `TableItem` cell branch of `map_uia_role` in `xa11y-windows/src/uia.rs` is now exercised end-to-end by `test-apps/wpf` (`windows-latest × wpf` in the `integ` matrix), alongside the DataItem cell shape `test-apps/winforms` covers.
 
 ## Design Tenets
 
@@ -114,6 +114,7 @@ cargo xtask test-gtk                          # GTK4 integration tests
 cargo xtask test-cocoa                        # Cocoa/AppKit integration tests (macOS only)
 cargo xtask test-tauri                        # Tauri integration tests
 cargo xtask test-winforms                     # WinForms integration tests (Windows only)
+cargo xtask test-wpf                          # WPF integration tests (Windows only)
 cargo xtask test-apps                         # all Python integration test suites
 cargo xtask fuzz                              # provider fuzzer
 cargo xtask fuzz --seed 42 -n 5000            # reproducible fuzz run
@@ -137,6 +138,7 @@ cd xa11y/fuzz && cargo +nightly fuzz run tree_ops -- -max_total_time=60
 - `test-apps/cocoa/` — Cocoa/AppKit test app (Swift, macOS-only)
 - `test-apps/tauri/` — Tauri test app (Rust + HTML)
 - `test-apps/winforms/` — .NET Windows Forms test app (C#, Windows-only)
+- `test-apps/wpf/` — .NET WPF test app (C#, Windows-only)
 - `tests/` — Python integration test suites (pytest + xa11y-python)
 - `xa11y-python/` — Python bindings via PyO3/maturin (excluded from Cargo workspace)
 - `xa11y/fuzz/` — libFuzzer fuzz targets for the xa11y public API (requires nightly)

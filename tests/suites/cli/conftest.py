@@ -212,6 +212,29 @@ def _launch_winforms():
     )
 
 
+def _launch_wpf():
+    # `net8.0-windows` must track TargetFramework in
+    # test-apps/wpf/xa11y-wpf-test-app.csproj.
+    project_dir = PROJECT_ROOT / "test-apps" / "wpf"
+    binary = project_dir / "bin" / "Debug" / "net8.0-windows" / "xa11y-wpf-test-app.exe"
+    if not binary.exists():
+        if sys.platform != "win32":
+            pytest.skip("WPF test app is Windows-only")
+        result = subprocess.run(
+            ["dotnet", "build", str(project_dir)],
+            cwd=str(PROJECT_ROOT),
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            pytest.fail(f"Failed to build WPF test app:\n{result.stdout}\n{result.stderr}")
+    yield from launch_test_app(
+        command=[str(binary)],
+        app_names=["xa11y-wpf-test-app"],
+        content_ready_selector='button[name="OK"]',
+    )
+
+
 _LAUNCHERS = {
     "qt": _launch_qt,
     "gtk": _launch_gtk,
@@ -221,6 +244,7 @@ _LAUNCHERS = {
     "accesskit": _launch_accesskit,
     "egui": _launch_egui,
     "winforms": _launch_winforms,
+    "wpf": _launch_wpf,
 }
 
 

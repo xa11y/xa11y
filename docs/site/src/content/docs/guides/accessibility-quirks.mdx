@@ -174,6 +174,23 @@ the MSAA role when it has a clean equivalent. This applies *only* to `Custom`:
 an unrecognized UIA control type stays `unknown`, so real gaps in the role map
 remain visible.
 
+### Windows: the same grid cell is `DataItem` or `Custom` depending on the framework
+
+There is no single control type for "table cell" in a framework grid. The two
+Microsoft grids disagree:
+
+- **WinForms `DataGridView`** — `DataGridViewCell.DataGridViewCellAccessibleObject`
+  overrides `ControlTypePropertyId` to `DataItem` and supports `TableItem`.
+- **WPF `DataGrid`** — `DataGridCellItemAutomationPeer` reports
+  `AutomationControlType.Custom` and supports `TableItem` + `GridItem`.
+
+`DataItem` is also what UIA uses for a *row*, so neither the control type nor
+the presence of `GridItem` identifies a cell on its own. xa11y treats the
+`TableItem` pattern as the cell signal for both `DataItem` and `Custom`
+elements, and falls back to a structural check (a `DataItem` whose parent is a
+`DataItem`) for bridges that expose no table patterns at all, such as
+AccessKit's.
+
 ### Windows: WinForms range controls have no `RangeValue` pattern
 
 A WinForms `TrackBar` reports `ControlType.Slider` and a `NumericUpDown`
@@ -184,6 +201,11 @@ set. The current value is readable as a *string* through `ValuePattern`; the
 minimum and maximum are not exposed at all. So a control that looks like a
 slider in the tree can still have no numeric value and no range, and stepping
 it through the accessibility API is not possible.
+
+WPF is the counter-example on the same platform: `SliderAutomationPeer` and
+`ProgressBarAutomationPeer` both implement `IRangeValueProvider`, so identical
+control types carry a value and a range there. "Is this a slider?" and "can I
+read its value?" are separate questions on Windows.
 
 ### Linux: roles are a 131-value C enum on the wire
 

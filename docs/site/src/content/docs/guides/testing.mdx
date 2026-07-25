@@ -50,14 +50,15 @@ UI Automation tree, not a fixture shaped to match the code.
 | `electron` | Chromium / Node | ✓ | — | — |
 | `egui` | Rust immediate-mode (eframe) | ✓ | ✓ | ✓ |
 | `winforms` | .NET Windows Forms | — | — | ✓ |
+| `wpf` | .NET WPF | — | — | ✓ |
 
 Across those rows, xa11y is exercised against all three platform accessibility
 backends — **AT-SPI2** on Linux, **AXUIElement** on macOS, and **UI
 Automation** on Windows — and against toolkits that report their trees in
 meaningfully different ways (retained-mode native widgets, immediate-mode
-GUIs, two distinct web renderers, and — with Windows Forms — a first-party
-Microsoft UIA provider rather than a third-party bridge). The toolkit-specific
-quirks this surfaces are documented in
+GUIs, two distinct web renderers, and — with Windows Forms and WPF — two
+first-party Microsoft UIA providers rather than third-party bridges). The
+toolkit-specific quirks this surfaces are documented in
 [Accessibility Quirks](/guides/accessibility-quirks/).
 
 ## One suite, every binding
@@ -75,7 +76,7 @@ Every push runs the suites across operating systems and toolkits in GitHub
 Actions ([`.github/workflows/ci.yml`](https://github.com/xa11y/xa11y/blob/main/.github/workflows/ci.yml)).
 The `integ` job alone is a matrix of a dozen OS × app cells (e.g.
 `ubuntu × {accesskit, qt, gtk, tauri, electron, egui}`,
-`macos × {cocoa, tauri, qt, egui}`, `windows × {qt, egui, winforms}`), each standing up
+`macos × {cocoa, tauri, qt, egui}`, `windows × {qt, egui, winforms, wpf}`), each standing up
 a headless display, accessibility bus, and the app under test before running
 the Python, JS, and CLI suites against it. Alongside it run the Rust unit and
 integration jobs per OS, a Wayland/uinput input job, bindings builds and

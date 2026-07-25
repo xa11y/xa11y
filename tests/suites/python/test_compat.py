@@ -320,9 +320,10 @@ def test_table_cells_normalize(app, app_config):
     """Table contents must normalize to table_cell on every toolkit and OS.
 
     This is the cross-platform contract behind ``table table_cell``
-    selectors: Qt's UIA DataItem+TableItem cells, AccessKit's pattern-less
-    DataItem cells (disambiguated structurally on Windows), AT-SPI
-    "table cell", and AXCell must all surface as ``table_cell``.
+    selectors: Qt's and WinForms' UIA DataItem+TableItem cells, WPF's
+    DataGrid cells (ControlType.Custom + TableItem), AccessKit's
+    pattern-less DataItem cells (disambiguated structurally on Windows),
+    AT-SPI "table cell", and AXCell must all surface as ``table_cell``.
     """
     selector = app_config.get("table_selector")
     if not selector:
@@ -561,9 +562,10 @@ def test_dialog_role(app, app_config):
     """A native toolkit dialog window must be reported with role 'dialog'.
 
     On Windows, UIA maps all top-level windows to WindowControlTypeId and
-    xa11y distinguishes dialogs via UIA_IsDialogPropertyId (set by Qt) or
-    AriaRole="dialog" (set by web/AccessKit content). This test exercises
-    the native Qt path via QDialog, which does not set AriaRole.
+    xa11y distinguishes dialogs via UIA_IsDialogPropertyId (set by Qt, and
+    by WPF through AutomationProperties.IsDialog) or AriaRole="dialog" (set
+    by web/AccessKit content). This test exercises the native path via
+    QDialog and the WPF dialog window, neither of which sets AriaRole.
 
     The test skips for toolkits that do not expose a dialog button.
     """

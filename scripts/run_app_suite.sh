@@ -11,7 +11,7 @@
 # Usage:
 #   scripts/run_app_suite.sh <app> [suite ...]
 #
-#   <app>    qt | gtk | cocoa | tauri | electron | accesskit | egui | winforms
+#   <app>    qt | gtk | cocoa | tauri | electron | accesskit | egui | winforms | wpf
 #   [suite]  python | js | cli   (default: python js cli, matching CI)
 #
 # Notes:
@@ -38,8 +38,8 @@ if [ ${#SUITES[@]} -eq 0 ]; then
 fi
 
 case "$APP" in
-    qt|gtk|cocoa|tauri|electron|accesskit|egui|winforms) ;;
-    *) echo "Unknown app: $APP (qt|gtk|cocoa|tauri|electron|accesskit|egui|winforms)" >&2; exit 2 ;;
+    qt|gtk|cocoa|tauri|electron|accesskit|egui|winforms|wpf) ;;
+    *) echo "Unknown app: $APP (qt|gtk|cocoa|tauri|electron|accesskit|egui|winforms|wpf)" >&2; exit 2 ;;
 esac
 
 has_suite() {
@@ -51,8 +51,8 @@ has_suite() {
 echo "=== xa11y integration harness: app=$APP suites=${SUITES[*]} ==="
 
 # ── Linux: display + window manager + AT-SPI ──────────────────────────
-# cocoa is macOS-only; electron is Linux-only; winforms is Windows-only.
-# Everything else is cross-OS.
+# cocoa is macOS-only; electron is Linux-only; winforms and wpf are
+# Windows-only. Everything else is cross-OS.
 if [ "$APP" = "cocoa" ] && [ "$(uname)" != "Darwin" ]; then
     echo "Cocoa tests are macOS-only — skipping on $(uname)."
     exit 0
@@ -63,8 +63,8 @@ case "$(uname)" in
     MINGW*|MSYS*|CYGWIN*) IS_WINDOWS=1 ;;
     *) IS_WINDOWS=0 ;;
 esac
-if [ "$APP" = "winforms" ] && [ "$IS_WINDOWS" = "0" ]; then
-    echo "WinForms tests are Windows-only — skipping on $(uname)."
+if { [ "$APP" = "winforms" ] || [ "$APP" = "wpf" ]; } && [ "$IS_WINDOWS" = "0" ]; then
+    echo "$APP tests are Windows-only — skipping on $(uname)."
     exit 0
 fi
 if [ "$APP" = "electron" ] && [ "$(uname)" != "Linux" ]; then
@@ -151,6 +151,10 @@ case "$APP" in
     winforms)
         echo "Building WinForms test app..."
         dotnet build test-apps/winforms
+        ;;
+    wpf)
+        echo "Building WPF test app..."
+        dotnet build test-apps/wpf
         ;;
     electron)
         if [ ! -x test-apps/electron/node_modules/.bin/electron ]; then

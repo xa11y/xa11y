@@ -571,6 +571,93 @@ APP_CONFIGS: dict[str, dict] = {
         "add_item_button_name": "Add Item",
         "remove_item_button_name": "Remove Item",
     },
+    "wpf": {
+        # The second Microsoft UI framework in the matrix (step 2 of issue
+        # #324), and the one that produces ControlType.Custom + TableItem
+        # cells — the branch of map_uia_role added in #323, which no other app
+        # in the matrix exercises. WinForms covers the DataItem cell shape.
+        #
+        # Windows-only: tests/harness/launch.py rejects it elsewhere.
+        #
+        # Unlike WinForms, WPF has AutomationProperties.IsDialog, which is
+        # exactly UIA_IsDialogPropertyId — so the native-dialog role test runs.
+        "dialog_button_name": "Open Dialog",
+        "dialog_name": "Sample Dialog",
+        "ok_button_name": "OK",
+        "cancel_button_name": "Cancel",
+        # WPF routes AutomationProperties.HelpText to UIA HelpText, one of the
+        # two properties xa11y reads as `description` (WinForms routes its
+        # AccessibleDescription to MSAA accDescription instead, which is why
+        # the WinForms config leaves this unasserted).
+        "ok_button_description": "Confirm the dialog",
+        "has_checkbox": True,
+        "checkbox_unchecked_name": "Agree to terms",
+        "checkbox_checked_name": "Subscribe",
+        "has_radio": True,
+        "radio_role": "radio_button",
+        "radio_a_name": "Option A",
+        "radio_b_name": "Option B",
+        # SliderAutomationPeer implements IRangeValueProvider, so unlike the
+        # WinForms TrackBar the value and the range are both readable and the
+        # whole slider group (compat, actions, events, errors) runs.
+        "slider_selector": 'slider[name="Volume"]',
+        "slider_initial_value": 50.0,
+        "slider_min": 0.0,
+        "slider_max": 100.0,
+        # WPF ships no spin-button control — there is no NumericUpDown or any
+        # other in-box control whose peer reports ControlType.Spinner, so the
+        # app has no widget to point at.
+        "spinbutton_selector": unsupported(
+            "WPF ships no spin-button control; no in-box control reports "
+            "ControlType.Spinner"
+        ),
+        # ProgressBarAutomationPeer also implements IRangeValueProvider.
+        "progress_bar_selector": 'progress_bar[name="Progress"]',
+        "textfield_selector": 'text_field[name="Search"]',
+        "textfield_initial_value": "hello world",
+        # Same UIA limitation the WinForms and egui configs note: there is no
+        # multiline-edit control type, so a WPF TextBox with AcceptsReturn is
+        # ControlType.Edit like any other.
+        "textarea_selector": unsupported(
+            "UIA has no distinct multiline edit control type, so a multiline "
+            "WPF TextBox is indistinguishable from a single-line one"
+        ),
+        # Table — DataGrid. The grid is ControlType.DataGrid, its rows are
+        # DataItem (DataGridItemAutomationPeer) and its cells are
+        # ControlType.Custom + the TableItem pattern
+        # (DataGridCellItemAutomationPeer), which is the Custom branch of
+        # map_uia_role in xa11y-windows/src/uia.rs. This is the only app in the
+        # matrix that produces that shape.
+        "table_selector": 'table[name="Users Table"]',
+        "table_min_cells": 4,
+        # Not asserted: DataGridCellItemAutomationPeer.GetNameCore synthesizes
+        # a localizable "<item> <column display index>" string from the row
+        # object and the column position, not the cell text.
+        "table_cell_names": None,
+        # No child accessibles under a grid cell, so nothing to reach by name.
+        "table_content_names": None,
+        # The cell text is the ValuePattern value
+        # (DataGridCellItemAutomationPeer implements IValueProvider over the
+        # column's clipboard content), which is how xa11y surfaces it.
+        "table_cell_values": ["Alice", "Admin", "Bob", "User"],
+        # The app selects cell (0, 0) with SelectionUnit=Cell. Unlike WinForms
+        # grid cells, WPF's implement ISelectionItemProvider, so this is read
+        # from SelectionItem.IsSelected rather than the MSAA state bit. Pinned
+        # by value, not name, because the synthesized cell names are not
+        # addressable (see table_cell_names).
+        "table_selected_cell_name": None,
+        "table_selected_cell_value": "Alice",
+        # Column headers are ControlType.HeaderItem
+        # (DataGridColumnHeaderAutomationPeer) named from the column's Header;
+        # test_table_headers_exposed matches on name, not role.
+        "table_header_names": ["Name", "Role"],
+        # Not yet verified unknown-free across the whole tree.
+        "expect_no_unknown_roles": False,
+        "window_name_contains": "xa11y-wpf-test-app",
+        "submit_button_name": "Submit",
+        "add_item_button_name": "Add Item",
+        "remove_item_button_name": "Remove Item",
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -749,6 +836,29 @@ def _launch_winforms() -> xa11y.App:
     )
 
 
+def _launch_wpf() -> xa11y.App:
+    # `net8.0-windows` must track TargetFramework in
+    # test-apps/wpf/xa11y-wpf-test-app.csproj.
+    project_dir = PROJECT_ROOT / "test-apps" / "wpf"
+    binary = project_dir / "bin" / "Debug" / "net8.0-windows" / "xa11y-wpf-test-app.exe"
+    if not binary.exists():
+        if sys.platform != "win32":
+            pytest.skip("WPF test app is Windows-only")
+        result = subprocess.run(
+            ["dotnet", "build", str(project_dir)],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            pytest.fail(f"Failed to build WPF test app:\n{result.stdout}\n{result.stderr}")
+    yield from launch_test_app(
+        command=[str(binary)],
+        app_names=["xa11y-wpf-test-app"],
+        content_ready_selector='button[name="OK"]',
+    )
+
+
 _LAUNCHERS = {
     "qt": _launch_qt,
     "gtk": _launch_gtk,
@@ -758,6 +868,7 @@ _LAUNCHERS = {
     "accesskit": _launch_accesskit,
     "egui": _launch_egui,
     "winforms": _launch_winforms,
+    "wpf": _launch_wpf,
 }
 
 

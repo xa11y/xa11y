@@ -7,7 +7,7 @@ between language suites.
 CLI usage:
     python tests/harness/launch.py <app> [suite ...]
 
-    <app>     one of: qt, gtk, cocoa, tauri, electron, accesskit, egui, winforms
+    <app>     one of: qt, gtk, cocoa, tauri, electron, accesskit, egui, winforms, wpf
     [suite]   optional subset: python js cli  (default: all applicable)
 
 Programmatic usage:
@@ -164,9 +164,32 @@ def _app_command(app: str) -> tuple[list[str], dict[str, str], list[str], str | 
             'button[name="OK"]',
         )
 
+    if app == "wpf":
+        if sys.platform != "win32":
+            raise ValueError("wpf app is only supported on Windows")
+        # Built by `dotnet build test-apps/wpf` (the caller's job — CI has a
+        # build step, scripts/run_app_suite.sh builds it locally). The
+        # `net8.0-windows` path segment must track TargetFramework in
+        # test-apps/wpf/xa11y-wpf-test-app.csproj.
+        binary = str(
+            PROJECT_ROOT
+            / "test-apps"
+            / "wpf"
+            / "bin"
+            / "Debug"
+            / "net8.0-windows"
+            / "xa11y-wpf-test-app.exe"
+        )
+        return (
+            [binary],
+            {},
+            ["xa11y-wpf-test-app"],
+            'button[name="OK"]',
+        )
+
     raise ValueError(
         f"Unknown app: {app!r}. "
-        f"Supported: qt, gtk, cocoa, tauri, electron, accesskit, egui, winforms"
+        f"Supported: qt, gtk, cocoa, tauri, electron, accesskit, egui, winforms, wpf"
     )
 
 
@@ -473,7 +496,17 @@ def _run_suites(
 # Public API
 # ---------------------------------------------------------------------------
 
-VALID_APPS = ("qt", "gtk", "cocoa", "tauri", "electron", "accesskit", "egui", "winforms")
+VALID_APPS = (
+    "qt",
+    "gtk",
+    "cocoa",
+    "tauri",
+    "electron",
+    "accesskit",
+    "egui",
+    "winforms",
+    "wpf",
+)
 VALID_SUITES = ("python", "js", "cli")
 DEFAULT_SUITES = list(VALID_SUITES)
 

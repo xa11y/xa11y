@@ -237,6 +237,10 @@ jobs:
           # the provider's DataItem row-vs-cell disambiguation exists for
           # framework grids like DataGridView (issues #321, #322, #324).
           - { os: windows-latest, app: winforms }
+          # WPF — the second Microsoft framework. Its DataGrid is the only app
+          # in the matrix producing ControlType.Custom + TableItem cells, the
+          # map_uia_role branch that was unit-tested only (issues #323, #324).
+          - { os: windows-latest, app: wpf }
     steps:
       - uses: actions/checkout@v7
 
@@ -306,6 +310,11 @@ jobs:
       - name: Build WinForms test app
         if: matrix.app == 'winforms'
         run: dotnet build test-apps/winforms
+
+      # ── WPF app (same preinstalled .NET SDK) ──────────────────────
+      - name: Build WPF test app
+        if: matrix.app == 'wpf'
+        run: dotnet build test-apps/wpf
 
       # ── Electron node_modules ──────────────────────────────────────
       - name: Cache Electron node_modules

@@ -74,6 +74,13 @@ const APP_CONFIG = {
     hasCheckbox: true,
     hasRadio: true,
   },
+  wpf: {
+    okButtonName: 'OK',
+    textFieldName: 'Search',      // AutomationProperties.Name = "Search"
+    minButtons: 2,
+    hasCheckbox: true,
+    hasRadio: true,
+  },
 };
 
 // Candidate app names. `scripts/run_js_tests.sh` can pre-resolve the actual
@@ -91,6 +98,7 @@ const APP_NAMES_BY_APP = {
   electron: ['xa11y-electron-test-app', 'Electron', 'xa11y'],
   egui: ['xa11y-egui-test-app'],
   winforms: ['xa11y-winforms-test-app'],
+  wpf: ['xa11y-wpf-test-app'],
 };
 
 const appEnv = process.env.XA11Y_TEST_APP || 'accesskit';
