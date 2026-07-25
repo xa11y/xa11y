@@ -1,153 +1,236 @@
-# Intentional divergence between xa11y-core's public API and its language
-# bindings. Every entry must have a rationale. Audit these periodically.
+# Contract between xa11y-core's public API and its language bindings.
 #
-# Enforced by `cargo xtask check-bindings-parity`.
+# Enforced by `cargo xtask check-bindings-parity`, which reads core's real
+# public surface from rustdoc JSON. Two rules:
+#
+#   1. Every public type in xa11y-core must be classified under [types].
+#      A new public type that nobody classified fails the check — that is
+#      the point. You cannot add public API and forget the bindings.
+#   2. For `mirrored` types, every public member must exist in both
+#      bindings, and every binding member must map to a core member,
+#      unless listed below with a reason.
+#
+# `#[doc(hidden)]` items are not public API and never need an entry.
+
+# ── Type classification ──────────────────────────────────────────────────
+
+[types]
+# Bindings expose this type and each of its members.
+mirrored = [
+    "App",
+    "Element",
+    "Event",
+    "InputSim",
+    "Locator",
+    "Screenshot",
+    "Subscription",
+]
+
+# Crosses the language boundary, but not as a class with mirrored members —
+# it becomes a primitive, a plain object, or a set of exception classes.
+opaque = [
+    { type = "Role", reason = "Roles cross the boundary as strings (`button`, `text_field`); the enum's variants are not mirrored as binding members." },
+    { type = "Error", reason = "Mapped to a hierarchy of native exception classes (XA11yError, TimeoutError, ...) rather than a single mirrored type." },
+    { type = "Diagnosis", reason = "Surfaced as structured attributes on the raised exception (selector, condition, candidates, ...), not as its own class." },
+    { type = "EventKind", reason = "Exposed as string constants (Python `EventType.FOCUS_CHANGED`, JS `EventTypeName` union) rather than a mirrored enum." },
+    { type = "StateFlag", reason = "Exposed as the string `state_flag` attribute on Event." },
+    { type = "Toggled", reason = "Exposed as the string union 'on' | 'off' | 'mixed'." },
+    { type = "Key", reason = "Keys cross the boundary as strings (`enter`, `ctrl+a`); the enum is a parsing detail." },
+    { type = "MouseButton", reason = "Exposed as the strings 'left' | 'right' | 'middle'." },
+    { type = "Rect", reason = "Python exposes a Rect class; JS returns a plain object literal typed in index.d.ts. Members are not mirrored uniformly, so they are covered by the per-binding type tests instead." },
+    { type = "TreeNode", reason = "`tree()` returns nested plain data (dicts / objects), not a mirrored node class." },
+]
+
+# Not part of the binding surface at all.
+internal = [
+    # ── Provider-facing traits: implemented by backends, not called by users ──
+    { type = "Provider", reason = "Implemented by platform backends; not user API." },
+    { type = "InputProvider", reason = "Implemented by platform backends; not user API." },
+    { type = "ScreenshotProvider", reason = "Implemented by platform backends; not user API." },
+    { type = "IntoPoint", reason = "Rust ergonomics trait for accepting (x, y) tuples or Points; bindings take plain numbers." },
+
+    # ── Selector engine internals: bindings accept selector strings ──
+    { type = "Selector", reason = "Bindings pass selector strings; the parsed representation stays in Rust." },
+    { type = "SelectorGroup", reason = "Parsed selector representation; bindings pass strings." },
+    { type = "SelectorSegment", reason = "Parsed selector representation; bindings pass strings." },
+    { type = "SimpleSelector", reason = "Parsed selector representation; bindings pass strings." },
+    { type = "AttrFilter", reason = "Parsed selector representation; bindings pass strings." },
+    { type = "Anchor", reason = "Parsed selector representation; bindings pass strings." },
+    { type = "Combinator", reason = "Parsed selector representation; bindings pass strings." },
+    { type = "MatchOp", reason = "Parsed selector representation; bindings pass strings." },
+    { type = "RoleMatch", reason = "Parsed selector representation; bindings pass strings." },
+
+    # ── Flattened into another type (see [[types.flatten]] below) ──
+    { type = "ElementData", reason = "Element derefs to ElementData; its fields are mirrored as getters on Element. See [[types.flatten]]." },
+    { type = "StateSet", reason = "Flattened into Element as individual boolean getters. See [[types.flatten]]." },
+    { type = "Keyboard", reason = "Flattened into InputSim in both bindings. See [[types.flatten]]." },
+    { type = "Mouse", reason = "Flattened into InputSim in both bindings. See [[types.flatten]]." },
+
+    # ── Event / subscription plumbing ──
+    { type = "EventReceiver", reason = "Internal channel wrapper; bindings expose Subscription's recv/iter idioms instead." },
+    { type = "CancelHandle", reason = "Internal cancellation token; bindings expose Subscription.close()." },
+    { type = "SubscriptionIter", reason = "Rust blocking iterator; bindings use __iter__ (Python) and EventEmitter (JS)." },
+    { type = "RecvStatus", reason = "Rust disconnected-vs-timeout discriminator; bindings raise exceptions instead." },
+    { type = "ElementState", reason = "Rust state enum for the generic wait_for_state; bindings expose specific wait_* methods." },
+
+    # ── Input geometry / option structs: bindings take plain params ──
+    { type = "Point", reason = "Bindings take plain x/y numbers." },
+    { type = "ScrollDelta", reason = "Bindings take plain dx/dy numbers." },
+    { type = "ClickOptions", reason = "Builder struct for Mouse::click_with; bindings take keyword/optional params." },
+    { type = "DragOptions", reason = "Builder struct for Mouse::drag_with; bindings take keyword/optional params." },
+    { type = "ClickTarget", reason = "Internal click-target discriminator for the input backends." },
+]
+
+# Types with no binding class of their own, whose members surface on another
+# type. Members listed here are REQUIRED on the target binding type — this
+# replaces what used to be dozens of per-member allowlist entries.
+[[types.flatten]]
+into = "Element"
+from = ["ElementData", "StateSet"]
+reason = "Element derefs to ElementData, and both bindings expose StateSet's booleans as getters directly on Element (element.enabled, element.visible, ...)."
+
+[[types.flatten]]
+into = "InputSim"
+from = ["Keyboard", "Mouse"]
+reason = "Both bindings flatten the keyboard and mouse sub-APIs onto InputSim (input_sim().click(), input_sim().type_text(), ...) instead of exposing sub-objects."
+
+# ── Python ───────────────────────────────────────────────────────────────
 
 [python]
-# Rust-only methods not exposed to Python. key = "Type::method".
-# Entries take the form: { method = "Type::method", reason = "why not exposed" }.
+# Core members deliberately not exposed to Python. key = "Type::member".
 rust_only = [
-    # ── App: explicit-provider plumbing ───────────────────────────────────
-    { method = "App::by_name_with", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
-    { method = "App::by_name_with_timeout", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
-    { method = "App::by_pid_with", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
-    { method = "App::by_pid_with_timeout", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
-    { method = "App::foreground_with", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
-    { method = "App::list_with", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
-    { method = "App::find_with", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection. Exposed to Python as `App.find`." },
-    { method = "App::try_find_with", reason = "Fallible-predicate variant of `find_with`; binding `App.find` routes through it and re-raises predicate errors. `_with` variants are Rust-only plumbing for explicit provider injection." },
-
-    # ── Internal constructors / plumbing accessors ────────────────────────
+    # App: explicit-provider plumbing. The binding uses the global singleton
+    # provider; `_with` variants exist for injection in Rust tests.
+    { method = "App::by_name_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "App::by_pid_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "App::foreground_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "App::list_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "App::find_with", reason = "Binding uses the singleton provider; exposed to Python as `App.find`." },
+    { method = "App::try_find_with", reason = "Fallible-predicate variant of find_with; `App.find` routes through it and re-raises predicate errors." },
     { method = "App::provider", reason = "Internal plumbing for provider implementors, not user API." },
     { method = "App::data", reason = "Internal plumbing for provider implementors, not user API." },
-    { method = "Locator::new", reason = "Internal Rust constructor; bindings construct Locators via App.locator() / module-level locator()." },
-    { method = "Locator::provider", reason = "Internal plumbing for provider implementors, not user API." },
-    { method = "Locator::root", reason = "Internal plumbing for provider implementors, not user API." },
-    { method = "Locator::nth_index", reason = "Internal plumbing for provider implementors, not user API." },
-    { method = "Element::new", reason = "Internal Rust constructor; bindings construct Elements via Locator / navigation methods." },
+
+    # Internal Rust constructors / accessors.
+    { method = "Locator::new", reason = "Internal Rust constructor; bindings build Locators via App.locator() / module-level locator()." },
+    { method = "Element::new", reason = "Internal Rust constructor; bindings obtain Elements via Locator / navigation." },
     { method = "Element::data", reason = "Internal plumbing for provider implementors, not user API." },
     { method = "Element::provider", reason = "Internal plumbing for provider implementors, not user API." },
-    { method = "Element::states", reason = "Python flattens StateSet into individual getters (enabled, visible, focused, checked, ...) instead of exposing a nested states struct." },
     { method = "Element::handle", reason = "Opaque provider handle; not part of the user-visible API." },
+    { method = "Element::states", reason = "Python flattens StateSet into individual getters (enabled, visible, ...) rather than exposing the nested struct. The individual booleans ARE required — see [[types.flatten]]." },
     { method = "Subscription::new", reason = "Internal Rust constructor; bindings create Subscriptions via App.subscribe() / Element.subscribe()." },
+    { method = "InputSim::new", reason = "Internal Rust constructor; bindings obtain an InputSim via the module-level input_sim()." },
 
-    # ── Wait / event-loop idiom differences ───────────────────────────────
-    { method = "Locator::with_timeout", reason = "Rust-only builder for a per-locator timeout override; Python uses per-call timeout parameters on every wait_* method plus the process-wide set_default_timeout() instead." },
-    { method = "Locator::wait_for_state", reason = "Rust generic state-enum wait; Python exposes specific wait_visible/wait_enabled/etc. plus predicate-based wait_until." },
-    { method = "Subscription::recv_status", reason = "Rust explicit disconnected-vs-timeout polling variant; Python uses predicate-based wait_for over typed Event receiver." },
-    { method = "Subscription::iter", reason = "Python exposes __iter__/__next__ context-manager idiom instead of an explicit blocking iterator." },
+    # Event field naming / representation.
+    { method = "Event::kind", reason = "Exposed to Python as the `event_type` string attribute rather than a nested EventKind object." },
+    { method = "Event::timestamp", reason = "A std::time::Instant — monotonic and process-local, with no meaningful cross-language representation. Deliberately not exposed." },
+
+    # Input primitives not currently bound. These are real gaps, not design
+    # decisions: the bindings expose the composite verbs (click, drag) but
+    # not the low-level half-press primitives or the options-struct variants.
+    { method = "InputSim::down", reason = "GAP: low-level key/button press-without-release is not exposed to Python. Bindings expose only composite verbs (press, click)." },
+    { method = "InputSim::up", reason = "GAP: low-level key/button release is not exposed to Python. Bindings expose only composite verbs (press, click)." },
+    { method = "InputSim::click_with", reason = "GAP: the ClickOptions variant of click is not exposed to Python; only the plain click() is bound." },
+    { method = "InputSim::drag_with", reason = "GAP: the DragOptions variant of drag is not exposed to Python; only the plain drag() is bound." },
+    { method = "InputSim::backend", reason = "Reports which platform input backend is active; diagnostic plumbing, not user API." },
+    { method = "InputSim::point_for", reason = "Internal coordinate resolution helper used by the Rust input builders." },
+    { method = "InputSim::keyboard", reason = "Sub-API accessor; bindings flatten keyboard methods onto InputSim directly." },
+    { method = "InputSim::mouse", reason = "Sub-API accessor; bindings flatten mouse methods onto InputSim directly." },
+
+    # Wait / event-loop idiom differences.
+    { method = "Locator::with_timeout", reason = "Rust-only per-locator timeout builder; Python uses per-call timeout parameters plus set_default_timeout()." },
+    { method = "Locator::wait_for_state", reason = "Rust generic state-enum wait; Python exposes wait_visible/wait_enabled/... plus predicate-based wait_until." },
+    { method = "Subscription::recv_status", reason = "Rust disconnected-vs-timeout polling variant; Python uses predicate-based wait_for." },
+    { method = "Subscription::iter", reason = "Python exposes the __iter__/__next__ context-manager idiom instead of a blocking iterator." },
 ]
-# Python-only methods not in Rust core. Python dunder methods (__repr__,
-# __str__, __eq__, __hash__, __iter__, __next__, __enter__, __exit__, __len__)
-# are filtered out automatically — no allowlist entry required.
+
+# Python members with no core counterpart. Dunder methods (__repr__, __eq__,
+# __iter__, ...) are filtered automatically and need no entry.
 python_only = [
-    # App convenience constructors wrap the `_with` variants and inject the
-    # singleton provider. The Rust equivalents live on the `AppExt` trait in
-    # the `xa11y` umbrella crate, not on `xa11y_core::App`.
-    { method = "App::by_name", reason = "Binding-level convenience over App::by_name_with using the singleton provider; mirrors `xa11y::AppExt::by_name`." },
-    { method = "App::by_pid", reason = "Binding-level convenience over App::by_pid_with using the singleton provider; mirrors `xa11y::AppExt::by_pid`." },
-    { method = "App::foreground", reason = "Binding-level convenience over App::foreground_with using the singleton provider; mirrors `xa11y::AppExt::foreground`." },
-    { method = "App::list", reason = "Binding-level convenience over App::list_with using the singleton provider; mirrors `xa11y::AppExt::list`." },
-    { method = "App::find", reason = "Binding-level convenience over App::try_find_with/find_with using the singleton provider; mirrors `xa11y::AppExt::find`. Predicate-based waited discovery over App.list()." },
+    # Convenience constructors wrapping the `_with` variants with the
+    # singleton provider. The Rust equivalents live on `xa11y::AppExt`.
+    { method = "App::by_name", reason = "Binding-level convenience over App::by_name_with; mirrors `xa11y::AppExt::by_name`." },
+    { method = "App::by_pid", reason = "Binding-level convenience over App::by_pid_with; mirrors `xa11y::AppExt::by_pid`." },
+    { method = "App::foreground", reason = "Binding-level convenience over App::foreground_with; mirrors `xa11y::AppExt::foreground`." },
+    { method = "App::list", reason = "Binding-level convenience over App::list_with; mirrors `xa11y::AppExt::list`." },
+    { method = "App::find", reason = "Binding-level convenience over App::try_find_with; mirrors `xa11y::AppExt::find`." },
 
-    # Flattened StateSet: Python exposes each boolean state directly on
-    # Element (element.enabled, element.visible, ...) instead of a nested
-    # states object. Core keeps these grouped under ElementData.states.
-    { method = "Element::enabled", reason = "Flattened from ElementData.states.enabled for Python ergonomics." },
-    { method = "Element::visible", reason = "Flattened from ElementData.states.visible for Python ergonomics." },
-    { method = "Element::focused", reason = "Flattened from ElementData.states.focused for Python ergonomics." },
-    { method = "Element::active", reason = "Flattened from ElementData.states.active for Python ergonomics." },
-    { method = "Element::checked", reason = "Flattened from ElementData.states.checked for Python ergonomics." },
-    { method = "Element::selected", reason = "Flattened from ElementData.states.selected for Python ergonomics." },
-    { method = "Element::expanded", reason = "Flattened from ElementData.states.expanded for Python ergonomics." },
-    { method = "Element::editable", reason = "Flattened from ElementData.states.editable for Python ergonomics." },
-    { method = "Element::focusable", reason = "Flattened from ElementData.states.focusable for Python ergonomics." },
-    { method = "Element::modal", reason = "Flattened from ElementData.states.modal for Python ergonomics." },
-    { method = "Element::required", reason = "Flattened from ElementData.states.required for Python ergonomics." },
-    { method = "Element::busy", reason = "Flattened from ElementData.states.busy for Python ergonomics." },
+    { method = "Element::subscribe", reason = "Binding convenience: subscribe to events for any element, delegating to provider.subscribe()." },
+    { method = "Subscription::close", reason = "Python context-manager idiom; pairs with __enter__ / __exit__ for explicit cleanup." },
 
-    # Element.subscribe is a binding convenience — core requires going through
-    # App.subscribe(), but the bindings let users subscribe to any element.
-    { method = "Element::subscribe", reason = "Binding convenience: subscribe to events for any element, delegating to the underlying provider.subscribe()." },
-
-    # Subscription.close pairs with __enter__ / __exit__ for explicit cleanup.
-    { method = "Subscription::close", reason = "Python context-manager idiom; pairs with __enter__ / __exit__ for explicit resource cleanup." },
+    # Event: core's `kind: EventKind` enum is destructured into flat string
+    # attributes at the boundary.
+    { method = "Event::event_type", reason = "Flattened from EventKind: the variant name as a string (`focus_changed`, `state_changed`, ...)." },
+    { method = "Event::state_flag", reason = "Flattened from EventKind::StateChanged payload: which state changed." },
+    { method = "Event::state_value", reason = "Flattened from EventKind::StateChanged payload: the new value of that state." },
 ]
+
+# ── JavaScript ───────────────────────────────────────────────────────────
 
 [js]
-# Rust-only methods not exposed to JS. key = "Type::method".
 rust_only = [
-    # ── App: explicit-provider plumbing ───────────────────────────────────
-    { method = "App::by_name_with", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
-    { method = "App::by_name_with_timeout", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
-    { method = "App::by_pid_with", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
-    { method = "App::by_pid_with_timeout", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
-    { method = "App::foreground_with", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
-    { method = "App::list_with", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
-    { method = "App::find_with", reason = "Binding uses the global singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection. Exposed to JS as `App.find`, implemented as a JS-side poll loop in index.js." },
-    { method = "App::try_find_with", reason = "Fallible-predicate variant of `find_with`; the JS `App.find` poll loop propagates predicate errors directly. `_with` variants are Rust-only plumbing for explicit provider injection." },
-
-    # ── Internal constructors / plumbing accessors ────────────────────────
+    { method = "App::by_name_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "App::by_pid_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "App::foreground_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "App::list_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "App::find_with", reason = "Binding uses the singleton provider; exposed to JS as `App.find`, a poll loop in index.js." },
+    { method = "App::try_find_with", reason = "Fallible-predicate variant of find_with; the JS App.find poll loop propagates predicate errors directly." },
     { method = "App::provider", reason = "Internal plumbing for provider implementors, not user API." },
     { method = "App::data", reason = "Internal plumbing for provider implementors, not user API." },
-    { method = "Locator::new", reason = "Internal Rust constructor; bindings construct Locators via App.locator() / module-level locator()." },
-    { method = "Locator::provider", reason = "Internal plumbing for provider implementors, not user API." },
-    { method = "Locator::root", reason = "Internal plumbing for provider implementors, not user API." },
-    { method = "Locator::nth_index", reason = "Internal plumbing for provider implementors, not user API." },
-    { method = "Element::new", reason = "Internal Rust constructor; bindings construct Elements via Locator / navigation methods." },
+
+    { method = "Locator::new", reason = "Internal Rust constructor; bindings build Locators via App.locator() / module-level locator()." },
+    { method = "Element::new", reason = "Internal Rust constructor; bindings obtain Elements via Locator / navigation." },
     { method = "Element::data", reason = "Internal plumbing for provider implementors, not user API." },
     { method = "Element::provider", reason = "Internal plumbing for provider implementors, not user API." },
-    { method = "Element::states", reason = "JS flattens StateSet into individual getters (enabled, visible, focused, checked, ...) instead of exposing a nested states object." },
     { method = "Element::handle", reason = "Opaque provider handle; not part of the user-visible API." },
+    { method = "Element::states", reason = "JS flattens StateSet into individual getters (enabled, visible, ...) rather than exposing the nested object. The individual booleans ARE required — see [[types.flatten]]." },
     { method = "Subscription::new", reason = "Internal Rust constructor; bindings create Subscriptions via App.subscribe() / Element.subscribe()." },
+    { method = "InputSim::new", reason = "Internal Rust constructor; bindings obtain an InputSim via the module-level inputSim()." },
 
-    # ── Wait / event-loop idiom differences ───────────────────────────────
-    { method = "Locator::with_timeout", reason = "Rust-only builder for a per-locator timeout override; JS uses per-call timeout options on every wait* method plus the process-wide setDefaultTimeout() instead." },
+    # Event field naming / representation.
+    { method = "Event::kind", reason = "Exposed to JS as the `type` string property rather than a nested EventKind object." },
+    { method = "Event::timestamp", reason = "A std::time::Instant — monotonic and process-local, with no meaningful cross-language representation. Deliberately not exposed." },
+
+    # Input primitives not currently bound. These are real gaps, not design
+    # decisions: the bindings expose the composite verbs (click, drag) but
+    # not the low-level half-press primitives or the options-struct variants.
+    { method = "InputSim::down", reason = "GAP: low-level key/button press-without-release is not exposed to JS. Bindings expose only composite verbs (press, click)." },
+    { method = "InputSim::up", reason = "GAP: low-level key/button release is not exposed to JS. Bindings expose only composite verbs (press, click)." },
+    { method = "InputSim::click_with", reason = "GAP: the ClickOptions variant of click is not exposed to JS; only the plain click() is bound." },
+    { method = "InputSim::drag_with", reason = "GAP: the DragOptions variant of drag is not exposed to JS; only the plain drag() is bound." },
+    { method = "InputSim::backend", reason = "Reports which platform input backend is active; diagnostic plumbing, not user API." },
+    { method = "InputSim::point_for", reason = "Internal coordinate resolution helper used by the Rust input builders." },
+    { method = "InputSim::keyboard", reason = "Sub-API accessor; bindings flatten keyboard methods onto InputSim directly." },
+    { method = "InputSim::mouse", reason = "Sub-API accessor; bindings flatten mouse methods onto InputSim directly." },
+
+    { method = "Locator::with_timeout", reason = "Rust-only per-locator timeout builder; JS uses per-call timeout options plus setDefaultTimeout()." },
     { method = "Locator::wait_for_state", reason = "Rust generic state-enum wait; JS exposes specific wait* helpers plus predicate-based waitUntil." },
-    { method = "Subscription::recv_status", reason = "Rust explicit disconnected-vs-timeout polling variant; JS uses predicate-based waitFor and EventEmitter model over blocking recv." },
-    { method = "Subscription::try_recv", reason = "JS exposes async EventEmitter + `start`/`drain` worker pattern instead of blocking recv/try_recv." },
-    { method = "Subscription::recv", reason = "JS exposes async EventEmitter + `start`/`drain` worker pattern instead of blocking recv/try_recv." },
-    { method = "Subscription::iter", reason = "JS exposes async EventEmitter + `start`/`drain` worker pattern instead of a blocking iterator." },
+    { method = "Subscription::recv_status", reason = "Rust disconnected-vs-timeout polling variant; JS uses waitFor and the EventEmitter model." },
+    { method = "Subscription::recv", reason = "JS exposes an async EventEmitter + start/drain worker pattern instead of blocking recv." },
+    { method = "Subscription::try_recv", reason = "JS exposes an async EventEmitter + start/drain worker pattern instead of blocking try_recv." },
+    { method = "Subscription::iter", reason = "JS exposes an async EventEmitter + start/drain worker pattern instead of a blocking iterator." },
 ]
-# JS-only methods not in Rust core. `constructor` is filtered automatically.
-js_only = [
-    # App convenience constructors mirror the Rust `xa11y::AppExt::by_name`
-    # etc. but live as static methods on the napi-generated App class.
-    { method = "App::by_name", reason = "Binding-level convenience over App::by_name_with using the singleton provider; mirrors `xa11y::AppExt::by_name`." },
-    { method = "App::by_pid", reason = "Binding-level convenience over App::by_pid_with using the singleton provider; mirrors `xa11y::AppExt::by_pid`." },
-    { method = "App::foreground", reason = "Binding-level convenience over App::foreground_with using the singleton provider; mirrors `xa11y::AppExt::foreground`." },
-    { method = "App::list", reason = "Binding-level convenience over App::list_with using the singleton provider; mirrors `xa11y::AppExt::list`." },
-    { method = "App::find", reason = "Binding-level convenience over App::try_find_with/find_with using the singleton provider; mirrors `xa11y::AppExt::find`. Implemented as a JS-side poll loop over App.list() in index.js, declared in index.d.ts." },
 
-    # App.waitForEvent is a JS-only convenience that wraps subscribe() + a
-    # one-shot waitForEvent() on the returned Subscription.
+# JS members with no core counterpart. `constructor` is filtered automatically.
+js_only = [
+    { method = "App::by_name", reason = "Binding-level convenience over App::by_name_with; mirrors `xa11y::AppExt::by_name`." },
+    { method = "App::by_pid", reason = "Binding-level convenience over App::by_pid_with; mirrors `xa11y::AppExt::by_pid`." },
+    { method = "App::foreground", reason = "Binding-level convenience over App::foreground_with; mirrors `xa11y::AppExt::foreground`." },
+    { method = "App::list", reason = "Binding-level convenience over App::list_with; mirrors `xa11y::AppExt::list`." },
+    { method = "App::find", reason = "Binding-level convenience over App::try_find_with; implemented as a poll loop in index.js, declared in index.d.ts." },
     { method = "App::wait_for_event", reason = "JS-only convenience: temporary subscription + single-event wait, declared in index.d.ts." },
 
-    # Flattened StateSet: JS exposes each boolean state directly on Element
-    # (element.enabled, element.visible, ...) instead of a nested states
-    # object. Core keeps these grouped under ElementData.states.
-    { method = "Element::enabled", reason = "Flattened from ElementData.states.enabled for JS ergonomics." },
-    { method = "Element::visible", reason = "Flattened from ElementData.states.visible for JS ergonomics." },
-    { method = "Element::focused", reason = "Flattened from ElementData.states.focused for JS ergonomics." },
-    { method = "Element::active", reason = "Flattened from ElementData.states.active for JS ergonomics." },
-    { method = "Element::checked", reason = "Flattened from ElementData.states.checked for JS ergonomics." },
-    { method = "Element::selected", reason = "Flattened from ElementData.states.selected for JS ergonomics." },
-    { method = "Element::expanded", reason = "Flattened from ElementData.states.expanded for JS ergonomics." },
-    { method = "Element::editable", reason = "Flattened from ElementData.states.editable for JS ergonomics." },
-    { method = "Element::focusable", reason = "Flattened from ElementData.states.focusable for JS ergonomics." },
-    { method = "Element::modal", reason = "Flattened from ElementData.states.modal for JS ergonomics." },
-    { method = "Element::required", reason = "Flattened from ElementData.states.required for JS ergonomics." },
-    { method = "Element::busy", reason = "Flattened from ElementData.states.busy for JS ergonomics." },
+    { method = "Element::subscribe", reason = "Binding convenience: subscribe to events for any element, delegating to provider.subscribe()." },
 
-    # Element.subscribe is a binding convenience — core requires going through
-    # App.subscribe(), but the bindings let users subscribe to any element.
-    { method = "Element::subscribe", reason = "Binding convenience: subscribe to events for any element, delegating to the underlying provider.subscribe()." },
+    # Event: core's `kind: EventKind` enum is destructured into flat string
+    # properties at the boundary.
+    { method = "Event::type", reason = "Flattened from EventKind: the variant name as a string (`focusChanged`, `stateChanged`, ...). Named `type` in JS, `event_type` in Python." },
+    { method = "Event::state_flag", reason = "Flattened from EventKind::StateChanged payload: which state changed." },
+    { method = "Event::state_value", reason = "Flattened from EventKind::StateChanged payload: the new value of that state." },
 
-    # _NativeSubscription worker-pattern helpers. These are internal plumbing
-    # for the EventEmitter-based Subscription wrapper in index.js.
+    # _NativeSubscription worker-pattern plumbing behind the EventEmitter wrapper.
     { method = "Subscription::start", reason = "JS threadsafe-function worker pattern for async event delivery; not user API." },
     { method = "Subscription::drain", reason = "JS threadsafe-function worker pattern for async event delivery; not user API." },
-    { method = "Subscription::close", reason = "JS idiom for explicit subscription teardown, exposed on both _NativeSubscription (napi) and the user-facing EventEmitter wrapper." },
+    { method = "Subscription::close", reason = "JS idiom for explicit teardown, on both _NativeSubscription and the EventEmitter wrapper." },
     { method = "Subscription::closed", reason = "JS readonly property on the EventEmitter-based Subscription wrapper." },
     { method = "Subscription::wait_for_event", reason = "JS-only EventEmitter convenience, declared in index.d.ts." },
 ]

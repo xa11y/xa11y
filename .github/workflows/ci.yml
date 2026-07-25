@@ -563,6 +563,12 @@ jobs:
         working-directory: xa11y-js
         run: cargo clippy --all-targets
 
+      # The bindings-parity check reads xa11y-core's real public API from
+      # rustdoc JSON, which is still nightly-only (`--output-format json`).
+      # Only rustdoc itself is needed, so the minimal profile is enough.
+      - name: Install nightly toolchain (rustdoc JSON)
+        run: rustup toolchain install nightly --profile minimal
+
       - name: Check bindings parity
         run: cargo xtask check-bindings-parity
 

@@ -75,6 +75,46 @@ These tenets are firm defaults, not absolutes. If a situation genuinely requires
 
 All raw CoreFoundation / AX FFI calls in `xa11y-macos/src/ax.rs` must go through the wrappers in `xa11y-macos/src/exception_safe.m`. That file wraps calls like `CFRetain`, `CFRelease`, `CFGetTypeID`, `CFNumberGetValue`, `CFBooleanGetValue`, `CFArrayGetCount`, `CFArrayGetValueAtIndex`, and `CFDictionaryGetValue` in `@try`/`@catch`. A misbehaving AX value's `-release` / `-getTypeID` can throw an `NSException` that unwinds through `extern "C"` → process abort. When adding a new CF or AX interop call, go through the `safe_*` wrapper; if one doesn't exist, add it to `exception_safe.m` first. Enforced by `cargo xtask check-macos-ffi` (run automatically as part of `cargo xtask check`), which fails the build if any raw CF/AX symbol is referenced outside a `//` comment in `ax.rs`.
 
+## Bindings Parity
+
+`cargo xtask check-bindings-parity` verifies that the Python and JS bindings mirror `xa11y-core`'s public API. It reads core's real public surface from **rustdoc JSON**, so new public API is discovered automatically rather than needing to be added to a hardcoded list.
+
+**Requires a nightly toolchain** (`--output-format json` is still unstable):
+
+```bash
+rustup toolchain install nightly --profile minimal
+```
+
+The check enforces two rules, both configured in `bindings/parity_allowlist.toml`:
+
+1. **Every public type in `xa11y-core` must be classified** under `[types]` as one of:
+   - `mirrored` — the bindings expose this type and each of its members.
+   - `opaque` — it crosses the boundary as a primitive, plain object, or exception class (`Role` as a string, `Error` as exception classes). Members are not compared.
+   - `internal` — not part of the binding surface (provider traits, selector-engine internals).
+
+   A new public type that nobody classified **fails the check**. This is the point: you cannot add public API and silently forget the bindings.
+
+2. **For `mirrored` types, members must match.** Every public core member must exist in both bindings, and every binding member must map to a core member — unless listed in `[python.rust_only]` / `[python.python_only]` (and the `[js.*]` equivalents) **with a reason**.
+
+### Flattening
+
+Some core types have no binding class of their own; their members surface on another type. Declare that with `[[types.flatten]]` rather than writing one allowlist entry per member:
+
+```toml
+[[types.flatten]]
+into = "Element"
+from = ["ElementData", "StateSet"]
+reason = "Element derefs to ElementData; both bindings expose StateSet's booleans as getters on Element."
+```
+
+Flattened members become **required** on the target binding type. Note that flattening merges by name, so two sources exposing the same member name (`Keyboard::down` and `Mouse::down`) collapse to one entry.
+
+### Notes
+
+- `#[doc(hidden)]` items are not public API and never need an allowlist entry — rustdoc excludes them.
+- Public **methods** on `mirrored` types must carry a doc comment; the binding stubs and the docs site are generated from them.
+- When rustdoc bumps its JSON format, the check fails loudly with the new version number. Verify the field reads in `xtask/src/rustdoc_api.rs` still hold, then add the version to `SUPPORTED_FORMAT_VERSIONS`.
+
 ## Pre-Commit / Pre-PR Checklist
 
 Run `cargo xtask check` to run all pre-PR checks in one command. It covers formatting, linting, unit tests, and Python bindings.

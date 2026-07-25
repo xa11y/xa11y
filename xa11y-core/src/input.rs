@@ -469,6 +469,12 @@ pub struct InputSim {
 }
 
 impl InputSim {
+    /// Build an `InputSim` over an explicit input backend.
+    ///
+    /// Most callers should use the platform-detected singleton instead —
+    /// `xa11y::input_sim()` in Rust, `input_sim()` / `inputSim()` in the
+    /// bindings. This constructor exists for tests and for embedders that
+    /// supply their own [`InputProvider`].
     pub fn new(backend: Arc<dyn InputProvider>) -> Self {
         Self { backend }
     }

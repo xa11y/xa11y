@@ -7,3 +7,7 @@ publish = false
 
 [dependencies]
 toml = { version = "1.1", default-features = false, features = ["parse", "serde"] }
+serde_json = { workspace = true }
+# `full` is required to parse whole source files (items, impl blocks, fn
+# signatures) rather than just proc-macro token streams.
+syn = { version = "3", features = ["full"] }
