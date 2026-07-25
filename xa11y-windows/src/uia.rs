@@ -112,7 +112,11 @@ impl WindowsProvider {
         if hwnd.0.is_null() {
             return Err(());
         }
-        unsafe { self.automation.ElementFromHandle(hwnd) }.map_err(|_| ())
+        // Callers fall back to the un-reacquired element on `Err`, which for a
+        // transiently-busy COM server would silently hand back an element whose
+        // AccessKit provider was never activated. Retry first so a foreign
+        // app's momentary busy-ness doesn't quietly degrade the result.
+        retry_transient(|| unsafe { self.automation.ElementFromHandle(hwnd) }).map_err(|_| ())
     }
 
     /// Find an application's root UIA element + window name by PID.
@@ -217,7 +221,7 @@ impl WindowsProvider {
         &self,
         element: &IUIAutomationElement,
     ) -> windows::core::Result<IUIAutomationElement> {
-        unsafe { element.BuildUpdatedCache(&self.batch_request) }
+        retry_transient(|| unsafe { element.BuildUpdatedCache(&self.batch_request) })
     }
 
     /// Get direct UIA children of an element with properties pre-fetched.
@@ -228,9 +232,12 @@ impl WindowsProvider {
             Ok(c) => c,
             Err(_) => return Vec::new(),
         };
-        match unsafe {
+        // An empty Vec here reads downstream as "this element has no children",
+        // so a transiently-busy provider would make a populated subtree look
+        // empty. Retry the classified-transient HRESULTs before degrading.
+        match retry_transient(|| unsafe {
             element.FindAllBuildCache(TreeScope_Children, &true_cond, &self.batch_request)
-        } {
+        }) {
             Ok(arr) => (0..uia_len(&arr))
                 .filter_map(|i| uia_get(&arr, i))
                 .collect(),
@@ -290,40 +297,88 @@ impl WindowsProvider {
 
 // ── Safe UIA helpers ────────────────────────────────────────────────────────
 
-/// Maximum number of attempts for a UIA call that keeps failing with
-/// `EVENT_E_ALL_SUBSCRIBERS_FAILED`, and the delay between attempts.
-const EVENT_SUBSCRIBER_FAILURE_ATTEMPTS: u32 = 3;
-const EVENT_SUBSCRIBER_FAILURE_RETRY_DELAY: std::time::Duration =
-    std::time::Duration::from_millis(50);
+/// Maximum number of attempts for a UIA call that keeps failing with a
+/// classified-transient HRESULT, and the delay between attempts.
+const TRANSIENT_RETRY_ATTEMPTS: u32 = 3;
+const TRANSIENT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Wrap a UIA COM call, mapping the error to xa11y Error::Platform.
+/// True for COM "the server can't take this call right now" HRESULTs.
 ///
-/// `EVENT_E_ALL_SUBSCRIBERS_FAILED` (0x80040201) is transient (see the
-/// constant's doc above): some providers (notably Qt's UIA backend) surface
-/// it from query calls like `FindAllBuildCache` even though only the
-/// notification layer hiccupped. The action paths (`press`/`toggle`/`select`)
-/// can swallow it outright because the action already completed (#169); a
-/// query needs a value, so the call is retried a few times before the error
-/// is propagated. Any other error is returned immediately — this is a retry
-/// of one classified-transient HRESULT, not a fallback (tenet 1).
-/// See: https://github.com/xa11y/xa11y/issues/257
-fn uia_call<T>(f: impl Fn() -> windows::core::Result<T>) -> Result<T> {
-    let mut attempts_left = EVENT_SUBSCRIBER_FAILURE_ATTEMPTS;
+/// App discovery reaches well beyond xa11y's own target: `get_children(None)`
+/// enumerates *every* top-level window on the desktop and makes a cross-process
+/// call into each one. Those foreign processes are ordinary applications with
+/// their own threading models, and COM refuses an incoming cross-apartment call
+/// while the target is busy:
+///
+/// - `RPC_E_CALL_REJECTED` (0x80010001) — the callee rejected the call.
+/// - `RPC_E_SERVERCALL_RETRYLATER` (0x8001010A) — the server is in a state
+///   that cannot process it, and says so explicitly.
+/// - `RPC_E_CANTCALLOUT_ININPUTSYNCCALL` (0x8001010D) — the target STA thread
+///   is dispatching an input-synchronous call (it is inside a cross-thread
+///   `SendMessage` handler), so COM will not let it call out.
+///
+/// None of these say anything about the app the caller actually asked for —
+/// an unrelated busy process on the machine must not fail their query. Windows
+/// raises them as first-chance SEH exceptions in the *calling* process before
+/// COM converts them to a failed HRESULT, which is why they surface in CI logs
+/// as `Windows fatal exception: code 0x8001010d` under pytest's faulthandler.
+/// Those lines are handled exceptions, not crashes.
+///
+/// Observed on the `winforms` Windows integ cell in #328's CI run.
+fn is_com_server_busy(e: &windows::core::Error) -> bool {
+    let code = e.code();
+    code == RPC_E_CALL_REJECTED
+        || code == RPC_E_SERVERCALL_RETRYLATER
+        || code == RPC_E_CANTCALLOUT_ININPUTSYNCCALL
+}
+
+/// The complete set of HRESULTs worth another attempt.
+///
+/// Deliberately a closed list. Every other error propagates on the first
+/// attempt, so this stays a retry of specifically-classified transient
+/// failures rather than a fallback chain (tenet 1).
+fn is_transient(e: &windows::core::Error) -> bool {
+    is_event_subscriber_failure(e) || is_com_server_busy(e)
+}
+
+/// Retry a COM call while it fails transiently, preserving the raw HRESULT.
+///
+/// Used by the call sites that need the original `windows::core::Error` (or
+/// that degrade rather than propagate). [`uia_call`] wraps this for the common
+/// case of mapping into [`Error::Platform`].
+fn retry_transient<T>(f: impl Fn() -> windows::core::Result<T>) -> windows::core::Result<T> {
+    let mut attempts_left = TRANSIENT_RETRY_ATTEMPTS;
     loop {
         attempts_left -= 1;
         match f() {
             Ok(v) => return Ok(v),
-            Err(e) if is_event_subscriber_failure(&e) && attempts_left > 0 => {
-                std::thread::sleep(EVENT_SUBSCRIBER_FAILURE_RETRY_DELAY);
+            Err(e) if is_transient(&e) && attempts_left > 0 => {
+                std::thread::sleep(TRANSIENT_RETRY_DELAY);
             }
-            Err(e) => {
-                return Err(Error::Platform {
-                    code: e.code().0 as i64,
-                    message: e.to_string(),
-                })
-            }
+            Err(e) => return Err(e),
         }
     }
+}
+
+/// Wrap a UIA COM call, mapping the error to xa11y Error::Platform.
+///
+/// Two families of HRESULT are retried before the error is propagated:
+///
+/// `EVENT_E_ALL_SUBSCRIBERS_FAILED` (0x80040201) — some providers (notably
+/// Qt's UIA backend) surface it from query calls like `FindAllBuildCache` even
+/// though only the notification layer hiccupped. The action paths
+/// (`press`/`toggle`/`select`) can swallow it outright because the action
+/// already completed (#169); a query needs a value, so it is retried.
+/// See: https://github.com/xa11y/xa11y/issues/257
+///
+/// The COM server-busy family — see [`is_com_server_busy`].
+///
+/// Any other error is returned immediately.
+fn uia_call<T>(f: impl Fn() -> windows::core::Result<T>) -> Result<T> {
+    retry_transient(f).map_err(|e| Error::Platform {
+        code: e.code().0 as i64,
+        message: e.to_string(),
+    })
 }
 
 /// Read a BSTR VARIANT property from the element's pre-fetched snapshot.
@@ -3216,14 +3271,14 @@ mod tests {
         let calls = std::cell::Cell::new(0u32);
         let result = uia_call(|| {
             calls.set(calls.get() + 1);
-            if calls.get() < EVENT_SUBSCRIBER_FAILURE_ATTEMPTS {
+            if calls.get() < TRANSIENT_RETRY_ATTEMPTS {
                 Err(subscriber_failure())
             } else {
                 Ok("tree")
             }
         });
         assert_eq!(result.unwrap(), "tree");
-        assert_eq!(calls.get(), EVENT_SUBSCRIBER_FAILURE_ATTEMPTS);
+        assert_eq!(calls.get(), TRANSIENT_RETRY_ATTEMPTS);
     }
 
     #[test]
@@ -3236,7 +3291,7 @@ mod tests {
             calls.set(calls.get() + 1);
             Err(subscriber_failure())
         });
-        assert_eq!(calls.get(), EVENT_SUBSCRIBER_FAILURE_ATTEMPTS);
+        assert_eq!(calls.get(), TRANSIENT_RETRY_ATTEMPTS);
         match result {
             Err(Error::Platform { code, .. }) => {
                 assert_eq!(code, EVENT_E_ALL_SUBSCRIBERS_FAILED.0 as i64);
@@ -3262,5 +3317,92 @@ mod tests {
             Err(Error::Platform { code, .. }) => assert_eq!(code, e_fail.0 as i64),
             other => panic!("expected Error::Platform, got {other:?}"),
         }
+    }
+
+    // ── COM server-busy retry ───────────────────────────────────────────────
+    //
+    // App discovery calls cross-process into every top-level window on the
+    // desktop, so a busy *unrelated* application used to fail the caller's
+    // query outright: uia_call propagated the HRESULT as Error::Platform, and
+    // App::find's poll_lookup only retries SelectorNotMatched.
+
+    /// The three HRESULTs that mean "busy, try again", with the shape of the
+    /// situation each one comes from.
+    const SERVER_BUSY_CODES: &[(windows::core::HRESULT, &str)] = &[
+        (RPC_E_CALL_REJECTED, "callee rejected the call"),
+        (RPC_E_SERVERCALL_RETRYLATER, "server says retry later"),
+        (
+            RPC_E_CANTCALLOUT_ININPUTSYNCCALL,
+            "target STA is in an input-synchronous call",
+        ),
+    ];
+
+    #[test]
+    fn com_server_busy_codes_are_classified_transient() {
+        for (code, what) in SERVER_BUSY_CODES {
+            let err = code.ok().unwrap_err();
+            assert!(is_com_server_busy(&err), "{what} ({code:?}) must be busy");
+            assert!(is_transient(&err), "{what} ({code:?}) must be transient");
+        }
+    }
+
+    #[test]
+    fn uia_call_retries_each_server_busy_code_then_succeeds() {
+        for (code, what) in SERVER_BUSY_CODES {
+            let calls = std::cell::Cell::new(0u32);
+            let result = uia_call(|| {
+                calls.set(calls.get() + 1);
+                if calls.get() < TRANSIENT_RETRY_ATTEMPTS {
+                    Err(code.ok().unwrap_err())
+                } else {
+                    Ok("apps")
+                }
+            });
+            assert_eq!(
+                result.unwrap(),
+                "apps",
+                "{what} should have been ridden out"
+            );
+            assert_eq!(calls.get(), TRANSIENT_RETRY_ATTEMPTS, "{what}");
+        }
+    }
+
+    #[test]
+    fn uia_call_propagates_persistent_server_busy() {
+        // Retrying is bounded: a server that is busy forever is a real
+        // failure and must reach the caller rather than spin.
+        let calls = std::cell::Cell::new(0u32);
+        let result: Result<()> = uia_call(|| {
+            calls.set(calls.get() + 1);
+            Err(RPC_E_CANTCALLOUT_ININPUTSYNCCALL.ok().unwrap_err())
+        });
+        assert_eq!(calls.get(), TRANSIENT_RETRY_ATTEMPTS);
+        match result {
+            Err(Error::Platform { code, .. }) => {
+                assert_eq!(code, RPC_E_CANTCALLOUT_ININPUTSYNCCALL.0 as i64);
+            }
+            other => panic!("expected Error::Platform, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn retry_transient_preserves_the_raw_hresult() {
+        // The degrading call sites (reacquire_via_hwnd, populate_cache,
+        // uia_children) need the COM error itself, not Error::Platform.
+        let err = retry_transient::<()>(|| Err(RPC_E_CALL_REJECTED.ok().unwrap_err()))
+            .expect_err("should still fail once attempts are exhausted");
+        assert_eq!(err.code(), RPC_E_CALL_REJECTED);
+    }
+
+    #[test]
+    fn retry_transient_does_not_retry_other_errors() {
+        let calls = std::cell::Cell::new(0u32);
+        let e_fail = windows::core::HRESULT(0x80004005u32 as i32);
+        let result: windows::core::Result<()> = retry_transient(|| {
+            calls.set(calls.get() + 1);
+            Err(e_fail.ok().unwrap_err())
+        });
+        assert_eq!(calls.get(), 1);
+        assert_eq!(result.unwrap_err().code(), e_fail);
     }
 }
