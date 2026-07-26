@@ -62,12 +62,11 @@ FocusChanged  app="Calculator"  target=text_field "Display"
 
 xa11y supports subscribing to these event streams per-app via `app.subscribe()`.
 
-## How does xa11y compare to
+## How does xa11y compare to other tools?
 
-- **[AccessKit](https://accesskit.dev/)** — AccessKit is for *adding* accessibility to an app. xa11y is for *reading* accessibility data from the outside.
-- **[Playwright](https://playwright.dev/)** — Similar concept, specific to web browsers. Major design inspiration for xa11y's Locator pattern and selector syntax.
-- **[pyatspi2](https://gitlab.gnome.org/GNOME/pyatspi2) / direct UIAutomation** — Single-platform libraries. xa11y wraps these underlying APIs into one cross-platform interface.
-- **[agent-desktop](https://github.com/crowecawcaw/agent-desktop)** — CLI tool built on xa11y for AI agents to read and interact with desktops via accessibility data.
+xa11y reads accessibility trees from the outside, across all three desktop platforms, through one API. That distinguishes it from single-platform libraries like pywinauto and FlaUI, from pixel-matching tools like SikuliX, and from [AccessKit](https://accesskit.dev/), which *publishes* a tree rather than consuming one.
+
+See the [comparison page](/compare/) for the full landscape, capability tables, and when to choose something else.
 
 ## Concepts
 

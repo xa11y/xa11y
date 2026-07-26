@@ -1,0 +1,122 @@
+---
+title: Comparison
+description: How xa11y compares to pywinauto, Appium, FlaUI, Terminator, SikuliX, Playwright, and other desktop UI automation tools — and when to choose something else.
+---
+
+xa11y drives native desktop applications by reading and acting on the **accessibility tree** — the same data screen readers consume — through one API on macOS, Windows, and Linux.
+
+If the application you need to automate does not expose an accessibility tree, xa11y cannot help you, and no amount of configuration will change that. Games, canvas-rendered UIs, and apps built on toolkits that were never wired up for accessibility are all in this category. Skip to [when not to use xa11y](#when-not-to-use-xa11y) — the honest answer there is a pixel- or vision-based tool.
+
+## Choose by what you're doing
+
+| If you are… | Consider | Why |
+| --- | --- | --- |
+| Testing a desktop app on **more than one OS** from one test suite | **xa11y** | One selector language and one API across AXUIElement, UI Automation, and AT-SPI2. This is the case it exists for. |
+| Testing a **Windows-only** app, and your team writes C# | [FlaUI](https://github.com/FlaUI/FlaUI) | A thin, well-maintained UIA wrapper with far more Windows-specific surface area than xa11y exposes. |
+| Testing a **Windows-only** app, and your team writes Python | [pywinauto](https://pywinauto.readthedocs.io/) or xa11y | pywinauto has a decade of accumulated Windows knowledge and a much larger body of examples. Choose xa11y if you expect to add macOS or Linux later. |
+| Already invested in **Appium/WebDriver** infrastructure | [Appium](https://appium.io/) | If you have a Selenium grid, reporting, and a team fluent in WebDriver, that consistency is worth more than a nicer local API. |
+| Building a **computer-use agent** on Windows | [Terminator](https://github.com/mediar-ai/terminator) or xa11y | Terminator is Windows-only but ships an MCP server and agent-shaped tooling. xa11y is the choice if the agent must also run on macOS or Linux. |
+| Automating an app with **no accessibility support** | [SikuliX](https://sikulix.github.io/), a VLM agent | No accessibility tool can drive what is not exposed. Match pixels or reason over screenshots. |
+| Auditing an app for **accessibility conformance** | [axe](https://github.com/dequelabs/axe-core), [Accessibility Insights](https://accessibilityinsights.io/) | xa11y reads the accessibility tree to automate apps; it does not evaluate that tree against WCAG or produce conformance reports. |
+| Adding accessibility **to** an app you are writing | [AccessKit](https://accesskit.dev/) | The other side of the same interface. AccessKit publishes a tree; xa11y consumes one. |
+
+## The fork in the road: how a tool sees the UI
+
+Nearly every meaningful difference between these tools follows from one choice — what they treat as the source of truth about the screen.
+
+**Accessibility tree.** The app publishes a structured description of itself: roles, names, values, states, bounds. Elements are addressed semantically (`button[name='Submit']`), so layout changes, themes, resolutions, and translations-in-progress don't break your selectors, and matching costs microseconds. The cost is a hard dependency on the app's accessibility support. Where it's absent or wrong, you get nothing. xa11y, pywinauto, FlaUI, Appium, dogtail, and Terminator all live here.
+
+**Pixel matching.** The tool screenshots the screen and looks for a reference image. It works on literally anything visible, including remote desktops and video. It also breaks on theme changes, DPI changes, font rendering differences, and antialiasing, and it cannot read a value it wasn't given a picture of. SikuliX and PyAutoGUI live here.
+
+**Vision-language models.** A model looks at a screenshot and decides where to click. Maximum flexibility, no reference images needed, and it tolerates UI it has never seen. It is also non-deterministic, costs a model call per step, and is orders of magnitude slower than a tree query. Increasingly these are used *with* an accessibility tree rather than instead of one — the tree gives exact bounds and stable identifiers, the model handles intent.
+
+The families are not mutually exclusive, and the strongest setups mix them: drive with the accessibility tree, fall back to pixels for the one canvas widget that has no tree. What matters is knowing which mechanism you are relying on for any given step. xa11y is deliberate about this line — its [input simulation](/guides/input/) is a separate surface that never silently substitutes for an accessibility action, so a passing test can't quietly degrade into blind coordinate clicking.
+
+## The landscape
+
+Accessibility-driven tools, which is where xa11y competes directly:
+
+| Tool | Platforms | Languages | Underlying API | License |
+| --- | --- | --- | --- | --- |
+| **xa11y** | macOS, Windows, Linux | Rust, Python, JavaScript | AXUIElement, UI Automation, AT-SPI2 | MIT |
+| [Appium](https://appium.io/) (Windows + Mac2 drivers) | macOS, Windows | Any WebDriver client | WinAppDriver, XCTest | Apache-2.0 |
+| [Terminator](https://github.com/mediar-ai/terminator) | Windows | Rust, Python, TypeScript | UI Automation | MIT |
+| [pywinauto](https://pywinauto.readthedocs.io/) | Windows | Python | Win32, UI Automation | BSD-3-Clause |
+| [FlaUI](https://github.com/FlaUI/FlaUI) | Windows | C#/.NET | UI Automation (UIA2/UIA3) | MIT |
+| [dogtail](https://gitlab.com/dogtail/dogtail) | Linux | Python | AT-SPI2 | GPL-2.0 |
+| [atomacos](https://github.com/daveenguyen/atomacos) | macOS | Python | AXUIElement | GPL-3.0 |
+
+Pixel- and vision-based tools, which see the screen instead of the tree:
+
+| Tool | Platforms | Mechanism | Reads values? | License |
+| --- | --- | --- | --- | --- |
+| [SikuliX](https://sikulix.github.io/) | macOS, Windows, Linux | OpenCV image matching + OCR | Via OCR only | MIT |
+| [PyAutoGUI](https://github.com/asweigart/pyautogui) | macOS, Windows, Linux | Input synthesis + basic image matching | No | BSD-3-Clause |
+| VLM computer-use agents | Any | Model reasoning over screenshots | Via the model | Varies |
+
+Commercial suites occupy a different category — they bundle a recorder, an IDE, reporting, and support, and are licensed per seat. [Squish](https://www.qt.io/product/quality-assurance/squish) is cross-platform with unusually deep Qt integration; [Ranorex](https://www.ranorex.com/) and [TestComplete](https://smartbear.com/product/testcomplete/) are Windows-centric and combine accessibility, pixel, and injected-agent techniques. Their feature sets are documented behind sales processes, so this page does not attempt a feature-level comparison — evaluate them directly if a bundled recorder and vendor support are what you are buying.
+
+## Capabilities
+
+Comparing xa11y against the accessibility-driven tools closest to it in scope:
+
+| | xa11y | Appium | Terminator | pywinauto | FlaUI |
+| --- | --- | --- | --- | --- | --- |
+| macOS / Windows / Linux | ● ● ● | ● ● ○ | ○ ● ○ | ○ ● ○ | ○ ● ○ |
+| Single API across platforms | ● | ● | n/a | n/a | n/a |
+| CSS-like selectors | ● | XPath | ● | Property dicts | Conditions API |
+| Auto-waiting on actions | ● | Configurable | ● | Explicit | Explicit |
+| Accessibility event streams | ● | ○ | ○ | ○ | ● |
+| Screenshots | ● | ● | ● | ● | ● |
+| Input simulation | Separate surface | Merged | Merged | Merged | Merged |
+| Runs without a browser/driver server | ● | ○ | ● | ● | ● |
+| Ecosystem size and maturity | ○ | ● | ◐ | ● | ● |
+
+● full · ◐ partial · ○ none
+
+Two rows deserve elaboration, one in each direction.
+
+**Auto-waiting.** A `Locator` in xa11y is a lazy query, not a captured handle. Every action re-resolves the selector and waits for the element to be visible and enabled before acting, which removes the retry-loop scaffolding that desktop test suites usually accumulate. This is borrowed wholesale from [Playwright's locator model](https://playwright.dev/docs/locators). Tools that hand you a captured element instead make staleness your problem — a real source of flake when the app redraws between find and click.
+
+**Maturity.** xa11y is at v0.12 and its API is not yet stable. pywinauto and FlaUI have years of production use, deeper per-platform coverage, more Stack Overflow answers, and more people who have already hit your bug. If you are automating one Windows app and will never need another platform, that accumulated knowledge is worth more than anything on this page. Choosing xa11y is a bet that one cross-platform API saves you more than a mature single-platform one.
+
+## Framework coverage
+
+The practical question for an accessibility-driven tool is not which platforms it claims but which UI toolkits actually work, since coverage depends on each toolkit's accessibility implementation. xa11y runs its integration suite against real applications in CI on every commit:
+
+| Toolkit | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| Qt | ● | ● | ● |
+| GTK4 | ● | — | — |
+| Tauri (WebKit/WebView2) | ● | ● | — |
+| Electron | ● | — | — |
+| egui / AccessKit | ● | ● | ● |
+| Cocoa / AppKit | — | ● | — |
+| WinForms | — | — | ● |
+| WPF | — | — | ● |
+
+A dash means untested in CI, not known-broken — most combinations work, but only the marked cells are verified continuously. The [Accessibility Quirks](/guides/accessibility-quirks/) guide documents the per-toolkit behaviour that these tests pin down.
+
+## When not to use xa11y
+
+- **The app exposes no accessibility tree.** Games, canvas-drawn interfaces, custom-rendered engines, and applications whose toolkit has accessibility disabled. Run `xa11y tree --app <name>` to check in a few seconds; if it comes back empty or shows a single opaque window, use SikuliX or a VLM agent.
+- **You need a recorder or a low-code interface.** xa11y is a library. Ranorex, TestComplete, and Squish sell exactly this.
+- **You are testing a website.** Use [Playwright](https://playwright.dev/) or Selenium. They test the DOM directly, control the browser lifecycle, and intercept network traffic — none of which xa11y does. xa11y drives a browser only as another desktop app.
+- **You need API stability today.** v0.12 is pre-1.0 and breaking changes still land in minor releases.
+- **You are on Windows only, permanently.** FlaUI and pywinauto expose more of UI Automation than xa11y does.
+- **You need to evaluate accessibility conformance.** xa11y reports what the tree says, not whether it complies with WCAG or ARIA authoring practices.
+
+## Related but not competing
+
+- **[AccessKit](https://accesskit.dev/)** — a library for *publishing* an accessibility tree from your app. xa11y *reads* trees. They compose: xa11y's own egui and winit test applications are AccessKit-backed, which is how the same suite runs against a pure-Rust GUI on all three platforms.
+- **[Playwright](https://playwright.dev/)** — browser automation. Not a competitor, but the major design influence on xa11y's `Locator` pattern, auto-waiting, and selector syntax.
+- **[agent-desktop](https://agent-desktop.dev)** — a CLI built *on* xa11y for AI agents that read and control desktops. If you want an agent tool rather than a library, start there.
+- **RPA platforms** — UiPath and Power Automate Desktop solve business process automation, including orchestration, scheduling, and licensing. Overlapping techniques, different product category.
+
+## How these claims were checked
+
+Verified July 2026 against: xa11y 0.12.0, FlaUI 5.0.0, pywinauto 0.6.x, Appium Windows and Mac2 drivers, Terminator (`terminator-rs`), dogtail 1.x, SikuliX 2.x.
+
+Two details worth knowing if you are evaluating Appium on Windows: its Windows driver proxies to Microsoft's **WinAppDriver**, which has had no release since 2022, though the Appium-side driver itself remains actively maintained. And the **Mac2** driver is built on XCTest, so it requires Xcode on every machine that runs tests — a meaningful constraint for CI images.
+
+Corrections are welcome — comparisons rot, and a wrong claim about another project is the most expensive kind of error on a page like this. Please [open an issue](https://github.com/xa11y/xa11y/issues).

@@ -45,6 +45,10 @@ export default defineConfig({
             { label: "Testing & Quality", slug: "guides/testing" },
           ],
         },
+        // Top-level rather than inside "Docs": the comparison page is an
+        // entry point for people evaluating xa11y against other tools, not
+        // reference material for people already using it.
+        { label: "Compare", slug: "compare" },
         {
           label: "API",
           items: [
