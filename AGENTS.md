@@ -187,6 +187,19 @@ Interface declarations are the other case: `declare module './native.js' { inter
 
 `native.d.ts` is generated, so a `MouseButton` parameter arrives as plain `string`. Add an entry to `xa11y-js/scripts/patch-native-dts.mjs` narrowing it to a literal union (`MouseButtonName`, `AnchorName`, …), and export the alias from `index.d.ts`. Each entry is a guarded substitution — `all: N` asserts the occurrence count, so a new call site that quietly picks up the wide type fails the build instead of shipping.
 
+### Signatures are checked on the Python side only
+
+The parity check compares member **names**. Signature drift — an added parameter, a renamed keyword, a changed default — is caught by `test_stub_method_signatures_match_runtime` in `xa11y-python/tests/test_typing.py`.
+
+It works because PyO3 emits a `__text_signature__` for every method, so `inspect.signature` reports the compiled module's real parameter names, keyword-only split, and defaults. The stub is then checkable against the thing it claims to describe, with no Rust parsing and no extra dependency. Dunders are compared by arity only: the interpreter invokes them positionally, and PyO3 owns the rendered signature of slot-backed ones (`Rect.__eq__` reports its parameter as `value` whatever the Rust source calls it).
+
+Two things it deliberately does not do:
+
+- **Types are not compared.** PyO3 attaches no annotations, so `param: str` in the stub has no runtime counterpart. Catching a wrong *type* still needs the Rust→PyO3 mapping table.
+- **There is no JS equivalent.** napi-generated prototype methods report `Function.length === 0`, so there is no arity to compare — and `native.d.ts` is generated from the Rust anyway, so only the hand-written `index.d.ts` wrapper layer could drift. `__test__/unit/typing.test.js` covers that at name level.
+
+Generating `_native.pyi` instead (with `pyo3-stub-gen`) is blocked: every version fails to compile against a PyO3 built with `abi3-py39`, which is what lets one wheel serve every Python version. See the notes on issue #331.
+
 ### Notes
 
 - `#[doc(hidden)]` items are not public API and never need an allowlist entry — rustdoc excludes them.

@@ -2,6 +2,7 @@
 
 import ast
 import importlib.resources as resources
+import inspect
 
 import xa11y
 from xa11y import _native
@@ -190,3 +191,163 @@ def test_stub_file_exists():
     files = resources.files("xa11y")
     stub = files / "_native.pyi"
     assert stub.is_file()
+
+
+# ── Signature parity ─────────────────────────────────────────────────────────
+#
+# The checks above compare member *names*. Renaming `Screenshot.to_png` to
+# `to_pngg` is caught there; changing only its signature was caught by
+# nothing — not by `cargo xtask check-bindings-parity` (names only) and not
+# by a type checker, which has no source of truth beyond the stub itself.
+#
+# PyO3 emits a `__text_signature__` for every method, so `inspect.signature`
+# reports the real parameter names, keyword-only split, and default values of
+# the compiled module. That makes the stub checkable against the thing it
+# claims to describe, with no Rust parsing and no extra dependency.
+#
+# What this does NOT compare is *types*: PyO3 attaches no annotations, so
+# `param: str` in the stub has no runtime counterpart. Catching a wrong type
+# annotation needs the Rust->PyO3 type-mapping table tracked separately.
+
+
+def _normalise_default(value: object) -> str:
+    """Render a runtime default the way ``ast.unparse`` renders a stub one."""
+    if value is Ellipsis:
+        return "..."
+    return repr(value)
+
+
+def _stub_shape(fn: ast.FunctionDef) -> tuple[list[str], list[str], dict[str, str]]:
+    """Positional names, keyword-only names, and defaults declared in the stub."""
+    args = fn.args
+    positional = [p.arg for p in args.args if p.arg not in ("self", "cls")]
+    keyword_only = sorted(p.arg for p in args.kwonlyargs)
+
+    defaults: dict[str, str] = {}
+    # Defaults align to the *tail* of the positional list.
+    for param, default in zip(args.args[len(args.args) - len(args.defaults) :], args.defaults):
+        defaults[param.arg] = ast.unparse(default)
+    for param, default in zip(args.kwonlyargs, args.kw_defaults):
+        if default is not None:
+            defaults[param.arg] = ast.unparse(default)
+    return positional, keyword_only, defaults
+
+
+def _runtime_shape(fn: object) -> tuple[list[str], list[str], dict[str, str]] | None:
+    """The same shape, read off the compiled module. ``None`` when PyO3
+    exposes no signature (slot wrappers without a text signature)."""
+    try:
+        signature = inspect.signature(fn)  # type: ignore[arg-type]
+    except (ValueError, TypeError):
+        return None
+
+    positional: list[str] = []
+    keyword_only: list[str] = []
+    defaults: dict[str, str] = {}
+    for name, param in signature.parameters.items():
+        if name in ("self", "cls"):
+            continue
+        if param.kind is param.KEYWORD_ONLY:
+            keyword_only.append(name)
+        elif param.kind is param.VAR_POSITIONAL:
+            positional.append(f"*{name}")
+        elif param.kind is param.VAR_KEYWORD:
+            keyword_only.append(f"**{name}")
+        else:
+            positional.append(name)
+        if param.default is not param.empty:
+            defaults[name] = _normalise_default(param.default)
+    return positional, sorted(keyword_only), defaults
+
+
+def _is_property(fn: ast.FunctionDef) -> bool:
+    return any(isinstance(d, ast.Name) and d.id == "property" for d in fn.decorator_list)
+
+
+def _signature_problems(label: str, stub: ast.FunctionDef, runtime: object) -> list[str]:
+    shape = _runtime_shape(runtime)
+    if shape is None:
+        return []
+    rt_positional, rt_keyword_only, rt_defaults = shape
+    st_positional, st_keyword_only, st_defaults = _stub_shape(stub)
+
+    # Dunders are invoked positionally by the interpreter, and PyO3 owns the
+    # rendered signature of slot-backed ones — `Rect.__eq__` reports its
+    # parameter as `value` no matter what the Rust source calls it. Compare
+    # how many parameters they take and leave the naming alone.
+    if stub.name.startswith("__") and stub.name.endswith("__"):
+        if len(rt_positional) != len(st_positional):
+            return [
+                f"{label}: takes {len(rt_positional)} argument(s), "
+                f"stub declares {len(st_positional)}"
+            ]
+        return []
+
+    problems = []
+    if rt_positional != st_positional:
+        problems.append(
+            f"{label}: positional parameters are {rt_positional}, stub declares {st_positional}"
+        )
+    if rt_keyword_only != st_keyword_only:
+        problems.append(
+            f"{label}: keyword-only parameters are {rt_keyword_only}, "
+            f"stub declares {st_keyword_only}"
+        )
+    if rt_defaults != st_defaults:
+        problems.append(f"{label}: defaults are {rt_defaults}, stub declares {st_defaults}")
+    return problems
+
+
+def test_stub_method_signatures_match_runtime():
+    """Every method the stub declares must have the signature the compiled
+    module actually exposes — parameter names, keyword-only split, defaults.
+
+    Members missing from one side entirely are the other tests' job; this one
+    compares the ones both sides agree exist.
+    """
+    tree = _load_stub_tree()
+    problems: list[str] = []
+    compared = 0
+
+    for node in tree.body:
+        if not isinstance(node, ast.ClassDef):
+            continue
+        runtime_cls = getattr(_native, node.name, None)
+        if runtime_cls is None:
+            continue
+        for item in node.body:
+            if not isinstance(item, ast.FunctionDef) or _is_property(item):
+                continue
+            runtime_fn = getattr(runtime_cls, item.name, None)
+            if runtime_fn is None:
+                continue
+            compared += 1
+            problems.extend(_signature_problems(f"{node.name}.{item.name}", item, runtime_fn))
+
+    # A refactor that stopped resolving runtime members would otherwise make
+    # this test pass by comparing nothing at all.
+    assert compared > 50, f"only compared {compared} methods; the lookup is probably broken"
+    assert not problems, "stub signatures disagree with the native module:\n  " + "\n  ".join(
+        problems
+    )
+
+
+def test_stub_function_signatures_match_runtime():
+    """The same check for module-level functions."""
+    tree = _load_stub_tree()
+    problems: list[str] = []
+    compared = 0
+
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        runtime_fn = getattr(_native, node.name, None)
+        if runtime_fn is None:
+            continue
+        compared += 1
+        problems.extend(_signature_problems(node.name, node, runtime_fn))
+
+    assert compared >= 5, f"only compared {compared} functions; the lookup is probably broken"
+    assert not problems, "stub signatures disagree with the native module:\n  " + "\n  ".join(
+        problems
+    )
