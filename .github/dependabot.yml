@@ -1,57 +1,73 @@
 version: 2
+
+# One grouped pull request per ecosystem, per week, all landing Monday 06:00 UTC.
+#
+# Dependabot cannot open a single pull request spanning more than one
+# package-ecosystem — a cargo bump and an npm bump are resolved by different
+# tooling against different lockfiles, so they can never share a branch. Four
+# entries is therefore the floor. Within each entry, `directories` collapses
+# every lockfile that ecosystem owns into one update run, and a catch-all
+# `groups` pattern collapses every dependency in that run into one PR.
 updates:
   # ── Rust ───────────────────────────────────────────────────────────
-  - package-ecosystem: "cargo"
-    directory: "/"
-    schedule:
-      interval: "weekly"
-
   # The Tauri and egui test apps are excluded from the workspace, so they
-  # carry their own committed lockfiles. Give each its own cargo entry so
-  # Dependabot proposes (and CI tests) their updates instead of CI silently
+  # carry their own committed lockfiles. Listing them here keeps Dependabot
+  # proposing (and CI testing) their updates instead of CI silently
   # re-resolving — and breaking — on an unpinned transitive release.
   - package-ecosystem: "cargo"
-    directory: "/test-apps/tauri"
+    directories:
+      - "/"
+      - "/test-apps/tauri"
+      - "/test-apps/egui"
     schedule:
       interval: "weekly"
-
-  - package-ecosystem: "cargo"
-    directory: "/test-apps/egui"
-    schedule:
-      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    groups:
+      cargo:
+        patterns:
+          - "*"
 
   # ── GitHub Actions ─────────────────────────────────────────────────
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
 
   # ── npm ────────────────────────────────────────────────────────────
   # JS bindings, the docs site, and the Electron test app each carry their
-  # own lockfile, so Dependabot needs an entry per directory.
+  # own lockfile.
   - package-ecosystem: "npm"
-    directory: "/xa11y-js"
+    directories:
+      - "/xa11y-js"
+      - "/docs/site"
+      - "/test-apps/electron"
     schedule:
       interval: "weekly"
-
-  - package-ecosystem: "npm"
-    directory: "/docs/site"
-    schedule:
-      interval: "weekly"
-
-  - package-ecosystem: "npm"
-    directory: "/test-apps/electron"
-    schedule:
-      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    groups:
+      npm:
+        patterns:
+          - "*"
 
   # ── Python ─────────────────────────────────────────────────────────
   # Shared integration-test requirements and the Python bindings package.
   - package-ecosystem: "pip"
-    directory: "/tests"
+    directories:
+      - "/tests"
+      - "/xa11y-python"
     schedule:
       interval: "weekly"
-
-  - package-ecosystem: "pip"
-    directory: "/xa11y-python"
-    schedule:
-      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+    groups:
+      pip:
+        patterns:
+          - "*"
