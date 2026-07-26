@@ -28,7 +28,7 @@ jobs:
       - name: Set up Rust
         uses: ./.github/actions/setup-rust
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -146,7 +146,7 @@ jobs:
       - name: Set up Rust
         uses: ./.github/actions/setup-rust
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -178,7 +178,7 @@ jobs:
       - name: Set up Rust
         uses: ./.github/actions/setup-rust
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -249,7 +249,7 @@ jobs:
         with:
           cache-key: integ
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -476,7 +476,7 @@ jobs:
         with:
           cache-key: examples
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -639,7 +639,7 @@ jobs:
           setup-display: "false"
           setup-atspi: "false"
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -692,7 +692,7 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
