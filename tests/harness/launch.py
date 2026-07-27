@@ -96,12 +96,6 @@ def _app_command(app: str) -> tuple[list[str], dict[str, str], list[str], str | 
         binary = str(
             PROJECT_ROOT / "test-apps" / "tauri" / "target" / "debug" / "xa11y-tauri-test-app"
         )
-        # The Windows renderer (WebView2) needs extra Chromium flags to report
-        # honest visibility on a headless CI desktop. They cannot be set from
-        # here: wry always calls `set_additional_browser_arguments`, so the
-        # WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS environment variable WebView2
-        # would otherwise read is ignored. They live in `additionalBrowserArgs`
-        # in test-apps/tauri/tauri.conf.json instead.
         return (
             [binary],
             {},

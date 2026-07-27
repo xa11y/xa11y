@@ -52,21 +52,16 @@ apps:
       wire-level `Windows (SendInput)` job exercises that backend without a
       webview, so a WebView2 quirk here stays distinguishable from a
       SendInput bug.
-      Under investigation: actionability-gated verbs (press, focus, toggle,
-      expand, scroll_into_view) fail on this cell. The content comes up
-      visible and the first suite presses it successfully; from partway
-      through the run onward UIA reports the same nodes IsOffscreen=true,
-      which xa11y reads back as visible=false, so the actionability wait
-      times out. Everything not gated on visibility passes, including the
-      whole CLI input_sim and screenshot suites.
-      Disabling CalculateNativeWinOcclusion was tried and ruled out: the
-      flags are correctly applied via `additionalBrowserArgs` in
-      test-apps/tauri/tauri.conf.json (they have to be — wry always calls
-      set_additional_browser_arguments, so the environment variable WebView2
-      would otherwise read is ignored; wry's defaults are repeated there
-      because the field replaces them wholesale, and everything shares one
-      --disable-features list because a second occurrence of the flag
-      overrides rather than appends), and the failure is unchanged.
+      The page is laid out in columns so it fits the window without
+      scrolling, and it has to stay that way. A page taller than its window
+      makes every test depend on the scroll position the previous test left:
+      focusing a control below the fold scrolls the top of the page out of
+      view, Chromium marks those nodes UIA IsOffscreen=true, and xa11y then
+      correctly refuses to act on them. Linux and macOS never showed it
+      because WebKit reports scrolled-out nodes as visible regardless. The
+      harness prints the content element's state between suites, which is
+      what pinned it (bounds went from y=148 to y=-534 across the Python
+      suite).
 
   electron:
     platforms: [linux]

@@ -10,12 +10,11 @@
     "windows": [
       {
         "title": "xa11y-tauri-test-app",
-        "width": 800,
+        "width": 1000,
         "height": 700,
         "resizable": true,
         "fullscreen": false,
-        "url": "index.html",
-        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows"
+        "url": "index.html"
       }
     ]
   },
