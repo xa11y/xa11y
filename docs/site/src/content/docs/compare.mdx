@@ -14,14 +14,14 @@ The four mechanisms compose, and a practical setup often drives through accessib
 
 The application exposes accessibility data — roles, names, values, states, bounds — and the tool reads it. Elements are addressed semantically, so a query costs microseconds and survives layout changes, themes, and resolution differences. Nothing is installed into the application under test, and you automate the shipping binary. You see only what the app exposes, and where accessibility support is absent or wrong there is nothing to read.
 
-| Tool | Languages | Underlying API |
+| Tool | Platforms | Languages |
 | --- | --- | --- |
-| **xa11y** | Rust, Python, JavaScript | AXUIElement, UI Automation, AT-SPI2 |
-| [Appium](https://appium.io/) (Windows + Mac2 drivers) | Any WebDriver client | WinAppDriver, XCTest |
-| [pywinauto](https://pywinauto.readthedocs.io/) | Python | Win32, UI Automation |
-| [FlaUI](https://github.com/FlaUI/FlaUI) | C#/.NET | UI Automation (UIA2/UIA3) |
-| [dogtail](https://gitlab.com/dogtail/dogtail) | Python | AT-SPI2 |
-| [atomacos](https://github.com/daveenguyen/atomacos) | Python | AXUIElement |
+| **xa11y** | macOS, Windows, Linux | Rust, Python, JavaScript |
+| [Appium](https://appium.io/) (Windows + Mac2 drivers) | macOS, Windows | Any WebDriver client |
+| [pywinauto](https://pywinauto.readthedocs.io/) | Windows | Python |
+| [FlaUI](https://github.com/FlaUI/FlaUI) | Windows | C#/.NET |
+| [dogtail](https://gitlab.com/dogtail/dogtail) | Linux | Python |
+| [atomacos](https://github.com/daveenguyen/atomacos) | macOS | Python |
 
 Appium normalizes through the WebDriver protocol rather than a library API, so any WebDriver client works, though each desktop platform is a separate driver with separate capabilities. Its Windows driver proxies to Microsoft's WinAppDriver, which has had no release since 2022, while the Appium-side driver remains actively maintained. The Mac2 driver is built on XCTest, so every machine running tests needs Xcode installed.
 
@@ -39,15 +39,19 @@ An agent acting on a stale handle fails exactly the way a flaky test does, since
 
 ## Injection-based suites: Squish, Ranorex, TestComplete
 
-These suites mostly do **not** read accessibility data. They load a hook into the target process and read the toolkit's own object model — Qt's QObject tree, the .NET visual tree, Java's AWT/Swing hierarchy — falling back to accessibility APIs where no dedicated hook exists. That reaches custom-drawn widgets, QML internals, and controls whose authors never implemented accessibility, a structural capability xa11y cannot match without also injecting, which it deliberately does not do. In exchange, injection changes the process you are testing, and the hook must support your toolkit and build. All three are licensed per seat and bundle a recorder, IDE, reporting, and support, which for testers who do not write code is the product.
+These suites load a hook into the target process and read the toolkit's own object model — Qt's QObject tree, the .NET visual tree, Java's AWT/Swing hierarchy — falling back to accessibility APIs where no dedicated hook exists. That reaches custom-drawn widgets, QML internals, and controls whose authors never implemented accessibility. xa11y reads none of those, because it does not inject.
 
-| Tool | Languages | Primary mechanism |
+Each hook is written against a specific toolkit, so these tools enumerate support per app framework rather than per platform, and whether yours is on the list matters more than anything else about them.
+
+| Tool | Languages | App frameworks |
 | --- | --- | --- |
-| [Squish](https://www.qt.io/product/quality-assurance/squish) | Python, JavaScript, Perl, Ruby, Tcl | Toolkit introspection, deepest Qt/QML support |
-| [Ranorex Studio](https://www.ranorex.com/) | C#, VB.NET | UIA + .NET introspection |
-| [TestComplete](https://smartbear.com/product/testcomplete/) | Python, JavaScript, VBScript, JScript, DelphiScript | UIA + toolkit introspection incl. Delphi/VCL |
+| [Squish](https://www.qt.io/product/quality-assurance/squish) | Python, JavaScript, Perl, Ruby, Tcl | Qt/QML, Java, Windows, Web, mobile — licensed per edition |
+| [Ranorex Studio](https://www.ranorex.com/) | C#, VB.NET | WinForms, WPF, Qt, Java, Delphi, UWP, MSAA/UIA |
+| [TestComplete](https://smartbear.com/product/testcomplete/) | Python, JavaScript, VBScript, JScript, DelphiScript | .NET, WPF, Java, Delphi/C++Builder (VCL), Qt |
 
-Squish (Qt Group, which acquired froglogic in 2021) is the only genuinely cross-platform one, and reaches QML internals the accessibility projection omits. Ranorex Studio is Windows-hosted and Windows-targeted, with no native macOS app testing. TestComplete has the broadest legacy-toolkit coverage, including Delphi and VCL.
+Squish (Qt Group, which acquired froglogic in 2021) is the only genuinely cross-platform one, and reaches QML internals the accessibility projection omits. Its editions are licensed separately, so a Qt app and a Java app are two licenses. Ranorex Studio is Windows-hosted and Windows-targeted, with no native macOS app testing. TestComplete has the broadest legacy-toolkit coverage, including Delphi and VCL.
+
+Injection has costs beyond the price. It changes the process you are testing, and the hook must support your toolkit and your build. All three are licensed per seat and bundle a recorder, IDE, reporting, and support, which for testers who do not write code is the product.
 
 These three are compared here only at the level their public documentation supports. Much of their feature detail sits behind sales processes and evaluation licenses, so this page makes no feature-level claims about them, and the tables are a starting point for your own trial.
 
