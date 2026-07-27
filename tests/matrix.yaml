@@ -52,11 +52,16 @@ apps:
       wire-level `Windows (SendInput)` job exercises that backend without a
       webview, so a WebView2 quirk here stays distinguishable from a
       SendInput bug.
-      WebView2 needs --disable-features=CalculateNativeWinOcclusion on a
-      hosted runner or it reports every node in the page as UIA
-      IsOffscreen=true, which xa11y honestly reads back as visible=false and
-      every actionability-gated verb then times out. The flags are passed by
-      webview2_env_overrides() in tests/harness/launch.py.
+      WebView2 needs CalculateNativeWinOcclusion disabled on a hosted runner
+      or it reports every node in the page as UIA IsOffscreen=true, which
+      xa11y honestly reads back as visible=false and every actionability-gated
+      verb then times out. The flags live in `additionalBrowserArgs` in
+      test-apps/tauri/tauri.conf.json, and they have to: wry always calls
+      set_additional_browser_arguments, so the WEBVIEW2_ADDITIONAL_BROWSER_-
+      ARGUMENTS environment variable is ignored. wry's own defaults are
+      repeated there because that field replaces them wholesale, and they
+      share one --disable-features list because a second occurrence of the
+      flag would override the first rather than add to it.
 
   electron:
     platforms: [linux]

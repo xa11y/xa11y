@@ -49,40 +49,6 @@ STARTUP_TIMEOUT = float(os.environ.get("XA11Y_TEST_STARTUP_TIMEOUT", "30"))
 # suite, and the Python harness skips all its suites on macOS anyway).
 _MACOS_FRONTMOST_APPS = {"tauri", "qt", "electron", "egui"}
 
-# Browser arguments for the WebView2-backed Tauri app on Windows.
-#
-# WebView2 runs Chromium's native-window occlusion calculation, and on a hosted
-# windows-latest runner it concludes the window is covered and never revises
-# that. A page it believes is hidden has every accessible node marked
-# UIA IsOffscreen=true, which xa11y reads as `visible=false` — so every
-# actionability-gated verb (press, focus, toggle, expand, scroll_into_view)
-# times out against a target that is in fact rendered and on screen. The tree
-# is otherwise complete and correct: names, values, roles and checked state all
-# read fine, and only the visibility bit is wrong.
-#
-# Both flags address that one decision: the first stops the occlusion
-# calculation, the second stops the renderer backgrounding itself if something
-# else concludes the window is occluded. This configures the *test app* for a
-# headless CI desktop, the same way the Electron app is launched with
-# --force-renderer-accessibility; xa11y's own behaviour is untouched, and
-# `visible` still means what it means.
-WEBVIEW2_BROWSER_ARGUMENTS = (
-    "--disable-features=CalculateNativeWinOcclusion "
-    "--disable-backgrounding-occluded-windows"
-)
-
-
-def webview2_env_overrides() -> dict[str, str]:
-    """Env overrides for the WebView2 test app. Empty off Windows.
-
-    WebView2 reads its extra browser arguments from this variable when the
-    host creates the environment with default options, which is what Tauri
-    does — so no change to test-apps/tauri is needed.
-    """
-    if sys.platform != "win32":
-        return {}
-    return {"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS": WEBVIEW2_BROWSER_ARGUMENTS}
-
 
 # ---------------------------------------------------------------------------
 # App definitions
@@ -130,9 +96,15 @@ def _app_command(app: str) -> tuple[list[str], dict[str, str], list[str], str | 
         binary = str(
             PROJECT_ROOT / "test-apps" / "tauri" / "target" / "debug" / "xa11y-tauri-test-app"
         )
+        # The Windows renderer (WebView2) needs extra Chromium flags to report
+        # honest visibility on a headless CI desktop. They cannot be set from
+        # here: wry always calls `set_additional_browser_arguments`, so the
+        # WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS environment variable WebView2
+        # would otherwise read is ignored. They live in `additionalBrowserArgs`
+        # in test-apps/tauri/tauri.conf.json instead.
         return (
             [binary],
-            webview2_env_overrides(),
+            {},
             ["xa11y-tauri-test-app"],
             'button[name="OK"]',
         )
@@ -260,6 +232,27 @@ def _setup_linux_a11y() -> None:
 # App launch + accessibility discovery
 # ---------------------------------------------------------------------------
 
+def _print_content_state(app: "xa11y.App", selector: str) -> None:
+    """Log the state of the content-ready element once it attaches.
+
+    An attached element is not necessarily an actionable one, and the gap
+    between the two is invisible at launch: a cell whose tree reads correctly
+    but reports every node ``visible=false`` looks like a healthy start and
+    only surfaces minutes later, as a wall of actionability timeouts in the
+    first suite that presses anything. Stating the element's state here puts
+    the cause at the top of the log instead (see the WebView2 occlusion note
+    on the tauri branch of `_app_command`).
+    """
+    try:
+        el = app.locator(selector).element()
+        print(
+            f"Content ready: {el.role} {el.name!r} visible={el.visible} "
+            f"enabled={el.enabled} bounds={el.bounds}"
+        )
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must never fail a launch
+        print(f"WARNING: could not read state of {selector!r}: {exc!r}")
+
+
 def _launch_app(
     app: str,
 ) -> tuple[subprocess.Popen[bytes], str]:
@@ -334,6 +327,8 @@ def _launch_app(
                 f"WARNING: content selector {content_ready_selector!r} not ready "
                 f"after timeout; proceeding anyway"
             )
+        else:
+            _print_content_state(app, content_ready_selector)
 
     # macOS: claim the frontmost slot before handing the app to the suites, so
     # input_sim/focus tests aren't silently misdirected to whatever onboarding

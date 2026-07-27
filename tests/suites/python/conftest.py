@@ -20,7 +20,6 @@ from pathlib import Path
 import pytest
 import xa11y
 
-from tests.harness.launch import webview2_env_overrides
 from tests.helpers import launch_test_app
 
 # ---------------------------------------------------------------------------
@@ -738,9 +737,6 @@ def _launch_tauri() -> xa11y.App:
     yield from launch_test_app(
         command=[binary],
         app_names=["xa11y-tauri-test-app"],
-        # Same WebView2 occlusion flags the shared harness launches with, so a
-        # standalone `pytest tests/suites/python` on Windows behaves like CI.
-        env_overrides=webview2_env_overrides(),
         content_ready_selector='button[name="OK"]',
         require_frontmost=True,
     )

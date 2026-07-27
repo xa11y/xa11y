@@ -14,7 +14,8 @@
         "height": 700,
         "resizable": true,
         "fullscreen": false,
-        "url": "index.html"
+        "url": "index.html",
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,CalculateNativeWinOcclusion --disable-backgrounding-occluded-windows"
       }
     ]
   },
