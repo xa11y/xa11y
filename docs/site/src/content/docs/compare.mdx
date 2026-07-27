@@ -12,7 +12,7 @@ The four mechanisms compose, and a practical setup often drives through accessib
 
 ## Accessibility-based libraries: xa11y, pywinauto, FlaUI, dogtail, atomacos
 
-The application exposes accessibility data — roles, names, values, states, bounds — and the tool reads it. Elements are addressed semantically, so a query costs microseconds and survives layout changes, themes, and resolution differences. Nothing is installed into the application under test, and you automate the shipping binary. You see only what the app exposes, and where accessibility support is absent or wrong there is nothing to read.
+The application exposes accessibility data — roles, names, values, states, bounds — and the tool reads it. Elements are addressed semantically, so a query costs milliseconds or less and survives layout changes, themes, and resolution differences. Nothing is installed into the application under test, and you automate the shipping binary. You see only what the app exposes, and where accessibility support is absent or wrong there is nothing to read.
 
 | Tool | Platforms | Languages |
 | --- | --- | --- |
@@ -27,7 +27,7 @@ Appium normalizes through the WebDriver protocol rather than a library API, so a
 
 ## Abstraction: platform mirrors versus a normalization layer
 
-The platform-specific libraries mostly mirror their underlying API almost exactly. pywinauto surfaces Win32 and UIA concepts directly, atomacos exposes AXUIElement attributes nearly raw, and dogtail exposes AT-SPI2's object model. That is predictable and gives you the full platform surface, including corners xa11y does not expose, but concepts, role names, and idioms differ per platform, so code written against one of them does not port, and supporting a second OS means rewriting against a different object model. xa11y instead normalizes, mapping one set of role names, one selector language, and one set of action verbs onto all three platform APIs, documented in [platform details](/guides/platform-details/). On one platform permanently, a library that mirrors that platform is more mature and exposes more of it; across two or three, the normalization is the point.
+The platform-specific libraries mostly mirror their underlying API. pywinauto surfaces Win32 and UIA concepts directly, atomacos exposes AXUIElement attributes nearly raw, dogtail exposes AT-SPI2's object model. That is predictable, and it gives you the full platform surface, including corners xa11y does not expose. But role names and idioms differ per platform, so code does not port, and a second OS means rewriting against a different object model. xa11y normalizes instead, mapping one set of roles, one selector language, and one set of action verbs onto all three platform APIs — see [platform details](/guides/platform-details/). On one platform permanently, the mirror is more mature and exposes more of it. Across two or three, the normalization is the point.
 
 ## Locators, auto-waiting, and stale handles
 
@@ -53,7 +53,7 @@ Squish (Qt Group, which acquired froglogic in 2021) is the only genuinely cross-
 
 Injection has costs beyond the price. It changes the process you are testing, and the hook must support your toolkit and your build. All three are licensed per seat and bundle a recorder, IDE, reporting, and support, which for testers who do not write code is the product.
 
-These three are compared here only at the level their public documentation supports. Much of their feature detail sits behind sales processes and evaluation licenses, so this page makes no feature-level claims about them, and the tables are a starting point for your own trial.
+Both tables draw on public documentation, so treat them as a starting point for an evaluation rather than a feature comparison.
 
 ## Pixels and screen parsing: SikuliX, PyAutoGUI, OmniParser
 
@@ -72,7 +72,7 @@ SikuliX and PyAutoGUI predate the model-based tools and share their failure mode
 
 An agent needs, on every step, an observation of the current UI and a way to act on it. The approaches differ mainly in how that observation is produced, and the differences compound because an agent observes many times per task.
 
-**Accessibility-driven.** The agent queries the semantic tree, directly through a library like xa11y or through a CLI or MCP tool built on one. An observation is microseconds of latency and a few hundred tokens once serialized, and it is deterministic. Elements carry exact bounds and identifiers, role plus name, that stay stable across renders and sessions, which is what lets a successful agent run harden into a repeatable script, since the selector it used yesterday still names the same button today. The app must expose accessibility data, and that data holds only what the app published.
+**Accessibility-driven.** The agent queries the semantic tree, directly through a library like xa11y or through a CLI or MCP tool built on one. An observation takes milliseconds or less and a few hundred tokens once serialized, and it is deterministic. Elements carry exact bounds and identifiers, role plus name, that stay stable across renders and sessions, which is what lets a successful agent run harden into a repeatable script, since the selector it used yesterday still names the same button today. The app must expose accessibility data, and that data holds only what the app published.
 
 **Screen-parsing models.** [OmniParser](https://github.com/microsoft/OmniParser), Microsoft's open-source screenshot-to-structured-elements model, is the canonical example. A detection model plus OCR reconstructs a pseudo-tree from pixels — bounding boxes, text, inferred interactability — for whatever is visible, which reaches applications with no accessibility support at all. In exchange, every observation costs a model inference, detection introduces error, and identifiers are synthesized per screenshot rather than stable across renders, so there is nothing durable to write a script against. Acting on the structure requires a separate executor.
 
@@ -82,7 +82,7 @@ An agent needs, on every step, an observation of the current UI and a way to act
 
 | Decision axis | Accessibility data | Screen parsing | End-to-end VLM |
 | --- | --- | --- | --- |
-| Latency per observation | Microseconds | Model inference | Model inference |
+| Latency per observation | Milliseconds or less | Model inference | Model inference |
 | Tokens per observation | Hundreds | Thousands and up | Thousands and up |
 | Reproducible output | Yes | No | No |
 | Identifiers stable across runs | Yes, selectors persist | No, synthesized per screenshot | No |
