@@ -232,25 +232,34 @@ def _setup_linux_a11y() -> None:
 # App launch + accessibility discovery
 # ---------------------------------------------------------------------------
 
-def _print_content_state(app: "xa11y.App", selector: str) -> None:
-    """Log the state of the content-ready element once it attaches.
+def _content_state(app: "xa11y.App", selector: str) -> str:
+    """One-line summary of the content-ready element's current state."""
+    try:
+        el = app.locator(selector).element()
+        return (
+            f"{el.role} {el.name!r} visible={el.visible} "
+            f"enabled={el.enabled} bounds={el.bounds}"
+        )
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must never fail a run
+        return f"<unreadable: {exc!r}>"
+
+
+def _print_content_state(app: "xa11y.App", selector: str, label: str) -> None:
+    """Log the state of the content-ready element.
 
     An attached element is not necessarily an actionable one, and the gap
     between the two is invisible at launch: a cell whose tree reads correctly
-    but reports every node ``visible=false`` looks like a healthy start and
+    but reports the content ``visible=false`` looks like a healthy start and
     only surfaces minutes later, as a wall of actionability timeouts in the
-    first suite that presses anything. Stating the element's state here puts
-    the cause at the top of the log instead (see the WebView2 occlusion note
-    on the tauri branch of `_app_command`).
+    first suite that presses anything.
+
+    Sampling it per suite rather than once at launch is what distinguishes
+    "came up wrong" from "went wrong partway through", which is a real
+    distinction: the windows-latest Tauri cell comes up with the content
+    visible, presses it successfully in the first suite, and then reports it
+    invisible for the rest of the run.
     """
-    try:
-        el = app.locator(selector).element()
-        print(
-            f"Content ready: {el.role} {el.name!r} visible={el.visible} "
-            f"enabled={el.enabled} bounds={el.bounds}"
-        )
-    except Exception as exc:  # noqa: BLE001 - a diagnostic must never fail a launch
-        print(f"WARNING: could not read state of {selector!r}: {exc!r}")
+    print(f"Content state ({label}): {_content_state(app, selector)}")
 
 
 def _launch_app(
@@ -328,7 +337,7 @@ def _launch_app(
                 f"after timeout; proceeding anyway"
             )
         else:
-            _print_content_state(app, content_ready_selector)
+            _print_content_state(app, content_ready_selector, "after launch")
 
     # macOS: claim the frontmost slot before handing the app to the suites, so
     # input_sim/focus tests aren't silently misdirected to whatever onboarding
@@ -546,11 +555,31 @@ def _print_ledger(app: str, ledger: list[tuple[str, str, str]]) -> None:
         print(line)
 
 
+def _sample_content_state(pid: int, selector: str | None, label: str) -> None:
+    """Print the content element's state between suites, if there is one.
+
+    Re-resolves the app rather than holding a handle across the suite runs:
+    each suite is a subprocess talking to the same app, and a stale handle
+    would report what we last saw rather than what is true now.
+    """
+    if selector is None:
+        return
+    import xa11y
+
+    try:
+        app = xa11y.App.find(lambda a: a.pid == pid, timeout=5.0)
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must never fail a run
+        print(f"Content state ({label}): <app not resolvable: {exc!r}>")
+        return
+    _print_content_state(app, selector, label)
+
+
 def _run_suites(
     app: str,
     suites: list[str],
     proc: subprocess.Popen[bytes],
     discovered_name: str,
+    content_ready_selector: str | None = None,
 ) -> int:
     """Run each requested suite serially and return the worst exit code."""
     env = os.environ.copy()
@@ -594,8 +623,10 @@ def _run_suites(
         report_path = Path(report_name)
         cmd = _suite_command(suite, report_path)
 
+        _sample_content_state(proc.pid, content_ready_selector, f"before {suite}")
         print(f"\n=== Running {suite} suite against {app} ===\n")
         result = subprocess.run(cmd, env=suite_env, cwd=str(PROJECT_ROOT))
+        _sample_content_state(proc.pid, content_ready_selector, f"after {suite}")
         rc = result.returncode
         if rc == 0:
             rc = _check_suite_ran_tests(suite, report_path)
@@ -662,7 +693,10 @@ def run(app_name: str, suites: Sequence[str] | None = None) -> int:
     proc: subprocess.Popen[bytes] | None = None
     try:
         proc, discovered_name = _launch_app(app_name)
-        return _run_suites(app_name, suite_list, proc, discovered_name)
+        _, _, _, content_ready_selector = _app_command(app_name)
+        return _run_suites(
+            app_name, suite_list, proc, discovered_name, content_ready_selector
+        )
     except KeyboardInterrupt:
         print("\nInterrupted by user.")
         return 130

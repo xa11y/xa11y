@@ -52,16 +52,21 @@ apps:
       wire-level `Windows (SendInput)` job exercises that backend without a
       webview, so a WebView2 quirk here stays distinguishable from a
       SendInput bug.
-      WebView2 needs CalculateNativeWinOcclusion disabled on a hosted runner
-      or it reports every node in the page as UIA IsOffscreen=true, which
-      xa11y honestly reads back as visible=false and every actionability-gated
-      verb then times out. The flags live in `additionalBrowserArgs` in
-      test-apps/tauri/tauri.conf.json, and they have to: wry always calls
-      set_additional_browser_arguments, so the WEBVIEW2_ADDITIONAL_BROWSER_-
-      ARGUMENTS environment variable is ignored. wry's own defaults are
-      repeated there because that field replaces them wholesale, and they
-      share one --disable-features list because a second occurrence of the
-      flag would override the first rather than add to it.
+      Under investigation: actionability-gated verbs (press, focus, toggle,
+      expand, scroll_into_view) fail on this cell. The content comes up
+      visible and the first suite presses it successfully; from partway
+      through the run onward UIA reports the same nodes IsOffscreen=true,
+      which xa11y reads back as visible=false, so the actionability wait
+      times out. Everything not gated on visibility passes, including the
+      whole CLI input_sim and screenshot suites.
+      Disabling CalculateNativeWinOcclusion was tried and ruled out: the
+      flags are correctly applied via `additionalBrowserArgs` in
+      test-apps/tauri/tauri.conf.json (they have to be — wry always calls
+      set_additional_browser_arguments, so the environment variable WebView2
+      would otherwise read is ignored; wry's defaults are repeated there
+      because the field replaces them wholesale, and everything shares one
+      --disable-features list because a second occurrence of the flag
+      overrides rather than appends), and the failure is unchanged.
 
   electron:
     platforms: [linux]
