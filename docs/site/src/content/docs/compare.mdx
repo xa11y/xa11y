@@ -1,44 +1,27 @@
 ---
 title: Comparison
-description: How xa11y compares to pywinauto, Appium, FlaUI, Squish, Ranorex, TestComplete, SikuliX, and other desktop UI automation tools — and when to choose something else.
+description: How xa11y relates to pywinauto, FlaUI, Appium, dogtail, atomacos, Squish, Ranorex, TestComplete, SikuliX, OmniParser, and VLM computer-use agents — what each approach can and cannot do.
 ---
 
-xa11y drives native desktop applications by reading and acting on the **accessibility tree** — the same data screen readers consume — through one API on macOS, Windows, and Linux.
+xa11y drives native desktop applications by reading and acting on the **accessibility tree** — the same structured data screen readers consume — through one API on macOS (AXUIElement), Windows (UI Automation), and Linux (AT-SPI2). It is a library, MIT-licensed, currently at v0.12.0 and pre-1.0: breaking changes still land in minor releases. Bindings exist for Rust, Python (3.9+), and JavaScript, plus a [CLI](/guides/cli/) (`xa11y apps`, `xa11y tree --app <name>`, `xa11y find`).
 
-If the application you need to automate does not expose an accessibility tree, xa11y cannot help you, and no amount of configuration will change that. Games, canvas-rendered UIs, and apps built on toolkits that were never wired up for accessibility are all in this category. Skip to [when not to use xa11y](#when-not-to-use-xa11y) — the honest answer there is a commercial tool that injects into the process, or a pixel-based one.
+The tools in this space split along one technical line: what a tool treats as the source of truth about the screen. Everything else — what it can see, what breaks it, what it costs per operation — follows from that choice. This page walks through the categories in turn: open-source accessibility libraries, commercial injection-based suites, pixel and vision tools, and the approaches used for computer-use agents. If you already know the app you want to automate exposes no accessibility tree, xa11y cannot help — see [when not to use xa11y](#when-not-to-use-xa11y).
 
-## Choose by what you're doing
+## Four ways to see a UI
 
-| If you are… | Consider | Why |
-| --- | --- | --- |
-| Testing a desktop app on **more than one OS** from one test suite | **xa11y** | One selector language and one API across AXUIElement, UI Automation, and AT-SPI2. This is the case it exists for. |
-| Building a **computer-use agent** or MCP tool | **xa11y** | A semantic tree costs microseconds to query and far fewer tokens than a screenshot, and it works the same on all three platforms. [agent-desktop](https://agent-desktop.dev) is a ready-made CLI built on it. |
-| Testing a **Windows-only** app, and your team writes C# | [FlaUI](https://github.com/FlaUI/FlaUI) | A thin, well-maintained UIA wrapper with far more Windows-specific surface area than xa11y exposes. |
-| Testing a **Windows-only** app, and your team writes Python | [pywinauto](https://pywinauto.readthedocs.io/) or xa11y | pywinauto has a decade of accumulated Windows knowledge and a much larger body of examples. Choose xa11y if you expect to add macOS or Linux later. |
-| Already invested in **Appium/WebDriver** infrastructure | [Appium](https://appium.io/) | If you have a Selenium grid, reporting, and a team fluent in WebDriver, that consistency is worth more than a nicer local API. |
-| Testing a **Qt or QML** app in depth, with budget | [Squish](https://www.qt.io/product/quality-assurance/squish) | It reads Qt's own object model rather than the accessibility projection of it, reaching QML internals and custom widgets that expose nothing to AT-SPI2 or UIA. |
-| Staffing testers who **don't write code** | [Ranorex](https://www.ranorex.com/), [TestComplete](https://smartbear.com/product/testcomplete/), Squish | Record-and-playback, an IDE, reporting, and vendor support are the product. xa11y is a library with none of that. |
-| Automating an app with **no accessibility support** | [SikuliX](https://sikulix.github.io/), a VLM agent, or a commercial suite | No accessibility tool can drive what is not exposed. Match pixels, reason over screenshots, or inject into the process. |
-| Auditing an app for **accessibility conformance** | [axe](https://github.com/dequelabs/axe-core), [Accessibility Insights](https://accessibilityinsights.io/) | xa11y reads the accessibility tree to automate apps; it does not evaluate that tree against WCAG or produce conformance reports. |
-| Adding accessibility **to** an app you are writing | [AccessKit](https://accesskit.dev/) | The other side of the same interface. AccessKit publishes a tree; xa11y consumes one. |
+**Accessibility tree.** The application publishes a structured description of itself: roles, names, values, states, bounds. Elements are addressed semantically (`button[name='Submit']`), so a query costs microseconds and survives layout changes, themes, and resolution differences. Nothing is installed into the application under test — you automate the shipping binary. The hard constraint is that you only see what the app exposes; where accessibility support is absent or wrong, there is nothing to read. xa11y, pywinauto, FlaUI, Appium's desktop drivers, dogtail, and atomacos work this way.
 
-## The fork in the road: how a tool sees the UI
+**Toolkit introspection.** The tool loads a hook into the target process and reads the toolkit's own object model — Qt's QObject tree, the .NET visual tree, Java's AWT/Swing hierarchy — rather than the accessibility projection of it. This sees strictly more: custom-drawn widgets, QML internals, and controls whose authors never implemented accessibility. The costs are that injection changes the process you are testing, the hook must support your toolkit and build, and in practice this is commercial territory. Squish, Ranorex, and TestComplete work this way, falling back to accessibility APIs where they lack a dedicated hook.
 
-Nearly every meaningful difference between these tools follows from one choice — what they treat as the source of truth about the screen.
+**Pixel matching.** Screenshot the screen, search for a reference image. Works on anything visible — including remote desktops and video — and breaks on theme, DPI, font-rendering, and antialiasing changes. It cannot read a value it was not given a picture of. SikuliX and PyAutoGUI work this way.
 
-**Accessibility tree.** The app publishes a structured description of itself: roles, names, values, states, bounds. Elements are addressed semantically (`button[name='Submit']`), so layout changes, themes, resolutions, and translations-in-progress don't break your selectors, and matching costs microseconds. Nothing is installed into the application under test — you automate the shipping binary. The cost is a hard dependency on the app's accessibility support: where it's absent or wrong, you get nothing. xa11y, pywinauto, FlaUI, Appium, dogtail, and atomacos live here.
+**Model-based vision.** A model interprets a screenshot, either producing structured elements (screen-parsing models such as OmniParser) or deciding the action directly (end-to-end VLM agents). Flexible on UI it has never seen, at the cost of a model inference per observation and non-deterministic output. Covered in detail [below](#computer-use-and-ai-agents).
 
-**Toolkit introspection.** The tool loads a hook into the application's process and reads the *real* widget objects — Qt's `QObject` tree, .NET's visual tree, Java's AWT/Swing hierarchy — rather than the accessibility projection of them. This sees strictly more than accessibility does: unnamed custom widgets, QML internals, private properties, and controls whose authors never implemented accessibility at all. The costs are that you need a build the hook supports, the injection changes the process you're testing, and this is almost exclusively commercial territory. Squish, Ranorex, and TestComplete live here, each falling back to accessibility APIs for the toolkits they lack a dedicated hook for.
+These mechanisms compose. A practical setup often drives through the tree and reaches for pixels or vision only where the tree has a hole. xa11y keeps that boundary explicit: [input simulation](/guides/input/) is a separate `InputSim` surface and never automatically substitutes for an accessibility action, so a passing test cannot silently degrade into blind coordinate clicking. That separation is a deliberate design rule, described in [Design](/guides/design/).
 
-**Pixel matching.** The tool screenshots the screen and looks for a reference image. It works on literally anything visible, including remote desktops and video. It also breaks on theme changes, DPI changes, font rendering differences, and antialiasing, and it cannot read a value it wasn't given a picture of. SikuliX and PyAutoGUI live here.
+## Accessibility-tree libraries
 
-**Vision-language models.** A model looks at a screenshot and decides where to click. Maximum flexibility, no reference images needed, and it tolerates UI it has never seen. It is also non-deterministic, costs a model call per step, and is orders of magnitude slower than a tree query. Increasingly these are used *with* an accessibility tree rather than instead of one — the tree gives exact bounds and stable identifiers, the model handles intent.
-
-The families are not mutually exclusive, and the strongest setups mix them: drive with the accessibility tree, fall back to pixels for the one canvas widget that has no tree. What matters is knowing which mechanism you are relying on for any given step. xa11y is deliberate about this line — its [input simulation](/guides/input/) is a separate surface that never silently substitutes for an accessibility action, so a passing test can't quietly degrade into blind coordinate clicking.
-
-## The landscape
-
-Open-source tools that read the accessibility tree, which is where xa11y competes most directly:
+The open-source tools that read the same data xa11y does:
 
 | Tool | Platforms | Languages | Underlying API | License |
 | --- | --- | --- | --- | --- |
@@ -49,31 +32,74 @@ Open-source tools that read the accessibility tree, which is where xa11y compete
 | [dogtail](https://gitlab.com/dogtail/dogtail) | Linux | Python | AT-SPI2 | GPL-2.0 |
 | [atomacos](https://github.com/daveenguyen/atomacos) | macOS | Python | AXUIElement | GPL-3.0 |
 
-Commercial suites, which bundle a recorder, an IDE, reporting, and support, and license per seat:
+Two structural differences separate xa11y from the rest of this table more than any feature checklist does.
 
-| Tool | Desktop targets | Languages | Primary mechanism | Notes |
-| --- | --- | --- | --- | --- |
-| [Squish](https://www.qt.io/product/quality-assurance/squish) | macOS, Windows, Linux | Python, JavaScript, Perl, Ruby, Tcl | Toolkit introspection (Qt, Java, native) | The only genuinely cross-platform option here. Unmatched Qt and QML depth. |
-| [Ranorex Studio](https://www.ranorex.com/) | Windows | C#, VB.NET | UIA + .NET introspection | Windows-hosted and Windows-targeted; no native macOS app testing. |
-| [TestComplete](https://smartbear.com/product/testcomplete/) | Windows | Python, JavaScript, VBScript, JScript, DelphiScript | UIA + .NET/Java/Delphi introspection | Broadest legacy-toolkit coverage, including Delphi and VCL. |
+### Abstraction level
 
-Pixel- and vision-based tools, which see the screen instead of the tree:
+The platform-specific libraries mostly mirror their underlying API almost exactly, adding little abstraction of their own. pywinauto surfaces Win32 and UIA concepts directly; atomacos exposes AXUIElement attributes nearly raw; dogtail exposes AT-SPI2's object model. That is a legitimate design choice — it is predictable, and it gives you the full platform surface, including corners xa11y does not expose. The consequence is that the concepts, role names, and idioms differ per platform, so code written against one of these libraries does not port; supporting a second OS means rewriting against a different library with a different object model.
+
+xa11y's contribution is the normalization layer: one set of role names, one selector language, one set of action verbs, mapped onto three quite different platform APIs. The [platform details](/guides/platform-details/) guide documents how each concept maps. The tradeoff runs both ways: if you are on one platform permanently, a library that mirrors that platform's API is more mature, better documented in Stack Overflow terms, and exposes more of it. If you need the same suite on two or three platforms, the normalization is the point.
+
+Appium sits between: it normalizes through the WebDriver protocol, so any WebDriver client works, but each desktop platform is a separate driver with separate capabilities. Two practical details if you evaluate it: the Windows driver proxies to Microsoft's WinAppDriver, which has had no release since 2022 (the Appium-side driver remains actively maintained), and the Mac2 driver is built on XCTest, so every machine running tests needs Xcode installed.
+
+### Locators, waiting, and staleness
+
+Most accessibility libraries hand you a captured node reference. That reference goes stale the moment the app redraws or replaces the subtree it came from, and the library leaves the resulting retry loops to you — the classic source of desktop-test flake, where a find succeeds and the click a few milliseconds later lands on a dead handle.
+
+xa11y's `Locator` is a lazy query instead: it re-resolves its selector on every operation and waits for the element to be visible and enabled before acting. (An `Element` in xa11y is the captured-handle form — it does not re-resolve — and the API keeps the two distinct.) The selector language is CSS-like: `button[name='Submit']`, `textfield[name^='Search']`, `group > button`, `:nth(2)`. The model is taken from Playwright's locators, adapted to accessibility trees.
+
+This matters beyond tests. An agent acting on a stale handle fails exactly the way a flaky test does — the UI changed between observation and action. A locator that re-resolves absorbs that race. And a selector is a compact, writable name for an element: an agent can carry `button[name='Save']` across turns of a conversation, or a person can paste it into a script, where a captured object reference cannot leave the process that made it. Most libraries in the table above have neither auto-waiting nor a selector language; you build both yourself.
+
+xa11y also exposes accessibility event streams (`app.subscribe()`) and [screenshots](/guides/screenshots/) of the full screen, a region, or an element's bounds. Platform prerequisites are minimal but real: macOS needs the Accessibility permission (plus Screen Recording on macOS 26+), Linux needs AT-SPI2 running, Windows needs nothing special.
+
+## Commercial suites
+
+The commercial desktop-testing suites mostly do **not** read the accessibility tree. They load a hook into the target process and read the toolkit's own object model, falling back to accessibility APIs where no dedicated hook exists. That lets them drive custom-drawn widgets that publish nothing to UIA or AT-SPI2 — a structural capability xa11y cannot match without also injecting, which it deliberately does not do. They are licensed per seat and bundle a recorder, an IDE, reporting, and vendor support; for a team of testers who do not write code, that bundle is the product, and xa11y offers none of it.
+
+| Tool | Desktop targets | Languages | Primary mechanism |
+| --- | --- | --- | --- |
+| [Squish](https://www.qt.io/product/quality-assurance/squish) | macOS, Windows, Linux | Python, JavaScript, Perl, Ruby, Tcl | Toolkit introspection (deepest Qt/QML support) |
+| [Ranorex Studio](https://www.ranorex.com/) | Windows | C#, VB.NET | UIA + .NET introspection |
+| [TestComplete](https://smartbear.com/product/testcomplete/) | Windows | Python, JavaScript, VBScript, JScript, DelphiScript | UIA + toolkit introspection incl. Delphi/VCL |
+
+Squish (Qt Group, which acquired froglogic in 2021) is the only genuinely cross-platform one, and reads Qt's object model directly — it reaches QML internals that the accessibility projection omits. Ranorex Studio is Windows-hosted and Windows-targeted, with no native macOS app testing. TestComplete has the broadest legacy-toolkit coverage, including Delphi and VCL.
+
+These three are compared here only at the level their public documentation supports — platforms, languages, mechanism. Much of their feature detail sits behind sales processes and evaluation licenses, so this page does not make feature-level claims about them; treat the table as a starting point for your own trial.
+
+## Pixel and vision tools
 
 | Tool | Platforms | Mechanism | Reads values? | License |
 | --- | --- | --- | --- | --- |
 | [SikuliX](https://sikulix.github.io/) | macOS, Windows, Linux | OpenCV image matching + OCR | Via OCR only | MIT |
 | [PyAutoGUI](https://github.com/asweigart/pyautogui) | macOS, Windows, Linux | Input synthesis + basic image matching | No | BSD-3-Clause |
-| VLM computer-use agents | Any | Model reasoning over screenshots | Via the model | Varies |
+| [OmniParser](https://github.com/microsoft/OmniParser) and similar screen parsers | Any | Detection model + OCR over screenshots | Via OCR | Open source (varies) |
+| End-to-end VLM computer-use agents | Any | Model reasoning over screenshots | Via the model | Varies |
 
-## Capabilities
+SikuliX and PyAutoGUI predate the model-based tools and share their failure mode in miniature: they see pixels, so anything that changes pixels without changing meaning — a theme, a DPI setting, font antialiasing — breaks the match. PyAutoGUI is primarily input synthesis; it cannot read a value out of the UI at all. The screen-parsing models and VLM agents in the bottom two rows are less automation libraries than components of agent systems, which is the subject of the next section.
 
-Comparing xa11y against the tools closest to it in scope, across both the open-source and commercial columns:
+## Computer use and AI agents
+
+An agent driving a desktop needs, on every step, an observation of the current UI and a way to act on it. The approaches in use differ mainly in how that observation is produced, and the differences compound because an agent observes many times per task.
+
+**Accessibility-tree-driven.** The agent queries the semantic tree — directly through a library like xa11y, or through a CLI or MCP tool built on one. An observation is a tree query: microseconds of latency, a few hundred tokens once serialized, and deterministic — the same UI state yields the same output every time. Elements come with exact bounds and identifiers (role plus name) that are stable across renders and across sessions, which is what makes it possible to write a repeatable script from an agent's successful run: the selector the agent used yesterday still names the same button today. The limit is inherited from the mechanism: the app must expose a tree, and the tree only contains what the app published.
+
+**Screen-parsing models.** [OmniParser](https://github.com/microsoft/OmniParser) — Microsoft's open-source screenshot-to-structured-elements model — is the canonical example of this category. A detection model plus OCR reconstructs a pseudo-tree from pixels: bounding boxes, text, and inferred interactability for whatever is visible. These work on anything on screen, including applications with no accessibility support at all, which is their reason to exist. In exchange, every observation costs a model inference, detection introduces error (missed elements, merged elements, wrong boxes), and the element identifiers are synthesized per screenshot — they are not stable across renders, so there is nothing durable to write a script against. Screen parsers are also not automation tools by themselves; they produce structure and rely on a separate executor to act.
+
+**End-to-end VLM agents.** The model looks at a screenshot and decides the action directly — Claude and OpenAI computer use, and similar systems. This is the most flexible option on UI nobody anticipated, since there is no intermediate representation to be wrong. It is also non-deterministic, the slowest per step, and carries the highest token cost per observation, because every step ships an image into a model and the reasoning happens in the loop.
+
+**Hybrid.** Increasingly the practical setup: use the accessibility tree for structure, element enumeration, and exact bounds, and bring in vision only for what the tree does not expose — a canvas region, an image, a custom widget with no accessibility support. The tree and the pixels are complementary observations of the same UI, not competing ones; a screenshot of an element's exact bounds (which the tree provides) is a much better vision input than a full-screen capture. xa11y's tree queries, element-bounds screenshots, and event streams are the tree-side half of this arrangement, and [agent-desktop](https://agent-desktop.dev) packages them as a CLI for agents.
+
+The decision axes are concrete. **Latency**: a tree query is microseconds; a model inference is hundreds of milliseconds to seconds. **Token cost per observation**: a serialized subtree is a few hundred tokens; screenshots and parsed screenshots are far more, and they recur on every step. **Determinism**: tree queries are reproducible, model output is not — which decides whether a failure can be replayed. **Identifier stability**: selectors survive across runs; synthesized boxes do not — which decides whether an agent's trajectory can harden into a script. **Coverage**: vision sees everything on screen; the tree sees only what the app exposes. Where an app has a usable tree, the tree-driven observation dominates on the first four axes; where it does not, vision is the only observation available. `xa11y tree --app <name>` answers in seconds which situation you are in.
+
+## Capability matrix
+
+xa11y against the tools closest to it in scope:
 
 | | xa11y | Appium | Squish | pywinauto | FlaUI |
 | --- | --- | --- | --- | --- | --- |
 | macOS / Windows / Linux | ● ● ● | ● ● ○ | ● ● ● | ○ ● ○ | ○ ● ○ |
 | Single API across platforms | ● | ● | ● | n/a | n/a |
-| CSS-like selectors | ● | XPath | Object map | Property dicts | Conditions API |
+| Selector language | CSS-like | XPath | Object map | Property dicts | Conditions API |
 | Auto-waiting on actions | ● | Configurable | ● | Explicit | Explicit |
 | Accessibility event streams | ● | ○ | ◐ | ○ | ● |
 | Screenshots | ● | ● | ● | ● | ● |
@@ -88,17 +114,11 @@ Comparing xa11y against the tools closest to it in scope, across both the open-s
 
 ● full · ◐ partial · ○ none
 
-Three rows deserve elaboration, and xa11y loses two of them.
-
-**Auto-waiting.** A `Locator` in xa11y is a lazy query, not a captured handle. Every action re-resolves the selector and waits for the element to be visible and enabled before acting, which removes the retry-loop scaffolding that desktop test suites usually accumulate. This is borrowed wholesale from [Playwright's locator model](https://playwright.dev/docs/locators). Tools that hand you a captured element instead make staleness your problem — a real source of flake when the app redraws between find and click.
-
-**Seeing non-accessible widgets.** This is the structural advantage the commercial suites have, and it is not one xa11y can engineer around — it follows from refusing to inject into the process under test. If your app has a custom-drawn control that publishes nothing to UIA or AT-SPI2, Squish can drive it through Qt's object model and xa11y cannot see it at all. Whether that matters depends entirely on your app; run `xa11y tree --app <name>` and look for the controls you care about before deciding.
-
-**Maturity.** xa11y is at v0.12 and its API is not yet stable. pywinauto, FlaUI, and the commercial suites have years of production use, deeper per-platform coverage, more Stack Overflow answers, and more people who have already hit your bug. If you are automating one Windows app and will never need another platform, that accumulated knowledge is worth more than anything on this page. Choosing xa11y is a bet that one cross-platform API saves you more than a mature single-platform one.
+Two rows where xa11y is behind deserve a plain statement. *Sees non-accessible widgets*: this follows from refusing to inject into the target process, and it is not something xa11y can engineer around — if a control publishes nothing to UIA or AT-SPI2, Squish can drive it through the toolkit's object model and xa11y cannot see it. *Maturity*: at v0.12.0 the API is not stable, and pywinauto, FlaUI, and the commercial suites have years of production use and deeper single-platform coverage. Choosing xa11y is a bet that one cross-platform API saves you more than a mature single-platform one; on one platform, permanently, it may not.
 
 ## Framework coverage
 
-The practical question for an accessibility-driven tool is not which platforms it claims but which UI toolkits actually work, since coverage depends on each toolkit's accessibility implementation. xa11y runs its integration suite against real applications in CI on every commit:
+For an accessibility-driven tool, the practical question is not which platforms it claims but which UI toolkits actually work, because coverage depends on each toolkit's accessibility implementation. xa11y runs its integration suite against real applications in CI on every commit:
 
 | Toolkit | Linux | macOS | Windows |
 | --- | --- | --- | --- |
@@ -111,31 +131,28 @@ The practical question for an accessibility-driven tool is not which platforms i
 | WinForms | — | — | ● |
 | WPF | — | — | ● |
 
-A dash means untested in CI, not known-broken — most combinations work, but only the marked cells are verified continuously. The [Accessibility Quirks](/guides/accessibility-quirks/) guide documents the per-toolkit behaviour that these tests pin down.
+A dash means untested in CI, not known-broken — most combinations work, but only the marked cells are verified continuously. The [accessibility quirks](/guides/accessibility-quirks/) guide documents the per-toolkit behavior these tests pin down.
 
 ## When not to use xa11y
 
-- **The app exposes no accessibility tree.** Games, canvas-drawn interfaces, custom-rendered engines, and applications whose toolkit has accessibility disabled. Run `xa11y tree --app <name>` to check in a few seconds; if it comes back empty or shows a single opaque window, you need a tool that injects into the process (Squish, TestComplete) or one that matches pixels (SikuliX).
-- **You need a recorder or a low-code interface.** xa11y is a library with no IDE, no recorder, and no reporting. Ranorex, TestComplete, and Squish sell exactly this, and for a team of non-programming testers that bundle is the product.
-- **You are testing a website.** Use [Playwright](https://playwright.dev/) or Selenium. They test the DOM directly, control the browser lifecycle, and intercept network traffic — none of which xa11y does. xa11y drives a browser only as another desktop app.
-- **You need API stability today.** v0.12 is pre-1.0 and breaking changes still land in minor releases.
+- **The app exposes no accessibility tree.** Games, canvas-drawn interfaces, and apps whose toolkit never wired up accessibility. Run `xa11y tree --app <name>`; if it comes back empty or shows one opaque window, you need injection (Squish, TestComplete), pixels (SikuliX), or vision.
+- **You need a recorder, an IDE, or a low-code interface.** xa11y is a library with none of those; the commercial suites bundle them.
+- **You are testing a website.** Playwright or Selenium test the DOM directly, control the browser lifecycle, and intercept network traffic. xa11y drives a browser only as another desktop app.
+- **You need API stability today.** v0.12.0 is pre-1.0; breaking changes still land in minor releases.
 - **You are on Windows only, permanently.** FlaUI and pywinauto expose more of UI Automation than xa11y does.
-- **You need vendor support with an SLA.** xa11y is a community project. The commercial suites include support contracts.
-- **You need to evaluate accessibility conformance.** xa11y reports what the tree says, not whether it complies with WCAG or ARIA authoring practices.
+- **You need vendor support with an SLA.** xa11y is a community project.
+- **You need to evaluate accessibility conformance.** xa11y reads the tree to automate apps; it does not evaluate the tree against WCAG. Use [axe](https://github.com/dequelabs/axe-core) or [Accessibility Insights](https://accessibilityinsights.io/).
 
 ## Related but not competing
 
-- **[AccessKit](https://accesskit.dev/)** — a library for *publishing* an accessibility tree from your app. xa11y *reads* trees. They compose: xa11y's own egui and winit test applications are AccessKit-backed, which is how the same suite runs against a pure-Rust GUI on all three platforms.
-- **[Playwright](https://playwright.dev/)** — browser automation. Not a competitor, but the major design influence on xa11y's `Locator` pattern, auto-waiting, and selector syntax.
-- **[agent-desktop](https://agent-desktop.dev)** — a CLI built *on* xa11y for AI agents that read and control desktops. If you want an agent tool rather than a library, start there.
-- **RPA platforms** — UiPath and Power Automate Desktop solve business process automation, including orchestration, scheduling, and licensing. Overlapping techniques, different product category.
+- **[AccessKit](https://accesskit.dev/)** — publishes an accessibility tree from inside your app; xa11y reads trees. The two are opposite sides of the same interface, and they compose: xa11y's own egui and winit test apps are AccessKit-backed, which is how one suite runs against a pure-Rust GUI on all three platforms.
+- **[Playwright](https://playwright.dev/)** — browser automation, and the design influence behind xa11y's `Locator` pattern and selector syntax.
+- **[agent-desktop](https://agent-desktop.dev)** — a CLI built on xa11y for AI agents that read and control desktops.
+- **RPA platforms** — UiPath and Power Automate Desktop solve business process automation, with orchestration, scheduling, and enterprise licensing. Overlapping techniques, different product category.
+- **Accessibility auditing tools** — axe and Accessibility Insights evaluate a tree against WCAG criteria. xa11y does no conformance evaluation.
 
 ## How these claims were checked
 
-Verified July 2026 against: xa11y 0.12.0, FlaUI 5.0.0, pywinauto 0.6.x, Appium Windows and Mac2 drivers, dogtail 1.x, SikuliX 2.x, and current vendor documentation for Squish, Ranorex Studio, and TestComplete.
+Verified July 2026 against: xa11y 0.12.0, FlaUI 5.0.0 (released February 2025), pywinauto 0.6.x, the Appium Windows and Mac2 drivers, dogtail 1.x (which added Wayland support via gnome-ponytail-daemon), atomacos (low recent activity), SikuliX 2.x, and the current public documentation for Squish, Ranorex Studio, and TestComplete. Commercial suites are described only to the level their public documentation supports.
 
-Two details worth knowing if you are evaluating Appium on Windows: its Windows driver proxies to Microsoft's **WinAppDriver**, which has had no release since 2022, though the Appium-side driver itself remains actively maintained. And the **Mac2** driver is built on XCTest, so it requires Xcode on every machine that runs tests — a meaningful constraint for CI images.
-
-Commercial suites are compared at the level their public documentation supports — platforms, languages, and mechanism — rather than feature by feature, because much of their detail sits behind sales processes and evaluation licences. Treat those three rows as a starting point for your own trial, not a substitute for one.
-
-Corrections are welcome — comparisons rot, and a wrong claim about another project is the most expensive kind of error on a page like this. Please [open an issue](https://github.com/xa11y/xa11y/issues).
+Comparisons rot, and a wrong claim about another project is the most expensive kind of error on a page like this. If you find one, please [open an issue](https://github.com/xa11y/xa11y/issues).
