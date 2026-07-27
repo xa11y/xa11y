@@ -30,8 +30,8 @@ use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     VIRTUAL_KEY, VK_7, VK_A, VK_BACK, VK_CONTROL, VK_DELETE, VK_END, VK_ESCAPE, VK_F24, VK_F5,
-    VK_HOME, VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT, VK_OEM_1, VK_OEM_PERIOD, VK_PRIOR, VK_RETURN,
-    VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_Z,
+    VK_HOME, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_NEXT, VK_OEM_1,
+    VK_OEM_PERIOD, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP, VK_Z,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetMessageW, SetWindowsHookExW, UnhookWindowsHookEx, HC_ACTION,
@@ -263,6 +263,28 @@ fn expect_mouse(event: Wire) -> (u32, i32, i32, u32, u32) {
     }
 }
 
+/// The virtual-key codes a low-level hook may report for a key sent as `vk`.
+///
+/// The backend deliberately sends the side-agnostic modifier codes — `Key::Shift`
+/// means "a shift key", not "the left one" — but Windows resolves those to their
+/// left-hand counterparts before the hook sees them (observed on windows-latest:
+/// `VK_SHIFT` 0x10 arrives as `VK_LSHIFT` 0xA0, with `scanCode` still 0). Both
+/// spellings name the same key, and which side the system picks is not something
+/// the backend chooses or promises, so either is accepted. Every other code
+/// arrives unchanged.
+fn accepted_vks(vk: VIRTUAL_KEY) -> [u32; 2] {
+    let sided = if vk == VK_SHIFT {
+        VK_LSHIFT
+    } else if vk == VK_CONTROL {
+        VK_LCONTROL
+    } else if vk == VK_MENU {
+        VK_LMENU
+    } else {
+        vk
+    };
+    [u32::from(vk.0), u32::from(sided.0)]
+}
+
 /// Alt-modified keys arrive as `WM_SYSKEY*` rather than `WM_KEY*`.
 fn is_key_down(message: u32) -> bool {
     message == WM_KEYDOWN || message == WM_SYSKEYDOWN
@@ -345,9 +367,13 @@ fn named_keys_map_to_their_virtual_key_codes() {
     for (key, expected) in cases {
         let events = tap(&sim, key);
         assert_eq!(events.len(), 2, "{key:?} produced {events:?}");
+        let accepted = accepted_vks(*expected);
         let (down, vk, _, _) = expect_key(events[0]);
         assert!(is_key_down(down), "{key:?} produced {events:?}");
-        assert_eq!(vk, u32::from(expected.0), "{key:?} produced {events:?}");
+        assert!(
+            accepted.contains(&vk),
+            "{key:?} should report one of {accepted:?}, produced {events:?}"
+        );
         let (up, _, _, _) = expect_key(events[1]);
         assert!(is_key_up(up), "{key:?} produced {events:?}");
     }

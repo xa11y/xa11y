@@ -324,7 +324,9 @@ jobs:
         uses: actions/cache@v6
         with:
           path: test-apps/tauri/target
-          key: ${{ runner.os }}-tauri-app-${{ hashFiles('test-apps/tauri/Cargo.lock', 'test-apps/tauri/Cargo.toml', 'test-apps/tauri/build.rs', 'test-apps/tauri/tauri.conf.json', 'test-apps/tauri/src/**', 'test-apps/tauri/frontend/**') }}
+          # icons/ is in the hash because tauri-build bakes icons/icon.ico into
+          # a Windows resource, so it is a build input on that OS.
+          key: ${{ runner.os }}-tauri-app-${{ hashFiles('test-apps/tauri/Cargo.lock', 'test-apps/tauri/Cargo.toml', 'test-apps/tauri/build.rs', 'test-apps/tauri/tauri.conf.json', 'test-apps/tauri/src/**', 'test-apps/tauri/frontend/**', 'test-apps/tauri/icons/**') }}
           restore-keys: |
             ${{ runner.os }}-tauri-app-
 
