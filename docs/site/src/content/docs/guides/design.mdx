@@ -92,14 +92,14 @@ The matrix below summarises which apps are exercised on which platforms and what
 | Qt          | PySide6 (Qt 6)               | Linux, macOS, Windows | Python integ               | compat, actions, events                  |
 | GTK         | GTK 4 (PyGObject)            | Linux                 | Python integ               | compat, actions¹                         |
 | Cocoa       | AppKit (Swift)               | macOS                 | Python integ               | compat, actions, events                  |
-| Tauri       | Tauri (Rust + HTML)          | Linux, macOS³         | Python integ               | compat, actions, events, input_sim, screenshot |
+| Tauri       | Tauri (Rust + HTML)          | Linux, macOS, Windows | Python integ               | compat, actions, events, input_sim, screenshot |
 | Electron    | Chromium + Node              | Linux                 | JS integ                   | compat, actions, AccessibilityNotEnabled detection |
 
 ¹ GTK event subscription is exercised through the Rust integ suite via AT-SPI2 rather than duplicated in the per-app Python suite.
 
 ² AccessKit on macOS runs locally rather than in CI, for the TCC reason described under the CI matrix below.
 
-³ No windows-latest cell for Tauri, which leaves the Windows `SendInput` path without end-to-end input-simulation coverage (`windows_input_sim` in `tests/matrix.yaml`).
+The `Platforms in CI` column is machine-checked. `tests/matrix_check.py` parses the `integ` matrix out of `ci.yml` and fails the build when an app's declared `platforms:` doesn't match the cells that exist, so a platform an app claims but never runs on cannot go unnoticed the way the missing Tauri-on-Windows cell did.
 
 ### CI matrix
 
@@ -111,6 +111,7 @@ CI runs every push and pull request, with `RUSTFLAGS: -Dwarnings` so warnings fa
 | Linux Wayland (uinput)  | `ubuntu-latest`   | uinput e2e for the Wayland input backend; reads back via libevdev.      |
 | macOS                   | `macos-latest`    | Workspace unit tests. (TCC-bound integ tests run locally. See below.)   |
 | Windows                 | `windows-latest`  | Workspace unit tests + AccessKit Rust integ suite via UIA.              |
+| Windows (SendInput)     | `windows-latest`  | Wire-level tests for the `SendInput` backend, read back via low-level hooks. |
 | Integ (per app × OS)    | matrix            | One app × one OS × Python+JS+CLI suites via `tests/harness/launch.py`.  |
 | Lint & Format           | `ubuntu-latest`   | `cargo fmt`, `clippy -Dwarnings`, README sync, bindings parity, matrix check. |
 | Python bindings         | `ubuntu-latest`   | maturin build, ruff, pytest for the Python wheel.                       |
@@ -139,3 +140,7 @@ Wayland input simulation goes through `uinput`. The Wayland uinput e2e tests run
 ### Windows: UI Automation
 
 Hosted `windows-latest` runners do have an interactive desktop session, so UIA event subscriptions work in CI. The Rust integ harness launches the AccessKit test app, waits for it to register with UIA, runs the `#[ignore]`d tests with `--test-threads=1`, and tears the app down.
+
+### Windows: input subsystem
+
+Input simulation goes through `SendInput`. The wire-level tests in `xa11y-windows/tests/send_input_wire.rs` install `WH_KEYBOARD_LL` and `WH_MOUSE_LL` hooks on a dedicated pumping thread, drive the backend, and assert the virtual-key codes, extended and injected flags, wheel deltas, and absolute pointer coordinates that reached the wire. The hooks swallow the injected events and pass real ones through, so the suite observes what `SendInput` emitted without any of it landing on a window, and running it locally does not take over the machine. This is the Windows counterpart of the `libevdev` readback described above, and it covers the backend with no app in the loop, keeping a WebView2 quirk in the Tauri cell distinguishable from a backend bug.

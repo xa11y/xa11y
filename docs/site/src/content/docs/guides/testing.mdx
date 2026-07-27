@@ -46,7 +46,7 @@ UI Automation tree, not a fixture shaped to match the code.
 | `qt` | PySide6 (Qt) | ✓ | ✓ | ✓ |
 | `gtk` | GTK4 (PyGObject) | ✓ | ○ | ○ |
 | `cocoa` | Swift / AppKit | ○ | ✓ | ○ |
-| `tauri` | Rust + WebView | ✓ | ✓ | ○ |
+| `tauri` | Rust + WebView | ✓ | ✓ | ✓ |
 | `electron` | Chromium / Node | ✓ | ○ | ○ |
 | `egui` | Rust immediate-mode (eframe) | ✓ | ✓ | ✓ |
 | `winforms` | .NET Windows Forms | ○ | ○ | ✓ |
@@ -57,10 +57,11 @@ runs locally through `./scripts/run_integ_tests_macos.sh` rather than in CI,
 because the Rust integ suite needs an Accessibility (TCC) grant that hosted
 macOS runners cannot hold against a cargo-hashed binary path.
 
-Tauri has no Windows cell, and since it is the only app carrying the
-input-simulation suite, the Windows `SendInput` path has no end-to-end
-coverage. That gap is declared as `windows_input_sim` in
-[`tests/matrix.yaml`](https://github.com/xa11y/xa11y/blob/main/tests/matrix.yaml).
+Tauri is the app carrying the input-simulation suite, so its three rows are
+what give each platform's input backend an end-to-end test. Each of those
+platform claims is now checked: `tests/matrix_check.py` reads the CI matrix out
+of the workflow and fails the build when a declared platform has no cell
+running it.
 
 Across those rows, xa11y is exercised against all three platform accessibility
 backends (**AT-SPI2** on Linux, **AXUIElement** on macOS, **UI Automation** on
@@ -84,14 +85,15 @@ asserted by hand.
 
 Every push runs the suites across operating systems and toolkits in GitHub
 Actions ([`.github/workflows/ci.yml`](https://github.com/xa11y/xa11y/blob/main/.github/workflows/ci.yml)).
-The `integ` job alone is a matrix of a dozen OS × app cells (e.g.
+The `integ` job alone is a matrix of fifteen OS × app cells (e.g.
 `ubuntu × {accesskit, qt, gtk, tauri, electron, egui}`,
-`macos × {cocoa, tauri, qt, egui}`, `windows × {qt, egui, winforms, wpf}`), each standing up
+`macos × {cocoa, tauri, qt, egui}`, `windows × {tauri, qt, egui, winforms, wpf}`), each standing up
 a headless display, accessibility bus, and the app under test before running
 the Python, JS, and CLI suites against it. Alongside it run the Rust unit and
-integration jobs per OS, a Wayland/uinput input job, bindings builds and
-typechecks, cross-compile checks, license auditing, docs build with link
-checking, and the fuzzers below.
+integration jobs per OS, two wire-level input jobs (Linux `uinput` read back
+through `libevdev`, Windows `SendInput` read back through low-level hooks),
+bindings builds and typechecks, cross-compile checks, license auditing, docs
+build with link checking, and the fuzzers below.
 
 ## Fuzzing and robustness
 

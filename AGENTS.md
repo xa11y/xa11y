@@ -249,6 +249,11 @@ cargo xtask test-winforms                     # WinForms integration tests (Wind
 cargo xtask test-wpf                          # WPF integration tests (Windows only)
 cargo xtask test-apps                         # all Python integration test suites
 cargo xtask fuzz                              # provider fuzzer
+
+# Wire-level input-backend tests (no app launched; both are #[ignore]d)
+cargo test -p xa11y-linux   --test wayland_input_e2e -- --ignored --test-threads=1
+cargo test -p xa11y-windows --test send_input_wire   -- --ignored --test-threads=1
+
 cargo xtask fuzz --seed 42 -n 5000            # reproducible fuzz run
 cargo xtask coverage                          # code coverage report
 cargo xtask docs                              # build documentation

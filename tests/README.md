@@ -27,6 +27,19 @@ themselves to the Tauri and Electron apps (see the top of
 `tests/suites/js/03_input_sim.test.js` and `04_screenshot.test.js`) and complement — not
 duplicate — the Tauri Python tests.
 
+Two of the three input backends are also tested at the wire, with no app in the loop, so a
+webview quirk stays distinguishable from a backend bug:
+
+| Backend | Job | Readback |
+| --- | --- | --- |
+| Linux `uinput` | `Linux Wayland (uinput)` | `libevdev`, in `xa11y-linux/tests/wayland_input_e2e.rs` |
+| Windows `SendInput` | `Windows (SendInput)` | `WH_KEYBOARD_LL` / `WH_MOUSE_LL` hooks, in `xa11y-windows/tests/send_input_wire.rs` |
+
+Both suites are `#[ignore]`d so a plain `cargo test --workspace` neither needs `/dev/uinput`
+nor injects input as a side effect. macOS has no equivalent (see the
+`macos_input_sim_wire_level` gap in `matrix.yaml`), so the `macos × tauri` cell is its only
+cover.
+
 ### Per-app compat tests verify a11y API surface compatibility
 
 These tests (find, tree navigation, roles, widget discovery, actions, events) confirm that
@@ -46,16 +59,28 @@ python tests/matrix_check.py     # or: cargo xtask test-matrix-check
 ```
 
 That command prints the per-app × per-language matrix, the documented gaps, and
-the platform exclusions, then checks two things CI enforces: that every empty
-cell has a matching documented gap, and that every claimed `(app, language,
-feature)` maps to a test file that actually exists.
+the platform exclusions, then checks three things CI enforces: that every empty
+cell has a matching documented gap, that every claimed `(app, language,
+feature)` maps to a test file that actually exists, and that every app's
+`platforms:` list matches the OS × app cells of the `integ` matrix in
+`.github/workflows/ci.yml`.
+
+The third check exists because the first two validate claims against *files*.
+`platforms:` was unvalidated prose that read as authoritative, and it claimed a
+`windows-latest × tauri` cell that had never existed — which, since Tauri is the
+only app carrying the input-simulation suite, meant the Windows `SendInput`
+backend was driven by no test of any kind (issue #348). An app that genuinely is
+covered by something other than an `integ` cell records the covering vehicle
+under `covered_outside_integ`, and that entry goes stale — and fails — as soon
+as the platform is dropped or gains a cell.
 
 This README deliberately does **not** duplicate the table. It used to, and the
 copy rotted — it was still listing a `cli_integ` gap that no longer existed and
 omitting three test apps that had since landed.
 
 > **A green matrix cell is not proof a suite ran.** `matrix_check.py` validates
-> claims against *test files on disk*, not against execution. What guarantees
+> that a claimed feature has a test file and that a claimed platform has a CI
+> cell; neither proves the tests inside that cell executed. What guarantees
 > execution is the harness: `tests/harness/launch.py` fails the run when a
 > requested suite cannot start, and prints a per-suite ledger at the end of
 > every cell saying whether each suite ran, was deliberately skipped
@@ -85,8 +110,12 @@ cargo xtask test-egui        # egui/eframe
 cargo xtask test-winforms    # WinForms (Windows only)
 cargo xtask test-wpf         # WPF (Windows only)
 
-# Unit-test the harness itself (no app launched)
+# Unit-test the harness and the coverage-index checker (no app launched)
 cargo xtask test-harness
+
+# Wire-level input backends (no app launched; both suites are #[ignore]d)
+cargo test -p xa11y-linux   --test wayland_input_e2e -- --ignored --test-threads=1
+cargo test -p xa11y-windows --test send_input_wire   -- --ignored --test-threads=1
 
 # Linux integration tests via container
 cargo xtask test-integ-container
@@ -114,6 +143,7 @@ tests/
   README.md            <- this file
   matrix.yaml          <- machine-readable coverage matrix
   matrix_check.py      <- CI validator (prints coverage summary; gaps must be documented)
+  test_matrix_check.py <- unit tests for the validator (cargo xtask test-harness)
   helpers.py           <- shared Python launch helpers (launch_test_app fixture)
   harness/
     launch.py          <- THE entry point: launches an app once, runs the
@@ -125,6 +155,12 @@ tests/
     js/                <- JS integ suite (numbered NN_<feature>.test.js)
     cli/               <- CLI integ suite — drives the `xa11y` binary
                           (tree, find, actions, input_sim, screenshot)
+
+xa11y-linux/tests/
+  wayland_input_e2e.rs <- wire-level uinput backend tests (libevdev readback)
+
+xa11y-windows/tests/
+  send_input_wire.rs   <- wire-level SendInput backend tests (low-level hooks)
 
 xa11y/tests/integ/     <- Rust core suite (AccessKit app, fast-path)
   mod.rs               <- shared helpers (app_tree, one, named, act)

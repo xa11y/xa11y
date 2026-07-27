@@ -195,6 +195,38 @@ jobs:
         shell: pwsh
         run: .\scripts\run_integ_tests_windows.ps1
 
+  # ── Windows SendInput: wire-level input-sim coverage. The counterpart
+  #    of the Linux Wayland (uinput) job above. Drives
+  #    WindowsInputProvider through its public API, intercepts the
+  #    resulting events with WH_KEYBOARD_LL / WH_MOUSE_LL hooks, and
+  #    asserts the virtual-key codes, extended/injected flags, wheel
+  #    deltas and absolute pointer coordinates that reached the wire.
+  #
+  #    Independent of any app or webview: the hook swallows the injected
+  #    events, so nothing on the runner's desktop ever sees them. That
+  #    keeps this job's verdict about `SendInput` alone, separate from
+  #    the `windows-latest × tauri` integ cell, which exercises the same
+  #    backend through WebView2 (issue #348).
+  windows-sendinput:
+    name: Windows (SendInput)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          cache-key: sendinput
+
+      # --test-threads=1 because the tests share one process-wide hook log
+      # and one desktop input queue. The tests are #[ignore]d so the
+      # `windows` job's `cargo test --workspace` doesn't inject input as a
+      # side effect of a plain unit-test run.
+      - name: Run SendInput wire-level tests
+        run: >
+          cargo test -p xa11y-windows --test send_input_wire --
+          --ignored --test-threads=1 --nocapture
+
   # ── Compatibility integ matrix: one app × one OS × all language suites ──
   #
   # Each matrix cell starts the test app once, then runs the Python, JS, and
@@ -226,6 +258,14 @@ jobs:
           - { os: macos-latest,   app: cocoa }
           - { os: macos-latest,   app: tauri }
           - { os: macos-latest,   app: qt }
+          # Tauri on Windows is the only cell that reaches WebView2, and the
+          # only end-to-end cover for xa11y-windows' SendInput backend: tauri
+          # is the sole app carrying the input_sim suite, so before this cell
+          # existed no test of any kind drove that backend (issue #348). The
+          # wire-level `windows-sendinput` job above covers the same backend
+          # without a webview, so a WebView2 quirk here is distinguishable
+          # from a SendInput bug.
+          - { os: windows-latest, app: tauri }
           - { os: windows-latest, app: qt }
           # egui (eframe) — pure-Rust cross-platform GUI driven through
           # AccessKit. Outside the workspace so we build it explicitly per-OS.
@@ -643,10 +683,12 @@ jobs:
         with:
           python-version: "3.12"
 
+      # pyyaml is for the coverage-index self-tests at the end of this job:
+      # tests/matrix_check.py reads matrix.yaml and the CI workflow.
       - name: Create virtualenv and install tools
         run: |
           python -m venv .venv
-          .venv/bin/pip install maturin ruff pytest
+          .venv/bin/pip install maturin ruff pytest pyyaml
 
       - name: Ruff lint
         working-directory: xa11y-python
@@ -665,12 +707,14 @@ jobs:
         run: ../.venv/bin/pytest tests/ -v
 
       # The shared integ harness (tests/harness/launch.py) decides which suites
-      # run in every `integ` matrix cell, so its bugs are invisible by
-      # construction — it stops covering something and the cell stays green
-      # (issue #327). Its self-tests launch no app and need no bindings, so
-      # they ride along in this job, which already has a venv with pytest.
-      - name: Run integ-harness self-tests
-        run: .venv/bin/pytest tests/harness -v
+      # run in every `integ` matrix cell, and matrix_check.py decides whether
+      # the coverage index is believed, so bugs in either are invisible by
+      # construction — they stop covering something and the cells stay green
+      # (issues #327 and #348). Their self-tests launch no app and need no
+      # bindings, so they ride along in this job, which already has a venv
+      # with pytest.
+      - name: Run integ-harness and coverage-index self-tests
+        run: .venv/bin/pytest tests/harness tests/test_matrix_check.py -v
 
   # ── Docs build ──────────────────────────────────────────────────
   docs:

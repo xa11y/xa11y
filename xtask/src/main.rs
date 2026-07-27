@@ -514,16 +514,27 @@ fn do_test_matrix_check() -> bool {
     run_in("python", &["tests/matrix_check.py"], &root)
 }
 
-/// Unit-test the shared integration harness itself.
+/// Unit-test the shared integration harness and the coverage-index checker.
 ///
-/// The harness decides which suites run in every CI matrix cell, so a bug in
-/// it is invisible: it just stops covering something and the cell stays green
-/// (issue #327). These tests never launch an app — plain pytest, no venv, no
-/// bindings required.
+/// The harness decides which suites run in every CI matrix cell and
+/// `matrix_check.py` decides whether the coverage index is believed, so a bug
+/// in either is invisible: it just stops covering something and the cell stays
+/// green (issues #327 and #348). These tests never launch an app — plain
+/// pytest, no venv, no bindings required.
 fn do_test_harness() -> bool {
-    heading("Integ harness self-tests");
+    heading("Integ harness + coverage-index self-tests");
     let root = project_root();
-    run_in("python", &["-m", "pytest", "tests/harness", "-v"], &root)
+    run_in(
+        "python",
+        &[
+            "-m",
+            "pytest",
+            "tests/harness",
+            "tests/test_matrix_check.py",
+            "-v",
+        ],
+        &root,
+    )
 }
 
 /// Paths the prose linter covers: the root README and every hand-written

@@ -5,14 +5,31 @@
 # "How xa11y Is Tested" page (docs/site/src/content/docs/guides/testing.mdx)
 # summarizes it — the test-app/platform table and the CI matrix description.
 # If you add/remove an app, platform, or feature here, update that page too.
+#
+# `platforms:` is checked against the `integ` matrix in .github/workflows/ci.yml
+# by matrix_check.py: an app must have a cell on every platform it names, or an
+# entry under `covered_outside_integ` naming the vehicle that covers it. It used
+# to be prose that only looked authoritative, which is how a windows-latest
+# Tauri cell that never existed hid the Windows input-simulation gap (#348).
 
 apps:
   accesskit:
     platforms: [linux, macos, windows]
+    covered_outside_integ:
+      macos: >
+        Rust integ suite via ./scripts/run_integ_tests_macos.sh, run locally
+        rather than in CI: the suite needs a kTCCServiceAccessibility grant
+        against a cargo-hashed binary path, which is fragile on hosted runners.
+      windows: >
+        Rust integ suite via scripts/run_integ_tests_windows.ps1 in the
+        `windows` CI job.
     notes: >
       Core Rust test app (winit + AccessKit). The primary coverage vehicle is the
       Rust integ suite in xa11y/tests/integ/, not the per-app compat matrix.
       JS integ tests also target this app for compat and actions.
+      The ubuntu-latest integ cell is the only one: the macOS/Windows cells ran
+      no language suites (see declared_suite_skips in tests/harness/launch.py),
+      so the Rust integ jobs carry those platforms instead.
 
   qt:
     platforms: [linux, macos, windows]
@@ -24,14 +41,17 @@ apps:
     platforms: [macos]
 
   tauri:
-    platforms: [linux, macos]
+    platforms: [linux, macos, windows]
     notes: >
       Primary vehicle for input_sim and screenshot coverage (one-per-platform strategy).
       Uses a dedicated event-log page that captures synthesised pointer and keyboard
       events, enabling end-to-end assertions rather than smoke tests.
-      No windows-latest cell: WebView2 has never been wired into the integ
-      matrix. Since tauri is the only app carrying input_sim, that leaves
-      Windows input simulation uncovered — tracked as windows_input_sim below.
+      The windows-latest cell landed in #348 and is the only cell that reaches
+      WebView2; it is also the only end-to-end cover for xa11y-windows'
+      SendInput backend, since tauri is the sole app carrying input_sim. The
+      wire-level `Windows (SendInput)` job exercises that backend without a
+      webview, so a WebView2 quirk here stays distinguishable from a
+      SendInput bug.
 
   electron:
     platforms: [linux]
@@ -96,11 +116,17 @@ features:
     tested_on: [tauri, electron]
     notes: >
       Tests platform input APIs, not a11y compatibility. Covered once per
-      platform on Linux and macOS, and not at all on Windows: both vehicles
-      (tauri, electron) stop short of a windows-latest cell, so the SendInput
-      path has no integration coverage. See the windows_input_sim gap.
+      platform: Linux and macOS through the tauri cells, Windows through the
+      windows-latest tauri cell added in #348.
       Python: Tauri app (end-to-end with event log). JS: Tauri + Electron apps
       (smoke tests; see the app gate in tests/suites/js/03_input_sim.test.js).
+      Linux and Windows additionally have a wire-level job that asserts the
+      events the backend emits with no app in the loop, so a renderer quirk is
+      distinguishable from a backend bug: `Linux Wayland (uinput)` reads back
+      through libevdev, `Windows (SendInput)` through WH_KEYBOARD_LL /
+      WH_MOUSE_LL hooks (xa11y-windows/tests/send_input_wire.rs). macOS has none,
+      so the tauri cell is its only cover — see the
+      macos_input_sim_wire_level gap.
 
   screenshot:
     description: "window and element screenshots; PNG save"
@@ -108,8 +134,8 @@ features:
     tested_on: [tauri, electron]
     notes: >
       Tests platform screenshot APIs. Covered once per platform. On Windows
-      that cover comes from rust_core alone, since neither per-app vehicle
-      (tauri, electron) has a windows-latest cell.
+      that cover came from rust_core alone until the windows-latest tauri cell
+      landed in #348; both now run there.
       Python: Tauri app. JS: Tauri + Electron apps. Rust: AccessKit app
       (rust_core).
 
@@ -190,18 +216,21 @@ gaps:
       apps: [accesskit]
       language: python
 
-  - id: windows_input_sim
+  - id: macos_input_sim_wire_level
     description: >
-      Input simulation has no integration coverage on Windows. input_sim is
-      carried by the tauri and electron apps only, and neither has a
-      windows-latest cell in the integ matrix (tauri: linux + macos;
-      electron: linux). The Linux Wayland uinput e2e job covers the Linux
-      backend at wire level and the macOS CGEvent path is covered through
-      tauri, so xa11y-windows' SendInput path is the one input backend no
-      test drives end-to-end. Closing it means adding
-      `- { os: windows-latest, app: tauri }` to the integ matrix.
-    severity: medium
-    workaround: "Unit tests only; no end-to-end assertion of the Windows SendInput path"
+      macOS is the one input backend with no wire-level job. Linux has
+      `Linux Wayland (uinput)`, which reads events back through libevdev, and
+      Windows has `Windows (SendInput)`, which reads them back through
+      WH_KEYBOARD_LL / WH_MOUSE_LL hooks; both assert the emitted codes with
+      no app in the loop, so a renderer quirk cannot be mistaken for a backend
+      bug. The macos-latest tauri cell is the only cover for CGEvent, and
+      several of its assertions are xfail(strict=False) because CGEvent drag
+      and scroll do not reliably reach WKWebView as DOM events — so an
+      end-to-end failure there is genuinely ambiguous between the two layers.
+      A CGEventTap readback would be the equivalent; whether one can run
+      under CI's TCC grant is unexplored.
+    severity: low
+    workaround: "macos-latest x tauri integ cell covers the CGEvent path end-to-end"
     affects:
       apps: [tauri]
       features: [input_sim]
@@ -220,6 +249,16 @@ gaps:
       features: [input_sim, screenshot]
 
 # Resolved gaps (kept here briefly for provenance):
+#   windows_input_sim — input simulation had no automated coverage of any kind
+#   on Windows: input_sim is carried by tauri and electron, and neither had a
+#   windows-latest cell, while xa11y-windows/src/input.rs had no unit tests
+#   either. Closed on two fronts in #348: the `- { os: windows-latest, app:
+#   tauri }` integ cell drives SendInput end-to-end through WebView2, and the
+#   `Windows (SendInput)` job runs xa11y-windows/tests/send_input_wire.rs,
+#   which reads the emitted events back through low-level hooks. The reason
+#   the gap stayed invisible — an unvalidated `platforms:` key — is closed by
+#   the Execution check in matrix_check.py.
+#
 #   uia_custom_table_cells_unit_only — the Custom + TableItem cell branch of
 #   map_uia_role (#323) had no app producing it: WinForms' DataGridView
 #   reports DataItem cells. test-apps/wpf's DataGrid reports

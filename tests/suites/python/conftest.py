@@ -237,7 +237,12 @@ APP_CONFIGS: dict[str, dict] = {
         "progress_bar_selector": 'progress_bar[name="Progress"]',
         "textfield_selector": 'text_field[name="Search"]',
         "textfield_initial_value": "hello world",
-        "textarea_selector": 'text_area[name="Notes"]',
+        # Text area — WebView2 goes through UIA, which has no distinct
+        # multiline text role: <textarea> collapses to UIA_EditControlTypeId
+        # (xa11y `text_field`). Skip on Windows, same as the egui entry below.
+        "textarea_selector": (
+            None if sys.platform == "win32" else 'text_area[name="Notes"]'
+        ),
         # Table — HTML <table> with a <caption> (WebKit's data-table
         # heuristic needs a caption/headers to expose the table at all, and
         # <th> is out — see the page comment). Only one table in the app,
@@ -252,11 +257,13 @@ APP_CONFIGS: dict[str, dict] = {
         "table_min_cells": 4,
         "table_cell_names": None,
         "table_content_names": None,
-        # WebKitGTK exposes cell text through the AT-SPI Text interface,
-        # which xa11y surfaces as the cell's value; macOS WebKit has no
-        # equivalent (text markers only).
+        # WebKitGTK exposes cell text through the AT-SPI Text interface, which
+        # xa11y surfaces as the cell's value. This is a WebKitGTK property, not
+        # a webview one: macOS WebKit has no equivalent (text markers only),
+        # and the Windows cell renders through WebView2, which is Chromium
+        # under UIA. Asserted on Linux only.
         "table_cell_values": (
-            None if sys.platform == "darwin" else ["Alice", "Admin", "Bob", "User"]
+            ["Alice", "Admin", "Bob", "User"] if sys.platform == "linux" else None
         ),
         # Plain HTML tables have no selection.
         "table_selected_cell_name": None,

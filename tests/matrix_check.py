@@ -4,7 +4,7 @@
 Run from the repo root:
     python tests/matrix_check.py
 
-Two independent checks run, and either failing exits non-zero:
+Three independent checks run, and any one failing exits non-zero:
 
   1. Internal consistency — every empty coverage cell has a matching
      documented gap entry.
@@ -12,6 +12,11 @@ Two independent checks run, and either failing exits non-zero:
      about, and every (language, feature) the matrix claims maps to a test
      file that actually exists on disk. This keeps matrix.yaml from drifting
      into claiming coverage that no longer ships.
+  3. Execution — every app's `platforms:` list matches the OS × app cells of
+     the `integ` matrix in .github/workflows/ci.yml. Checks 1 and 2 both
+     validate claims against *files*, which is how `platforms:` claimed a
+     windows-latest Tauri cell that had never existed and took the Windows
+     input-simulation gap with it (issue #348, and #327 before it).
 """
 
 from __future__ import annotations
@@ -29,8 +34,18 @@ except ImportError:
 TESTS_DIR = Path(__file__).parent
 MATRIX_PATH = TESTS_DIR / "matrix.yaml"
 HARNESS_PATH = TESTS_DIR / "harness" / "launch.py"
+WORKFLOW_PATH = TESTS_DIR.parent / ".github" / "workflows" / "ci.yml"
 LANGUAGES = ["python", "js", "cli"]
 SYMBOLS = {True: "✅", False: "❌"}
+
+# GitHub runner labels used by the `integ` matrix, mapped to the platform names
+# matrix.yaml writes in `platforms:`. An unknown label is an error rather than
+# a silently ignored cell — a runner rename must be noticed here.
+RUNNER_PLATFORMS = {
+    "ubuntu-latest": "linux",
+    "macos-latest": "macos",
+    "windows-latest": "windows",
+}
 
 # For each language, map a coverage *feature* to the test file(s) that would
 # exercise it. A claimed feature is considered real if at least one of its
@@ -126,6 +141,101 @@ def verify_against_tests(data: dict) -> list[str]:
     return problems
 
 
+def integ_cells() -> dict[str, set[str]]:
+    """Parse the `integ` job's OS × app matrix out of the CI workflow.
+
+    Returns {app: {platform, ...}} using matrix.yaml's platform names.
+
+    Raises RuntimeError if the workflow no longer has the shape this reads —
+    a silently-empty result would turn the whole platform check into a no-op,
+    which is exactly the failure mode this check exists to prevent.
+    """
+    with WORKFLOW_PATH.open() as f:
+        workflow = yaml.safe_load(f)
+
+    try:
+        include = workflow["jobs"]["integ"]["strategy"]["matrix"]["include"]
+    except (KeyError, TypeError) as exc:
+        raise RuntimeError(
+            f"could not find jobs.integ.strategy.matrix.include in "
+            f"{WORKFLOW_PATH}; the platform check cannot run against a "
+            f"workflow it can't read"
+        ) from exc
+
+    cells: dict[str, set[str]] = {}
+    for entry in include:
+        os_label, app = entry.get("os"), entry.get("app")
+        if os_label is None or app is None:
+            raise RuntimeError(f"integ matrix entry is missing os/app: {entry!r}")
+        if os_label not in RUNNER_PLATFORMS:
+            raise RuntimeError(
+                f"integ matrix entry uses runner {os_label!r}, which "
+                f"matrix_check.py doesn't map to a platform (known: "
+                f"{', '.join(sorted(RUNNER_PLATFORMS))})"
+            )
+        cells.setdefault(app, set()).add(RUNNER_PLATFORMS[os_label])
+    return cells
+
+
+def verify_platforms(data: dict) -> list[str]:
+    """Return problems where `platforms:` disagrees with the CI integ matrix.
+
+    `platforms:` used to be unvalidated prose that read as authoritative. Three
+    ways it can now be wrong, all fatal:
+
+    * a platform is claimed but has no `integ` cell and no
+      `covered_outside_integ` entry naming the vehicle that covers it instead;
+    * a cell exists for a platform the app doesn't claim;
+    * a `covered_outside_integ` entry is stale — it names a platform the app no
+      longer claims, or one that *does* have a cell now, so the entry excuses
+      nothing while still reading as a live design decision.
+    """
+    problems: list[str] = []
+    apps_meta: dict = data.get("apps", {})
+    cells = integ_cells()
+
+    for app in sorted(set(cells) - set(apps_meta)):
+        problems.append(
+            f"the integ matrix has cells for app '{app}' "
+            f"({', '.join(sorted(cells[app]))}), which matrix.yaml doesn't describe"
+        )
+
+    for app, meta in apps_meta.items():
+        claimed = set(meta.get("platforms", []) or [])
+        actual = cells.get(app, set())
+        elsewhere = meta.get("covered_outside_integ", {}) or {}
+
+        for platform in sorted(claimed - actual - set(elsewhere)):
+            problems.append(
+                f"apps.{app}.platforms claims '{platform}', but the integ "
+                f"matrix has no {{os: *-latest, app: {app}}} cell there. Add "
+                f"the cell, drop the claim, or record the covering vehicle "
+                f"under apps.{app}.covered_outside_integ.{platform}"
+            )
+        for platform in sorted(actual - claimed):
+            problems.append(
+                f"the integ matrix runs {app} on {platform}, but "
+                f"apps.{app}.platforms doesn't list it"
+            )
+        for platform, reason in sorted(elsewhere.items()):
+            if platform not in claimed:
+                problems.append(
+                    f"apps.{app}.covered_outside_integ names '{platform}', "
+                    f"which apps.{app}.platforms no longer claims (stale entry)"
+                )
+            elif platform in actual:
+                problems.append(
+                    f"apps.{app}.covered_outside_integ names '{platform}', "
+                    f"which now has an integ cell (stale entry)"
+                )
+            elif not str(reason).strip():
+                problems.append(
+                    f"apps.{app}.covered_outside_integ.{platform} has no "
+                    f"reason; it must name the vehicle that covers the platform"
+                )
+    return problems
+
+
 def load_matrix() -> dict:
     with MATRIX_PATH.open() as f:
         return yaml.safe_load(f)
@@ -214,6 +324,21 @@ def main() -> int:
         print("  OK: every claimed (app, language, feature) maps to a real test.")
     print()
 
+    # Execution check: does `platforms:` match the cells CI actually runs?
+    try:
+        platform_drift = verify_platforms(data)
+    except RuntimeError as exc:
+        platform_drift = [str(exc)]
+
+    print("Execution Check (platforms: vs. the CI integ matrix)")
+    print("=" * 60)
+    if platform_drift:
+        for problem in platform_drift:
+            print(f"  ✗ {problem}")
+    else:
+        print("  OK: every declared platform has a cell that runs it.")
+    print()
+
     # Result
     failed = False
     if undocumented:
@@ -226,10 +351,17 @@ def main() -> int:
         print("FAIL: matrix.yaml claims coverage that doesn't exist on disk (see above).")
         failed = True
 
+    if platform_drift:
+        print("FAIL: matrix.yaml's platforms: disagree with the CI integ matrix (see above).")
+        failed = True
+
     if failed:
         return 1
 
-    print("OK: matrix is internally consistent and matches the tests on disk.")
+    print(
+        "OK: matrix is internally consistent, matches the tests on disk, "
+        "and matches the platforms CI runs."
+    )
     return 0
 
 

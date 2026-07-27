@@ -29,3 +29,14 @@ windows = { version = "0.62", features = [
 # `::windows_core::*` paths directly rather than going through the `windows`
 # re-export.
 windows-core = "0.62"
+
+[target.'cfg(target_os = "windows")'.dev-dependencies]
+# tests/send_input_wire.rs installs WH_KEYBOARD_LL / WH_MOUSE_LL hooks to read
+# back what SendInput actually put on the wire. Integration tests link the
+# crate from outside, so they need their own handle on the `windows` bindings.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }

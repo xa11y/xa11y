@@ -36,7 +36,17 @@ pytestmark = pytest.mark.skipif(
 )
 
 HIT_TARGET = 'button[name="Hit target"]'
-EVENT_LOG = 'text_area[name="Event log"]'
+# UIA has no distinct multiline text role, so WebView2's <textarea> collapses to
+# UIA_EditControlTypeId, which xa11y maps to `text_field`; WebKitGTK and
+# WKWebView both expose it as `text_area`. Same collapse the egui entry in
+# conftest.py records for AccessKit's MultilineTextInput. The role has to be in
+# the selector rather than dropped: the enclosing <fieldset> takes its name from
+# the <legend>, so a role-less `[name="Event log"]` matches two elements.
+EVENT_LOG = (
+    'text_field[name="Event log"]'
+    if sys.platform == "win32"
+    else 'text_area[name="Event log"]'
+)
 TYPED_FIELD = 'text_field[name="Typed text"]'
 CLEAR_BUTTON = 'button[name="Clear log"]'
 
