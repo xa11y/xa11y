@@ -49,6 +49,40 @@ STARTUP_TIMEOUT = float(os.environ.get("XA11Y_TEST_STARTUP_TIMEOUT", "30"))
 # suite, and the Python harness skips all its suites on macOS anyway).
 _MACOS_FRONTMOST_APPS = {"tauri", "qt", "electron", "egui"}
 
+# Browser arguments for the WebView2-backed Tauri app on Windows.
+#
+# WebView2 runs Chromium's native-window occlusion calculation, and on a hosted
+# windows-latest runner it concludes the window is covered and never revises
+# that. A page it believes is hidden has every accessible node marked
+# UIA IsOffscreen=true, which xa11y reads as `visible=false` — so every
+# actionability-gated verb (press, focus, toggle, expand, scroll_into_view)
+# times out against a target that is in fact rendered and on screen. The tree
+# is otherwise complete and correct: names, values, roles and checked state all
+# read fine, and only the visibility bit is wrong.
+#
+# Both flags address that one decision: the first stops the occlusion
+# calculation, the second stops the renderer backgrounding itself if something
+# else concludes the window is occluded. This configures the *test app* for a
+# headless CI desktop, the same way the Electron app is launched with
+# --force-renderer-accessibility; xa11y's own behaviour is untouched, and
+# `visible` still means what it means.
+WEBVIEW2_BROWSER_ARGUMENTS = (
+    "--disable-features=CalculateNativeWinOcclusion "
+    "--disable-backgrounding-occluded-windows"
+)
+
+
+def webview2_env_overrides() -> dict[str, str]:
+    """Env overrides for the WebView2 test app. Empty off Windows.
+
+    WebView2 reads its extra browser arguments from this variable when the
+    host creates the environment with default options, which is what Tauri
+    does — so no change to test-apps/tauri is needed.
+    """
+    if sys.platform != "win32":
+        return {}
+    return {"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS": WEBVIEW2_BROWSER_ARGUMENTS}
+
 
 # ---------------------------------------------------------------------------
 # App definitions
@@ -98,7 +132,7 @@ def _app_command(app: str) -> tuple[list[str], dict[str, str], list[str], str | 
         )
         return (
             [binary],
-            {},
+            webview2_env_overrides(),
             ["xa11y-tauri-test-app"],
             'button[name="OK"]',
         )

@@ -52,6 +52,11 @@ apps:
       wire-level `Windows (SendInput)` job exercises that backend without a
       webview, so a WebView2 quirk here stays distinguishable from a
       SendInput bug.
+      WebView2 needs --disable-features=CalculateNativeWinOcclusion on a
+      hosted runner or it reports every node in the page as UIA
+      IsOffscreen=true, which xa11y honestly reads back as visible=false and
+      every actionability-gated verb then times out. The flags are passed by
+      webview2_env_overrides() in tests/harness/launch.py.
 
   electron:
     platforms: [linux]
