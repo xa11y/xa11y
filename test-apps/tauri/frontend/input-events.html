@@ -16,8 +16,14 @@
        Two columns keep the hit target, typed field, event log, and clear
        button all inside the window — the same reason index.html uses a grid. */
     body { font-family: system-ui, sans-serif; margin: 12px; }
-    .cols { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
-    .col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+    /* nowrap + fixed column widths: the columns must never wrap into a vertical
+       stack, or "Clear log" drops below the fold again. The event log lines and
+       the .last status strings are unbounded text, so without a width cap their
+       max-content would widen a column enough to force that wrap. */
+    .cols { display: flex; gap: 16px; align-items: flex-start; flex-wrap: nowrap; }
+    .col { display: flex; flex-direction: column; gap: 12px; min-width: 0; flex: 0 0 auto; }
+    .col-inputs { width: 320px; }
+    .col-log { width: 500px; }
     fieldset { margin: 0; padding: 12px; }
     legend { font-weight: bold; }
     .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
@@ -37,7 +43,9 @@
     #hit-target:focus { border-color: #0078d7; background: #eef6ff; }
     #event-log { width: 480px; height: 180px; font-family: ui-monospace, monospace; white-space: pre; }
     #typed-text { width: 300px; }
-    .last { font-family: ui-monospace, monospace; color: #333; }
+    /* Status strings grow to long single lines after each event; cap and wrap
+       them inside the column so their width can't push the columns to wrap. */
+    .last { font-family: ui-monospace, monospace; color: #333; max-width: 300px; overflow-wrap: anywhere; }
     a { color: #0078d7; }
   </style>
 </head>
@@ -56,7 +64,7 @@
     log via the a11y tree. Each event is one line.</p>
 
   <div class="cols">
-    <div class="col">
+    <div class="col col-inputs">
       <!-- Hit target — captures mouse events -->
       <fieldset>
         <legend>Hit target</legend>
@@ -79,7 +87,7 @@
       </fieldset>
     </div>
 
-    <div class="col">
+    <div class="col col-log">
       <!-- Event log — what integ tests assert against -->
       <fieldset>
         <legend>Event log</legend>
