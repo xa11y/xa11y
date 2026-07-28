@@ -379,6 +379,16 @@ def test_platform_meta_chord(tauri_input_app, sim):
 def test_type_text_writes_to_focused_input(tauri_input_app, sim):
     _clear_log(tauri_input_app)
     _focus_typed_field(tauri_input_app)
+    # Focus the field with a real pointer click as well, not only a11y .focus().
+    # Under WebView2 a UIA SetFocus does not reliably move DOM focus, so the
+    # KEYEVENTF_UNICODE characters type_text injects would land on no focused
+    # element and the field would stay empty — the key-event tests above pass
+    # only because their listener is on `window`, which fires regardless of
+    # focus. A synthesised click sets real DOM focus on every platform.
+    field = tauri_input_app.locator(TYPED_FIELD).element()
+    fr = field.bounds
+    assert fr is not None, "typed field has no bounds"
+    sim.click((fr.x + fr.width // 2, fr.y + fr.height // 2))
     sim.type_text("hello xa11y")
     # Poll the typed-text input's value (not the event log) — type_text uses
     # Unicode / scancode paths that don't always generate synthetic key events
