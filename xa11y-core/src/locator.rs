@@ -72,6 +72,45 @@ fn state_label(state: ElementState) -> &'static str {
     }
 }
 
+/// The state conditions an action's auto-wait requires before it will act.
+///
+/// Every locator action requires the target to be `enabled` — a disabled
+/// control cannot be operated through any accessibility API. Most verbs also
+/// require `visible`, matching the input-simulation heritage where an action
+/// needs on-screen coordinates. `scroll_into_view` is the exception: gating it
+/// on `visible` is circular, since making an off-screen element visible is its
+/// whole purpose (issue #350).
+#[derive(Clone, Copy)]
+struct Actionability {
+    /// Require `states.visible` in addition to `enabled`.
+    require_visible: bool,
+}
+
+impl Actionability {
+    /// The default gate: the target must be both visible and enabled.
+    const VISIBLE_AND_ENABLED: Self = Self {
+        require_visible: true,
+    };
+    /// Gate for `scroll_into_view`: enabled only, no visibility requirement.
+    const ENABLED: Self = Self {
+        require_visible: false,
+    };
+
+    /// Whether `data` satisfies this gate.
+    fn is_met(self, data: &ElementData) -> bool {
+        data.states.enabled && (!self.require_visible || data.states.visible)
+    }
+
+    /// Human label for the gate, used in timeout diagnoses.
+    fn label(self) -> &'static str {
+        if self.require_visible {
+            "visible && enabled"
+        } else {
+            "enabled"
+        }
+    }
+}
+
 /// A lazy element descriptor that re-resolves against a fresh accessibility
 /// tree on every operation.
 ///
@@ -532,18 +571,25 @@ impl Locator {
         }
     }
 
-    /// Poll until the element is attached, visible, and enabled, returning a
-    /// live [`Element`] handle. Used by the action methods below to provide
-    /// resilience against transient unactionable states.
+    /// Poll until the element satisfies `gate`, returning a live [`Element`]
+    /// handle. Used by the action methods below to provide resilience against
+    /// transient unactionable states.
     ///
     /// `action` names the calling action for the timeout diagnosis, so a
     /// failed `press()` reports *what* was being attempted and what the
     /// last poll observed.
     ///
+    /// `gate` states which conditions the action requires. Most verbs use
+    /// [`Actionability::VISIBLE_AND_ENABLED`]; `scroll_into_view` uses
+    /// [`Actionability::ENABLED`], because gating it on `visible` is circular —
+    /// it is the one verb whose purpose is to make an off-screen element
+    /// visible, so requiring visibility means it can never act on exactly the
+    /// elements that need it (issue #350).
+    ///
     /// Always performs at least one attempt before checking the deadline, so
     /// `Duration::ZERO` means "single attempt, no polling" — the same
     /// contract as `poll_lookup` in `app.rs`.
-    fn auto_wait(&self, action: &str) -> Result<Element> {
+    fn auto_wait(&self, action: &str, gate: Actionability) -> Result<Element> {
         let timeout = self.effective_timeout()?;
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
@@ -552,7 +598,7 @@ impl Locator {
         loop {
             // This poll's observation, for the timeout diagnosis.
             let observed = match self.resolve_data() {
-                Ok(data) if data.states.visible && data.states.enabled => {
+                Ok(data) if gate.is_met(&data) => {
                     return Ok(Element::new(data, Arc::clone(&self.provider)));
                 }
                 Ok(data) => {
@@ -569,7 +615,7 @@ impl Locator {
             if elapsed >= timeout {
                 return Err(self.diagnose_timeout(
                     elapsed,
-                    format!("{action} target actionable (visible && enabled)"),
+                    format!("{action} target actionable ({})", gate.label()),
                     observed.as_ref(),
                     ever_matched,
                 ));
@@ -588,62 +634,80 @@ impl Locator {
 
     /// Click / invoke the matched element.
     pub fn press(&self) -> Result<()> {
-        self.auto_wait("press")?.press()
+        self.auto_wait("press", Actionability::VISIBLE_AND_ENABLED)?
+            .press()
     }
 
     /// Set keyboard focus on the matched element.
     pub fn focus(&self) -> Result<()> {
-        self.auto_wait("focus")?.focus()
+        self.auto_wait("focus", Actionability::VISIBLE_AND_ENABLED)?
+            .focus()
     }
 
     /// Remove keyboard focus from the matched element.
     pub fn blur(&self) -> Result<()> {
-        self.auto_wait("blur")?.blur()
+        self.auto_wait("blur", Actionability::VISIBLE_AND_ENABLED)?
+            .blur()
     }
 
     /// Toggle the matched element (checkbox, switch).
     pub fn toggle(&self) -> Result<()> {
-        self.auto_wait("toggle")?.toggle()
+        self.auto_wait("toggle", Actionability::VISIBLE_AND_ENABLED)?
+            .toggle()
     }
 
     /// Select the matched element (list item, etc.).
     pub fn select(&self) -> Result<()> {
-        self.auto_wait("select")?.select()
+        self.auto_wait("select", Actionability::VISIBLE_AND_ENABLED)?
+            .select()
     }
 
     /// Expand the matched element.
     pub fn expand(&self) -> Result<()> {
-        self.auto_wait("expand")?.expand()
+        self.auto_wait("expand", Actionability::VISIBLE_AND_ENABLED)?
+            .expand()
     }
 
     /// Collapse the matched element.
     pub fn collapse(&self) -> Result<()> {
-        self.auto_wait("collapse")?.collapse()
+        self.auto_wait("collapse", Actionability::VISIBLE_AND_ENABLED)?
+            .collapse()
     }
 
     /// Show the context menu for the matched element.
     pub fn show_menu(&self) -> Result<()> {
-        self.auto_wait("show_menu")?.show_menu()
+        self.auto_wait("show_menu", Actionability::VISIBLE_AND_ENABLED)?
+            .show_menu()
     }
 
     /// Increment the matched element (slider, spinner).
     pub fn increment(&self) -> Result<()> {
-        self.auto_wait("increment")?.increment()
+        self.auto_wait("increment", Actionability::VISIBLE_AND_ENABLED)?
+            .increment()
     }
 
     /// Decrement the matched element (slider, spinner).
     pub fn decrement(&self) -> Result<()> {
-        self.auto_wait("decrement")?.decrement()
+        self.auto_wait("decrement", Actionability::VISIBLE_AND_ENABLED)?
+            .decrement()
     }
 
     /// Scroll the matched element into view.
+    ///
+    /// Unlike the other verbs, this waits only for the target to be attached
+    /// and `enabled`, **not** `visible`: an off-screen element is precisely
+    /// what `scroll_into_view` exists to bring on-screen, so gating on
+    /// visibility would be circular and would time out on the elements that
+    /// most need scrolling (issue #350).
     pub fn scroll_into_view(&self) -> Result<()> {
-        self.auto_wait("scroll_into_view")?.scroll_into_view()
+        self.auto_wait("scroll_into_view", Actionability::ENABLED)?
+            .scroll_into_view()
     }
 
     /// Set the text value of the matched element.
     pub fn set_value(&self, value: &str) -> Result<()> {
-        self.auto_wait("set_value")?.set_value(value)
+        self.auto_wait("set_value", Actionability::VISIBLE_AND_ENABLED)?
+            .set_value(value)
     }
 
     /// Set the numeric value of the matched element (slider, spinner).
@@ -655,13 +719,14 @@ impl Locator {
                 message: format!("set_numeric_value requires a finite value, got {}", value),
             });
         }
-        self.auto_wait("set_numeric_value")?
+        self.auto_wait("set_numeric_value", Actionability::VISIBLE_AND_ENABLED)?
             .set_numeric_value(value)
     }
 
     /// Type text at the current cursor position on the matched element.
     pub fn type_text(&self, text: &str) -> Result<()> {
-        self.auto_wait("type_text")?.type_text(text)
+        self.auto_wait("type_text", Actionability::VISIBLE_AND_ENABLED)?
+            .type_text(text)
     }
 
     /// Select a text range within the matched element.
@@ -671,7 +736,8 @@ impl Locator {
                 message: format!("select_text start ({}) must be <= end ({})", start, end),
             });
         }
-        self.auto_wait("select_text")?.select_text(start, end)
+        self.auto_wait("select_text", Actionability::VISIBLE_AND_ENABLED)?
+            .select_text(start, end)
     }
 
     /// Perform an action by name (with auto-wait).
@@ -679,7 +745,8 @@ impl Locator {
     /// This is the escape hatch for platform-specific actions not covered
     /// by the named methods above. Also works for well-known action names.
     pub fn perform_action(&self, action: &str) -> Result<()> {
-        self.auto_wait("perform_action")?.perform_action(action)
+        self.auto_wait("perform_action", Actionability::VISIBLE_AND_ENABLED)?
+            .perform_action(action)
     }
 
     // ── Wait operations ─────────────────────────────────────────────
@@ -969,6 +1036,67 @@ mod tests {
         root_locator(r#"button[name="DoesNotExist"]"#)
             .wait_detached(Duration::ZERO)
             .expect("an absent element is already detached");
+    }
+
+    // ── scroll_into_view actionability gate (issue #350) ─────────────
+
+    #[test]
+    fn scroll_into_view_acts_on_offscreen_element() {
+        // static_text "Status" is enabled but visible=false — the exact state
+        // scroll_into_view exists to fix. Gating it on `visible` (as every
+        // other verb is) would be circular and time out; it must act instead.
+        let provider = build_provider();
+        let handle = Arc::clone(&provider);
+        let provider_dyn: Arc<dyn Provider> = provider;
+        let loc = Locator::new(provider_dyn, None, r#"static_text[name="Status"]"#)
+            .with_timeout(Duration::ZERO);
+        loc.scroll_into_view()
+            .expect("scroll_into_view must act on an off-screen (visible=false) element");
+        // And it must reach the provider, not short-circuit.
+        assert!(
+            handle
+                .actions()
+                .iter()
+                .any(|(_, action, _)| action == "scroll_into_view"),
+            "scroll_into_view must delegate to the provider"
+        );
+    }
+
+    #[test]
+    fn visible_gated_verb_still_blocks_on_offscreen_element() {
+        // The gate relaxation is scoped to scroll_into_view: press() on the
+        // same off-screen element must still wait on `visible` and time out.
+        let loc = root_locator(r#"static_text[name="Status"]"#).with_timeout(Duration::ZERO);
+        let err = loc
+            .press()
+            .expect_err("press must still require visibility");
+        assert!(matches!(err, Error::Timeout { .. }), "got {err:?}");
+        let d = err.diagnosis().expect("timeout must carry a diagnosis");
+        assert_eq!(
+            d.condition.as_deref(),
+            Some("press target actionable (visible && enabled)")
+        );
+    }
+
+    #[test]
+    fn scroll_into_view_still_requires_enabled() {
+        // The relaxed gate drops `visible`, not `enabled`: a disabled target
+        // has no operable accessibility action, so scroll_into_view times out
+        // with a diagnosis naming the enabled-only condition.
+        let loc = root_locator(r#"button[name="Forward"]"#).with_timeout(SHORT_WAIT);
+        let err = loc
+            .scroll_into_view()
+            .expect_err("disabled element must time out");
+        let d = err.diagnosis().expect("timeout must carry a diagnosis");
+        assert_eq!(
+            d.condition.as_deref(),
+            Some("scroll_into_view target actionable (enabled)")
+        );
+        let last = d.last_observed.as_deref().unwrap_or_default();
+        assert!(
+            last.contains("enabled=false"),
+            "last observed should expose the blocking state, got: {last}"
+        );
     }
 
     // ── Rootless search across apps ─────────────────────────────────
