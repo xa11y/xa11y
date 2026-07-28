@@ -5,13 +5,25 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>xa11y-tauri-test-app · input events</title>
   <style>
-    body { font-family: system-ui, sans-serif; margin: 16px; }
-    fieldset { margin-bottom: 16px; padding: 12px; }
+    /* The whole page must fit inside the 1000×700 window without scrolling.
+       A page taller than its window scrolls lower controls out of view, and
+       WebView2/Chromium — unlike WebKit, which reports scrolled-out nodes as
+       visible regardless — then correctly marks them UIA IsOffscreen=true, so
+       xa11y correctly refuses to act on them. The old single-column stack put
+       "Clear log" at the bottom, below the fold, so every input_sim test that
+       cleared the log first timed out waiting for it to become actionable on
+       the windows-latest cell while the same suite passed on Linux and macOS.
+       Two columns keep the hit target, typed field, event log, and clear
+       button all inside the window — the same reason index.html uses a grid. */
+    body { font-family: system-ui, sans-serif; margin: 12px; }
+    .cols { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+    .col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+    fieldset { margin: 0; padding: 12px; }
     legend { font-weight: bold; }
     .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
     #hit-target {
       width: 300px;
-      height: 160px;
+      height: 140px;
       border: 2px dashed #888;
       background: #f5f5f5;
       display: flex;
@@ -23,7 +35,7 @@
       cursor: default;
     }
     #hit-target:focus { border-color: #0078d7; background: #eef6ff; }
-    #event-log { width: 520px; height: 220px; font-family: ui-monospace, monospace; white-space: pre; }
+    #event-log { width: 480px; height: 180px; font-family: ui-monospace, monospace; white-space: pre; }
     #typed-text { width: 300px; }
     .last { font-family: ui-monospace, monospace; color: #333; }
     a { color: #0078d7; }
@@ -43,38 +55,44 @@
   <p>Drive mouse/keyboard events via <code>xa11y::InputSim</code> and read the
     log via the a11y tree. Each event is one line.</p>
 
-  <!-- Hit target — captures mouse events -->
-  <fieldset>
-    <legend>Hit target</legend>
-    <div class="row">
-      <button id="hit-target"
-              type="button"
-              aria-label="Hit target">Click / scroll / drag here</button>
-    </div>
-    <div class="last" id="last-mouse" aria-label="Last mouse">last mouse: (none)</div>
-  </fieldset>
+  <div class="cols">
+    <div class="col">
+      <!-- Hit target — captures mouse events -->
+      <fieldset>
+        <legend>Hit target</legend>
+        <div class="row">
+          <button id="hit-target"
+                  type="button"
+                  aria-label="Hit target">Click / scroll / drag here</button>
+        </div>
+        <div class="last" id="last-mouse" aria-label="Last mouse">last mouse: (none)</div>
+      </fieldset>
 
-  <!-- Typed text — captures type_text() output -->
-  <fieldset>
-    <legend>Typed text</legend>
-    <div class="row">
-      <label for="typed-text">Typed text</label>
-      <input type="text" id="typed-text" aria-label="Typed text" />
+      <!-- Typed text — captures type_text() output -->
+      <fieldset>
+        <legend>Typed text</legend>
+        <div class="row">
+          <label for="typed-text">Typed text</label>
+          <input type="text" id="typed-text" aria-label="Typed text" />
+        </div>
+        <div class="last" id="last-key" aria-label="Last key">last key: (none)</div>
+      </fieldset>
     </div>
-    <div class="last" id="last-key" aria-label="Last key">last key: (none)</div>
-  </fieldset>
 
-  <!-- Event log — what integ tests assert against -->
-  <fieldset>
-    <legend>Event log</legend>
-    <div class="row">
-      <textarea id="event-log" aria-label="Event log" readonly></textarea>
+    <div class="col">
+      <!-- Event log — what integ tests assert against -->
+      <fieldset>
+        <legend>Event log</legend>
+        <div class="row">
+          <textarea id="event-log" aria-label="Event log" readonly></textarea>
+        </div>
+        <div class="row">
+          <button id="clear-log" aria-label="Clear log">Clear log</button>
+          <span class="last" id="event-count" aria-label="Event count">events: 0</span>
+        </div>
+      </fieldset>
     </div>
-    <div class="row">
-      <button id="clear-log" aria-label="Clear log">Clear log</button>
-      <span class="last" id="event-count" aria-label="Event count">events: 0</span>
-    </div>
-  </fieldset>
+  </div>
 
   <script>
     'use strict';
