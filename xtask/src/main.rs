@@ -571,8 +571,19 @@ fn do_lint_docs() -> bool {
 }
 
 fn do_docs() -> bool {
-    heading("Check doc tables");
     let root = project_root();
+
+    // Before anything else: a page that doesn't declare its Diátaxis type is
+    // a structural problem, and reporting it takes no toolchain. The Astro
+    // content schema enforces the frontmatter key again at build time; this
+    // additionally checks the banner comment and the page's directory.
+    heading("Check doc page types");
+    let page_types_ok = run_in("python", &["docs/check_page_types.py"], &root);
+    if !page_types_ok {
+        return false;
+    }
+
+    heading("Check doc tables");
     let tables_ok = run_in("python", &["docs/check_tables.py"], &root);
     if !tables_ok {
         return false;

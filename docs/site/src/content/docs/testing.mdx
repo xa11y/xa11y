@@ -1,7 +1,12 @@
 ---
 title: How xa11y Is Tested
 description: The xa11y test suite, with 700+ automated tests run against real GUI toolkits on Linux, macOS, and Windows, plus fuzzing and a set of enforced correctness tenets.
+pageType: evaluation
 ---
+
+{/* DIATAXIS: evaluation — pre-adoption material for someone deciding whether to
+    use xa11y. Deliberately outside the four Diátaxis modes; see
+    docs/PAGE_TYPES.md before adding another one. */}
 
 xa11y drives the *real* accessibility tree of a running application. There is
 no way to mock that meaningfully, so the library is verified the same way it is
@@ -40,22 +45,41 @@ accessibility tree xa11y reads through the platform API. This is the part that
 matters: a passing test means xa11y handled a real AT-SPI2, AXUIElement, or
 UI Automation tree, not a fixture shaped to match the code.
 
-| Test app | Toolkit | Linux | macOS | Windows |
-| --- | --- | :---: | :---: | :---: |
-| `accesskit` | Rust + winit (AccessKit) | ✓ | ✓&nbsp;† | ✓ |
-| `qt` | PySide6 (Qt) | ✓ | ✓ | ✓ |
-| `gtk` | GTK4 (PyGObject) | ✓ | ○ | ○ |
-| `cocoa` | Swift / AppKit | ○ | ✓ | ○ |
-| `tauri` | Rust + WebView | ✓ | ✓ | ✓ |
-| `electron` | Chromium / Node | ✓ | ○ | ○ |
-| `egui` | Rust immediate-mode (eframe) | ✓ | ✓ | ✓ |
-| `winforms` | .NET Windows Forms | ○ | ○ | ✓ |
-| `wpf` | .NET WPF | ○ | ○ | ✓ |
+| Test app | Toolkit | Linux | macOS | Windows | Features covered |
+| --- | --- | :---: | :---: | :---: | --- |
+| `accesskit` | Rust + winit (AccessKit) | ✓ | ✓&nbsp;† | ✓ | compat, actions, events, errors, screenshot |
+| `qt` | PySide6 (Qt) | ✓ | ✓ | ✓ | compat, actions, events, errors |
+| `gtk` | GTK4 (PyGObject) | ✓ | ○ | ○ | compat, actions, events, errors |
+| `cocoa` | Swift / AppKit | ○ | ✓ | ○ | compat, actions, events, errors |
+| `tauri` | Rust + WebView | ✓ | ✓ | ✓ | compat, actions, events, errors, input_sim, screenshot |
+| `electron` | Chromium / Node | ✓ | ○ | ○ | compat, actions, errors, input_sim, screenshot |
+| `egui` | Rust immediate-mode (eframe) | ✓ | ✓ | ✓ | compat, actions, events, errors |
+| `winforms` | .NET Windows Forms | ○ | ○ | ✓ | compat, actions, events, errors |
+| `wpf` | .NET WPF | ○ | ○ | ✓ | compat, actions, events, errors |
 
 A hollow circle means the combination is not run in CI. † AccessKit on macOS
 runs locally through `./scripts/run_integ_tests_macos.sh` rather than in CI,
 because the Rust integ suite needs an Accessibility (TCC) grant that hosted
 macOS runners cannot hold against a cargo-hashed binary path.
+
+Reading the feature column: `compat` is tree structure, roles, and widget
+discovery; `actions` is press, focus, toggle, type, and expand/collapse;
+`events` is subscription and state-change detection; `errors` is invalid
+selectors, selector misses, wait timeouts, and unsupported actions;
+`input_sim` and `screenshot` are the platform input and capture surfaces. Not
+every language suite covers every feature listed for an app. The per-language
+breakdown is in [`tests/matrix.yaml`](https://github.com/xa11y/xa11y/blob/main/tests/matrix.yaml),
+which is the authoritative index and the file this table summarises.
+
+Which suite drives which app varies. The AccessKit row is covered primarily by
+the Rust integration suite in `xa11y/tests/integ/` rather than by the per-app
+compatibility suites, and its `screenshot` coverage comes from there; the JS
+suite also targets it for compat and actions. GTK event subscription is
+exercised through that same Rust suite over AT-SPI2 rather than duplicated in
+the GTK Python suite. Electron is driven by the JS suite, which additionally
+covers `AccessibilityNotEnabled` detection by launching the app *without*
+`--force-renderer-accessibility` and asserting that xa11y says so rather than
+reporting an empty tree.
 
 Tauri is the app carrying the input-simulation suite, so its three rows are
 what give each platform's input backend an end-to-end test. Each of those
@@ -70,7 +94,7 @@ ways: retained-mode native widgets, immediate-mode GUIs, two distinct web
 renderers, and two first-party Microsoft UIA providers rather than third-party
 bridges, by way of Windows Forms and WPF. The
 toolkit-specific quirks this surfaces are documented in
-[Accessibility Quirks](/guides/accessibility-quirks/).
+[Accessibility Quirks](/explanation/accessibility-quirks/).
 
 ## One suite, every binding
 
@@ -111,7 +135,7 @@ fallbacks**, **action fidelity** (an advertised action invokes the real
 platform action, never a substitute), **errors that carry their own
 diagnosis**, and **blocking calls that release the host runtime's lock**. These
 are written out in full, with anti-patterns, in
-[Architecture & Design](/guides/design/#design-tenets) and restated verbatim in
+[Architecture & Design](/explanation/design/#design-tenets) and restated verbatim in
 the repo's `CLAUDE.md` so human reviewers and automated ones apply them
 identically.
 

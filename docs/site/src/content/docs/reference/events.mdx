@@ -1,0 +1,179 @@
+---
+title: Events
+description: The accessibility event stream xa11y exposes per application, the full list of event types, and the subscription API in Rust, Python, and JavaScript.
+pageType: reference
+---
+
+{/* DIATAXIS: reference — a factual description of the machinery, structured
+    for lookup rather than for reading through. Neutral and complete. No task
+    narratives, no rationale, no teaching. */}
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+Accessibility APIs emit events when the interface changes: elements appearing
+or disappearing, focus moving, names or values updating. `app.subscribe()`
+returns a live stream of those events for one application.
+
+A subscription carries every event for its application, with no filters and no
+selectors. Filter on the receiving side.
+
+## Event types
+
+The type name is spelled `snake_case` in Python and the CLI, `camelCase` in
+JavaScript, and is a Rust enum variant of `EventKind`.
+
+| Rust `EventKind` | Python `event_type` | JavaScript | Fires when |
+| --- | --- | --- | --- |
+| `FocusChanged` | `focus_changed` | `focusChanged` | Keyboard focus moved to a new element. Target is the element that gained focus. |
+| `ValueChanged` | `value_changed` | `valueChanged` | An element's value changed: slider position, text contents, checkbox state, spin button, progress. |
+| `NameChanged` | `name_changed` | `nameChanged` | An element's name or label changed. |
+| `StateChanged` | `state_changed` | `stateChanged` | A boolean state flag changed. Carries `flag` and `value`, both always populated. |
+| `StructureChanged` | `structure_changed` | `structureChanged` | Children were added or removed, or the tree was otherwise invalidated. Target is the parent, when known. |
+| `WindowOpened` | `window_opened` | `windowOpened` | A new window was created. |
+| `WindowClosed` | `window_closed` | `windowClosed` | A window was closed. Target is a snapshot taken at destruction time, so some attributes may be absent. |
+| `WindowActivated` | `window_activated` | `windowActivated` | A window became the active window. |
+| `WindowDeactivated` | `window_deactivated` | `windowDeactivated` | A window lost active status. |
+| `SelectionChanged` | `selection_changed` | `selectionChanged` | Selection changed in a list, table, or other container. Target is the container, not the selected items. |
+| `MenuOpened` | `menu_opened` | `menuOpened` | A menu became visible. |
+| `MenuClosed` | `menu_closed` | `menuClosed` | A menu was dismissed. |
+| `TextChanged` | `text_changed` | `textChanged` | Text content changed in an editable element. Re-query the target's value for the current contents. |
+| `Announcement` | `announcement` | `announcement` | A live region update, alert, or explicit announcement request was posted. |
+
+Variants carry a payload only where the data is present on every supporting
+platform. For everything else, re-query the `target` element after receipt.
+`TextChanged` carries no delta because macOS `AXValueChanged` supplies none,
+and `Announcement` carries no text because Windows
+`UIA_LiveRegionChangedEventId` supplies none.
+
+### Per-platform coverage gaps
+
+| Event | Gap |
+| --- | --- |
+| `MenuOpened` / `MenuClosed` | Not reliably emitted on Linux. These will not fire there. |
+| `WindowActivated` | Windows has no first-class UIA event. It is inferred from focus changes. |
+| `StateChanged` | Linux delivers all state bits. Windows delivers `IsEnabled`, `ToggleState`, `ExpandCollapseState`, and `SelectionItem_IsSelected`. macOS delivers `Checked` and `Busy` alone; `Enabled` is not deliverable through any public app-level macOS notification and will never fire there. |
+
+## State flags
+
+The `flag` carried by `StateChanged`:
+
+`enabled`, `visible`, `focused`, `checked`, `selected`, `expanded`, `editable`,
+`focusable`, `modal`, `required`, `busy`.
+
+## Event fields
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `kind` (Rust) / `event_type` (Python) / `type` (JavaScript) | `EventKind` / string | What happened |
+| `target` | Element snapshot, optional | The element that triggered the event. Absent when the element is unavailable or already destroyed. |
+| `app_name` | string | Name of the application that produced the event |
+| `app_pid` | integer | Process ID of that application |
+| `timestamp` | monotonic instant | Time of receipt |
+
+## Subscribing
+
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    `app.subscribe()` returns a `Subscription`, a pull-based stream.
+
+    ```rust
+    let calc = App::by_name("Calculator", Duration::from_secs(5))?;
+    let sub = calc.subscribe()?;
+
+    // Block until a specific event arrives
+    let event = sub.wait_for(
+        |e| e.kind == EventKind::FocusChanged,
+        Duration::from_secs(5),
+    )?;
+    println!("Focus moved to: {:?}", event.target);
+
+    // Or poll without blocking
+    if let Some(event) = sub.try_recv() {
+        println!("{:?}", event.kind);
+    }
+
+    // Or iterate (blocks until next event)
+    for event in sub.iter() {
+        println!("{:?}: {}", event.kind, event.app_name);
+    }
+    ```
+
+    Drop the `Subscription` to stop listening. It is `Send` and not `Clone`, so
+    move it to another thread when you need it there.
+
+    | Method | Behaviour |
+    | --- | --- |
+    | `try_recv()` | Returns `Option<Event>` without blocking |
+    | `recv(timeout)` | Blocks up to `timeout` for the next event |
+    | `wait_for(predicate, timeout)` | Blocks until an event satisfies `predicate` |
+    | `iter()` | Blocking iterator over the stream |
+  </TabItem>
+  <TabItem label="Python">
+    `app.subscribe()` returns a `Subscription`, usable as a context manager or
+    iterated directly.
+
+    ```python
+    calc = xa11y.App.by_name("Calculator")
+
+    with calc.subscribe() as sub:
+        # Block until a specific event arrives
+        event = sub.wait_for(
+            lambda e: e.event_type == xa11y.EventType.FOCUS_CHANGED,
+            timeout=5.0,
+        )
+        print(f"Focus moved to: {event.target}")
+
+        # Or poll without blocking
+        event = sub.try_recv()
+        if event is not None:
+            print(event.event_type)
+
+        # Or iterate (blocks until next event)
+        for event in sub:
+            print(f"{event.event_type}: {event.app_name}")
+    ```
+
+    `xa11y.EventType` carries a constant per event type
+    (`EventType.FOCUS_CHANGED`, `EventType.ANNOUNCEMENT`, and so on). Each
+    constant's value is the `snake_case` string that `Event.event_type` holds,
+    so comparing against the constant and against the literal are the same
+    comparison.
+  </TabItem>
+  <TabItem label="JavaScript">
+    `app.subscribe()` returns a `Subscription`, which is an `EventEmitter`.
+
+    ```js
+    const calc = await App.byName('Calculator');
+    const sub = await calc.subscribe();
+
+    // Handle every event of a given type
+    sub.on('focusChanged', (ev) => {
+        console.log(`Focus moved to: ${ev.target?.name}`);
+    });
+
+    // Or await a single matching event
+    const ev = await sub.waitForEvent('focusChanged', { timeout: 5000 });
+
+    // Or await any event matching a predicate
+    const any = await sub.waitFor((e) => e.target?.role === 'button', { timeout: 5000 });
+
+    // Stop delivery
+    sub.close();
+    ```
+
+    Events are emitted under their specific type name and under the catch-all
+    name `'event'`, so `sub.on('event', …)` receives everything.
+  </TabItem>
+</Tabs>
+
+## From the CLI
+
+`xa11y events --app NAME` streams the same events to stdout until interrupted.
+See [CLI](/reference/cli/#xa11y-events).
+
+## Errors
+
+`Subscription.wait_for` raises `Timeout` when no matching event arrives. The
+diagnosis reports how many non-matching events were seen and distinguishes a
+quiet stream from a disconnected one. See
+[Errors and diagnosis](/explanation/errors-and-diagnosis/#event-waits).

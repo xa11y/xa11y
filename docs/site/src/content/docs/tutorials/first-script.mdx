@@ -1,0 +1,313 @@
+---
+title: Your first xa11y script
+description: Drive a running desktop application from a script. Read its accessibility tree, press a button, wait for the result, and read a failure diagnosis.
+pageType: tutorial
+---
+
+{/* DIATAXIS: tutorial — a guided lesson the reader follows start to finish and
+    is guaranteed to finish successfully. Keep momentum: no options, no
+    alternatives, no exhaustive lists. Those belong in guides/, reference/,
+    explanation/. */}
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+By the end of this page you will have driven a real desktop application from a
+script: read its accessibility tree, pressed a button, waited for the interface
+to catch up, and read one of xa11y's failure diagnoses. It takes about ten
+minutes.
+
+You will use your platform's Calculator as the target, because every desktop
+ships one and its tree is small enough to read in full. Nothing here is
+specific to Calculator. The last step points at how to repeat it against your
+own application.
+
+:::note[Before you start]
+Install xa11y and grant the platform permissions it needs by following
+[Install xa11y](/guides/install/), then come back here. On macOS this takes a
+terminal restart, so it is worth doing first.
+:::
+
+## Step 1: Start the target application
+
+<Tabs syncKey="os">
+  <TabItem label="macOS">
+    ```bash
+    open -a Calculator
+    ```
+  </TabItem>
+  <TabItem label="Windows">
+    ```bash
+    start calc
+    ```
+  </TabItem>
+  <TabItem label="Linux">
+    ```bash
+    gnome-calculator &
+    ```
+  </TabItem>
+</Tabs>
+
+Leave the window open. Every step below reads the live application, so closing
+it ends the lesson.
+
+## Step 2: Confirm xa11y can see it
+
+xa11y ships a command-line tool. Ask it what is running:
+
+```bash
+xa11y apps
+```
+
+```
+1234  Calculator
+5678  Terminal
+9012  Finder
+```
+
+**Checkpoint.** Calculator appears in that list with a process ID. If the list
+is empty or Calculator is missing, the permissions from
+[Install xa11y](/guides/install/) have not taken effect. On macOS, restart your
+terminal. On Linux, confirm the AT-SPI bus is running.
+
+## Step 3: Read the accessibility tree
+
+This is the step that matters most, and the habit worth forming before you
+write any code. Print the tree:
+
+```bash
+xa11y tree --app Calculator
+```
+
+```
+application "Calculator" [enabled visible] bounds=(0,0,400,600)
+├── window "Calculator" [enabled visible] bounds=(0,0,400,600)
+│   ├── group "Display" [enabled visible]
+│   │   └── static_text "Result" value="0" [enabled visible]
+│   └── group "Keypad" [enabled visible]
+│       ├── button "7" [enabled visible focusable] actions=[press,focus]
+│       ├── button "8" [enabled visible focusable] actions=[press,focus]
+│       └── button "+" [enabled visible focusable] actions=[press,focus]
+└── menu_bar [enabled visible]
+```
+
+Your output will differ from the tree above, and that is the lesson. An
+element's accessibility **name** is what the application publishes for screen
+readers, and it is frequently something other than the glyph painted on the
+button. The multiplication key reports `×` on one platform and `Multiply` on
+another. The display element is `static_text "Result"` in the tree above and
+something else on your machine.
+
+So read your own output and pick two things out of it:
+
+- The name of the button for the digit **7**.
+- The role and name of the element showing the running total.
+
+Write them down. The next steps use them.
+
+**Checkpoint.** You have a tree with a `window` in it and buttons below that. A
+tree containing only `application` and a single `window` means the application
+is not publishing its contents. On Linux that happens with Electron and
+Chromium applications, which need a launch flag
+(see [Platform Details](/reference/platform-details/#linux-electron-and-chromium-apps)).
+
+## Step 4: Test a selector before you write it into code
+
+xa11y finds elements with CSS-like selectors. Try one against the live
+application, substituting the button name you wrote down:
+
+```bash
+xa11y find "button[name='7']" --app Calculator
+```
+
+```
+button "7" [enabled visible focusable] actions=[press,focus]
+
+1 matches
+```
+
+**Checkpoint.** Exactly one match. `0 matches` means the name does not match
+what the application publishes, so go back to your tree output and copy the
+name character for character.
+
+Now press it from the shell:
+
+```bash
+xa11y action press "button[name='7']" --app Calculator
+```
+
+Watch the Calculator window. The display changes to `7`. You have driven a
+desktop application without writing a line of code.
+
+## Step 5: Write the script
+
+Create `first_script.py` (or the equivalent for your language) and put this in
+it, substituting your own selectors:
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+    ```python
+    import xa11y
+
+    calc = xa11y.App.by_name("Calculator")
+
+    # Press 7, then +, then 8, then =
+    calc.locator("button[name='7']").press()
+    calc.locator("button[name='+']").press()
+    calc.locator("button[name='8']").press()
+    calc.locator("button[name='=']").press()
+
+    display = calc.locator("static_text[name='Result']")
+    print(display.element().value)
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    import { App } from '@crowecawcaw/xa11y';
+
+    const calc = await App.byName('Calculator');
+
+    // Press 7, then +, then 8, then =
+    await calc.locator("button[name='7']").press();
+    await calc.locator("button[name='+']").press();
+    await calc.locator("button[name='8']").press();
+    await calc.locator("button[name='=']").press();
+
+    const display = calc.locator("static_text[name='Result']");
+    console.log((await display.element()).value);
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use std::time::Duration;
+    use xa11y::*;
+
+    fn main() -> Result<()> {
+        let calc = App::by_name("Calculator", Duration::from_secs(5))?;
+
+        // Press 7, then +, then 8, then =
+        calc.locator("button[name='7']").press()?;
+        calc.locator("button[name='+']").press()?;
+        calc.locator("button[name='8']").press()?;
+        calc.locator("button[name='=']").press()?;
+
+        let display = calc.locator("static_text[name='Result']");
+        println!("{:?}", display.element()?.value);
+
+        Ok(())
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+Run it.
+
+**Checkpoint.** The script prints `15`, and you watched the Calculator window
+change while it ran.
+
+Two things happened that are worth naming. `App.by_name` polled until the
+operating system reported Calculator to the accessibility API, rather than
+failing on the first attempt. And each `locator(...)` re-resolved its selector
+at the moment it acted, so the script targeted whatever was on screen then
+rather than a handle captured earlier.
+
+## Step 6: Wait for the result instead of assuming it
+
+Desktop interfaces update a few frames after the input that caused the change.
+The script above read the display immediately after pressing `=`, which works
+on a fast machine and flakes on a slow one.
+
+Replace the last two lines with a wait that carries the assertion:
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+    ```python
+    display = calc.locator("static_text[name='Result']")
+    display.wait_until(lambda element: element and element.value == "15", timeout=5.0)
+    print("got 15")
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    const display = calc.locator("static_text[name='Result']");
+    await display.waitUntil((el) => el?.value === '15', { timeout: 5000 });
+    console.log('got 15');
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let display = calc.locator("static_text[name='Result']");
+    display.wait_until(
+        |element| element.and_then(|e| e.value.as_deref()) == Some("15"),
+        Duration::from_secs(5),
+    )?;
+    println!("got 15");
+    ```
+  </TabItem>
+</Tabs>
+
+**Checkpoint.** The script prints `got 15`, and it returns as soon as the
+display updates rather than after a fixed delay.
+
+This is the shape every xa11y test takes: act, then wait for the condition you
+care about. A sleep long enough to be safe on a cold CI runner is a sleep long
+enough to slow every local run, so xa11y gives you no reason to write one.
+
+## Step 7: Break it on purpose
+
+Failures are where a library either helps you or wastes your afternoon, so make
+this one fail. Change a selector to a name that does not exist:
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+    ```python
+    calc.locator("button[name='Multiplyy']").press()
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    await calc.locator("button[name='Multiplyy']").press();
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    calc.locator("button[name='Multiplyy']").press()?;
+    ```
+  </TabItem>
+</Tabs>
+
+Run it again. The error names the selector it was resolving, the condition it
+was waiting for, what it saw on the final attempt, and which nearby elements
+almost matched:
+
+```text
+xa11y.TimeoutError: Timeout after 5.0s; waiting for: press target actionable
+(visible && enabled); selector: button[name="Multiplyy"]; last observed:
+selector never matched; candidates: button "Multiply", button "Minus"
+```
+
+**Checkpoint.** Your error lists real buttons from your own Calculator under
+`candidates`. That list is the fix: the near-miss is the name you meant.
+
+Every field in that message is also available as a structured attribute, so a
+test harness can act on it without parsing prose. That is covered in
+[Errors and diagnosis](/explanation/errors-and-diagnosis/).
+
+## What you learned
+
+- Read the tree before writing selectors, because accessibility names are
+  something other than the on-screen labels.
+- Try a selector with `xa11y find` before committing it to code.
+- Act through a `Locator`, which re-resolves its selector on every call.
+- Wait for a condition rather than sleeping.
+- Read the diagnosis attached to a failure instead of re-running under logging.
+
+## Next steps
+
+- [Write desktop tests](/guides/desktop-testing/) turns this script into a test
+  suite that launches the application under test and tears it down.
+- [Find the right selector](/guides/debug-selectors/) is the recipe for the
+  step 3 and step 4 loop when the tree is large and unfamiliar.
+- [Selectors](/reference/selectors/) is the full syntax: operators,
+  combinators, `nth`, and alternation.
+- [How xa11y works](/explanation/how-it-works/) explains accessibility trees,
+  the `App` / `Element` / `Locator` model, and where the data comes from.

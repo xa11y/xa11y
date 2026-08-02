@@ -1,0 +1,193 @@
+---
+title: Selectors
+description: The CSS-like selector syntax xa11y uses to find elements, including roles, attribute operators, combinators, nth, and alternation.
+pageType: reference
+---
+
+{/* DIATAXIS: reference — a factual description of the machinery, structured
+    for lookup rather than for reading through. Neutral and complete. No task
+    narratives, no rationale, no teaching. */}
+
+A selector is the query string passed to `app.locator(selector)`, to the
+module-level `xa11y.locator(selector)`, and to the `xa11y find` and
+`xa11y action` CLI commands. It selects elements for actions, waits, and
+queries.
+
+This page is the syntax. For the workflow of arriving at a selector that
+matches, see [Find the right selector](/guides/debug-selectors/).
+
+## At a glance
+
+```
+button                              # by role
+button[name='Submit']               # role + exact name match
+text_field[name^='Search']          # starts-with (case-insensitive)
+text_field[name*='email']           # contains (case-insensitive)
+button[name$='Cancel']              # ends-with (case-insensitive)
+[focusable='true']                  # attribute only, any role
+group > button                      # direct child combinator
+window button[name='OK']            # descendant (any depth)
+button:nth(2)                       # 2nd match (1-based)
+button[name='Play'], button[name='Pause']  # alternation
+```
+
+## Roles
+
+A selector may begin with a role name. Normalized roles are written in
+`snake_case`:
+
+`button`, `text_field`, `text_area`, `check_box`, `radio_button`, `static_text`,
+`combo_box`, `list`, `list_item`, `menu`, `menu_item`, `menu_bar`, `tab`,
+`tab_group`, `table`, `table_row`, `table_cell`, `toolbar`, `scroll_bar`,
+`scroll_thumb`, `slider`, `image`, `link`, `group`, `dialog`, `alert`,
+`progress_bar`, `tree_item`, `web_area`, `heading`, `separator`, `split_group`,
+`switch`, `spin_button`, `tooltip`, `status`, `navigation`, `window`,
+`application`, `unknown`.
+
+The mapping from each of these onto the platform's own role vocabulary is in
+[Platform Details](/reference/platform-details/#role-mapping). An element whose
+platform role has no normalized equivalent reports `unknown`, and
+`unknown` matches those elements.
+
+A role name that is not a known normalized role is matched against the
+platform's *original* role string instead, which is the escape hatch for
+selecting on a distinction normalization discards. `AXButton` and
+`AXTabButton` on macOS are examples. The comparison is exact and runs against
+the `ax_role`, `ax_subrole`, `atspi_role`, and `class_name` keys alone, so a
+value matching some other raw attribute cannot be mistaken for a role. Platform
+role names containing a space (AT-SPI's `push button`) cannot be written this
+way, because a role token accepts letters, digits, and underscores alone.
+
+The role may be omitted entirely, in which case the selector matches any role:
+`[name='Submit']` matches an element with that name whatever its role. There is
+no `*` wildcard. Writing `*` is a syntax error, so use an attribute-only
+selector for "any role".
+
+## Attribute filters
+
+The form is `[attribute<operator>'value']`. The value must be quoted with
+single or double quotes. Several filters may be chained, and all of them must
+match: `button[name='OK'][enabled='true']`.
+
+### Operators
+
+| Operator | Meaning | Case |
+| --- | --- | --- |
+| `=` | Exact match | Case-sensitive |
+| `*=` | Contains | Case-insensitive |
+| `^=` | Starts with | Case-insensitive |
+| `$=` | Ends with | Case-insensitive |
+
+There is no presence-only filter. `[focusable]` is a syntax error; write
+`[focusable='true']`.
+
+The case-insensitive operators compare after an ASCII-oriented lowercase
+mapping, so for names that differ only in a locale-specific case edge case, use
+the case-sensitive `=` operator with the precise string.
+
+### Attributes
+
+Element properties, matched against the element's normalized data:
+
+| Attribute | Value format |
+| --- | --- |
+| `role` | The `snake_case` role name |
+| `name` | String |
+| `value` | String |
+| `description` | String |
+| `bounds` | JSON object, `{"x":…,"y":…,"width":…,"height":…}` |
+| `numeric_value` | Number formatted as a string |
+| `min_value` | Number formatted as a string |
+| `max_value` | Number formatted as a string |
+| `stable_id` | String |
+
+State flags, matched as the strings `'true'` and `'false'`:
+
+| Attribute | Notes |
+| --- | --- |
+| `enabled` | |
+| `visible` | |
+| `focused` | |
+| `active` | |
+| `focusable` | |
+| `selected` | |
+| `editable` | |
+| `modal` | |
+| `required` | |
+| `busy` | |
+| `expanded` | Absent on elements with no expand/collapse concept, which then match nothing |
+
+One tri-state flag:
+
+| Attribute | Values |
+| --- | --- |
+| `checked` | `'on'`, `'off'`, `'mixed'` |
+
+Any other attribute name falls through to the element's platform-specific `raw`
+map, so `[AXRoleDescription='slider']` on macOS or `[atspi_name='…']` on Linux
+matches against the untouched platform value. The keys available there are
+platform-specific and listed under
+[name resolution](/reference/platform-details/#name-resolution).
+
+## Combinators
+
+| Combinator | Meaning |
+| --- | --- |
+| `A B` (space) | `B` at any depth below `A` |
+| `A > B` | `B` as a direct child of `A` |
+
+## `:nth(n)`
+
+`button:nth(2)` selects the second match, 1-based, in document order. It
+applies to the segment it is attached to.
+
+Requesting an index past the end produces a diagnosis naming both numbers, for
+example `selector matched 2 element(s); nth(5) requested`.
+
+## Alternation (selector groups)
+
+A top-level comma separates *alternation clauses*, with the same semantics CSS
+uses for selector lists. The result is the union of each clause's matches,
+deduplicated by element identity and returned in document order.
+
+This is useful when the label of an element changes with state and you want one
+locator that handles every variant:
+
+```python
+# macOS Calculator's leftmost button is "All Clear" when the display is 0
+# and "Clear" once you've typed anything. Match either.
+app.locator("button[name='All Clear'], button[name='Clear']").press()
+```
+
+Each clause is parsed independently, so combinators apply per clause.
+`window button, dialog button` reads as "buttons under a window, plus buttons
+under a dialog", rather than as a stray comma inside one selector.
+
+Chained `descendant()` and `child()` calls on a group locator distribute over
+every clause:
+
+```python
+# Equivalent to: "toolbar button, dialog button"
+app.locator("toolbar, dialog").descendant("button")
+```
+
+Commas inside quoted attribute values (`[name='a,b']`) are not separators.
+
+## Writing selectors that keep working
+
+Make selectors specific enough that they stay stable as the interface evolves.
+`button` alone can start matching the wrong element or returning several
+matches once the application grows another button, so scope it: prefer
+`button[name='Cancel']` inside a named group or window.
+
+## Errors
+
+A malformed selector raises `InvalidSelector` at parse time, before any
+platform call, with a message naming the problem (`expected operator (=, *=,
+^=, $=)`, `unterminated string in attribute value`, `empty simple selector`).
+
+A well-formed selector that matches nothing raises `SelectorNotMatched` from
+fail-fast calls, or `Timeout` from waits and auto-waiting actions. Both carry a
+diagnosis listing near-miss candidates. See
+[Errors](/reference/errors/) for the variants and
+[Errors and diagnosis](/explanation/errors-and-diagnosis/) for how to read them.

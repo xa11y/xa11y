@@ -1,0 +1,78 @@
+---
+title: Errors
+description: Every xa11y error variant, when it is raised, and the Python exception and JavaScript error class each one maps to.
+pageType: reference
+---
+
+{/* DIATAXIS: reference — a factual description of the machinery, structured
+    for lookup rather than for reading through. Neutral and complete. No task
+    narratives, no rationale, no teaching. */}
+
+Every fallible xa11y operation returns `Result<T, Error>` in Rust, raises an
+exception in Python, and rejects with an error in JavaScript. This page is the
+catalogue.
+
+For how to *read* a failure, including the diagnosis attached to timeouts and
+selector misses, see
+[Errors and diagnosis](/explanation/errors-and-diagnosis/).
+
+## Variants
+
+The Rust `Error` enum is the source of truth. Both bindings collapse some
+variants onto a shared class, so the mapping columns are what you catch.
+
+| Rust variant | Raised when | Python | JavaScript |
+| --- | --- | --- | --- |
+| `PermissionDenied` | Accessibility or Screen Recording permission is not granted. Carries setup instructions. On macOS 26+ both permissions are required. | `PermissionDeniedError` | `PermissionDeniedError` |
+| `AccessibilityNotEnabled` | The application advertises a tree, but its content is empty because its accessibility bridge is off. Chromium and Electron on Linux without `--force-renderer-accessibility` is the common case. | `AccessibilityNotEnabledError` | `AccessibilityNotEnabledError` |
+| `SelectorNotMatched` | No element (or no application) matched the selector on a fail-fast call. Carries a diagnosis. | `SelectorNotMatchedError` | `SelectorNotMatchedError` |
+| `ElementStale` | The element's platform handle is stale and re-traversal could not relocate it. | `SelectorNotMatchedError` | `SelectorNotMatchedError` |
+| `ActionNotSupported` | The element's role does not support the requested action. | `ActionNotSupportedError` | `ActionNotSupportedError` |
+| `TextValueNotSupported` | The platform cannot set a text value on this element. | `ActionNotSupportedError` | `ActionNotSupportedError` |
+| `Timeout` | A wait, or the auto-wait inside an action, exceeded its deadline. Always carries a diagnosis. | `TimeoutError` | `TimeoutError` |
+| `InvalidSelector` | The selector string could not be parsed. Raised before any platform call. | `InvalidSelectorError` | `InvalidSelectorError` |
+| `InvalidActionData` | An action argument failed validation: a text range with `start > end`, an uppercase `Char` key, a malformed key name, a bad target tuple. | `InvalidActionDataError` | `InvalidActionDataError` |
+| `InvalidConfig` | Process-wide configuration is invalid, such as an unparsable `XA11Y_DEFAULT_TIMEOUT`. | `ValueError` | `InvalidActionDataError` |
+| `NoElementBounds` | The element has no bounds, so no screen point can be computed for it. Off-screen and virtual nodes hit this. | `ValueError` | `InvalidActionDataError` |
+| `Unsupported` | The operation has no implementation for this platform or session, such as a Linux session with neither `DISPLAY` nor `WAYLAND_DISPLAY` set. | `ActionNotSupportedError` | `ActionNotSupportedError` |
+| `Platform` | A raw platform failure. Carries the OS error code and message. | `PlatformError` | `PlatformError` |
+
+Two of the mappings are worth noticing before writing an `except` clause.
+`InvalidConfig` and `NoElementBounds` raise a plain `ValueError` in Python
+rather than an xa11y class, so `except xa11y.XA11yError` does not catch them.
+Every other variant descends from `XA11yError` in Python and from `XA11yError`
+in JavaScript.
+
+## Which surfaces raise what
+
+Most variants can come from any call. These are the ones tied to a particular
+surface:
+
+| Surface | Variants it raises |
+| --- | --- |
+| [Input simulation](/guides/input/) | `PermissionDenied` (the OS denied synthesis, for example macOS Input Monitoring), `Unsupported`, `NoElementBounds`, `InvalidActionData`, `Platform` |
+| [Screenshots](/guides/screenshots/) | `PermissionDenied` (macOS Screen Recording not granted, or the Wayland portal denied consent), `Unsupported` (no capture backend for the session), `NoElementBounds`, `Platform` (capture or PNG encode failure) |
+| [Selectors](/reference/selectors/) | `InvalidSelector` at parse time, `SelectorNotMatched` or `Timeout` at resolve time |
+| [Events](/reference/events/) | `Timeout` from `wait_for` |
+
+## Structured fields
+
+`Timeout` and `SelectorNotMatched` carry a `Diagnosis` describing what the
+operation was waiting for and what it last saw. The fields are reachable
+without parsing the message:
+
+| Rust (`Diagnosis`) | Python | JavaScript |
+| --- | --- | --- |
+| `condition` | `condition` | `condition` |
+| `selector` | `selector` | `selector` |
+| `last_observed` | `last_observed` | `lastObserved` |
+| `candidates` | `candidates` | `candidates` |
+| `scope` | `scope` | `scope` |
+| `elapsed` (on `Timeout`) | `elapsed` (seconds) | `elapsedMs` |
+
+In Python every attribute is always present, holding `None` or `[]` when it
+does not apply, so no `hasattr` guard is needed. On `SelectorNotMatchedError`,
+`elapsed` is always `None`.
+
+See [Errors and diagnosis](/explanation/errors-and-diagnosis/) for what each
+field contains and how to read one.

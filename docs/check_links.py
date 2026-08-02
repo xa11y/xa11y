@@ -26,7 +26,7 @@ HTML_HREF = re.compile(r'href="(/[^"]+)"')
 
 
 def slug_to_file(slug: str) -> Path:
-    """Convert a Starlight content slug like /guides/overview/ to a file path."""
+    """Convert a Starlight content slug like /explanation/how-it-works/ to a file path."""
     slug = slug.strip("/")
     if not slug:
         return DOCS_DIR / "index.mdx"

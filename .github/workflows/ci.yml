@@ -765,6 +765,9 @@ jobs:
         working-directory: xa11y-js
         run: node scripts/patch-native-dts.mjs
 
+      - name: Check doc page types
+        run: python docs/check_page_types.py
+
       - name: Check doc tables
         run: python docs/check_tables.py
 

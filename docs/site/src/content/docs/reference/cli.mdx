@@ -1,18 +1,24 @@
 ---
 title: CLI
-description: Use the xa11y CLI to explore accessibility trees and debug failing tests.
+description: Command reference for the xa11y CLI, covering apps, tree, find, action, and events, plus the available actions and target flags.
+pageType: reference
 ---
 
-The `xa11y` command-line tool is for exploring and debugging. It mirrors the library API and is useful for inspecting an app before writing code, or figuring out why a selector isn't matching.
+{/* DIATAXIS: reference — a factual description of the machinery, structured
+    for lookup rather than for reading through. Neutral and complete. No task
+    narratives, no rationale, no teaching. */}
 
-If you're looking to build agents that control desktop applications, see [agent-desktop.dev](https://agent-desktop.dev), a purpose-built tool for that, built on xa11y.
+The `xa11y` command-line tool mirrors the library API. It is the fastest way to
+inspect an application before writing code against it.
 
-## Install
+Install it with `cargo install xa11y` or `pip install xa11y`, both of which
+provide the same binary. See [Install xa11y](/guides/install/#install-the-cli).
 
-```bash
-cargo install xa11y        # from crates.io
-pip install xa11y           # includes the CLI binary
-```
+For the task of arriving at a working selector, see
+[Find the right selector](/guides/debug-selectors/). If you're looking to build
+agents that control desktop applications, see
+[agent-desktop.dev](https://agent-desktop.dev), a purpose-built tool for that,
+built on xa11y.
 
 ## Commands
 
@@ -52,7 +58,7 @@ application "Calculator" [enabled visible] bounds=(0,0,400,600)
 
 This is the fastest way to understand an app's structure. Every element shows its role, name, value, states, bounds, and available actions.
 
-The same output is available in-code via `Element.dump()` (and `Element.tree()` for a structured snapshot) in every language binding. See the [Quick Start](/guides/quick-start/#discover-the-tree-first) for examples.
+The same output is available in-code via `Element.dump()` (and `Element.tree()` for a structured snapshot) in every language binding. See [Find the right selector](/guides/debug-selectors/#read-the-tree-from-code-instead) for examples.
 
 ### `xa11y find`
 
@@ -146,43 +152,13 @@ All commands except `apps` require a target application:
 | `--app NAME` | Target application by name (substring match) |
 | `--pid PID` | Target application by process ID |
 
-## Common workflows
+## Selectors
 
-**Figure out the right selector for a test:**
-
-```bash
-# 1. See the full tree
-xa11y tree --app MyApp
-
-# 2. Try a selector
-xa11y find "button[name='Submit']" --app MyApp
-
-# 3. Narrow it down
-xa11y find "dialog button[name='Submit']" --app MyApp
-```
-
-**Debug a failing test:**
+`xa11y find` and `xa11y action` take the same selector syntax as the library.
+See [Selectors](/reference/selectors/) for operators, combinators, and
+attributes. Note that the syntax has no `*` wildcard, so "any element with this
+state" is written as an attribute-only selector:
 
 ```bash
-# What does the tree actually look like right now?
-xa11y tree --app MyApp
-
-# Is the element there but with a different name?
-xa11y find "button" --app MyApp
-
-# Watch events to see what's happening
-xa11y events --app MyApp
-```
-
-**Explore an unfamiliar app:**
-
-```bash
-# What apps are running?
-xa11y apps
-
-# What's the structure?
-xa11y tree --app Slack
-
-# What can I interact with?
-xa11y find "*[focusable]" --app Slack
+xa11y find "[focusable='true']" --app Slack
 ```

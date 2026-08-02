@@ -263,6 +263,31 @@ cargo xtask lint-docs                         # Vale prose lint for README + doc
 cd xa11y/fuzz && cargo +nightly fuzz run tree_ops -- -max_total_time=60
 ```
 
+## Docs Structure (Diátaxis)
+
+The hand-written pages under `docs/site/src/content/docs/` follow
+[Diátaxis](https://diataxis.fr). Every page is exactly one of **tutorial**,
+**how-to guide**, **reference**, or **explanation**, and the directory layout,
+the sidebar groups, and the page itself all say which.
+
+`docs/PAGE_TYPES.md` is the contract. Read it before adding or restructuring a
+page. The short version:
+
+- Frontmatter carries `pageType: <type>`, and the first thing after the
+  frontmatter is a `{/* DIATAXIS: <type> — … */}` banner with fixed wording.
+- The page lives in the directory its type maps to: `tutorials/`, `guides/`,
+  `reference/`, `explanation/`, or the site root for `evaluation` / `landing`.
+- `python docs/check_page_types.py` enforces all three, and runs in
+  `cargo xtask docs` and the `docs` CI job. The Astro content schema in
+  `docs/site/src/content.config.ts` enforces the frontmatter key again, so
+  `npm run build` fails on a page that omits it.
+
+The rule that matters most in practice: **a reference table has exactly one
+home.** If a second page needs it, that page links. The docs previously carried
+selector syntax on two pages, a CLI manual on two pages, and the error variant
+table on a page that wasn't about errors; all three had drifted apart by the
+time they were merged. When a page seems to need two modes, write two pages.
+
 ## Docs Prose Linting
 
 `README.md` and the hand-written pages under `docs/site/src/content/docs/` are

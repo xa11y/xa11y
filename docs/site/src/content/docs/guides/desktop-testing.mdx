@@ -1,7 +1,12 @@
 ---
 title: Desktop Testing
 description: Using xa11y to write integration tests for desktop applications.
+pageType: how-to
 ---
+
+{/* DIATAXIS: how-to — a goal-oriented recipe for a reader who already knows
+    what they want. Steps and decisions only. Concepts go to explanation/,
+    exhaustive option lists go to reference/. */}
 
 import { Code, Tabs, TabItem } from "@astrojs/starlight/components";
 import pythonExample from "../../../../../../examples/python/end_to_end.py?raw";
@@ -43,7 +48,7 @@ Or set the `XA11Y_DEFAULT_TIMEOUT` environment variable (seconds, read once at s
 
 Because Locator *actions* (`press()`, `set_value()`, `toggle()`, …) already auto-wait for the target to be visible and enabled, a short `wait_visible()` immediately before an action is redundant. Pass a per-call `timeout=` when one step needs a longer window, or raise the default once when the whole suite does.
 
-The same rule applies to *finding* things: every entry point that can race app startup has a polling form built in, so a hand-rolled `while`/`sleep` loop is never needed. Built-in polling also releases the host language's runtime lock while it waits (Python threads keep running during a 60s `wait_visible`) and produces a structured diagnosis on timeout, covering what it waited for, what it last observed, and near-miss candidates (see [Errors & Diagnosis](/guides/errors/)). A manual loop gets none of that.
+The same rule applies to *finding* things: every entry point that can race app startup has a polling form built in, so a hand-rolled `while`/`sleep` loop is never needed. Built-in polling also releases the host language's runtime lock while it waits (Python threads keep running during a 60s `wait_visible`) and produces a structured diagnosis on timeout, covering what it waited for, what it last observed, and near-miss candidates (see [Errors & Diagnosis](/explanation/errors-and-diagnosis/)). A manual loop gets none of that.
 
 ## Attaching to the app under test
 
@@ -56,7 +61,7 @@ app = xa11y.App.by_pid(proc.pid, timeout=60.0)
 
 A PID is not always enough on its own.
 
-- **The UI may register as more than one accessibility app.** Some toolkits register top-level windows as *separate* accessibility applications sharing the host PID. On Windows UIA, a Qt dialog can appear as its own app rather than under the main window's tree (see [Accessibility API Quirks](/guides/accessibility-quirks/)). Match it with a predicate instead of polling `App.list()` by hand:
+- **The UI may register as more than one accessibility app.** Some toolkits register top-level windows as *separate* accessibility applications sharing the host PID. On Windows UIA, a Qt dialog can appear as its own app rather than under the main window's tree (see [Accessibility API Quirks](/explanation/accessibility-quirks/)). Match it with a predicate instead of polling `App.list()` by hand:
 
   ```python
   dialog_app = xa11y.App.find(
@@ -216,25 +221,17 @@ bash   examples/cli/end_to_end.sh                     # CLI (xa11y binary)
   </TabItem>
 </Tabs>
 
-## Debugging with the CLI
+## Debugging a failing test
 
-The `xa11y` CLI is helpful when writing and debugging tests. Use it to explore the accessibility tree of your app and find the right selectors before putting them in test code:
+Start from the error. A timeout or selector miss already names the selector, the
+wait condition, the final observation, and the near-miss candidates, so the
+first move is to read it rather than to add logging. See
+[Errors & Diagnosis](/explanation/errors-and-diagnosis/).
 
-```bash
-# See what's in the tree
-xa11y tree --app MyApp
-
-# Test a selector interactively
-xa11y find "button[name='Submit']" --app MyApp
-
-# Try an action manually
-xa11y action press "button[name='Submit']" --app MyApp
-
-# Watch events while interacting with the app
-xa11y events --app MyApp
-```
-
-See the [Overview](/guides/overview/#cli) for the full CLI reference.
+When you need to interrogate the live application, the `xa11y` CLI explores the
+tree, tries selectors, and streams events without a rebuild.
+[Find the right selector](/guides/debug-selectors/) is the recipe, and
+[CLI](/reference/cli/) is the command reference.
 
 ## Tips
 

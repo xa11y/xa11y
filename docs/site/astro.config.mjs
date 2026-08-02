@@ -11,6 +11,21 @@ export default defineConfig({
   markdown: {
     gfm: true,
   },
+  // The Diátaxis reorganisation changed every slug outside `guides/ci`,
+  // `guides/desktop-testing`, `guides/input`, and `guides/screenshots`. These
+  // keep inbound links from the README, crates.io, PyPI, and search results
+  // working. `guides/quick-start` lands on the tutorial that replaced it; its
+  // installation half now lives at `guides/install`.
+  redirects: {
+    "/guides/quick-start": "/tutorials/first-script/",
+    "/guides/overview": "/explanation/how-it-works/",
+    "/guides/errors": "/explanation/errors-and-diagnosis/",
+    "/guides/design": "/explanation/design/",
+    "/guides/accessibility-quirks": "/explanation/accessibility-quirks/",
+    "/guides/cli": "/reference/cli/",
+    "/guides/platform-details": "/reference/platform-details/",
+    "/guides/testing": "/testing/",
+  },
   integrations: [
     starlight({
       title: "xa11y",
@@ -24,41 +39,68 @@ export default defineConfig({
           href: "https://github.com/xa11y/xa11y",
         },
       ],
+      // The sidebar groups follow Diátaxis (https://diataxis.fr): learning,
+      // task, information, and understanding are four different needs, and a
+      // reader arrives with exactly one of them. Every page declares which
+      // group it belongs to in its `pageType` frontmatter, checked by
+      // docs/check_page_types.py. See docs/PAGE_TYPES.md before adding a page.
       sidebar: [
         {
-          label: "Docs",
+          label: "Tutorial",
+          items: [{ label: "Your first script", slug: "tutorials/first-script" }],
+        },
+        {
+          label: "How-to guides",
           items: [
-            { label: "Quick Start", slug: "guides/quick-start" },
-            { label: "Overview", slug: "guides/overview" },
-            { label: "CLI", slug: "guides/cli" },
-            { label: "Desktop Testing", slug: "guides/desktop-testing" },
-            { label: "Errors & Diagnosis", slug: "guides/errors" },
-            { label: "Testing in CI", slug: "guides/ci" },
-            { label: "Input Simulation", slug: "guides/input" },
-            { label: "Screenshots", slug: "guides/screenshots" },
-            { label: "Platform Details", slug: "guides/platform-details" },
-            {
-              label: "Accessibility Quirks",
-              slug: "guides/accessibility-quirks",
-            },
-            { label: "Architecture & Design", slug: "guides/design" },
-            { label: "Testing & Quality", slug: "guides/testing" },
+            { label: "Install xa11y", slug: "guides/install" },
+            { label: "Write desktop tests", slug: "guides/desktop-testing" },
+            { label: "Find the right selector", slug: "guides/debug-selectors" },
+            { label: "Test in CI", slug: "guides/ci" },
+            { label: "Simulate input", slug: "guides/input" },
+            { label: "Capture screenshots", slug: "guides/screenshots" },
           ],
         },
-        // Top-level rather than inside "Docs": the comparison page is an
-        // entry point for people evaluating xa11y against other tools, not
-        // reference material for people already using it.
-        { label: "Compare", slug: "compare" },
         {
-          label: "API",
+          label: "Reference",
           items: [
+            { label: "Selectors", slug: "reference/selectors" },
+            { label: "Events", slug: "reference/events" },
+            { label: "Errors", slug: "reference/errors" },
+            { label: "CLI", slug: "reference/cli" },
+            { label: "Platform Details", slug: "reference/platform-details" },
             {
-              label: "Rust",
+              label: "Rust API",
               link: "https://docs.rs/xa11y/",
               attrs: { target: "_blank", rel: "noopener" },
             },
-            { label: "Python", link: "/api/python/reference/api/xa11y/" },
-            { label: "JavaScript", link: "/api/javascript/" },
+            { label: "Python API", link: "/api/python/reference/api/xa11y/" },
+            { label: "JavaScript API", link: "/api/javascript/" },
+          ],
+        },
+        {
+          label: "Explanation",
+          items: [
+            { label: "How xa11y works", slug: "explanation/how-it-works" },
+            {
+              label: "Errors & Diagnosis",
+              slug: "explanation/errors-and-diagnosis",
+            },
+            {
+              label: "Accessibility Quirks",
+              slug: "explanation/accessibility-quirks",
+            },
+            { label: "Architecture & Design", slug: "explanation/design" },
+          ],
+        },
+        // Top-level rather than inside a Diátaxis group: these two address
+        // someone deciding whether to adopt xa11y at all, which is a question
+        // none of the four modes is for. Filing them under Explanation would
+        // bury them below the fold for the audience they exist to serve.
+        {
+          label: "Evaluating xa11y",
+          items: [
+            { label: "Compare to other tools", slug: "compare" },
+            { label: "How xa11y is tested", slug: "testing" },
           ],
         },
       ],

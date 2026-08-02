@@ -1,9 +1,14 @@
 ---
 title: Architecture & Design
 description: Internal architecture, design tenets, and testing strategy for xa11y.
+pageType: explanation
 ---
 
-This page is for contributors and for consumers who want a clearer picture of what xa11y is built on, how design decisions are made, and how the library is hardened. If you are looking for usage docs, start at the [Overview](/guides/overview/). For how the library is verified (the test suites, the toolkit fleet, and CI), see [How xa11y Is Tested](/guides/testing/).
+{/* DIATAXIS: explanation — background and rationale: why the design is what it
+    is, and how the pieces relate. No step-by-step instructions, no exhaustive
+    tables. */}
+
+This page is for contributors and for consumers who want a clearer picture of what xa11y is built on, how design decisions are made, and how the library is hardened. If you are looking for usage docs, start at [How xa11y works](/explanation/how-it-works/). For how the library is verified (the test suites, the toolkit fleet, and CI), see [How xa11y Is Tested](/testing/).
 
 ## Architecture at a glance
 
@@ -54,6 +59,25 @@ Prefer `Result` over `.unwrap()` / `.expect()` in provider and binding code.
 - **Tests** may use `.expect("...")` with a descriptive message when the failure indicates a broken fixture.
 - Any new `.unwrap()` must have an invariant one line above that proves it can't panic.
 
+### 5. Blocking calls release the host runtime's lock
+
+In language bindings, any call that can block, sleep, or poll (waits, auto-waiting actions, attach/discovery loops, event receives) must release the host runtime's global lock for the duration of the block. That means Python's GIL, or the platform equivalent. A wait that holds the GIL freezes every other thread in the consumer's process for up to the full timeout, and pushes consumers into architectural workarounds such as moving an in-process mock server out into a separate process.
+
+The one legitimate reason to hold the lock is calling back into the host language, for example a Python predicate in `wait_until` or `App.find`. Reacquire it per callback rather than for the whole loop. A missing `allow_threads` on a blocking path is a correctness bug rather than a missed optimisation.
+
+Enforced for Python by `xa11y-python/tests/test_gil_release.py`, which asserts that a background thread keeps making progress while a native wait blocks.
+
+### 6. Errors carry their own diagnosis
+
+An error must contain enough context to understand the failure without re-running it under extra logging. If a consumer would need to wrap a call in `try`/`except` to print which selector, what condition, and what the tree looked like, that state belongs in the error itself.
+
+- A timeout that reports only its duration is a bug. It must name what it was waiting for and what it last observed.
+- "Not found" errors should describe where they searched and what they did find, including near-miss candidates.
+- Bindings expose the context as structured fields rather than prose in a message string, so harnesses can act on it programmatically.
+- Collection is bounded and runs on the failure path alone. Diagnosis must never slow the success path or emit megabyte messages, and an error that a poll loop uses as a retry signal must stay cheap.
+
+The structured carrier is the `Diagnosis` struct in `xa11y-core/src/error.rs`, whose module docs describe the pattern: enrich at the terminal failure site, bound every payload, and never let diagnosis collection mask the original error. What this produces for a consumer is described in [Errors & Diagnosis](/explanation/errors-and-diagnosis/).
+
 ### Breaking a tenet
 
 These are firm defaults. A real exception has to clear three bars:
@@ -84,22 +108,14 @@ The testing philosophy has two pillars: **integration tests against real, live a
 
 ### Test-suite map
 
-The matrix below summarises which apps are exercised on which platforms and what each suite covers. `compat` = tree structure and widget discovery. `actions` = press/toggle/focus/type/expand-collapse. `events` = subscription and state-change detection. `input_sim` and `screenshot` = the platform-input and screenshot surfaces.
+Which app is exercised on which platform, by which suite, and for which
+features is tabulated once, in
+[How xa11y Is Tested](/testing/#tested-against-real-toolkits-not-stubs). The
+authoritative index behind that table is
+[`tests/matrix.yaml`](https://github.com/xa11y/xa11y/blob/main/tests/matrix.yaml),
+which is where a new app, platform, or feature gets declared.
 
-| Test app    | Frameworks tested            | Platforms in CI       | Suites that target it      | Features covered                         |
-|-------------|------------------------------|-----------------------|----------------------------|------------------------------------------|
-| AccessKit   | Rust + winit + AccessKit     | Linux, Windows²       | Rust core integ, JS integ  | compat, actions, events, screenshot      |
-| Qt          | PySide6 (Qt 6)               | Linux, macOS, Windows | Python integ               | compat, actions, events                  |
-| GTK         | GTK 4 (PyGObject)            | Linux                 | Python integ               | compat, actions¹                         |
-| Cocoa       | AppKit (Swift)               | macOS                 | Python integ               | compat, actions, events                  |
-| Tauri       | Tauri (Rust + HTML)          | Linux, macOS, Windows | Python integ               | compat, actions, events, input_sim, screenshot |
-| Electron    | Chromium + Node              | Linux                 | JS integ                   | compat, actions, AccessibilityNotEnabled detection |
-
-¹ GTK event subscription is exercised through the Rust integ suite via AT-SPI2 rather than duplicated in the per-app Python suite.
-
-² AccessKit on macOS runs locally rather than in CI, for the TCC reason described under the CI matrix below.
-
-The `Platforms in CI` column is machine-checked. `tests/matrix_check.py` parses the `integ` matrix out of `ci.yml` and fails the build when an app's declared `platforms:` doesn't match the cells that exist, so a platform an app claims but never runs on cannot go unnoticed the way the missing Tauri-on-Windows cell did.
+The declarations there are machine-checked. `tests/matrix_check.py` parses the `integ` matrix out of `ci.yml` and fails the build when an app's declared `platforms:` doesn't match the cells that exist, so a platform an app claims but never runs on cannot go unnoticed the way the missing Tauri-on-Windows cell did.
 
 ### CI matrix
 

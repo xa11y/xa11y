@@ -2,13 +2,18 @@
 title: How xa11y compares to other desktop automation tools
 description: What separates accessibility-based libraries, injection-based suites, and vision tools for desktop UI automation, and where xa11y, pywinauto, FlaUI, Appium, Squish, and OmniParser each fit.
 lastUpdated: 2026-07-27
+pageType: evaluation
 ---
 
-xa11y drives native desktop applications by reading and acting on accessibility data (the same information screen readers consume) through one API on macOS (AXUIElement), Windows (UI Automation), and Linux (AT-SPI2). It is open source under MIT, with bindings for Rust, Python, and JavaScript and a [command-line tool](/guides/cli/) for exploring accessibility trees. What it adds over calling each platform's API directly is cross-platform coverage behind one interface, CSS-like selectors, and locators that re-resolve and wait for an element to be ready before acting, which removes most of the retry scaffolding desktop automation otherwise accumulates.
+{/* DIATAXIS: evaluation — pre-adoption material for someone deciding whether to
+    use xa11y. Deliberately outside the four Diátaxis modes; see
+    docs/PAGE_TYPES.md before adding another one. */}
+
+xa11y drives native desktop applications by reading and acting on accessibility data (the same information screen readers consume) through one API on macOS (AXUIElement), Windows (UI Automation), and Linux (AT-SPI2). It is open source under MIT, with bindings for Rust, Python, and JavaScript and a [command-line tool](/reference/cli/) for exploring accessibility trees. What it adds over calling each platform's API directly is cross-platform coverage behind one interface, CSS-like selectors, and locators that re-resolve and wait for an element to be ready before acting, which removes most of the retry scaffolding desktop automation otherwise accumulates.
 
 What separates the tools in this space is what each treats as the source of truth about the screen: accessibility data, a toolkit's internal object model, raw pixels, or a model's reading of those pixels. What a tool can see, what breaks it, and what it costs per operation all follow from that, so this page is organized around it. If your target app exposes no accessibility data, xa11y cannot help. Skip to [when not to use xa11y](#when-not-to-use-xa11y).
 
-These mechanisms compose, and a practical setup often drives through accessibility data and reaches for pixels only where that has a hole. xa11y keeps the boundary explicit. [Input simulation](/guides/input/) is a separate `InputSim` surface that never automatically substitutes for an accessibility action, so a passing test cannot silently degrade into blind coordinate clicking. That separation is a deliberate design rule, described in [Design](/guides/design/).
+These mechanisms compose, and a practical setup often drives through accessibility data and reaches for pixels only where that has a hole. xa11y keeps the boundary explicit. [Input simulation](/guides/input/) is a separate `InputSim` surface that never automatically substitutes for an accessibility action, so a passing test cannot silently degrade into blind coordinate clicking. That separation is a deliberate design rule, described in [Design](/explanation/design/).
 
 ## Accessibility-based libraries: xa11y, pywinauto, FlaUI, dogtail, atomacos
 
@@ -27,7 +32,7 @@ Appium normalizes through the WebDriver protocol rather than a library API, so a
 
 ## Abstraction: platform mirrors versus a normalization layer
 
-The platform-specific libraries mostly mirror their underlying API. pywinauto surfaces Win32 and UIA concepts directly, atomacos exposes AXUIElement attributes nearly raw, dogtail exposes AT-SPI2's object model. That is predictable, and it exposes the full platform surface, including corners xa11y leaves out. But role names and idioms differ per platform. Code does not port, and a second OS means rewriting against a different object model. xa11y normalizes instead, mapping one set of roles, one selector language, and one set of action verbs onto all three platform APIs. See [platform details](/guides/platform-details/). On one platform permanently, the mirror is more mature and exposes more of it. Across two or three, the normalization is the point.
+The platform-specific libraries mostly mirror their underlying API. pywinauto surfaces Win32 and UIA concepts directly, atomacos exposes AXUIElement attributes nearly raw, dogtail exposes AT-SPI2's object model. That is predictable, and it exposes the full platform surface, including corners xa11y leaves out. But role names and idioms differ per platform. Code does not port, and a second OS means rewriting against a different object model. xa11y normalizes instead, mapping one set of roles, one selector language, and one set of action verbs onto all three platform APIs. See [platform details](/reference/platform-details/). On one platform permanently, the mirror is more mature and exposes more of it. Across two or three, the normalization is the point.
 
 ## Locators, auto-waiting, and stale handles
 
@@ -127,7 +132,7 @@ For an accessibility-driven tool, the practical question is not which platforms 
 | WinForms | ○ | ○ | ● |
 | WPF | ○ | ○ | ● |
 
-A hollow circle means untested in CI rather than known-broken. Most combinations work, but only the filled cells are verified continuously. The [accessibility quirks](/guides/accessibility-quirks/) guide documents the per-toolkit behavior these tests pin down.
+A hollow circle means untested in CI rather than known-broken. Most combinations work, but only the filled cells are verified continuously. The [accessibility quirks](/explanation/accessibility-quirks/) guide documents the per-toolkit behavior these tests pin down.
 
 Platform prerequisites are minimal but real. macOS needs the Accessibility permission, plus Screen Recording on macOS 26+. Linux needs AT-SPI2 running. Windows works as installed.
 

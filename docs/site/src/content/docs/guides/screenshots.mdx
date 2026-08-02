@@ -1,7 +1,12 @@
 ---
 title: Screenshots
 description: Capture the screen, a region, or the pixels behind any accessibility element.
+pageType: how-to
 ---
+
+{/* DIATAXIS: how-to — a goal-oriented recipe for a reader who already knows
+    what they want. Steps and decisions only. Concepts go to explanation/,
+    exhaustive option lists go to reference/. */}
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
 
@@ -199,9 +204,14 @@ A common pattern is to capture the full screen (or the app under test) whenever 
 
 ## Error handling
 
-| Error | When |
-| --- | --- |
-| `PermissionDenied` | macOS Screen Recording not granted, or Wayland portal denied consent |
-| `Unsupported` | No capture backend available for the session (no `DISPLAY`, no working Wayland portal, etc.) |
-| `NoElementBounds` | The element passed to `screenshot_element` has no bounds |
-| `Platform` | Raw OS / FFI failure during capture or PNG encode |
+Capture raises four of xa11y's error variants:
+
+- `PermissionDenied` when macOS Screen Recording is not granted, or the Wayland portal denied consent.
+- `Unsupported` when no capture backend is available for the session: no `DISPLAY`, no working Wayland portal, and so on.
+- `NoElementBounds` when the element passed to `screenshot_element` has no bounds.
+- `Platform` for a raw OS or FFI failure during capture or PNG encode.
+
+The Python example above catches `xa11y.XA11yError`, which covers
+`PermissionDenied`, `Unsupported`, and `Platform`. `NoElementBounds` surfaces
+as a plain `ValueError` in Python, so catch that too when capturing by element.
+See [Errors](/reference/errors/) for the full mapping.

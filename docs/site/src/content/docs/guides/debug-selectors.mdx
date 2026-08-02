@@ -1,0 +1,146 @@
+---
+title: Find the right selector
+description: Work out which selector matches the element you want, from the shell or from code, and diagnose a selector that stopped matching.
+pageType: how-to
+---
+
+{/* DIATAXIS: how-to — a goal-oriented recipe for a reader who already knows
+    what they want. Steps and decisions only. Concepts go to explanation/,
+    exhaustive option lists go to reference/. */}
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+Accessibility names are frequently something other than the label painted on
+screen, so a guessed selector is a coin flip. Read the tree first, every time.
+
+For the syntax itself, see [Selectors](/reference/selectors/). For the CLI
+commands used here, see [CLI](/reference/cli/).
+
+## Work out a selector for the first time
+
+The CLI dumps a whole application in one command and behaves the same whatever
+language you are writing in, so start there.
+
+```bash
+# 1. What's running, and under what name?
+xa11y apps
+
+# 2. See the full tree
+xa11y tree --app MyApp
+
+# 3. Try a selector against the live app
+xa11y find "button[name='Submit']" --app MyApp
+
+# 4. Narrow it until exactly one element matches
+xa11y find "dialog button[name='Submit']" --app MyApp
+```
+
+`xa11y find` prints every match and a count, so "0 matches" and "7 matches" are
+both visible before the selector reaches your code.
+
+## Read the tree from code instead
+
+`dump()` and `tree()` are available on `App`, `Locator`, and `Element` in every
+binding. `dump()` returns the indented string, and `tree()` returns the same
+data as a structured snapshot.
+
+<Tabs syncKey="lang">
+  <TabItem label="Python">
+    ```python
+    import xa11y
+
+    calc = xa11y.App.by_name("Calculator")
+
+    print(calc.dump())              # full indented tree, rooted at the app
+    print(calc.dump(max_depth=2))   # limit depth
+    snapshot = calc.tree()          # same data as a nested dict
+
+    # Locators and elements also support dump() / tree()
+    print(calc.locator("group[name='Keypad']").dump())
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use std::time::Duration;
+    use xa11y::*;
+
+    let calc = App::by_name("Calculator", Duration::from_secs(5))?;
+
+    println!("{}", calc.dump(None)?);            // full indented tree
+    println!("{}", calc.dump(Some(2))?);         // limit depth
+    let snapshot = calc.tree(None)?;             // same data as a TreeNode
+
+    // Locators and elements also support dump() / tree()
+    println!("{}", calc.locator("group[name='Keypad']").dump(None)?);
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    import { App } from '@crowecawcaw/xa11y';
+
+    const calc = await App.byName('Calculator');
+
+    console.log(await calc.dump());              // full indented tree
+    console.log(await calc.dump(2));             // limit depth
+    const snapshot = await calc.tree();          // same data as a nested object
+
+    // Locators and elements also support dump() / tree()
+    console.log(await calc.locator("group[name='Keypad']").dump());
+    ```
+  </TabItem>
+</Tabs>
+
+`max_depth` of `0` returns the root node alone, `1` adds its direct children,
+and so on. Omit it for the whole subtree.
+
+## Diagnose a selector that stopped matching
+
+Start from the error. A timeout or a selector miss already names what the
+locator was resolving, what it last observed, and which elements almost
+matched, so read the `candidates` list before reaching for the CLI. See
+[Errors and diagnosis](/explanation/errors-and-diagnosis/).
+
+When you need to look at the live application:
+
+```bash
+# What does the tree actually look like right now?
+xa11y tree --app MyApp
+
+# Is the element there under a different name?
+xa11y find "button" --app MyApp
+
+# Watch events while you interact, to see what the app reports changing
+xa11y events --app MyApp
+```
+
+Three failures account for most of them:
+
+- **The name differs from the on-screen label.** Copy it from the tree output
+  character for character, or switch to a substring operator:
+  `button[name^='Save']`.
+- **The element is there but not actionable.** The diagnosis says
+  `matched button "Export" (visible=false, enabled=true, focused=false)` rather
+  than `selector never matched`. The selector is right and the wait condition
+  is what is failing.
+- **The element belongs to a different accessibility application.** Some
+  toolkits register dialogs as their own application sharing the host process.
+  `xa11y apps` shows them as separate rows. See
+  [Attaching to the app under test](/guides/desktop-testing/#attaching-to-the-app-under-test).
+
+## Explore an unfamiliar application
+
+```bash
+# What apps are running?
+xa11y apps
+
+# What's the structure?
+xa11y tree --app Slack
+
+# What can I interact with?
+xa11y find "[focusable='true']" --app Slack
+```
+
+If the tree comes back holding only an `application` and a `window`, the
+application is not publishing its contents rather than being empty. On Linux
+that is the Electron and Chromium default. See
+[Platform Details](/reference/platform-details/#linux-electron-and-chromium-apps).

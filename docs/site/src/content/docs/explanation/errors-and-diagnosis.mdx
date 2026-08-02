@@ -1,14 +1,23 @@
 ---
 title: Errors & Diagnosis
 description: xa11y errors carry their own diagnosis, including selectors, wait conditions, last observations, and bounded scope snapshots.
+pageType: explanation
 ---
+
+{/* DIATAXIS: explanation — background and rationale: why the design is what it
+    is, and how the pieces relate. No step-by-step instructions, no exhaustive
+    tables. */}
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
 
 xa11y errors are designed so you never have to re-run a failure under extra
 logging to understand it. A timeout tells you *what it was waiting for* and
-*what it last saw*; a selector miss tells you *what was actually there*. The
-same information is available two ways:
+*what it last saw*; a selector miss tells you *what was actually there*.
+
+This page is about reading a failure. For the catalogue of error variants and
+which exception class each maps to, see [Errors](/reference/errors/).
+
+The same information is available two ways:
 
 - **Rendered into the message.** The exception text alone is enough to
   diagnose a CI failure from the log.

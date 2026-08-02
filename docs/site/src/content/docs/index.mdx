@@ -8,13 +8,17 @@ hero:
     html: '<img src="/hero.svg" alt="Animated demo of xa11y querying a Slack accessibility tree, then pressing buttons and typing text, then running assertions" width="600" height="520" />'
   actions:
     - text: Get Started
-      link: /guides/quick-start/
+      link: /tutorials/first-script/
       icon: right-arrow
     - text: View on GitHub
       link: https://github.com/xa11y/xa11y
       variant: minimal
       icon: external
+pageType: landing
 ---
+
+{/* DIATAXIS: landing — the site entry point. Navigational only: every claim
+    here is a summary of a page it links to. */}
 
 import { Card, CardGrid } from "@astrojs/starlight/components";
 
@@ -39,6 +43,6 @@ import { Card, CardGrid } from "@astrojs/starlight/components";
   <Card title="Proven, not vibes" icon="approve-check">
     700+ automated tests run against real GUI toolkits (Qt, GTK, Cocoa,
     Tauri, Electron, egui, Windows Forms, WPF) on Linux, macOS, and Windows. See
-    [How xa11y Is Tested](/guides/testing/).
+    [How xa11y Is Tested](/testing/).
   </Card>
 </CardGrid>

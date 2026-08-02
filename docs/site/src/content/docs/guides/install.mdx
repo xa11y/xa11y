@@ -1,0 +1,96 @@
+---
+title: Install xa11y
+description: Install the xa11y library and CLI for Rust, Python, or JavaScript, and grant the accessibility permissions each platform requires.
+pageType: how-to
+---
+
+{/* DIATAXIS: how-to — a goal-oriented recipe for a reader who already knows
+    what they want. Steps and decisions only. Concepts go to explanation/,
+    exhaustive option lists go to reference/. */}
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+## Install the library
+
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    ```toml
+    [dependencies]
+    xa11y = "0.4"
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```bash
+    pip install xa11y
+    ```
+
+    Requires Python 3.9+. Pre-built wheels are available for Linux (x86_64, aarch64), macOS (x86_64, aarch64), and Windows (x86_64).
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```bash
+    npm install @crowecawcaw/xa11y
+    ```
+
+    Requires Node.js 18+. Pre-built native binaries are published for Linux (x86_64, aarch64), macOS (x86_64, aarch64), and Windows (x86_64).
+  </TabItem>
+</Tabs>
+
+## Install the CLI
+
+The `xa11y` command-line tool is the fastest way to inspect an application
+before writing selectors against it, and both of these install the same binary:
+
+```bash
+cargo install xa11y        # from crates.io
+pip install xa11y          # the Python package includes the CLI binary
+```
+
+See [CLI](/reference/cli/) for the command reference.
+
+## Grant platform permissions
+
+### macOS
+
+macOS needs two permissions:
+
+1. **Accessibility**, under System Settings → Privacy & Security → Accessibility. Grant permission to your terminal (or IDE).
+2. **Screen & System Audio Recording** (macOS 26+), under System Settings → Privacy & Security → Screen & System Audio Recording. Grant permission to your terminal. Without it, the accessibility API exposes menu bars alone. Window content such as buttons and text fields stays invisible.
+
+After changing permissions, restart your terminal for them to take effect. `App::by_name()` (Rust) or `xa11y.App.by_name()` (Python) will return a `PermissionDenied` error with setup instructions if either permission is missing.
+
+[Input simulation](/guides/input/) and [screenshots](/guides/screenshots/) each
+need one more grant on macOS. Those pages list what and why.
+
+### Linux
+
+Linux needs AT-SPI2 running, which is the default on GNOME and most desktop environments, and nothing else to grant. Electron and Chromium-based apps (VS Code, Cursor, Chrome) require an additional launch flag to expose their accessibility tree. See [Platform Details](/reference/platform-details/#linux-electron-and-chromium-apps).
+
+To check whether the bus can see a given application at all:
+
+```bash
+busctl --user tree org.a11y.atspi.Registry | grep -i "<app-name>"
+```
+
+### Windows
+
+Windows works as installed. UI Automation is available in any interactive
+desktop session.
+
+## Verify the install
+
+Start any application with a window, then:
+
+```bash
+xa11y apps
+```
+
+A list of running applications with their process IDs means the install and the
+permissions are both good. An empty list on macOS means the permissions have
+not taken effect yet, so restart the terminal.
+
+## Next steps
+
+- [Your first xa11y script](/tutorials/first-script/) drives a running
+  application end to end in about ten minutes.
+- [Testing in CI](/guides/ci/) covers the same setup on a machine with no
+  display and no permissions granted.

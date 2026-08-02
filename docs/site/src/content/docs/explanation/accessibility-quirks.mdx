@@ -1,7 +1,12 @@
 ---
 title: Accessibility API Quirks
 description: A field guide to the platform-specific bugs, gotchas, and surprising behaviors of the desktop accessibility APIs (AT-SPI2 on Linux, AXUIElement on macOS, UI Automation on Windows) plus the toolkits (Chromium, Electron, Qt, GTK, WebKit, AccessKit) layered on top of them.
+pageType: explanation
 ---
+
+{/* DIATAXIS: explanation — background and rationale: why the design is what it
+    is, and how the pieces relate. No step-by-step instructions, no exhaustive
+    tables. */}
 
 Building anything on top of the desktop accessibility stack (a screen reader,
 a test framework, an automation tool, an AI computer-use agent) means
@@ -569,7 +574,7 @@ In containers, Docker's `/dev` tmpfs isolation hides host-created
 - **Windows and Linux report logical (device-independent) coordinates**, with
   `Screenshot.scale` bridging to physical pixels. On Linux the scale is exact
   where reliably detectable and falls back to `1.0` (coordinates then physical)
-  otherwise. See [platform details](/guides/platform-details/#coordinates-and-hidpi).
+  otherwise. See [platform details](/reference/platform-details/#coordinates-and-hidpi).
   Multi-monitor setups produce negative coordinates for displays positioned
   left of or above the primary.
 
@@ -585,7 +590,7 @@ In containers, Docker's `/dev` tmpfs isolation hides host-created
 - [UI Automation overview](https://learn.microsoft.com/en-us/windows/win32/winauto/entry-uiauto-win32) ·
   [UIA_IsDialogPropertyId](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-automation-element-propids)
 - [AccessKit](https://accesskit.dev/)
-- xa11y's own [Platform Details](/guides/platform-details/) and
+- xa11y's own [Platform Details](/reference/platform-details/) and
   [Testing in CI](/guides/ci/) guides, and the
   [running list of upstream issues](https://github.com/xa11y/xa11y/blob/main/external-issues.md)
   we've filed or documented.

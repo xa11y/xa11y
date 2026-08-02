@@ -1,7 +1,12 @@
 ---
 title: Platform Details
 description: Role mappings, action mappings, and platform-specific caveats.
+pageType: reference
 ---
+
+{/* DIATAXIS: reference — a factual description of the machinery, structured
+    for lookup rather than for reading through. Neutral and complete. No task
+    narratives, no rationale, no teaching. */}
 
 xa11y normalizes platform-specific APIs into a unified interface. This page documents how roles and actions map across platforms, and where behavior differs.
 
@@ -100,7 +105,7 @@ All platforms report bounds as logical (device-independent) screen coordinates w
 
 - **macOS** reports in points, its native logical unit. On Retina displays, 1 point = 2 physical pixels.
 - **Windows** reports device-independent pixels (DIPs), and `scale` is the display's DPI scaling (e.g. `1.5` at 150%).
-- **Linux** reports logical pixels where the HiDPI scale is reliably detectable, and falls back to physical at scale `1.0` otherwise. See [Coordinates and HiDPI](/guides/platform-details/#coordinates-and-hidpi) for exactly when.
+- **Linux** reports logical pixels where the HiDPI scale is reliably detectable, and falls back to physical at scale `1.0` otherwise. See [Coordinates and HiDPI](/reference/platform-details/#coordinates-and-hidpi) for exactly when.
 - Multi-monitor setups can produce negative coordinates for displays positioned left of or above the primary.
 
 ### Name resolution

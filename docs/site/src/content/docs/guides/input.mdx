@@ -1,7 +1,12 @@
 ---
 title: Input Simulation
 description: Synthesise OS-level pointer and keyboard events from Rust, Python, or JavaScript.
+pageType: how-to
 ---
+
+{/* DIATAXIS: how-to — a goal-oriented recipe for a reader who already knows
+    what they want. Steps and decisions only. Concepts go to explanation/,
+    exhaustive option lists go to reference/. */}
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
 
@@ -114,7 +119,7 @@ xa11y picks the Linux backend at runtime: if `DISPLAY` is set we drive XTest, an
 
 Every pointer method accepts either a screen-space point or an `Element`:
 
-- **Point** is absolute screen coordinates in logical (device-independent) units. That means points on macOS and DIPs on Windows. On Linux it means logical pixels, or physical pixels where the HiDPI scale can't be read reliably (see [platform details](/guides/platform-details/#coordinates-and-hidpi)). Origin is the top-left of the primary display, and negative values are valid on multi-monitor setups.
+- **Point** is absolute screen coordinates in logical (device-independent) units. That means points on macOS and DIPs on Windows. On Linux it means logical pixels, or physical pixels where the HiDPI scale can't be read reliably (see [platform details](/reference/platform-details/#coordinates-and-hidpi)). Origin is the top-left of the primary display, and negative values are valid on multi-monitor setups.
 - **Element** uses the centre of the element's `bounds` at the time of the call. `InputSim` does not re-read the accessibility tree for you, so re-fetch via a locator first if the UI may have moved.
 
 In Rust, additional anchors are available via `ClickOptions.anchor` (`Anchor::TopLeft`, `Anchor::Offset { dx, dy }`, etc.).
@@ -286,10 +291,17 @@ Drag-and-drop has no accessibility equivalent on most platforms. Resolve both en
 
 ## Error handling
 
-| Error | When |
-| --- | --- |
-| `PermissionDenied` | OS denied the synthesis permission (macOS Input Monitoring, etc.) |
-| `Unsupported` | Platform has no backend for the operation (e.g. Linux session with neither `DISPLAY` nor `WAYLAND_DISPLAY` set) |
-| `NoElementBounds` | Target `Element` has no bounds. Re-fetch it or anchor on a point |
-| `InvalidActionData` | Uppercase `Char` key, malformed key name, or bad target tuple |
-| `Platform` | Raw OS failure (FFI return code etc.) |
+Input simulation raises five of xa11y's error variants:
+
+- `PermissionDenied` when the OS denied the synthesis permission, such as macOS Input Monitoring.
+- `Unsupported` when the platform has no backend for the operation, such as a Linux session with neither `DISPLAY` nor `WAYLAND_DISPLAY` set.
+- `NoElementBounds` when the target `Element` has no bounds. Re-fetch it, or anchor on a point.
+- `InvalidActionData` for an uppercase `Char` key, a malformed key name, or a bad target tuple.
+- `Platform` for a raw OS failure such as an FFI return code.
+
+Arguments are parsed before the first OS call, so a rejected argument can never
+leave a half-delivered gesture behind with a key pressed and never released.
+
+Note that `NoElementBounds` surfaces as a plain `ValueError` in Python rather
+than as an `xa11y` exception class. See [Errors](/reference/errors/) for the
+full mapping.
