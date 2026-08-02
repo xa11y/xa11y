@@ -1,13 +1,6 @@
 ---
 // Custom landing page — Graphite theme with lime accent
 // Overrides the Starlight splash page for the root URL
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-
-const cargoToml = readFileSync(resolve("../../Cargo.toml"), "utf-8");
-const verMatch = cargoToml.match(/^version\s*=\s*"([^"]+)"/m);
-if (!verMatch) throw new Error("Could not find version in Cargo.toml");
-const version = `v${verMatch[1]}`;
 ---
 
 <!doctype html>
@@ -73,7 +66,6 @@ const version = `v${verMatch[1]}`;
   .brand .glyph::after{
     content:''; position:absolute; right:-3px; bottom:-3px; width:8px; height:8px; background:var(--accent); border-radius:2px;
   }
-  .brand .ver{ color:var(--ink-dim); font:400 12px/1 var(--mono); margin-left:2px; }
   nav.nav{ display:flex; gap:20px; font-size:13.5px; color:var(--ink-muted); }
   nav.nav a{ text-decoration:none; }
   nav.nav a:hover{ color:var(--ink); }
@@ -309,7 +301,7 @@ const version = `v${verMatch[1]}`;
 <body>
 
 <header class="topbar">
-  <a class="brand" href="/"><span class="glyph">x</span> xa11y <span class="ver">{version}</span></a>
+  <a class="brand" href="/"><span class="glyph">x</span> xa11y</a>
   <nav class="nav">
     <a href="/tutorials/first-script/">tutorial</a>
     <a href="/explanation/how-it-works/">how it works</a>
@@ -426,7 +418,7 @@ const version = `v${verMatch[1]}`;
 
 <footer>
   <div>
-    <div class="brand" style="margin-bottom:12px;"><span class="glyph">x</span> xa11y <span class="ver">{version}</span></div>
+    <div class="brand" style="margin-bottom:12px;"><span class="glyph">x</span> xa11y</div>
     <div style="color:var(--ink-muted); font-size:13px; line-height:1.55; max-width:34ch;">
       A Playwright-style library for driving native desktop apps on macOS, Windows, and Linux. MIT-licensed, built in the open.
     </div>
