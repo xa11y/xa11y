@@ -34,8 +34,14 @@ from pathlib import Path
 
 DOCS_DIR = Path(__file__).parent / "site" / "src" / "content" / "docs"
 
-# Directory trees that are generated rather than hand-written.
-EXCLUDED_DIRS = ("api",)
+# Generated rather than hand-written, as a path prefix relative to DOCS_DIR.
+# A prefix (rather than "any component named api") so a hand-written page at
+# `guides/api/…` would still be checked.
+EXCLUDED_PREFIXES = ("api/",)
+
+# Starlight renders both; checking only .mdx would let a .md page skip the
+# banner and directory rules.
+PAGE_SUFFIXES = ("*.mdx", "*.md")
 
 # The canonical banner text for each page type. The banner is compared after
 # whitespace normalisation, so the wrapping in a page's source is free but
@@ -72,6 +78,10 @@ CANONICAL_TEXT = {
     ),
 }
 
+# Kept in sync by hand with the PAGE_TYPES literal in
+# docs/site/src/content.config.ts, which enforces the same set at build time.
+# Adding a type here without adding it there makes the site build reject a page
+# this check accepts, which is a loud failure rather than a silent one.
 PAGE_TYPES = tuple(CANONICAL_TEXT)
 
 # Where each page type is allowed to live, as a path prefix relative to
@@ -162,11 +172,12 @@ def check_file(path: Path) -> list[str]:
 def main() -> int:
     pages = sorted(
         p
-        for p in DOCS_DIR.rglob("*.mdx")
-        if not any(part in EXCLUDED_DIRS for part in p.relative_to(DOCS_DIR).parts)
+        for suffix in PAGE_SUFFIXES
+        for p in DOCS_DIR.rglob(suffix)
+        if not p.relative_to(DOCS_DIR).as_posix().startswith(EXCLUDED_PREFIXES)
     )
     if not pages:
-        print(f"ERROR: no .mdx files found in {DOCS_DIR}", file=sys.stderr)
+        print(f"ERROR: no page files found in {DOCS_DIR}", file=sys.stderr)
         return 1
 
     failures = 0

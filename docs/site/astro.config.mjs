@@ -64,6 +64,7 @@ export default defineConfig({
           label: "Reference",
           items: [
             { label: "Selectors", slug: "reference/selectors" },
+            { label: "Locator & Element", slug: "reference/locator" },
             { label: "Events", slug: "reference/events" },
             { label: "Errors", slug: "reference/errors" },
             { label: "CLI", slug: "reference/cli" },

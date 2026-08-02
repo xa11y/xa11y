@@ -35,8 +35,10 @@ xa11y find "button[name='Submit']" --app MyApp
 xa11y find "dialog button[name='Submit']" --app MyApp
 ```
 
-`xa11y find` prints every match and a count, so "0 matches" and "7 matches" are
-both visible before the selector reaches your code.
+`xa11y find` prints every match and a parenthesised count, so a selector that
+matched seven things when you wanted one is visible before it reaches your
+code. A selector matching nothing is an error (`no elements matched selector:
+…`) with a non-zero exit, rather than an empty list.
 
 ## Read the tree from code instead
 

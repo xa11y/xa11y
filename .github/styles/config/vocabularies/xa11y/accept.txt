@@ -82,6 +82,7 @@ readback
 renderers
 repo
 runtime
+stdout
 subprocess
 substring
 surfaceably
@@ -89,6 +90,7 @@ teardown
 tearoff
 typechecks
 uncheck
+unparsable
 unstripped
 upscaled
 viewport

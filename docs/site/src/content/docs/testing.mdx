@@ -48,7 +48,7 @@ UI Automation tree, not a fixture shaped to match the code.
 | Test app | Toolkit | Linux | macOS | Windows | Features covered |
 | --- | --- | :---: | :---: | :---: | --- |
 | `accesskit` | Rust + winit (AccessKit) | ✓ | ✓&nbsp;† | ✓ | compat, actions, events, errors, screenshot |
-| `qt` | PySide6 (Qt) | ✓ | ✓ | ✓ | compat, actions, events, errors |
+| `qt` | PySide6 (Qt 6) | ✓ | ✓ | ✓ | compat, actions, events, errors |
 | `gtk` | GTK4 (PyGObject) | ✓ | ○ | ○ | compat, actions, events, errors |
 | `cocoa` | Swift / AppKit | ○ | ✓ | ○ | compat, actions, events, errors |
 | `tauri` | Rust + WebView | ✓ | ✓ | ✓ | compat, actions, events, errors, input_sim, screenshot |
@@ -71,7 +71,9 @@ every language suite covers every feature listed for an app. The per-language
 breakdown is in [`tests/matrix.yaml`](https://github.com/xa11y/xa11y/blob/main/tests/matrix.yaml),
 which is the authoritative index and the file this table summarises.
 
-Which suite drives which app varies. The AccessKit row is covered primarily by
+Which suite drives which app varies. Qt, GTK, Cocoa, Tauri, WinForms, and WPF
+are driven by the Python integration suite, with JS and CLI suites running the
+same scenarios alongside it. The AccessKit row is covered primarily by
 the Rust integration suite in `xa11y/tests/integ/` rather than by the per-app
 compatibility suites, and its `screenshot` coverage comes from there; the JS
 suite also targets it for compat and actions. GTK event subscription is

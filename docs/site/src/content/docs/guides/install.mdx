@@ -65,11 +65,8 @@ need one more grant on macOS. Those pages list what and why.
 
 Linux needs AT-SPI2 running, which is the default on GNOME and most desktop environments, and nothing else to grant. Electron and Chromium-based apps (VS Code, Cursor, Chrome) require an additional launch flag to expose their accessibility tree. See [Platform Details](/reference/platform-details/#linux-electron-and-chromium-apps).
 
-To check whether the bus can see a given application at all:
-
-```bash
-busctl --user tree org.a11y.atspi.Registry | grep -i "<app-name>"
-```
+To check whether the bus can see a given application at all, see
+[diagnosing AT-SPI2](/reference/platform-details/#linux-electron-and-chromium-apps).
 
 ### Windows
 

@@ -81,9 +81,10 @@ match: `button[name='OK'][enabled='true']`.
 There is no presence-only filter. `[focusable]` is a syntax error; write
 `[focusable='true']`.
 
-The case-insensitive operators compare after an ASCII-oriented lowercase
-mapping, so for names that differ only in a locale-specific case edge case, use
-the case-sensitive `=` operator with the precise string.
+The case-insensitive operators compare after a simple Unicode lowercase
+mapping rather than full case folding, so pairs such as Turkish `I`/`ı` and
+German `ß`/`SS` do not match. For names that differ only in such an edge case,
+use the case-sensitive `=` operator with the precise string.
 
 ### Attributes
 
@@ -172,13 +173,6 @@ app.locator("toolbar, dialog").descendant("button")
 ```
 
 Commas inside quoted attribute values (`[name='a,b']`) are not separators.
-
-## Writing selectors that keep working
-
-Make selectors specific enough that they stay stable as the interface evolves.
-`button` alone can start matching the wrong element or returning several
-matches once the application grows another button, so scope it: prefer
-`button[name='Cancel']` inside a named group or window.
 
 ## Errors
 

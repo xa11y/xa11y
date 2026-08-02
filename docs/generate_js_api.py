@@ -330,6 +330,10 @@ def main() -> None:
         "---",
         'title: "JavaScript API Reference"',
         'description: "API reference for the xa11y Node.js bindings (@crowecawcaw/xa11y)."',
+        # The docs collection schema requires a pageType on every page (see
+        # docs/PAGE_TYPES.md). Generated API pages are reference material.
+        # docs/check_page_types.py skips `api/`, so no banner is needed.
+        "pageType: reference",
         "---",
         "",
         "{/* This page is auto-generated. Do not edit by hand. */}",

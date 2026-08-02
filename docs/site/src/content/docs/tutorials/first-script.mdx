@@ -59,9 +59,9 @@ xa11y apps
 ```
 
 ```
-1234  Calculator
-5678  Terminal
-9012  Finder
+1234	Calculator	focused
+5678	Terminal
+9012	Finder
 ```
 
 **Checkpoint.** Calculator appears in that list with a process ID. If the list
@@ -121,13 +121,18 @@ xa11y find "button[name='7']" --app Calculator
 
 ```
 button "7" [enabled visible focusable] actions=[press,focus]
-
-1 matches
+(1 match)
 ```
 
-**Checkpoint.** Exactly one match. `0 matches` means the name does not match
-what the application publishes, so go back to your tree output and copy the
-name character for character.
+**Checkpoint.** Exactly one match. A selector that matches nothing is an error
+rather than an empty list:
+
+```
+error: no elements matched selector: button[name='7']
+```
+
+That means the name does not match what the application publishes, so go back
+to your tree output and copy the name character for character.
 
 Now press it from the shell:
 
@@ -141,7 +146,20 @@ desktop application without writing a line of code.
 ## Step 5: Write the script
 
 Create `first_script.py` (or the equivalent for your language) and put this in
-it, substituting your own selectors:
+it. **Replace the three names below with the ones from your own tree**, exactly
+as step 3 printed them:
+
+| Placeholder in the code | Replace with |
+| --- | --- |
+| `button[name='7']` | the digit-7 button you wrote down in step 3 |
+| `button[name='+']` | the addition button from the same tree |
+| `static_text[name='Result']` | the role and name of the element showing the running total |
+
+Names vary by platform. macOS Calculator publishes plain glyphs (`7`, `+`, `=`)
+and a display whose role is `static_text`; Windows Calculator publishes word
+names (`Seven`, `Plus`, `Equals`); GNOME Calculator publishes glyphs with its
+own display role. Copying from your own step-3 output is what makes this work
+whichever you are on.
 
 <Tabs syncKey="lang">
   <TabItem label="Python">
@@ -202,7 +220,9 @@ it, substituting your own selectors:
 Run it.
 
 **Checkpoint.** The script prints `15`, and you watched the Calculator window
-change while it ran.
+change while it ran. A `TimeoutError` here means one of the three names is
+still the placeholder rather than yours; the error names which selector failed
+and lists what it found instead, which step 7 covers.
 
 Two things happened that are worth naming. `App.by_name` polled until the
 operating system reported Calculator to the accessibility API, rather than
@@ -222,7 +242,10 @@ Replace the last two lines with a wait that carries the assertion:
   <TabItem label="Python">
     ```python
     display = calc.locator("static_text[name='Result']")
-    display.wait_until(lambda element: element and element.value == "15", timeout=5.0)
+    display.wait_until(
+        lambda element: element is not None and element.value == "15",
+        timeout=5.0,
+    )
     print("got 15")
     ```
   </TabItem>
@@ -281,7 +304,7 @@ almost matched:
 
 ```text
 xa11y.TimeoutError: Timeout after 5.0s; waiting for: press target actionable
-(visible && enabled); selector: button[name="Multiplyy"]; last observed:
+(visible && enabled); selector: button[name='Multiplyy']; last observed:
 selector never matched; candidates: button "Multiply", button "Minus"
 ```
 

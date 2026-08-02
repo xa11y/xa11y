@@ -9,8 +9,11 @@ import { defineCollection, z } from "astro:content";
 // the same rule without a Node toolchain and additionally checks the
 // in-file banner comment and the directory the page lives in.
 //
-// Generated API pages under `src/content/docs/api/` are HTML, not .mdx, so
-// they never reach this schema.
+// Generated API pages under `src/content/docs/api/` are .mdx too and do reach
+// this schema, so `docs/generate_python_api.py` and `docs/generate_js_api.py`
+// emit `pageType: reference` in the frontmatter they write. They are
+// gitignored, so a local build that skips generation would not catch a
+// regression here; the docs CI job generates before building and would.
 const PAGE_TYPES = [
   "tutorial",
   "how-to",

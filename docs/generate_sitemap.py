@@ -16,6 +16,7 @@ this sitemap; docs.rs publishes its own sitemap.
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -52,11 +53,28 @@ def url_for(path: Path) -> str:
     return f"{SITE_BASE}/{rel}"
 
 
+# Astro emits a `<meta http-equiv="refresh" content="0;url=...">` stub for every
+# entry in the `redirects` map in astro.config.mjs. Those stubs are real files
+# under dist/ but they are not pages, and listing them as canonical URLs asks
+# search engines to index a redirect. Detect them by their marker rather than by
+# re-reading the redirect map, so a redirect added later is excluded for free.
+REDIRECT_MARKER = re.compile(r"<meta[^>]+http-equiv=[\"']refresh[\"']", re.IGNORECASE)
+
+
+def is_redirect_stub(path: Path) -> bool:
+    try:
+        return REDIRECT_MARKER.search(path.read_text(errors="replace")) is not None
+    except OSError:
+        return False
+
+
 def should_include(path: Path) -> bool:
     rel = path.relative_to(DIST).as_posix()
     if any(rel.startswith(p) for p in EXCLUDE_DIR_PREFIXES):
         return False
     if path.name in EXCLUDE_FILENAMES:
+        return False
+    if is_redirect_stub(path):
         return False
     return True
 

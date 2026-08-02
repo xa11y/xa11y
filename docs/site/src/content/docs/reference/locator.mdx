@@ -1,0 +1,128 @@
+---
+title: Locator & Element
+description: The methods available on Locator and Element, the element properties they expose, and how the two differ in re-resolution and auto-waiting.
+pageType: reference
+---
+
+{/* DIATAXIS: reference — a factual description of the machinery, structured
+    for lookup rather than for reading through. Neutral and complete. No task
+    narratives, no rationale, no teaching. */}
+
+`Locator` and `Element` are the two ways to reach a node in the accessibility
+tree. This page lists what each one offers. Full signatures, including
+parameter types and defaults, are in the generated API reference:
+[Rust](https://docs.rs/xa11y/), [Python](/api/python/reference/api/xa11y/),
+[JavaScript](/api/javascript/).
+
+For the model behind the two, see
+[How xa11y works](/explanation/how-it-works/#taking-actions).
+
+## Locator
+
+Created by `app.locator(selector)`, or by the module-level
+`xa11y.locator(selector)` for a search rooted at the system rather than at one
+application. A `Locator` re-resolves its selector on every operation.
+
+### Actions
+
+`press()`, `focus()`, `blur()`, `toggle()`, `select()`, `expand()`,
+`collapse()`, `set_value()`, `set_numeric_value()`, `type_text()`,
+`select_text()`, `increment()`, `decrement()`, `show_menu()`,
+`scroll_into_view()`.
+
+Each auto-waits for the target to be visible and enabled before dispatching.
+Which platform API each verb reaches is in
+[Platform Details](/reference/platform-details/#action-mapping).
+
+### Waits
+
+`wait_visible()`, `wait_hidden()`, `wait_attached()`, `wait_detached()`,
+`wait_enabled()`, `wait_disabled()`, `wait_focused()`, `wait_unfocused()`,
+`wait_for_state()`, `wait_until()`.
+
+Each polls until the condition holds or the timeout expires, then raises
+`Timeout` with a diagnosis. `wait_until()` takes a predicate over the resolved
+element, which is `None` when the selector did not match.
+
+### Queries
+
+| Method | Returns |
+| --- | --- |
+| `element()` | The single match. Raises `SelectorNotMatched` when there is none. |
+| `elements()` | Every match |
+| `exists()` | Boolean |
+| `count()` | Number of matches |
+
+### Chaining
+
+`nth(n)`, `first()`, `child(selector)`, `descendant(selector)`.
+
+`child()` and `descendant()` distribute over every clause of an alternation
+selector. See [Selectors](/reference/selectors/#alternation-selector-groups).
+
+`tree()` and `dump()` are not on `Locator`. Call `.element()` first.
+
+## Element
+
+A live handle returned by `app.children()`, `element.children()`,
+`element.parent()`, `locator.element()`, or `locator.elements()`.
+
+### Properties
+
+| Property | Type |
+| --- | --- |
+| `role` | Normalized role, `snake_case` |
+| `name` | String, optional |
+| `value` | String, optional |
+| `description` | String, optional |
+| `bounds` | Rect (`x`, `y`, `width`, `height`), optional |
+| `states` | State set (`enabled`, `visible`, `focused`, and the rest) |
+| `actions` | List of action names this element supports |
+| `numeric_value` | Number, optional |
+| `min_value` | Number, optional |
+| `max_value` | Number, optional |
+| `stable_id` | String, optional |
+| `pid` | Process ID of the owning application |
+| `raw` | Platform-native key/value map |
+
+`name`, `value`, and `description` are stripped of Unicode bidi format
+controls. `raw` holds the unstripped platform string under the platform-native
+key. Each of these properties except `raw`, `states`, and `actions` is also
+usable as a selector attribute, along with the individual state flags. See
+[Selectors](/reference/selectors/#attributes).
+
+### Navigation and snapshots
+
+| Method | Returns |
+| --- | --- |
+| `children()` | Direct children, queried from the platform on each call |
+| `parent()` | The parent element |
+| `tree(max_depth)` | The subtree as a structured snapshot (`role`, `name`, `value`, `children`) |
+| `dump(max_depth)` | The same snapshot as an indented string |
+
+`max_depth` of `0` returns the root node alone, `1` adds its direct children,
+and so on. Omit it for the full subtree. `tree()` and `dump()` are also
+available on `App` and `Locator`.
+
+### Actions
+
+The same action verbs listed for `Locator` are available on `Element`. The
+difference is what they act on:
+
+| | `Locator` | `Element` |
+| --- | --- | --- |
+| Selector | Re-resolved on every call | Not applicable; the handle is fixed |
+| Auto-wait | Waits for visible and enabled | None |
+| Handle went away | Re-resolves against the current tree | Raises `ElementStale` |
+
+## Default timeout
+
+Auto-waiting actions, the `wait_*` family, and application lookup share one
+process-wide default of **5 seconds**. Resolution runs from most to least
+specific: an explicit per-call `timeout` argument, then
+`set_default_timeout()`, then the `XA11Y_DEFAULT_TIMEOUT` environment variable
+(seconds, read once at startup), then the built-in 5 seconds. A timeout of `0`
+means a single attempt with no polling.
+
+An unparsable `XA11Y_DEFAULT_TIMEOUT` raises `InvalidConfig`. See
+[Errors](/reference/errors/).

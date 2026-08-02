@@ -116,7 +116,7 @@ and when to choose something else.
 
 <img src="/concepts.svg" alt="Diagram of the Read, Act, and Listen paths through xa11y. Read goes App to .children() to Element. Act goes App to .locator() to Locator, then on to actions, waits, and .elements(). Listen goes App to .subscribe() to Subscription, then on to recv(), wait_for(), and iter()" style="width:100%;max-width:720px;margin:1rem auto;display:block" />
 
-xa11y is built around three core types:
+xa11y is built around a small set of types:
 
 - **App** is the entry point for driving an application. Construct via `App::by_name()`, `App::by_pid()`, `App::find()` (predicate-based discovery), or `App::list()`. An App offers `app.children()` for tree navigation, `app.locator(selector)` for actions and waits, and `app.subscribe()` for event streams.
 - **Element** is a live handle to a node in the accessibility tree. Navigate with `children()` and `parent()`, where each call queries the platform lazily. Read properties like `role`, `name`, `value`, `states`, `bounds`. Capture the subtree as a structured snapshot with `tree(max_depth)` or as an indented string with `dump(max_depth)`. Actions (`press()`, `set_value()`, etc.) are available too, acting on the captured handle without re-resolution or auto-wait.
@@ -244,11 +244,10 @@ interface.
   </TabItem>
 </Tabs>
 
-Element properties: `role`, `name`, `value`, `description`, `bounds`, `states`,
-`actions`, `numeric_value`, `min_value`, `max_value`, `stable_id`, `pid`.
-Element navigation and snapshots: `children()`, `parent()`, `tree(max_depth)`,
-`dump(max_depth)`. Most of these properties are also usable as selector
-attributes, which [Selectors](/reference/selectors/) covers.
+An element carries the semantic properties the application published: its
+role, name, value, description, bounds, state flags, and the list of actions it
+supports. [Locator & Element](/reference/locator/#properties) has the full set,
+and most of them double as selector attributes.
 
 `name`, `value`, and `description` are stripped of Unicode bidi format controls
 (LRM, RLM, embeddings, isolates) so that equality assertions match the logical
@@ -420,28 +419,18 @@ interface.
   </TabItem>
 </Tabs>
 
-The vocabulary available on a Locator:
-
-**Actions:** `press()`, `focus()`, `blur()`, `toggle()`, `select()`,
-`expand()`, `collapse()`, `set_value()`, `set_numeric_value()`, `type_text()`,
-`select_text()`, `increment()`, `decrement()`, `show_menu()`,
-`scroll_into_view()`.
-
-**Waits:** `wait_visible()`, `wait_hidden()`, `wait_attached()`,
-`wait_detached()`, `wait_enabled()`, `wait_disabled()`, `wait_focused()`,
-`wait_unfocused()`, `wait_for_state()`, `wait_until()`.
-
-**Queries:** `element()` (single match), `elements()` (all matches),
-`exists()`, `count()`.
-
-**Chaining:** `nth(n)`, `first()`, `child(selector)`, `descendant(selector)`.
+A Locator offers four families of operation: the action verbs, the `wait_*`
+family, the queries (`element`, `elements`, `exists`, `count`), and the
+chaining methods that narrow one locator into another.
+[Locator & Element](/reference/locator/#locator) lists all of them.
 
 To inspect element properties or traverse the subtree, call `.element()` first,
 because `tree()` and `dump()` live on `Element` rather than `Locator`.
 
 A selector specific enough to survive the interface growing another button is
-worth the extra characters. [Selectors](/reference/selectors/#writing-selectors-that-keep-working)
-covers what that means in practice.
+worth the extra characters. `button` alone can start matching the wrong element
+once the application grows a second one, so scope it to a named group or
+window.
 
 ### Element actions
 
@@ -506,6 +495,7 @@ that keeps a verb honest is design tenet 3,
 
 ## Where to go next
 
+- [Locator & Element](/reference/locator/) lists every method and property.
 - [Selectors](/reference/selectors/) is the query syntax in full.
 - [Events](/reference/events/) is the event stream in full.
 - [Errors](/reference/errors/) lists every error variant, and

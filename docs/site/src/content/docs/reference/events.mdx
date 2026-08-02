@@ -173,7 +173,10 @@ See [CLI](/reference/cli/#xa11y-events).
 
 ## Errors
 
-`Subscription.wait_for` raises `Timeout` when no matching event arrives. The
-diagnosis reports how many non-matching events were seen and distinguishes a
-quiet stream from a disconnected one. See
+`Subscription.wait_for` raises `Timeout` when the timeout expires with no
+matching event. The diagnosis reports how many non-matching events were seen
+and says whether the stream went quiet or disconnected. See
 [Errors and diagnosis](/explanation/errors-and-diagnosis/#event-waits).
+
+A stream that disconnects before the timeout is a different failure: the
+Python binding raises `PlatformError` rather than waiting out the clock.
