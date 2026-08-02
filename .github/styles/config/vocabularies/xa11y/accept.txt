@@ -79,6 +79,7 @@ fuzzers?
 greppable
 [Ii]nteg
 lookups
+lossy
 memoization
 outer
 readback

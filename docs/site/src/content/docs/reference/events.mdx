@@ -50,8 +50,8 @@ and `Announcement` carries no text because Windows
 | Event | Gap |
 | --- | --- |
 | `MenuOpened` / `MenuClosed` | Not reliably emitted on Linux. These will not fire there. |
-| `WindowActivated` | Windows has no first-class UIA event. It is inferred from focus changes. |
-| `StateChanged` | Linux delivers all state bits. Windows delivers `IsEnabled`, `ToggleState`, `ExpandCollapseState`, and `SelectionItem_IsSelected`. macOS delivers `Checked` and `Busy` alone. No public app-level macOS notification reports `Enabled`, so it will never fire there. |
+| `WindowActivated` / `WindowDeactivated` | Not emitted on Windows. UIA has no first-class event, and inferring it from focus changes was tried and removed as lossy. |
+| `StateChanged` | Linux delivers all state bits. Windows delivers `IsEnabled`, `ToggleState`, and `ExpandCollapseState`; per-item selection arrives as `SelectionChanged` rather than as a state flag. macOS delivers `Checked` and `Busy` alone. No public app-level macOS notification reports `Enabled`, so it will never fire there. |
 
 ## State flags
 

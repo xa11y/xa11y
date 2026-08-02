@@ -28,8 +28,10 @@ pub enum EventKind {
     /// `flag` and `value` are always populated — this variant is only emitted
     /// when both are known. Coverage varies by platform:
     /// - Linux: all state bits via Object:StateChanged.
-    /// - Windows: IsEnabled, ToggleState, ExpandCollapseState,
-    ///   SelectionItem_IsSelected via PropertyChanged events.
+    /// - Windows: IsEnabled, ToggleState, ExpandCollapseState via
+    ///   PropertyChanged events. Per-item selection is NOT among them; it
+    ///   arrives as `SelectionChanged` from
+    ///   UIA_SelectionItem_ElementSelectedEventId instead.
     /// - macOS: Checked (via AXValueChanged on checkbox/radio) and Busy
     ///   (via AXElementBusyChanged). Enabled is NOT deliverable via any
     ///   public app-level macOS notification and will never fire on macOS.
@@ -53,7 +55,10 @@ pub enum EventKind {
     ///
     /// - macOS: AXFocusedWindowChanged.
     /// - Linux: Window:Activate.
-    /// - Windows: no first-class UIA event; inferred from focus changes.
+    /// - Windows: NOT emitted. UIA has no first-class event, and inferring
+    ///   it from focus changes was tried and removed as lossy (it misses
+    ///   alt-tab and tool windows, and fires spuriously on in-app focus
+    ///   moves). See `design/events.md`.
     WindowActivated,
 
     /// A window lost active status.

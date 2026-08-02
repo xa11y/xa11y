@@ -96,7 +96,7 @@ Element properties, matched against the element's normalized data:
 | `name` | String |
 | `value` | String |
 | `description` | String |
-| `bounds` | JSON object, `{"x":…,"y":…,"width":…,"height":…}` |
+| `bounds` | JSON object with keys in **alphabetical** order: `{"height":…,"width":…,"x":…,"y":…}`. An exact `=` match has to reproduce that order, so `*=` is the practical operator here. |
 | `numeric_value` | Number formatted as a string |
 | `min_value` | Number formatted as a string |
 | `max_value` | Number formatted as a string |
