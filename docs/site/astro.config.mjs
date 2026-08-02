@@ -44,9 +44,16 @@ export default defineConfig({
       // reader arrives with exactly one of them. Every page declares which
       // group it belongs to in its `pageType` frontmatter, checked by
       // docs/check_page_types.py. See docs/PAGE_TYPES.md before adding a page.
+      //
+      // These labels are reader-facing, and two of them deliberately do not
+      // spell the Diátaxis mode name: "Get started" for `tutorial` and
+      // "Concepts" for `explanation`, which reads as a term of art when used
+      // as a heading. The contract is the `pageType` key and the directory,
+      // neither of which moves with the label. The landing page nav in
+      // src/pages/index.astro uses the same five words.
       sidebar: [
         {
-          label: "Tutorial",
+          label: "Get started",
           items: [{ label: "Your first script", slug: "tutorials/first-script" }],
         },
         {
@@ -61,25 +68,7 @@ export default defineConfig({
           ],
         },
         {
-          label: "Reference",
-          items: [
-            { label: "Selectors", slug: "reference/selectors" },
-            { label: "Locator & Element", slug: "reference/locator" },
-            { label: "Events", slug: "reference/events" },
-            { label: "Errors", slug: "reference/errors" },
-            { label: "CLI", slug: "reference/cli" },
-            { label: "Platform Details", slug: "reference/platform-details" },
-            {
-              label: "Rust API",
-              link: "https://docs.rs/xa11y/",
-              attrs: { target: "_blank", rel: "noopener" },
-            },
-            { label: "Python API", link: "/api/python/reference/api/xa11y/" },
-            { label: "JavaScript API", link: "/api/javascript/" },
-          ],
-        },
-        {
-          label: "Explanation",
+          label: "Concepts",
           items: [
             { label: "How xa11y works", slug: "explanation/how-it-works" },
             {
@@ -102,6 +91,27 @@ export default defineConfig({
           items: [
             { label: "Compare to other tools", slug: "compare" },
             { label: "How xa11y is tested", slug: "testing" },
+          ],
+        },
+        // Reference sits last: it is lookup material for someone already
+        // using xa11y, so it is the one group nobody reads their way into.
+        // The groups above run in the order a newcomer needs them.
+        {
+          label: "Reference",
+          items: [
+            { label: "Selectors", slug: "reference/selectors" },
+            { label: "Locator & Element", slug: "reference/locator" },
+            { label: "Events", slug: "reference/events" },
+            { label: "Errors", slug: "reference/errors" },
+            { label: "CLI", slug: "reference/cli" },
+            { label: "Platform Details", slug: "reference/platform-details" },
+            {
+              label: "Rust API",
+              link: "https://docs.rs/xa11y/",
+              attrs: { target: "_blank", rel: "noopener" },
+            },
+            { label: "Python API", link: "/api/python/reference/api/xa11y/" },
+            { label: "JavaScript API", link: "/api/javascript/" },
           ],
         },
       ],

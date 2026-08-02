@@ -66,9 +66,53 @@
   .brand .glyph::after{
     content:''; position:absolute; right:-3px; bottom:-3px; width:8px; height:8px; background:var(--accent); border-radius:2px;
   }
-  nav.nav{ display:flex; gap:20px; font-size:13.5px; color:var(--ink-muted); }
+  nav.nav{ display:flex; align-items:center; gap:20px; font-size:13.5px; color:var(--ink-muted); }
   nav.nav a{ text-decoration:none; }
   nav.nav a:hover{ color:var(--ink); }
+
+  /* Reference is the one nav entry no single link represents: nine pages plus
+     three separate API sites. It gets a disclosure menu (a button toggling a
+     group of links) rather than `role="menu"` — the WAI-ARIA menu pattern is
+     for application menus, not navigation. */
+  .menu{ position:relative; }
+  .menu-btn{
+    font:inherit; font-size:13.5px; color:inherit;
+    background:none; border:0; padding:0; cursor:pointer;
+    display:inline-flex; align-items:center; gap:5px;
+  }
+  .menu-btn:hover, .menu-btn[aria-expanded="true"]{ color:var(--ink); }
+  .menu-btn .chev{ font-size:9px; transition:transform .15s ease; }
+  .menu-btn[aria-expanded="true"] .chev{ transform:rotate(180deg); }
+  .menu-panel{
+    position:absolute; top:calc(100% + 14px); left:-18px; z-index:60;
+    display:grid; grid-template-columns:repeat(2, minmax(148px, 1fr)); gap:24px;
+    padding:18px 22px;
+    background:var(--surface); border:1px solid var(--rule); border-radius:8px;
+    box-shadow:0 14px 32px rgba(0,0,0,0.10);
+  }
+  .menu-panel[hidden]{ display:none; }
+  .menu-col{ display:flex; flex-direction:column; gap:10px; }
+  .menu-col h6{
+    font:500 10.5px/1 var(--mono); color:var(--ink-dim);
+    letter-spacing:.12em; text-transform:uppercase; margin:0 0 2px;
+  }
+  .menu-col a{ color:var(--ink-muted); font-size:13.5px; white-space:nowrap; }
+  .menu-col a:hover{ color:var(--ink); }
+
+  .nav-toggle{
+    display:none;
+    background:transparent; border:1px solid var(--rule-2); border-radius:6px;
+    color:var(--ink-muted); padding:6px 10px; cursor:pointer;
+    font:13px/1 var(--sans);
+  }
+  .nav-toggle:hover{ color:var(--ink); border-color:var(--ink); }
+
+  /* The site is an accessibility library's own front door; keyboard focus has
+     to be visible on every interactive element. */
+  a:focus-visible, button:focus-visible{
+    outline:2px solid var(--ink); outline-offset:3px; border-radius:2px;
+  }
+
   .spacer{ flex:1; }
   .icon-btn{
     background:transparent; border:1px solid var(--rule-2);
@@ -294,7 +338,24 @@
     .cases{ grid-template-columns:1fr; }
     .qs{ grid-template-columns:1fr; }
     footer{ grid-template-columns: repeat(2, 1fr); }
-    nav.nav{ display:none; }
+    /* Below this width the nav collapses behind a disclosure button rather
+       than disappearing, which is what it used to do. */
+    .nav-toggle{ display:inline-flex; }
+    nav.nav{
+      display:none;
+      position:absolute; top:100%; left:0; right:0;
+      flex-direction:column; align-items:flex-start; gap:16px;
+      padding:16px 24px 20px;
+      background:var(--paper); border-bottom:1px solid var(--rule);
+    }
+    nav.nav[data-open="true"]{ display:flex; }
+    .menu{ width:100%; }
+    .menu-panel{
+      position:static; grid-template-columns:1fr; gap:16px;
+      margin-top:14px; padding:0 0 0 14px;
+      border:0; border-left:1px solid var(--rule); border-radius:0;
+      box-shadow:none; background:transparent;
+    }
   }
 </style>
 </head>
@@ -302,15 +363,38 @@
 
 <header class="topbar">
   <a class="brand" href="/"><span class="glyph">x</span> xa11y</a>
-  <nav class="nav">
-    <a href="/tutorials/first-script/">tutorial</a>
-    <a href="/explanation/how-it-works/">how it works</a>
-    <a href="/reference/cli/">CLI</a>
-    <a href="https://docs.rs/xa11y/">API</a>
-    <a href="/guides/desktop-testing/">testing</a>
-    <a href="/reference/platform-details/">platforms</a>
+  <!-- The nav mirrors the docs sidebar groups in astro.config.mjs, so the
+       structure a reader clicks here is the structure they land in. -->
+  <nav class="nav" id="site-nav">
+    <a href="/tutorials/first-script/">get started</a>
+    <a href="/guides/install/">guides</a>
+    <a href="/explanation/how-it-works/">concepts</a>
+    <a href="/compare/">compare</a>
+    <div class="menu">
+      <button class="menu-btn" id="ref-btn" aria-expanded="false" aria-controls="ref-panel">
+        reference <span class="chev" aria-hidden="true">&#9662;</span>
+      </button>
+      <div class="menu-panel" id="ref-panel" role="group" aria-labelledby="ref-btn" hidden>
+        <div class="menu-col">
+          <h6>pages</h6>
+          <a href="/reference/selectors/">selectors</a>
+          <a href="/reference/locator/">locator &amp; element</a>
+          <a href="/reference/events/">events</a>
+          <a href="/reference/errors/">errors</a>
+          <a href="/reference/cli/">CLI</a>
+          <a href="/reference/platform-details/">platform details</a>
+        </div>
+        <div class="menu-col">
+          <h6>API docs</h6>
+          <a href="https://docs.rs/xa11y/">rust</a>
+          <a href="/api/python/reference/api/xa11y/">python</a>
+          <a href="/api/javascript/">javascript</a>
+        </div>
+      </div>
+    </div>
   </nav>
   <div class="spacer"></div>
+  <button class="nav-toggle" aria-expanded="false" aria-controls="site-nav">menu</button>
   <a class="icon-btn" href="https://github.com/xa11y/xa11y">GitHub &rarr;</a>
 </header>
 
@@ -426,10 +510,11 @@
   <div>
     <h5>docs</h5>
     <ul>
-      <li><a href="/tutorials/first-script/">tutorial</a></li>
-      <li><a href="/explanation/how-it-works/">how it works</a></li>
+      <li><a href="/tutorials/first-script/">get started</a></li>
+      <li><a href="/explanation/how-it-works/">concepts</a></li>
       <li><a href="https://docs.rs/xa11y/">rust API</a></li>
       <li><a href="/api/python/reference/api/xa11y/">python API</a></li>
+      <li><a href="/api/javascript/">javascript API</a></li>
     </ul>
   </div>
   <div>
@@ -456,6 +541,57 @@
 </footer>
 
 <script is:inline>
+  // --- Nav: disclosure menu + mobile toggle ---
+  (function () {
+    var navToggle = document.querySelector('.nav-toggle');
+    var nav = document.getElementById('site-nav');
+
+    function setNavOpen(open) {
+      navToggle.setAttribute('aria-expanded', String(open));
+      nav.dataset.open = String(open);
+    }
+
+    navToggle.addEventListener('click', function () {
+      setNavOpen(navToggle.getAttribute('aria-expanded') !== 'true');
+    });
+
+    Array.prototype.forEach.call(document.querySelectorAll('.menu'), function (menu) {
+      var btn = menu.querySelector('.menu-btn');
+      var panel = menu.querySelector('.menu-panel');
+
+      function setOpen(open) {
+        btn.setAttribute('aria-expanded', String(open));
+        panel.hidden = !open;
+      }
+
+      btn.addEventListener('click', function () {
+        setOpen(btn.getAttribute('aria-expanded') !== 'true');
+      });
+
+      // Tabbing out of the menu closes it; clicking elsewhere does too. The
+      // button's own click runs first, so re-opening by clicking it still works.
+      menu.addEventListener('focusout', function (e) {
+        if (!menu.contains(e.relatedTarget)) setOpen(false);
+      });
+      document.addEventListener('click', function (e) {
+        if (!menu.contains(e.target)) setOpen(false);
+      });
+      menu.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape' && btn.getAttribute('aria-expanded') === 'true') {
+          setOpen(false);
+          btn.focus();
+        }
+      });
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && navToggle.getAttribute('aria-expanded') === 'true') {
+        setNavOpen(false);
+        navToggle.focus();
+      }
+    });
+  })();
+
   // --- Syntax highlighting ---
   function escapeHtml(s) {
     return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
