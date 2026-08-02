@@ -76,10 +76,9 @@ are driven by the Python integration suite, with JS and CLI suites running the
 same scenarios alongside it. The AccessKit row is covered primarily by
 the Rust integration suite in `xa11y/tests/integ/` rather than by the per-app
 compatibility suites, and its `screenshot` coverage comes from there; the JS
-suite also targets it for compat and actions. GTK event subscription is
-exercised through that same Rust suite over AT-SPI2 rather than duplicated in
-the GTK Python suite. Electron is driven by the JS suite, which additionally
-covers `AccessibilityNotEnabled` detection by launching the app *without*
+suite also targets it for compat and actions. GTK is
+also driven by the Python suite. Electron is driven by the JS suite, which
+also covers `AccessibilityNotEnabled` detection by launching the app *without*
 `--force-renderer-accessibility` and asserting that xa11y says so rather than
 reporting an empty tree.
 

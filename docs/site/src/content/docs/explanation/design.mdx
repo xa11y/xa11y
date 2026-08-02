@@ -63,7 +63,7 @@ Prefer `Result` over `.unwrap()` / `.expect()` in provider and binding code.
 
 In language bindings, any call that can block, sleep, or poll (waits, auto-waiting actions, attach/discovery loops, event receives) must release the host runtime's global lock for the duration of the block. That means Python's GIL, or the platform equivalent. A wait that holds the GIL freezes every other thread in the consumer's process for up to the full timeout, and pushes consumers into architectural workarounds such as moving an in-process mock server out into a separate process.
 
-The one legitimate reason to hold the lock is calling back into the host language, for example a Python predicate in `wait_until` or `App.find`. Reacquire it per callback rather than for the whole loop. A missing `allow_threads` on a blocking path is a correctness bug rather than a missed optimisation.
+The one legitimate reason to hold the lock is calling back into the host language, such as a Python predicate in `wait_until` or `App.find`. Reacquire it per callback rather than for the whole loop. A missing `allow_threads` on a blocking path is a correctness bug rather than a missed optimisation.
 
 Enforced for Python by `xa11y-python/tests/test_gil_release.py`, which asserts that a background thread keeps making progress while a native wait blocks.
 
@@ -76,7 +76,7 @@ An error must contain enough context to understand the failure without re-runnin
 - Bindings expose the context as structured fields rather than prose in a message string, so harnesses can act on it programmatically.
 - Collection is bounded and runs on the failure path alone. Diagnosis must never slow the success path or emit megabyte messages, and an error that a poll loop uses as a retry signal must stay cheap.
 
-The structured carrier is the `Diagnosis` struct in `xa11y-core/src/error.rs`, whose module docs describe the pattern: enrich at the terminal failure site, bound every payload, and never let diagnosis collection mask the original error. What this produces for a consumer is described in [Errors & Diagnosis](/explanation/errors-and-diagnosis/).
+The structured carrier is the `Diagnosis` struct in `xa11y-core/src/error.rs`. Its module docs describe the pattern. Enrich at the terminal failure site. Bound every payload. Never let diagnosis collection mask the original error. What this produces for a consumer is described in [Errors & Diagnosis](/explanation/errors-and-diagnosis/).
 
 ### Breaking a tenet
 

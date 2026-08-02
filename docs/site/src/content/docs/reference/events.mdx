@@ -25,7 +25,7 @@ JavaScript, and is a Rust enum variant of `EventKind`.
 | Rust `EventKind` | Python `event_type` | JavaScript | Fires when |
 | --- | --- | --- | --- |
 | `FocusChanged` | `focus_changed` | `focusChanged` | Keyboard focus moved to a new element. Target is the element that gained focus. |
-| `ValueChanged` | `value_changed` | `valueChanged` | An element's value changed: slider position, text contents, checkbox state, spin button, progress. |
+| `ValueChanged` | `value_changed` | `valueChanged` | An element's value changed. Covers slider position, text contents, checkbox state, spin buttons, and progress. |
 | `NameChanged` | `name_changed` | `nameChanged` | An element's name or label changed. |
 | `StateChanged` | `state_changed` | `stateChanged` | A boolean state flag changed. Carries `flag` and `value`, both always populated. |
 | `StructureChanged` | `structure_changed` | `structureChanged` | Children were added or removed, or the tree was otherwise invalidated. Target is the parent, when known. |
@@ -39,8 +39,8 @@ JavaScript, and is a Rust enum variant of `EventKind`.
 | `TextChanged` | `text_changed` | `textChanged` | Text content changed in an editable element. Re-query the target's value for the current contents. |
 | `Announcement` | `announcement` | `announcement` | A live region update, alert, or explicit announcement request was posted. |
 
-Variants carry a payload only where the data is present on every supporting
-platform. For everything else, re-query the `target` element after receipt.
+A variant includes extra data only where that data is present on every
+supporting platform. For everything else, re-query the `target` element after receipt.
 `TextChanged` carries no delta because macOS `AXValueChanged` supplies none,
 and `Announcement` carries no text because Windows
 `UIA_LiveRegionChangedEventId` supplies none.
@@ -51,7 +51,7 @@ and `Announcement` carries no text because Windows
 | --- | --- |
 | `MenuOpened` / `MenuClosed` | Not reliably emitted on Linux. These will not fire there. |
 | `WindowActivated` | Windows has no first-class UIA event. It is inferred from focus changes. |
-| `StateChanged` | Linux delivers all state bits. Windows delivers `IsEnabled`, `ToggleState`, `ExpandCollapseState`, and `SelectionItem_IsSelected`. macOS delivers `Checked` and `Busy` alone; `Enabled` is not deliverable through any public app-level macOS notification and will never fire there. |
+| `StateChanged` | Linux delivers all state bits. Windows delivers `IsEnabled`, `ToggleState`, `ExpandCollapseState`, and `SelectionItem_IsSelected`. macOS delivers `Checked` and `Busy` alone. No public app-level macOS notification reports `Enabled`, so it will never fire there. |
 
 ## State flags
 
@@ -68,7 +68,10 @@ The `flag` carried by `StateChanged`:
 | `target` | Element snapshot, optional | The element that triggered the event. Absent when the element is unavailable or already destroyed. |
 | `app_name` | string | Name of the application that produced the event |
 | `app_pid` | integer | Process ID of that application |
-| `timestamp` | monotonic instant | Time of receipt |
+| `timestamp` | monotonic instant | Time of receipt. Rust only. |
+
+Python flattens the `state_changed` payload onto the event itself as
+`state_flag` and `state_value`, which are `None` for every other event type.
 
 ## Subscribing
 
@@ -175,7 +178,7 @@ See [CLI](/reference/cli/#xa11y-events).
 
 `Subscription.wait_for` raises `Timeout` when the timeout expires with no
 matching event. The diagnosis reports how many non-matching events were seen
-and says whether the stream went quiet or disconnected. See
+and says whether the stream stopped delivering or disconnected. See
 [Errors and diagnosis](/explanation/errors-and-diagnosis/#event-waits).
 
 A stream that disconnects before the timeout is a different failure: the

@@ -207,7 +207,7 @@ A common pattern is to capture the full screen (or the app under test) whenever 
 Capture raises four of xa11y's error variants:
 
 - `PermissionDenied` when macOS Screen Recording is not granted, or the Wayland portal denied consent.
-- `Unsupported` when no capture backend is available for the session: no `DISPLAY`, no working Wayland portal, and so on.
+- `Unsupported` when no capture backend covers the session, which a missing `DISPLAY` or an unresponsive Wayland portal will both produce.
 - `NoElementBounds` when the element passed to `screenshot_element` has no bounds.
 - `Platform` for a raw OS or FFI failure during capture or PNG encode.
 

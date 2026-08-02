@@ -137,8 +137,8 @@ def check_file(path: Path) -> list[str]:
     banner_match = BANNER.search(body)
     if not banner_match:
         problems.append(
-            f"no `{{/* DIATAXIS: {declared} — … */}}` banner after the "
-            "frontmatter (see docs/PAGE_TYPES.md for the text to paste)"
+            "no DIATAXIS banner after the frontmatter. Paste this:\n"
+            f"      {{/* DIATAXIS: {declared} — {CANONICAL_TEXT[declared]} */}}"
         )
     else:
         if body[: banner_match.start()].strip():

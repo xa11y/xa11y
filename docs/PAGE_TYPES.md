@@ -47,6 +47,49 @@ that question, and filing those pages under `explanation` would bury them below
 the fold for the audience they exist to serve. Keep the exception narrow: a
 page that a *user* of xa11y would consult is one of the four real modes.
 
+## The banner text for each type
+
+The wording is fixed, and `docs/check_page_types.py` compares it after
+collapsing whitespace, so wrap the lines however suits the file. Copy the one
+matching your page's `pageType`. (If you forget, the check prints the right
+text for you.)
+
+### `tutorial`
+
+```mdx
+{/* DIATAXIS: tutorial — a guided lesson the reader follows start to finish and is guaranteed to finish successfully. Keep momentum: no options, no alternatives, no exhaustive lists. Those belong in guides/, reference/, explanation/. */}
+```
+
+### `how-to`
+
+```mdx
+{/* DIATAXIS: how-to — a goal-oriented recipe for a reader who already knows what they want. Steps and decisions only. Concepts go to explanation/, exhaustive option lists go to reference/. */}
+```
+
+### `reference`
+
+```mdx
+{/* DIATAXIS: reference — a factual description of the machinery, structured for lookup rather than for reading through. Neutral and complete. No task narratives, no rationale, no teaching. */}
+```
+
+### `explanation`
+
+```mdx
+{/* DIATAXIS: explanation — background and rationale: why the design is what it is, and how the pieces relate. No step-by-step instructions, no exhaustive tables. */}
+```
+
+### `evaluation`
+
+```mdx
+{/* DIATAXIS: evaluation — pre-adoption material for someone deciding whether to use xa11y. Deliberately outside the four Diátaxis modes; see docs/PAGE_TYPES.md before adding another one. */}
+```
+
+### `landing`
+
+```mdx
+{/* DIATAXIS: landing — the site entry point. Navigational only: every claim here is a summary of a page it links to. */}
+```
+
 ## What the check enforces
 
 `docs/check_page_types.py` runs in `cargo xtask docs` and in the `docs` CI job,

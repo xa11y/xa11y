@@ -14,10 +14,10 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
 acting on them. It also subscribes to accessibility event streams, and can
 synthesise low-level input or capture screenshots.
 
-This page explains the model. The code here illustrates the concepts rather
-than serving as a recipe: the [tutorial](/tutorials/first-script/) is the
-guided path, the [guides](/guides/install/) are the recipes, and the
-[API reference](https://docs.rs/xa11y/) carries the signatures.
+This page explains the model, and the code here illustrates concepts rather
+than prescribing steps. The [tutorial](/tutorials/first-script/) is the guided
+path, the [guides](/guides/install/) are the recipes, and the
+[API reference](https://docs.rs/xa11y/) has the signatures.
 
 ## What is desktop accessibility?
 
@@ -28,10 +28,10 @@ AXUIElement, Windows UI Automation, Linux AT-SPI2), and the underlying concepts
 are the same. xa11y provides a single API that works with all of them.
 
 That inheritance is the source of both xa11y's strengths and its limits. The
-data is published by the application itself, so it is semantic rather than
-pixel-derived: a button is labelled a button because the application says so.
-Equally, an application that publishes nothing is invisible to xa11y, and no
-amount of cleverness in the library changes that.
+application publishes the data itself, which makes it semantic rather than
+pixel-derived. A button is labelled a button because the application says so.
+By the same token, an application that publishes nothing stays invisible to
+xa11y, and no amount of cleverness in the library changes that.
 
 ### Trees
 
@@ -424,13 +424,10 @@ family, the queries (`element`, `elements`, `exists`, `count`), and the
 chaining methods that narrow one locator into another.
 [Locator & Element](/reference/locator/#locator) lists all of them.
 
-To inspect element properties or traverse the subtree, call `.element()` first,
-because `tree()` and `dump()` live on `Element` rather than `Locator`.
-
 A selector specific enough to survive the interface growing another button is
 worth the extra characters. `button` alone can start matching the wrong element
-once the application grows a second one, so scope it to a named group or
-window.
+once the application grows a second one, so scope it to the group or window
+that contains the one you mean.
 
 ### Element actions
 

@@ -31,7 +31,8 @@ PAGES_DIR = Path(__file__).parent / "site" / "src" / "pages"
 # checkout, so accept the prefix rather than making this check depend on
 # whether the generators have run yet.
 ASSET_PATH_PREFIXES = [
-    "/api/",
+    "/api/python/",
+    "/api/javascript/",
 ]
 
 # Site-root paths that are neither content pages nor generated API assets:
@@ -43,12 +44,18 @@ MARKDOWN_LINK = re.compile(r"\]\((/[^)]+)\)")
 HTML_HREF = re.compile(r'href="(/[^"]+)"')
 
 
-def slug_to_file(slug: str) -> Path:
-    """Convert a Starlight content slug like /explanation/how-it-works/ to a file path."""
-    slug = slug.strip("/")
-    if not slug:
-        return DOCS_DIR / "index.mdx"
-    return DOCS_DIR / f"{slug}.mdx"
+def slug_to_file(slug: str) -> Path | None:
+    """Resolve a Starlight slug like /explanation/how-it-works/ to its source.
+
+    Starlight renders both .mdx and .md, so try each. Returns None when
+    neither exists.
+    """
+    slug = slug.strip("/") or "index"
+    for suffix in (".mdx", ".md"):
+        candidate = DOCS_DIR / f"{slug}{suffix}"
+        if candidate.exists():
+            return candidate
+    return None
 
 
 def check_file(filepath: Path) -> list[tuple[int, str, str]]:
@@ -92,9 +99,9 @@ def validate_link(link: str) -> str | None:
         return None
 
     # Must resolve to an existing content page
-    target = slug_to_file(link)
-    if not target.exists():
-        return f"no content page at {target.relative_to(DOCS_DIR)}"
+    if slug_to_file(link) is None:
+        stem = link.strip("/") or "index"
+        return f"no content page at {stem}.mdx (or .md)"
     return None
 
 

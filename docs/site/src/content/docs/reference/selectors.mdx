@@ -56,7 +56,7 @@ selecting on a distinction normalization discards. `AXButton` and
 the `ax_role`, `ax_subrole`, `atspi_role`, and `class_name` keys alone, so a
 value matching some other raw attribute cannot be mistaken for a role. Platform
 role names containing a space (AT-SPI's `push button`) cannot be written this
-way, because a role token accepts letters, digits, and underscores alone.
+way, because a role token accepts only the characters `[A-Za-z0-9_]`.
 
 The role may be omitted entirely, in which case the selector matches any role:
 `[name='Submit']` matches an element with that name whatever its role. There is
@@ -78,8 +78,8 @@ match: `button[name='OK'][enabled='true']`.
 | `^=` | Starts with | Case-insensitive |
 | `$=` | Ends with | Case-insensitive |
 
-There is no presence-only filter. `[focusable]` is a syntax error; write
-`[focusable='true']`.
+There is no presence-only filter. `[focusable]` is a syntax error. Write
+`[focusable='true']` instead.
 
 The case-insensitive operators compare after a simple Unicode lowercase
 mapping rather than full case folding, so pairs such as Turkish `I`/`ı` and
@@ -124,7 +124,7 @@ One tri-state flag:
 | --- | --- |
 | `checked` | `'on'`, `'off'`, `'mixed'` |
 
-Any other attribute name falls through to the element's platform-specific `raw`
+Any other attribute name is looked up in the element's platform-specific `raw`
 map, so `[AXRoleDescription='slider']` on macOS or `[atspi_name='…']` on Linux
 matches against the untouched platform value. The keys available there are
 platform-specific and listed under

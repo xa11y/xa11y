@@ -159,9 +159,47 @@ new value.
 
 Useful for understanding what events fire when you interact with an app, or for debugging event subscriptions in your code.
 
+## Input simulation
+
+These synthesise OS-level events at screen coordinates. They take no selector
+and read no accessibility data, so they need no target application. See
+[Simulate input](/guides/input/) for when to prefer an accessibility action.
+
+| Command | Flags |
+| --- | --- |
+| `xa11y click` | `--at X,Y` `[--button left\|right\|middle]` `[--count N]` `[--held K,K]` |
+| `xa11y move` | `--at X,Y` |
+| `xa11y drag` | `--from X,Y` `--to X,Y` `[--button B]` `[--duration-ms MS]` `[--held K,K]` |
+| `xa11y scroll` | `--at X,Y` `[--dx N]` `[--dy N]` |
+| `xa11y key` | `KEY` `[--held K,K]` |
+| `xa11y type` | `TEXT` |
+
+## `xa11y screenshot`
+
+Captures a region, or the whole primary display when `--region` is omitted.
+`--out -` writes PNG bytes to stdout.
+
+```bash
+xa11y screenshot --region X,Y,W,H --out PATH
+```
+
+## Composing the two halves
+
+`find -o bounds` and `find -o center` emit coordinates in the form the input
+and screenshot commands take, which is how an accessibility query drives a
+pixel operation:
+
+```bash
+region=$(xa11y find 'button[name="OK"]' --app Safari -o bounds)
+xa11y screenshot --region "$region" --out button.png
+
+xa11y click --at "$(xa11y find 'button[name="OK"]' --app Safari -o center)"
+```
+
 ## Flags
 
-All commands except `apps` require a target application:
+The accessibility commands other than `apps` require a target application. The
+input-simulation and screenshot commands take neither flag.
 
 | Flag | Description |
 | --- | --- |

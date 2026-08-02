@@ -12,12 +12,17 @@ pageType: tutorial
 import { Tabs, TabItem } from "@astrojs/starlight/components";
 
 By the end of this page you will have driven a real desktop application from a
-script: read its accessibility tree, pressed a button, waited for the interface
-to catch up, and read one of xa11y's failure diagnoses. It takes about ten
-minutes.
+script. Along the way you will:
+
+- print an application's accessibility tree and read it
+- act on an element through that tree
+- hold until the interface catches up
+- produce one of xa11y's failure diagnoses on purpose, and read it back
+
+It takes about ten minutes.
 
 You will use your platform's Calculator as the target, because every desktop
-ships one and its tree is small enough to read in full. Nothing here is
+has one and its tree is small enough to read in full. Nothing here is
 specific to Calculator. The last step points at how to repeat it against your
 own application.
 
@@ -52,7 +57,8 @@ it ends the lesson.
 
 ## Step 2: Confirm xa11y can see it
 
-xa11y ships a command-line tool. Ask it what is running:
+xa11y installs a command-line tool alongside the library. Ask it what is
+running:
 
 ```bash
 xa11y apps
@@ -224,11 +230,11 @@ change while it ran. A `TimeoutError` here means one of the three names is
 still the placeholder rather than yours; the error names which selector failed
 and lists what it found instead, which step 7 covers.
 
-Two things happened that are worth naming. `App.by_name` polled until the
-operating system reported Calculator to the accessibility API, rather than
-failing on the first attempt. And each `locator(...)` re-resolved its selector
-at the moment it acted, so the script targeted whatever was on screen then
-rather than a handle captured earlier.
+`App.by_name` polled until the operating system reported Calculator to the
+accessibility API, rather than failing on the first attempt. Each
+`locator(...)` then re-resolved its selector at the moment it acted, so the
+script targeted whatever was on screen at that moment rather than a handle
+captured earlier.
 
 ## Step 6: Wait for the result instead of assuming it
 

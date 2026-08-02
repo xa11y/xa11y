@@ -44,7 +44,7 @@ setDefaultTimeout(30);                 // JavaScript (seconds)
 xa11y::set_default_timeout(Duration::from_secs(30));   // Rust
 ```
 
-Or set the `XA11Y_DEFAULT_TIMEOUT` environment variable (seconds, read once at startup). Resolution order runs from most to least specific. An explicit per-call `timeout=` always wins. After that comes the programmatic `set_default_timeout()` value, the environment variable, and finally the built-in 5 seconds. A timeout of `0` means a single attempt with no polling.
+Or set the `XA11Y_DEFAULT_TIMEOUT` environment variable, which is read once at startup. An explicit per-call `timeout=` always wins over both. See [the resolution order](/reference/locator/#default-timeout) for how the four levels rank.
 
 Because Locator *actions* (`press()`, `set_value()`, `toggle()`, …) already auto-wait for the target to be visible and enabled, a short `wait_visible()` immediately before an action is redundant. Pass a per-call `timeout=` when one step needs a longer window, or raise the default once when the whole suite does.
 

@@ -31,10 +31,10 @@ variants onto a shared class, so the mapping columns are what you catch.
 | `TextValueNotSupported` | The platform cannot set a text value on this element. | `ActionNotSupportedError` | `ActionNotSupportedError` |
 | `Timeout` | A wait, or the auto-wait inside an action, exceeded its deadline. Always carries a diagnosis. | `TimeoutError` | `TimeoutError` |
 | `InvalidSelector` | The selector string could not be parsed. Raised before any platform call. | `InvalidSelectorError` | `InvalidSelectorError` |
-| `InvalidActionData` | An action argument failed validation: a text range with `start > end`, an uppercase `Char` key, a malformed key name, a bad target tuple. | `InvalidActionDataError` | `InvalidActionDataError` |
+| `InvalidActionData` | An action argument failed validation. A text range with `start > end` does this, as does an uppercase `Char` key, a malformed key name, or a bad target tuple. | `InvalidActionDataError` | `InvalidActionDataError` |
 | `InvalidConfig` | Process-wide configuration is invalid, such as an unparsable `XA11Y_DEFAULT_TIMEOUT`. | `ValueError` | `InvalidActionDataError` |
 | `NoElementBounds` | The element has no bounds, so no screen point can be computed for it. Off-screen and virtual nodes hit this. | `ValueError` | `InvalidActionDataError` |
-| `Unsupported` | The operation has no implementation for this platform or session, such as a Linux session with neither `DISPLAY` nor `WAYLAND_DISPLAY` set. | `ActionNotSupportedError` | `ActionNotSupportedError` |
+| `Unsupported` | No backend covers this operation on the current platform or session. A Linux session with neither `DISPLAY` nor `WAYLAND_DISPLAY` set hits this. | `ActionNotSupportedError` | `ActionNotSupportedError` |
 | `Platform` | A raw platform failure. Carries the OS error code and message. | `PlatformError` | `PlatformError` |
 
 Two of the mappings are worth noticing before writing an `except` clause.
@@ -50,7 +50,7 @@ surface:
 
 | Surface | Variants it raises |
 | --- | --- |
-| [Input simulation](/guides/input/) | `PermissionDenied` (the OS denied synthesis, for example macOS Input Monitoring), `Unsupported`, `NoElementBounds`, `InvalidActionData`, `Platform` |
+| [Input simulation](/guides/input/) | `PermissionDenied` (the OS denied synthesis, such as macOS Input Monitoring), `Unsupported`, `NoElementBounds`, `InvalidActionData`, `Platform` |
 | [Screenshots](/guides/screenshots/) | `PermissionDenied` (macOS Screen Recording not granted, or the Wayland portal denied consent), `Unsupported` (no capture backend for the session), `NoElementBounds`, `Platform` (capture or PNG encode failure) |
 | [Selectors](/reference/selectors/) | `InvalidSelector` at parse time, `SelectorNotMatched` or `Timeout` at resolve time |
 | [Events](/reference/events/) | `Timeout` from `wait_for` |

@@ -28,9 +28,13 @@ application. A `Locator` re-resolves its selector on every operation.
 `press()`, `focus()`, `blur()`, `toggle()`, `select()`, `expand()`,
 `collapse()`, `set_value()`, `set_numeric_value()`, `type_text()`,
 `select_text()`, `increment()`, `decrement()`, `show_menu()`,
-`scroll_into_view()`.
+`scroll_into_view()`, `perform_action(name)`.
 
 Each auto-waits for the target to be visible and enabled before dispatching.
+The exception is `scroll_into_view()`, which waits for attached and enabled
+alone: an off-screen element is what it exists to bring on-screen, so gating it
+on visibility would never resolve.
+
 Which platform API each verb reaches is in
 [Platform Details](/reference/platform-details/#action-mapping).
 
@@ -38,17 +42,21 @@ Which platform API each verb reaches is in
 
 `wait_visible()`, `wait_hidden()`, `wait_attached()`, `wait_detached()`,
 `wait_enabled()`, `wait_disabled()`, `wait_focused()`, `wait_unfocused()`,
-`wait_for_state()`, `wait_until()`.
+`wait_until()`.
 
 Each polls until the condition holds or the timeout expires, then raises
 `Timeout` with a diagnosis. `wait_until()` takes a predicate over the resolved
 element, which is `None` when the selector did not match.
 
+Rust adds `wait_for_state()`, a generic wait over the `ElementState` enum. The
+bindings expose the specific `wait_*` helpers above and `wait_until()` in its
+place.
+
 ### Queries
 
 | Method | Returns |
 | --- | --- |
-| `element()` | The single match. Raises `SelectorNotMatched` when there is none. |
+| `element()` | The first match in document order, or the `nth()` index when one is set. Raises `SelectorNotMatched` when there is none. Several matches is not an error. |
 | `elements()` | Every match |
 | `exists()` | Boolean |
 | `count()` | Number of matches |
@@ -59,8 +67,6 @@ element, which is `None` when the selector did not match.
 
 `child()` and `descendant()` distribute over every clause of an alternation
 selector. See [Selectors](/reference/selectors/#alternation-selector-groups).
-
-`tree()` and `dump()` are not on `Locator`. Call `.element()` first.
 
 ## Element
 
@@ -88,7 +94,8 @@ A live handle returned by `app.children()`, `element.children()`,
 `name`, `value`, and `description` are stripped of Unicode bidi format
 controls. `raw` holds the unstripped platform string under the platform-native
 key. Each of these properties except `raw`, `states`, and `actions` is also
-usable as a selector attribute, along with the individual state flags. See
+usable as a selector attribute, along with the individual state flags.
+`pid` is the exception, having no attribute of its own. See
 [Selectors](/reference/selectors/#attributes).
 
 ### Navigation and snapshots
