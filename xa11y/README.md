@@ -39,7 +39,7 @@ fn main() -> Result<()> {
 
 ```toml
 [dependencies]
-xa11y = "0.4"
+xa11y = "0.12"
 ```
 
 > On **macOS**, grant your terminal **two** permissions in **System Settings > Privacy & Security**:

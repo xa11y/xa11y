@@ -40,7 +40,9 @@ DOCS_DIR = Path(__file__).parent / "site" / "src" / "content" / "docs"
 EXCLUDED_PREFIXES = ("api/",)
 
 # Starlight renders both; checking only .mdx would let a .md page skip the
-# banner and directory rules.
+# pageType and directory rules. The banner is exempt for .md, because
+# `{/* … */}` is MDX comment syntax and a plain .md page would render it as
+# visible body text.
 PAGE_SUFFIXES = ("*.mdx", "*.md")
 
 # The canonical banner text for each page type. The banner is compared after
@@ -84,8 +86,9 @@ CANONICAL_TEXT = {
 # this check accepts, which is a loud failure rather than a silent one.
 PAGE_TYPES = tuple(CANONICAL_TEXT)
 
-# Where each page type is allowed to live, as a path prefix relative to
-# DOCS_DIR. An empty prefix means the site root.
+# The directory each page type must live in, relative to DOCS_DIR, compared
+# exactly rather than as a prefix: a `reference` page belongs in `reference/`
+# itself, not in a subdirectory of it. An empty string means the site root.
 REQUIRED_DIR = {
     "tutorial": "tutorials",
     "how-to": "guides",
@@ -107,6 +110,18 @@ BANNER = re.compile(
 def normalize(text: str) -> str:
     """Collapse all whitespace runs, so banner line wrapping is free."""
     return " ".join(text.split())
+
+
+def check_directory(declared: str, rel: Path) -> list[str]:
+    """Return a problem if the page is not in the directory its type maps to."""
+    required = REQUIRED_DIR[declared]
+    actual = rel.parent.as_posix()
+    actual = "" if actual == "." else actual
+    if actual == required:
+        return []
+    where = f"`{required}/`" if required else "the site root"
+    found = f"`{actual}/`" if actual else "the site root"
+    return [f"a `{declared}` page must live in {where}, but this one is in {found}"]
 
 
 def check_file(path: Path) -> list[str]:
@@ -132,9 +147,14 @@ def check_file(path: Path) -> list[str]:
         ]
 
     # The banner must be the first thing after the frontmatter, ahead of any
-    # prose or imports, so an editor sees it without scrolling.
+    # prose or imports, so an editor sees it without scrolling. It is MDX
+    # comment syntax, so a plain .md page is exempt: Starlight would render
+    # `{/* … */}` there as visible body text.
     body = text[fm_match.end() :]
     banner_match = BANNER.search(body)
+    if path.suffix == ".md":
+        problems.extend(check_directory(declared, rel))
+        return problems
     if not banner_match:
         problems.append(
             "no DIATAXIS banner after the frontmatter. Paste this:\n"
@@ -156,16 +176,7 @@ def check_file(path: Path) -> list[str]:
                 f"`{declared}`; expected:\n      {CANONICAL_TEXT[declared]}"
             )
 
-    required = REQUIRED_DIR[declared]
-    actual = rel.parent.as_posix()
-    actual = "" if actual == "." else actual
-    if actual != required:
-        where = f"`{required}/`" if required else "the site root"
-        problems.append(
-            f"a `{declared}` page must live in {where}, but this one is in "
-            + (f"`{actual}/`" if actual else "the site root")
-        )
-
+    problems.extend(check_directory(declared, rel))
     return problems
 
 

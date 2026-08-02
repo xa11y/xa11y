@@ -63,6 +63,8 @@ pub enum EventKind {
 
     /// A window lost active status.
     /// Target: the window element.
+    ///
+    /// - Windows: NOT emitted, for the same reason as `WindowActivated`.
     WindowDeactivated,
 
     /// The selection changed in a list, table, or other container.
