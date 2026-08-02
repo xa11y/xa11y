@@ -36,7 +36,7 @@ use crate::api::{ApiSurface, ApiType, Member, TypeKind};
 /// enum,trait,impl,function}`, `visibility`, `docs`) still mean the same
 /// thing. Failing closed is deliberate: a silently mis-parsed API surface
 /// would report "all mirrored" for an API it never actually read.
-pub const SUPPORTED_FORMAT_VERSIONS: &[u64] = &[60];
+pub const SUPPORTED_FORMAT_VERSIONS: &[u64] = &[60, 61];
 
 /// Run `cargo +nightly rustdoc` and return the parsed JSON document.
 fn generate(root: &Path) -> Result<Value, String> {
