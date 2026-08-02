@@ -25,6 +25,8 @@ text_field[name^='Search']          # starts-with (case-insensitive)
 text_field[name*='email']           # contains (case-insensitive)
 button[name$='Cancel']              # ends-with (case-insensitive)
 [focusable='true']                  # attribute only, any role
+*                                   # universal selector, any element
+group > *                           # every direct child, whatever its role
 group > button                      # direct child combinator
 window button[name='OK']            # descendant (any depth)
 button:nth(2)                       # 2nd match (1-based)
@@ -59,9 +61,46 @@ role names containing a space (AT-SPI's `push button`) cannot be written this
 way, because a role token accepts only the characters `[A-Za-z0-9_]`.
 
 The role may be omitted entirely, in which case the selector matches any role:
-`[name='Submit']` matches an element with that name whatever its role. There is
-no `*` wildcard. Writing `*` is a syntax error, so use an attribute-only
-selector for "any role".
+`[name='Submit']` matches an element with that name whatever its role.
+
+## The universal selector
+
+`*` matches any element. It means the same thing as omitting the role, so
+`*[name='Submit']` and `[name='Submit']` are the same query. Write it where a
+role cannot simply be left out:
+
+| Selector | Matches |
+| --- | --- |
+| `*` | Every element in scope |
+| `dialog > *` | Every direct child of a dialog, whatever its role |
+| `window *` | Every descendant of a window |
+| `group > * > button` | Buttons exactly two levels below a group |
+
+The last row is the case with no other spelling: it skips exactly one
+generation without naming the role in between. For the two middle rows,
+[`children()` and `tree()`](/reference/locator/#navigation-and-snapshots)
+answer the same question imperatively when you already hold the parent
+element.
+
+`*` binds as a whole segment, so it cannot be combined with a role name.
+`*button`, `button*`, and `**` are all syntax errors.
+
+### Cost
+
+A selector scoped to an application walks that application's subtree. `*`
+retains every node of that walk instead of the few that match a role, so it
+materializes every element's attributes:
+
+- On Windows the walk already materializes every node in one batched
+  `FindAllBuildCache` call, so `*` costs nothing extra.
+- On macOS and Linux the walk fetches only the attributes a selector asks
+  about, so `*` shifts the cost from "probe every node, build the matches" to
+  "build every node."
+
+A bare `*` with no application scope repeats that across every running
+application. That is the same order of work as calling `App.dump()` on
+everything on the desktop. It is a reasonable thing to ask for when exploring,
+but prefer to scope the search or pass a limit in code that runs often.
 
 ## Attribute filters
 

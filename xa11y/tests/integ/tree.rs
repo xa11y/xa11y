@@ -702,6 +702,118 @@ mod tests {
         );
     }
 
+    // ── universal selector (`*`) ────────────────────────────────────────
+
+    #[test]
+    #[ignore]
+    fn wildcard_is_superset_of_every_role_query() {
+        // `*` imposes no constraint, so on a real backend it must match at
+        // least every element any role-specific query finds. This is the
+        // end-to-end check that each provider's per-node probe treats an
+        // unconstrained SimpleSelector as a match rather than skipping it
+        // (the probe paths short-circuit on role, so "no role" is the branch
+        // most likely to be mishandled).
+        let app = h::app_root();
+        let all = app.locator("*").count().unwrap();
+        let buttons = app.locator("button").count().unwrap();
+        let text_fields = app.locator("text_field").count().unwrap();
+
+        assert!(buttons > 0, "fixture must have buttons. App: {}", app);
+        assert!(
+            all >= buttons + text_fields,
+            "`*` must match at least every button and text_field: \
+             all={all} buttons={buttons} text_fields={text_fields}",
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn wildcard_with_filter_equals_bare_attribute_selector() {
+        // `*[x]` and `[x]` are the same query by construction — the parser
+        // produces an identical SimpleSelector. Assert it on a real provider
+        // so a backend that special-cases "no role" can't diverge them.
+        let app = h::app_root();
+        let starred = app.locator(r#"*[role="button"]"#).count().unwrap();
+        let bare = app.locator(r#"[role="button"]"#).count().unwrap();
+        assert_eq!(
+            starred, bare,
+            "`*[role=\"button\"]` must equal `[role=\"button\"]`",
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn wildcard_child_returns_exactly_the_direct_children() {
+        // `window > *` must return each window's direct children and stop
+        // there. Compare against `Element::children()`, which is the same
+        // question asked through a different provider entry point.
+        let app = h::app_root();
+        let windows = app.locator("window").elements().unwrap();
+        assert!(!windows.is_empty(), "fixture must have a window");
+
+        let via_wildcard = app.locator("window").child("*").count().unwrap();
+        let via_children: usize = windows
+            .iter()
+            .map(|w| w.children().expect("children() must succeed").len())
+            .sum();
+
+        assert_eq!(
+            via_wildcard, via_children,
+            "`window > *` must equal the direct children of every window. App: {}",
+            app,
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn wildcard_descendant_is_superset_of_wildcard_child() {
+        // `window *` (any depth) must be a superset of `window > *` (one
+        // level). Holds on any tree shape, so it's the portable check that
+        // the two combinators are wired to the wildcard segment correctly.
+        let app = h::app_root();
+        let child = app.locator("window").child("*").count().unwrap();
+        let descendant = app.locator("window").descendant("*").count().unwrap();
+
+        assert!(child > 0, "fixture window must have children. App: {}", app);
+        assert!(
+            descendant >= child,
+            "`window *` must be a superset of `window > *`: \
+             descendant={descendant} child={child}",
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn wildcard_intermediate_segment_stays_within_button_set() {
+        // `window > * > button` skips exactly one generation — the case with
+        // no imperative workaround. Whatever it finds must be a subset of
+        // all buttons; asserting a subset rather than a count keeps this
+        // portable across the three backends' differing tree depths.
+        let app = h::app_root();
+        let all_buttons: std::collections::HashSet<String> = app
+            .locator("button")
+            .elements()
+            .unwrap()
+            .into_iter()
+            .filter_map(|e| e.data().name.clone())
+            .collect();
+        let nested: Vec<String> = app
+            .locator("window > * > button")
+            .elements()
+            .unwrap()
+            .into_iter()
+            .filter_map(|e| e.data().name.clone())
+            .collect();
+
+        for name in &nested {
+            assert!(
+                all_buttons.contains(name),
+                "`window > * > button` matched {name:?}, which `button` did not. App: {}",
+                app,
+            );
+        }
+    }
+
     #[test]
     #[ignore]
     fn selector_group_doc_order_interleaves_clauses() {

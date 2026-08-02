@@ -6,7 +6,7 @@
 //! selector      := simple_selector (combinator simple_selector)*
 //! combinator    := " "          // descendant (any depth)
 //!                | " > "       // direct child
-//! simple_selector := role_name? attr_filter* pseudo?
+//! simple_selector := (role_name | "*")? attr_filter* pseudo?
 //! role_name     := [a-z_]+     // snake_case role name
 //! attr_filter   := "[" attr_name op value "]"
 //! attr_name     := "name" | "value" | "description" | "role"
@@ -19,6 +19,17 @@
 //! A top-level comma separates an *alternation group*: the result is the
 //! union of each clause's matches, deduplicated by element identity and
 //! returned in document order. See [`SelectorGroup`].
+//!
+//! `*` is the universal selector and matches any element. It is equivalent to
+//! omitting the role, so `*[name="OK"]` and `[name="OK"]` are the same query;
+//! it exists for the positions where a role cannot simply be left out —
+//! `dialog > *` (any direct child), `window *` (any descendant), and
+//! `group > * > button` (skip exactly one generation).
+//!
+//! A bare `*` searched from the system root matches every element of every
+//! running application. That is a proportionate amount of work for what was
+//! asked, but it is not cheap: see the "Cost" section of the selector
+//! reference in the docs site.
 
 use std::collections::HashSet;
 
@@ -195,19 +206,34 @@ impl Selector {
         let mut filters = Vec::new();
         let mut nth = None;
 
-        // Try to parse role name. Normalized roles are snake_case (e.g., `button`).
-        // Platform roles may include uppercase (e.g., `AXButton`, `PUSH_BUTTON`).
-        let start = pos;
-        while pos < chars.len() && (chars[pos].is_ascii_alphanumeric() || chars[pos] == '_') {
+        // `*` is the universal selector: it imposes no role constraint, which
+        // is exactly `role: None`. It carries no field of its own — it only
+        // suppresses the "empty simple selector" guard below, so that a
+        // segment consisting of nothing but `*` is legal where a segment
+        // consisting of nothing at all is not.
+        //
+        // A role name and `*` are alternatives, never a sequence: consuming
+        // `*` skips the role parse entirely, so `*button` falls out of this
+        // function at the `*` and is rejected by the caller's combinator
+        // check rather than silently parsing as `button`.
+        let wildcard = chars.get(pos) == Some(&'*');
+        if wildcard {
             pos += 1;
-        }
-        if pos > start {
-            let role_str: String = chars[start..pos].iter().collect();
-            match Role::from_snake_case(&role_str) {
-                Some(r) => role = Some(RoleMatch::Normalized(r)),
-                None => {
-                    // Not a normalized role — treat as a platform role name.
-                    role = Some(RoleMatch::Platform(role_str));
+        } else {
+            // Try to parse role name. Normalized roles are snake_case (e.g., `button`).
+            // Platform roles may include uppercase (e.g., `AXButton`, `PUSH_BUTTON`).
+            let start = pos;
+            while pos < chars.len() && (chars[pos].is_ascii_alphanumeric() || chars[pos] == '_') {
+                pos += 1;
+            }
+            if pos > start {
+                let role_str: String = chars[start..pos].iter().collect();
+                match Role::from_snake_case(&role_str) {
+                    Some(r) => role = Some(RoleMatch::Normalized(r)),
+                    None => {
+                        // Not a normalized role — treat as a platform role name.
+                        role = Some(RoleMatch::Platform(role_str));
+                    }
                 }
             }
         }
@@ -261,7 +287,7 @@ impl Selector {
             }
         }
 
-        if role.is_none() && filters.is_empty() && nth.is_none() {
+        if !wildcard && role.is_none() && filters.is_empty() && nth.is_none() {
             return Err(Error::InvalidSelector {
                 selector: input.to_string(),
                 message: "empty simple selector".to_string(),
@@ -1138,28 +1164,26 @@ mod tests {
         assert_eq!(sel.segments[0].simple.filters[0].value, "addr");
     }
 
-    #[test]
-    fn nth_on_non_last_segment_filters_during_traversal() {
-        // Regression: `:nth(N)` on a non-last segment used to be treated as a
-        // pool limit on phase-1 (so up to N candidates were collected and
-        // *all* of their children expanded). The expected behaviour is that
-        // `:nth(N)` collapses the candidate set to just the N-th match
-        // before descending.
-        //
-        // Tree:
-        //   root (application)
-        //     ├── toolbar "A" → button "A1", button "A2"
-        //     └── toolbar "B" → button "B1", button "B2"
-        //
-        // `toolbar:nth(2) > button` must return only [B1, B2], not
-        // [A1, A2, B1, B2].
-        struct Row {
-            handle: u64,
-            role: Role,
-            name: &'static str,
-            parent: Option<u64>,
-        }
-        let tree: Vec<Row> = vec![
+    /// One row of [`fixture_tree`] — a flat parent-pointer encoding of a
+    /// small tree, which `fixture_children` turns into a `get_children_fn`.
+    struct Row {
+        handle: u64,
+        role: Role,
+        name: &'static str,
+        parent: Option<u64>,
+    }
+
+    /// A fixed two-level tree shared by the traversal tests:
+    ///
+    /// ```text
+    /// root (application)
+    ///   ├── toolbar "A" → button "A1", button "A2"
+    ///   └── toolbar "B" → button "B1", button "B2"
+    /// ```
+    ///
+    /// Document order is `root, A, A1, A2, B, B1, B2`.
+    fn fixture_tree() -> Vec<Row> {
+        vec![
             Row {
                 handle: 0,
                 role: Role::Application,
@@ -1202,35 +1226,63 @@ mod tests {
                 name: "B2",
                 parent: Some(2),
             },
-        ];
-        let make_data = |row: &Row| ElementData {
-            role: row.role,
-            name: Some(row.name.to_string()),
-            value: None,
-            description: None,
-            bounds: None,
-            actions: vec![],
-            states: crate::element::StateSet::default(),
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: None,
-            pid: Some(1),
-            raw: std::collections::HashMap::new(),
-            handle: row.handle,
-        };
-        let tree_ref = &tree;
-        let get_children = move |parent: Option<&ElementData>| -> Result<Vec<ElementData>> {
+        ]
+    }
+
+    /// Build a `get_children_fn` over a [`fixture_tree`], resolving children
+    /// by parent handle. Returned by reference so one fixture can serve
+    /// several `find_elements_in_tree` calls in a single test.
+    fn fixture_children(
+        tree: &[Row],
+    ) -> impl Fn(Option<&ElementData>) -> Result<Vec<ElementData>> + '_ {
+        fn make_data(row: &Row) -> ElementData {
+            ElementData {
+                role: row.role,
+                name: Some(row.name.to_string()),
+                value: None,
+                description: None,
+                bounds: None,
+                actions: vec![],
+                states: crate::element::StateSet::default(),
+                numeric_value: None,
+                min_value: None,
+                max_value: None,
+                stable_id: None,
+                pid: Some(1),
+                raw: std::collections::HashMap::new(),
+                handle: row.handle,
+            }
+        }
+        move |parent: Option<&ElementData>| -> Result<Vec<ElementData>> {
             let parent_handle = parent.map(|e| e.handle);
-            Ok(tree_ref
+            Ok(tree
                 .iter()
                 .filter(|row| row.parent == parent_handle)
                 .map(make_data)
                 .collect())
-        };
+        }
+    }
+
+    #[test]
+    fn nth_on_non_last_segment_filters_during_traversal() {
+        // Regression: `:nth(N)` on a non-last segment used to be treated as a
+        // pool limit on phase-1 (so up to N candidates were collected and
+        // *all* of their children expanded). The expected behaviour is that
+        // `:nth(N)` collapses the candidate set to just the N-th match
+        // before descending.
+        //
+        // Tree:
+        //   root (application)
+        //     ├── toolbar "A" → button "A1", button "A2"
+        //     └── toolbar "B" → button "B1", button "B2"
+        //
+        // `toolbar:nth(2) > button` must return only [B1, B2], not
+        // [A1, A2, B1, B2].
+        let tree = fixture_tree();
+        let get_children = fixture_children(&tree);
 
         let sel = Selector::parse("toolbar:nth(2) > button").unwrap();
-        let results = find_elements_in_tree(get_children, None, &sel, None, None).unwrap();
+        let results = find_elements_in_tree(&get_children, None, &sel, None, None).unwrap();
         let names: Vec<_> = results.iter().map(|e| e.name.clone().unwrap()).collect();
         assert_eq!(
             names,
@@ -1245,6 +1297,169 @@ mod tests {
         // parse as Ok but produce a Root-combinator segment in a non-first
         // position, causing an unreachable!() panic in find_elements_in_tree.
         assert!(Selector::parse("button:nth(1):nth(2)").is_err());
+    }
+
+    // ── universal selector (`*`) ────────────────────────────────────────────
+
+    #[test]
+    fn parse_bare_wildcard() {
+        let sel = Selector::parse("*").unwrap();
+        assert_eq!(sel.segments.len(), 1);
+        let simple = &sel.segments[0].simple;
+        // `*` is spelled as "no constraint at all" — it adds no field of its
+        // own, so the matcher needs no wildcard-specific branch.
+        assert!(simple.role.is_none());
+        assert!(simple.filters.is_empty());
+        assert!(simple.nth.is_none());
+    }
+
+    #[test]
+    fn parse_wildcard_as_combinator_target() {
+        let sel = Selector::parse("dialog > *").unwrap();
+        assert_eq!(sel.segments.len(), 2);
+        assert_eq!(sel.segments[1].combinator, Combinator::Child);
+        assert!(sel.segments[1].simple.role.is_none());
+
+        let sel = Selector::parse("window *").unwrap();
+        assert_eq!(sel.segments.len(), 2);
+        assert_eq!(sel.segments[1].combinator, Combinator::Descendant);
+        assert!(sel.segments[1].simple.role.is_none());
+    }
+
+    #[test]
+    fn parse_wildcard_as_intermediate_segment() {
+        // The case with no workaround before `*`: skip exactly one generation.
+        let sel = Selector::parse("group > * > button").unwrap();
+        assert_eq!(sel.segments.len(), 3);
+        assert!(sel.segments[1].simple.role.is_none());
+        assert_eq!(sel.segments[1].combinator, Combinator::Child);
+        assert!(matches!(
+            sel.segments[2].simple.role,
+            Some(RoleMatch::Normalized(Role::Button))
+        ));
+    }
+
+    #[test]
+    fn parse_wildcard_with_filters_and_nth() {
+        // `*[name="OK"]` must parse to exactly what `[name="OK"]` parses to.
+        let starred = Selector::parse(r#"*[name="OK"]"#).unwrap();
+        let bare = Selector::parse(r#"[name="OK"]"#).unwrap();
+        assert!(starred.segments[0].simple.role.is_none());
+        assert_eq!(
+            starred.segments[0].simple.filters.len(),
+            bare.segments[0].simple.filters.len()
+        );
+        assert_eq!(starred.segments[0].simple.filters[0].attr, "name");
+        assert_eq!(starred.segments[0].simple.filters[0].value, "OK");
+
+        let sel = Selector::parse("*:nth(3)").unwrap();
+        assert!(sel.segments[0].simple.role.is_none());
+        assert_eq!(sel.segments[0].simple.nth, Some(3));
+    }
+
+    #[test]
+    fn parse_wildcard_in_alternation_group() {
+        let group = SelectorGroup::parse("button, *").unwrap();
+        assert_eq!(group.clauses.len(), 2);
+        assert!(group.clauses[1].segments[0].simple.role.is_none());
+    }
+
+    #[test]
+    fn parse_wildcard_glued_to_role_is_error() {
+        // `*` and a role name are alternatives, not a sequence. Both orders
+        // must fail rather than silently dropping one of the two tokens.
+        assert!(Selector::parse("*button").is_err());
+        assert!(Selector::parse("button*").is_err());
+        assert!(Selector::parse("**").is_err());
+    }
+
+    #[test]
+    fn wildcard_matches_any_element() {
+        let sel = Selector::parse("*").unwrap();
+        let simple = &sel.segments[0].simple;
+
+        let mut el = element_default();
+        el.role = Role::Button;
+        assert!(matches_simple(&el, simple));
+
+        // Including roles that carry no name and no platform data at all —
+        // `*` must not accidentally depend on an attribute being present.
+        let el = element_default();
+        assert!(matches_simple(&el, simple));
+
+        let mut el = element_default();
+        el.role = Role::Unknown;
+        el.name = None;
+        assert!(matches_simple(&el, simple));
+    }
+
+    #[test]
+    fn wildcard_child_returns_all_children_of_anchor() {
+        // `toolbar > *` must return every child of the toolbar regardless of
+        // role, and must not reach past one generation.
+        let tree = fixture_tree();
+        let get_children = fixture_children(&tree);
+
+        let sel = Selector::parse("toolbar:nth(1) > *").unwrap();
+        let results = find_elements_in_tree(&get_children, None, &sel, None, None).unwrap();
+        let names: Vec<_> = results.iter().map(|e| e.name.clone().unwrap()).collect();
+        assert_eq!(names, vec!["A1".to_string(), "A2".to_string()]);
+    }
+
+    #[test]
+    fn wildcard_intermediate_segment_skips_one_generation() {
+        // `application > * > button` must find buttons that are exactly
+        // grandchildren of the root — i.e. it descends through the toolbars
+        // without naming them.
+        let tree = fixture_tree();
+        let get_children = fixture_children(&tree);
+
+        let sel = Selector::parse("application > * > button").unwrap();
+        let results = find_elements_in_tree(&get_children, None, &sel, None, None).unwrap();
+        let names: Vec<_> = results.iter().map(|e| e.name.clone().unwrap()).collect();
+        assert_eq!(names, vec!["A1", "A2", "B1", "B2"]);
+    }
+
+    #[test]
+    fn bare_wildcard_matches_every_node() {
+        let tree = fixture_tree();
+        let get_children = fixture_children(&tree);
+
+        let sel = Selector::parse("*").unwrap();
+        let results = find_elements_in_tree(&get_children, None, &sel, None, None).unwrap();
+        // Every node in the fixture, in document order.
+        let names: Vec<_> = results.iter().map(|e| e.name.clone().unwrap()).collect();
+        assert_eq!(names, vec!["root", "A", "A1", "A2", "B", "B1", "B2"]);
+    }
+
+    #[test]
+    fn wildcard_in_group_dedups_against_overlapping_clause() {
+        // `*` subsumes every other clause, so the union must not emit the
+        // buttons twice. This exercises the path-identity dedup in
+        // `find_elements_in_tree_group` against a clause that matches
+        // everything.
+        let tree = fixture_tree();
+        let get_children = fixture_children(&tree);
+
+        let group = SelectorGroup::parse("button, *").unwrap();
+        let results = find_elements_in_tree_group(&get_children, None, &group, None, None).unwrap();
+        let names: Vec<_> = results.iter().map(|e| e.name.clone().unwrap()).collect();
+        assert_eq!(
+            names,
+            vec!["root", "A", "A1", "A2", "B", "B1", "B2"],
+            "`button, *` must return each node once, in document order"
+        );
+    }
+
+    #[test]
+    fn bare_wildcard_respects_limit() {
+        let tree = fixture_tree();
+        let get_children = fixture_children(&tree);
+
+        let sel = Selector::parse("*").unwrap();
+        let results = find_elements_in_tree(&get_children, None, &sel, Some(3), None).unwrap();
+        let names: Vec<_> = results.iter().map(|e| e.name.clone().unwrap()).collect();
+        assert_eq!(names, vec!["root", "A", "A1"]);
     }
 
     /// Helper: build an ElementData with a given `raw` map for matcher tests.
