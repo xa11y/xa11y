@@ -7,7 +7,14 @@ use crate::element::ElementData;
 /// Variants carry payload only when that data is guaranteed to be present
 /// on all supporting platforms. For everything else, re-query the `target`
 /// element after receipt.
+///
+/// `#[non_exhaustive]`: the normalized event set grows as backends learn to
+/// surface more notifications. Both bindings project these to strings, and
+/// `cargo xtask check-bindings-parity` fails when a variant is missing from
+/// either mapping — see `[[types.variant_coverage]]` in
+/// `bindings/parity_allowlist.toml`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum EventKind {
     /// Keyboard focus moved to a new element.
     /// Target: the element that gained focus.
@@ -105,7 +112,12 @@ pub enum EventKind {
 }
 
 /// Individual state flags used in [`EventKind::StateChanged`].
+///
+/// `#[non_exhaustive]`: this enum tracks [`crate::StateSet`], which is itself
+/// `#[non_exhaustive]` — a new state there gains a flag here. Binding
+/// coverage is enforced by `cargo xtask check-bindings-parity`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum StateFlag {
     Enabled,
     Visible,
@@ -121,7 +133,12 @@ pub enum StateFlag {
 }
 
 /// An accessibility event delivered to subscribers.
+///
+/// `#[non_exhaustive]`: event metadata grows (a platform-native sequence
+/// number and the originating window are both plausible additions). Build one
+/// with [`Event::new`] and assign the optional fields.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Event {
     /// What happened and any type-specific data.
     pub kind: EventKind,
@@ -136,12 +153,34 @@ pub struct Event {
     pub timestamp: std::time::Instant,
 }
 
+impl Event {
+    /// An event with no `target` and `timestamp` set to now.
+    ///
+    /// Assign [`Event::target`] afterwards when a snapshot of the triggering
+    /// element is available, and [`Event::timestamp`] when the receipt time is
+    /// not the construction time.
+    pub fn new(kind: EventKind, app_name: impl Into<String>, app_pid: u32) -> Self {
+        Self {
+            kind,
+            target: None,
+            app_name: app_name.into(),
+            app_pid,
+            timestamp: std::time::Instant::now(),
+        }
+    }
+}
+
 /// Desired element state for wait_for operations.
 ///
 /// Basic variants (`Attached`, `Detached`, `Visible`, `Hidden`, `Enabled`,
 /// `Disabled`, `Focused`, `Unfocused`) cover common cases. For arbitrary
 /// conditions, use [`Locator::wait_until`] with a closure.
+///
+/// `#[non_exhaustive]`: the set of named wait conditions is open — `Checked`,
+/// `Selected`, and `Expanded` are all states [`crate::StateSet`] already
+/// carries that could earn a shorthand here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum ElementState {
     /// Wait until an element matching the selector exists in the tree.
     Attached,

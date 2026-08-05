@@ -21,3 +21,17 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+
+# Public API surface: every public struct and enum in this crate must make an
+# explicit choice about future extensibility — `#[non_exhaustive]` when the
+# type is expected to grow, or an `#[allow(..., reason = "...")]` naming the
+# closed domain that makes growth impossible. These two clippy lints are
+# allow-by-default restriction lints; enabling them here means a new public
+# type cannot be added without that decision being made and recorded.
+#
+# Scoped to xa11y-core deliberately: this is the crate whose types cross into
+# downstream consumers and the language bindings. The provider crates' public
+# types are internal plumbing behind the umbrella crate.
+[lints.clippy]
+exhaustive_enums = "warn"
+exhaustive_structs = "warn"

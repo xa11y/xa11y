@@ -778,22 +778,21 @@ impl LinuxProvider {
                 .insert(handle, action_index_map);
         }
 
-        ElementData {
-            role,
-            name,
-            value,
-            description,
-            bounds,
-            actions,
-            states,
-            numeric_value,
-            min_value,
-            max_value,
-            pid,
-            stable_id: Some(aref.path.clone()),
-            raw,
-            handle,
-        }
+        let mut data = ElementData::for_role(role);
+        data.name = name;
+        data.value = value;
+        data.description = description;
+        data.bounds = bounds;
+        data.actions = actions;
+        data.states = states;
+        data.numeric_value = numeric_value;
+        data.min_value = min_value;
+        data.max_value = max_value;
+        data.pid = pid;
+        data.stable_id = Some(aref.path.clone());
+        data.raw = raw;
+        data.handle = handle;
+        data
     }
 
     /// Get the AT-SPI parent of an accessible ref.
@@ -1098,6 +1097,14 @@ impl LinuxProvider {
                     if raw_role != *platform_role {
                         return false;
                     }
+                }
+                // A role-match form this fast path predates. Route it through
+                // the shared matcher rather than guessing, the same way an
+                // unrecognised attribute filter is routed below — core owns
+                // the semantics of its own selector AST.
+                _ => {
+                    let data = self.build_element_data(aref, None);
+                    return xa11y_core::selector::matches_simple(&data, simple);
                 }
             }
         }
@@ -1593,13 +1600,10 @@ impl Provider for LinuxProvider {
         }
         Err(
             Error::selector_not_matched(format!("application[pid={pid}]")).diagnose(
-                xa11y_core::Diagnosis {
-                    last_observed: Some(format!(
-                        "{total} AT-SPI registry entries examined, {unresolved} without a \
-                         resolvable pid"
-                    )),
-                    ..Default::default()
-                },
+                xa11y_core::Diagnosis::new().last_observed(format!(
+                    "{total} AT-SPI registry entries examined, {unresolved} without a \
+                     resolvable pid"
+                )),
             ),
         )
     }

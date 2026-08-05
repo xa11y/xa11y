@@ -230,12 +230,7 @@ fn capture_rect(x: i32, y: i32, w: i32, h: i32, scale: f32) -> Result<Screenshot
         px[3] = 0xFF;
     }
 
-    Ok(Screenshot {
-        width,
-        height,
-        pixels,
-        scale,
-    })
+    Ok(Screenshot::new(width, height, pixels, scale))
 }
 
 #[cfg(target_os = "windows")]

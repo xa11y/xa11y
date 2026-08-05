@@ -189,13 +189,8 @@ struct EventContext {
 
 impl EventContext {
     fn emit(&self, kind: EventKind, target: Option<ElementData>) {
-        let event = Event {
-            kind,
-            target,
-            app_name: self.app_name.clone(),
-            app_pid: self.app_pid,
-            timestamp: std::time::Instant::now(),
-        };
+        let mut event = Event::new(kind, self.app_name.clone(), self.app_pid);
+        event.target = target;
         if let Ok(tx) = self.tx.lock() {
             let _ = tx.send(event);
         }
@@ -511,25 +506,21 @@ fn build_event_snapshot(
         raw
     };
 
-    Some(ElementData {
-        role,
-        name,
-        value,
-        description: None,
-        bounds: None,
-        actions: vec![],
-        states,
-        numeric_value,
-        min_value,
-        max_value,
-        stable_id: Some(aref.path.clone()),
-        pid,
-        raw,
-        // Handle is 0 — snapshots are read-only targets, not live handles
-        // into the main provider's cache. Consumers wanting to drive actions
-        // must re-resolve through the regular locator path.
-        handle: 0,
-    })
+    // `handle` stays at ElementData::for_role's 0 — snapshots are read-only
+    // targets, not live handles into the main provider's cache. Consumers
+    // wanting to drive actions must re-resolve through the regular locator
+    // path.
+    let mut data = ElementData::for_role(role);
+    data.name = name;
+    data.value = value;
+    data.states = states;
+    data.numeric_value = numeric_value;
+    data.min_value = min_value;
+    data.max_value = max_value;
+    data.stable_id = Some(aref.path.clone());
+    data.pid = pid;
+    data.raw = raw;
+    Some(data)
 }
 
 fn make_proxy<'a>(conn: &'a Connection, bus: &str, path: &str, iface: &str) -> Option<Proxy<'a>> {

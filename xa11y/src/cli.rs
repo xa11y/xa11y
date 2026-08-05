@@ -769,6 +769,10 @@ pub(crate) fn format_event_kind(kind: &EventKind) -> &'static str {
         EventKind::MenuClosed => "menu_closed",
         EventKind::TextChanged => "text_changed",
         EventKind::Announcement => "announcement",
+        // `EventKind` is `#[non_exhaustive]`. A kind this build predates is
+        // still worth printing as a line — the CLI is a debugging tool, and
+        // dropping the event entirely would be worse than naming it vaguely.
+        _ => "unknown",
     }
 }
 
@@ -807,12 +811,11 @@ pub(crate) fn build_click_options(opts: &Opts) -> CliResult<ClickOptions> {
         .unwrap_or(MouseButton::Left);
     let count = opts.count.unwrap_or(1);
     let held = parse_held(opts.held.as_deref())?;
-    Ok(ClickOptions {
-        button,
-        count,
-        held,
-        anchor: Anchor::Center,
-    })
+    Ok(ClickOptions::new()
+        .button(button)
+        .count(count)
+        .held(held)
+        .anchor(Anchor::Center))
 }
 
 fn cmd_move(args: &[String]) -> CliResult<()> {
@@ -856,11 +859,10 @@ pub(crate) fn build_drag_options(opts: &Opts) -> CliResult<DragOptions> {
         .unwrap_or(MouseButton::Left);
     let held = parse_held(opts.held.as_deref())?;
     let duration = Duration::from_millis(opts.duration_ms.unwrap_or(150));
-    Ok(DragOptions {
-        button,
-        held,
-        duration,
-    })
+    Ok(DragOptions::new()
+        .button(button)
+        .held(held)
+        .duration(duration))
 }
 
 fn cmd_scroll(args: &[String]) -> CliResult<()> {
@@ -1099,22 +1101,9 @@ mod tests {
     // ── Format element ──────────────────────────────────────────────────────
 
     fn make_element(role: Role, name: Option<&str>) -> ElementData {
-        ElementData {
-            role,
-            name: name.map(String::from),
-            value: None,
-            description: None,
-            bounds: None,
-            actions: vec![],
-            states: StateSet::default(),
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: None,
-            pid: None,
-            raw: std::collections::HashMap::new(),
-            handle: 0,
-        }
+        let mut data = ElementData::for_role(role);
+        data.name = name.map(String::from);
+        data
     }
 
     #[test]
@@ -1229,16 +1218,14 @@ mod tests {
 
     #[test]
     fn format_event_detail_state_change() {
-        let event = Event {
-            kind: EventKind::StateChanged {
+        let event = Event::new(
+            EventKind::StateChanged {
                 flag: StateFlag::Focused,
                 value: true,
             },
-            app_name: "App".into(),
-            app_pid: 1,
-            target: None,
-            timestamp: std::time::Instant::now(),
-        };
+            "App",
+            1,
+        );
         let detail = format_event_detail(&event);
         assert!(detail.contains("Focused=true"));
     }
@@ -1258,13 +1245,7 @@ mod tests {
 
     #[test]
     fn format_event_detail_empty() {
-        let event = Event {
-            kind: EventKind::FocusChanged,
-            app_name: "App".into(),
-            app_pid: 1,
-            target: None,
-            timestamp: std::time::Instant::now(),
-        };
+        let event = Event::new(EventKind::FocusChanged, "App", 1);
         assert!(format_event_detail(&event).is_empty());
     }
 

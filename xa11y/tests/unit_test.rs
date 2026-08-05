@@ -356,22 +356,18 @@ fn sample_provider() -> Arc<MockProvider> {
     for (i, (role, name, value, desc, bounds, actions, states, nv, minv, maxv)) in
         elements.into_iter().enumerate()
     {
-        let data = ElementData {
-            role,
-            name: name.map(String::from),
-            value: value.map(String::from),
-            description: desc.map(String::from),
-            bounds,
-            actions,
-            states,
-            numeric_value: nv,
-            min_value: minv,
-            max_value: maxv,
-            stable_id: None,
-            pid: Some(1234),
-            raw: std::collections::HashMap::new(),
-            handle: i as u64,
-        };
+        let mut data = ElementData::for_role(role);
+        data.name = name.map(String::from);
+        data.value = value.map(String::from);
+        data.description = desc.map(String::from);
+        data.bounds = bounds;
+        data.actions = actions;
+        data.states = states;
+        data.numeric_value = nv;
+        data.min_value = minv;
+        data.max_value = maxv;
+        data.pid = Some(1234);
+        data.handle = i as u64;
         nodes.push(MockNode {
             data,
             children: children_map[i].clone(),
@@ -564,32 +560,18 @@ fn error_display() {
 
 #[test]
 fn element_json_serialization() {
-    let element = ElementData {
-        role: Role::Button,
-        name: Some("Submit".to_string()),
-        value: None,
-        description: None,
-        bounds: Some(Rect {
+    let element = {
+        let mut e = ElementData::for_role(Role::Button);
+        e.name = Some("Submit".to_string());
+        e.bounds = Some(Rect {
             x: 100,
             y: 200,
             width: 80,
             height: 30,
-        }),
-        actions: vec!["press".to_string()],
-        states: {
-            let mut s = StateSet::default();
-            s.enabled = true;
-            s.visible = true;
-            s.focused = true;
-            s
-        },
-        pid: None,
-        stable_id: None,
-        numeric_value: None,
-        min_value: None,
-        max_value: None,
-        raw: std::collections::HashMap::new(),
-        handle: 0,
+        });
+        e.actions = vec!["press".to_string()];
+        e.states.focused = true;
+        e
     };
 
     let json = serde_json::to_string_pretty(&element).unwrap();
@@ -911,21 +893,12 @@ fn locator_descendant_through_nested_groups() {
 
     let nodes: Vec<MockNode> = (0..5usize)
         .map(|i| MockNode {
-            data: ElementData {
-                role: roles[i],
-                name: names[i].map(String::from),
-                value: None,
-                description: None,
-                bounds: None,
-                actions: vec![],
-                states: StateSet::default(),
-                numeric_value: None,
-                min_value: None,
-                max_value: None,
-                stable_id: None,
-                pid: Some(1234),
-                raw: std::collections::HashMap::new(),
-                handle: i as u64,
+            data: {
+                let mut d = ElementData::for_role(roles[i]);
+                d.name = names[i].map(String::from);
+                d.pid = Some(1234);
+                d.handle = i as u64;
+                d
             },
             children: children_map[i].clone(),
             parent: parent_map[i],
@@ -993,22 +966,10 @@ fn multi_app_provider() -> Arc<MultiAppMockProvider> {
 
     let mut nodes = Vec::new();
     for (i, (role, name, pid)) in defs.into_iter().enumerate() {
-        let data = ElementData {
-            role,
-            name: name.map(String::from),
-            value: None,
-            description: None,
-            bounds: None,
-            actions: vec![],
-            states: StateSet::default(),
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: None,
-            pid,
-            raw: std::collections::HashMap::new(),
-            handle: i as u64,
-        };
+        let mut data = ElementData::for_role(role);
+        data.name = name.map(String::from);
+        data.pid = pid;
+        data.handle = i as u64;
         nodes.push(MockNode {
             data,
             children: children_map[i].clone(),

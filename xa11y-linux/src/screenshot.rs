@@ -161,12 +161,7 @@ impl LinuxScreenshot {
             rgba.push(0xFF);
         }
 
-        Ok(Screenshot {
-            width: w as u32,
-            height: h as u32,
-            pixels: rgba,
-            scale: 1.0,
-        })
+        Ok(Screenshot::new(w as u32, h as u32, rgba, 1.0))
     }
 
     fn capture_wayland(&self, conn: &ZbusConnection, rect: Option<Rect>) -> Result<Screenshot> {
@@ -319,21 +314,11 @@ fn decode_png_to_rgba(bytes: &[u8]) -> Result<Screenshot> {
         }
     };
 
-    Ok(Screenshot {
-        width: info.width,
-        height: info.height,
-        pixels: rgba,
-        scale: 1.0,
-    })
+    Ok(Screenshot::new(info.width, info.height, rgba, 1.0))
 }
 
 fn crop_rgba(shot: Screenshot, rect: Rect) -> Result<Screenshot> {
-    let Screenshot {
-        width: sw,
-        height: sh,
-        pixels,
-        scale,
-    } = shot;
+    let (sw, sh, pixels, scale) = (shot.width, shot.height, shot.pixels, shot.scale);
     let x = rect.x.max(0) as u32;
     let y = rect.y.max(0) as u32;
     if x >= sw || y >= sh {
@@ -356,10 +341,5 @@ fn crop_rgba(shot: Screenshot, rect: Rect) -> Result<Screenshot> {
         let end = start + (w as usize) * 4;
         out.extend_from_slice(&pixels[start..end]);
     }
-    Ok(Screenshot {
-        width: w,
-        height: h,
-        pixels: out,
-        scale,
-    })
+    Ok(Screenshot::new(w, h, out, scale))
 }

@@ -215,7 +215,7 @@ impl WaylandInputBackend {
     }
 
     pub(crate) fn pointer_down(&self, button: MouseButton) -> Result<()> {
-        let key = button_key(button);
+        let key = button_key(button)?;
         let mut s = self.lock();
         emit(
             &mut s.device,
@@ -224,7 +224,7 @@ impl WaylandInputBackend {
     }
 
     pub(crate) fn pointer_up(&self, button: MouseButton) -> Result<()> {
-        let key = button_key(button);
+        let key = button_key(button)?;
         let mut s = self.lock();
         emit(
             &mut s.device,
@@ -238,7 +238,7 @@ impl WaylandInputBackend {
         }
         let x = self.map_x(at.x);
         let y = self.map_y(at.y);
-        let key = button_key(button);
+        let key = button_key(button)?;
         let mut s = self.lock();
         // Move + click as one frame so the compositor sees the position
         // and the button-down on the same input report.
@@ -338,11 +338,19 @@ fn emit(dev: &mut VirtualDevice, events: &[InputEvent]) -> Result<()> {
     dev.emit(events).map_err(map_io)
 }
 
-fn button_key(b: MouseButton) -> KeyCode {
+/// Map a button to its evdev key code.
+///
+/// Fallible because [`MouseButton`] is `#[non_exhaustive]`: a button this
+/// backend has no code for is reported rather than silently dispatched as a
+/// different one.
+fn button_key(b: MouseButton) -> Result<KeyCode> {
     match b {
-        MouseButton::Left => KeyCode::BTN_LEFT,
-        MouseButton::Right => KeyCode::BTN_RIGHT,
-        MouseButton::Middle => KeyCode::BTN_MIDDLE,
+        MouseButton::Left => Ok(KeyCode::BTN_LEFT),
+        MouseButton::Right => Ok(KeyCode::BTN_RIGHT),
+        MouseButton::Middle => Ok(KeyCode::BTN_MIDDLE),
+        other => Err(Error::Unsupported {
+            feature: format!("mouse button {other:?} has no evdev button code"),
+        }),
     }
 }
 
@@ -449,9 +457,12 @@ mod tests {
 
     #[test]
     fn button_key_uses_input_event_codes() {
-        assert_eq!(button_key(MouseButton::Left), KeyCode::BTN_LEFT);
-        assert_eq!(button_key(MouseButton::Right), KeyCode::BTN_RIGHT);
-        assert_eq!(button_key(MouseButton::Middle), KeyCode::BTN_MIDDLE);
+        assert_eq!(button_key(MouseButton::Left).unwrap(), KeyCode::BTN_LEFT);
+        assert_eq!(button_key(MouseButton::Right).unwrap(), KeyCode::BTN_RIGHT);
+        assert_eq!(
+            button_key(MouseButton::Middle).unwrap(),
+            KeyCode::BTN_MIDDLE
+        );
     }
 
     #[test]

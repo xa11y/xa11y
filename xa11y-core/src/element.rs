@@ -14,7 +14,19 @@ use crate::role::Role;
 /// This is the underlying data struct. Most consumers should use [`Element`],
 /// which wraps `ElementData` with a provider reference for lazy navigation.
 /// `ElementData` is used directly by provider implementors.
+///
+/// `#[non_exhaustive]`: this is the type that grows every time the normalized
+/// element model learns a new property, and provider implementors are a
+/// documented public role. Build one with [`ElementData::for_role`] and assign
+/// the fields the platform reported:
+///
+/// ```
+/// # use xa11y_core::{ElementData, Role};
+/// let mut data = ElementData::for_role(Role::Button);
+/// data.name = Some("Submit".to_string());
+/// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ElementData {
     /// Element role
     pub role: Role,
@@ -94,6 +106,42 @@ pub struct ElementData {
     /// Not serialized — only valid within the provider that created it.
     #[serde(skip, default)]
     pub handle: u64,
+}
+
+impl ElementData {
+    /// An element with the given role and every other field empty.
+    ///
+    /// `states` starts at [`StateSet::default`] (enabled and visible, nothing
+    /// else), and `handle` at `0` — providers assign their own.
+    ///
+    /// Named `for_role` rather than `new` because `ElementData` is flattened
+    /// onto `Element` for the bindings-parity check, where a member called
+    /// `new` would collide with the existing [`Element::new`].
+    pub fn for_role(role: Role) -> Self {
+        Self {
+            role,
+            name: None,
+            value: None,
+            description: None,
+            bounds: None,
+            actions: Vec::new(),
+            states: StateSet::default(),
+            numeric_value: None,
+            min_value: None,
+            max_value: None,
+            stable_id: None,
+            pid: None,
+            raw: RawPlatformData::new(),
+            handle: 0,
+        }
+    }
+}
+
+impl Default for ElementData {
+    /// An [`Role::Unknown`] element with no properties.
+    fn default() -> Self {
+        Self::for_role(Role::Unknown)
+    }
 }
 
 /// A live element with lazy navigation via a provider reference.
@@ -430,6 +478,12 @@ impl Default for StateSet {
 }
 
 /// Tri-state toggle value.
+#[allow(
+    clippy::exhaustive_enums,
+    reason = "Closed domain: a toggle is off, on, or indeterminate. Every \
+              platform's tri-state checkbox is exactly these three values, \
+              and a fourth would not be a toggle."
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Toggled {
     Off,
@@ -441,6 +495,12 @@ pub enum Toggled {
 /// Screen-pixel bounding rectangle (origin + size).
 /// `x`/`y` are signed to support negative multi-monitor coordinates.
 /// `width`/`height` are unsigned (always non-negative).
+#[allow(
+    clippy::exhaustive_structs,
+    reason = "Closed domain: an axis-aligned rectangle is fully described by \
+              an origin and a size. Literal construction is the point of the \
+              type, and it will not gain a fifth field."
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Rect {
     pub x: i32,
@@ -638,12 +698,29 @@ pub type RawPlatformData = HashMap<String, serde_json::Value>;
 /// Returned by [`Element::tree`] and [`Locator::tree`]. Each node carries the
 /// role, display name, and value of one element, plus its children recursively.
 /// `children` is empty when `max_depth` was reached or the element is a leaf.
+///
+/// `#[non_exhaustive]`: a dump node grows alongside [`ElementData`] — bounds
+/// and stable ids are both plausible additions. Build one with
+/// [`TreeNode::new`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct TreeNode {
     pub role: String,
     pub name: Option<String>,
     pub value: Option<String>,
     pub children: Vec<TreeNode>,
+}
+
+impl TreeNode {
+    /// A leaf node with the given role and no name, value, or children.
+    pub fn new(role: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            name: None,
+            value: None,
+            children: Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]

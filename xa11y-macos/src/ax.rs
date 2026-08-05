@@ -1220,6 +1220,17 @@ fn matches_ax_with_role(
                     return false;
                 }
             }
+            // `RoleMatch` is `#[non_exhaustive]`. A form this fast path
+            // predates goes through the full snapshot + shared matcher, the
+            // same route a non-fast-path attribute filter takes above — core
+            // owns the semantics of its own selector AST.
+            _ => {
+                if ax.is_null() {
+                    return false;
+                }
+                let data = build_snapshot_data(ax, None, 0);
+                return xa11y_core::selector::matches_simple(&data, simple);
+            }
         }
     }
 
@@ -1447,22 +1458,10 @@ impl MacOSProvider {
 /// targets), pass `0`.
 fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -> ElementData {
     if element.is_null() {
-        return ElementData {
-            role: Role::Unknown,
-            name: None,
-            value: None,
-            description: None,
-            bounds: None,
-            actions: vec![],
-            states: StateSet::default(),
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: None,
-            raw: std::collections::HashMap::new(),
-            pid,
-            handle,
-        };
+        let mut data = ElementData::for_role(Role::Unknown);
+        data.pid = pid;
+        data.handle = handle;
+        return data;
     }
 
     let body = move || -> ElementData {
@@ -1716,22 +1715,21 @@ fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -
         let value = xa11y_core::text::strip_bidi_opt(value);
         let description = xa11y_core::text::strip_bidi_opt(description);
 
-        ElementData {
-            role,
-            name,
-            value,
-            description,
-            bounds,
-            actions,
-            states,
-            stable_id: attrs.identifier,
-            numeric_value,
-            min_value,
-            max_value,
-            raw,
-            pid,
-            handle,
-        }
+        let mut data = ElementData::for_role(role);
+        data.name = name;
+        data.value = value;
+        data.description = description;
+        data.bounds = bounds;
+        data.actions = actions;
+        data.states = states;
+        data.stable_id = attrs.identifier;
+        data.numeric_value = numeric_value;
+        data.min_value = min_value;
+        data.max_value = max_value;
+        data.raw = raw;
+        data.pid = pid;
+        data.handle = handle;
+        data
     };
     body()
 }
@@ -2125,12 +2123,8 @@ impl Provider for MacOSProvider {
         if app_element.is_null() {
             return Err(
                 Error::selector_not_matched(format!("application[pid={pid}]")).diagnose(
-                    xa11y_core::Diagnosis {
-                        last_observed: Some(
-                            "AXUIElementCreateApplication returned NULL".to_string(),
-                        ),
-                        ..Default::default()
-                    },
+                    xa11y_core::Diagnosis::new()
+                        .last_observed("AXUIElementCreateApplication returned NULL"),
                 ),
             );
         }
@@ -2165,13 +2159,10 @@ impl Provider for MacOSProvider {
             | AX_ERROR_NO_VALUE => Err(Error::selector_not_matched(format!(
                 "application[pid={pid}]"
             ))
-            .diagnose(xa11y_core::Diagnosis {
-                last_observed: Some(format!(
-                    "AX attach probe returned AXError {err}: process not yet AX-reachable, \
-                     exited, or has no accessibility bridge"
-                )),
-                ..Default::default()
-            })),
+            .diagnose(xa11y_core::Diagnosis::new().last_observed(format!(
+                "AX attach probe returned AXError {err}: process not yet AX-reachable, \
+                 exited, or has no accessibility bridge"
+            )))),
             _ => Err(Error::Platform {
                 code: err as i64,
                 message: format!(
@@ -2587,13 +2578,8 @@ unsafe extern "C" fn ax_observer_callback(
     };
 
     for kind in kinds {
-        let event = Event {
-            kind,
-            app_name: ctx.app_name.clone(),
-            app_pid: ctx.app_pid,
-            target: target.clone(),
-            timestamp: std::time::Instant::now(),
-        };
+        let mut event = Event::new(kind, ctx.app_name.clone(), ctx.app_pid);
+        event.target = target.clone();
         let _ = ctx.sender.send(event);
     }
 }
@@ -2674,13 +2660,9 @@ impl MacOSProvider {
             }
             return Err(
                 Error::selector_not_matched(format!("application[pid={pid}]")).diagnose(
-                    xa11y_core::Diagnosis {
-                        last_observed: Some(
-                            "AXUIElementCreateApplication returned NULL while subscribing"
-                                .to_string(),
-                        ),
-                        ..Default::default()
-                    },
+                    xa11y_core::Diagnosis::new().last_observed(
+                        "AXUIElementCreateApplication returned NULL while subscribing",
+                    ),
                 ),
             );
         }
@@ -3095,11 +3077,7 @@ mod tests {
     fn matches_ax_returns_false_for_null_element() {
         use xa11y_core::selector::{RoleMatch, SimpleSelector};
         // Role-only selector should not match a null element
-        let simple = SimpleSelector {
-            role: Some(RoleMatch::Normalized(Role::Button)),
-            filters: vec![],
-            nth: None,
-        };
+        let simple = SimpleSelector::with_role(RoleMatch::Normalized(Role::Button));
         assert!(!matches_ax(std::ptr::null(), &simple));
     }
 
@@ -3108,11 +3086,7 @@ mod tests {
         use xa11y_core::selector::SimpleSelector;
         // No role constraint — should match anything (even null, since no
         // attribute to check). But null has no role, so no-role selector matches.
-        let simple = SimpleSelector {
-            role: None,
-            filters: vec![],
-            nth: None,
-        };
+        let simple = SimpleSelector::any();
         // A null element can't report a role, but the selector has no role
         // constraint, so it should match.
         assert!(matches_ax(std::ptr::null(), &simple));
@@ -3121,11 +3095,7 @@ mod tests {
     #[test]
     fn matches_ax_rejects_wrong_role() {
         use xa11y_core::selector::{RoleMatch, SimpleSelector};
-        let simple = SimpleSelector {
-            role: Some(RoleMatch::Normalized(Role::CheckBox)),
-            filters: vec![],
-            nth: None,
-        };
+        let simple = SimpleSelector::with_role(RoleMatch::Normalized(Role::CheckBox));
         // Null element has no role — should not match CheckBox
         assert!(!matches_ax(std::ptr::null(), &simple));
     }
@@ -3133,15 +3103,8 @@ mod tests {
     #[test]
     fn matches_ax_with_name_filter_rejects_null() {
         use xa11y_core::selector::{AttrFilter, MatchOp, SimpleSelector};
-        let simple = SimpleSelector {
-            role: None,
-            filters: vec![AttrFilter {
-                attr: "name".to_string(),
-                op: MatchOp::Exact,
-                value: "Submit".to_string(),
-            }],
-            nth: None,
-        };
+        let mut simple = SimpleSelector::any();
+        simple.filters = vec![AttrFilter::new("name", MatchOp::Exact, "Submit")];
         // Null element has no name — filter should fail
         assert!(!matches_ax(std::ptr::null(), &simple));
     }
@@ -3157,15 +3120,8 @@ mod tests {
         // panicking.
         use xa11y_core::selector::{AttrFilter, MatchOp, SimpleSelector};
         for attr in ["enabled", "checked", "focused", "selected"] {
-            let simple = SimpleSelector {
-                role: None,
-                filters: vec![AttrFilter {
-                    attr: attr.to_string(),
-                    op: MatchOp::Exact,
-                    value: "true".to_string(),
-                }],
-                nth: None,
-            };
+            let mut simple = SimpleSelector::any();
+            simple.filters = vec![AttrFilter::new(attr, MatchOp::Exact, "true")];
             assert!(
                 !matches_ax(std::ptr::null(), &simple),
                 "non-fast-path attr `{attr}` should fall through to the full matcher \

@@ -572,22 +572,21 @@ fn build_snapshot_data(
         (None, None, None)
     };
 
-    ElementData {
-        role,
-        name,
-        value,
-        description,
-        bounds,
-        actions,
-        states,
-        stable_id: automation_id,
-        numeric_value,
-        min_value,
-        max_value,
-        pid,
-        raw,
-        handle,
-    }
+    let mut data = ElementData::for_role(role);
+    data.name = name;
+    data.value = value;
+    data.description = description;
+    data.bounds = bounds;
+    data.actions = actions;
+    data.states = states;
+    data.stable_id = automation_id;
+    data.numeric_value = numeric_value;
+    data.min_value = min_value;
+    data.max_value = max_value;
+    data.pid = pid;
+    data.raw = raw;
+    data.handle = handle;
+    data
 }
 
 /// Build the batch request that describes which properties and patterns
@@ -862,12 +861,8 @@ impl Provider for WindowsProvider {
             Err(e) if e.code().is_ok() => {
                 return Err(
                     Error::selector_not_matched(format!("application[pid={pid}]")).diagnose(
-                        xa11y_core::Diagnosis {
-                            last_observed: Some(
-                                "no top-level UIA element owned by the process yet".to_string(),
-                            ),
-                            ..Default::default()
-                        },
+                        xa11y_core::Diagnosis::new()
+                            .last_observed("no top-level UIA element owned by the process yet"),
                     ),
                 );
             }
@@ -931,7 +926,7 @@ impl Provider for WindowsProvider {
         for segment in segments {
             let mut next_candidates = Vec::new();
             for candidate in &candidates {
-                match segment.combinator {
+                match &segment.combinator {
                     Combinator::Child => {
                         let children = self.get_children(Some(candidate))?;
                         for child in children {
@@ -943,12 +938,10 @@ impl Provider for WindowsProvider {
                     Combinator::Descendant => {
                         // Walk level-by-level to avoid provider-activation boundary
                         // issues with FindAllBuildCache(Subtree) on fragment elements.
-                        let sub_selector = Selector {
-                            segments: vec![SelectorSegment {
-                                combinator: Combinator::Root,
-                                simple: segment.simple.clone(),
-                            }],
-                        };
+                        let sub_selector = Selector::from_segments(vec![SelectorSegment::new(
+                            Combinator::Root,
+                            segment.simple.clone(),
+                        )]);
                         let mut sub_results = xa11y_core::selector::find_elements_in_tree(
                             |el| self.get_children(el),
                             Some(candidate),
@@ -959,6 +952,18 @@ impl Provider for WindowsProvider {
                         next_candidates.append(&mut sub_results);
                     }
                     Combinator::Root => unreachable!(),
+                    // `Combinator` is `#[non_exhaustive]`. A combinator this
+                    // push-down predates is reported rather than approximated
+                    // as a child or descendant walk — a wrong match set is
+                    // worse than a clear "not supported here".
+                    other => {
+                        return Err(Error::Unsupported {
+                            feature: format!(
+                                "selector combinator {other:?} is not implemented by the \
+                                 UIA multi-segment push-down"
+                            ),
+                        })
+                    }
                 }
             }
             let mut seen = std::collections::HashSet::new();
@@ -2076,13 +2081,8 @@ unsafe impl Sync for EventContext {}
 
 impl EventContext {
     fn emit(&self, kind: EventKind, target: Option<ElementData>) {
-        let event = Event {
-            kind,
-            app_name: self.app_name.clone(),
-            app_pid: self.app_pid,
-            target,
-            timestamp: std::time::Instant::now(),
-        };
+        let mut event = Event::new(kind, self.app_name.clone(), self.app_pid);
+        event.target = target;
         if let Ok(tx) = self.sender.lock() {
             // Receiver may be dropped after close(); lost event is expected then.
             let _ = tx.send(event);
@@ -2679,23 +2679,10 @@ mod tests {
         let Some(provider) = try_provider() else {
             return;
         };
-        let dummy = ElementData {
-            role: Role::Button,
-            name: Some("test".to_string()),
-            value: None,
-            description: None,
-            bounds: None,
-            actions: vec![],
-            states: StateSet::default(),
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: None,
-            pid: None,
-            raw: std::collections::HashMap::new(),
-            handle: u64::MAX, // stale handle
-        };
-        // Unknown action name should return ActionNotSupported
+        let mut dummy = ElementData::for_role(Role::Button);
+        dummy.name = Some("test".to_string());
+        dummy.handle = u64::MAX; // stale handle
+                                 // Unknown action name should return ActionNotSupported
         let result = provider.perform_action(&dummy, "nonexistent_action");
         assert!(
             matches!(result, Err(Error::ActionNotSupported { .. })),
@@ -2708,22 +2695,9 @@ mod tests {
         let Some(provider) = try_provider() else {
             return;
         };
-        let dummy = ElementData {
-            role: Role::Button,
-            name: Some("test".to_string()),
-            value: None,
-            description: None,
-            bounds: None,
-            actions: vec![],
-            states: StateSet::default(),
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: None,
-            pid: None,
-            raw: std::collections::HashMap::new(),
-            handle: u64::MAX,
-        };
+        let mut dummy = ElementData::for_role(Role::Button);
+        dummy.name = Some("test".to_string());
+        dummy.handle = u64::MAX;
         // Actions that look up the cached element should return ElementStale
         let result = provider.press(&dummy);
         assert!(
@@ -3008,7 +2982,7 @@ mod tests {
         let Some(root) = provider.list_apps().unwrap_or_default().into_iter().next() else {
             return;
         };
-        let empty_selector = Selector { segments: vec![] };
+        let empty_selector = Selector::from_segments(vec![]);
         let result = provider
             .find_elements(&root, &empty_selector, None, None)
             .unwrap();
@@ -3033,22 +3007,10 @@ mod tests {
     // ── Event subscription tests ────────────────────────────────────────────
 
     fn dummy_element(pid: Option<u32>) -> ElementData {
-        ElementData {
-            role: Role::Application,
-            name: Some("test".to_string()),
-            value: None,
-            description: None,
-            bounds: None,
-            actions: vec![],
-            states: StateSet::default(),
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: None,
-            pid,
-            raw: std::collections::HashMap::new(),
-            handle: 0,
-        }
+        let mut data = ElementData::for_role(Role::Application);
+        data.name = Some("test".to_string());
+        data.pid = pid;
+        data
     }
 
     #[test]

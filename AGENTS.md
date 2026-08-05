@@ -85,7 +85,7 @@ All raw CoreFoundation / AX FFI calls in `xa11y-macos/src/ax.rs` must go through
 rustup toolchain install nightly --profile minimal
 ```
 
-The check enforces two rules, both configured in `bindings/parity_allowlist.toml`:
+The check enforces three rules, all configured in `bindings/parity_allowlist.toml`:
 
 1. **Every public type in `xa11y-core` must be classified** under `[types]` as one of:
    - `mirrored` — the bindings expose this type and each of its members.
@@ -97,6 +97,12 @@ The check enforces two rules, both configured in `bindings/parity_allowlist.toml
 2. **For `mirrored` types, members must match.** Every public core member must exist in both bindings, and every binding member must map to a core member — unless listed in `[python.rust_only]` / `[python.python_only]` (and the `[js.*]` equivalents) **with a reason**.
 
    Those per-member entries are themselves checked for staleness: an entry naming a member that core (or the binding) no longer has excuses nothing while still reading as a live design decision, so it fails the check rather than accumulating.
+
+3. **Hand-mapped `#[non_exhaustive]` enums must have every variant covered.**
+   See [Variant coverage](#variant-coverage-replaces-the-compiler-for-hand-mapped-enums)
+   under Public API Extensibility — `[[types.variant_coverage]]` is what
+   replaced the bindings' exhaustive `match` as the guard against an unmapped
+   `Error` / `EventKind` / `StateFlag` variant.
 
 ### Flattening
 
@@ -125,6 +131,78 @@ rename = [
 ```
 
 A `rename` naming a member no longer present in its source is reported as stale, same as a stale `[types]` entry.
+
+## Public API Extensibility
+
+Every public struct and enum in `xa11y-core` must make an explicit choice about
+future growth. Two clippy restriction lints, enabled in `xa11y-core/Cargo.toml`,
+enforce that the choice is made:
+
+```toml
+[lints.clippy]
+exhaustive_enums = "warn"
+exhaustive_structs = "warn"
+```
+
+CI runs with `-Dwarnings`, so a new public type is a build failure until it
+either carries `#[non_exhaustive]` or an `#[allow(..., reason = "...")]` naming
+the closed domain that makes growth impossible. This is the same discipline the
+parity allowlist applies at the bindings boundary, one level down.
+
+**Default to `#[non_exhaustive]`.** Take the `allow` only when the type is a
+closed domain in the mathematical sense — `Rect` (an origin and a size),
+`Point`, `ScrollDelta`, `Toggled` (off/on/indeterminate), `RecvStatus`
+(value/timeout/disconnected). "I can't think of a new field right now" is not a
+closed domain.
+
+`#[non_exhaustive]` forbids struct expressions from *other crates*, including
+functional-update syntax — `Diagnosis { .., ..Default::default() }` does not
+compile from `xa11y-linux`. So a non-exhaustive struct owes callers a way to
+build one:
+
+- **Required fields, few of them** — a plain constructor: `Screenshot::new`,
+  `Event::new`, `TreeNode::new`.
+- **Many optional fields** — a constructor plus public field assignment:
+  `ElementData::for_role(role)` then `data.name = ...`. Providers fill in a
+  dozen fields; a dozen chained setters would read worse than assignment.
+- **Options structs** — chained setters returning `Self`:
+  `ClickOptions::new().button(..).count(..)`, `Diagnosis::new().condition(..)`.
+
+One trap: a constructor named `new` on a type that is **flattened** into
+another (see [Flattening](#flattening)) collides with the target's own `new`,
+and both would then be satisfied by a single allowlist entry. That is why
+`ElementData` has `for_role` rather than `new` — `Element::new` already exists.
+The parity check reports this shadowing rather than merging silently.
+
+### Variant coverage replaces the compiler for hand-mapped enums
+
+`#[non_exhaustive]` on an enum forces downstream `match` arms to carry a `_`
+fallback. For `Error`, `EventKind`, and `StateFlag` that fallback *removes a
+guard the project relied on*: the bindings' exhaustive matches were what failed
+the build when a variant was added without being mapped.
+
+`[[types.variant_coverage]]` in `bindings/parity_allowlist.toml` is the
+replacement. Each entry names an enum and the files that must mention every one
+of its variants as `Type::Variant`:
+
+```toml
+[[types.variant_coverage]]
+type = "EventKind"
+reason = "Each variant maps to a distinct event-type string in both bindings and in the CLI."
+files = [
+    "xa11y-python/src/lib.rs",
+    "xa11y-js/src/types.rs",
+    "xa11y/src/cli.rs",
+]
+```
+
+Adding a variant to one of these enums therefore means editing every listed
+file, which is the same work the compiler used to demand. Entries are checked
+for staleness (a type that left core, or that is not an enum) the same way
+`[types]` entries are.
+
+`Role` and `Key` are deliberately **not** covered: they convert mechanically
+(`to_snake_case`, a string parser), so a new variant needs no binding edit.
 
 ## Binding Shape Conventions
 
@@ -218,7 +296,7 @@ CI runs with `RUSTFLAGS: -Dwarnings`, so all warnings are errors. Individual che
 4. **Integration tests** (if touching provider/test-app code) — `cargo xtask test-integ`
 5. **Python bindings** — `cargo xtask test-python`
 6. **Docs prose** (if touching `README.md` or `docs/site/src/content/docs/`) — `cargo xtask lint-docs`
-7. **No new `#[allow(...)]` without justification** — if you must suppress a warning, add a comment explaining why
+7. **No new `#[allow(...)]` without justification** — if you must suppress a warning, add a comment explaining why. The `clippy::exhaustive_*` allows in `xa11y-core` use the `reason = "..."` form; see [Public API Extensibility](#public-api-extensibility).
 
 Common CI failures:
 - `unused import` / `dead_code` — remove the unused code or add `#[allow(dead_code)]` with a reason

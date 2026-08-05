@@ -256,26 +256,27 @@ pub fn build_provider(elements: &[FuzzElement]) -> Option<Arc<FuzzProvider>> {
             .map(|&idx| ALL_ACTIONS[idx as usize % ALL_ACTIONS.len()].to_string())
             .collect();
         nodes.push(FuzzNode {
-            data: ElementData {
-                role,
-                name: fuzz.name.clone(),
-                value: fuzz.value.clone(),
-                description: fuzz.description.clone(),
-                bounds: fuzz.bounds.as_ref().map(|b| Rect {
+            data: {
+                let mut d = ElementData::for_role(role);
+                d.name = fuzz.name.clone();
+                d.value = fuzz.value.clone();
+                d.description = fuzz.description.clone();
+                d.bounds = fuzz.bounds.as_ref().map(|b| Rect {
                     x: b.x,
                     y: b.y,
                     width: b.width,
                     height: b.height,
-                }),
-                actions,
-                states: make_state(&fuzz.states),
-                stable_id: fuzz.stable_id.clone(),
-                numeric_value: fuzz.numeric_value,
-                min_value: fuzz.min_value,
-                max_value: fuzz.max_value,
-                pid: fuzz.pid,
-                raw: make_raw(&fuzz.raw),
-                handle: i as u64,
+                });
+                d.actions = actions;
+                d.states = make_state(&fuzz.states);
+                d.stable_id = fuzz.stable_id.clone();
+                d.numeric_value = fuzz.numeric_value;
+                d.min_value = fuzz.min_value;
+                d.max_value = fuzz.max_value;
+                d.pid = fuzz.pid;
+                d.raw = make_raw(&fuzz.raw);
+                d.handle = i as u64;
+                d
             },
             children: vec![],
             parent: None,

@@ -9,6 +9,9 @@
 #   2. For `mirrored` types, every public member must exist in both
 #      bindings, and every binding member must map to a core member,
 #      unless listed below with a reason.
+#   3. For `[[types.variant_coverage]]` enums, every variant must be named
+#      in each listed file. These enums are `#[non_exhaustive]`, so the
+#      compiler no longer fails a binding that forgets one.
 #
 # `#[doc(hidden)]` items are not public API and never need an entry.
 #
@@ -87,6 +90,46 @@ internal = [
     { type = "ClickTarget", reason = "Internal click-target discriminator for the input backends." },
 ]
 
+# ── Variant coverage ─────────────────────────────────────────────────────
+#
+# `Error`, `EventKind`, and `StateFlag` are `#[non_exhaustive]` in core, and
+# each crosses the boundary through a hand-written per-variant mapping rather
+# than a mechanical conversion. (`Role` and `Key` are not here: they convert
+# via `to_snake_case` / a parser, so a new variant needs no binding edit.)
+#
+# Before `#[non_exhaustive]`, the bindings' exhaustive `match` was what forced
+# a new variant to be mapped — adding one to core failed their build. The `_`
+# arm those matches now carry for forward compatibility would swallow it
+# silently. These entries are the replacement guard: every variant of `type`
+# must appear as `Type::Variant` in each listed file.
+#
+# Adding a variant to one of these enums therefore means editing every file
+# below, which is the same work the compiler used to demand.
+[[types.variant_coverage]]
+type = "Error"
+reason = "Each variant maps to a specific exception class / error code; an unmapped one would fall through to the generic XA11yError."
+files = [
+    "xa11y-python/src/lib.rs",
+    "xa11y-js/src/errors.rs",
+]
+
+[[types.variant_coverage]]
+type = "EventKind"
+reason = "Each variant maps to a distinct event-type string in both bindings and in the CLI's `xa11y watch` output; an unmapped one would print as 'unknown'."
+files = [
+    "xa11y-python/src/lib.rs",
+    "xa11y-js/src/types.rs",
+    "xa11y/src/cli.rs",
+]
+
+[[types.variant_coverage]]
+type = "StateFlag"
+reason = "Each variant maps to a distinct state-name string in both bindings; an unmapped one would surface as 'unknown'."
+files = [
+    "xa11y-python/src/lib.rs",
+    "xa11y-js/src/types.rs",
+]
+
 # Types with no binding class of their own, whose members surface on another
 # type. Members listed here are REQUIRED on the target binding type — this
 # replaces what used to be dozens of per-member allowlist entries.
@@ -129,6 +172,9 @@ rust_only = [
     # Internal Rust constructors / accessors.
     { method = "Locator::new", reason = "Internal Rust constructor; bindings build Locators via App.locator() / module-level locator()." },
     { method = "Element::new", reason = "Internal Rust constructor; bindings obtain Elements via Locator / navigation." },
+    { method = "Element::for_role", reason = "Flattened from ElementData: the provider-side constructor for a bare ElementData. Bindings receive elements from the provider and never build one." },
+    { method = "Event::new", reason = "Provider-side constructor for an Event. Bindings receive events from a Subscription and never build one." },
+    { method = "Screenshot::new", reason = "Backend-side constructor for a capture. Bindings receive Screenshots from the capture entry points and never build one." },
     { method = "Element::data", reason = "Internal plumbing for provider implementors, not user API." },
     { method = "Element::provider", reason = "Internal plumbing for provider implementors, not user API." },
     { method = "Element::handle", reason = "Opaque provider handle; not part of the user-visible API." },
@@ -204,6 +250,9 @@ rust_only = [
 
     { method = "Locator::new", reason = "Internal Rust constructor; bindings build Locators via App.locator() / module-level locator()." },
     { method = "Element::new", reason = "Internal Rust constructor; bindings obtain Elements via Locator / navigation." },
+    { method = "Element::for_role", reason = "Flattened from ElementData: the provider-side constructor for a bare ElementData. Bindings receive elements from the provider and never build one." },
+    { method = "Event::new", reason = "Provider-side constructor for an Event. Bindings receive events from a Subscription and never build one." },
+    { method = "Screenshot::new", reason = "Backend-side constructor for a capture. Bindings receive Screenshots from the capture entry points and never build one." },
     { method = "Element::data", reason = "Internal plumbing for provider implementors, not user API." },
     { method = "Element::provider", reason = "Internal plumbing for provider implementors, not user API." },
     { method = "Element::handle", reason = "Opaque provider handle; not part of the user-visible API." },

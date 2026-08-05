@@ -192,35 +192,45 @@ impl MacOSInputProvider {
 
 // ── Mapping helpers ─────────────────────────────────────────────────
 
-fn cg_button(b: MouseButton) -> u32 {
-    match b {
-        MouseButton::Left => K_CG_MOUSE_BUTTON_LEFT,
-        MouseButton::Right => K_CG_MOUSE_BUTTON_RIGHT,
-        MouseButton::Middle => K_CG_MOUSE_BUTTON_CENTER,
-    }
+/// The four CoreGraphics codes a button needs: its `kCGMouseButton` number
+/// and the down / up / dragged event types.
+#[derive(Clone, Copy)]
+struct CgButton {
+    number: u32,
+    down: u32,
+    up: u32,
+    dragged: u32,
 }
 
-fn cg_button_down(b: MouseButton) -> u32 {
+/// Resolve a button to its CoreGraphics codes.
+///
+/// Fallible because [`MouseButton`] is `#[non_exhaustive]`: a button this
+/// backend has no codes for is reported rather than silently dispatched as a
+/// different one. One lookup for all four codes keeps that decision in a
+/// single place.
+fn cg_button(b: MouseButton) -> Result<CgButton> {
     match b {
-        MouseButton::Left => K_CG_EVENT_LEFT_MOUSE_DOWN,
-        MouseButton::Right => K_CG_EVENT_RIGHT_MOUSE_DOWN,
-        MouseButton::Middle => K_CG_EVENT_OTHER_MOUSE_DOWN,
-    }
-}
-
-fn cg_button_up(b: MouseButton) -> u32 {
-    match b {
-        MouseButton::Left => K_CG_EVENT_LEFT_MOUSE_UP,
-        MouseButton::Right => K_CG_EVENT_RIGHT_MOUSE_UP,
-        MouseButton::Middle => K_CG_EVENT_OTHER_MOUSE_UP,
-    }
-}
-
-fn cg_button_dragged(b: MouseButton) -> u32 {
-    match b {
-        MouseButton::Left => K_CG_EVENT_LEFT_MOUSE_DRAGGED,
-        MouseButton::Right => K_CG_EVENT_RIGHT_MOUSE_DRAGGED,
-        MouseButton::Middle => K_CG_EVENT_OTHER_MOUSE_DRAGGED,
+        MouseButton::Left => Ok(CgButton {
+            number: K_CG_MOUSE_BUTTON_LEFT,
+            down: K_CG_EVENT_LEFT_MOUSE_DOWN,
+            up: K_CG_EVENT_LEFT_MOUSE_UP,
+            dragged: K_CG_EVENT_LEFT_MOUSE_DRAGGED,
+        }),
+        MouseButton::Right => Ok(CgButton {
+            number: K_CG_MOUSE_BUTTON_RIGHT,
+            down: K_CG_EVENT_RIGHT_MOUSE_DOWN,
+            up: K_CG_EVENT_RIGHT_MOUSE_UP,
+            dragged: K_CG_EVENT_RIGHT_MOUSE_DRAGGED,
+        }),
+        MouseButton::Middle => Ok(CgButton {
+            number: K_CG_MOUSE_BUTTON_CENTER,
+            down: K_CG_EVENT_OTHER_MOUSE_DOWN,
+            up: K_CG_EVENT_OTHER_MOUSE_UP,
+            dragged: K_CG_EVENT_OTHER_MOUSE_DRAGGED,
+        }),
+        other => Err(Error::Unsupported {
+            feature: format!("mouse button {other:?} has no CoreGraphics event codes"),
+        }),
     }
 }
 
@@ -278,6 +288,13 @@ fn vk_for(key: &Key) -> Result<u16> {
             }
         },
         Key::Char(c) => vk_for_char(*c)?,
+        // `Key` is `#[non_exhaustive]`; a key this backend has no keycode
+        // for is reported rather than silently mapped to a neighbouring one.
+        other => {
+            return Err(Error::Unsupported {
+                feature: format!("key {other:?} has no HIToolbox keycode on macOS"),
+            })
+        }
     };
     Ok(vk)
 }
@@ -360,12 +377,14 @@ impl InputProvider for MacOSInputProvider {
         // CGEvent needs a position; pass (0,0) — the system uses the current
         // cursor location for button-only events anyway, but supplying a point
         // keeps the struct well-formed.
-        let ev = self.mouse_event(cg_button_down(button), Point::new(0, 0), cg_button(button))?;
+        let b = cg_button(button)?;
+        let ev = self.mouse_event(b.down, Point::new(0, 0), b.number)?;
         self.post(ev)
     }
 
     fn pointer_up(&self, button: MouseButton) -> Result<()> {
-        let ev = self.mouse_event(cg_button_up(button), Point::new(0, 0), cg_button(button))?;
+        let b = cg_button(button)?;
+        let ev = self.mouse_event(b.up, Point::new(0, 0), b.number)?;
         self.post(ev)
     }
 
@@ -373,19 +392,20 @@ impl InputProvider for MacOSInputProvider {
         if count == 0 {
             return Ok(());
         }
+        let b = cg_button(button)?;
         self.pointer_move(at)?;
         // `kCGMouseEventClickState` tells the OS which click in a sequence this
         // is (1 = single, 2 = double, …). We emit N paired down/up events
         // with increasing click-state so AppKit/Cocoa recognises multi-clicks
         // regardless of the OS double-click timing window.
         for i in 1..=count {
-            let down = self.mouse_event(cg_button_down(button), at, cg_button(button))?;
+            let down = self.mouse_event(b.down, at, b.number)?;
             // SAFETY: down is a valid CGEventRef.
             unsafe {
                 CGEventSetIntegerValueField(down, K_CG_MOUSE_EVENT_CLICK_STATE, i as i64);
             }
             self.post(down)?;
-            let up = self.mouse_event(cg_button_up(button), at, cg_button(button))?;
+            let up = self.mouse_event(b.up, at, b.number)?;
             unsafe {
                 CGEventSetIntegerValueField(up, K_CG_MOUSE_EVENT_CLICK_STATE, i as i64);
             }
@@ -487,8 +507,9 @@ impl InputProvider for MacOSInputProvider {
         self.pointer_down(button)?;
         let step_ms = STEP.as_millis().max(1);
         let steps = (duration.as_millis() / step_ms).max(1) as i32;
-        let dragged_ty = cg_button_dragged(button);
-        let cg_btn = cg_button(button);
+        let b = cg_button(button)?;
+        let dragged_ty = b.dragged;
+        let cg_btn = b.number;
         for i in 1..=steps {
             let t = i as f64 / steps as f64;
             let x = from.x + ((to.x - from.x) as f64 * t).round() as i32;

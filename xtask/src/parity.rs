@@ -12,6 +12,15 @@
 //! appear in both bindings, and every binding member must correspond to a
 //! core member — unless listed, with a reason, in the per-language
 //! allowlist.
+//!
+//! **Variant coverage.** `Error`, `EventKind`, and `StateFlag` cross the
+//! boundary as hand-written per-variant mappings rather than a mechanical
+//! conversion, and they are `#[non_exhaustive]`. Those two facts together
+//! mean the compiler no longer forces a new variant to be handled: a
+//! downstream `match` needs a `_` arm, and the arm swallows it. Each
+//! `[[types.variant_coverage]]` entry names the files that must mention every
+//! variant of a type, restoring the guard the exhaustive matches used to
+//! provide.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -54,8 +63,20 @@ struct Flatten {
     rename: BTreeMap<String, String>,
 }
 
+/// One `[[types.variant_coverage]]` entry: an enum whose variants must each
+/// be named in every listed file.
+struct VariantCoverage {
+    /// The core enum whose variants are checked.
+    ty: String,
+    /// Repo-relative paths that must mention every variant as `Ty::Variant`.
+    files: Vec<String>,
+}
+
 struct Allowlist {
     tiers: BTreeMap<String, Tier>,
+    /// Enums whose variants are hand-mapped rather than mechanically
+    /// converted, plus the files doing the mapping.
+    variant_coverage: Vec<VariantCoverage>,
     /// Target type -> the types whose members are folded into it.
     ///
     /// Some core types have no binding class of their own; their members
@@ -164,8 +185,44 @@ fn parse_allowlist(path: &Path) -> Result<Allowlist, String> {
         }
     }
 
+    let mut variant_coverage = Vec::new();
+    if let Some(entries) = value
+        .get("types")
+        .and_then(|t| t.get("variant_coverage"))
+        .and_then(|v| v.as_array())
+    {
+        for entry in entries {
+            let Some(ty) = entry.get("type").and_then(|v| v.as_str()) else {
+                return Err(format!(
+                    "{}: a [[types.variant_coverage]] entry is missing `type`",
+                    path.display()
+                ));
+            };
+            let Some(files) = entry.get("files").and_then(|v| v.as_array()) else {
+                return Err(format!(
+                    "{}: [[types.variant_coverage]] `{ty}` is missing `files`",
+                    path.display()
+                ));
+            };
+            if entry.get("reason").and_then(|v| v.as_str()).is_none() {
+                return Err(format!(
+                    "{}: [[types.variant_coverage]] `{ty}` is missing `reason`",
+                    path.display()
+                ));
+            }
+            variant_coverage.push(VariantCoverage {
+                ty: ty.to_string(),
+                files: files
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect(),
+            });
+        }
+    }
+
     Ok(Allowlist {
         tiers,
+        variant_coverage,
         flatten,
         python: LangAllow {
             rust_only: collect(&value, "python", "rust_only"),
@@ -176,6 +233,102 @@ fn parse_allowlist(path: &Path) -> Result<Allowlist, String> {
             extra: collect(&value, "js", "js_only"),
         },
     })
+}
+
+/// Whether `haystack` names `needle` as a whole path segment.
+///
+/// A plain substring search would let `Error::Platform` be satisfied by a
+/// mention of a hypothetical `Error::PlatformTimeout`, so the character after
+/// the match must not continue the identifier.
+fn mentions_path(haystack: &str, needle: &str) -> bool {
+    let mut from = 0;
+    while let Some(rel) = haystack[from..].find(needle) {
+        let end = from + rel + needle.len();
+        let continues = haystack[end..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_');
+        if !continues {
+            return true;
+        }
+        from = end;
+    }
+    false
+}
+
+/// Check that every variant of each `[[types.variant_coverage]]` type is
+/// named in each of that entry's files.
+///
+/// This is the guard that `#[non_exhaustive]` took away. Before it, a new
+/// `Error` variant failed the bindings' build because their `match` had no
+/// `_` arm; now the arm exists for forward compatibility and this check is
+/// what fails instead.
+fn check_variant_coverage(
+    root: &Path,
+    core: &crate::api::ApiSurface,
+    allow: &Allowlist,
+) -> Vec<String> {
+    let mut errs = Vec::new();
+    for entry in &allow.variant_coverage {
+        let Some(ty) = core.get(&entry.ty) else {
+            errs.push(format!(
+                "!! Stale [[types.variant_coverage]] entry: `{}` is not a public type \
+                 in xa11y-core.\n   \
+                 Fix: remove it from bindings/parity_allowlist.toml.",
+                entry.ty
+            ));
+            continue;
+        };
+        if ty.kind != crate::api::TypeKind::Enum {
+            errs.push(format!(
+                "!! [[types.variant_coverage]] `{}` is a {}, not an enum — it has no \
+                 variants to cover.\n   \
+                 Fix: remove it from bindings/parity_allowlist.toml.",
+                entry.ty,
+                ty.kind.as_str()
+            ));
+            continue;
+        }
+        // On an enum, `is_field` members are the variants; inherent methods
+        // come through as methods and are not part of this check.
+        let variants: Vec<&str> = ty
+            .members
+            .iter()
+            .filter(|m| m.is_field)
+            .map(|m| m.name.as_str())
+            .collect();
+
+        for file in &entry.files {
+            let path = root.join(file);
+            let Ok(src) = std::fs::read_to_string(&path) else {
+                errs.push(format!(
+                    "!! [[types.variant_coverage]] `{}` names `{file}`, which could not \
+                     be read.\n   \
+                     Fix: correct the path in bindings/parity_allowlist.toml.",
+                    entry.ty
+                ));
+                continue;
+            };
+            let missing: Vec<&str> = variants
+                .iter()
+                .copied()
+                .filter(|v| !mentions_path(&src, &format!("{}::{v}", entry.ty)))
+                .collect();
+            if !missing.is_empty() {
+                errs.push(format!(
+                    "!! {file} does not handle {} variant(s) of `{}`: {}\n   \
+                     `{}` is #[non_exhaustive], so the compiler accepts the `_` arm \
+                     instead of failing here.\n   \
+                     Fix: add an explicit arm for each, or drop the variant from core.",
+                    missing.len(),
+                    entry.ty,
+                    missing.join(", "),
+                    entry.ty,
+                ));
+            }
+        }
+    }
+    errs
 }
 
 /// Python dunders never need a core counterpart.
@@ -195,6 +348,16 @@ fn is_js_idiomatic(name: &str) -> bool {
 /// otherwise collapse into a single required `down`, quietly excusing the
 /// bindings from exposing one of them. That is reported rather than tolerated:
 /// a `rename` entry is the fix.
+///
+/// A source *method* that shadows a base *method* of the same name is
+/// reported too: `ElementData::new` landing on a type that already has
+/// `Element::new` is two operations sharing one allowlist entry, which lets
+/// one member's design decision silently stand in for the other's.
+///
+/// Method-vs-method only. A source *field* landing on a base accessor of the
+/// same name — `ElementData::pid` and `Element::pid` — is the deref pattern
+/// working as designed: they are the same value, and one binding getter
+/// genuinely covers both.
 fn fold_flattened(
     base: &ApiType,
     flatten: Option<&Flatten>,
@@ -209,6 +372,13 @@ fn fold_flattened(
     // Folded member name -> the `Source::member` it came from, so a collision
     // can name both sides.
     let mut origin: BTreeMap<String, String> = BTreeMap::new();
+    // The base type's own methods, for the shadowing check below.
+    let base_methods: BTreeSet<&str> = base
+        .members
+        .iter()
+        .filter(|m| !m.is_field)
+        .map(|m| m.name.as_str())
+        .collect();
     for src in &f.from {
         let Some(t) = core.get(src) else {
             errs.push(format!(
@@ -229,6 +399,16 @@ fn fold_flattened(
                     "!! [[types.flatten]] into `{}`: `{prev}` and `{from}` both flatten to \
                      `{}`, so only one can be required.\n   \
                      Fix: disambiguate in bindings/parity_allowlist.toml with \
+                     `rename = [{{ member = \"{from}\", to = \"...\" }}]`.",
+                    base.name, member.name
+                ));
+            }
+            if !member.is_field && base_methods.contains(member.name.as_str()) {
+                errs.push(format!(
+                    "!! [[types.flatten]] into `{0}`: `{from}` shadows the existing method \
+                     `{0}::{1}`, so both would be satisfied by one allowlist entry.\n   \
+                     Fix: rename the core method, or disambiguate in \
+                     bindings/parity_allowlist.toml with \
                      `rename = [{{ member = \"{from}\", to = \"...\" }}]`.",
                     base.name, member.name
                 ));
@@ -630,6 +810,16 @@ pub fn check(root: &Path) -> bool {
         }
     }
 
+    // ── Layer 3: variant coverage for hand-mapped non_exhaustive enums ──
+    let variant_errs = check_variant_coverage(root, &core, &allow);
+    if !variant_errs.is_empty() {
+        ok = false;
+        eprintln!();
+        for e in &variant_errs {
+            eprintln!("{e}");
+        }
+    }
+
     // ── Undocumented public core API ────────────────────────────────────
     // Scoped to methods on mirrored types: those are what the binding stubs
     // and the docs site render. Enum variants and plain data fields
@@ -884,5 +1074,152 @@ mod tests {
             input.rename.get("Keyboard::down").map(String::as_str),
             Some("key_down")
         );
+    }
+
+    // ── Variant coverage ────────────────────────────────────────────────
+
+    fn enum_ty(name: &str, variants: &[&str]) -> ApiType {
+        ApiType {
+            name: name.to_string(),
+            kind: TypeKind::Enum,
+            members: variants.iter().map(|v| Member::field(*v, true)).collect(),
+        }
+    }
+
+    fn coverage_allow(ty: &str, files: &[&str]) -> Allowlist {
+        Allowlist {
+            tiers: BTreeMap::new(),
+            variant_coverage: vec![VariantCoverage {
+                ty: ty.to_string(),
+                files: files.iter().map(|f| f.to_string()).collect(),
+            }],
+            flatten: BTreeMap::new(),
+            python: LangAllow::default(),
+            js: LangAllow::default(),
+        }
+    }
+
+    /// A path mention only counts when it ends at an identifier boundary —
+    /// otherwise `Error::Platform` would be satisfied by an unrelated
+    /// `Error::PlatformTimeout` arm.
+    #[test]
+    fn mentions_path_requires_an_identifier_boundary() {
+        assert!(mentions_path(
+            "match e { Error::Platform { .. } => {} }",
+            "Error::Platform"
+        ));
+        assert!(mentions_path("Error::Platform,", "Error::Platform"));
+        assert!(!mentions_path(
+            "Error::PlatformTimeout => {}",
+            "Error::Platform"
+        ));
+        assert!(!mentions_path("Error::Platform2 => {}", "Error::Platform"));
+        // A later real mention still counts even after a near-miss.
+        assert!(mentions_path(
+            "Error::PlatformTimeout => {} Error::Platform => {}",
+            "Error::Platform"
+        ));
+    }
+
+    /// The check reads real files, so it needs one on disk. `Cargo.toml` at
+    /// the repo root is a stable file that mentions no enum variants.
+    fn repo_root() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask has a parent directory")
+            .to_path_buf()
+    }
+
+    #[test]
+    fn variant_coverage_reports_a_variant_no_file_mentions() {
+        let core = surface(&[enum_ty("Error", &["Timeout", "Platform"])]);
+        let allow = coverage_allow("Error", &["Cargo.toml"]);
+        let errs = check_variant_coverage(&repo_root(), &core, &allow);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("Timeout"), "{}", errs[0]);
+        assert!(errs[0].contains("Platform"), "{}", errs[0]);
+    }
+
+    #[test]
+    fn variant_coverage_passes_when_every_variant_is_named() {
+        // The real Error mapping in the Python binding covers every variant.
+        let core = surface(&[enum_ty(
+            "Error",
+            &["Timeout", "Platform", "NoElementBounds"],
+        )]);
+        let allow = coverage_allow("Error", &["xa11y-python/src/lib.rs"]);
+        assert!(check_variant_coverage(&repo_root(), &core, &allow).is_empty());
+    }
+
+    #[test]
+    fn variant_coverage_entry_for_a_missing_type_is_stale() {
+        let core = surface(&[enum_ty("Error", &["Timeout"])]);
+        let allow = coverage_allow("Gone", &["Cargo.toml"]);
+        let errs = check_variant_coverage(&repo_root(), &core, &allow);
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("Stale"), "{}", errs[0]);
+    }
+
+    #[test]
+    fn variant_coverage_entry_for_a_struct_is_reported() {
+        let core = surface(&[ty("Rect", &["x", "y"])]);
+        let allow = coverage_allow("Rect", &["Cargo.toml"]);
+        let errs = check_variant_coverage(&repo_root(), &core, &allow);
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("not an enum"), "{}", errs[0]);
+    }
+
+    #[test]
+    fn variant_coverage_reports_an_unreadable_file() {
+        let core = surface(&[enum_ty("Error", &["Timeout"])]);
+        let allow = coverage_allow("Error", &["no/such/file.rs"]);
+        let errs = check_variant_coverage(&repo_root(), &core, &allow);
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("no/such/file.rs"), "{}", errs[0]);
+    }
+
+    /// The repo's own entries must cover the enums whose bindings mappings
+    /// are hand-written — that is the guard `#[non_exhaustive]` replaced.
+    #[test]
+    fn repo_allowlist_covers_the_hand_mapped_enums() {
+        let path = repo_root().join("bindings/parity_allowlist.toml");
+        let allow = parse_allowlist(&path).expect("the repo allowlist parses");
+        let covered: BTreeSet<&str> = allow
+            .variant_coverage
+            .iter()
+            .map(|v| v.ty.as_str())
+            .collect();
+        for ty in ["Error", "EventKind", "StateFlag"] {
+            assert!(covered.contains(ty), "{ty} needs a variant_coverage entry");
+        }
+    }
+
+    // ── Flatten shadowing ───────────────────────────────────────────────
+
+    /// A flattened *method* that shadows a base method is two operations
+    /// sharing one allowlist entry.
+    #[test]
+    fn flattened_method_shadowing_a_base_method_is_reported() {
+        let base = ty("Element", &["new"]);
+        let core = surface(&[base.clone(), ty("ElementData", &["new"])]);
+        let (_, errs) = fold_flattened(&base, Some(&flatten(&["ElementData"], &[])), &core);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("shadows"), "{}", errs[0]);
+    }
+
+    /// A flattened *field* landing on a base accessor of the same name is
+    /// the deref pattern working as designed — `Element::pid` and
+    /// `ElementData::pid` are the same value.
+    #[test]
+    fn flattened_field_under_a_base_accessor_is_fine() {
+        let base = ty("Element", &["pid"]);
+        let data = ApiType {
+            name: "ElementData".to_string(),
+            kind: TypeKind::Struct,
+            members: vec![Member::field("pid", true)],
+        };
+        let core = surface(&[base.clone(), data]);
+        let (_, errs) = fold_flattened(&base, Some(&flatten(&["ElementData"], &[])), &core);
+        assert!(errs.is_empty(), "{errs:?}");
     }
 }

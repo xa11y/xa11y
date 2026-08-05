@@ -41,12 +41,23 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// See the [module docs](self) for the pattern governing when and how to
 /// attach one. All fields are optional; renderers skip empty fields.
 ///
-/// Always construct with functional-update syntax —
-/// `Diagnosis { condition: ..., ..Diagnosis::default() }` — so adding a new
-/// diagnostic field later doesn't break existing construction sites.
-/// (`#[non_exhaustive]` would enforce that, but it also forbids struct
-/// expressions from the platform crates and bindings that build these.)
+/// `#[non_exhaustive]`: diagnostic context is expected to grow, and every
+/// growth would otherwise be a breaking change for the platform crates and
+/// bindings that build these. Construct with [`Diagnosis::new`] and the
+/// chained setters below:
+///
+/// ```
+/// # use xa11y_core::Diagnosis;
+/// Diagnosis::new()
+///     .condition("visible")
+///     .last_observed("matched button \"Export\" (visible=false)");
+/// ```
+///
+/// The fields stay public — reading them is how the bindings project a
+/// diagnosis into exception attributes, and a renderer that skips an unknown
+/// field is not a compatibility hazard the way a broken constructor is.
 #[derive(Debug, Clone, Default, PartialEq)]
+#[non_exhaustive]
 pub struct Diagnosis {
     /// What the operation was waiting for or trying to find, e.g.
     /// `"visible"`, `"press target actionable (visible && enabled)"`,
@@ -71,6 +82,46 @@ pub struct Diagnosis {
 }
 
 impl Diagnosis {
+    /// An empty diagnosis. Fill it in with the chained setters.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set what the operation was waiting for or trying to find.
+    #[must_use]
+    pub fn condition(mut self, condition: impl Into<String>) -> Self {
+        self.condition = Some(condition.into());
+        self
+    }
+
+    /// Set the selector being resolved when the operation failed.
+    #[must_use]
+    pub fn selector(mut self, selector: impl Into<String>) -> Self {
+        self.selector = Some(selector.into());
+        self
+    }
+
+    /// Set what was last observed before the failure.
+    #[must_use]
+    pub fn last_observed(mut self, last_observed: impl Into<String>) -> Self {
+        self.last_observed = Some(last_observed.into());
+        self
+    }
+
+    /// Set the bounded list of near-miss candidates.
+    #[must_use]
+    pub fn candidates(mut self, candidates: impl IntoIterator<Item = String>) -> Self {
+        self.candidates = candidates.into_iter().collect();
+        self
+    }
+
+    /// Set the bounded rendering of the search scope.
+    #[must_use]
+    pub fn scope(mut self, scope: impl Into<String>) -> Self {
+        self.scope = Some(scope.into());
+        self
+    }
+
     /// True when no field carries any information.
     pub fn is_empty(&self) -> bool {
         self.condition.is_none()
@@ -128,7 +179,16 @@ fn diagnosis_suffix(diagnosis: &Option<Box<Diagnosis>>) -> String {
 /// [`Timeout`](Error::Timeout) through [`Error::selector_not_matched`] /
 /// [`Error::timeout`] and attach context with [`Error::diagnose`] — see the
 /// [module docs](self) for the diagnosis pattern.
+///
+/// `#[non_exhaustive]`: new failure modes arrive with every backend and
+/// platform quirk, so downstream `match` arms need a `_` fallback. Before
+/// this attribute the bindings' exhaustive matches were what forced a new
+/// variant to be mapped; that guard now lives in
+/// `cargo xtask check-bindings-parity`, which fails when a variant is not
+/// referenced by both binding error mappers (see `[[types.variant_coverage]]`
+/// in `bindings/parity_allowlist.toml`).
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// Accessibility permissions not granted.
     #[error("Permission denied: {instructions}")]

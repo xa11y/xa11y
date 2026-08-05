@@ -106,6 +106,13 @@ impl Subscription {
 /// `Event` is boxed to keep the enum small — `Event` carries an
 /// `ElementData` snapshot and is ~360 bytes, while the other two variants
 /// are empty.
+#[allow(
+    clippy::exhaustive_enums,
+    reason = "Closed domain: a bounded receive on a channel either yields a \
+              value, runs out of time, or finds the senders gone. This \
+              mirrors std's RecvTimeoutError, which has the same three \
+              outcomes and is likewise complete."
+)]
 pub enum RecvStatus {
     /// An event was received.
     Event(Box<Event>),
