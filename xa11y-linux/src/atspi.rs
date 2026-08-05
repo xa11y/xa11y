@@ -6,7 +6,7 @@ use std::sync::Mutex;
 
 use rayon::prelude::*;
 use xa11y_core::{
-    ElementData, Error, Provider, Rect, Result, Role, StateSet, Subscription, Toggled,
+    ElementData, ElementParts, Error, Provider, Rect, Result, Role, StateSet, Subscription, Toggled,
 };
 use zbus::blocking::{Connection, Proxy};
 
@@ -778,21 +778,23 @@ impl LinuxProvider {
                 .insert(handle, action_index_map);
         }
 
-        let mut data = ElementData::for_role(role);
-        data.name = name;
-        data.value = value;
-        data.description = description;
-        data.bounds = bounds;
-        data.actions = actions;
-        data.states = states;
-        data.numeric_value = numeric_value;
-        data.min_value = min_value;
-        data.max_value = max_value;
-        data.pid = pid;
-        data.stable_id = Some(aref.path.clone());
-        data.raw = raw;
-        data.handle = handle;
-        data
+        ElementParts {
+            role,
+            name,
+            value,
+            description,
+            bounds,
+            actions,
+            states,
+            numeric_value,
+            min_value,
+            max_value,
+            stable_id: Some(aref.path.clone()),
+            pid,
+            raw,
+            handle,
+        }
+        .into()
     }
 
     /// Get the AT-SPI parent of an accessible ref.

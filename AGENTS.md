@@ -162,11 +162,52 @@ build one:
 
 - **Required fields, few of them** — a plain constructor: `Screenshot::new`,
   `Event::new`, `TreeNode::new`.
-- **Many optional fields** — a constructor plus public field assignment:
-  `ElementData::for_role(role)` then `data.name = ...`. Providers fill in a
-  dozen fields; a dozen chained setters would read worse than assignment.
+- **Many optional fields, partial by nature** — a constructor plus public
+  field assignment: `ElementData::for_role(role)` then `data.name = ...`. An
+  event target or a test fixture genuinely does not have every field.
 - **Options structs** — chained setters returning `Self`:
   `ClickOptions::new().button(..).count(..)`, `Diagnosis::new().condition(..)`.
+
+### When a writer needs the opposite guarantee
+
+`#[non_exhaustive]` protects *readers*: adding a field does not break them.
+For a type whose writers must be complete, it removes something valuable —
+the struct literal that used to fail their build until they populated the new
+field. `ElementData` is the case: three provider crates translate a platform
+node into one, and a new property silently arriving as `None` on every
+platform is a bug, not a default.
+
+The fix is to give the two roles separate types rather than to pick one
+guarantee over the other:
+
+```rust
+#[non_exhaustive]                       // readers: growth is not breaking
+pub struct ElementData { .. }
+
+#[doc(hidden)]                          // writers: growth IS breaking, on purpose
+#[allow(clippy::exhaustive_structs, reason = "This type IS the completeness guard...")]
+pub struct ElementParts { .. }          // same fields, exhaustive
+
+impl From<ElementParts> for ElementData { .. }   // reconciled in one place
+```
+
+Providers write `ElementParts { .. }.into()`. Adding a field to both types is
+then a compile error in every backend and a no-op for consumers.
+
+Reach for this only where all three hold: the type is `#[non_exhaustive]`, it
+has complete-construction sites in *other* crates, and a defaulted new field
+would be a bug. Two of those are easy to get wrong:
+
+- **Construction sites inside `xa11y-core` need nothing.** A crate can always
+  struct-literal its own `#[non_exhaustive]` type, and that literal is still
+  exhaustiveness-checked. `TreeNode` is built only in core, so it is covered.
+- **An all-required-args constructor is already the guard.** `Screenshot::new`
+  takes every field, so a new one changes the signature and breaks all callers.
+  A `Parts` type would add nothing.
+
+`Diagnosis`, `ClickOptions`, and `DragOptions` are the counter-case: every
+call site sets one or two fields on purpose, so completeness is meaningless
+and `Default` is the whole point.
 
 One trap: a constructor named `new` on a type that is **flattened** into
 another (see [Flattening](#flattening)) collides with the target's own `new`,

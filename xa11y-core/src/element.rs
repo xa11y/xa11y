@@ -16,9 +16,14 @@ use crate::role::Role;
 /// `ElementData` is used directly by provider implementors.
 ///
 /// `#[non_exhaustive]`: this is the type that grows every time the normalized
-/// element model learns a new property, and provider implementors are a
-/// documented public role. Build one with [`ElementData::for_role`] and assign
-/// the fields the platform reported:
+/// element model learns a new property, so adding a field must not break the
+/// consumers that only ever *read* one.
+///
+/// Providers, which *write* one, need the opposite guarantee — a new field
+/// should stop their build until they have decided what it means on their
+/// platform. [`ElementParts`] carries that half of the contract; see its docs.
+/// Build a partial element (an event target, a test fixture) with
+/// [`ElementData::for_role`] and assign what you have:
 ///
 /// ```
 /// # use xa11y_core::{ElementData, Role};
@@ -141,6 +146,88 @@ impl Default for ElementData {
     /// An [`Role::Unknown`] element with no properties.
     fn default() -> Self {
         Self::for_role(Role::Unknown)
+    }
+}
+
+/// Every field a provider must decide on when it builds a complete element.
+///
+/// [`ElementData`] is `#[non_exhaustive]` because its *readers* must not break
+/// when the element model grows. Its *writers* need the opposite: a new field
+/// should fail their build until each platform has decided what maps to it.
+/// Both properties hold because the two roles have separate types — this one
+/// is deliberately exhaustive, so a struct literal in `xa11y-linux`,
+/// `xa11y-macos`, or `xa11y-windows` stops compiling the moment a field is
+/// added here.
+///
+/// Use it in the "build a complete element from a platform node" path. Paths
+/// that are partial by nature — an event target with no bounds, a test
+/// fixture — should use [`ElementData::for_role`] instead, and accept that a
+/// new field arrives there as its default.
+///
+/// Not public API: `#[doc(hidden)]`, and changing it is not a semver event.
+#[doc(hidden)]
+#[allow(
+    clippy::exhaustive_structs,
+    reason = "This type IS the completeness guard. Literal construction from \
+              the provider crates is exactly what makes a new ElementData \
+              field fail their build until each platform maps it; \
+              #[non_exhaustive] here would delete the property it exists for."
+)]
+#[derive(Debug, Clone)]
+pub struct ElementParts {
+    pub role: Role,
+    pub name: Option<String>,
+    pub value: Option<String>,
+    pub description: Option<String>,
+    pub bounds: Option<Rect>,
+    pub actions: Vec<String>,
+    pub states: StateSet,
+    pub numeric_value: Option<f64>,
+    pub min_value: Option<f64>,
+    pub max_value: Option<f64>,
+    pub stable_id: Option<String>,
+    pub pid: Option<u32>,
+    pub raw: RawPlatformData,
+    pub handle: u64,
+}
+
+impl From<ElementParts> for ElementData {
+    fn from(parts: ElementParts) -> Self {
+        // Destructured field-by-field on purpose: this is the one place the
+        // two types are reconciled, so a field added to one but not the other
+        // fails here rather than silently defaulting in every provider.
+        let ElementParts {
+            role,
+            name,
+            value,
+            description,
+            bounds,
+            actions,
+            states,
+            numeric_value,
+            min_value,
+            max_value,
+            stable_id,
+            pid,
+            raw,
+            handle,
+        } = parts;
+        Self {
+            role,
+            name,
+            value,
+            description,
+            bounds,
+            actions,
+            states,
+            numeric_value,
+            min_value,
+            max_value,
+            stable_id,
+            pid,
+            raw,
+            handle,
+        }
     }
 }
 

@@ -13,8 +13,8 @@ use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, STATE_SYSTEM_
 
 use xa11y_core::{
     selector::{matches_simple, Combinator, Selector, SelectorSegment},
-    CancelHandle, ElementData, Error, Event, EventKind, EventReceiver, Provider, Rect, Result,
-    Role, StateFlag, StateSet, Subscription, Toggled,
+    CancelHandle, ElementData, ElementParts, Error, Event, EventKind, EventReceiver, Provider,
+    Rect, Result, Role, StateFlag, StateSet, Subscription, Toggled,
 };
 
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
@@ -572,21 +572,23 @@ fn build_snapshot_data(
         (None, None, None)
     };
 
-    let mut data = ElementData::for_role(role);
-    data.name = name;
-    data.value = value;
-    data.description = description;
-    data.bounds = bounds;
-    data.actions = actions;
-    data.states = states;
-    data.stable_id = automation_id;
-    data.numeric_value = numeric_value;
-    data.min_value = min_value;
-    data.max_value = max_value;
-    data.pid = pid;
-    data.raw = raw;
-    data.handle = handle;
-    data
+    ElementParts {
+        role,
+        name,
+        value,
+        description,
+        bounds,
+        actions,
+        states,
+        numeric_value,
+        min_value,
+        max_value,
+        stable_id: automation_id,
+        pid,
+        raw,
+        handle,
+    }
+    .into()
 }
 
 /// Build the batch request that describes which properties and patterns

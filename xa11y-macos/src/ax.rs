@@ -14,8 +14,8 @@ use rayon::prelude::*;
 #[cfg(test)]
 use xa11y_core::Selector;
 use xa11y_core::{
-    CancelHandle, ElementData, Error, Event, EventKind, EventReceiver, Provider, Rect, Result,
-    Role, StateFlag, StateSet, Subscription, Toggled,
+    CancelHandle, ElementData, ElementParts, Error, Event, EventKind, EventReceiver, Provider,
+    Rect, Result, Role, StateFlag, StateSet, Subscription, Toggled,
 };
 
 // ── FFI Declarations ──────────────────────────────────────────────────────────
@@ -1715,21 +1715,23 @@ fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -
         let value = xa11y_core::text::strip_bidi_opt(value);
         let description = xa11y_core::text::strip_bidi_opt(description);
 
-        let mut data = ElementData::for_role(role);
-        data.name = name;
-        data.value = value;
-        data.description = description;
-        data.bounds = bounds;
-        data.actions = actions;
-        data.states = states;
-        data.stable_id = attrs.identifier;
-        data.numeric_value = numeric_value;
-        data.min_value = min_value;
-        data.max_value = max_value;
-        data.raw = raw;
-        data.pid = pid;
-        data.handle = handle;
-        data
+        ElementParts {
+            role,
+            name,
+            value,
+            description,
+            bounds,
+            actions,
+            states,
+            numeric_value,
+            min_value,
+            max_value,
+            stable_id: attrs.identifier,
+            pid,
+            raw,
+            handle,
+        }
+        .into()
     };
     body()
 }
