@@ -9,108 +9,191 @@ use crate::error::Error;
 use crate::provider::Provider;
 use crate::role::Role;
 
-/// The raw data for a single element in an accessibility tree.
+/// Declare a reader/writer struct pair from one field list.
 ///
-/// This is the underlying data struct. Most consumers should use [`Element`],
-/// which wraps `ElementData` with a provider reference for lazy navigation.
-/// `ElementData` is used directly by provider implementors.
+/// `#[non_exhaustive]` gives *readers* a stability guarantee: adding a field
+/// does not break a consumer that only reads one. *Writers* need the opposite
+/// — a new field should stop their build until they have decided what it
+/// means. Two types satisfy both, but only if their field sets cannot drift,
+/// which is what this macro enforces: there is one list, so a field cannot be
+/// added to one type and defaulted in the other.
 ///
-/// `#[non_exhaustive]`: this is the type that grows every time the normalized
-/// element model learns a new property, so adding a field must not break the
-/// consumers that only ever *read* one.
-///
-/// Providers, which *write* one, need the opposite guarantee — a new field
-/// should stop their build until they have decided what it means on their
-/// platform. [`ElementParts`] carries that half of the contract; see its docs.
-/// Build a partial element (an event target, a test fixture) with
-/// [`ElementData::for_role`] and assign what you have:
-///
-/// ```
-/// # use xa11y_core::{ElementData, Role};
-/// let mut data = ElementData::for_role(Role::Button);
-/// data.name = Some("Submit".to_string());
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct ElementData {
-    /// Element role
-    pub role: Role,
+/// The reader gets the doc comments, serde attributes, and `#[non_exhaustive]`.
+/// The writer gets the bare fields and stays exhaustive, so a struct literal
+/// in another crate fails to compile the moment the list grows.
+macro_rules! reader_writer_pair {
+    (
+        $(#[$reader_meta:meta])*
+        pub struct $reader:ident;
 
-    /// Human-readable name (title, label).
+        $(#[$writer_meta:meta])*
+        pub struct $writer:ident;
+
+        fields {
+            $(
+                $(#[$field_meta:meta])*
+                pub $field:ident : $ty:ty,
+            )*
+        }
+    ) => {
+        $(#[$reader_meta])*
+        #[non_exhaustive]
+        pub struct $reader {
+            $(
+                $(#[$field_meta])*
+                pub $field: $ty,
+            )*
+        }
+
+        $(#[$writer_meta])*
+        #[doc(hidden)]
+        pub struct $writer {
+            $(pub $field: $ty,)*
+        }
+
+        impl From<$writer> for $reader {
+            fn from(parts: $writer) -> Self {
+                // Destructured, not field-by-field: both halves come from the
+                // macro's single field list, so neither can gain a field the
+                // other silently defaults.
+                let $writer { $($field,)* } = parts;
+                Self { $($field,)* }
+            }
+        }
+    };
+}
+
+reader_writer_pair! {
+    /// The raw data for a single element in an accessibility tree.
     ///
-    /// Stripped of Unicode bidi format controls (LRM, RLM, embeddings,
-    /// overrides, isolates) so equality assertions match the logical text.
-    /// The unstripped platform string is preserved in [`Self::raw`] under the
-    /// platform-native key (e.g. `AXTitle` on macOS, `atspi_name` on Linux,
-    /// `uia_name` on Windows). See [`crate::text::strip_bidi`].
-    pub name: Option<String>,
-
-    /// Current value (text content, slider position, etc.).
+    /// This is the underlying data struct. Most consumers should use
+    /// [`Element`], which wraps `ElementData` with a provider reference for
+    /// lazy navigation. `ElementData` is used directly by provider
+    /// implementors.
     ///
-    /// Stripped of Unicode bidi format controls. The unstripped platform
-    /// string is preserved in [`Self::raw`] (`AXValue` on macOS, `atspi_value`
-    /// on Linux, `uia_value` on Windows). See [`crate::text::strip_bidi`].
-    pub value: Option<String>,
-
-    /// Supplementary description (tooltip, help text).
+    /// `#[non_exhaustive]`: this is the type that grows every time the
+    /// normalized element model learns a new property, so adding a field must
+    /// not break the consumers that only ever *read* one. Providers, which
+    /// *write* one, get the opposite guarantee from [`ElementParts`].
     ///
-    /// Stripped of Unicode bidi format controls. The unstripped platform
-    /// string is preserved in [`Self::raw`] (`AXDescription`/`AXHelp` on
-    /// macOS, `atspi_description` on Linux, `uia_help_text` on Windows).
-    /// See [`crate::text::strip_bidi`].
-    pub description: Option<String>,
-
-    /// Bounding rectangle in **logical** screen coordinates
-    /// (device-independent points), origin at the top-left of the primary
-    /// display. This is the same coordinate space accepted by
-    /// [`crate::ScreenshotProvider::capture_region`] and by the input layer's
-    /// [`crate::input::Point`], so bounds can be fed directly to
-    /// `screenshot_element` / `click` without conversion.
+    /// Build a partial element (an event target, a test fixture) with
+    /// [`ElementData::for_role`] and assign what you have:
     ///
-    /// To map to physical device pixels (e.g. to index into a captured image),
-    /// multiply by the [`crate::Screenshot::scale`] reported for that display:
-    /// `physical = logical × scale`. See [`Rect::to_physical`] /
-    /// [`Rect::to_logical`].
-    pub bounds: Option<Rect>,
+    /// ```
+    /// # use xa11y_core::{ElementData, Role};
+    /// let mut data = ElementData::for_role(Role::Button);
+    /// data.name = Some("Submit".to_string());
+    /// ```
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct ElementData;
 
-    /// Available actions reported by the platform.
+    /// Every field a provider must decide on when it builds a *complete*
+    /// element from a platform node.
     ///
-    /// Names are `snake_case` strings — well-known actions use their standard
-    /// names (`"press"`, `"toggle"`, `"expand"`, etc.) and platform-specific
-    /// actions use their converted names (e.g. macOS `AXCustomThing` →
-    /// `"custom_thing"`).
-    pub actions: Vec<String>,
-
-    /// Current state flags
-    pub states: StateSet,
-
-    /// Numeric value for range controls (sliders, progress bars, spinners).
-    pub numeric_value: Option<f64>,
-
-    /// Minimum value for range controls.
-    pub min_value: Option<f64>,
-
-    /// Maximum value for range controls.
-    pub max_value: Option<f64>,
-
-    /// Platform-assigned stable identifier for cross-snapshot correlation.
-    /// - macOS: `AXIdentifier`
-    /// - Windows: `AutomationId`
-    /// - Linux: D-Bus `object_path`
+    /// Deliberately exhaustive: a struct literal in `xa11y-linux`,
+    /// `xa11y-macos`, or `xa11y-windows` stops compiling the moment a field
+    /// is added, which is the only thing that forces a per-platform decision
+    /// instead of a silent `None` on every backend.
     ///
-    /// Not all elements have one.
-    pub stable_id: Option<String>,
+    /// Paths that are partial by nature — an event target with no bounds, a
+    /// test fixture — should use [`ElementData::for_role`] instead and accept
+    /// that a new field arrives there as its default.
+    ///
+    /// Not public API (`#[doc(hidden)]`). Because a new field here is a
+    /// compile error in the sibling provider crates, they pin `xa11y-core`
+    /// with `=` rather than a caret requirement — see the workspace
+    /// `Cargo.toml`.
+    #[allow(
+        clippy::exhaustive_structs,
+        reason = "This type IS the completeness guard. Literal construction \
+                  from the provider crates is exactly what makes a new \
+                  ElementData field fail their build until each platform maps \
+                  it; #[non_exhaustive] here would delete the property it \
+                  exists for."
+    )]
+    #[derive(Debug, Clone)]
+    pub struct ElementParts;
 
-    /// Process ID of the application that owns this element.
-    pub pid: Option<u32>,
+    fields {
+        /// Element role
+        pub role: Role,
 
-    /// Platform-specific raw data
-    pub raw: RawPlatformData,
+        /// Human-readable name (title, label).
+        ///
+        /// Stripped of Unicode bidi format controls (LRM, RLM, embeddings,
+        /// overrides, isolates) so equality assertions match the logical text.
+        /// The unstripped platform string is preserved in [`Self::raw`] under the
+        /// platform-native key (e.g. `AXTitle` on macOS, `atspi_name` on Linux,
+        /// `uia_name` on Windows). See [`crate::text::strip_bidi`].
+        pub name: Option<String>,
 
-    /// Opaque handle for the provider to look up the platform object.
-    /// Not serialized — only valid within the provider that created it.
-    #[serde(skip, default)]
-    pub handle: u64,
+        /// Current value (text content, slider position, etc.).
+        ///
+        /// Stripped of Unicode bidi format controls. The unstripped platform
+        /// string is preserved in [`Self::raw`] (`AXValue` on macOS, `atspi_value`
+        /// on Linux, `uia_value` on Windows). See [`crate::text::strip_bidi`].
+        pub value: Option<String>,
+
+        /// Supplementary description (tooltip, help text).
+        ///
+        /// Stripped of Unicode bidi format controls. The unstripped platform
+        /// string is preserved in [`Self::raw`] (`AXDescription`/`AXHelp` on
+        /// macOS, `atspi_description` on Linux, `uia_help_text` on Windows).
+        /// See [`crate::text::strip_bidi`].
+        pub description: Option<String>,
+
+        /// Bounding rectangle in **logical** screen coordinates
+        /// (device-independent points), origin at the top-left of the primary
+        /// display. This is the same coordinate space accepted by
+        /// [`crate::ScreenshotProvider::capture_region`] and by the input layer's
+        /// [`crate::input::Point`], so bounds can be fed directly to
+        /// `screenshot_element` / `click` without conversion.
+        ///
+        /// To map to physical device pixels (e.g. to index into a captured image),
+        /// multiply by the [`crate::Screenshot::scale`] reported for that display:
+        /// `physical = logical × scale`. See [`Rect::to_physical`] /
+        /// [`Rect::to_logical`].
+        pub bounds: Option<Rect>,
+
+        /// Available actions reported by the platform.
+        ///
+        /// Names are `snake_case` strings — well-known actions use their standard
+        /// names (`"press"`, `"toggle"`, `"expand"`, etc.) and platform-specific
+        /// actions use their converted names (e.g. macOS `AXCustomThing` →
+        /// `"custom_thing"`).
+        pub actions: Vec<String>,
+
+        /// Current state flags
+        pub states: StateSet,
+
+        /// Numeric value for range controls (sliders, progress bars, spinners).
+        pub numeric_value: Option<f64>,
+
+        /// Minimum value for range controls.
+        pub min_value: Option<f64>,
+
+        /// Maximum value for range controls.
+        pub max_value: Option<f64>,
+
+        /// Platform-assigned stable identifier for cross-snapshot correlation.
+        /// - macOS: `AXIdentifier`
+        /// - Windows: `AutomationId`
+        /// - Linux: D-Bus `object_path`
+        ///
+        /// Not all elements have one.
+        pub stable_id: Option<String>,
+
+        /// Process ID of the application that owns this element.
+        pub pid: Option<u32>,
+
+        /// Platform-specific raw data
+        pub raw: RawPlatformData,
+
+        /// Opaque handle for the provider to look up the platform object.
+        /// Not serialized — only valid within the provider that created it.
+        #[serde(skip, default)]
+        pub handle: u64,
+    }
 }
 
 impl ElementData {
@@ -119,10 +202,16 @@ impl ElementData {
     /// `states` starts at [`StateSet::default`] (enabled and visible, nothing
     /// else), and `handle` at `0` — providers assign their own.
     ///
+    /// This is the *partial* construction path. A provider translating a real
+    /// platform node should use [`ElementParts`] instead, so that a new field
+    /// fails its build rather than arriving as a default.
+    ///
     /// Named `for_role` rather than `new` because `ElementData` is flattened
     /// onto `Element` for the bindings-parity check, where a member called
     /// `new` would collide with the existing [`Element::new`].
     pub fn for_role(role: Role) -> Self {
+        // Struct literal, not a builder: this lives in the defining crate, so
+        // the compiler still checks it for completeness when a field is added.
         Self {
             role,
             name: None,
@@ -143,91 +232,9 @@ impl ElementData {
 }
 
 impl Default for ElementData {
-    /// An [`Role::Unknown`] element with no properties.
+    /// A [`Role::Unknown`] element with no properties.
     fn default() -> Self {
         Self::for_role(Role::Unknown)
-    }
-}
-
-/// Every field a provider must decide on when it builds a complete element.
-///
-/// [`ElementData`] is `#[non_exhaustive]` because its *readers* must not break
-/// when the element model grows. Its *writers* need the opposite: a new field
-/// should fail their build until each platform has decided what maps to it.
-/// Both properties hold because the two roles have separate types — this one
-/// is deliberately exhaustive, so a struct literal in `xa11y-linux`,
-/// `xa11y-macos`, or `xa11y-windows` stops compiling the moment a field is
-/// added here.
-///
-/// Use it in the "build a complete element from a platform node" path. Paths
-/// that are partial by nature — an event target with no bounds, a test
-/// fixture — should use [`ElementData::for_role`] instead, and accept that a
-/// new field arrives there as its default.
-///
-/// Not public API: `#[doc(hidden)]`, and changing it is not a semver event.
-#[doc(hidden)]
-#[allow(
-    clippy::exhaustive_structs,
-    reason = "This type IS the completeness guard. Literal construction from \
-              the provider crates is exactly what makes a new ElementData \
-              field fail their build until each platform maps it; \
-              #[non_exhaustive] here would delete the property it exists for."
-)]
-#[derive(Debug, Clone)]
-pub struct ElementParts {
-    pub role: Role,
-    pub name: Option<String>,
-    pub value: Option<String>,
-    pub description: Option<String>,
-    pub bounds: Option<Rect>,
-    pub actions: Vec<String>,
-    pub states: StateSet,
-    pub numeric_value: Option<f64>,
-    pub min_value: Option<f64>,
-    pub max_value: Option<f64>,
-    pub stable_id: Option<String>,
-    pub pid: Option<u32>,
-    pub raw: RawPlatformData,
-    pub handle: u64,
-}
-
-impl From<ElementParts> for ElementData {
-    fn from(parts: ElementParts) -> Self {
-        // Destructured field-by-field on purpose: this is the one place the
-        // two types are reconciled, so a field added to one but not the other
-        // fails here rather than silently defaulting in every provider.
-        let ElementParts {
-            role,
-            name,
-            value,
-            description,
-            bounds,
-            actions,
-            states,
-            numeric_value,
-            min_value,
-            max_value,
-            stable_id,
-            pid,
-            raw,
-            handle,
-        } = parts;
-        Self {
-            role,
-            name,
-            value,
-            description,
-            bounds,
-            actions,
-            states,
-            numeric_value,
-            min_value,
-            max_value,
-            stable_id,
-            pid,
-            raw,
-            handle,
-        }
     }
 }
 
@@ -500,49 +507,74 @@ fn write_tree_node(node: &TreeNode, depth: usize, out: &mut String) {
     }
 }
 
-/// Boolean state flags for an element.
-///
-/// **Semantics for non-applicable states:** When a state doesn't apply to an
-/// element's role, the backend uses the platform's reported value or defaults:
-/// - `enabled`: `true` (elements are enabled unless explicitly disabled)
-/// - `visible`: `true` (elements are visible unless explicitly hidden/offscreen)
-/// - `focused`, `active`, `focusable`, `modal`, `selected`, `editable`, `required`, `busy`: `false`
-///
-/// States that are inherently inapplicable use `Option`: `checked` is `None`
-/// for non-checkable elements, `expanded` is `None` for non-expandable elements.
-///
-/// More states may be added in compatible releases, so this struct is
-/// `#[non_exhaustive]`: construct it via [`StateSet::default()`] (or
-/// [`Default::default()`]) and set the fields you need. Struct-literal
-/// construction is reserved to `xa11y-core`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[non_exhaustive]
-pub struct StateSet {
-    pub enabled: bool,
-    pub visible: bool,
-    pub focused: bool,
-    /// Whether this element is the active (foreground) window — the window that
-    /// currently receives the user's input. Only meaningful for window-like
-    /// elements (windows, dialogs); `false` elsewhere. Distinct from `focused`,
-    /// which is element-level keyboard focus. Platform mappings: the AT-SPI
-    /// `ACTIVE` state (Linux), `AXMain` (macOS), and the foreground `HWND`
-    /// (Windows).
-    #[serde(default)]
-    pub active: bool,
-    /// None = not checkable
-    pub checked: Option<Toggled>,
-    pub selected: bool,
-    /// None = not expandable
-    pub expanded: Option<bool>,
-    pub editable: bool,
-    /// Whether the element can receive keyboard focus
-    pub focusable: bool,
-    /// Whether the element is a modal dialog
-    pub modal: bool,
-    /// Form field required
-    pub required: bool,
-    /// Async operation in progress
-    pub busy: bool,
+reader_writer_pair! {
+    /// Boolean state flags for an element.
+    ///
+    /// **Semantics for non-applicable states:** When a state doesn't apply to
+    /// an element's role, the backend uses the platform's reported value or
+    /// defaults:
+    /// - `enabled`: `true` (elements are enabled unless explicitly disabled)
+    /// - `visible`: `true` (elements are visible unless explicitly hidden/offscreen)
+    /// - `focused`, `active`, `focusable`, `modal`, `selected`, `editable`, `required`, `busy`: `false`
+    ///
+    /// States that are inherently inapplicable use `Option`: `checked` is
+    /// `None` for non-checkable elements, `expanded` is `None` for
+    /// non-expandable elements.
+    ///
+    /// `#[non_exhaustive]`: more states arrive in compatible releases and must
+    /// not break readers. Providers building a complete state set use
+    /// [`StateParts`], which is exhaustive — the documented defaults above are
+    /// what a *partial* construction falls back to, not a licence for a
+    /// backend to skip deciding.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    pub struct StateSet;
+
+    /// Every state a provider must decide on when it translates a platform
+    /// node's state bits.
+    ///
+    /// Deliberately exhaustive, for the same reason as [`ElementParts`]: a new
+    /// state must fail each backend's build rather than silently inherit
+    /// [`StateSet::default`]. That matters more here than the defaults
+    /// suggest — the parity check requires every state to surface as a binding
+    /// getter, so a silently-defaulted state ships as a documented API that no
+    /// platform populates.
+    ///
+    /// Not public API (`#[doc(hidden)]`).
+    #[allow(
+        clippy::exhaustive_structs,
+        reason = "This type IS the completeness guard for element state. See \
+                  ElementParts; the same reasoning applies."
+    )]
+    #[derive(Debug, Clone)]
+    pub struct StateParts;
+
+    fields {
+        pub enabled: bool,
+        pub visible: bool,
+        pub focused: bool,
+        /// Whether this element is the active (foreground) window — the window that
+        /// currently receives the user's input. Only meaningful for window-like
+        /// elements (windows, dialogs); `false` elsewhere. Distinct from `focused`,
+        /// which is element-level keyboard focus. Platform mappings: the AT-SPI
+        /// `ACTIVE` state (Linux), `AXMain` (macOS), and the foreground `HWND`
+        /// (Windows).
+        #[serde(default)]
+        pub active: bool,
+        /// None = not checkable
+        pub checked: Option<Toggled>,
+        pub selected: bool,
+        /// None = not expandable
+        pub expanded: Option<bool>,
+        pub editable: bool,
+        /// Whether the element can receive keyboard focus
+        pub focusable: bool,
+        /// Whether the element is a modal dialog
+        pub modal: bool,
+        /// Form field required
+        pub required: bool,
+        /// Async operation in progress
+        pub busy: bool,
+    }
 }
 
 impl Default for StateSet {

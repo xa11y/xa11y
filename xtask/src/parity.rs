@@ -68,8 +68,75 @@ struct Flatten {
 struct VariantCoverage {
     /// The core enum whose variants are checked.
     ty: String,
-    /// Repo-relative paths that must mention every variant as `Ty::Variant`.
-    files: Vec<String>,
+    /// Files that must mention every variant, and how each spells it.
+    files: Vec<CoveredFile>,
+}
+
+/// One file in a `[[types.variant_coverage]]` entry.
+struct CoveredFile {
+    /// Repo-relative path.
+    path: String,
+    /// How this file spells a variant.
+    spelling: Spelling,
+    /// Literal prefix the file puts in front of the spelled variant, e.g.
+    /// `XA11Y_` for the JS error-code constants.
+    prefix: String,
+}
+
+/// How a covered file names a variant.
+///
+/// A Rust mapping writes the variant as a path (`EventKind::FocusChanged`);
+/// a generated `.pyi`, a `.d.ts` union, or a JS lookup table writes it as a
+/// string in that language's own convention. Both are places a new variant
+/// has to be handled, so both are checkable — they just need different
+/// needles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Spelling {
+    /// `EventKind::FocusChanged` — a path in Rust code.
+    RustPath,
+    /// `focus_changed`
+    Snake,
+    /// `focusChanged`
+    Camel,
+    /// `FOCUS_CHANGED`
+    ScreamingSnake,
+}
+
+impl Spelling {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "rust_path" => Some(Self::RustPath),
+            "snake" => Some(Self::Snake),
+            "camel" => Some(Self::Camel),
+            "screaming_snake" => Some(Self::ScreamingSnake),
+            _ => None,
+        }
+    }
+}
+
+/// `FocusChanged` -> `focus_changed`.
+fn to_snake(variant: &str) -> String {
+    let mut out = String::with_capacity(variant.len() + 4);
+    for (i, c) in variant.chars().enumerate() {
+        if c.is_uppercase() {
+            if i != 0 {
+                out.push('_');
+            }
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// `FocusChanged` -> `focusChanged`.
+fn to_camel(variant: &str) -> String {
+    let mut chars = variant.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 struct Allowlist {
@@ -210,12 +277,51 @@ fn parse_allowlist(path: &Path) -> Result<Allowlist, String> {
                     path.display()
                 ));
             }
+            let mut covered = Vec::new();
+            for f in files {
+                // A bare string is the common case: a Rust mapping that
+                // writes `Type::Variant`.
+                if let Some(fp) = f.as_str() {
+                    covered.push(CoveredFile {
+                        path: fp.to_string(),
+                        spelling: Spelling::RustPath,
+                        prefix: String::new(),
+                    });
+                    continue;
+                }
+                let Some(fp) = f.get("path").and_then(|v| v.as_str()) else {
+                    return Err(format!(
+                        "{}: a [[types.variant_coverage]] `{ty}` file entry needs `path`",
+                        path.display()
+                    ));
+                };
+                let spelling = match f.get("spelling").and_then(|v| v.as_str()) {
+                    None => Spelling::RustPath,
+                    Some(name) => match Spelling::parse(name) {
+                        Some(sp) => sp,
+                        None => {
+                            return Err(format!(
+                                "{}: [[types.variant_coverage]] `{ty}` file `{fp}` has \
+                                 unknown spelling `{name}` (expected rust_path, snake, \
+                                 camel, or screaming_snake)",
+                                path.display()
+                            ))
+                        }
+                    },
+                };
+                covered.push(CoveredFile {
+                    path: fp.to_string(),
+                    spelling,
+                    prefix: f
+                        .get("prefix")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                });
+            }
             variant_coverage.push(VariantCoverage {
                 ty: ty.to_string(),
-                files: files
-                    .iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect(),
+                files: covered,
             });
         }
     }
@@ -233,6 +339,91 @@ fn parse_allowlist(path: &Path) -> Result<Allowlist, String> {
             extra: collect(&value, "js", "js_only"),
         },
     })
+}
+
+/// Strip comments so a mention inside one cannot satisfy the check.
+///
+/// `// TODO: map Error::NewVariant later` is not handling a variant, but a
+/// plain substring scan counts it. Comment syntax is picked by extension:
+/// `#` for Python, `//` and `/* */` for Rust and JavaScript. (A `#` scan
+/// would eat Rust attributes, so the two are kept apart rather than unioned.)
+fn strip_comments(src: &str, path: &str) -> String {
+    let hash_comments = path.ends_with(".py") || path.ends_with(".pyi");
+    let mut out = String::with_capacity(src.len());
+    let mut chars = src.chars().peekable();
+    let mut in_block = false;
+    while let Some(c) = chars.next() {
+        if in_block {
+            if c == '*' && chars.peek() == Some(&'/') {
+                chars.next();
+                in_block = false;
+            }
+            continue;
+        }
+        if hash_comments && c == '#' {
+            for n in chars.by_ref() {
+                if n == '\n' {
+                    out.push('\n');
+                    break;
+                }
+            }
+            continue;
+        }
+        if !hash_comments && c == '/' {
+            match chars.peek() {
+                Some('/') => {
+                    for n in chars.by_ref() {
+                        if n == '\n' {
+                            out.push('\n');
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                Some('*') => {
+                    chars.next();
+                    in_block = true;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Blank out string-literal bodies, keeping the quotes.
+///
+/// Only applied to the `rust_path` spelling: a `Type::Variant` mention has to
+/// be code, so `let msg = "handle Error::NewVariant";` must not count. The
+/// string spellings are the opposite — their whole point is to match a string
+/// literal — so they skip this.
+fn strip_string_literals(src: &str) -> String {
+    let mut out = String::with_capacity(src.len());
+    let mut chars = src.chars().peekable();
+    while let Some(c) = chars.next() {
+        out.push(c);
+        if c != '"' && c != '\'' {
+            continue;
+        }
+        let quote = c;
+        while let Some(n) = chars.next() {
+            if n == '\\' {
+                chars.next();
+                continue;
+            }
+            if n == quote {
+                out.push(quote);
+                break;
+            }
+            if n == '\n' {
+                out.push('\n');
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// Whether `haystack` names `needle` as a whole path segment.
@@ -299,27 +490,43 @@ fn check_variant_coverage(
             .collect();
 
         for file in &entry.files {
-            let path = root.join(file);
-            let Ok(src) = std::fs::read_to_string(&path) else {
+            let path = root.join(&file.path);
+            let Ok(raw) = std::fs::read_to_string(&path) else {
                 errs.push(format!(
-                    "!! [[types.variant_coverage]] `{}` names `{file}`, which could not \
+                    "!! [[types.variant_coverage]] `{}` names `{}`, which could not \
                      be read.\n   \
                      Fix: correct the path in bindings/parity_allowlist.toml.",
-                    entry.ty
+                    entry.ty, file.path
                 ));
                 continue;
             };
-            let missing: Vec<&str> = variants
+            // Comments never count as handling a variant. For the code
+            // spelling, string literals do not either.
+            let mut src = strip_comments(&raw, &file.path);
+            if file.spelling == Spelling::RustPath {
+                src = strip_string_literals(&src);
+            }
+            let needle = |v: &str| match file.spelling {
+                Spelling::RustPath => format!("{}::{v}", entry.ty),
+                Spelling::Snake => format!("{}{}", file.prefix, to_snake(v)),
+                Spelling::Camel => format!("{}{}", file.prefix, to_camel(v)),
+                Spelling::ScreamingSnake => {
+                    format!("{}{}", file.prefix, to_snake(v).to_uppercase())
+                }
+            };
+            let missing: Vec<String> = variants
                 .iter()
                 .copied()
-                .filter(|v| !mentions_path(&src, &format!("{}::{v}", entry.ty)))
+                .filter(|v| !mentions_path(&src, &needle(v)))
+                .map(|v| format!("{v} (as `{}`)", needle(v)))
                 .collect();
             if !missing.is_empty() {
                 errs.push(format!(
-                    "!! {file} does not handle {} variant(s) of `{}`: {}\n   \
-                     `{}` is #[non_exhaustive], so the compiler accepts the `_` arm \
+                    "!! {} does not handle {} variant(s) of `{}`: {}\n   \
+                     `{}` is #[non_exhaustive], so the compiler accepts a `_` arm \
                      instead of failing here.\n   \
-                     Fix: add an explicit arm for each, or drop the variant from core.",
+                     Fix: handle each explicitly, or drop the variant from core.",
+                    file.path,
                     missing.len(),
                     entry.ty,
                     missing.join(", "),
@@ -1091,7 +1298,14 @@ mod tests {
             tiers: BTreeMap::new(),
             variant_coverage: vec![VariantCoverage {
                 ty: ty.to_string(),
-                files: files.iter().map(|f| f.to_string()).collect(),
+                files: files
+                    .iter()
+                    .map(|f| CoveredFile {
+                        path: f.to_string(),
+                        spelling: Spelling::RustPath,
+                        prefix: String::new(),
+                    })
+                    .collect(),
             }],
             flatten: BTreeMap::new(),
             python: LangAllow::default(),
@@ -1221,5 +1435,98 @@ mod tests {
         let core = surface(&[base.clone(), data]);
         let (_, errs) = fold_flattened(&base, Some(&flatten(&["ElementData"], &[])), &core);
         assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    // ── Comment / string-literal blindness ──────────────────────────────
+
+    /// A mention inside a comment is not handling a variant. This is the hole
+    /// the first version of the check had.
+    #[test]
+    fn a_comment_does_not_satisfy_variant_coverage() {
+        let core = surface(&[enum_ty("Error", &["Timeout"])]);
+        let rs = "// TODO: map Error::Timeout later\nfn f() {}\n";
+        assert!(!mentions_path(
+            &strip_string_literals(&strip_comments(rs, "x.rs")),
+            "Error::Timeout"
+        ));
+        // ...and the real thing still counts.
+        let real = "match e { Error::Timeout { .. } => {} }";
+        assert!(mentions_path(
+            &strip_string_literals(&strip_comments(real, "x.rs")),
+            "Error::Timeout"
+        ));
+        let _ = core;
+    }
+
+    #[test]
+    fn a_string_literal_does_not_satisfy_the_code_spelling() {
+        let src = r#"let msg = "handle Error::Timeout";"#;
+        assert!(!mentions_path(
+            &strip_string_literals(&strip_comments(src, "x.rs")),
+            "Error::Timeout"
+        ));
+    }
+
+    /// Python uses `#`, Rust uses `//` — stripping `#` from Rust would eat
+    /// attributes, so the two are kept apart.
+    #[test]
+    fn comment_syntax_follows_the_file_extension() {
+        let py = "# focus_changed is handled below\nFOO = 1\n";
+        assert!(!strip_comments(py, "stub.pyi").contains("focus_changed"));
+        // `#` is not a comment in Rust; the attribute survives.
+        let rs = "#[derive(Debug)]\nstruct S;\n";
+        assert!(strip_comments(rs, "x.rs").contains("derive"));
+    }
+
+    /// The string spellings must NOT strip literals — matching a literal is
+    /// the whole point of them.
+    #[test]
+    fn string_spellings_match_inside_literals() {
+        let pyi = "    FOCUS_CHANGED: str = \"focus_changed\"\n";
+        assert!(mentions_path(
+            &strip_comments(pyi, "x.pyi"),
+            "focus_changed"
+        ));
+    }
+
+    #[test]
+    fn variant_spellings_convert_as_documented() {
+        assert_eq!(to_snake("FocusChanged"), "focus_changed");
+        assert_eq!(to_snake("NoElementBounds"), "no_element_bounds");
+        assert_eq!(to_camel("FocusChanged"), "focusChanged");
+        assert_eq!(to_snake("Timeout").to_uppercase(), "TIMEOUT");
+    }
+
+    /// The repo's own entries must cover the string-spelled files, not just
+    /// the Rust mappings — those were missed the first time round.
+    #[test]
+    fn repo_allowlist_covers_the_string_spelled_binding_files() {
+        let path = repo_root().join("bindings/parity_allowlist.toml");
+        let allow = parse_allowlist(&path).expect("the repo allowlist parses");
+        let event = allow
+            .variant_coverage
+            .iter()
+            .find(|v| v.ty == "EventKind")
+            .expect("EventKind has a variant_coverage entry");
+        let paths: Vec<&str> = event.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(
+            paths.iter().any(|p| p.ends_with("_native.pyi")),
+            "Python's EventType constants must be covered: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p.ends_with("patch-native-dts.mjs")),
+            "the JS EventTypeName union must be covered: {paths:?}"
+        );
+        let err = allow
+            .variant_coverage
+            .iter()
+            .find(|v| v.ty == "Error")
+            .expect("Error has a variant_coverage entry");
+        assert!(
+            err.files.iter().any(|f| f.path.ends_with("index.js")
+                && f.spelling == Spelling::ScreamingSnake
+                && f.prefix == "XA11Y_"),
+            "the JS error-code table must be covered"
+        );
     }
 }

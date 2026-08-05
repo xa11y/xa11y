@@ -41,33 +41,53 @@ use crate::role::Role;
 ///
 /// # Extensibility
 ///
-/// This type and the AST types below it are all `#[non_exhaustive]`. The
-/// selector language is the part of the public surface that grows most often —
-/// the universal `*` selector was the most recent addition — and each new
-/// piece of syntax lands as a variant or field here. Build the AST with the
-/// constructors on each type rather than struct literals; parsing a string
-/// through [`Selector::parse`] remains the usual route.
+/// This type and the AST types below it are deliberately **exhaustive**. The
+/// selector language grows — the universal `*` selector was the most recent
+/// addition — and each new piece of syntax has to be handled by the provider
+/// fast-paths in `xa11y-linux`, `xa11y-macos`, and `xa11y-windows` that match
+/// on this AST directly. `#[non_exhaustive]` would replace their compile
+/// errors with `_` arms that silently return the wrong match set. Growth here
+/// should break the backends; that break is the feature.
+///
+/// Bindings are unaffected either way: they pass selector *strings*, and the
+/// parsed representation never crosses the language boundary.
+#[allow(
+    clippy::exhaustive_structs,
+    reason = "Selector AST: a closed contract between core's parser (the only \
+              writer) and the provider fast-paths that match on it. Growth \
+              must break those backends so each decides whether to support \
+              the new syntax or route to the shared matcher — a `_` arm would \
+              silently mismatch instead. See the note on `Selector`."
+)]
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct Selector {
     /// Chain of simple selectors with combinators.
     pub segments: Vec<SelectorSegment>,
 }
 
-/// One simple selector plus the combinator joining it to the previous segment.
+#[allow(
+    clippy::exhaustive_structs,
+    reason = "Selector AST: a closed contract between core's parser (the only \
+              writer) and the provider fast-paths that match on it. Growth \
+              must break those backends so each decides whether to support \
+              the new syntax or route to the shared matcher — a `_` arm would \
+              silently mismatch instead. See the note on `Selector`."
+)]
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct SelectorSegment {
     pub combinator: Combinator,
     pub simple: SimpleSelector,
 }
 
-/// How a segment relates to the one before it.
-///
-/// `#[non_exhaustive]`: CSS has sibling combinators (`+`, `~`) that this
-/// language does not implement yet.
+#[allow(
+    clippy::exhaustive_enums,
+    reason = "Selector AST: a closed contract between core's parser (the only \
+              writer) and the provider fast-paths that match on it. Growth \
+              must break those backends so each decides whether to support \
+              the new syntax or route to the shared matcher — a `_` arm would \
+              silently mismatch instead. See the note on `Selector`."
+)]
 #[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
 pub enum Combinator {
     /// Root (first segment, no combinator)
     Root,
@@ -78,10 +98,15 @@ pub enum Combinator {
 }
 
 /// How a role is matched in a selector.
-///
-/// `#[non_exhaustive]`: see [`Selector`].
+#[allow(
+    clippy::exhaustive_enums,
+    reason = "Selector AST: a closed contract between core's parser (the only \
+              writer) and the provider fast-paths that match on it. Growth \
+              must break those backends so each decides whether to support \
+              the new syntax or route to the shared matcher — a `_` arm would \
+              silently mismatch instead. See the note on `Selector`."
+)]
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub enum RoleMatch {
     /// Match against a normalized role (e.g., `button`, `text_field`).
     Normalized(Role),
@@ -89,67 +114,34 @@ pub enum RoleMatch {
     Platform(String),
 }
 
-/// A single segment's constraints: an optional role, attribute filters, and an
-/// optional positional index.
-#[derive(Debug, Clone, Default)]
-#[non_exhaustive]
+#[allow(
+    clippy::exhaustive_structs,
+    reason = "Selector AST: a closed contract between core's parser (the only \
+              writer) and the provider fast-paths that match on it. Growth \
+              must break those backends so each decides whether to support \
+              the new syntax or route to the shared matcher — a `_` arm would \
+              silently mismatch instead. See the note on `Selector`."
+)]
+#[derive(Debug, Clone)]
 pub struct SimpleSelector {
     pub role: Option<RoleMatch>,
     pub filters: Vec<AttrFilter>,
     pub nth: Option<usize>,
 }
 
-/// One `[attr=value]` constraint.
+#[allow(
+    clippy::exhaustive_structs,
+    reason = "Selector AST: a closed contract between core's parser (the only \
+              writer) and the provider fast-paths that match on it. Growth \
+              must break those backends so each decides whether to support \
+              the new syntax or route to the shared matcher — a `_` arm would \
+              silently mismatch instead. See the note on `Selector`."
+)]
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct AttrFilter {
     pub attr: AttrName,
     pub op: MatchOp,
     pub value: String,
-}
-
-impl Selector {
-    /// A selector built from an already-parsed segment chain.
-    ///
-    /// Prefer [`Selector::parse`] for selector strings; this is for backends
-    /// that decompose a parsed selector and rebuild parts of it.
-    pub fn from_segments(segments: Vec<SelectorSegment>) -> Self {
-        Self { segments }
-    }
-}
-
-impl SelectorSegment {
-    /// A segment joining `simple` to the previous one via `combinator`.
-    pub fn new(combinator: Combinator, simple: SimpleSelector) -> Self {
-        Self { combinator, simple }
-    }
-}
-
-impl SimpleSelector {
-    /// A selector with no constraints — matches any element. Assign `role`,
-    /// `filters`, and `nth` to narrow it.
-    pub fn any() -> Self {
-        Self::default()
-    }
-
-    /// A selector constrained to one role and nothing else.
-    pub fn with_role(role: RoleMatch) -> Self {
-        Self {
-            role: Some(role),
-            ..Self::default()
-        }
-    }
-}
-
-impl AttrFilter {
-    /// A filter comparing `attr` against `value` under `op`.
-    pub fn new(attr: impl Into<AttrName>, op: MatchOp, value: impl Into<String>) -> Self {
-        Self {
-            attr: attr.into(),
-            op,
-            value: value.into(),
-        }
-    }
 }
 
 /// Attribute name for selector filters. Any `snake_case` string is valid —
@@ -176,12 +168,15 @@ pub type AttrName = String;
 ///
 /// For names that differ only in such edge cases, use the case-sensitive
 /// `Exact` operator with the precise string instead.
-///
-/// `#[non_exhaustive]`: CSS attribute selectors have operators this language
-/// has not adopted (`|=`, `~=`), and a regex or case-sensitive-substring
-/// operator would land here too.
+#[allow(
+    clippy::exhaustive_enums,
+    reason = "Selector AST: a closed contract between core's parser (the only \
+              writer) and the provider fast-paths that match on it. Growth \
+              must break those backends so each decides whether to support \
+              the new syntax or route to the shared matcher — a `_` arm would \
+              silently mismatch instead. See the note on `Selector`."
+)]
 #[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
 pub enum MatchOp {
     /// Exact match (case-sensitive)
     Exact,
@@ -457,10 +452,15 @@ impl Selector {
 ///
 /// Constructed from a string via [`SelectorGroup::parse`]. Commas inside
 /// quoted attribute values are not treated as separators.
-///
-/// `#[non_exhaustive]`: see [`Selector`].
+#[allow(
+    clippy::exhaustive_structs,
+    reason = "Selector AST: a closed contract between core's parser (the only \
+              writer) and the provider fast-paths that match on it. Growth \
+              must break those backends so each decides whether to support \
+              the new syntax or route to the shared matcher — a `_` arm would \
+              silently mismatch instead. See the note on `Selector`."
+)]
 #[derive(Debug, Clone)]
-#[non_exhaustive]
 pub struct SelectorGroup {
     /// Selector clauses, in source order.
     pub clauses: Vec<Selector>,

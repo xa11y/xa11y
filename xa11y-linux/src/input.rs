@@ -99,13 +99,6 @@ pub(crate) fn key_to_keysym(key: &Key) -> Result<u32> {
             XK_F1 + (*n as u32 - 1)
         }
         Key::Char(c) => char_keysym(*c),
-        // `Key` is `#[non_exhaustive]`; a key this backend has no keysym for
-        // is reported rather than silently mapped to a neighbouring one.
-        other => {
-            return Err(Error::Unsupported {
-                feature: format!("key {other:?} has no X11 keysym mapping"),
-            })
-        }
     };
     Ok(keysym)
 }
@@ -248,11 +241,11 @@ impl X11InputBackend {
     }
 
     fn pointer_down(&self, button: MouseButton) -> Result<()> {
-        self.button_event(button_number(button)?, true)
+        self.button_event(button_number(button), true)
     }
 
     fn pointer_up(&self, button: MouseButton) -> Result<()> {
-        self.button_event(button_number(button)?, false)
+        self.button_event(button_number(button), false)
     }
 
     fn pointer_click(&self, at: Point, button: MouseButton, count: u32) -> Result<()> {
@@ -260,7 +253,7 @@ impl X11InputBackend {
             return Ok(());
         }
         self.pointer_move(at)?;
-        let btn = button_number(button)?;
+        let btn = button_number(button);
         for _ in 0..count {
             self.button_event(btn, true)?;
             self.button_event(btn, false)?;
@@ -459,18 +452,10 @@ fn clamp_coord(v: i32) -> i16 {
     v.clamp(i16::MIN as i32, i16::MAX as i32) as i16
 }
 
-/// Map a button to its X11 button number.
-///
-/// Fallible because [`MouseButton`] is `#[non_exhaustive]`: a button this
-/// backend has no number for is reported rather than silently dispatched as
-/// a different one.
-fn button_number(button: MouseButton) -> Result<u8> {
+fn button_number(button: MouseButton) -> u8 {
     match button {
-        MouseButton::Left => Ok(1),
-        MouseButton::Middle => Ok(2),
-        MouseButton::Right => Ok(3),
-        other => Err(Error::Unsupported {
-            feature: format!("mouse button {other:?} has no X11 button number"),
-        }),
+        MouseButton::Left => 1,
+        MouseButton::Middle => 2,
+        MouseButton::Right => 3,
     }
 }

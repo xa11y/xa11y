@@ -105,12 +105,22 @@ internal = [
 #
 # Adding a variant to one of these enums therefore means editing every file
 # below, which is the same work the compiler used to demand.
+# A file entry is either a bare path (the variant is written as
+# `Type::Variant` in Rust code) or a table naming how that file spells it:
+# `spelling = "snake" | "camel" | "screaming_snake"`, plus an optional
+# `prefix`. Generated stubs and JS lookup tables carry the variant as a
+# string, and they are just as much a place a new variant must be handled.
+# Comments never satisfy the check; for `rust_path`, string literals don't
+# either.
 [[types.variant_coverage]]
 type = "Error"
 reason = "Each variant maps to a specific exception class / error code; an unmapped one would fall through to the generic XA11yError."
 files = [
     "xa11y-python/src/lib.rs",
     "xa11y-js/src/errors.rs",
+    # index.js maps each code tag to a JS error class; an unlisted tag falls
+    # through `if (!Cls) return err` and reaches the user as an untyped Error.
+    { path = "xa11y-js/index.js", spelling = "screaming_snake", prefix = "XA11Y_" },
 ]
 
 [[types.variant_coverage]]
@@ -120,6 +130,10 @@ files = [
     "xa11y-python/src/lib.rs",
     "xa11y-js/src/types.rs",
     "xa11y/src/cli.rs",
+    # The user-facing spellings: Python's EventType constants and the JS
+    # EventTypeName union. Both are hand-maintained alongside the Rust arms.
+    { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake" },
+    { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "camel" },
 ]
 
 [[types.variant_coverage]]

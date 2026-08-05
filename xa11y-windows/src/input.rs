@@ -198,13 +198,6 @@ fn vk_for(key: &Key) -> Result<(VIRTUAL_KEY, bool)> {
             (vk, false)
         }
         Key::Char(c) => (vk_for_char(*c)?, false),
-        // `Key` is `#[non_exhaustive]`; a key this backend has no virtual-key
-        // code for is reported rather than silently mapped to a neighbour.
-        other => {
-            return Err(Error::Unsupported {
-                feature: format!("key {other:?} has no Win32 virtual-key mapping"),
-            })
-        }
     };
     Ok(v)
 }
@@ -273,21 +266,11 @@ fn vk_for_char(c: char) -> Result<VIRTUAL_KEY> {
     Ok(vk)
 }
 
-/// Map a button to its `MOUSEEVENTF_*` down/up flags.
-///
-/// Fallible because [`MouseButton`] is `#[non_exhaustive]`: a button this
-/// backend has no flags for is reported rather than silently dispatched as a
-/// different one. (Windows expresses X1/X2 through `MOUSEEVENTF_XDOWN` plus a
-/// `mouseData` field rather than a distinct flag pair, so adding them here
-/// will need more than a match arm.)
-fn button_down_up(button: MouseButton) -> Result<(u32, u32)> {
+fn button_down_up(button: MouseButton) -> (u32, u32) {
     match button {
-        MouseButton::Left => Ok((MOUSEEVENTF_LEFTDOWN.0, MOUSEEVENTF_LEFTUP.0)),
-        MouseButton::Right => Ok((MOUSEEVENTF_RIGHTDOWN.0, MOUSEEVENTF_RIGHTUP.0)),
-        MouseButton::Middle => Ok((MOUSEEVENTF_MIDDLEDOWN.0, MOUSEEVENTF_MIDDLEUP.0)),
-        other => Err(Error::Unsupported {
-            feature: format!("mouse button {other:?} has no MOUSEEVENTF flag pair"),
-        }),
+        MouseButton::Left => (MOUSEEVENTF_LEFTDOWN.0, MOUSEEVENTF_LEFTUP.0),
+        MouseButton::Right => (MOUSEEVENTF_RIGHTDOWN.0, MOUSEEVENTF_RIGHTUP.0),
+        MouseButton::Middle => (MOUSEEVENTF_MIDDLEDOWN.0, MOUSEEVENTF_MIDDLEUP.0),
     }
 }
 
@@ -311,12 +294,12 @@ impl InputProvider for WindowsInputProvider {
     }
 
     fn pointer_down(&self, button: MouseButton) -> Result<()> {
-        let (down, _) = button_down_up(button)?;
+        let (down, _) = button_down_up(button);
         self.send(&[mouse_input(down, 0, 0, 0)])
     }
 
     fn pointer_up(&self, button: MouseButton) -> Result<()> {
-        let (_, up) = button_down_up(button)?;
+        let (_, up) = button_down_up(button);
         self.send(&[mouse_input(up, 0, 0, 0)])
     }
 
@@ -325,7 +308,7 @@ impl InputProvider for WindowsInputProvider {
             return Ok(());
         }
         self.pointer_move(at)?;
-        let (down, up) = button_down_up(button)?;
+        let (down, up) = button_down_up(button);
         // Batch each press/release into one SendInput call so the system
         // bookkeeps the click-count (double/triple click) for us when the
         // calls arrive within the OS double-click time.

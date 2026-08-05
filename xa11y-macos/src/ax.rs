@@ -15,7 +15,7 @@ use rayon::prelude::*;
 use xa11y_core::Selector;
 use xa11y_core::{
     CancelHandle, ElementData, ElementParts, Error, Event, EventKind, EventReceiver, Provider,
-    Rect, Result, Role, StateFlag, StateSet, Subscription, Toggled,
+    Rect, Result, Role, StateFlag, StateParts, StateSet, Subscription, Toggled,
 };
 
 // ── FFI Declarations ──────────────────────────────────────────────────────────
@@ -1220,17 +1220,6 @@ fn matches_ax_with_role(
                     return false;
                 }
             }
-            // `RoleMatch` is `#[non_exhaustive]`. A form this fast path
-            // predates goes through the full snapshot + shared matcher, the
-            // same route a non-fast-path attribute filter takes above — core
-            // owns the semantics of its own selector AST.
-            _ => {
-                if ax.is_null() {
-                    return false;
-                }
-                let data = build_snapshot_data(ax, None, 0);
-                return xa11y_core::selector::matches_simple(&data, simple);
-            }
         }
     }
 
@@ -1458,6 +1447,7 @@ impl MacOSProvider {
 /// targets), pass `0`.
 fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -> ElementData {
     if element.is_null() {
+        // Partial by nature: a null AXUIElementRef reports nothing.
         let mut data = ElementData::for_role(Role::Unknown);
         data.pid = pid;
         data.handle = handle;
@@ -1606,32 +1596,35 @@ fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -
         let active = matches!(role, Role::Window | Role::Dialog)
             && ax_bool(element, "AXMain").unwrap_or(false);
 
-        let mut states = StateSet::default();
-        states.enabled = attrs.enabled.unwrap_or(true);
-        states.visible = !attrs.hidden.unwrap_or(false);
-        states.focused = attrs.focused.unwrap_or(false);
-        states.active = active;
-        states.focusable = focusable;
-        states.modal = attrs.modal.unwrap_or(false);
-        states.checked = checked;
-        // `AXSelected` is the per-element attribute, but bridges like Qt's
-        // implement selection only container-side (AXSelectedChildren on the
-        // table). Probe the container only when the attribute is entirely
-        // absent AND the role is a selectable item — AppKit elements carry
-        // AXSelected directly, so they never pay for the probe. `raw` keeps
-        // only genuinely present platform attributes, so a derived value
-        // shows up in `states.selected` but adds no fake "AXSelected" key.
-        states.selected = match attrs.selected {
-            Some(s) => s,
-            None if selection_can_come_from_container(role) => {
-                container_selection_contains(element, 2)
-            }
-            None => false,
-        };
-        states.expanded = attrs.expanded;
-        states.editable = matches!(role, Role::TextField | Role::TextArea);
-        states.required = false;
-        states.busy = false;
+        let states: StateSet = StateParts {
+            enabled: attrs.enabled.unwrap_or(true),
+            visible: !attrs.hidden.unwrap_or(false),
+            focused: attrs.focused.unwrap_or(false),
+            active,
+            focusable,
+            modal: attrs.modal.unwrap_or(false),
+            checked,
+            // `AXSelected` is the per-element attribute, but bridges like
+            // Qt's implement selection only container-side
+            // (AXSelectedChildren on the table). Probe the container only
+            // when the attribute is entirely absent AND the role is a
+            // selectable item — AppKit elements carry AXSelected directly, so
+            // they never pay for the probe. `raw` keeps only genuinely
+            // present platform attributes, so a derived value shows up in
+            // `states.selected` but adds no fake "AXSelected" key.
+            selected: match attrs.selected {
+                Some(s) => s,
+                None if selection_can_come_from_container(role) => {
+                    container_selection_contains(element, 2)
+                }
+                None => false,
+            },
+            expanded: attrs.expanded,
+            editable: matches!(role, Role::TextField | Role::TextArea),
+            required: false,
+            busy: false,
+        }
+        .into();
 
         let bounds = match (attrs.position, attrs.size) {
             (Some((x, y)), Some((w, h))) if w > 0.0 || h > 0.0 => Some(Rect {
@@ -3079,7 +3072,11 @@ mod tests {
     fn matches_ax_returns_false_for_null_element() {
         use xa11y_core::selector::{RoleMatch, SimpleSelector};
         // Role-only selector should not match a null element
-        let simple = SimpleSelector::with_role(RoleMatch::Normalized(Role::Button));
+        let simple = SimpleSelector {
+            role: Some(RoleMatch::Normalized(Role::Button)),
+            filters: vec![],
+            nth: None,
+        };
         assert!(!matches_ax(std::ptr::null(), &simple));
     }
 
@@ -3088,7 +3085,11 @@ mod tests {
         use xa11y_core::selector::SimpleSelector;
         // No role constraint — should match anything (even null, since no
         // attribute to check). But null has no role, so no-role selector matches.
-        let simple = SimpleSelector::any();
+        let simple = SimpleSelector {
+            role: None,
+            filters: vec![],
+            nth: None,
+        };
         // A null element can't report a role, but the selector has no role
         // constraint, so it should match.
         assert!(matches_ax(std::ptr::null(), &simple));
@@ -3097,7 +3098,11 @@ mod tests {
     #[test]
     fn matches_ax_rejects_wrong_role() {
         use xa11y_core::selector::{RoleMatch, SimpleSelector};
-        let simple = SimpleSelector::with_role(RoleMatch::Normalized(Role::CheckBox));
+        let simple = SimpleSelector {
+            role: Some(RoleMatch::Normalized(Role::CheckBox)),
+            filters: vec![],
+            nth: None,
+        };
         // Null element has no role — should not match CheckBox
         assert!(!matches_ax(std::ptr::null(), &simple));
     }
@@ -3105,8 +3110,15 @@ mod tests {
     #[test]
     fn matches_ax_with_name_filter_rejects_null() {
         use xa11y_core::selector::{AttrFilter, MatchOp, SimpleSelector};
-        let mut simple = SimpleSelector::any();
-        simple.filters = vec![AttrFilter::new("name", MatchOp::Exact, "Submit")];
+        let simple = SimpleSelector {
+            role: None,
+            filters: vec![AttrFilter {
+                attr: "name".to_string(),
+                op: MatchOp::Exact,
+                value: "Submit".to_string(),
+            }],
+            nth: None,
+        };
         // Null element has no name — filter should fail
         assert!(!matches_ax(std::ptr::null(), &simple));
     }
@@ -3122,8 +3134,15 @@ mod tests {
         // panicking.
         use xa11y_core::selector::{AttrFilter, MatchOp, SimpleSelector};
         for attr in ["enabled", "checked", "focused", "selected"] {
-            let mut simple = SimpleSelector::any();
-            simple.filters = vec![AttrFilter::new(attr, MatchOp::Exact, "true")];
+            let simple = SimpleSelector {
+                role: None,
+                filters: vec![AttrFilter {
+                    attr: attr.to_string(),
+                    op: MatchOp::Exact,
+                    value: "true".to_string(),
+                }],
+                nth: None,
+            };
             assert!(
                 !matches_ax(std::ptr::null(), &simple),
                 "non-fast-path attr `{attr}` should fall through to the full matcher \

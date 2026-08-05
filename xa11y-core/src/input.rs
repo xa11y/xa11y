@@ -183,11 +183,18 @@ impl IntoPoint for &Element {
 
 /// A mouse button.
 ///
-/// `#[non_exhaustive]`: the three-button set is what every backend supports
-/// today, but side buttons (X1/X2, conventionally back and forward) are
-/// expressible on all three platforms' input APIs.
+/// Deliberately **exhaustive**, for the same reason as [`Key`]: every variant
+/// has to be mapped to an X11 button number, an evdev code, a CoreGraphics
+/// event type, and a `MOUSEEVENTF_*` flag pair. Adding a side button (X1/X2)
+/// is real work in four backends — Windows alone expresses them through
+/// `MOUSEEVENTF_XDOWN` plus a `mouseData` field rather than a distinct flag —
+/// and the build should say so.
+#[allow(
+    clippy::exhaustive_enums,
+    reason = "Capability enum: each variant must be mapped by every input \
+              backend, so adding one has to break their builds. See Key."
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-#[non_exhaustive]
 pub enum MouseButton {
     #[default]
     Left,
@@ -261,11 +268,21 @@ impl ScrollDelta {
 ///
 /// # Extensibility
 ///
-/// `#[non_exhaustive]`: this covers the keys a UI test reaches for, not the
-/// full set a keyboard has. Media keys, `CapsLock`, `PrintScreen`, and the
-/// numpad are all absent and all addable.
+/// Deliberately **exhaustive**. This enum names platform capabilities: every
+/// variant has to be translated to a keysym, a virtual-key code, and an evdev
+/// keycode by four separate input backends. Growth here *should* be breaking,
+/// because the compile error in each backend is the only thing that forces a
+/// per-platform decision. `#[non_exhaustive]` would turn "nobody mapped this
+/// key" into a runtime `Error::Unsupported` from a library whose type system
+/// advertises the key — a worse outcome than a build failure at the point the
+/// variant is added.
+#[allow(
+    clippy::exhaustive_enums,
+    reason = "Capability enum: each variant must be mapped by every input \
+              backend, so adding one has to break their builds. See the \
+              Extensibility note above."
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[non_exhaustive]
 pub enum Key {
     /// A printable character (lowercase, no shifted symbols). Backends
     /// translate this to the matching physical key. See the type-level docs

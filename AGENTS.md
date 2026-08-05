@@ -149,11 +149,29 @@ either carries `#[non_exhaustive]` or an `#[allow(..., reason = "...")]` naming
 the closed domain that makes growth impossible. This is the same discipline the
 parity allowlist applies at the bindings boundary, one level down.
 
-**Default to `#[non_exhaustive]`.** Take the `allow` only when the type is a
-closed domain in the mathematical sense — `Rect` (an origin and a size),
-`Point`, `ScrollDelta`, `Toggled` (off/on/indeterminate), `RecvStatus`
+**Default to `#[non_exhaustive]`.** Take the `allow` when the type is a closed
+domain in the mathematical sense — `Rect` (an origin and a size), `Point`,
+`ScrollDelta`, `Toggled` (off/on/indeterminate), `RecvStatus`
 (value/timeout/disconnected). "I can't think of a new field right now" is not a
 closed domain.
+
+**Capability enums are the second reason to stay exhaustive, and it is not
+about closedness.** If a backend must translate every variant into an OS
+primitive, growth *should* break the build: the compile error in each backend
+is the only thing that forces a per-platform decision. `#[non_exhaustive]`
+converts that into a `_` arm and a runtime `Error::Unsupported` from a library
+whose type system advertises the capability — strictly worse than a build
+failure at the point the variant is added.
+
+The test is "does a new variant require work in another crate?"
+
+| Enum | | Why |
+|---|---|---|
+| `Key`, `MouseButton` | exhaustive | Four input backends map each to a keysym / VK / evdev code / `MOUSEEVENTF_*` flag. |
+| `Combinator`, `RoleMatch`, and the rest of the selector AST | exhaustive | Provider fast-paths match on it; a `_` arm silently returns the wrong match set. |
+| `Role` | `#[non_exhaustive]` | Backends map platform → `Role`, never the reverse, and `Unknown` is the documented fallback. |
+| `Anchor` | `#[non_exhaustive]` | `anchor_point` resolves it in core; no backend sees it. |
+| `Error`, `EventKind`, `StateFlag`, `ElementState` | `#[non_exhaustive]` | Only the bindings map them, and `[[types.variant_coverage]]` guards that. |
 
 `#[non_exhaustive]` forbids struct expressions from *other crates*, including
 functional-update syntax — `Diagnosis { .., ..Default::default() }` does not
@@ -178,21 +196,42 @@ node into one, and a new property silently arriving as `None` on every
 platform is a bug, not a default.
 
 The fix is to give the two roles separate types rather than to pick one
-guarantee over the other:
+guarantee over the other. `reader_writer_pair!` in `xa11y-core/src/element.rs`
+declares both from **one field list**, so they cannot drift:
 
 ```rust
-#[non_exhaustive]                       // readers: growth is not breaking
-pub struct ElementData { .. }
+reader_writer_pair! {
+    /// Readers: growth is not breaking.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct ElementData;
 
-#[doc(hidden)]                          // writers: growth IS breaking, on purpose
-#[allow(clippy::exhaustive_structs, reason = "This type IS the completeness guard...")]
-pub struct ElementParts { .. }          // same fields, exhaustive
+    /// Writers: growth IS breaking, on purpose.
+    #[allow(clippy::exhaustive_structs, reason = "This type IS the completeness guard...")]
+    #[derive(Debug, Clone)]
+    pub struct ElementParts;
 
-impl From<ElementParts> for ElementData { .. }   // reconciled in one place
+    fields { /// Element role
+             pub role: Role, ... }
+}
 ```
 
-Providers write `ElementParts { .. }.into()`. Adding a field to both types is
-then a compile error in every backend and a no-op for consumers.
+The reader gets the docs, the serde attributes, and `#[non_exhaustive]`; the
+writer gets bare fields and stays exhaustive; the `From` impl is generated.
+Providers write `ElementParts { .. }.into()`, so adding a field is a compile
+error in every backend and a no-op for consumers.
+
+**The single list is the point.** With two hand-written structs, adding a field
+to `ElementData` alone leaves exactly one place to write a default — the `From`
+impl — and the compiler points you at it. That is the cheapest fix and it
+defeats the whole design. `StateSet` / `StateParts` uses the same macro for the
+same reason: a silently-defaulted state is worse than it looks, because the
+parity check then requires a binding getter for a state no platform populates.
+
+Because a new field here is a deliberate compile error across a crate
+boundary, the workspace pins intra-workspace deps with `=` rather than a caret
+(`Cargo.toml`), so cargo cannot pair a newer `xa11y-core` with an older
+provider in a downstream tree. `cargo xtask check` verifies the pins survive
+cargo-release's `dependent-version = "upgrade"` rewrite.
 
 Reach for this only where all three hold: the type is `#[non_exhaustive]`, it
 has complete-construction sites in *other* crates, and a defaulted new field
@@ -237,10 +276,22 @@ files = [
 ]
 ```
 
-Adding a variant to one of these enums therefore means editing every listed
-file, which is the same work the compiler used to demand. Entries are checked
-for staleness (a type that left core, or that is not an enum) the same way
-`[types]` entries are.
+A file entry is either a bare path — the variant is written as `Type::Variant`
+in Rust code — or a table naming how that file spells it:
+
+```toml
+{ path = "xa11y-js/index.js", spelling = "screaming_snake", prefix = "XA11Y_" }
+```
+
+`snake`, `camel`, and `screaming_snake` cover the generated `.pyi` constants,
+the `EventTypeName` union, and the JS error-code table. Those are hand-
+maintained alongside the Rust arms and are just as much a place a new variant
+must be handled.
+
+Comments never satisfy the check, and for `rust_path` neither do string
+literals — `// TODO: map Error::NewVariant` is not handling a variant. Entries
+are checked for staleness (a type that left core, or that is not an enum) the
+same way `[types]` entries are.
 
 `Role` and `Key` are deliberately **not** covered: they convert mechanically
 (`to_snake_case`, a string parser), so a new variant needs no binding edit.

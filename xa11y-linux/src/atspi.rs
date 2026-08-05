@@ -6,7 +6,8 @@ use std::sync::Mutex;
 
 use rayon::prelude::*;
 use xa11y_core::{
-    ElementData, ElementParts, Error, Provider, Rect, Result, Role, StateSet, Subscription, Toggled,
+    ElementData, ElementParts, Error, Provider, Rect, Result, Role, StateParts, StateSet,
+    Subscription, Toggled,
 };
 use zbus::blocking::{Connection, Proxy};
 
@@ -904,21 +905,23 @@ impl LinuxProvider {
             None
         };
 
-        let mut states = StateSet::default();
-        states.enabled = enabled;
-        states.visible = visible;
-        states.focused = (bits & FOCUSED) != 0;
-        // AT-SPI `ACTIVE` marks the foreground window/frame (see
-        // `focused_app`, which relies on the same bit).
-        states.active = (bits & ACTIVE) != 0;
-        states.checked = checked;
-        states.selected = (bits & SELECTED) != 0;
-        states.expanded = expanded;
-        states.editable = (bits & EDITABLE) != 0;
-        states.focusable = (bits & FOCUSABLE) != 0;
-        states.modal = (bits & MODAL) != 0;
-        states.required = (bits & REQUIRED) != 0;
-        states.busy = (bits & BUSY) != 0;
+        let states = StateParts {
+            enabled,
+            visible,
+            focused: (bits & FOCUSED) != 0,
+            // AT-SPI `ACTIVE` marks the foreground window/frame (see
+            // `focused_app`, which relies on the same bit).
+            active: (bits & ACTIVE) != 0,
+            checked,
+            selected: (bits & SELECTED) != 0,
+            expanded,
+            editable: (bits & EDITABLE) != 0,
+            focusable: (bits & FOCUSABLE) != 0,
+            modal: (bits & MODAL) != 0,
+            required: (bits & REQUIRED) != 0,
+            busy: (bits & BUSY) != 0,
+        }
+        .into();
         (states, bits)
     }
 
@@ -1099,14 +1102,6 @@ impl LinuxProvider {
                     if raw_role != *platform_role {
                         return false;
                     }
-                }
-                // A role-match form this fast path predates. Route it through
-                // the shared matcher rather than guessing, the same way an
-                // unrecognised attribute filter is routed below — core owns
-                // the semantics of its own selector AST.
-                _ => {
-                    let data = self.build_element_data(aref, None);
-                    return xa11y_core::selector::matches_simple(&data, simple);
                 }
             }
         }

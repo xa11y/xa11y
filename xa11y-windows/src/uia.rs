@@ -14,7 +14,7 @@ use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, STATE_SYSTEM_
 use xa11y_core::{
     selector::{matches_simple, Combinator, Selector, SelectorSegment},
     CancelHandle, ElementData, ElementParts, Error, Event, EventKind, EventReceiver, Provider,
-    Rect, Result, Role, StateFlag, StateSet, Subscription, Toggled,
+    Rect, Result, Role, StateFlag, StateParts, StateSet, Subscription, Toggled,
 };
 
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
@@ -928,7 +928,7 @@ impl Provider for WindowsProvider {
         for segment in segments {
             let mut next_candidates = Vec::new();
             for candidate in &candidates {
-                match &segment.combinator {
+                match segment.combinator {
                     Combinator::Child => {
                         let children = self.get_children(Some(candidate))?;
                         for child in children {
@@ -940,10 +940,12 @@ impl Provider for WindowsProvider {
                     Combinator::Descendant => {
                         // Walk level-by-level to avoid provider-activation boundary
                         // issues with FindAllBuildCache(Subtree) on fragment elements.
-                        let sub_selector = Selector::from_segments(vec![SelectorSegment::new(
-                            Combinator::Root,
-                            segment.simple.clone(),
-                        )]);
+                        let sub_selector = Selector {
+                            segments: vec![SelectorSegment {
+                                combinator: Combinator::Root,
+                                simple: segment.simple.clone(),
+                            }],
+                        };
                         let mut sub_results = xa11y_core::selector::find_elements_in_tree(
                             |el| self.get_children(el),
                             Some(candidate),
@@ -954,18 +956,6 @@ impl Provider for WindowsProvider {
                         next_candidates.append(&mut sub_results);
                     }
                     Combinator::Root => unreachable!(),
-                    // `Combinator` is `#[non_exhaustive]`. A combinator this
-                    // push-down predates is reported rather than approximated
-                    // as a child or descendant walk — a wrong match set is
-                    // worse than a clear "not supported here".
-                    other => {
-                        return Err(Error::Unsupported {
-                            feature: format!(
-                                "selector combinator {other:?} is not implemented by the \
-                                 UIA multi-segment push-down"
-                            ),
-                        })
-                    }
                 }
             }
             let mut seen = std::collections::HashSet::new();
@@ -1807,20 +1797,21 @@ fn parse_states(
 
     let focusable = unsafe { element.CachedIsKeyboardFocusable() }.unwrap_or(FALSE) == TRUE;
 
-    let mut states = StateSet::default();
-    states.enabled = enabled;
-    states.visible = visible;
-    states.focused = focused;
-    states.active = active;
-    states.focusable = focusable;
-    states.modal = false;
-    states.checked = checked;
-    states.selected = selected;
-    states.expanded = expanded;
-    states.editable = editable;
-    states.required = false;
-    states.busy = false;
-    states
+    StateParts {
+        enabled,
+        visible,
+        focused,
+        active,
+        focusable,
+        modal: false,
+        checked,
+        selected,
+        expanded,
+        editable,
+        required: false,
+        busy: false,
+    }
+    .into()
 }
 
 /// True when an MSAA state bitmask has `STATE_SYSTEM_SELECTED` set.
@@ -2984,7 +2975,7 @@ mod tests {
         let Some(root) = provider.list_apps().unwrap_or_default().into_iter().next() else {
             return;
         };
-        let empty_selector = Selector::from_segments(vec![]);
+        let empty_selector = Selector { segments: vec![] };
         let result = provider
             .find_elements(&root, &empty_selector, None, None)
             .unwrap();
