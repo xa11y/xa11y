@@ -138,16 +138,33 @@ CI configuration: see `.github/workflows/ci.yml`.
 The per-app suites are app-agnostic: one set of tests per language, parameterised
 by `XA11Y_TEST_APP`, rather than a directory per framework.
 
+The Python and CLI suites get their app fixtures from
+[`pytest-xa11y`](../pytest-xa11y/README.md), the pytest plugin this repository
+publishes. Launching, waiting for the app to register with the accessibility
+API, gating on a readiness selector, claiming the macOS frontmost slot,
+detecting a mid-run crash and tearing the process down all live there rather
+than in a conftest. Running these suites therefore needs the plugin installed
+(`pip install -e pytest-xa11y`); `scripts/setup_python_integ_env.sh` and the
+`integ` CI cells both do that alongside the bindings.
+
+Dogfooding it is deliberate. The plugin is the supported way to test a desktop
+app with xa11y, so the most demanding consumer of it should be this repository:
+nine toolkits, three operating systems, and every failure mode the launch path
+has ever hit.
+
 ```
 tests/
   README.md            <- this file
   matrix.yaml          <- machine-readable coverage matrix
   matrix_check.py      <- CI validator (prints coverage summary; gaps must be documented)
   test_matrix_check.py <- unit tests for the validator (cargo xtask test-harness)
-  helpers.py           <- shared Python launch helpers (launch_test_app fixture)
+  launchers.py         <- per-app AppLauncher recipes for pytest-xa11y,
+                          shared by the python and cli suites
   harness/
     launch.py          <- THE entry point: launches an app once, runs the
                           requested suites against it, audits what actually ran
+                          (keeps its own command table: it runs on a bare
+                          interpreter, with no pytest and no plugin)
     test_launch.py     <- unit tests for the harness (cargo xtask test-harness)
   suites/
     python/            <- Python integ suite (compat, actions, events, errors,

@@ -37,6 +37,7 @@ COMMANDS:
     test-compat [APP]   Run shared harness (python + js + cli suites) against APP (default: tauri)
     test-matrix-check   Validate the tests/matrix.yaml coverage index
     test-harness        Unit-test the shared integ harness (tests/harness/)
+    test-pytest-plugin  Install and test the pytest-xa11y plugin package
     docs                Build documentation
     lint-docs           Lint README + docs prose with Vale (requires the `vale` binary)
     coverage            Generate code coverage report
@@ -44,7 +45,7 @@ COMMANDS:
     sync-readmes [--check]  Generate crates.io/PyPI READMEs from root README.md
     check-macos-ffi     Verify xa11y-macos/src/ax.rs only uses safe_* CF/AX wrappers
     check-bindings-parity  Verify Python/JS bindings mirror xa11y-core's public API
-    check               Run ALL pre-PR checks (fmt, lint, test, test-python, test-js, test-harness)
+    check               Run ALL pre-PR checks (fmt, lint, test, test-python, test-js, test-harness, test-pytest-plugin)
     help                Show this help
 ";
 
@@ -77,6 +78,7 @@ fn main() -> ExitCode {
         "test-compat" => do_test_compat(rest),
         "test-matrix-check" => do_test_matrix_check(),
         "test-harness" => do_test_harness(),
+        "test-pytest-plugin" => do_test_pytest_plugin(),
         "docs" => do_docs(),
         "lint-docs" => do_lint_docs(),
         "coverage" => do_coverage(),
@@ -175,7 +177,19 @@ fn do_fmt(args: &[String]) -> bool {
         run_in("ruff", &["format", "python/", "tests/"], &python_dir)
     };
 
-    rust_ok && python_ok
+    heading("pytest-xa11y format (ruff)");
+    let plugin_dir = project_root().join("pytest-xa11y");
+    let plugin_ok = if check {
+        run_in(
+            "ruff",
+            &["format", "--check", "src/", "tests/"],
+            &plugin_dir,
+        )
+    } else {
+        run_in("ruff", &["format", "src/", "tests/"], &plugin_dir)
+    };
+
+    rust_ok && python_ok && plugin_ok
 }
 
 fn do_lint() -> bool {
@@ -204,7 +218,11 @@ fn do_lint() -> bool {
     heading("JS bindings: cargo fmt --check");
     let js_fmt_ok = run_in("cargo", &["fmt", "--", "--check"], &js_dir);
 
-    clippy_ok && ruff_ok && py_cargo_ok && py_fmt_ok && js_cargo_ok && js_fmt_ok
+    heading("pytest-xa11y: ruff check");
+    let plugin_dir = project_root().join("pytest-xa11y");
+    let plugin_ok = run_in("ruff", &["check", "src/", "tests/"], &plugin_dir);
+
+    clippy_ok && ruff_ok && py_cargo_ok && py_fmt_ok && js_cargo_ok && js_fmt_ok && plugin_ok
 }
 
 fn do_test() -> bool {
@@ -521,6 +539,26 @@ fn do_test_matrix_check() -> bool {
 /// in either is invisible: it just stops covering something and the cell stays
 /// green (issues #327 and #348). These tests never launch an app — plain
 /// pytest, no venv, no bindings required.
+/// Install and test the pytest-xa11y plugin package.
+///
+/// The package is pure Python and lives outside the Cargo workspace (like
+/// xa11y-python), so workspace-wide commands do not reach it. Its own tests
+/// launch no app: they cover launcher validation, capability probing, the
+/// event recorder, diagnostics rendering, and the plugin's pytest hooks via
+/// pytest's `pytester`. They do need `xa11y` importable — run
+/// `cargo xtask test-python` first if the bindings are not installed.
+fn do_test_pytest_plugin() -> bool {
+    heading("pytest-xa11y: install");
+    let root = project_root();
+    let plugin_dir = root.join("pytest-xa11y");
+    if !run_in("pip", &["install", "-e", "."], &plugin_dir) {
+        return false;
+    }
+
+    heading("pytest-xa11y: test");
+    run_in("python", &["-m", "pytest", "tests/", "-v"], &plugin_dir)
+}
+
 fn do_test_harness() -> bool {
     heading("Integ harness + coverage-index self-tests");
     let root = project_root();
@@ -944,6 +982,12 @@ fn do_check() -> bool {
     heading("PRE-PR CHECK: test-harness");
     if !do_test_harness() {
         eprintln!("!! Integ harness self-tests failed.");
+        ok = false;
+    }
+
+    heading("PRE-PR CHECK: test-pytest-plugin");
+    if !do_test_pytest_plugin() {
+        eprintln!("!! pytest-xa11y tests failed.");
         ok = false;
     }
 

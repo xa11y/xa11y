@@ -51,24 +51,6 @@ TAURI_MACOS = APP == "tauri" and sys.platform == "darwin"
 
 
 # ---------------------------------------------------------------------------
-# Helper
-# ---------------------------------------------------------------------------
-
-
-def _drain_for(sub: xa11y.Subscription, duration: float) -> list[xa11y.Event]:
-    """Collect all events received over ``duration`` seconds."""
-    events: list[xa11y.Event] = []
-    deadline = time.monotonic() + duration
-    while time.monotonic() < deadline:
-        ev = sub.try_recv()
-        if ev is not None:
-            events.append(ev)
-        else:
-            time.sleep(0.05)
-    return events
-
-
-# ---------------------------------------------------------------------------
 # Core subscription API
 # ---------------------------------------------------------------------------
 
@@ -86,11 +68,11 @@ def test_subscription_close_is_idempotent(app):
     sub.close()
 
 
-def test_try_recv_returns_none_when_idle(app):
+def test_try_recv_returns_none_when_idle(app, xa11y_events):
     """try_recv returns None (does not raise) when the event queue is empty."""
-    with app.subscribe() as sub:
-        _drain_for(sub, 0.3)
-        assert sub.try_recv() is None
+    with xa11y_events(app) as events:
+        events.drain(0.3)
+        assert events.subscription.try_recv() is None
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +111,7 @@ def test_try_recv_returns_none_when_idle(app):
     ),
     strict=False,
 )
-def test_focus_changed_event(app, app_config):
+def test_focus_changed_event(app, app_config, xa11y_events):
     """focus() on a focusable control fires a FocusChanged event."""
     ok_name = app_config["ok_button_name"]
     submit_name = app_config.get("submit_button_name")
@@ -139,12 +121,9 @@ def test_focus_changed_event(app, app_config):
     # Seed focus on OK so the next focus() is an actual move.
     app.locator(f'button[name="{ok_name}"]').focus()
     time.sleep(ACTION_SETTLE)
-    with app.subscribe() as sub:
+    with xa11y_events(app) as events:
         app.locator(f'button[name="{submit_name}"]').focus()
-        event = sub.wait_for(
-            lambda e: e.event_type == xa11y.EventType.FOCUS_CHANGED,
-            timeout=5.0,
-        )
+        event = events.expect(xa11y.EventType.FOCUS_CHANGED, timeout=5.0)
         assert event.event_type == xa11y.EventType.FOCUS_CHANGED
 
 
@@ -183,17 +162,14 @@ def test_focus_changed_event(app, app_config):
     ),
     strict=False,
 )
-def test_value_changed_event_slider(app, app_config):
+def test_value_changed_event_slider(app, app_config, xa11y_events):
     """Incrementing a slider fires a ValueChanged event."""
     sel = app_config.get("slider_selector")
     if not sel:
         pytest.skip("app has no slider widget")
-    with app.subscribe() as sub:
+    with xa11y_events(app) as events:
         app.locator(sel).increment()
-        event = sub.wait_for(
-            lambda e: e.event_type == xa11y.EventType.VALUE_CHANGED,
-            timeout=5.0,
-        )
+        event = events.expect(xa11y.EventType.VALUE_CHANGED, timeout=5.0)
         assert event.event_type == xa11y.EventType.VALUE_CHANGED
 
 
@@ -204,17 +180,14 @@ def test_value_changed_event_slider(app, app_config):
     ),
     strict=False,
 )
-def test_value_changed_event_spinbox(app, app_config):
+def test_value_changed_event_spinbox(app, app_config, xa11y_events):
     """Incrementing a spin_button fires a ValueChanged event."""
     sel = app_config.get("spinbutton_selector")
     if not sel:
         pytest.skip("app has no spin_button widget")
-    with app.subscribe() as sub:
+    with xa11y_events(app) as events:
         app.locator(sel).increment()
-        event = sub.wait_for(
-            lambda e: e.event_type == xa11y.EventType.VALUE_CHANGED,
-            timeout=5.0,
-        )
+        event = events.expect(xa11y.EventType.VALUE_CHANGED, timeout=5.0)
         assert event.event_type == xa11y.EventType.VALUE_CHANGED
 
 
@@ -245,7 +218,7 @@ def test_value_changed_event_spinbox(app, app_config):
     ),
     strict=False,
 )
-def test_state_changed_event_checkbox(app, app_name, app_config):
+def test_state_changed_event_checkbox(app, app_name, app_config, xa11y_events):
     """Toggling a checkbox fires StateChanged or ValueChanged."""
     if not app_config.get("has_checkbox"):
         pytest.skip("app has no checkbox widgets")
@@ -256,13 +229,11 @@ def test_state_changed_event_checkbox(app, app_name, app_config):
         )
     name = app_config["checkbox_checked_name"]
     cb = app.locator(f'check_box[name="{name}"]')
-    with app.subscribe() as sub:
+    with xa11y_events(app) as events:
         cb.toggle()
-        event = sub.wait_for(
-            lambda e: e.event_type in (
-                xa11y.EventType.STATE_CHANGED,
-                xa11y.EventType.VALUE_CHANGED,
-            ),
+        # Bridges disagree about which event a toggle emits, so accept either.
+        event = events.expect(
+            (xa11y.EventType.STATE_CHANGED, xa11y.EventType.VALUE_CHANGED),
             timeout=5.0,
         )
         assert event.event_type in (
@@ -311,17 +282,14 @@ def test_state_changed_event_checkbox(app, app_name, app_config):
     ),
     strict=False,
 )
-def test_name_changed_event_status_label(app, app_config):
+def test_name_changed_event_status_label(app, app_config, xa11y_events):
     """Pressing Submit mutates the status label → NameChanged event."""
     submit_name = app_config.get("submit_button_name")
     if not submit_name:
         pytest.skip("app has no Submit button")
-    with app.subscribe() as sub:
+    with xa11y_events(app) as events:
         app.locator(f'button[name="{submit_name}"]').press()
-        event = sub.wait_for(
-            lambda e: e.event_type == xa11y.EventType.NAME_CHANGED,
-            timeout=5.0,
-        )
+        event = events.expect(xa11y.EventType.NAME_CHANGED, timeout=5.0)
         assert event.event_type == xa11y.EventType.NAME_CHANGED
 
 
@@ -353,18 +321,15 @@ def test_name_changed_event_status_label(app, app_config):
     ),
     strict=False,
 )
-def test_structure_changed_event_add_item(app, app_config):
+def test_structure_changed_event_add_item(app, app_config, xa11y_events):
     """Pressing Add Item appends a row → StructureChanged event."""
     add_name = app_config.get("add_item_button_name")
     remove_name = app_config.get("remove_item_button_name")
     if not add_name:
         pytest.skip("app has no Add Item button")
-    with app.subscribe() as sub:
+    with xa11y_events(app) as events:
         app.locator(f'button[name="{add_name}"]').press()
-        event = sub.wait_for(
-            lambda e: e.event_type == xa11y.EventType.STRUCTURE_CHANGED,
-            timeout=5.0,
-        )
+        event = events.expect(xa11y.EventType.STRUCTURE_CHANGED, timeout=5.0)
         assert event.event_type == xa11y.EventType.STRUCTURE_CHANGED
     # Restore
     if remove_name:
@@ -390,6 +355,9 @@ def test_event_has_app_metadata(app, app_config):
     sel = app_config.get("slider_selector")
     if not sel:
         pytest.skip("app has no slider to trigger an event")
+    # Stays on the raw subscription: this is the only integration test that
+    # calls Subscription.recv, and routing it through the recorder would leave
+    # a public method with no live coverage.
     with app.subscribe() as sub:
         app.locator(sel).increment()
         event = sub.recv(timeout=5.0)
@@ -404,17 +372,14 @@ def test_event_has_app_metadata(app, app_config):
     ),
     strict=False,
 )
-def test_event_has_target(app, app_config):
+def test_event_has_target(app, app_config, xa11y_events):
     """Events carry a target element when the platform populates it."""
     sel = app_config.get("slider_selector")
     if not sel:
         pytest.skip("app has no slider to trigger an event")
-    with app.subscribe() as sub:
+    with xa11y_events(app) as events:
         app.locator(sel).increment()
-        event = sub.wait_for(
-            lambda e: e.target is not None,
-            timeout=5.0,
-        )
+        event = events.expect(predicate=lambda e: e.target is not None, timeout=5.0)
         assert event.target is not None
         assert event.target.role is not None
 
@@ -436,6 +401,9 @@ def test_wait_for_event(app, app_config):
     sel = app_config.get("spinbutton_selector") or app_config.get("slider_selector")
     if not sel:
         pytest.skip("no incrementable widget available")
+    # Stays on the raw subscription for the same reason as
+    # test_event_has_app_metadata: Subscription.wait_for is the API under test
+    # here, and EventRecorder.expect only exercises it indirectly.
     with app.subscribe() as sub:
         app.locator(sel).increment()
         event = sub.wait_for(

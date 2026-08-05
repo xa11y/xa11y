@@ -1,0 +1,69 @@
+[build-system]
+requires = ["hatchling>=1.18"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pytest-xa11y"
+# pytest-xa11y versions independently of xa11y itself: it is a test-harness
+# package whose surface changes on its own schedule. See RELEASING.md.
+version = "0.1.0"
+description = "pytest fixtures, capability markers and failure diagnostics for desktop UI testing with xa11y"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+keywords = ["pytest", "testing", "desktop", "gui", "accessibility", "a11y", "automation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: Pytest",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Testing",
+]
+dependencies = [
+    "pytest>=7.0",
+    # Lower bound, not a pin: the plugin uses only long-stable xa11y API
+    # (App.find, Locator waits, structured error attributes) and must not
+    # force a lockstep upgrade on consumers.
+    "xa11y>=0.12",
+]
+
+[project.entry-points.pytest11]
+xa11y = "pytest_xa11y.plugin"
+
+[project.urls]
+Homepage = "https://github.com/xa11y/xa11y"
+Repository = "https://github.com/xa11y/xa11y"
+Documentation = "https://xa11y.dev/guides/desktop-testing/"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pytest_xa11y"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/", "tests/", "README.md", "RELEASING.md", "pyproject.toml"]
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -7,8 +7,12 @@ through the accessibility tree.
 Every platform needs the host process to hold the input-synthesis permission
 (Accessibility + Input Monitoring on macOS, XTest on X11 — no grant needed
 on Windows). CI on macOS GitHub Actions runners typically lacks the grant,
-so these tests are skipped there via the XA11Y_SKIP_INPUT_SIM env var set
-by the harness.
+so the harness sets XA11Y_SKIP_INPUT_SIM=1 there. That env var still works
+and is still what the harness sets; pytest-xa11y is what reads it now, behind
+the ``xa11y_requires("input_sim")`` marker below. Availability has to be
+declared this way rather than probed because a missing grant is undetectable
+on macOS: ``CGEventPost`` returns void, so the events are discarded with
+every layer reporting success.
 
 Hit-target and typed-text fields are identified by role + name (aria-label).
 The event log is a read-only textarea; on macOS/Linux a11y trees it surfaces
@@ -25,15 +29,16 @@ import time
 import pytest
 import xa11y
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("XA11Y_TEST_APP") not in ("tauri", None)
-    or os.environ.get("XA11Y_SKIP_INPUT_SIM") == "1",
-    reason=(
-        "input_sim tests only run against Tauri (one-per-platform strategy). "
-        "Set XA11Y_TEST_APP=tauri (or leave unset) and ensure "
-        "XA11Y_SKIP_INPUT_SIM is not '1'."
+pytestmark = [
+    pytest.mark.skipif(
+        os.environ.get("XA11Y_TEST_APP") not in ("tauri", None),
+        reason=(
+            "input_sim tests only run against Tauri (one-per-platform strategy). "
+            "Set XA11Y_TEST_APP=tauri, or leave it unset."
+        ),
     ),
-)
+    pytest.mark.xa11y_requires("input_sim"),
+]
 
 HIT_TARGET = 'button[name="Hit target"]'
 # UIA has no distinct multiline text role, so WebView2's <textarea> collapses to

@@ -4,8 +4,16 @@ The screenshot pipeline needs pixel-capture permission on some platforms
 (Screen Recording on macOS, a working X11 DISPLAY or Wayland portal on
 Linux). Windows does not need a grant. Where the current session has no
 capture path at all, the backend returns ``ActionNotSupportedError`` (mapped
-from Rust's ``Error::Unsupported``); the tests treat that as a skip rather
-than a failure so they stay useful on headless CI runners.
+from Rust's ``Error::Unsupported``); on headless CI (Xvfb without a
+compositor) X11 ``GetImage`` can additionally reject a region capture whose
+coordinates fall outside the root window's reported extents, surfacing as a
+``PlatformError``. Both say the session has no usable capture path, not that
+the binding is broken, so both skip rather than fail.
+
+Deciding that is pytest-xa11y's job, not this file's: the module-level
+``xa11y_requires("screenshot")`` marker probes the session once, and
+``xa11y_capabilities.guard("screenshot")`` turns a capture that fails at the
+call into a skip.
 """
 
 from __future__ import annotations
@@ -15,37 +23,18 @@ import os
 import pytest
 import xa11y
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("XA11Y_TEST_APP") not in ("tauri", None),
-    reason="screenshot tests only run against Tauri (one-per-platform strategy)",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        os.environ.get("XA11Y_TEST_APP") not in ("tauri", None),
+        reason="screenshot tests only run against Tauri (one-per-platform strategy)",
+    ),
+    pytest.mark.xa11y_requires("screenshot"),
+]
 
 
-def _capture_or_skip(fn):
-    """Run a capture call, skipping on Unsupported/PermissionDenied.
-
-    On headless CI (Xvfb without a compositor), X11 `GetImage` can reject
-    region captures whose coordinates fall outside the root window's
-    reported extents — this surfaces as ``PlatformError`` with a
-    ``GetImage`` / ``Match`` message. Treat that as a skip, not a failure:
-    it signals the session has no usable capture path for that region, not
-    that the binding is broken.
-    """
-    try:
-        return fn()
-    except xa11y.ActionNotSupportedError as e:
-        pytest.skip(f"capture unsupported in this session: {e}")
-    except xa11y.PermissionDeniedError as e:
-        pytest.skip(f"screen capture permission not granted: {e}")
-    except xa11y.PlatformError as e:
-        msg = str(e)
-        if "GetImage" in msg or "BadMatch" in msg or "SCScreenshotManager" in msg:
-            pytest.skip(f"screen capture not available in this session: {e}")
-        raise
-
-
-def test_capture_full_display_returns_rgba_png(app):
-    shot = _capture_or_skip(xa11y.screenshot)
+def test_capture_full_display_returns_rgba_png(app, xa11y_capabilities):
+    with xa11y_capabilities.guard("screenshot"):
+        shot = xa11y.screenshot()
 
     assert shot.width > 0
     assert shot.height > 0
@@ -58,9 +47,10 @@ def test_capture_full_display_returns_rgba_png(app):
     assert len(png) > 100
 
 
-def test_capture_region_matches_requested_size_at_scale(app):
+def test_capture_region_matches_requested_size_at_scale(app, xa11y_capabilities):
     rect = (0, 0, 50, 40)
-    shot = _capture_or_skip(lambda: xa11y.screenshot(region=rect))
+    with xa11y_capabilities.guard("screenshot"):
+        shot = xa11y.screenshot(region=rect)
 
     # Physical pixels = logical * scale, within 1px of rounding.
     expected_w = round(rect[2] * shot.scale)
@@ -70,7 +60,7 @@ def test_capture_region_matches_requested_size_at_scale(app):
     assert len(shot.pixels) == shot.width * shot.height * 4
 
 
-def test_capture_element_uses_element_bounds(app):
+def test_capture_element_uses_element_bounds(app, xa11y_capabilities):
     # Submit is the first button on the widgets page; it appears in the a11y
     # tree on all three platforms (macOS, Windows, Linux AT-SPI). Fall back
     # to any button with bounds if the widget set drifts, so the test stays
@@ -88,7 +78,8 @@ def test_capture_element_uses_element_bounds(app):
     else:
         pytest.skip("no button with on-screen bounds available")
 
-    shot = _capture_or_skip(lambda: xa11y.screenshot(element=el))
+    with xa11y_capabilities.guard("screenshot"):
+        shot = xa11y.screenshot(element=el)
 
     expected_w = round(bounds.width * shot.scale)
     expected_h = round(bounds.height * shot.scale)
@@ -96,8 +87,9 @@ def test_capture_element_uses_element_bounds(app):
     assert abs(shot.height - expected_h) <= 1
 
 
-def test_save_png_writes_valid_file(app, tmp_path):
-    shot = _capture_or_skip(lambda: xa11y.screenshot(region=(0, 0, 20, 20)))
+def test_save_png_writes_valid_file(app, tmp_path, xa11y_capabilities):
+    with xa11y_capabilities.guard("screenshot"):
+        shot = xa11y.screenshot(region=(0, 0, 20, 20))
 
     out = tmp_path / "shot.png"
     shot.save_png(out)

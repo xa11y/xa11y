@@ -65,8 +65,17 @@ function runGit(...args) {
   return execFileSync("git", args, { encoding: "utf8" }).trim();
 }
 
+// The xa11y release series. Sibling packages in this repo tag their own
+// series (pytest-xa11y-v*), and those tags must never appear in an xa11y
+// commit range — an unfiltered tag list would make the previous tag of
+// v0.13.0 whatever sorted next, producing notes for the wrong range.
+const RELEASE_TAG_PATTERN = /^v\d+\.\d+\.\d+/;
+
 function getPreviousTag(currentTag) {
-  const tags = runGit("tag", "--sort=-v:refname").split("\n").filter(Boolean);
+  const tags = runGit("tag", "--sort=-v:refname")
+    .split("\n")
+    .filter(Boolean)
+    .filter((tag) => RELEASE_TAG_PATTERN.test(tag));
   const idx = tags.indexOf(currentTag);
   if (idx === -1) return tags[0] ?? null;
   return tags[idx + 1] ?? null;

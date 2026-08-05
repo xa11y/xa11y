@@ -43,6 +43,9 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 # the 30s boundary (the app was present in the very next enumeration), and
 # WebView2 had not loaded the Tauri page within the residue the old shared
 # deadline left it.
+#
+# `XA11Y_TEST_STARTUP_TIMEOUT` is read by tests/launchers.py too, which is how
+# the pytest-xa11y suites get the same budget as this harness.
 _DEFAULT_STARTUP_TIMEOUT = 60.0 if sys.platform == "win32" else 30.0
 STARTUP_TIMEOUT = float(
     os.environ.get("XA11Y_TEST_STARTUP_TIMEOUT", _DEFAULT_STARTUP_TIMEOUT)
@@ -57,7 +60,7 @@ CONTENT_READY_TIMEOUT = float(
 # Apps with a real, activatable macOS window whose tests depend on holding the
 # frontmost slot — input_sim delivers CGEvents to the frontmost app, and focus
 # assertions read OS focus state. We actively claim the front before tests run
-# (see tests.helpers.ensure_macos_frontmost) instead of reactively killing a
+# (see pytest_xa11y.ensure_macos_frontmost) instead of reactively killing a
 # hardcoded list of focus-stealing onboarding processes (issue #230). Excluded:
 # cocoa (--headless, accessory app — can't be frontmost) and accesskit
 # (synthesises its own focus events; its macOS coverage is the Rust integ
@@ -372,9 +375,10 @@ def _launch_app(
     # input_sim/focus tests aren't silently misdirected to whatever onboarding
     # process the runner image booted with (issue #230).
     if sys.platform == "darwin" and app in _MACOS_FRONTMOST_APPS:
-        if str(PROJECT_ROOT) not in sys.path:
-            sys.path.insert(0, str(PROJECT_ROOT))
-        from tests.helpers import ensure_macos_frontmost
+        # Imported lazily and only on macOS: this module also runs on a bare
+        # interpreter (cargo xtask test-harness) where pytest-xa11y need not
+        # be installed.
+        from pytest_xa11y import ensure_macos_frontmost
 
         print(f"Ensuring test app (pid={proc.pid}) is frontmost (macOS)...")
         ok, detail = ensure_macos_frontmost(proc.pid)

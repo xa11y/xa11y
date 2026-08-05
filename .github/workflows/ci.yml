@@ -394,11 +394,21 @@ jobs:
         working-directory: xa11y-python
         run: ../.venv-integ/bin/pip install -e .
 
+      # The python and cli suites get their app fixtures from pytest-xa11y.
+      - name: Install pytest-xa11y
+        if: runner.os != 'Windows'
+        run: .venv-integ/bin/pip install -e pytest-xa11y
+
       - name: Build & install xa11y Python bindings (Windows)
         if: runner.os == 'Windows'
         working-directory: xa11y-python
         shell: bash
         run: ../.venv-integ/Scripts/pip.exe install -e .
+
+      - name: Install pytest-xa11y (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: .venv-integ/Scripts/pip.exe install -e pytest-xa11y
 
       # ── Build xa11y-js ─────────────────────────────────────────────
       - name: Cache xa11y-js node_modules and native target
@@ -446,7 +456,7 @@ jobs:
 
       # Front-most focus on macOS is claimed at app-launch time, not here: the
       # harness actively activates the test app and polls until it is verified
-      # frontmost (tests.helpers.ensure_macos_frontmost), replacing the old
+      # frontmost (pytest_xa11y.ensure_macos_frontmost), replacing the old
       # hardcoded `killall` list of focus-stealing onboarding processes. That
       # name-based approach rotted whenever GitHub rolled a new runner image
       # with a different offender (issue #230); the active-claim approach is
@@ -717,6 +727,24 @@ jobs:
       # with pytest.
       - name: Run integ-harness and coverage-index self-tests
         run: .venv/bin/pytest tests/harness tests/test_matrix_check.py -v
+
+      # pytest-xa11y rides along in this job because its tests need `xa11y`
+      # importable and this is where the bindings were just built. Testing it
+      # against a PyPI xa11y instead would let the plugin drift from the
+      # library it is a plugin for. Its own suite launches no app.
+      - name: Install pytest-xa11y
+        run: .venv/bin/pip install -e pytest-xa11y
+
+      - name: Ruff lint (pytest-xa11y)
+        working-directory: pytest-xa11y
+        run: ../.venv/bin/ruff check src/ tests/
+
+      - name: Ruff format (pytest-xa11y)
+        working-directory: pytest-xa11y
+        run: ../.venv/bin/ruff format --check src/ tests/
+
+      - name: Run pytest-xa11y tests
+        run: .venv/bin/pytest pytest-xa11y/tests -v
 
   # ── Docs build ──────────────────────────────────────────────────
   docs:

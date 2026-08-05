@@ -81,6 +81,48 @@ A PID is not always enough on its own.
 
   System-root searches visit every app's tree, so keep the selector specific and prefer app-scoped locators everywhere else.
 
+## Using pytest
+
+Python suites can get the launch-and-attach flow above from
+[`pytest-xa11y`](https://pypi.org/project/pytest-xa11y/), which packages it as fixtures.
+
+```bash
+pip install pytest-xa11y
+```
+
+Declare how the app starts in one fixture:
+
+```python
+# conftest.py
+import pytest
+from pytest_xa11y import AppLauncher
+
+
+@pytest.fixture(scope="session")
+def xa11y_launcher():
+    return AppLauncher(
+        command=[APP_PATH],
+        ready='button[name="Sign in"]',
+    )
+```
+
+Tests then take the running app as a fixture:
+
+```python
+def test_sign_in(xa11y_app):
+    xa11y_app.locator('text_field[name="Email"]').set_value("a@b.c")
+    xa11y_app.locator('button[name="Sign in"]').press()
+    xa11y_app.locator('static_text[name^="Welcome"]').wait_visible()
+```
+
+`xa11y_app` is an ordinary `App`, so everything on this page applies to it unchanged.
+
+The plugin also covers three things a hand-written fixture does not. A failing test gets
+the accessibility tree and the app's output attached to its report. A test needing screen
+capture or input synthesis skips with the reason when the session cannot provide it. An app
+that exits mid-run is reported once, in place of every later test failing on a lookup that
+cannot succeed.
+
 ## Example: testing a calculator
 
 This test opens Calculator, performs `7 × 8`, and asserts the result is `56`.

@@ -1,0 +1,212 @@
+"""Process lifetime: launch failures, readiness, mid-run death, teardown.
+
+``xa11y`` is swapped for a stand-in namespace so these run with no
+accessibility bus and no GUI — the subprocesses are ordinary Python.
+"""
+
+from __future__ import annotations
+
+import sys
+import time
+import types
+from typing import ClassVar
+
+import pytest
+import xa11y
+
+from pytest_xa11y import AppLauncher, AppSession
+from pytest_xa11y import session as session_module
+from pytest_xa11y.errors import AppDied, AppLaunchError
+
+ALIVE = [sys.executable, "-c", "import time; time.sleep(60)"]
+DIES = [sys.executable, "-c", "import sys; sys.stderr.write('boom\\n'); sys.exit(3)"]
+CHATTY_THEN_DIES = [
+    sys.executable,
+    "-c",
+    "import sys; sys.stdout.write('x' * 200000); sys.exit(1)",
+]
+
+
+class FakeApp:
+    def __init__(self, pid=1, name="fake-app", dump="window"):
+        self.pid = pid
+        self.name = name
+        self._dump = dump
+        self.located = []
+
+    def dump(self, max_depth=None):
+        return self._dump
+
+    def locator(self, selector):
+        self.located.append(selector)
+        return FakeLocator(selector)
+
+
+class FakeLocator:
+    ready_selectors: ClassVar[set] = set()
+
+    def __init__(self, selector):
+        self.selector = selector
+
+    def wait_attached(self, timeout=None):
+        if self.selector in FakeLocator.ready_selectors:
+            return object()
+        raise xa11y.TimeoutError(f"Timeout after {timeout}s; waiting for: attached")
+
+
+def _fake_xa11y(*, find, listed=()):
+    """A stand-in for the xa11y module exposing only what AppSession touches."""
+    app_ns = types.SimpleNamespace(find=find, list=lambda: list(listed))
+    return types.SimpleNamespace(
+        App=app_ns,
+        TimeoutError=xa11y.TimeoutError,
+        SelectorNotMatchedError=xa11y.SelectorNotMatchedError,
+        PlatformError=xa11y.PlatformError,
+        XA11yError=xa11y.XA11yError,
+    )
+
+
+@pytest.fixture
+def never_finds(monkeypatch):
+    def find(predicate, timeout=None):
+        time.sleep(0.05)
+        raise xa11y.TimeoutError("Timeout; waiting for: app")
+
+    monkeypatch.setattr(session_module, "xa11y", _fake_xa11y(find=find))
+
+
+@pytest.fixture
+def finds_immediately(monkeypatch):
+    app = FakeApp()
+
+    def find(predicate, timeout=None):
+        return app
+
+    monkeypatch.setattr(session_module, "xa11y", _fake_xa11y(find=find))
+    return app
+
+
+def _session(command, **kwargs):
+    launcher = AppLauncher(command=command, **kwargs)
+    return AppSession(launcher, startup_timeout=kwargs.pop("startup_timeout", 2.0))
+
+
+def test_missing_binary_names_the_command():
+    session = AppSession(
+        AppLauncher(command=["/nonexistent/xa11y-test-binary"]), startup_timeout=1.0
+    )
+    with pytest.raises(AppLaunchError, match="Could not launch"):
+        session.start()
+
+
+def test_early_exit_reports_code_and_stderr(never_finds):
+    session = AppSession(AppLauncher(command=DIES), startup_timeout=5.0)
+    with pytest.raises(AppLaunchError) as excinfo:
+        session.start()
+    message = str(excinfo.value)
+    assert "exited during startup (code 3)" in message
+    assert "boom" in message
+    session.stop()
+
+
+def test_large_output_does_not_deadlock_the_child(never_finds):
+    # Captured to a temp file, not a pipe: 200 KB overflows a pipe buffer and
+    # would block the child forever with nobody draining it.
+    session = AppSession(AppLauncher(command=CHATTY_THEN_DIES), startup_timeout=10.0)
+    with pytest.raises(AppLaunchError) as excinfo:
+        session.start()
+    assert "exited during startup (code 1)" in str(excinfo.value)
+    assert "truncated" in str(excinfo.value)
+    session.stop()
+
+
+def test_app_never_registers_reports_scope_and_hint(monkeypatch):
+    def find(predicate, timeout=None):
+        time.sleep(0.05)
+        raise xa11y.TimeoutError("Timeout")
+
+    listed = [FakeApp(pid=9, name="Some Other App")]
+    monkeypatch.setattr(session_module, "xa11y", _fake_xa11y(find=find, listed=listed))
+    session = AppSession(AppLauncher(command=ALIVE), startup_timeout=0.3)
+    with pytest.raises(AppLaunchError) as excinfo:
+        session.start()
+    message = str(excinfo.value)
+    assert "did not register with the accessibility API" in message
+    assert "Some Other App" in message
+    assert "app_names" in message  # the hint
+
+
+def test_platform_errors_during_startup_are_reported_not_discarded(monkeypatch):
+    def find(predicate, timeout=None):
+        time.sleep(0.05)
+        raise xa11y.PlatformError("Platform error (2): bus not ready")
+
+    monkeypatch.setattr(session_module, "xa11y", _fake_xa11y(find=find))
+    session = AppSession(AppLauncher(command=ALIVE), startup_timeout=0.3)
+    with pytest.raises(AppLaunchError) as excinfo:
+        session.start()
+    assert "last accessibility error" in str(excinfo.value)
+    assert "bus not ready" in str(excinfo.value)
+
+
+def test_readiness_selector_gates_startup(finds_immediately, monkeypatch):
+    monkeypatch.setattr(FakeLocator, "ready_selectors", set())
+    session = AppSession(AppLauncher(command=ALIVE, ready='button[name="OK"]'), startup_timeout=0.3)
+    with pytest.raises(AppLaunchError) as excinfo:
+        session.start()
+    message = str(excinfo.value)
+    assert "content never became ready" in message
+    assert 'button[name="OK"]' in message
+    assert "tree:" in message
+
+
+def test_readiness_selector_passes(finds_immediately, monkeypatch):
+    monkeypatch.setattr(FakeLocator, "ready_selectors", {'button[name="OK"]'})
+    session = AppSession(AppLauncher(command=ALIVE, ready='button[name="OK"]'), startup_timeout=2.0)
+    try:
+        assert session.start() is finds_immediately
+    finally:
+        session.stop()
+
+
+def test_check_alive_raises_once_the_app_dies(finds_immediately):
+    session = AppSession(AppLauncher(command=ALIVE), startup_timeout=2.0)
+    session.start()
+    session.check_alive()  # still running
+
+    session.process.kill()
+    session.process.wait(timeout=5)
+    with pytest.raises(AppDied, match="exited mid-run"):
+        session.check_alive()
+    session.stop()
+
+
+def test_stop_terminates_and_is_idempotent(finds_immediately):
+    session = AppSession(AppLauncher(command=ALIVE), startup_timeout=2.0)
+    session.start()
+    process = session.process
+    session.stop()
+    session.stop()
+    assert process.poll() is not None
+
+
+def test_attach_never_terminates_a_process_it_did_not_start(finds_immediately):
+    session = AppSession(AppLauncher(attach_pid=1234), startup_timeout=2.0)
+    session.start()
+    assert session.process is None
+    session.stop()  # must not raise
+
+
+def test_reset_errors_propagate(finds_immediately):
+    def broken_reset(app):
+        raise RuntimeError("reset target is gone")
+
+    session = AppSession(AppLauncher(command=ALIVE, reset=broken_reset), startup_timeout=2.0)
+    session.start()
+    try:
+        # A reset that has stopped working is reported, not swallowed — it is
+        # the cause of the *next* test's inexplicable failure.
+        with pytest.raises(RuntimeError, match="reset target is gone"):
+            session.run_reset()
+    finally:
+        session.stop()

@@ -69,3 +69,10 @@ else
     echo "Building xa11y-python and installing into $VENV_DIR..."
     (cd "$PROJECT_ROOT/xa11y-python" && "$PIP" install --quiet -e .)
 fi
+
+# pytest-xa11y supplies the app fixtures the python and cli suites use. It is
+# pure Python and installs in a second, so it is installed unconditionally
+# rather than behind an importability check like the bindings above — that
+# check exists to skip a Rust rebuild, and there is no rebuild to skip here.
+echo "Installing pytest-xa11y into $VENV_DIR..."
+"$PIP" install --quiet -e "$PROJECT_ROOT/pytest-xa11y"
