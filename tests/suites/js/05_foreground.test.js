@@ -6,6 +6,11 @@
 // read `isForeground` flag for the app's pid. When the OS reports our app as
 // frontmost we assert the strong invariants; otherwise we fall back to the
 // app-agnostic ones (types, uniqueness) so the suite degrades gracefully.
+//
+// The gate is read either side of the observation it gates, and honoured only
+// when the two agree — see `observeWithStableForeground`. Reading it once,
+// afterwards, made the gate and the observation two views of a desktop that
+// had moved in between.
 
 'use strict';
 
@@ -27,23 +32,59 @@ async function freshForegroundFlag(app) {
   return me ? Boolean(me.isForeground) : null;
 }
 
+/**
+ * Run `observe()` sandwiched between two reads of the app's frontmost flag,
+ * and report the flag only when it did not change across the observation.
+ *
+ * The gate and the thing it gates are two separate reads of mutable global
+ * desktop state, so taking them one after the other is a race: if the
+ * foreground moves to our app *between* `App.foreground()` resolving someone
+ * else and the gate being read, the gate opens on a fact that was not true
+ * when the observation was taken, and the strong assertion compares two
+ * moments that never coexisted. That is a real CI failure, not a bug in the
+ * binding:
+ *
+ *     our app (pid=7764) reports isForeground but
+ *     App.foreground() resolved a different pid=1704
+ *
+ * Reading the flag either side and requiring agreement means the strong
+ * invariants are asserted only against an observation the desktop held still
+ * for. A few retries cover a desktop that is merely settling; one that keeps
+ * changing hands reports `frontmost: null`, and the caller degrades to the
+ * app-agnostic assertions exactly as it already does when the app is not
+ * frontmost at all.
+ */
+async function observeWithStableForeground(app, observe, attempts = 5) {
+  let value;
+  for (let i = 0; i < attempts; i += 1) {
+    const before = await freshForegroundFlag(app);
+    value = await observe();
+    const after = await freshForegroundFlag(app);
+    if (before === after) return { value, frontmost: before };
+  }
+  return { value, frontmost: null };
+}
+
 // ── App.foreground() ────────────────────────────────────────────────────────
 
 test('App.foreground() resolves to a foreground app', async () => {
   const app = await getApp();
-  let fg;
+  let reading;
   try {
-    fg = await App.foreground({ timeout: 5000 });
+    reading = await observeWithStableForeground(app, () =>
+      App.foreground({ timeout: 5000 }),
+    );
   } catch (err) {
     if (err instanceof SelectorNotMatchedError) return; // nothing holds focus
     throw err;
   }
+  const { value: fg, frontmost } = reading;
 
   assert.ok(typeof fg.pid === 'number' && fg.pid > 0);
   // Whatever App.foreground() returns is, by definition, the foreground app.
   assert.equal(fg.isForeground, true);
 
-  if (await freshForegroundFlag(app)) {
+  if (frontmost) {
     assert.equal(
       fg.pid,
       app.pid,
@@ -88,7 +129,12 @@ test('App.isForeground is a plain boolean', async () => {
 
 test('active window reports active; descendants do not', async () => {
   const app = await getApp();
-  const windows = await app.locator('window').elements();
+  // Same race as above: the window snapshot and the frontmost gate are two
+  // reads of moving state, so take the snapshot inside the sandwich.
+  const { value: windows, frontmost } = await observeWithStableForeground(
+    app,
+    () => app.locator('window').elements(),
+  );
   if (windows.length === 0) return; // no separate window node (e.g. UIA app-as-window)
 
   const activeWindows = windows.filter((w) => w.active);
@@ -99,7 +145,6 @@ test('active window reports active; descendants do not', async () => {
     `expected at most one active window, found ${activeWindows.length}`,
   );
 
-  const frontmost = await freshForegroundFlag(app);
   if (frontmost) {
     assert.equal(
       activeWindows.length,
