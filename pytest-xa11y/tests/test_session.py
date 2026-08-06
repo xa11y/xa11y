@@ -284,3 +284,27 @@ def test_attach_mode_detects_a_dead_pid(finds_immediately):
     # nothing there would be a feature that never runs where it is needed.
     with pytest.raises(AppDied, match="no longer running"):
         session.check_alive()
+
+
+def test_liveness_reports_alive_when_it_cannot_tell(monkeypatch):
+    # An inconclusive probe ends the whole run if it answers "dead", so it
+    # must answer "alive". A false alive costs only the old behaviour.
+    monkeypatch.setattr(session_module.sys, "platform", "win32")
+
+    def no_tasklist(*args, **kwargs):
+        raise FileNotFoundError("tasklist not found")
+
+    monkeypatch.setattr(session_module.subprocess, "run", no_tasklist)
+    assert session_module._pid_alive(4242) is True
+
+
+def test_liveness_reports_alive_when_tasklist_errors(monkeypatch):
+    import subprocess as sp
+
+    monkeypatch.setattr(session_module.sys, "platform", "win32")
+    monkeypatch.setattr(
+        session_module.subprocess,
+        "run",
+        lambda *a, **k: sp.CompletedProcess(a, returncode=1, stdout="", stderr="boom"),
+    )
+    assert session_module._pid_alive(4242) is True

@@ -42,15 +42,29 @@ _TERMINATE_GRACE = 5.0
 
 
 def _pid_alive(pid: int) -> bool:
-    """Whether ``pid`` still names a running process."""
+    """Whether ``pid`` still names a running process.
+
+    Reports alive whenever it cannot tell. This check exists to convert a
+    mid-run crash into one clear message, and it ends the whole run when it
+    says "dead" — so an inconclusive probe must never be the thing that
+    stops a suite. A false "alive" costs the old behaviour (tests fail on
+    lookups against a gone process); a false "dead" invents a failure.
+    """
     if sys.platform == "win32":
-        # No signal 0 on Windows: ask the task list instead. tasklist is
-        # present on every supported version and needs no extra dependency.
-        result = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-            capture_output=True,
-            text=True,
-        )
+        # No signal 0 on Windows: ask the task list instead. tasklist ships
+        # with every supported version, so a missing one means an unusual
+        # environment rather than a dead app.
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return True
+        if result.returncode != 0:
+            return True
         return str(pid) in result.stdout
     try:
         os.kill(pid, 0)
@@ -58,6 +72,8 @@ def _pid_alive(pid: int) -> bool:
         return False
     except PermissionError:
         # Alive, but owned by another user — which is still alive.
+        return True
+    except OSError:
         return True
     return True
 
