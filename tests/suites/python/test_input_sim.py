@@ -53,6 +53,9 @@ CLEAR_BUTTON = 'button[name="Clear log"]'
 # Wait up to this long for a log line to appear after we post an event.
 LOG_SETTLE_TIMEOUT = 2.0
 
+# Wait up to this long for focus to actually land before synthesising input.
+FOCUS_SETTLE_TIMEOUT = 5.0
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -65,7 +68,13 @@ def _read_log(app: xa11y.App) -> str:
 
 
 def _wait_for_log(app: xa11y.App, predicate, timeout: float = LOG_SETTLE_TIMEOUT) -> str:
-    """Poll the log until `predicate(text)` returns True or we time out."""
+    """Poll the log until `predicate(text)` returns True, or fail saying what it saw.
+
+    Raises rather than returning the last value. Returning it produced
+    `assert 'keydown' in ''` — an assertion that reports the symptom and hides
+    both the wait and what the page actually held. The traceback still names
+    the predicate, because it points at the calling line.
+    """
     deadline = time.monotonic() + timeout
     last = ""
     while time.monotonic() < deadline:
@@ -73,15 +82,26 @@ def _wait_for_log(app: xa11y.App, predicate, timeout: float = LOG_SETTLE_TIMEOUT
         if predicate(last):
             return last
         time.sleep(0.05)
-    return last
+    raise AssertionError(
+        f"Event log never matched within {timeout:.1f}s.\n"
+        f"  log was: {last!r}\n"
+        f"  an empty log means the synthesised input never reached the webview "
+        f"at all, rather than arriving in the wrong shape."
+    )
 
 
 def _clear_log(app: xa11y.App) -> None:
     app.locator(CLEAR_BUTTON).press()
     # The press itself is a synthetic a11y action (not input sim), so the
     # log should be empty immediately — but give one tick for the webview
-    # handler to run.
-    _wait_for_log(app, lambda t: t == "", timeout=0.5)
+    # handler to run. Best-effort on purpose: a stale line here is not worth
+    # failing the test that has not run yet, and every caller asserts on the
+    # content it goes on to produce.
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline:
+        if _read_log(app) == "":
+            return
+        time.sleep(0.05)
 
 
 def _line(log: str, kind: str) -> str:
@@ -101,13 +121,32 @@ def _field(line: str, key: str) -> str:
     return ""
 
 
+def _focus_settled(app: xa11y.App, selector: str) -> None:
+    """Focus `selector` and wait until the platform agrees it is focused.
+
+    `focus()` auto-waits for the target to be visible and enabled and then
+    issues the focus action; it does not wait for focus to *land*. Synthesised
+    keystrokes go to whatever holds keyboard focus at the moment they are
+    posted, so a test that types immediately after `focus()` can have its first
+    keystroke delivered to the previous holder and dropped.
+
+    That is a race the suite loses only occasionally, and only on the first
+    keyboard test after the mouse ones — the rest inherit settled focus, which
+    is why `test_key_press_reports_keydown_keyup` failed alone on Windows with
+    an empty event log while every later keyboard test passed.
+    """
+    locator = app.locator(selector)
+    locator.focus()
+    locator.wait_focused(timeout=FOCUS_SETTLE_TIMEOUT)
+
+
 def _focus_hit_target(app: xa11y.App) -> None:
     """Focus the hit target so keyboard events land on a meaningful element."""
-    app.locator(HIT_TARGET).focus()
+    _focus_settled(app, HIT_TARGET)
 
 
 def _focus_typed_field(app: xa11y.App) -> None:
-    app.locator(TYPED_FIELD).focus()
+    _focus_settled(app, TYPED_FIELD)
 
 
 def _hit_center(app: xa11y.App) -> tuple[int, int]:

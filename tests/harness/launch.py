@@ -24,7 +24,6 @@ import signal
 import subprocess
 import sys
 import tempfile
-import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Sequence
