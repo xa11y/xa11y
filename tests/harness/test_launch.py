@@ -17,6 +17,7 @@ Run with:  cargo xtask test-harness   (or: python -m pytest tests/harness)
 from __future__ import annotations
 
 import subprocess
+import inspect
 import sys
 from pathlib import Path
 
@@ -222,3 +223,57 @@ def test_every_suite_writes_a_junit_report(suite, tmp_path):
     assert any(str(report) in arg for arg in cmd), (
         f"{suite} suite command does not write a junit report: {cmd}"
     )
+
+
+# ── Startup and content-readiness budgets ────────────────────────────────────
+
+
+def test_discovery_and_readiness_have_independent_budgets():
+    """Readiness must not inherit whatever discovery left over.
+
+    The two shared a deadline, so an app that took most of the startup budget
+    to register left the content wait its 1-second floor. That is how the
+    Tauri suites came to run against a Windows window holding nothing but
+    Minimize/Maximize/Close: WebView2 had not painted the page inside one
+    second, and the gate gave up.
+    """
+    assert launch.CONTENT_READY_TIMEOUT >= launch.STARTUP_TIMEOUT, (
+        "content readiness gets its own full budget, not the residue of discovery"
+    )
+
+
+def test_windows_gets_a_longer_startup_budget():
+    """Both phases are measurably slower on Windows, and both have overrun.
+
+    UIA registration for the egui app finished at the 30s boundary — the app
+    appeared in the very next enumeration — and WebView2 content load has
+    overrun as well.
+    """
+    expected = 60.0 if sys.platform == "win32" else 30.0
+    assert launch._DEFAULT_STARTUP_TIMEOUT == expected
+
+
+def test_both_budgets_are_overridable_by_environment():
+    """A slow machine must be able to buy more time without a code change."""
+    source = inspect.getsource(launch)
+    assert "XA11Y_TEST_STARTUP_TIMEOUT" in source
+    assert "XA11Y_TEST_CONTENT_TIMEOUT" in source
+
+
+def test_readiness_failure_is_fatal_not_a_warning():
+    """A gate that continues is not a gate.
+
+    "Proceeding anyway" turned one clear "the app never became ready" into a
+    scatter of unrelated-looking failures in whichever suite ran first, while
+    the app finished loading behind them — the shape of issue #327, where a
+    cell reported on work it had not really done.
+    """
+    source = inspect.getsource(launch._launch_app)
+    assert "proceeding anyway" not in source, (
+        "the content-readiness gate must fail rather than warn and continue"
+    )
+    # The message is wrapped across f-string lines, so match a contiguous
+    # fragment and the raise itself rather than the whole sentence.
+    assert "content never became " in source
+    assert "raise RuntimeError(" in source
+    assert "XA11Y_TEST_CONTENT_TIMEOUT" in source

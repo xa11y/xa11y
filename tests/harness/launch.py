@@ -35,9 +35,25 @@ from typing import Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
-# Overall app-startup / content-readiness deadline, in seconds. Overridable
-# for slow machines and loaded CI runners (matches tests/helpers.py).
-STARTUP_TIMEOUT = float(os.environ.get("XA11Y_TEST_STARTUP_TIMEOUT", "30"))
+# How long to wait for the app to register with the accessibility API, and —
+# separately — how long to then wait for its content to load. Two budgets, not
+# one shared deadline: see _launch_app.
+#
+# Windows gets longer because both phases are measurably slower there and both
+# have been observed to overrun. UIA registration for the egui app finished at
+# the 30s boundary (the app was present in the very next enumeration), and
+# WebView2 had not loaded the Tauri page within the residue the old shared
+# deadline left it.
+_DEFAULT_STARTUP_TIMEOUT = 60.0 if sys.platform == "win32" else 30.0
+STARTUP_TIMEOUT = float(
+    os.environ.get("XA11Y_TEST_STARTUP_TIMEOUT", _DEFAULT_STARTUP_TIMEOUT)
+)
+
+# Content readiness gets its own budget of the same size. Sharing one deadline
+# with discovery meant a slow-registering app left readiness the 1-second floor.
+CONTENT_READY_TIMEOUT = float(
+    os.environ.get("XA11Y_TEST_CONTENT_TIMEOUT", STARTUP_TIMEOUT)
+)
 
 # Apps with a real, activatable macOS window whose tests depend on holding the
 # frontmost slot — input_sim delivers CGEvents to the frontmost app, and focus
@@ -280,8 +296,6 @@ def _launch_app(
 
     import xa11y  # imported late so the module is optional for callers that don't need it
 
-    deadline = time.monotonic() + STARTUP_TIMEOUT
-
     # Discovery is a single waited call: `App.find` polls the accessibility
     # API internally, so the harness no longer hand-rolls a retry loop. Match
     # on the PID we just launched *or* any of the platform's candidate names
@@ -320,18 +334,40 @@ def _launch_app(
 
     # Wait for content to be ready if a selector was specified — again one
     # library call (`wait_attached`) rather than a manual poll loop.
+    #
+    # Its own budget, not `deadline - now`. Discovery and readiness used to
+    # share one deadline, so an app that took most of the startup budget to
+    # register left the content wait its 1-second floor. On Windows that is
+    # what happened: WebView2 had not painted the Tauri page inside one
+    # second, the gate gave up, and the suites then ran against a window
+    # holding nothing but Minimize/Maximize/Close.
     if content_ready_selector is not None:
         print(f"Waiting for content: {content_ready_selector!r}")
-        remaining = max(deadline - time.monotonic(), 1.0)
         try:
-            app.locator(content_ready_selector).wait_attached(timeout=remaining)
-        except (xa11y.SelectorNotMatchedError, xa11y.TimeoutError, xa11y.PlatformError):
-            print(
-                f"WARNING: content selector {content_ready_selector!r} not ready "
-                f"after timeout; proceeding anyway"
+            app.locator(content_ready_selector).wait_attached(
+                timeout=CONTENT_READY_TIMEOUT
             )
-        else:
-            _print_content_state(app, content_ready_selector, "after launch")
+        except (xa11y.SelectorNotMatchedError, xa11y.TimeoutError, xa11y.PlatformError) as exc:
+            # Fail, rather than warn and continue. "Proceeding anyway" turned
+            # one clear "the app never became ready" into a scatter of
+            # unrelated-looking test failures in whichever suite ran first,
+            # while the app finished loading behind them — the same shape as
+            # issue #327, where a cell reported on work it had not really
+            # done. A gate that continues is not a gate.
+            try:
+                tree = app.dump(max_depth=8)
+            except Exception:  # noqa: BLE001 - diagnosis only
+                tree = "<tree unavailable>"
+            _kill_app(proc)
+            raise RuntimeError(
+                f"Test app (pid={proc.pid}) started but its content never became "
+                f"ready: selector {content_ready_selector!r} did not resolve within "
+                f"{CONTENT_READY_TIMEOUT:.0f}s.\n"
+                f"Raise XA11Y_TEST_CONTENT_TIMEOUT if this machine is simply slow.\n"
+                f"Last error: {exc}\n"
+                f"Tree at give-up:\n{tree}"
+            ) from exc
+        _print_content_state(app, content_ready_selector, "after launch")
 
     # macOS: claim the frontmost slot before handing the app to the suites, so
     # input_sim/focus tests aren't silently misdirected to whatever onboarding
