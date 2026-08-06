@@ -5,6 +5,12 @@ tight loop while the main thread blocks inside a native xa11y wait. If the
 wait held the GIL, the background thread could not be scheduled and the
 counter would stay near zero for the duration of the wait.
 
+Everything here runs against the mock provider. ``App.find`` cannot: it
+resolves the platform provider through ``xa11y::provider()``, so its tenet-5
+coverage lives in ``tests/suites/python/test_gil_release.py``, where a live
+accessibility bus exists. Issue #358 went unnoticed because that gap was not
+recorded anywhere.
+
 Referenced from AGENTS.md (Design Tenets, tenet 5) — keep the file name
 stable.
 """

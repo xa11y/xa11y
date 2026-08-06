@@ -1316,39 +1316,55 @@ impl App {
     /// ```
     #[staticmethod]
     #[pyo3(signature = (predicate, *, timeout=None))]
-    fn find(predicate: PyObject, timeout: Option<f64>) -> PyResult<Self> {
+    fn find(py: Python<'_>, predicate: PyObject, timeout: Option<f64>) -> PyResult<Self> {
         let timeout = effective_timeout(timeout)?;
         let provider = get_provider()?;
-        // The predicate is Python, so the poll loop must hold the GIL to call
-        // it (mirrors `Locator.wait_until`). We route through `try_find_with`
-        // so a raised exception fails fast: stash the real `PyErr` here and
-        // return an error from the closure (which `poll_lookup` short-circuits
-        // on), then re-raise the original Python exception below rather than
-        // coercing it to a misleading "no match".
-        let pred_err: std::cell::RefCell<Option<PyErr>> = std::cell::RefCell::new(None);
-        let result = xa11y::App::try_find_with(provider.clone(), timeout, |data| {
-            Python::with_gil(|py| -> xa11y::Result<bool> {
-                let outcome: PyResult<bool> = (|| {
-                    let app = Py::new(py, App::from_data(data, provider.clone()))?;
-                    predicate.call1(py, (app,))?.bind(py).is_truthy()
-                })();
-                match outcome {
-                    Ok(matched) => Ok(matched),
-                    Err(e) => {
-                        *pred_err.borrow_mut() = Some(e);
-                        Err(xa11y::Error::Platform {
-                            code: -1,
-                            message: "find() predicate raised".to_string(),
-                        })
+        // The poll loop runs with the GIL released (tenet 5); the predicate
+        // closure reacquires it per call. This mirrors `Locator.wait_until`.
+        // Holding the GIL for the loop would freeze every other thread in the
+        // consumer's process for the full timeout — and the loop *sleeps*
+        // between polls (`poll_lookup` in xa11y-core), so it is not even doing
+        // useful work while it blocks them.
+        //
+        // We route through `try_find_with` so a raised exception fails fast:
+        // stash the real `PyErr` here and return an error from the closure
+        // (which `poll_lookup` short-circuits on), then re-raise the original
+        // Python exception below rather than coercing it to a misleading
+        // "no match".
+        //
+        // A `Mutex` rather than a `RefCell`: the closure crosses
+        // `allow_threads`, which requires it to be `Send`, and `&RefCell` is
+        // not. There is no contention — the predicate runs on this thread —
+        // so the lock costs nothing.
+        let pred_err: std::sync::Mutex<Option<PyErr>> = std::sync::Mutex::new(None);
+        let result = py.allow_threads(|| {
+            xa11y::App::try_find_with(provider.clone(), timeout, |data| {
+                Python::with_gil(|py| -> xa11y::Result<bool> {
+                    let outcome: PyResult<bool> = (|| {
+                        let app = Py::new(py, App::from_data(data, provider.clone()))?;
+                        predicate.call1(py, (app,))?.bind(py).is_truthy()
+                    })();
+                    match outcome {
+                        Ok(matched) => Ok(matched),
+                        Err(e) => {
+                            // Poisoning cannot lose anything that matters here:
+                            // the stashed error is write-once and read once.
+                            *pred_err.lock().unwrap_or_else(|p| p.into_inner()) = Some(e);
+                            Err(xa11y::Error::Platform {
+                                code: -1,
+                                message: "find() predicate raised".to_string(),
+                            })
+                        }
                     }
-                }
+                })
             })
         });
+        let stashed = pred_err.into_inner().unwrap_or_else(|p| p.into_inner());
         match result {
             Ok(app) => Ok(Self::from_core(app)),
             // A stashed predicate error takes precedence — re-raise the exact
             // Python exception the predicate threw.
-            Err(e) => Err(pred_err.into_inner().unwrap_or_else(|| to_py_err(e))),
+            Err(e) => Err(stashed.unwrap_or_else(|| to_py_err(e))),
         }
     }
 
