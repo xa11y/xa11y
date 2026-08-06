@@ -122,6 +122,14 @@ Tests carrying either marker skip when pytest-xdist is running more than one
 worker. Input synthesis and the frontmost slot are process-global, and
 parallel workers take them from each other.
 
+**The `xa11y_` marker prefix is reserved**, and every way of writing one of
+these markers wrongly fails collection rather than warning: a typo in the
+marker name, a capability that does not exist, or `xa11y_requires()` with no
+arguments. pytest only warns about an unknown marker, which means the test
+still runs — unguarded, while reading as guarded. A test claiming a guard it
+does not have is worse than one with no guard at all, so this is an error and
+every offending marker in the run is reported at once.
+
 ## Events
 
 ```python

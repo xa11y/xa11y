@@ -27,6 +27,10 @@ DEFAULT_MAX_DIAGNOSTICS = 10
 # keyboard) that parallel workers would fight over.
 _SERIAL_ONLY_MARKERS = ("xa11y_frontmost",)
 
+# Every marker this plugin defines. Anything else under the reserved xa11y_
+# prefix is a typo, and pytest_collection_modifyitems fails the run on it.
+_KNOWN_MARKERS = ("xa11y_requires", "xa11y_frontmost")
+
 _STATE_KEY = pytest.StashKey["_State"]()
 
 
@@ -307,6 +311,51 @@ def _xa11y_per_test(request: pytest.FixtureRequest) -> Iterator[None]:
 # ---------------------------------------------------------------------------
 # Markers
 # ---------------------------------------------------------------------------
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Reject markers that would silently guard nothing.
+
+    pytest treats an unrecognised marker as a warning, and a warning in a
+    thousand-line CI log is not a signal. Every way of writing one of this
+    plugin's markers wrongly — a typo in the name, a capability that does not
+    exist, ``xa11y_requires()`` with no arguments — otherwise produces a test
+    that runs unguarded while reading as guarded. That is a test claiming
+    coverage it does not have, which is the failure mode worth being strict
+    about.
+
+    The ``xa11y_`` marker prefix is reserved by this plugin for that reason.
+    """
+    problems: list[str] = []
+    for item in items:
+        for marker in item.iter_markers():
+            if not marker.name.startswith("xa11y_"):
+                continue
+            if marker.name not in _KNOWN_MARKERS:
+                problems.append(
+                    f"{item.nodeid}: unknown marker @pytest.mark.{marker.name}. "
+                    f"pytest-xa11y reserves the xa11y_ prefix; known markers are "
+                    f"{', '.join(_KNOWN_MARKERS)}."
+                )
+                continue
+            if marker.name != "xa11y_requires":
+                continue
+            if not marker.args:
+                problems.append(
+                    f"{item.nodeid}: @pytest.mark.xa11y_requires() needs at least one "
+                    f"capability ({', '.join(KNOWN_CAPABILITIES)}); with none it guards "
+                    f"nothing and the test runs as though it had no marker."
+                )
+            for name in marker.args:
+                if name not in KNOWN_CAPABILITIES:
+                    problems.append(
+                        f"{item.nodeid}: unknown capability {name!r} in "
+                        f"@pytest.mark.xa11y_requires; expected one of "
+                        f"{', '.join(KNOWN_CAPABILITIES)}."
+                    )
+
+    if problems:
+        raise pytest.UsageError("\n".join(problems))
 
 
 def pytest_runtest_setup(item: pytest.Item) -> None:

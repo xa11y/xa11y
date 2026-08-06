@@ -67,22 +67,6 @@ def test_requires_marker_skips_a_disabled_capability(pytester: pytest.Pytester):
     result.stdout.fnmatch_lines(["*screenshot unavailable: disabled via --xa11y-skip=screenshot*"])
 
 
-def test_requires_marker_rejects_an_unknown_capability(pytester: pytest.Pytester):
-    # A typo in a marker must fail the test rather than silently never skipping.
-    pytester.makepyfile(
-        """
-        import pytest
-
-        @pytest.mark.xa11y_requires("screenshsot")
-        def test_typo():
-            pass
-        """
-    )
-    result = pytester.runpytest()
-    result.assert_outcomes(errors=1)
-    result.stdout.fnmatch_lines(["*Unknown capability*screenshsot*"])
-
-
 def test_markers_are_registered(pytester: pytest.Pytester):
     result = pytester.runpytest("--markers")
     result.stdout.fnmatch_lines(["*xa11y_requires(*capabilities)*"])
@@ -178,3 +162,86 @@ def test_worker_count_reads_xdist_workerinput():
 
 def test_worker_count_survives_a_malformed_workerinput():
     assert _worker_count(_Config({"workercount": "many"})) == 1
+
+
+def test_requires_marker_with_no_capabilities_is_rejected(pytester: pytest.Pytester):
+    # Guards nothing, but reads as guarded. pytest would otherwise run it.
+    pytester.makepyfile(
+        """
+        import pytest
+
+        @pytest.mark.xa11y_requires()
+        def test_guards_nothing():
+            pass
+        """
+    )
+    result = pytester.runpytest()
+    result.stderr.fnmatch_lines(["*needs at least one capability*"])
+    assert result.ret != 0
+
+
+def test_typo_in_a_marker_name_is_rejected(pytester: pytest.Pytester):
+    # pytest only warns about an unknown marker, so the test would run
+    # unguarded. The xa11y_ prefix is reserved so this can be an error.
+    pytester.makepyfile(
+        """
+        import pytest
+
+        @pytest.mark.xa11y_frontmst
+        def test_typo():
+            pass
+        """
+    )
+    result = pytester.runpytest()
+    result.stderr.fnmatch_lines(["*unknown marker @pytest.mark.xa11y_frontmst*"])
+    assert result.ret != 0
+
+
+def test_unknown_capability_is_rejected_at_collection(pytester: pytest.Pytester):
+    pytester.makepyfile(
+        """
+        import pytest
+
+        @pytest.mark.xa11y_requires("screenshsot")
+        def test_typo():
+            pass
+        """
+    )
+    result = pytester.runpytest()
+    result.stderr.fnmatch_lines(["*unknown capability 'screenshsot'*"])
+    assert result.ret != 0
+
+
+def test_every_bad_marker_is_reported_at_once(pytester: pytest.Pytester):
+    # One run, every problem: fixing them one CI cycle at a time is the thing
+    # collection-time validation is meant to avoid.
+    pytester.makepyfile(
+        """
+        import pytest
+
+        @pytest.mark.xa11y_requires("nope")
+        def test_one():
+            pass
+
+        @pytest.mark.xa11y_requires()
+        def test_two():
+            pass
+        """
+    )
+    result = pytester.runpytest()
+    result.stderr.fnmatch_lines(["*unknown capability 'nope'*"])
+    result.stderr.fnmatch_lines(["*needs at least one capability*"])
+
+
+def test_valid_markers_collect_cleanly(pytester: pytest.Pytester):
+    pytester.makepyfile(
+        """
+        import pytest
+
+        @pytest.mark.xa11y_requires("screenshot", "input_sim")
+        @pytest.mark.xa11y_frontmost
+        def test_fine():
+            pass
+        """
+    )
+    pytester.runpytest("--xa11y-skip=screenshot").assert_outcomes(skipped=1)
