@@ -18,9 +18,19 @@ something. None of that is an xa11y release, and the reverse holds too:
 publish an identical build. Tying them would mean either a stream of no-op
 pytest-xa11y releases or a version number that says nothing.
 
-The dependency is a lower bound, `xa11y>=0.12`, not a pin. The plugin uses
-long-stable API — `App.find`, locator waits, structured error attributes — so
-a consumer can upgrade either package on its own schedule.
+The dependency is a lower bound, not a pin, so a consumer can upgrade either
+package on its own schedule.
+
+The bound is not decorative. It currently reads `xa11y>=0.13.0` because the
+launch path makes one long `App.find` call instead of polling it in chunks,
+and on an earlier release that call holds the GIL for the whole startup wait
+(xa11y/xa11y#359). A consumer who resolved an older xa11y would get a plugin
+that freezes their other threads for up to the startup timeout. **This
+package therefore cannot publish before xa11y 0.13.0 does** — check that the
+floor is a released version before running the workflow.
+
+Raising the floor is a minor bump at least. It can make a working install
+unresolvable, which is a breaking change for anyone pinning the library.
 
 ## Cutting a release
 

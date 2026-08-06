@@ -308,3 +308,81 @@ def test_liveness_reports_alive_when_tasklist_errors(monkeypatch):
         lambda *a, **k: sp.CompletedProcess(a, returncode=1, stdout="", stderr="boom"),
     )
     assert session_module._pid_alive(4242) is True
+
+
+def test_app_discovery_makes_one_find_call_for_the_whole_budget(monkeypatch):
+    # Not a chunked loop: core attaches a full app enumeration to each timeout,
+    # so a caller that retries on timeout pays for one per iteration and throws
+    # it away (the anti-pattern tenet 6 names).
+    calls = []
+
+    def find(predicate, timeout=None):
+        calls.append(timeout)
+        time.sleep(0.05)
+        raise xa11y.TimeoutError("Timeout")
+
+    monkeypatch.setattr(session_module, "xa11y", _fake_xa11y(find=find))
+    session = AppSession(AppLauncher(command=ALIVE), startup_timeout=1.0)
+    with pytest.raises(AppLaunchError):
+        session.start()
+    session.stop()
+    assert len(calls) == 1, f"expected one App.find call, got {len(calls)}"
+    assert calls[0] == pytest.approx(1.0, abs=0.2)
+
+
+def test_a_transient_platform_error_is_still_retried(monkeypatch):
+    # The one case worth looping on: core propagates bus errors immediately
+    # rather than polling through them, and they are transient during
+    # accessibility registration.
+    app = FakeApp()
+    attempts = []
+
+    def find(predicate, timeout=None):
+        attempts.append(timeout)
+        if len(attempts) < 3:
+            raise xa11y.PlatformError("Platform error (2): bus not ready")
+        return app
+
+    monkeypatch.setattr(session_module, "xa11y", _fake_xa11y(find=find))
+    session = AppSession(AppLauncher(command=ALIVE), startup_timeout=5.0)
+    try:
+        assert session.start() is app
+    finally:
+        session.stop()
+    assert len(attempts) == 3
+
+
+def test_a_process_that_dies_unenumerated_is_reported_as_a_crash(monkeypatch):
+    # Nothing to enumerate means the predicate never runs, so death is only
+    # noticed when the wait ends. It must still be reported as the crash it
+    # is, not as an accessibility-registration failure.
+    def find(predicate, timeout=None):
+        time.sleep(0.2)
+        raise xa11y.TimeoutError("Timeout")
+
+    monkeypatch.setattr(session_module, "xa11y", _fake_xa11y(find=find))
+    session = AppSession(AppLauncher(command=DIES), startup_timeout=1.0)
+    with pytest.raises(AppLaunchError) as excinfo:
+        session.start()
+    message = str(excinfo.value)
+    assert "exited during startup (code 3)" in message
+    assert "did not register with the accessibility API" not in message
+
+
+def test_the_predicate_aborts_the_search_when_the_process_dies(monkeypatch):
+    # With candidates to evaluate, death is caught inside the predicate — one
+    # poll tick rather than the whole timeout.
+    def find(predicate, timeout=None):
+        deadline = time.monotonic() + (timeout or 0)
+        while time.monotonic() < deadline:
+            predicate(FakeApp(pid=999, name="someone-else"))
+            time.sleep(0.05)
+        raise xa11y.TimeoutError("Timeout")
+
+    monkeypatch.setattr(session_module, "xa11y", _fake_xa11y(find=find))
+    session = AppSession(AppLauncher(command=DIES), startup_timeout=30.0)
+    started = time.monotonic()
+    with pytest.raises(AppLaunchError, match="exited during startup"):
+        session.start()
+    # Well inside the 30s budget: the abort came from the predicate.
+    assert time.monotonic() - started < 10

@@ -203,7 +203,9 @@ rather than dropped, so a stale collector cannot quietly stop contributing.
 ## Versioning
 
 pytest-xa11y versions independently of xa11y and depends on it with a lower
-bound, not a pin. See [RELEASING.md](RELEASING.md).
+bound, not a pin. The bound is `xa11y>=0.13.0`: the launch path makes a single
+long `App.find` call, which on earlier releases holds the GIL for the whole
+startup wait. See [RELEASING.md](RELEASING.md).
 
 ## License
 

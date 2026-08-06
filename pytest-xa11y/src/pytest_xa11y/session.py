@@ -17,23 +17,6 @@ from .errors import AppDied, AppLaunchError
 from .frontmost import ensure_macos_frontmost
 from .launcher import AppLauncher
 
-# One poll chunk of App.find, so a dead process is noticed within a second
-# rather than at the end of the whole startup timeout.
-#
-# The chunking is a workaround, not the design. One App.find call for the
-# full timeout, raising from inside the predicate on process death, would be
-# strictly better: death detection improves to once per poll tick, and core
-# stops building a full app enumeration for each timeout we discard as a
-# retry signal (the anti-pattern tenet 6 names).
-#
-# The GIL half of that has landed on main (xa11y/xa11y#359), but no *released*
-# xa11y carries it yet, and this package depends on a lower bound rather than
-# a pin. Until the minimum supported release includes the fix, a single long
-# App.find call would freeze the consumer's other threads for the whole
-# startup wait on any version they can actually install. Chunking at least
-# yields between calls. Revisit when the floor moves.
-_FIND_CHUNK = 1.0
-
 # Bytes of captured stdout/stderr reported on failure. Diagnostics are
 # bounded: a crash loop can emit megabytes, and the tail is the useful part.
 _OUTPUT_TAIL = 4000
@@ -196,25 +179,48 @@ class AppSession:
             lowered = name.lower()
             return any(candidate_name.lower() in lowered for candidate_name in names)
 
+        def match_or_abort(candidate: xa11y.App) -> bool:
+            # Checking for process death inside the predicate is what lets
+            # this be a single App.find call. A raising predicate aborts the
+            # search immediately and propagates, so a crashed app is reported
+            # as a crash within one poll tick instead of at the end of the
+            # whole timeout.
+            self._raise_if_exited(during="startup")
+            return matches(candidate)
+
         deadline = time.monotonic() + self.startup_timeout
         last_platform_error: Exception | None = None
-        while time.monotonic() < deadline:
+        while True:
             self._raise_if_exited(during="startup")
             remaining = max(0.0, deadline - time.monotonic())
+            if remaining <= 0:
+                break
             try:
-                return xa11y.App.find(matches, timeout=min(_FIND_CHUNK, remaining))
+                return xa11y.App.find(match_or_abort, timeout=remaining)
             except (xa11y.TimeoutError, xa11y.SelectorNotMatchedError):
-                # Expected while the app is still registering — this is the
-                # loop's retry signal, not a failure.
-                continue
+                # The whole timeout is spent. Not a retry signal — App.find
+                # polls internally for the full duration, so this is terminal.
+                break
             except xa11y.PlatformError as exc:
                 # The accessibility bus can legitimately error mid-registration
-                # (AT-SPI in particular). Retry, but keep the error: if we
-                # ultimately time out, the last one is reported rather than
-                # discarded.
+                # (AT-SPI in particular), and core propagates that immediately
+                # rather than polling through it. Retry for the remaining time,
+                # but keep the error: if we ultimately time out, the last one
+                # is reported rather than discarded.
+                #
+                # Only this case loops. Retrying on *timeout* would be the
+                # tenet-6 anti-pattern — core attaches a full app enumeration
+                # to each timeout, and a loop that discards them pays for one
+                # per iteration.
                 last_platform_error = exc
                 continue
 
+        # A process that died without ever being enumerated never reached the
+        # predicate, so check once more before blaming accessibility
+        # registration. "exited during startup (code 3)" with the captured
+        # output is a diagnosis; "did not register with the accessibility API"
+        # for a process that is not running is a wrong one.
+        self._raise_if_exited(during="startup")
         self._fail_not_found(pid, last_platform_error)
 
     def _fail_not_found(self, pid: int, last_platform_error: Exception | None) -> NoReturn:
@@ -253,21 +259,39 @@ class AppSession:
         raise AppLaunchError("\n".join(lines))
 
     def _await_ready(self, app: xa11y.App, selector: str) -> None:
-        """Poll until the readiness selector resolves."""
+        """Wait for the readiness selector to resolve.
+
+        One ``wait_attached`` call for the whole budget, for the same reason
+        ``_await_app`` makes one ``App.find`` call: the wait polls internally,
+        releases the GIL, and attaches a bounded diagnosis to its timeout —
+        which a caller that loops would build and discard every iteration.
+
+        Unlike ``App.find`` there is no predicate to hook, so a process that
+        dies *during* content load is noticed when the wait ends rather than
+        within a second of dying. The reported error is still the crash, with
+        the exit code and captured output; only the promptness differs.
+        """
         deadline = time.monotonic() + self.startup_timeout
         last_error: Exception | None = None
-        while time.monotonic() < deadline:
+        while True:
             self._raise_if_exited(during="content readiness")
             remaining = max(0.0, deadline - time.monotonic())
+            if remaining <= 0:
+                break
             try:
-                app.locator(selector).wait_attached(timeout=min(_FIND_CHUNK, remaining))
+                app.locator(selector).wait_attached(timeout=remaining)
                 return
             except (xa11y.TimeoutError, xa11y.SelectorNotMatchedError) as exc:
+                # The full budget is spent; the wait polled throughout it.
                 last_error = exc
-                continue
+                break
             except xa11y.PlatformError as exc:
+                # Transient bus errors are not polled through by core, so this
+                # is the one case worth retrying with the remaining time.
                 last_error = exc
                 continue
+
+        self._raise_if_exited(during="content readiness")
 
         detail = [
             f"{self.launcher.display_name!r} started but its content never became "

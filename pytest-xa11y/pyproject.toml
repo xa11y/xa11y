@@ -29,10 +29,13 @@ classifiers = [
 ]
 dependencies = [
     "pytest>=7.0",
-    # Lower bound, not a pin: the plugin uses only long-stable xa11y API
-    # (App.find, Locator waits, structured error attributes) and must not
-    # force a lockstep upgrade on consumers.
-    "xa11y>=0.12",
+    # Lower bound, not a pin — but a real one. The launch path makes a single
+    # long App.find call rather than polling it in chunks, which requires the
+    # GIL fix from xa11y/xa11y#359: on an earlier release that call holds the
+    # GIL for the whole startup wait and freezes every other thread in the
+    # consumer's process. 0.13.0 is the first release carrying it, so this
+    # package cannot publish before xa11y 0.13.0 does.
+    "xa11y>=0.13.0",
 ]
 
 [project.entry-points.pytest11]
