@@ -142,9 +142,13 @@ def write_screenshot(
     Returns ``None`` when capture is unavailable in this session — that is
     reported once in the session header, not repeated per failure.
     """
-    if not capabilities.available(SCREENSHOT):
-        return None
     try:
+        # Inside the try: `available()` probes, and a probe can raise. This
+        # runs from `pytest_runtest_makereport`, where an exception is fatal —
+        # pytest reports an INTERNALERROR and the failing test's own assertion
+        # is never printed. Diagnostics must never be able to do that.
+        if not capabilities.available(SCREENSHOT):
+            return None
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"{stem}.png"
         # The app's own window, not the whole display: on a shared CI runner
@@ -158,7 +162,7 @@ def write_screenshot(
         else:
             xa11y.screenshot().save_png(path)
         return str(path)
-    except (xa11y.XA11yError, OSError) as exc:
+    except Exception as exc:  # see above: this must never be fatal
         return f"<screenshot failed: {exc!r}>"
 
 

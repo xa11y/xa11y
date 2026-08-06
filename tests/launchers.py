@@ -208,6 +208,14 @@ def launcher_for(app_name: str) -> AppLauncher:
             # toolkits expose a name to the accessibility API before their pid
             # lookup resolves, and others the reverse. Matching either signal
             # absorbs both races.
+            #
+            # This is a substring match, where the conftests it replaced used
+            # exact equality. Looser, and worth knowing: App.find returns the
+            # first candidate the platform enumerates that satisfies the
+            # predicate, so a name match can win over the correct pid. The
+            # names the harness discovers here are specific
+            # ("xa11y-qt-test-app"), so nothing generic can collide; a suite
+            # that needs precision uses AppLauncher(app_name_prefix=...).
             app_names=[harness_name] if harness_name else [],
             label=app_name,
             startup_timeout=STARTUP_TIMEOUT,

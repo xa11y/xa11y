@@ -382,3 +382,153 @@ def test_header_appears_once_something_is_configured(pytester: pytest.Pytester):
     pytester.makepyfile("def test_noop(): pass")
     result = pytester.runpytest("--xa11y-startup-timeout=45")
     result.stdout.fnmatch_lines(["xa11y: startup timeout 45s*"])
+
+
+BROKEN_CAPTURE_CONFTEST = (
+    FAKE_APP_CONFTEST
+    + """
+
+@pytest.fixture(scope="session", autouse=True)
+def _broken_capture(_fake_backend):
+    import pathlib
+    import xa11y
+    counter = pathlib.Path("capture-attempts.txt")
+    counter.write_text("")
+    def boom(**kwargs):
+        with counter.open("a") as handle:
+            handle.write("x")
+        raise xa11y.PlatformError("compositor handshake returned garbage")
+    xa11y.screenshot = boom
+    yield
+"""
+)
+
+
+def test_artifacts_never_turn_a_failure_into_an_internalerror(pytester: pytest.Pytester):
+    # write_screenshot runs from pytest_runtest_makereport, where a raise is
+    # fatal: pytest reports INTERNALERROR and the failing test's own assertion
+    # is never printed.
+    pytester.makeconftest(BROKEN_CAPTURE_CONFTEST)
+    pytester.makepyfile(
+        """
+        def test_fails(xa11y_app):
+            assert False, "the assertion the developer needs to see"
+        """
+    )
+    result = pytester.runpytest("--xa11y-artifacts=out")
+    result.assert_outcomes(failed=1)
+    output = result.stdout.str()
+    assert "INTERNALERROR" not in output
+    assert "the assertion the developer needs to see" in output
+    assert "screenshot failed" in output
+
+
+def test_a_failing_probe_is_reported_once_not_per_test(pytester: pytest.Pytester):
+    pytester.makeconftest(BROKEN_CAPTURE_CONFTEST)
+    pytester.makepyfile(
+        """
+        import pytest
+
+        @pytest.mark.xa11y_requires("screenshot")
+        def test_one(): pass
+
+        @pytest.mark.xa11y_requires("screenshot")
+        def test_two(): pass
+
+        @pytest.mark.xa11y_requires("screenshot")
+        def test_three(): pass
+        """
+    )
+    result = pytester.runpytest()
+    result.assert_outcomes(errors=3)
+    # One real capture attempt, not one per test. The failure is cached and
+    # re-raised the way pytest caches a fixture error, so a thirty-test
+    # screenshot module does not make thirty screen-capture attempts.
+    attempts = (pytester.path / "capture-attempts.txt").read_text()
+    assert len(attempts) == 1, f"probed {len(attempts)} times, expected 1"
+    # And the error says what was happening and how to get out of it.
+    result.stdout.fnmatch_lines(["*probing the 'screenshot' capability failed*"])
+    result.stdout.fnmatch_lines(["*--xa11y-skip=screenshot*"])
+
+
+FRONTMOST_CONFTEST = (
+    FAKE_APP_CONFTEST
+    + """
+
+@pytest.fixture(scope="session", autouse=True)
+def _refuse_the_front(_fake_backend):
+    import pytest_xa11y.plugin as plugin
+    plugin.ensure_macos_frontmost = lambda pid, **kw: (False, "front claim failed")
+    yield
+"""
+)
+
+
+def test_a_failed_front_claim_skips_one_test_not_the_suite(pytester: pytest.Pytester):
+    # The claim happens inside the session-scoped app fixture. pytest caches a
+    # session-scoped fixture's Skipped and re-raises it for every later
+    # consumer, so skipping there would skip the whole suite — and exit 0,
+    # reporting a green run that tested nothing.
+    pytester.makeconftest(FRONTMOST_CONFTEST)
+    pytester.makepyfile(
+        """
+        import pytest
+
+        @pytest.mark.xa11y_frontmost
+        def test_a_wants_the_front(xa11y_app): pass
+
+        def test_b_unrelated(xa11y_app): pass
+
+        def test_c_unrelated(xa11y_app): pass
+        """
+    )
+    result = pytester.runpytest()
+    result.assert_outcomes(passed=2, skipped=1)
+
+
+def test_a_factory_app_exiting_does_not_abort_the_run(pytester: pytest.Pytester):
+    # Dismissing a dialog *is* its process exiting. An app the suite launched
+    # itself must not end the run when it goes.
+    pytester.makeconftest(FAKE_APP_CONFTEST)
+    pytester.makepyfile(
+        """
+        import sys
+        import pytest
+        from pytest_xa11y import AppLauncher
+
+        SHORT = [sys.executable, "-c", "import time; time.sleep(0.2)"]
+
+        def test_launches_and_dismisses(xa11y_app_factory):
+            xa11y_app_factory(AppLauncher(command=SHORT, label="dialog"))
+            import time; time.sleep(0.5)
+
+        def test_after_the_dialog_closed(xa11y_app):
+            assert xa11y_app is not None
+
+        def test_also_runs(xa11y_app):
+            assert xa11y_app is not None
+        """
+    )
+    pytester.runpytest().assert_outcomes(passed=3)
+
+
+def test_the_app_under_test_dying_still_ends_the_run(pytester: pytest.Pytester):
+    # The counterpart: the session app is the app under test, and every
+    # remaining test would fail on a lookup against a process that is gone.
+    pytester.makeconftest(
+        FAKE_APP_CONFTEST.replace(
+            "return AppLauncher(attach_pid=os.getpid())",
+            "import subprocess, sys\n"
+            "    proc = subprocess.Popen([sys.executable, '-c', 'pass'])\n"
+            "    proc.wait()\n"
+            "    return AppLauncher(attach_pid=proc.pid)",
+        )
+    )
+    pytester.makepyfile(
+        """
+        def test_one(xa11y_app): pass
+        def test_two(xa11y_app): pass
+        """
+    )
+    result = pytester.runpytest()
+    assert "Interrupted" in result.stdout.str()

@@ -68,6 +68,9 @@ class Capabilities:
     def __init__(self, disabled: tuple[str, ...] = ()) -> None:
         self._disabled = tuple(disabled)
         self._cache: dict[str, tuple[bool, str | None]] = {}
+        # Probes that raised. Cached so the failure is reported once, not
+        # re-attempted for every test that asks.
+        self._failures: dict[str, Exception] = {}
 
     def _declared_unavailable(self, name: str) -> str | None:
         """Reason this capability was switched off out of band, if it was."""
@@ -86,19 +89,39 @@ class Capabilities:
         return self.check(name)[1]
 
     def check(self, name: str) -> tuple[bool, str | None]:
-        """Return ``(available, reason)``, probing at most once per session."""
+        """Return ``(available, reason)``, probing at most once per session.
+
+        "At most once" holds on the failure path too: a probe that raises has
+        its exception cached and re-raised, the way pytest caches a fixture
+        error. Without that, a thirty-test screenshot module would attempt
+        thirty screen captures and print thirty copies of the same traceback.
+        """
         if name not in KNOWN_CAPABILITIES:
             raise ValueError(
                 f"Unknown capability {name!r}; expected one of {list(KNOWN_CAPABILITIES)}."
             )
+        if name in self._failures:
+            raise self._failures[name]
         if name not in self._cache:
             declared = self._declared_unavailable(name)
             if declared is not None:
                 self._cache[name] = (False, declared)
-            elif name == SCREENSHOT:
-                self._cache[name] = _probe_screenshot()
-            else:
-                self._cache[name] = _probe_input_sim()
+                return self._cache[name]
+            probe = _probe_screenshot if name == SCREENSHOT else _probe_input_sim
+            try:
+                self._cache[name] = probe()
+            except xa11y.XA11yError as exc:
+                # Say what was being done and what the way out is: the bare
+                # platform error alone does not tell a reader that this was a
+                # capability probe rather than their own call (tenet 6).
+                enriched = type(exc)(
+                    f"probing the {name!r} capability failed: {exc}. This is not one of "
+                    f"the errors that mean the session simply lacks {name}, so it is "
+                    f"reported rather than skipped. Pass --xa11y-skip={name} if this "
+                    f"machine genuinely cannot do it."
+                )
+                self._failures[name] = enriched
+                raise enriched from exc
         return self._cache[name]
 
     def skip_unless(self, name: str) -> None:

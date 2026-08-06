@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Callable
@@ -59,6 +60,11 @@ class _State:
         # @pytest.mark.xa11y_frontmost at the moment an app is created, which
         # for a non-autouse fixture is *after* the autouse per-test hook.
         self.current_item: pytest.Item | None = None
+        # Apps started during the current test. The frontmost claim targets
+        # the most recent of these, falling back to the session app — never
+        # `live[-1]`, which can be a factory app launched by an earlier test
+        # and left running.
+        self.item_sessions: list[AppSession] = []
 
     def register(self, session: AppSession) -> None:
         self.live.append(session)
@@ -226,38 +232,60 @@ def xa11y_launcher() -> AppLauncher:
     )
 
 
-def _claim_frontmost(state: _State, session: AppSession) -> None:
-    """Claim the macOS front slot for ``session`` if this test asked for it.
+def _claim_frontmost(state: _State, session: AppSession) -> tuple[bool, str]:
+    """Claim the macOS front slot for ``session``, reporting success.
 
-    Called both when an app is created and once per test for an app carried
-    over from an earlier one. Claiming twice is harmless — the last claim
-    wins, and the last claim is the app this test actually drives.
+    Deliberately does **not** skip. It is called from the app fixtures, and
+    `xa11y_app` is session-scoped: pytest caches a session-scoped fixture's
+    `Skipped` and re-raises it for every later consumer, so one failed claim
+    would skip the entire suite and exit 0. A macOS runner that booted with
+    Setup Assistant holding the front would then report a green run that
+    tested nothing. The skip decision belongs to one test, so it is taken
+    per-test in `pytest_runtest_call`.
     """
     item = state.current_item
     if item is None or item.get_closest_marker("xa11y_frontmost") is None:
-        return
+        return True, "not requested"
     pid = session.app.pid if session.app is not None else None
     if pid is None:
         # App.pid is optional. Left unguarded, osascript interpolates the
         # None into its query and fails for the full timeout before
         # reporting something misleading about the frontmost slot.
-        pytest.skip(
+        return False, (
             f"cannot claim the macOS frontmost slot: "
             f"{session.launcher.display_name!r} reports no pid"
         )
-    ok, detail = ensure_macos_frontmost(pid)
-    if not ok:
-        pytest.skip(detail)
+    return ensure_macos_frontmost(pid)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_call(item: pytest.Item):
+    """Take the frontmost decision once every fixture has been resolved.
+
+    Runs after setup, so an app created by a non-autouse fixture for this
+    test is visible — which the autouse per-test fixture cannot see, because
+    autouse fixtures are set up first.
+    """
+    state = _state(item.config)
+    if item.get_closest_marker("xa11y_frontmost") is not None:
+        target = state.item_sessions[-1] if state.item_sessions else state.session
+        if target is not None:
+            ok, detail = _claim_frontmost(state, target)
+            if not ok:
+                pytest.skip(detail)
+    yield
 
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None):
     state = _state(item.config)
     state.current_item = item
+    state.item_sessions = []
     try:
         yield
     finally:
         state.current_item = None
+        state.item_sessions = []
 
 
 @pytest.fixture(scope="session")
@@ -288,6 +316,7 @@ def xa11y_app(request: pytest.FixtureRequest, xa11y_launcher: AppLauncher) -> It
     state.register(session)
     try:
         app = session.start()
+        state.item_sessions.append(session)
         _claim_frontmost(state, session)
         yield app
     finally:
@@ -305,10 +334,11 @@ def xa11y_fresh_app(
     crash recovery.
     """
     state = _state(request.config)
-    session = AppSession(xa11y_launcher, startup_timeout=state.startup_timeout)
+    session = AppSession(xa11y_launcher, startup_timeout=state.startup_timeout, critical=False)
     state.register(session)
     try:
         app = session.start()
+        state.item_sessions.append(session)
         _claim_frontmost(state, session)
         yield app
     finally:
@@ -330,10 +360,18 @@ def xa11y_app_factory(
     sessions: list[AppSession] = []
 
     def launch(launcher: AppLauncher) -> xa11y.App:
-        session = AppSession(launcher, startup_timeout=state.startup_timeout)
+        session = AppSession(launcher, startup_timeout=state.startup_timeout, critical=False)
         sessions.append(session)
         state.register(session)
-        app = session.start()
+        try:
+            app = session.start()
+        except Exception:
+            # A launch that failed leaves nothing to diagnose or reap, and
+            # leaving it registered would report its exit as a mid-run death
+            # on top of the failure the caller already sees.
+            state.unregister(session)
+            raise
+        state.item_sessions.append(session)
         _claim_frontmost(state, session)
         return app
 
@@ -395,16 +433,17 @@ def _xa11y_per_test(request: pytest.FixtureRequest) -> Iterator[None]:
         try:
             session.check_alive()
         except AppDied as exc:
-            # End the run here. Every remaining test would fail on a lookup
-            # against a process that no longer exists, burying the one message
-            # that explains why under N copies of itself.
+            if not session.critical:
+                # An app the suite launched itself. Its exit is frequently
+                # deliberate — dismissing a dialog is its process exiting —
+                # so stop tracking it and carry on.
+                state.unregister(session)
+                continue
+            # The app under test is gone. End the run: every remaining test
+            # would fail on a lookup against a process that no longer exists,
+            # burying the one message that explains why under N copies.
             request.session.shouldstop = f"xa11y: {exc}"
             raise
-
-    # Claim for the app carried over from an earlier test. An app created
-    # *for* this test claims again as it starts, and wins, because a
-    # non-autouse fixture runs after this one.
-    _claim_frontmost(state, state.live[-1])
 
     # `reset` is defined against the session app specifically: it is what
     # exists across tests and therefore what accumulates state. A fresh app
@@ -468,7 +507,14 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
                     )
 
     if problems:
-        raise pytest.UsageError("\n".join(problems))
+        report = "\n".join(problems)
+        # Under pytest-xdist a UsageError raised here is destroyed: the worker
+        # dies and the controller reports its own internal assertion instead,
+        # so the message never reaches the log. Write it out first. That is
+        # the setup where logs are longest, and the whole point of validating
+        # at collection time is to produce a signal there.
+        print(f"pytest-xa11y: invalid markers\n{report}", file=sys.stderr, flush=True)
+        raise pytest.UsageError(report)
 
 
 def pytest_runtest_setup(item: pytest.Item) -> None:
@@ -575,7 +621,11 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
 
     report.sections.append(("xa11y app state", "\n\n".join(blocks)))
 
-    if state.diagnostics_emitted == state.max_diagnostics:
+    if state.diagnostics_emitted >= state.max_diagnostics:
         report.sections.append(
-            ("xa11y app state", f"(diagnostics capped at {state.max_diagnostics} per run)")
+            (
+                "xa11y diagnostics cap",
+                f"Further failures in this run get no app state: the cap is "
+                f"{state.max_diagnostics} (--xa11y-max-diagnostics).",
+            )
         )

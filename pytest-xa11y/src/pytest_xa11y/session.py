@@ -24,11 +24,14 @@ from .launcher import AppLauncher
 # full timeout, raising from inside the predicate on process death, would be
 # strictly better: death detection improves to once per poll tick, and core
 # stops building a full app enumeration for each timeout we discard as a
-# retry signal (the anti-pattern tenet 6 names). It is blocked on
-# xa11y/xa11y#358 — App.find holds the GIL for its entire poll loop, so a
-# single long call would freeze the consumer's other threads for the whole
-# startup wait. Chunking at least yields between calls. Revisit when #358
-# lands.
+# retry signal (the anti-pattern tenet 6 names).
+#
+# The GIL half of that has landed on main (xa11y/xa11y#359), but no *released*
+# xa11y carries it yet, and this package depends on a lower bound rather than
+# a pin. Until the minimum supported release includes the fix, a single long
+# App.find call would freeze the consumer's other threads for the whole
+# startup wait on any version they can actually install. Chunking at least
+# yields between calls. Revisit when the floor moves.
 _FIND_CHUNK = 1.0
 
 # Bytes of captured stdout/stderr reported on failure. Diagnostics are
@@ -54,6 +57,11 @@ def _pid_alive(pid: int) -> bool:
         # No signal 0 on Windows: ask the task list instead. tasklist ships
         # with every supported version, so a missing one means an unusual
         # environment rather than a dead app.
+        #
+        # This costs one subprocess per live app per test on Windows, where
+        # the other platforms cost a syscall. Worth it to keep the check real
+        # in attach mode — which is the normal path under a harness that
+        # launches the app once — but it is not free.
         try:
             result = subprocess.run(
                 ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
@@ -103,8 +111,15 @@ class AppSession:
     test or ``xa11y_app_factory`` call.
     """
 
-    def __init__(self, launcher: AppLauncher, *, startup_timeout: float) -> None:
+    def __init__(
+        self, launcher: AppLauncher, *, startup_timeout: float, critical: bool = True
+    ) -> None:
         self.launcher = launcher
+        # Whether this app's death should end the run. True for the app under
+        # test; False for the ad-hoc ones a suite launches itself, whose exit
+        # is often the point of the test — dismissing a dialog *is* its
+        # process exiting, and that must not abort everything after it.
+        self.critical = critical
         self.startup_timeout = (
             launcher.startup_timeout if launcher.startup_timeout is not None else startup_timeout
         )
@@ -122,7 +137,8 @@ class AppSession:
             pid = self.launcher.attach_pid
         else:
             self._spawn()
-            assert self.process is not None  # set by _spawn
+            if self.process is None:  # pragma: no cover - _spawn sets it or raises
+                raise AppLaunchError(f"{self.launcher.display_name!r} produced no process handle.")
             pid = self.process.pid
 
         self.app = self._await_app(pid)
@@ -273,13 +289,20 @@ class AppSession:
         if self.process is None or self.process.poll() is None:
             return
         rc = self.process.returncode
-        raise AppLaunchError(
+        # Read the output *before* stopping: stop() closes the capture files.
+        message = (
             f"{self.launcher.display_name!r} exited during {during} "
             f"(code {rc}).\n"
             f"  command: {list(self.launcher.command)}\n"
             f"  stdout: {_tail(self._stdout)}\n"
             f"  stderr: {_tail(self._stderr)}"
         )
+        # Tear down before raising, as _fail_not_found and _await_ready do.
+        # Otherwise the half-started session stays registered and its exit is
+        # re-reported later as a mid-run death, killing the run a second time
+        # with a message that contradicts the launch failure already shown.
+        self.stop()
+        raise AppLaunchError(message)
 
     def check_alive(self) -> None:
         """Raise if the app has exited since the last check.
