@@ -17,6 +17,12 @@ from .errors import AppDied, AppLaunchError
 from .frontmost import ensure_macos_frontmost
 from .launcher import AppLauncher
 
+# Pause between retries after a transient accessibility-bus error. Core
+# returns those immediately rather than polling through them, so a retry loop
+# with no throttle spins: measured at ~270k App.find calls per second against
+# a machine with no session bus, pinning a core for the whole startup budget.
+_BUS_RETRY_INTERVAL = 0.25
+
 # Bytes of captured stdout/stderr reported on failure. Diagnostics are
 # bounded: a crash loop can emit megabytes, and the tail is the useful part.
 _OUTPUT_TAIL = 4000
@@ -106,6 +112,14 @@ class AppSession:
         self.startup_timeout = (
             launcher.startup_timeout if launcher.startup_timeout is not None else startup_timeout
         )
+        # Whether the process we spawn is the one expected to register with
+        # the accessibility API. `app_names` exists for the case where it is
+        # not — launcher shims that spawn a child and exit, anything that
+        # re-execs — and for those our process exiting is normal, not a
+        # failure. Death detection is switched off there rather than reporting
+        # a clean exit as a crash. The cost is that such a launcher gets no
+        # liveness checking; we do not know which process to watch.
+        self._own_process_registers = not launcher.app_names
         self.process: subprocess.Popen | None = None
         self.app: xa11y.App | None = None
         self._stdout: IO[bytes] | None = None
@@ -124,9 +138,13 @@ class AppSession:
                 raise AppLaunchError(f"{self.launcher.display_name!r} produced no process handle.")
             pid = self.process.pid
 
-        self.app = self._await_app(pid)
+        # One budget for "appear and become ready", which is what
+        # AppLauncher.startup_timeout says it is. A deadline per phase would
+        # let start() block for twice the documented time.
+        deadline = time.monotonic() + self.startup_timeout
+        self.app = self._await_app(pid, deadline)
         if self.launcher.ready:
-            self._await_ready(self.app, self.launcher.ready)
+            self._await_ready(self.app, self.launcher.ready, deadline)
         if self.launcher.frontmost:
             ok, detail = ensure_macos_frontmost(self.app.pid or pid)
             if not ok:
@@ -157,7 +175,7 @@ class AppSession:
                 f"  cwd: {self.launcher.cwd or '<inherited>'}"
             ) from exc
 
-    def _await_app(self, pid: int) -> xa11y.App:
+    def _await_app(self, pid: int, deadline: float) -> xa11y.App:
         """Poll until the app registers with the platform accessibility API."""
         names = self.launcher.app_names
         prefix = self.launcher.app_name_prefix
@@ -188,31 +206,34 @@ class AppSession:
             self._raise_if_exited(during="startup")
             return matches(candidate)
 
-        deadline = time.monotonic() + self.startup_timeout
+        predicate = match_or_abort if self._own_process_registers else matches
         last_platform_error: Exception | None = None
+        bus_error_was_terminal = False
         while True:
             self._raise_if_exited(during="startup")
             remaining = max(0.0, deadline - time.monotonic())
             if remaining <= 0:
                 break
             try:
-                return xa11y.App.find(match_or_abort, timeout=remaining)
+                return xa11y.App.find(predicate, timeout=remaining)
             except (xa11y.TimeoutError, xa11y.SelectorNotMatchedError):
-                # The whole timeout is spent. Not a retry signal — App.find
+                # The whole budget is spent. Not a retry signal — App.find
                 # polls internally for the full duration, so this is terminal.
+                # Retrying it would also be the tenet-6 anti-pattern: core
+                # attaches a full app enumeration to each timeout, and a loop
+                # that discards them pays for one per iteration.
+                bus_error_was_terminal = False
                 break
             except xa11y.PlatformError as exc:
                 # The accessibility bus can legitimately error mid-registration
                 # (AT-SPI in particular), and core propagates that immediately
-                # rather than polling through it. Retry for the remaining time,
-                # but keep the error: if we ultimately time out, the last one
-                # is reported rather than discarded.
-                #
-                # Only this case loops. Retrying on *timeout* would be the
-                # tenet-6 anti-pattern — core attaches a full app enumeration
-                # to each timeout, and a loop that discards them pays for one
-                # per iteration.
+                # rather than polling through it — in about a millisecond. This
+                # is the only looping branch, so it carries the throttle: an
+                # unthrottled retry here pins a core for the whole budget on
+                # any machine where the bus is simply absent.
                 last_platform_error = exc
+                bus_error_was_terminal = True
+                time.sleep(min(_BUS_RETRY_INTERVAL, max(0.0, deadline - time.monotonic())))
                 continue
 
         # A process that died without ever being enumerated never reached the
@@ -221,9 +242,14 @@ class AppSession:
         # output is a diagnosis; "did not register with the accessibility API"
         # for a process that is not running is a wrong one.
         self._raise_if_exited(during="startup")
-        self._fail_not_found(pid, last_platform_error)
+        self._fail_not_found(pid, last_platform_error, bus_error_was_terminal)
 
-    def _fail_not_found(self, pid: int, last_platform_error: Exception | None) -> NoReturn:
+    def _fail_not_found(
+        self,
+        pid: int,
+        last_platform_error: Exception | None,
+        bus_error_was_terminal: bool = False,
+    ) -> NoReturn:
         try:
             listed = [f"{a.name!r} (pid={a.pid})" for a in xa11y.App.list()]
         except xa11y.XA11yError as exc:
@@ -237,11 +263,21 @@ class AppSession:
             looked_for += f" and name starting with {self.launcher.app_name_prefix!r}"
         elif self.launcher.app_names:
             looked_for += f" or name containing {list(self.launcher.app_names)}"
-        lines = [
-            f"{self.launcher.display_name!r} did not register with the accessibility "
-            f"API within {self.startup_timeout:.0f}s.",
-            looked_for,
-        ]
+        if bus_error_was_terminal and last_platform_error is not None:
+            # The app never registered because there was nothing to register
+            # with. Saying "did not register with the accessibility API" here
+            # blames the app for the session's missing bus, and buries the
+            # actual cause three lines down (tenet 6).
+            headline = (
+                f"the accessibility API is not usable in this session, so "
+                f"{self.launcher.display_name!r} could not be found: {last_platform_error}"
+            )
+        else:
+            headline = (
+                f"{self.launcher.display_name!r} did not register with the accessibility "
+                f"API within {self.startup_timeout:.0f}s."
+            )
+        lines = [headline, looked_for]
         if last_platform_error is not None:
             lines.append(f"  last accessibility error: {last_platform_error!r}")
         lines.append("  running apps: " + (", ".join(shown) if shown else "<none>"))
@@ -258,7 +294,7 @@ class AppSession:
         self.stop()
         raise AppLaunchError("\n".join(lines))
 
-    def _await_ready(self, app: xa11y.App, selector: str) -> None:
+    def _await_ready(self, app: xa11y.App, selector: str, deadline: float) -> None:
         """Wait for the readiness selector to resolve.
 
         One ``wait_attached`` call for the whole budget, for the same reason
@@ -271,7 +307,6 @@ class AppSession:
         within a second of dying. The reported error is still the crash, with
         the exit code and captured output; only the promptness differs.
         """
-        deadline = time.monotonic() + self.startup_timeout
         last_error: Exception | None = None
         while True:
             self._raise_if_exited(during="content readiness")
@@ -287,8 +322,10 @@ class AppSession:
                 break
             except xa11y.PlatformError as exc:
                 # Transient bus errors are not polled through by core, so this
-                # is the one case worth retrying with the remaining time.
+                # is the one case worth retrying with the remaining time — and,
+                # as in _await_app, the one that needs the throttle.
                 last_error = exc
+                time.sleep(min(_BUS_RETRY_INTERVAL, max(0.0, deadline - time.monotonic())))
                 continue
 
         self._raise_if_exited(during="content readiness")
@@ -310,6 +347,8 @@ class AppSession:
     # -- health ------------------------------------------------------------
 
     def _raise_if_exited(self, *, during: str) -> None:
+        if not self._own_process_registers:
+            return
         if self.process is None or self.process.poll() is None:
             return
         rc = self.process.returncode
@@ -343,7 +382,7 @@ class AppSession:
         where it is most needed. There is no captured output to report in
         that mode, because the process is not ours.
         """
-        if self._stopped:
+        if self._stopped or not self._own_process_registers:
             return
 
         if self.process is not None:

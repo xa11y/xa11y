@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -227,13 +228,11 @@ def launcher_for(app_name: str) -> AppLauncher:
             f"Unknown XA11Y_TEST_APP={app_name!r}. Known apps: {', '.join(KNOWN_APPS)}"
         )
 
-    launcher = builder()
-    return AppLauncher(
-        command=launcher.command,
-        env=launcher.env,
-        cwd=launcher.cwd,
-        app_names=launcher.app_names,
-        ready=launcher.ready,
+    # `replace` rather than rebuilding field by field: the latter silently
+    # drops any field not listed, which is a bug waiting for the first builder
+    # that sets `reset` or `app_name_prefix`.
+    return replace(
+        builder(),
         startup_timeout=STARTUP_TIMEOUT,
         frontmost=app_name in FRONTMOST_APPS,
         label=app_name,

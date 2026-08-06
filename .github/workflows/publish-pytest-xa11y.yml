@@ -85,11 +85,35 @@ jobs:
       - name: Install build tooling
         run: python -m pip install --upgrade build
 
+      # The floor in pyproject.toml deliberately understates the real
+      # requirement while no released xa11y carries the GIL fix (#359), so
+      # that CI can install the package at all. Publishing with it still in
+      # place would ship metadata permitting an xa11y that freezes the
+      # consumer's threads. RELEASING.md describes this as a human gate; a
+      # human gate is not a gate, so it is checked here.
+      - name: Refuse to publish with a placeholder dependency floor
+        run: |
+          FLOOR=$(grep -oE '"xa11y>=[0-9.]+"' pytest-xa11y/pyproject.toml)
+          echo "declared floor: $FLOOR"
+          if [ "$FLOOR" = '"xa11y>=0.12"' ]; then
+            echo "::error::pytest-xa11y still declares the placeholder floor xa11y>=0.12."
+            echo "Raise it to the first released xa11y containing the App.find GIL fix"
+            echo "(xa11y/xa11y#359) before publishing. See pytest-xa11y/RELEASING.md."
+            exit 1
+          fi
+
+      # Note this resolves xa11y from PyPI, not from this workspace: the job
+      # has no Rust toolchain. It therefore verifies the plugin against the
+      # released library a consumer would actually get, which is the right
+      # thing for a publish gate — and the reason the floor check above has
+      # to come first, since the tests fake App.find and would pass happily
+      # against a version without the fix.
       - name: Verify the plugin's own tests pass before publishing
         run: |
           python -m pip install -e ./pytest-xa11y
           python -m pip install pytest
           python -m pytest pytest-xa11y/tests -q
+          python -c "import xa11y, sys; print('resolved xa11y', xa11y.__version__ if hasattr(xa11y, '__version__') else '(unknown)')"
 
       - name: Build
         working-directory: pytest-xa11y

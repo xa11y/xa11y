@@ -574,7 +574,10 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
     state = _state(item.config)
 
     if call.excinfo is not None:
-        diagnosis = render_diagnosis(call.excinfo.value)
+        try:
+            diagnosis = render_diagnosis(call.excinfo.value)
+        except Exception as exc:  # never fatal: this runs on the report hook
+            diagnosis = f"<rendering the diagnosis raised {exc!r}>"
         if diagnosis:
             report.sections.append(("xa11y diagnosis", diagnosis))
 

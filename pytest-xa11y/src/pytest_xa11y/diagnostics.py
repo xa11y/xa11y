@@ -116,12 +116,16 @@ def render_diagnosis(exc: BaseException) -> str | None:
     if not present:
         return None
 
+    # Formatted defensively. These attributes come from whatever xa11y the
+    # consumer resolved, and the dependency is a lower bound with no upper
+    # one: a future release that makes `candidates` a mapping or `elapsed` a
+    # timedelta must not turn every failing test into an INTERNALERROR.
     lines = [f"{type(exc).__name__} diagnosis:"]
     for field, value in present:
-        if field == "candidates":
+        if field == "candidates" and isinstance(value, (list, tuple)):
             lines.append("  candidates:")
             lines.extend(f"    - {candidate}" for candidate in value)
-        elif field == "elapsed":
+        elif field == "elapsed" and isinstance(value, (int, float)):
             lines.append(f"  elapsed: {value:.2f}s")
         elif field == "scope":
             lines.append("  search scope (bounded):")

@@ -40,9 +40,17 @@ today would be unsatisfiable — CI installs xa11y from source at 0.12.1, which
 2. Raise the floor in `pyproject.toml` to that version.
 3. Only then run the workflow.
 
-Nothing can ship the bad combination before that happens, because this
-package cannot be released before xa11y is. But the gate is a human step, not
-an automated one — there is no check that will stop you.
+The publish workflow enforces step 2: it fails if the placeholder floor is
+still declared. That check exists because the earlier wording here — that
+nothing *could* ship the bad combination — was wrong. The workflow is
+`workflow_dispatch`, anyone can run it today, and the plugin's own tests fake
+`App.find`, so they pass against a released xa11y without the fix. Only the
+floor check stands between that and PyPI.
+
+Note also that the publish job resolves xa11y from PyPI rather than from this
+workspace, because it has no Rust toolchain. That is deliberate — a publish
+gate should test what a consumer resolves — but it means the tests there
+cannot detect a missing library fix, only the floor check can.
 
 Raising the floor later is a minor bump at least. It can make a working
 install unresolvable, which is breaking for anyone pinning the library.

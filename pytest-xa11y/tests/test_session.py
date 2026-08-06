@@ -386,3 +386,60 @@ def test_the_predicate_aborts_the_search_when_the_process_dies(monkeypatch):
         session.start()
     # Well inside the 30s budget: the abort came from the predicate.
     assert time.monotonic() - started < 10
+
+
+def test_bus_errors_are_retried_with_a_throttle(monkeypatch):
+    # The only looping branch, so it carries the throttle. Unthrottled it spins
+    # at ~270k App.find calls a second and pins a core for the whole budget.
+    attempts = []
+
+    def find(predicate, timeout=None):
+        attempts.append(time.monotonic())
+        raise xa11y.PlatformError("Platform error (-1): no D-Bus session bus")
+
+    monkeypatch.setattr(session_module, "xa11y", _fake_xa11y(find=find))
+    session = AppSession(AppLauncher(command=ALIVE), startup_timeout=1.0)
+    with pytest.raises(AppLaunchError):
+        session.start()
+    session.stop()
+    # 1s budget at a 0.25s throttle is a handful of attempts, not thousands.
+    assert len(attempts) <= 8, f"{len(attempts)} attempts in 1s — the retry is not throttled"
+
+
+def test_an_unusable_bus_is_named_as_the_cause(monkeypatch):
+    def find(predicate, timeout=None):
+        raise xa11y.PlatformError("Platform error (-1): no D-Bus session bus")
+
+    monkeypatch.setattr(session_module, "xa11y", _fake_xa11y(find=find))
+    session = AppSession(AppLauncher(command=ALIVE), startup_timeout=0.6)
+    with pytest.raises(AppLaunchError) as excinfo:
+        session.start()
+    session.stop()
+    message = str(excinfo.value)
+    # The app is not at fault for the session having no accessibility API.
+    assert "accessibility API is not usable in this session" in message
+    assert "no D-Bus session bus" in message.splitlines()[0]
+
+
+def test_app_names_tolerate_the_launched_process_exiting(monkeypatch):
+    # `app_names` exists for launcher shims that spawn a child and exit. For
+    # those, our process exiting is normal — reporting it as a crash makes the
+    # documented use case impossible.
+    target = FakeApp(pid=424242, name="MyApp")
+
+    def find(predicate, timeout=None):
+        deadline = time.monotonic() + (timeout or 0)
+        while time.monotonic() < deadline:
+            if predicate(target):
+                return target
+            time.sleep(0.02)
+        raise xa11y.TimeoutError("Timeout")
+
+    monkeypatch.setattr(session_module, "xa11y", _fake_xa11y(find=find))
+    session = AppSession(AppLauncher(command=DIES, app_names=["MyApp"]), startup_timeout=5.0)
+    try:
+        # The shim exits immediately; the predicate must not treat that as fatal.
+        assert session.start() is target
+        session.check_alive()  # and nor must the between-tests check
+    finally:
+        session.stop()

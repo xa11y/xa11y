@@ -70,7 +70,7 @@ class Capabilities:
         self._cache: dict[str, tuple[bool, str | None]] = {}
         # Probes that raised. Cached so the failure is reported once, not
         # re-attempted for every test that asks.
-        self._failures: dict[str, Exception] = {}
+        self._failures: dict[str, tuple[type, str]] = {}
 
     def _declared_unavailable(self, name: str) -> str | None:
         """Reason this capability was switched off out of band, if it was."""
@@ -101,7 +101,11 @@ class Capabilities:
                 f"Unknown capability {name!r}; expected one of {list(KNOWN_CAPABILITIES)}."
             )
         if name in self._failures:
-            raise self._failures[name]
+            # A fresh exception each time. Re-raising one object appends to
+            # its __traceback__ on every raise, so a large suite would grow a
+            # single unboundedly long traceback.
+            kind, message = self._failures[name]
+            raise kind(message)
         if name not in self._cache:
             declared = self._declared_unavailable(name)
             if declared is not None:
@@ -120,7 +124,7 @@ class Capabilities:
                     f"reported rather than skipped. Pass --xa11y-skip={name} if this "
                     f"machine genuinely cannot do it."
                 )
-                self._failures[name] = enriched
+                self._failures[name] = (type(exc), str(enriched))
                 raise enriched from exc
         return self._cache[name]
 
