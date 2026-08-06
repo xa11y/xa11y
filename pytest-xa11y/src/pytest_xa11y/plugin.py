@@ -55,6 +55,10 @@ class _State:
         self.live: list[AppSession] = []
         self.recorders: list[EventRecorder] = []
         self.diagnostics_emitted = 0
+        # The test currently running. App fixtures need it to honour
+        # @pytest.mark.xa11y_frontmost at the moment an app is created, which
+        # for a non-autouse fixture is *after* the autouse per-test hook.
+        self.current_item: pytest.Item | None = None
 
     def register(self, session: AppSession) -> None:
         self.live.append(session)
@@ -162,7 +166,27 @@ def pytest_configure(config: pytest.Config) -> None:
         xa11y.set_default_timeout(timeout)
 
 
-def pytest_report_header(config: pytest.Config) -> str:
+def pytest_report_header(config: pytest.Config) -> str | None:
+    """Describe the configuration, but only where it can matter.
+
+    The plugin loads via an entry point, so it is active in every suite of
+    every project that has it installed. A suite that never launches an app
+    should not have a line about accessibility startup timeouts in its
+    header, so stay quiet unless something was actually configured.
+    """
+    if (
+        not any(
+            config.getoption(name) not in (None, [], ())
+            for name in (
+                "xa11y_timeout",
+                "xa11y_artifacts",
+                "xa11y_skip",
+            )
+        )
+        and config.getoption("xa11y_startup_timeout") == DEFAULT_STARTUP_TIMEOUT
+    ):
+        return None
+
     state = _state(config)
     parts = [f"startup timeout {state.startup_timeout:.0f}s"]
     timeout = config.getoption("xa11y_timeout")
@@ -202,6 +226,40 @@ def xa11y_launcher() -> AppLauncher:
     )
 
 
+def _claim_frontmost(state: _State, session: AppSession) -> None:
+    """Claim the macOS front slot for ``session`` if this test asked for it.
+
+    Called both when an app is created and once per test for an app carried
+    over from an earlier one. Claiming twice is harmless — the last claim
+    wins, and the last claim is the app this test actually drives.
+    """
+    item = state.current_item
+    if item is None or item.get_closest_marker("xa11y_frontmost") is None:
+        return
+    pid = session.app.pid if session.app is not None else None
+    if pid is None:
+        # App.pid is optional. Left unguarded, osascript interpolates the
+        # None into its query and fails for the full timeout before
+        # reporting something misleading about the frontmost slot.
+        pytest.skip(
+            f"cannot claim the macOS frontmost slot: "
+            f"{session.launcher.display_name!r} reports no pid"
+        )
+    ok, detail = ensure_macos_frontmost(pid)
+    if not ok:
+        pytest.skip(detail)
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item: pytest.Item, nextitem: pytest.Item | None):
+    state = _state(item.config)
+    state.current_item = item
+    try:
+        yield
+    finally:
+        state.current_item = None
+
+
 @pytest.fixture(scope="session")
 def xa11y_capabilities(request: pytest.FixtureRequest) -> Capabilities:
     """What this session can exercise: screenshot capture, input synthesis."""
@@ -229,7 +287,9 @@ def xa11y_app(request: pytest.FixtureRequest, xa11y_launcher: AppLauncher) -> It
     state.session = session
     state.register(session)
     try:
-        yield session.start()
+        app = session.start()
+        _claim_frontmost(state, session)
+        yield app
     finally:
         session.stop()
         state.unregister(session)
@@ -248,7 +308,9 @@ def xa11y_fresh_app(
     session = AppSession(xa11y_launcher, startup_timeout=state.startup_timeout)
     state.register(session)
     try:
-        yield session.start()
+        app = session.start()
+        _claim_frontmost(state, session)
+        yield app
     finally:
         session.stop()
         state.unregister(session)
@@ -271,7 +333,9 @@ def xa11y_app_factory(
         session = AppSession(launcher, startup_timeout=state.startup_timeout)
         sessions.append(session)
         state.register(session)
-        return session.start()
+        app = session.start()
+        _claim_frontmost(state, session)
+        return app
 
     try:
         yield launch
@@ -337,21 +401,10 @@ def _xa11y_per_test(request: pytest.FixtureRequest) -> Iterator[None]:
             request.session.shouldstop = f"xa11y: {exc}"
             raise
 
-    if request.node.get_closest_marker("xa11y_frontmost"):
-        # The most recently started app is the one this test is driving.
-        target = state.live[-1]
-        pid = target.app.pid if target.app is not None else None
-        if pid is None:
-            # App.pid is optional, and osascript would interpolate the None
-            # into its query and then fail for ten seconds before reporting
-            # something misleading about the frontmost slot.
-            pytest.skip(
-                f"cannot claim the macOS frontmost slot: "
-                f"{target.launcher.display_name!r} reports no pid"
-            )
-        ok, detail = ensure_macos_frontmost(pid)
-        if not ok:
-            pytest.skip(detail)
+    # Claim for the app carried over from an earlier test. An app created
+    # *for* this test claims again as it starts, and wins, because a
+    # non-autouse fixture runs after this one.
+    _claim_frontmost(state, state.live[-1])
 
     # `reset` is defined against the session app specifically: it is what
     # exists across tests and therefore what accumulates state. A fresh app
@@ -392,6 +445,13 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
                 )
                 continue
             if marker.name != "xa11y_requires":
+                if marker.args or marker.kwargs:
+                    # Same class as the rest: arguments that are accepted and
+                    # ignored read as configuration that is doing something.
+                    problems.append(
+                        f"{item.nodeid}: @pytest.mark.{marker.name} takes no "
+                        f"arguments, but got {marker.args or marker.kwargs}."
+                    )
                 continue
             if not marker.args:
                 problems.append(

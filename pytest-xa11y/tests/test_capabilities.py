@@ -6,7 +6,7 @@ import pytest
 import xa11y
 from _pytest.outcomes import Skipped
 
-from pytest_xa11y import Capabilities
+from pytest_xa11y import Capabilities, Capability
 from pytest_xa11y.capabilities import INPUT_SIM, SCREENSHOT
 
 
@@ -161,3 +161,13 @@ def _raiser(exc):
         raise exc
 
     return raise_it
+
+
+def test_capability_members_are_plain_strings(no_probes):
+    # The enum is a spelling, not a second vocabulary: everything that takes
+    # a capability name must keep taking a string.
+    assert Capability.SCREENSHOT == "screenshot"
+    assert f"{Capability.SCREENSHOT}" == "screenshot"
+    caps = Capabilities((Capability.SCREENSHOT,))
+    assert caps.available("screenshot") is False
+    assert caps.available(Capability.SCREENSHOT) is False

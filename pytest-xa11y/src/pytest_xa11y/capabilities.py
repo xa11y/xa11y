@@ -14,13 +14,33 @@ from __future__ import annotations
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
+from enum import Enum
 
 import pytest
 import xa11y
 
-SCREENSHOT = "screenshot"
-INPUT_SIM = "input_sim"
-KNOWN_CAPABILITIES = (SCREENSHOT, INPUT_SIM)
+
+class Capability(str, Enum):
+    """The capabilities a session may or may not be able to exercise.
+
+    A ``str`` subclass, so a plain string keeps working everywhere a
+    capability is named — in the marker, on the command line, in
+    ``guard()``. The enum exists for completion and for a spelling that a
+    type checker can see; it is not a second vocabulary.
+    """
+
+    SCREENSHOT = "screenshot"
+    INPUT_SIM = "input_sim"
+
+    def __str__(self) -> str:  # pragma: no cover - trivial
+        # `str, Enum` renders as "Capability.SCREENSHOT" in f-strings before
+        # 3.11's StrEnum; messages should show the name users write.
+        return self.value
+
+
+SCREENSHOT = Capability.SCREENSHOT.value
+INPUT_SIM = Capability.INPUT_SIM.value
+KNOWN_CAPABILITIES = tuple(member.value for member in Capability)
 
 # Platform errors that mean "this session has no usable capture path", as
 # opposed to "capture is broken". Matched on message because the platform

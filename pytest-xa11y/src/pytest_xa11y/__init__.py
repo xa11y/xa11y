@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from importlib.metadata import PackageNotFoundError, version
 
-from .capabilities import KNOWN_CAPABILITIES, Capabilities
+from .capabilities import KNOWN_CAPABILITIES, Capabilities, Capability
 from .diagnostics import register_diagnostic
 from .errors import AppDied, AppLaunchError, LauncherNotConfigured, PytestXa11yError
 from .events import EventRecorder
@@ -46,6 +46,7 @@ __all__ = [
     "AppLauncher",
     "AppSession",
     "Capabilities",
+    "Capability",
     "EventRecorder",
     "LauncherNotConfigured",
     "PytestXa11yError",

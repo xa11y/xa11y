@@ -353,3 +353,32 @@ def test_recorder_events_do_not_leak_into_a_later_test(pytester: pytest.Pytester
     # A close() that raises must not strand the recorder in session state.
     second = result.stdout.str().split("test_unrelated_failure")[-1]
     assert "focus_changed" not in second
+
+
+def test_frontmost_marker_rejects_arguments(pytester: pytest.Pytester):
+    pytester.makepyfile(
+        """
+        import pytest
+
+        @pytest.mark.xa11y_frontmost("always")
+        def test_args_ignored():
+            pass
+        """
+    )
+    result = pytester.runpytest()
+    result.stderr.fnmatch_lines(["*xa11y_frontmost takes no arguments*"])
+    assert result.ret != 0
+
+
+def test_header_is_silent_in_an_unconfigured_project(pytester: pytest.Pytester):
+    # The plugin auto-loads everywhere it is installed; a suite that never
+    # launches an app should not get a line about accessibility timeouts.
+    pytester.makepyfile("def test_noop(): pass")
+    result = pytester.runpytest()
+    assert "xa11y:" not in result.stdout.str()
+
+
+def test_header_appears_once_something_is_configured(pytester: pytest.Pytester):
+    pytester.makepyfile("def test_noop(): pass")
+    result = pytester.runpytest("--xa11y-startup-timeout=45")
+    result.stdout.fnmatch_lines(["xa11y: startup timeout 45s*"])

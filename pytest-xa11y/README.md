@@ -86,6 +86,7 @@ AppLauncher(
     env={"QT_ACCESSIBILITY": "1"},    # merged over os.environ
     cwd=PROJECT_ROOT,
     app_names=["my-app"],             # match the a11y name too, not just the PID
+    app_name_prefix="Submit to ",     # ...or narrow to one app within our PID
     ready='button[name="OK"]',        # gate startup on content
     startup_timeout=60,               # overrides --xa11y-startup-timeout
     frontmost=True,                   # claim the macOS front slot
@@ -99,7 +100,16 @@ one; the plugin never terminates a process it did not start.
 
 `app_names` matters when the process that registers with the accessibility
 API is not the one you launched — Electron helper processes, launcher shims
-that spawn a child and exit, anything that re-execs.
+that spawn a child and exit, anything that re-execs. It matches PID **or**
+name, widening the search.
+
+`app_name_prefix` is the opposite pairing: PID **and** name prefix, narrowing
+it. Reach for it when one process registers several accessibility apps and
+only one of them is what you want. A Qt dialog hosted inside a DCC
+application (Maya, Nuke, Cinema 4D) appears as its own accessibility app
+sharing the host's PID on Windows UIA, and matching on PID alone attaches to
+the host. The two fields are mutually exclusive — one widens what the other
+narrows.
 
 ## Markers
 
@@ -108,8 +118,16 @@ that spawn a child and exit, anything that re-execs.
 @pytest.mark.xa11y_frontmost                # claim the macOS front slot first
 ```
 
-`xa11y_requires("screenshot")` probes once per session by attempting the
-smallest possible capture.
+Capability names are plain strings. `pytest_xa11y.Capability` is a `str` enum
+of the same values, for completion and type checking; `Capability.SCREENSHOT`
+and `"screenshot"` are interchangeable everywhere.
+
+`xa11y_requires("screenshot")` probes once per session with a full-display
+capture — the weakest thing the marker can be taken to mean, since a
+full-display capture can succeed where a region capture is rejected. Only the
+errors that mean "this session has no capture path" produce a skip. A capture
+that fails for any other reason propagates and fails the test, because a
+broken capture pipeline must not be able to turn a suite green.
 
 `xa11y_requires("input_sim")` cannot probe on macOS or Windows, and the plugin
 does not pretend otherwise: `CGEventPost` returns void, so without the
@@ -124,8 +142,8 @@ parallel workers take them from each other.
 
 **The `xa11y_` marker prefix is reserved**, and every way of writing one of
 these markers wrongly fails collection rather than warning: a typo in the
-marker name, a capability that does not exist, or `xa11y_requires()` with no
-arguments. pytest only warns about an unknown marker, which means the test
+marker name, a capability that does not exist, `xa11y_requires()` with no
+arguments, or arguments passed to `xa11y_frontmost`, which takes none. pytest only warns about an unknown marker, which means the test
 still runs — unguarded, while reading as guarded. A test claiming a guard it
 does not have is worse than one with no guard at all, so this is an error and
 every offending marker in the run is reported at once.

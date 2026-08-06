@@ -17,10 +17,18 @@ from .errors import AppDied, AppLaunchError
 from .frontmost import ensure_macos_frontmost
 from .launcher import AppLauncher
 
-# One poll chunk of App.find. Short enough that a dead process is noticed
-# promptly, long enough that the loop is not the hot path — App.find polls
-# internally and releases the GIL, so the chunking costs nothing but a
-# re-entry per second.
+# One poll chunk of App.find, so a dead process is noticed within a second
+# rather than at the end of the whole startup timeout.
+#
+# The chunking is a workaround, not the design. One App.find call for the
+# full timeout, raising from inside the predicate on process death, would be
+# strictly better: death detection improves to once per poll tick, and core
+# stops building a full app enumeration for each timeout we discard as a
+# retry signal (the anti-pattern tenet 6 names). It is blocked on
+# xa11y/xa11y#358 — App.find holds the GIL for its entire poll loop, so a
+# single long call would freeze the consumer's other threads for the whole
+# startup wait. Chunking at least yields between calls. Revisit when #358
+# lands.
 _FIND_CHUNK = 1.0
 
 # Bytes of captured stdout/stderr reported on failure. Diagnostics are
