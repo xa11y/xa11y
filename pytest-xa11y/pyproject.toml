@@ -29,13 +29,21 @@ classifiers = [
 ]
 dependencies = [
     "pytest>=7.0",
-    # Lower bound, not a pin — but a real one. The launch path makes a single
-    # long App.find call rather than polling it in chunks, which requires the
-    # GIL fix from xa11y/xa11y#359: on an earlier release that call holds the
-    # GIL for the whole startup wait and freezes every other thread in the
-    # consumer's process. 0.13.0 is the first release carrying it, so this
-    # package cannot publish before xa11y 0.13.0 does.
-    "xa11y>=0.13.0",
+    # This bound deliberately understates the real requirement, and must be
+    # raised before the first publish — see RELEASING.md.
+    #
+    # The launch path makes a single long App.find call rather than polling it
+    # in chunks, which needs the GIL fix from xa11y/xa11y#359. That fix is on
+    # main but in no *released* version: the workspace still builds 0.12.1. A
+    # floor of >=0.13.0 is therefore unsatisfiable today and breaks every CI
+    # cell at `pip install -e pytest-xa11y`, because CI installs xa11y from
+    # source at 0.12.1 — which does carry the fix, while its version number
+    # does not yet say so.
+    #
+    # So: keep the floor installable now, and gate the publish on raising it.
+    # Nothing can ship the bad combination in the meantime, because this
+    # package cannot be released before xa11y is.
+    "xa11y>=0.12",
 ]
 
 [project.entry-points.pytest11]

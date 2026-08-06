@@ -21,16 +21,31 @@ pytest-xa11y releases or a version number that says nothing.
 The dependency is a lower bound, not a pin, so a consumer can upgrade either
 package on its own schedule.
 
-The bound is not decorative. It currently reads `xa11y>=0.13.0` because the
-launch path makes one long `App.find` call instead of polling it in chunks,
-and on an earlier release that call holds the GIL for the whole startup wait
-(xa11y/xa11y#359). A consumer who resolved an older xa11y would get a plugin
-that freezes their other threads for up to the startup timeout. **This
-package therefore cannot publish before xa11y 0.13.0 does** — check that the
-floor is a released version before running the workflow.
+### Release gate: raise the xa11y floor first
 
-Raising the floor is a minor bump at least. It can make a working install
-unresolvable, which is a breaking change for anyone pinning the library.
+The declared floor is `xa11y>=0.12`, and that **understates the real
+requirement**. The launch path makes one long `App.find` call instead of
+polling it in chunks, which needs the GIL fix from xa11y/xa11y#359. On any
+release without it, that call holds the GIL for the whole startup wait and
+freezes every other thread in the consumer's process.
+
+The fix is on `main` but in no released version. Declaring the honest floor
+today would be unsatisfiable — CI installs xa11y from source at 0.12.1, which
+*carries* the fix while its version number does not yet say so — so
+`pip install -e pytest-xa11y` would fail in every cell.
+
+**Before the first publish:**
+
+1. Confirm the xa11y release carrying #359 exists on PyPI.
+2. Raise the floor in `pyproject.toml` to that version.
+3. Only then run the workflow.
+
+Nothing can ship the bad combination before that happens, because this
+package cannot be released before xa11y is. But the gate is a human step, not
+an automated one — there is no check that will stop you.
+
+Raising the floor later is a minor bump at least. It can make a working
+install unresolvable, which is breaking for anyone pinning the library.
 
 ## Cutting a release
 
