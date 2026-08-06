@@ -17,6 +17,7 @@ import xa11y
 from pytest_xa11y import AppLauncher, AppSession
 from pytest_xa11y import session as session_module
 from pytest_xa11y.errors import AppDied, AppLaunchError
+from pytest_xa11y.session import _tail
 
 ALIVE = [sys.executable, "-c", "import time; time.sleep(60)"]
 DIES = [sys.executable, "-c", "import sys; sys.stderr.write('boom\\n'); sys.exit(3)"]
@@ -421,8 +422,8 @@ def test_an_unusable_bus_is_named_as_the_cause(monkeypatch):
     assert "no D-Bus session bus" in message.splitlines()[0]
 
 
-def test_app_names_tolerate_the_launched_process_exiting(monkeypatch):
-    # `app_names` exists for launcher shims that spawn a child and exit. For
+def test_spawns_and_exits_tolerates_the_launched_process_exiting(monkeypatch):
+    # `spawns_and_exits` is for launcher shims that hand off and exit. For
     # those, our process exiting is normal — reporting it as a crash makes the
     # documented use case impossible.
     target = FakeApp(pid=424242, name="MyApp")
@@ -436,10 +437,129 @@ def test_app_names_tolerate_the_launched_process_exiting(monkeypatch):
         raise xa11y.TimeoutError("Timeout")
 
     monkeypatch.setattr(session_module, "xa11y", _fake_xa11y(find=find))
-    session = AppSession(AppLauncher(command=DIES, app_names=["MyApp"]), startup_timeout=5.0)
+    session = AppSession(
+        AppLauncher(command=DIES, app_names=["MyApp"], spawns_and_exits=True),
+        startup_timeout=5.0,
+    )
     try:
         # The shim exits immediately; the predicate must not treat that as fatal.
         assert session.start() is target
         session.check_alive()  # and nor must the between-tests check
     finally:
         session.stop()
+
+
+def test_app_names_alone_does_not_switch_off_death_detection(never_finds):
+    # `app_names` widens the accessibility-tree match; the predicate still
+    # tries the spawned PID first. An app that needs it (Electron, a Qt app
+    # whose AT-SPI name lags its PID) is still an app we launched, and a crash
+    # must still be reported as a crash — not as "never registered" after the
+    # whole startup budget. Every launcher in this repo sets app_names.
+    session = AppSession(
+        AppLauncher(command=DIES, app_names=["xa11y-qt-test-app"]), startup_timeout=5.0
+    )
+    with pytest.raises(AppLaunchError) as excinfo:
+        session.start()
+    message = str(excinfo.value)
+    assert "exited during startup (code 3)" in message
+    assert "boom" in message
+    assert "did not register" not in message
+    session.stop()
+
+
+def test_app_names_alone_does_not_switch_off_the_liveness_check(finds_immediately):
+    session = AppSession(
+        AppLauncher(command=ALIVE, app_names=["xa11y-qt-test-app"]), startup_timeout=2.0
+    )
+    session.start()
+    session.check_alive()
+
+    session.process.kill()
+    session.process.wait(timeout=5)
+    with pytest.raises(AppDied, match="exited mid-run"):
+        session.check_alive()
+    session.stop()
+
+
+def test_attach_mode_detects_a_dead_pid_even_with_app_names(finds_immediately):
+    # The shape `tests/launchers.py` builds whenever the harness exports
+    # XA11Y_TEST_APP_NAME, which is every attached CI run.
+    import subprocess as sp
+
+    proc = sp.Popen(ALIVE)
+    session = AppSession(
+        AppLauncher(attach_pid=proc.pid, app_names=["xa11y-qt-test-app"]), startup_timeout=2.0
+    )
+    session.start()
+    session.check_alive()
+
+    proc.kill()
+    proc.wait(timeout=5)
+    with pytest.raises(AppDied, match="no longer running"):
+        session.check_alive()
+
+
+def test_not_found_reports_the_real_process_state(monkeypatch):
+    # A `spawns_and_exits` launcher is the one case with no death detection,
+    # so this report is where its exit has to show up. Claiming "alive" for a
+    # process that is gone points the reader away from the actual failure.
+    def find(predicate, timeout=None):
+        time.sleep(0.05)
+        raise xa11y.TimeoutError("Timeout")
+
+    monkeypatch.setattr(session_module, "xa11y", _fake_xa11y(find=find))
+    session = AppSession(
+        AppLauncher(command=DIES, app_names=["MyApp"], spawns_and_exits=True),
+        startup_timeout=0.5,
+    )
+    with pytest.raises(AppLaunchError) as excinfo:
+        session.start()
+    message = str(excinfo.value)
+    assert "process: exited (code 3)" in message
+    assert "process: alive" not in message
+
+
+def test_reading_the_output_tail_does_not_disturb_the_app_writing_it(never_finds):
+    # `subprocess` gives the child a dup of the capture descriptor, and a dup
+    # shares the file *offset*. Seeking the handle the child holds would move
+    # where its next write lands, so a tail taken mid-run could punch a hole
+    # in the log it is reporting. `output_tails()` runs on every failing test.
+    import os as _os
+
+    session = AppSession(
+        AppLauncher(
+            command=[
+                sys.executable,
+                "-u",
+                "-c",
+                "import sys\nfor i in range(500): sys.stdout.write('L%04d\\n' % i)\n",
+            ]
+        ),
+        startup_timeout=2.0,
+    )
+    session._spawn()
+    before = _os.lseek(session._stdout.fileno(), 0, _os.SEEK_CUR)
+    for _ in range(50):
+        session.output_tails()
+    after = _os.lseek(session._stdout.fileno(), 0, _os.SEEK_CUR)
+    assert after >= before, "the app's write offset moved backwards"
+
+    session.process.wait(timeout=10)
+    written = _os.stat(session._stdout_path).st_size
+    assert written == 500 * 6, f"log is {written} bytes, expected {500 * 6}"
+
+    tail = _tail(session._stdout_path)
+    assert tail.endswith("L0499\n")
+    assert len(tail.splitlines()[-1]) == 5
+    session.stop()
+
+
+def test_stop_removes_the_capture_files(finds_immediately):
+    import os as _os
+
+    session = AppSession(AppLauncher(command=ALIVE), startup_timeout=2.0)
+    session.start()
+    paths = [session._stdout_path, session._stderr_path]
+    assert all(_os.path.exists(path) for path in paths)
+    session.stop()
+    assert not any(_os.path.exists(path) for path in paths)

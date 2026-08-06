@@ -7,6 +7,7 @@ from typing import ClassVar
 import pytest
 import xa11y
 
+from pytest_xa11y import diagnostics as diagnostics_module
 from pytest_xa11y import register_diagnostic
 from pytest_xa11y.diagnostics import clear_diagnostics, collect, render_diagnosis
 
@@ -70,6 +71,28 @@ def test_collect_includes_process_output_and_events():
     )
     assert "stdout: hello" in block
     assert "focus_changed" in block
+
+
+def test_platform_state_is_opt_out_so_it_is_not_repeated_per_app(monkeypatch):
+    # Which app holds the macOS front describes the desktop, not one app. A
+    # report covering several live apps asks once; repeating it would be the
+    # same answer at the price of two more osascript round trips per app.
+    calls = []
+    monkeypatch.setattr(diagnostics_module.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        diagnostics_module, "macos_frontmost", lambda: (calls.append("front"), (7, "Finder"))[1]
+    )
+    monkeypatch.setattr(
+        diagnostics_module, "macos_visible_processes", lambda: (calls.append("visible"), "x")[1]
+    )
+
+    first = collect(FakeApp(), dump_depth=4)
+    assert "macOS frontmost" in first
+    assert calls == ["front", "visible"]
+
+    second = collect(FakeApp(), dump_depth=4, platform_state=False)
+    assert "macOS frontmost" not in second
+    assert calls == ["front", "visible"]
 
 
 def test_registered_collector_contributes():

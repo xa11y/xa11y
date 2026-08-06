@@ -42,7 +42,15 @@ class AppLauncher:
             spawned PID. Needed when the process that registers with the
             accessibility API is not the one launched — Electron helper
             processes, launchers that re-exec, and Windows shims that spawn a
-            child and exit are the usual cases.
+            child and exit are the usual cases. Widening the match says
+            nothing about which process to *watch*; see ``spawns_and_exits``.
+        spawns_and_exits: the launched command hands off to another process
+            and exits, so its exit is normal rather than a crash. Switches
+            off death detection: this session then has no process whose
+            lifetime is the app's, so a startup crash is reported as "never
+            registered" and a mid-run exit is not noticed at all. Set it only
+            for a genuine shim — leave it alone for an app that stays running
+            under its own PID, even one that needs ``app_names`` to be found.
         app_name_prefix: match a candidate whose PID is ours *and* whose name
             starts with this. The opposite pairing to ``app_names``, and the
             one to reach for when a single process registers several
@@ -74,6 +82,7 @@ class AppLauncher:
     cwd: str | Path | None = None
     app_names: Sequence[str] = ()
     app_name_prefix: str | None = None
+    spawns_and_exits: bool = False
     ready: str | None = None
     startup_timeout: float | None = None
     frontmost: bool = False
@@ -108,6 +117,13 @@ class AppLauncher:
                 "AppLauncher takes app_names= or app_name_prefix=, not both: "
                 "app_names widens the match to any process with that name, "
                 "app_name_prefix narrows it to one app within our own process."
+            )
+        if self.attach_pid is not None and self.spawns_and_exits:
+            raise ValueError(
+                "AppLauncher takes attach_pid= or spawns_and_exits=, not both: "
+                "spawns_and_exits describes a command this session launched, and "
+                "attach mode launches nothing. The attached PID is the process to "
+                "watch, whatever spawned it."
             )
         if self.attach_pid is not None and self.attach_pid <= 0:
             raise ValueError(f"AppLauncher(attach_pid={self.attach_pid!r}) must be positive.")

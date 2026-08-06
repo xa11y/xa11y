@@ -486,6 +486,34 @@ def test_a_failed_front_claim_skips_one_test_not_the_suite(pytester: pytest.Pyte
     result.assert_outcomes(passed=2, skipped=1)
 
 
+def test_a_factory_app_that_cannot_take_the_front_skips_the_test(pytester: pytest.Pytester):
+    # `pytest_runtest_call` claims the front before the body runs, so an app
+    # the test launches *itself* is past that point. The factory takes the
+    # claim and acts on the answer — a discarded one would leave a marked test
+    # driving an app that never got the front, which is the silent
+    # misdirection the marker exists to prevent.
+    pytester.makeconftest(FRONTMOST_CONFTEST)
+    pytester.makepyfile(
+        """
+        import sys
+
+        import pytest
+        from pytest_xa11y import AppLauncher
+
+        @pytest.mark.xa11y_frontmost
+        def test_dialog_needs_the_front(xa11y_app_factory):
+            launcher = AppLauncher(
+                command=[sys.executable, "-c", "import time; time.sleep(5)"], label="dialog"
+            )
+            xa11y_app_factory(launcher)
+            raise AssertionError("must not reach the body after a failed claim")
+        """
+    )
+    result = pytester.runpytest("-rs")
+    result.assert_outcomes(skipped=1)
+    result.stdout.fnmatch_lines(["*front claim failed*"])
+
+
 def test_a_factory_app_exiting_does_not_abort_the_run(pytester: pytest.Pytester):
     # Dismissing a dialog *is* its process exiting. An app the suite launched
     # itself must not end the run when it goes.

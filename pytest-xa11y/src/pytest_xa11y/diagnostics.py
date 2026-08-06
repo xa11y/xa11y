@@ -57,8 +57,15 @@ def collect(
     dump_depth: int,
     process_output: Sequence[str] = (),
     events: str | None = None,
+    platform_state: bool = True,
 ) -> str:
-    """Build the failure-report block for the app under test."""
+    """Build the failure-report block for the app under test.
+
+    ``platform_state`` covers the session-wide macOS facts (which app holds
+    the front, which processes are visible). Those describe the desktop, not
+    one app, so a caller reporting several live apps asks for them once — two
+    ``osascript`` round trips per app would be repeated answers at a cost.
+    """
     lines: list[str] = []
 
     if app is None:
@@ -67,7 +74,7 @@ def collect(
         lines.append(_app_identity(app))
         lines.append(_tree_dump(app, dump_depth))
 
-    if sys.platform == "darwin":
+    if platform_state and sys.platform == "darwin":
         front_pid, front_name = macos_frontmost()
         lines.append(f"macOS frontmost: {front_name!r} (pid={front_pid})")
         lines.append(f"macOS visible processes: {macos_visible_processes()}")

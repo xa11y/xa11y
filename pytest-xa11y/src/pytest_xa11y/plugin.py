@@ -235,13 +235,16 @@ def xa11y_launcher() -> AppLauncher:
 def _claim_frontmost(state: _State, session: AppSession) -> tuple[bool, str]:
     """Claim the macOS front slot for ``session``, reporting success.
 
-    Deliberately does **not** skip. It is called from the app fixtures, and
-    `xa11y_app` is session-scoped: pytest caches a session-scoped fixture's
-    `Skipped` and re-raises it for every later consumer, so one failed claim
-    would skip the entire suite and exit 0. A macOS runner that booted with
-    Setup Assistant holding the front would then report a green run that
-    tested nothing. The skip decision belongs to one test, so it is taken
-    per-test in `pytest_runtest_call`.
+    Deliberately does **not** skip, because one caller must not. The claim is
+    taken from `pytest_runtest_call`, before the test body, and again from
+    `xa11y_app_factory` for an app launched *during* it. Skipping is right in
+    the second case and is done there; in the first the hook decides.
+
+    What it must never become is a skip inside a session-scoped fixture:
+    pytest caches a session-scoped fixture's `Skipped` and re-raises it for
+    every later consumer, so one failed claim would skip the entire suite and
+    exit 0. A macOS runner that booted with Setup Assistant holding the front
+    would then report a green run that tested nothing.
     """
     item = state.current_item
     if item is None or item.get_closest_marker("xa11y_frontmost") is None:
@@ -316,8 +319,12 @@ def xa11y_app(request: pytest.FixtureRequest, xa11y_launcher: AppLauncher) -> It
     state.register(session)
     try:
         app = session.start()
+        # No frontmost claim here. This runs during setup, and
+        # `pytest_runtest_call` takes the claim after setup — where the result
+        # can be acted on, because a skip there is scoped to the one test that
+        # asked for the front rather than cached on this session-scoped
+        # fixture. Claiming in both places would only be a discarded answer.
         state.item_sessions.append(session)
-        _claim_frontmost(state, session)
         yield app
     finally:
         session.stop()
@@ -338,8 +345,9 @@ def xa11y_fresh_app(
     state.register(session)
     try:
         app = session.start()
+        # As in `xa11y_app`: the claim is `pytest_runtest_call`'s, taken after
+        # setup, where its answer is acted on.
         state.item_sessions.append(session)
-        _claim_frontmost(state, session)
         yield app
     finally:
         session.stop()
@@ -372,7 +380,13 @@ def xa11y_app_factory(
             state.unregister(session)
             raise
         state.item_sessions.append(session)
-        _claim_frontmost(state, session)
+        # The one claim taken after `pytest_runtest_call` has run, so this is
+        # where a marked test's front slot is secured for an app launched
+        # mid-body. Skipping is safe and correct here: `launch` is called from
+        # the test itself, so nothing is cached on a broader-scoped fixture.
+        ok, detail = _claim_frontmost(state, session)
+        if not ok:
+            pytest.skip(detail)
         return app
 
     try:
@@ -602,8 +616,10 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
                 session.app,
                 dump_depth=state.dump_depth,
                 process_output=session.output_tails(),
-                # Events belong to the run, not to one app; attach them once.
+                # Events and the desktop's focus state belong to the run, not
+                # to one app; attach them once.
                 events=events if index == 0 else None,
+                platform_state=index == 0,
             )
         except Exception as exc:
             block = f"<diagnostics collection raised {exc!r}>"

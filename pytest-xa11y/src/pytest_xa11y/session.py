@@ -75,16 +75,32 @@ def _pid_alive(pid: int) -> bool:
     return True
 
 
-def _tail(stream: IO[bytes] | None, limit: int = _OUTPUT_TAIL) -> str:
-    """Read the last ``limit`` bytes of a captured output file."""
-    if stream is None:
+def _open_capture() -> tuple[str, IO[bytes]]:
+    """A file to capture one output stream into, as ``(path, write handle)``."""
+    fd, path = tempfile.mkstemp(prefix="pytest-xa11y-", suffix=".log")
+    return path, os.fdopen(fd, "wb")
+
+
+def _tail(path: str | None, limit: int = _OUTPUT_TAIL) -> str:
+    """Read the last ``limit`` bytes of a captured output file.
+
+    Opens its own handle rather than seeking the one the child was given.
+    ``subprocess`` hands the child a *dup* of that descriptor (a duplicated
+    handle on Windows), and a dup shares the file **offset** — so seeking it
+    here moves where the app's next write lands, and a tail taken while the
+    app is still running can leave a hole in its own log. A separate open has
+    an independent offset and cannot.
+    """
+    if path is None:
         return "<not captured>"
     try:
-        stream.flush()
-        size = stream.seek(0, 2)
-        stream.seek(max(0, size - limit))
-        data = stream.read()
-    except (OSError, ValueError) as exc:
+        with open(path, "rb") as handle:
+            size = handle.seek(0, 2)
+            handle.seek(max(0, size - limit))
+            # Bounded explicitly: a read to EOF would return everything the
+            # app wrote *during* the read, which on a crash loop is unbounded.
+            data = handle.read(limit)
+    except OSError as exc:
         return f"<unreadable: {exc!r}>"
     text = data.decode("utf-8", errors="replace")
     if size > limit:
@@ -112,18 +128,25 @@ class AppSession:
         self.startup_timeout = (
             launcher.startup_timeout if launcher.startup_timeout is not None else startup_timeout
         )
-        # Whether the process we spawn is the one expected to register with
-        # the accessibility API. `app_names` exists for the case where it is
-        # not — launcher shims that spawn a child and exit, anything that
-        # re-execs — and for those our process exiting is normal, not a
-        # failure. Death detection is switched off there rather than reporting
-        # a clean exit as a crash. The cost is that such a launcher gets no
-        # liveness checking; we do not know which process to watch.
-        self._own_process_registers = not launcher.app_names
+        # Whether this session has a process whose lifetime is the app's, and
+        # can therefore tell a crash from a clean handoff.
+        #
+        # Deliberately *not* inferred from `app_names`. That field widens the
+        # accessibility-tree match — the predicate still tries the spawned PID
+        # first — so an app needing it (Electron, a Qt app whose AT-SPI name
+        # lags its PID) is still an app we launched and can still watch. Only
+        # `spawns_and_exits` says the launched process hands off and goes; only
+        # that switches death detection off. Attach mode always has a process
+        # to watch: the caller named its PID outright.
+        self._watch_process = launcher.attach_pid is not None or not launcher.spawns_and_exits
         self.process: subprocess.Popen | None = None
         self.app: xa11y.App | None = None
+        # Paths rather than handles: `_tail` opens its own, because the handle
+        # handed to the child shares its file offset (see `_tail`).
         self._stdout: IO[bytes] | None = None
         self._stderr: IO[bytes] | None = None
+        self._stdout_path: str | None = None
+        self._stderr_path: str | None = None
         self._stopped = False
 
     # -- lifecycle ---------------------------------------------------------
@@ -157,9 +180,9 @@ class AppSession:
         # its 64 KiB buffer and blocks the child forever, which turns a chatty
         # app into a hung test run. SIM115 does not apply — these deliberately
         # outlive the function, holding the app's output for as long as it
-        # runs, and stop() closes them.
-        self._stdout = tempfile.TemporaryFile()  # noqa: SIM115
-        self._stderr = tempfile.TemporaryFile()  # noqa: SIM115
+        # runs, and stop() closes and removes them.
+        self._stdout_path, self._stdout = _open_capture()
+        self._stderr_path, self._stderr = _open_capture()
         try:
             self.process = subprocess.Popen(
                 list(self.launcher.command),
@@ -206,7 +229,7 @@ class AppSession:
             self._raise_if_exited(during="startup")
             return matches(candidate)
 
-        predicate = match_or_abort if self._own_process_registers else matches
+        predicate = match_or_abort if self._watch_process else matches
         last_platform_error: Exception | None = None
         bus_error_was_terminal = False
         while True:
@@ -282,9 +305,15 @@ class AppSession:
             lines.append(f"  last accessibility error: {last_platform_error!r}")
         lines.append("  running apps: " + (", ".join(shown) if shown else "<none>"))
         if self.process is not None:
-            lines.append(f"  process: alive (pid={self.process.pid})")
-            lines.append(f"  stdout: {_tail(self._stdout)}")
-            lines.append(f"  stderr: {_tail(self._stderr)}")
+            # Asked, not assumed. `_raise_if_exited` ran just above and would
+            # have taken over for a watched process — but a `spawns_and_exits`
+            # launcher is not watched, and printing "alive" for a process that
+            # is gone is a diagnosis pointing away from the actual failure.
+            rc = self.process.poll()
+            state = "alive" if rc is None else f"exited (code {rc})"
+            lines.append(f"  process: {state} (pid={self.process.pid})")
+            lines.append(f"  stdout: {_tail(self._stdout_path)}")
+            lines.append(f"  stderr: {_tail(self._stderr_path)}")
         if not self.launcher.app_names:
             lines.append(
                 "  hint: if the process that registers is not the one launched "
@@ -347,18 +376,18 @@ class AppSession:
     # -- health ------------------------------------------------------------
 
     def _raise_if_exited(self, *, during: str) -> None:
-        if not self._own_process_registers:
+        if not self._watch_process:
             return
         if self.process is None or self.process.poll() is None:
             return
         rc = self.process.returncode
-        # Read the output *before* stopping: stop() closes the capture files.
+        # Read the output *before* stopping: stop() removes the capture files.
         message = (
             f"{self.launcher.display_name!r} exited during {during} "
             f"(code {rc}).\n"
             f"  command: {list(self.launcher.command)}\n"
-            f"  stdout: {_tail(self._stdout)}\n"
-            f"  stderr: {_tail(self._stderr)}"
+            f"  stdout: {_tail(self._stdout_path)}\n"
+            f"  stderr: {_tail(self._stderr_path)}"
         )
         # Tear down before raising, as _fail_not_found and _await_ready do.
         # Otherwise the half-started session stays registered and its exit is
@@ -381,8 +410,11 @@ class AppSession:
         that silently did nothing there would be a feature that never runs
         where it is most needed. There is no captured output to report in
         that mode, because the process is not ours.
+
+        The only launcher this declines to check is ``spawns_and_exits``,
+        where there is genuinely no process whose lifetime is the app's.
         """
-        if self._stopped or not self._own_process_registers:
+        if self._stopped or not self._watch_process:
             return
 
         if self.process is not None:
@@ -391,8 +423,8 @@ class AppSession:
             raise AppDied(
                 f"{self.launcher.display_name!r} exited mid-run (code "
                 f"{self.process.returncode}).\n"
-                f"  stdout: {_tail(self._stdout)}\n"
-                f"  stderr: {_tail(self._stderr)}"
+                f"  stdout: {_tail(self._stdout_path)}\n"
+                f"  stderr: {_tail(self._stderr_path)}"
             )
 
         pid = self.launcher.attach_pid
@@ -433,10 +465,19 @@ class AppSession:
                 # reap it, and there is nothing further this process can do.
                 with contextlib.suppress(subprocess.TimeoutExpired):
                     proc.wait(timeout=_TERMINATE_GRACE)
+        # Close the write handles first, then unlink: on Windows a file cannot
+        # be removed while a handle to it is open, and the app's handle has
+        # just gone with the process above.
         for handle in (self._stdout, self._stderr):
             if handle is not None:
                 with contextlib.suppress(OSError):
                     handle.close()
+        for path in (self._stdout_path, self._stderr_path):
+            if path is not None:
+                with contextlib.suppress(OSError):
+                    os.unlink(path)
+        self._stdout_path = None
+        self._stderr_path = None
         # Set last: an exception on the way through here would otherwise leave
         # the session marked stopped with its handles open and its process
         # still running, and a second stop() would decline to try again.
@@ -448,4 +489,4 @@ class AppSession:
         """Bounded stdout/stderr tails, for failure reports."""
         if self.process is None:
             return []
-        return [f"stdout: {_tail(self._stdout)}", f"stderr: {_tail(self._stderr)}"]
+        return [f"stdout: {_tail(self._stdout_path)}", f"stderr: {_tail(self._stderr_path)}"]

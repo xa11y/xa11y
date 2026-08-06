@@ -75,3 +75,16 @@ def test_app_names_and_prefix_are_mutually_exclusive():
 def test_app_name_prefix_is_accepted_alone():
     launcher = AppLauncher(command=["./app"], app_name_prefix="Submit to ")
     assert launcher.app_name_prefix == "Submit to "
+
+
+def test_spawns_and_exits_defaults_off_so_apps_are_watched():
+    # The default has to be "watch this process": it is what makes a startup
+    # crash report its exit code, and app_names must not opt out of that.
+    assert AppLauncher(command=["./app"], app_names=["a"]).spawns_and_exits is False
+
+
+def test_spawns_and_exits_and_attach_pid_are_mutually_exclusive():
+    # Attach mode launches nothing, so there is no handoff to describe — and
+    # the attached PID is the process to watch whatever spawned it.
+    with pytest.raises(ValueError, match="not both"):
+        AppLauncher(attach_pid=42, spawns_and_exits=True)

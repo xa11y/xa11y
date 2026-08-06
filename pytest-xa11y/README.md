@@ -87,6 +87,7 @@ AppLauncher(
     cwd=PROJECT_ROOT,
     app_names=["my-app"],             # match the a11y name too, not just the PID
     app_name_prefix="Submit to ",     # ...or narrow to one app within our PID
+    spawns_and_exits=False,           # the command hands off and exits
     ready='button[name="OK"]',        # gate startup on content
     startup_timeout=60,               # overrides --xa11y-startup-timeout
     frontmost=True,                   # claim the macOS front slot
@@ -102,6 +103,14 @@ one; the plugin never terminates a process it did not start.
 API is not the one you launched — Electron helper processes, launcher shims
 that spawn a child and exit, anything that re-execs. It matches PID **or**
 name, widening the search.
+
+`spawns_and_exits` is separate on purpose. Needing a name to *find* the app
+says nothing about which process to *watch*, and conflating the two costs the
+liveness reporting above: with death detection off, a startup crash is
+reported as "never registered" after the full timeout, and a mid-run exit is
+not noticed at all. Set it only for a command that genuinely hands off and
+goes — a Windows launcher shim — and leave it alone for an app that stays
+running under its own PID, `app_names` or not.
 
 `app_name_prefix` is the opposite pairing: PID **and** name prefix, narrowing
 it. Reach for it when one process registers several accessibility apps and
