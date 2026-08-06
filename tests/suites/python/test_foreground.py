@@ -19,6 +19,11 @@ The gate itself is the freshly-read ``is_foreground`` flag for the app's pid
 — when the OS says our app is frontmost we assert the strong invariants;
 otherwise we fall back to the app-agnostic ones (types, bounds, uniqueness)
 so the suite degrades gracefully rather than flaking.
+
+The gate is read either side of the observation it gates, and honoured only
+when the two agree — see ``_observe_with_stable_foreground``. Reading it once,
+afterwards, made the gate and the observation two views of a desktop that had
+moved in between.
 """
 
 from __future__ import annotations
@@ -41,6 +46,40 @@ def _fresh_foreground_flag(app: xa11y.App) -> bool | None:
     return None
 
 
+def _observe_with_stable_foreground(app, observe, attempts: int = 5):
+    """Run ``observe()`` between two reads of the frontmost flag.
+
+    Returns ``(value, frontmost)``, where ``frontmost`` is the flag only if it
+    did not change across the observation, and ``None`` otherwise.
+
+    The gate and the thing it gates are two separate reads of mutable global
+    desktop state, so taking them one after the other is a race: if the
+    foreground moves to our app *between* ``App.foreground()`` resolving
+    someone else and the gate being read, the gate opens on a fact that was not
+    true when the observation was taken, and the strong assertion compares two
+    moments that never coexisted. That is a real CI failure, not a binding bug
+    — the JS mirror of this file hit it on ``windows-latest``::
+
+        our app (pid=7764) reports isForeground but
+        App.foreground() resolved a different pid=1704
+
+    Reading the flag either side and requiring agreement means the strong
+    invariants are asserted only against an observation the desktop held still
+    for. A few retries cover a desktop that is merely settling; one that keeps
+    changing hands yields ``None``, and the caller degrades to the
+    app-agnostic assertions exactly as it already does when the app is not
+    frontmost at all.
+    """
+    value = None
+    for _ in range(attempts):
+        before = _fresh_foreground_flag(app)
+        value = observe()
+        after = _fresh_foreground_flag(app)
+        if before == after:
+            return value, before
+    return value, None
+
+
 # ---------------------------------------------------------------------------
 # App.foreground()
 # ---------------------------------------------------------------------------
@@ -53,7 +92,9 @@ def test_foreground_resolves_to_a_foreground_app(app):
     as AccessKit-on-Xvfb), the resolved pid must be ours.
     """
     try:
-        fg = xa11y.App.foreground(timeout=5.0)
+        fg, frontmost = _observe_with_stable_foreground(
+            app, lambda: xa11y.App.foreground(timeout=5.0)
+        )
     except xa11y.SelectorNotMatchedError:
         pytest.skip("nothing holds the system foreground in this harness")
 
@@ -62,7 +103,7 @@ def test_foreground_resolves_to_a_foreground_app(app):
     # foreground application.
     assert fg.is_foreground is True
 
-    if _fresh_foreground_flag(app):
+    if frontmost:
         assert fg.pid == app.pid, (
             f"our app (pid={app.pid}) reports is_foreground but "
             f"App.foreground() resolved a different pid={fg.pid}"
@@ -119,7 +160,11 @@ def test_active_window(app, app_config):
     Strengthened to *exactly one* (and to our app's window) only when the OS
     reports our app as frontmost.
     """
-    windows = app.locator("window").elements()
+    # Same race as above: the window snapshot and the frontmost gate are two
+    # reads of moving state, so take the snapshot inside the sandwich.
+    windows, frontmost = _observe_with_stable_foreground(
+        app, lambda: app.locator("window").elements()
+    )
     if not windows:
         # Windows/UIA can model the app itself as the top-level window with no
         # separate `window` child; nothing to assert about window activeness.
@@ -132,7 +177,6 @@ def test_active_window(app, app_config):
         f"expected at most one active window, found {len(active_windows)}"
     )
 
-    frontmost = _fresh_foreground_flag(app)
     if frontmost:
         assert len(active_windows) == 1, (
             "app is frontmost but no window reports active=True"
