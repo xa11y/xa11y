@@ -76,13 +76,39 @@ def test_probe_runs_once_per_session(monkeypatch):
     assert len(calls) == 1
 
 
-def test_unprobeable_platform_error_still_reports_unavailable(monkeypatch):
-    # A capture failure we do not recognise is still a capture failure — it
-    # must not be reported as available.
-    monkeypatch.setattr(xa11y, "screenshot", _raiser(xa11y.PlatformError("something else")))
+def test_unrecognised_platform_error_propagates_rather_than_skipping(monkeypatch):
+    # A capture pipeline that is genuinely broken must fail the suite, not
+    # turn it green via a module-wide skip. Only the known "no capture path"
+    # signatures mean unavailable; this is the same policy guard() applies.
+    monkeypatch.setattr(
+        xa11y, "screenshot", _raiser(xa11y.PlatformError("Platform error (5): decoder blew up"))
+    )
+    with pytest.raises(xa11y.PlatformError, match="decoder blew up"):
+        Capabilities().check(SCREENSHOT)
+
+
+def test_headless_linux_signature_is_recognised(monkeypatch):
+    monkeypatch.setattr(
+        xa11y,
+        "screenshot",
+        _raiser(
+            xa11y.PlatformError(
+                "Platform error (-1): Unsupported: screenshot (no DISPLAY or WAYLAND_DISPLAY set)"
+            )
+        ),
+    )
     available, reason = Capabilities().check(SCREENSHOT)
     assert available is False
-    assert "capture failed" in reason
+    assert "no capture path" in reason
+
+
+def test_probe_captures_the_full_display_not_a_region(monkeypatch):
+    # A full-display capture can succeed where a region capture is rejected,
+    # so probing with a region would skip modules whose captures would work.
+    calls = []
+    monkeypatch.setattr(xa11y, "screenshot", lambda **kw: calls.append(kw) or object())
+    Capabilities().check(SCREENSHOT)
+    assert calls == [{}]
 
 
 def test_skip_unless_skips_with_the_reason(monkeypatch):

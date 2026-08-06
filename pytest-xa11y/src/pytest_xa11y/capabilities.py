@@ -26,9 +26,20 @@ KNOWN_CAPABILITIES = (SCREENSHOT, INPUT_SIM)
 # opposed to "capture is broken". Matched on message because the platform
 # layer reports them as a generic Error::Platform with the OS's own wording:
 # X11 rejects a region capture outside the root window's reported extents
-# under a bare Xvfb, and macOS surfaces a ScreenCaptureKit failure the same
-# way.
-_CAPTURE_UNAVAILABLE_MARKERS = ("GetImage", "BadMatch", "SCScreenshotManager")
+# under a bare Xvfb, macOS surfaces a ScreenCaptureKit failure the same way,
+# and a headless Linux session reports an unsupported backend inside a
+# Platform error rather than as Error::Unsupported.
+#
+# This list is the whole definition of "unavailable". Anything else is a real
+# failure and is re-raised — a capture pipeline that has genuinely broken must
+# not be able to turn a suite green by skipping.
+_CAPTURE_UNAVAILABLE_MARKERS = (
+    "GetImage",
+    "BadMatch",
+    "SCScreenshotManager",
+    "no DISPLAY or WAYLAND_DISPLAY",
+    "Unsupported: screenshot",
+)
 
 
 class Capabilities:
@@ -113,9 +124,27 @@ def _is_capture_unavailable(exc: Exception) -> bool:
 
 
 def _probe_screenshot() -> tuple[bool, str | None]:
-    """Attempt the smallest possible capture and see whether it lands."""
+    """Attempt a capture and report whether this session has a capture path.
+
+    Two things this deliberately does not do.
+
+    It does not treat an unrecognised ``PlatformError`` as unavailable. Only
+    the errors that mean "no capture path here" — an unsupported backend, a
+    missing grant, the known headless signatures — produce a skip; anything
+    else propagates and fails the test. A capture pipeline that is genuinely
+    broken must not turn a suite green by way of a module-wide skip, which is
+    the same rule ``guard()`` follows. The two must agree: they are one policy
+    applied at two moments.
+
+    It does not probe with a region. A full-display capture can succeed in a
+    session where a region capture is rejected (X11 rejects regions outside
+    the root window's reported extents under a bare Xvfb), so probing with
+    the more fragile of the two paths would skip modules whose captures would
+    have worked. The probe asks the weakest question the marker can be taken
+    to mean: can this session capture anything at all?
+    """
     try:
-        xa11y.screenshot(region=(0, 0, 1, 1))
+        xa11y.screenshot()
     except xa11y.ActionNotSupportedError as exc:
         return False, f"unsupported in this session ({exc})"
     except xa11y.PermissionDeniedError as exc:
@@ -123,7 +152,7 @@ def _probe_screenshot() -> tuple[bool, str | None]:
     except xa11y.PlatformError as exc:
         if _is_capture_unavailable(exc):
             return False, f"no capture path in this session ({exc})"
-        return False, f"capture failed ({exc})"
+        raise
     return True, None
 
 

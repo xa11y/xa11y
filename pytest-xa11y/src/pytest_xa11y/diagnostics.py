@@ -147,7 +147,27 @@ def write_screenshot(
     try:
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"{stem}.png"
-        xa11y.screenshot().save_png(path)
+        # The app's own window, not the whole display: on a shared CI runner
+        # the display is mostly other people's business, and the artifact is
+        # meant to show what the test was looking at. Falls back to the full
+        # display when the app exposes no window with bounds — a headless or
+        # accessory app has nothing to frame.
+        window = _app_window_bounds(app)
+        if window is not None:
+            xa11y.screenshot(region=window).save_png(path)
+        else:
+            xa11y.screenshot().save_png(path)
         return str(path)
     except (xa11y.XA11yError, OSError) as exc:
         return f"<screenshot failed: {exc!r}>"
+
+
+def _app_window_bounds(app: xa11y.App):
+    """The app's active window rect, or ``None`` if it has no usable one."""
+    try:
+        bounds = app.locator("window").element().bounds
+    except xa11y.XA11yError:
+        return None
+    if bounds is None or bounds.width <= 0 or bounds.height <= 0:
+        return None
+    return (bounds.x, bounds.y, bounds.width, bounds.height)

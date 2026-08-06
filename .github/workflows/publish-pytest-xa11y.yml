@@ -30,6 +30,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      version: ${{ steps.bump.outputs.version }}
+      tag: ${{ steps.bump.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -45,6 +48,7 @@ jobs:
         run: |
           VERSION=$(python .github/scripts/bump_pytest_xa11y.py --level "${{ inputs.level }}")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=pytest-xa11y-v$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Commit and tag
         run: |
@@ -65,10 +69,14 @@ jobs:
     if: always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     steps:
+      # The tag when there was a bump, else main. Checking out `main`
+      # unconditionally would publish whatever else had landed there between
+      # the bump push and this checkout — the sdist would then not be the tree
+      # the tag points at.
       - uses: actions/checkout@v7
         with:
-          # Pick up the bump commit when there was one.
-          ref: main
+          fetch-depth: 0
+          ref: ${{ needs.version-bump.outputs.tag || 'main' }}
 
       - uses: actions/setup-python@v7
         with:
@@ -116,7 +124,7 @@ jobs:
 
   create-release:
     name: Create GitHub Release
-    needs: [publish-pypi]
+    needs: [version-bump, publish-pypi]
     if: always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     permissions:
@@ -125,7 +133,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
-          ref: main
+          ref: ${{ needs.version-bump.outputs.tag || 'main' }}
 
       - uses: actions/setup-python@v7
         with:
@@ -136,10 +144,17 @@ jobs:
           name: pytest-xa11y-dist
           path: dist
 
+      # On the bump path the version comes from the job that did the bumping.
+      # On level=release there was no bump, so read it from the checked-out
+      # tree — and note the tag does not exist yet there; `gh release create`
+      # creates it at this commit.
       - name: Resolve tag
         id: tag
         run: |
-          VERSION=$(python .github/scripts/bump_pytest_xa11y.py --show)
+          VERSION="${{ needs.version-bump.outputs.version }}"
+          if [ -z "$VERSION" ]; then
+            VERSION=$(python .github/scripts/bump_pytest_xa11y.py --show)
+          fi
           echo "tag=pytest-xa11y-v$VERSION" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 

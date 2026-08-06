@@ -34,8 +34,12 @@ from pytest_xa11y import AppLauncher
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # Overall app-startup / content-readiness deadline, in seconds. Overridable
-# for slow machines and loaded CI runners.
-STARTUP_TIMEOUT = float(os.environ.get("XA11Y_TEST_STARTUP_TIMEOUT", "30"))
+# for slow machines and loaded CI runners. `None` when unset, so the plugin's
+# own default (and `--xa11y-startup-timeout`) applies — an AppLauncher's
+# startup_timeout outranks the flag, so passing one unconditionally would make
+# the flag inert.
+_STARTUP_TIMEOUT_ENV = os.environ.get("XA11Y_TEST_STARTUP_TIMEOUT")
+STARTUP_TIMEOUT = float(_STARTUP_TIMEOUT_ENV) if _STARTUP_TIMEOUT_ENV else None
 
 # Apps with a real, activatable macOS window whose tests depend on holding the
 # frontmost slot — input simulation delivers CGEvents there, and focus

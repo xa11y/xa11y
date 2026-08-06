@@ -38,11 +38,18 @@ class AppLauncher:
             non-POSIX ``shlex`` rules intact.
         env: extra environment variables, merged over ``os.environ``.
         cwd: working directory for the subprocess.
-        app_names: accessibility-tree names to match in addition to the
+        app_names: accessibility-tree names to match *in addition to* the
             spawned PID. Needed when the process that registers with the
             accessibility API is not the one launched — Electron helper
             processes, launchers that re-exec, and Windows shims that spawn a
             child and exit are the usual cases.
+        app_name_prefix: match a candidate whose PID is ours *and* whose name
+            starts with this. The opposite pairing to ``app_names``, and the
+            one to reach for when a single process registers several
+            accessibility apps: a Qt dialog hosted inside a DCC application
+            appears as its own app sharing the host's PID on Windows UIA, and
+            matching on PID alone would attach to the host. Mutually exclusive
+            with ``app_names``, which would widen what this narrows.
         ready: a selector that must resolve before the first test runs.
             Guards against the window existing while its content is still
             loading, which is the normal state of affairs for webview apps.
@@ -66,6 +73,7 @@ class AppLauncher:
     env: Mapping[str, str] | None = None
     cwd: str | Path | None = None
     app_names: Sequence[str] = ()
+    app_name_prefix: str | None = None
     ready: str | None = None
     startup_timeout: float | None = None
     frontmost: bool = False
@@ -94,6 +102,12 @@ class AppLauncher:
                 "AppLauncher takes command= or attach_pid=, not both: "
                 "attaching to a running process and launching a new one are "
                 "different lifecycles (the plugin only terminates what it starts)."
+            )
+        if self.app_name_prefix is not None and self.app_names:
+            raise ValueError(
+                "AppLauncher takes app_names= or app_name_prefix=, not both: "
+                "app_names widens the match to any process with that name, "
+                "app_name_prefix narrows it to one app within our own process."
             )
         if self.attach_pid is not None and self.attach_pid <= 0:
             raise ValueError(f"AppLauncher(attach_pid={self.attach_pid!r}) must be positive.")

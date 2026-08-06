@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
+import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Callable
@@ -12,7 +14,7 @@ import xa11y
 
 from .capabilities import INPUT_SIM, KNOWN_CAPABILITIES, Capabilities
 from .diagnostics import collect, render_diagnosis, write_screenshot
-from .errors import LauncherNotConfigured
+from .errors import AppDied, LauncherNotConfigured
 from .events import EventRecorder
 from .frontmost import ensure_macos_frontmost
 from .launcher import AppLauncher
@@ -44,9 +46,24 @@ class _State:
         artifacts = config.getoption("xa11y_artifacts")
         self.artifacts_dir: Path | None = Path(artifacts).resolve() if artifacts else None
         self.capabilities = Capabilities(tuple(config.getoption("xa11y_skip") or ()))
+        # The session-scoped app, when one has been requested. Distinct from
+        # `live` because `reset` is defined against this app specifically.
         self.session: AppSession | None = None
+        # Every app currently running, session-scoped and per-test alike, in
+        # start order. A single slot here would make the failure report
+        # describe the session app while the test was driving a fresh one.
+        self.live: list[AppSession] = []
         self.recorders: list[EventRecorder] = []
         self.diagnostics_emitted = 0
+
+    def register(self, session: AppSession) -> None:
+        self.live.append(session)
+
+    def unregister(self, session: AppSession) -> None:
+        if session in self.live:
+            self.live.remove(session)
+        if self.session is session:
+            self.session = None
 
 
 def _state(config: pytest.Config) -> _State:
@@ -210,11 +227,12 @@ def xa11y_app(request: pytest.FixtureRequest, xa11y_launcher: AppLauncher) -> It
     state = _state(request.config)
     session = AppSession(xa11y_launcher, startup_timeout=state.startup_timeout)
     state.session = session
+    state.register(session)
     try:
         yield session.start()
     finally:
         session.stop()
-        state.session = None
+        state.unregister(session)
 
 
 @pytest.fixture
@@ -228,10 +246,12 @@ def xa11y_fresh_app(
     """
     state = _state(request.config)
     session = AppSession(xa11y_launcher, startup_timeout=state.startup_timeout)
+    state.register(session)
     try:
         yield session.start()
     finally:
         session.stop()
+        state.unregister(session)
 
 
 @pytest.fixture(scope="session")
@@ -250,6 +270,7 @@ def xa11y_app_factory(
     def launch(launcher: AppLauncher) -> xa11y.App:
         session = AppSession(launcher, startup_timeout=state.startup_timeout)
         sessions.append(session)
+        state.register(session)
         return session.start()
 
     try:
@@ -257,6 +278,7 @@ def xa11y_app_factory(
     finally:
         for session in reversed(sessions):
             session.stop()
+            state.unregister(session)
 
 
 @pytest.fixture
@@ -281,30 +303,61 @@ def xa11y_events(
         yield make
     finally:
         for recorder in created:
-            recorder.close()
+            # Deregister first and close each one independently: a close() that
+            # raises (its app just died, say) must not leave the recorder in
+            # the session-wide list, where every later failure would render its
+            # stale events as though they belonged to that test.
             if recorder in state.recorders:
                 state.recorders.remove(recorder)
+            with contextlib.suppress(Exception):
+                recorder.close()
 
 
 @pytest.fixture(autouse=True)
 def _xa11y_per_test(request: pytest.FixtureRequest) -> Iterator[None]:
     """Liveness check, reset, and frontmost claim around each test.
 
-    Autouse, but inert unless a session app exists: a suite that never
-    requests ``xa11y_app`` never launches one.
+    Autouse, but inert unless an app is running: a suite that never requests
+    one never launches one.
     """
     state = _state(request.config)
-    session = state.session
-    if session is None:
+    if not state.live:
         yield
         return
 
-    session.check_alive()
-    if request.node.get_closest_marker("xa11y_frontmost") and session.app is not None:
-        ok, detail = ensure_macos_frontmost(session.app.pid)
+    # Every live app, not just the session one — a fresh or factory-launched
+    # app that dies mid-run has to be reported too.
+    for session in list(state.live):
+        try:
+            session.check_alive()
+        except AppDied as exc:
+            # End the run here. Every remaining test would fail on a lookup
+            # against a process that no longer exists, burying the one message
+            # that explains why under N copies of itself.
+            request.session.shouldstop = f"xa11y: {exc}"
+            raise
+
+    if request.node.get_closest_marker("xa11y_frontmost"):
+        # The most recently started app is the one this test is driving.
+        target = state.live[-1]
+        pid = target.app.pid if target.app is not None else None
+        if pid is None:
+            # App.pid is optional, and osascript would interpolate the None
+            # into its query and then fail for ten seconds before reporting
+            # something misleading about the frontmost slot.
+            pytest.skip(
+                f"cannot claim the macOS frontmost slot: "
+                f"{target.launcher.display_name!r} reports no pid"
+            )
+        ok, detail = ensure_macos_frontmost(pid)
         if not ok:
             pytest.skip(detail)
-    session.run_reset()
+
+    # `reset` is defined against the session app specifically: it is what
+    # exists across tests and therefore what accumulates state. A fresh app
+    # is new by construction and has nothing to reset.
+    if state.session is not None:
+        state.session.run_reset()
     yield
 
 
@@ -397,6 +450,14 @@ def _worker_count(config: pytest.Config) -> int:
 # ---------------------------------------------------------------------------
 
 
+def _artifact_stem(nodeid: str, label: str, index: int) -> str:
+    """A filename-safe stem. Parametrised node ids carry characters Windows
+    rejects (``:``, ``[``, ``]``, ``?``, ``*``), and the failed write was only
+    reported as a lost artifact."""
+    safe = re.sub(r"[^\w.-]", "_", f"{nodeid}-{label}")
+    return f"{safe}-{index}" if index else safe
+
+
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
     outcome = yield
@@ -411,8 +472,8 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
         if diagnosis:
             report.sections.append(("xa11y diagnosis", diagnosis))
 
-    session = state.session
-    if session is None or session.app is None:
+    running = [session for session in state.live if session.app is not None]
+    if not running:
         return
     if state.diagnostics_emitted >= state.max_diagnostics:
         return
@@ -422,23 +483,37 @@ def pytest_runtest_makereport(item: pytest.Item, call: pytest.CallInfo):
     if state.recorders:
         events = "\n".join(recorder.render() for recorder in state.recorders)
 
-    try:
-        block = collect(
-            session.app,
-            dump_depth=state.dump_depth,
-            process_output=session.output_tails(),
-            events=events,
-        )
-    except Exception as exc:
-        block = f"<diagnostics collection raised {exc!r}>"
+    # Every live app gets a block. Reporting only one would describe the
+    # session app while the test was driving a fresh one — a report that
+    # confidently shows the wrong process's tree is worse than no report.
+    blocks = []
+    for index, session in enumerate(running):
+        try:
+            block = collect(
+                session.app,
+                dump_depth=state.dump_depth,
+                process_output=session.output_tails(),
+                # Events belong to the run, not to one app; attach them once.
+                events=events if index == 0 else None,
+            )
+        except Exception as exc:
+            block = f"<diagnostics collection raised {exc!r}>"
 
-    if state.artifacts_dir is not None:
-        stem = item.nodeid.replace("/", "_").replace("::", "__").replace(" ", "_")
-        saved = write_screenshot(session.app, state.capabilities, state.artifacts_dir, stem)
-        if saved:
-            block += f"\nscreenshot: {saved}"
+        if state.artifacts_dir is not None:
+            saved = write_screenshot(
+                session.app,
+                state.capabilities,
+                state.artifacts_dir,
+                _artifact_stem(item.nodeid, session.launcher.display_name, index),
+            )
+            if saved:
+                block += f"\nscreenshot: {saved}"
 
-    report.sections.append(("xa11y app state", block))
+        if len(running) > 1:
+            block = f"[{session.launcher.display_name}]\n{block}"
+        blocks.append(block)
+
+    report.sections.append(("xa11y app state", "\n\n".join(blocks)))
 
     if state.diagnostics_emitted == state.max_diagnostics:
         report.sections.append(

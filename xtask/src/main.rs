@@ -532,13 +532,6 @@ fn do_test_matrix_check() -> bool {
     run_in("python", &["tests/matrix_check.py"], &root)
 }
 
-/// Unit-test the shared integration harness and the coverage-index checker.
-///
-/// The harness decides which suites run in every CI matrix cell and
-/// `matrix_check.py` decides whether the coverage index is believed, so a bug
-/// in either is invisible: it just stops covering something and the cell stays
-/// green (issues #327 and #348). These tests never launch an app — plain
-/// pytest, no venv, no bindings required.
 /// Install and test the pytest-xa11y plugin package.
 ///
 /// The package is pure Python and lives outside the Cargo workspace (like
@@ -559,6 +552,13 @@ fn do_test_pytest_plugin() -> bool {
     run_in("python", &["-m", "pytest", "tests/", "-v"], &plugin_dir)
 }
 
+/// Unit-test the shared integration harness and the coverage-index checker.
+///
+/// The harness decides which suites run in every CI matrix cell and
+/// `matrix_check.py` decides whether the coverage index is believed, so a bug
+/// in either is invisible: it just stops covering something and the cell stays
+/// green (issues #327 and #348). These tests never launch an app — plain
+/// pytest, no venv, no bindings required.
 fn do_test_harness() -> bool {
     heading("Integ harness + coverage-index self-tests");
     let root = project_root();

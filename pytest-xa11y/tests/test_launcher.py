@@ -65,3 +65,13 @@ def test_resolved_env_merges_over_os_environ(monkeypatch):
 def test_resolved_env_is_none_without_overrides():
     # None means "inherit", which is not the same as an empty environment.
     assert AppLauncher(command=["./app"]).resolved_env() is None
+
+
+def test_app_names_and_prefix_are_mutually_exclusive():
+    with pytest.raises(ValueError, match="not both"):
+        AppLauncher(command=["./app"], app_names=["a"], app_name_prefix="Dialog")
+
+
+def test_app_name_prefix_is_accepted_alone():
+    launcher = AppLauncher(command=["./app"], app_name_prefix="Submit to ")
+    assert launcher.app_name_prefix == "Submit to "

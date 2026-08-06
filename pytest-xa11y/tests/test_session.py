@@ -210,3 +210,77 @@ def test_reset_errors_propagate(finds_immediately):
             session.run_reset()
     finally:
         session.stop()
+
+
+def _matcher_for(launcher, monkeypatch, candidates):
+    """Run AppSession's discovery against a fixed candidate list."""
+    seen = {}
+
+    def find(predicate, timeout=None):
+        for candidate in candidates:
+            if predicate(candidate):
+                seen["matched"] = candidate
+                return candidate
+        raise xa11y.TimeoutError("Timeout")
+
+    monkeypatch.setattr(session_module, "xa11y", _fake_xa11y(find=find))
+    return seen
+
+
+class Candidate:
+    def __init__(self, pid, name):
+        self.pid = pid
+        self.name = name
+
+
+def test_app_name_prefix_narrows_within_our_own_process(monkeypatch):
+    # A DCC-hosted Qt dialog registers as its own accessibility app sharing
+    # the host's pid; matching on pid alone attaches to the host.
+    session = AppSession(
+        AppLauncher(attach_pid=99, app_name_prefix="Submit to "), startup_timeout=1.0
+    )
+    seen = _matcher_for(
+        session.launcher,
+        monkeypatch,
+        [Candidate(99, "Cinema 4D"), Candidate(99, "Submit to AWS Deadline Cloud")],
+    )
+    session.start()
+    assert seen["matched"].name == "Submit to AWS Deadline Cloud"
+
+
+def test_without_a_prefix_the_host_process_wins(monkeypatch):
+    # Documents the default: pid alone matches whichever app the platform
+    # enumerates first for that process.
+    session = AppSession(AppLauncher(attach_pid=99), startup_timeout=1.0)
+    seen = _matcher_for(
+        session.launcher,
+        monkeypatch,
+        [Candidate(99, "Cinema 4D"), Candidate(99, "Submit to AWS Deadline Cloud")],
+    )
+    session.start()
+    assert seen["matched"].name == "Cinema 4D"
+
+
+def test_app_names_widen_to_a_different_process(monkeypatch):
+    session = AppSession(AppLauncher(attach_pid=1, app_names=["electron"]), startup_timeout=1.0)
+    seen = _matcher_for(
+        session.launcher, monkeypatch, [Candidate(7, "some-other"), Candidate(9, "Electron Helper")]
+    )
+    session.start()
+    assert seen["matched"].pid == 9
+
+
+def test_attach_mode_detects_a_dead_pid(finds_immediately):
+    import subprocess as sp
+
+    proc = sp.Popen(ALIVE)
+    session = AppSession(AppLauncher(attach_pid=proc.pid), startup_timeout=2.0)
+    session.start()
+    session.check_alive()  # still running
+
+    proc.kill()
+    proc.wait(timeout=5)
+    # Attach mode is the normal path in CI, so a liveness check that did
+    # nothing there would be a feature that never runs where it is needed.
+    with pytest.raises(AppDied, match="no longer running"):
+        session.check_alive()

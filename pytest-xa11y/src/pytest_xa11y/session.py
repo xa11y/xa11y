@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import os
 import signal
 import subprocess
 import sys
@@ -30,6 +31,27 @@ _OUTPUT_TAIL = 4000
 _MAX_APP_CANDIDATES = 40
 
 _TERMINATE_GRACE = 5.0
+
+
+def _pid_alive(pid: int) -> bool:
+    """Whether ``pid`` still names a running process."""
+    if sys.platform == "win32":
+        # No signal 0 on Windows: ask the task list instead. tasklist is
+        # present on every supported version and needs no extra dependency.
+        result = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+            capture_output=True,
+            text=True,
+        )
+        return str(pid) in result.stdout
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Alive, but owned by another user — which is still alive.
+        return True
+    return True
 
 
 def _tail(stream: IO[bytes] | None, limit: int = _OUTPUT_TAIL) -> str:
@@ -115,12 +137,24 @@ class AppSession:
     def _await_app(self, pid: int) -> xa11y.App:
         """Poll until the app registers with the platform accessibility API."""
         names = self.launcher.app_names
+        prefix = self.launcher.app_name_prefix
 
         def matches(candidate: xa11y.App) -> bool:
-            if candidate.pid == pid:
+            pid_matches = candidate.pid == pid
+            name = candidate.name or ""
+            if prefix is not None:
+                # Narrowing: one process registers several accessibility apps
+                # and only one of them is the dialog under test.
+                return pid_matches and name.startswith(prefix)
+            if pid_matches:
                 return True
-            candidate_name = (candidate.name or "").lower()
-            return any(name.lower() in candidate_name for name in names)
+            # Widening: the registering process is not the one we spawned.
+            # Note this cannot express a preference between names — App.find
+            # returns the first candidate the platform enumerates that
+            # satisfies the predicate, so a list of names is a set, not an
+            # order. Use app_name_prefix when precision matters.
+            lowered = name.lower()
+            return any(candidate_name.lower() in lowered for candidate_name in names)
 
         deadline = time.monotonic() + self.startup_timeout
         last_platform_error: Exception | None = None
@@ -153,7 +187,9 @@ class AppSession:
             shown.append(f"... and {len(listed) - _MAX_APP_CANDIDATES} more")
 
         looked_for = f"  looked for: pid={pid}"
-        if self.launcher.app_names:
+        if self.launcher.app_name_prefix:
+            looked_for += f" and name starting with {self.launcher.app_name_prefix!r}"
+        elif self.launcher.app_names:
             looked_for += f" or name containing {list(self.launcher.app_names)}"
         lines = [
             f"{self.launcher.display_name!r} did not register with the accessibility "
@@ -228,16 +264,33 @@ class AppSession:
         remaining test failing on an unrelated selector error, and the actual
         cause — the process is gone, and here is what it printed — is nowhere
         in the report.
+
+        Attach mode gets a signal-0 probe rather than nothing. The harness in
+        this repository launches the app once and hands every language suite
+        its pid, so attach mode is the *normal* path in CI; a liveness check
+        that silently did nothing there would be a feature that never runs
+        where it is most needed. There is no captured output to report in
+        that mode, because the process is not ours.
         """
-        if self.process is None or self._stopped:
+        if self._stopped:
             return
-        if self.process.poll() is None:
+
+        if self.process is not None:
+            if self.process.poll() is None:
+                return
+            raise AppDied(
+                f"{self.launcher.display_name!r} exited mid-run (code "
+                f"{self.process.returncode}).\n"
+                f"  stdout: {_tail(self._stdout)}\n"
+                f"  stderr: {_tail(self._stderr)}"
+            )
+
+        pid = self.launcher.attach_pid
+        if pid is None or _pid_alive(pid):
             return
         raise AppDied(
-            f"{self.launcher.display_name!r} exited mid-run (code "
-            f"{self.process.returncode}). Remaining tests cannot run.\n"
-            f"  stdout: {_tail(self._stdout)}\n"
-            f"  stderr: {_tail(self._stderr)}"
+            f"{self.launcher.display_name!r} (attached pid={pid}) is no longer "
+            f"running. Its output was not captured by this process."
         )
 
     def run_reset(self) -> None:
@@ -256,7 +309,6 @@ class AppSession:
         """Terminate the app, if this session started it."""
         if self._stopped:
             return
-        self._stopped = True
         proc = self.process
         if proc is not None and proc.poll() is None:
             try:
@@ -275,6 +327,10 @@ class AppSession:
             if handle is not None:
                 with contextlib.suppress(OSError):
                     handle.close()
+        # Set last: an exception on the way through here would otherwise leave
+        # the session marked stopped with its handles open and its process
+        # still running, and a second stop() would decline to try again.
+        self._stopped = True
 
     # -- diagnostics -------------------------------------------------------
 

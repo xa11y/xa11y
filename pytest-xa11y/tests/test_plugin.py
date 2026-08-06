@@ -245,3 +245,111 @@ def test_valid_markers_collect_cleanly(pytester: pytest.Pytester):
         """
     )
     pytester.runpytest("--xa11y-skip=screenshot").assert_outcomes(skipped=1)
+
+
+FAKE_APP_CONFTEST = """
+import os
+
+import pytest
+import pytest_xa11y.session as session_module
+from pytest_xa11y import AppLauncher
+
+
+class FakeApp:
+    def __init__(self, name):
+        self.name = name
+        self.pid = 1
+
+    def dump(self, max_depth=None):
+        return "<tree of %s>" % self.name
+
+
+class _Finder:
+    def __init__(self):
+        self.n = 0
+
+    def __call__(self, predicate, timeout=None):
+        self.n += 1
+        return FakeApp("fake-%d" % self.n)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _fake_backend():
+    import types, xa11y
+    session_module.xa11y = types.SimpleNamespace(
+        App=types.SimpleNamespace(find=_Finder(), list=lambda: []),
+        TimeoutError=xa11y.TimeoutError,
+        SelectorNotMatchedError=xa11y.SelectorNotMatchedError,
+        PlatformError=xa11y.PlatformError,
+        XA11yError=xa11y.XA11yError,
+    )
+    yield
+
+
+@pytest.fixture(scope="session")
+def xa11y_launcher():
+    # Attach to this very process: it is certainly alive, so the plugin's
+    # liveness check has something real to pass against.
+    return AppLauncher(attach_pid=os.getpid())
+"""
+
+
+def test_fresh_app_failure_reports_the_app_the_test_drove(pytester: pytest.Pytester):
+    # A report that confidently prints the wrong process's tree is worse than
+    # printing none: the session app and the fresh app are different processes.
+    pytester.makeconftest(FAKE_APP_CONFTEST)
+    pytester.makepyfile(
+        """
+        def test_session_app_starts_first(xa11y_app):
+            assert xa11y_app.name == "fake-1"
+
+        def test_fresh_app_fails(xa11y_app, xa11y_fresh_app):
+            assert xa11y_fresh_app.name == "nope"
+        """
+    )
+    result = pytester.runpytest()
+    result.assert_outcomes(passed=1, failed=1)
+    output = result.stdout.str()
+    assert "<tree of fake-2>" in output, "the fresh app's tree must be in the report"
+    assert "<tree of fake-1>" in output, "the session app is still live and also reported"
+
+
+def test_recorder_events_do_not_leak_into_a_later_test(pytester: pytest.Pytester):
+    pytester.makeconftest(FAKE_APP_CONFTEST)
+    pytester.makepyfile(
+        """
+        import pytest
+
+
+        class Sub:
+            def __init__(self):
+                self.queue = [Ev()]
+
+            def try_recv(self):
+                return self.queue.pop(0) if self.queue else None
+
+            def close(self):
+                raise RuntimeError("app already gone")
+
+
+        class Ev:
+            event_type = "focus_changed"
+            target = None
+
+
+        def test_records_then_fails(xa11y_app, xa11y_events, monkeypatch):
+            monkeypatch.setattr(type(xa11y_app), "subscribe", lambda self: Sub(), raising=False)
+            with xa11y_events(xa11y_app) as events:
+                events.drain(0.05)
+                assert False, "first failure"
+
+
+        def test_unrelated_failure(xa11y_app):
+            assert False, "second failure"
+        """
+    )
+    result = pytester.runpytest()
+    result.assert_outcomes(failed=2)
+    # A close() that raises must not strand the recorder in session state.
+    second = result.stdout.str().split("test_unrelated_failure")[-1]
+    assert "focus_changed" not in second
