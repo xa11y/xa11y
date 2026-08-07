@@ -60,9 +60,8 @@ safari.locator("text_field[name^='Search']").set_value("hello world")
 <!-- rust-only -->
 **Rust**
 
-```toml
-[dependencies]
-xa11y = "0.12"
+```bash
+cargo add xa11y
 ```
 <!-- /rust-only -->
 

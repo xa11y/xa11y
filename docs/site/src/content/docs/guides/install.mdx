@@ -14,10 +14,11 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
 
 <Tabs syncKey="lang">
   <TabItem label="Rust">
-    ```toml
-    [dependencies]
-    xa11y = "0.12"
+    ```bash
+    cargo add xa11y
     ```
+
+    Adds the current release to `Cargo.toml`. The platform backend is picked by target, so there are no feature flags to choose.
   </TabItem>
   <TabItem label="Python">
     ```bash

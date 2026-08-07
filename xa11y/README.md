@@ -40,9 +40,8 @@ fn main() -> Result<()> {
 
 **Rust**
 
-```toml
-[dependencies]
-xa11y = "0.12"
+```bash
+cargo add xa11y
 ```
 
 > On **macOS**, grant your terminal **two** permissions in **System Settings > Privacy & Security**:
