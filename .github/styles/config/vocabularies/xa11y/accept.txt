@@ -63,6 +63,7 @@ froglogic
 libFuzzer
 maturin
 napi
+npm
 pytest
 pywinauto
 serde
