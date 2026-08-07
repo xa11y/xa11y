@@ -705,9 +705,20 @@ fn do_sync_readmes(args: &[String]) -> bool {
 
     let mut ok = true;
     for &(keep, dest) in targets {
-        let remove = if keep == "rust" { "python" } else { "rust" };
-        let expected = strip_lang_blocks(&source, keep, remove);
+        let expected = render_readme(&source, keep);
         let path = root.join(dest);
+
+        // A marker surviving the render is a typo'd language name: it would
+        // ship to crates.io or PyPI as literal text, and the block it guards
+        // would land in the wrong README.
+        for residue in ["-only -->", "-only-hidden"] {
+            if expected.contains(residue) {
+                eprintln!(
+                    "{dest}: unresolved `{residue}` marker — language names must be one of {README_LANGS:?}"
+                );
+                ok = false;
+            }
+        }
 
         if check {
             let actual = fs::read_to_string(&path).unwrap_or_default();
@@ -727,38 +738,93 @@ fn do_sync_readmes(args: &[String]) -> bool {
     ok
 }
 
-/// Remove `<!-- {remove}-only -->...<!-- /{remove}-only -->` blocks entirely,
-/// and unwrap `<!-- {keep}-only -->...<!-- /{keep}-only -->` markers (keeping content).
-fn strip_lang_blocks(source: &str, keep: &str, remove: &str) -> String {
-    let open_remove = format!("<!-- {remove}-only -->\n");
-    let close_remove = format!("<!-- /{remove}-only -->\n");
-    let open_keep = format!("<!-- {keep}-only -->\n");
-    let close_keep = format!("<!-- /{keep}-only -->\n");
+/// Languages a README block can be tagged for. The root README renders every
+/// visible block, so it is the one page that shows all three install steps;
+/// each package README keeps its own language's blocks and drops the rest.
+const README_LANGS: &[&str] = &["rust", "python", "js"];
 
-    // Remove the other language's blocks
-    let mut result = String::with_capacity(source.len());
-    let mut rest = source;
-    while let Some(start) = rest.find(&open_remove) {
-        result.push_str(&rest[..start]);
-        rest = &rest[start + open_remove.len()..];
-        if let Some(end) = rest.find(&close_remove) {
-            rest = &rest[end + close_remove.len()..];
-        } else {
-            // Unclosed marker — keep the rest as-is
-            break;
-        }
+/// Render the package README for `keep` from the root README: keep that
+/// language's blocks, drop every other language's, and collapse the blank
+/// lines the dropped blocks leave behind.
+fn render_readme(source: &str, keep: &str) -> String {
+    let mut result = source.to_string();
+    for lang in README_LANGS {
+        result = resolve_lang_blocks(&result, lang, *lang == keep);
     }
-    result.push_str(rest);
 
-    // Unwrap the kept language's markers
-    result = result.replace(&open_keep, "");
-    result = result.replace(&close_keep, "");
-
-    // Collapse triple+ blank lines
     while result.contains("\n\n\n") {
         result = result.replace("\n\n\n", "\n\n");
     }
+    result
+}
 
+/// Resolve every block tagged for `lang`, keeping its content without the
+/// markers when `keep` and dropping the whole block otherwise.
+///
+/// Two spellings are recognised. A visible block renders as ordinary Markdown
+/// in the root README:
+///
+/// ```text
+/// <!-- python-only -->
+/// ...content...
+/// <!-- /python-only -->
+/// ```
+///
+/// A hidden block puts the content *inside* the comment, so the root README
+/// renders nothing while that language's package README still gets it. This is
+/// how the crates.io README keeps a Rust example that the root README, which
+/// leads with Python, doesn't show:
+///
+/// ```text
+/// <!-- rust-only-hidden
+/// ...content...
+/// -->
+/// ```
+///
+/// Hidden content must not itself contain `-->`, which would end the comment
+/// early and leak the remainder into the rendered root README.
+///
+/// An unclosed marker leaves the rest of the document untouched, so a
+/// malformed README fails the `--check` diff instead of being silently
+/// truncated.
+fn resolve_lang_blocks(source: &str, lang: &str, keep: bool) -> String {
+    let visible_open = format!("<!-- {lang}-only -->\n");
+    let visible_close = format!("<!-- /{lang}-only -->\n");
+    let hidden_open = format!("<!-- {lang}-only-hidden\n");
+    let hidden_close = "-->\n";
+
+    let mut result = String::with_capacity(source.len());
+    let mut rest = source;
+    loop {
+        // Whichever spelling comes first wins. The two openers cannot match
+        // the same marker: one ends in `-only -->`, the other in `-only-hidden`.
+        let hidden = rest.find(&hidden_open).map(|at| (at, true));
+        let visible = rest.find(&visible_open).map(|at| (at, false));
+        let (start, is_hidden) = match (hidden, visible) {
+            (Some(h), Some(v)) if v.0 < h.0 => v,
+            (Some(h), _) => h,
+            (None, Some(v)) => v,
+            (None, None) => break,
+        };
+        let (open, close) = if is_hidden {
+            (hidden_open.as_str(), hidden_close)
+        } else {
+            (visible_open.as_str(), visible_close.as_str())
+        };
+
+        result.push_str(&rest[..start]);
+        let body = &rest[start + open.len()..];
+        let Some(end) = body.find(close) else {
+            result.push_str(&rest[start..]);
+            return result;
+        };
+        if keep {
+            result.push_str(&body[..end]);
+        }
+        rest = &body[end + close.len()..];
+    }
+
+    result.push_str(rest);
     result
 }
 
@@ -997,4 +1063,80 @@ fn do_check() -> bool {
         heading("Some checks failed");
     }
     ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{render_readme, README_LANGS};
+
+    #[test]
+    fn visible_block_survives_only_in_its_own_readme() {
+        let source = "\
+# Title
+
+<!-- rust-only -->
+cargo
+<!-- /rust-only -->
+
+<!-- python-only -->
+pip
+<!-- /python-only -->
+
+<!-- js-only -->
+npm
+<!-- /js-only -->
+";
+        // The trailing blank line is what the dropped blocks leave behind:
+        // blank-line collapsing folds runs of three or more newlines only.
+        assert_eq!(render_readme(source, "rust"), "# Title\n\ncargo\n\n");
+        assert_eq!(render_readme(source, "python"), "# Title\n\npip\n\n");
+        assert_eq!(render_readme(source, "js"), "# Title\n\nnpm\n");
+    }
+
+    #[test]
+    fn hidden_block_is_unwrapped_for_its_own_readme() {
+        let source = "\
+## Quick Example
+
+<!-- rust-only-hidden
+fn main() -> Result<()> { Ok(()) }
+-->
+
+<!-- python-only -->
+import xa11y
+<!-- /python-only -->
+";
+        assert_eq!(
+            render_readme(source, "rust"),
+            "## Quick Example\n\nfn main() -> Result<()> { Ok(()) }\n\n"
+        );
+        assert_eq!(
+            render_readme(source, "python"),
+            "## Quick Example\n\nimport xa11y\n"
+        );
+    }
+
+    #[test]
+    fn unclosed_marker_leaves_the_document_intact() {
+        // No close marker: the text is preserved verbatim so `--check` reports
+        // a diff rather than the generator silently truncating the README.
+        let source = "# Title\n\n<!-- rust-only -->\ncargo\n";
+        assert_eq!(render_readme(source, "rust"), source);
+        assert_eq!(render_readme(source, "python"), source);
+    }
+
+    #[test]
+    fn the_real_readme_resolves_every_marker() {
+        let source = std::fs::read_to_string(super::project_root().join("README.md"))
+            .expect("root README.md is readable");
+        for keep in README_LANGS {
+            let rendered = render_readme(&source, keep);
+            for residue in ["-only -->", "-only-hidden"] {
+                assert!(
+                    !rendered.contains(residue),
+                    "`{residue}` survived rendering README.md for {keep}"
+                );
+            }
+        }
+    }
 }

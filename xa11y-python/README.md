@@ -2,6 +2,7 @@
 
 [![Crates.io](https://img.shields.io/crates/v/xa11y)](https://crates.io/crates/xa11y)
 [![PyPI](https://img.shields.io/pypi/v/xa11y)](https://pypi.org/project/xa11y/)
+[![npm](https://img.shields.io/npm/v/@crowecawcaw/xa11y)](https://www.npmjs.com/package/@crowecawcaw/xa11y)
 [![CI](https://github.com/xa11y/xa11y/actions/workflows/ci.yml/badge.svg)](https://github.com/xa11y/xa11y/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-xa11y.dev-blueviolet)](https://xa11y.dev)
@@ -10,7 +11,7 @@ A Playwright-style library for driving native desktop apps on macOS, Windows, an
 
 **Use cases:** end-to-end desktop testing, computer-use agents, MCP tools, assistive technology.
 
-**[Documentation](https://xa11y.dev)** | **[Rust API](https://docs.rs/xa11y)** | **[Python API](https://xa11y.dev/api/python/)**
+**[Documentation](https://xa11y.dev)** | **[Rust API](https://docs.rs/xa11y)** | **[Python API](https://xa11y.dev/api/python/)** | **[JavaScript API](https://xa11y.dev/api/javascript/)**
 
 ## Quick Example
 
@@ -30,6 +31,8 @@ safari.locator("text_field[name^='Search']").set_value("hello world")
 ```
 
 ## Installation
+
+**Python**
 
 ```bash
 pip install xa11y

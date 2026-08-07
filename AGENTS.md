@@ -322,6 +322,30 @@ Two things worth knowing before adding pages:
   `.vale.ini` skips those blocks explicitly. Top-level fences are handled by
   the parser.
 
+## READMEs
+
+`README.md` at the repo root is the source. `cargo xtask sync-readmes` renders
+it into `xa11y/README.md` (crates.io) and `xa11y-python/README.md` (PyPI), and
+CI runs `--check` and fails when either has drifted. Edit the root and
+re-render; never edit a package README directly. `xa11y-js/README.md` is
+hand-written and sits outside this pipeline.
+
+Language-specific content is marked, in one of two forms:
+
+- `<!-- python-only -->` ... `<!-- /python-only -->` renders in the root README
+  *and* in that language's package README. Every visible block shows on the
+  root page, which is why the root lists all three install steps while each
+  package README lists only its own.
+- `<!-- rust-only-hidden` ... `-->` puts the content inside the comment, so the
+  root README renders nothing while the package README still gets it. The Rust
+  quick example ships this way: the root page leads with Python, and crates.io
+  still gets a Rust snippet.
+
+The recognised language names are `rust`, `python`, and `js` (`README_LANGS` in
+`xtask/src/main.rs`). A typo'd name fails `sync-readmes` instead of shipping a
+literal marker to a package registry. Hidden content must not contain `-->`,
+which would end the comment early and leak the rest into the root page.
+
 ## Project Structure
 
 - `xa11y-core/` — Platform-independent types, traits, selector engine
