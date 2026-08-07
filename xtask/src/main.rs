@@ -743,26 +743,9 @@ fn do_sync_readmes(args: &[String]) -> bool {
 /// each package README keeps its own language's blocks and drops the rest.
 const README_LANGS: &[&str] = &["rust", "python", "js"];
 
-/// Render the package README for `keep` from the root README: keep that
-/// language's blocks, drop every other language's, and collapse the blank
-/// lines the dropped blocks leave behind.
-fn render_readme(source: &str, keep: &str) -> String {
-    let mut result = source.to_string();
-    for lang in README_LANGS {
-        result = resolve_lang_blocks(&result, lang, *lang == keep);
-    }
-
-    while result.contains("\n\n\n") {
-        result = result.replace("\n\n\n", "\n\n");
-    }
-    result
-}
-
-/// Resolve every block tagged for `lang`, keeping its content without the
-/// markers when `keep` and dropping the whole block otherwise.
+/// A language-tagged README block, in one of two spellings.
 ///
-/// Two spellings are recognised. A visible block renders as ordinary Markdown
-/// in the root README:
+/// A visible block renders as ordinary Markdown in the root README:
 ///
 /// ```text
 /// <!-- python-only -->
@@ -781,50 +764,94 @@ fn render_readme(source: &str, keep: &str) -> String {
 /// -->
 /// ```
 ///
-/// Hidden content must not itself contain `-->`, which would end the comment
-/// early and leak the remainder into the rendered root README.
-///
-/// An unclosed marker leaves the rest of the document untouched, so a
-/// malformed README fails the `--check` diff instead of being silently
-/// truncated.
-fn resolve_lang_blocks(source: &str, lang: &str, keep: bool) -> String {
-    let visible_open = format!("<!-- {lang}-only -->\n");
-    let visible_close = format!("<!-- /{lang}-only -->\n");
-    let hidden_open = format!("<!-- {lang}-only-hidden\n");
-    let hidden_close = "-->\n";
+/// Hidden content must not itself contain a line that is exactly `-->`, which
+/// would end the comment early and leak the remainder into the rendered root
+/// README.
+#[derive(Clone, Copy)]
+enum BlockKind {
+    Visible,
+    Hidden,
+}
 
-    let mut result = String::with_capacity(source.len());
-    let mut rest = source;
-    loop {
-        // Whichever spelling comes first wins. The two openers cannot match
-        // the same marker: one ends in `-only -->`, the other in `-only-hidden`.
-        let hidden = rest.find(&hidden_open).map(|at| (at, true));
-        let visible = rest.find(&visible_open).map(|at| (at, false));
-        let (start, is_hidden) = match (hidden, visible) {
-            (Some(h), Some(v)) if v.0 < h.0 => v,
-            (Some(h), _) => h,
-            (None, Some(v)) => v,
-            (None, None) => break,
-        };
-        let (open, close) = if is_hidden {
-            (hidden_open.as_str(), hidden_close)
-        } else {
-            (visible_open.as_str(), visible_close.as_str())
-        };
-
-        result.push_str(&rest[..start]);
-        let body = &rest[start + open.len()..];
-        let Some(end) = body.find(close) else {
-            result.push_str(&rest[start..]);
-            return result;
-        };
-        if keep {
-            result.push_str(&body[..end]);
+impl BlockKind {
+    fn open(self, lang: &str) -> String {
+        match self {
+            Self::Visible => format!("<!-- {lang}-only -->"),
+            Self::Hidden => format!("<!-- {lang}-only-hidden"),
         }
-        rest = &body[end + close.len()..];
     }
 
-    result.push_str(rest);
+    fn close(self, lang: &str) -> String {
+        match self {
+            Self::Visible => format!("<!-- /{lang}-only -->"),
+            Self::Hidden => "-->".to_string(),
+        }
+    }
+}
+
+/// Match a line against every language's opening markers.
+fn open_marker(line: &str) -> Option<(&'static str, BlockKind)> {
+    for lang in README_LANGS {
+        for kind in [BlockKind::Visible, BlockKind::Hidden] {
+            if line == kind.open(lang) {
+                return Some((lang, kind));
+            }
+        }
+    }
+    None
+}
+
+/// Render the package README for `keep` from the root README: keep that
+/// language's blocks, drop every other language's, and collapse the blank
+/// lines the dropped blocks leave behind.
+///
+/// Markers are matched one whole line at a time with the terminator trimmed, so
+/// a CRLF working copy (what `actions/checkout` produces on Windows) renders
+/// the same as an LF one. Matching `"<!-- rust-only -->\n"` as a substring
+/// instead silently resolved no blocks at all there.
+///
+/// An unclosed marker returns the source untouched rather than a half-rendered
+/// document, so the `--check` diff and the marker-residue check both fail
+/// loudly instead of a package README shipping with a marker in it.
+fn render_readme(source: &str, keep: &str) -> String {
+    let mut result = String::with_capacity(source.len());
+    let mut open: Option<(&str, BlockKind)> = None;
+    let mut prev_blank = false;
+
+    for line in source.split_inclusive('\n') {
+        let text = line.trim_end();
+
+        match open {
+            Some((lang, kind)) => {
+                if text == kind.close(lang) {
+                    open = None;
+                    continue;
+                }
+                if lang != keep {
+                    continue;
+                }
+            }
+            None => {
+                if let Some(found) = open_marker(text) {
+                    open = Some(found);
+                    continue;
+                }
+            }
+        }
+
+        // Dropping a block leaves its surrounding blank lines adjacent; keep at
+        // most one so the rendered README has no double gaps.
+        let blank = text.is_empty();
+        if blank && prev_blank {
+            continue;
+        }
+        prev_blank = blank;
+        result.push_str(line);
+    }
+
+    if open.is_some() {
+        return source.to_string();
+    }
     result
 }
 
@@ -1114,6 +1141,33 @@ import xa11y
             render_readme(source, "python"),
             "## Quick Example\n\nimport xa11y\n"
         );
+    }
+
+    #[test]
+    fn crlf_renders_the_same_as_lf() {
+        // `actions/checkout` converts to CRLF on Windows, so the whole README
+        // arrives with `\r\n` terminators. Matching markers as substrings with
+        // a trailing `\n` resolved nothing at all there, which shipped a
+        // package README full of literal markers.
+        let lf = "\
+# Title
+
+<!-- rust-only-hidden
+cargo add xa11y
+-->
+
+<!-- python-only -->
+pip install xa11y
+<!-- /python-only -->
+";
+        let crlf = lf.replace('\n', "\r\n");
+        for keep in README_LANGS {
+            assert_eq!(
+                render_readme(&crlf, keep),
+                render_readme(lf, keep).replace('\n', "\r\n"),
+                "CRLF and LF renders diverge for {keep}"
+            );
+        }
     }
 
     #[test]
