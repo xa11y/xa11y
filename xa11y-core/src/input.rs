@@ -56,6 +56,11 @@ use crate::error::{Error, Result};
 /// physical device pixels before dispatching the event. Consumers never see
 /// physical pixels here — a point that lands on an element's centre is
 /// `anchor_point(&element.bounds, Anchor::Center)`, unscaled.
+#[allow(
+    clippy::exhaustive_structs,
+    reason = "Closed domain: a 2D screen point is an x and a y. Literal \
+              construction is the point of the type."
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Point {
     pub x: i32,
@@ -93,7 +98,12 @@ impl Point {
 /// All anchors are computed against the element's [`Rect`] *at the time of the
 /// input call*, not at element-fetch time — but only if the caller supplies a
 /// fresh element. `InputSim` will not re-traverse the a11y tree on its own.
+///
+/// `#[non_exhaustive]`: the named anchors are the four corners and the centre,
+/// which is five of the standard nine-point grid — `TopCenter`, `BottomCenter`,
+/// `LeftCenter`, and `RightCenter` are the obvious next additions.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
 pub enum Anchor {
     #[default]
     Center,
@@ -172,6 +182,18 @@ impl IntoPoint for &Element {
 // ── Pointer ─────────────────────────────────────────────────────────
 
 /// A mouse button.
+///
+/// Deliberately **exhaustive**, for the same reason as [`Key`]: every variant
+/// has to be mapped to an X11 button number, an evdev code, a CoreGraphics
+/// event type, and a `MOUSEEVENTF_*` flag pair. Adding a side button (X1/X2)
+/// is real work in four backends — Windows alone expresses them through
+/// `MOUSEEVENTF_XDOWN` plus a `mouseData` field rather than a distinct flag —
+/// and the build should say so.
+#[allow(
+    clippy::exhaustive_enums,
+    reason = "Capability enum: each variant must be mapped by every input \
+              backend, so adding one has to break their builds. See Key."
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum MouseButton {
     #[default]
@@ -183,6 +205,11 @@ pub enum MouseButton {
 /// Direction and magnitude of a scroll event, in platform "ticks" (typically
 /// one notch of a physical scroll wheel). Positive `dy` scrolls content
 /// downward (i.e. moves the viewport up); positive `dx` scrolls right.
+#[allow(
+    clippy::exhaustive_structs,
+    reason = "Closed domain: scrolling has two axes. A third would need a \
+              third scroll axis to exist."
+)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct ScrollDelta {
     pub dx: i32,
@@ -238,6 +265,23 @@ impl ScrollDelta {
 ///
 /// `Meta` is the platform's "command" modifier: Cmd on macOS, Win on Windows,
 /// Super on Linux. Backends are responsible for the platform mapping.
+///
+/// # Extensibility
+///
+/// Deliberately **exhaustive**. This enum names platform capabilities: every
+/// variant has to be translated to a keysym, a virtual-key code, and an evdev
+/// keycode by four separate input backends. Growth here *should* be breaking,
+/// because the compile error in each backend is the only thing that forces a
+/// per-platform decision. `#[non_exhaustive]` would turn "nobody mapped this
+/// key" into a runtime `Error::Unsupported` from a library whose type system
+/// advertises the key — a worse outcome than a build failure at the point the
+/// variant is added.
+#[allow(
+    clippy::exhaustive_enums,
+    reason = "Capability enum: each variant must be mapped by every input \
+              backend, so adding one has to break their builds. See the \
+              Extensibility note above."
+)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Key {
     /// A printable character (lowercase, no shifted symbols). Backends
@@ -298,7 +342,12 @@ impl Key {
 // ── Click / drag option structs ─────────────────────────────────────
 
 /// Options for [`Mouse::click_with`].
+///
+/// `#[non_exhaustive]`: an options struct exists to grow. Start from
+/// [`ClickOptions::new`] and chain only what you need —
+/// `ClickOptions::new().button(MouseButton::Right).count(2)`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ClickOptions {
     pub button: MouseButton,
     /// Number of consecutive clicks (1 = single, 2 = double, …).
@@ -321,8 +370,47 @@ impl Default for ClickOptions {
     }
 }
 
+impl ClickOptions {
+    /// Default options: left button, single click, nothing held, centre anchor.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the button to click with.
+    #[must_use]
+    pub fn button(mut self, button: MouseButton) -> Self {
+        self.button = button;
+        self
+    }
+
+    /// Set the number of consecutive clicks (`2` is a double-click).
+    #[must_use]
+    pub fn count(mut self, count: u32) -> Self {
+        self.count = count;
+        self
+    }
+
+    /// Set the keys held for the duration of the click.
+    #[must_use]
+    pub fn held(mut self, held: impl IntoIterator<Item = Key>) -> Self {
+        self.held = held.into_iter().collect();
+        self
+    }
+
+    /// Set the anchor used when the target is an [`Element`].
+    #[must_use]
+    pub fn anchor(mut self, anchor: Anchor) -> Self {
+        self.anchor = anchor;
+        self
+    }
+}
+
 /// Options for [`Mouse::drag_with`].
+///
+/// `#[non_exhaustive]`: see [`ClickOptions`]. Start from
+/// [`DragOptions::new`] and chain what you need.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct DragOptions {
     pub button: MouseButton,
     /// Keys held for the duration of the drag.
@@ -339,6 +427,34 @@ impl Default for DragOptions {
             held: Vec::new(),
             duration: Duration::from_millis(150),
         }
+    }
+}
+
+impl DragOptions {
+    /// Default options: left button, nothing held, 150ms.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the button held down for the drag.
+    #[must_use]
+    pub fn button(mut self, button: MouseButton) -> Self {
+        self.button = button;
+        self
+    }
+
+    /// Set the keys held for the duration of the drag.
+    #[must_use]
+    pub fn held(mut self, held: impl IntoIterator<Item = Key>) -> Self {
+        self.held = held.into_iter().collect();
+        self
+    }
+
+    /// Set the total time over which the drag is performed.
+    #[must_use]
+    pub fn duration(mut self, duration: Duration) -> Self {
+        self.duration = duration;
+        self
     }
 }
 
@@ -656,6 +772,13 @@ impl Keyboard<'_> {
 
 /// Explicit target for [`Mouse::click_with`]: either a raw point or an
 /// element to anchor against.
+#[allow(
+    clippy::exhaustive_enums,
+    reason = "Closed domain: a click lands at a screen position, which the \
+              caller either states outright or derives from an element's \
+              bounds. Locator is deliberately not a third variant — see the \
+              IntoPoint docs on why resolving stays explicit."
+)]
 pub enum ClickTarget<'a> {
     Point(Point),
     Element(&'a Element),

@@ -14,8 +14,8 @@ use rayon::prelude::*;
 #[cfg(test)]
 use xa11y_core::Selector;
 use xa11y_core::{
-    CancelHandle, ElementData, Error, Event, EventKind, EventReceiver, Provider, Rect, Result,
-    Role, StateFlag, StateSet, Subscription, Toggled,
+    CancelHandle, ElementData, ElementParts, Error, Event, EventKind, EventParts, EventReceiver,
+    Provider, Rect, Result, Role, StateFlag, StateParts, StateSet, Subscription, Toggled,
 };
 
 // ── FFI Declarations ──────────────────────────────────────────────────────────
@@ -1447,7 +1447,11 @@ impl MacOSProvider {
 /// targets), pass `0`.
 fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -> ElementData {
     if element.is_null() {
-        return ElementData {
+        // A null AXUIElementRef reports nothing, but this is still a
+        // production path that returns an element to consumers — so it goes
+        // through ElementParts rather than `for_role`. A new property needs a
+        // decision here too, even if the decision is almost always "absent".
+        return ElementParts {
             role: Role::Unknown,
             name: None,
             value: None,
@@ -1459,10 +1463,11 @@ fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -
             min_value: None,
             max_value: None,
             stable_id: None,
-            raw: std::collections::HashMap::new(),
             pid,
+            raw: std::collections::HashMap::new(),
             handle,
-        };
+        }
+        .into();
     }
 
     let body = move || -> ElementData {
@@ -1607,32 +1612,35 @@ fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -
         let active = matches!(role, Role::Window | Role::Dialog)
             && ax_bool(element, "AXMain").unwrap_or(false);
 
-        let mut states = StateSet::default();
-        states.enabled = attrs.enabled.unwrap_or(true);
-        states.visible = !attrs.hidden.unwrap_or(false);
-        states.focused = attrs.focused.unwrap_or(false);
-        states.active = active;
-        states.focusable = focusable;
-        states.modal = attrs.modal.unwrap_or(false);
-        states.checked = checked;
-        // `AXSelected` is the per-element attribute, but bridges like Qt's
-        // implement selection only container-side (AXSelectedChildren on the
-        // table). Probe the container only when the attribute is entirely
-        // absent AND the role is a selectable item — AppKit elements carry
-        // AXSelected directly, so they never pay for the probe. `raw` keeps
-        // only genuinely present platform attributes, so a derived value
-        // shows up in `states.selected` but adds no fake "AXSelected" key.
-        states.selected = match attrs.selected {
-            Some(s) => s,
-            None if selection_can_come_from_container(role) => {
-                container_selection_contains(element, 2)
-            }
-            None => false,
-        };
-        states.expanded = attrs.expanded;
-        states.editable = matches!(role, Role::TextField | Role::TextArea);
-        states.required = false;
-        states.busy = false;
+        let states: StateSet = StateParts {
+            enabled: attrs.enabled.unwrap_or(true),
+            visible: !attrs.hidden.unwrap_or(false),
+            focused: attrs.focused.unwrap_or(false),
+            active,
+            focusable,
+            modal: attrs.modal.unwrap_or(false),
+            checked,
+            // `AXSelected` is the per-element attribute, but bridges like
+            // Qt's implement selection only container-side
+            // (AXSelectedChildren on the table). Probe the container only
+            // when the attribute is entirely absent AND the role is a
+            // selectable item — AppKit elements carry AXSelected directly, so
+            // they never pay for the probe. `raw` keeps only genuinely
+            // present platform attributes, so a derived value shows up in
+            // `states.selected` but adds no fake "AXSelected" key.
+            selected: match attrs.selected {
+                Some(s) => s,
+                None if selection_can_come_from_container(role) => {
+                    container_selection_contains(element, 2)
+                }
+                None => false,
+            },
+            expanded: attrs.expanded,
+            editable: matches!(role, Role::TextField | Role::TextArea),
+            required: false,
+            busy: false,
+        }
+        .into();
 
         let bounds = match (attrs.position, attrs.size) {
             (Some((x, y)), Some((w, h))) if w > 0.0 || h > 0.0 => Some(Rect {
@@ -1716,7 +1724,7 @@ fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -
         let value = xa11y_core::text::strip_bidi_opt(value);
         let description = xa11y_core::text::strip_bidi_opt(description);
 
-        ElementData {
+        ElementParts {
             role,
             name,
             value,
@@ -1724,14 +1732,15 @@ fn build_snapshot_data(element: AXUIElementRef, pid: Option<u32>, handle: u64) -
             bounds,
             actions,
             states,
-            stable_id: attrs.identifier,
             numeric_value,
             min_value,
             max_value,
-            raw,
+            stable_id: attrs.identifier,
             pid,
+            raw,
             handle,
         }
+        .into()
     };
     body()
 }
@@ -2125,12 +2134,8 @@ impl Provider for MacOSProvider {
         if app_element.is_null() {
             return Err(
                 Error::selector_not_matched(format!("application[pid={pid}]")).diagnose(
-                    xa11y_core::Diagnosis {
-                        last_observed: Some(
-                            "AXUIElementCreateApplication returned NULL".to_string(),
-                        ),
-                        ..Default::default()
-                    },
+                    xa11y_core::Diagnosis::new()
+                        .last_observed("AXUIElementCreateApplication returned NULL"),
                 ),
             );
         }
@@ -2165,13 +2170,10 @@ impl Provider for MacOSProvider {
             | AX_ERROR_NO_VALUE => Err(Error::selector_not_matched(format!(
                 "application[pid={pid}]"
             ))
-            .diagnose(xa11y_core::Diagnosis {
-                last_observed: Some(format!(
-                    "AX attach probe returned AXError {err}: process not yet AX-reachable, \
-                     exited, or has no accessibility bridge"
-                )),
-                ..Default::default()
-            })),
+            .diagnose(xa11y_core::Diagnosis::new().last_observed(format!(
+                "AX attach probe returned AXError {err}: process not yet AX-reachable, \
+                 exited, or has no accessibility bridge"
+            )))),
             _ => Err(Error::Platform {
                 code: err as i64,
                 message: format!(
@@ -2587,13 +2589,14 @@ unsafe extern "C" fn ax_observer_callback(
     };
 
     for kind in kinds {
-        let event = Event {
+        let event: Event = EventParts {
             kind,
+            target: target.clone(),
             app_name: ctx.app_name.clone(),
             app_pid: ctx.app_pid,
-            target: target.clone(),
             timestamp: std::time::Instant::now(),
-        };
+        }
+        .into();
         let _ = ctx.sender.send(event);
     }
 }
@@ -2674,13 +2677,9 @@ impl MacOSProvider {
             }
             return Err(
                 Error::selector_not_matched(format!("application[pid={pid}]")).diagnose(
-                    xa11y_core::Diagnosis {
-                        last_observed: Some(
-                            "AXUIElementCreateApplication returned NULL while subscribing"
-                                .to_string(),
-                        ),
-                        ..Default::default()
-                    },
+                    xa11y_core::Diagnosis::new().last_observed(
+                        "AXUIElementCreateApplication returned NULL while subscribing",
+                    ),
                 ),
             );
         }

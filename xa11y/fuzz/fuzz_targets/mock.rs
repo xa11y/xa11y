@@ -6,7 +6,10 @@
 
 use arbitrary::Arbitrary;
 use std::sync::Arc;
-use xa11y::{ElementData, Error, Provider, Rect, Result, Role, StateSet, Subscription, Toggled};
+use xa11y::{
+    ElementData, ElementParts, Error, Provider, Rect, Result, Role, StateParts, StateSet,
+    Subscription, Toggled,
+};
 
 // ── Role and Action tables ────────────────────────────────────────────────────
 
@@ -199,24 +202,25 @@ impl Provider for FuzzProvider {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 pub fn make_state(s: &FuzzStateSet) -> StateSet {
-    let mut state = StateSet::default();
-    state.enabled = s.enabled;
-    state.visible = s.visible;
-    state.focused = s.focused;
-    state.active = false;
-    state.checked = s.checked.map(|v| match v % 3 {
-        0 => Toggled::Off,
-        1 => Toggled::On,
-        _ => Toggled::Mixed,
-    });
-    state.selected = s.selected;
-    state.expanded = s.expanded;
-    state.editable = s.editable;
-    state.focusable = s.focusable;
-    state.modal = s.modal;
-    state.required = s.required;
-    state.busy = s.busy;
-    state
+    StateParts {
+        enabled: s.enabled,
+        visible: s.visible,
+        focused: s.focused,
+        active: false,
+        checked: s.checked.map(|v| match v % 3 {
+            0 => Toggled::Off,
+            1 => Toggled::On,
+            _ => Toggled::Mixed,
+        }),
+        selected: s.selected,
+        expanded: s.expanded,
+        editable: s.editable,
+        focusable: s.focusable,
+        modal: s.modal,
+        required: s.required,
+        busy: s.busy,
+    }
+    .into()
 }
 
 pub fn make_raw(r: &FuzzRawPlatform) -> std::collections::HashMap<String, serde_json::Value> {
@@ -256,7 +260,7 @@ pub fn build_provider(elements: &[FuzzElement]) -> Option<Arc<FuzzProvider>> {
             .map(|&idx| ALL_ACTIONS[idx as usize % ALL_ACTIONS.len()].to_string())
             .collect();
         nodes.push(FuzzNode {
-            data: ElementData {
+            data: ElementParts {
                 role,
                 name: fuzz.name.clone(),
                 value: fuzz.value.clone(),
@@ -269,14 +273,15 @@ pub fn build_provider(elements: &[FuzzElement]) -> Option<Arc<FuzzProvider>> {
                 }),
                 actions,
                 states: make_state(&fuzz.states),
-                stable_id: fuzz.stable_id.clone(),
                 numeric_value: fuzz.numeric_value,
                 min_value: fuzz.min_value,
                 max_value: fuzz.max_value,
+                stable_id: fuzz.stable_id.clone(),
                 pid: fuzz.pid,
                 raw: make_raw(&fuzz.raw),
                 handle: i as u64,
-            },
+            }
+            .into(),
             children: vec![],
             parent: None,
         });

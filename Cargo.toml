@@ -29,10 +29,19 @@ license = "MIT"
 repository = "https://github.com/xa11y/xa11y"
 
 [workspace.dependencies]
-xa11y-core = { path = "xa11y-core", version = "0.13.0", default-features = false }
-xa11y-macos = { path = "xa11y-macos", version = "0.13.0" }
-xa11y-windows = { path = "xa11y-windows", version = "0.13.0" }
-xa11y-linux = { path = "xa11y-linux", version = "0.13.0" }
+# Pinned with `=`, not a caret. These crates share `#[doc(hidden)]`
+# construction contracts (`ElementParts`, `StateParts`, `EventParts`) across
+# the crate boundary, so a core that gains a field deliberately fails the
+# providers' build — a caret requirement would let cargo pair mismatched
+# versions in a downstream tree and surface that break in someone else's
+# project. They already release in lockstep (`release.toml`:
+# `shared-version = true`); this makes cargo enforce it. `cargo xtask check`
+# verifies the pins survive cargo-release's `dependent-version = "upgrade"`
+# rewrite.
+xa11y-core = { path = "xa11y-core", version = "=0.13.0", default-features = false }
+xa11y-macos = { path = "xa11y-macos", version = "=0.13.0" }
+xa11y-windows = { path = "xa11y-windows", version = "=0.13.0" }
+xa11y-linux = { path = "xa11y-linux", version = "=0.13.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

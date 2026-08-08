@@ -13,8 +13,8 @@ use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, STATE_SYSTEM_
 
 use xa11y_core::{
     selector::{matches_simple, Combinator, Selector, SelectorSegment},
-    CancelHandle, ElementData, Error, Event, EventKind, EventReceiver, Provider, Rect, Result,
-    Role, StateFlag, StateSet, Subscription, Toggled,
+    CancelHandle, ElementData, ElementParts, Error, Event, EventKind, EventParts, EventReceiver,
+    Provider, Rect, Result, Role, StateFlag, StateParts, StateSet, Subscription, Toggled,
 };
 
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
@@ -572,7 +572,7 @@ fn build_snapshot_data(
         (None, None, None)
     };
 
-    ElementData {
+    ElementParts {
         role,
         name,
         value,
@@ -580,14 +580,15 @@ fn build_snapshot_data(
         bounds,
         actions,
         states,
-        stable_id: automation_id,
         numeric_value,
         min_value,
         max_value,
+        stable_id: automation_id,
         pid,
         raw,
         handle,
     }
+    .into()
 }
 
 /// Build the batch request that describes which properties and patterns
@@ -862,12 +863,8 @@ impl Provider for WindowsProvider {
             Err(e) if e.code().is_ok() => {
                 return Err(
                     Error::selector_not_matched(format!("application[pid={pid}]")).diagnose(
-                        xa11y_core::Diagnosis {
-                            last_observed: Some(
-                                "no top-level UIA element owned by the process yet".to_string(),
-                            ),
-                            ..Default::default()
-                        },
+                        xa11y_core::Diagnosis::new()
+                            .last_observed("no top-level UIA element owned by the process yet"),
                     ),
                 );
             }
@@ -1800,20 +1797,21 @@ fn parse_states(
 
     let focusable = unsafe { element.CachedIsKeyboardFocusable() }.unwrap_or(FALSE) == TRUE;
 
-    let mut states = StateSet::default();
-    states.enabled = enabled;
-    states.visible = visible;
-    states.focused = focused;
-    states.active = active;
-    states.focusable = focusable;
-    states.modal = false;
-    states.checked = checked;
-    states.selected = selected;
-    states.expanded = expanded;
-    states.editable = editable;
-    states.required = false;
-    states.busy = false;
-    states
+    StateParts {
+        enabled,
+        visible,
+        focused,
+        active,
+        focusable,
+        modal: false,
+        checked,
+        selected,
+        expanded,
+        editable,
+        required: false,
+        busy: false,
+    }
+    .into()
 }
 
 /// True when an MSAA state bitmask has `STATE_SYSTEM_SELECTED` set.
@@ -2076,13 +2074,14 @@ unsafe impl Sync for EventContext {}
 
 impl EventContext {
     fn emit(&self, kind: EventKind, target: Option<ElementData>) {
-        let event = Event {
+        let event: Event = EventParts {
             kind,
+            target,
             app_name: self.app_name.clone(),
             app_pid: self.app_pid,
-            target,
             timestamp: std::time::Instant::now(),
-        };
+        }
+        .into();
         if let Ok(tx) = self.sender.lock() {
             // Receiver may be dropped after close(); lost event is expected then.
             let _ = tx.send(event);
@@ -2679,23 +2678,10 @@ mod tests {
         let Some(provider) = try_provider() else {
             return;
         };
-        let dummy = ElementData {
-            role: Role::Button,
-            name: Some("test".to_string()),
-            value: None,
-            description: None,
-            bounds: None,
-            actions: vec![],
-            states: StateSet::default(),
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: None,
-            pid: None,
-            raw: std::collections::HashMap::new(),
-            handle: u64::MAX, // stale handle
-        };
-        // Unknown action name should return ActionNotSupported
+        let mut dummy = ElementData::for_role(Role::Button);
+        dummy.name = Some("test".to_string());
+        dummy.handle = u64::MAX; // stale handle
+                                 // Unknown action name should return ActionNotSupported
         let result = provider.perform_action(&dummy, "nonexistent_action");
         assert!(
             matches!(result, Err(Error::ActionNotSupported { .. })),
@@ -2708,22 +2694,9 @@ mod tests {
         let Some(provider) = try_provider() else {
             return;
         };
-        let dummy = ElementData {
-            role: Role::Button,
-            name: Some("test".to_string()),
-            value: None,
-            description: None,
-            bounds: None,
-            actions: vec![],
-            states: StateSet::default(),
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: None,
-            pid: None,
-            raw: std::collections::HashMap::new(),
-            handle: u64::MAX,
-        };
+        let mut dummy = ElementData::for_role(Role::Button);
+        dummy.name = Some("test".to_string());
+        dummy.handle = u64::MAX;
         // Actions that look up the cached element should return ElementStale
         let result = provider.press(&dummy);
         assert!(
@@ -3033,22 +3006,10 @@ mod tests {
     // ── Event subscription tests ────────────────────────────────────────────
 
     fn dummy_element(pid: Option<u32>) -> ElementData {
-        ElementData {
-            role: Role::Application,
-            name: Some("test".to_string()),
-            value: None,
-            description: None,
-            bounds: None,
-            actions: vec![],
-            states: StateSet::default(),
-            numeric_value: None,
-            min_value: None,
-            max_value: None,
-            stable_id: None,
-            pid,
-            raw: std::collections::HashMap::new(),
-            handle: 0,
-        }
+        let mut data = ElementData::for_role(Role::Application);
+        data.name = Some("test".to_string());
+        data.pid = pid;
+        data
     }
 
     #[test]

@@ -27,6 +27,12 @@ pub use xa11y_core::{
     Toggled, TreeNode,
 };
 
+// `#[doc(hidden)]`: the provider-side construction contracts. Re-exported so
+// an out-of-tree `Provider` implementation can reach them — without this the
+// completeness guard stops at this repo's own backends. Not public API.
+#[doc(hidden)]
+pub use xa11y_core::{ElementParts, EventParts, StateParts};
+
 // Re-export the process-wide default-timeout configuration (see
 // `xa11y_core::config`): the default for every auto-wait / `wait_*` call
 // that doesn't pass an explicit timeout. `set_default_timeout` overrides the

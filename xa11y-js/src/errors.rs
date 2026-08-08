@@ -27,6 +27,12 @@ pub mod codes {
     pub const PLATFORM: &str = "XA11Y_PLATFORM";
     pub const NO_ELEMENT_BOUNDS: &str = "XA11Y_NO_ELEMENT_BOUNDS";
     pub const UNSUPPORTED: &str = "XA11Y_UNSUPPORTED";
+    /// Fallback for an `xa11y::Error` variant this build of the binding does
+    /// not know. `xa11y::Error` is `#[non_exhaustive]`, so a core built ahead
+    /// of the bindings can produce one. `cargo xtask check-bindings-parity`
+    /// fails when a variant is not named in `map_err`, so reaching this in a
+    /// matched pair of versions is a bug, not a supported path.
+    pub const UNKNOWN: &str = "XA11Y_UNKNOWN";
 }
 
 /// Unit separator between the human-readable message and the JSON diagnosis
@@ -104,6 +110,9 @@ pub fn map_err(e: xa11y::Error) -> Error {
         xa11y::Error::Unsupported { feature } => {
             (codes::UNSUPPORTED, format!("Unsupported: {feature}"))
         }
+        // See `codes::UNKNOWN`: variant coverage is enforced by
+        // `cargo xtask check-bindings-parity`, not by the compiler.
+        other => (codes::UNKNOWN, other.to_string()),
     };
 
     let payload = match &e {

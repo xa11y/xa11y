@@ -6,7 +6,8 @@ use std::sync::Mutex;
 
 use rayon::prelude::*;
 use xa11y_core::{
-    ElementData, Error, Provider, Rect, Result, Role, StateSet, Subscription, Toggled,
+    ElementData, ElementParts, Error, Provider, Rect, Result, Role, StateParts, StateSet,
+    Subscription, Toggled,
 };
 use zbus::blocking::{Connection, Proxy};
 
@@ -778,7 +779,7 @@ impl LinuxProvider {
                 .insert(handle, action_index_map);
         }
 
-        ElementData {
+        ElementParts {
             role,
             name,
             value,
@@ -789,11 +790,12 @@ impl LinuxProvider {
             numeric_value,
             min_value,
             max_value,
-            pid,
             stable_id: Some(aref.path.clone()),
+            pid,
             raw,
             handle,
         }
+        .into()
     }
 
     /// Get the AT-SPI parent of an accessible ref.
@@ -903,21 +905,23 @@ impl LinuxProvider {
             None
         };
 
-        let mut states = StateSet::default();
-        states.enabled = enabled;
-        states.visible = visible;
-        states.focused = (bits & FOCUSED) != 0;
-        // AT-SPI `ACTIVE` marks the foreground window/frame (see
-        // `focused_app`, which relies on the same bit).
-        states.active = (bits & ACTIVE) != 0;
-        states.checked = checked;
-        states.selected = (bits & SELECTED) != 0;
-        states.expanded = expanded;
-        states.editable = (bits & EDITABLE) != 0;
-        states.focusable = (bits & FOCUSABLE) != 0;
-        states.modal = (bits & MODAL) != 0;
-        states.required = (bits & REQUIRED) != 0;
-        states.busy = (bits & BUSY) != 0;
+        let states = StateParts {
+            enabled,
+            visible,
+            focused: (bits & FOCUSED) != 0,
+            // AT-SPI `ACTIVE` marks the foreground window/frame (see
+            // `focused_app`, which relies on the same bit).
+            active: (bits & ACTIVE) != 0,
+            checked,
+            selected: (bits & SELECTED) != 0,
+            expanded,
+            editable: (bits & EDITABLE) != 0,
+            focusable: (bits & FOCUSABLE) != 0,
+            modal: (bits & MODAL) != 0,
+            required: (bits & REQUIRED) != 0,
+            busy: (bits & BUSY) != 0,
+        }
+        .into();
         (states, bits)
     }
 
@@ -1593,13 +1597,10 @@ impl Provider for LinuxProvider {
         }
         Err(
             Error::selector_not_matched(format!("application[pid={pid}]")).diagnose(
-                xa11y_core::Diagnosis {
-                    last_observed: Some(format!(
-                        "{total} AT-SPI registry entries examined, {unresolved} without a \
-                         resolvable pid"
-                    )),
-                    ..Default::default()
-                },
+                xa11y_core::Diagnosis::new().last_observed(format!(
+                    "{total} AT-SPI registry entries examined, {unresolved} without a \
+                     resolvable pid"
+                )),
             ),
         )
     }

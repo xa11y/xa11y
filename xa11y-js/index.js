@@ -126,6 +126,12 @@ const CODE_TO_CLASS = {
   // XA11Y_DEFAULT_TIMEOUT environment variable) -- an invalid-value error,
   // same family as a bad per-call timeout argument.
   XA11Y_INVALID_CONFIG: InvalidActionDataError,
+
+  // Fallback tag emitted by `map_err` for a core error variant this build of
+  // the binding does not know. `xa11y::Error` is `#[non_exhaustive]`; a
+  // matched pair of versions never emits this (the parity check fails first),
+  // but a mismatched pair should still raise a typed xa11y error.
+  XA11Y_UNKNOWN: XA11yError,
 };
 
 /**

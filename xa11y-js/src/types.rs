@@ -73,6 +73,9 @@ pub fn event_kind_to_str(kind: &xa11y::EventKind) -> &'static str {
         xa11y::EventKind::MenuClosed => "menuClosed",
         xa11y::EventKind::TextChanged => "textChanged",
         xa11y::EventKind::Announcement => "announcement",
+        // `EventKind` is `#[non_exhaustive]`; coverage is enforced by
+        // `cargo xtask check-bindings-parity`, not by the compiler.
+        _ => "unknown",
     }
 }
 
@@ -90,6 +93,9 @@ pub fn state_flag_to_str(flag: xa11y::StateFlag) -> &'static str {
         xa11y::StateFlag::Modal => "modal",
         xa11y::StateFlag::Required => "required",
         xa11y::StateFlag::Busy => "busy",
+        // `StateFlag` is `#[non_exhaustive]`; coverage is enforced by
+        // `cargo xtask check-bindings-parity`, not by the compiler.
+        _ => "unknown",
     }
 }
 

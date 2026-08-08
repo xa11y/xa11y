@@ -85,7 +85,7 @@ All raw CoreFoundation / AX FFI calls in `xa11y-macos/src/ax.rs` must go through
 rustup toolchain install nightly --profile minimal
 ```
 
-The check enforces two rules, both configured in `bindings/parity_allowlist.toml`:
+The check enforces three rules, all configured in `bindings/parity_allowlist.toml`:
 
 1. **Every public type in `xa11y-core` must be classified** under `[types]` as one of:
    - `mirrored` — the bindings expose this type and each of its members.
@@ -97,6 +97,12 @@ The check enforces two rules, both configured in `bindings/parity_allowlist.toml
 2. **For `mirrored` types, members must match.** Every public core member must exist in both bindings, and every binding member must map to a core member — unless listed in `[python.rust_only]` / `[python.python_only]` (and the `[js.*]` equivalents) **with a reason**.
 
    Those per-member entries are themselves checked for staleness: an entry naming a member that core (or the binding) no longer has excuses nothing while still reading as a live design decision, so it fails the check rather than accumulating.
+
+3. **Hand-mapped `#[non_exhaustive]` enums must have every variant covered.**
+   See [Variant coverage](#variant-coverage-replaces-the-compiler-for-hand-mapped-enums)
+   under Public API Extensibility — `[[types.variant_coverage]]` is what
+   replaced the bindings' exhaustive `match` as the guard against an unmapped
+   `Error` / `EventKind` / `StateFlag` variant.
 
 ### Flattening
 
@@ -125,6 +131,184 @@ rename = [
 ```
 
 A `rename` naming a member no longer present in its source is reported as stale, same as a stale `[types]` entry.
+
+## Public API Extensibility
+
+Every public struct and enum in `xa11y-core` must make an explicit choice about
+future growth. Two clippy restriction lints, enabled in `xa11y-core/Cargo.toml`,
+enforce that the choice is made:
+
+```toml
+[lints.clippy]
+exhaustive_enums = "warn"
+exhaustive_structs = "warn"
+```
+
+CI runs with `-Dwarnings`, so a new public type is a build failure until it
+either carries `#[non_exhaustive]` or an `#[allow(..., reason = "...")]` naming
+the closed domain that makes growth impossible. This is the same discipline the
+parity allowlist applies at the bindings boundary, one level down.
+
+**Default to `#[non_exhaustive]`.** Take the `allow` when the type is a closed
+domain in the mathematical sense — `Rect` (an origin and a size), `Point`,
+`ScrollDelta`, `Toggled` (off/on/indeterminate), `RecvStatus`
+(value/timeout/disconnected). "I can't think of a new field right now" is not a
+closed domain.
+
+**Capability enums are the second reason to stay exhaustive, and it is not
+about closedness.** If a backend must translate every variant into an OS
+primitive, growth *should* break the build: the compile error in each backend
+is the only thing that forces a per-platform decision. `#[non_exhaustive]`
+converts that into a `_` arm and a runtime `Error::Unsupported` from a library
+whose type system advertises the capability — strictly worse than a build
+failure at the point the variant is added.
+
+The test is "does a new variant require work in another crate?"
+
+| Enum | | Why |
+|---|---|---|
+| `Key`, `MouseButton` | exhaustive | Four input backends map each to a keysym / VK / evdev code / `MOUSEEVENTF_*` flag. |
+| `Combinator`, `RoleMatch`, and the rest of the selector AST | exhaustive | Provider fast-paths match on it — `RoleMatch` in the Linux and macOS matchers, `Combinator` in the Windows push-down — and a `_` arm silently returns the wrong match set. |
+| `Role` | `#[non_exhaustive]` | Backends map platform → `Role`, never the reverse, and `Unknown` is the documented fallback. |
+| `Anchor` | `#[non_exhaustive]` | `anchor_point` resolves it in core; no backend sees it. |
+| `Error`, `EventKind`, `StateFlag` | `#[non_exhaustive]` | Only the bindings map them, and `[[types.variant_coverage]]` guards that. |
+| `ElementState` | `#[non_exhaustive]` | Resolved in core by `ElementState::is_met`; no binding or backend maps it, so nothing needs a coverage entry. |
+
+`#[non_exhaustive]` forbids struct expressions from *other crates*, including
+functional-update syntax — `Diagnosis { .., ..Default::default() }` does not
+compile from `xa11y-linux`. So a non-exhaustive struct owes callers a way to
+build one:
+
+- **Required fields, few of them** — a plain constructor: `Screenshot::new`,
+  `Event::new`, `TreeNode::new`.
+- **Many optional fields, partial by nature** — a constructor plus public
+  field assignment: `ElementData::for_role(role)` then `data.name = ...`. An
+  event target or a test fixture genuinely does not have every field.
+- **Options structs** — chained setters returning `Self`:
+  `ClickOptions::new().button(..).count(..)`, `Diagnosis::new().condition(..)`.
+
+### When a writer needs the opposite guarantee
+
+`#[non_exhaustive]` protects *readers*: adding a field does not break them.
+For a type whose writers must be complete, it removes something valuable —
+the struct literal that used to fail their build until they populated the new
+field. `ElementData` is the case: three provider crates translate a platform
+node into one, and a new property silently arriving as `None` on every
+platform is a bug, not a default.
+
+The fix is to give the two roles separate types rather than to pick one
+guarantee over the other. `reader_writer_pair!` in `xa11y-core/src/element.rs`
+declares both from **one field list**, so they cannot drift:
+
+```rust
+reader_writer_pair! {
+    /// Readers: growth is not breaking.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct ElementData;
+
+    /// Writers: growth IS breaking, on purpose.
+    #[allow(clippy::exhaustive_structs, reason = "This type IS the completeness guard...")]
+    #[derive(Debug, Clone)]
+    pub struct ElementParts;
+
+    fields { /// Element role
+             pub role: Role, ... }
+}
+```
+
+The reader gets the docs, the serde attributes, and `#[non_exhaustive]`; the
+writer gets bare fields and stays exhaustive; the `From` impl is generated.
+Providers write `ElementParts { .. }.into()`, so adding a field is a compile
+error in every backend and a no-op for consumers.
+
+**The single list is the point.** With two hand-written structs, adding a field
+to `ElementData` alone leaves exactly one place to write a default — the `From`
+impl — and the compiler points you at it. That is the cheapest fix and it
+defeats the whole design. `StateSet` / `StateParts` uses the same macro for the
+same reason: a silently-defaulted state is worse than it looks, because the
+parity check then requires a binding getter for a state no platform populates.
+
+Because a new field here is a deliberate compile error across a crate
+boundary, the workspace pins intra-workspace deps with `=` rather than a caret
+(`Cargo.toml`), so cargo cannot pair a newer `xa11y-core` with an older
+provider in a downstream tree. `cargo xtask check` verifies the pins survive
+cargo-release's `dependent-version = "upgrade"` rewrite.
+
+Reach for this only where all three hold: the type is `#[non_exhaustive]`, it
+has complete-construction sites in *other* crates, and a defaulted new field
+would be a bug. Two of those are easy to get wrong:
+
+- **Construction sites inside `xa11y-core` need nothing.** A crate can always
+  struct-literal its own `#[non_exhaustive]` type, and that literal is still
+  exhaustiveness-checked. `TreeNode` is built only in core, so it is covered.
+- **An all-required-args constructor is already the guard.** `Screenshot::new`
+  takes every field, so a new one changes the signature and breaks all callers.
+  A `Parts` type would add nothing.
+
+`Diagnosis`, `ClickOptions`, and `DragOptions` are the counter-case: every
+call site sets one or two fields on purpose, so completeness is meaningless
+and `Default` is the whole point.
+
+One trap: a constructor named `new` on a type that is **flattened** into
+another (see [Flattening](#flattening)) collides with the target's own `new`,
+and both would then be satisfied by a single allowlist entry. That is why
+`ElementData` has `for_role` rather than `new` — `Element::new` already exists.
+The parity check reports this shadowing rather than merging silently.
+
+### Variant coverage replaces the compiler for hand-mapped enums
+
+`#[non_exhaustive]` on an enum forces downstream `match` arms to carry a `_`
+fallback. For `Error`, `EventKind`, and `StateFlag` that fallback *removes a
+guard the project relied on*: the bindings' exhaustive matches were what failed
+the build when a variant was added without being mapped.
+
+`[[types.variant_coverage]]` in `bindings/parity_allowlist.toml` is the
+replacement. Each entry names an enum and the files that must mention every one
+of its variants as `Type::Variant`:
+
+```toml
+[[types.variant_coverage]]
+type = "EventKind"
+reason = "Each variant maps to a distinct event-type string in both bindings and in the CLI."
+files = [
+    "xa11y-python/src/lib.rs",
+    "xa11y-js/src/types.rs",
+    "xa11y/src/cli.rs",
+]
+```
+
+A file entry is either a bare path — the variant is written as `Type::Variant`
+in Rust code — or a table naming how that file spells it:
+
+```toml
+{ path = "xa11y-js/index.js", spelling = "screaming_snake", prefix = "XA11Y_" }
+```
+
+`snake`, `camel`, and `screaming_snake` cover the generated `.pyi` constants,
+the `EventTypeName` union, and the JS error-code table. Those are hand-
+maintained alongside the Rust arms and are just as much a place a new variant
+must be handled.
+
+Rust files are parsed with `syn` and scanned as tokens, so a mention only
+counts if it is real code — `// TODO: map Error::NewVariant`, a doc comment, a
+string literal, a `use` import, and anything under `#[cfg(test)]` all fail the
+check, and the lexer handles nested block comments and raw strings for free.
+The `.pyi` / `.mjs` / `.js` files have no parser, so they get a line-comment
+strip and a quoted-token match instead. Entries are checked for staleness (a
+type that left core, or that is not an enum) the same way `[types]` entries
+are.
+
+`Anchor`, `MouseButton`, and `Toggled` are covered for the *binding* side
+only. They cross as snake_case strings through hand-written parsers whose
+catch-all arm would otherwise swallow a new variant; `MouseButton` and
+`Toggled` stay exhaustive in core, so the backends are still guarded by the
+compiler. A variant with a payload rather than a name (`Anchor::Offset`) has
+no string spelling, so a file entry can `exclude` it — and a stale exclude is
+reported like any other.
+
+`Role` and `Key` are deliberately **not** covered: `Role` converts
+mechanically via `to_snake_case`, and `Key` is parsed from a string by a
+binding-side parser that already rejects unknown names loudly.
 
 ## Binding Shape Conventions
 
@@ -220,7 +404,7 @@ CI runs with `RUSTFLAGS: -Dwarnings`, so all warnings are errors. Individual che
 6. **pytest plugin** (if touching `pytest-xa11y/`) — `cargo xtask test-pytest-plugin`
 7. **Docs prose** (if touching `README.md` or `docs/site/src/content/docs/`) — `cargo xtask lint-docs`
 8. **Docs site** (if touching `docs/site/src/content/docs/`) — `python docs/check_page_types.py`, `docs/check_tables.py`, `docs/check_links.py`
-9. **No new `#[allow(...)]` without justification** — if you must suppress a warning, add a comment explaining why
+9. **No new `#[allow(...)]` without justification** — if you must suppress a warning, add a comment explaining why. The `clippy::exhaustive_*` allows in `xa11y-core` use the `reason = "..."` form; see [Public API Extensibility](#public-api-extensibility).
 
 Common CI failures:
 - `unused import` / `dead_code` — remove the unused code or add `#[allow(dead_code)]` with a reason

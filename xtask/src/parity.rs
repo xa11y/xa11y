@@ -12,9 +12,21 @@
 //! appear in both bindings, and every binding member must correspond to a
 //! core member — unless listed, with a reason, in the per-language
 //! allowlist.
+//!
+//! **Variant coverage.** `Error`, `EventKind`, and `StateFlag` cross the
+//! boundary as hand-written per-variant mappings rather than a mechanical
+//! conversion, and they are `#[non_exhaustive]`. Those two facts together
+//! mean the compiler no longer forces a new variant to be handled: a
+//! downstream `match` needs a `_` arm, and the arm swallows it. Each
+//! `[[types.variant_coverage]]` entry names the files that must mention every
+//! variant of a type, restoring the guard the exhaustive matches used to
+//! provide.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+
+use quote::ToTokens;
+use syn::{Attribute, Item};
 
 use crate::api::ApiType;
 use crate::binding_api;
@@ -54,8 +66,107 @@ struct Flatten {
     rename: BTreeMap<String, String>,
 }
 
+/// One `[[types.variant_coverage]]` entry: an enum whose variants must each
+/// be named in every listed file.
+struct VariantCoverage {
+    /// The core enum whose variants are checked.
+    ty: String,
+    /// Files that must mention every variant, and how each spells it.
+    files: Vec<CoveredFile>,
+}
+
+/// One file in a `[[types.variant_coverage]]` entry.
+struct CoveredFile {
+    /// Repo-relative path.
+    path: String,
+    /// How this file spells a variant.
+    spelling: Spelling,
+    /// Literal prefix the file puts in front of the spelled variant, e.g.
+    /// `XA11Y_` for the JS error-code constants.
+    prefix: String,
+    /// Restrict the scan to one declaration in the file.
+    ///
+    /// Needles are otherwise matched file-wide, which is fine until a file
+    /// carries more than one enum's spellings in a flat namespace.
+    /// `patch-native-dts.mjs` does: `MouseButtonName`'s `'left'` would satisfy
+    /// `Anchor::Left`, and `AnchorName`'s `'center'` would satisfy
+    /// `MouseButton::Center`, so a new anchor could ship with no TypeScript
+    /// name and a green check. Naming the declaration scopes the search to it.
+    ///
+    /// Slices from the line naming the declaration through the first line
+    /// ending in `;` — the shape of a TypeScript type alias, which is where
+    /// this is needed.
+    within: Option<String>,
+    /// Variants this file legitimately does not name.
+    ///
+    /// A payload-carrying variant may have no string spelling at all:
+    /// `Anchor::Offset` crosses as a `(dx, dy)` pair, so the TypeScript
+    /// `AnchorName` union has nothing to list for it. Entries are checked for
+    /// staleness like everything else.
+    exclude: BTreeSet<String>,
+}
+
+/// How a covered file names a variant.
+///
+/// A Rust mapping writes the variant as a path (`EventKind::FocusChanged`);
+/// a generated `.pyi`, a `.d.ts` union, or a JS lookup table writes it as a
+/// string in that language's own convention. Both are places a new variant
+/// has to be handled, so both are checkable — they just need different
+/// needles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Spelling {
+    /// `EventKind::FocusChanged` — a path in Rust code.
+    RustPath,
+    /// `focus_changed`
+    Snake,
+    /// `focusChanged`
+    Camel,
+    /// `FOCUS_CHANGED`
+    ScreamingSnake,
+}
+
+impl Spelling {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "rust_path" => Some(Self::RustPath),
+            "snake" => Some(Self::Snake),
+            "camel" => Some(Self::Camel),
+            "screaming_snake" => Some(Self::ScreamingSnake),
+            _ => None,
+        }
+    }
+}
+
+/// `FocusChanged` -> `focus_changed`.
+fn to_snake(variant: &str) -> String {
+    let mut out = String::with_capacity(variant.len() + 4);
+    for (i, c) in variant.chars().enumerate() {
+        if c.is_uppercase() {
+            if i != 0 {
+                out.push('_');
+            }
+            out.extend(c.to_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// `FocusChanged` -> `focusChanged`.
+fn to_camel(variant: &str) -> String {
+    let mut chars = variant.chars();
+    match chars.next() {
+        Some(first) => first.to_lowercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 struct Allowlist {
     tiers: BTreeMap<String, Tier>,
+    /// Enums whose variants are hand-mapped rather than mechanically
+    /// converted, plus the files doing the mapping.
+    variant_coverage: Vec<VariantCoverage>,
     /// Target type -> the types whose members are folded into it.
     ///
     /// Some core types have no binding class of their own; their members
@@ -164,8 +275,95 @@ fn parse_allowlist(path: &Path) -> Result<Allowlist, String> {
         }
     }
 
+    let mut variant_coverage = Vec::new();
+    if let Some(entries) = value
+        .get("types")
+        .and_then(|t| t.get("variant_coverage"))
+        .and_then(|v| v.as_array())
+    {
+        for entry in entries {
+            let Some(ty) = entry.get("type").and_then(|v| v.as_str()) else {
+                return Err(format!(
+                    "{}: a [[types.variant_coverage]] entry is missing `type`",
+                    path.display()
+                ));
+            };
+            let Some(files) = entry.get("files").and_then(|v| v.as_array()) else {
+                return Err(format!(
+                    "{}: [[types.variant_coverage]] `{ty}` is missing `files`",
+                    path.display()
+                ));
+            };
+            if entry.get("reason").and_then(|v| v.as_str()).is_none() {
+                return Err(format!(
+                    "{}: [[types.variant_coverage]] `{ty}` is missing `reason`",
+                    path.display()
+                ));
+            }
+            let mut covered = Vec::new();
+            for f in files {
+                // A bare string is the common case: a Rust mapping that
+                // writes `Type::Variant`.
+                if let Some(fp) = f.as_str() {
+                    covered.push(CoveredFile {
+                        path: fp.to_string(),
+                        spelling: Spelling::RustPath,
+                        prefix: String::new(),
+                        exclude: BTreeSet::new(),
+                        within: None,
+                    });
+                    continue;
+                }
+                let Some(fp) = f.get("path").and_then(|v| v.as_str()) else {
+                    return Err(format!(
+                        "{}: a [[types.variant_coverage]] `{ty}` file entry needs `path`",
+                        path.display()
+                    ));
+                };
+                let spelling = match f.get("spelling").and_then(|v| v.as_str()) {
+                    None => Spelling::RustPath,
+                    Some(name) => match Spelling::parse(name) {
+                        Some(sp) => sp,
+                        None => {
+                            return Err(format!(
+                                "{}: [[types.variant_coverage]] `{ty}` file `{fp}` has \
+                                 unknown spelling `{name}` (expected rust_path, snake, \
+                                 camel, or screaming_snake)",
+                                path.display()
+                            ))
+                        }
+                    },
+                };
+                covered.push(CoveredFile {
+                    path: fp.to_string(),
+                    spelling,
+                    prefix: f
+                        .get("prefix")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    exclude: f
+                        .get("exclude")
+                        .and_then(|v| v.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    within: f.get("within").and_then(|v| v.as_str()).map(String::from),
+                });
+            }
+            variant_coverage.push(VariantCoverage {
+                ty: ty.to_string(),
+                files: covered,
+            });
+        }
+    }
+
     Ok(Allowlist {
         tiers,
+        variant_coverage,
         flatten,
         python: LangAllow {
             rust_only: collect(&value, "python", "rust_only"),
@@ -176,6 +374,366 @@ fn parse_allowlist(path: &Path) -> Result<Allowlist, String> {
             extra: collect(&value, "js", "js_only"),
         },
     })
+}
+
+/// Variants of `ty` that a Rust file mentions as a path in real code.
+///
+/// Reads the file with the Rust lexer and parser rather than scanning text.
+/// That is the whole point: comments never reach the token stream, and a
+/// string literal collapses into a single `Literal` token, so
+/// `"handle Error::Timeout"` contains no `Ident` for the scan to trip on.
+/// Nested block comments, raw strings, and the `&'static`
+/// lifetime-versus-char-literal ambiguity are the real lexer's problem, not
+/// ours — every one of those was a bug in the hand-rolled scanner this
+/// replaced.
+///
+/// `use` items and `#[cfg(test)]` items are dropped before scanning:
+/// importing a variant or naming it in a test is not mapping it. Doing that
+/// at the AST level is exact, unlike the brace-counting it replaced.
+fn rust_mentions(src: &str, path: &str, ty: &str) -> Result<BTreeSet<String>, String> {
+    let file = syn::parse_file(src).map_err(|e| {
+        format!(
+            "[[types.variant_coverage]] reads `{path}` as Rust (the `rust_path` \
+             spelling) but it does not parse: {e}\n   \
+             Fix: give the entry a `spelling` if it is not a Rust file."
+        )
+    })?;
+    let mut tokens = proc_macro2::TokenStream::new();
+    collect_code_tokens(&file.items, &mut tokens);
+    let mut found = BTreeSet::new();
+    scan_paths(tokens, ty, &mut found);
+    Ok(found)
+}
+
+/// Attributes of an item, for the `#[cfg(test)]` check.
+fn item_attrs(item: &syn::Item) -> &[Attribute] {
+    match item {
+        Item::Const(i) => &i.attrs,
+        Item::Enum(i) => &i.attrs,
+        Item::ExternCrate(i) => &i.attrs,
+        Item::Fn(i) => &i.attrs,
+        Item::ForeignMod(i) => &i.attrs,
+        Item::Impl(i) => &i.attrs,
+        Item::Macro(i) => &i.attrs,
+        Item::Mod(i) => &i.attrs,
+        Item::Static(i) => &i.attrs,
+        Item::Struct(i) => &i.attrs,
+        Item::Trait(i) => &i.attrs,
+        Item::TraitAlias(i) => &i.attrs,
+        Item::Type(i) => &i.attrs,
+        Item::Union(i) => &i.attrs,
+        Item::Use(i) => &i.attrs,
+        _ => &[],
+    }
+}
+
+/// Whether any attribute is a `cfg` gate mentioning `test`.
+///
+/// Token-level, so `#[cfg(all(test))]`, `#[cfg( test )]`, and
+/// `#[cfg(any(test, foo))]` are all recognised, while
+/// `#[cfg(feature = "testing")]` is not — `"testing"` is a `Literal`, never
+/// an `Ident`.
+fn is_cfg_test(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|a| {
+        a.path().is_ident("cfg") && {
+            let mut found = false;
+            find_ident(a.meta.to_token_stream(), "test", &mut found);
+            found
+        }
+    })
+}
+
+fn find_ident(ts: proc_macro2::TokenStream, name: &str, found: &mut bool) {
+    for tt in ts {
+        match tt {
+            proc_macro2::TokenTree::Ident(id) if id == name => *found = true,
+            proc_macro2::TokenTree::Group(g) => find_ident(g.stream(), name, found),
+            _ => {}
+        }
+    }
+}
+
+/// Flatten items into a token stream, skipping imports and test-only code.
+fn collect_code_tokens(items: &[Item], out: &mut proc_macro2::TokenStream) {
+    for item in items {
+        if matches!(item, Item::Use(_)) || is_cfg_test(item_attrs(item)) {
+            continue;
+        }
+        // Recurse into inline modules so a nested `#[cfg(test)]` is caught
+        // rather than swallowed whole with its parent.
+        if let Item::Mod(m) = item {
+            if let Some((_, inner)) = &m.content {
+                collect_code_tokens(inner, out);
+                continue;
+            }
+        }
+        out.extend(item.to_token_stream());
+    }
+}
+
+/// Collect every `V` appearing as `ty::V` in the token stream.
+fn scan_paths(ts: proc_macro2::TokenStream, ty: &str, found: &mut BTreeSet<String>) {
+    let tt: Vec<proc_macro2::TokenTree> = ts.into_iter().collect();
+    for (i, t) in tt.iter().enumerate() {
+        if let proc_macro2::TokenTree::Group(g) = t {
+            scan_paths(g.stream(), ty, found);
+        }
+        let proc_macro2::TokenTree::Ident(id) = t else {
+            continue;
+        };
+        if id != ty {
+            continue;
+        }
+        if let (
+            Some(proc_macro2::TokenTree::Punct(a)),
+            Some(proc_macro2::TokenTree::Punct(b)),
+            Some(proc_macro2::TokenTree::Ident(v)),
+        ) = (tt.get(i + 1), tt.get(i + 2), tt.get(i + 3))
+        {
+            if a.as_char() == ':' && b.as_char() == ':' {
+                found.insert(v.to_string());
+            }
+        }
+    }
+}
+
+/// Strip line comments from a non-Rust file.
+///
+/// Only used for the string spellings, which live in `.pyi`, `.mjs`, and
+/// `.js` files where no parser is available. String literals are kept — for
+/// those spellings, matching a literal is the whole job. A `//` or `#` inside
+/// a string does not start a comment, which is what stops a URL from eating
+/// the rest of its line.
+///
+/// Line at a time on purpose: whatever this gets wrong stays on one line.
+fn strip_line_comments(src: &str, path: &str) -> String {
+    let marker = if path.ends_with(".py") || path.ends_with(".pyi") {
+        "#"
+    } else {
+        "//"
+    };
+    src.lines()
+        .map(|line| {
+            let mut quote: Option<char> = None;
+            let mut cut = line.len();
+            let mut it = line.char_indices();
+            while let Some((i, c)) = it.next() {
+                match quote {
+                    Some(q) => {
+                        if c == '\\' {
+                            it.next();
+                        } else if c == q {
+                            quote = None;
+                        }
+                    }
+                    None => {
+                        if line[i..].starts_with(marker) {
+                            cut = i;
+                            break;
+                        }
+                        if c == '"' || c == '\'' {
+                            quote = Some(c);
+                        }
+                    }
+                }
+            }
+            &line[..cut]
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Return only the lines of `decl`'s declaration.
+///
+/// From the line naming `decl` through the first line ending in `;`. That is
+/// the shape of a TypeScript type alias, which is the case this exists for —
+/// see [`CoveredFile::within`].
+fn slice_declaration(src: &str, decl: &str) -> Option<String> {
+    let lines: Vec<&str> = src.lines().collect();
+    let start = lines.iter().position(|l| mentions_path(l, decl))?;
+    let end = lines[start..]
+        .iter()
+        .position(|l| l.trim_end().ends_with(';'))
+        .map(|o| start + o)
+        .unwrap_or(lines.len() - 1);
+    Some(lines[start..=end].join("\n"))
+}
+
+/// Whether `haystack` names `needle` as a whole path segment.
+///
+/// A plain substring search would let `Error::Platform` be satisfied by a
+/// mention of a hypothetical `Error::PlatformTimeout`, so the character after
+/// the match must not continue the identifier.
+fn mentions_path(haystack: &str, needle: &str) -> bool {
+    let ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut from = 0;
+    while let Some(rel) = haystack[from..].find(needle) {
+        let start = from + rel;
+        let end = start + needle.len();
+        // Both ends must be boundaries: `Error::Platform` is not satisfied by
+        // `Error::PlatformTimeout`, and `focus_changed` is not satisfied by
+        // `my_focus_changed`.
+        let before_ok = haystack[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !ident(c));
+        let after_ok = haystack[end..].chars().next().is_none_or(ident_not);
+        if before_ok && after_ok {
+            return true;
+        }
+        from = end;
+    }
+    false
+}
+
+/// Helper for the trailing-boundary test above.
+fn ident_not(c: char) -> bool {
+    !(c.is_alphanumeric() || c == '_')
+}
+
+/// Check that every variant of each `[[types.variant_coverage]]` type is
+/// named in each of that entry's files.
+///
+/// This is the guard that `#[non_exhaustive]` took away. Before it, a new
+/// `Error` variant failed the bindings' build because their `match` had no
+/// `_` arm; now the arm exists for forward compatibility and this check is
+/// what fails instead.
+fn check_variant_coverage(
+    root: &Path,
+    core: &crate::api::ApiSurface,
+    allow: &Allowlist,
+) -> Vec<String> {
+    let mut errs = Vec::new();
+    for entry in &allow.variant_coverage {
+        let Some(ty) = core.get(&entry.ty) else {
+            errs.push(format!(
+                "!! Stale [[types.variant_coverage]] entry: `{}` is not a public type \
+                 in xa11y-core.\n   \
+                 Fix: remove it from bindings/parity_allowlist.toml.",
+                entry.ty
+            ));
+            continue;
+        };
+        if ty.kind != crate::api::TypeKind::Enum {
+            errs.push(format!(
+                "!! [[types.variant_coverage]] `{}` is a {}, not an enum — it has no \
+                 variants to cover.\n   \
+                 Fix: remove it from bindings/parity_allowlist.toml.",
+                entry.ty,
+                ty.kind.as_str()
+            ));
+            continue;
+        }
+        // On an enum, `is_field` members are the variants; inherent methods
+        // come through as methods and are not part of this check.
+        let variants: Vec<&str> = ty
+            .members
+            .iter()
+            .filter(|m| m.is_field)
+            .map(|m| m.name.as_str())
+            .collect();
+
+        for file in &entry.files {
+            let path = root.join(&file.path);
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                errs.push(format!(
+                    "!! [[types.variant_coverage]] `{}` names `{}`, which could not \
+                     be read.\n   \
+                     Fix: correct the path in bindings/parity_allowlist.toml.",
+                    entry.ty, file.path
+                ));
+                continue;
+            };
+            // Rust files go through the compiler's own lexer and parser;
+            // everything else gets a line-comment strip.
+            let rust_paths = if file.spelling == Spelling::RustPath {
+                match rust_mentions(&raw, &file.path, &entry.ty) {
+                    Ok(found) => found,
+                    Err(e) => {
+                        errs.push(format!("!! {e}"));
+                        continue;
+                    }
+                }
+            } else {
+                BTreeSet::new()
+            };
+            let scrubbed = strip_line_comments(&raw, &file.path);
+            let src = match &file.within {
+                None => scrubbed,
+                Some(decl) => match slice_declaration(&scrubbed, decl) {
+                    Some(slice) => slice,
+                    None => {
+                        errs.push(format!(
+                            "!! Stale `within` in [[types.variant_coverage]] `{}` for `{}`: \
+                             no declaration named `{decl}`.\n   \
+                             Fix: correct or remove it in bindings/parity_allowlist.toml.",
+                            entry.ty, file.path
+                        ));
+                        continue;
+                    }
+                },
+            };
+            let needle = |v: &str| match file.spelling {
+                Spelling::RustPath => format!("{}::{v}", entry.ty),
+                Spelling::Snake => format!("{}{}", file.prefix, to_snake(v)),
+                Spelling::Camel => format!("{}{}", file.prefix, to_camel(v)),
+                Spelling::ScreamingSnake => {
+                    format!("{}{}", file.prefix, to_snake(v).to_uppercase())
+                }
+            };
+            // A string spelling must appear quoted, or as a declared name.
+            // Without this a bare word anywhere in the file stands in for a
+            // mapping — `Toggled::Left` was satisfied by `MouseButtonName`'s
+            // `'left'`, which says nothing about checked state.
+            let present = |n: &str| {
+                if file.spelling == Spelling::RustPath {
+                    // `n` is `Ty::Variant`; the AST scan already keyed by type.
+                    return n
+                        .rsplit("::")
+                        .next()
+                        .is_some_and(|v| rust_paths.contains(v));
+                }
+                mentions_path(&src, &format!("\"{n}\""))
+                    || mentions_path(&src, &format!("'{n}'"))
+                    || mentions_path(&src, &format!("{n}:"))
+            };
+            // An `exclude` naming a variant the enum no longer has excuses
+            // nothing while still reading as a live decision.
+            for gone in file
+                .exclude
+                .iter()
+                .filter(|e| !variants.contains(&e.as_str()))
+            {
+                errs.push(format!(
+                    "!! Stale exclude in [[types.variant_coverage]] `{}` for `{}`: \
+                     `{gone}` is not a variant.\n   \
+                     Fix: remove it from bindings/parity_allowlist.toml.",
+                    entry.ty, file.path
+                ));
+            }
+            let missing: Vec<String> = variants
+                .iter()
+                .copied()
+                .filter(|v| !file.exclude.contains(*v))
+                .filter(|v| !present(&needle(v)))
+                .map(|v| format!("{v} (as `{}`)", needle(v)))
+                .collect();
+            if !missing.is_empty() {
+                errs.push(format!(
+                    "!! {} does not handle {} variant(s) of `{}`: {}\n   \
+                     `{}` is #[non_exhaustive], so the compiler accepts a `_` arm \
+                     instead of failing here.\n   \
+                     Fix: handle each explicitly, or drop the variant from core.",
+                    file.path,
+                    missing.len(),
+                    entry.ty,
+                    missing.join(", "),
+                    entry.ty,
+                ));
+            }
+        }
+    }
+    errs
 }
 
 /// Python dunders never need a core counterpart.
@@ -195,6 +753,16 @@ fn is_js_idiomatic(name: &str) -> bool {
 /// otherwise collapse into a single required `down`, quietly excusing the
 /// bindings from exposing one of them. That is reported rather than tolerated:
 /// a `rename` entry is the fix.
+///
+/// A source *method* that shadows a base *method* of the same name is
+/// reported too: `ElementData::new` landing on a type that already has
+/// `Element::new` is two operations sharing one allowlist entry, which lets
+/// one member's design decision silently stand in for the other's.
+///
+/// Method-vs-method only. A source *field* landing on a base accessor of the
+/// same name — `ElementData::pid` and `Element::pid` — is the deref pattern
+/// working as designed: they are the same value, and one binding getter
+/// genuinely covers both.
 fn fold_flattened(
     base: &ApiType,
     flatten: Option<&Flatten>,
@@ -209,6 +777,13 @@ fn fold_flattened(
     // Folded member name -> the `Source::member` it came from, so a collision
     // can name both sides.
     let mut origin: BTreeMap<String, String> = BTreeMap::new();
+    // The base type's own methods, for the shadowing check below.
+    let base_methods: BTreeSet<&str> = base
+        .members
+        .iter()
+        .filter(|m| !m.is_field)
+        .map(|m| m.name.as_str())
+        .collect();
     for src in &f.from {
         let Some(t) = core.get(src) else {
             errs.push(format!(
@@ -229,6 +804,16 @@ fn fold_flattened(
                     "!! [[types.flatten]] into `{}`: `{prev}` and `{from}` both flatten to \
                      `{}`, so only one can be required.\n   \
                      Fix: disambiguate in bindings/parity_allowlist.toml with \
+                     `rename = [{{ member = \"{from}\", to = \"...\" }}]`.",
+                    base.name, member.name
+                ));
+            }
+            if !member.is_field && base_methods.contains(member.name.as_str()) {
+                errs.push(format!(
+                    "!! [[types.flatten]] into `{0}`: `{from}` shadows the existing method \
+                     `{0}::{1}`, so both would be satisfied by one allowlist entry.\n   \
+                     Fix: rename the core method, or disambiguate in \
+                     bindings/parity_allowlist.toml with \
                      `rename = [{{ member = \"{from}\", to = \"...\" }}]`.",
                     base.name, member.name
                 ));
@@ -630,6 +1215,16 @@ pub fn check(root: &Path) -> bool {
         }
     }
 
+    // ── Layer 3: variant coverage for hand-mapped non_exhaustive enums ──
+    let variant_errs = check_variant_coverage(root, &core, &allow);
+    if !variant_errs.is_empty() {
+        ok = false;
+        eprintln!();
+        for e in &variant_errs {
+            eprintln!("{e}");
+        }
+    }
+
     // ── Undocumented public core API ────────────────────────────────────
     // Scoped to methods on mirrored types: those are what the binding stubs
     // and the docs site render. Enum variants and plain data fields
@@ -883,6 +1478,383 @@ mod tests {
         assert_eq!(
             input.rename.get("Keyboard::down").map(String::as_str),
             Some("key_down")
+        );
+    }
+
+    // ── Variant coverage ────────────────────────────────────────────────
+
+    fn enum_ty(name: &str, variants: &[&str]) -> ApiType {
+        ApiType {
+            name: name.to_string(),
+            kind: TypeKind::Enum,
+            members: variants.iter().map(|v| Member::field(*v, true)).collect(),
+        }
+    }
+
+    fn coverage_allow(ty: &str, files: &[&str]) -> Allowlist {
+        Allowlist {
+            tiers: BTreeMap::new(),
+            variant_coverage: vec![VariantCoverage {
+                ty: ty.to_string(),
+                files: files
+                    .iter()
+                    .map(|f| CoveredFile {
+                        path: f.to_string(),
+                        spelling: Spelling::RustPath,
+                        prefix: String::new(),
+                        exclude: BTreeSet::new(),
+                        within: None,
+                    })
+                    .collect(),
+            }],
+            flatten: BTreeMap::new(),
+            python: LangAllow::default(),
+            js: LangAllow::default(),
+        }
+    }
+
+    /// A path mention only counts when it ends at an identifier boundary —
+    /// otherwise `Error::Platform` would be satisfied by an unrelated
+    /// `Error::PlatformTimeout` arm.
+    #[test]
+    fn mentions_path_requires_an_identifier_boundary() {
+        assert!(mentions_path(
+            "match e { Error::Platform { .. } => {} }",
+            "Error::Platform"
+        ));
+        assert!(mentions_path("Error::Platform,", "Error::Platform"));
+        assert!(!mentions_path(
+            "Error::PlatformTimeout => {}",
+            "Error::Platform"
+        ));
+        assert!(!mentions_path("Error::Platform2 => {}", "Error::Platform"));
+        // Leading boundary too: `my_focus_changed` is not `focus_changed`.
+        assert!(!mentions_path("my_focus_changed: str", "focus_changed"));
+        assert!(mentions_path("  focus_changed: str", "focus_changed"));
+        // A later real mention still counts even after a near-miss.
+        assert!(mentions_path(
+            "Error::PlatformTimeout => {} Error::Platform => {}",
+            "Error::Platform"
+        ));
+    }
+
+    /// The check reads real files, so it needs one on disk. `xtask/src/api.rs`
+    /// is a stable Rust file that mentions no `Error` variants.
+    fn repo_root() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("xtask has a parent directory")
+            .to_path_buf()
+    }
+
+    #[test]
+    fn variant_coverage_reports_a_variant_no_file_mentions() {
+        let core = surface(&[enum_ty("Error", &["Timeout", "Platform"])]);
+        let allow = coverage_allow("Error", &["xtask/src/api.rs"]);
+        let errs = check_variant_coverage(&repo_root(), &core, &allow);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("Timeout"), "{}", errs[0]);
+        assert!(errs[0].contains("Platform"), "{}", errs[0]);
+    }
+
+    #[test]
+    fn variant_coverage_passes_when_every_variant_is_named() {
+        // The real Error mapping in the Python binding covers every variant.
+        let core = surface(&[enum_ty(
+            "Error",
+            &["Timeout", "Platform", "NoElementBounds"],
+        )]);
+        let allow = coverage_allow("Error", &["xa11y-python/src/lib.rs"]);
+        assert!(check_variant_coverage(&repo_root(), &core, &allow).is_empty());
+    }
+
+    #[test]
+    fn variant_coverage_entry_for_a_missing_type_is_stale() {
+        let core = surface(&[enum_ty("Error", &["Timeout"])]);
+        let allow = coverage_allow("Gone", &["xtask/src/api.rs"]);
+        let errs = check_variant_coverage(&repo_root(), &core, &allow);
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("Stale"), "{}", errs[0]);
+    }
+
+    #[test]
+    fn variant_coverage_entry_for_a_struct_is_reported() {
+        let core = surface(&[ty("Rect", &["x", "y"])]);
+        let allow = coverage_allow("Rect", &["xtask/src/api.rs"]);
+        let errs = check_variant_coverage(&repo_root(), &core, &allow);
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("not an enum"), "{}", errs[0]);
+    }
+
+    #[test]
+    fn variant_coverage_reports_an_unreadable_file() {
+        let core = surface(&[enum_ty("Error", &["Timeout"])]);
+        let allow = coverage_allow("Error", &["no/such/file.rs"]);
+        let errs = check_variant_coverage(&repo_root(), &core, &allow);
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].contains("no/such/file.rs"), "{}", errs[0]);
+    }
+
+    /// The repo's own entries must cover the enums whose bindings mappings
+    /// are hand-written — that is the guard `#[non_exhaustive]` replaced.
+    #[test]
+    fn repo_allowlist_covers_the_hand_mapped_enums() {
+        let path = repo_root().join("bindings/parity_allowlist.toml");
+        let allow = parse_allowlist(&path).expect("the repo allowlist parses");
+        let covered: BTreeSet<&str> = allow
+            .variant_coverage
+            .iter()
+            .map(|v| v.ty.as_str())
+            .collect();
+        for ty in ["Error", "EventKind", "StateFlag"] {
+            assert!(covered.contains(ty), "{ty} needs a variant_coverage entry");
+        }
+    }
+
+    // ── Flatten shadowing ───────────────────────────────────────────────
+
+    /// A flattened *method* that shadows a base method is two operations
+    /// sharing one allowlist entry.
+    #[test]
+    fn flattened_method_shadowing_a_base_method_is_reported() {
+        let base = ty("Element", &["new"]);
+        let core = surface(&[base.clone(), ty("ElementData", &["new"])]);
+        let (_, errs) = fold_flattened(&base, Some(&flatten(&["ElementData"], &[])), &core);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("shadows"), "{}", errs[0]);
+    }
+
+    /// A flattened *field* landing on a base accessor of the same name is
+    /// the deref pattern working as designed — `Element::pid` and
+    /// `ElementData::pid` are the same value.
+    #[test]
+    fn flattened_field_under_a_base_accessor_is_fine() {
+        let base = ty("Element", &["pid"]);
+        let data = ApiType {
+            name: "ElementData".to_string(),
+            kind: TypeKind::Struct,
+            members: vec![Member::field("pid", true)],
+        };
+        let core = surface(&[base.clone(), data]);
+        let (_, errs) = fold_flattened(&base, Some(&flatten(&["ElementData"], &[])), &core);
+        assert!(errs.is_empty(), "{errs:?}");
+    }
+
+    // ── Rust files: read by the real lexer and parser ───────────────────
+    //
+    // Every case below was a bug in the hand-rolled text scanner this
+    // replaced. They are kept as tests because they are the reason for the
+    // approach, not because syn is in doubt.
+
+    fn mentions(src: &str) -> BTreeSet<String> {
+        rust_mentions(src, "x.rs", "Error").expect("parses")
+    }
+
+    #[test]
+    fn a_real_match_arm_counts() {
+        assert!(mentions("fn f(e: E) { match e { Error::Timeout => {} } }").contains("Timeout"));
+    }
+
+    /// A variant named in an arm *body* counts too — `parse_anchor` maps
+    /// string to variant, so the mention is on the right-hand side.
+    #[test]
+    fn a_variant_in_an_arm_body_counts() {
+        assert!(
+            mentions(r#"fn f() { match s { "t" => Error::Timeout, _ => x } }"#).contains("Timeout")
+        );
+    }
+
+    /// The realistic miss: someone meant to come back to it.
+    #[test]
+    fn comments_never_count() {
+        for src in [
+            "// TODO: map Error::Timeout later\nfn f() {}",
+            "/* Error::Timeout */\nfn f() {}",
+            "/* outer /* inner */ Error::Timeout still comment */\nfn f() {}",
+            "/// Doc: see Error::Timeout\nfn f() {}",
+        ] {
+            assert!(!mentions(src).contains("Timeout"), "{src}");
+        }
+    }
+
+    /// A string collapses to one `Literal` token, so it has no idents at all.
+    #[test]
+    fn string_literals_never_count() {
+        for src in [
+            r#"fn f() { let m = "handle Error::Timeout"; }"#,
+            r##"fn f() { let m = r#"Error::Timeout"#; }"##,
+        ] {
+            assert!(!mentions(src).contains("Timeout"), "{src}");
+        }
+    }
+
+    /// Importing a variant is not mapping it; neither is naming it in a test.
+    #[test]
+    fn imports_and_test_items_never_count() {
+        assert!(!mentions("use xa11y::Error::Timeout;\nfn f() {}").contains("Timeout"));
+        for gate in ["#[cfg(test)]", "#[cfg(all(test))]", "#[cfg( test )]"] {
+            let src =
+                format!("{gate}\nmod t {{ fn f() {{ let _ = Error::Timeout; }} }}\nfn g() {{}}");
+            assert!(!mentions(&src).contains("Timeout"), "{gate}");
+        }
+        // A bodyless `mod tests;` used to swallow whatever followed it.
+        let src = "#[cfg(test)]\nmod tests;\nfn f() { match e { Error::Timeout => {} } }";
+        assert!(mentions(src).contains("Timeout"));
+    }
+
+    /// `#[cfg(feature = "testing")]` is not a test gate — `"testing"` is a
+    /// literal, never an ident.
+    #[test]
+    fn a_feature_gate_named_testing_is_not_a_test_gate() {
+        let src = "#[cfg(feature = \"testing\")]\nfn f() { let _ = Error::Timeout; }";
+        assert!(mentions(src).contains("Timeout"));
+    }
+
+    /// The hazards that broke two hand-rolled scanners are the lexer's
+    /// problem now. None of them may hide following code.
+    #[test]
+    fn lexer_hazards_do_not_hide_following_code() {
+        for hazard in [
+            r#"const A: &str = "/*";"#,
+            r#"const B: &str = "https://xa11y.dev";"#,
+            "const C: &'static str = \"x\";",
+            "const D: char = '\\'';",
+            r##"const E: &str = r#"unterminated "quote"#;"##,
+        ] {
+            let src = format!("{hazard}\nfn f() {{ match e {{ Error::Timeout => {{}} }} }}");
+            assert!(mentions(&src).contains("Timeout"), "hazard: {hazard}");
+        }
+    }
+
+    /// A file that does not parse is an error, not a silent pass.
+    #[test]
+    fn unparseable_rust_is_reported() {
+        assert!(rust_mentions("fn f( {", "x.rs", "Error").is_err());
+    }
+
+    // ── Non-Rust files: line-comment strip only ─────────────────────────
+
+    #[test]
+    fn line_comments_are_stripped_per_language() {
+        assert!(
+            !strip_line_comments("# focus_changed here\nX = 1\n", "s.pyi")
+                .contains("focus_changed")
+        );
+        assert!(
+            !strip_line_comments("// 'focusChanged' here\nx;\n", "i.mjs").contains("focusChanged")
+        );
+    }
+
+    /// String spellings must keep their literals — matching one is the job.
+    #[test]
+    fn string_literals_survive_for_string_spellings() {
+        let pyi = "    FOCUS_CHANGED: str = \"focus_changed\"\n";
+        assert!(mentions_path(
+            &strip_line_comments(pyi, "x.pyi"),
+            "focus_changed"
+        ));
+    }
+
+    /// A `//` inside a string is not a comment, and damage stays on its line.
+    #[test]
+    fn strip_line_comments_never_reaches_past_its_line() {
+        for hazard in [
+            "const S = 'a//b';",
+            "const U = \"https://x\";",
+            "const T = `x//y`;",
+        ] {
+            let src = format!("{hazard}\nXA11Y_TIMEOUT: TimeoutError,\n");
+            assert!(
+                mentions_path(&strip_line_comments(&src, "index.js"), "XA11Y_TIMEOUT"),
+                "hazard: {hazard}"
+            );
+        }
+    }
+
+    /// Needles are matched file-wide, which breaks down when one file holds
+    /// several enums' spellings — `patch-native-dts.mjs` does. `within`
+    /// scopes the search to one declaration.
+    #[test]
+    fn within_scopes_the_search_to_one_declaration() {
+        let mjs = "export type CheckedState = 'on' | 'off' | 'mixed';\n\n\
+                   export type MouseButtonName = 'left' | 'right' | 'middle';\n\n\
+                   export type AnchorName =\n  | 'center'\n  | 'top_left';\n";
+        // Without scoping, MouseButtonName's 'left' answers for an anchor.
+        assert!(mentions_path(mjs, "'left'"));
+        // Scoped to AnchorName, it does not.
+        let anchors = slice_declaration(mjs, "AnchorName").expect("AnchorName is declared");
+        assert!(!mentions_path(&anchors, "'left'"));
+        assert!(mentions_path(&anchors, "'top_left'"));
+        // And the button union still answers for itself.
+        let buttons = slice_declaration(mjs, "MouseButtonName").expect("declared");
+        assert!(mentions_path(&buttons, "'left'"));
+        assert!(!mentions_path(&buttons, "'center'"));
+    }
+
+    #[test]
+    fn a_within_naming_nothing_is_reported_as_stale() {
+        assert!(slice_declaration("export type Foo = 'a';\n", "Nope").is_none());
+    }
+
+    /// The repo's `.mjs` entries must all be scoped — that file is the one
+    /// place several enums share a namespace.
+    #[test]
+    fn repo_allowlist_scopes_every_shared_namespace_file() {
+        let path = repo_root().join("bindings/parity_allowlist.toml");
+        let allow = parse_allowlist(&path).expect("the repo allowlist parses");
+        for entry in &allow.variant_coverage {
+            for f in &entry.files {
+                if f.path.ends_with("patch-native-dts.mjs") {
+                    assert!(
+                        f.within.is_some(),
+                        "{} -> {} needs `within`: that file carries four enums' \
+                         spellings in one namespace",
+                        entry.ty,
+                        f.path
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn variant_spellings_convert_as_documented() {
+        assert_eq!(to_snake("FocusChanged"), "focus_changed");
+        assert_eq!(to_snake("NoElementBounds"), "no_element_bounds");
+        assert_eq!(to_camel("FocusChanged"), "focusChanged");
+        assert_eq!(to_snake("Timeout").to_uppercase(), "TIMEOUT");
+    }
+
+    /// The repo's own entries must cover the string-spelled files, not just
+    /// the Rust mappings — those were missed the first time round.
+    #[test]
+    fn repo_allowlist_covers_the_string_spelled_binding_files() {
+        let path = repo_root().join("bindings/parity_allowlist.toml");
+        let allow = parse_allowlist(&path).expect("the repo allowlist parses");
+        let event = allow
+            .variant_coverage
+            .iter()
+            .find(|v| v.ty == "EventKind")
+            .expect("EventKind has a variant_coverage entry");
+        let paths: Vec<&str> = event.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(
+            paths.iter().any(|p| p.ends_with("_native.pyi")),
+            "Python's EventType constants must be covered: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p.ends_with("patch-native-dts.mjs")),
+            "the JS EventTypeName union must be covered: {paths:?}"
+        );
+        let err = allow
+            .variant_coverage
+            .iter()
+            .find(|v| v.ty == "Error")
+            .expect("Error has a variant_coverage entry");
+        assert!(
+            err.files.iter().any(|f| f.path.ends_with("index.js")
+                && f.spelling == Spelling::ScreamingSnake
+                && f.prefix == "XA11Y_"),
+            "the JS error-code table must be covered"
         );
     }
 }

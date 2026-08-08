@@ -124,12 +124,7 @@ impl MacOSScreenshot {
         let pixels_vec = unsafe { std::slice::from_raw_parts(pixels, size) }.to_vec();
         unsafe { safe_cg_free_pixels(pixels) };
 
-        Ok(Screenshot {
-            width,
-            height,
-            pixels: pixels_vec,
-            scale: scale as f32,
-        })
+        Ok(Screenshot::new(width, height, pixels_vec, scale as f32))
     }
 }
 

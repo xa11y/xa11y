@@ -56,7 +56,12 @@ pub trait ScreenshotProvider: Send + Sync {
 /// physical to logical (1.0 on standard displays, 2.0 on typical Retina /
 /// 1.5/1.75/2.0 on common Windows/Linux HiDPI configurations). `pixels.len()`
 /// equals `width * height * 4`.
+///
+/// `#[non_exhaustive]`: capture metadata grows — which display the pixels came
+/// from, and the colour space they are in, are both things a backend could
+/// start reporting. Build one with [`Screenshot::new`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Screenshot {
     pub width: u32,
     pub height: u32,
@@ -65,6 +70,20 @@ pub struct Screenshot {
 }
 
 impl Screenshot {
+    /// A capture of `width` × `height` physical pixels in RGBA8.
+    ///
+    /// No validation here — [`Screenshot::to_png`] is where a `pixels` length
+    /// that disagrees with the dimensions is reported, so a backend that
+    /// builds one can still hand back a partial buffer for inspection.
+    pub fn new(width: u32, height: u32, pixels: Vec<u8>, scale: f32) -> Self {
+        Self {
+            width,
+            height,
+            pixels,
+            scale,
+        }
+    }
+
     /// Encode as PNG and return the bytes.
     pub fn to_png(&self) -> Result<Vec<u8>> {
         let expected = (self.width as usize)

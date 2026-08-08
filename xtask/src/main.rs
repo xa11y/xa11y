@@ -1021,8 +1021,85 @@ fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
 }
 
+/// Verify every intra-workspace dependency pins `=<workspace version>`.
+///
+/// `ElementParts` and `StateParts` are `#[doc(hidden)]` construction contracts
+/// shared across the core/provider crate boundary: adding a field to one is a
+/// compile error in the others, by design. With a caret requirement, cargo
+/// would happily resolve `xa11y-linux 0.13.0` against `xa11y-core 0.13.1` in a
+/// downstream tree and that deliberate break would surface as a build failure
+/// in someone else's project. `=` makes the lockstep the crates already
+/// release in (see `release.toml`'s `shared-version`) a resolution
+/// requirement. Same reasoning as serde/serde_derive.
+///
+/// Checked here rather than trusted, because `cargo-release`'s
+/// `dependent-version = "upgrade"` rewrites these lines on every release and a
+/// silently-dropped `=` would be exactly the kind of quiet regression the rest
+/// of this tooling exists to catch.
+fn do_check_workspace_pins() -> bool {
+    heading("Workspace dependency pinning");
+
+    let path = project_root().join("Cargo.toml");
+    let Ok(src) = std::fs::read_to_string(&path) else {
+        eprintln!("!! could not read {}", path.display());
+        return false;
+    };
+    let Ok(toml) = toml::from_str::<toml::Value>(&src) else {
+        eprintln!("!! could not parse {}", path.display());
+        return false;
+    };
+
+    let version = toml
+        .get("workspace")
+        .and_then(|w| w.get("package"))
+        .and_then(|p| p.get("version"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if version.is_empty() {
+        eprintln!("!! [workspace.package] has no version");
+        return false;
+    }
+    let expected = format!("={version}");
+
+    let Some(deps) = toml
+        .get("workspace")
+        .and_then(|w| w.get("dependencies"))
+        .and_then(|d| d.as_table())
+    else {
+        eprintln!("!! [workspace.dependencies] missing");
+        return false;
+    };
+
+    let mut ok = true;
+    for (name, dep) in deps {
+        // Only the crates published from this workspace.
+        if !name.starts_with("xa11y") {
+            continue;
+        }
+        let found = dep.get("version").and_then(|v| v.as_str()).unwrap_or("");
+        if found == expected {
+            println!("  {name} = \"{found}\"");
+        } else {
+            ok = false;
+            eprintln!(
+                "!! {name} is declared `version = \"{found}\"`, expected \"{expected}\".\n   \
+                 Intra-workspace deps pin exactly — see this function's docs.\n   \
+                 Fix: set `version = \"{expected}\"` in the workspace Cargo.toml."
+            );
+        }
+    }
+    ok
+}
+
 fn do_check() -> bool {
     let mut ok = true;
+
+    heading("PRE-PR CHECK: workspace-pins");
+    if !do_check_workspace_pins() {
+        eprintln!("!! Workspace pinning check failed. See above for details.");
+        ok = false;
+    }
 
     heading("PRE-PR CHECK: sync-readmes");
     if !do_sync_readmes(&["--check".to_string()]) {

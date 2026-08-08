@@ -1,13 +1,20 @@
 use serde::{Deserialize, Serialize};
 
-use crate::element::ElementData;
+use crate::element::{reader_writer_pair, ElementData};
 
 /// The kind of accessibility event, normalized across platforms.
 ///
 /// Variants carry payload only when that data is guaranteed to be present
 /// on all supporting platforms. For everything else, re-query the `target`
 /// element after receipt.
+///
+/// `#[non_exhaustive]`: the normalized event set grows as backends learn to
+/// surface more notifications. Both bindings project these to strings, and
+/// `cargo xtask check-bindings-parity` fails when a variant is missing from
+/// either mapping — see `[[types.variant_coverage]]` in
+/// `bindings/parity_allowlist.toml`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum EventKind {
     /// Keyboard focus moved to a new element.
     /// Target: the element that gained focus.
@@ -105,7 +112,12 @@ pub enum EventKind {
 }
 
 /// Individual state flags used in [`EventKind::StateChanged`].
+///
+/// `#[non_exhaustive]`: this enum tracks [`crate::StateSet`], which is itself
+/// `#[non_exhaustive]` — a new state there gains a flag here. Binding
+/// coverage is enforced by `cargo xtask check-bindings-parity`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum StateFlag {
     Enabled,
     Visible,
@@ -120,20 +132,67 @@ pub enum StateFlag {
     Busy,
 }
 
-/// An accessibility event delivered to subscribers.
-#[derive(Debug, Clone)]
-pub struct Event {
-    /// What happened and any type-specific data.
-    pub kind: EventKind,
-    /// Snapshot of the element that triggered the event, if available.
-    /// None for events where the element is not available or already destroyed.
-    pub target: Option<ElementData>,
-    /// Name of the application that produced this event.
-    pub app_name: String,
-    /// Process ID of the application that produced this event.
-    pub app_pid: u32,
-    /// Monotonic timestamp at event receipt.
-    pub timestamp: std::time::Instant,
+reader_writer_pair! {
+    /// An accessibility event delivered to subscribers.
+    ///
+    /// `#[non_exhaustive]`: event metadata grows — a platform-native sequence
+    /// number and the originating window are both plausible additions — and
+    /// that growth must not break consumers who only read one. Backends, which
+    /// build them, get the opposite guarantee from [`EventParts`].
+    #[derive(Debug, Clone)]
+    pub struct Event;
+
+    /// Every field a backend must decide on when it translates a platform
+    /// notification into an [`Event`].
+    ///
+    /// Deliberately exhaustive, for the same reason as
+    /// [`crate::ElementParts`]. `Event::new` is not a substitute: it takes
+    /// three of the five fields, so a new one would land beside `target` and
+    /// `timestamp` as a silent default rather than a compile error.
+    ///
+    /// Not public API (`#[doc(hidden)]`).
+    #[allow(
+        clippy::exhaustive_structs,
+        reason = "This type IS the completeness guard for events. See \
+                  ElementParts; the same reasoning applies."
+    )]
+    #[derive(Debug, Clone)]
+    pub struct EventParts;
+
+    fields {
+        /// What happened and any type-specific data.
+        pub kind: EventKind,
+        /// Snapshot of the element that triggered the event, if available.
+        /// None for events where the element is not available or already
+        /// destroyed.
+        pub target: Option<ElementData>,
+        /// Name of the application that produced this event.
+        pub app_name: String,
+        /// Process ID of the application that produced this event.
+        pub app_pid: u32,
+        /// Monotonic timestamp at event receipt.
+        pub timestamp: std::time::Instant,
+    }
+}
+
+impl Event {
+    /// An event with no `target` and `timestamp` set to now.
+    ///
+    /// The *partial* construction path, for tests and for callers that only
+    /// have the three required fields. A backend translating a real platform
+    /// notification should use [`EventParts`] instead, so that a new field
+    /// fails its build rather than arriving as a default.
+    pub fn new(kind: EventKind, app_name: impl Into<String>, app_pid: u32) -> Self {
+        // Struct literal, not a builder: this lives in the defining crate, so
+        // the compiler still checks it for completeness when a field is added.
+        Self {
+            kind,
+            target: None,
+            app_name: app_name.into(),
+            app_pid,
+            timestamp: std::time::Instant::now(),
+        }
+    }
 }
 
 /// Desired element state for wait_for operations.
@@ -141,7 +200,12 @@ pub struct Event {
 /// Basic variants (`Attached`, `Detached`, `Visible`, `Hidden`, `Enabled`,
 /// `Disabled`, `Focused`, `Unfocused`) cover common cases. For arbitrary
 /// conditions, use [`Locator::wait_until`] with a closure.
+///
+/// `#[non_exhaustive]`: the set of named wait conditions is open — `Checked`,
+/// `Selected`, and `Expanded` are all states [`crate::StateSet`] already
+/// carries that could earn a shorthand here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum ElementState {
     /// Wait until an element matching the selector exists in the tree.
     Attached,

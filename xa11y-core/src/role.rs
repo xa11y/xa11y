@@ -2,6 +2,12 @@ use serde::{Deserialize, Serialize};
 
 /// A normalized enum covering UI element types across all platforms.
 /// Derived from ARIA roles, scoped to roles commonly surfaced by real desktop applications.
+///
+/// `#[non_exhaustive]`: every platform mapping that learns a new control type
+/// adds a variant here, so downstream `match` arms need a `_` fallback.
+/// [`Role::Unknown`] is the value to fall back *to* when a role is not
+/// recognised; the attribute is what keeps adding the next one from being a
+/// breaking change.
 #[derive(
     Debug,
     Clone,
@@ -16,6 +22,7 @@ use serde::{Deserialize, Serialize};
 )]
 #[strum(serialize_all = "snake_case")]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum Role {
     Unknown,
     Window,

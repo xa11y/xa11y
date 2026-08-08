@@ -38,18 +38,41 @@ use crate::error::{Error, Result};
 use crate::role::Role;
 
 /// A parsed CSS-like selector for matching accessibility tree elements.
+///
+/// # Extensibility
+///
+/// This type and the AST types below it are deliberately **exhaustive**. The
+/// selector language grows — the universal `*` selector was the most recent
+/// addition — and each new piece of syntax has to be handled by the provider
+/// fast-paths in `xa11y-linux`, `xa11y-macos`, and `xa11y-windows` that match
+/// on this AST directly. `#[non_exhaustive]` would replace their compile
+/// errors with `_` arms that silently return the wrong match set. Growth here
+/// should break the backends; that break is the feature.
+///
+/// Bindings are unaffected either way: they pass selector *strings*, and the
+/// parsed representation never crosses the language boundary.
+#[allow(
+    clippy::exhaustive_structs,
+    reason = "Selector AST: a closed contract between core's parser (the only \
+              writer) and the provider fast-paths that match on it. Growth \
+              must break those backends so each decides whether to support \
+              the new syntax or route to the shared matcher — a `_` arm would \
+              silently mismatch instead. See the note on `Selector`."
+)]
 #[derive(Debug, Clone)]
 pub struct Selector {
     /// Chain of simple selectors with combinators.
     pub segments: Vec<SelectorSegment>,
 }
 
+#[allow(clippy::exhaustive_structs, reason = "Selector AST — see `Selector`.")]
 #[derive(Debug, Clone)]
 pub struct SelectorSegment {
     pub combinator: Combinator,
     pub simple: SimpleSelector,
 }
 
+#[allow(clippy::exhaustive_enums, reason = "Selector AST — see `Selector`.")]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Combinator {
     /// Root (first segment, no combinator)
@@ -61,6 +84,7 @@ pub enum Combinator {
 }
 
 /// How a role is matched in a selector.
+#[allow(clippy::exhaustive_enums, reason = "Selector AST — see `Selector`.")]
 #[derive(Debug, Clone)]
 pub enum RoleMatch {
     /// Match against a normalized role (e.g., `button`, `text_field`).
@@ -69,6 +93,7 @@ pub enum RoleMatch {
     Platform(String),
 }
 
+#[allow(clippy::exhaustive_structs, reason = "Selector AST — see `Selector`.")]
 #[derive(Debug, Clone)]
 pub struct SimpleSelector {
     pub role: Option<RoleMatch>,
@@ -76,6 +101,7 @@ pub struct SimpleSelector {
     pub nth: Option<usize>,
 }
 
+#[allow(clippy::exhaustive_structs, reason = "Selector AST — see `Selector`.")]
 #[derive(Debug, Clone)]
 pub struct AttrFilter {
     pub attr: AttrName,
@@ -107,6 +133,7 @@ pub type AttrName = String;
 ///
 /// For names that differ only in such edge cases, use the case-sensitive
 /// `Exact` operator with the precise string instead.
+#[allow(clippy::exhaustive_enums, reason = "Selector AST — see `Selector`.")]
 #[derive(Debug, Clone, PartialEq)]
 pub enum MatchOp {
     /// Exact match (case-sensitive)
@@ -383,6 +410,7 @@ impl Selector {
 ///
 /// Constructed from a string via [`SelectorGroup::parse`]. Commas inside
 /// quoted attribute values are not treated as separators.
+#[allow(clippy::exhaustive_structs, reason = "Selector AST — see `Selector`.")]
 #[derive(Debug, Clone)]
 pub struct SelectorGroup {
     /// Selector clauses, in source order.

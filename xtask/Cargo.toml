@@ -11,3 +11,8 @@ serde_json = { workspace = true }
 # `full` is required to parse whole source files (items, impl blocks, fn
 # signatures) rather than just proc-macro token streams.
 syn = { version = "3", features = ["full"] }
+# Used with syn to read the *code* of a source file: the Rust lexer drops
+# comments and collapses string literals into single tokens, so the variant
+# scan needs no comment/quote handling of its own.
+quote = "1"
+proc-macro2 = "1"

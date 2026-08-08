@@ -141,21 +141,16 @@ In Rust, additional anchors are available via `ClickOptions.anchor` (`Anchor::To
     // Shift-click with explicit options
     m.click_with(
         ClickTarget::from(&element),
-        ClickOptions {
-            held: vec![Key::Shift],
-            anchor: Anchor::TopLeft,
-            ..Default::default()
-        },
+        ClickOptions::new()
+            .held([Key::Shift])
+            .anchor(Anchor::TopLeft),
     )?;
 
     // Slow drag for apps that need more frames
     m.drag_with(
         (50, 50),
         (200, 200),
-        DragOptions {
-            duration: Duration::from_millis(500),
-            ..Default::default()
-        },
+        DragOptions::new().duration(Duration::from_millis(500)),
     )?;
     ```
   </TabItem>

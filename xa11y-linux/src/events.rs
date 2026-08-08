@@ -32,8 +32,8 @@ use zbus::zvariant::OwnedValue;
 use zbus::MatchRule;
 
 use xa11y_core::{
-    CancelHandle, ElementData, Error, Event, EventKind, EventReceiver, Result, Role, StateFlag,
-    StateSet, Subscription, Toggled,
+    CancelHandle, ElementData, ElementParts, Error, Event, EventKind, EventParts, EventReceiver,
+    Result, Role, StateFlag, StateParts, StateSet, Subscription, Toggled,
 };
 
 use crate::atspi::{map_atspi_role, map_atspi_role_number, AccessibleRef, LinuxProvider};
@@ -189,13 +189,14 @@ struct EventContext {
 
 impl EventContext {
     fn emit(&self, kind: EventKind, target: Option<ElementData>) {
-        let event = Event {
+        let event: Event = EventParts {
             kind,
             target,
             app_name: self.app_name.clone(),
             app_pid: self.app_pid,
             timestamp: std::time::Instant::now(),
-        };
+        }
+        .into();
         if let Ok(tx) = self.tx.lock() {
             let _ = tx.send(event);
         }
@@ -511,25 +512,28 @@ fn build_event_snapshot(
         raw
     };
 
-    Some(ElementData {
-        role,
-        name,
-        value,
-        description: None,
-        bounds: None,
-        actions: vec![],
-        states,
-        numeric_value,
-        min_value,
-        max_value,
-        stable_id: Some(aref.path.clone()),
-        pid,
-        raw,
-        // Handle is 0 — snapshots are read-only targets, not live handles
-        // into the main provider's cache. Consumers wanting to drive actions
-        // must re-resolve through the regular locator path.
-        handle: 0,
-    })
+    Some(
+        ElementParts {
+            role,
+            name,
+            value,
+            description: None,
+            bounds: None,
+            actions: vec![],
+            states,
+            numeric_value,
+            min_value,
+            max_value,
+            stable_id: Some(aref.path.clone()),
+            pid,
+            raw,
+            // Snapshots are read-only targets, not live handles into the main
+            // provider's cache. Consumers wanting to drive actions must
+            // re-resolve through the regular locator path.
+            handle: 0,
+        }
+        .into(),
+    )
 }
 
 fn make_proxy<'a>(conn: &'a Connection, bus: &str, path: &str, iface: &str) -> Option<Proxy<'a>> {
@@ -694,22 +698,23 @@ fn states_from_bits(bits: u64, role: Role) -> StateSet {
         None
     };
 
-    let mut states = StateSet::default();
-    states.enabled = enabled;
-    states.visible = visible;
-    states.focused = (bits & FOCUSED) != 0;
-    // AT-SPI `ACTIVE` = foreground window/frame; kept in sync with
-    // `LinuxProvider::parse_states`.
-    states.active = (bits & ACTIVE) != 0;
-    states.checked = checked;
-    states.selected = (bits & SELECTED) != 0;
-    states.expanded = expanded;
-    states.editable = (bits & EDITABLE) != 0;
-    states.focusable = (bits & FOCUSABLE) != 0;
-    states.modal = (bits & MODAL) != 0;
-    states.required = (bits & REQUIRED) != 0;
-    states.busy = (bits & BUSY) != 0;
-    states
+    StateParts {
+        enabled,
+        visible,
+        focused: (bits & FOCUSED) != 0,
+        // AT-SPI `ACTIVE` = foreground window/frame; kept in sync with
+        // `LinuxProvider::parse_states`.
+        active: (bits & ACTIVE) != 0,
+        checked,
+        selected: (bits & SELECTED) != 0,
+        expanded,
+        editable: (bits & EDITABLE) != 0,
+        focusable: (bits & FOCUSABLE) != 0,
+        modal: (bits & MODAL) != 0,
+        required: (bits & REQUIRED) != 0,
+        busy: (bits & BUSY) != 0,
+    }
+    .into()
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────

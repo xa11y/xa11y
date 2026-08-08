@@ -143,6 +143,13 @@ fn to_py_err(e: xa11y::Error) -> PyErr {
         xa11y::Error::Unsupported { feature } => {
             ActionNotSupportedError::new_err(format!("Unsupported: {feature}"))
         }
+        // `xa11y::Error` is `#[non_exhaustive]`, so the compiler no longer
+        // forces a new variant to be mapped here. `cargo xtask
+        // check-bindings-parity` does instead: it fails when a core variant
+        // is not named in this function. This arm exists so a core built
+        // ahead of the bindings still raises something meaningful rather
+        // than failing to compile.
+        other => XA11yError::new_err(other.to_string()),
     }
 }
 
@@ -917,6 +924,9 @@ fn event_kind_to_str(kind: &xa11y::EventKind) -> &'static str {
         xa11y::EventKind::MenuClosed => "menu_closed",
         xa11y::EventKind::TextChanged => "text_changed",
         xa11y::EventKind::Announcement => "announcement",
+        // See the note on `to_py_err`: variant coverage is enforced by
+        // `cargo xtask check-bindings-parity`, not by the compiler.
+        _ => "unknown",
     }
 }
 
@@ -933,6 +943,9 @@ fn state_flag_to_str(flag: xa11y::StateFlag) -> &'static str {
         xa11y::StateFlag::Modal => "modal",
         xa11y::StateFlag::Required => "required",
         xa11y::StateFlag::Busy => "busy",
+        // See the note on `to_py_err`: variant coverage is enforced by
+        // `cargo xtask check-bindings-parity`, not by the compiler.
+        _ => "unknown",
     }
 }
 
@@ -1075,13 +1088,13 @@ impl Subscription {
         loop {
             let remaining = dur.saturating_sub(start.elapsed());
             if remaining.is_zero() {
-                return Err(to_py_err(xa11y::Error::timeout(start.elapsed()).diagnose(
-                    xa11y::Diagnosis {
-                        condition: Some("event matching predicate".to_string()),
-                        last_observed: Some(format!("{seen} event(s) received, none matched")),
-                        ..Default::default()
-                    },
-                )));
+                return Err(to_py_err(
+                    xa11y::Error::timeout(start.elapsed()).diagnose(
+                        xa11y::Diagnosis::new()
+                            .condition("event matching predicate")
+                            .last_observed(format!("{seen} event(s) received, none matched")),
+                    ),
+                ));
             }
             let poll = remaining.min(Duration::from_millis(50));
             let provider = self.provider.clone();
@@ -1555,12 +1568,10 @@ impl InputSim {
         anchor: Option<Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let pt = parse_target_anchored(&target, parse_anchor(anchor.as_ref())?)?;
-        let opts = xa11y::ClickOptions {
-            button: parse_button(button)?,
-            count,
-            held: parse_keys(held)?,
-            ..Default::default()
-        };
+        let opts = xa11y::ClickOptions::new()
+            .button(parse_button(button)?)
+            .count(count)
+            .held(parse_keys(held)?);
         py.allow_threads(move || {
             self.inner
                 .mouse()
@@ -1628,11 +1639,10 @@ impl InputSim {
     ) -> PyResult<()> {
         let from = parse_target(&start)?;
         let to = parse_target(&end)?;
-        let opts = xa11y::DragOptions {
-            button: parse_button(button)?,
-            held: parse_keys(held)?,
-            duration: parse_duration(duration)?,
-        };
+        let opts = xa11y::DragOptions::new()
+            .button(parse_button(button)?)
+            .held(parse_keys(held)?)
+            .duration(parse_duration(duration)?);
         py.allow_threads(move || self.inner.mouse().drag_with(from, to, opts))
             .map_err(to_py_err)
     }

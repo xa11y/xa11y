@@ -228,12 +228,10 @@ impl InputSim {
     ) -> napi::Result<AsyncTask<MouseTask>> {
         let options = options.unwrap_or_default();
         let pt = parse_target_anchored(target, parse_anchor(options.anchor)?)?;
-        let opts = xa11y::ClickOptions {
-            button: parse_button(options.button)?,
-            count: options.count.unwrap_or(1),
-            held: parse_keys(options.held)?,
-            ..Default::default()
-        };
+        let opts = xa11y::ClickOptions::new()
+            .button(parse_button(options.button)?)
+            .count(options.count.unwrap_or(1))
+            .held(parse_keys(options.held)?);
         Ok(AsyncTask::new(MouseTask {
             inner: self.inner.clone(),
             op: MouseOp::Click(pt, opts),
@@ -316,11 +314,12 @@ impl InputSim {
         let from = parse_target(start)?;
         let to = parse_target(end)?;
         let options = options.unwrap_or_default();
-        let opts = xa11y::DragOptions {
-            button: parse_button(options.button)?,
-            held: parse_keys(options.held)?,
-            duration: Duration::from_millis(options.duration.unwrap_or(150).into()),
-        };
+        let opts = xa11y::DragOptions::new()
+            .button(parse_button(options.button)?)
+            .held(parse_keys(options.held)?)
+            .duration(Duration::from_millis(
+                options.duration.unwrap_or(150).into(),
+            ));
         Ok(AsyncTask::new(MouseTask {
             inner: self.inner.clone(),
             op: MouseOp::Drag(from, to, opts),
