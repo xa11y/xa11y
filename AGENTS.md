@@ -208,7 +208,7 @@ Generating `_native.pyi` instead (with `pyo3-stub-gen`) is blocked: every versio
 
 ## Pre-Commit / Pre-PR Checklist
 
-Run `cargo xtask check` to run all pre-PR checks in one command. It covers formatting, linting, unit tests, and Python bindings.
+Run `cargo xtask check` to run all pre-PR checks in one command. It covers formatting, linting, unit tests, both bindings, the integ harness self-tests, and the pytest plugin.
 
 CI runs with `RUSTFLAGS: -Dwarnings`, so all warnings are errors. Individual checks:
 
@@ -217,8 +217,10 @@ CI runs with `RUSTFLAGS: -Dwarnings`, so all warnings are errors. Individual che
 3. **Unit tests** — `cargo xtask test`
 4. **Integration tests** (if touching provider/test-app code) — `cargo xtask test-integ`
 5. **Python bindings** — `cargo xtask test-python`
-6. **Docs prose** (if touching `README.md` or `docs/site/src/content/docs/`) — `cargo xtask lint-docs`
-7. **No new `#[allow(...)]` without justification** — if you must suppress a warning, add a comment explaining why
+6. **pytest plugin** (if touching `pytest-xa11y/`) — `cargo xtask test-pytest-plugin`
+7. **Docs prose** (if touching `README.md` or `docs/site/src/content/docs/`) — `cargo xtask lint-docs`
+8. **Docs site** (if touching `docs/site/src/content/docs/`) — `python docs/check_page_types.py`, `docs/check_tables.py`, `docs/check_links.py`
+9. **No new `#[allow(...)]` without justification** — if you must suppress a warning, add a comment explaining why
 
 Common CI failures:
 - `unused import` / `dead_code` — remove the unused code or add `#[allow(dead_code)]` with a reason
@@ -229,7 +231,8 @@ Common CI failures:
 ## Running Tests
 
 ```bash
-# All pre-PR checks (fmt, lint, test, test-python)
+# All pre-PR checks (fmt, lint, test, test-python, test-js, test-harness,
+# test-pytest-plugin, plus the macOS FFI and bindings-parity checks)
 cargo xtask check
 
 # Individual commands
@@ -238,6 +241,7 @@ cargo xtask fmt --check                       # check without modifying
 cargo xtask lint                              # clippy + ruff + Python Rust check
 cargo xtask test                              # unit tests
 cargo xtask test-python                       # build + test Python bindings
+cargo xtask test-pytest-plugin                # install + test pytest-xa11y
 cargo xtask test-integ                        # integration tests (auto-detects OS)
 cargo xtask test-integ-container              # Linux integration tests via Finch
 cargo xtask test-integ-container tree_has_buttons  # single test in container
@@ -345,25 +349,3 @@ The recognised language names are `rust`, `python`, and `js` (`README_LANGS` in
 `xtask/src/main.rs`). A typo'd name fails `sync-readmes` instead of shipping a
 literal marker to a package registry. Hidden content must not contain `-->`,
 which would end the comment early and leak the rest into the root page.
-
-## Project Structure
-
-- `xa11y-core/` — Platform-independent types, traits, selector engine
-- `xa11y-linux/` — AT-SPI2 backend via zbus
-- `xa11y-macos/` — macOS backend (AXUIElement, with ObjC exception safety)
-- `xa11y-windows/` — Windows backend (UI Automation)
-- `xa11y/` — Umbrella crate, unit tests, integration tests
-- `test-apps/accesskit/` — AccessKit + winit app used as target for Rust integration tests
-- `test-apps/qt/` — PySide6 Qt test app
-- `test-apps/gtk/` — GTK4 test app (Python, PyGObject)
-- `test-apps/cocoa/` — Cocoa/AppKit test app (Swift, macOS-only)
-- `test-apps/tauri/` — Tauri test app (Rust + HTML)
-- `test-apps/winforms/` — .NET Windows Forms test app (C#, Windows-only)
-- `test-apps/wpf/` — .NET WPF test app (C#, Windows-only)
-- `tests/` — Python integration test suites (pytest + xa11y-python)
-- `xa11y-python/` — Python bindings via PyO3/maturin (excluded from Cargo workspace)
-- `xa11y/fuzz/` — libFuzzer fuzz targets for the xa11y public API (requires nightly)
-- `xa11y-fuzz/` — Live provider fuzzer (randomised stress test against a running test app)
-- `xtask/` — Development workflow commands (`cargo xtask <command>`)
-- `scripts/` — Shell scripts for integration tests, fuzzing, coverage
-- `docs/` — Documentation site and generation scripts

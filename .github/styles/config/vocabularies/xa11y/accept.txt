@@ -70,9 +70,13 @@ serde
 
 # ── Software-writing vocabulary ─────────────────────────────────────
 antialiasing
+argv
+autouse
+basename
 [Bb]oolean
 combinators?
 compat
+dataclass
 deduplicated
 enum
 env

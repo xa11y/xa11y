@@ -38,6 +38,11 @@ own API — locators, elements, actions and errors are xa11y's, documented in
 xa11y's own reference. There is no second API surface here to learn or to
 drift out of step.
 
+**The full reference — every fixture, `AppLauncher` field, marker, and
+command-line option — is at <https://xa11y.dev/reference/pytest/>.** This file
+covers what the plugin does and why the sharper edges are shaped the way they
+are.
+
 ## What the plugin does
 
 **Launch and attach.** `AppLauncher` describes how the app starts; the plugin
@@ -66,38 +71,11 @@ its report. xa11y's structured error diagnosis (what it waited for, what it
 last observed, near-miss candidates) is rendered as its own labelled section.
 All of it bounded, on the failure path only, capped per run.
 
-## Fixtures
+## Finding the app
 
-| Fixture | Scope | What it gives you |
-| --- | --- | --- |
-| `xa11y_launcher` | session | **You define this.** The launch recipe. |
-| `xa11y_app` | session | The app under test. |
-| `xa11y_fresh_app` | function | A newly launched app, torn down after the test. |
-| `xa11y_app_factory` | session | Launch additional apps (dialogs that register separately, multi-process suites). |
-| `xa11y_events` | function | An `EventRecorder` for a block of test code. |
-| `xa11y_capabilities` | session | What this session can exercise, and why not. |
-| `xa11y_artifacts` | session | The artifacts directory, or `None`. |
-
-## AppLauncher
-
-```python
-AppLauncher(
-    command=[BINARY, "--headless"],   # argv, as a list
-    env={"QT_ACCESSIBILITY": "1"},    # merged over os.environ
-    cwd=PROJECT_ROOT,
-    app_names=["my-app"],             # match the a11y name too, not just the PID
-    app_name_prefix="Submit to ",     # ...or narrow to one app within our PID
-    spawns_and_exits=False,           # the command hands off and exits
-    ready='button[name="OK"]',        # gate startup on content
-    startup_timeout=60,               # overrides --xa11y-startup-timeout
-    frontmost=True,                   # claim the macOS front slot
-    reset=lambda app: app.locator('button[name="Home"]').press(),
-    label="widgets",                  # used in diagnostics and artifact names
-)
-```
-
-`attach_pid=N` attaches to an already-running process instead of launching
-one; the plugin never terminates a process it did not start.
+The default is a self-contained binary that registers under its own PID.
+Three fields cover the cases that are not, and the distinctions between them
+matter:
 
 `app_names` matters when the process that registers with the accessibility
 API is not the one you launched — Electron helper processes, launcher shims
@@ -120,12 +98,10 @@ sharing the host's PID on Windows UIA, and matching on PID alone attaches to
 the host. The two fields are mutually exclusive — one widens what the other
 narrows.
 
-## Markers
+`attach_pid=N` attaches to an already-running process instead of launching
+one; the plugin never terminates a process it did not start.
 
-```python
-@pytest.mark.xa11y_requires("screenshot")   # or "input_sim"
-@pytest.mark.xa11y_frontmost                # claim the macOS front slot first
-```
+## Capabilities and markers
 
 Capability names are plain strings. `pytest_xa11y.Capability` is a `str` enum
 of the same values, for completion and type checking; `Capability.SCREENSHOT`
@@ -181,17 +157,6 @@ events.expect(("state_changed", "value_changed"), timeout=5.0)
 There is no `expect()` that means "the next event, whatever it is". A filter
 left off by accident would pass against anything that arrived; use
 `Subscription.recv` when that is genuinely what you want.
-
-## Options
-
-| Option | Default | Effect |
-| --- | --- | --- |
-| `--xa11y-timeout=SECONDS` | library default (5s) | Calls `xa11y.set_default_timeout()`. Outranks `XA11Y_DEFAULT_TIMEOUT`; a per-call `timeout=` still wins over both. |
-| `--xa11y-startup-timeout=SECONDS` | 30 | Waiting for the app to appear and become ready. |
-| `--xa11y-artifacts=DIR` | off | Save a screenshot of each failing test. |
-| `--xa11y-skip=CAPABILITY` | none | Declare a capability unavailable. Repeatable. |
-| `--xa11y-dump-depth=N` | 12 | Depth of the tree dump on failure. |
-| `--xa11y-max-diagnostics=N` | 10 | Cap diagnostics per run, so a wholesale failure does not bury its own report. |
 
 ## Suite-specific diagnostics
 

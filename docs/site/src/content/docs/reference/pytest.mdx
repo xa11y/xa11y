@@ -1,0 +1,275 @@
+---
+title: pytest plugin
+description: Reference for pytest-xa11y — the fixtures, AppLauncher fields, capability markers, command-line options, and failure-report sections it adds to a pytest suite.
+pageType: reference
+---
+
+{/* DIATAXIS: reference — a factual description of the machinery, structured
+    for lookup rather than for reading through. Neutral and complete. No task
+    narratives, no rationale, no teaching. */}
+
+[`pytest-xa11y`](https://pypi.org/project/pytest-xa11y/) packages the
+launch-and-attach flow as pytest fixtures. It ships separately from the `xa11y`
+package and versions on its own line.
+
+```bash
+pip install pytest-xa11y
+```
+
+The plugin loads through the `pytest11` entry point, so installing it is all
+the wiring there is. It stays inert until a test requests one of its fixtures.
+
+A suite supplies one fixture, `xa11y_launcher`, and takes the running
+application from `xa11y_app`:
+
+```python
+# conftest.py
+import pytest
+from pytest_xa11y import AppLauncher
+
+
+@pytest.fixture(scope="session")
+def xa11y_launcher():
+    return AppLauncher(command=["./my-app"], ready='button[name="Sign in"]')
+```
+
+```python
+def test_sign_in(xa11y_app):
+    xa11y_app.locator('text_field[name="Email"]').set_value("a@b.c")
+    xa11y_app.locator('button[name="Sign in"]').press()
+```
+
+`xa11y_app` is an `xa11y.App`. Locators, elements, actions, and errors are the
+library's own, documented under [Locator & Element](/reference/locator/) and
+[Errors](/reference/errors/). The plugin adds no second API for driving the UI.
+
+## Fixtures
+
+| Fixture | Scope | Value |
+| --- | --- | --- |
+| `xa11y_launcher` | session | Supplied by the suite. An `AppLauncher`. The built-in definition raises `LauncherNotConfigured`. |
+| `xa11y_app` | session | The application under test, launched once per session and terminated at the end of it. |
+| `xa11y_fresh_app` | function | A newly launched application, terminated at the end of the test. |
+| `xa11y_app_factory` | session | `launch(AppLauncher) -> App`, for additional applications. Each is terminated at the end of the session. |
+| `xa11y_events` | function | `record(App) -> EventRecorder`. Recorders are closed at the end of the test. |
+| `xa11y_capabilities` | session | The session's `Capabilities`. |
+| `xa11y_artifacts` | session | The resolved artifacts directory as a `Path`, or `None` when `--xa11y-artifacts` is unset. |
+
+An autouse fixture runs around every test once an application is live. It
+checks each live application is still running, then calls
+`AppLauncher.reset` for the session application. The death of an application
+launched by `xa11y_app` stops the run. The death of one launched by
+`xa11y_fresh_app` or `xa11y_app_factory` drops it from the live set, and the
+run continues.
+
+## AppLauncher
+
+`AppLauncher` is a frozen dataclass. Every field except `command` is optional,
+and invalid combinations raise `ValueError` at construction.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `command` | sequence of str | `()` | argv for the application. A bare string is rejected. |
+| `env` | mapping | `None` | Extra environment variables, merged over `os.environ`. |
+| `cwd` | str or Path | `None` | Working directory for the subprocess. |
+| `app_names` | sequence of str | `()` | Accessibility names to match in addition to the spawned PID. Widens the match. |
+| `app_name_prefix` | str | `None` | Match a candidate whose PID is ours and whose name starts with this. Narrows the match. |
+| `spawns_and_exits` | bool | `False` | The command hands off to another process and exits. Switches off death detection. |
+| `ready` | str | `None` | Selector that must resolve before the first test runs. |
+| `startup_timeout` | float | `None` | Seconds to appear and become ready. Overrides `--xa11y-startup-timeout`. |
+| `frontmost` | bool | `False` | Claim and verify the macOS frontmost slot at launch. No-op off macOS. |
+| `reset` | callable | `None` | Called with the `App` before each test. |
+| `attach_pid` | int | `None` | Attach to a running process instead of launching one. |
+| `label` | str | `None` | Name used in diagnostics and artifact filenames. Defaults to the command's basename. |
+
+Mutually exclusive pairs, each rejected at construction: `command` with
+`attach_pid`, `app_names` with `app_name_prefix`, and `attach_pid` with
+`spawns_and_exits`. `startup_timeout` must be positive and finite, and `reset`
+must be callable.
+
+`startup_timeout` is one budget covering both phases, appearing in the
+accessibility tree and satisfying `ready`. A process the plugin attached to is
+never terminated by it.
+
+`AppLauncher.display_name` returns `label`, the command's basename, or
+`pid-<n>` in attach mode. `AppLauncher.resolved_env()` returns the merged
+subprocess environment, or `None` when `env` is unset.
+
+## Markers
+
+```python
+@pytest.mark.xa11y_requires("screenshot")
+@pytest.mark.xa11y_frontmost
+def test_capture(xa11y_app): ...
+```
+
+| Marker | Arguments | Effect |
+| --- | --- | --- |
+| `xa11y_requires` | one or more capability names | Skips the test unless every named capability is available. |
+| `xa11y_frontmost` | none | Claims and verifies the macOS frontmost slot before the test body. Skips with the name of the offending application when the claim fails. No-op off macOS. |
+
+The `xa11y_` marker prefix is reserved. Collection fails, rather than warns, on
+an unknown `xa11y_` marker, an unknown capability name, `xa11y_requires()` with
+no arguments, or arguments passed to `xa11y_frontmost`. Every offending marker
+in the run is reported at once.
+
+Tests requiring `input_sim`, and tests marked `xa11y_frontmost`, skip when
+`pytest-xdist` reports more than one worker. Input synthesis and the frontmost
+slot are process-global state that parallel workers take from each other. Run
+those tests with `-p no:xdist` or `-n0`.
+
+### Capabilities
+
+| Name | Probe | Notes |
+| --- | --- | --- |
+| `screenshot` | One full-display capture, once per session. | Only the errors meaning "this session has no capture path" produce a skip. Any other capture failure propagates. A full-display capture can succeed where a region capture is rejected. |
+| `input_sim` | Constructs the input backend, once per session. | Real on Linux, where both backends validate eagerly. macOS and Windows always report available: `CGEventPost` returns void, so a missing grant is indistinguishable from success. Declare it with `--xa11y-skip=input_sim`. |
+
+`pytest_xa11y.Capability` is a `str` enum of the same names.
+`Capability.SCREENSHOT` and `"screenshot"` are interchangeable everywhere a
+capability is named. `pytest_xa11y.KNOWN_CAPABILITIES` is the tuple of valid
+names.
+
+## Command-line options
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `--xa11y-timeout=SECONDS` | the library default of 5s | Calls `xa11y.set_default_timeout()`. Outranks `XA11Y_DEFAULT_TIMEOUT`; a per-call `timeout=` outranks both. |
+| `--xa11y-startup-timeout=SECONDS` | `30` | Time allowed for the application to appear and satisfy `ready`. An `AppLauncher`'s own `startup_timeout` overrides it. |
+| `--xa11y-artifacts=DIR` | off | Write a screenshot of each live application's window to `DIR` on every failing test, framing the whole display when the application has no window with bounds. Nothing is written when the `screenshot` capability is unavailable. |
+| `--xa11y-skip=CAPABILITY` | none | Declare a capability unavailable. Repeatable. Accepts only known capability names. |
+| `--xa11y-dump-depth=N` | `12` | Depth of the tree dump attached to failing tests. |
+| `--xa11y-max-diagnostics=N` | `10` | Attach application state to at most `N` failing tests per run. |
+
+| Environment variable | Effect |
+| --- | --- |
+| `XA11Y_SKIP_INPUT_SIM=1` | Equivalent to `--xa11y-skip=input_sim`. |
+| `XA11Y_DEFAULT_TIMEOUT` | Read by the library. `--xa11y-timeout` outranks it. |
+
+The plugin prints a `xa11y:` header line reporting the timeouts, disabled
+capabilities, and artifacts directory. The line is omitted when nothing was
+configured, so a suite that never launches an application prints no header.
+
+## Failure reports
+
+A failing test gets up to three report sections.
+
+| Section | Contents |
+| --- | --- |
+| `xa11y diagnosis` | The structured fields of an xa11y error: `condition`, `selector`, `elapsed`, `last_observed`, `candidates`, `scope`. Present only when the failure carries a [Diagnosis](/explanation/errors-and-diagnosis/). |
+| `xa11y app state` | Per live application: its identity, a tree dump to `--xa11y-dump-depth`, and the tail of its output. The first block also carries the macOS frontmost state and any recorded events. With `--xa11y-artifacts`, the path of the screenshot written for that application. |
+| `xa11y diagnostics cap` | Emitted once, on the failure that reaches `--xa11y-max-diagnostics`. Later failures get no application state. |
+
+Collection is bounded and runs on the failure path alone. A collector that
+raises is reported in place of its block rather than dropped.
+
+### register_diagnostic
+
+```python
+import pytest_xa11y
+
+pytest_xa11y.register_diagnostic(
+    "event log",
+    lambda app: app.locator('text_area[name="Event log"]').element().value or "",
+)
+```
+
+`register_diagnostic(name, collector)` adds a suite-specific collector to the
+`xa11y app state` section. The collector receives the live `App` and returns a
+string.
+
+## EventRecorder
+
+Obtained from `xa11y_events`. Whatever a recorder has seen is attached to the
+failure report.
+
+```python
+def test_focus_moves(xa11y_app, xa11y_events):
+    with xa11y_events(xa11y_app) as events:
+        xa11y_app.locator('button[name="OK"]').focus()
+        events.expect("focus_changed", name="OK", timeout=2.0)
+```
+
+| Member | Signature | Behaviour |
+| --- | --- | --- |
+| `expect` | `(event_type=None, *, name=None, predicate=None, timeout=5.0)` | Waits for a matching event and returns it, or fails the test with what did arrive. Blocks in xa11y's own wait, releasing the GIL. |
+| `seen` | `(event_type=None, *, name=None, predicate=None)` | Already-recorded matches. Does not wait. |
+| `drain` | `(duration=0.3)` | Every event delivered over the next `duration` seconds. |
+| `recorded` | property | Every event seen, oldest first. |
+| `render` | `(*, indent="", limit=25)` | Bounded rendering of what was recorded. |
+| `subscription` | property | The underlying `xa11y.Subscription`. Raises `RuntimeError` when the recorder is not open. |
+| `open` / `close` | `()` | Lifecycle. A recorder is also a context manager. |
+
+`event_type` takes one type name or several, where several means any of them.
+Platforms disagree about which event an interaction emits, so a checkbox toggle
+is `state_changed` on one bridge and `value_changed` on another:
+
+```python
+events.expect(("state_changed", "value_changed"), timeout=5.0)
+```
+
+`name` matches the target element's name exactly. At least one of
+`event_type`, `name`, or `predicate` is required: `expect()` with no filter
+would match whatever arrived, and `ValueError` is raised instead. Use
+[`Subscription.recv`](/reference/events/) to wait for the next event of any
+kind.
+
+Recorders retain the last 200 events, and `render` shows the last 25 of them.
+
+## Capabilities
+
+The object behind `xa11y_capabilities`. Every method takes a capability name
+and raises `ValueError` on an unknown one. Probes run at most once per session,
+including the failing case: a probe that raises has its exception cached and
+re-raised.
+
+| Method | Returns | Behaviour |
+| --- | --- | --- |
+| `available(name)` | bool | Whether the capability can be exercised here. |
+| `reason(name)` | str or `None` | Why it is unavailable, or `None` when it is available. |
+| `check(name)` | `(available, reason)` | Both of the above, in one call. |
+| `skip_unless(name)` | `None` | Skips the current test when the capability is unavailable. What `xa11y_requires` calls. |
+| `guard(name)` | context manager | Turns a capability-unavailable error raised inside the block into a skip, and re-raises everything else. |
+| `summary()` | str | One clause per capability, as used in the session header. |
+
+`guard` exists alongside the marker because availability is not one yes or no.
+A region capture can be rejected in a session where a full-display capture
+succeeds, so the narrower question is answered at the call:
+
+```python
+def test_region(xa11y_capabilities):
+    with xa11y_capabilities.guard("screenshot"):
+        shot = xa11y.screenshot(region=(0, 0, 50, 40))
+```
+
+## Exceptions
+
+Raised by the plugin, never by the application under test. All are importable
+from `pytest_xa11y`.
+
+| Exception | Raised when |
+| --- | --- |
+| `PytestXa11yError` | Base class for the three below. |
+| `LauncherNotConfigured` | A fixture asked for `xa11y_launcher` and the suite defined none. |
+| `AppLaunchError` | The application could not be launched, found, or made ready. Carries the exit code and output tail for a process that exited during startup. |
+| `AppDied` | The application exited mid-run. Raised between tests, and it stops the run for the session application. |
+
+## Lower-level pieces
+
+`AppSession(launcher, *, startup_timeout, critical=True)` is the object behind
+each fixture: `start()`, `check_alive()`, `run_reset()`, `stop()`, and
+`output_tails()`. The fixtures manage its lifecycle, and a suite driving one
+by hand owns the teardown.
+
+`ensure_macos_frontmost(pid, *, timeout=10.0)` returns `(ok, detail)` after
+claiming the front slot for `pid` and polling until the system confirms it.
+`detail` names the application holding the front when the claim fails. Off
+macOS it reports success without acting.
+
+## See also
+
+- [Write desktop tests](/guides/desktop-testing/) for the launch-and-attach
+  flow the plugin packages.
+- [Testing in CI](/guides/ci/) for the options a CI run needs.
+- The [package README](https://github.com/xa11y/xa11y/blob/main/pytest-xa11y/README.md)
+  for the design reasoning behind the fields above.

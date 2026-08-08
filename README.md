@@ -73,6 +73,14 @@ pip install xa11y
 ```
 
 Requires Python 3.9+. Pre-built wheels available for Linux, macOS, and Windows.
+
+For pytest suites, [`pytest-xa11y`](https://xa11y.dev/reference/pytest/) adds
+fixtures that launch the app under test, capability markers that skip what the
+machine cannot do, and the accessibility tree on every failure:
+
+```bash
+pip install pytest-xa11y
+```
 <!-- /python-only -->
 
 <!-- js-only -->

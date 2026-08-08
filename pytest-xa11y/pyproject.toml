@@ -46,7 +46,7 @@ xa11y = "pytest_xa11y.plugin"
 [project.urls]
 Homepage = "https://github.com/xa11y/xa11y"
 Repository = "https://github.com/xa11y/xa11y"
-Documentation = "https://xa11y.dev/guides/desktop-testing/"
+Documentation = "https://xa11y.dev/reference/pytest/"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pytest_xa11y"]

@@ -40,6 +40,14 @@ pip install xa11y
 
 Requires Python 3.9+. Pre-built wheels available for Linux, macOS, and Windows.
 
+For pytest suites, [`pytest-xa11y`](https://xa11y.dev/reference/pytest/) adds
+fixtures that launch the app under test, capability markers that skip what the
+machine cannot do, and the accessibility tree on every failure:
+
+```bash
+pip install pytest-xa11y
+```
+
 > On **macOS**, grant your terminal **two** permissions in **System Settings > Privacy & Security**:
 > 1. **Accessibility**, required for all accessibility API access.
 > 2. **Screen & System Audio Recording** (macOS 26+), required to read window content. Without it, only menu bars are visible.

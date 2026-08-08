@@ -177,6 +177,52 @@ dbus-run-session -- bash -c '
 '
 ```
 
+## Running a pytest-xa11y suite
+
+If your suite uses [`pytest-xa11y`](/reference/pytest/), install it alongside
+`xa11y` and give the run the flags CI needs and a laptop does not:
+
+```yaml
+      - run: pip install xa11y pytest pytest-xa11y
+      - run: |
+          pytest tests/ \
+            --xa11y-startup-timeout=90 \
+            --xa11y-artifacts=artifacts/
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: xa11y-artifacts
+          path: artifacts/
+```
+
+`--xa11y-startup-timeout` covers a cold runner, where a first launch pays for
+page cache misses and an accessibility bridge that is still coming up. The
+30-second default is tuned for a warm machine.
+
+`--xa11y-artifacts` writes a screenshot of every live application on each
+failing test and names the path in the failure report. Upload the directory so
+the screenshots outlive the runner. The accessibility tree, the app's output,
+and xa11y's own error diagnosis are already in the report, so a failure is
+usually readable without them.
+
+On **macOS and Windows runners without the input grant**, declare it:
+
+```bash
+pytest tests/ --xa11y-skip=input_sim
+```
+
+Neither platform can be probed for it. `CGEventPost` returns void, so synthetic
+events are discarded silently and every layer reports success. Without the
+flag, tests marked `@pytest.mark.xa11y_requires("input_sim")` run and assert
+against a UI that never received the input. `XA11Y_SKIP_INPUT_SIM=1` does the
+same job for a runner-wide setting.
+
+One thing to know before reaching for `pytest-xdist`: tests needing
+`input_sim`, and tests marked `xa11y_frontmost`, skip when more than one worker
+is running. Input synthesis and the macOS frontmost slot are process-global,
+and parallel workers take them from each other. Split those tests into a
+serial job rather than losing them to a silent skip.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
@@ -187,3 +233,4 @@ dbus-run-session -- bash -c '
 | Window never appears in the tree | The toolkit needs a window manager. Set `setup-window-manager: true`. |
 | `Xvfb` fails to start | The display number is taken. Set a different `display` (e.g. `:98`). |
 | Tests hang or flake on macOS | An onboarding window (Setup Assistant) holds front-app focus. Dismiss it before running input-driven tests. |
+| Tests skip with "needs exclusive use of the desktop session" | `pytest-xdist` is running more than one worker. Run the input and frontmost tests with `-p no:xdist` or `-n0`. |
