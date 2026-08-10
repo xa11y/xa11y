@@ -92,7 +92,7 @@ Query accessibility trees with CSS-like selectors:
 
 ## Ecosystem
 
-- **[strands-xa11y](https://github.com/xa11y/strands-xa11y)** gives a [Strands](https://strandsagents.com) agent desktop control as a single tool, with a read-only variant for agents that observe and never act. `pip install strands-xa11y`.
+- **[strands-xa11y](https://github.com/xa11y/strands-xa11y)** packages xa11y as a desktop-control tool for [Strands](https://strandsagents.com), AWS's open-source SDK for building AI agents. One tool gives an agent the accessibility tree and the actions on it; a read-only variant covers agents that observe and never act. `pip install strands-xa11y`.
 - **[agent-desktop](https://agent-desktop.dev)** is a CLI built on xa11y for AI agents that read and control desktops.
 
 ## Contributing
