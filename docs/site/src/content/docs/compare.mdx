@@ -85,6 +85,8 @@ An agent needs, on every step, an observation of the current UI and a way to act
 
 **Hybrid.** Increasingly the practical setup, using accessibility data for structure, enumeration, and exact bounds, with vision only for what it does not expose, such as a canvas region, an image, or a custom widget. Accessibility data and vision are complementary observations of the same UI, and a screenshot cropped to an element's exact bounds is a far better vision input than a full-screen capture. [agent-desktop](https://agent-desktop.dev) packages xa11y's tree queries, element screenshots, and event streams as a CLI for agents.
 
+[strands-xa11y](https://github.com/xa11y/strands-xa11y) (`pip install strands-xa11y`) packages that same loop for a [Strands](https://strandsagents.com) agent rather than for a runtime that shells out, as a single tool named `use_desktop`. The model reads a snapshot of the tree with a ref on every line, then acts by ref or by [selector](/reference/selectors/). Its `inspect_desktop` variant is the same tool with the acting half removed from the schema, for an agent that should observe and never touch. That repository documents the tool surface and the consent prompts around acting on a real desktop; the [platform permissions](/guides/install/) underneath are xa11y's.
+
 | Decision axis | Accessibility data | Screen parsing | End-to-end VLM |
 | --- | --- | --- | --- |
 | Latency per observation | Milliseconds or less | Model inference | Model inference |
@@ -149,6 +151,7 @@ Platform prerequisites are minimal but real. macOS needs the Accessibility permi
 
 - **[AccessKit](https://accesskit.dev/)** publishes accessibility data from inside your app, where xa11y reads it from outside. They sit on opposite sides of the same interface and compose, since xa11y's own egui and winit test apps are AccessKit-backed, which is how one suite runs against a pure-Rust GUI on all three platforms.
 - **[Playwright](https://playwright.dev/)** does browser automation, and is the design influence behind xa11y's `Locator` pattern and selector syntax.
+- **[strands-xa11y](https://github.com/xa11y/strands-xa11y)** gives a [Strands](https://strandsagents.com) agent xa11y as a desktop-control tool, with a read-only variant for agents that observe.
 - **[agent-desktop](https://agent-desktop.dev)** is a CLI built on xa11y for AI agents that read and control desktops.
 - **RPA platforms** such as UiPath and Power Automate Desktop solve business process automation, with orchestration, scheduling, and enterprise licensing. Overlapping techniques, different product category.
 - **Accessibility auditing tools** such as axe and Accessibility Insights evaluate accessibility data against WCAG criteria. xa11y does no conformance evaluation.
