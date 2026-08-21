@@ -72,6 +72,10 @@ FEATURE_FILES: dict[str, dict[str, list[str]]] = {
         "actions": ["test_actions.py"],
         "input_sim": ["test_input_sim.py"],
         "screenshot": ["test_screenshot.py"],
+        # The MCP suite lives in the cli suite because it drives the same
+        # binary — parametrized over all three launchers rather than just the
+        # one `cli_bin` resolves.
+        "mcp": ["test_mcp.py"],
     },
     "js": {
         # JS suite files are numbered (e.g. 01_compat.test.js); match on the

@@ -8,6 +8,14 @@ description = "Cross-platform accessibility client library — unified API for r
 readme = "README.md"
 
 [features]
+# The `xa11y` binary: argument parsing, the human-readable output formats, and
+# the MCP stdio server. On by default so `cargo install xa11y` keeps producing
+# the CLI, and so both language bindings (which forward their own entry points
+# into `cli::run`) get it without extra configuration. A library consumer that
+# only wants the API can drop the two protocol modules with
+# `default-features = false`.
+default = ["cli"]
+cli = []
 testing = []
 strict-roles = ["xa11y-core/strict-roles"]
 # Re-exports the shared mock Provider from xa11y-core. Used by language
@@ -29,6 +37,7 @@ xa11y-linux = { workspace = true }
 [[bin]]
 name = "xa11y"
 path = "src/bin/xa11y.rs"
+required-features = ["cli"]
 
 [dependencies.serde_json]
 workspace = true

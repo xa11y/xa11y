@@ -28,7 +28,7 @@ JavaScript, and the CLI. Roughly:
 | Rust integration | ~150 | `xa11y/tests/integ/` | Live tree reads, action dispatch, events, screenshots against a running app |
 | Python binding unit | ~240 | `xa11y-python/tests/` | The PyO3 surface: types, actions, exceptions, GIL release, subscriptions |
 | Python integration | ~100 | `tests/suites/python/` | Per-app compat, actions, events, errors, input simulation, screenshots |
-| CLI integration | ~30 | `tests/suites/cli/` | The `xa11y` CLI end-to-end against running apps |
+| CLI integration | ~70 | `tests/suites/cli/` | The `xa11y` CLI end-to-end against running apps, plus the MCP server over every CLI launcher |
 | JavaScript unit | ~115 | `xa11y-js/__test__/unit/` | The napi-rs binding surface |
 | JavaScript integration | ~40 | `tests/suites/js/` | Per-app compat, actions, input simulation, screenshots |
 
@@ -105,6 +105,25 @@ input simulation, screenshots) against the *same* running app, driven by a
 shared harness (`tests/harness/launch.py`). Binding parity is proven by every
 binding passing identical scenarios against an identical target, rather than
 asserted by hand.
+
+## One CLI, three launchers
+
+The `xa11y` command comes with all three packages, and all three run the same
+Rust code: `cargo install xa11y` produces the binary, `pip install xa11y`
+installs a console script into it, and the npm package installs a Node bin
+that does the same. Nothing checked that they agreed until the MCP suite
+(`tests/suites/cli/test_mcp.py`), which runs every one of its tests once per
+launcher.
+
+That parametrization found real drift on its first run: the Python wrapper
+mapped every failure to exit code 1, losing the documented 2 for usage errors,
+and prefixed those messages twice. The exit-code contract now lives in one
+Rust function that all three launchers call.
+
+The integration cells set `XA11Y_REQUIRE_ALL_CLI`, which turns a missing
+launcher into a failure. A suite that quietly narrowed itself to whichever
+launcher happened to be built would look exactly like one that tested all
+three.
 
 ## The CI matrix
 

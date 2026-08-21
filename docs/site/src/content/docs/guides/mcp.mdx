@@ -1,0 +1,141 @@
+---
+title: Serve xa11y over MCP
+description: Wire the xa11y MCP server into a client so an agent can read and drive desktop applications through accessibility APIs.
+pageType: how-to
+---
+
+{/* DIATAXIS: how-to — a goal-oriented recipe for a reader who already knows
+    what they want. Steps and decisions only. Concepts go to explanation/,
+    exhaustive option lists go to reference/. */}
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+`xa11y mcp` serves the accessibility tree, actions, input simulation, and
+screenshots as [Model Context Protocol](https://modelcontextprotocol.io) tools
+over stdio. A client launches it as a subprocess, so an agent can drive a
+desktop application without you writing any glue.
+
+For the tool list, argument names, and result shapes, see the
+[CLI reference](/reference/cli/#xa11y-mcp).
+
+## Install the command
+
+Any of the three packages provides it. Pick whichever matches the rest of
+your setup. The server is the same either way.
+
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+
+```bash
+cargo install xa11y
+```
+
+  </TabItem>
+  <TabItem label="Python">
+
+```bash
+pip install xa11y
+```
+
+  </TabItem>
+  <TabItem label="JavaScript">
+
+```bash
+npm install -g @crowecawcaw/xa11y
+```
+
+  </TabItem>
+</Tabs>
+
+Check it starts:
+
+```bash
+xa11y mcp
+```
+
+Run in a terminal it prints a one-line note to stderr and waits. That is
+correct: it is waiting for JSON-RPC on stdin. Press Ctrl-D to exit.
+
+## Register it with a client
+
+Most clients read a JSON config naming the command to launch.
+
+```json
+{
+  "mcpServers": {
+    "xa11y": {
+      "command": "xa11y",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+If the command is not on `PATH`, give an absolute path. The Python and Node
+packages install the same `xa11y` command into their environment's bin
+directory, so a virtualenv or a local `npm install` needs the path to that
+copy rather than a global one.
+
+Restart the client and confirm it lists eleven tools, starting with `apps`.
+
+## Grant accessibility permission first
+
+The server can only see what the platform lets it see, and a client that
+launches it as a subprocess inherits the client's own permissions. Grant them
+to the application that launches the server, not to `xa11y` itself.
+
+| Platform | Requirement |
+| --- | --- |
+| macOS | Accessibility permission for the client application |
+| Windows | None for normal user sessions |
+| Linux | An AT-SPI bus (`at-spi-bus-launcher` running) |
+
+See [Install xa11y](/guides/install/) for the per-platform steps. Without the
+grant, the first tool call fails with a `permission_denied` result rather than
+an empty tree.
+
+## Drive an application
+
+A typical sequence: find the application, read its structure, act on it.
+
+1. `apps` returns running applications and their process ids.
+2. `tree` with `app` or `pid` returns the structure, 12 levels deep by
+   default.
+3. `find` with a [selector](/reference/selectors/) returns matching elements,
+   each with `bounds` and a precomputed `center`.
+4. `action` performs an accessibility action on a match.
+
+Prefer `action` over `click`. It calls the application's own accessibility
+action, so it works regardless of window position, focus, or whether the
+element is on screen. Reach for `click`, `key`, and `type` only where no
+accessibility action exists — see [Simulate input](/guides/input/).
+
+## Keep results small
+
+Every result goes into the model's context. Two arguments control the size:
+
+- `tree` takes `max_depth`. Start at 2 or 3 to find the window you want, then
+  walk into it.
+- `find` takes `limit`, defaulting to 50.
+
+Both report whether they truncated, so a shortened result never reads as a
+complete one.
+
+## Read a failure instead of retrying blind
+
+A failed tool call comes back as a result with `isError: true` rather than a
+protocol error, so the model sees it and can correct itself. The payload
+carries a `kind` and, for lookup failures, a diagnosis naming what the search
+was looking for, what it last observed, and which near-miss elements were
+present.
+
+A selector that matched nothing lists the candidates that were there, which is
+usually enough to fix the selector on the next call. See
+[Errors and diagnosis](/explanation/errors-and-diagnosis/).
+
+## What is not there yet
+
+Event streaming has no tool. `xa11y events` blocks for as long as you watch,
+and a tool call that never returns hangs the client, so it needs a different
+shape — a handle from a start call, drained by a poll call. Until then, watch
+events from the [CLI](/reference/cli/#xa11y-events) or the library.

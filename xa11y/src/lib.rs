@@ -68,7 +68,13 @@ pub use xa11y_core::{CancelHandle, EventReceiver, Provider, RecvStatus, Selector
 pub use xa11y_core::mock;
 
 #[doc(hidden)]
+#[cfg(feature = "cli")]
 pub mod cli;
+
+// The MCP stdio server behind `xa11y mcp`. Reached only through `cli::run`,
+// so it rides the same feature.
+#[cfg(feature = "cli")]
+mod mcp;
 
 // Re-export the extension trait so `use xa11y::*` enables `App::by_name(...)`.
 pub use app_ext::AppExt;

@@ -64,11 +64,38 @@ impl From<Error> for CliError {
 /// Result alias for CLI operations.
 pub type CliResult<T> = std::result::Result<T, CliError>;
 
+/// Run the CLI, render any failure to stderr, and return the process exit code.
+///
+/// This is the entry point every launcher uses — the `xa11y` binary, Python's
+/// `xa11y` console script, and the Node `xa11y` bin — so the exit-code
+/// contract on [`CliError`] and the error-message formatting are defined once
+/// rather than re-implemented per language. They had already drifted: the
+/// Python wrapper mapped every failure to exit 1, losing the documented
+/// `2` for usage errors, and prefixed usage errors twice ("error: usage
+/// error: ...").
+///
+/// Writes only to stderr, so it is safe to call for `xa11y mcp`, whose stdout
+/// carries protocol messages.
+pub fn run_main(args: &[String]) -> i32 {
+    match run(args) {
+        Ok(()) => 0,
+        Err(e) => {
+            // `CliError`'s Display already prefixes usage errors with
+            // "usage error: "; everything else gets the generic prefix.
+            match &e {
+                CliError::Usage(_) => eprintln!("{e}"),
+                _ => eprintln!("error: {e}"),
+            }
+            e.exit_code()
+        }
+    }
+}
+
 /// Run the CLI with the given arguments (excluding the program name).
 ///
 /// Returns `Ok(())` on success, or an `Err` with a human-readable message
-/// on failure. The caller is responsible for printing the error and exiting
-/// with [`CliError::exit_code`].
+/// on failure. Most callers want [`run_main`], which renders the error and
+/// produces the exit code.
 pub fn run(args: &[String]) -> CliResult<()> {
     match args.first().map(|s| s.as_str()) {
         Some("apps") => cmd_apps(),
@@ -83,6 +110,7 @@ pub fn run(args: &[String]) -> CliResult<()> {
         Some("key") => cmd_key(&args[1..]),
         Some("type") => cmd_type(&args[1..]),
         Some("screenshot") => cmd_screenshot(&args[1..]),
+        Some("mcp") => crate::mcp::serve(&args[1..]),
         _ => {
             print_usage();
             Ok(())
@@ -117,6 +145,10 @@ Input simulation (coords only — no selectors, no a11y):
 Screenshot (regions only — no selectors, no a11y):
   xa11y screenshot [--region X,Y,W,H] --out PATH
                                             --out - writes PNG bytes to stdout
+
+Model Context Protocol:
+  xa11y mcp                                 Serve the above as MCP tools over
+                                            stdio (for MCP clients, not humans)
 
 Compose a11y + input/screenshot via `find -o bounds|center`:
   region=$(xa11y find 'button[name=\"OK\"]' --app Safari -o bounds)
@@ -675,8 +707,55 @@ fn cmd_action(args: &[String]) -> CliResult<()> {
 
     let app = resolve_app(&opts)?;
     let locator = app.locator(selector);
+    perform_action(&locator, action_name, value.as_deref())?;
+    println!("ok");
+    Ok(())
+}
 
-    match action_name.as_str() {
+/// Every action verb `xa11y action` and the MCP `action` tool accept.
+///
+/// Single source of truth: the CLI's unknown-action error and the MCP tool's
+/// `inputSchema` enum both read this, so a verb added to [`perform_action`]
+/// cannot be advertised by one surface and rejected by the other.
+pub(crate) const ACTION_NAMES: &[&str] = &[
+    "press",
+    "focus",
+    "blur",
+    "toggle",
+    "expand",
+    "collapse",
+    "select",
+    "show-menu",
+    "scroll-into-view",
+    "increment",
+    "decrement",
+    "set-value",
+    "type-text",
+    "select-text",
+];
+
+/// Actions that require a `--value` (MCP: `value`) argument.
+pub(crate) const ACTIONS_REQUIRING_VALUE: &[&str] = &["set-value", "type-text", "select-text"];
+
+/// Dispatch a named action verb onto `locator`.
+///
+/// Shared by `xa11y action` and the MCP `action` tool so the two cannot drift
+/// on which verbs exist or which of them need a value. Writes nothing to
+/// stdout: the MCP stdio transport allows only protocol messages there, so
+/// the "ok" line stays in the CLI half.
+pub(crate) fn perform_action(
+    locator: &Locator,
+    action_name: &str,
+    value: Option<&str>,
+) -> CliResult<()> {
+    // Each `requires --value` arm re-checks rather than trusting a caller to
+    // have consulted ACTIONS_REQUIRING_VALUE (tenet 1: the failure is
+    // surfaced where it happens, not assumed away upstream).
+    let need_value = |verb: &str| -> CliResult<&str> {
+        value.ok_or_else(|| CliError::Usage(format!("{verb} requires a value")))
+    };
+
+    match action_name {
         "press" => locator.press()?,
         "focus" => locator.focus()?,
         "blur" => locator.blur()?,
@@ -688,39 +767,39 @@ fn cmd_action(args: &[String]) -> CliResult<()> {
         "scroll-into-view" => locator.scroll_into_view()?,
         "increment" => locator.increment()?,
         "decrement" => locator.decrement()?,
-        "set-value" => {
-            let v = value.ok_or_else(|| CliError::Usage("set-value requires --value".into()))?;
-            locator.set_value(&v)?;
-        }
-        "type-text" => {
-            let v = value.ok_or_else(|| CliError::Usage("type-text requires --value".into()))?;
-            locator.type_text(&v)?;
-        }
+        "set-value" => locator.set_value(need_value("set-value")?)?,
+        "type-text" => locator.type_text(need_value("type-text")?)?,
         "select-text" => {
-            let v = value
-                .ok_or_else(|| CliError::Usage("select-text requires --value START,END".into()))?;
-            let parts: Vec<&str> = v.split(',').collect();
-            if parts.len() != 2 {
-                return Err(CliError::Usage(
-                    "select-text --value must be START,END (e.g. 0,5)".into(),
-                ));
-            }
-            let start: u32 = parts[0]
-                .trim()
-                .parse()
-                .map_err(|_| CliError::Usage("invalid START in select-text --value".into()))?;
-            let end: u32 = parts[1]
-                .trim()
-                .parse()
-                .map_err(|_| CliError::Usage("invalid END in select-text --value".into()))?;
+            let v = need_value("select-text")?;
+            let (start, end) = parse_text_range(v)?;
             locator.select_text(start, end)?;
         }
         other => {
-            return Err(CliError::Usage(format!("unknown action: {other}")));
+            return Err(CliError::Usage(format!(
+                "unknown action: {other} (expected one of: {})",
+                ACTION_NAMES.join(", ")
+            )));
         }
     }
-    println!("ok");
     Ok(())
+}
+
+/// Parse a `START,END` character range for `select-text`.
+pub(crate) fn parse_text_range(raw: &str) -> CliResult<(u32, u32)> {
+    let parts: Vec<&str> = raw.split(',').collect();
+    if parts.len() != 2 {
+        return Err(CliError::Usage(format!(
+            "select-text value must be START,END (e.g. 0,5), got: {raw}"
+        )));
+    }
+    let start: u32 = parts[0].trim().parse().map_err(|_| {
+        CliError::Usage(format!("invalid START in select-text value: {}", parts[0]))
+    })?;
+    let end: u32 = parts[1]
+        .trim()
+        .parse()
+        .map_err(|_| CliError::Usage(format!("invalid END in select-text value: {}", parts[1])))?;
+    Ok((start, end))
 }
 
 fn cmd_events(args: &[String]) -> CliResult<()> {

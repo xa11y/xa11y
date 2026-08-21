@@ -506,17 +506,29 @@ jobs:
       # On Linux, DISPLAY / D-Bus / AT-SPI (+ the egui window manager) were
       # already brought up by the setup-a11y step above, and XA11Y_A11Y_READY
       # tells launch.py not to start a second AT-SPI stack.
+      #
+      # XA11Y_REQUIRE_ALL_CLI makes tests/suites/cli/test_mcp.py fail when any
+      # of the three CLI launchers (the Rust binary, the Python console
+      # script, the Node bin) is missing. Without it the suite would narrow
+      # itself to whatever happened to be built, and a cell that exercised one
+      # launcher would look exactly like one that exercised three.
       - name: Run integration harness (Linux)
         if: runner.os == 'Linux'
+        env:
+          XA11Y_REQUIRE_ALL_CLI: "1"
         run: .venv-integ/bin/python tests/harness/launch.py ${{ matrix.app }} python js cli
 
       - name: Run integration harness (macOS)
         if: runner.os == 'macOS'
+        env:
+          XA11Y_REQUIRE_ALL_CLI: "1"
         run: .venv-integ/bin/python tests/harness/launch.py ${{ matrix.app }} python js cli
 
       - name: Run integration harness (Windows)
         if: runner.os == 'Windows'
         shell: bash
+        env:
+          XA11Y_REQUIRE_ALL_CLI: "1"
         run: .venv-integ/Scripts/python.exe tests/harness/launch.py ${{ matrix.app }} python js cli
 
   # ── Published end-to-end examples (issue #192) ─────────────────────

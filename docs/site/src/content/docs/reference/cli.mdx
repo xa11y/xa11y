@@ -11,8 +11,10 @@ pageType: reference
 The `xa11y` command-line tool mirrors the library API. It is the fastest way to
 inspect an application before writing code against it.
 
-Install it with `cargo install xa11y` or `pip install xa11y`, both of which
-provide the same binary. See [Install xa11y](/guides/install/#install-the-cli).
+Install it with `cargo install xa11y`, `pip install xa11y`, or
+`npm install @crowecawcaw/xa11y`. All three provide the same command, built
+from the same Rust code. See
+[Install xa11y](/guides/install/#install-the-cli).
 
 For the task of arriving at a working selector, see
 [Find the right selector](/guides/debug-selectors/). If you're looking to build
@@ -183,6 +185,77 @@ Captures a region, or the whole primary display when `--region` is omitted.
 ```bash
 xa11y screenshot --region X,Y,W,H --out PATH
 ```
+
+## `xa11y mcp`
+
+Serves the commands above as [Model Context Protocol](https://modelcontextprotocol.io)
+tools over stdio. An MCP client launches it as a subprocess and speaks JSON-RPC
+on its standard streams, one message per line. It is not meant to be run by
+hand.
+
+```bash
+xa11y mcp
+```
+
+The same server ships in all three packages, because all three launchers run
+the same Rust implementation. To wire it into a client, see
+[Serve xa11y over MCP](/guides/mcp/).
+
+### Protocol revisions
+
+The server is dual-era. It answers `server/discover` for clients on the
+stateless revisions (`2026-07-28` and later) and `initialize` for clients that
+open with a handshake (`2025-11-25`, `2025-06-18`, `2025-03-26`). A request
+naming a revision it does not speak gets a `-32022` error listing the ones it
+does.
+
+### Tools
+
+Each tool takes the arguments its CLI counterpart takes as flags. The
+accessibility tools need `app` or `pid`; the input and screenshot tools take
+screen coordinates and no target.
+
+| Tool | Arguments |
+| --- | --- |
+| `apps` | none |
+| `tree` | `app`, `pid`, `max_depth` |
+| `find` | `selector`, `app`, `pid`, `limit` |
+| `action` | `action`, `selector`, `app`, `pid`, `value` |
+| `click` | `x`, `y`, `button`, `count`, `held` |
+| `move` | `x`, `y` |
+| `drag` | `from_x`, `from_y`, `to_x`, `to_y`, `button`, `duration_ms`, `held` |
+| `scroll` | `x`, `y`, `dx`, `dy` |
+| `key` | `key`, `held` |
+| `type` | `text` |
+| `screenshot` | `x`, `y`, `width`, `height` |
+
+`action` accepts the same verbs as [`xa11y action`](#xa11y-action). `key`
+accepts the same key names as [`xa11y key`](#input-simulation).
+
+Streaming events has no tool. A tool call that never returns would hang the
+client, so `xa11y events` has no MCP counterpart yet.
+
+### Results
+
+Every tool returns `structuredContent`, mirrored as JSON in a text block for
+clients on revisions that predate `structuredContent`. `find` reports each
+match's `bounds` and a precomputed `center`, so a result feeds straight into
+`click` or `screenshot` without arithmetic.
+
+Results are bounded, because each one lands in a model's context window.
+`tree` walks 12 levels by default and never returns more than 2000 nodes;
+`find` returns 50 matches by default and never more than 500. Both report
+whether they truncated.
+
+### Errors
+
+Failures split the way the protocol asks. An unknown tool or a malformed
+request is a JSON-RPC error. Everything a model could fix by retrying — a
+selector that matched nothing, an application that is not running, a bad key
+name — comes back as a result with `isError: true`, carrying the failure's
+`kind` and, where the error has one, its
+[diagnosis](/explanation/errors-and-diagnosis/): what the operation was
+waiting for, what it last observed, and which near-miss elements were present.
 
 ## Composing the two halves
 

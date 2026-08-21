@@ -45,6 +45,7 @@ COMMANDS:
     fuzz [ARGS..]       Run provider fuzzer (pass-through args)
     sync-readmes [--check]  Generate crates.io/PyPI READMEs from root README.md
     check-macos-ffi     Verify xa11y-macos/src/ax.rs only uses safe_* CF/AX wrappers
+    check-mcp-stdout    Verify xa11y/src/mcp writes nothing to stdout but protocol
     check-bindings-parity  Verify Python/JS bindings mirror xa11y-core's public API
     check               Run ALL pre-PR checks (fmt, lint, test, test-python, test-js, test-harness, test-pytest-plugin, test-strands)
     help                Show this help
@@ -87,6 +88,7 @@ fn main() -> ExitCode {
         "fuzz" => do_fuzz(rest),
         "sync-readmes" => do_sync_readmes(rest),
         "check-macos-ffi" => do_check_macos_ffi(),
+        "check-mcp-stdout" => do_check_mcp_stdout(),
         "check-bindings-parity" => parity::check(&project_root()),
         "check" => do_check(),
         "help" | "--help" | "-h" => {
@@ -215,6 +217,24 @@ fn do_lint() -> bool {
         "-Dwarnings",
     );
 
+    // The `cli` feature is on by default, so nothing above ever builds
+    // `xa11y` without it. A library consumer who takes the opt-out
+    // (`default-features = false`) does, and an unguarded `cfg` would leave
+    // that configuration broken until they reported it.
+    heading("Clippy (xa11y without the cli feature)");
+    let no_cli_ok = run_with_env(
+        "cargo",
+        &[
+            "clippy",
+            "-p",
+            "xa11y",
+            "--no-default-features",
+            "--all-targets",
+        ],
+        "RUSTFLAGS",
+        "-Dwarnings",
+    );
+
     heading("Ruff check");
     let python_dir = project_root().join("xa11y-python");
     let ruff_ok = run_in("ruff", &["check", "python/", "tests/"], &python_dir);
@@ -248,6 +268,7 @@ fn do_lint() -> bool {
     let strands_ok = run_in("ruff", &["check", "src/", "tests/"], &strands_dir);
 
     clippy_ok
+        && no_cli_ok
         && ruff_ok
         && py_cargo_ok
         && py_fmt_ok
@@ -924,6 +945,104 @@ fn render_readme(source: &str, keep: &str) -> String {
 /// add a `safe_*` wrapper to `exception_safe.m` first and call that instead.
 /// References in `//` line comments are ignored so documentation can still
 /// mention the forbidden symbols by name.
+fn do_check_mcp_stdout() -> bool {
+    heading("MCP stdout-purity check");
+
+    // The MCP stdio transport reserves stdout for protocol messages: a stray
+    // print corrupts the session for the client, which usually surfaces on the
+    // far side as a baffling parse error rather than as anything pointing back
+    // here. Diagnostics belong on stderr, which the spec leaves free.
+    //
+    // `eprint!` / `eprintln!` are fine and deliberately absent from this list.
+    const FORBIDDEN_MACROS: &[&str] = &["println!", "print!"];
+
+    let dir = project_root().join("xa11y/src/mcp");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            eprintln!("Failed to read {}: {e}", dir.display());
+            return false;
+        }
+    };
+
+    let mut files: Vec<std::path::PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|ext| ext == "rs"))
+        .collect();
+    files.sort();
+
+    if files.is_empty() {
+        eprintln!("!! No Rust sources found under {}.", dir.display());
+        return false;
+    }
+
+    let mut violations: Vec<(String, usize, String)> = Vec::new();
+    for path in &files {
+        let src = match fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("Failed to read {}: {e}", path.display());
+                return false;
+            }
+        };
+        for (lineno, line) in src.lines().enumerate() {
+            let code = strip_line_comment(line);
+            for &mac in FORBIDDEN_MACROS {
+                // `println!` ends in `!`, so a plain substring search would also
+                // hit `eprintln!`. Requiring the preceding byte to not be an
+                // identifier character keeps the two apart.
+                if contains_macro_call(code, mac) {
+                    violations.push((
+                        path.display().to_string(),
+                        lineno + 1,
+                        line.trim().to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    if violations.is_empty() {
+        eprintln!(
+            "OK: no stdout writes under xa11y/src/mcp ({} file(s) checked).",
+            files.len()
+        );
+        return true;
+    }
+
+    eprintln!(
+        "!! {} stdout write(s) found under xa11y/src/mcp:",
+        violations.len()
+    );
+    for (file, lineno, line) in &violations {
+        eprintln!("  {file}:{lineno}: {line}");
+    }
+    eprintln!(
+        "\n  stdout carries MCP protocol messages only. Use eprintln! (stderr),\n\
+         which the stdio transport leaves free for logging."
+    );
+    false
+}
+
+/// Whether `code` invokes the macro `name` (e.g. `println!`) as its own token.
+///
+/// The leading-byte test is what separates `println!` from `eprintln!`.
+fn contains_macro_call(code: &str, name: &str) -> bool {
+    let bytes = code.as_bytes();
+    let mut from = 0;
+    while let Some(offset) = code[from..].find(name) {
+        let start = from + offset;
+        let preceded_by_ident = start
+            .checked_sub(1)
+            .is_some_and(|i| bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric());
+        if !preceded_by_ident {
+            return true;
+        }
+        from = start + name.len();
+    }
+    false
+}
+
 fn do_check_macos_ffi() -> bool {
     heading("macOS FFI exception-safety check");
 
@@ -1169,6 +1288,12 @@ fn do_check() -> bool {
     heading("PRE-PR CHECK: macos-ffi");
     if !do_check_macos_ffi() {
         eprintln!("!! macOS FFI check failed. See above for details.");
+        ok = false;
+    }
+
+    heading("PRE-PR CHECK: mcp-stdout");
+    if !do_check_mcp_stdout() {
+        eprintln!("!! MCP stdout-purity check failed. See above for details.");
         ok = false;
     }
 

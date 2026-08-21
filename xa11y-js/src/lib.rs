@@ -77,6 +77,27 @@ pub fn get_default_timeout() -> napi::Result<f64> {
     Ok(xa11y::default_timeout().map_err(map_err)?.as_secs_f64())
 }
 
+/// CLI entry point called from the `xa11y` bin script.
+///
+/// Runs the Rust CLI implementation with the given args (excluding the
+/// program name) and returns the process exit code: `0` success, `1`
+/// operation failed, `2` usage error. The error message is written to stderr
+/// by the shared entry point, so the Node, Python, and Rust launchers render
+/// failures identically.
+///
+/// Returns a code rather than throwing because a thrown napi `Error` cannot
+/// carry one: the shim would have to re-encode the code in the message, the
+/// way the `XA11Y_*` error tags already do, and every caller would have to
+/// decode it.
+///
+/// This is intentionally synchronous. It backs a process whose only job is to
+/// run one command — for `xa11y mcp` that means owning stdin and stdout for
+/// the life of the process — so there is no event loop left to starve.
+#[napi(js_name = "cliMain")]
+pub fn cli_main(args: Vec<String>) -> i32 {
+    xa11y::cli::run_main(&args)
+}
+
 /// Create a top-level [`Locator`](locator::Locator) that searches from the
 /// system accessibility root (across all applications).
 #[napi(js_name = "locator")]

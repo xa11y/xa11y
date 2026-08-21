@@ -66,6 +66,7 @@ export default defineConfig({
             { label: "Simulate input", slug: "guides/input" },
             { label: "Capture screenshots", slug: "guides/screenshots" },
             { label: "Drive a desktop from a Strands agent", slug: "guides/strands" },
+            { label: "Serve xa11y over MCP", slug: "guides/mcp" },
           ],
         },
         {

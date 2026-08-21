@@ -123,10 +123,14 @@ internal = [
 
 [[types.variant_coverage]]
 type = "Error"
-reason = "Each variant maps to a specific exception class / error code; an unmapped one would fall through to the generic XA11yError."
+reason = "Each variant maps to a specific exception class / error code / MCP failure kind; an unmapped one would fall through to the generic XA11yError or to the MCP kind \"unknown\"."
 files = [
     "xa11y-python/src/lib.rs",
     "xa11y-js/src/errors.rs",
+    # `failure_kind` tags every MCP tool error so an agent harness can branch
+    # on the kind instead of parsing prose. Its `_` arm reports "unknown",
+    # which is exactly the silent degradation this check exists to catch.
+    "xa11y/src/mcp/tools.rs",
     # index.js maps each code tag to a JS error class; an unlisted tag falls
     # through `if (!Cls) return err` and reaches the user as an untyped Error.
     { path = "xa11y-js/index.js", spelling = "screaming_snake", prefix = "XA11Y_" },

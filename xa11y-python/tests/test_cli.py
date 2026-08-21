@@ -3,8 +3,6 @@
 import subprocess
 import sys
 
-import pytest
-
 
 def run_cli(*args: str) -> subprocess.CompletedProcess:
     """Run the xa11y CLI via the Python entry point."""
@@ -157,24 +155,30 @@ def test_cli_main_importable():
     assert callable(_cli_main)
 
 
-def test_cli_main_no_args_does_not_crash():
-    """Calling _cli_main with no args should print usage, not crash."""
+def test_cli_main_no_args_succeeds():
+    """Calling _cli_main with no args prints usage and reports success."""
     from xa11y._native import _cli_main
 
-    # No args → prints usage to stderr, returns Ok(())
-    _cli_main([])
+    assert _cli_main([]) == 0
 
 
-def test_cli_main_tree_no_app_raises():
-    """tree without --app should raise an error."""
+def test_cli_main_returns_two_for_a_usage_error(capfd):
+    """`tree` without a target is a usage error: exit 2, message on stderr.
+
+    _cli_main returns the exit code rather than raising. Raising meant the
+    console script collapsed every failure to 1, losing the documented `2`
+    for usage errors (and double-prefixing the message).
+    """
     from xa11y._native import _cli_main
 
-    with pytest.raises(Exception, match=r"--app|--pid"):
-        _cli_main(["tree"])
+    assert _cli_main(["tree"]) == 2
+    stderr = capfd.readouterr().err
+    assert "--app" in stderr or "--pid" in stderr
+    assert not stderr.startswith("error: usage error:"), "one prefix, not two"
 
 
-def test_cli_main_action_missing_args_raises():
+def test_cli_main_returns_two_for_missing_action_arguments(capfd):
     from xa11y._native import _cli_main
 
-    with pytest.raises(Exception, match=r"usage|ACTION"):
-        _cli_main(["action"])
+    assert _cli_main(["action"]) == 2
+    assert "usage" in capfd.readouterr().err.lower()

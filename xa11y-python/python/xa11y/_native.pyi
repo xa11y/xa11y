@@ -745,6 +745,16 @@ def screenshot(
     screen coordinates. Passing both raises ``ValueError``.
     """
 
+# ── CLI entry point ──────────────────────────────────────────────────────────
+
+def _cli_main(args: list[str]) -> int:
+    """Run the Rust CLI and return the process exit code.
+
+    ``args`` excludes the program name. Returns ``0`` on success, ``1`` on an
+    operation failure, ``2`` on a usage error; the message is written to
+    stderr by the Rust side. Backs the ``xa11y`` console script.
+    """
+
 # ── Test helpers ─────────────────────────────────────────────────────────────
 
 def _make_test_locator() -> Locator: ...

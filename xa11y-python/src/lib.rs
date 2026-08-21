@@ -2032,16 +2032,23 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 /// CLI entry point called from the Python `xa11y` console script.
 ///
-/// Runs the Rust CLI implementation with the given args (excluding program name).
+/// Runs the Rust CLI implementation with the given args (excluding the
+/// program name) and returns the process exit code: `0` success, `1`
+/// operation failed, `2` usage error. The error message is written to stderr
+/// by the shared entry point, so every launcher renders failures identically.
+///
+/// Returning a code rather than raising is deliberate. The exit-code contract
+/// is documented in the CLI help and honoured by the `xa11y` binary; mapping
+/// failures to exceptions here meant the console script collapsed all of them
+/// to `1` and lost the `2` for usage errors.
+///
+/// The whole run happens inside `allow_threads` (tenet 5). `cli::run` never
+/// calls back into Python, and it blocks for as long as the operation takes —
+/// the lifetime of the process for `xa11y events` and `xa11y mcp`. Holding the
+/// GIL across that would freeze every other thread in the interpreter.
 #[pyfunction]
-fn _cli_main(args: Vec<String>) -> PyResult<()> {
-    xa11y::cli::run(&args).map_err(|e| match e {
-        // Underlying xa11y errors keep their typed Python exceptions.
-        xa11y::cli::CliError::Xa11y(inner) => to_py_err(inner),
-        // Usage / not-found errors are CLI-level; Display carries the full
-        // human-readable message (including the "usage error: " prefix).
-        other => XA11yError::new_err(other.to_string()),
-    })
+fn _cli_main(py: Python<'_>, args: Vec<String>) -> i32 {
+    py.allow_threads(move || xa11y::cli::run_main(&args))
 }
 
 // ── Test helpers ────────────────────────────────────────────────────────────

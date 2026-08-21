@@ -20,6 +20,7 @@
   "main": "index.js",
   "types": "index.d.ts",
   "files": [
+    "bin/xa11y.js",
     "index.js",
     "index.d.ts",
     "native.js",
@@ -58,5 +59,8 @@
     "@napi-rs/cli": "^3.0.0",
     "@types/node": "^26.0.0",
     "typescript": "^7.0.2"
+  },
+  "bin": {
+    "xa11y": "bin/xa11y.js"
   }
 }

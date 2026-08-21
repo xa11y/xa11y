@@ -11,6 +11,17 @@ coverage lives in ``tests/suites/python/test_gil_release.py``, where a live
 accessibility bus exists. Issue #358 went unnoticed because that gap was not
 recorded anywhere.
 
+``_cli_main`` is the other known gap, and it is deliberate. It wraps the whole
+CLI run in ``allow_threads`` (which matters most for ``xa11y events`` and
+``xa11y mcp``, both of which block for the life of the process), but no CLI
+subcommand blocks for a bounded, display-free duration, so a tick-counting
+assertion would be flaky. The one construction that is deterministic —
+redirecting fd 0 to a pipe and closing the write end from a timer thread —
+*deadlocks* rather than fails if the GIL is held, because the closing thread
+cannot be scheduled. A hanging CI job is worse than a recorded gap, so the
+property is left to review of the one-line wrapper. Recording it here rather
+than nowhere is the lesson of issue #358.
+
 Referenced from AGENTS.md (Design Tenets, tenet 5) — keep the file name
 stable.
 """

@@ -149,6 +149,28 @@ features:
       Python: Tauri app. JS: Tauri + Electron apps. Rust: AccessKit app
       (rust_core).
 
+  mcp:
+    description: "MCP stdio server: framing, dual-era handshake, tool schemas, and identical behaviour from all three CLI launchers"
+    per_app: false
+    tested_on: [qt, gtk, cocoa, tauri, electron, egui, winforms, wpf]
+    notes: >
+      Runs inside the cli suite (tests/suites/cli/test_mcp.py), so it covers
+      every app whose cell runs that suite; the accesskit cells skip it along
+      with the rest of the cli suite. Most assertions are protocol-level and
+      app-independent — the tool-call tests use whichever app the cell
+      launched.
+      Every test runs once per CLI entry point: the Rust binary, the Python
+      console script (xa11y._cli), and the Node bin (xa11y-js/bin/xa11y.js).
+      That parametrization is the point of the suite. All three forward argv
+      into cli::run_main, and nothing verified they agreed until this suite —
+      the exit-code contract had already drifted, with the Python wrapper
+      collapsing every failure to 1.
+      Set XA11Y_REQUIRE_ALL_CLI=1 to make a missing launcher an error rather
+      than a narrower run; the integ cells set it.
+      Framing, version negotiation, tool schemas, and error mapping also have
+      unit coverage in xa11y/src/mcp/, which runs on every platform with no
+      app and no display.
+
 # rust_core is the xa11y/tests/integ/ suite — separate from per-app compat suites.
 rust_core:
   app: accesskit
@@ -173,42 +195,42 @@ coverage:
   qt:
     python: [compat, actions, events, errors]
     js: [compat, actions]
-    cli: [compat, actions]
+    cli: [compat, actions, mcp]
 
   gtk:
     python: [compat, actions, events, errors]
     js: [compat, actions]
-    cli: [compat, actions]
+    cli: [compat, actions, mcp]
 
   cocoa:
     python: [compat, actions, events, errors]
     js: [compat, actions]
-    cli: [compat, actions]
+    cli: [compat, actions, mcp]
 
   tauri:
     python: [compat, actions, events, errors, input_sim, screenshot]
     js: [compat, actions, input_sim, screenshot]
-    cli: [compat, actions, input_sim, screenshot]
+    cli: [compat, actions, input_sim, screenshot, mcp]
 
   electron:
     python: [compat, actions, errors]
     js: [compat, actions, input_sim, screenshot]
-    cli: [compat, actions]
+    cli: [compat, actions, mcp]
 
   egui:
     python: [compat, actions, events, errors]
     js: [compat, actions]
-    cli: [compat, actions]
+    cli: [compat, actions, mcp]
 
   winforms:
     python: [compat, actions, events, errors]
     js: [compat, actions]
-    cli: [compat, actions]
+    cli: [compat, actions, mcp]
 
   wpf:
     python: [compat, actions, events, errors]
     js: [compat, actions]
-    cli: [compat, actions]
+    cli: [compat, actions, mcp]
 
 gaps:
   - id: accesskit_python_suite_non_linux
