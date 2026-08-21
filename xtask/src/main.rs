@@ -37,6 +37,7 @@ COMMANDS:
     test-compat [APP]   Run shared harness (python + js + cli suites) against APP (default: tauri)
     test-matrix-check   Validate the tests/matrix.yaml coverage index
     test-harness        Unit-test the shared integ harness (tests/harness/)
+    test-mcp-client     Drive `xa11y mcp` with the official MCP Python SDK
     test-pytest-plugin  Install and test the pytest-xa11y plugin package
     test-strands        Test the strands-xa11y agent-tool package
     docs                Build documentation
@@ -80,6 +81,7 @@ fn main() -> ExitCode {
         "test-compat" => do_test_compat(rest),
         "test-matrix-check" => do_test_matrix_check(),
         "test-harness" => do_test_harness(),
+        "test-mcp-client" => do_test_mcp_client(),
         "test-pytest-plugin" => do_test_pytest_plugin(),
         "test-strands" => do_test_strands(),
         "docs" => do_docs(),
@@ -630,6 +632,42 @@ fn do_test_strands() -> bool {
     // sys.path would import the `xa11y/` crate directory as a namespace
     // package instead of the bindings.
     run("python", &["strands-xa11y/tests/check_real_surface.py"])
+}
+
+/// Drive `xa11y mcp` with the official MCP Python SDK.
+///
+/// The raw-JSON suite in `tests/suites/cli/test_mcp.py` asserts the shapes this
+/// project believes the spec asks for; this one asserts that a real client
+/// agrees. That gap is not theoretical — the SDK's revision-pinned wire models
+/// mark several fields required that the prose describes as MUST, and it
+/// rejected `tools/list` outright until the mandatory caching hints were added.
+///
+/// Needs only the `xa11y` binary: no display, no accessibility bus, no test
+/// application. Kept out of `cargo xtask check` because it installs a
+/// dependency tree (pydantic and friends) that the rest of the checks do not
+/// need; CI runs it as its own job on one platform.
+fn do_test_mcp_client() -> bool {
+    heading("MCP client interop: install the SDK");
+    let root = project_root();
+    let suite_dir = root.join("tests/mcp_client");
+    if !run(
+        "pip",
+        &[
+            "install",
+            "-r",
+            &suite_dir.join("requirements.txt").display().to_string(),
+        ],
+    ) {
+        return false;
+    }
+
+    heading("MCP client interop: build the CLI");
+    if !run("cargo", &["build", "-p", "xa11y"]) {
+        return false;
+    }
+
+    heading("MCP client interop: test");
+    run_in("python", &["-m", "pytest", "tests/mcp_client", "-v"], &root)
 }
 
 /// Unit-test the shared integration harness and the coverage-index checker.

@@ -15,6 +15,7 @@ QObject
 UIs
 input_sim
 interactability
+interop
 showmenu
 static_text
 subrole

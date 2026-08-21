@@ -31,6 +31,7 @@ JavaScript, and the CLI. Roughly:
 | CLI integration | ~70 | `tests/suites/cli/` | The `xa11y` CLI end-to-end against running apps, plus the MCP server over every CLI launcher |
 | JavaScript unit | ~115 | `xa11y-js/__test__/unit/` | The napi-rs binding surface |
 | JavaScript integration | ~40 | `tests/suites/js/` | Per-app compat, actions, input simulation, screenshots |
+| MCP client interop | ~30 | `tests/mcp_client/` | `xa11y mcp` driven by the official MCP Python SDK, in both protocol eras |
 
 Counts are approximate and grow over time, so read the figures above as a rough
 shape. The authoritative coverage index, recording which app is tested in which
@@ -105,6 +106,31 @@ input simulation, screenshots) against the *same* running app, driven by a
 shared harness (`tests/harness/launch.py`). Binding parity is proven by every
 binding passing identical scenarios against an identical target, rather than
 asserted by hand.
+
+## Checked against a real MCP client
+
+The MCP server has two test suites, and the split is deliberate.
+`tests/suites/cli/test_mcp.py` speaks raw JSON-RPC and asserts the shapes this
+project believes the specification asks for. `tests/mcp_client/` drives the
+same server with the official MCP Python SDK and asserts that a real client
+agrees.
+
+Those are different questions. The SDK validates responses against wire models
+pinned to each protocol revision, and those models mark as required several
+fields the prose describes as MUST. The server returned `tools/list` and
+`server/discover` without their mandatory caching hints, and the raw-JSON
+suite passed the whole time, because it was checking one reading of the spec
+against itself. The SDK rejected the response outright on first contact.
+
+Each suite covers what the other cannot. The SDK exercises what a real client
+actually sends, in both protocol eras. The raw-JSON suite exercises what the
+SDK refuses to send: malformed lines, unsupported protocol versions,
+notifications out of order.
+
+The interop job runs on Linux only. The server is hand-rolled JSON-RPC over
+standard streams with no platform-specific code in it, so the answer does not
+vary by operating system; the accessibility layer beneath it is what does, and
+the integration matrix covers that.
 
 ## One CLI, three launchers
 

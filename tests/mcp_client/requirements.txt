@@ -1,0 +1,16 @@
+# The official MCP Python SDK, used as a real client against `xa11y mcp`.
+#
+# Pinned exactly, for the same reason .vale.ini pins its style package: an
+# upstream release must not be able to turn CI red without a commit here. The
+# SDK's revision-pinned wire models are strict about the shapes the spec
+# requires, which is the whole point of testing against it — a lenient parser
+# would have accepted the `tools/list` result that was missing its mandatory
+# caching hints.
+mcp==2.0.0
+
+# Used directly, to check each tool's inputSchema is valid JSON Schema.
+# Declared rather than leaned on as a transitive dep of mcp.
+jsonschema>=4.26.0
+
+pytest>=9.1.1
+pytest-timeout>=2.4.0

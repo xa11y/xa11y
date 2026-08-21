@@ -42,6 +42,32 @@ pub(crate) fn supported_versions() -> Vec<&'static str> {
     all
 }
 
+/// How long a client may consider `server/discover` and `tools/list` fresh.
+///
+/// Both are compile-time constants here — the tool table is a `const` slice and
+/// the version list never changes — and on stdio the process *is* the session,
+/// so neither can change under a connected client. The hour is arbitrary but
+/// safe. The alternative invalidation channel, `listChanged`, is deliberately
+/// not advertised: there is nothing to notify about.
+const CACHE_TTL_MS: u64 = 3_600_000;
+
+/// Neither cacheable result carries user-specific data, so a shared gateway or
+/// caching proxy may serve them to any caller. See the spec's guidance:
+/// `"public"` is for lists that are identical for every user.
+const CACHE_SCOPE: &str = "public";
+
+/// Stamp the caching hints onto a cacheable result.
+///
+/// The spec is a MUST: every `resultType: "complete"` result from
+/// `server/discover`, `tools/list`, and the other cacheable operations carries
+/// `ttlMs` and `cacheScope`. Omitting them is not a lenient degradation — the
+/// official SDK's revision-pinned wire models mark both fields required, so a
+/// real client rejects the response outright.
+fn with_cache_hints(result: &mut Map<String, Value>) {
+    result.insert("ttlMs".into(), json!(CACHE_TTL_MS));
+    result.insert("cacheScope".into(), json!(CACHE_SCOPE));
+}
+
 /// `_meta` key carrying the protocol version on a modern request.
 const META_PROTOCOL_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
 /// `_meta` key carrying the server identity on a modern result.
@@ -203,13 +229,14 @@ impl<H: ToolHost> Session<H> {
     }
 
     fn discover_result(&self) -> Value {
-        json!({
-            "resultType": "complete",
-            "supportedVersions": supported_versions(),
-            "capabilities": { "tools": {} },
-            "instructions": INSTRUCTIONS,
-            "_meta": { META_SERVER_INFO: server_info() },
-        })
+        let mut result = Map::new();
+        result.insert("resultType".into(), json!("complete"));
+        result.insert("supportedVersions".into(), json!(supported_versions()));
+        result.insert("capabilities".into(), json!({ "tools": {} }));
+        result.insert("instructions".into(), json!(INSTRUCTIONS));
+        result.insert("_meta".into(), json!({ META_SERVER_INFO: server_info() }));
+        with_cache_hints(&mut result);
+        Value::Object(result)
     }
 
     /// The legacy handshake reply.
@@ -240,6 +267,9 @@ impl<H: ToolHost> Session<H> {
         let mut result = Map::new();
         if self.modern_results() {
             result.insert("resultType".into(), json!("complete"));
+            // Caching hints exist only on the modern revisions; a legacy
+            // client has no field to put them in.
+            with_cache_hints(&mut result);
         }
         result.insert("tools".into(), Value::Array(self.host.list()));
         Value::Object(result)
@@ -440,6 +470,40 @@ mod tests {
         );
         assert!(result["capabilities"]["tools"].is_object());
         assert_eq!(result["_meta"][META_SERVER_INFO]["name"], "xa11y");
+    }
+
+    #[test]
+    fn discover_carries_the_required_caching_hints() {
+        // A MUST in the spec, and the official SDK's revision-pinned wire
+        // model marks both fields required — omitting them made a real client
+        // reject the response, which is how this was found.
+        let mut s = session();
+        let resp = s.handle(req(1, "server/discover", modern_meta())).unwrap();
+        assert_eq!(resp["result"]["ttlMs"], CACHE_TTL_MS);
+        assert_eq!(resp["result"]["cacheScope"], CACHE_SCOPE);
+    }
+
+    #[test]
+    fn modern_tools_list_carries_the_required_caching_hints() {
+        let mut s = session();
+        s.handle(req(1, "server/discover", modern_meta()));
+        let resp = s.handle(req(2, "tools/list", Value::Null)).unwrap();
+        assert_eq!(resp["result"]["ttlMs"], CACHE_TTL_MS);
+        assert_eq!(resp["result"]["cacheScope"], CACHE_SCOPE);
+    }
+
+    #[test]
+    fn legacy_tools_list_omits_the_caching_hints() {
+        // The legacy revisions have no field for them.
+        let mut s = session();
+        s.handle(req(
+            1,
+            "initialize",
+            json!({ "protocolVersion": "2025-06-18" }),
+        ));
+        let resp = s.handle(req(2, "tools/list", Value::Null)).unwrap();
+        assert!(resp["result"].get("ttlMs").is_none());
+        assert!(resp["result"].get("cacheScope").is_none());
     }
 
     #[test]

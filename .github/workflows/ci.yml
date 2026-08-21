@@ -884,6 +884,41 @@ jobs:
           fi
 
   # ── Docs build ──────────────────────────────────────────────────
+  mcp-client:
+    name: MCP client interop
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          cache-key: mcp-client
+
+      # xa11y-linux links against libxkbcommon.
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tests/mcp_client/requirements.txt
+
+      # One platform is enough. The server is a hand-rolled JSON-RPC
+      # implementation over stdin/stdout with no platform-specific code in
+      # it — the accessibility layer beneath it is what varies by OS, and the
+      # integ matrix already covers that. What this job asks is whether a real
+      # MCP client can talk to the protocol layer at all, and the answer does
+      # not change with the operating system.
+      #
+      # It is also the only check that reads the spec back at us rather than
+      # reading our own reading of it: `tools/list` shipped without its
+      # mandatory caching hints, and the raw-JSON suite (which asserts the
+      # shapes we believed were right) passed the whole time.
+      - name: Drive the MCP server with the official Python SDK
+        run: cargo xtask test-mcp-client
+
   docs:
     name: Docs build
     runs-on: ubuntu-latest

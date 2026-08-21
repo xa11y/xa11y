@@ -170,6 +170,13 @@ features:
       Framing, version negotiation, tool schemas, and error mapping also have
       unit coverage in xa11y/src/mcp/, which runs on every platform with no
       app and no display.
+      Separately, tests/mcp_client/ drives the server with the official MCP
+      Python SDK in both protocol eras, on ubuntu-latest only (the `mcp-client`
+      CI job). It is not per-app and needs no display: the server is
+      hand-rolled JSON-RPC with no platform-specific code, so the interop
+      answer does not vary by OS. It is the only check that reads the spec back
+      at us rather than our own reading of it — `tools/list` shipped without
+      its mandatory caching hints and the raw-JSON suite passed throughout.
 
 # rust_core is the xa11y/tests/integ/ suite — separate from per-app compat suites.
 rust_core:
