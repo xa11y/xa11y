@@ -153,7 +153,7 @@ impl LinuxScreenshot {
         }
 
         let mut rgba = Vec::with_capacity(reply.data.len());
-        for chunk in reply.data.chunks_exact(4) {
+        for chunk in reply.data.as_chunks::<4>().0 {
             // X11 BGRX little-endian → RGBA
             rgba.push(chunk[2]);
             rgba.push(chunk[1]);
@@ -301,7 +301,7 @@ fn decode_png_to_rgba(bytes: &[u8]) -> Result<Screenshot> {
         (png::ColorType::Rgba, png::BitDepth::Eight) => buf,
         (png::ColorType::Rgb, png::BitDepth::Eight) => {
             let mut out = Vec::with_capacity((info.width * info.height * 4) as usize);
-            for px in buf.chunks_exact(3) {
+            for px in buf.as_chunks::<3>().0 {
                 out.extend_from_slice(&[px[0], px[1], px[2], 0xFF]);
             }
             out
