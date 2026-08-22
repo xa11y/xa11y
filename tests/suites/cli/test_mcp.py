@@ -293,17 +293,40 @@ def test_unknown_tool_is_a_protocol_error(mcp):
     assert response["error"]["code"] == -32602
 
 
-def test_apps_lists_the_running_test_app(mcp, app_name):
+def test_apps_lists_the_running_test_app(mcp, app_pid):
+    """By pid, which is the only identifier the fixture actually knows.
+
+    The matrix key (`qt`, `gtk`) is a launcher recipe name, not an
+    accessibility name: the Qt app reports itself as `Python` on macOS,
+    because that is the process the interpreter runs as.
+    """
     result = mcp.call_tool("apps")["result"]
     assert result["isError"] is False
     structured = result["structuredContent"]
     assert structured["count"] == len(structured["applications"])
-    names = [a["name"] for a in structured["applications"]]
-    assert any(app_name in name for name in names), f"{app_name} not among {names}"
+    listed = {a["pid"]: a for a in structured["applications"]}
+    assert app_pid in listed, f"pid {app_pid} not among {sorted(listed)}"
+    assert listed[app_pid]["name"], "a listed application must carry a name"
 
 
-def test_tree_is_depth_limited_and_reports_truncation(mcp, app_name):
-    result = mcp.call_tool("tree", {"app": app_name, "max_depth": 1})["result"]
+def test_the_app_argument_resolves_the_same_application_as_pid(mcp, app_pid):
+    """`app` matches a name substring; `pid` is exact. Both must reach one app.
+
+    The name comes from the `apps` listing rather than from the matrix key,
+    which is what the tools resolve against and what a model would read.
+    """
+    listing = mcp.call_tool("apps")["result"]["structuredContent"]["applications"]
+    reported = next(a["name"] for a in listing if a["pid"] == app_pid)
+    if sum(1 for a in listing if reported in a["name"]) > 1:
+        pytest.skip(f"{reported!r} is a substring of more than one running app")
+
+    by_name = mcp.call_tool("tree", {"app": reported, "max_depth": 0})["result"]
+    assert by_name["isError"] is False, by_name["content"]
+    assert by_name["structuredContent"]["pid"] == app_pid
+
+
+def test_tree_is_depth_limited_and_reports_truncation(mcp, app_pid):
+    result = mcp.call_tool("tree", {"pid": app_pid, "max_depth": 1})["result"]
     assert result["isError"] is False
     structured = result["structuredContent"]
     assert structured["max_depth"] == 1
@@ -314,13 +337,13 @@ def test_tree_is_depth_limited_and_reports_truncation(mcp, app_name):
         assert "children" not in child, "max_depth=1 stops after direct children"
 
 
-def test_tree_defaults_to_a_bounded_depth(mcp, app_name):
-    structured = mcp.call_tool("tree", {"app": app_name})["result"]["structuredContent"]
+def test_tree_defaults_to_a_bounded_depth(mcp, app_pid):
+    structured = mcp.call_tool("tree", {"pid": app_pid})["result"]["structuredContent"]
     assert structured["max_depth"] == 12, "the default must be bounded, not unlimited"
 
 
-def test_find_reports_bounds_and_a_precomputed_center(mcp, app_name):
-    result = mcp.call_tool("find", {"app": app_name, "selector": "button"})["result"]
+def test_find_reports_bounds_and_a_precomputed_center(mcp, app_pid):
+    result = mcp.call_tool("find", {"pid": app_pid, "selector": "button"})["result"]
     assert result["isError"] is False
     structured = result["structuredContent"]
     assert structured["match_count"] >= 1
@@ -332,29 +355,29 @@ def test_find_reports_bounds_and_a_precomputed_center(mcp, app_name):
     assert center["y"] == bounds["y"] + bounds["height"] // 2
 
 
-def test_find_respects_its_limit_and_flags_the_truncation(mcp, app_name):
+def test_find_respects_its_limit_and_flags_the_truncation(mcp, app_pid):
     structured = mcp.call_tool(
-        "find", {"app": app_name, "selector": "*", "limit": 1}
+        "find", {"pid": app_pid, "selector": "*", "limit": 1}
     )["result"]["structuredContent"]
     assert structured["returned"] == 1
     if structured["match_count"] > 1:
         assert structured["truncated"] is True
 
 
-def test_element_payloads_omit_the_platform_blob(mcp, app_name):
+def test_element_payloads_omit_the_platform_blob(mcp, app_pid):
     """`raw` and `handle` are large and meaningless to a model."""
     structured = mcp.call_tool(
-        "find", {"app": app_name, "selector": "button", "limit": 1}
+        "find", {"pid": app_pid, "selector": "button", "limit": 1}
     )["result"]["structuredContent"]
     first = structured["matches"][0]
     assert "raw" not in first
     assert "handle" not in first
 
 
-def test_a_failed_lookup_is_a_tool_error_carrying_its_diagnosis(mcp, app_name):
+def test_a_failed_lookup_is_a_tool_error_carrying_its_diagnosis(mcp, app_pid):
     """Tenet 6 reaching the model: the retry should be informed, not a guess."""
     response = mcp.call_tool(
-        "find", {"app": app_name, "selector": 'button[name="DefinitelyNotHere"]'}
+        "find", {"pid": app_pid, "selector": 'button[name="DefinitelyNotHere"]'}
     )
     assert "error" not in response, "a model can fix this, so it must be a tool error"
     result = response["result"]
@@ -384,7 +407,7 @@ def test_a_partial_screenshot_region_is_rejected(mcp):
     assert "height" in result["structuredContent"]["message"]
 
 
-def test_action_presses_a_button(mcp, app_name):
+def test_action_presses_a_button(mcp, app_pid):
     """`button:nth(1)` rather than `button`: the tool acts on exactly one.
 
     This test used to pass `button` and press whichever of the app's buttons
@@ -392,25 +415,25 @@ def test_action_presses_a_button(mcp, app_name):
     `test_action_refuses_a_selector_that_matches_several` now forbids.
     """
     result = mcp.call_tool(
-        "action", {"app": app_name, "action": "press", "selector": "button:nth(1)"}
+        "action", {"pid": app_pid, "action": "press", "selector": "button:nth(1)"}
     )["result"]
     assert result["isError"] is False, result["content"]
     assert result["structuredContent"]["ok"] is True
 
 
-def test_action_refuses_a_selector_that_matches_several(mcp, app_name):
+def test_action_refuses_a_selector_that_matches_several(mcp, app_pid):
     """The schema promises exactly one match, so acting on the first is a bug.
 
     An agent that writes `button[name*="Save"]` against an app with "Save" and
     "Save As" pressed the wrong one and was told `ok: true`.
     """
-    found = mcp.call_tool("find", {"app": app_name, "selector": "button"})["result"]
+    found = mcp.call_tool("find", {"pid": app_pid, "selector": "button"})["result"]
     total = found["structuredContent"]["match_count"]
     if total < 2:
         pytest.skip("the app under test has fewer than two buttons")
 
     result = mcp.call_tool(
-        "action", {"app": app_name, "action": "press", "selector": "button"}
+        "action", {"pid": app_pid, "action": "press", "selector": "button"}
     )["result"]
     assert result["isError"] is True, "acting on the first of several is the defect"
     structured = result["structuredContent"]
@@ -424,9 +447,9 @@ def test_action_refuses_a_selector_that_matches_several(mcp, app_name):
     assert "[name=" in structured["message"]
 
 
-def test_a_refused_ambiguous_selector_lists_what_it_matched(mcp, app_name):
+def test_a_refused_ambiguous_selector_lists_what_it_matched(mcp, app_pid):
     """The candidate list must be the way out, not just proof of the problem."""
-    found = mcp.call_tool("find", {"app": app_name, "selector": "button"})["result"]
+    found = mcp.call_tool("find", {"pid": app_pid, "selector": "button"})["result"]
     if found["structuredContent"]["match_count"] < 2:
         pytest.skip("the app under test has fewer than two buttons")
     names = [m.get("name") for m in found["structuredContent"]["matches"] if m.get("name")]
@@ -437,7 +460,7 @@ def test_a_refused_ambiguous_selector_lists_what_it_matched(mcp, app_name):
         pytest.skip("the app's buttons have no distinct names")
 
     result = mcp.call_tool(
-        "action", {"app": app_name, "action": "press", "selector": "button"}
+        "action", {"pid": app_pid, "action": "press", "selector": "button"}
     )["result"]
     candidates = " ".join(result["structuredContent"]["diagnosis"]["candidates"])
     assert unique[0] in candidates, candidates
@@ -445,7 +468,7 @@ def test_a_refused_ambiguous_selector_lists_what_it_matched(mcp, app_name):
     # And the selector the candidate list points at is one the tool accepts.
     narrowed = mcp.call_tool(
         "action",
-        {"app": app_name, "action": "focus", "selector": f'button[name="{unique[0]}"]'},
+        {"pid": app_pid, "action": "focus", "selector": f'button[name="{unique[0]}"]'},
     )["result"]
     if narrowed["isError"]:
         # `focus` is advisory and not every AT bridge implements it; what must
@@ -453,7 +476,7 @@ def test_a_refused_ambiguous_selector_lists_what_it_matched(mcp, app_name):
         assert narrowed["structuredContent"]["kind"] != "ambiguous_selector"
 
 
-def test_find_says_what_it_did_see_when_nothing_matched(mcp, app_name):
+def test_find_says_what_it_did_see_when_nothing_matched(mcp, app_pid):
     """`find` is the tool whose whole job is finding things.
 
     Its miss used to be `{"kind": "no_match", "message": "no elements matched
@@ -461,7 +484,7 @@ def test_find_says_what_it_did_see_when_nothing_matched(mcp, app_name):
     a scope snapshot for the same typo.
     """
     selector = 'button[name="Sbumit"]'
-    result = mcp.call_tool("find", {"app": app_name, "selector": selector})["result"]
+    result = mcp.call_tool("find", {"pid": app_pid, "selector": selector})["result"]
     assert result["isError"] is True
     structured = result["structuredContent"]
     assert structured["kind"] == "no_match"
@@ -471,7 +494,7 @@ def test_find_says_what_it_did_see_when_nothing_matched(mcp, app_name):
     assert diagnosis["scope"], "and describe where it looked"
 
 
-def test_states_are_selectable_with_the_syntax_the_schema_advertises(mcp, app_name):
+def test_states_are_selectable_with_the_syntax_the_schema_advertises(mcp, app_pid):
     """The advertised example was `checkbox[checked]`: wrong role, wrong syntax."""
     tools = {t["name"]: t for t in mcp.request(1, "tools/list")["result"]["tools"]}
     description = tools["find"]["inputSchema"]["properties"]["selector"]["description"]
@@ -479,17 +502,17 @@ def test_states_are_selectable_with_the_syntax_the_schema_advertises(mcp, app_na
     assert "checkbox[checked]" not in description
 
     result = mcp.call_tool(
-        "find", {"app": app_name, "selector": 'check_box[checked="on"]'}
+        "find", {"pid": app_pid, "selector": 'check_box[checked="on"]'}
     )["result"]
     if result["isError"]:
         # No checked box in this app is fine. A syntax error is not.
         assert result["structuredContent"]["kind"] == "no_match", result["structuredContent"]
 
 
-def test_set_numeric_value_moves_a_slider_in_one_call(mcp, app_name):
+def test_set_numeric_value_moves_a_slider_in_one_call(mcp, app_pid):
     """Without this verb the only route from 51 to 88 was 37 `increment` calls."""
     found = mcp.call_tool(
-        "find", {"app": app_name, "selector": "slider:nth(1)"}
+        "find", {"pid": app_pid, "selector": "slider:nth(1)"}
     )["result"]
     if found["isError"]:
         pytest.skip("no slider in the app under test")
@@ -505,7 +528,7 @@ def test_set_numeric_value_moves_a_slider_in_one_call(mcp, app_name):
     result = mcp.call_tool(
         "action",
         {
-            "app": app_name,
+            "pid": app_pid,
             "action": "set-numeric-value",
             "selector": "slider:nth(1)",
             "value": str(target),
@@ -513,19 +536,19 @@ def test_set_numeric_value_moves_a_slider_in_one_call(mcp, app_name):
     )["result"]
     assert result["isError"] is False, result["content"]
 
-    after = mcp.call_tool("find", {"app": app_name, "selector": "slider:nth(1)"})["result"]
+    after = mcp.call_tool("find", {"pid": app_pid, "selector": "slider:nth(1)"})["result"]
     assert after["structuredContent"]["matches"][0]["numeric_value"] == pytest.approx(
         target, abs=1.0
     )
 
 
-def test_a_bad_numeric_value_is_rejected_before_anything_waits(mcp, app_name):
+def test_a_bad_numeric_value_is_rejected_before_anything_waits(mcp, app_pid):
     """Parsed before the first platform call, so it cannot cost the auto-wait."""
     start = time.monotonic()
     result = mcp.call_tool(
         "action",
         {
-            "app": app_name,
+            "pid": app_pid,
             "action": "set-numeric-value",
             "selector": "slider:nth(1)",
             "value": "loud",
@@ -548,14 +571,14 @@ def test_the_action_schema_offers_the_numeric_setter(mcp):
     )
 
 
-def test_an_unsupported_action_is_spelled_the_way_it_must_be_typed(mcp, app_name):
+def test_an_unsupported_action_is_spelled_the_way_it_must_be_typed(mcp, app_pid):
     """The enum takes `show-menu`; the failure used to say `show_menu`."""
-    found = mcp.call_tool("find", {"app": app_name, "selector": "static_text"})["result"]
+    found = mcp.call_tool("find", {"pid": app_pid, "selector": "static_text"})["result"]
     if found["isError"]:
         pytest.skip("no static text in the app under test")
 
     result = mcp.call_tool(
-        "action", {"app": app_name, "action": "show-menu", "selector": "static_text:nth(1)"}
+        "action", {"pid": app_pid, "action": "show-menu", "selector": "static_text:nth(1)"}
     )["result"]
     if not result["isError"]:
         pytest.skip("show-menu is supported on this element")
