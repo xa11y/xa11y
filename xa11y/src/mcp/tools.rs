@@ -289,8 +289,13 @@ fn app_target_properties() -> Map<String, Value> {
         "app".into(),
         json!({
             "type": "string",
-            "description": "Application name, matched as a substring (e.g. \"Calculator\"). \
-                            Give this or `pid`.",
+            "description": "Application name, matched exactly and case-sensitively — \
+                            not a substring, so the WinForms test app answers to \
+                            \"xa11y-winforms-test-app\" and not to \"winforms\". Take \
+                            the spelling from the `apps` tool rather than guessing it: \
+                            an application often reports its interpreter or bundle name \
+                            (a Qt app run under Python reports \"python\"). Give this \
+                            or `pid`.",
         }),
     );
     props.insert(
@@ -774,7 +779,7 @@ fn target_app(args: &Value) -> CliResult<App> {
     // `resolve_app`, so the two surfaces cannot drift on what `app` means.
     if opts.app.is_none() && opts.pid.is_none() {
         return Err(usage(
-            "specify \"app\" (application name, matched as a substring) or \"pid\" \
+            "specify \"app\" (application name, matched exactly) or \"pid\" \
              (process id); the `apps` tool lists both for every running application",
         ));
     }

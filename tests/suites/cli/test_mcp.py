@@ -310,19 +310,39 @@ def test_apps_lists_the_running_test_app(mcp, app_pid):
 
 
 def test_the_app_argument_resolves_the_same_application_as_pid(mcp, app_pid):
-    """`app` matches a name substring; `pid` is exact. Both must reach one app.
+    """Both targeting arguments must reach the same application.
 
-    The name comes from the `apps` listing rather than from the matrix key,
-    which is what the tools resolve against and what a model would read.
+    `app` matches the name exactly (`App::by_name`), so the name has to come
+    from the `apps` listing rather than from the matrix key — which is the
+    same thing a model has to do, and the reason `apps` exists.
     """
     listing = mcp.call_tool("apps")["result"]["structuredContent"]["applications"]
     reported = next(a["name"] for a in listing if a["pid"] == app_pid)
-    if sum(1 for a in listing if reported in a["name"]) > 1:
-        pytest.skip(f"{reported!r} is a substring of more than one running app")
+    if sum(1 for a in listing if a["name"] == reported) > 1:
+        pytest.skip(f"more than one running application is named {reported!r}")
 
     by_name = mcp.call_tool("tree", {"app": reported, "max_depth": 0})["result"]
     assert by_name["isError"] is False, by_name["content"]
     assert by_name["structuredContent"]["pid"] == app_pid
+
+
+def test_the_app_argument_does_not_match_a_substring(mcp, app_pid):
+    """The schema says exact, so a prefix of a real name must not resolve.
+
+    The suite itself made this mistake: it passed the matrix key (`winforms`)
+    where the application answers to `xa11y-winforms-test-app`.
+    """
+    listing = mcp.call_tool("apps")["result"]["structuredContent"]["applications"]
+    reported = next(a["name"] for a in listing if a["pid"] == app_pid)
+    if len(reported) < 2:
+        pytest.skip(f"{reported!r} is too short to take a proper prefix of")
+    prefix = reported[:-1]
+    if any(a["name"] == prefix for a in listing):
+        pytest.skip(f"{prefix!r} is itself a running application")
+
+    result = mcp.call_tool("tree", {"app": prefix})["result"]
+    assert result["isError"] is True, f"{prefix!r} must not resolve {reported!r}"
+    assert result["structuredContent"]["kind"] in {"no_match", "timeout"}
 
 
 def test_tree_is_depth_limited_and_reports_truncation(mcp, app_pid):
