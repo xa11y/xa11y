@@ -6,8 +6,8 @@ use std::sync::Mutex;
 
 use rayon::prelude::*;
 use xa11y_core::{
-    ElementData, ElementParts, Error, Provider, Rect, Result, Role, StateParts, StateSet,
-    Subscription, Toggled,
+    ElementData, ElementParts, Error, Provider, Rect, Result, Role, ShellSurfaceKind, StateParts,
+    StateSet, Subscription, Toggled,
 };
 use zbus::blocking::{Connection, Proxy};
 
@@ -302,6 +302,29 @@ impl LinuxProvider {
             .map_err(|e| Error::Platform {
                 code: -1,
                 message: format!("GetState deserialize failed: {}", e),
+            })
+    }
+
+    /// Get the AT-SPI attribute set via `GetAttributes` (D-Bus `a{ss}`).
+    ///
+    /// These are the free-form toolkit attributes libatspi renders as
+    /// `"key:value"` strings — `toolkit`, `window-type`, ARIA properties on
+    /// web content, and so on. Nothing else in the provider needs them yet;
+    /// `list_shell_surfaces` reads `window-type` to recognise panels.
+    fn get_attributes(&self, aref: &AccessibleRef) -> Result<HashMap<String, String>> {
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
+        let reply = proxy
+            .call_method("GetAttributes", &())
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("GetAttributes failed: {}", e),
+            })?;
+        reply
+            .body()
+            .deserialize::<HashMap<String, String>>()
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("GetAttributes deserialize failed: {}", e),
             })
     }
 
@@ -1519,6 +1542,62 @@ impl Provider for LinuxProvider {
         }
     }
 
+    /// Enumerate desktop panels and docks.
+    ///
+    /// A Linux shell surface is a top-level AT-SPI frame whose attribute set
+    /// carries `window-type:dock` — how panels self-identify, from
+    /// xfce4-panel's panel and dock rows to GNOME's and KDE's shells. One
+    /// surface per such frame, so a panel process that owns two rows yields
+    /// two [`ShellSurfaceKind::Panel`] entries, each with the panel process's
+    /// pid. Panels are commonly unnamed; the frame's `name` is then `None` and
+    /// the core falls back to the kind.
+    ///
+    /// `Panel` is the only kind Linux vends: the desktop has no menu bar,
+    /// taskbar, or dock object of its own, and StatusNotifierItem *menus* live
+    /// on `com.canonical.dbusmenu`, a different subsystem from AT-SPI. Their
+    /// absence from the listing is honest scope, not failure.
+    ///
+    /// The scan runs over [`list_apps`](Self::list_apps) rather than its own
+    /// registry walk, so it inherits that enumeration's empty-name filter: a
+    /// panel that registers on the bus without a name is invisible here for
+    /// the same reason it is invisible to `App::list`.
+    fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
+        let mut surfaces = Vec::new();
+        for app in self.list_apps()? {
+            let app_ref = self.get_cached(app.handle)?;
+            let top_levels = match self.get_atspi_children(&app_ref) {
+                Ok(t) => t,
+                // Same policy as `focused_app`: a single app failing to
+                // enumerate its windows shouldn't abort the whole scan — skip
+                // it and keep going.
+                Err(_) => continue,
+            };
+            for top in top_levels
+                .iter()
+                .filter(|t| t.path != "/org/a11y/atspi/null")
+            {
+                // A top-level that won't answer GetRoleName or GetAttributes
+                // can't be classified. Skipping it is the same call as above:
+                // one unresponsive process must not blank the whole listing.
+                let role_name = match self.get_role_name(top) {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+                let attributes = match self.get_attributes(top) {
+                    Ok(a) => a,
+                    Err(_) => continue,
+                };
+                if is_dock_frame(&role_name, &attributes) {
+                    surfaces.push((
+                        ShellSurfaceKind::Panel,
+                        self.build_element_data(top, app.pid),
+                    ));
+                }
+            }
+        }
+        Ok(surfaces)
+    }
+
     /// Enumerate top-level applications by listing direct children of the
     /// AT-SPI registry root — every running accessibility-enabled app
     /// registers a child accessible there. Apps with empty names are
@@ -2259,6 +2338,16 @@ fn is_never_descend_atspi_role(role: &str) -> bool {
     )
 }
 
+/// Whether a top-level accessible is a desktop panel or dock: an AT-SPI2
+/// `frame` whose attribute set carries `window-type:dock`.
+///
+/// `window-type` mirrors the window manager's `_NET_WM_WINDOW_TYPE` hint, so
+/// it is set by the panel itself rather than inferred — an ordinary
+/// application window carries `normal`, or no `window-type` at all.
+fn is_dock_frame(role_name: &str, attributes: &HashMap<String, String>) -> bool {
+    role_name == "frame" && attributes.get("window-type").is_some_and(|t| t == "dock")
+}
+
 /// Map an AT-SPI2 action name to its canonical `snake_case` xa11y action name.
 ///
 /// Toolkit-specific aliases are normalised to the single canonical name:
@@ -2663,6 +2752,46 @@ mod tests {
             assert!(
                 !is_never_descend_atspi_role(role),
                 "container role {role:?} must remain descendable"
+            );
+        }
+    }
+
+    fn attrs(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// A panel frame is the `window-type:dock` attribute and nothing else —
+    /// xfce4-panel's rows are unnamed frames, so no name or role-number test
+    /// can stand in for it.
+    #[test]
+    fn test_dock_frame_detection() {
+        assert!(is_dock_frame(
+            "frame",
+            &attrs(&[("toolkit", "GTK"), ("window-type", "dock")])
+        ));
+        // An ordinary application window: same role, different window type.
+        assert!(!is_dock_frame(
+            "frame",
+            &attrs(&[("window-type", "normal")])
+        ));
+        // Most toolkits set no `window-type` at all.
+        assert!(!is_dock_frame("frame", &attrs(&[("toolkit", "GTK")])));
+        assert!(!is_dock_frame("frame", &HashMap::new()));
+    }
+
+    /// The dock attribute only makes a surface on a top-level frame. A `panel`
+    /// role is the AT-SPI name for an ordinary grouping container (it maps to
+    /// `Role::Group`), and `window` / `dialog` are not what panels register as.
+    #[test]
+    fn test_dock_frame_requires_frame_role() {
+        let dock = attrs(&[("window-type", "dock")]);
+        for role in ["panel", "window", "dialog", "filler", "application", ""] {
+            assert!(
+                !is_dock_frame(role, &dock),
+                "{role:?} must not be reported as a shell surface"
             );
         }
     }

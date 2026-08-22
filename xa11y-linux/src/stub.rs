@@ -2,7 +2,8 @@
 
 use xa11y_core::input::{InputProvider, Key, MouseButton, Point, ScrollDelta};
 use xa11y_core::{
-    ElementData, Error, Provider, Rect, Result, Screenshot, ScreenshotProvider, Subscription,
+    ElementData, Error, Provider, Rect, Result, Screenshot, ScreenshotProvider, ShellSurfaceKind,
+    Subscription,
 };
 
 #[derive(Default)]
@@ -96,6 +97,10 @@ impl Provider for LinuxProvider {
     }
 
     fn focused_app(&self) -> Result<ElementData> {
+        Err(unavailable())
+    }
+
+    fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
         Err(unavailable())
     }
 
