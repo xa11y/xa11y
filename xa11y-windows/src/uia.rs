@@ -14,7 +14,8 @@ use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, STATE_SYSTEM_
 use xa11y_core::{
     selector::{matches_simple, Combinator, Selector, SelectorSegment},
     CancelHandle, ElementData, ElementParts, Error, Event, EventKind, EventParts, EventReceiver,
-    Provider, Rect, Result, Role, StateFlag, StateParts, StateSet, Subscription, Toggled,
+    Provider, Rect, Result, Role, ShellSurfaceKind, StateFlag, StateParts, StateSet, Subscription,
+    Toggled,
 };
 
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
@@ -251,6 +252,28 @@ impl WindowsProvider {
         uia_call(|| unsafe {
             root.FindAllBuildCache(TreeScope_Subtree, &true_cond, &self.batch_request)
         })
+    }
+
+    /// True when at least one direct child of `element` is reported on screen.
+    ///
+    /// Used by [`list_shell_surfaces`](Provider::list_shell_surfaces) for the
+    /// one shell class whose presence under the desktop root does not mean it
+    /// is open — see the `ControlCenterWindow` arm there. A child that does
+    /// not publish `IsOffscreen` at all counts as *not* on screen: the
+    /// platform did not say it was visible, and inventing an answer would put
+    /// a dismissed panel in the listing.
+    ///
+    /// A failing COM call propagates rather than degrading to `false` — "the
+    /// shell window could not be inspected" is not "the shell window is
+    /// closed" (tenet 1).
+    fn has_onscreen_child(&self, element: &IUIAutomationElement) -> Result<bool> {
+        let true_cond = uia_call(|| unsafe { self.automation.CreateTrueCondition() })?;
+        let children = uia_call(|| unsafe {
+            element.FindAllBuildCache(TreeScope_Children, &true_cond, &self.batch_request)
+        })?;
+        Ok((0..uia_len(&children))
+            .filter_map(|i| uia_get(&children, i))
+            .any(|child| uia_cached_bool(&child, UIA_IsOffscreenPropertyId) == Some(false)))
     }
 
     /// Extract a UIA element's RuntimeId as a `Vec<i32>` for use as a stable
@@ -824,6 +847,108 @@ impl Provider for WindowsProvider {
         Ok(None)
     }
 
+    /// Enumerate the Windows shell surfaces by classifying the UIA desktop
+    /// root's **direct** children by class name.
+    ///
+    /// [`get_children(None)`](Self::get_children) filters the same children to
+    /// `ControlType.Window`, which is exactly what hides the shell: every
+    /// surface below is a `Pane`. This walk therefore takes the raw child
+    /// list (`TreeScope_Children` + `TrueCondition`) and keeps only the
+    /// classes it recognises. Anything else — ordinary app windows and their
+    /// panes — is skipped silently: it is not a shell surface, and it is
+    /// already reachable through `list_apps`.
+    ///
+    /// | Class name | Kind |
+    /// |---|---|
+    /// | `Shell_TrayWnd` | [`Taskbar`](ShellSurfaceKind::Taskbar) — task band, visible tray row, overflow chevron |
+    /// | `Progman` | [`Desktop`](ShellSurfaceKind::Desktop) — the desktop icon host |
+    /// | `TopLevelWindowForOverflowXamlIsland` | [`Flyout`](ShellSurfaceKind::Flyout) — the tray overflow |
+    /// | `Microsoft.UI.Content.PopupWindowSiteBridge` | [`Flyout`](ShellSurfaceKind::Flyout) — a shell popup |
+    /// | `ControlCenterWindow` | [`Flyout`](ShellSurfaceKind::Flyout) — Quick Settings, **only while its content is on screen** |
+    ///
+    /// Two shell classes are deliberately *not* listed:
+    ///
+    /// - `Windows.UI.Core.CoreWindow` hosts the Notification Center, but only
+    ///   when the owning process is `ShellExperienceHost` — every other
+    ///   `CoreWindow` under the desktop root is an ordinary UWP app. UIA
+    ///   carries no process *image name*, and this crate does no process-image
+    ///   lookup at all, so telling the two apart would mean adding
+    ///   `OpenProcess`/`QueryFullProcessImageName` FFI for one surface.
+    ///   Notification Center is therefore absent from the listing rather than
+    ///   guessed at — absence is honest, a misclassified app window is not.
+    /// - `Shell_SecondaryTrayWnd` (per-monitor taskbars) is out of v1 scope,
+    ///   per the proposal.
+    ///
+    /// Order is stable: taskbars, then desktops, then flyouts in enumeration
+    /// order.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Platform`] when the desktop root itself cannot be read or its
+    /// children cannot be enumerated. Individual classes are never
+    /// error-skipped (tenet 1).
+    fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
+        let root = uia_call(|| unsafe { self.automation.GetRootElement() })?;
+        let true_cond = uia_call(|| unsafe { self.automation.CreateTrueCondition() })?;
+        let found = uia_call(|| unsafe {
+            root.FindAllBuildCache(TreeScope_Children, &true_cond, &self.batch_request)
+        })?;
+
+        // (rank, kind, data) — rank groups the output; the stable sort below
+        // keeps enumeration order within a group.
+        let mut surfaces: Vec<(u8, ShellSurfaceKind, ElementData)> = Vec::new();
+
+        for i in 0..uia_len(&found) {
+            let Some(el) = uia_get(&found, i) else {
+                continue;
+            };
+            let Some(class_name) = uia_cached_bstr(&el, UIA_ClassNamePropertyId) else {
+                continue;
+            };
+
+            let (rank, kind) = match class_name.as_str() {
+                "Shell_TrayWnd" => (0u8, ShellSurfaceKind::Taskbar),
+                "Progman" => (1u8, ShellSurfaceKind::Desktop),
+                // The tray overflow host is a desktop-root child only while
+                // the flyout is open, so its presence is the open signal.
+                // The XAML popup site bridge behaves the same way.
+                "TopLevelWindowForOverflowXamlIsland"
+                | "Microsoft.UI.Content.PopupWindowSiteBridge" => (2u8, ShellSurfaceKind::Flyout),
+                // Quick Settings is the exception: its host window persists as
+                // a desktop-root child after dismissal, keeping the bounds it
+                // had while open, and only its XAML content goes offscreen.
+                // Presence therefore does not mean open — the content's
+                // `IsOffscreen` does.
+                "ControlCenterWindow" => {
+                    if !self.has_onscreen_child(&el)? {
+                        continue;
+                    }
+                    (2u8, ShellSurfaceKind::Flyout)
+                }
+                _ => continue,
+            };
+
+            // The host process (explorer.exe, ShellHost.exe), never a
+            // per-icon owner — UIA does not carry one.
+            let pid = unsafe { el.CachedProcessId() }.unwrap_or(0) as u32;
+            // Mirror get_children(None): re-acquire via HWND so the window's
+            // UIA provider is activated, then repopulate the snapshot that
+            // build_element_data reads.
+            let el = self
+                .reacquire_via_hwnd(&el)
+                .and_then(|e| self.populate_cache(&e).map_err(|_| ()))
+                .unwrap_or(el);
+            let data = self.build_element_data(&el, (pid != 0).then_some(pid));
+            surfaces.push((rank, kind, data));
+        }
+
+        surfaces.sort_by_key(|(rank, _, _)| *rank);
+        Ok(surfaces
+            .into_iter()
+            .map(|(_, kind, data)| (kind, data))
+            .collect())
+    }
+
     /// Enumerate top-level applications. UIA exposes apps as top-level
     /// `Window` control-type elements under the desktop root — there's no
     /// dedicated `Application` accessible — so we list the desktop's direct
@@ -1380,7 +1505,17 @@ impl Provider for WindowsProvider {
     }
 
     fn show_menu(&self, element: &ElementData) -> Result<()> {
-        // No direct UIA equivalent; try context menu via legacy
+        // No direct UIA equivalent; try context menu via legacy.
+        //
+        // `get_actions` never advertises `show_menu`, which is what keeps this
+        // honest on shell chrome: `IUIAutomationElement3::ShowContextMenu`
+        // returns S_OK on XAML shell chrome (the Win11 tray buttons) while
+        // opening nothing. Anyone wiring it up later must advertise it only
+        // where the platform really implements it — Win32 shell UI such as
+        // the desktop's list items — and keep it off XAML chrome, or the
+        // action list starts claiming a verb that silently does nothing
+        // (tenet 3). The tray-icon context menu stays an explicit `InputSim`
+        // right-click composition.
         Err(Error::ActionNotSupported {
             action: "show_menu".to_string(),
             role: element.role,

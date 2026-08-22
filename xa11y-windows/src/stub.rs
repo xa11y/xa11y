@@ -1,7 +1,7 @@
 //! Stub backend for non-Windows platforms (allows compilation on all targets).
 
 use xa11y_core::input::{InputProvider, Key, MouseButton, Point, ScrollDelta};
-use xa11y_core::{ElementData, Error, Provider, Result, Subscription};
+use xa11y_core::{ElementData, Error, Provider, Result, ShellSurfaceKind, Subscription};
 
 #[derive(Default)]
 pub struct WindowsProvider;
@@ -65,6 +65,9 @@ impl Provider for WindowsProvider {
         unreachable!()
     }
     fn focused_app(&self) -> Result<ElementData> {
+        unreachable!()
+    }
+    fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
         unreachable!()
     }
     fn press(&self, _: &ElementData) -> Result<()> {
