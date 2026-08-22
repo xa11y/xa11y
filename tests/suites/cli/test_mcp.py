@@ -428,17 +428,29 @@ def test_a_partial_screenshot_region_is_rejected(mcp):
 
 
 def test_action_presses_a_button(mcp, app_pid):
-    """`button:nth(1)` rather than `button`: the tool acts on exactly one.
+    """By name, because an ordinal does not say which control it lands on.
 
-    This test used to pass `button` and press whichever of the app's buttons
-    came first, which is the behaviour
-    `test_action_refuses_a_selector_that_matches_several` now forbids.
+    `button` alone is what `test_action_refuses_a_selector_that_matches_several`
+    now forbids, but `button:nth(1)` is not the fix: document order on Windows
+    starts with the title bar, so it pressed `Restore` / `Maximize` / `Close`
+    rather than anything the app owns. That took the window out of the
+    accessibility tree and every later test in the run with it, including two
+    in `test_tree.py` that have nothing to do with MCP.
+
+    On Electron it landed on Chromium's own chrome instead, whose buttons
+    report `Action press not supported on button`.
+
+    Every test app has an `OK` button, and `test_actions.py` already presses
+    it by name through the CLI on every one of them — naming it is also what
+    the `action` tool tells a model to do.
     """
+    selector = 'button[name="OK"]'
     result = mcp.call_tool(
-        "action", {"pid": app_pid, "action": "press", "selector": "button:nth(1)"}
+        "action", {"pid": app_pid, "action": "press", "selector": selector}
     )["result"]
     assert result["isError"] is False, result["content"]
     assert result["structuredContent"]["ok"] is True
+    assert result["structuredContent"]["selector"] == selector
 
 
 def test_action_refuses_a_selector_that_matches_several(mcp, app_pid):
