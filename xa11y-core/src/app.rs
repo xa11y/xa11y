@@ -7,8 +7,9 @@ use crate::event_provider::Subscription;
 use crate::locator::Locator;
 use crate::provider::Provider;
 
-/// Polling interval shared by all timeout-bearing lookups.
-const LOOKUP_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Polling interval shared by all timeout-bearing lookups (application and
+/// shell-surface alike — see `shell.rs`).
+pub(crate) const LOOKUP_POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Maximum number of running applications listed in a lookup-failure
 /// diagnosis. Bounded per tenet 6 — diagnostics must not grow with an
@@ -570,6 +571,11 @@ mod tests {
         fn list_apps(&self) -> Result<Vec<ElementData>> {
             self.inner.list_apps()
         }
+        fn list_shell_surfaces(
+            &self,
+        ) -> Result<Vec<(crate::shell::ShellSurfaceKind, ElementData)>> {
+            self.inner.list_shell_surfaces()
+        }
         fn press(&self, e: &ElementData) -> Result<()> {
             self.inner.press(e)
         }
@@ -676,6 +682,11 @@ mod tests {
         }
         fn focused_app(&self) -> Result<ElementData> {
             Ok(Self::window("Modal", 101, true))
+        }
+        fn list_shell_surfaces(
+            &self,
+        ) -> Result<Vec<(crate::shell::ShellSurfaceKind, ElementData)>> {
+            self.inner.list_shell_surfaces()
         }
         fn get_children(&self, e: Option<&ElementData>) -> Result<Vec<ElementData>> {
             self.inner.get_children(e)
@@ -972,6 +983,11 @@ mod tests {
                 // Reports pid 42 as foreground, but no enumerated entry is
                 // active.
                 Ok(MultiWindowProvider::window("Ghost", 102, false))
+            }
+            fn list_shell_surfaces(
+                &self,
+            ) -> Result<Vec<(crate::shell::ShellSurfaceKind, ElementData)>> {
+                self.inner.list_shell_surfaces()
             }
             fn get_children(&self, e: Option<&ElementData>) -> Result<Vec<ElementData>> {
                 self.inner.get_children(e)

@@ -23,6 +23,22 @@
 //!             └── list_item "Item 2"
 //! ```
 //!
+//! # Shell surfaces
+//!
+//! Two parentless roots model the OS shell (see [`crate::shell`]). They are
+//! reachable only through [`Provider::list_shell_surfaces`] — deliberately not
+//! from `list_apps` / `get_children(None)`, so shell UI stays invisible to code
+//! that only asks for applications:
+//!
+//! ```text
+//! toolbar "Taskbar" (shell surface: taskbar, pid=MOCK_SHELL_PID)
+//! ├── button "Show Hidden Icons" (stable_id="systray-chevron")
+//! └── button "Volume" (stable_id="SystemTrayIcon")
+//!
+//! list "Desktop" (shell surface: desktop, pid=MOCK_SHELL_PID)
+//! └── list_item "Trash"
+//! ```
+//!
 //! Call [`build_provider`] to get an `Arc<dyn Provider>`. The provider records
 //! actions into an internal log; use [`MockProviderHandle::actions`] to inspect
 //! them from tests.
@@ -35,6 +51,24 @@ use crate::error::{Error, Result};
 use crate::event_provider::Subscription;
 use crate::provider::Provider;
 use crate::role::Role;
+use crate::shell::ShellSurfaceKind;
+
+/// Pid the mock reports for its shell-surface roots and their subtrees.
+/// Distinct from the test app's 1234 so `ShellSurface::pid` is checkable and
+/// so shell nodes can't be confused with app nodes.
+pub const MOCK_SHELL_PID: u32 = 4242;
+
+/// Index of the first shell node. Everything from here on belongs to a shell
+/// surface rather than to the test application.
+const FIRST_SHELL_NODE: usize = 13;
+
+/// The mock's shell surfaces, as `(kind, node index)`. The indices are
+/// positions in the element table `build_provider` builds below — the shell
+/// roots are the parentless nodes appended after the application subtree.
+const SHELL_SURFACES: [(ShellSurfaceKind, usize); 2] = [
+    (ShellSurfaceKind::Taskbar, FIRST_SHELL_NODE),
+    (ShellSurfaceKind::Desktop, FIRST_SHELL_NODE + 3),
+];
 
 /// Tuple describing one row in the mock element table.
 ///
@@ -143,6 +177,15 @@ impl Provider for MockProvider {
             return Err(Error::selector_not_matched("focused application"));
         }
         Ok(self.nodes[0].data.clone())
+    }
+
+    fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
+        // Fixed fixture: `SHELL_SURFACES`' indices name nodes `build_provider`
+        // always creates, so indexing here cannot be out of range.
+        Ok(SHELL_SURFACES
+            .iter()
+            .map(|(kind, idx)| (*kind, self.nodes[*idx].data.clone()))
+            .collect())
     }
 
     fn press(&self, el: &ElementData) -> Result<()> {
@@ -460,6 +503,106 @@ pub fn build_provider() -> Arc<MockProvider> {
             None,
             None,
         ),
+        // ── Shell surfaces (indices 13.., parentless) ─────────────────
+        // The taskbar surface: a chevron that opens the tray overflow plus
+        // one visible tray icon — the shape the Windows overflow workflow
+        // drives.
+        (
+            Role::Toolbar,
+            Some("Taskbar"),
+            None,
+            None,
+            Some(Rect {
+                x: 0,
+                y: 1040,
+                width: 1920,
+                height: 40,
+            }),
+            vec![],
+            StateSet::default(),
+            None,
+            None,
+            None,
+            Some("Shell_TrayWnd"),
+            None,
+        ),
+        (
+            Role::Button,
+            Some("Show Hidden Icons"),
+            None,
+            Some("Open the tray overflow"),
+            Some(Rect {
+                x: 1700,
+                y: 1045,
+                width: 30,
+                height: 30,
+            }),
+            vec!["press", "focus"],
+            StateSet {
+                focusable: true,
+                ..StateSet::default()
+            },
+            None,
+            None,
+            None,
+            Some("systray-chevron"),
+            None,
+        ),
+        (
+            Role::Button,
+            Some("Volume"),
+            None,
+            None,
+            Some(Rect {
+                x: 1740,
+                y: 1045,
+                width: 30,
+                height: 30,
+            }),
+            vec!["press", "focus"],
+            StateSet {
+                focusable: true,
+                ..StateSet::default()
+            },
+            None,
+            None,
+            None,
+            Some("SystemTrayIcon"),
+            None,
+        ),
+        // A second surface of a different kind, so kind filtering and the
+        // ambiguity refusal have something to discriminate between.
+        (
+            Role::List,
+            Some("Desktop"),
+            None,
+            None,
+            None,
+            vec![],
+            StateSet::default(),
+            None,
+            None,
+            None,
+            Some("Progman"),
+            None,
+        ),
+        (
+            Role::ListItem,
+            Some("Trash"),
+            None,
+            None,
+            None,
+            vec!["select", "focus"],
+            StateSet {
+                focusable: true,
+                ..StateSet::default()
+            },
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
     ];
 
     // Parent/child topology indexed by position in `elements`.
@@ -477,6 +620,11 @@ pub fn build_provider() -> Arc<MockProvider> {
         vec![11, 12],         // 10: list
         vec![],               // 11: list_item 1
         vec![],               // 12: list_item 2
+        vec![14, 15],         // 13: taskbar surface root
+        vec![],               // 14: button Show Hidden Icons
+        vec![],               // 15: button Volume
+        vec![17],             // 16: desktop surface root
+        vec![],               // 17: list_item Trash
     ];
     let parent_map: Vec<Option<usize>> = vec![
         None,
@@ -492,12 +640,26 @@ pub fn build_provider() -> Arc<MockProvider> {
         Some(5),
         Some(10),
         Some(10),
+        // Shell surface roots are top-level in their own right: they have no
+        // parent, and nothing in the application subtree points at them.
+        None,
+        Some(13),
+        Some(13),
+        None,
+        Some(16),
     ];
 
     let mut nodes = Vec::with_capacity(elements.len());
     for (i, (role, name, value, desc, bounds, actions, states, nv, minv, maxv, sid, raw)) in
         elements.into_iter().enumerate()
     {
+        // Shell surfaces are hosted by the mock's shell process, not by the
+        // test app, so they carry their own pid.
+        let pid = if i >= FIRST_SHELL_NODE {
+            MOCK_SHELL_PID
+        } else {
+            1234
+        };
         let data = ElementData {
             role,
             name: name.map(String::from),
@@ -510,7 +672,7 @@ pub fn build_provider() -> Arc<MockProvider> {
             min_value: minv,
             max_value: maxv,
             stable_id: sid.map(String::from),
-            pid: Some(1234),
+            pid: Some(pid),
             raw: raw.unwrap_or_default(),
             handle: i as u64,
         };

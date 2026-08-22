@@ -23,8 +23,8 @@ use std::sync::{Arc, OnceLock};
 // Re-export public types.
 pub use xa11y_core::{
     App, Diagnosis, Element, ElementData, ElementState, Error, Event, EventKind, Locator,
-    RawPlatformData, Rect, Result, Role, StateFlag, StateSet, Subscription, SubscriptionIter,
-    Toggled, TreeNode,
+    RawPlatformData, Rect, Result, Role, ShellSurface, ShellSurfaceKind, StateFlag, StateSet,
+    Subscription, SubscriptionIter, Toggled, TreeNode,
 };
 
 // `#[doc(hidden)]`: the provider-side construction contracts. Re-exported so
@@ -76,8 +76,10 @@ pub mod cli;
 #[cfg(feature = "cli")]
 mod mcp;
 
-// Re-export the extension trait so `use xa11y::*` enables `App::by_name(...)`.
+// Re-export the extension traits so `use xa11y::*` enables `App::by_name(...)`
+// and `ShellSurface::by_kind(...)`.
 pub use app_ext::AppExt;
+pub use shell_ext::ShellSurfaceExt;
 
 // ── Internal singleton ──────────────────────────────────────────────────────
 
@@ -334,6 +336,53 @@ mod app_ext {
             F: Fn(&ElementData) -> Result<bool>,
         {
             App::try_find_with(provider()?, timeout, predicate)
+        }
+    }
+}
+
+// ── ShellSurfaceExt extension trait ─────────────────────────────────────────
+
+mod shell_ext {
+    use std::time::Duration;
+
+    use super::{provider, Result, ShellSurface, ShellSurfaceKind};
+
+    /// Extension trait that adds singleton-based constructors to
+    /// [`ShellSurface`].
+    ///
+    /// Imported automatically via `use xa11y::*`.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use std::time::Duration;
+    /// use xa11y::*;
+    ///
+    /// let taskbar = ShellSurface::by_kind(ShellSurfaceKind::Taskbar, Duration::ZERO)?;
+    /// taskbar.locator("button[name='Show Hidden Icons']").press()?;
+    /// # Ok::<(), xa11y::Error>(())
+    /// ```
+    pub trait ShellSurfaceExt: Sized {
+        /// List the OS shell surfaces currently on screen using the global
+        /// singleton provider. The listing is live and reads nothing into
+        /// existence: transient surfaces appear only while open, and
+        /// enumerating never opens or presses anything. See
+        /// [`ShellSurface::list_with`].
+        fn list() -> Result<Vec<Self>>;
+        /// Wait for exactly one surface of `kind` using the global singleton
+        /// provider, polling until it appears or `timeout` elapses. Pass
+        /// `Duration::ZERO` for a single attempt with no waiting. Errors with
+        /// a candidate diagnosis both when none and when several match — see
+        /// [`ShellSurface::by_kind_with`] for the full contract.
+        fn by_kind(kind: ShellSurfaceKind, timeout: Duration) -> Result<Self>;
+    }
+
+    impl ShellSurfaceExt for ShellSurface {
+        fn list() -> Result<Vec<Self>> {
+            ShellSurface::list_with(provider()?)
+        }
+
+        fn by_kind(kind: ShellSurfaceKind, timeout: Duration) -> Result<Self> {
+            ShellSurface::by_kind_with(provider()?, kind, timeout)
         }
     }
 }

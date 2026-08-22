@@ -1266,6 +1266,12 @@ mod tests {
             self.inner.focused_app()
         }
 
+        fn list_shell_surfaces(
+            &self,
+        ) -> Result<Vec<(crate::shell::ShellSurfaceKind, crate::element::ElementData)>> {
+            self.inner.list_shell_surfaces()
+        }
+
         fn get_children(
             &self,
             parent: Option<&crate::element::ElementData>,

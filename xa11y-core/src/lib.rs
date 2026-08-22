@@ -10,6 +10,7 @@ pub mod provider;
 pub mod role;
 pub mod screenshot;
 pub mod selector;
+pub mod shell;
 pub mod text;
 
 /// Shared in-memory mock Provider. Gated behind `test-support` so only the
@@ -41,6 +42,7 @@ pub use provider::Provider;
 pub use role::{unknown_role, Role};
 pub use screenshot::{Screenshot, ScreenshotProvider};
 pub use selector::{Selector, SelectorGroup};
+pub use shell::{ShellSurface, ShellSurfaceKind};
 pub use text::{is_bidi_control, strip_bidi, strip_bidi_opt};
 
 /// Maximum tree traversal depth for providers. Prevents stack overflow from

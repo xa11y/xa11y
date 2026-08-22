@@ -63,6 +63,12 @@ impl Provider for MockProvider {
         Err(Error::selector_not_matched("focused application"))
     }
 
+    // This fixture models an application tree only; shell-surface behaviour is
+    // covered in xa11y-core against its own mock.
+    fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
+        Ok(vec![])
+    }
+
     fn press(&self, element: &ElementData) -> Result<()> {
         *self.last_action.lock().unwrap() = Some((element.handle, "press".to_string()));
         Ok(())
@@ -1028,6 +1034,12 @@ impl Provider for MultiAppMockProvider {
         Err(Error::selector_not_matched("focused application"))
     }
 
+    // This fixture models an application tree only; shell-surface behaviour is
+    // covered in xa11y-core against its own mock.
+    fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
+        Ok(vec![])
+    }
+
     fn press(&self, _: &ElementData) -> Result<()> {
         Ok(())
     }
@@ -1302,6 +1314,9 @@ impl Provider for DelayedProvider {
     fn focused_app(&self) -> Result<ElementData> {
         Err(Error::selector_not_matched("focused application"))
     }
+    fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
+        self.inner.list_shell_surfaces()
+    }
     fn press(&self, e: &ElementData) -> Result<()> {
         self.inner.press(e)
     }
@@ -1453,6 +1468,9 @@ impl Provider for AppByPidOverrideProvider {
     fn focused_app(&self) -> Result<ElementData> {
         Err(Error::selector_not_matched("focused application"))
     }
+    fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
+        self.inner.list_shell_surfaces()
+    }
     fn app_by_pid(&self, pid: u32) -> Result<ElementData> {
         self.app_by_pid_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1599,6 +1617,9 @@ impl Provider for GhostAppProvider {
     }
     fn focused_app(&self) -> Result<ElementData> {
         Err(Error::selector_not_matched("focused application"))
+    }
+    fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
+        self.inner.list_shell_surfaces()
     }
     fn press(&self, e: &ElementData) -> Result<()> {
         self.inner.press(e)

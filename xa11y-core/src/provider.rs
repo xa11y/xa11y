@@ -2,6 +2,7 @@ use crate::element::ElementData;
 use crate::error::{Error, Result};
 use crate::event_provider::Subscription;
 use crate::selector::{matches_simple, Combinator, Selector, SelectorGroup, SelectorSegment};
+use crate::shell::ShellSurfaceKind;
 
 /// Platform backend trait for accessibility tree access.
 ///
@@ -116,6 +117,24 @@ pub trait Provider: Send + Sync {
     /// portable way to derive the foreground app, so a silent no-op default
     /// would hide an unimplemented backend (tenet 1).
     fn focused_app(&self) -> Result<ElementData>;
+
+    /// Enumerate OS shell surfaces — taskbars, panels, docks, menu bars,
+    /// status items, the desktop, and any transient shell flyout currently
+    /// open. One entry per surface, each a real platform element usable as a
+    /// search root.
+    ///
+    /// The listing is live: transient surfaces
+    /// ([`ShellSurfaceKind::Flyout`]) appear only while they are on screen,
+    /// and enumerating NEVER opens, closes, or presses anything. Required —
+    /// no default impl, for the same reason [`list_apps`](Self::list_apps)
+    /// has none: enumeration is platform-specific, and a silent empty default
+    /// would hide an unimplemented backend (tenet 1).
+    ///
+    /// The kind is part of the primitive's contract, so it travels in the
+    /// signature where the compiler sees it rather than being smuggled
+    /// through `raw`. Backends return the platform root untouched;
+    /// `ShellSurface::list_with` stamps `raw["shell_kind"]` in one place.
+    fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>>;
 
     /// Search for elements matching a selector.
     ///
@@ -335,6 +354,9 @@ impl<T: Provider + ?Sized> Provider for &T {
     }
     fn focused_app(&self) -> Result<ElementData> {
         (**self).focused_app()
+    }
+    fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
+        (**self).list_shell_surfaces()
     }
     fn find_elements(
         &self,

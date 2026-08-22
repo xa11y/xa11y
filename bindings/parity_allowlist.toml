@@ -32,6 +32,7 @@ mirrored = [
     "InputSim",
     "Locator",
     "Screenshot",
+    "ShellSurface",
     "Subscription",
 ]
 
@@ -39,6 +40,7 @@ mirrored = [
 # it becomes a primitive, a plain object, or a set of exception classes.
 opaque = [
     { type = "Role", reason = "Roles cross the boundary as strings (`button`, `text_field`); the enum's variants are not mirrored as binding members." },
+    { type = "ShellSurfaceKind", reason = "Shell-surface kinds cross the boundary as strings (`taskbar`, `status_items`) — identically spelled in both bindings, like Role, and converted mechanically via to_snake_case; the enum's variants are not mirrored as binding members." },
     { type = "Error", reason = "Mapped to a hierarchy of native exception classes (XA11yError, TimeoutError, ...) rather than a single mirrored type." },
     { type = "Diagnosis", reason = "Surfaced as structured attributes on the raised exception (selector, condition, candidates, ...), not as its own class." },
     { type = "EventKind", reason = "Exposed as string constants (Python `EventType.FOCUS_CHANGED`, JS `EventTypeName` union) rather than a mirrored enum." },
@@ -230,6 +232,12 @@ rust_only = [
     { method = "App::provider", reason = "Internal plumbing for provider implementors, not user API." },
     { method = "App::data", reason = "Internal plumbing for provider implementors, not user API." },
 
+    # ShellSurface: same singleton fold as App. `ShellSurface.list()` /
+    # `.by_kind()` in the binding are the `xa11y::ShellSurfaceExt` methods.
+    { method = "ShellSurface::list_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "ShellSurface::by_kind_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "ShellSurface::data", reason = "Internal plumbing for provider implementors, not user API." },
+
     # Internal Rust constructors / accessors.
     { method = "Locator::new", reason = "Internal Rust constructor; bindings build Locators via App.locator() / module-level locator()." },
     { method = "Element::new", reason = "Internal Rust constructor; bindings obtain Elements via Locator / navigation." },
@@ -308,6 +316,12 @@ rust_only = [
     { method = "App::try_find_with", reason = "Fallible-predicate variant of find_with; the JS App.find poll loop propagates predicate errors directly." },
     { method = "App::provider", reason = "Internal plumbing for provider implementors, not user API." },
     { method = "App::data", reason = "Internal plumbing for provider implementors, not user API." },
+
+    # ShellSurface: same singleton fold as App. `ShellSurface.list()` /
+    # `.by_kind()` in the binding are the `xa11y::ShellSurfaceExt` methods.
+    { method = "ShellSurface::list_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "ShellSurface::by_kind_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "ShellSurface::data", reason = "Internal plumbing for provider implementors, not user API." },
 
     { method = "Locator::new", reason = "Internal Rust constructor; bindings build Locators via App.locator() / module-level locator()." },
     { method = "Element::new", reason = "Internal Rust constructor; bindings obtain Elements via Locator / navigation." },

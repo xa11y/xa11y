@@ -7,8 +7,8 @@
 use arbitrary::Arbitrary;
 use std::sync::Arc;
 use xa11y::{
-    ElementData, ElementParts, Error, Provider, Rect, Result, Role, StateParts, StateSet,
-    Subscription, Toggled,
+    ElementData, ElementParts, Error, Provider, Rect, Result, Role, ShellSurfaceKind, StateParts,
+    StateSet, Subscription, Toggled,
 };
 
 // ── Role and Action tables ────────────────────────────────────────────────────
@@ -172,6 +172,12 @@ impl Provider for FuzzProvider {
             return Err(Error::selector_not_matched("focused application"));
         }
         Ok(self.nodes[0].data.clone())
+    }
+
+    // The fuzzed trees model application trees only; shell-surface discovery
+    // has no fuzz target of its own yet.
+    fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
+        Ok(vec![])
     }
 
     fn press(&self, _: &ElementData) -> Result<()> { Ok(()) }
