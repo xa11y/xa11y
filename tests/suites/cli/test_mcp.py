@@ -466,6 +466,11 @@ def test_action_presses_a_button(mcp, app_pid):
     On Electron it landed on Chromium's own chrome instead, whose buttons
     report `Action press not supported on button`.
 
+    On Tauri it was worse than a failure. The app's first button navigates to
+    `input-events.html`, a page carrying none of the widgets, so pressing it
+    made every later test skip for want of a slider or a check box and the
+    cell reported success while covering almost nothing.
+
     Every test app has an `OK` button, and `test_actions.py` already presses
     it by name through the CLI on every one of them — naming it is also what
     the `action` tool tells a model to do.
