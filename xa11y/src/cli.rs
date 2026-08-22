@@ -22,6 +22,24 @@ pub enum CliError {
     /// `find` matched no elements — exit code 1. Kept distinct from `Usage`
     /// so scripts can tell "ran fine but found nothing" from a bad invocation.
     NotFound(String),
+    /// A selector matched several elements where the caller's contract is
+    /// exactly one — exit code 1.
+    ///
+    /// Constructed by the MCP `action` tool, whose schema promises "must match
+    /// exactly one element". `xa11y action` keeps the library's document-order
+    /// first-match semantics, which its own reference documents; the MCP tool
+    /// cannot, because a model that is told "exactly one" and silently gets
+    /// the first of several has no way to notice.
+    ///
+    /// The [`Diagnosis`] carries the selector, the observed match count, and a
+    /// bounded candidate list, so the recovery — an attribute filter or
+    /// `:nth(n)` — is readable straight off the error (tenet 6).
+    Ambiguous {
+        /// How many elements the selector matched.
+        count: usize,
+        /// Selector, match count, and bounded candidate list.
+        diagnosis: Box<Diagnosis>,
+    },
     /// An underlying xa11y operation failed — exit code 1.
     Xa11y(Error),
 }
@@ -31,7 +49,7 @@ impl CliError {
     pub fn exit_code(&self) -> i32 {
         match self {
             CliError::Usage(_) => 2,
-            CliError::NotFound(_) | CliError::Xa11y(_) => 1,
+            CliError::NotFound(_) | CliError::Ambiguous { .. } | CliError::Xa11y(_) => 1,
         }
     }
 }
@@ -41,6 +59,12 @@ impl std::fmt::Display for CliError {
         match self {
             CliError::Usage(msg) => write!(f, "usage error: {msg}"),
             CliError::NotFound(msg) => write!(f, "{msg}"),
+            CliError::Ambiguous { count, diagnosis } => write!(
+                f,
+                "Ambiguous selector: matched {count} elements, but this operation acts on \
+                 exactly one; narrow it with an attribute filter (e.g. [name=\"…\"]) or pick \
+                 one with :nth(n), 1-based{diagnosis}"
+            ),
             CliError::Xa11y(e) => write!(f, "{e}"),
         }
     }
@@ -730,12 +754,14 @@ pub(crate) const ACTION_NAMES: &[&str] = &[
     "increment",
     "decrement",
     "set-value",
+    "set-numeric-value",
     "type-text",
     "select-text",
 ];
 
 /// Actions that require a `--value` (MCP: `value`) argument.
-pub(crate) const ACTIONS_REQUIRING_VALUE: &[&str] = &["set-value", "type-text", "select-text"];
+pub(crate) const ACTIONS_REQUIRING_VALUE: &[&str] =
+    &["set-value", "set-numeric-value", "type-text", "select-text"];
 
 /// Dispatch a named action verb onto `locator`.
 ///
@@ -755,33 +781,89 @@ pub(crate) fn perform_action(
         value.ok_or_else(|| CliError::Usage(format!("{verb} requires a value")))
     };
 
-    match action_name {
-        "press" => locator.press()?,
-        "focus" => locator.focus()?,
-        "blur" => locator.blur()?,
-        "toggle" => locator.toggle()?,
-        "expand" => locator.expand()?,
-        "collapse" => locator.collapse()?,
-        "select" => locator.select()?,
-        "show-menu" => locator.show_menu()?,
-        "scroll-into-view" => locator.scroll_into_view()?,
-        "increment" => locator.increment()?,
-        "decrement" => locator.decrement()?,
-        "set-value" => locator.set_value(need_value("set-value")?)?,
-        "type-text" => locator.type_text(need_value("type-text")?)?,
-        "select-text" => {
-            let v = need_value("select-text")?;
-            let (start, end) = parse_text_range(v)?;
-            locator.select_text(start, end)?;
+    // The dispatch runs inside a closure so every arm's failure passes through
+    // `relabel_action_error` on the way out, and the verb spelling a caller is
+    // told about is the one this function accepts.
+    let dispatch = || -> CliResult<()> {
+        match action_name {
+            "press" => locator.press()?,
+            "focus" => locator.focus()?,
+            "blur" => locator.blur()?,
+            "toggle" => locator.toggle()?,
+            "expand" => locator.expand()?,
+            "collapse" => locator.collapse()?,
+            "select" => locator.select()?,
+            "show-menu" => locator.show_menu()?,
+            "scroll-into-view" => locator.scroll_into_view()?,
+            "increment" => locator.increment()?,
+            "decrement" => locator.decrement()?,
+            "set-value" => locator.set_value(need_value("set-value")?)?,
+            "set-numeric-value" => {
+                // Parsed before the locator is touched, so a bad number cannot
+                // burn the auto-wait timeout or reach the platform call.
+                let v = parse_numeric_value(need_value("set-numeric-value")?)?;
+                locator.set_numeric_value(v)?;
+            }
+            "type-text" => locator.type_text(need_value("type-text")?)?,
+            "select-text" => {
+                let v = need_value("select-text")?;
+                let (start, end) = parse_text_range(v)?;
+                locator.select_text(start, end)?;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown action: {other} (expected one of: {})",
+                    ACTION_NAMES.join(", ")
+                )));
+            }
         }
-        other => {
-            return Err(CliError::Usage(format!(
-                "unknown action: {other} (expected one of: {})",
-                ACTION_NAMES.join(", ")
-            )));
-        }
+        Ok(())
+    };
+
+    dispatch().map_err(|e| relabel_action_error(e, action_name))
+}
+
+/// Parse a `--value` for `set-numeric-value`.
+///
+/// Rejects unparsable and non-finite input here rather than letting it reach
+/// the provider: the CLI and the MCP tool both take this value as a string,
+/// and "parse arguments before the first OS call" is what keeps a bad number
+/// from spending the auto-wait timeout before failing.
+pub(crate) fn parse_numeric_value(raw: &str) -> CliResult<f64> {
+    let parsed: f64 = raw.trim().parse().map_err(|_| {
+        CliError::Usage(format!(
+            "set-numeric-value value must be a number (e.g. 88 or 0.5), got: {raw}"
+        ))
+    })?;
+    if !parsed.is_finite() {
+        return Err(CliError::Usage(format!(
+            "set-numeric-value value must be finite, got: {raw}"
+        )));
     }
-    Ok(())
+    Ok(parsed)
+}
+
+/// Re-spell the action name in an `ActionNotSupported` as the verb the caller
+/// typed.
+///
+/// Providers report the failing action by its Rust method name
+/// (`show_menu`, `scroll_into_view`), so the error told the user to use a
+/// spelling `xa11y action` and the MCP `action` tool both reject. Only the
+/// name is rewritten, and only when it is the same verb modulo the separator
+/// — a provider naming some *other* action passes through untouched, because
+/// that difference is information, not noise.
+fn relabel_action_error(err: CliError, verb: &str) -> CliError {
+    match err {
+        CliError::Xa11y(Error::ActionNotSupported { action, role })
+            if action.replace('_', "-") == verb =>
+        {
+            CliError::Xa11y(Error::ActionNotSupported {
+                action: verb.to_string(),
+                role,
+            })
+        }
+        other => other,
+    }
 }
 
 /// Parse a `START,END` character range for `select-text`.
@@ -1516,6 +1598,98 @@ mod tests {
     fn parse_button_unknown_errors() {
         assert!(parse_button("Left").is_err()); // case-sensitive
         assert!(parse_button("nope").is_err());
+    }
+
+    // ── Action verbs ────────────────────────────────────────────────────────
+
+    #[test]
+    fn every_value_taking_verb_is_a_verb() {
+        // `ACTIONS_REQUIRING_VALUE` is advertised to MCP callers as a subset
+        // of the action enum; a verb in one list and not the other would be
+        // documented and unreachable.
+        for verb in ACTIONS_REQUIRING_VALUE {
+            assert!(ACTION_NAMES.contains(verb), "{verb} is not an action");
+        }
+    }
+
+    #[test]
+    fn set_numeric_value_is_offered_and_needs_a_value() {
+        assert!(ACTION_NAMES.contains(&"set-numeric-value"));
+        assert!(ACTIONS_REQUIRING_VALUE.contains(&"set-numeric-value"));
+    }
+
+    #[test]
+    fn numeric_values_parse_the_way_a_slider_is_written() {
+        assert_eq!(parse_numeric_value("88").unwrap(), 88.0);
+        assert_eq!(parse_numeric_value(" 0.5 ").unwrap(), 0.5);
+        assert_eq!(parse_numeric_value("-3").unwrap(), -3.0);
+    }
+
+    #[test]
+    fn a_non_numeric_value_is_rejected_before_any_platform_call() {
+        let err = parse_numeric_value("loud").expect_err("must reject");
+        assert!(matches!(err, CliError::Usage(_)), "{err}");
+        assert!(err.to_string().contains("loud"), "{err}");
+    }
+
+    #[test]
+    fn non_finite_values_are_rejected_rather_than_passed_on() {
+        for raw in ["NaN", "inf", "-inf"] {
+            let err = parse_numeric_value(raw).expect_err("must reject {raw}");
+            assert!(err.to_string().contains("finite"), "{raw}: {err}");
+        }
+    }
+
+    #[test]
+    fn an_unsupported_action_is_named_the_way_the_caller_must_type_it() {
+        // Providers report the failing action by its Rust method name, so the
+        // error used to tell the user to use `show_menu`, which both surfaces
+        // reject.
+        let err = relabel_action_error(
+            CliError::Xa11y(Error::ActionNotSupported {
+                action: "show_menu".into(),
+                role: Role::MenuItem,
+            }),
+            "show-menu",
+        );
+        assert_eq!(
+            err.to_string(),
+            "Action show-menu not supported on menu_item"
+        );
+    }
+
+    #[test]
+    fn an_unrelated_action_name_in_an_error_is_left_alone() {
+        // A provider naming some *other* action is reporting something the
+        // caller needs to see, not a spelling to normalize.
+        let err = relabel_action_error(
+            CliError::Xa11y(Error::ActionNotSupported {
+                action: "activate".into(),
+                role: Role::MenuItem,
+            }),
+            "press",
+        );
+        assert!(err.to_string().contains("activate"), "{err}");
+    }
+
+    #[test]
+    fn an_ambiguous_selector_is_an_operation_failure_that_names_the_way_out() {
+        let err = CliError::Ambiguous {
+            count: 2,
+            diagnosis: Box::new(Diagnosis::new().selector("radio_button").candidates(vec![
+                "radio_button \"A\"".into(),
+                "radio_button \"B\"".into(),
+            ])),
+        };
+        assert_eq!(
+            err.exit_code(),
+            1,
+            "not a usage error: the call was well-formed"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("matched 2 elements"), "{msg}");
+        assert!(msg.contains(":nth(n)"), "{msg}");
+        assert!(msg.contains("radio_button \"B\""), "{msg}");
     }
 
     // ── `find -o bounds|center` output formatters ───────────────────────────

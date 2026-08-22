@@ -37,6 +37,53 @@ const FIND_MAX_LIMIT: usize = 500;
 /// Longest candidate list carried in a failure's diagnosis.
 const MAX_DIAGNOSIS_CANDIDATES: usize = 20;
 
+/// What an element's `actions` field is, and what it is not.
+///
+/// Carried by both element-returning tools, because the field is the first
+/// thing a model reads to decide what it may call — and reading it as a
+/// capability list is wrong in both directions. It is a faithful report of
+/// what the application advertises through the platform's action interface
+/// (AT-SPI `Action`, UIA patterns, `AXActionNames`), which is a different set
+/// from the verbs `action` accepts: a slider that lists nothing still
+/// increments, and a check box that lists only `press` still toggles.
+const ACTIONS_FIELD_NOTE: &str = "\
+`actions` on an element lists the actions the application advertises through \
+the platform's accessibility action interface. It is neither the set of verbs \
+the `action` tool accepts nor a capability list, and an absent or empty \
+`actions` rules nothing out. Choose the verb from the element's reported \
+properties instead: `increment` / `decrement` / `set-numeric-value` apply to \
+anything reporting `numeric_value` (with `min_value` / `max_value` as its \
+range), `set-value` / `type-text` / `select-text` to anything whose `states` \
+include `editable`, `focus` to anything `focusable`, `toggle` to anything \
+carrying a `checked` state, and `expand` / `collapse` to anything carrying \
+`expanded`. `press` is the general activation verb and applies to any \
+control, whether or not it lists one. A verb the element genuinely cannot do comes back as \
+`action_not_supported` rather than doing something else, so trying the one \
+the properties imply is safe.";
+
+/// Selector syntax, as a model needs to be told it.
+///
+/// Every rule here is one an agent got wrong against a real application: it
+/// wrote `checkbox` for `check_box`, `[checked]` for `[checked="on"]`,
+/// `[name*="item" i]` for `[name*="item"]`, and `:checked` / `:focused` /
+/// `:nth-child(1)` where only attribute filters and `:nth(n)` exist.
+const SELECTOR_SYNTAX: &str = "\
+Roles are snake_case: `check_box`, `radio_button`, `text_field`, \
+`static_text`, `list_item`, `menu_item`. Attribute filters are \
+`[attr=\"value\"]` and the value must be quoted — there is no presence-only \
+form, so `[checked]` is a syntax error where `[checked=\"on\"]` works. \
+Operators are `=` (exact, case-sensitive), `*=` (contains), `^=` (starts \
+with) and `$=` (ends with); the last three are already case-insensitive and \
+there is no trailing `i` flag. Chain filters to AND them: \
+`button[name=\"OK\"][enabled=\"true\"]`. Combinators are a space (descendant) \
+and `>` (direct child), and a comma unions clauses. `:nth(n)` picks the nth \
+match in document order, 1-based, and is the only pseudo-class — `:checked`, \
+`:focused` and `:nth-child()` do not exist here. States are matchable as \
+ordinary attributes: `checked` takes `\"on\"` / `\"off\"` / `\"mixed\"`, and \
+`\"true\"` / `\"false\"` work for `enabled`, `visible`, `focused`, \
+`focusable`, `selected`, `editable`, `expanded`, `required`, `busy`, \
+`modal` and `active`.";
+
 /// What one tool call produced.
 #[derive(Debug)]
 pub(crate) struct ToolOutput {
@@ -238,9 +285,12 @@ fn tool_definition(name: &str) -> Value {
             tool(
                 "tree",
                 "Read accessibility tree",
-                "Read an application's accessibility tree: roles, names, values, \
-                 states, screen bounds, and available actions. Use this to \
-                 understand a window before acting on it.",
+                &format!(
+                    "Read an application's accessibility tree: roles, names, values, \
+                     states, screen bounds, and advertised actions. Use this to \
+                     understand a window before acting on it, and again afterwards to \
+                     confirm what an action changed.\n\n{ACTIONS_FIELD_NOTE}"
+                ),
                 object_schema(props, &[]),
             )
         }
@@ -250,9 +300,13 @@ fn tool_definition(name: &str) -> Value {
                 "selector".into(),
                 json!({
                     "type": "string",
-                    "description": "xa11y selector, CSS-like. Examples: \
-                                    `button[name=\"OK\"]`, `text_field[name*=\"Search\"]`, \
-                                    `window > group button`, `checkbox[checked]`.",
+                    "description": format!(
+                        "xa11y selector, CSS-like. Examples: `button[name=\"OK\"]`, \
+                         `text_field[name*=\"Search\"]`, `window > group button`, \
+                         `check_box[checked=\"on\"]`, `radio_button:nth(2)`, \
+                         `button[name=\"Save\"], button[name=\"Save As\"]`.\n\n\
+                         {SELECTOR_SYNTAX}"
+                    ),
                 }),
             );
             props.insert(
@@ -267,9 +321,15 @@ fn tool_definition(name: &str) -> Value {
             tool(
                 "find",
                 "Find elements",
-                "Find elements matching a selector. Each match reports its screen \
-                 `bounds` and `center`, which are the coordinates the click, move, \
-                 drag, scroll, and screenshot tools take.",
+                &format!(
+                    "Find elements matching a selector. Each match reports its screen \
+                     `bounds` and `center`, which are the coordinates the click, move, \
+                     drag, scroll, and screenshot tools take, plus its `states` and \
+                     the actions the application advertises. A selector that matches \
+                     nothing comes back with the near-miss candidates that were in \
+                     scope, so read those before guessing again.\n\n\
+                     {ACTIONS_FIELD_NOTE}"
+                ),
                 object_schema(props, &["selector"]),
             )
         }
@@ -290,8 +350,15 @@ fn tool_definition(name: &str) -> Value {
                 "selector".into(),
                 json!({
                     "type": "string",
-                    "description": "Selector for the element to act on. Must match exactly one \
-                                    element.",
+                    "description": format!(
+                        "Selector for the element to act on. Must match exactly one \
+                         element: a selector matching several is refused with \
+                         `ambiguous_selector` and the list of what it matched, rather \
+                         than acted on. Narrow it with an attribute filter or pick \
+                         one with `:nth(n)`. Examples: `button[name=\"Save As\"]`, \
+                         `text_field[name=\"Search\"]`, `check_box[checked=\"off\"]`, \
+                         `radio_button:nth(2)`.\n\n{SELECTOR_SYNTAX}"
+                    ),
                 }),
             );
             props.insert(
@@ -299,17 +366,37 @@ fn tool_definition(name: &str) -> Value {
                 json!({
                     "type": "string",
                     "description": "Argument for actions that need one: the text for `set-value` \
-                                    and `type-text`, or `START,END` character offsets for \
-                                    `select-text`.",
+                                    and `type-text`, a number for `set-numeric-value` (e.g. \
+                                    \"88\", within the element's `min_value`..`max_value`), or \
+                                    `START,END` character offsets for `select-text`.",
                 }),
             );
             tool(
                 "action",
                 "Perform accessibility action",
-                "Perform an accessibility action on an element. Prefer this over the \
-                 mouse and keyboard tools: it calls the application's own action, so \
-                 it does not depend on window position, focus, or anything being \
-                 visible on screen.",
+                &format!(
+                    "Perform an accessibility action on an element. Prefer this over the \
+                     mouse and keyboard tools: it calls the application's own action, so \
+                     it does not depend on window position, focus, or anything being \
+                     visible on screen.\n\n\
+                     The selector must match exactly one element. One that matches \
+                     several is refused with an `ambiguous_selector` failure listing \
+                     what it matched, rather than applied to the first of them.\n\n\
+                     Auto-waits for the selector to match an element that is visible and \
+                     enabled, re-resolving as it polls, and only then acts. The wait runs \
+                     up to the default timeout, currently {timeout}. Set {timeout_env} \
+                     (in seconds) in the environment the server is launched with to \
+                     change it; no tool argument does. A call that is going to fail \
+                     therefore takes that long and returns a `timeout` failure \
+                     naming what it was waiting for and what it last saw. Do not wrap \
+                     this tool in a retry loop; the wait is the retry loop.\n\n\
+                     `ok: true` means the application accepted the call, not that \
+                     anything changed: a control is free to accept an action and do \
+                     nothing. Confirm the effect by re-reading with `tree` or `find`.\n\n\
+                     {ACTIONS_FIELD_NOTE}",
+                    timeout = default_timeout_label(),
+                    timeout_env = crate::DEFAULT_TIMEOUT_ENV_VAR,
+                ),
                 object_schema(props, &["action", "selector"]),
             )
         }
@@ -491,6 +578,19 @@ fn tool_definition(name: &str) -> Value {
     }
 }
 
+/// The auto-wait timeout, as the `action` description states it.
+///
+/// A misconfigured [`crate::DEFAULT_TIMEOUT_ENV_VAR`] is reported rather than
+/// papered over with the built-in default (tenet 1): every action call in the
+/// session is about to fail with that same message, and the tool list is the
+/// first place a client could learn why.
+fn default_timeout_label() -> String {
+    match crate::default_timeout() {
+        Ok(timeout) => format!("{timeout:?}"),
+        Err(e) => format!("unresolvable ({e}) — every action call will fail until it is fixed"),
+    }
+}
+
 fn point_properties(what: &str) -> Map<String, Value> {
     let mut props = Map::new();
     props.insert(
@@ -604,6 +704,17 @@ fn target_app(args: &Value) -> CliResult<App> {
         pid,
         ..Default::default()
     };
+    // `resolve_app`'s own "specify one" message names `--app` / `--pid`,
+    // which are flags this surface does not have: an MCP caller passes `app`
+    // and `pid` as tool arguments. Only the *naming* of the missing argument
+    // is answered here — matching a name to a running application stays in
+    // `resolve_app`, so the two surfaces cannot drift on what `app` means.
+    if opts.app.is_none() && opts.pid.is_none() {
+        return Err(usage(
+            "specify \"app\" (application name, matched as a substring) or \"pid\" \
+             (process id); the `apps` tool lists both for every running application",
+        ));
+    }
     resolve_app(&opts)
 }
 
@@ -709,11 +820,23 @@ fn tool_find(args: &Value) -> CliResult<ToolOutput> {
     let limit = opt_usize(args, "limit", FIND_DEFAULT_LIMIT, FIND_MAX_LIMIT)?;
     let app = target_app(args)?;
 
-    let elements = app.locator(selector).elements()?;
+    let locator = app.locator(selector);
+    let mut elements = locator.elements()?;
     if elements.is_empty() {
-        return Err(CliError::NotFound(format!(
-            "no elements matched selector: {selector}"
-        )));
+        // `elements()` reports a miss as an empty list, so the failure that
+        // reaches the model would otherwise carry nothing but the selector it
+        // already knows. `element()` is the terminal, diagnosed form of the
+        // same query: its `SelectorNotMatched` names the near-miss candidates
+        // and a bounded snapshot of the scope (tenet 6). The cost is paid on
+        // this path only — a successful find never re-resolves.
+        match locator.element() {
+            Err(e) => return Err(CliError::Xa11y(e)),
+            // The tree changed between the two queries. Reporting the element
+            // that is there now beats reporting a miss that is no longer true
+            // (tenet 1: no silent fallback either way — this is the honest
+            // answer to "what matches now").
+            Ok(el) => elements.push(el),
+        }
     }
 
     let total = elements.len();
@@ -740,14 +863,117 @@ fn tool_action(args: &Value) -> CliResult<ToolOutput> {
     let app = target_app(args)?;
 
     let locator = app.locator(selector);
+    // The schema promises "must match exactly one element", so enforce it here
+    // rather than letting the locator's document-order first-match stand in
+    // for it: a model told "exactly one" that silently gets the first of
+    // several has no way to notice it pressed the wrong control.
+    //
+    // Zero matches deliberately falls through to the action, whose auto-wait
+    // is what gives an element still being built time to appear — and whose
+    // timeout carries the richer "never matched" diagnosis.
+    let matches = locator.elements()?;
+    if matches.len() > 1 {
+        return Err(ambiguous(selector, &matches));
+    }
+
     cli::perform_action(&locator, action, value)?;
 
+    // `ok` reports that the platform accepted the call. Whether the
+    // application did anything with it is only knowable by re-reading, which
+    // is what the tool's description tells the caller to do.
     Ok(ToolOutput::json(json!({
         "ok": true,
         "action": action,
         "selector": selector,
         "application": app.name,
     })))
+}
+
+/// One line naming a candidate, carrying only what tells it apart from its
+/// siblings.
+///
+/// Deliberately not `cli::format_element_oneline`: that renders every state
+/// and the platform id, which on AT-SPI is a 60-character object path. Twenty
+/// of those is a paragraph of noise in a context window, and none of it
+/// answers the only question here — which of these did you mean.
+fn describe_candidate(data: &crate::ElementData) -> String {
+    let mut line = match &data.name {
+        Some(name) => format!("{} \"{}\"", data.role.to_snake_case(), truncate(name, 60)),
+        None => format!("{} (unnamed)", data.role.to_snake_case()),
+    };
+    let mut extras: Vec<String> = Vec::new();
+    if let Some(value) = &data.value {
+        extras.push(format!("value=\"{}\"", truncate(value, 40)));
+    }
+    if let Some(checked) = &data.states.checked {
+        extras.push(format!(
+            "checked={}",
+            match checked {
+                crate::Toggled::Off => "off",
+                crate::Toggled::On => "on",
+                crate::Toggled::Mixed => "mixed",
+            }
+        ));
+    }
+    if data.states.selected {
+        extras.push("selected".into());
+    }
+    if !data.states.enabled {
+        extras.push("disabled".into());
+    }
+    if !data.states.visible {
+        extras.push("hidden".into());
+    }
+    // The centre point is what tells two identically-named siblings apart,
+    // and it is also what `click` would need if the caller goes that way.
+    if let Some(b) = data.bounds {
+        extras.push(format!(
+            "at ({},{})",
+            b.x + (b.width as i32) / 2,
+            b.y + (b.height as i32) / 2
+        ));
+    }
+    if !extras.is_empty() {
+        line.push_str(&format!(" [{}]", extras.join(" ")));
+    }
+    line
+}
+
+/// Cut a string to `max` characters, marking the cut.
+fn truncate(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    text.chars().take(max).collect::<String>() + "…"
+}
+
+/// Build the "matched more than one" failure, with the candidate list that
+/// makes the recovery readable (tenet 6).
+///
+/// The candidate list is bounded *here*, not only where it is serialized, so
+/// the rendered message is bounded too — it is the only copy a client on a
+/// revision without `structuredContent` sees.
+fn ambiguous(selector: &str, matches: &[Element]) -> CliError {
+    let mut candidates: Vec<String> = matches
+        .iter()
+        .take(MAX_DIAGNOSIS_CANDIDATES)
+        .map(|el| describe_candidate(el))
+        .collect();
+    if matches.len() > MAX_DIAGNOSIS_CANDIDATES {
+        candidates.push(format!(
+            "… (+{} more matches)",
+            matches.len() - MAX_DIAGNOSIS_CANDIDATES
+        ));
+    }
+    CliError::Ambiguous {
+        count: matches.len(),
+        diagnosis: Box::new(
+            crate::Diagnosis::new()
+                .selector(selector)
+                .last_observed(format!("selector matched {} elements", matches.len()))
+                .candidates(candidates),
+        ),
+    }
 }
 
 fn tool_click(args: &Value) -> CliResult<ToolOutput> {
@@ -997,10 +1223,28 @@ pub(crate) fn describe_failure(tool: &str, err: &CliError) -> (String, Value) {
     structured.insert("message".into(), json!(text));
     structured.insert("kind".into(), json!(failure_kind(err)));
 
-    if let CliError::Xa11y(inner) = err {
-        if let Some(diagnosis) = diagnosis_of(inner) {
+    match err {
+        CliError::Xa11y(inner) => {
+            if let Some(diagnosis) = diagnosis_of(inner) {
+                let mut encoded = diagnosis_json(diagnosis);
+                // A `SelectorNotMatched` carries its selector on the error
+                // rather than in the diagnosis, because the message already
+                // names it. A harness reading `structuredContent` should not
+                // have to parse prose to get it back, so it is filled in here
+                // when the diagnosis itself did not set it.
+                if let (Some(obj), crate::Error::SelectorNotMatched { selector, .. }) =
+                    (encoded.as_object_mut(), inner)
+                {
+                    obj.entry("selector").or_insert_with(|| json!(selector));
+                }
+                structured.insert("diagnosis".into(), encoded);
+            }
+        }
+        CliError::Ambiguous { count, diagnosis } => {
+            structured.insert("match_count".into(), json!(count));
             structured.insert("diagnosis".into(), diagnosis_json(diagnosis));
         }
+        CliError::Usage(_) | CliError::NotFound(_) => {}
     }
     (text, Value::Object(structured))
 }
@@ -1058,6 +1302,7 @@ fn failure_kind(err: &CliError) -> &'static str {
     let inner = match err {
         CliError::Usage(_) => return "invalid_arguments",
         CliError::NotFound(_) => return "no_match",
+        CliError::Ambiguous { .. } => return "ambiguous_selector",
         CliError::Xa11y(inner) => inner,
     };
     match inner {
@@ -1188,12 +1433,6 @@ mod tests {
     }
 
     #[test]
-    fn a_target_needs_app_or_pid() {
-        let err = target_app(&args(json!({}))).expect_err("must reject");
-        assert!(err.to_string().contains("--app"), "{err}");
-    }
-
-    #[test]
     fn partial_screenshot_regions_are_rejected_with_the_missing_keys() {
         let err = tool_screenshot(&args(json!({ "x": 0, "y": 0, "width": 10 })))
             .expect_err("must reject a partial region");
@@ -1245,6 +1484,193 @@ mod tests {
             MAX_DIAGNOSIS_CANDIDATES
         );
         assert_eq!(encoded["candidates_omitted"], 5);
+    }
+
+    #[test]
+    fn an_ambiguous_selector_names_every_candidate_and_the_way_out() {
+        let mut a = crate::ElementData::for_role(crate::Role::RadioButton);
+        a.name = Some("Option A".into());
+        a.states.checked = Some(crate::Toggled::On);
+        let mut b = crate::ElementData::for_role(crate::Role::RadioButton);
+        b.name = Some("Option B".into());
+        b.states.checked = Some(crate::Toggled::Off);
+
+        let err = CliError::Ambiguous {
+            count: 2,
+            diagnosis: Box::new(
+                crate::Diagnosis::new()
+                    .selector("radio_button")
+                    .last_observed("selector matched 2 elements")
+                    .candidates(vec![describe_candidate(&a), describe_candidate(&b)]),
+            ),
+        };
+        let (text, structured) = describe_failure("action", &err);
+        assert_eq!(structured["kind"], "ambiguous_selector");
+        assert_eq!(structured["match_count"], 2);
+        assert_eq!(structured["diagnosis"]["selector"], "radio_button");
+        let candidates = structured["diagnosis"]["candidates"].as_array().unwrap();
+        assert_eq!(candidates.len(), 2);
+        // The state that says which one is already selected has to be in the
+        // list, or "press the other one" is still a guess.
+        assert!(candidates[0].as_str().unwrap().contains("checked=on"));
+        assert!(candidates[1].as_str().unwrap().contains("checked=off"));
+        // The recovery must be readable off the message alone, for clients on
+        // revisions with no structuredContent.
+        assert!(text.contains("Option B"), "{text}");
+        assert!(text.contains(":nth(n)"), "{text}");
+        assert!(text.contains("[name="), "{text}");
+    }
+
+    #[test]
+    fn a_candidate_line_carries_what_tells_siblings_apart_and_nothing_else() {
+        let mut data = crate::ElementData::for_role(crate::Role::Button);
+        data.name = Some("Save".into());
+        data.stable_id = Some("/org/a11y/atspi/accessible/0/12345678901234567890".into());
+        data.bounds = Some(Rect {
+            x: 10,
+            y: 20,
+            width: 100,
+            height: 40,
+        });
+        let line = describe_candidate(&data);
+        assert_eq!(line, "button \"Save\" [at (60,40)]");
+        assert!(
+            !line.contains("atspi"),
+            "the platform id is 60 characters of noise: {line}"
+        );
+    }
+
+    #[test]
+    fn a_long_candidate_name_is_cut_rather_than_carried_whole() {
+        let mut data = crate::ElementData::for_role(crate::Role::StaticText);
+        data.name = Some("x".repeat(500));
+        let line = describe_candidate(&data);
+        assert!(line.chars().count() < 100, "{}", line.chars().count());
+        assert!(line.contains('…'), "the cut must be visible: {line}");
+    }
+
+    #[test]
+    fn a_selector_miss_reports_the_selector_as_a_field_not_only_in_prose() {
+        // A harness should be able to branch on the selector without parsing
+        // the message. Core keeps it on the error, not in the diagnosis.
+        let err = CliError::Xa11y(
+            crate::Error::selector_not_matched("button[name=\"Sbumit\"]").diagnose(
+                crate::Diagnosis::new().candidates(vec!["button \"Submit\"".to_string()]),
+            ),
+        );
+        let (_, structured) = describe_failure("find", &err);
+        assert_eq!(structured["kind"], "no_match");
+        assert_eq!(
+            structured["diagnosis"]["selector"],
+            "button[name=\"Sbumit\"]"
+        );
+        assert_eq!(
+            structured["diagnosis"]["candidates"][0],
+            "button \"Submit\""
+        );
+    }
+
+    #[test]
+    fn a_diagnosis_that_names_its_own_selector_is_not_overwritten() {
+        let err = CliError::Xa11y(
+            crate::Error::selector_not_matched("outer")
+                .diagnose(crate::Diagnosis::new().selector("inner")),
+        );
+        let (_, structured) = describe_failure("find", &err);
+        assert_eq!(structured["diagnosis"]["selector"], "inner");
+    }
+
+    #[test]
+    fn the_missing_target_error_names_the_tool_arguments_not_cli_flags() {
+        // `resolve_app`'s own message says "--app NAME or --pid PID", which
+        // are flags no MCP caller can pass.
+        let err = target_app(&args(json!({}))).expect_err("must reject");
+        let msg = err.to_string();
+        assert!(msg.contains("\"app\""), "{msg}");
+        assert!(msg.contains("\"pid\""), "{msg}");
+        assert!(!msg.contains("--"), "no CLI flags on this surface: {msg}");
+    }
+
+    #[test]
+    fn the_action_schema_documents_the_verbs_that_need_a_value() {
+        let def = tool_definition("action");
+        let action = def["inputSchema"]["properties"]["action"]["description"]
+            .as_str()
+            .expect("action description");
+        for verb in ACTIONS_REQUIRING_VALUE {
+            assert!(action.contains(verb), "{verb} not named: {action}");
+        }
+        let value = def["inputSchema"]["properties"]["value"]["description"]
+            .as_str()
+            .expect("value description");
+        assert!(
+            value.contains("set-numeric-value"),
+            "the numeric verb needs its value format spelled out: {value}"
+        );
+    }
+
+    #[test]
+    fn the_action_description_states_the_contract_a_caller_would_otherwise_guess() {
+        let description = tool_definition("action")["description"]
+            .as_str()
+            .expect("action description")
+            .to_string();
+        // Each of these was a wrong assumption a real agent made.
+        assert!(description.contains("exactly one"), "{description}");
+        assert!(description.contains("Auto-waits"), "{description}");
+        assert!(
+            description.contains(crate::DEFAULT_TIMEOUT_ENV_VAR),
+            "the timeout has to be nameable: {description}"
+        );
+        assert!(
+            description.contains("not that anything changed"),
+            "{description}"
+        );
+    }
+
+    #[test]
+    fn the_element_tools_say_what_the_actions_field_is_not() {
+        for name in ["tree", "find"] {
+            let description = tool_definition(name)["description"]
+                .as_str()
+                .expect("description")
+                .to_string();
+            assert!(
+                description.contains("neither the set of verbs"),
+                "{name} must not let `actions` read as a capability list"
+            );
+        }
+    }
+
+    #[test]
+    fn the_selector_examples_the_tools_advertise_actually_parse() {
+        // The `find` schema used to advertise `checkbox[checked]`, in which
+        // both the role and the syntax are wrong. Every example in a
+        // description is a selector a model will copy, so each one is parsed
+        // here.
+        for tool in ["find", "action"] {
+            let text = tool_definition(tool)["inputSchema"]["properties"]["selector"]
+                ["description"]
+                .as_str()
+                .expect("selector description")
+                .to_string();
+            // Only the "Examples:" paragraph. The syntax paragraph below it
+            // quotes fragments and deliberate counter-examples (`[checked]`),
+            // which are not selectors anyone should paste.
+            let listed = text
+                .split("Examples:")
+                .nth(1)
+                .unwrap_or_else(|| panic!("{tool} lists no examples"))
+                .split("\n\n")
+                .next()
+                .expect("split always yields one part");
+            let examples: Vec<&str> = listed.split('`').skip(1).step_by(2).collect();
+            assert!(examples.len() >= 4, "{tool}: too few examples to be useful");
+            for example in examples {
+                crate::SelectorGroup::parse(example)
+                    .unwrap_or_else(|e| panic!("{tool} advertises {example:?}, which fails: {e}"));
+            }
+        }
     }
 
     #[test]

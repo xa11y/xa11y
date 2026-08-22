@@ -115,9 +115,15 @@ Actions that need a value use `--value`:
 
 ```bash
 xa11y action set-value "text_field[name='Search']" --app Safari --value "hello"
+xa11y action set-numeric-value "slider[name='Volume']" --app Music --value 88
 xa11y action type-text "text_field[name='Message']" --app Slack --value "ship it"
 xa11y action select-text "text_field" --app TextEdit --value "0,5"
 ```
+
+`set-value` writes text. A slider, spin button, or progress bar carries a
+number instead, and rejects text with `TextValueNotSupported`; use
+`set-numeric-value`, which takes any finite number and does in one call what
+`increment` would take a step at a time.
 
 #### Available actions
 
@@ -135,6 +141,7 @@ xa11y action select-text "text_field" --app TextEdit --value "0,5"
 | `increment` | Increment a numeric value |
 | `decrement` | Decrement a numeric value |
 | `set-value` | Set text value (requires `--value`) |
+| `set-numeric-value` | Set numeric value, for sliders and spin buttons (requires `--value N`) |
 | `type-text` | Type text as keystrokes (requires `--value`) |
 | `select-text` | Select a text range (requires `--value START,END`) |
 
@@ -230,7 +237,28 @@ screen coordinates and no target.
 | `screenshot` | `x`, `y`, `width`, `height` |
 
 `action` accepts the same verbs as [`xa11y action`](#xa11y-action). `key`
-accepts the same key names as [`xa11y key`](#input-simulation).
+accepts the same key names as [`xa11y key`](#input-simulation). Selectors are
+the same syntax the library takes; see [Selectors](/reference/selectors/).
+
+The `action` tool differs from `xa11y action` in one way, deliberately. The
+command acts on the first match, as the library's `Locator` does. The tool
+requires the selector to match **exactly one** element and returns an
+`ambiguous_selector` failure listing the candidates otherwise, because its
+schema promises that and a model told "exactly one" cannot tell that it got
+the first of several. Narrow the selector or pick one with `:nth(n)`.
+
+Both surfaces auto-wait: the element has to exist, be visible, and be enabled
+before the action runs, within the default timeout (5 seconds, or
+`XA11Y_DEFAULT_TIMEOUT` seconds when that is set in the server's environment).
+A call that is going to fail therefore takes that long, and no MCP argument
+shortens it. `ok: true` reports that the application accepted the call, not
+that anything changed; read the tree again to confirm an effect.
+
+An element's `actions` field reports what the application advertises through
+the platform's action interface. It is not the set of verbs `action` accepts,
+and it is not a capability list: a slider that advertises nothing still
+increments. Pick the verb from the element's own properties — `numeric_value`
+for the value verbs, an `editable` state for the text verbs.
 
 Streaming events has no tool. A tool call that never returns would hang the
 client, so `xa11y events` has no MCP counterpart yet.
@@ -252,10 +280,12 @@ whether they truncated.
 Failures split the way the protocol asks. An unknown tool or a malformed
 request is a JSON-RPC error. Everything a model could fix by retrying — a
 selector that matched nothing, an application that is not running, a bad key
-name — comes back as a result with `isError: true`, carrying the failure's
-`kind` and, where the error has one, its
-[diagnosis](/explanation/errors-and-diagnosis/): what the operation was
-waiting for, what it last observed, and which near-miss elements were present.
+name, a selector that matched several where one was required — comes back as a
+result with `isError: true`, carrying the failure's `kind` and, where the error
+has one, its [diagnosis](/explanation/errors-and-diagnosis/): what the operation
+was waiting for, what it last observed, and which near-miss elements were
+present. `find` and `action` report a miss the same way, so a typo costs one
+call from either.
 
 ## Composing the two halves
 

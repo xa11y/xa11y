@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -384,11 +385,194 @@ def test_a_partial_screenshot_region_is_rejected(mcp):
 
 
 def test_action_presses_a_button(mcp, app_name):
+    """`button:nth(1)` rather than `button`: the tool acts on exactly one.
+
+    This test used to pass `button` and press whichever of the app's buttons
+    came first, which is the behaviour
+    `test_action_refuses_a_selector_that_matches_several` now forbids.
+    """
     result = mcp.call_tool(
-        "action", {"app": app_name, "action": "press", "selector": "button"}
+        "action", {"app": app_name, "action": "press", "selector": "button:nth(1)"}
     )["result"]
     assert result["isError"] is False, result["content"]
     assert result["structuredContent"]["ok"] is True
+
+
+def test_action_refuses_a_selector_that_matches_several(mcp, app_name):
+    """The schema promises exactly one match, so acting on the first is a bug.
+
+    An agent that writes `button[name*="Save"]` against an app with "Save" and
+    "Save As" pressed the wrong one and was told `ok: true`.
+    """
+    found = mcp.call_tool("find", {"app": app_name, "selector": "button"})["result"]
+    total = found["structuredContent"]["match_count"]
+    if total < 2:
+        pytest.skip("the app under test has fewer than two buttons")
+
+    result = mcp.call_tool(
+        "action", {"app": app_name, "action": "press", "selector": "button"}
+    )["result"]
+    assert result["isError"] is True, "acting on the first of several is the defect"
+    structured = result["structuredContent"]
+    assert structured["kind"] == "ambiguous_selector"
+    assert structured["match_count"] == total
+    candidates = structured["diagnosis"]["candidates"]
+    assert candidates, "without the candidates the caller has to go find them again"
+    # Both recoveries have to be readable off the message alone: clients on the
+    # oldest revision this server speaks get no structuredContent at all.
+    assert ":nth(n)" in structured["message"]
+    assert "[name=" in structured["message"]
+
+
+def test_a_refused_ambiguous_selector_lists_what_it_matched(mcp, app_name):
+    """The candidate list must be the way out, not just proof of the problem."""
+    found = mcp.call_tool("find", {"app": app_name, "selector": "button"})["result"]
+    if found["structuredContent"]["match_count"] < 2:
+        pytest.skip("the app under test has fewer than two buttons")
+    names = [m.get("name") for m in found["structuredContent"]["matches"] if m.get("name")]
+    # A name shared by two buttons would be ambiguous in its own right, which
+    # is a different case from the one under test.
+    unique = [n for n in names if names.count(n) == 1 and '"' not in n]
+    if not unique:
+        pytest.skip("the app's buttons have no distinct names")
+
+    result = mcp.call_tool(
+        "action", {"app": app_name, "action": "press", "selector": "button"}
+    )["result"]
+    candidates = " ".join(result["structuredContent"]["diagnosis"]["candidates"])
+    assert unique[0] in candidates, candidates
+
+    # And the selector the candidate list points at is one the tool accepts.
+    narrowed = mcp.call_tool(
+        "action",
+        {"app": app_name, "action": "focus", "selector": f'button[name="{unique[0]}"]'},
+    )["result"]
+    if narrowed["isError"]:
+        # `focus` is advisory and not every AT bridge implements it; what must
+        # not come back is a second complaint about the selector.
+        assert narrowed["structuredContent"]["kind"] != "ambiguous_selector"
+
+
+def test_find_says_what_it_did_see_when_nothing_matched(mcp, app_name):
+    """`find` is the tool whose whole job is finding things.
+
+    Its miss used to be `{"kind": "no_match", "message": "no elements matched
+    selector: ..."}` and nothing else, while `action`'s carried candidates and
+    a scope snapshot for the same typo.
+    """
+    selector = 'button[name="Sbumit"]'
+    result = mcp.call_tool("find", {"app": app_name, "selector": selector})["result"]
+    assert result["isError"] is True
+    structured = result["structuredContent"]
+    assert structured["kind"] == "no_match"
+    diagnosis = structured["diagnosis"]
+    assert diagnosis["selector"] == selector, "as a field, not only inside the prose"
+    assert diagnosis["candidates"], "a miss must name the near misses it found"
+    assert diagnosis["scope"], "and describe where it looked"
+
+
+def test_states_are_selectable_with_the_syntax_the_schema_advertises(mcp, app_name):
+    """The advertised example was `checkbox[checked]`: wrong role, wrong syntax."""
+    tools = {t["name"]: t for t in mcp.request(1, "tools/list")["result"]["tools"]}
+    description = tools["find"]["inputSchema"]["properties"]["selector"]["description"]
+    assert 'check_box[checked="on"]' in description
+    assert "checkbox[checked]" not in description
+
+    result = mcp.call_tool(
+        "find", {"app": app_name, "selector": 'check_box[checked="on"]'}
+    )["result"]
+    if result["isError"]:
+        # No checked box in this app is fine. A syntax error is not.
+        assert result["structuredContent"]["kind"] == "no_match", result["structuredContent"]
+
+
+def test_set_numeric_value_moves_a_slider_in_one_call(mcp, app_name):
+    """Without this verb the only route from 51 to 88 was 37 `increment` calls."""
+    found = mcp.call_tool(
+        "find", {"app": app_name, "selector": "slider:nth(1)"}
+    )["result"]
+    if found["isError"]:
+        pytest.skip("no slider in the app under test")
+    element = found["structuredContent"]["matches"][0]
+    if not {"numeric_value", "min_value", "max_value"} <= element.keys():
+        pytest.skip("the slider reports no numeric range")
+
+    low, high = element["min_value"], element["max_value"]
+    target = low + (high - low) * 0.75
+    if abs(target - element["numeric_value"]) < 1:
+        target = low + (high - low) * 0.25
+
+    result = mcp.call_tool(
+        "action",
+        {
+            "app": app_name,
+            "action": "set-numeric-value",
+            "selector": "slider:nth(1)",
+            "value": str(target),
+        },
+    )["result"]
+    assert result["isError"] is False, result["content"]
+
+    after = mcp.call_tool("find", {"app": app_name, "selector": "slider:nth(1)"})["result"]
+    assert after["structuredContent"]["matches"][0]["numeric_value"] == pytest.approx(
+        target, abs=1.0
+    )
+
+
+def test_a_bad_numeric_value_is_rejected_before_anything_waits(mcp, app_name):
+    """Parsed before the first platform call, so it cannot cost the auto-wait."""
+    start = time.monotonic()
+    result = mcp.call_tool(
+        "action",
+        {
+            "app": app_name,
+            "action": "set-numeric-value",
+            "selector": "slider:nth(1)",
+            "value": "loud",
+        },
+    )["result"]
+    assert result["isError"] is True
+    assert result["structuredContent"]["kind"] == "invalid_arguments"
+    assert "loud" in result["structuredContent"]["message"]
+    assert time.monotonic() - start < 3, "a bad argument must not spend the timeout"
+
+
+def test_the_action_schema_offers_the_numeric_setter(mcp):
+    properties = {
+        t["name"]: t["inputSchema"].get("properties", {})
+        for t in mcp.request(1, "tools/list")["result"]["tools"]
+    }["action"]
+    assert "set-numeric-value" in properties["action"]["enum"]
+    assert "set-numeric-value" in properties["value"]["description"], (
+        "a verb that needs a value must say what the value looks like"
+    )
+
+
+def test_an_unsupported_action_is_spelled_the_way_it_must_be_typed(mcp, app_name):
+    """The enum takes `show-menu`; the failure used to say `show_menu`."""
+    found = mcp.call_tool("find", {"app": app_name, "selector": "static_text"})["result"]
+    if found["isError"]:
+        pytest.skip("no static text in the app under test")
+
+    result = mcp.call_tool(
+        "action", {"app": app_name, "action": "show-menu", "selector": "static_text:nth(1)"}
+    )["result"]
+    if not result["isError"]:
+        pytest.skip("show-menu is supported on this element")
+    structured = result["structuredContent"]
+    if structured["kind"] != "action_not_supported":
+        pytest.skip(f"show-menu failed as {structured['kind']}, not as unsupported")
+    assert "show_menu" not in structured["message"], structured["message"]
+    assert "show-menu" in structured["message"]
+
+
+def test_a_missing_target_is_named_in_the_tools_own_vocabulary(mcp):
+    """`--app` and `--pid` are CLI flags; an MCP caller passes `app` and `pid`."""
+    result = mcp.call_tool("find", {"selector": "button"})["result"]
+    assert result["isError"] is True
+    message = result["structuredContent"]["message"]
+    assert '"app"' in message and '"pid"' in message, message
+    assert "--" not in message, f"no flags exist on this surface: {message}"
 
 
 # ── Cross-entry-point parity ─────────────────────────────────────────────────

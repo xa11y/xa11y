@@ -150,7 +150,7 @@ features:
       (rust_core).
 
   mcp:
-    description: "MCP stdio server: framing, dual-era handshake, tool schemas, and identical behaviour from all three CLI launchers"
+    description: "MCP stdio server: framing, dual-era handshake, tool schemas, tool contracts, and identical behaviour from all three CLI launchers"
     per_app: false
     tested_on: [qt, gtk, cocoa, tauri, electron, egui, winforms, wpf]
     notes: >
@@ -170,6 +170,11 @@ features:
       Framing, version negotiation, tool schemas, and error mapping also have
       unit coverage in xa11y/src/mcp/, which runs on every platform with no
       app and no display.
+      The tool-call tests that do need an app are the ones about contracts a
+      description alone cannot enforce: `action` refusing a selector that
+      matched several rather than acting on the first, `find` reporting the
+      near misses it did see, and `set-numeric-value` moving a slider in one
+      call. Each skips on an app that lacks the widget it needs.
       Separately, tests/mcp_client/ drives the server with the official MCP
       Python SDK in both protocol eras, on ubuntu-latest only (the `mcp-client`
       CI job). It is not per-app and needs no display: the server is

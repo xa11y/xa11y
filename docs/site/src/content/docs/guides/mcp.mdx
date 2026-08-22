@@ -110,6 +110,12 @@ action, so it works regardless of window position, focus, or whether the
 element is on screen. Reach for `click`, `key`, and `type` only where no
 accessibility action exists — see [Simulate input](/guides/input/).
 
+Two things about `action` are worth knowing before the first call. Its
+selector has to match one element: `button` in an application with eight of
+them is refused, with the eight listed, rather than applied to whichever came
+first. And its `ok: true` means the application accepted the call, not that
+the interface changed, so read the tree again when the effect matters.
+
 ## Keep results small
 
 Every result goes into the model's context. Two arguments control the size:
@@ -129,8 +135,9 @@ carries a `kind` and, for lookup failures, a diagnosis naming what the search
 was looking for, what it last observed, and which near-miss elements were
 present.
 
-A selector that matched nothing lists the candidates that were there, which is
-usually enough to fix the selector on the next call. See
+A selector that matched nothing lists the candidates that were there, and one
+that matched too many lists what it matched, which is usually enough to fix the
+selector on the next call. See
 [Errors and diagnosis](/explanation/errors-and-diagnosis/).
 
 ## What is not there yet

@@ -188,6 +188,83 @@ def test_an_argument_mistake_is_reported_as_something_to_fix(run_client):
     assert "selector" in result.structured_content["message"]
 
 
+def test_a_missing_target_is_named_in_the_tools_own_vocabulary(run_client):
+    """An MCP caller passes `app` and `pid`; `--app` and `--pid` are CLI flags.
+
+    The handlers share `resolve_app` with the CLI, whose "specify one" message
+    named the flags. A model reading it has no flag to reach for.
+    """
+    result = run_client(lambda c: c.call_tool("find", {"selector": "button"}))
+    assert result.is_error is True
+    message = result.structured_content["message"]
+    assert '"app"' in message and '"pid"' in message, message
+    assert "--" not in message, f"there are no flags on this surface: {message}"
+
+
+# ── What the tool list tells a model ─────────────────────────────────────────
+
+
+def _tool(run_client, name: str):
+    result = run_client(lambda c: c.list_tools())
+    return next(t for t in result.tools if t.name == name)
+
+
+def test_the_action_verbs_include_setting_a_numeric_value(run_client):
+    """`set-value` is text-only, which left sliders reachable only by stepping.
+
+    `Locator::set_numeric_value` already existed in core; neither the CLI's
+    verb list nor the tool that reads it surfaced it, so moving a slider from
+    51 to 88 meant 37 `increment` round-trips.
+    """
+    action = _tool(run_client, "action")
+    assert "set-numeric-value" in action.input_schema["properties"]["action"]["enum"]
+    value = action.input_schema["properties"]["value"]["description"]
+    assert "set-numeric-value" in value, f"the value format must be stated: {value}"
+
+
+def test_the_action_tool_states_the_contract_a_caller_would_otherwise_guess(run_client):
+    """Each of these was a wrong assumption an agent made against a live app."""
+    description = _tool(run_client, "action").description
+    assert "exactly one" in description, "it acts on one element, or refuses"
+    assert "Auto-waits" in description, "a failing call blocks; say so"
+    assert "XA11Y_DEFAULT_TIMEOUT" in description, "and name the knob that changes it"
+    assert "not that anything changed" in description, "`ok: true` is not verification"
+
+
+def test_the_element_tools_say_what_the_actions_field_is_not(run_client):
+    """`actions` reads as a capability list and is not one.
+
+    A slider advertising no actions still increments; a check box advertising
+    only `press` still toggles. The field is what the application exposes
+    through the platform's action interface, which is a different question
+    from what the `action` tool accepts.
+    """
+    for name in ("tree", "find"):
+        description = _tool(run_client, name).description
+        assert "neither the set of verbs" in description, name
+        assert "numeric_value" in description, f"{name} must name what to read instead"
+
+
+def test_the_advertised_selector_example_is_valid_syntax(run_client):
+    """`find` advertised `checkbox[checked]`, in which both halves are wrong.
+
+    The role is `check_box`, and there is no presence-only attribute form —
+    the selector engine answers `expected operator (=, *=, ^=, $=)`.
+    """
+    selector = _tool(run_client, "find").input_schema["properties"]["selector"]
+    description = selector["description"]
+    assert "checkbox[checked]" not in description
+    assert 'check_box[checked="on"]' in description
+    assert "presence-only" in description, "say why `[checked]` fails"
+    assert ":nth(n)" in description, "and what the only pseudo-class is"
+
+
+def test_the_instructions_warn_that_ok_is_not_verification(run_client):
+    instructions = run_client(lambda c: _identity(c.instructions))
+    assert "exactly one element" in instructions
+    assert "not that anything changed" in instructions
+
+
 def test_an_unknown_tool_is_a_protocol_error(run_client):
     """Not fixable by adjusting arguments, so the spec puts it on the envelope.
 

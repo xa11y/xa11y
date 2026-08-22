@@ -92,6 +92,11 @@ structure. Address elements with xa11y selectors, which are CSS-like: \
 Prefer `action` over the mouse and keyboard tools — it calls the application's \
 own accessibility action and does not depend on window position or focus.
 
+`action` acts on exactly one element and auto-waits for it, so a selector that \
+matches several is refused rather than applied to the first, and no retry loop \
+of your own is needed. Its `ok: true` means the application accepted the call, \
+not that anything changed — confirm by reading the tree again.
+
 The input and screenshot tools work in screen coordinates only. Get those from \
 `find`, which returns each match's `bounds` and `center`.
 

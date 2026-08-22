@@ -99,6 +99,19 @@ candidate lists are truncated — and each of them reports that it truncated. A
 silently shortened result reads as a complete one, which is worse than no
 result.
 
+**A tool description is a contract the handler keeps.** `action` advertises
+"must match exactly one element" and used to act on the first of however many
+matched, which is what `Locator` does by design — the tool inherited the
+behaviour and promised something stricter. A model reading "exactly one"
+cannot tell that it pressed the wrong control, so the tool counts the matches
+and refuses with `ambiguous_selector` and the candidate list. When a
+description states a precondition, the handler enforces it or the description
+stops making the claim. The same rule applies to what a description *omits*:
+the auto-wait, the default timeout, and the fact that `ok: true` means the
+platform accepted the call rather than that anything changed are all in the
+`action` description, because an agent that has to discover them by
+experiment spends calls doing it.
+
 The server is dual-era: it answers `server/discover` for the stateless
 revisions (`2026-07-28` and later) and `initialize` for the handshake ones. The
 era is latched per session from the first request that identifies one, and it
