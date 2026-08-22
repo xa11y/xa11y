@@ -76,7 +76,7 @@ packages install the same `xa11y` command into their environment's bin
 directory, so a virtualenv or a local `npm install` needs the path to that
 copy rather than a global one.
 
-Restart the client and confirm it lists eleven tools, starting with `apps`.
+Restart the client and confirm it lists twelve tools, starting with `apps`.
 
 ## Grant accessibility permission first
 
@@ -104,6 +104,13 @@ A typical sequence: find the application, read its structure, act on it.
 3. `find` with a [selector](/reference/selectors/) returns matching elements,
    each with `bounds` and a precomputed `center`.
 4. `action` performs an accessibility action on a match.
+
+To reach OS chrome instead of an application, call `shell` for the surfaces
+that are present and pass the kind you want as the `shell` argument to `tree`,
+`find`, or `action`. The listing is live, so a `flyout` shows up only while it
+is open, and a hidden Windows tray icon needs the taskbar's "Show Hidden Icons"
+button pressed first. Kinds and the rest of the model are in
+[Shell surfaces](/reference/shell/).
 
 Prefer `action` over `click`. It calls the application's own accessibility
 action, so it works regardless of window position, focus, or whether the

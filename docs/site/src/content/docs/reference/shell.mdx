@@ -1,0 +1,160 @@
+---
+title: Shell surfaces
+description: The OS-owned accessibility roots xa11y can target, what each kind maps to on each platform, and the discovery API in Rust, Python, JavaScript, the CLI, and MCP.
+pageType: reference
+---
+
+{/* DIATAXIS: reference — a factual description of the machinery, structured
+    for lookup rather than for reading through. Neutral and complete. No task
+    narratives, no rationale, no teaching. */}
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+A shell surface is one accessibility root owned by the operating system rather
+than by an application. Menu bars, status items, taskbars, panels, docks, the
+desktop, and open flyouts are all shell surfaces. The [Kinds](#kinds) table
+below gives each one per platform.
+
+`ShellSurface` is the entry point for those roots, as `App` is for application
+roots. Each surface wraps an element the platform itself vends, tagged with a
+`kind`. Selectors, locators, auto-waiting, actions, `tree()`, `dump()`, and
+every error type work on a shell surface exactly as they do on an application.
+
+## Kinds
+
+The kind crosses every binding as its `snake_case` string, with the same
+spelling in Rust, Python, JavaScript, the CLI, and MCP.
+
+| Kind | Windows | macOS | Linux |
+| --- | --- | --- | --- |
+| `menu_bar` | *(none)* | The active application's `AXMenuBar`, Apple menu included. Name and process id are the owning application's. | *(none)* |
+| `status_items` | *(none)* | One surface per process with a live `AXExtrasMenuBar`. Name and process id are the owning application's. | *(none)* |
+| `taskbar` | The `Shell_TrayWnd` pane, holding the task band and the visible tray row with its overflow chevron. | *(none)* | *(none)* |
+| `panel` | *(none)* | *(none)* | Each AT-SPI frame carrying `window-type:dock`. One surface per frame, so a panel and a dock row are two surfaces. |
+| `dock` | *(none)* | The Dock process's application element. | *(none)* |
+| `desktop` | `Progman` and its list view. | Finder's desktop scroll area. | *(none)* |
+| `flyout` | The tray overflow, Quick Settings, Notification Center, and shell context-menu popups, while open. | Opened Control Center and Notification Center panels, while open. | *(none)* |
+| `unknown` | A shell-owned window the backend could not classify. | Same. | Same. |
+
+A cell reading *(none)* means the platform has no such object. `list()` on
+Linux returns no `taskbar`, and `by_kind` for a kind that platform lacks fails
+with `SelectorNotMatched` naming what was found instead. Windows has no
+per-process tray hosting, so tray icons live inside the `taskbar` and `flyout`
+surfaces rather than under `status_items`.
+
+The kind set grows as more shell UI is classified, so handle an unknown kind
+string the way you handle an unknown role.
+
+## Surface members
+
+| Member | Meaning |
+| --- | --- |
+| `kind` | The kind string from the table above |
+| `name` | The owning application for per-application surfaces, the platform's own name otherwise (`Taskbar`, `Dock`) |
+| `pid` | Owning process, where the platform reports one. Optional. |
+| `locator(selector)` | A `Locator` rooted at the surface, with the usual auto-wait and action set |
+| `children()` | The surface root's direct children |
+| `tree(max_depth)` | A structured snapshot, same shape as `App.tree()` |
+| `dump(max_depth)` | The same snapshot as indented text |
+| `as_element()` | The surface root as an ordinary `Element` |
+
+`pid` reports the process the platform attributes the surface to, which is not
+always the process that drew the icon you are looking at. On macOS it is the
+true owner. On Windows it is the host process (`explorer.exe`), because UIA
+carries no per-icon owner. On Linux it is the panel process.
+
+## Discovery
+
+<Tabs syncKey="lang">
+  <TabItem label="Rust">
+    `ShellSurface::list()` and `ShellSurface::by_kind()` come from the
+    `ShellSurfaceExt` trait, mirroring `AppExt`.
+
+    ```rust
+    use std::time::Duration;
+    use xa11y::{ShellSurface, ShellSurfaceExt, ShellSurfaceKind};
+
+    for surface in ShellSurface::list()? {
+        println!("{:?}\t{:?}\t{}", surface.kind, surface.pid, surface.name);
+    }
+
+    // `Duration::ZERO` makes one attempt; anything longer polls.
+    let bar = ShellSurface::by_kind(ShellSurfaceKind::MenuBar, Duration::from_secs(2))?;
+    bar.locator("menu_item[name='Save']").press()?;
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    Timeouts are seconds, as everywhere else in the Python binding.
+
+    ```python
+    for surface in xa11y.ShellSurface.list():
+        print(surface.kind, surface.pid, surface.name, sep="\t")
+
+    bar = xa11y.ShellSurface.by_kind("menu_bar", timeout=2.0)
+    bar.locator("menu_item[name='Save']").press()
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    Timeouts are milliseconds, matching `App.byName()`.
+
+    ```js
+    for (const surface of await ShellSurface.list()) {
+        console.log(surface.kind, surface.pid, surface.name);
+    }
+
+    const bar = await ShellSurface.byKind('menu_bar', { timeout: 2000 });
+    await bar.locator("menu_item[name='Save']").press();
+    ```
+  </TabItem>
+</Tabs>
+
+`by_kind` requires exactly one surface of that kind. Several `status_items`
+processes, several `panel` frames, or a second `flyout` produce
+`SelectorNotMatched` with a diagnosis listing every candidate by kind, name,
+and process id. Call `list()` and pick by process id to disambiguate.
+
+## Mutation model
+
+Listing is live, and it reads only. Enumerating surfaces and dumping their
+trees never opens, closes, focuses, or presses anything. So a `flyout` surface
+appears in `list()` while it is on screen and disappears from the next call
+once it closes.
+
+Content that exists only while a flyout is open is reached by pressing a real
+element and then asking for the surface again. Windows tray icons in the
+overflow are the case that comes up most: they are absent from the tree until
+the chevron opens the flyout that hosts them.
+
+```python
+taskbar = xa11y.ShellSurface.by_kind("taskbar", timeout=2.0)
+taskbar.locator("button[name='Show Hidden Icons']").press()
+
+flyout = xa11y.ShellSurface.by_kind("flyout", timeout=3.0)
+flyout.locator("button[name*='Tailscale']").press()
+```
+
+The press is an ordinary accessibility action on an element the platform
+advertises. No shell API opens a surface on the caller's behalf.
+
+## From the CLI
+
+`xa11y shell` lists surfaces, and `--shell KIND` targets one from `tree`,
+`find`, and `action`. It is mutually exclusive with `--app`, and `--pid`
+alongside it picks between same-kind surfaces. See
+[CLI](/reference/cli/#xa11y-shell).
+
+```bash
+xa11y shell
+xa11y tree --shell taskbar
+xa11y find "button[name*='Tailscale']" --shell flyout
+xa11y action press "button[name='Show Hidden Icons']" --shell taskbar
+```
+
+## From MCP
+
+The `shell` tool lists surfaces as `{kind, name, pid}` rows. The `tree`,
+`find`, and `action` tools take an optional `shell` argument holding a kind
+string, mutually exclusive with `app` and combinable with `pid`. A kind that
+matches several surfaces returns an `ambiguous_shell_surface` failure carrying
+the candidate list. See [CLI](/reference/cli/#tools) for the argument tables
+and [Serve xa11y over MCP](/guides/mcp/) for client setup.

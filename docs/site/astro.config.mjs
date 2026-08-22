@@ -106,6 +106,7 @@ export default defineConfig({
             { label: "Events", slug: "reference/events" },
             { label: "Errors", slug: "reference/errors" },
             { label: "CLI", slug: "reference/cli" },
+            { label: "Shell surfaces", slug: "reference/shell" },
             { label: "pytest plugin", slug: "reference/pytest" },
             { label: "Platform Details", slug: "reference/platform-details" },
             {

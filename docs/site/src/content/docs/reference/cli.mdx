@@ -43,6 +43,28 @@ Columns are tab-separated: process ID, then name. The foreground application
 carries a third column, the literal token `focused`. An application whose
 process ID cannot be resolved shows `-` in the first column.
 
+### `xa11y shell`
+
+List the OS shell surfaces currently present.
+
+```bash
+xa11y shell
+```
+
+```
+taskbar	1204	Taskbar
+desktop	1204	Desktop
+flyout	5120	System tray overflow window
+```
+
+Columns are tab-separated: kind, process ID, then name. A surface whose process
+ID cannot be resolved shows `-` in the second column. The listing is live, so a
+`flyout` appears only while it is on screen. Enumerating never opens or presses
+anything.
+
+The kind column, what each kind maps to per platform, and the query API in
+every language are in [Shell surfaces](/reference/shell/).
+
 ### `xa11y tree`
 
 Print the full accessibility tree for an application.
@@ -219,15 +241,16 @@ does.
 ### Tools
 
 Each tool takes the arguments its CLI counterpart takes as flags. The
-accessibility tools need `app` or `pid`; the input and screenshot tools take
-screen coordinates and no target.
+accessibility tools need `app`, `pid`, or `shell`; the input and screenshot
+tools take screen coordinates and no target.
 
 | Tool | Arguments |
 | --- | --- |
 | `apps` | none |
-| `tree` | `app`, `pid`, `max_depth` |
-| `find` | `selector`, `app`, `pid`, `limit` |
-| `action` | `action`, `selector`, `app`, `pid`, `value` |
+| `shell` | none |
+| `tree` | `app`, `pid`, `shell`, `max_depth` |
+| `find` | `selector`, `app`, `pid`, `shell`, `limit` |
+| `action` | `action`, `selector`, `app`, `pid`, `shell`, `value` |
 | `click` | `x`, `y`, `button`, `count`, `held` |
 | `move` | `x`, `y` |
 | `drag` | `from_x`, `from_y`, `to_x`, `to_y`, `button`, `duration_ms`, `held` |
@@ -239,6 +262,11 @@ screen coordinates and no target.
 `action` accepts the same verbs as [`xa11y action`](#xa11y-action). `key`
 accepts the same key names as [`xa11y key`](#input-simulation). Selectors are
 the same syntax the library takes; see [Selectors](/reference/selectors/).
+
+`shell` takes a kind string, is mutually exclusive with `app`, and combines
+with `pid`. A kind matching several surfaces comes back as an
+`ambiguous_shell_surface` failure with the candidates listed. See
+[Shell surfaces](/reference/shell/).
 
 The `action` tool differs from `xa11y action` in one way, deliberately. The
 command acts on the first match, as the library's `Locator` does. The tool
@@ -302,13 +330,18 @@ xa11y click --at "$(xa11y find 'button[name="OK"]' --app Safari -o center)"
 
 ## Flags
 
-The accessibility commands other than `apps` require a target application. The
-input-simulation and screenshot commands take neither flag.
+The accessibility commands other than `apps` and `shell` require a target. The
+input-simulation and screenshot commands take none of these flags.
 
 | Flag | Description |
 | --- | --- |
 | `--app NAME` | Target application by exact, case-sensitive name (see `xa11y apps`) |
-| `--pid PID` | Target application by process ID |
+| `--pid PID` | Target by process ID |
+| `--shell KIND` | Target a shell surface by kind (see `xa11y shell`). Mutually exclusive with `--app`; combine with `--pid` to pick between same-kind surfaces |
+
+`tree`, `find`, and `action` accept `--shell` wherever they accept `--app`. A
+kind matching several surfaces is a usage error listing the candidates, exit
+code 2. The kinds are listed in [Shell surfaces](/reference/shell/#kinds).
 
 ## Selectors
 
