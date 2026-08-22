@@ -37,6 +37,78 @@ const FIND_MAX_LIMIT: usize = 500;
 /// Longest candidate list carried in a failure's diagnosis.
 const MAX_DIAGNOSIS_CANDIDATES: usize = 20;
 
+/// Inclusive bounds for one integer tool argument.
+///
+/// The schema fragment and the handler's range check are both derived from
+/// the same value, so a client that validates against `inputSchema` and one
+/// that does not are refused on exactly the same inputs. They had already
+/// disagreed in both directions: `click`'s `count` declared `minimum: 1` and
+/// accepted `0`, which reached the backend as "click zero times" and came
+/// back `ok: true`; and it capped at ten without the schema ever saying so,
+/// which reads to a model as an arbitrary refusal.
+#[derive(Debug, Clone, Copy)]
+struct Bounds {
+    min: i64,
+    max: i64,
+}
+
+/// Screen coordinates. The range is `i32`'s because that is what
+/// [`crate::Point`] and [`crate::Rect`] carry; stating it beats a caller
+/// discovering it from an "out of range" reply.
+const COORD: Bounds = Bounds {
+    min: i32::MIN as i64,
+    max: i32::MAX as i64,
+};
+/// Process ids. Zero is not a process any accessibility API reports.
+const PID: Bounds = Bounds {
+    min: 1,
+    max: u32::MAX as i64,
+};
+/// `tree`'s `max_depth`. The ceiling is far past any real UI: it exists so a
+/// caller cannot ask for a walk the node budget would have to cut anyway.
+const TREE_DEPTH: Bounds = Bounds { min: 0, max: 64 };
+/// `find`'s `limit`. Zero would return nothing while reporting matches.
+const FIND_LIMIT: Bounds = Bounds {
+    min: 1,
+    max: FIND_MAX_LIMIT as i64,
+};
+/// `click`'s `count`. Zero clicks is not a click.
+const CLICK_COUNT: Bounds = Bounds { min: 1, max: 10 };
+/// `drag`'s `duration_ms`. A minute is already far longer than any gesture an
+/// application animates.
+const DRAG_DURATION_MS: Bounds = Bounds {
+    min: 0,
+    max: 60_000,
+};
+/// A screenshot region's width and height, which cannot be empty.
+const SCREENSHOT_EXTENT: Bounds = Bounds {
+    min: 1,
+    max: u32::MAX as i64,
+};
+
+impl Bounds {
+    /// The JSON Schema fragment declaring an integer argument in this range.
+    fn property(self, description: String) -> Value {
+        json!({
+            "type": "integer",
+            "minimum": self.min,
+            "maximum": self.max,
+            "description": description,
+        })
+    }
+
+    /// Range-check a value, naming the bounds the schema advertised.
+    fn check(self, key: &str, value: i64) -> CliResult<i64> {
+        if value < self.min || value > self.max {
+            return Err(usage(format!(
+                "\"{key}\" must be between {} and {}, got {value}",
+                self.min, self.max
+            )));
+        }
+        Ok(value)
+    }
+}
+
 /// What an element's `actions` field is, and what it is not.
 ///
 /// Carried by both element-returning tools, because the field is the first
@@ -223,10 +295,7 @@ fn app_target_properties() -> Map<String, Value> {
     );
     props.insert(
         "pid".into(),
-        json!({
-            "type": "integer",
-            "description": "Process id of the target application. Give this or `app`.",
-        }),
+        PID.property("Process id of the target application. Give this or `app`.".into()),
     );
     props
 }
@@ -271,16 +340,12 @@ fn tool_definition(name: &str) -> Value {
             let mut props = app_target_properties();
             props.insert(
                 "max_depth".into(),
-                json!({
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": format!(
-                        "How deep to walk. Default {TREE_DEFAULT_MAX_DEPTH}. \
-                         0 returns the application node alone. Results are also \
-                         capped at {TREE_MAX_NODES} nodes; `truncated` in the result \
-                         says whether either limit was hit."
-                    ),
-                }),
+                TREE_DEPTH.property(format!(
+                    "How deep to walk. Default {TREE_DEFAULT_MAX_DEPTH}. \
+                     0 returns the application node alone. Results are also \
+                     capped at {TREE_MAX_NODES} nodes; `truncated` in the result \
+                     says whether either limit was hit."
+                )),
             );
             tool(
                 "tree",
@@ -311,12 +376,9 @@ fn tool_definition(name: &str) -> Value {
             );
             props.insert(
                 "limit".into(),
-                json!({
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": FIND_MAX_LIMIT,
-                    "description": format!("Maximum matches to return. Default {FIND_DEFAULT_LIMIT}."),
-                }),
+                FIND_LIMIT.property(format!(
+                    "Maximum matches to return. Default {FIND_DEFAULT_LIMIT}."
+                )),
             );
             tool(
                 "find",
@@ -412,11 +474,7 @@ fn tool_definition(name: &str) -> Value {
             );
             props.insert(
                 "count".into(),
-                json!({
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Consecutive clicks. 2 is a double-click. Default 1.",
-                }),
+                CLICK_COUNT.property("Consecutive clicks. 2 is a double-click. Default 1.".into()),
             );
             props.insert("held".into(), held_property());
             tool(
@@ -438,22 +496,17 @@ fn tool_definition(name: &str) -> Value {
         ),
         "drag" => {
             let mut props = Map::new();
-            props.insert(
-                "from_x".into(),
-                json!({ "type": "integer", "description": "Starting X, in screen coordinates." }),
-            );
-            props.insert(
-                "from_y".into(),
-                json!({ "type": "integer", "description": "Starting Y, in screen coordinates." }),
-            );
-            props.insert(
-                "to_x".into(),
-                json!({ "type": "integer", "description": "Ending X, in screen coordinates." }),
-            );
-            props.insert(
-                "to_y".into(),
-                json!({ "type": "integer", "description": "Ending Y, in screen coordinates." }),
-            );
+            for (key, what) in [
+                ("from_x", "Starting X"),
+                ("from_y", "Starting Y"),
+                ("to_x", "Ending X"),
+                ("to_y", "Ending Y"),
+            ] {
+                props.insert(
+                    key.into(),
+                    COORD.property(format!("{what}, in screen coordinates.")),
+                );
+            }
             props.insert(
                 "button".into(),
                 json!({
@@ -464,13 +517,11 @@ fn tool_definition(name: &str) -> Value {
             );
             props.insert(
                 "duration_ms".into(),
-                json!({
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "How long the drag takes, in milliseconds. Default 150. \
-                                    Slower drags are more reliable in applications that \
-                                    animate.",
-                }),
+                DRAG_DURATION_MS.property(
+                    "How long the drag takes, in milliseconds. Default 150. Slower drags \
+                     are more reliable in applications that animate."
+                        .into(),
+                ),
             );
             props.insert("held".into(), held_property());
             tool(
@@ -484,17 +535,12 @@ fn tool_definition(name: &str) -> Value {
             let mut props = point_properties("Screen coordinate to scroll over.");
             props.insert(
                 "dx".into(),
-                json!({
-                    "type": "integer",
-                    "description": "Horizontal scroll delta. Positive scrolls right. Default 0.",
-                }),
+                COORD
+                    .property("Horizontal scroll delta. Positive scrolls right. Default 0.".into()),
             );
             props.insert(
                 "dy".into(),
-                json!({
-                    "type": "integer",
-                    "description": "Vertical scroll delta. Positive scrolls down. Default 0.",
-                }),
+                COORD.property("Vertical scroll delta. Positive scrolls down. Default 0.".into()),
             );
             tool(
                 "scroll",
@@ -541,22 +587,19 @@ fn tool_definition(name: &str) -> Value {
         }
         "screenshot" => {
             let mut props = Map::new();
-            for (key, axis) in [
-                ("x", "Left edge"),
-                ("y", "Top edge"),
-                ("width", "Width"),
-                ("height", "Height"),
+            for (key, axis, bounds) in [
+                ("x", "Left edge", COORD),
+                ("y", "Top edge", COORD),
+                ("width", "Width", SCREENSHOT_EXTENT),
+                ("height", "Height", SCREENSHOT_EXTENT),
             ] {
                 props.insert(
                     key.into(),
-                    json!({
-                        "type": "integer",
-                        "description": format!(
-                            "{axis} of the region to capture, in screen coordinates. \
-                             Give all four to capture a region, or none to capture the \
-                             whole screen."
-                        ),
-                    }),
+                    bounds.property(format!(
+                        "{axis} of the region to capture, in screen coordinates. \
+                         Give all four to capture a region, or none to capture the \
+                         whole screen."
+                    )),
                 );
             }
             tool(
@@ -595,11 +638,11 @@ fn point_properties(what: &str) -> Map<String, Value> {
     let mut props = Map::new();
     props.insert(
         "x".into(),
-        json!({ "type": "integer", "description": format!("{what} X, in screen coordinates.") }),
+        COORD.property(format!("{what} X, in screen coordinates.")),
     );
     props.insert(
         "y".into(),
-        json!({ "type": "integer", "description": format!("{what} Y, in screen coordinates.") }),
+        COORD.property(format!("{what} Y, in screen coordinates.")),
     );
     props
 }
@@ -644,29 +687,42 @@ fn opt_int(args: &Value, key: &str) -> CliResult<Option<i64>> {
     }
 }
 
-fn req_i32(args: &Value, key: &str) -> CliResult<i32> {
+/// Read a required integer argument and range-check it against `bounds`.
+fn req_bounded(args: &Value, key: &str, bounds: Bounds) -> CliResult<i64> {
     let v =
         opt_int(args, key)?.ok_or_else(|| usage(format!("missing required argument \"{key}\"")))?;
+    bounds.check(key, v)
+}
+
+/// Read an optional integer argument, range-checked against `bounds`.
+///
+/// `default` is not checked: it is this module's own value, not the caller's,
+/// and `every_bounded_default_is_inside_its_own_bounds` asserts it is legal.
+fn opt_bounded(args: &Value, key: &str, default: i64, bounds: Bounds) -> CliResult<i64> {
+    match opt_int(args, key)? {
+        None => Ok(default),
+        Some(v) => bounds.check(key, v),
+    }
+}
+
+/// A coordinate, whose bounds are exactly `i32`'s.
+fn req_i32(args: &Value, key: &str) -> CliResult<i32> {
+    let v = req_bounded(args, key, COORD)?;
+    // `COORD` is `i32::MIN..=i32::MAX`, so the conversion cannot fail.
     i32::try_from(v).map_err(|_| usage(format!("\"{key}\" is out of range: {v}")))
 }
 
+/// An optional coordinate-range integer (`scroll`'s deltas).
 fn opt_i32(args: &Value, key: &str, default: i32) -> CliResult<i32> {
-    match opt_int(args, key)? {
-        None => Ok(default),
-        Some(v) => i32::try_from(v).map_err(|_| usage(format!("\"{key}\" is out of range: {v}"))),
-    }
+    let v = opt_bounded(args, key, i64::from(default), COORD)?;
+    i32::try_from(v).map_err(|_| usage(format!("\"{key}\" is out of range: {v}")))
 }
 
-fn opt_usize(args: &Value, key: &str, default: usize, max: usize) -> CliResult<usize> {
-    let Some(v) = opt_int(args, key)? else {
-        return Ok(default);
-    };
-    let v =
-        usize::try_from(v).map_err(|_| usage(format!("\"{key}\" must not be negative: {v}")))?;
-    if v > max {
-        return Err(usage(format!("\"{key}\" must be at most {max}, got {v}")));
-    }
-    Ok(v)
+/// An optional count, range-checked and widened to `usize`.
+fn opt_usize(args: &Value, key: &str, default: usize, bounds: Bounds) -> CliResult<usize> {
+    let v = opt_bounded(args, key, default as i64, bounds)?;
+    // Every `Bounds` used with this helper has a non-negative `min`.
+    usize::try_from(v).map_err(|_| usage(format!("\"{key}\" must not be negative: {v}")))
 }
 
 /// Read the `held` modifier list, reusing the CLI's key-name parser so the
@@ -677,10 +733,13 @@ fn held_keys(args: &Value) -> CliResult<Vec<crate::Key>> {
         Some(Value::Array(items)) => {
             let names = items
                 .iter()
-                .map(|v| {
-                    v.as_str()
-                        .map(str::to_string)
-                        .ok_or_else(|| usage("\"held\" entries must be key-name strings"))
+                .map(|v| match v.as_str() {
+                    // An empty entry would survive the join and reach
+                    // `parse_held` as "no modifiers at all", which is a
+                    // silently different gesture from the one asked for.
+                    Some("") => Err(usage("\"held\" entries must not be empty")),
+                    Some(s) => Ok(s.to_string()),
+                    None => Err(usage("\"held\" entries must be key-name strings")),
                 })
                 .collect::<CliResult<Vec<_>>>()?;
             parse_held(Some(&names.join(",")))
@@ -694,10 +753,14 @@ fn held_keys(args: &Value) -> CliResult<Vec<crate::Key>> {
 fn target_app(args: &Value) -> CliResult<App> {
     let pid = match opt_int(args, "pid")? {
         None => None,
-        Some(v) => Some(
-            u32::try_from(v)
-                .map_err(|_| usage(format!("\"pid\" is not a valid process id: {v}")))?,
-        ),
+        Some(v) => {
+            let v = PID.check("pid", v)?;
+            // `PID` is `1..=u32::MAX`, so the conversion cannot fail.
+            Some(
+                u32::try_from(v)
+                    .map_err(|_| usage(format!("\"pid\" is not a valid process id: {v}")))?,
+            )
+        }
     };
     let opts = Opts {
         app: opt_str(args, "app")?.map(str::to_string),
@@ -739,7 +802,7 @@ fn tool_apps() -> CliResult<ToolOutput> {
 }
 
 fn tool_tree(args: &Value) -> CliResult<ToolOutput> {
-    let max_depth = opt_usize(args, "max_depth", TREE_DEFAULT_MAX_DEPTH, 64)?;
+    let max_depth = opt_usize(args, "max_depth", TREE_DEFAULT_MAX_DEPTH, TREE_DEPTH)?;
     let app = target_app(args)?;
     let root = Element::new(app.data.clone(), app.provider().clone());
 
@@ -817,7 +880,7 @@ fn build_node(
 
 fn tool_find(args: &Value) -> CliResult<ToolOutput> {
     let selector = req_str(args, "selector")?;
-    let limit = opt_usize(args, "limit", FIND_DEFAULT_LIMIT, FIND_MAX_LIMIT)?;
+    let limit = opt_usize(args, "limit", FIND_DEFAULT_LIMIT, FIND_LIMIT)?;
     let app = target_app(args)?;
 
     let locator = app.locator(selector);
@@ -983,7 +1046,7 @@ fn tool_click(args: &Value) -> CliResult<ToolOutput> {
         Some(raw) => parse_button(raw)?,
         None => crate::MouseButton::Left,
     };
-    let count = opt_usize(args, "count", 1, 10)? as u32;
+    let count = opt_usize(args, "count", 1, CLICK_COUNT)? as u32;
     let held = held_keys(args)?;
 
     let opts = ClickOptions::new()
@@ -1013,7 +1076,7 @@ fn tool_drag(args: &Value) -> CliResult<ToolOutput> {
         Some(raw) => parse_button(raw)?,
         None => crate::MouseButton::Left,
     };
-    let duration_ms = opt_usize(args, "duration_ms", 150, 60_000)?;
+    let duration_ms = opt_usize(args, "duration_ms", 150, DRAG_DURATION_MS)?;
     let held = held_keys(args)?;
 
     let opts = DragOptions::new()
@@ -1076,13 +1139,10 @@ fn tool_screenshot(args: &Value) -> CliResult<ToolOutput> {
     let shot = if present.is_empty() {
         crate::screenshot()?
     } else if present.len() == REGION_KEYS.len() {
-        let width = opt_usize(args, "width", 0, u32::MAX as usize)? as u32;
-        let height = opt_usize(args, "height", 0, u32::MAX as usize)? as u32;
-        if width == 0 || height == 0 {
-            return Err(usage(
-                "screenshot region must have a non-zero width and height",
-            ));
-        }
+        // `SCREENSHOT_EXTENT` starts at 1, so an empty region is refused here
+        // rather than captured as a zero-byte image that looks like a success.
+        let width = req_bounded(args, "width", SCREENSHOT_EXTENT)? as u32;
+        let height = req_bounded(args, "height", SCREENSHOT_EXTENT)? as u32;
         crate::screenshot_region(Rect {
             x: req_i32(args, "x")?,
             y: req_i32(args, "y")?,
@@ -1395,9 +1455,11 @@ mod tests {
     }
 
     #[test]
-    fn out_of_range_coordinates_are_rejected() {
+    fn out_of_range_coordinates_are_rejected_and_name_the_range() {
         let err = req_i32(&args(json!({ "x": 99_999_999_999i64 })), "x").expect_err("must reject");
-        assert!(err.to_string().contains("out of range"), "{err}");
+        let msg = err.to_string();
+        assert!(msg.contains("must be between"), "{msg}");
+        assert!(msg.contains(&i32::MAX.to_string()), "{msg}");
     }
 
     #[test]
@@ -1406,7 +1468,7 @@ mod tests {
             &args(json!({ "limit": FIND_MAX_LIMIT + 1 })),
             "limit",
             FIND_DEFAULT_LIMIT,
-            FIND_MAX_LIMIT,
+            FIND_LIMIT,
         )
         .expect_err("must reject");
         assert!(err.to_string().contains(&FIND_MAX_LIMIT.to_string()));
@@ -1414,14 +1476,88 @@ mod tests {
 
     #[test]
     fn defaults_apply_when_an_optional_argument_is_absent() {
-        let got = opt_usize(
-            &args(json!({})),
-            "limit",
-            FIND_DEFAULT_LIMIT,
-            FIND_MAX_LIMIT,
-        )
-        .unwrap();
+        let got = opt_usize(&args(json!({})), "limit", FIND_DEFAULT_LIMIT, FIND_LIMIT).unwrap();
         assert_eq!(got, FIND_DEFAULT_LIMIT);
+    }
+
+    // ── Schema / handler agreement ─────────────────────────────────────────
+
+    /// Every integer argument in every tool schema, as `(tool, key, bounds)`.
+    fn schema_integer_bounds() -> Vec<(&'static str, String, Bounds)> {
+        let mut found = Vec::new();
+        for name in TOOL_NAMES {
+            let def = tool_definition(name);
+            let Some(props) = def["inputSchema"]["properties"].as_object() else {
+                continue;
+            };
+            for (key, prop) in props {
+                if prop["type"] != "integer" {
+                    continue;
+                }
+                let min = prop["minimum"].as_i64().unwrap_or_else(|| {
+                    panic!("{name}.{key} is an integer with no declared minimum")
+                });
+                let max = prop["maximum"].as_i64().unwrap_or_else(|| {
+                    panic!("{name}.{key} is an integer with no declared maximum")
+                });
+                found.push((*name, key.clone(), Bounds { min, max }));
+            }
+        }
+        found
+    }
+
+    #[test]
+    fn every_integer_argument_declares_the_range_the_handler_enforces() {
+        // An undeclared cap reads to a model as an arbitrary refusal, and a
+        // declared minimum the handler does not enforce is worse: `count: 0`
+        // used to reach the backend as "click zero times" and report ok.
+        let bounded = schema_integer_bounds();
+        assert!(!bounded.is_empty(), "no integer arguments found at all");
+        for (tool, key, bounds) in bounded {
+            assert!(bounds.min <= bounds.max, "{tool}.{key} has inverted bounds");
+            assert!(
+                bounds.check(&key, bounds.min - 1).is_err(),
+                "{tool}.{key} accepts one below its declared minimum"
+            );
+            assert!(
+                bounds.check(&key, bounds.max + 1).is_err(),
+                "{tool}.{key} accepts one above its declared maximum"
+            );
+            assert!(bounds.check(&key, bounds.min).is_ok(), "{tool}.{key} min");
+            assert!(bounds.check(&key, bounds.max).is_ok(), "{tool}.{key} max");
+        }
+    }
+
+    #[test]
+    fn every_bounded_default_is_inside_its_own_bounds() {
+        // `opt_bounded` does not range-check the default, because the default
+        // is this module's value rather than the caller's. That is only safe
+        // while every one of them is legal.
+        for (label, default, bounds) in [
+            ("max_depth", TREE_DEFAULT_MAX_DEPTH as i64, TREE_DEPTH),
+            ("limit", FIND_DEFAULT_LIMIT as i64, FIND_LIMIT),
+            ("count", 1, CLICK_COUNT),
+            ("duration_ms", 150, DRAG_DURATION_MS),
+        ] {
+            assert!(
+                bounds.check(label, default).is_ok(),
+                "{label}'s default {default} is outside {bounds:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_zero_click_count_is_refused_rather_than_reported_as_a_click() {
+        let err = opt_usize(&args(json!({ "count": 0 })), "count", 1, CLICK_COUNT)
+            .expect_err("zero clicks is not a click");
+        assert!(err.to_string().contains("between 1 and 10"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_screenshot_region_is_refused_before_the_capture() {
+        let err = tool_screenshot(&args(json!({ "x": 0, "y": 0, "width": 0, "height": 10 })))
+            .expect_err("a zero-width region is not a region");
+        assert!(err.to_string().contains("width"), "{err}");
     }
 
     #[test]
@@ -1430,6 +1566,15 @@ mod tests {
         assert_eq!(keys, vec![crate::Key::Shift, crate::Key::Ctrl]);
         let err = held_keys(&args(json!({ "held": ["Nope"] }))).expect_err("must reject");
         assert!(err.to_string().contains("Nope"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_held_list_means_no_modifiers_but_an_empty_entry_does_not() {
+        assert!(held_keys(&args(json!({ "held": [] }))).unwrap().is_empty());
+        // `[""]` used to join to `""`, which `parse_held` reads as "no
+        // modifiers" — a silently different gesture from the one asked for.
+        let err = held_keys(&args(json!({ "held": [""] }))).expect_err("must reject");
+        assert!(err.to_string().contains("must not be empty"), "{err}");
     }
 
     #[test]

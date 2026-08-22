@@ -883,7 +883,7 @@ jobs:
             exit 1
           fi
 
-  # ── Docs build ──────────────────────────────────────────────────
+  # ── MCP client interop ──────────────────────────────────────────
   mcp-client:
     name: MCP client interop
     runs-on: ubuntu-latest
@@ -919,6 +919,7 @@ jobs:
       - name: Drive the MCP server with the official Python SDK
         run: cargo xtask test-mcp-client
 
+  # ── Docs build ──────────────────────────────────────────────────
   docs:
     name: Docs build
     runs-on: ubuntu-latest
