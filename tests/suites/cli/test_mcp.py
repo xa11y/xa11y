@@ -363,8 +363,15 @@ def test_tree_defaults_to_a_bounded_depth(mcp, app_pid):
 
 
 def test_find_reports_bounds_and_a_precomputed_center(mcp, app_pid):
-    result = mcp.call_tool("find", {"pid": app_pid, "selector": "button"})["result"]
-    assert result["isError"] is False
+    """Named, because `button` alone leads with window chrome on Windows.
+
+    Title-bar buttons report no bounds at all, so indexing `matches[0]` was a
+    `KeyError` there rather than the assertion this test means to make.
+    """
+    result = mcp.call_tool("find", {"pid": app_pid, "selector": 'button[name="OK"]'})[
+        "result"
+    ]
+    assert result["isError"] is False, result["content"]
     structured = result["structuredContent"]
     assert structured["match_count"] >= 1
     first = structured["matches"][0]
@@ -373,6 +380,25 @@ def test_find_reports_bounds_and_a_precomputed_center(mcp, app_pid):
     center = first["center"]
     assert center["x"] == bounds["x"] + bounds["width"] // 2
     assert center["y"] == bounds["y"] + bounds["height"] // 2
+
+
+def test_bounds_and_center_are_reported_together_or_not_at_all(mcp, app_pid):
+    """The handler inserts both from one `Option`, so neither can appear alone.
+
+    Checked across every button the app has, chrome included, which is the
+    part the named lookup above deliberately does not reach.
+    """
+    structured = mcp.call_tool("find", {"pid": app_pid, "selector": "button"})["result"][
+        "structuredContent"
+    ]
+    assert structured["match_count"] >= 1
+    for match in structured["matches"]:
+        assert ("bounds" in match) == ("center" in match), match
+        if "bounds" not in match:
+            continue
+        bounds, center = match["bounds"], match["center"]
+        assert center["x"] == bounds["x"] + bounds["width"] // 2, match
+        assert center["y"] == bounds["y"] + bounds["height"] // 2, match
 
 
 def test_find_respects_its_limit_and_flags_the_truncation(mcp, app_pid):
