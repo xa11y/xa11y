@@ -47,12 +47,42 @@ forever. So:
 not either. `legend` is a straight borrow from maps and charts and needs no
 defence.
 
-One soft collision to know about: "annotation" is also a live term inside
-accessibility itself — `AXCustomContent` on macOS, `annotation` roles in ARIA.
-It is not close enough to bite (nothing in xa11y exposes either today), but if
-a future release surfaces `AXCustomContent`, that is the name it will want, and
-this feature will have taken it. Worth accepting knowingly rather than
-discovering later.
+#### The collision with accessibility's own "annotation"
+
+"Annotation" is a live term inside accessibility. The concrete one is Windows
+UIA's **`AnnotationPattern`** (`UIA_AnnotationPatternId`, `UIA_AnnotationControlTypeId`,
+`AnnotationType_Comment` / `_SpellingError` / `_TrackChanges`), which Word and
+Excel use for comments and tracked changes. ARIA has an annotations module too
+(`role="comment"`, `role="suggestion"`, `role="mark"` — note it also owns
+"mark", so that name was no safer).
+
+Taking the word is **worth it**, for three reasons.
+
+**The layers do not share a namespace.** Everything this feature names lives on
+the screenshot side: `--annotate`, `xa11y_core::screenshot::Annotation`,
+`Screenshot::annotate`, `Annotated`, `ANNOTATION_PALETTE`. A future a11y
+annotation would live on `Element` and in `Role`. `Role::Annotation` is a
+variant, not a type, so it cannot collide with a struct at all.
+
+**The noun a consumer touches is `legend`, not `annotations`.** This is
+structural, not luck. `annotate` is a *verb* (a flag, a kwarg, a method) and the
+data it produces is a *legend*. Verbs and nouns collide far less than two nouns
+would. Had the output field been `shot.annotations`, the answer here would be
+different.
+
+**A Windows-only pattern probably never gets normalized anyway.** Tenet 1 of
+`design/README.md` is "abstract where platforms agree"; `AnnotationPattern` has
+no AT-SPI equivalent and no macOS one (`NSAccessibilityCustomContent` is
+"custom content", a different shape). By this project's own rules that data
+belongs in `element.raw["patterns"]` and the UIA escape hatch, not in a
+normalized name.
+
+**The escape, reserved now so nobody has to invent it under pressure.** If a
+future release does normalize it: the a11y side takes the qualified name
+(`TextAnnotation`, or `element.comments` if the scope is really comments), and
+the screenshot side keeps the bare one. What must *not* happen is a bare
+`Element::annotations` field appearing later — that is the one shape that makes
+the two genuinely ambiguous, and it is cheap to rule out today.
 
 ### Tag format
 
