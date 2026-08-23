@@ -1,4 +1,4 @@
-# Marked screenshots
+# Annotated screenshots
 
 Design for [#376](https://github.com/xa11y/xa11y/issues/376) — a screenshot with
 bounding boxes drawn over selected elements, plus a machine-readable legend
@@ -17,8 +17,8 @@ carries the boxes; the legend carries the selector that acts on each box.
 
 ## What this is not
 
-**Not a vision fallback.** The marks come from the accessibility tree. An app
-with no tree gets no marks, and the feature degrades to a plain screenshot. If
+**Not a vision fallback.** The annotations come from the accessibility tree. An app
+with no tree gets no annotations, and the feature degrades to a plain screenshot. If
 the tree is *missing*, this does not help; it helps when the tree is *present
 but uninformative*, which is the case the issue describes.
 
@@ -37,50 +37,97 @@ forever. So:
 
 | Term | Means |
 |---|---|
-| **mark** | one drawn box + tag, for one element |
-| `--mark SELECTOR` | the CLI flag; each occurrence is a **mark group** |
+| **annotation** | one drawn box + tag, for one element |
+| `--annotate SELECTOR` | the CLI flag; each occurrence is one **group** |
 | **tag** | the short text drawn in the box (`A7`) |
 | **legend** | the out-of-band list mapping tag → element |
 
-`legend` is a straight borrow from maps and charts and needs no defence.
-"annotate" was the runner-up and is fine, but it is longer and it collides
-softly with `AXCustomContent`-style annotations. "highlight" implies transient
-on-screen chrome, which this is not. "segmented" (macapptree's word) describes
-image segmentation, which this is not either.
+"highlight" implies transient on-screen chrome, which this is not.
+"segmented" (macapptree's word) describes image segmentation, which this is
+not either. `legend` is a straight borrow from maps and charts and needs no
+defence.
+
+One soft collision to know about: "annotation" is also a live term inside
+accessibility itself — `AXCustomContent` on macOS, `annotation` roles in ARIA.
+It is not close enough to bite (nothing in xa11y exposes either today), but if
+a future release surfaces `AXCustomContent`, that is the name it will want, and
+this feature will have taken it. Worth accepting knowingly rather than
+discovering later.
 
 ### Tag format
 
-The issue thread and the feature request both reach for `2.15` — selector 2,
-element 15. Three problems:
+The request reaches for `2.15` — selector 2, element 15. Two problems with a
+numeric group *and* a numeric index in one tag, whatever separates them:
 
-1. **It reads as a decimal.** `2.15`, `2.150`, and `2.1.5` are the same number
-   of characters of model attention, and only one of them is a valid tag. A
-   model transcribing a tag back into a tool call has no type to check it
-   against.
-2. **The indices are 0-based; every other index in xa11y is 1-based.**
+1. **Separator loss collides two distinct tags.** `1-12` and `11-2` both render
+   to `112` if the hyphen is lost to compression, downscaling, or a model
+   simply not attending to a 3px horizontal bar. A dot is worse: `2.15` also
+   reads as a decimal, so `2.150` is an equally plausible transcription and
+   nothing type-checks it.
+2. **The indices in the request are 0-based; every index in xa11y is 1-based.**
    `:nth(n)` and `Locator.nth(n)` are 1-based. A tag reading `2.15` invites
-   `:nth(15)` when the element is `:nth(16)`.
-3. **Colour is the only redundant channel.** Group identity is carried by the
-   colour of the box and by the leading digit, but the leading digit is easy to
-   lose against the separator at small sizes.
+   `:nth(15)` for what is actually `:nth(16)`.
 
-Recommended instead: **a letter for the group, a 1-based number for the element
-within it** — `A1`, `B7`, `C12`.
+**Decision: a letter for the group, a 1-based number within it** — `A1`, `B7`,
+`C12`.
 
-- Unambiguous as text; nothing parses it as a number.
-- The number is the `:nth(n)` argument, exactly.
-- The letter is the text alternative to the colour. This is WCAG 1.4.1 applied
-  to our own output, which is a thing an accessibility library should get right
-  without being asked.
-- Two glyphs instead of four at 12px, and no punctuation to render.
+The reason is (1), and it is the whole argument: a letter followed by digits is
+**self-delimiting**. There is no separator, so there is nothing to lose, and no
+two distinct tags can ever render to the same glyph sequence. `A12` and `AB2`
+stay distinct under any amount of downscaling. That property is not available
+to any all-numeric scheme.
 
-Groups past `Z` continue `AA`, `AB`. In practice a caller passing 27 selectors
-has a different problem.
+Everything else is a bonus: the number is exactly the `:nth(n)` argument; the
+letter is the text alternative to the box colour (WCAG 1.4.1, which an
+accessibility library should apply to its own output unprompted); and `A12` is
+three glyphs where `1-12` is four, which matters on a 20px toolbar icon.
 
-The format lives in one function (`tag_for(group, index)` in
-`xa11y-core/src/screenshot/mark.rs`), so switching back to `2.15` is a
-one-function change plus the tests that assert it. If you want to keep the
-numeric form, that is where it goes.
+Groups past `Z` continue `AA`, `AB`. A caller passing 27 selectors has a
+different problem.
+
+#### "Letters don't correspond to the locator index — is that an issue?"
+
+Almost never, because **the tag is not the machine-readable channel.** Every
+legend entry carries `group` as a 1-based `int` alongside the tag:
+
+```python
+e.tag      # "B7"
+e.group    # 2     ← the annotate= index, no letter arithmetic
+e.index    # 7
+e.selector # "text_field:nth(7)"
+```
+
+So code filtering by group compares ints, and the model acting on a box uses
+`e.selector` and never decodes the tag at all. The letter exists for one job:
+being unambiguous *in the image*, where there is no structured field to fall
+back on.
+
+The one place the correspondence is exercised by a human is reading the CLI
+legend, and the group header spells it out rather than making anyone count:
+
+```
+A  button       #0072B2   7 annotated
+B  text_field   #D55E00   2 annotated
+```
+
+That leaves exactly one scenario where letters cost anything: someone holding
+the image with the legend lost, wanting to know which `--annotate` flag produced
+a box. A→1 is a 26-entry mapping everyone already knows from spreadsheet
+columns. Against that, `1-12` costs a collision class that no lookup recovers.
+
+#### The one variant worth considering
+
+With a single `--annotate`, the group prefix carries no information, so tags
+could be bare `1`, `2`, `3` and only grow a letter once a second group exists.
+Fewer glyphs in the common case.
+
+Recommend against: it makes the tag format conditional on an argument count, so
+nothing can learn or parse one rule, and a script reading tags breaks the day
+someone adds a second `--annotate`. A uniform format is worth three pixels.
+
+`tag_for(group, index)` in `xa11y-core/src/screenshot/annotate.rs` is the only
+place this is decided; the tests that assert it are the only other place a
+change lands.
 
 ## Layering
 
@@ -90,7 +137,7 @@ Two layers, and the split is the load-bearing part of this design.
 xa11y-core::screenshot   pure pixels: Rect + text + colour → new Screenshot
         ▲                 no Provider, no selectors, no platform
         │
-xa11y (umbrella)         selectors → Locator::elements() → Vec<Mark>
+xa11y (umbrella)         selectors → Locator::elements() → Vec<Annotation>
         ▲                 owns the target resolution and the legend
         │
    cli / mcp / bindings
@@ -102,40 +149,40 @@ no permissions, which is where essentially all the arithmetic risk lives.
 
 ## Core: the drawing half
 
-New module `xa11y-core/src/screenshot/mark.rs` (today `screenshot.rs` is a flat
+New module `xa11y-core/src/screenshot/annotate.rs` (today `screenshot.rs` is a flat
 file; it becomes a directory).
 
 ```rust
 /// One box to draw: where, what to write in it, and in what colour.
 ///
 /// `rect` is in **logical** screen coordinates, the same space as
-/// `Element::bounds`. `Screenshot::mark` converts to physical pixels.
+/// `Element::bounds`. `Screenshot::annotate` converts to physical pixels.
 #[non_exhaustive]
-pub struct Mark {
+pub struct Annotation {
     pub rect: Rect,
     pub tag: String,
     pub color: [u8; 3],
 }
 
-impl Mark {
+impl Annotation {
     pub fn new(rect: Rect, tag: impl Into<String>) -> Self;   // palette[0]
     pub fn color(mut self, rgb: [u8; 3]) -> Self;            // chained setter
 }
 
 /// Colour-blind-safe qualitative palette (Okabe–Ito, minus black).
-pub const MARK_PALETTE: [[u8; 3]; 7] = [ /* … */ ];
+pub const ANNOTATION_PALETTE: [[u8; 3]; 7] = [ /* … */ ];
 
 impl Screenshot {
-    /// Draw `marks` onto a copy of this capture.
+    /// Draw `annotations` onto a copy of this capture.
     ///
     /// `origin` is the logical top-left of what this capture covers — the
     /// region passed to `capture_region`, or `(0, 0)` for a full-display
-    /// capture. Marks are translated by it and scaled by `self.scale`.
+    /// capture. Annotations are translated by it and scaled by `self.scale`.
     ///
-    /// Marks whose rect does not intersect the image are **skipped, not
+    /// Annotations whose rect does not intersect the image are **skipped, not
     /// clamped**, and reported in the returned `Vec<usize>` of skipped
     /// indices. A box clamped to the edge would claim the wrong pixels.
-    pub fn mark(&self, marks: &[Mark], origin: Point) -> Result<(Screenshot, Vec<usize>)>;
+    pub fn annotate(&self, annotations: &[Annotation], origin: Point) -> Result<(Screenshot, Vec<usize>)>;
 }
 ```
 
@@ -143,15 +190,15 @@ impl Screenshot {
 `[types]` classification in `bindings/parity_allowlist.toml` and a binding
 decision, and buys nothing over three bytes.
 
-`Mark` is `#[non_exhaustive]` with a constructor and a chained setter, matching
+`Annotation` is `#[non_exhaustive]` with a constructor and a chained setter, matching
 `ClickOptions` — it is built in `xa11y`, another crate, so it owes callers a
 way to construct one (AGENTS.md, "Public API Extensibility").
 
 ### Drawing, without a new dependency
 
-- **Boxes.** A `stroke` px outline in the mark colour, `stroke = clamp(round(scale), 1, 4)`.
+- **Boxes.** A `stroke` px outline in the annotation colour, `stroke = clamp(round(scale), 1, 4)`.
   Written straight into the RGBA buffer; no blending, no alpha.
-- **Tags.** A filled badge in the mark colour at the box's inner top-left, with
+- **Tags.** A filled badge in the annotation colour at the box's inner top-left, with
   the tag drawn on top in whichever of black/white has more contrast against
   that colour (relative luminance, the WCAG formula). At 7 palette colours this
   is a compile-time-checkable property, so the unit test asserts every palette
@@ -165,13 +212,13 @@ way to construct one (AGENTS.md, "Public API Extensibility").
   `image`/`imageproc` is heavier still.
 
 - **Badge collisions.** Nested elements (window ⊃ group ⊃ button) put badges on
-  top of each other. Marks are drawn largest-area-first so small elements land
+  top of each other. Annotations are drawn largest-area-first so small elements land
   on top, and a badge that would overlap one already placed tries the box's
   other three inner corners before accepting the overlap. Greedy, bounded, and
   good enough; a layout solver is not warranted.
 
 - **Duplicates are not deduplicated.** Two selectors matching one element get
-  two marks and two legend entries. Merging them would silently drop a group's
+  two annotations and two legend entries. Merging them would silently drop a group's
   membership, which is information the caller asked for.
 
 ### Overflow
@@ -179,25 +226,21 @@ way to construct one (AGENTS.md, "Public API Extensibility").
 `Rect` is `i32`, `scale` is `f32`, and the products index a `Vec<u8>`. Every
 coordinate goes through `Rect::to_physical` (which already sanitises a
 non-finite or non-positive scale) and then a checked conversion to a pixel
-index. A new `cargo-fuzz` target — `xa11y/fuzz/fuzz_targets/mark_ops.rs` —
-drives `Screenshot::mark` with arbitrary rects, scales, and image dimensions
+index. A new `cargo-fuzz` target — `xa11y/fuzz/fuzz_targets/annotate_ops.rs` —
+drives `Screenshot::annotate` with arbitrary rects, scales, and image dimensions
 and asserts it neither panics nor writes out of bounds.
 
 ## Umbrella: the resolution half
 
 ```rust
-/// What to capture, and what to mark on it.
-#[non_exhaustive]
-pub struct MarkedCapture { /* built with chained setters */ }
-
-pub fn screenshot_marked(
+pub fn screenshot_annotated(
     region: Option<Rect>,
     groups: &[Locator],
-) -> Result<Marked>;
+) -> Result<Annotated>;
 
 /// A capture plus the legend describing what was drawn on it.
 #[non_exhaustive]
-pub struct Marked {
+pub struct Annotated {
     pub screenshot: Screenshot,
     pub legend: Vec<LegendEntry>,
     pub omitted: Vec<Omission>,
@@ -206,7 +249,7 @@ pub struct Marked {
 #[non_exhaustive]
 pub struct LegendEntry {
     pub tag: String,          // "B7"
-    pub group: usize,         // 1-based, matches the --mark order
+    pub group: usize,         // 1-based, matches the --annotate order
     pub index: usize,         // 1-based, the :nth(n) argument
     pub selector: String,     // "button:nth(7)" — usable as-is
     pub role: String,
@@ -241,7 +284,7 @@ work unchanged, and the umbrella crate does not grow a second app-resolution
 path next to the one `cli::resolve_app` already owns.
 
 The CLI still takes strings, because a command line has no other option; it
-resolves `--app`/`--pid`/`--shell` once and builds one `Locator` per `--mark`.
+resolves `--app`/`--pid`/`--shell` once and builds one `Locator` per `--annotate`.
 
 ## Surfaces
 
@@ -253,20 +296,20 @@ legend). The bindings then expose **one** `screenshot()` whose return type does
 not depend on its arguments — AGENTS.md, "Options structs fold into the primary
 verb": two names for one operation is worse than one name with options.
 
-Rust keeps `Marked` as a distinct type because Rust callers can destructure it;
+Rust keeps `Annotated` as a distinct type because Rust callers can destructure it;
 the bindings flatten it onto `Screenshot` (`shot.legend`, `shot.omitted`, both
-empty for an unmarked capture) and declare the flatten in the parity allowlist.
+empty for an unannotated capture) and declare the flatten in the parity allowlist.
 
 ### CLI
 
 ```
 xa11y screenshot [--region X,Y,W,H] --out PATH
                  [--app NAME | --pid PID | --shell KIND]
-                 [--mark SELECTOR]...
+                 [--annotate SELECTOR]...
                  [--legend text|json|none]
 ```
 
-`--mark` is repeatable and is the opt-in: with none, behaviour is byte-identical
+`--annotate` is repeatable and is the opt-in: with none, behaviour is byte-identical
 to today.
 
 This is the one real cost of the design. `xa11y screenshot`'s help text
@@ -281,11 +324,11 @@ refuses and names the two fixes (`--out FILE`, or `--legend none`). Tenet 1 —
 the alternative is a caller piping a PNG somewhere and never learning that the
 legend they asked for went to a different stream.
 
-Text legend, one group header plus one line per mark:
+Text legend, one group header plus one line per annotation:
 
 ```
-A  button       #0072B2  7 marked
-B  text_field   #D55E00  2 marked
+A  button       #0072B2  7 annotated
+B  text_field   #D55E00  2 annotated
 
 A1  button      "7"          bounds=104,318,48,44   button:nth(1)
 A2  button      "8"          bounds=156,318,48,44   button:nth(2)
@@ -297,25 +340,25 @@ omitted: 1 element (outside_capture: button "Paste")
 
 ### MCP
 
-`screenshot` gains `marks: string[]` and the shared `app`/`pid`/`shell` target
+`screenshot` gains `annotate: string[]` and the shared `app`/`pid`/`shell` target
 properties. The result keeps its image content and gains `legend`, `omitted`,
 and `truncated` in the JSON summary.
 
 Three things the tool description must state, because a model that discovers
 them by experiment spends calls doing it:
 
-- Marks come from the accessibility tree, so an app without one gets no marks.
+- Annotations come from the accessibility tree, so an app without one gets no annotations.
 - The tag format, and that the number is the `:nth(n)` argument.
 - The legend cap (100 entries) and that `truncated` reports when it bit.
 
-The cap is the "Results are bounded" rule from AGENTS.md. A `--mark div`-style
+The cap is the "Results are bounded" rule from AGENTS.md. A `--annotate div`-style
 selector over a large tree would otherwise put a thousand entries in a context
-window. Marks past the cap are neither drawn nor listed, and `truncated` says
+window. Annotations past the cap are neither drawn nor listed, and `truncated` says
 how many.
 
 ### Python
 
-`marks=` is a keyword-only parameter on the existing `screenshot()`. Absent, the
+`annotate=` is a keyword-only parameter on the existing `screenshot()`. Absent, the
 call is exactly what it is today.
 
 ```python
@@ -325,14 +368,14 @@ app = xa11y.App.by_name("Calculator")
 
 shot = xa11y.screenshot(
     element=app.locator("window").element(),
-    marks=[app.locator("button"), app.locator("text_field")],
+    annotate=[app.locator("button"), app.locator("text_field")],
 )
 shot.save_png("calc.png")
 ```
 
-`marks` accepts `Locator | str`. A `Locator` brings its own scope; a bare string
+`annotate` accepts `Locator | str`. A `Locator` brings its own scope; a bare string
 is resolved against the system root, the same as `xa11y.locator(s)` — so
-`marks=["button"]` means *every* button on screen, which is occasionally what
+`annotate=["button"]` means *every* button on screen, which is occasionally what
 you want and never what you want by accident.
 
 The legend is a list of entries, in draw order:
@@ -351,7 +394,7 @@ Each entry:
 | Attribute | Type | |
 |---|---|---|
 | `tag` | `str` | what is drawn in the box — `"B7"` |
-| `group` | `int` | 1-based, matching the `marks=` order |
+| `group` | `int` | 1-based, matching the `annotate=` order |
 | `index` | `int` | 1-based, and exactly the `:nth(n)` argument |
 | `selector` | `str` | `"button:nth(7)"` — usable against the same scope |
 | `role` | `str` | snake_case, as everywhere else |
@@ -382,47 +425,47 @@ for o in shot.omitted:
 `reason` is one of `"no_bounds"`, `"zero_area"`, `"outside_capture"` — a
 snake_case string, like every other enum that crosses the binding boundary.
 
-Both `legend` and `omitted` are `[]` on an unmarked capture, so consumers need
+Both `legend` and `omitted` are `[]` on an unannotated capture, so consumers need
 no version check.
 
 #### Scoping and cropping compose
 
-The `element=` / `region=` argument crops the image; `marks=` chooses what to
+The `element=` / `region=` argument crops the image; `annotate=` chooses what to
 draw on it. They are independent, and either can be omitted:
 
 ```python
-# whole display, marks from one app
-xa11y.screenshot(marks=[app.locator("button")])
+# whole display, annotations from one app
+xa11y.screenshot(annotate=[app.locator("button")])
 
-# one window cropped, marks scoped to that window
+# one window cropped, annotations scoped to that window
 win = app.locator("window[name='Preferences']")
-xa11y.screenshot(element=win.element(), marks=[win.descendant("button")])
+xa11y.screenshot(element=win.element(), annotate=[win.descendant("button")])
 
-# a fixed region, marks from the whole system
-xa11y.screenshot(region=(0, 0, 1440, 90), marks=["button"])
+# a fixed region, annotations from the whole system
+xa11y.screenshot(region=(0, 0, 1440, 90), annotate=["button"])
 ```
 
-Marks outside the crop land in `omitted`; they are not clamped to the edge.
+Annotations outside the crop land in `omitted`; they are not clamped to the edge.
 
 #### The GIL
 
 Selector resolution and pixel work both happen inside `py.allow_threads`. The
-`marks=` arguments are parsed and the locators cloned before the block, since
+`annotate=` arguments are parsed and the locators cloned before the block, since
 that needs the GIL (tenet 5, and the same shape `screenshot(element=...)`
 already has).
 
 #### Typing
 
-`_native.pyi` gains `LegendEntry` and `Omission` classes and the `marks`
+`_native.pyi` gains `LegendEntry` and `Omission` classes and the `annotate`
 parameter, checked against the compiled module by
-`test_stub_method_signatures_match_runtime`. `MarkOmissionReason` joins
+`test_stub_method_signatures_match_runtime`. `OmissionReasonName` joins
 `MouseButtonName` and `AnchorName` as a `Literal` union — identically spelled in
 the JS binding, since it is a value a user compares against as a literal.
 
 ### JS
 
-`screenshot({ marks: ['button'], app: 'Safari' })` → `Screenshot` with
-`.legend` / `.omitted`. `marks` accepts `Locator | string`, matching Python.
+`screenshot({ annotate: ['button'], app: 'Safari' })` → `Screenshot` with
+`.legend` / `.omitted`. `annotate` accepts `Locator | string`, matching Python.
 `index.d.ts` needs the `Screenshot` class members added by hand — the napi
 declaration in `native.d.ts` is shadowed and reaches nobody (AGENTS.md, "Type
 Declarations").
@@ -445,7 +488,7 @@ documented on `to_physical`; a 1px stroke offset is not worth a second
 rounding mode.
 
 **Mixed-DPI Wayland.** `Screenshot::scale` is a single scalar and cannot
-represent per-monitor scales (see `xa11y-linux/src/scale.rs`). Marks on the
+represent per-monitor scales (see `xa11y-linux/src/scale.rs`). Annotations on the
 non-dominant output are misplaced. Same caveat the capture path already
 carries; this feature makes it visible rather than introducing it.
 
@@ -453,16 +496,16 @@ carries; this feature makes it visible rather than introducing it.
 
 | Layer | Where | What |
 |---|---|---|
-| Core unit | `xa11y-core/src/screenshot/mark.rs` | synthetic `Screenshot`, exact pixel assertions on stroke position and colour; clipping; `origin` translation; `scale` transform; tag glyph rendering; palette contrast ≥ 4.5:1; badge collision nudge; `Vec<usize>` of skipped marks |
-| Core fuzz | `xa11y/fuzz/fuzz_targets/mark_ops.rs` | arbitrary rects × scales × dims, no panic, no OOB write |
+| Core unit | `xa11y-core/src/screenshot/annotate.rs` | synthetic `Screenshot`, exact pixel assertions on stroke position and colour; clipping; `origin` translation; `scale` transform; tag glyph rendering; palette contrast ≥ 4.5:1; badge collision nudge; `Vec<usize>` of skipped annotations |
+| Core fuzz | `xa11y/fuzz/fuzz_targets/annotate_ops.rs` | arbitrary rects × scales × dims, no panic, no OOB write |
 | Umbrella unit | `xa11y/src/lib.rs` | legend construction against the core `MockProvider`: group/index numbering, `:nth(n)` round-trip, `omitted` classification |
-| Integ | `xa11y/tests/integ/screenshot.rs` | mark the AccessKit test app's buttons; legend matches `h::named`; PNG decodes; existing headless/`Unsupported` skips reused |
-| CLI | `tests/suites/cli/test_screenshot.py` | `--mark` × launchers, `--legend json` shape, `--out -` + legend refused with exit 2 |
+| Integ | `xa11y/tests/integ/screenshot.rs` | annotation the AccessKit test app's buttons; legend matches `h::named`; PNG decodes; existing headless/`Unsupported` skips reused |
+| CLI | `tests/suites/cli/test_screenshot.py` | `--annotate` × launchers, `--legend json` shape, `--out -` + legend refused with exit 2 |
 | MCP raw | `tests/suites/cli/test_mcp.py` | argument validation, truncation flag |
 | MCP SDK | `tests/mcp_client/test_interop.py` | the real client's view of the new schema — both suites, per AGENTS.md |
-| Python | `xa11y-python/tests/`, `test_typing.py` | stub signature vs runtime; `test_gil_release.py` unaffected (marking is CPU work inside `allow_threads`) |
+| Python | `xa11y-python/tests/`, `test_typing.py` | stub signature vs runtime; `test_gil_release.py` unaffected (annotating is CPU work inside `allow_threads`) |
 | JS | `xa11y-js/__test__/unit/typing.test.js` | `index.d.ts` members exist on the runtime object |
-| Parity | `bindings/parity_allowlist.toml` | `Mark`, `Marked`, `LegendEntry`, `Omission`, `OmissionReason` classified; `Marked` flattened into `Screenshot` |
+| Parity | `bindings/parity_allowlist.toml` | `Annotation`, `Annotated`, `LegendEntry`, `Omission`, `OmissionReason` classified; `Annotated` flattened into `Screenshot` |
 | Docs | `reference/cli.mdx`, `guides/mcp.mdx`, new guide page | Diátaxis banner + `pageType`; `cargo xtask lint-docs` |
 
 `OmissionReason` is a new `#[non_exhaustive]` enum that the bindings map by
@@ -473,26 +516,26 @@ hand to strings, so it needs a `[[types.variant_coverage]]` entry naming
 
 Four PRs, each independently green.
 
-1. **Core drawing.** `Mark`, `MARK_PALETTE`, the bitmap font, `Screenshot::mark`,
+1. **Core drawing.** `Annotation`, `ANNOTATION_PALETTE`, the bitmap font, `Screenshot::annotate`,
    unit tests, fuzz target. No user-visible surface; nothing downstream changes.
-2. **Umbrella + CLI.** `Marked`, `LegendEntry`, `Omission`, `screenshot_marked`,
-   `--mark`/`--legend`, help text, `reference/cli.mdx`, CLI + integ tests.
+2. **Umbrella + CLI.** `Annotated`, `LegendEntry`, `Omission`, `screenshot_annotated`,
+   `--annotate`/`--legend`, help text, `reference/cli.mdx`, CLI + integ tests.
 3. **MCP.** Tool schema, handler, description, both interop suites, `guides/mcp.mdx`.
 4. **Bindings.** Python + JS, parity allowlist, typing tests, the guide page,
    and `strands-xa11y/tests/check_real_surface.py` if the `use_desktop` tool
-   should surface marks (worth a separate decision — see below).
+   should surface annotations (worth a separate decision — see below).
 
 Order matters only between 1 and the rest.
 
 ## Open questions
 
-- **Should `strands-xa11y`'s `use_desktop` tool expose marks?** It is the
+- **Should `strands-xa11y`'s `use_desktop` tool expose annotations?** It is the
   clearest consumer of the feature and the reason the package exists in this
   repo. Out of scope for the four PRs above; worth its own issue.
-- **Should a mark group be able to carry a caller-chosen colour?** The CLI would
-  need `--mark 'button#0072B2'` or a parallel `--mark-color` flag, both ugly.
-  Deferring: the palette is colour-blind-safe and deterministic by group order,
-  which is what a legend needs.
-- **Tag format.** Recorded above as a recommendation, not a decision. The
-  requester asked for `2.15`; this doc argues for `B7` and isolates the choice
-  in one function either way.
+- **Should an annotation group be able to carry a caller-chosen colour?** The
+  CLI would need `--annotate 'button#0072B2'` or a parallel `--annotate-color`
+  flag, both ugly. Deferring: the palette is colour-blind-safe and deterministic
+  by group order, which is what a legend needs.
+
+Tag format is **settled** (`A1` / `B7`, see above), as is the vocabulary
+(annotation / tag / legend).
