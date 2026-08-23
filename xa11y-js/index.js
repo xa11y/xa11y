@@ -667,6 +667,34 @@ function inputSim() {
 }
 
 /**
+ * Normalise one `annotate` entry into a `Locator`.
+ *
+ * A `Locator` brings its own scope. A bare string builds a rootless one,
+ * exactly as `locator(s)` does, and `screenshot` then refuses it with
+ * `InvalidSelectorError`: a rootless search runs once per application and
+ * concatenates the results, so each legend entry's `<selector>:nth(n)` would
+ * count within one application while the legend counts across all of them,
+ * and the entry would name a different element than the box it labels. Scope
+ * the group with `app.locator('button')`.
+ *
+ * A string stays a legal argument *shape* so the refusal names the fix rather
+ * than reading as a type error. Splitting the union here keeps the native
+ * entry point taking one concrete type.
+ *
+ * @param {unknown} entry
+ * @param {number} at
+ * @returns {import('./native.js').Locator}
+ */
+function annotationGroup(entry, at) {
+  if (typeof entry === 'string') return locator(entry);
+  if (entry instanceof native.Locator) return entry;
+  throw new InvalidActionDataError(
+    `screenshot: annotate[${at}] must be a Locator or a selector string, got ` +
+      `${entry === null ? 'null' : typeof entry}`,
+  );
+}
+
+/**
  * Capture pixels from the screen.
  *
  * With no arguments, captures the full primary display. Pass `element` to
@@ -674,15 +702,40 @@ function inputSim() {
  * `{x, y, width, height}` to capture an explicit rectangle in logical
  * screen coordinates. Passing both throws `InvalidActionDataError`.
  *
+ * `annotate` draws a numbered box over every element each locator matches and
+ * fills in `legend` / `omitted` / `truncated` on the result. Each entry is one
+ * group, with its own colour and tag letter, and must be scoped to an
+ * application — `app.locator('button')`. A rootless group, which is what a
+ * bare selector string builds, throws `InvalidSelectorError`; see
+ * {@link annotationGroup}. Cropping and annotating are independent:
+ * annotations outside the captured area land in `omitted` rather than being
+ * clamped to an edge.
+ *
  * @param {object} [options]
  * @param {import('./native.js').Element} [options.element]
  * @param {{x: number, y: number, width: number, height: number}} [options.region]
+ * @param {Array<import('./native.js').Locator | string>} [options.annotate]
  * @returns {Promise<import('./native.js').Screenshot>}
  */
 function screenshot(options) {
   if (options && options.element && options.region) {
     throw new InvalidActionDataError(
       'screenshot: pass either `element` or `region`, not both',
+    );
+  }
+  if (options && options.annotate !== undefined && options.annotate !== null) {
+    if (!Array.isArray(options.annotate)) {
+      throw new InvalidActionDataError(
+        'screenshot: `annotate` must be an array of Locators or selector strings',
+      );
+    }
+    // Every entry is parsed before the capture starts, so a bad argument
+    // costs no pixels and cannot leave a half-drawn result behind.
+    const groups = options.annotate.map(annotationGroup);
+    return wrap(native._screenshotAnnotated)(
+      groups,
+      options.element ?? null,
+      options.region ?? null,
     );
   }
   if (options && options.element) {

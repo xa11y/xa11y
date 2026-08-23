@@ -51,6 +51,9 @@ opaque = [
     { type = "Anchor", reason = "Exposed as the strings 'center' | 'top_left' | 'top_right' | 'bottom_left' | 'bottom_right', or an (dx, dy) / [dx, dy] offset pair for Anchor::Offset." },
     { type = "Rect", reason = "Python exposes a Rect class; JS returns a plain object literal typed in index.d.ts. Members are not mirrored uniformly, so they are covered by the per-binding type tests instead." },
     { type = "TreeNode", reason = "`tree()` returns nested plain data (dicts / objects), not a mirrored node class." },
+    { type = "LegendEntry", reason = "Python exposes a frozen LegendEntry class; JS returns a plain object literal, typed by the generated native.d.ts and forwarded from index.d.ts. Same split as Rect — members are not mirrored uniformly, so they are covered by the per-binding type tests instead." },
+    { type = "Omission", reason = "Python exposes a frozen Omission class; JS returns a plain object literal, typed by the generated native.d.ts and forwarded from index.d.ts. Same split as Rect and LegendEntry." },
+    { type = "OmissionReason", reason = "Reasons cross the boundary as identically-spelled snake_case strings (`no_bounds`, `zero_area`, `outside_capture`); the enum's variants are not mirrored as binding members. See [[types.variant_coverage]]." },
 ]
 
 # Not part of the binding surface at all.
@@ -90,6 +93,10 @@ internal = [
     { type = "ClickOptions", reason = "Options struct for Mouse::click_with; its fields are the optional params of the bindings' click() (Python keywords, JS options object)." },
     { type = "DragOptions", reason = "Options struct for Mouse::drag_with; its fields are the optional params of the bindings' drag() (Python keywords, JS options object)." },
     { type = "ClickTarget", reason = "Internal click-target discriminator for the input backends." },
+
+    # ── Screenshot annotation: built by the umbrella crate, never by a caller ──
+    { type = "Annotation", reason = "Built by the umbrella crate from resolved locators; bindings pass selectors and receive a legend, never an Annotation." },
+    { type = "Annotated", reason = "Flattened into Screenshot in both bindings: `shot.legend`, `shot.omitted`, `shot.truncated`, all empty/zero on an unannotated capture. See [[types.flatten]]." },
 ]
 
 # ── Variant coverage ─────────────────────────────────────────────────────
@@ -204,6 +211,24 @@ files = [
     { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "ShellSurfaceKindName" },
 ]
 
+# Omission reasons follow the ShellSurfaceKind pattern exactly, and for the
+# same reason. Every Rust-side rendering — the CLI's text and JSON legends, the
+# MCP result, and both bindings — goes through `OmissionReason::as_str`, whose
+# exhaustive match in core is the compiler's guard; hand-copying that mapping
+# into the bindings would buy a second place to get it wrong. What no compiler
+# guards is the two hand-written type declarations below, where a reason
+# missing from the union is a literal a consumer's type checker rejects even
+# though the runtime returns it.
+[[types.variant_coverage]]
+type = "OmissionReason"
+reason = "Reasons cross as identically-spelled snake_case strings via OmissionReason::as_str; the Python Literal and the TypeScript union are hand-maintained and would silently narrow a reason out of the typed API."
+files = [
+    # Whole-file, like the ShellSurfaceKind entry above: a Python assignment
+    # has no `;` for the slicer to stop at.
+    { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake" },
+    { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "OmissionReasonName" },
+]
+
 [[types.variant_coverage]]
 type = "StateFlag"
 reason = "Each variant maps to a distinct state-name string in both bindings; an unmapped one would surface as 'unknown'."
@@ -235,6 +260,21 @@ rename = [
     { member = "Mouse::up", to = "mouse_up" },
 ]
 
+# The annotated-capture result. `xa11y::screenshot_annotated` returns an
+# `Annotated`; the bindings return one `Screenshot` whose type does not depend
+# on the arguments, with the legend hanging off it (AGENTS.md, "Options structs
+# fold into the primary verb"). Flattening is what makes `legend` / `omitted` /
+# `truncated` *required* on both binding classes rather than optional extras
+# nobody would notice were missing.
+#
+# `Annotated::for_capture` is deliberately not named `new`: it would shadow
+# `Screenshot::new` here, and one allowlist entry would then stand in for two
+# different operations. The checker reports that shadowing; this is the fix.
+[[types.flatten]]
+into = "Screenshot"
+from = ["Annotated"]
+reason = "Both bindings surface the annotation legend on their Screenshot class (shot.legend, shot.omitted, shot.truncated) instead of a second result type."
+
 # ── Python ───────────────────────────────────────────────────────────────
 
 [python]
@@ -263,6 +303,9 @@ rust_only = [
     { method = "Element::for_role", reason = "Flattened from ElementData: the provider-side constructor for a bare ElementData. Bindings receive elements from the provider and never build one." },
     { method = "Event::new", reason = "Provider-side constructor for an Event. Bindings receive events from a Subscription and never build one." },
     { method = "Screenshot::new", reason = "Backend-side constructor for a capture. Bindings receive Screenshots from the capture entry points and never build one." },
+    { method = "Screenshot::annotate", reason = "Core drawing primitive taking Annotations in logical coordinates. Folded into the primary verb in the bindings: annotation is a keyword/option on screenshot(), which returns the drawn capture plus its legend." },
+    { method = "Screenshot::screenshot", reason = "Flattened from Annotated: the capture the legend describes. The binding's Screenshot IS that capture, so a `screenshot.screenshot` would name itself." },
+    { method = "Screenshot::for_capture", reason = "Flattened from Annotated: the Rust-side constructor for an annotated result. Bindings receive one from screenshot() and never build one." },
     { method = "Element::data", reason = "Internal plumbing for provider implementors, not user API." },
     { method = "Element::provider", reason = "Internal plumbing for provider implementors, not user API." },
     { method = "Element::handle", reason = "Opaque provider handle; not part of the user-visible API." },
@@ -349,6 +392,9 @@ rust_only = [
     { method = "Element::for_role", reason = "Flattened from ElementData: the provider-side constructor for a bare ElementData. Bindings receive elements from the provider and never build one." },
     { method = "Event::new", reason = "Provider-side constructor for an Event. Bindings receive events from a Subscription and never build one." },
     { method = "Screenshot::new", reason = "Backend-side constructor for a capture. Bindings receive Screenshots from the capture entry points and never build one." },
+    { method = "Screenshot::annotate", reason = "Core drawing primitive taking Annotations in logical coordinates. Folded into the primary verb in the bindings: annotation is a keyword/option on screenshot(), which returns the drawn capture plus its legend." },
+    { method = "Screenshot::screenshot", reason = "Flattened from Annotated: the capture the legend describes. The binding's Screenshot IS that capture, so a `screenshot.screenshot` would name itself." },
+    { method = "Screenshot::for_capture", reason = "Flattened from Annotated: the Rust-side constructor for an annotated result. Bindings receive one from screenshot() and never build one." },
     { method = "Element::data", reason = "Internal plumbing for provider implementors, not user API." },
     { method = "Element::provider", reason = "Internal plumbing for provider implementors, not user API." },
     { method = "Element::handle", reason = "Opaque provider handle; not part of the user-visible API." },

@@ -466,19 +466,29 @@ CFTypeRef safe_ax_value_create_cf_range(CFIndex location, CFIndex length) {
 //   -4  bitmap context creation failed
 //   -5  requested rect has zero / negative dimensions
 //   -9999 ObjC exception
+// `out_origin_x` / `out_origin_y` receive the **logical** screen coordinate
+// that the returned image's pixel (0, 0) sits at: the requested rect's origin
+// for a region capture, and the captured display's `frame.origin` for a full
+// one. The display we capture is `content.displays[0]`, which is not
+// necessarily the display at (0, 0), so a caller that assumed (0, 0) would
+// place everything it maps onto these pixels off by that display's offset.
 int safe_cg_capture_rgba(
     int use_rect,
     double rect_x, double rect_y, double rect_w, double rect_h,
     uint8_t **out_pixels,
     uint32_t *out_width,
     uint32_t *out_height,
-    double *out_scale
+    double *out_scale,
+    double *out_origin_x,
+    double *out_origin_y
 ) {
     @try {
         if (out_pixels) *out_pixels = NULL;
         if (out_width) *out_width = 0;
         if (out_height) *out_height = 0;
         if (out_scale) *out_scale = 1.0;
+        if (out_origin_x) *out_origin_x = 0.0;
+        if (out_origin_y) *out_origin_y = 0.0;
 
         if (use_rect && (rect_w <= 0.0 || rect_h <= 0.0)) {
             return -5;
@@ -595,6 +605,11 @@ int safe_cg_capture_rgba(
         *out_width = (uint32_t)w;
         *out_height = (uint32_t)h;
         *out_scale = disp_scale;
+        // `src_x` / `src_y` are already the logical top-left of what was
+        // captured: the caller's rect for a region, the display's frame origin
+        // for a full capture.
+        if (out_origin_x) *out_origin_x = src_x;
+        if (out_origin_y) *out_origin_y = src_y;
         return 0;
     } @catch (NSException *e) {
         return -9999;

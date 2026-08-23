@@ -206,8 +206,9 @@ impl Screenshot {
     /// Draw `annotations` onto a copy of this capture.
     ///
     /// `origin` is the logical top-left of what this capture covers — the
-    /// region passed to `capture_region`, or `(0, 0)` for a full-display
-    /// capture. Annotations are translated by it and scaled by `self.scale`.
+    /// region passed to `capture_region`, or whatever
+    /// `ScreenshotProvider::capture_full` reported alongside the pixels.
+    /// Annotations are translated by it and scaled by `self.scale`.
     ///
     /// Annotations whose rect does not intersect the image are **skipped, not
     /// clamped**, and reported in the returned `Vec<usize>` of skipped
@@ -228,24 +229,44 @@ way to construct one (AGENTS.md, "Public API Extensibility").
 
 - **Boxes.** A `stroke` px outline in the annotation colour, `stroke = clamp(round(scale), 1, 4)`.
   Written straight into the RGBA buffer; no blending, no alpha.
-- **Tags.** A filled badge in the annotation colour at the box's inner top-left, with
-  the tag drawn on top in whichever of black/white has more contrast against
-  that colour (relative luminance, the WCAG formula). At 7 palette colours this
-  is a compile-time-checkable property, so the unit test asserts every palette
-  entry clears 4.5:1 against its chosen foreground.
+- **Tags.** A filled badge in the annotation colour, outlined in its own
+  foreground colour, sitting **outside** the box — by default resting on the
+  box's top edge, left-aligned. The tag is drawn in whichever of black/white
+  has more contrast against the badge colour (relative luminance, the WCAG
+  formula). At 7 palette colours this is a checkable property, so the unit test
+  asserts every palette entry clears 4.5:1 against its chosen foreground.
+
+  Outside, not inside, and this was learned the expensive way: the first
+  implementation put the badge at the box's inner top-left, which on a toolbar
+  button is exactly where the button's own label is. The `A1` badge covered the
+  word "New". An annotation that destroys the content it points at defeats the
+  feature, and no unit test was ever going to notice — it took running the
+  thing against a real Qt application and looking at the picture.
+
 - **Glyphs.** An embedded 5×7 bitmap font covering `0-9` and `A-Z` — 36 glyphs
-  × 7 bytes, a `const [[u8; 7]; 36]`. Integer-scaled by `clamp(round(scale), 1, 4)`.
+  × 7 bytes, a `const [[u8; 7]; 36]`. Scaled by `2 × stroke`, so a tag is 10×14
+  px at 1× and keeps its apparent size on a HiDPI capture rather than shrinking.
 
   The alternative is `ab_glyph`/`fontdue` plus an embedded TTF: a dependency,
   a few hundred KB in every binary and both wheels, and a rasteriser, for two
   character classes. The bitmap table is about sixty lines and never changes.
   `image`/`imageproc` is heavier still.
 
-- **Badge collisions.** Nested elements (window ⊃ group ⊃ button) put badges on
-  top of each other. Annotations are drawn largest-area-first so small elements land
-  on top, and a badge that would overlap one already placed tries the box's
-  other three inner corners before accepting the overlap. Greedy, bounded, and
-  good enough; a layout solver is not warranted.
+- **Badge placement.** Ten candidate spots in preference order — above the box
+  (left- then right-aligned), below it, beside it, and the four inner corners
+  as a last resort. Each is scored on whether it is visible at all, whether it
+  covers a badge already placed, and whether it fits wholly on the image; the
+  first candidate holding the best score wins. Annotations are drawn
+  largest-area-first so small elements land on top. Greedy, bounded, and good
+  enough; a layout solver is not warranted.
+
+  Two things this deliberately does not solve. A badge can still cover a
+  *neighbouring* element's pixels — in a dense form there is nowhere to put a
+  badge that covers nothing, and the guarantee that matters is that an
+  annotated element stays readable. And a box filling the whole capture has no
+  on-image outside spot, so it falls through to an inner corner and covers its
+  own content; that is the one case where the old failure mode survives, and it
+  is the case where the box is a window rather than a control.
 
 - **Duplicates are not deduplicated.** Two selectors matching one element get
   two annotations and two legend entries. Merging them would silently drop a group's
@@ -302,9 +323,10 @@ pub struct Omission {
 `app.locator(entry.selector).press()`.
 
 `omitted` is tenet 1 and tenet 6. An element with no bounds, a zero-sized one,
-or one on a second monitor is dropped from the image — dropping it *silently*
-would leave a legend that disagrees with the picture and no way to find out
-why. See "Multi-monitor" below; that case is common enough to matter.
+or one outside the captured pixels is dropped from the image — dropping it
+*silently* would leave a legend that disagrees with the picture and no way to
+find out why. See "Multi-monitor" below for what a full capture does and does
+not cover.
 
 ### Why `Locator` and not `&str`
 
@@ -312,6 +334,11 @@ A selector alone has no scope. Taking a `Locator` means the caller has already
 said what tree it searches, the chained forms (`app.locator("toolbar").child("button")`)
 work unchanged, and the umbrella crate does not grow a second app-resolution
 path next to the one `cli::resolve_app` already owns.
+
+A `Locator` can still be rootless, and that is refused — see the Python section.
+The scope is not decoration: it is what each entry's `<selector>:nth(n)` is
+resolved against, and a group with no scope has no numbering the entry can
+round-trip through.
 
 The CLI still takes strings, because a command line has no other option; it
 resolves `--app`/`--pid`/`--shell` once and builds one `Locator` per `--annotate`.
@@ -403,10 +430,17 @@ shot = xa11y.screenshot(
 shot.save_png("calc.png")
 ```
 
-`annotate` accepts `Locator | str`. A `Locator` brings its own scope; a bare string
-is resolved against the system root, the same as `xa11y.locator(s)` — so
-`annotate=["button"]` means *every* button on screen, which is occasionally what
-you want and never what you want by accident.
+`annotate` accepts `Locator | str`, and every group must be **scoped to an
+application**. A bare string builds a rootless locator, the same as
+`xa11y.locator(s)`, and those are refused with `InvalidSelectorError`: a
+rootless search runs once per application and concatenates the results, so its
+`:nth(n)` counts within one application while the legend numbers matches across
+all of them. With one button in the first application and three in the second,
+the entry for the second application's first button would carry
+`button:nth(2)` — which resolves to that application's *second* button, with no
+error. Numbering per application and adding the owning pid to each entry would
+only help a caller who reads the pid; `entry.selector` on its own, which is the
+documented round trip, would stay wrong. The error names the fix.
 
 The legend is a list of entries, in draw order:
 
@@ -471,8 +505,8 @@ xa11y.screenshot(annotate=[app.locator("button")])
 win = app.locator("window[name='Preferences']")
 xa11y.screenshot(element=win.element(), annotate=[win.descendant("button")])
 
-# a fixed region, annotations from the whole system
-xa11y.screenshot(region=(0, 0, 1440, 90), annotate=["button"])
+# a fixed region, annotations from one app's menu bar items
+xa11y.screenshot(region=(0, 0, 1440, 90), annotate=[app.locator("menu_item")])
 ```
 
 Annotations outside the crop land in `omitted`; they are not clamped to the edge.
@@ -494,18 +528,37 @@ the JS binding, since it is a value a user compares against as a literal.
 
 ### JS
 
-`screenshot({ annotate: ['button'], app: 'Safari' })` → `Screenshot` with
-`.legend` / `.omitted`. `annotate` accepts `Locator | string`, matching Python.
+`screenshot({ annotate: [app.locator('button')] })` → `Screenshot` with
+`.legend` / `.omitted`. `annotate` accepts `Locator | string` and refuses
+rootless groups, matching Python.
 `index.d.ts` needs the `Screenshot` class members added by hand — the napi
 declaration in `native.d.ts` is shadowed and reaches nobody (AGENTS.md, "Type
 Declarations").
 
 ## Known limits, stated rather than papered over
 
-**Multi-monitor.** `ScreenshotProvider::capture_full` captures the *primary*
-display. An element on a second monitor has valid bounds that are outside the
-capture, and lands in `omitted` with `OutsideCapture`. Not a bug to fix here;
-a documented consequence of the existing capture contract.
+**Multi-monitor.** What `ScreenshotProvider::capture_full` covers is the
+backend's own answer, and it is not "the primary display" everywhere: Windows
+captures the whole **virtual desktop**, Linux/X11 the root window, macOS one
+`SCDisplay`. So an element on a second monitor lands in `omitted` with
+`OutsideCapture` on macOS, and is genuinely *in the image* on Windows and X11.
+
+What is uniform is that the capture reports **where** it is.
+`capture_full` returns the logical coordinate its pixel `(0, 0)` sits at
+alongside the pixels, and `screenshot_annotated` translates every box by it.
+That origin is not `(0, 0)` on Windows — the virtual desktop's top-left goes
+negative as soon as a monitor is arranged left of or above the primary — nor on
+a Mac whose `displays[0]` is not at the coordinate-space origin. Assuming
+`(0, 0)` there did not put anything in `omitted`: the shifted rectangles still
+landed inside the (wider) image, so every box was drawn one monitor's width out
+of place and the legend said nothing was wrong.
+
+The residue is `Screenshot::scale`, which is a single scalar for a capture that
+may span monitors at different DPI. Windows reports the scale of the monitor at
+the virtual origin: exact on a uniform-DPI desktop, and off by the DPI ratio for
+boxes on a monitor that scales differently. Capturing per-monitor is the fix and
+it changes the capture contract, so it stays stated here rather than papered
+over. The Wayland note below is the same limitation from the other side.
 
 **Occlusion.** The accessibility tree carries no z-order. An element behind
 another window has bounds, so it gets a box drawn over whatever is actually
@@ -526,7 +579,7 @@ carries; this feature makes it visible rather than introducing it.
 
 | Layer | Where | What |
 |---|---|---|
-| Core unit | `xa11y-core/src/screenshot/annotate.rs` | synthetic `Screenshot`, exact pixel assertions on stroke position and colour; clipping; `origin` translation; `scale` transform; tag glyph rendering; palette contrast ≥ 4.5:1; badge collision nudge; `Vec<usize>` of skipped annotations |
+| Core unit | `xa11y-core/src/screenshot/annotate.rs` | synthetic `Screenshot`, exact pixel assertions on stroke position and colour; clipping; `origin` translation; `scale` transform; tag glyph rendering; palette contrast ≥ 4.5:1; badge placement preference order and clipping; `Vec<usize>` of skipped annotations |
 | Core fuzz | `xa11y/fuzz/fuzz_targets/annotate_ops.rs` | arbitrary rects × scales × dims, no panic, no OOB write |
 | Umbrella unit | `xa11y/src/lib.rs` | legend construction against the core `MockProvider`: group/index numbering, `:nth(n)` round-trip, `omitted` classification |
 | Integ | `xa11y/tests/integ/screenshot.rs` | annotation the AccessKit test app's buttons; legend matches `h::named`; PNG decodes; existing headless/`Unsupported` skips reused |

@@ -24,6 +24,10 @@ test-support = ["xa11y-core/test-support"]
 
 [dependencies]
 xa11y-core = { workspace = true }
+# `LegendEntry` / `Omission` / `OmissionReason` derive `Serialize` so the CLI's
+# `--legend json`, the MCP result and the bindings all render one shape rather
+# than each hand-building a JSON object that can drift from the others.
+serde = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 xa11y-macos = { workspace = true }

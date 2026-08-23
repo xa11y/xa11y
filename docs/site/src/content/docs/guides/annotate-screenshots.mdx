@@ -1,0 +1,411 @@
+---
+title: Annotated screenshots
+description: Draw boxes over the elements a selector matches, then turn each box back into a selector that acts on it.
+pageType: how-to
+---
+
+{/* DIATAXIS: how-to — a goal-oriented recipe for a reader who already knows
+    what they want. Steps and decisions only. Concepts go to explanation/,
+    exhaustive option lists go to reference/. */}
+
+import { Tabs, TabItem } from "@astrojs/starlight/components";
+
+A plain capture shows what an application looks like without saying which tree
+node is which pixel. Annotating draws that correlation into the image. Every
+element a selector matches gets an outlined box and a short tag, and a legend
+maps each tag back to a selector that acts on it.
+
+Reach for this when the accessibility tree is present and uninformative, so
+that elements have no name, or a role of `group`, or no tree node beyond the
+window that draws them. The boxes come from the tree, so an application that
+exposes no tree gets a plain capture and an empty legend.
+
+For an unannotated capture, see [Screenshots](/guides/screenshots/).
+
+## Capture with boxes
+
+Each annotation group is one selector. Every element it matches inside the
+target application gets a box in that group's colour.
+
+<Tabs syncKey="lang">
+  <TabItem label="CLI">
+    ```bash
+    xa11y screenshot --pid 4242 --annotate button --out calc.png
+    ```
+
+    `--annotate` needs a target, so pass `--app NAME`, `--pid PID`, or
+    `--shell KIND`. The image goes to `--out`; the legend goes to stdout. See
+    [`xa11y screenshot`](/reference/cli/#xa11y-screenshot) for the full grammar.
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    use std::time::Duration;
+    use xa11y::*;
+
+    fn main() -> Result<()> {
+        let app = App::by_name("Calculator", Duration::from_secs(5))?;
+        let shot = screenshot_annotated(None, &[app.locator("button")])?;
+        shot.screenshot.save_png("calc.png")?;
+        Ok(())
+    }
+    ```
+
+    `screenshot_annotated` returns an `Annotated`, which carries the capture as
+    `screenshot` alongside `legend`, `omitted`, and `truncated`. Pass
+    `Some(rect)` as the first argument to crop.
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import xa11y
+
+    app = xa11y.App.by_name("Calculator")
+    shot = xa11y.screenshot(annotate=[app.locator("button")])
+    shot.save_png("calc.png")
+    ```
+
+    `annotate` is keyword-only and takes a list. Each entry is a `Locator` or a
+    selector string, and each one has to be scoped, so `app.locator("button")`
+    or `win.descendant("button")` rather than a bare `"button"`.
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    import { screenshot, App } from '@crowecawcaw/xa11y';
+
+    const app = await App.byName('Calculator');
+    const shot = await screenshot({ annotate: [app.locator('button')] });
+    await shot.savePng('calc.png');
+    ```
+
+    `annotate` takes an array of `Locator` or selector string, the same as
+    Python, and each entry has to be scoped the same way.
+  </TabItem>
+</Tabs>
+
+Every group has to be scoped to an application, or to an element inside one. A
+bare selector string builds a rootless locator, the same one `xa11y.locator()`
+returns, and that is refused with `InvalidSelector` before any tree is read. A
+rootless search resolves once per application and concatenates the results, so
+the `:nth(n)` that each legend entry carries would count inside one application
+while the legend counts across all of them. The selector beside a box would
+then reach a different element. The error message names the fix.
+
+Cropping and annotating are independent. `element` / `region` chooses what is
+captured, `annotate` chooses what is drawn on it, and either can be omitted.
+
+<Tabs syncKey="lang">
+  <TabItem label="CLI">
+    ```bash
+    # Crop to a region, box the buttons inside the target application
+    xa11y screenshot --app Calculator --region 0,0,1440,900 \
+                     --annotate button --out top.png
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    // A fixed region, annotations scoped to the application
+    let region = Rect { x: 0, y: 0, width: 1440, height: 900 };
+    let shot = screenshot_annotated(Some(region), &[app.locator("button")])?;
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    win = app.locator("window[name='Preferences']")
+
+    # One window cropped, annotations scoped to that window
+    shot = xa11y.screenshot(
+        element=win.element(),
+        annotate=[win.descendant("button")],
+    )
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    const win = app.locator("window[name='Preferences']");
+
+    // One window cropped, annotations scoped to that window
+    const shot = await screenshot({
+      element: await win.element(),
+      annotate: [win.descendant('button')],
+    });
+    ```
+  </TabItem>
+</Tabs>
+
+An element that matches a selector while falling outside the crop is reported
+under `omitted` instead. Boxes are never clamped to the edge, because a clamped
+box claims pixels that belong to something else.
+
+## Read the legend
+
+A tag is a letter for the group and a 1-based number within it, so `B7` is the
+seventh match of the second selector. There is no separator between the two,
+which is what keeps `A12` and `AB2` distinct after the image is downscaled.
+
+The CLI prints a group header block, then one line per box.
+
+```
+A  button  #E69F00  3 annotated
+
+A1  button  "7"  bounds=104,318,48,44  button:nth(1)
+A2  button  "8"  bounds=156,318,48,44  button:nth(2)
+A3  button  "9"  bounds=208,318,48,44  button:nth(3)
+```
+
+Each header line gives the group letter, the group's selector, its box colour,
+and a count of the elements it annotated. Groups with no matches still get a
+header line, so a selector that reached nothing is visible rather than absent.
+The entry lines below them give the tag, the role, the accessible name (`-` when
+the element has none), the logical bounds, and a selector that resolves to that
+one element.
+
+In code, the legend is a list of entries in draw order.
+
+<Tabs syncKey="lang">
+  <TabItem label="CLI">
+
+    Add `--legend json` for the same information as one JSON object on stdout.
+    It carries `groups`, `legend`, `omitted`, `truncated`, and `cap`, with the
+    group letter and colour already resolved.
+
+    ```bash
+    xa11y screenshot --pid 4242 --annotate button --out calc.png --legend json
+    ```
+
+    `--legend none` suppresses it, which is what `--out -` requires.
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    for e in &shot.legend {
+        println!("{}  {}  {:?}  {}", e.tag, e.role, e.name, e.selector);
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    for e in shot.legend:
+        print(f"{e.tag:>4}  {e.role:<12} {e.name!r:<16} {e.selector}")
+
+    #   A1  button       '7'              button:nth(1)
+    #   A2  button       '8'              button:nth(2)
+    #   B1  text_field   'Display'        text_field:nth(1)
+    ```
+
+    An entry carries `tag`, `group`, `index`, `selector`, `role`, `name`,
+    `bounds`, and `color`.
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    for (const e of shot.legend) {
+      console.log(e.tag, e.role, e.name, e.selector);
+    }
+    ```
+
+    An entry carries `tag`, `group`, `index`, `selector`, `role`, `name`,
+    `bounds`, and `color`.
+  </TabItem>
+</Tabs>
+
+`group` and `index` are the same two numbers the tag spells, as integers. Code
+that filters by group compares `group` rather than decoding a letter.
+
+## Act on a box
+
+`index` is exactly the `:nth(n)` argument, and `selector` is built from it
+already. A model reads a tag off the PNG, and the caller hands the matching
+entry's selector straight back to a locator against the same scope.
+
+<Tabs syncKey="lang">
+  <TabItem label="CLI">
+    ```bash
+    # The legend line for A7 ends in the selector that reaches it
+    xa11y action press 'button:nth(7)' --pid 4242
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    // "A7" was read off the PNG
+    let entry = shot.legend.iter().find(|e| e.tag == "A7").expect("A7");
+    app.locator(&entry.selector).press()?;
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    tag = "B1"                                    # read off the PNG
+    entry = next(e for e in shot.legend if e.tag == tag)
+    app.locator(entry.selector).set_value("42")
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    const tag = 'B1';                             // read off the PNG
+    const entry = shot.legend.find((e) => e.tag === tag);
+    await app.locator(entry.selector).setValue('42');
+    ```
+  </TabItem>
+</Tabs>
+
+The round trip holds because the group's locator and the entry's selector share
+a scope. An entry produced by `app.locator("button")` resolves against `app`,
+and every group has such a scope, since a rootless one is refused.
+
+## Use more than one group
+
+Pass a second locator, or repeat `--annotate`, for a second group with its own
+letter and colour.
+
+<Tabs syncKey="lang">
+  <TabItem label="CLI">
+    ```bash
+    xa11y screenshot --pid 4242 \
+                     --annotate button --annotate text_field \
+                     --out calc.png
+    ```
+
+    ```
+    A  button      #E69F00  3 annotated
+    B  text_field  #56B4E9  1 annotated
+
+    A1  button      "7"        bounds=104,318,48,44  button:nth(1)
+    A2  button      "8"        bounds=156,318,48,44  button:nth(2)
+    A3  button      "9"        bounds=208,318,48,44  button:nth(3)
+    B1  text_field  "Display"  bounds=100,60,320,52  text_field:nth(1)
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    let shot = screenshot_annotated(
+        None,
+        &[app.locator("button"), app.locator("text_field")],
+    )?;
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    shot = xa11y.screenshot(
+        annotate=[app.locator("button"), app.locator("text_field")],
+    )
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    const shot = await screenshot({
+      annotate: [app.locator('button'), app.locator('text_field')],
+    });
+    ```
+  </TabItem>
+</Tabs>
+
+Colours cycle through a seven-entry palette chosen to stay distinguishable for
+colour-blind readers, and the letter is the text alternative to the colour.
+Nothing is deduplicated, so an element matched by two groups gets two boxes and
+two legend entries.
+
+One selector shape is refused. A comma-separated alternation such as
+`button, link` fails with `InvalidSelector`, because appending `:nth(n)` to it
+would bind to the last clause alone and break the round trip. Pass one group per
+clause, which also gives each clause its own colour. See
+[Selectors](/reference/selectors/) for the syntax itself.
+
+## Find out why an element has no box
+
+Anything that matched a selector without reaching the image is reported in
+`omitted`, each entry with a reason.
+
+| `reason` | Means |
+| --- | --- |
+| `no_bounds` | The accessibility tree reports no bounds for the element. |
+| `zero_area` | The bounds have zero width or zero height. |
+| `outside_capture` | The bounds fall outside the captured area, such as the far side of an explicit `region` or a display the capture did not reach. |
+
+<Tabs syncKey="lang">
+  <TabItem label="CLI">
+
+    The text legend ends with a summary line, and lists up to five elements
+    inline. `--legend json` includes every omission.
+
+    ```
+    omitted: 1 element (outside_capture: button "Paste")
+    ```
+  </TabItem>
+  <TabItem label="Rust">
+    ```rust
+    for o in &shot.omitted {
+        println!("{:?}  {}  {:?}", o.reason, o.role, o.name);
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    for o in shot.omitted:
+        print(o.reason, o.role, o.name)
+
+    #   outside_capture  button     'Paste'
+    #   no_bounds        menu_item  'About'
+    ```
+  </TabItem>
+  <TabItem label="JavaScript">
+    ```js
+    for (const o of shot.omitted) {
+      console.log(o.reason, o.role, o.name);
+    }
+    ```
+  </TabItem>
+</Tabs>
+
+`legend` and `omitted` are empty on an unannotated capture, so a consumer needs
+no version check.
+
+## Limits
+
+**What a full capture covers is the platform's own answer.** Windows captures
+the whole virtual desktop, so an element on a second monitor gets a box rather
+than an omission. macOS captures one display, so an element anywhere else has
+valid bounds that fall outside the image and arrives in `omitted` with
+`outside_capture`. Linux captures the X11 root window, or whatever the Wayland
+portal hands back.
+
+**A capture carries one scale factor.** On a desktop where the monitors differ
+in DPI, that factor is right for the monitor the capture starts at and wrong
+for the others, so a box drawn on another monitor is misplaced by the ratio
+between the two. A Wayland session with per-monitor scale factors has the same
+limit. Capture the window you care about with `region` or `element` to stay on
+one monitor.
+
+**An occluded element still gets a box.** The accessibility tree carries no
+z-order, so an element behind another window has bounds and gets a box drawn
+over whatever is on screen at those coordinates. Narrow the group with a state
+selector such as `button[visible]` when that matters, since only the caller
+knows what the group meant.
+
+**A badge can cover a neighbour.** Each tag sits outside its own box, above the
+top edge by preference, so it never hides the element it points at. In a dense
+form no badge position covers nothing at all, so a badge can sit over a
+neighbouring element's pixels. A box that fills the whole capture has no
+on-image position outside itself, and its badge falls back to an inner corner
+of its own box.
+
+**At most 100 elements are described.** The cap spans all groups and counts both
+drawn boxes and omitted elements. Matches past it are neither drawn nor listed,
+and `truncated` reports how many there were. A non-zero `truncated` means the
+legend is a prefix of what matched, so narrow the selector.
+
+```
+truncated: 37 more elements matched but were not described (cap: 100)
+```
+
+**Selectors resolve before the capture.** The tree read and the pixel read are
+not simultaneous, so an element that moves between them is boxed where it was.
+This is the race `screenshot_element` already has.
+
+**Boxes can sit a pixel off at fractional scale.** Position and size round
+independently when converting logical bounds to physical pixels, so at 1.5x a
+box edge can be one pixel away from the true edge.
+
+## Errors
+
+Annotating adds the failures that come with reading an accessibility tree, on
+top of the capture failures listed in
+[Screenshots](/guides/screenshots/#error-handling). The application has to be
+found, the platform has to answer a tree read, and every group's selector has to
+parse as a single clause. See [Errors](/reference/errors/) for the mapping to
+each language.

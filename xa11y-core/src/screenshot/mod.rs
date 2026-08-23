@@ -22,11 +22,35 @@
 //! are at those coordinates — the target window is **not** raised or
 //! activated. If you need the element in the foreground, do that explicitly
 //! before calling `xa11y::screenshot_element`.
+//!
+//! # Annotation
+//!
+//! [`annotate`] draws boxes and tags onto a capture: [`Screenshot::annotate`]
+//! takes [`Annotation`]s in logical screen coordinates, plus the logical
+//! coordinate the capture's own pixel `(0, 0)` sits at, and returns a new
+//! capture with them drawn in. That second argument is why
+//! [`ScreenshotProvider::capture_full`] returns a pair: what a full capture
+//! covers differs per platform, and so does where it starts. That module is
+//! pure pixels — it knows nothing about selectors, providers, or platforms.
+//!
+//! [`legend`] carries the other half of the result: [`Annotated`],
+//! [`LegendEntry`], [`Omission`] and [`OmissionReason`] describe *what* was
+//! drawn and what could not be. They are built by
+//! `xa11y::screenshot_annotated`, which is where selectors are resolved, and
+//! live here so the language bindings that surface them are covered by
+//! `cargo xtask check-bindings-parity`.
 
 use std::path::Path;
 
 use crate::element::Rect;
 use crate::error::{Error, Result};
+use crate::input::Point;
+
+pub mod annotate;
+pub mod legend;
+
+pub use annotate::{tag_for, Annotation, ANNOTATION_PALETTE};
+pub use legend::{Annotated, LegendEntry, Omission, OmissionReason};
 
 /// Platform backend trait for screen capture.
 ///
@@ -42,11 +66,32 @@ use crate::error::{Error, Result};
 ///   (e.g. Linux with neither X11 DISPLAY nor a working Wayland portal).
 /// - [`Error::Platform`] for raw OS / FFI failures.
 pub trait ScreenshotProvider: Send + Sync {
-    /// Capture the primary display in full.
-    fn capture_full(&self) -> Result<Screenshot>;
+    /// Capture everything this backend treats as "the screen", and report
+    /// **where** those pixels are.
+    ///
+    /// The returned [`Point`] is the logical screen coordinate that the
+    /// capture's pixel `(0, 0)` sits at. It is not always the origin:
+    ///
+    /// - Windows captures the whole **virtual desktop**, whose top-left is
+    ///   `(SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN)` — negative whenever a
+    ///   monitor is arranged left of or above the primary one.
+    /// - macOS captures one `SCDisplay`, whose `frame.origin` is only `(0, 0)`
+    ///   when it is the display at the coordinate-space origin.
+    /// - Linux X11 captures the root window, which is at `(0, 0)`.
+    ///
+    /// Reporting it is the whole reason this method returns a pair. Anything
+    /// that maps a logical rectangle (an `Element::bounds`) onto these pixels
+    /// — [`Screenshot::annotate`] above all — must subtract this origin
+    /// first, and a backend that guessed `(0, 0)` drew every box one
+    /// monitor's width out of place with nothing to report it.
+    fn capture_full(&self) -> Result<(Screenshot, Point)>;
 
     /// Capture a sub-rectangle specified in logical screen coordinates
     /// (the same coordinate space as [`Rect`] in `Element::bounds`).
+    ///
+    /// No origin is returned because `rect` **is** it: an implementation must
+    /// capture the pixels at `rect`, so the capture's pixel `(0, 0)` is at
+    /// `(rect.x, rect.y)` by contract.
     fn capture_region(&self, rect: Rect) -> Result<Screenshot>;
 }
 

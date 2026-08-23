@@ -34,6 +34,15 @@ impl Locator {
     pub(crate) fn from_inner(inner: xa11y::Locator) -> Self {
         Self { inner }
     }
+
+    /// The core locator this wraps.
+    ///
+    /// Outside the `#[napi]` impl on purpose: a `pub fn` inside it would be
+    /// exported to JS, and this is plumbing for the annotated-capture entry
+    /// point, which needs the locators an `annotate` array carries.
+    pub(crate) fn core(&self) -> xa11y::Locator {
+        self.inner.clone()
+    }
 }
 
 #[napi]

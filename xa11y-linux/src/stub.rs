@@ -66,7 +66,7 @@ impl LinuxScreenshot {
 }
 
 impl ScreenshotProvider for LinuxScreenshot {
-    fn capture_full(&self) -> Result<Screenshot> {
+    fn capture_full(&self) -> Result<(Screenshot, Point)> {
         unreachable!()
     }
     fn capture_region(&self, _: Rect) -> Result<Screenshot> {

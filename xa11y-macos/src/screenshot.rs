@@ -3,7 +3,7 @@
 //! Returns physical (device) pixels as RGBA8. Requires the Screen Recording
 //! TCC permission — checked at construction time, same as `MacOSProvider`.
 
-use xa11y_core::{Error, Rect, Result, Screenshot, ScreenshotProvider};
+use xa11y_core::{Error, Point, Rect, Result, Screenshot, ScreenshotProvider};
 
 use crate::ax::MacOSProvider;
 
@@ -18,6 +18,8 @@ extern "C" {
         out_width: *mut u32,
         out_height: *mut u32,
         out_scale: *mut f64,
+        out_origin_x: *mut f64,
+        out_origin_y: *mut f64,
     ) -> i32;
     fn safe_cg_free_pixels(pixels: *mut u8);
 }
@@ -36,7 +38,15 @@ impl MacOSScreenshot {
         Ok(Self)
     }
 
-    fn capture(&self, rect: Option<Rect>) -> Result<Screenshot> {
+    /// Capture, and report the **logical** screen coordinate of the returned
+    /// image's pixel `(0, 0)`.
+    ///
+    /// For a region that is the requested rect's origin. For a full capture it
+    /// is the captured display's `frame.origin`, which is `(0, 0)` only when
+    /// `SCShareableContent.displays[0]` happens to be the display at the
+    /// coordinate-space origin — on a multi-display Mac it often is not, and
+    /// assuming `(0, 0)` misplaces everything a caller maps onto these pixels.
+    fn capture(&self, rect: Option<Rect>) -> Result<(Screenshot, Point)> {
         let (use_rect, rx, ry, rw, rh) = match rect {
             Some(r) => (
                 1_i32,
@@ -52,6 +62,8 @@ impl MacOSScreenshot {
         let mut width: u32 = 0;
         let mut height: u32 = 0;
         let mut scale: f64 = 1.0;
+        let mut origin_x: f64 = 0.0;
+        let mut origin_y: f64 = 0.0;
 
         let rc = unsafe {
             safe_cg_capture_rgba(
@@ -64,6 +76,8 @@ impl MacOSScreenshot {
                 &mut width,
                 &mut height,
                 &mut scale,
+                &mut origin_x,
+                &mut origin_y,
             )
         };
 
@@ -124,16 +138,26 @@ impl MacOSScreenshot {
         let pixels_vec = unsafe { std::slice::from_raw_parts(pixels, size) }.to_vec();
         unsafe { safe_cg_free_pixels(pixels) };
 
-        Ok(Screenshot::new(width, height, pixels_vec, scale as f32))
+        // The shim reports the origin in logical points; `Point` is integral,
+        // matching `Rect` (and therefore `Element::bounds`), so round rather
+        // than truncate — a display at y = -899.5 must not become -899.
+        let origin = Point::new(origin_x.round() as i32, origin_y.round() as i32);
+
+        Ok((
+            Screenshot::new(width, height, pixels_vec, scale as f32),
+            origin,
+        ))
     }
 }
 
 impl ScreenshotProvider for MacOSScreenshot {
-    fn capture_full(&self) -> Result<Screenshot> {
+    fn capture_full(&self) -> Result<(Screenshot, Point)> {
         self.capture(None)
     }
 
     fn capture_region(&self, rect: Rect) -> Result<Screenshot> {
-        self.capture(Some(rect))
+        // The origin is `rect`'s own by contract, so there is nothing here the
+        // caller does not already have.
+        self.capture(Some(rect)).map(|(shot, _)| shot)
     }
 }

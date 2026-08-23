@@ -615,6 +615,205 @@ def test_a_partial_screenshot_region_is_rejected(mcp):
     assert "height" in result["structuredContent"]["message"]
 
 
+# ── Screenshot annotation ────────────────────────────────────────────────────
+#
+# `annotate` opts the capture into the accessibility tree: each selector is one
+# group of boxes, and the legend maps every box back to a selector that acts on
+# it. Without it the result is what it was before the feature existed, which is
+# the first thing asserted below.
+#
+# Argument validation happens before any capture and before any tree read, so
+# the refusal tests need neither a display nor capture permission.
+
+# `xa11y::MAX_ANNOTATIONS`. Not a copy of the constant but the assertion
+# against it: the tool description quotes the same number, and a cap the
+# description misstates is worse than no cap.
+ANNOTATION_CAP = 100
+
+# Failures that mean this session cannot capture pixels at all, rather than
+# anything about the tool: no compositor or X11 display on Linux, no Screen
+# Recording grant on macOS.
+CAPTURE_UNAVAILABLE = {"unsupported", "permission_denied", "platform"}
+
+
+def _screenshot(mcp, arguments: dict) -> dict:
+    """A capture, skipped rather than failed when the session cannot take one."""
+    result = mcp.call_tool("screenshot", arguments)["result"]
+    if result["isError"]:
+        structured = result["structuredContent"]
+        if structured["kind"] in CAPTURE_UNAVAILABLE:
+            pytest.skip(f"screen capture unavailable here: {structured['message']}")
+        pytest.fail(f"screenshot {arguments} failed: {structured}")
+    return result
+
+
+def _screenshot_tool(mcp) -> dict:
+    tools = {t["name"]: t for t in mcp.request(1, "tools/list")["result"]["tools"]}
+    return tools["screenshot"]
+
+
+def test_the_screenshot_tool_takes_annotation_selectors_and_a_target(mcp):
+    schema = _screenshot_tool(mcp)["inputSchema"]
+    properties = schema["properties"]
+    assert properties["annotate"]["type"] == "array"
+    assert properties["annotate"]["items"]["type"] == "string"
+    # The shared target properties rather than a second set of definitions.
+    # The `shell` enum is the tell: one place derives it from
+    # `ShellSurfaceKind::ALL`.
+    assert set(properties["shell"]["enum"]) == SHELL_KINDS
+    assert {"app", "pid"} <= properties.keys()
+    # Region arguments are untouched, and a plain capture still takes no
+    # arguments at all.
+    assert {"x", "y", "width", "height"} <= properties.keys()
+    assert schema["required"] == []
+
+
+def test_the_screenshot_tool_states_the_annotation_contract(mcp):
+    """Every claim here is one a model would otherwise pay calls to discover."""
+    description = _screenshot_tool(mcp)["description"]
+    assert "no accessibility tree gets no annotations" in description
+    assert "`B7` is the seventh match" in description, "spell the tag format out"
+    assert ":nth(n)" in description, "and say what the number is for"
+    assert "legend[i].selector" in description, "the round trip is the point"
+    assert f"At most {ANNOTATION_CAP} elements" in description
+    assert "`truncated` counts" in description
+    # And that a target does nothing on its own, which the handler enforces in
+    # `test_a_target_without_annotate_is_refused_rather_than_captured_full_screen`.
+    assert "A target passed without `annotate` is refused" in description
+
+
+def test_annotating_without_a_target_names_the_arguments_that_fix_it(mcp):
+    """Selectors need a tree to resolve against, and the fix is not guessable."""
+    result = mcp.call_tool("screenshot", {"annotate": ["button"]})["result"]
+    assert result["isError"] is True
+    structured = result["structuredContent"]
+    assert structured["kind"] == "invalid_arguments"
+    message = structured["message"]
+    assert "annotate" in message, message
+    for key in ('"app"', '"pid"', '"shell"'):
+        assert key in message, f"{key} must be offered: {message}"
+    assert "--" not in message, f"no flags exist on this surface: {message}"
+
+
+def test_a_partial_screenshot_region_is_still_rejected_when_annotating(mcp):
+    """Arguments are read before the target, so the answer is the fixable one."""
+    result = mcp.call_tool(
+        "screenshot",
+        {"x": 0, "y": 0, "width": 10, "annotate": ["button"], "pid": 1},
+    )["result"]
+    assert result["isError"] is True
+    assert "height" in result["structuredContent"]["message"]
+
+
+def test_annotate_entries_must_be_selector_strings(mcp):
+    """The SDK sends whatever it is handed, so the handler is the only check."""
+    for arguments, expected in (
+        ({"annotate": [""], "pid": 1}, "must not be empty"),
+        ({"annotate": [7], "pid": 1}, "selector strings"),
+        ({"annotate": "button", "pid": 1}, "must be an array"),
+    ):
+        result = mcp.call_tool("screenshot", arguments)["result"]
+        assert result["isError"] is True, arguments
+        structured = result["structuredContent"]
+        assert structured["kind"] == "invalid_arguments", arguments
+        assert expected in structured["message"], structured["message"]
+
+
+def test_a_target_without_annotate_is_refused_rather_than_captured_full_screen(mcp):
+    """A target is read only to resolve `annotate` selectors.
+
+    Each of these used to return a full-screen capture and report success, so
+    the model that asked to target an application had no way to tell that its
+    argument did nothing. The last pair also contradicted the `shell`
+    property's own promise that passing it with `app` is refused.
+    """
+    for arguments, named in (
+        ({"pid": 1}, ('"pid"',)),
+        ({"app": "Calculator"}, ('"app"',)),
+        ({"shell": "taskbar"}, ('"shell"',)),
+        ({"app": "Calculator", "shell": "taskbar"}, ('"app"', '"shell"')),
+        ({"pid": 1, "x": 0, "y": 0, "width": 40, "height": 30}, ('"pid"',)),
+        # An empty `annotate` is the plain-capture path too.
+        ({"annotate": [], "pid": 1}, ('"pid"',)),
+    ):
+        result = mcp.call_tool("screenshot", arguments)["result"]
+        assert result["isError"] is True, arguments
+        structured = result["structuredContent"]
+        assert structured["kind"] == "invalid_arguments", arguments
+        message = structured["message"]
+        for key in named:
+            assert key in message, f"{arguments}: {key} unnamed in {message}"
+        assert "annotate" in message, message
+        assert "plain capture" in message, message
+
+
+def test_a_plain_capture_reports_only_the_image(mcp):
+    """Without `annotate`, nothing about the result changed."""
+    result = _screenshot(mcp, {"x": 0, "y": 0, "width": 40, "height": 30})
+    assert set(result["structuredContent"]) == {"width", "height", "scale", "bytes"}
+    assert [c["type"] for c in result["content"]] == ["image", "text"]
+
+
+def test_an_annotated_capture_carries_a_legend_that_acts_on_the_boxes(mcp, app_pid):
+    """The round trip the feature exists for: read a tag, act on that element."""
+    result = _screenshot(mcp, {"pid": app_pid, "annotate": ["button"]})
+    assert [c["type"] for c in result["content"]] == ["image", "text"], (
+        "the image is still what a screenshot returns"
+    )
+    structured = result["structuredContent"]
+    assert structured["truncated"] == 0, "one app's buttons are under the cap"
+    legend = structured["legend"]
+    if not legend:
+        pytest.skip(f"no button here could be boxed (omitted: {structured['omitted']})")
+
+    indices = [e["index"] for e in legend]
+    assert len(set(indices)) == len(indices), "an index names one match"
+    for entry in legend:
+        assert entry["group"] == 1, entry
+        assert entry["tag"] == f"A{entry['index']}", entry
+        assert entry["role"] == "button", entry
+        assert len(entry["color"]) == 3, entry
+        assert entry["bounds"]["width"] > 0 and entry["bounds"]["height"] > 0, entry
+
+    # The legend's selector must be one the other tools accept unchanged,
+    # against the same target.
+    selector = legend[0]["selector"]
+    found = mcp.call_tool("find", {"pid": app_pid, "selector": selector})["result"]
+    assert found["isError"] is False, found["structuredContent"]
+    assert found["structuredContent"]["match_count"] == 1, selector
+
+
+def test_a_second_selector_is_a_second_group_lettered_b(mcp, app_pid):
+    """And two groups matching one element get two boxes, not one.
+
+    Deduplicating them would drop a group's membership, which is exactly what
+    the caller asked for by passing the selector twice.
+    """
+    structured = _screenshot(mcp, {"pid": app_pid, "annotate": ["button", "button"]})[
+        "structuredContent"
+    ]
+    legend = structured["legend"]
+    if not legend:
+        pytest.skip("no button here could be boxed")
+    by_group = {1: [], 2: []}
+    for entry in legend:
+        assert entry["group"] in by_group, entry
+        by_group[entry["group"]].append(entry)
+    assert by_group[1] and by_group[2], "the same selector twice is two groups"
+    assert len(by_group[1]) == len(by_group[2])
+    assert all(e["tag"].startswith("A") for e in by_group[1])
+    assert all(e["tag"].startswith("B") for e in by_group[2])
+
+
+def test_the_legend_is_capped_and_says_when_the_cap_bit(mcp, app_pid):
+    """Bounded results: `*` over a real tree must not dump the whole app."""
+    structured = _screenshot(mcp, {"pid": app_pid, "annotate": ["*"]})["structuredContent"]
+    described = len(structured["legend"]) + len(structured["omitted"])
+    assert described <= ANNOTATION_CAP, "the legend is a bounded result"
+    if structured["truncated"] > 0:
+        assert described == ANNOTATION_CAP, "the cap is what stopped it, so say so"
+
+
 def test_action_presses_a_button(mcp, app_pid):
     """By name, because an ordinal does not say which control it lands on.
 

@@ -216,9 +216,19 @@ Input simulation (coords only — no selectors, no a11y):
   xa11y key    KEY [--held K,K]
   xa11y type   TEXT
 
-Screenshot (regions only — no selectors, no a11y):
+Screenshot (pixels; --annotate adds selectors and a11y):
   xa11y screenshot [--region X,Y,W,H] --out PATH
-                                            --out - writes PNG bytes to stdout
+                   [--app NAME | --pid PID | --shell KIND]
+                   [--annotate SELECTOR]... [--legend text|json|none]
+                                            --out - writes PNG bytes to stdout.
+                                            With no --annotate: a plain capture,
+                                            no target, no a11y.
+  Each --annotate is one group: it boxes every element its selector matches in
+  TARGET, in that group's colour, and the legend on stdout maps each box's tag
+  to a selector that acts on it (A7 -> button:nth(7)). Repeat for more groups.
+  Boxes come from the accessibility tree, so --annotate needs a target and gains
+  its failures (app not found, no match); an app with no tree gets no boxes.
+  --out - and a legend both want stdout: pick --out FILE, or --legend none.
 
 Model Context Protocol:
   xa11y mcp                                 Serve the above as MCP tools over
@@ -266,6 +276,12 @@ pub(crate) struct Opts {
     pub duration_ms: Option<u64>,
     pub region: Option<String>,
     pub out: Option<String>,
+    /// One selector per `--annotate` occurrence, in the order given. Each is
+    /// one annotation *group*: it gets its own colour and tag letter, so the
+    /// flag collects repeats rather than the last one winning.
+    pub annotate: Vec<String>,
+    /// Raw `--legend` value, parsed by [`parse_legend_format`].
+    pub legend: Option<String>,
     // Output format for `find`
     pub output_format: Option<String>,
 }
@@ -377,6 +393,17 @@ pub(crate) fn parse_opts(args: &[String]) -> CliResult<(Opts, Vec<String>)> {
             "--out" => {
                 i += 1;
                 opts.out = Some(flag_value(args, i, "--out")?.to_string());
+            }
+            // The one repeatable flag: each occurrence is a distinct
+            // annotation group, so a later one must not overwrite an earlier.
+            "--annotate" => {
+                i += 1;
+                opts.annotate
+                    .push(flag_value(args, i, "--annotate")?.to_string());
+            }
+            "--legend" => {
+                i += 1;
+                opts.legend = Some(flag_value(args, i, "--legend")?.to_string());
             }
             "-o" => {
                 i += 1;
@@ -1416,20 +1443,106 @@ fn cmd_type(args: &[String]) -> CliResult<()> {
 
 // ── Screenshot ──────────────────────────────────────────────────────────────
 
+/// How `--legend` renders the annotation legend.
+///
+/// The legend is deliberately *out of band* — stdout text or JSON, never
+/// composited into the image. Rendered text costs image area, changes the
+/// output dimensions, and is strictly worse for a model than the same data as
+/// JSON.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LegendFormat {
+    /// Aligned columns for a human reading a terminal. The default.
+    Text,
+    /// One JSON object carrying the same information, for a script.
+    Json,
+    /// Print nothing. The boxes are still drawn.
+    None,
+}
+
+/// Parse a `--legend` value. Runs before any capture, so a misspelling is a
+/// usage error rather than something discovered after the pixels are written.
+pub(crate) fn parse_legend_format(raw: &str) -> CliResult<LegendFormat> {
+    match raw {
+        "text" => Ok(LegendFormat::Text),
+        "json" => Ok(LegendFormat::Json),
+        "none" => Ok(LegendFormat::None),
+        other => Err(CliError::Usage(format!(
+            "unknown --legend value: {other} (expected text|json|none)"
+        ))),
+    }
+}
+
+/// Longest inline omission list in the text legend. Bounded per tenet 6 and
+/// the MCP "results are bounded" rule: the full list is always available in
+/// `--legend json`.
+const MAX_LEGEND_OMISSION_DETAILS: usize = 5;
+
 fn cmd_screenshot(args: &[String]) -> CliResult<()> {
     let (opts, _pos) = parse_opts(args)?;
     let out = opts
         .out
         .as_deref()
         .ok_or_else(|| missing("--out PATH (use - for stdout)"))?;
+    let region = opts.region.as_deref().map(parse_region_arg).transpose()?;
 
-    let shot = if let Some(region_str) = opts.region.as_deref() {
-        let rect = parse_region_arg(region_str)?;
-        crate::screenshot_region(rect)?
-    } else {
-        crate::screenshot()?
+    // Without --annotate this command is exactly what it was before the
+    // feature existed: no target, no tree read, no legend.
+    if opts.annotate.is_empty() {
+        if let Some(raw) = opts.legend.as_deref() {
+            return Err(CliError::Usage(format!(
+                "--legend {raw} has nothing to describe: add --annotate SELECTOR, or drop \
+                 --legend"
+            )));
+        }
+        let shot = match region {
+            Some(rect) => crate::screenshot_region(rect)?,
+            None => crate::screenshot()?,
+        };
+        return write_screenshot(&shot, out);
+    }
+
+    // Every argument is validated before the first OS call, so a bad
+    // invocation cannot leave a capture or a half-written file behind.
+    let legend_format = match opts.legend.as_deref() {
+        Some(raw) => parse_legend_format(raw)?,
+        None => LegendFormat::Text,
     };
+    if out == "-" && legend_format != LegendFormat::None {
+        // PNG bytes and legend text cannot share one stream. Quietly moving
+        // the legend to stderr would leave a caller piping a PNG somewhere and
+        // never learning that what they asked for went elsewhere (tenet 1).
+        return Err(CliError::Usage(
+            "--out - writes PNG bytes to stdout, and the legend would corrupt them: write \
+             the image to a file with --out FILE, or drop the legend with --legend none"
+                .into(),
+        ));
+    }
+    if opts.app.is_none() && opts.pid.is_none() && opts.shell.is_none() {
+        return Err(CliError::Usage(
+            "--annotate resolves selectors against a target, and this command has none: add \
+             --app NAME, --pid PID, or --shell KIND"
+                .into(),
+        ));
+    }
 
+    let target = resolve_target(&opts)?;
+    let groups: Vec<Locator> = opts.annotate.iter().map(|s| target.locator(s)).collect();
+    let annotated = crate::screenshot_annotated(region, &groups)?;
+
+    write_screenshot(&annotated.screenshot, out)?;
+    match legend_format {
+        LegendFormat::None => {}
+        LegendFormat::Text => print!("{}", render_legend_text(&opts.annotate, &annotated)),
+        LegendFormat::Json => println!("{}", render_legend_json(&opts.annotate, &annotated)?),
+    }
+    Ok(())
+}
+
+/// Write `shot` to `out` — a file, or stdout for `-`.
+///
+/// Split out of [`cmd_screenshot`] so the annotated and unannotated paths
+/// cannot drift in how they emit the image or report it.
+fn write_screenshot(shot: &Screenshot, out: &str) -> CliResult<()> {
     if out == "-" {
         use std::io::Write;
         let bytes = shot.to_png()?;
@@ -1447,6 +1560,218 @@ fn cmd_screenshot(args: &[String]) -> CliResult<()> {
         );
     }
     Ok(())
+}
+
+/// The tag letter for a 1-based group — `A`, `B`, … `AA`.
+///
+/// Derived from `tag_for` rather than reimplemented, so the letter in the
+/// header and the letter drawn in the image cannot disagree: `tag_for(g, 1)`
+/// is the group's letters followed by `1`, and the letters are `A-Z` only.
+fn group_letter(group: usize) -> String {
+    screenshot::tag_for(group, 1)
+        .trim_end_matches(|c: char| c.is_ascii_digit())
+        .to_string()
+}
+
+fn hex_color(rgb: [u8; 3]) -> String {
+    format!("#{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2])
+}
+
+/// A name for a legend column: quoted and escaped, or `-` when the element has
+/// none. `-` rather than `""`, so a nameless element is distinguishable from
+/// one whose name is the empty string.
+fn legend_name(name: Option<&str>) -> String {
+    match name {
+        Some(n) => format!("{n:?}"),
+        None => "-".to_string(),
+    }
+}
+
+fn legend_bounds(b: &Rect) -> String {
+    format!("bounds={},{},{},{}", b.x, b.y, b.width, b.height)
+}
+
+/// The first group whose `annotated` count may be short because the
+/// annotation cap bit, or `None` when nothing was truncated.
+///
+/// A group starved by the cap draws nothing, and a bare `0 annotated` reads as
+/// "this selector matched nothing" — the opposite meaning. `truncated` is a
+/// single total with no group attribution ([`crate::Annotated`] carries none),
+/// so the honest answer is a boundary rather than a per-group count:
+/// `screenshot_annotated` resolves groups in flag order and stops resolving
+/// at the cap, so nothing after the last group present in the legend was
+/// resolved to completion. Every group from there on is reported as possibly
+/// short; the ones before it are exact.
+///
+/// Pure, so both renderings share one rule and cannot disagree about which
+/// groups are suspect.
+fn first_capped_group(annotated: &crate::Annotated) -> Option<usize> {
+    if annotated.truncated == 0 {
+        return None;
+    }
+    // No legend at all means the cap could have bitten in any group, so the
+    // boundary is the first one.
+    Some(annotated.legend.iter().map(|e| e.group).max().unwrap_or(1))
+}
+
+/// Render the human-readable legend: a group header block, one line per drawn
+/// box, then what could not be drawn.
+///
+/// Pure and string-returning so the layout is testable without a display.
+/// `selectors` is the `--annotate` list in flag order, which is what makes a
+/// group with zero drawn boxes still appear in the header — the alternative
+/// reads as if the flag was ignored.
+fn render_legend_text(selectors: &[String], annotated: &crate::Annotated) -> String {
+    let mut out = String::new();
+
+    let letters: Vec<String> = (1..=selectors.len()).map(group_letter).collect();
+    let letter_w = letters.iter().map(String::len).max().unwrap_or(1);
+    let selector_w = selectors.iter().map(String::len).max().unwrap_or(0);
+    let first_capped = first_capped_group(annotated);
+
+    for (g, selector) in selectors.iter().enumerate() {
+        let group = g + 1;
+        let color = screenshot::ANNOTATION_PALETTE[g % screenshot::ANNOTATION_PALETTE.len()];
+        let drawn = annotated.legend.iter().filter(|e| e.group == group).count();
+        let note = match (first_capped.is_some_and(|first| group >= first), drawn) {
+            (false, _) => "",
+            // The case this exists for: without the note, a group the cap
+            // starved is byte-identical to one whose selector matched
+            // nothing.
+            (true, 0) => "  (cap reached at or before this group, so 0 is not \"matched nothing\")",
+            (true, _) => "  (cap reached, so more may have matched)",
+        };
+        out.push_str(&format!(
+            "{:<letter_w$}  {:<selector_w$}  {}  {} annotated{}\n",
+            letters[g],
+            selector,
+            hex_color(color),
+            drawn,
+            note
+        ));
+    }
+
+    if !annotated.legend.is_empty() {
+        let names: Vec<String> = annotated
+            .legend
+            .iter()
+            .map(|e| legend_name(e.name.as_deref()))
+            .collect();
+        let bounds: Vec<String> = annotated
+            .legend
+            .iter()
+            .map(|e| legend_bounds(&e.bounds))
+            .collect();
+        let tag_w = annotated
+            .legend
+            .iter()
+            .map(|e| e.tag.len())
+            .max()
+            .unwrap_or(0);
+        let role_w = annotated
+            .legend
+            .iter()
+            .map(|e| e.role.len())
+            .max()
+            .unwrap_or(0);
+        let name_w = names.iter().map(String::len).max().unwrap_or(0);
+        let bounds_w = bounds.iter().map(String::len).max().unwrap_or(0);
+
+        out.push('\n');
+        for (i, entry) in annotated.legend.iter().enumerate() {
+            out.push_str(&format!(
+                "{:<tag_w$}  {:<role_w$}  {:<name_w$}  {:<bounds_w$}  {}\n",
+                entry.tag, entry.role, names[i], bounds[i], entry.selector
+            ));
+        }
+    }
+
+    if !annotated.omitted.is_empty() {
+        let shown = annotated.omitted.len().min(MAX_LEGEND_OMISSION_DETAILS);
+        let mut details: Vec<String> = annotated.omitted[..shown]
+            .iter()
+            .map(|o| {
+                format!(
+                    "{}: {} {}",
+                    o.reason.as_str(),
+                    o.role,
+                    legend_name(o.name.as_deref())
+                )
+            })
+            .collect();
+        if annotated.omitted.len() > shown {
+            details.push(format!("… +{} more", annotated.omitted.len() - shown));
+        }
+        out.push('\n');
+        out.push_str(&format!(
+            "omitted: {} element{} ({})\n",
+            annotated.omitted.len(),
+            if annotated.omitted.len() == 1 {
+                ""
+            } else {
+                "s"
+            },
+            details.join(", ")
+        ));
+    }
+
+    if annotated.truncated > 0 {
+        out.push_str(&format!(
+            "truncated: {} more element{} matched but {} not described (cap: {})\n",
+            annotated.truncated,
+            if annotated.truncated == 1 { "" } else { "s" },
+            if annotated.truncated == 1 {
+                "was"
+            } else {
+                "were"
+            },
+            crate::MAX_ANNOTATIONS
+        ));
+    }
+
+    out
+}
+
+/// Render the same information as one JSON object.
+///
+/// `groups` repeats what the header block says (letter, colour, count, and
+/// the `capped` flag from [`first_capped_group`]) so a consumer never has to
+/// redo the palette arithmetic, and `truncated` is always present — a caller
+/// must be able to tell a complete legend from a prefix of one without
+/// checking a length against a cap it has to know.
+fn render_legend_json(selectors: &[String], annotated: &crate::Annotated) -> CliResult<String> {
+    let first_capped = first_capped_group(annotated);
+    let groups: Vec<serde_json::Value> = selectors
+        .iter()
+        .enumerate()
+        .map(|(g, selector)| {
+            let group = g + 1;
+            let color = screenshot::ANNOTATION_PALETTE[g % screenshot::ANNOTATION_PALETTE.len()];
+            serde_json::json!({
+                "group": group,
+                "letter": group_letter(group),
+                "selector": selector,
+                "color": color,
+                "color_hex": hex_color(color),
+                "annotated": annotated.legend.iter().filter(|e| e.group == group).count(),
+                "capped": first_capped.is_some_and(|first| group >= first),
+            })
+        })
+        .collect();
+
+    let doc = serde_json::json!({
+        "groups": groups,
+        "legend": annotated.legend,
+        "omitted": annotated.omitted,
+        "truncated": annotated.truncated,
+        "cap": crate::MAX_ANNOTATIONS,
+    });
+    serde_json::to_string_pretty(&doc).map_err(|e| {
+        CliError::Xa11y(Error::Platform {
+            code: -1,
+            message: format!("render legend as JSON: {e}"),
+        })
+    })
 }
 
 #[cfg(test)]
@@ -2469,5 +2794,462 @@ mod tests {
         assert_eq!(d.held.len(), 1);
         assert!(matches!(d.held[0], Key::Ctrl));
         assert_eq!(d.duration, Duration::from_millis(500));
+    }
+
+    // ── Screenshot annotation: flags and legend rendering ───────────────────
+
+    #[test]
+    fn parse_opts_annotate_is_repeatable() {
+        // Each occurrence is a distinct group, so the last must not win.
+        let args = strs(&["--annotate", "button", "--annotate", "text_field"]);
+        let (opts, pos) = parse_opts(&args).expect("flags must parse");
+        assert_eq!(opts.annotate, vec![s("button"), s("text_field")]);
+        assert!(pos.is_empty());
+    }
+
+    #[test]
+    fn parse_opts_annotate_preserves_flag_order() {
+        let args = strs(&["--annotate", "c", "--out", "x.png", "--annotate", "a"]);
+        let (opts, _) = parse_opts(&args).expect("flags must parse");
+        assert_eq!(
+            opts.annotate,
+            vec![s("c"), s("a")],
+            "group order is flag order, and it decides colour and tag letter"
+        );
+    }
+
+    #[test]
+    fn parse_opts_annotate_absent_is_empty_not_none() {
+        let args = strs(&["--out", "x.png"]);
+        let (opts, _) = parse_opts(&args).expect("flags must parse");
+        assert!(opts.annotate.is_empty());
+        assert!(opts.legend.is_none());
+    }
+
+    #[test]
+    fn parse_opts_trailing_annotate_flag_errors() {
+        let args = strs(&["--out", "x.png", "--annotate"]);
+        let err = parse_opts(&args).expect_err("a trailing --annotate has no selector");
+        assert!(matches!(err, CliError::Usage(_)), "{err:?}");
+    }
+
+    #[test]
+    fn parse_opts_legend_flag() {
+        let args = strs(&["--legend", "json"]);
+        let (opts, _) = parse_opts(&args).expect("flags must parse");
+        assert_eq!(opts.legend.as_deref(), Some("json"));
+    }
+
+    #[test]
+    fn parse_legend_format_accepts_exactly_the_three_advertised_values() {
+        assert_eq!(parse_legend_format("text").unwrap(), LegendFormat::Text);
+        assert_eq!(parse_legend_format("json").unwrap(), LegendFormat::Json);
+        assert_eq!(parse_legend_format("none").unwrap(), LegendFormat::None);
+
+        let err = parse_legend_format("yaml").expect_err("unknown formats are usage errors");
+        match err {
+            CliError::Usage(msg) => {
+                assert!(msg.contains("text|json|none"), "{msg}");
+            }
+            other => panic!("expected Usage, got {other:?}"),
+        }
+    }
+
+    /// `--out -` puts PNG bytes on stdout and the legend wants the same
+    /// stream. The command refuses and names both fixes rather than quietly
+    /// moving the legend to stderr (tenet 1).
+    #[test]
+    fn annotating_to_stdout_with_a_legend_is_a_usage_error_naming_both_fixes() {
+        let args = strs(&["--out", "-", "--app", "TestApp", "--annotate", "button"]);
+        let err = cmd_screenshot(&args).expect_err("PNG and legend cannot share stdout");
+        assert_eq!(err.exit_code(), 2);
+        let msg = err.to_string();
+        assert!(msg.contains("--out FILE"), "{msg}");
+        assert!(msg.contains("--legend none"), "{msg}");
+    }
+
+    #[test]
+    fn annotating_to_stdout_with_legend_none_passes_argument_validation() {
+        // It still fails — there is no target resolution to be had in a unit
+        // test — but the failure must no longer be the stdout collision.
+        let args = strs(&[
+            "--out",
+            "-",
+            "--app",
+            "no-such-app-4f2a",
+            "--annotate",
+            "button",
+            "--legend",
+            "none",
+        ]);
+        let err = cmd_screenshot(&args).expect_err("no such app");
+        let msg = err.to_string();
+        assert!(!msg.contains("--legend none"), "{msg}");
+    }
+
+    #[test]
+    fn annotating_without_a_target_is_a_usage_error_naming_the_flags() {
+        let args = strs(&["--out", "x.png", "--annotate", "button"]);
+        let err = cmd_screenshot(&args).expect_err("--annotate needs something to search");
+        assert_eq!(err.exit_code(), 2);
+        let msg = err.to_string();
+        assert!(msg.contains("--app NAME"), "{msg}");
+        assert!(msg.contains("--pid PID"), "{msg}");
+        assert!(msg.contains("--shell KIND"), "{msg}");
+    }
+
+    #[test]
+    fn a_legend_with_nothing_to_describe_is_a_usage_error() {
+        let args = strs(&["--out", "x.png", "--legend", "json"]);
+        let err = cmd_screenshot(&args).expect_err("--legend alone describes nothing");
+        assert_eq!(err.exit_code(), 2);
+        assert!(err.to_string().contains("--annotate SELECTOR"), "{err}");
+    }
+
+    #[test]
+    fn a_bad_legend_value_is_rejected_before_the_target_is_touched() {
+        let args = strs(&[
+            "--out",
+            "x.png",
+            "--app",
+            "no-such-app-4f2a",
+            "--annotate",
+            "button",
+            "--legend",
+            "yaml",
+        ]);
+        let err = cmd_screenshot(&args).expect_err("yaml is not a legend format");
+        assert_eq!(err.exit_code(), 2, "parse before the first OS call");
+        assert!(err.to_string().contains("text|json|none"), "{err}");
+    }
+
+    #[test]
+    fn a_bad_region_is_still_rejected_when_annotating() {
+        let args = strs(&[
+            "--out",
+            "x.png",
+            "--region",
+            "1,2,3",
+            "--app",
+            "TestApp",
+            "--annotate",
+            "button",
+        ]);
+        let err = cmd_screenshot(&args).expect_err("--region needs four numbers");
+        assert_eq!(err.exit_code(), 2);
+        assert!(err.to_string().contains("X,Y,W,H"), "{err}");
+    }
+
+    #[test]
+    fn missing_out_is_still_the_first_thing_checked() {
+        let err = cmd_screenshot(&strs(&["--annotate", "button"]))
+            .expect_err("--out is required either way");
+        assert_eq!(err.exit_code(), 2);
+        assert!(err.to_string().contains("--out PATH"), "{err}");
+    }
+
+    // ── Legend rendering ────────────────────────────────────────────────────
+
+    fn rect(x: i32, y: i32, width: u32, height: u32) -> Rect {
+        Rect {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    fn entry(tag: &str, group: usize, index: usize, role: &str, name: Option<&str>) -> LegendEntry {
+        // `LegendEntry::new` derives the tag from the group and index, so the
+        // fixture's spelling is an assertion rather than an input: a test that
+        // wrote a tag the numbering could never produce would be testing a
+        // shape the resolver cannot hand this renderer.
+        let entry = LegendEntry::new(
+            group,
+            index,
+            format!("{role}:nth({index})"),
+            role,
+            name.map(str::to_string),
+            rect(104, 318, 48, 44),
+            screenshot::ANNOTATION_PALETTE[(group - 1) % 7],
+        );
+        assert_eq!(entry.tag, tag, "fixture tag disagrees with tag_for");
+        entry
+    }
+
+    /// A synthetic result. `Annotated` lives in `xa11y-core` and is
+    /// `#[non_exhaustive]`, so it is built through its constructor, which
+    /// takes every field — a new one changes that signature and breaks this
+    /// fixture rather than defaulting silently.
+    fn annotated(legend: Vec<LegendEntry>, omitted: Vec<Omission>, truncated: usize) -> Annotated {
+        Annotated::for_capture(
+            Screenshot::new(2, 2, vec![0; 16], 1.0),
+            legend,
+            omitted,
+            truncated,
+        )
+    }
+
+    #[test]
+    fn the_text_legend_leads_with_one_header_per_group() {
+        let out = render_legend_text(
+            &[s("button"), s("text_field")],
+            &annotated(
+                vec![
+                    entry("A1", 1, 1, "button", Some("7")),
+                    entry("A2", 1, 2, "button", Some("8")),
+                    entry("B1", 2, 1, "text_field", Some("Display")),
+                ],
+                vec![],
+                0,
+            ),
+        );
+        let lines: Vec<&str> = out.lines().collect();
+
+        assert_eq!(lines[0], "A  button      #E69F00  2 annotated");
+        assert_eq!(lines[1], "B  text_field  #56B4E9  1 annotated");
+        assert_eq!(lines[2], "", "a blank line separates headers from entries");
+        assert!(lines[3].starts_with("A1  button"), "{}", lines[3]);
+        assert!(lines[3].contains("bounds=104,318,48,44"), "{}", lines[3]);
+        assert!(lines[3].ends_with("button:nth(1)"), "{}", lines[3]);
+        assert!(lines[5].ends_with("text_field:nth(1)"), "{}", lines[5]);
+    }
+
+    #[test]
+    fn the_text_legend_columns_line_up_across_roles_of_different_widths() {
+        let out = render_legend_text(
+            &[s("*")],
+            &annotated(
+                vec![
+                    entry("A1", 1, 1, "button", Some("Go")),
+                    entry("A2", 1, 2, "text_field", Some("A much longer name")),
+                ],
+                vec![],
+                0,
+            ),
+        );
+        let rows: Vec<&str> = out.lines().skip(2).collect();
+        let selector_col: Vec<usize> = rows
+            .iter()
+            .map(|l| l.find("bounds=").expect("every row has bounds"))
+            .collect();
+        assert_eq!(
+            selector_col[0], selector_col[1],
+            "the bounds column must start at the same offset on every row:\n{out}"
+        );
+    }
+
+    #[test]
+    fn a_group_that_matched_nothing_still_gets_a_header() {
+        // Otherwise the flag reads as if it had been ignored.
+        let out = render_legend_text(
+            &[s("button"), s("progress_bar")],
+            &annotated(vec![entry("A1", 1, 1, "button", None)], vec![], 0),
+        );
+        assert!(out.contains("B  progress_bar"), "{out}");
+        assert!(out.contains("0 annotated"), "{out}");
+    }
+
+    #[test]
+    fn a_nameless_element_renders_as_a_dash_not_empty_quotes() {
+        let out = render_legend_text(
+            &[s("button")],
+            &annotated(vec![entry("A1", 1, 1, "button", None)], vec![], 0),
+        );
+        let row = out.lines().nth(2).expect("one entry row");
+        assert!(row.contains(" -  "), "{row}");
+        assert!(!row.contains("\"\""), "{row}");
+    }
+
+    #[test]
+    fn the_text_legend_reports_what_could_not_be_drawn() {
+        let out = render_legend_text(
+            &[s("button")],
+            &annotated(
+                vec![entry("A1", 1, 1, "button", Some("7"))],
+                vec![Omission::new(
+                    "button:nth(2)",
+                    "button",
+                    Some(s("Paste")),
+                    OmissionReason::OutsideCapture,
+                )],
+                0,
+            ),
+        );
+        assert!(
+            out.contains("omitted: 1 element (outside_capture: button \"Paste\")"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn the_omitted_summary_is_bounded_and_says_how_many_it_dropped() {
+        let many: Vec<Omission> = (0..MAX_LEGEND_OMISSION_DETAILS + 4)
+            .map(|i| {
+                Omission::new(
+                    format!("button:nth({i})"),
+                    "button",
+                    None,
+                    OmissionReason::NoBounds,
+                )
+            })
+            .collect();
+        let total = many.len();
+        let out = render_legend_text(&[s("button")], &annotated(vec![], many, 0));
+
+        assert!(out.contains(&format!("omitted: {total} elements")), "{out}");
+        assert!(out.contains("… +4 more"), "{out}");
+    }
+
+    #[test]
+    fn the_text_legend_says_when_the_cap_bit() {
+        let out = render_legend_text(
+            &[s("*")],
+            &annotated(vec![entry("A1", 1, 1, "button", None)], vec![], 37),
+        );
+        assert!(out.contains("truncated: 37 more elements"), "{out}");
+        assert!(
+            out.contains(&format!("cap: {}", crate::MAX_ANNOTATIONS)),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_group_starved_by_the_cap_does_not_read_as_one_that_matched_nothing() {
+        // A and B were resolved, the cap bit, and C never got looked at. Its
+        // header used to print "0 annotated", which is byte-for-byte what
+        // `a_group_that_matched_nothing_still_gets_a_header` asserts for a
+        // selector that genuinely matched nothing.
+        let legend = || {
+            vec![
+                entry("A1", 1, 1, "button", None),
+                entry("B1", 2, 1, "text_field", None),
+            ]
+        };
+        let selectors = [s("button"), s("text_field"), s("link")];
+        let starved = render_legend_text(&selectors, &annotated(legend(), vec![], 12));
+        let lines: Vec<&str> = starved.lines().collect();
+
+        // A finished before the cap could bite, so its count is exact.
+        assert!(!lines[0].contains("cap"), "{starved}");
+        // B is the group the cap could have cut short.
+        assert!(lines[1].contains("cap reached"), "{starved}");
+        // C is the case this test exists for.
+        assert!(lines[2].contains("0 annotated"), "{starved}");
+        assert!(lines[2].contains("cap reached"), "{starved}");
+
+        let nothing = render_legend_text(&selectors, &annotated(legend(), vec![], 0));
+        let c_nothing = nothing.lines().nth(2).expect("a header per selector");
+        assert!(c_nothing.contains("0 annotated"), "{nothing}");
+        assert!(
+            !c_nothing.contains("cap"),
+            "nothing was lost here:\n{nothing}"
+        );
+        assert_ne!(
+            lines[2], c_nothing,
+            "a starved group and one that matched nothing must not render identically"
+        );
+    }
+
+    #[test]
+    fn the_json_groups_flag_the_ones_the_cap_may_have_shortened() {
+        let selectors = [s("button"), s("text_field"), s("link")];
+        let render = |truncated| {
+            let json = render_legend_json(
+                &selectors,
+                &annotated(vec![entry("A1", 1, 1, "button", None)], vec![], truncated),
+            )
+            .expect("the legend must serialize");
+            serde_json::from_str::<serde_json::Value>(&json).expect("valid JSON")
+        };
+
+        // `truncated` is a total that attributes the loss to no group;
+        // `capped` is what tells a consumer that C's `annotated: 0` is not
+        // "matched nothing".
+        let capped = render(12);
+        assert_eq!(capped["groups"][2]["annotated"], 0);
+        assert_eq!(capped["groups"][2]["capped"], true);
+        assert_eq!(capped["groups"][0]["capped"], true, "the cap bit in A");
+
+        let complete = render(0);
+        assert_eq!(complete["groups"][2]["annotated"], 0);
+        assert_eq!(complete["groups"][2]["capped"], false);
+        assert_eq!(complete["groups"][0]["capped"], false);
+    }
+
+    #[test]
+    fn with_no_legend_at_all_every_group_is_flagged_as_possibly_capped() {
+        // 100 omissions and a non-zero `truncated` leave no legend entry to
+        // locate the cap by, so no group can be called exact.
+        let out = render_legend_text(&[s("button"), s("link")], &annotated(vec![], vec![], 5));
+        assert_eq!(out.lines().filter(|l| l.contains("cap reached")).count(), 2);
+    }
+
+    #[test]
+    fn a_legend_with_nothing_in_it_is_headers_only() {
+        let out = render_legend_text(&[s("button")], &annotated(vec![], vec![], 0));
+        assert_eq!(out, "A  button  #E69F00  0 annotated\n");
+    }
+
+    #[test]
+    fn the_json_legend_carries_the_groups_the_entries_and_the_cap() {
+        let json = render_legend_json(
+            &[s("button"), s("text_field")],
+            &annotated(
+                vec![entry("A1", 1, 1, "button", Some("7"))],
+                vec![Omission::new(
+                    "check_box:nth(1)",
+                    "check_box",
+                    Some(s("Agree")),
+                    OmissionReason::NoBounds,
+                )],
+                3,
+            ),
+        )
+        .expect("the legend must serialize");
+        let doc: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+
+        assert_eq!(doc["groups"][0]["letter"], "A");
+        assert_eq!(doc["groups"][0]["selector"], "button");
+        assert_eq!(doc["groups"][0]["color_hex"], "#E69F00");
+        assert_eq!(doc["groups"][0]["annotated"], 1);
+        assert_eq!(doc["groups"][1]["letter"], "B");
+        assert_eq!(doc["groups"][1]["annotated"], 0);
+
+        assert_eq!(doc["legend"][0]["tag"], "A1");
+        assert_eq!(doc["legend"][0]["selector"], "button:nth(1)");
+        assert_eq!(doc["legend"][0]["index"], 1);
+        assert_eq!(doc["legend"][0]["bounds"]["x"], 104);
+        assert_eq!(doc["legend"][0]["color"], serde_json::json!([230, 159, 0]));
+
+        assert_eq!(doc["omitted"][0]["reason"], "no_bounds");
+        assert_eq!(doc["omitted"][0]["selector"], "check_box:nth(1)");
+
+        assert_eq!(doc["truncated"], 3);
+        assert_eq!(doc["cap"], crate::MAX_ANNOTATIONS);
+    }
+
+    #[test]
+    fn group_letters_follow_the_tag_format_past_z() {
+        assert_eq!(group_letter(1), "A");
+        assert_eq!(group_letter(2), "B");
+        assert_eq!(group_letter(26), "Z");
+        assert_eq!(group_letter(27), "AA");
+        // The letter in the header and the letter drawn in the image are the
+        // same function, so they cannot disagree.
+        assert!(screenshot::tag_for(27, 5).starts_with(&group_letter(27)));
+    }
+
+    #[test]
+    fn group_colours_cycle_with_the_palette() {
+        let selectors: Vec<String> = (0..9).map(|i| format!("role{i}")).collect();
+        let out = render_legend_text(&selectors, &annotated(vec![], vec![], 0));
+        let hexes: Vec<&str> = out
+            .lines()
+            .map(|l| l.split_whitespace().nth(2).expect("a colour column"))
+            .collect();
+        assert_eq!(hexes[0], hexes[7], "group 8 reuses group 1's colour");
+        assert_eq!(hexes[1], hexes[8]);
+        assert_eq!(hexes[0], "#E69F00");
     }
 }

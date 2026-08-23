@@ -14,7 +14,7 @@ xa11y can capture pixel-level snapshots of the screen alongside its accessibilit
 
 The entry points are:
 
-- **Full screen** captures the entire primary display.
+- **Full screen** captures whatever the platform treats as the whole screen. On Windows that is the virtual desktop, which spans every monitor. macOS captures one display, and Linux the X11 root window.
 - **Region** captures an explicit rectangle in logical screen coordinates.
 - **Element** captures the pixels under an accessibility element's current bounds.
 
@@ -37,7 +37,7 @@ Screenshots are decoupled from the accessibility and input layers. Capture never
     use xa11y::*;
 
     fn main() -> Result<()> {
-        // Full primary display
+        // Full screen
         let shot = screenshot()?;
         shot.save_png("full.png")?;
 
@@ -59,7 +59,7 @@ Screenshots are decoupled from the accessibility and input layers. Capture never
     ```python
     import xa11y
 
-    # Full primary display
+    # Full screen
     shot = xa11y.screenshot()
     shot.save_png("full.png")
 
@@ -80,7 +80,7 @@ Screenshots are decoupled from the accessibility and input layers. Capture never
     ```js
     import { screenshot, App } from '@crowecawcaw/xa11y';
 
-    // Full primary display
+    // Full screen
     const full = await screenshot();
     await full.savePng('full.png');
 

@@ -24,7 +24,7 @@ use zbus::blocking::Connection as ZbusConnection;
 use zbus::blocking::Proxy;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 
-use xa11y_core::{Error, Rect, Result, Screenshot, ScreenshotProvider};
+use xa11y_core::{Error, Point, Rect, Result, Screenshot, ScreenshotProvider};
 
 /// Choose the Linux screenshot backend based on session environment.
 pub struct LinuxScreenshot {
@@ -250,7 +250,7 @@ impl LinuxScreenshot {
 }
 
 impl ScreenshotProvider for LinuxScreenshot {
-    fn capture_full(&self) -> Result<Screenshot> {
+    fn capture_full(&self) -> Result<(Screenshot, Point)> {
         // Captured pixels are physical; stamp the physical-to-logical ratio so
         // callers can map logical bounds onto them. `capture_*` produce the
         // raw pixels; the scale is metadata applied here. See `crate::scale`.
@@ -260,7 +260,13 @@ impl ScreenshotProvider for LinuxScreenshot {
             Backend::Wayland { conn } => self.capture_wayland(conn, None),
         }?;
         shot.scale = scale as f32;
-        Ok(shot)
+        // Both paths start at the coordinate-space origin, so unlike Windows
+        // and macOS there is no offset to subtract: X11 reads the root window,
+        // whose top-left is (0, 0) by definition, and the portal hands back the
+        // whole screen. This is asserted rather than assumed — a backend that
+        // grew a per-output capture would have to report that output's origin
+        // here, per `ScreenshotProvider::capture_full`.
+        Ok((shot, Point::new(0, 0)))
     }
 
     fn capture_region(&self, rect: Rect) -> Result<Screenshot> {

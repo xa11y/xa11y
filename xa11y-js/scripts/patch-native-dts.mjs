@@ -12,6 +12,8 @@
 //   4. Narrow the input layer's button and anchor strings.
 //   5. Narrow `ShellSurface.kind` and `ShellSurface.byKind`'s parameter to
 //      `ShellSurfaceKindName`.
+//   5b. Narrow `Omission.reason` -> `OmissionReasonName` and
+//      `LegendEntry.color` -> a three-element tuple.
 //   6. Append a `;` to the napi-emitted `NativeSubscription` type alias
 //      (napi-rs omits terminators, which confuses the docs generator's
 //      multi-line type-alias parser).
@@ -61,6 +63,9 @@ export type AnchorName =
   | 'top_right'
   | 'bottom_left'
   | 'bottom_right';
+
+/** Why an annotated element is not in the image. Spelled as in Python. */
+export type OmissionReasonName = 'no_bounds' | 'zero_area' | 'outside_capture';
 
 /** Kinds of OS shell surface, spelled as in Python, the CLI and MCP. */
 export type ShellSurfaceKindName =
@@ -122,6 +127,24 @@ const REPLACEMENTS = [
     name: 'ShellSurface.kind -> ShellSurfaceKindName',
     from: '  get kind(): string\n',
     to: '  get kind(): ShellSurfaceKindName\n',
+    all: 1,
+  },
+  {
+    // The only string-valued member of the legend. A reason missing from the
+    // union is a literal a consumer's type checker rejects even though the
+    // runtime returns it, which is why it is also under
+    // [[types.variant_coverage]] in bindings/parity_allowlist.toml.
+    name: 'Omission.reason -> OmissionReasonName',
+    from: '  reason: string\n',
+    to: '  reason: OmissionReasonName\n',
+    all: 1,
+  },
+  {
+    // A colour is exactly three channels; `Array<number>` lets a two-element
+    // array type-check.
+    name: 'LegendEntry.color -> [number, number, number]',
+    from: '  color: Array<number>\n',
+    to: '  color: [number, number, number]\n',
     all: 1,
   },
   {

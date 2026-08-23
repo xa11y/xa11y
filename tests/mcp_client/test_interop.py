@@ -322,6 +322,122 @@ def test_naming_both_an_app_and_a_shell_surface_is_a_fixable_error(run_client):
     assert "--" not in structured["message"], "there are no flags on this surface"
 
 
+# ── Screenshot annotation ────────────────────────────────────────────────────
+
+# `xa11y::MAX_ANNOTATIONS`, quoted in the tool description. Asserted against
+# rather than copied: a cap the description misstates is worse than no cap.
+ANNOTATION_CAP = 100
+
+
+def test_the_annotated_screenshot_schema_reaches_both_protocol_eras(run_client, mode):
+    """The new fields have to survive whichever listing a client asks for.
+
+    `auto` takes the tool list from a stateless `server/discover` session,
+    whose result the SDK's wire model requires `ttlMs` and `cacheScope` on;
+    `legacy` takes it after the `initialize` handshake. A schema that only
+    survived one of them would be invisible to half the deployed clients, and
+    a listing that grew a field without its caching hints is rejected outright
+    rather than degraded.
+    """
+    result = run_client(lambda c: c.list_tools())
+    screenshot = next(t for t in result.tools if t.name == "screenshot")
+    properties = screenshot.input_schema["properties"]
+    assert properties["annotate"]["type"] == "array"
+    assert properties["annotate"]["items"]["type"] == "string"
+    assert set(properties["shell"]["enum"]) == SHELL_KINDS, "the shared target set"
+    assert {"app", "pid", "x", "y", "width", "height"} <= properties.keys()
+    assert screenshot.input_schema["required"] == [], "a plain capture takes nothing"
+    if mode == "auto":
+        assert result.ttl_ms >= 0
+        assert result.cache_scope in {"public", "private"}
+
+
+def test_a_client_that_validates_arguments_can_make_an_annotated_call(run_client):
+    """`additionalProperties: false` refuses anything the tool did not declare.
+
+    A client that checks arguments against `inputSchema` before sending them
+    is the reason both halves of this feature have to be in one schema: the
+    selectors and the target they resolve against.
+    """
+    schema = _tool(run_client, "screenshot").input_schema
+    jsonschema.validate({"app": "Calculator", "annotate": ["button", "text_field"]}, schema)
+    jsonschema.validate({}, schema)
+    for rejected in ({"annotate": "button"}, {"annotate": [1]}):
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(rejected, schema)
+
+
+def test_the_screenshot_tool_states_the_annotation_contract(run_client):
+    """Each of these costs a model a call to discover by experiment."""
+    description = _tool(run_client, "screenshot").description
+    assert "no accessibility tree gets no annotations" in description
+    assert "`B7` is the seventh match" in description, "spell the tag format out"
+    assert ":nth(n)" in description, "and say what the number is for"
+    assert "legend[i].selector" in description, "the round trip is the point"
+    assert f"At most {ANNOTATION_CAP} elements" in description
+    assert "`truncated` counts" in description
+    # The precondition
+    # `test_a_target_without_annotate_is_refused_rather_than_captured_full_screen`
+    # enforces. A description that claims a target is simply optional here
+    # would send a client into that refusal with no warning.
+    assert "A target passed without `annotate` is refused" in description
+
+
+def test_annotating_without_a_target_comes_back_as_something_to_fix(run_client):
+    """Refused before the capture, so this holds on a machine with no display."""
+    result = run_client(lambda c: c.call_tool("screenshot", {"annotate": ["button"]}))
+    assert result.is_error is True
+    structured = result.structured_content
+    assert structured["kind"] == "invalid_arguments"
+    message = structured["message"]
+    assert '"app"' in message and '"pid"' in message, message
+    assert "--" not in message, f"there are no flags on this surface: {message}"
+
+
+def test_a_target_without_annotate_is_refused_rather_than_captured_full_screen(run_client):
+    """A validating client can send every one of these, so the handler is the guard.
+
+    `app`, `pid` and `shell` are read only to resolve `annotate` selectors, so
+    each of these once came back as a whole-desktop capture with no error, and
+    a client that asked to target an application had no way to tell from the
+    result that its argument did nothing. The schema cannot express the rule:
+    `jsonschema.validate` below asserts that these argument sets pass the
+    `inputSchema` a real client checks against before sending, which is what
+    leaves the refusal to the handler.
+
+    One session for the whole set, and refused before any capture is taken, so
+    this holds on a machine with no display.
+    """
+    schema = _tool(run_client, "screenshot").input_schema
+    cases = [
+        ({"pid": 1}, ('"pid"',)),
+        ({"app": "Calculator"}, ('"app"',)),
+        ({"shell": "taskbar"}, ('"shell"',)),
+        # Refused for naming a target, which is also the `shell` property's own
+        # promise about being paired with `app`.
+        ({"app": "Calculator", "shell": "taskbar"}, ('"app"', '"shell"')),
+        # A crop is not a target, so the region does not excuse the `pid`.
+        ({"pid": 1, "x": 0, "y": 0, "width": 40, "height": 30}, ('"pid"',)),
+        # An empty array is the plain-capture path too.
+        ({"annotate": [], "pid": 1}, ('"pid"',)),
+    ]
+    for arguments, _named in cases:
+        jsonschema.validate(arguments, schema)
+
+    async def body(client):
+        return [await client.call_tool("screenshot", a) for a, _ in cases]
+
+    for (arguments, named), result in zip(cases, run_client(body), strict=True):
+        assert result.is_error is True, arguments
+        structured = result.structured_content
+        assert structured["kind"] == "invalid_arguments", arguments
+        message = structured["message"]
+        for key in named:
+            assert key in message, f"{arguments}: {key} unnamed in {message}"
+        assert "annotate" in message, message
+        assert "plain capture" in message, message
+
+
 def test_the_instructions_mention_the_shell_surfaces(run_client):
     """The only place a model learns OS chrome is reachable at all."""
     instructions = run_client(lambda c: _identity(c.instructions))

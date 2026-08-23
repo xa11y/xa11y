@@ -19,6 +19,9 @@ import {
   type AppLookupOptions,
   type CheckedState,
   type EventTypeName,
+  type LegendEntry,
+  type Omission,
+  type OmissionReasonName,
   type Rect,
   type ScreenshotOptions,
   type ShellSurfaceKindName,
@@ -167,6 +170,21 @@ async function checks() {
   const _shot2: Screenshot = await screenshot(shotOpts);
   const _shot3: Screenshot = await screenshot({ element: el });
 
+  // Annotated capture: `annotate` takes locators or selector strings, and the
+  // legend comes back on the same Screenshot type.
+  const _shot4: Screenshot = await screenshot({ annotate: ['button', loc] });
+  const _shot5: Screenshot = await screenshot({ element: el, annotate: [loc] });
+  const legend: LegendEntry[] = shot.legend;
+  const omitted: Omission[] = shot.omitted;
+  const _truncated: number = shot.truncated;
+  const _tag: string = legend[0].tag;
+  const _group: number = legend[0].group;
+  const _entrySelector: string = legend[0].selector;
+  const _entryName: string | undefined = legend[0].name;
+  const _entryBounds: Rect = legend[0].bounds;
+  const _entryColor: [number, number, number] = legend[0].color;
+  const _reason: OmissionReasonName = omitted[0].reason;
+
   // Unused to silence noUnusedLocals
   void _app2;
   void apps;
@@ -183,6 +201,16 @@ async function checks() {
   void _png;
   void _shot2;
   void _shot3;
+  void _shot4;
+  void _shot5;
+  void _truncated;
+  void _tag;
+  void _group;
+  void _entrySelector;
+  void _entryName;
+  void _entryBounds;
+  void _entryColor;
+  void _reason;
   void surfaces;
   void _flyout;
   void _surfaceName;

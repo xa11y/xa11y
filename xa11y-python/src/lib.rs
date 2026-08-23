@@ -2067,11 +2067,127 @@ fn input_sim() -> PyResult<InputSim> {
 
 // ── Screenshot ──────────────────────────────────────────────────────────────
 
+/// One drawn annotation box: the tag in the image, and the element it came
+/// from.
+///
+/// `bounds` is in logical screen coordinates — the same space as
+/// `Element.bounds`, not the capture's pixel space. `color` is the RGB triple
+/// the box was drawn in, for correlating a box with its entry by eye.
+#[pyclass(frozen)]
+#[derive(Clone)]
+struct LegendEntry {
+    /// What is drawn in the box — ``"B7"``.
+    #[pyo3(get)]
+    tag: String,
+    /// 1-based, matching the position of this element's locator in
+    /// ``annotate=``.
+    #[pyo3(get)]
+    group: usize,
+    /// 1-based, and exactly the ``:nth(n)`` argument in `selector`.
+    #[pyo3(get)]
+    index: usize,
+    /// A selector usable as-is against the same scope the group had.
+    #[pyo3(get)]
+    selector: String,
+    /// The element's role, snake_case as everywhere else.
+    #[pyo3(get)]
+    role: String,
+    /// The element's accessible name, when it has one.
+    #[pyo3(get)]
+    name: Option<String>,
+    /// The element's bounds in logical screen coordinates.
+    #[pyo3(get)]
+    bounds: Rect,
+    /// The box colour as an ``(r, g, b)`` tuple.
+    #[pyo3(get)]
+    color: (u8, u8, u8),
+}
+
+#[pymethods]
+impl LegendEntry {
+    fn __repr__(&self) -> String {
+        format!(
+            "LegendEntry(tag={:?}, group={}, index={}, selector={:?}, role={:?}, name={:?})",
+            self.tag, self.group, self.index, self.selector, self.role, self.name,
+        )
+    }
+}
+
+impl LegendEntry {
+    fn from_core(entry: xa11y::LegendEntry) -> Self {
+        let [r, g, b] = entry.color;
+        Self {
+            tag: entry.tag,
+            group: entry.group,
+            index: entry.index,
+            selector: entry.selector,
+            role: entry.role,
+            name: entry.name,
+            bounds: Rect {
+                x: entry.bounds.x,
+                y: entry.bounds.y,
+                width: entry.bounds.width,
+                height: entry.bounds.height,
+            },
+            color: (r, g, b),
+        }
+    }
+}
+
+/// An element that matched an ``annotate=`` selector but is not in the image.
+///
+/// Reported rather than dropped: a legend that disagreed with the picture,
+/// with no way to find out why, is what this exists to prevent.
+#[pyclass(frozen)]
+#[derive(Clone)]
+struct Omission {
+    /// The selector that would reach this element.
+    #[pyo3(get)]
+    selector: String,
+    /// The element's role, snake_case.
+    #[pyo3(get)]
+    role: String,
+    /// The element's accessible name, when it has one.
+    #[pyo3(get)]
+    name: Option<String>,
+    /// Why it could not be drawn: ``"no_bounds"``, ``"zero_area"`` or
+    /// ``"outside_capture"``.
+    #[pyo3(get)]
+    reason: String,
+}
+
+#[pymethods]
+impl Omission {
+    fn __repr__(&self) -> String {
+        format!(
+            "Omission(selector={:?}, role={:?}, name={:?}, reason={:?})",
+            self.selector, self.role, self.name, self.reason
+        )
+    }
+}
+
+impl Omission {
+    fn from_core(omission: xa11y::Omission) -> Self {
+        Self {
+            selector: omission.selector,
+            role: omission.role,
+            name: omission.name,
+            // `as_str` is core's own exhaustive match, so a new reason cannot
+            // reach Python as a name this binding invented.
+            reason: omission.reason.as_str().to_string(),
+        }
+    }
+}
+
 /// A captured image: raw RGBA8 pixels plus dimensions and scale.
 ///
 /// `width` and `height` are in physical pixels. `scale` is the physical-to-
 /// logical ratio (1.0 on standard displays, 2.0 on typical Retina). `pixels`
 /// length is `width * height * 4` (RGBA).
+///
+/// `legend`, `omitted` and `truncated` describe what `annotate=` drew. They
+/// are `[]`, `[]` and `0` on an unannotated capture, so consumers need no
+/// version check.
 #[pyclass(frozen)]
 struct Screenshot {
     #[pyo3(get)]
@@ -2080,7 +2196,54 @@ struct Screenshot {
     height: u32,
     #[pyo3(get)]
     scale: f32,
+    /// One entry per drawn box, in group order and then match order.
+    #[pyo3(get)]
+    legend: Vec<LegendEntry>,
+    /// Elements that matched an ``annotate=`` selector but could not be drawn.
+    #[pyo3(get)]
+    omitted: Vec<Omission>,
+    /// How many matched elements were not described at all because the
+    /// annotation cap was reached. ``0`` when the cap did not bite.
+    #[pyo3(get)]
+    truncated: usize,
     inner: xa11y::Screenshot,
+}
+
+impl Screenshot {
+    /// Wrap a plain capture — no annotations were requested.
+    fn plain(shot: xa11y::Screenshot) -> Self {
+        Self {
+            width: shot.width,
+            height: shot.height,
+            scale: shot.scale,
+            legend: Vec::new(),
+            omitted: Vec::new(),
+            truncated: 0,
+            inner: shot,
+        }
+    }
+
+    /// Wrap an annotated capture together with its legend.
+    fn annotated(result: xa11y::Annotated) -> Self {
+        let shot = result.screenshot;
+        Self {
+            width: shot.width,
+            height: shot.height,
+            scale: shot.scale,
+            legend: result
+                .legend
+                .into_iter()
+                .map(LegendEntry::from_core)
+                .collect(),
+            omitted: result
+                .omitted
+                .into_iter()
+                .map(Omission::from_core)
+                .collect(),
+            truncated: result.truncated,
+            inner: shot,
+        }
+    }
 }
 
 #[pymethods]
@@ -2110,6 +2273,33 @@ impl Screenshot {
     }
 }
 
+/// Parse one `annotate=` entry into a Locator.
+///
+/// A `Locator` brings its own scope, which is what every legend entry's
+/// `<selector>:nth(n)` resolves against. A bare `str` builds a rootless
+/// locator exactly as `xa11y.locator(s)` does, and `screenshot_annotated`
+/// refuses those: a rootless search runs once per application and
+/// concatenates, so its `:nth` counts within one application while the legend
+/// counts across all of them, and an entry would name a different element than
+/// the box beside it. The refusal happens in core, before any tree read or
+/// capture, and its message names the fix (`app.locator(...)`).
+///
+/// Runs before any capture, so a bad argument costs no pixels (AGENTS.md,
+/// "Parse arguments before the first OS call").
+fn parse_annotate_group(item: &Bound<'_, PyAny>) -> PyResult<xa11y::Locator> {
+    if let Ok(locator) = item.extract::<PyRef<'_, Locator>>() {
+        return Ok(locator.inner.clone());
+    }
+    if let Ok(selector) = item.extract::<String>() {
+        return Ok(xa11y::Locator::new(get_provider()?, None, &selector));
+    }
+    Err(PyTypeError::new_err(format!(
+        "screenshot(annotate=...): each entry must be a Locator or a selector \
+         string, got {}",
+        item.get_type().name()?,
+    )))
+}
+
 /// Capture pixels from the screen.
 ///
 /// With no arguments, captures the full primary display. Pass `element=` to
@@ -2117,13 +2307,25 @@ impl Screenshot {
 /// width, height)` to capture an explicit rectangle in logical screen
 /// coordinates.
 ///
-/// Raises `ValueError` if both `element` and `region` are given.
+/// `annotate=` draws a numbered box over every element each locator matches
+/// and fills in `legend` / `omitted` / `truncated` on the result. Each entry
+/// is one group, with its own colour and tag letter, and must be a `Locator`
+/// scoped to an application — `app.locator("button")`. Cropping and
+/// annotating are independent: annotations outside the captured area land in
+/// `omitted` rather than being clamped to an edge.
+///
+/// Raises `ValueError` if both `element` and `region` are given, `TypeError`
+/// for an `annotate=` entry that is neither a Locator nor a string, and
+/// `InvalidSelectorError` for a rootless group (a bare selector string, or
+/// `xa11y.locator(...)`) — its `:nth(n)` would count per application while
+/// the legend counts across all of them.
 #[pyfunction]
-#[pyo3(signature = (*, element=None, region=None))]
+#[pyo3(signature = (*, element=None, region=None, annotate=None))]
 fn screenshot(
     py: Python<'_>,
     element: Option<&Element>,
     region: Option<(i32, i32, u32, u32)>,
+    annotate: Option<Vec<Bound<'_, PyAny>>>,
 ) -> PyResult<Screenshot> {
     if element.is_some() && region.is_some() {
         return Err(PyValueError::new_err(
@@ -2131,28 +2333,58 @@ fn screenshot(
         ));
     }
 
-    let shot = if let Some(element) = element {
-        let el = xa11y::Element::new(element.inner_data.clone(), element.provider.clone());
-        py.allow_threads(move || xa11y::screenshot_element(&el))
-    } else if let Some((x, y, w, h)) = region {
-        let rect = xa11y::Rect {
-            x,
-            y,
-            width: w,
-            height: h,
-        };
-        py.allow_threads(move || xa11y::screenshot_region(rect))
-    } else {
-        py.allow_threads(xa11y::screenshot)
-    }
-    .map_err(to_py_err)?;
+    let rect = region.map(|(x, y, width, height)| xa11y::Rect {
+        x,
+        y,
+        width,
+        height,
+    });
 
-    Ok(Screenshot {
-        width: shot.width,
-        height: shot.height,
-        scale: shot.scale,
-        inner: shot,
-    })
+    let Some(annotate) = annotate else {
+        // No annotations requested: the plain capture path, unchanged.
+        let shot = if let Some(element) = element {
+            let el = xa11y::Element::new(element.inner_data.clone(), element.provider.clone());
+            py.allow_threads(move || xa11y::screenshot_element(&el))
+        } else if let Some(rect) = rect {
+            py.allow_threads(move || xa11y::screenshot_region(rect))
+        } else {
+            py.allow_threads(xa11y::screenshot)
+        }
+        .map_err(to_py_err)?;
+        return Ok(Screenshot::plain(shot));
+    };
+
+    // Everything that needs the GIL happens up here: the locators are parsed
+    // and cloned out of their Python wrappers first. The capture, the tree
+    // reads behind each locator, and the drawing all happen below, inside
+    // `allow_threads` (tenet 5).
+    let groups = annotate
+        .iter()
+        .map(parse_annotate_group)
+        .collect::<PyResult<Vec<_>>>()?;
+
+    // `screenshot_annotated` crops by region, so an `element=` target becomes
+    // that element's bounds — the same rectangle `screenshot_element` would
+    // have captured, and the same `NoElementBounds` when it has none.
+    let rect = match element {
+        Some(element) => Some(
+            element
+                .bounds_data
+                .map(|(x, y, width, height)| xa11y::Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                })
+                .ok_or_else(|| to_py_err(xa11y::Error::NoElementBounds))?,
+        ),
+        None => rect,
+    };
+
+    let result = py
+        .allow_threads(move || xa11y::screenshot_annotated(rect, &groups))
+        .map_err(to_py_err)?;
+    Ok(Screenshot::annotated(result))
 }
 
 // ── Module-level functions ──────────────────────────────────────────────────
@@ -2209,7 +2441,9 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Event>()?;
     m.add_class::<EventType>()?;
     m.add_class::<InputSim>()?;
+    m.add_class::<LegendEntry>()?;
     m.add_class::<Locator>()?;
+    m.add_class::<Omission>()?;
     m.add_class::<Rect>()?;
     m.add_class::<Screenshot>()?;
     m.add_class::<ShellSurface>()?;

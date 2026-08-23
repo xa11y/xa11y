@@ -123,16 +123,95 @@ them is refused, with the eight listed, rather than applied to whichever came
 first. And its `ok: true` means the application accepted the call, not that
 the interface changed, so read the tree again when the effect matters.
 
+## Annotate a screenshot
+
+A plain screenshot shows the model what the application looks like without
+saying which tree node is which pixel. When the tree is present but
+uninformative, `annotate` draws that correlation into the image.
+
+Pass an array of selectors and a target:
+
+```json
+{
+  "pid": 4242,
+  "annotate": ["button", "text_field"]
+}
+```
+
+Each selector is one group, and every element it matches gets an outlined box
+with a short tag. The result keeps the PNG and gains a legend:
+
+```json
+{
+  "width": 2560,
+  "height": 1440,
+  "scale": 2.0,
+  "bytes": 184320,
+  "legend": [
+    {
+      "tag": "A1",
+      "group": 1,
+      "index": 1,
+      "selector": "button:nth(1)",
+      "role": "button",
+      "name": "7",
+      "bounds": { "x": 104, "y": 318, "width": 48, "height": 44 },
+      "color": [230, 159, 0]
+    }
+  ],
+  "omitted": [],
+  "truncated": 0
+}
+```
+
+A tag is a letter for the group and a 1-based number within it, so `B7` is the
+seventh match of the second selector. That number is the `:nth(n)` argument,
+and `selector` is built from it already. A model that reads `B7` off the image
+hands `legend[i].selector` to `action` or `find` with the same target, which is
+the round trip the feature exists for.
+
+The boxes come from the accessibility tree. An application that exposes no tree
+gets no annotations and the capture comes back plain.
+
+The target scopes the selectors. Cropping stays with `x`, `y`, `width`, and
+`height`, so the two compose: capture one window's region, and annotate the
+elements inside it.
+
+A target on its own is refused. `app`, `pid`, and `shell` are read only to
+resolve `annotate` selectors, so `{"pid": 4242}` with no `annotate` used to
+come back as a full-desktop capture reporting success, and the model that asked
+to target an application had no way to see that its argument did nothing. It
+now returns `invalid_arguments`, naming the key it could not use and offering
+both fixes: add `annotate` to box that target's elements, or drop the target
+for a plain capture. An empty `annotate` array is the plain-capture path too,
+so it is refused on the same terms.
+
+`omitted` lists everything that matched a selector without reaching the image,
+each with a `reason` of `no_bounds`, `zero_area`, or `outside_capture`. The
+three are described in
+[Annotated screenshots](/guides/annotate-screenshots/#find-out-why-an-element-has-no-box).
+
+Boxes are never clamped to the edge of the capture, because a clamped box
+claims pixels that belong to something else.
+
+One caveat before you trust a box. The tree does not say which window is in
+front, so an element hidden behind another window still gets a box drawn over
+whatever is on screen there. Narrow the group with `button[visible]` when that
+matters, since only the caller knows what it meant.
+
 ## Keep results small
 
-Every result goes into the model's context. Two arguments control the size:
+Every result goes into the model's context. Three arguments control the size:
 
 - `tree` takes `max_depth`. Start at 2 or 3 to find the window you want, then
   walk into it.
 - `find` takes `limit`, defaulting to 50.
+- `screenshot` takes `annotate`, which describes at most 100 elements. A
+  selector like `*` over a large window reaches that cap.
 
-Both report whether they truncated, so a shortened result never reads as a
-complete one.
+All three report whether they truncated, so a shortened result never reads as a
+complete one. For `annotate`, `truncated` counts the matches it did not reach,
+and narrowing the selectors is the way to see the rest.
 
 ## Read a failure instead of retrying blind
 

@@ -208,12 +208,111 @@ and read no accessibility data, so they need no target application. See
 
 ## `xa11y screenshot`
 
-Captures a region, or the whole primary display when `--region` is omitted.
-`--out -` writes PNG bytes to stdout.
+Captures pixels and writes them as a PNG. With `--annotate` it also reads the
+accessibility tree, draws an outlined box over every element a selector
+matches, and prints a legend.
 
 ```bash
-xa11y screenshot --region X,Y,W,H --out PATH
+xa11y screenshot [--region X,Y,W,H] --out PATH
+                 [--app NAME | --pid PID | --shell KIND]
+                 [--annotate SELECTOR]...
+                 [--legend text|json|none]
 ```
+
+| Flag | Description |
+| --- | --- |
+| `--out PATH` | Required. Writes the PNG to `PATH`, or to stdout for `-` |
+| `--region X,Y,W,H` | Captures this rectangle in logical screen coordinates. Omitted, the capture is whatever the platform treats as the whole screen: the virtual desktop on Windows, one display on macOS, the root window on Linux |
+| `--app NAME` / `--pid PID` / `--shell KIND` | The target whose tree `--annotate` searches, as described under [Flags](#flags) |
+| `--annotate SELECTOR` | Repeatable. One annotation group per occurrence |
+| `--legend text\|json\|none` | Legend format on stdout. Defaults to `text` |
+
+Without `--annotate` the command reads no accessibility data, takes no target,
+and prints nothing on stdout. A capture written to a file reports its
+dimensions on stderr.
+
+### `--annotate`
+
+Each occurrence is one group. A group has a letter (`A`, `B`, and so on past
+`Z` as `AA`), a colour from a seven-entry palette that cycles, and one box per
+element its selector matches inside the target. A box carries a tag of the
+group letter and a 1-based index, so `B7` is the seventh match of the second
+`--annotate`. That index is the `:nth(n)` argument in the entry's selector.
+
+Selectors are the same syntax the library takes; see
+[Selectors](/reference/selectors/). A comma-separated alternation is refused
+with `InvalidSelector`, because `<selector>:nth(n)` would bind to its last
+clause alone. Pass one `--annotate` per clause.
+
+Cropping and annotating are independent. `--region` chooses what is captured
+and `--annotate` chooses what is drawn on it, so a match outside the captured
+area is reported as omitted rather than clamped to an edge.
+
+At most 100 elements are described across all groups, counting drawn boxes and
+omitted elements. Matches past the cap are neither drawn nor listed.
+
+For the task, see
+[Annotated screenshots](/guides/annotate-screenshots/).
+
+### `--legend`
+
+`text` writes a group header block, one line per box, then a summary of what
+was omitted and what the cap cut off:
+
+```
+A  button      #E69F00  3 annotated
+B  text_field  #56B4E9  1 annotated
+
+A1  button      "7"        bounds=104,318,48,44  button:nth(1)
+A2  button      "8"        bounds=156,318,48,44  button:nth(2)
+A3  button      "9"        bounds=208,318,48,44  button:nth(3)
+B1  text_field  "Display"  bounds=100,60,320,52  text_field:nth(1)
+
+omitted: 1 element (outside_capture: button "Paste")
+truncated: 37 more elements matched but were not described (cap: 100)
+```
+
+A group with no matches still gets a header line. An element with no accessible
+name shows `-` in the name column, which keeps it distinct from one named with
+the empty string. The omission summary lists at most five elements inline.
+
+Once the cap has been reached, each header line from the first affected group
+onward carries a parenthetical, because its count is a lower bound:
+
+```
+B  button     #56B4E9  62 annotated  (cap reached, so more may have matched)
+C  menu_item  #009E73  0 annotated  (cap reached at or before this group, so 0 is not "matched nothing")
+```
+
+Groups resolve in `--annotate` order and resolution stops at the cap, so the
+groups before the first affected one are exact. A group starved by the cap
+would otherwise read the same as one whose selector reached nothing.
+
+`json` writes one object instead, with `groups` (letter, selector, colour,
+count, and `capped` per group), `legend`, `omitted`, `truncated`, and `cap`. It
+carries the whole omission list.
+
+`capped` is the boolean behind the parentheticals above. `true` means the cap
+may have shortened this group, so `"annotated": 0` alongside it does not mean
+the selector matched nothing. It is `false` on every group when `truncated` is
+`0`.
+
+`none` suppresses the legend and leaves stdout empty.
+
+### Usage errors
+
+These three exit with code 2 before any capture is taken.
+
+| Invocation | Message names |
+| --- | --- |
+| `--annotate` with no `--app`, `--pid`, or `--shell` | The three target flags |
+| `--out -` together with a legend | `--out FILE`, or `--legend none` |
+| `--legend` with no `--annotate` | Adding `--annotate SELECTOR`, or dropping `--legend` |
+
+PNG bytes and legend text cannot share stdout, so the second refuses rather
+than moving the legend to stderr, where a caller piping the image would never
+learn that it went elsewhere. A `--legend` value outside `text`, `json`, and
+`none` is a usage error as well.
 
 ## `xa11y mcp`
 
@@ -241,8 +340,9 @@ does.
 ### Tools
 
 Each tool takes the arguments its CLI counterpart takes as flags. The
-accessibility tools need `app`, `pid`, or `shell`; the input and screenshot
-tools take screen coordinates and no target.
+accessibility tools need `app`, `pid`, or `shell`. The input tools take screen
+coordinates and no target. `screenshot` takes a target only when `annotate`
+gives it selectors to resolve.
 
 | Tool | Arguments |
 | --- | --- |
@@ -257,7 +357,7 @@ tools take screen coordinates and no target.
 | `scroll` | `x`, `y`, `dx`, `dy` |
 | `key` | `key`, `held` |
 | `type` | `text` |
-| `screenshot` | `x`, `y`, `width`, `height` |
+| `screenshot` | `x`, `y`, `width`, `height`, `annotate`, `app`, `pid`, `shell` |
 
 `action` accepts the same verbs as [`xa11y action`](#xa11y-action). `key`
 accepts the same key names as [`xa11y key`](#input-simulation). Selectors are
@@ -267,6 +367,15 @@ the same syntax the library takes; see [Selectors](/reference/selectors/).
 with `pid`. A kind matching several surfaces comes back as an
 `ambiguous_shell_surface` failure with the candidates listed. See
 [Shell surfaces](/reference/shell/).
+
+`annotate` is an array of selectors, one annotation group per entry, and it is
+`screenshot`'s counterpart to the CLI's repeatable `--annotate`. Every element
+a selector matches gets an outlined box and a tag drawn on the capture, and the
+result gains `legend`, `omitted`, and `truncated` alongside the image. It reads
+the accessibility tree, so it needs `app`, `pid`, or `shell`. That target
+scopes the selectors and leaves the captured area to `x`, `y`, `width`, and
+`height`. At most 100 elements are described; `truncated` counts the matches
+past that cap. See [Annotate a screenshot](/guides/mcp/#annotate-a-screenshot).
 
 The `action` tool differs from `xa11y action` in one way, deliberately. The
 command acts on the first match, as the library's `Locator` does. The tool
@@ -331,7 +440,8 @@ xa11y click --at "$(xa11y find 'button[name="OK"]' --app Safari -o center)"
 ## Flags
 
 The accessibility commands other than `apps` and `shell` require a target. The
-input-simulation and screenshot commands take none of these flags.
+input-simulation commands take none of these flags, and `screenshot` takes one
+only when `--annotate` gives it selectors to resolve.
 
 | Flag | Description |
 | --- | --- |

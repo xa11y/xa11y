@@ -23,5 +23,10 @@ name = "selector"
 path = "fuzz_targets/selector.rs"
 doc = false
 
+[[bin]]
+name = "annotate_ops"
+path = "fuzz_targets/annotate_ops.rs"
+doc = false
+
 [workspace]
 members = ["."]

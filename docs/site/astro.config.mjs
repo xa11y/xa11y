@@ -65,6 +65,7 @@ export default defineConfig({
             { label: "Test in CI", slug: "guides/ci" },
             { label: "Simulate input", slug: "guides/input" },
             { label: "Capture screenshots", slug: "guides/screenshots" },
+            { label: "Annotate a screenshot", slug: "guides/annotate-screenshots" },
             { label: "Drive a desktop from a Strands agent", slug: "guides/strands" },
             { label: "Serve xa11y over MCP", slug: "guides/mcp" },
           ],

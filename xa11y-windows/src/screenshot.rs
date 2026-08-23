@@ -24,6 +24,24 @@
 //! pixels. Multi-monitor setups with mixed DPI are handled per-monitor; see
 //! [`crate::dpi`] for the boundary-straddling caveat.
 //!
+//! `capture_full` covers the whole **virtual desktop**, so it can span several
+//! monitors at once. Two consequences follow, and both are reported rather
+//! than hidden:
+//!
+//! - Its pixel `(0, 0)` is at `(SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN)`, which
+//!   is negative whenever a monitor sits left of or above the primary one.
+//!   That offset is returned alongside the capture, per
+//!   [`ScreenshotProvider::capture_full`].
+//! - Its [`Screenshot::scale`] is a single scalar and is the effective scale
+//!   of the monitor **at that virtual origin**. On a uniform-DPI desktop that
+//!   is every monitor's scale and the mapping is exact. On a mixed-DPI desktop
+//!   it is exact only on the origin monitor; logical coordinates on the others
+//!   map to physical pixels by their own factor, so anything drawn from
+//!   logical bounds (annotation boxes) is misplaced there by the DPI ratio.
+//!   This is the same single-scalar limitation `capture_region` already
+//!   carries at a DPI seam; capturing per-monitor is the fix, and it would
+//!   change the capture contract rather than this backend.
+//!
 //! # Active session required
 //!
 //! `BitBlt` against the desktop DC only works when the calling process's
@@ -34,7 +52,7 @@
 //! code we surface it as [`Error::Unsupported`] so callers can distinguish
 //! "no desktop to capture" from a real platform failure.
 
-use xa11y_core::{Error, Rect, Result, Screenshot, ScreenshotProvider};
+use xa11y_core::{Error, Point, Rect, Result, Screenshot, ScreenshotProvider};
 
 pub struct WindowsScreenshot;
 
@@ -50,7 +68,7 @@ impl WindowsScreenshot {
 
 #[cfg(not(target_os = "windows"))]
 impl ScreenshotProvider for WindowsScreenshot {
-    fn capture_full(&self) -> Result<Screenshot> {
+    fn capture_full(&self) -> Result<(Screenshot, Point)> {
         unreachable!()
     }
     fn capture_region(&self, _: Rect) -> Result<Screenshot> {
@@ -83,7 +101,7 @@ impl WindowsScreenshot {
 
 #[cfg(target_os = "windows")]
 impl ScreenshotProvider for WindowsScreenshot {
-    fn capture_full(&self) -> Result<Screenshot> {
+    fn capture_full(&self) -> Result<(Screenshot, Point)> {
         // With Per-Monitor-V2 awareness the virtual-screen metrics are already
         // physical pixels, so no logical->physical conversion is needed here.
         let vx = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
@@ -99,8 +117,24 @@ impl ScreenshotProvider for WindowsScreenshot {
         // Report the scale of the monitor at the virtual-desktop origin. The
         // full capture may span mixed-DPI monitors; `scale` is a single scalar
         // by contract, so we report the origin monitor's factor.
-        let scale = crate::dpi::scale_for_physical_point(vx, vy) as f32;
-        capture_rect(vx, vy, vw, vh, scale)
+        let scale = crate::dpi::scale_for_physical_point(vx, vy);
+        let shot = capture_rect(vx, vy, vw, vh, scale as f32)?;
+
+        // Pixel (0, 0) of this capture is physical (vx, vy) — the top-left of
+        // the *virtual desktop*, not of the primary monitor. `vx`/`vy` go
+        // negative as soon as a monitor is arranged left of or above the
+        // primary one, and every consumer that maps logical bounds onto these
+        // pixels has to subtract that. Convert through `Rect::to_logical` so
+        // the rounding matches `Rect::to_physical`, which is what the
+        // annotation math applies on the way back.
+        let logical = Rect {
+            x: vx,
+            y: vy,
+            width: 0,
+            height: 0,
+        }
+        .to_logical(scale);
+        Ok((shot, Point::new(logical.x, logical.y)))
     }
 
     fn capture_region(&self, rect: Rect) -> Result<Screenshot> {

@@ -25,8 +25,8 @@ use crate::cli::{
     Target, ACTIONS_REQUIRING_VALUE, ACTION_NAMES,
 };
 use crate::{
-    App, AppExt, ClickOptions, ClickTarget, DragOptions, Element, Rect, ScrollDelta, ShellSurface,
-    ShellSurfaceExt,
+    App, AppExt, ClickOptions, ClickTarget, DragOptions, Element, Locator, Rect, ScrollDelta,
+    ShellSurface, ShellSurfaceExt,
 };
 
 /// Depth used by `tree` when the caller does not ask for one.
@@ -641,7 +641,12 @@ fn tool_definition(name: &str) -> Value {
             )
         }
         "screenshot" => {
-            let mut props = Map::new();
+            // The target properties are the shared ones rather than a second
+            // set: `annotate` resolves selectors, and a selector on this tool
+            // has to name a target on exactly the terms it does everywhere
+            // else. They stay optional here — an unannotated capture reads no
+            // accessibility tree and needs no target at all.
+            let mut props = app_target_properties();
             for (key, axis, bounds) in [
                 ("x", "Left edge", COORD),
                 ("y", "Top edge", COORD),
@@ -657,11 +662,25 @@ fn tool_definition(name: &str) -> Value {
                     )),
                 );
             }
+            props.insert(
+                "annotate".into(),
+                json!({
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Selectors to draw onto the capture, one annotation \
+                                    group per entry and in order: the first selector is \
+                                    group `A`, the second `B`. Every element a selector \
+                                    matches gets an outlined box and a tag, and one \
+                                    `legend` entry naming it. Needs a target — `app`, \
+                                    `pid` or `shell` — for the selectors to resolve \
+                                    against. Omit it for a plain capture, which reads \
+                                    no accessibility tree.",
+                }),
+            );
             tool(
                 "screenshot",
                 "Capture screenshot",
-                "Capture the screen, or a region of it, as a PNG. Region coordinates \
-                 come from `find`, which reports each match's `bounds`.",
+                &screenshot_description(),
                 object_schema(props, &[]),
             )
         }
@@ -674,6 +693,45 @@ fn tool_definition(name: &str) -> Value {
             "inputSchema": { "type": "object" },
         }),
     }
+}
+
+/// The `screenshot` tool's description.
+///
+/// Built rather than written as a literal because the annotation cap is
+/// [`crate::MAX_ANNOTATIONS`], and a description that names a different number
+/// than the handler enforces is the drift this file exists to avoid.
+///
+/// Four things are stated here that a model would otherwise pay calls to
+/// discover: that the boxes come from the accessibility tree (so an
+/// application without one gets none), the tag format, that a tag's number is
+/// the `:nth(n)` argument and `legend[i].selector` is usable as-is, and the
+/// cap with the field that reports when it bit.
+fn screenshot_description() -> String {
+    format!(
+        "Capture the screen, or a region of it, as a PNG. Region coordinates come \
+         from `find`, which reports each match's `bounds`.\n\n\
+         `annotate` draws the accessibility tree onto the capture: each selector is \
+         one group, and every element it matches gets an outlined box with a short \
+         tag. It needs a target — `app`, `pid` or `shell` — for its selectors to \
+         resolve against. The target scopes what is boxed and never crops the image; \
+         `x`/`y`/`width`/`height` are what crop it. The boxes come from the tree, so \
+         an application that exposes no accessibility tree gets no annotations and \
+         the capture comes back plain. A target passed without `annotate` is refused \
+         rather than ignored, since nothing would read it.\n\n\
+         A tag is a letter for the group (`A` is the first selector, `B` the second) \
+         and a 1-based number within that group, so `B7` is the seventh match of the \
+         second selector. That number is the `:nth(n)` argument, and every `legend` \
+         entry carries the finished selector: `legend[i].selector` goes straight to \
+         `action` or `find` with the same target.\n\n\
+         With `annotate`, the result gains `legend` (one entry per drawn box: `tag`, \
+         `group`, `index`, `selector`, `role`, `name`, `bounds`, `color`), `omitted` \
+         (elements that matched a selector but could not be drawn, each with a \
+         `reason` of `no_bounds`, `zero_area` or `outside_capture`), and `truncated`. \
+         At most {cap} elements are described in total; `truncated` counts the \
+         matches past that cap, which are neither drawn nor listed. Narrow the \
+         selectors when it is not zero.",
+        cap = crate::MAX_ANNOTATIONS,
+    )
 }
 
 /// The auto-wait timeout, as the `action` description states it.
@@ -800,6 +858,59 @@ fn held_keys(args: &Value) -> CliResult<Vec<crate::Key>> {
             parse_held(Some(&names.join(",")))
         }
         Some(_) => Err(usage("\"held\" must be an array of key names")),
+    }
+}
+
+/// Read the `annotate` selector list, one entry per annotation group.
+///
+/// An empty entry is refused rather than resolved: the selector parser reads
+/// `""` as a syntax error naming nothing, and a caller who sent one meant a
+/// group they can still name.
+fn annotate_selectors(args: &Value) -> CliResult<Vec<String>> {
+    match args.get("annotate") {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|v| match v.as_str() {
+                Some("") => Err(usage("\"annotate\" entries must not be empty")),
+                Some(s) => Ok(s.to_string()),
+                None => Err(usage("\"annotate\" entries must be selector strings")),
+            })
+            .collect(),
+        Some(_) => Err(usage(
+            "\"annotate\" must be an array of selectors, one per annotation group",
+        )),
+    }
+}
+
+/// Whether any of the target-naming arguments was given.
+///
+/// [`target`] refuses a call with none of them, but its message answers "which
+/// application?" and not "why does a screenshot need one at all". `screenshot`
+/// asks this first so it can say that `annotate` is what needs the target.
+fn has_target(args: &Value) -> bool {
+    !target_keys(args).is_empty()
+}
+
+/// The target-naming arguments this call actually passed, in schema order.
+///
+/// `screenshot` names them back to the caller when they were passed without
+/// `annotate`, because "a target does nothing here" is only actionable if the
+/// answer says which of the three it means.
+fn target_keys(args: &Value) -> Vec<&'static str> {
+    ["app", "pid", "shell"]
+        .into_iter()
+        .filter(|key| !matches!(args.get(*key), None | Some(Value::Null)))
+        .collect()
+}
+
+/// Render argument names as `"a"`, `"a" and "b"`, or `"a", "b" and "c"`.
+fn quoted_list(names: &[&str]) -> String {
+    let quoted: Vec<String> = names.iter().map(|n| format!("\"{n}\"")).collect();
+    match quoted.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
     }
 }
 
@@ -1244,22 +1355,25 @@ fn tool_screenshot(args: &Value) -> CliResult<ToolOutput> {
         .filter(|k| !matches!(args.get(*k), None | Some(Value::Null)))
         .collect();
 
+    // Every argument is read before the first OS call, so a malformed one
+    // costs neither a capture nor a tree read.
+    //
     // Partial regions are rejected rather than silently widened to the full
     // screen: a caller who passed three of four coordinates meant to capture
     // a region, and a full-screen image would look like it had worked.
-    let shot = if present.is_empty() {
-        crate::screenshot()?
+    let region = if present.is_empty() {
+        None
     } else if present.len() == REGION_KEYS.len() {
         // `SCREENSHOT_EXTENT` starts at 1, so an empty region is refused here
         // rather than captured as a zero-byte image that looks like a success.
         let width = req_bounded(args, "width", SCREENSHOT_EXTENT)? as u32;
         let height = req_bounded(args, "height", SCREENSHOT_EXTENT)? as u32;
-        crate::screenshot_region(Rect {
+        Some(Rect {
             x: req_i32(args, "x")?,
             y: req_i32(args, "y")?,
             width,
             height,
-        })?
+        })
     } else {
         let missing: Vec<&str> = REGION_KEYS
             .iter()
@@ -1271,15 +1385,96 @@ fn tool_screenshot(args: &Value) -> CliResult<ToolOutput> {
             missing.join(", ")
         )));
     };
+    let selectors = annotate_selectors(args)?;
 
-    let png = shot.to_png()?;
-    let summary = json!({
-        "width": shot.width,
-        "height": shot.height,
-        "scale": shot.scale,
-        "bytes": png.len(),
-    });
-    Ok(ToolOutput::png(&png, summary))
+    // Without `annotate` this is the capture it was before annotation
+    // existed: no target, no tree read, and the same four summary fields.
+    if selectors.is_empty() {
+        // A target is only ever read to resolve `annotate` selectors, so one
+        // passed without them would have done nothing at all. Returning the
+        // whole desktop and reporting `ok` is the failure mode the tool
+        // descriptions exist to prevent: the model asked to target an
+        // application and cannot tell from the result that it did not. It
+        // also lets `{app, shell}` through, which the `shell` property's own
+        // description says is refused.
+        let named = target_keys(args);
+        if !named.is_empty() {
+            return Err(usage(format!(
+                "{} without \"annotate\" does nothing: a target is only read to resolve \
+                 annotation selectors, and it never crops the capture. Add \"annotate\" \
+                 (an array of selectors) to box that target's elements, or drop {} for a \
+                 plain capture — use \"x\"/\"y\"/\"width\"/\"height\" to capture part \
+                 of the screen",
+                quoted_list(&named),
+                if named.len() == 1 { "it" } else { "them" },
+            )));
+        }
+        let shot = match region {
+            Some(rect) => crate::screenshot_region(rect)?,
+            None => crate::screenshot()?,
+        };
+        let png = shot.to_png()?;
+        let summary = capture_summary(&shot, &png);
+        return Ok(ToolOutput::png(&png, Value::Object(summary)));
+    }
+
+    if !has_target(args) {
+        // `target` would refuse this too, but its message answers a different
+        // question: a model reading "specify app or pid" on a screenshot tool
+        // has no reason to connect it to the selectors it just passed.
+        return Err(usage(
+            "\"annotate\" resolves selectors against a target, and this call names \
+             none: add \"app\" (application name), \"pid\" (process id), or \"shell\" \
+             (an OS shell surface). Drop \"annotate\" for a plain capture, which needs \
+             no target",
+        ));
+    }
+    let target = target(args)?;
+    let groups: Vec<Locator> = selectors.iter().map(|s| target.locator(s)).collect();
+    let annotated = crate::screenshot_annotated(region, &groups)?;
+
+    let png = annotated.screenshot.to_png()?;
+    let mut summary = capture_summary(&annotated.screenshot, &png);
+    // Serialized from the same types the CLI's `--legend json` and the
+    // bindings render, so the three surfaces cannot describe one box three
+    // ways.
+    summary.insert("legend".into(), legend_json("legend", &annotated.legend)?);
+    summary.insert(
+        "omitted".into(),
+        legend_json("omitted", &annotated.omitted)?,
+    );
+    // Always present alongside a legend: a caller has to be able to tell a
+    // complete legend from a prefix of one without knowing the cap.
+    summary.insert("truncated".into(), json!(annotated.truncated));
+    Ok(ToolOutput::png(&png, Value::Object(summary)))
+}
+
+/// The fields every capture reports, annotated or not.
+///
+/// One builder for both paths, so the plain capture cannot drift from the
+/// annotated one on what it says about the image.
+fn capture_summary(shot: &crate::Screenshot, png: &[u8]) -> Map<String, Value> {
+    let mut out = Map::new();
+    out.insert("width".into(), json!(shot.width));
+    out.insert("height".into(), json!(shot.height));
+    out.insert("scale".into(), json!(shot.scale));
+    out.insert("bytes".into(), json!(png.len()));
+    out
+}
+
+/// Serialize one of the legend lists.
+///
+/// `json!` would embed these through an implicit `to_value(..).unwrap()`.
+/// Nothing in [`crate::LegendEntry`] or [`crate::Omission`] can fail to
+/// serialize today, and this is what keeps that a reported failure rather than
+/// a panic if one of them grows a field that can (tenet 4).
+fn legend_json<T: serde::Serialize>(what: &str, value: &T) -> CliResult<Value> {
+    serde_json::to_value(value).map_err(|e| {
+        CliError::Xa11y(crate::Error::Platform {
+            code: -1,
+            message: format!("serialize the screenshot {what}: {e}"),
+        })
+    })
 }
 
 // ── Element encoding ────────────────────────────────────────────────────────
@@ -1756,6 +1951,181 @@ mod tests {
             .expect_err("must reject a partial region");
         let msg = err.to_string();
         assert!(msg.contains("height"), "{msg}");
+    }
+
+    #[test]
+    fn the_screenshot_schema_offers_annotation_and_the_shared_target() {
+        let schema = tool_definition("screenshot")["inputSchema"].clone();
+        let props = &schema["properties"];
+        assert_eq!(props["annotate"]["type"], "array");
+        assert_eq!(props["annotate"]["items"]["type"], "string");
+        // The target properties are the shared ones, not a second set: the
+        // `shell` enum is the proof, since it is derived from
+        // `ShellSurfaceKind::ALL` in one place only.
+        assert_eq!(props["shell"]["enum"], json!(cli::shell_kind_names()));
+        assert!(props["app"].is_object() && props["pid"].is_object());
+        // And none of them became required, so a plain capture is still a
+        // call with no arguments at all.
+        assert_eq!(schema["required"], json!([]));
+    }
+
+    #[test]
+    fn the_screenshot_description_states_what_a_model_would_otherwise_probe_for() {
+        let description = tool_definition("screenshot")["description"]
+            .as_str()
+            .expect("a description is a string")
+            .to_string();
+        // Annotations come from the tree, so an app without one gets none.
+        assert!(
+            description.contains("no accessibility tree gets no annotations"),
+            "{description}"
+        );
+        // The tag format, and that its number is the `:nth(n)` argument.
+        assert!(
+            description.contains("`B7` is the seventh match"),
+            "{description}"
+        );
+        assert!(description.contains(":nth(n)"), "{description}");
+        assert!(description.contains("legend[i].selector"), "{description}");
+        // The cap, and the field that reports when it bit.
+        assert!(
+            description.contains(&format!("At most {} elements", crate::MAX_ANNOTATIONS)),
+            "{description}"
+        );
+        assert!(description.contains("`truncated` counts"), "{description}");
+        // And that a target is not silently ignored without `annotate`. The
+        // handler is held to that promise by
+        // `a_target_without_annotate_is_refused_rather_than_captured_full_screen`.
+        assert!(
+            description.contains("A target passed without `annotate` is refused"),
+            "{description}"
+        );
+    }
+
+    #[test]
+    fn annotating_without_a_target_says_which_arguments_fix_it() {
+        let err = tool_screenshot(&args(json!({ "annotate": ["button"] })))
+            .expect_err("selectors need something to resolve against");
+        let msg = err.to_string();
+        assert!(msg.contains("annotate"), "{msg}");
+        for key in ["\"app\"", "\"pid\"", "\"shell\""] {
+            assert!(msg.contains(key), "{key} must be offered: {msg}");
+        }
+        // The CLI's version of this names `--app`; no flag exists here.
+        assert!(!msg.contains("--"), "no flags on this surface: {msg}");
+    }
+
+    #[test]
+    fn a_target_without_annotate_is_refused_rather_than_captured_full_screen() {
+        // Each of these used to return a full-screen capture and report `ok`,
+        // so a model could not tell that its target had done nothing. The
+        // refusal happens before any capture, which is why this runs headless.
+        for (arguments, named) in [
+            (json!({ "app": "Calculator" }), vec!["\"app\""]),
+            (json!({ "pid": 42 }), vec!["\"pid\""]),
+            (json!({ "shell": "taskbar" }), vec!["\"shell\""]),
+            // This one also contradicted the `shell` property's own promise
+            // that passing it together with `app` is refused.
+            (
+                json!({ "app": "Calculator", "shell": "taskbar" }),
+                vec!["\"app\"", "\"shell\""],
+            ),
+            (
+                json!({ "app": "Calculator", "x": 0, "y": 0, "width": 4, "height": 4 }),
+                vec!["\"app\""],
+            ),
+            // An empty `annotate` is the plain-capture path too, so it is
+            // refused for the same reason an absent one is.
+            (json!({ "annotate": [], "pid": 42 }), vec!["\"pid\""]),
+        ] {
+            let err = tool_screenshot(&args(arguments.clone()))
+                .expect_err(&format!("{arguments} must be refused"));
+            assert!(matches!(err, CliError::Usage(_)), "{arguments}: {err}");
+            let msg = err.to_string();
+            for key in named {
+                assert!(msg.contains(key), "{arguments}: {key} unnamed in {msg}");
+            }
+            // And the answer names both ways out.
+            assert!(msg.contains("annotate"), "{arguments}: {msg}");
+            assert!(msg.contains("plain capture"), "{arguments}: {msg}");
+        }
+    }
+
+    #[test]
+    fn annotate_entries_must_be_non_empty_selector_strings() {
+        for (arguments, expected) in [
+            (json!({ "annotate": [""] }), "must not be empty"),
+            (json!({ "annotate": [7] }), "selector strings"),
+            (json!({ "annotate": "button" }), "must be an array"),
+        ] {
+            let err = annotate_selectors(&args(arguments.clone()))
+                .expect_err(&format!("{arguments} must be refused"));
+            assert!(err.to_string().contains(expected), "{arguments}: {err}");
+        }
+        // The absent and empty forms both mean "no annotation", which is the
+        // plain capture path.
+        assert!(annotate_selectors(&args(json!({}))).unwrap().is_empty());
+        assert!(annotate_selectors(&args(json!({ "annotate": [] })))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_bad_region_is_refused_before_the_annotation_target_is_resolved() {
+        // Both are wrong here. The region is read first, so the answer names
+        // the argument the caller can fix without a tree read having happened.
+        let err = tool_screenshot(&args(json!({
+            "x": 0, "y": 0, "width": 10, "annotate": ["button"], "pid": 1,
+        })))
+        .expect_err("a partial region is still a partial region");
+        assert!(err.to_string().contains("height"), "{err}");
+    }
+
+    #[test]
+    fn a_plain_capture_summary_keeps_exactly_the_fields_it_always_had() {
+        // The unannotated result is byte-identical to what it was before
+        // annotation existed; `legend` and friends appear only with
+        // `annotate`, which is what `screenshot_description` promises.
+        let shot = crate::Screenshot::new(4, 2, vec![0; 4 * 2 * 4], 2.0);
+        let summary = capture_summary(&shot, &[0u8; 11]);
+        assert_eq!(
+            Value::Object(summary),
+            json!({ "width": 4, "height": 2, "scale": 2.0, "bytes": 11 })
+        );
+    }
+
+    #[test]
+    fn the_legend_is_serialized_from_the_shared_types() {
+        // One shape for the CLI's `--legend json`, this result, and the
+        // bindings — asserted here so a hand-built second shape cannot creep
+        // back in.
+        let entry = crate::LegendEntry::new(
+            2,
+            7,
+            "button:nth(7)",
+            "button",
+            Some("OK".into()),
+            Rect {
+                x: 1,
+                y: 2,
+                width: 3,
+                height: 4,
+            },
+            [0, 114, 178],
+        );
+        let encoded = legend_json("legend", &vec![entry]).expect("a legend serializes");
+        assert_eq!(encoded[0]["tag"], "B7");
+        assert_eq!(encoded[0]["selector"], "button:nth(7)");
+        assert_eq!(encoded[0]["color"], json!([0, 114, 178]));
+
+        let omission = crate::Omission::new(
+            "button:nth(9)",
+            "button",
+            None,
+            crate::OmissionReason::OutsideCapture,
+        );
+        let encoded = legend_json("omitted", &vec![omission]).expect("an omission serializes");
+        assert_eq!(encoded[0]["reason"], "outside_capture");
     }
 
     #[test]

@@ -81,6 +81,8 @@ combinators?
 compat
 dataclass
 deduplicated
+downscaled
+downscaling
 enum
 env
 fuzzers?

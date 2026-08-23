@@ -40,7 +40,10 @@ export type {
   ClickOptions,
   DragOptions,
   EventTypeName,
+  LegendEntry,
   MouseButtonName,
+  Omission,
+  OmissionReasonName,
   Rect,
   ShellSurfaceKindName,
 } from './native.js';
@@ -421,6 +424,21 @@ export interface ScreenshotOptions {
   element?: Element;
   /** Capture an explicit sub-rectangle in logical screen coordinates. */
   region?: Rect;
+  /**
+   * Draw a numbered box over every element each locator matches, and fill in
+   * `legend` / `omitted` / `truncated` on the result.
+   *
+   * Each entry is one group, with its own colour and tag letter, and must be
+   * scoped to an application — `app.locator('button')`. An entry that is
+   * neither a `Locator` nor a string throws `InvalidActionDataError`.
+   *
+   * A rootless group throws `InvalidSelectorError`. A bare string builds one,
+   * exactly as {@link locator} does, and a rootless search runs once per
+   * application and concatenates — so each entry's `<selector>:nth(n)` would
+   * count within one application while the legend counts across all of them,
+   * and the entry would name a different element than the box it labels.
+   */
+  annotate?: Array<Locator | string>;
 }
 
 /**
@@ -435,6 +453,13 @@ export interface ScreenshotOptions {
  * const full = await screenshot();
  * const region = await screenshot({ region: { x: 0, y: 0, width: 100, height: 100 } });
  * const el = await screenshot({ element: await locator('button').element() });
+ *
+ * // Annotated: boxes over every button in one application, plus a legend
+ * // that maps each tag back to a selector. The group is scoped to `app`
+ * // because a rootless one throws `InvalidSelectorError`.
+ * const app = await App.byName('Calculator');
+ * const shot = await screenshot({ annotate: [app.locator('button')] });
+ * for (const entry of shot.legend) console.log(entry.tag, entry.selector);
  * ```
  */
 export declare function screenshot(options?: ScreenshotOptions): Promise<Screenshot>;
