@@ -150,7 +150,7 @@ features:
       (rust_core).
 
   mcp:
-    description: "MCP stdio server: framing, dual-era handshake, tool schemas, tool contracts, and identical behaviour from all three CLI launchers"
+    description: "MCP stdio server: framing, dual-era handshake, tool schemas, tool contracts, event subscriptions, and identical behaviour from all three CLI launchers"
     per_app: false
     tested_on: [qt, gtk, cocoa, tauri, electron, egui, winforms, wpf]
     notes: >
@@ -175,6 +175,16 @@ features:
       matched several rather than acting on the first, `find` reporting the
       near misses it did see, and `set-numeric-value` moving a slider in one
       call. Each skips on an app that lacks the widget it needs.
+      The `events_start` / `events_poll` / `events_stop` trio is covered the
+      same way, split by what is platform-independent. The handle lifecycle —
+      a handle is issued, resolves while open, and reports `subscription_expired`
+      once stopped — asserts strictly on every cell. Whether an event actually
+      *arrives* after an action does not: bridge delivery for programmatic
+      actions is unreliable on several app/platform combinations (see the
+      per-combo markers in tests/suites/python/test_events.py), so that one
+      test carries a non-strict xfail. Buffer bounds, drop accounting and
+      expiry are unit-tested in xa11y/src/mcp/events.rs, which needs no
+      display: the registry is driven by a plain channel.
       Separately, tests/mcp_client/ drives the server with the official MCP
       Python SDK in both protocol eras, on ubuntu-latest only (the `mcp-client`
       CI job). It is not per-app and needs no display: the server is

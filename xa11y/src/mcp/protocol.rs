@@ -101,6 +101,11 @@ matches several is refused rather than applied to the first, and no retry loop \
 of your own is needed. Its `ok: true` means the application accepted the call, \
 not that anything changed — confirm by reading the tree again.
 
+To watch what an application does rather than poll its tree, \
+`events_start` returns a handle, `events_poll` drains buffered events, and \
+`events_stop` closes it. Start the subscription before the action you want to \
+observe.
+
 The input and screenshot tools work in screen coordinates only. Get those from \
 `find`, which returns each match's `bounds` and `center`.
 

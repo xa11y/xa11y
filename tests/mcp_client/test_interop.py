@@ -40,6 +40,9 @@ EXPECTED_TOOLS = [
     "key",
     "type",
     "screenshot",
+    "events_start",
+    "events_poll",
+    "events_stop",
 ]
 
 # Every `ShellSurfaceKind` spelling, as `shell` reports them and the `shell`
@@ -436,6 +439,63 @@ def test_a_target_without_annotate_is_refused_rather_than_captured_full_screen(r
             assert key in message, f"{arguments}: {key} unnamed in {message}"
         assert "annotate" in message, message
         assert "plain capture" in message, message
+
+
+# ── Event subscriptions ──────────────────────────────────────────────────────
+
+
+def test_the_event_tools_round_trip_a_handle_through_a_real_client(run_client):
+    """The stateful-tools shape end to end, with no display and no app.
+
+    `events_start` cannot open a subscription here — there is nothing to
+    watch — so this drives the half that does not need one: an id the server
+    never issued has to come back as a tool error the model can act on, with
+    the open handles named.
+    """
+    result = run_client(
+        lambda c: c.call_tool("events_poll", {"subscription_id": "sub_1"})
+    )
+    assert result.is_error is True
+    structured = result.structured_content
+    assert structured["kind"] in {"subscription_expired", "subscription_not_found"}
+    assert structured["subscription_id"] == "sub_1"
+    assert structured["live_subscriptions"] == []
+
+
+def test_the_event_tools_declare_the_arguments_a_client_validates(run_client):
+    start = _tool(run_client, "events_start")
+    assert "shell" not in start.input_schema["properties"], (
+        "events are subscribed per application"
+    )
+    kinds = start.input_schema["properties"]["kinds"]
+    assert "focus_changed" in kinds["items"]["enum"]
+
+    poll = _tool(run_client, "events_poll")
+    assert poll.input_schema["required"] == ["subscription_id"]
+    assert poll.input_schema["properties"]["timeout_ms"]["maximum"] == 15000
+
+
+def test_events_start_states_its_handles_retention(run_client):
+    """The spec asks a stateful tool to say how long its handle lives."""
+    description = _tool(run_client, "events_start").description
+    assert "reclaimed after" in description
+    assert "subscription_expired" in description
+
+
+def test_a_poll_with_a_bad_timeout_is_refused_rather_than_clamped(run_client):
+    result = run_client(
+        lambda c: c.call_tool(
+            "events_poll", {"subscription_id": "sub_1", "timeout_ms": 600000}
+        )
+    )
+    assert result.is_error is True
+    assert result.structured_content["kind"] == "invalid_arguments"
+
+
+def test_the_instructions_mention_watching_events(run_client):
+    """A model that never learns the trio exists polls the tree instead."""
+    instructions = run_client(lambda c: _identity(c.instructions))
+    assert "events_start" in instructions
 
 
 def test_the_instructions_mention_the_shell_surfaces(run_client):

@@ -147,7 +147,7 @@ files = [
 
 [[types.variant_coverage]]
 type = "EventKind"
-reason = "Each variant maps to a distinct event-type string in both bindings and in the CLI's `xa11y watch` output; an unmapped one would print as 'unknown'."
+reason = "Each variant maps to a distinct event-type string in both bindings and in the CLI's `xa11y watch` output; an unmapped one would print as 'unknown'. `xa11y/src/cli.rs` carries two lists that must grow together: `format_event_kind`'s arms and `event_kind_names`' KNOWN array, which is what MCP's events_start `kinds` filter validates against."
 files = [
     "xa11y-python/src/lib.rs",
     "xa11y-js/src/types.rs",
@@ -231,10 +231,11 @@ files = [
 
 [[types.variant_coverage]]
 type = "StateFlag"
-reason = "Each variant maps to a distinct state-name string in both bindings; an unmapped one would surface as 'unknown'."
+reason = "Each variant maps to a distinct state-name string in both bindings and in the CLI's `format_state_flag`, which MCP's events_poll reports as `state_flag`; an unmapped one would surface as 'unknown'."
 files = [
     "xa11y-python/src/lib.rs",
     "xa11y-js/src/types.rs",
+    "xa11y/src/cli.rs",
 ]
 
 # Types with no binding class of their own, whose members surface on another

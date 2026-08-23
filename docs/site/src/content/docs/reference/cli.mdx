@@ -358,6 +358,9 @@ gives it selectors to resolve.
 | `key` | `key`, `held` |
 | `type` | `text` |
 | `screenshot` | `x`, `y`, `width`, `height`, `annotate`, `app`, `pid`, `shell` |
+| `events_start` | `app`, `pid`, `kinds` |
+| `events_poll` | `subscription_id`, `max`, `timeout_ms` |
+| `events_stop` | `subscription_id` |
 
 `action` accepts the same verbs as [`xa11y action`](#xa11y-action). `key`
 accepts the same key names as [`xa11y key`](#input-simulation). Selectors are
@@ -397,8 +400,33 @@ and it is not a capability list: a slider that advertises nothing still
 increments. Pick the verb from the element's own properties — `numeric_value`
 for the value verbs, an `editable` state for the text verbs.
 
-Streaming events has no tool. A tool call that never returns would hang the
-client, so `xa11y events` has no MCP counterpart yet.
+### Events
+
+[`xa11y events`](#xa11y-events) blocks for as long as you watch, and a tool
+call that never returns hangs the client. The MCP counterpart is a trio
+instead: `events_start` returns a `subscription_id`, `events_poll` drains what
+has arrived, and `events_stop` closes it.
+
+Subscriptions are per application, so `events_start` takes `app` or `pid` and
+has no `shell` argument. `kinds` filters what gets buffered; the names are the
+ones in [Events](/reference/events/).
+
+Events buffer from the moment `events_start` returns, so a subscription has to
+exist before the action it is meant to observe. At most 1024 are held, and past
+that the oldest are evicted: `dropped` in each poll result counts what was lost
+since the previous poll, `dropped_total` over the subscription's life, and each
+event's `sequence` makes the gap visible in the events themselves.
+
+`events_poll` returns at most `max` events (100 by default) and does not block
+by default. A `timeout_ms` up to 15000 waits for the first event and returns as
+soon as one lands. `live: false` means the source is gone — the application
+exited, or the platform dropped the subscription — so nothing further can
+arrive.
+
+A handle lives in the server process and no longer. It stops resolving once
+`events_stop` closes it, or after five minutes without a poll. Either way the
+next call naming it is a `subscription_expired` failure, which is a different
+kind from the `subscription_not_found` an id that was never issued gets.
 
 ### Results
 

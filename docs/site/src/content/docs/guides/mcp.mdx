@@ -226,9 +226,43 @@ that matched too many lists what it matched, which is usually enough to fix the
 selector on the next call. See
 [Errors and diagnosis](/explanation/errors-and-diagnosis/).
 
+## Watch what an application does
+
+Reading the tree twice tells you what changed, not when. `events_start` opens
+a subscription to an application's accessibility events and returns a handle:
+
+```json
+{
+  "name": "events_start",
+  "arguments": { "app": "Calculator", "kinds": ["focus_changed", "value_changed"] }
+}
+```
+
+Events buffer from the moment that call returns, so open the subscription
+before the action you want to observe, act, then drain:
+
+```json
+{ "name": "events_poll", "arguments": { "subscription_id": "sub_1" } }
+```
+
+A poll returns the buffered events oldest first, each with its `kind`, a
+`sequence`, `at_ms` since the subscription started, and the `target` element in
+the shape `find` returns. It does not block by default, so an empty `events`
+means nothing has happened yet. Pass `timeout_ms` (up to 15000) to wait for the
+first event when you are expecting a specific one.
+
+Two fields say what the events cannot. `dropped` counts events lost to the
+buffer filling up since the previous poll: poll more often, narrow `kinds`, or
+accept the gap. `live: false` means the application is gone and no further
+event can arrive.
+
+Call `events_stop` when you are done. A subscription nobody polls for five
+minutes is reclaimed, and its handle then comes back as a
+`subscription_expired` failure.
+
 ## What is not there yet
 
-Event streaming has no tool. `xa11y events` blocks for as long as you watch,
-and a tool call that never returns hangs the client, so it needs a different
-shape — a handle from a start call, drained by a poll call. Until then, watch
-events from the [CLI](/reference/cli/#xa11y-events) or the library.
+Revision `2026-07-28` has `subscriptions/listen`, where the server pushes
+notifications instead of the model polling for them. That is the better shape
+for events, and the handle trio above is what works on every revision this
+server speaks, including the ones that have no such mechanism.

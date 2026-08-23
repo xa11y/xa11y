@@ -20,9 +20,10 @@
 use serde_json::{json, Map, Value};
 
 use super::base64;
+use super::events::{Registry, BUFFER_CAPACITY, EXPIRY};
 use crate::cli::{
-    self, parse_button, parse_held, parse_key_name, resolve_target, CliError, CliResult, Opts,
-    Target, ACTIONS_REQUIRING_VALUE, ACTION_NAMES,
+    self, parse_button, parse_held, parse_key_name, resolve_app, resolve_target, CliError,
+    CliResult, Opts, Target, ACTIONS_REQUIRING_VALUE, ACTION_NAMES,
 };
 use crate::{
     App, AppExt, ClickOptions, ClickTarget, DragOptions, Element, Locator, Rect, ScrollDelta,
@@ -39,6 +40,10 @@ const FIND_DEFAULT_LIMIT: usize = 50;
 const FIND_MAX_LIMIT: usize = 500;
 /// Longest candidate list carried in a failure's diagnosis.
 const MAX_DIAGNOSIS_CANDIDATES: usize = 20;
+/// Events returned by one `events_poll` when the caller does not ask.
+const EVENTS_DEFAULT_MAX: usize = 100;
+/// Ceiling on `events_poll`'s `max`, so one poll cannot dump a full buffer.
+const EVENTS_MAX_MAX: usize = 500;
 
 /// Inclusive bounds for one integer tool argument.
 ///
@@ -87,6 +92,20 @@ const DRAG_DURATION_MS: Bounds = Bounds {
 const SCREENSHOT_EXTENT: Bounds = Bounds {
     min: 1,
     max: u32::MAX as i64,
+};
+/// `events_poll`'s `max`. Zero would report no events while draining none.
+const EVENTS_MAX: Bounds = Bounds {
+    min: 1,
+    max: EVENTS_MAX_MAX as i64,
+};
+/// `events_poll`'s `timeout_ms`.
+///
+/// The ceiling is well under any typical client request timeout, and it has a
+/// second reason to stay low: the stdio session loop handles one message at a
+/// time, so a blocking poll blocks every other tool call for its duration.
+const EVENTS_TIMEOUT_MS: Bounds = Bounds {
+    min: 0,
+    max: 15_000,
 };
 
 impl Bounds {
@@ -232,7 +251,22 @@ pub(crate) trait ToolHost {
 }
 
 /// The real tool host, backed by the platform accessibility provider.
-pub(crate) struct Xa11yTools;
+///
+/// Holds the session's event subscriptions. Everything else here is
+/// stateless, and this is state only because MCP has no session of its own to
+/// hang a live subscription on — see [`super::events`]. Dropping the host
+/// stops every drainer and cancels every platform subscription.
+pub(crate) struct Xa11yTools {
+    events: Registry,
+}
+
+impl Xa11yTools {
+    pub(crate) fn new() -> Self {
+        Self {
+            events: Registry::new(),
+        }
+    }
+}
 
 /// Every tool name, in list order.
 const TOOL_NAMES: &[&str] = &[
@@ -248,6 +282,9 @@ const TOOL_NAMES: &[&str] = &[
     "key",
     "type",
     "screenshot",
+    "events_start",
+    "events_poll",
+    "events_stop",
 ];
 
 impl ToolHost for Xa11yTools {
@@ -276,6 +313,9 @@ impl ToolHost for Xa11yTools {
             "key" => tool_key(args),
             "type" => tool_type(args),
             "screenshot" => tool_screenshot(args),
+            "events_start" => tool_events_start(&self.events, args),
+            "events_poll" => tool_events_poll(&self.events, args),
+            "events_stop" => tool_events_stop(&self.events, args),
             // Unreachable through `Session`, which checks `has_tool` first.
             // Kept as a real error rather than an `unreachable!` so a future
             // caller that skips the check gets a diagnosis, not a panic
@@ -684,6 +724,51 @@ fn tool_definition(name: &str) -> Value {
                 object_schema(props, &[]),
             )
         }
+        "events_start" => tool(
+            "events_start",
+            "Start watching events",
+            &events_start_description(),
+            object_schema(events_start_properties(), &[]),
+        ),
+        "events_poll" => {
+            let mut props = subscription_id_property();
+            props.insert(
+                "max".into(),
+                EVENTS_MAX.property(format!(
+                    "Most events to return in one call. Default {EVENTS_DEFAULT_MAX}. \
+                     `buffered` in the result says how many are still waiting and \
+                     `truncated` says whether any were."
+                )),
+            );
+            props.insert(
+                "timeout_ms".into(),
+                EVENTS_TIMEOUT_MS.property(
+                    "How long to wait for the first event when the buffer is empty. \
+                     Default 0, which drains whatever has arrived and returns straight \
+                     away — poll again rather than holding a call open unless you are \
+                     waiting for a specific event. A blocking poll returns as soon as \
+                     one event lands, not after the whole timeout, and it blocks every \
+                     other tool call for as long as it waits."
+                        .into(),
+                ),
+            );
+            tool(
+                "events_poll",
+                "Poll buffered events",
+                &events_poll_description(),
+                object_schema(props, &["subscription_id"]),
+            )
+        }
+        "events_stop" => tool(
+            "events_stop",
+            "Stop watching events",
+            "Close a subscription and release the underlying platform subscription. \
+             Reports how many events it delivered, how many it dropped, and how many \
+             were still buffered when it closed. Stopping a subscription you are done \
+             with is worth doing rather than letting it expire: until it does, the \
+             application keeps delivering events into a buffer nobody reads.",
+            object_schema(subscription_id_property(), &["subscription_id"]),
+        ),
         // `TOOL_NAMES` is the single source of truth and every entry has an
         // arm above; an unnamed tool would be a programming error, so it
         // surfaces as one rather than shipping an empty definition.
@@ -693,6 +778,104 @@ fn tool_definition(name: &str) -> Value {
             "inputSchema": { "type": "object" },
         }),
     }
+}
+
+/// `events_start`'s arguments: an application, and an optional kind filter.
+///
+/// Written out rather than taken from [`app_target_properties`] because
+/// `shell` is not among them — accessibility events are subscribed per
+/// application, exactly as `xa11y events` refuses `--shell` — and an argument
+/// a schema advertises but a handler refuses is worse than one that is absent.
+fn events_start_properties() -> Map<String, Value> {
+    let mut props = Map::new();
+    props.insert(
+        "app".into(),
+        json!({
+            "type": "string",
+            "description": "Application name, matched exactly and case-sensitively. \
+                            Take the spelling from the `apps` tool rather than \
+                            guessing it. Give this or `pid`.",
+        }),
+    );
+    props.insert(
+        "pid".into(),
+        PID.property("Process id of the application to watch. Give this or `app`.".into()),
+    );
+    props.insert(
+        "kinds".into(),
+        json!({
+            "type": "array",
+            "items": { "type": "string", "enum": cli::event_kind_names() },
+            "description": "Kinds to buffer, e.g. [\"focus_changed\", \"value_changed\"]. \
+                            Omit for every kind. Filtering happens before buffering, so \
+                            on a chatty application it is what keeps the events you \
+                            care about from being evicted by ones you do not.",
+        }),
+    );
+    props
+}
+
+/// The `subscription_id` argument, shared by `events_poll` and `events_stop`.
+fn subscription_id_property() -> Map<String, Value> {
+    let mut props = Map::new();
+    props.insert(
+        "subscription_id".into(),
+        json!({
+            "type": "string",
+            "description": "Handle returned by `events_start`.",
+        }),
+    );
+    props
+}
+
+/// The `events_start` tool's description.
+///
+/// Built rather than written as a literal because it states the retention
+/// window and the buffer size, both of which are constants in
+/// [`super::events`] — a description naming a different number than the
+/// registry enforces is the drift this file exists to avoid. The
+/// specification asks a stateful tool to state its handle's retention here,
+/// which is the only place a model reads before calling.
+fn events_start_description() -> String {
+    format!(
+        "Start watching an application's accessibility events — focus moves, value \
+         and state changes, windows opening, selections, announcements. Returns a \
+         `subscription_id` to pass to `events_poll` and `events_stop`.\n\n\
+         Watching is per application: there is no `shell` argument, because \
+         accessibility events are delivered by an application's own \
+         subscription.\n\n\
+         Events are buffered from the moment this returns, so start the \
+         subscription *before* the action you want to observe, then act, then \
+         poll. Up to {BUFFER_CAPACITY} events are held; past that the oldest are \
+         evicted and every poll reports how many were lost, so a gap is always \
+         visible rather than silent.\n\n\
+         The handle lives in this server process and no longer: it is reclaimed \
+         after {} minutes without a poll, and a reclaimed handle comes back from \
+         `events_poll` as a `subscription_expired` failure. Call `events_stop` when \
+         you are done.",
+        EXPIRY.as_secs() / 60,
+    )
+}
+
+/// The `events_poll` tool's description.
+fn events_poll_description() -> String {
+    format!(
+        "Take buffered events from a subscription, oldest first. Returns at most \
+         `max` of them ({EVENTS_DEFAULT_MAX} by default), and by default does not \
+         block: an empty `events` means nothing has happened yet, not that the \
+         subscription is broken.\n\n\
+         Each event carries a `kind`, a `sequence` (monotonic, so a gap is exactly \
+         what was dropped), `at_ms` since the subscription started, and the `target` \
+         element in the same shape `find` returns — bounds, states and all. A \
+         `state_changed` event also carries `state_flag` and `state_value`.\n\n\
+         Two fields say what the events alone cannot. `dropped` counts events lost \
+         to buffer eviction since the previous poll — poll more often, narrow \
+         `kinds`, or accept the gap. `live: false` means the source is gone (the \
+         application exited, or the platform dropped the subscription): drain what \
+         is left, then stop polling, because nothing further can arrive.\n\n\
+         An event is a snapshot from when it fired. Read the tree again to see the \
+         UI as it is now."
+    )
 }
 
 /// The `screenshot` tool's description.
@@ -914,6 +1097,20 @@ fn quoted_list(names: &[&str]) -> String {
     }
 }
 
+/// Read the `pid` argument, range-checked and narrowed.
+fn pid_arg(args: &Value) -> CliResult<Option<u32>> {
+    match opt_int(args, "pid")? {
+        None => Ok(None),
+        Some(v) => {
+            let v = PID.check("pid", v)?;
+            // `PID` is `1..=u32::MAX`, so the conversion cannot fail.
+            Ok(Some(u32::try_from(v).map_err(|_| {
+                usage(format!("\"pid\" is not a valid process id: {v}"))
+            })?))
+        }
+    }
+}
+
 /// Resolve the target — an application or a shell surface — from `app` /
 /// `pid` / `shell`, through the CLI's own resolver so name matching, kind
 /// parsing and the ambiguity refusal stay identical on both surfaces.
@@ -925,20 +1122,9 @@ fn quoted_list(names: &[&str]) -> String {
 /// application, and a kind to a surface on screen, stays in `cli`, so the two
 /// surfaces cannot drift on what `app` or `shell` means.
 fn target(args: &Value) -> CliResult<Target> {
-    let pid = match opt_int(args, "pid")? {
-        None => None,
-        Some(v) => {
-            let v = PID.check("pid", v)?;
-            // `PID` is `1..=u32::MAX`, so the conversion cannot fail.
-            Some(
-                u32::try_from(v)
-                    .map_err(|_| usage(format!("\"pid\" is not a valid process id: {v}")))?,
-            )
-        }
-    };
     let opts = Opts {
         app: opt_str(args, "app")?.map(str::to_string),
-        pid,
+        pid: pid_arg(args)?,
         shell: opt_str(args, "shell")?.map(str::to_string),
         ..Default::default()
     };
@@ -1453,6 +1639,105 @@ fn tool_screenshot(args: &Value) -> CliResult<ToolOutput> {
 ///
 /// One builder for both paths, so the plain capture cannot drift from the
 /// annotated one on what it says about the image.
+fn tool_events_start(registry: &Registry, args: &Value) -> CliResult<ToolOutput> {
+    // Parse everything before subscribing, so a bad `kinds` entry cannot
+    // leave a live platform subscription behind that nobody holds a handle to.
+    let kinds = event_kinds(args)?;
+    let app = events_app(args)?;
+    let sub = app.subscribe()?;
+    Ok(ToolOutput::json(
+        registry.start(&app.name, app.pid, sub, kinds)?,
+    ))
+}
+
+fn tool_events_poll(registry: &Registry, args: &Value) -> CliResult<ToolOutput> {
+    let id = req_str(args, "subscription_id")?;
+    let max = opt_usize(args, "max", EVENTS_DEFAULT_MAX, EVENTS_MAX)?;
+    let timeout_ms = opt_bounded(args, "timeout_ms", 0, EVENTS_TIMEOUT_MS)?;
+    // `EVENTS_TIMEOUT_MS.min` is 0, so the conversion cannot fail.
+    let timeout = std::time::Duration::from_millis(
+        u64::try_from(timeout_ms)
+            .map_err(|_| usage(format!("\"timeout_ms\" must not be negative: {timeout_ms}")))?,
+    );
+    Ok(ToolOutput::json(registry.poll(id, max, timeout)?))
+}
+
+fn tool_events_stop(registry: &Registry, args: &Value) -> CliResult<ToolOutput> {
+    let id = req_str(args, "subscription_id")?;
+    Ok(ToolOutput::json(registry.stop(id)?))
+}
+
+/// Resolve the application to watch.
+///
+/// Separate from [`target`] because there is no shell surface to resolve:
+/// events come from an application's own subscription. `shell` is refused by
+/// name rather than by `additionalProperties`, so a client that does not
+/// validate against the schema gets the reason instead of a silent
+/// full-application subscription — the same answer `xa11y events` gives
+/// `--shell`.
+fn events_app(args: &Value) -> CliResult<crate::App> {
+    if opt_str(args, "shell")?.is_some() {
+        return Err(usage(
+            "\"shell\" is not a target for the event tools: accessibility events are \
+             subscribed per application, and a shell surface has no subscription of \
+             its own. Give \"app\" or \"pid\"",
+        ));
+    }
+    let opts = Opts {
+        app: opt_str(args, "app")?.map(str::to_string),
+        pid: pid_arg(args)?,
+        ..Default::default()
+    };
+    if opts.app.is_none() && opts.pid.is_none() {
+        return Err(usage(
+            "specify \"app\" (application name, matched exactly) or \"pid\" (process \
+             id); the `apps` tool lists both for every running application",
+        ));
+    }
+    resolve_app(&opts)
+}
+
+/// The `kinds` filter, validated against the names events actually report.
+///
+/// An unknown name is refused rather than accepted-and-never-matched: a
+/// filter that silently matches nothing looks exactly like an application
+/// that emits nothing, and the model has no way to tell which it got.
+fn event_kinds(args: &Value) -> CliResult<Option<Vec<String>>> {
+    let known = cli::event_kind_names();
+    match args.get("kinds") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Array(items)) if items.is_empty() => Err(usage(
+            "\"kinds\" must name at least one event kind; omit it to receive every kind",
+        )),
+        Some(Value::Array(items)) => {
+            let mut kinds: Vec<String> = Vec::with_capacity(items.len());
+            for item in items {
+                let name = match item {
+                    Value::String(name) if !name.is_empty() => name,
+                    _ => {
+                        return Err(usage(
+                            "each entry in \"kinds\" must be a non-empty event-kind name",
+                        ))
+                    }
+                };
+                if !known.contains(&name.as_str()) {
+                    return Err(usage(format!(
+                        "unknown event kind: \"{name}\" (expected one of {})",
+                        known.join(", ")
+                    )));
+                }
+                if !kinds.iter().any(|k| k == name) {
+                    kinds.push(name.clone());
+                }
+            }
+            Ok(Some(kinds))
+        }
+        Some(_) => Err(usage(
+            "\"kinds\" must be an array of event-kind names, e.g. [\"focus_changed\"]",
+        )),
+    }
+}
+
 fn capture_summary(shot: &crate::Screenshot, png: &[u8]) -> Map<String, Value> {
     let mut out = Map::new();
     out.insert("width".into(), json!(shot.width));
@@ -1486,7 +1771,7 @@ fn legend_json<T: serde::Serialize>(what: &str, value: &T) -> CliResult<Value> {
 /// pointer), neither of which means anything to a model and both of which
 /// would dominate the payload. Absent fields are omitted rather than sent as
 /// nulls, for the same reason.
-fn element_data_json(data: &crate::ElementData) -> Value {
+pub(super) fn element_data_json(data: &crate::ElementData) -> Value {
     let mut node = Map::new();
     node.insert("role".into(), json!(data.role.to_snake_case()));
     insert_some(&mut node, "name", data.name.as_deref().map(Value::from));
@@ -1619,6 +1904,11 @@ pub(crate) fn describe_failure(tool: &str, err: &CliError) -> (String, Value) {
             structured.insert("shell_kind".into(), json!(kind));
             structured.insert("diagnosis".into(), diagnosis_json(diagnosis));
         }
+        CliError::NoSubscription { id, expired, live } => {
+            structured.insert("subscription_id".into(), json!(id));
+            structured.insert("expired".into(), json!(expired));
+            structured.insert("live_subscriptions".into(), json!(live));
+        }
         CliError::Usage(_) | CliError::NotFound(_) => {}
     }
     (text, Value::Object(structured))
@@ -1679,6 +1969,11 @@ fn failure_kind(err: &CliError) -> &'static str {
         CliError::NotFound(_) => return "no_match",
         CliError::Ambiguous { .. } => return "ambiguous_selector",
         CliError::AmbiguousShellSurface { .. } => return "ambiguous_shell_surface",
+        // Two tags, not one: an expired handle means "start another
+        // subscription", an unknown one means "the id is wrong", and a model
+        // that cannot tell them apart retries the wrong one.
+        CliError::NoSubscription { expired: true, .. } => return "subscription_expired",
+        CliError::NoSubscription { expired: false, .. } => return "subscription_not_found",
         CliError::Xa11y(inner) => inner,
     };
     match inner {
@@ -1761,7 +2056,7 @@ mod tests {
 
     #[test]
     fn every_listed_tool_has_a_definition_and_is_callable() {
-        let host = Xa11yTools;
+        let host = Xa11yTools::new();
         let defs = host.list();
         assert_eq!(defs.len(), TOOL_NAMES.len());
         for def in &defs {
@@ -1906,6 +2201,8 @@ mod tests {
             ("limit", FIND_DEFAULT_LIMIT as i64, FIND_LIMIT),
             ("count", 1, CLICK_COUNT),
             ("duration_ms", 150, DRAG_DURATION_MS),
+            ("max", EVENTS_DEFAULT_MAX as i64, EVENTS_MAX),
+            ("timeout_ms", 0, EVENTS_TIMEOUT_MS),
         ] {
             assert!(
                 bounds.check(label, default).is_ok(),
@@ -2128,6 +2425,171 @@ mod tests {
         assert_eq!(encoded[0]["reason"], "outside_capture");
     }
 
+    // ── Event subscriptions ─────────────────────────────────────────────
+
+    #[test]
+    fn the_event_tools_are_a_trio_and_the_handle_ties_them_together() {
+        // The shape the specification's Stateful Tools guidance asks for:
+        // a creation tool hands out a handle, the others take it.
+        for name in ["events_poll", "events_stop"] {
+            let schema = tool_definition(name)["inputSchema"].clone();
+            assert_eq!(schema["required"], json!(["subscription_id"]));
+            assert!(
+                schema["properties"]["subscription_id"]["description"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("events_start"),
+                "{name} must say where its handle comes from"
+            );
+        }
+    }
+
+    #[test]
+    fn events_start_states_the_retention_the_registry_actually_enforces() {
+        // The specification asks a stateful tool to state its handle's
+        // retention, and a description naming a different number than the
+        // registry enforces is worse than one that says nothing.
+        let description = tool_definition("events_start")["description"]
+            .as_str()
+            .expect("a description")
+            .to_string();
+        assert!(
+            description.contains(&format!("{} minutes", EXPIRY.as_secs() / 60)),
+            "{description}"
+        );
+        assert!(
+            description.contains(&BUFFER_CAPACITY.to_string()),
+            "the buffer size a caller has to poll fast enough to stay inside: {description}"
+        );
+        assert!(
+            description.contains("*before* the action"),
+            "a subscription started after the click observes nothing: {description}"
+        );
+    }
+
+    #[test]
+    fn events_poll_says_what_an_empty_result_and_a_dropped_count_mean() {
+        let definition = tool_definition("events_poll");
+        let description = definition["description"].as_str().expect("a description");
+        assert!(
+            description.contains("does not block"),
+            "a model that expects a long poll by default waits for nothing: {description}"
+        );
+        assert!(
+            description.contains("dropped"),
+            "loss is only actionable if the caller knows the field exists: {description}"
+        );
+        assert!(
+            description.contains("live: false"),
+            "polling a dead stream forever is the failure mode this prevents: {description}"
+        );
+    }
+
+    #[test]
+    fn events_start_offers_no_shell_argument_and_says_why_when_one_arrives() {
+        // The schema is the first answer; the handler is the one a client that
+        // does not validate against it gets.
+        let props = tool_definition("events_start")["inputSchema"]["properties"].clone();
+        assert!(props.get("shell").is_none(), "{props}");
+
+        let err = tool_events_start(&Registry::new(), &args(json!({ "shell": "taskbar" })))
+            .expect_err("a shell surface has no subscription of its own");
+        assert!(
+            err.to_string().contains("per application"),
+            "must say why rather than reading as a misspelled argument: {err}"
+        );
+    }
+
+    #[test]
+    fn events_start_without_a_target_names_the_arguments_that_fix_it() {
+        let err = tool_events_start(&Registry::new(), &args(json!({})))
+            .expect_err("something has to be watched");
+        assert!(err.to_string().contains("\"app\""), "{err}");
+        assert!(err.to_string().contains("\"pid\""), "{err}");
+    }
+
+    #[test]
+    fn the_kinds_filter_advertises_exactly_the_names_events_report() {
+        let items =
+            tool_definition("events_start")["inputSchema"]["properties"]["kinds"]["items"].clone();
+        let advertised: Vec<String> = items["enum"]
+            .as_array()
+            .expect("the filter enumerates its names")
+            .iter()
+            .map(|v| v.as_str().unwrap_or_default().to_string())
+            .collect();
+        assert_eq!(advertised, cli::event_kind_names());
+    }
+
+    #[test]
+    fn an_unknown_event_kind_is_refused_with_the_ones_that_exist() {
+        // Accepting it would look exactly like an application that emits
+        // nothing, and the caller could not tell which it got.
+        let err = event_kinds(&args(json!({ "kinds": ["focus_change"] })))
+            .expect_err("a near-miss spelling is still a miss");
+        assert!(err.to_string().contains("focus_change"), "{err}");
+        assert!(err.to_string().contains("focus_changed"), "{err}");
+    }
+
+    #[test]
+    fn an_empty_kinds_list_is_refused_rather_than_read_as_no_filter() {
+        // `[]` reads as "no kinds at all", which would buffer nothing forever.
+        let err = event_kinds(&args(json!({ "kinds": [] }))).expect_err("must refuse");
+        assert!(err.to_string().contains("omit it"), "{err}");
+        assert_eq!(event_kinds(&args(json!({}))).unwrap(), None);
+    }
+
+    #[test]
+    fn a_repeated_kind_is_kept_once() {
+        let kinds = event_kinds(&args(
+            json!({ "kinds": ["focus_changed", "focus_changed"] }),
+        ))
+        .expect("a repeat is a caller's redundancy, not an error");
+        assert_eq!(kinds, Some(vec!["focus_changed".to_string()]));
+    }
+
+    #[test]
+    fn a_poll_needs_its_handle_and_range_checks_the_rest() {
+        let registry = Registry::new();
+        let err = tool_events_poll(&registry, &args(json!({}))).expect_err("must refuse");
+        assert!(err.to_string().contains("subscription_id"), "{err}");
+
+        let err = tool_events_poll(
+            &registry,
+            &args(json!({ "subscription_id": "sub_1", "timeout_ms": 60_000 })),
+        )
+        .expect_err("a timeout past the cap is refused, not silently clamped");
+        assert!(err.to_string().contains("15000"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_handle_is_a_fixable_tool_error_carrying_its_kind() {
+        let registry = Registry::new();
+        let err = tool_events_poll(&registry, &args(json!({ "subscription_id": "sub_7" })))
+            .expect_err("nothing was ever started");
+        assert_eq!(failure_kind(&err), "subscription_not_found");
+        let (_, structured) = describe_failure("events_poll", &err);
+        assert_eq!(structured["subscription_id"], json!("sub_7"));
+        assert_eq!(structured["expired"], json!(false));
+        assert_eq!(structured["live_subscriptions"], json!([]));
+    }
+
+    #[test]
+    fn an_expired_handle_is_a_different_kind_from_an_unknown_one() {
+        let err = CliError::NoSubscription {
+            id: "sub_1".into(),
+            expired: true,
+            live: vec!["sub_2".into()],
+        };
+        assert_eq!(failure_kind(&err), "subscription_expired");
+        let (text, structured) = describe_failure("events_poll", &err);
+        assert!(
+            text.contains("sub_2"),
+            "the open handles are the way out, so they belong in the message: {text}"
+        );
+        assert_eq!(structured["live_subscriptions"], json!(["sub_2"]));
+    }
+
     #[test]
     fn failure_kinds_cover_the_error_surface() {
         assert_eq!(
@@ -2138,6 +2600,14 @@ mod tests {
         assert_eq!(
             failure_kind(&CliError::Xa11y(crate::Error::NoElementBounds)),
             "no_element_bounds"
+        );
+        assert_eq!(
+            failure_kind(&CliError::NoSubscription {
+                id: "sub_1".into(),
+                expired: false,
+                live: Vec::new(),
+            }),
+            "subscription_not_found"
         );
     }
 

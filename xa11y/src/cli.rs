@@ -60,6 +60,27 @@ pub enum CliError {
         /// Candidate list and what was observed.
         diagnosis: Box<Diagnosis>,
     },
+    /// An MCP event-subscription handle could not be resolved — exit code 1.
+    ///
+    /// Constructed by the `events_poll` / `events_stop` tools. MCP has no
+    /// protocol-level session, so a subscription is addressed by an opaque
+    /// handle, and a handle can miss for two reasons a model must tell apart:
+    /// it was issued and is now closed — stopped, or reclaimed for idling —
+    /// in which case starting another one works; or it was never issued, in
+    /// which case the id itself is wrong. `expired` carries that distinction
+    /// and `failure_kind` maps the two to separate tags.
+    ///
+    /// `live` names the handles that *are* open, so the recovery is readable
+    /// straight off the error rather than requiring another call (tenet 6).
+    NoSubscription {
+        /// The handle the caller passed.
+        id: String,
+        /// Whether this handle was issued and later reclaimed for idling, as
+        /// opposed to never having been issued at all.
+        expired: bool,
+        /// Handles that are open right now, in issue order.
+        live: Vec<String>,
+    },
     /// An underlying xa11y operation failed — exit code 1.
     Xa11y(Error),
 }
@@ -72,6 +93,7 @@ impl CliError {
             CliError::NotFound(_)
             | CliError::Ambiguous { .. }
             | CliError::AmbiguousShellSurface { .. }
+            | CliError::NoSubscription { .. }
             | CliError::Xa11y(_) => 1,
         }
     }
@@ -101,6 +123,26 @@ impl std::fmt::Display for CliError {
                  operation targets exactly one; pick one by process id — `--pid PID` on \
                  the command line, the `pid` argument in MCP{diagnosis}"
             ),
+            CliError::NoSubscription { id, expired, live } => {
+                let cause = if *expired {
+                    "is no longer open: `events_stop` closed it, or it expired \
+                     after idling past the retention window `events_start` \
+                     reported as `expires_after_ms`"
+                } else {
+                    "is not a handle this server issued: check the id against \
+                     what `events_start` returned"
+                };
+                let open = if live.is_empty() {
+                    "no subscriptions are open".to_string()
+                } else {
+                    format!("open subscriptions: {}", live.join(", "))
+                };
+                write!(
+                    f,
+                    "subscription \"{id}\" {cause}. Start another with \
+                     `events_start`; {open}"
+                )
+            }
             CliError::Xa11y(e) => write!(f, "{e}"),
         }
     }
@@ -1310,6 +1352,76 @@ pub(crate) fn format_event_kind(kind: &EventKind) -> &'static str {
     }
 }
 
+/// Every spelling [`format_event_kind`] can produce, for MCP's `events_start`
+/// `kinds` filter to validate a requested name against.
+///
+/// Derived by running the formatter over one value of each variant rather than
+/// written out a second time, so the filter cannot advertise a name the
+/// formatter never emits, and cannot spell one differently.
+///
+/// What it cannot do is notice a variant missing from `KNOWN` below.
+/// [`EventKind`] is `#[non_exhaustive]`, so a `match` here would compile with
+/// a `_` arm just as `format_event_kind` does, and there is nothing to
+/// enumerate the variants at runtime. The guards are the
+/// `[[types.variant_coverage]]` entry for `EventKind`, which requires this
+/// file to name every variant, and
+/// `every_advertised_event_kind_name_round_trips`, which fails if an entry
+/// here formats as `unknown` or repeats another. **A new variant belongs in
+/// both `format_event_kind` and `KNOWN`.**
+pub(crate) fn event_kind_names() -> &'static [&'static str] {
+    /// One value per variant. `StateChanged`'s payload is arbitrary: only the
+    /// variant reaches `format_event_kind`.
+    const KNOWN: &[EventKind] = &[
+        EventKind::FocusChanged,
+        EventKind::ValueChanged,
+        EventKind::NameChanged,
+        EventKind::StateChanged {
+            flag: StateFlag::Enabled,
+            value: true,
+        },
+        EventKind::StructureChanged,
+        EventKind::WindowOpened,
+        EventKind::WindowClosed,
+        EventKind::WindowActivated,
+        EventKind::WindowDeactivated,
+        EventKind::SelectionChanged,
+        EventKind::MenuOpened,
+        EventKind::MenuClosed,
+        EventKind::TextChanged,
+        EventKind::Announcement,
+    ];
+    static NAMES: std::sync::LazyLock<Vec<&'static str>> =
+        std::sync::LazyLock::new(|| KNOWN.iter().map(format_event_kind).collect());
+    NAMES.as_slice()
+}
+
+/// snake_case name for a state flag, matching the spelling both bindings use
+/// for `Event.state_flag` and the one `states` uses in element payloads.
+///
+/// Hand-mapped rather than derived from `Debug`, which would render a future
+/// multi-word variant as one lowercase run. `[[types.variant_coverage]]` lists
+/// this file for `StateFlag` so a new variant cannot quietly reach a client as
+/// `unknown`.
+pub(crate) fn format_state_flag(flag: StateFlag) -> &'static str {
+    match flag {
+        StateFlag::Enabled => "enabled",
+        StateFlag::Visible => "visible",
+        StateFlag::Focused => "focused",
+        StateFlag::Checked => "checked",
+        StateFlag::Selected => "selected",
+        StateFlag::Expanded => "expanded",
+        StateFlag::Editable => "editable",
+        StateFlag::Focusable => "focusable",
+        StateFlag::Modal => "modal",
+        StateFlag::Required => "required",
+        StateFlag::Busy => "busy",
+        // `StateFlag` is `#[non_exhaustive]`. Same reasoning as
+        // `format_event_kind`: naming the flag vaguely beats dropping the
+        // event that carries it.
+        _ => "unknown",
+    }
+}
+
 pub(crate) fn format_event_detail(event: &Event) -> String {
     if let EventKind::StateChanged { flag, value } = event.kind {
         format!(" {flag:?}={value}")
@@ -2370,6 +2482,56 @@ mod tests {
             "state_changed"
         );
         assert_eq!(format_event_kind(&EventKind::Announcement), "announcement");
+    }
+
+    #[test]
+    fn every_advertised_event_kind_name_round_trips() {
+        // `event_kind_names` is what MCP's `kinds` filter validates against.
+        // A name that formats as "unknown" would be advertised and never
+        // match; a repeat would mean two variants collapsed onto one spelling.
+        let names = event_kind_names();
+        assert!(!names.contains(&"unknown"), "{names:?}");
+        let mut sorted = names.to_vec();
+        sorted.sort_unstable();
+        let before = sorted.len();
+        sorted.dedup();
+        assert_eq!(before, sorted.len(), "duplicate spelling in {names:?}");
+        assert!(names.contains(&"focus_changed"));
+        assert!(names.contains(&"state_changed"));
+    }
+
+    #[test]
+    fn state_flags_are_snake_case_and_match_the_binding_spellings() {
+        assert_eq!(format_state_flag(StateFlag::Checked), "checked");
+        assert_eq!(format_state_flag(StateFlag::Focusable), "focusable");
+    }
+
+    #[test]
+    fn a_missing_subscription_says_which_kind_of_miss_and_what_is_open() {
+        // Tenet 6: the recovery is readable off the error rather than needing
+        // another call to discover.
+        let expired = CliError::NoSubscription {
+            id: "sub_1".into(),
+            expired: true,
+            live: vec!["sub_2".into(), "sub_3".into()],
+        };
+        let text = expired.to_string();
+        assert!(text.contains("sub_1"), "{text}");
+        assert!(text.contains("expired"), "{text}");
+        assert!(text.contains("sub_2, sub_3"), "{text}");
+        assert_eq!(expired.exit_code(), 1);
+
+        let unknown = CliError::NoSubscription {
+            id: "sub_9".into(),
+            expired: false,
+            live: Vec::new(),
+        }
+        .to_string();
+        assert!(unknown.contains("not a handle this server issued"), "{unknown}");
+        assert!(
+            unknown.contains("no subscriptions are open"),
+            "an empty list still has to read as a sentence: {unknown}"
+        );
     }
 
     #[test]

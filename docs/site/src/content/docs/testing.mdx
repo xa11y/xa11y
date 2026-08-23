@@ -28,7 +28,7 @@ JavaScript, and the CLI. Roughly:
 | Rust integration | ~150 | `xa11y/tests/integ/` | Live tree reads, action dispatch, events, screenshots against a running app |
 | Python binding unit | ~240 | `xa11y-python/tests/` | The PyO3 surface: types, actions, exceptions, GIL release, subscriptions |
 | Python integration | ~100 | `tests/suites/python/` | Per-app compat, actions, events, errors, input simulation, screenshots |
-| CLI integration | ~70 | `tests/suites/cli/` | The `xa11y` CLI end-to-end against running apps, plus the MCP server over every CLI launcher |
+| CLI integration | ~80 | `tests/suites/cli/` | The `xa11y` CLI end-to-end against running apps, plus the MCP server and its event subscriptions over every CLI launcher |
 | JavaScript unit | ~115 | `xa11y-js/__test__/unit/` | The napi-rs binding surface |
 | JavaScript integration | ~40 | `tests/suites/js/` | Per-app compat, actions, input simulation, screenshots |
 | MCP client interop | ~30 | `tests/mcp_client/` | `xa11y mcp` driven by the official MCP Python SDK, in both protocol eras |

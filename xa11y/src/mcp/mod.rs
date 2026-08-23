@@ -15,10 +15,13 @@
 //! - [`transport`] — newline-delimited JSON-RPC framing.
 //! - [`protocol`] — envelope handling, dual-era method routing, error mapping.
 //! - [`tools`] — the tool table and the handlers that reach the provider.
+//! - [`events`] — subscriptions held across calls for the `events_*` trio.
 //! - [`base64`] — image-content encoding.
 //!
 //! Only `tools` touches the accessibility layer, so everything else is
-//! covered by ordinary unit tests on every platform.
+//! covered by ordinary unit tests on every platform — `events` included: it
+//! is driven by a plain channel, so its buffering and expiry are testable
+//! with no display.
 //!
 //! # stdout is the wire
 //!
@@ -30,6 +33,7 @@
 //! check` enforces this by scanning for print macros under `src/mcp/`.
 
 mod base64;
+mod events;
 mod protocol;
 mod tools;
 mod transport;
@@ -75,7 +79,7 @@ fn serve_streams<R: std::io::BufRead, W: std::io::Write>(
     input: &mut R,
     output: &mut W,
 ) -> CliResult<()> {
-    let mut session = protocol::Session::new(tools::Xa11yTools);
+    let mut session = protocol::Session::new(tools::Xa11yTools::new());
     loop {
         let message = match transport::read_message(input) {
             Ok(Some(message)) => message,
