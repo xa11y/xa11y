@@ -92,6 +92,10 @@ structure. Address elements with xa11y selectors, which are CSS-like: \
 Prefer `action` over the mouse and keyboard tools — it calls the application's \
 own accessibility action and does not depend on window position or focus.
 
+OS shell UI — the taskbar, the desktop, docks and panels, the menu bar, status \
+items, open flyouts — is reached the same way: `shell` lists what is on screen, \
+and `tree`, `find` and `action` take a `shell` argument in place of `app`.
+
 `action` acts on exactly one element and auto-waits for it, so a selector that \
 matches several is refused rather than applied to the first, and no retry loop \
 of your own is needed. Its `ok: true` means the application accepted the call, \

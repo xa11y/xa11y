@@ -29,6 +29,7 @@ pytestmark = pytest.mark.timeout(120)
 
 EXPECTED_TOOLS = [
     "apps",
+    "shell",
     "tree",
     "find",
     "action",
@@ -40,6 +41,20 @@ EXPECTED_TOOLS = [
     "type",
     "screenshot",
 ]
+
+# Every `ShellSurfaceKind` spelling, as `shell` reports them and the `shell`
+# argument accepts them. Kept in step with `SHELL_KIND_NAMES` in
+# xa11y/src/cli.rs.
+SHELL_KINDS = {
+    "menu_bar",
+    "status_items",
+    "taskbar",
+    "panel",
+    "dock",
+    "desktop",
+    "flyout",
+    "unknown",
+}
 
 
 async def _identity(value):
@@ -257,6 +272,58 @@ def test_the_advertised_selector_example_is_valid_syntax(run_client):
     assert 'check_box[checked="on"]' in description
     assert "presence-only" in description, "say why `[checked]` fails"
     assert ":nth(n)" in description, "and what the only pseudo-class is"
+
+
+def test_the_shell_tool_round_trips_through_a_real_client(run_client):
+    """Either answer is informative: this suite runs with no desktop at all.
+
+    A listing parses as structured content; a machine with no accessibility
+    bus produces a tool error. What must not happen is a protocol error, or a
+    result the SDK cannot parse.
+    """
+    result = run_client(lambda c: c.call_tool("shell", {}))
+    structured = result.structured_content
+    assert structured is not None, "the SDK must be able to parse structuredContent"
+    if result.is_error:
+        assert structured["kind"] and structured["message"]
+        return
+    assert structured["count"] == len(structured["surfaces"])
+    for surface in structured["surfaces"]:
+        assert surface["kind"] in SHELL_KINDS, surface
+        assert surface["name"]
+
+
+def test_the_shell_tool_states_its_contract(run_client):
+    """Enumeration is inert and a flyout is transient — neither is guessable."""
+    description = _tool(run_client, "shell").description
+    assert "listing is live" in description
+    assert "only while it is open" in description
+    assert "never opens or presses anything" in description
+    assert "Show Hidden Icons" in description, "spell the overflow workflow out"
+
+
+def test_the_element_tools_take_a_shell_surface_as_a_target(run_client):
+    for name in ("tree", "find", "action"):
+        shell = _tool(run_client, name).input_schema["properties"]["shell"]
+        assert set(shell["enum"]) == SHELL_KINDS, name
+        assert "Mutually exclusive with `app`" in shell["description"], name
+
+
+def test_naming_both_an_app_and_a_shell_surface_is_a_fixable_error(run_client):
+    result = run_client(
+        lambda c: c.call_tool("find", {"selector": "button", "app": "X", "shell": "taskbar"})
+    )
+    assert result.is_error is True
+    structured = result.structured_content
+    assert structured["kind"] == "invalid_arguments"
+    assert '"shell"' in structured["message"]
+    assert "--" not in structured["message"], "there are no flags on this surface"
+
+
+def test_the_instructions_mention_the_shell_surfaces(run_client):
+    """The only place a model learns OS chrome is reachable at all."""
+    instructions = run_client(lambda c: _identity(c.instructions))
+    assert "shell" in instructions
 
 
 def test_the_instructions_warn_that_ok_is_not_verification(run_client):

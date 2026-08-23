@@ -40,6 +40,26 @@ pub enum CliError {
         /// Selector, match count, and bounded candidate list.
         diagnosis: Box<Diagnosis>,
     },
+    /// Several shell surfaces of one kind are present where the caller's
+    /// contract is exactly one — exit code 1.
+    ///
+    /// Kept distinct from [`CliError::Ambiguous`] because the recovery is a
+    /// different one: a selector is narrowed with an attribute filter or
+    /// `:nth(n)`, whereas a shell surface is picked by process id. MCP maps
+    /// the two to distinct failure kinds (`ambiguous_selector` and
+    /// `ambiguous_shell_surface`) for the same reason.
+    ///
+    /// The [`Diagnosis`] carries the candidates — kind, name and pid of every
+    /// surface that matched — so the disambiguating pid is readable straight
+    /// off the error (tenet 6).
+    AmbiguousShellSurface {
+        /// How many shell surfaces matched.
+        count: usize,
+        /// The kind that was asked for, in its snake_case spelling.
+        kind: String,
+        /// Candidate list and what was observed.
+        diagnosis: Box<Diagnosis>,
+    },
     /// An underlying xa11y operation failed — exit code 1.
     Xa11y(Error),
 }
@@ -49,7 +69,10 @@ impl CliError {
     pub fn exit_code(&self) -> i32 {
         match self {
             CliError::Usage(_) => 2,
-            CliError::NotFound(_) | CliError::Ambiguous { .. } | CliError::Xa11y(_) => 1,
+            CliError::NotFound(_)
+            | CliError::Ambiguous { .. }
+            | CliError::AmbiguousShellSurface { .. }
+            | CliError::Xa11y(_) => 1,
         }
     }
 }
@@ -64,6 +87,19 @@ impl std::fmt::Display for CliError {
                 "Ambiguous selector: matched {count} elements, but this operation acts on \
                  exactly one; narrow it with an attribute filter (e.g. [name=\"…\"]) or pick \
                  one with :nth(n), 1-based{diagnosis}"
+            ),
+            // Both argument spellings are named because this one message is
+            // rendered on both surfaces: `--pid` for the command line, `pid`
+            // for an MCP caller, who has no flags at all.
+            CliError::AmbiguousShellSurface {
+                count,
+                kind,
+                diagnosis,
+            } => write!(
+                f,
+                "Ambiguous shell surface: {count} {kind} surfaces are present, but this \
+                 operation targets exactly one; pick one by process id — `--pid PID` on \
+                 the command line, the `pid` argument in MCP{diagnosis}"
             ),
             CliError::Xa11y(e) => write!(f, "{e}"),
         }
@@ -123,6 +159,7 @@ pub fn run_main(args: &[String]) -> i32 {
 pub fn run(args: &[String]) -> CliResult<()> {
     match args.first().map(|s| s.as_str()) {
         Some("apps") => cmd_apps(),
+        Some("shell") => cmd_shell(&args[1..]),
         Some("tree") => cmd_tree(&args[1..]),
         Some("find") => cmd_find(&args[1..]),
         Some("action") => cmd_action(&args[1..]),
@@ -151,12 +188,22 @@ Usage:
 
 Accessibility tree:
   xa11y apps                                List running applications
-  xa11y tree   [--app NAME | --pid PID]     Print the accessibility tree
-  xa11y find   SELECTOR [--app NAME | --pid PID] [-o pretty|bounds|center]
+  xa11y shell                               List OS shell surfaces: KIND PID NAME
+  xa11y tree   [TARGET]                     Print the accessibility tree
+  xa11y find   SELECTOR [TARGET] [-o pretty|bounds|center]
                                             Find elements matching a selector
-  xa11y action ACTION SELECTOR [--app NAME | --pid PID] [--value V]
+  xa11y action ACTION SELECTOR [TARGET] [--value V]
                                             Perform an action on an element
   xa11y events [--app NAME | --pid PID]     Stream accessibility events
+
+TARGET — what tree/find/action search (--shell and --app are exclusive):
+  --app NAME | --pid PID                    A running application
+  --shell KIND [--pid PID]                  An OS shell surface, as listed by
+                                            `xa11y shell`. KIND is one of:
+                                            menu_bar, status_items, taskbar,
+                                            panel, dock, desktop, flyout,
+                                            unknown. Add --pid when several
+                                            surfaces share a kind.
 
 Input simulation (coords only — no selectors, no a11y):
   xa11y click  --at X,Y [--button left|right|middle] [--count N] [--held K,K]
@@ -198,6 +245,9 @@ Exit codes:
 pub(crate) struct Opts {
     pub app: Option<String>,
     pub pid: Option<u32>,
+    /// Shell surface kind, as its snake_case spelling. Mutually exclusive with
+    /// `app`; combines with `pid` to disambiguate same-kind surfaces.
+    pub shell: Option<String>,
     pub value: Option<String>,
     // Input simulation / screenshot
     pub at: Option<String>,
@@ -265,6 +315,10 @@ pub(crate) fn parse_opts(args: &[String]) -> CliResult<(Opts, Vec<String>)> {
                     "--pid",
                     "an integer process id",
                 )?);
+            }
+            "--shell" => {
+                i += 1;
+                opts.shell = Some(flag_value(args, i, "--shell")?.to_string());
             }
             "--value" => {
                 i += 1;
@@ -452,6 +506,216 @@ pub(crate) fn resolve_app(opts: &Opts) -> CliResult<App> {
     }
 }
 
+// ── Shell surface targeting ─────────────────────────────────────────────────
+
+/// Every [`ShellSurfaceKind`] spelling `--shell` (MCP: `shell`) accepts.
+///
+/// Single source of truth for the flag's error message, the help text, and the
+/// MCP schema's `enum`, so a kind cannot be advertised by one surface and
+/// rejected by another. `ShellSurfaceKind` is `#[non_exhaustive]` and derives
+/// its strings with strum, so this list is hand-maintained; every entry is
+/// round-tripped through [`ShellSurfaceKind::from_snake_case`] by
+/// `every_advertised_shell_kind_parses`, which fails if one is misspelled.
+pub(crate) const SHELL_KIND_NAMES: &[&str] = &[
+    "menu_bar",
+    "status_items",
+    "taskbar",
+    "panel",
+    "dock",
+    "desktop",
+    "flyout",
+    "unknown",
+];
+
+/// Longest candidate list carried in a shell-lookup failure. Bounded per
+/// tenet 6 — diagnostics must not grow with the environment.
+const MAX_SHELL_CANDIDATES: usize = 20;
+
+/// Parse a `--shell` / `shell` value into a [`ShellSurfaceKind`].
+///
+/// Runs before any enumeration, so a misspelled kind is a usage error rather
+/// than a listing the caller has to read to discover the typo.
+pub(crate) fn parse_shell_kind(raw: &str) -> CliResult<ShellSurfaceKind> {
+    ShellSurfaceKind::from_snake_case(raw).ok_or_else(|| {
+        CliError::Usage(format!(
+            "unknown shell surface kind: {raw} (expected one of: {})",
+            SHELL_KIND_NAMES.join(", ")
+        ))
+    })
+}
+
+/// Bounded `kind "name" (pid=N)` rendering of the surfaces that were present.
+fn describe_shell_surfaces(surfaces: &[ShellSurface]) -> Vec<String> {
+    bound_candidates(
+        surfaces
+            .iter()
+            .map(|s| {
+                let pid = s.pid.map(|p| format!(" (pid={p})")).unwrap_or_default();
+                format!("{} \"{}\"{pid}", s.kind.to_snake_case(), s.name)
+            })
+            .collect(),
+    )
+}
+
+/// Cap a candidate list at [`MAX_SHELL_CANDIDATES`], naming how many were
+/// dropped.
+///
+/// Split out from the rendering so the cap is testable without a provider:
+/// a diagnosis that grows with the environment is the tenet-6 failure that
+/// costs the success path nothing and the failure path everything.
+fn bound_candidates(mut lines: Vec<String>) -> Vec<String> {
+    if lines.len() > MAX_SHELL_CANDIDATES {
+        let dropped = lines.len() - MAX_SHELL_CANDIDATES;
+        lines.truncate(MAX_SHELL_CANDIDATES);
+        lines.push(format!("… (+{dropped} more)"));
+    }
+    lines
+}
+
+/// Resolve the one shell surface of `kind` (optionally owned by `pid`).
+///
+/// A single enumeration attempt, like [`resolve_app`]: these surfaces are
+/// either on screen or they are not, and a caller who wants to *wait* for one
+/// (the tray-overflow flyout, after pressing the chevron) uses
+/// `ShellSurface::by_kind` with a timeout. The lookup is written here rather
+/// than delegated to `by_kind`, which has no pid filter and reports ambiguity
+/// and absence through the same error — this surface must tell them apart, so
+/// a caller is told either "add a pid" or "here is what is on screen".
+///
+/// # Errors
+///
+/// - [`CliError::Usage`] for an unknown kind name.
+/// - [`CliError::AmbiguousShellSurface`] when several surfaces match.
+/// - [`CliError::Xa11y`] with [`Error::SelectorNotMatched`] when none do, its
+///   diagnosis naming every surface that *was* enumerated.
+pub(crate) fn resolve_shell_surface(kind_raw: &str, pid: Option<u32>) -> CliResult<ShellSurface> {
+    let kind = parse_shell_kind(kind_raw)?;
+    let selector = match pid {
+        Some(p) => format!("shell_surface[kind={kind}][pid={p}]"),
+        None => format!("shell_surface[kind={kind}]"),
+    };
+
+    let (mut matched, others): (Vec<ShellSurface>, Vec<ShellSurface>) = ShellSurface::list()?
+        .into_iter()
+        .partition(|s| s.kind == kind && pid.is_none_or(|p| s.pid == Some(p)));
+
+    if matched.len() > 1 {
+        let hint = match pid {
+            // A pid was already given and did not narrow it: saying "add a
+            // pid" would send the caller somewhere they have been.
+            Some(p) => format!(
+                "{} {kind} surfaces share pid {p}; this operation cannot pick between them",
+                matched.len()
+            ),
+            None => format!(
+                "{} {kind} surfaces are present; `xa11y shell` lists their pids",
+                matched.len()
+            ),
+        };
+        return Err(CliError::AmbiguousShellSurface {
+            count: matched.len(),
+            kind: kind.to_snake_case().to_string(),
+            diagnosis: Box::new(
+                Diagnosis::new()
+                    .condition(format!("exactly one {kind} shell surface"))
+                    .last_observed(hint)
+                    .candidates(describe_shell_surfaces(&matched)),
+            ),
+        });
+    }
+
+    matched.pop().ok_or_else(|| {
+        let observed = match pid {
+            Some(p) => format!("no {kind} surface with pid {p} is present"),
+            None => format!("no {kind} surface is present"),
+        };
+        CliError::Xa11y(
+            Error::selector_not_matched(selector).diagnose(
+                Diagnosis::new()
+                    .condition(format!("a {kind} shell surface"))
+                    .last_observed(format!(
+                        "{observed}; {} other shell surface(s) enumerated",
+                        others.len()
+                    ))
+                    .candidates(describe_shell_surfaces(&others)),
+            ),
+        )
+    })
+}
+
+/// What `tree`, `find` and `action` search: a running application, or an OS
+/// shell surface.
+///
+/// Value-producing, so the MCP handlers can share the resolution without
+/// reaching for a `cmd_*` function — those print, and on the stdio transport
+/// stdout carries protocol messages only.
+#[derive(Debug)]
+pub(crate) enum Target {
+    /// A running application, from `--app` / `--pid`.
+    App(App),
+    /// An OS shell surface, from `--shell` (plus `--pid` to disambiguate).
+    Shell(ShellSurface),
+}
+
+impl Target {
+    /// A [`Locator`] rooted at the target.
+    pub(crate) fn locator(&self, selector: &str) -> Locator {
+        match self {
+            Target::App(app) => app.locator(selector),
+            Target::Shell(surface) => surface.locator(selector),
+        }
+    }
+
+    /// The target's root element.
+    pub(crate) fn root(&self) -> Element {
+        match self {
+            Target::App(app) => Element::new(app.data.clone(), app.provider().clone()),
+            Target::Shell(surface) => surface.as_element(),
+        }
+    }
+
+    /// The target's human-readable name.
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            Target::App(app) => &app.name,
+            Target::Shell(surface) => &surface.name,
+        }
+    }
+
+    /// The owning process, where the platform reports one.
+    pub(crate) fn pid(&self) -> Option<u32> {
+        match self {
+            Target::App(app) => app.pid,
+            Target::Shell(surface) => surface.pid,
+        }
+    }
+
+    /// The shell surface behind this target, if it is one.
+    pub(crate) fn shell(&self) -> Option<&ShellSurface> {
+        match self {
+            Target::App(_) => None,
+            Target::Shell(surface) => Some(surface),
+        }
+    }
+}
+
+/// Resolve the target of a `tree` / `find` / `action` invocation.
+///
+/// `--shell` and `--app` name two different things to search, so passing both
+/// is a usage error rather than one of them silently winning.
+pub(crate) fn resolve_target(opts: &Opts) -> CliResult<Target> {
+    match (&opts.shell, &opts.app) {
+        (Some(_), Some(_)) => Err(CliError::Usage(
+            "--shell and --app are mutually exclusive: --shell targets an OS shell surface, \
+             --app a running application. Use --pid alongside --shell to pick between \
+             surfaces of one kind."
+                .into(),
+        )),
+        (Some(kind), None) => Ok(Target::Shell(resolve_shell_surface(kind, opts.pid)?)),
+        (None, _) => Ok(Target::App(resolve_app(opts)?)),
+    }
+}
+
 // ── Output helpers ──────────────────────────────────────────────────────────
 
 pub(crate) fn format_element_oneline(el: &ElementData) -> String {
@@ -615,11 +879,45 @@ fn cmd_apps() -> CliResult<()> {
     Ok(())
 }
 
+/// List the OS shell surfaces currently on screen.
+///
+/// Columns are `kind\tpid\tname`, mirroring `xa11y apps`' tab-separated
+/// contract: the kind leads because it is what `--shell` takes, and the pid
+/// keeps its `-` for a surface the platform attributes to no process.
+fn cmd_shell(args: &[String]) -> CliResult<()> {
+    // The listing takes no filters. Ignoring `--shell taskbar` here would let
+    // someone believe it had narrowed the output (tenet 1); the flag belongs
+    // on tree / find / action.
+    if let Some(first) = args.first() {
+        return Err(CliError::Usage(format!(
+            "xa11y shell takes no arguments (got: {first}). It lists every surface; \
+             pass --shell KIND to tree, find or action to target one."
+        )));
+    }
+    let surfaces = ShellSurface::list()?;
+    if surfaces.is_empty() {
+        println!("No shell surfaces found.");
+        return Ok(());
+    }
+    for surface in &surfaces {
+        let pid_str = surface
+            .pid
+            .map(|p| p.to_string())
+            .unwrap_or_else(|| "-".into());
+        println!(
+            "{}\t{}\t{}",
+            surface.kind.to_snake_case(),
+            pid_str,
+            surface.name
+        );
+    }
+    Ok(())
+}
+
 fn cmd_tree(args: &[String]) -> CliResult<()> {
     let (opts, _pos) = parse_opts(args)?;
-    let app = resolve_app(&opts)?;
-    let root_el = Element::new(app.data.clone(), app.provider().clone());
-    print_tree_recursive(&root_el, "", true, true);
+    let target = resolve_target(&opts)?;
+    print_tree_recursive(&target.root(), "", true, true);
     Ok(())
 }
 
@@ -627,12 +925,14 @@ fn cmd_find(args: &[String]) -> CliResult<()> {
     let (opts, positional) = parse_opts(args)?;
     let selector = positional.first().ok_or_else(|| {
         CliError::Usage(
-            "usage: xa11y find SELECTOR [--app NAME | --pid PID] [-o pretty|bounds|center]".into(),
+            "usage: xa11y find SELECTOR [--app NAME | --pid PID | --shell KIND] \
+             [-o pretty|bounds|center]"
+                .into(),
         )
     })?;
 
-    let app = resolve_app(&opts)?;
-    let elements = app.locator(selector).elements()?;
+    let target = resolve_target(&opts)?;
+    let elements = target.locator(selector).elements()?;
     if elements.is_empty() {
         return Err(CliError::NotFound(format!(
             "no elements matched selector: {selector}"
@@ -722,15 +1022,17 @@ fn cmd_action(args: &[String]) -> CliResult<()> {
     let (opts, positional) = parse_opts(args)?;
     if positional.len() < 2 {
         return Err(CliError::Usage(
-            "usage: xa11y action ACTION SELECTOR [--app NAME | --pid PID] [--value V]".into(),
+            "usage: xa11y action ACTION SELECTOR [--app NAME | --pid PID | --shell KIND] \
+             [--value V]"
+                .into(),
         ));
     }
     let action_name = &positional[0];
     let selector = &positional[1];
     let value = opts.value.clone();
 
-    let app = resolve_app(&opts)?;
-    let locator = app.locator(selector);
+    let target = resolve_target(&opts)?;
+    let locator = target.locator(selector);
     perform_action(&locator, action_name, value.as_deref())?;
     println!("ok");
     Ok(())
@@ -886,6 +1188,17 @@ pub(crate) fn parse_text_range(raw: &str) -> CliResult<(u32, u32)> {
 
 fn cmd_events(args: &[String]) -> CliResult<()> {
     let (opts, _pos) = parse_opts(args)?;
+    // Events are subscribed per application; there is no surface-level event
+    // story yet (see design/shell-surfaces/PROPOSAL.md §10). Saying so beats
+    // letting `--shell` fall through to "specify --app NAME or --pid PID",
+    // which reads as though the flag were misspelled.
+    if opts.shell.is_some() {
+        return Err(CliError::Usage(
+            "--shell is not supported by `events`: accessibility events are subscribed \
+             per application. Use --app NAME or --pid PID."
+                .into(),
+        ));
+    }
     let app = resolve_app(&opts)?;
     let sub = app.subscribe()?;
     eprintln!(
@@ -1224,6 +1537,166 @@ mod tests {
         let args = strs(&["--duration-ms", "fast"]);
         let err = parse_opts(&args).expect_err("non-numeric --duration-ms must be a usage error");
         assert!(matches!(err, CliError::Usage(_)));
+    }
+
+    // ── Shell surface targeting ─────────────────────────────────────────────
+
+    #[test]
+    fn parse_opts_shell_flag() {
+        let args = strs(&["--shell", "taskbar"]);
+        let (opts, pos) = parse_opts(&args).expect("flags must parse");
+        assert_eq!(opts.shell.as_deref(), Some("taskbar"));
+        assert!(opts.app.is_none());
+        assert!(pos.is_empty());
+    }
+
+    #[test]
+    fn parse_opts_shell_combines_with_pid() {
+        // `--pid` alongside `--shell` disambiguates same-kind surfaces rather
+        // than naming an application, so both must survive parsing together.
+        let args = strs(&["--shell", "panel", "--pid", "4242"]);
+        let (opts, _) = parse_opts(&args).expect("flags must parse");
+        assert_eq!(opts.shell.as_deref(), Some("panel"));
+        assert_eq!(opts.pid, Some(4242));
+    }
+
+    #[test]
+    fn parse_opts_trailing_shell_flag_errors() {
+        let args = strs(&["tree", "--shell"]);
+        let err = parse_opts(&args).expect_err("trailing --shell must be a usage error");
+        assert!(matches!(err, CliError::Usage(_)));
+        assert!(format!("{err}").contains("--shell requires a value"));
+    }
+
+    #[test]
+    fn parse_opts_shell_value_before_positional_does_not_leak() {
+        let args = strs(&["press", "--shell", "taskbar", "button"]);
+        let (opts, pos) = parse_opts(&args).expect("flags must parse");
+        assert_eq!(opts.shell.as_deref(), Some("taskbar"));
+        assert_eq!(pos, vec![s("press"), s("button")]);
+    }
+
+    #[test]
+    fn every_advertised_shell_kind_parses() {
+        // `SHELL_KIND_NAMES` is hand-maintained (ShellSurfaceKind is
+        // `#[non_exhaustive]` and derives its strings with strum), so a
+        // misspelled entry would be advertised in the help text, the flag's
+        // error message and the MCP schema while being rejected on arrival.
+        for name in SHELL_KIND_NAMES {
+            let kind = parse_shell_kind(name).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(kind.to_snake_case(), *name);
+        }
+    }
+
+    #[test]
+    fn an_unknown_shell_kind_is_a_usage_error_listing_the_valid_ones() {
+        let err = parse_shell_kind("taskbr").expect_err("must reject");
+        assert!(matches!(err, CliError::Usage(_)), "{err}");
+        assert_eq!(err.exit_code(), 2);
+        let msg = format!("{err}");
+        assert!(msg.contains("taskbr"), "must echo the bad value: {msg}");
+        for name in SHELL_KIND_NAMES {
+            assert!(msg.contains(name), "{name} must be offered: {msg}");
+        }
+    }
+
+    #[test]
+    fn a_shell_kind_is_case_sensitive_snake_case() {
+        // The same spelling crosses every surface — the bindings, `--shell`,
+        // MCP's `shell` argument and the `shell_kind` raw attribute.
+        assert!(parse_shell_kind("Taskbar").is_err());
+        assert!(parse_shell_kind("status-items").is_err());
+        assert!(parse_shell_kind("status_items").is_ok());
+    }
+
+    #[test]
+    fn shell_and_app_together_are_a_usage_error_before_any_platform_call() {
+        let args = strs(&["--shell", "taskbar", "--app", "Safari"]);
+        let (opts, _) = parse_opts(&args).expect("flags must parse");
+        let err = resolve_target(&opts).expect_err("two targets is not a target");
+        assert!(matches!(err, CliError::Usage(_)), "{err}");
+        assert_eq!(err.exit_code(), 2);
+        let msg = format!("{err}");
+        assert!(msg.contains("--shell") && msg.contains("--app"), "{msg}");
+    }
+
+    #[test]
+    fn an_unknown_shell_kind_is_rejected_before_the_shell_is_enumerated() {
+        // Parsed first, so a typo cannot cost an enumeration — and so this is
+        // testable with no display and no accessibility bus.
+        let args = strs(&["--shell", "not_a_surface"]);
+        let (opts, _) = parse_opts(&args).expect("flags must parse");
+        let err = resolve_target(&opts).expect_err("must reject");
+        assert!(matches!(err, CliError::Usage(_)), "{err}");
+        assert!(format!("{err}").contains("not_a_surface"));
+    }
+
+    #[test]
+    fn the_shell_listing_takes_no_arguments() {
+        // Accepting and ignoring `--shell taskbar` would read as a filter that
+        // silently did nothing.
+        let err = cmd_shell(&strs(&["--shell", "taskbar"])).expect_err("must reject");
+        assert!(matches!(err, CliError::Usage(_)), "{err}");
+        assert_eq!(err.exit_code(), 2);
+        assert!(format!("{err}").contains("takes no arguments"));
+    }
+
+    #[test]
+    fn events_says_why_shell_is_not_a_target_rather_than_asking_for_an_app() {
+        let args = strs(&["--shell", "taskbar"]);
+        let err = cmd_events(&args).expect_err("events takes no shell surface");
+        assert!(matches!(err, CliError::Usage(_)), "{err}");
+        let msg = format!("{err}");
+        assert!(msg.contains("--shell"), "{msg}");
+        assert!(msg.contains("per application"), "{msg}");
+    }
+
+    #[test]
+    fn an_ambiguous_shell_surface_is_an_operation_failure_that_names_the_pids() {
+        let err = CliError::AmbiguousShellSurface {
+            count: 2,
+            kind: "panel".into(),
+            diagnosis: Box::new(
+                Diagnosis::new()
+                    .condition("exactly one panel shell surface")
+                    .last_observed("2 panel surfaces are present; `xa11y shell` lists their pids")
+                    .candidates(vec![
+                        "panel \"Top\" (pid=101)".into(),
+                        "panel \"Dock\" (pid=102)".into(),
+                    ]),
+            ),
+        };
+        assert_eq!(
+            err.exit_code(),
+            1,
+            "not a usage error: the call was well-formed"
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("2 panel surfaces"), "{msg}");
+        // Both spellings, because this one message is rendered on both
+        // surfaces and an MCP caller has no flags.
+        assert!(msg.contains("--pid PID"), "{msg}");
+        assert!(msg.contains("`pid` argument"), "{msg}");
+        assert!(msg.contains("panel \"Dock\" (pid=102)"), "{msg}");
+    }
+
+    #[test]
+    fn shell_candidate_lists_are_bounded_and_say_how_many_were_dropped() {
+        // Tenet 6: rich, but never unbounded — a machine with 30 panels must
+        // not turn one failure into 30 lines of message.
+        let many: Vec<String> = (0..MAX_SHELL_CANDIDATES + 3)
+            .map(|i| format!("panel \"Panel {i}\" (pid={i})"))
+            .collect();
+        let bounded = bound_candidates(many);
+        assert_eq!(bounded.len(), MAX_SHELL_CANDIDATES + 1);
+        assert_eq!(bounded[0], "panel \"Panel 0\" (pid=0)");
+        assert!(bounded.last().unwrap().contains("+3 more"));
+    }
+
+    #[test]
+    fn a_short_shell_candidate_list_is_carried_whole() {
+        let few = vec!["taskbar \"Taskbar\" (pid=4)".to_string()];
+        assert_eq!(bound_candidates(few.clone()), few);
     }
 
     // ── Exit-code contract ──────────────────────────────────────────────────

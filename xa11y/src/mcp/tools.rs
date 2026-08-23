@@ -21,10 +21,13 @@ use serde_json::{json, Map, Value};
 
 use super::base64;
 use crate::cli::{
-    self, parse_button, parse_held, parse_key_name, resolve_app, CliError, CliResult, Opts,
-    ACTIONS_REQUIRING_VALUE, ACTION_NAMES,
+    self, parse_button, parse_held, parse_key_name, resolve_target, CliError, CliResult, Opts,
+    Target, ACTIONS_REQUIRING_VALUE, ACTION_NAMES, SHELL_KIND_NAMES,
 };
-use crate::{App, AppExt, ClickOptions, ClickTarget, DragOptions, Element, Rect, ScrollDelta};
+use crate::{
+    App, AppExt, ClickOptions, ClickTarget, DragOptions, Element, Rect, ScrollDelta, ShellSurface,
+    ShellSurfaceExt,
+};
 
 /// Depth used by `tree` when the caller does not ask for one.
 const TREE_DEFAULT_MAX_DEPTH: usize = 12;
@@ -234,6 +237,7 @@ pub(crate) struct Xa11yTools;
 /// Every tool name, in list order.
 const TOOL_NAMES: &[&str] = &[
     "apps",
+    "shell",
     "tree",
     "find",
     "action",
@@ -261,6 +265,7 @@ impl ToolHost for Xa11yTools {
     fn call(&self, name: &str, args: &Value) -> CliResult<ToolOutput> {
         match name {
             "apps" => tool_apps(),
+            "shell" => tool_shell(),
             "tree" => tool_tree(args),
             "find" => tool_find(args),
             "action" => tool_action(args),
@@ -282,7 +287,8 @@ impl ToolHost for Xa11yTools {
 
 // ── Tool definitions ────────────────────────────────────────────────────────
 
-/// Properties naming the target application, shared by every a11y tool.
+/// Properties naming the target — an application or a shell surface — shared
+/// by every a11y tool.
 fn app_target_properties() -> Map<String, Value> {
     let mut props = Map::new();
     props.insert(
@@ -294,13 +300,33 @@ fn app_target_properties() -> Map<String, Value> {
                             \"xa11y-winforms-test-app\" and not to \"winforms\". Take \
                             the spelling from the `apps` tool rather than guessing it: \
                             an application often reports its interpreter or bundle name \
-                            (a Qt app run under Python reports \"python\"). Give this \
-                            or `pid`.",
+                            (a Qt app run under Python reports \"python\"). Give this, \
+                            `pid`, or `shell`.",
         }),
     );
     props.insert(
         "pid".into(),
-        PID.property("Process id of the target application. Give this or `app`.".into()),
+        PID.property(
+            "Process id of the target application. Give this or `app`. Alongside \
+             `shell` it picks between surfaces of one kind rather than naming an \
+             application."
+                .into(),
+        ),
+    );
+    props.insert(
+        "shell".into(),
+        json!({
+            "type": "string",
+            "enum": SHELL_KIND_NAMES,
+            "description": "Target an OS shell surface instead of an application: the \
+                            taskbar, the desktop, a dock or panel, the menu bar, a \
+                            process's status items, or an open flyout. Call the `shell` \
+                            tool for what is on screen right now and pass a listed \
+                            `kind` here. Mutually exclusive with `app` — passing both \
+                            is refused. When several surfaces share a kind, add `pid` \
+                            to pick one; without it the call comes back as \
+                            `ambiguous_shell_surface` with the candidates.",
+        }),
     );
     props
 }
@@ -341,6 +367,23 @@ fn tool_definition(name: &str) -> Value {
              the `app` or `pid` the other tools need.",
             json!({ "type": "object", "additionalProperties": false }),
         ),
+        "shell" => tool(
+            "shell",
+            "List OS shell surfaces",
+            "List the OS shell surfaces on screen: the taskbar, the desktop, docks and \
+             panels, the menu bar, per-process status items, and any open flyout. Each \
+             row gives the `kind` to pass as `shell` to `tree`, `find` and `action`, \
+             plus the surface's `name` and owning `pid`.\n\n\
+             The listing is live rather than a fixed table. A `flyout` exists only \
+             while it is open, and a platform with no surface of a kind lists none — \
+             that is scope, not failure. Enumerating never opens or presses anything, so \
+             calling this tool cannot change what is on screen.\n\n\
+             Content that exists only behind a press has to be opened by you first. On \
+             Windows the hidden tray icons are not in the taskbar surface at all: press \
+             the taskbar button named \"Show Hidden Icons\" with `action`, call `shell` \
+             again, and target the flyout that has appeared with `shell: \"flyout\"`.",
+            json!({ "type": "object", "additionalProperties": false }),
+        ),
         "tree" => {
             let mut props = app_target_properties();
             props.insert(
@@ -359,7 +402,9 @@ fn tool_definition(name: &str) -> Value {
                     "Read an application's accessibility tree: roles, names, values, \
                      states, screen bounds, and advertised actions. Use this to \
                      understand a window before acting on it, and again afterwards to \
-                     confirm what an action changed.\n\n{ACTIONS_FIELD_NOTE}"
+                     confirm what an action changed. Pass `shell` in place of `app` / \
+                     `pid` to read an OS shell surface's tree instead.\n\n\
+                     {ACTIONS_FIELD_NOTE}"
                 ),
                 object_schema(props, &[]),
             )
@@ -753,9 +798,17 @@ fn held_keys(args: &Value) -> CliResult<Vec<crate::Key>> {
     }
 }
 
-/// Resolve the target application from `app` / `pid`, through the CLI's own
-/// resolver so name matching and the "specify one" error stay identical.
-fn target_app(args: &Value) -> CliResult<App> {
+/// Resolve the target — an application or a shell surface — from `app` /
+/// `pid` / `shell`, through the CLI's own resolver so name matching, kind
+/// parsing and the ambiguity refusal stay identical on both surfaces.
+///
+/// The two argument-naming errors are raised *here* rather than in
+/// [`resolve_target`], whose messages name `--app` and `--shell`: those are
+/// flags this surface does not have, and a model reading one has nothing to
+/// reach for. Only the naming is answered here — matching a name to a running
+/// application, and a kind to a surface on screen, stays in `cli`, so the two
+/// surfaces cannot drift on what `app` or `shell` means.
+fn target(args: &Value) -> CliResult<Target> {
     let pid = match opt_int(args, "pid")? {
         None => None,
         Some(v) => {
@@ -770,20 +823,48 @@ fn target_app(args: &Value) -> CliResult<App> {
     let opts = Opts {
         app: opt_str(args, "app")?.map(str::to_string),
         pid,
+        shell: opt_str(args, "shell")?.map(str::to_string),
         ..Default::default()
     };
-    // `resolve_app`'s own "specify one" message names `--app` / `--pid`,
-    // which are flags this surface does not have: an MCP caller passes `app`
-    // and `pid` as tool arguments. Only the *naming* of the missing argument
-    // is answered here — matching a name to a running application stays in
-    // `resolve_app`, so the two surfaces cannot drift on what `app` means.
-    if opts.app.is_none() && opts.pid.is_none() {
+    if opts.app.is_some() && opts.shell.is_some() {
         return Err(usage(
-            "specify \"app\" (application name, matched exactly) or \"pid\" \
-             (process id); the `apps` tool lists both for every running application",
+            "give \"app\" or \"shell\", not both: \"shell\" targets an OS shell surface \
+             (the `shell` tool lists them) and \"app\" targets a running application. \
+             Use \"pid\" with \"shell\" to pick between surfaces of one kind",
         ));
     }
-    resolve_app(&opts)
+    if opts.app.is_none() && opts.shell.is_none() && opts.pid.is_none() {
+        return Err(usage(
+            "specify \"app\" (application name, matched exactly) or \"pid\" \
+             (process id); the `apps` tool lists both for every running application, \
+             and \"shell\" targets an OS shell surface instead",
+        ));
+    }
+    resolve_target(&opts)
+}
+
+/// The target's identity, as every element-returning result reports it.
+///
+/// An application keeps the `application` / `pid` fields it has always
+/// reported; a shell surface gets a `shell` object instead, because calling a
+/// taskbar an "application" is the kind of small lie a model then repeats.
+fn target_fields(target: &Target, out: &mut Map<String, Value>) {
+    match target.shell() {
+        None => {
+            out.insert("application".into(), json!(target.name()));
+        }
+        Some(surface) => {
+            out.insert(
+                "shell".into(),
+                json!({
+                    "kind": surface.kind.to_snake_case(),
+                    "name": surface.name,
+                    "pid": surface.pid,
+                }),
+            );
+        }
+    }
+    out.insert("pid".into(), json!(target.pid()));
 }
 
 // ── Handlers ────────────────────────────────────────────────────────────────
@@ -806,26 +887,46 @@ fn tool_apps() -> CliResult<ToolOutput> {
     })))
 }
 
+fn tool_shell() -> CliResult<ToolOutput> {
+    let surfaces = ShellSurface::list()?;
+    let listed: Vec<Value> = surfaces
+        .iter()
+        .map(|surface| {
+            json!({
+                "kind": surface.kind.to_snake_case(),
+                "name": surface.name,
+                "pid": surface.pid,
+            })
+        })
+        .collect();
+    Ok(ToolOutput::json(json!({
+        "count": listed.len(),
+        "surfaces": listed,
+    })))
+}
+
 fn tool_tree(args: &Value) -> CliResult<ToolOutput> {
     let max_depth = opt_usize(args, "max_depth", TREE_DEFAULT_MAX_DEPTH, TREE_DEPTH)?;
-    let app = target_app(args)?;
-    let root = Element::new(app.data.clone(), app.provider().clone());
+    let target = target(args)?;
+    let root = target.root();
 
     let mut budget = TREE_MAX_NODES;
     let mut depth_capped = false;
     let node = build_node(&root, max_depth, 0, &mut budget, &mut depth_capped);
 
-    Ok(ToolOutput::json(json!({
-        "application": app.name,
-        "pid": app.pid,
-        "max_depth": max_depth,
-        "truncated": {
+    let mut out = Map::new();
+    target_fields(&target, &mut out);
+    out.insert("max_depth".into(), json!(max_depth));
+    out.insert(
+        "truncated".into(),
+        json!({
             "by_depth": depth_capped,
             "by_node_limit": budget == 0,
             "node_limit": TREE_MAX_NODES,
-        },
-        "tree": node,
-    })))
+        }),
+    );
+    out.insert("tree".into(), node);
+    Ok(ToolOutput::json(Value::Object(out)))
 }
 
 /// Walk `element` into a JSON node, honouring both the depth limit and a
@@ -886,9 +987,9 @@ fn build_node(
 fn tool_find(args: &Value) -> CliResult<ToolOutput> {
     let selector = req_str(args, "selector")?;
     let limit = opt_usize(args, "limit", FIND_DEFAULT_LIMIT, FIND_LIMIT)?;
-    let app = target_app(args)?;
+    let target = target(args)?;
 
-    let locator = app.locator(selector);
+    let locator = target.locator(selector);
     let mut elements = locator.elements()?;
     if elements.is_empty() {
         // `elements()` reports a miss as an empty list, so the failure that
@@ -914,23 +1015,23 @@ fn tool_find(args: &Value) -> CliResult<ToolOutput> {
         .map(|el| element_data_json(el))
         .collect();
 
-    Ok(ToolOutput::json(json!({
-        "selector": selector,
-        "application": app.name,
-        "match_count": total,
-        "returned": matches.len(),
-        "truncated": total > matches.len(),
-        "matches": matches,
-    })))
+    let mut out = Map::new();
+    out.insert("selector".into(), json!(selector));
+    target_fields(&target, &mut out);
+    out.insert("match_count".into(), json!(total));
+    out.insert("returned".into(), json!(matches.len()));
+    out.insert("truncated".into(), json!(total > matches.len()));
+    out.insert("matches".into(), Value::Array(matches));
+    Ok(ToolOutput::json(Value::Object(out)))
 }
 
 fn tool_action(args: &Value) -> CliResult<ToolOutput> {
     let action = req_str(args, "action")?;
     let selector = req_str(args, "selector")?;
     let value = opt_str(args, "value")?;
-    let app = target_app(args)?;
+    let target = target(args)?;
 
-    let locator = app.locator(selector);
+    let locator = target.locator(selector);
     // The schema promises "must match exactly one element", so enforce it here
     // rather than letting the locator's document-order first-match stand in
     // for it: a model told "exactly one" that silently gets the first of
@@ -949,12 +1050,12 @@ fn tool_action(args: &Value) -> CliResult<ToolOutput> {
     // `ok` reports that the platform accepted the call. Whether the
     // application did anything with it is only knowable by re-reading, which
     // is what the tool's description tells the caller to do.
-    Ok(ToolOutput::json(json!({
-        "ok": true,
-        "action": action,
-        "selector": selector,
-        "application": app.name,
-    })))
+    let mut out = Map::new();
+    out.insert("ok".into(), json!(true));
+    out.insert("action".into(), json!(action));
+    out.insert("selector".into(), json!(selector));
+    target_fields(&target, &mut out);
+    Ok(ToolOutput::json(Value::Object(out)))
 }
 
 /// One line naming a candidate, carrying only what tells it apart from its
@@ -1309,6 +1410,15 @@ pub(crate) fn describe_failure(tool: &str, err: &CliError) -> (String, Value) {
             structured.insert("match_count".into(), json!(count));
             structured.insert("diagnosis".into(), diagnosis_json(diagnosis));
         }
+        CliError::AmbiguousShellSurface {
+            count,
+            kind,
+            diagnosis,
+        } => {
+            structured.insert("match_count".into(), json!(count));
+            structured.insert("shell_kind".into(), json!(kind));
+            structured.insert("diagnosis".into(), diagnosis_json(diagnosis));
+        }
         CliError::Usage(_) | CliError::NotFound(_) => {}
     }
     (text, Value::Object(structured))
@@ -1368,6 +1478,7 @@ fn failure_kind(err: &CliError) -> &'static str {
         CliError::Usage(_) => return "invalid_arguments",
         CliError::NotFound(_) => return "no_match",
         CliError::Ambiguous { .. } => return "ambiguous_selector",
+        CliError::AmbiguousShellSurface { .. } => return "ambiguous_shell_surface",
         CliError::Xa11y(inner) => inner,
     };
     match inner {
@@ -1734,11 +1845,140 @@ mod tests {
     fn the_missing_target_error_names_the_tool_arguments_not_cli_flags() {
         // `resolve_app`'s own message says "--app NAME or --pid PID", which
         // are flags no MCP caller can pass.
-        let err = target_app(&args(json!({}))).expect_err("must reject");
+        let err = target(&args(json!({}))).expect_err("must reject");
         let msg = err.to_string();
         assert!(msg.contains("\"app\""), "{msg}");
         assert!(msg.contains("\"pid\""), "{msg}");
+        assert!(msg.contains("\"shell\""), "the third target must be named");
         assert!(!msg.contains("--"), "no CLI flags on this surface: {msg}");
+    }
+
+    // ── Shell surfaces ──────────────────────────────────────────────────────
+
+    #[test]
+    fn app_and_shell_together_are_refused_before_anything_is_enumerated() {
+        // Two different things to search: picking one silently would act on a
+        // target the caller did not name.
+        let err = target(&args(json!({ "app": "Safari", "shell": "menu_bar" })))
+            .expect_err("two targets is not a target");
+        assert!(matches!(err, CliError::Usage(_)), "{err}");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("\"app\"") && msg.contains("\"shell\""),
+            "{msg}"
+        );
+        assert!(!msg.contains("--"), "no CLI flags on this surface: {msg}");
+    }
+
+    #[test]
+    fn an_unknown_shell_kind_is_a_fixable_argument_error_naming_the_kinds() {
+        // Parsed before the shell is enumerated, which is also what makes this
+        // testable with no display.
+        let err = target(&args(json!({ "shell": "task_bar" }))).expect_err("must reject");
+        assert_eq!(failure_kind(&err), "invalid_arguments");
+        let msg = err.to_string();
+        assert!(msg.contains("task_bar"), "must echo the bad value: {msg}");
+        for name in SHELL_KIND_NAMES {
+            assert!(msg.contains(name), "{name} must be offered: {msg}");
+        }
+    }
+
+    #[test]
+    fn the_shell_argument_advertises_exactly_the_kinds_the_parser_accepts() {
+        // A kind in the schema's enum that the parser rejects reads to a model
+        // as an arbitrary refusal; one the parser accepts but the schema omits
+        // is unreachable for a client that validates before sending.
+        for name in ["tree", "find", "action"] {
+            let def = tool_definition(name);
+            let listed = def["inputSchema"]["properties"]["shell"]["enum"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name} must offer the shell argument"));
+            assert_eq!(listed.len(), SHELL_KIND_NAMES.len(), "{name}");
+            for kind in SHELL_KIND_NAMES {
+                assert!(listed.iter().any(|v| v == kind), "{name} omits {kind}");
+                cli::parse_shell_kind(kind)
+                    .unwrap_or_else(|e| panic!("{name} advertises {kind}, which fails: {e}"));
+            }
+        }
+    }
+
+    #[test]
+    fn the_shell_argument_says_it_cannot_be_combined_with_app() {
+        for name in ["tree", "find", "action"] {
+            let description = tool_definition(name)["inputSchema"]["properties"]["shell"]
+                ["description"]
+                .as_str()
+                .expect("shell description")
+                .to_string();
+            assert!(
+                description.contains("Mutually exclusive with `app`"),
+                "{name}: {description}"
+            );
+            assert!(
+                description.contains("ambiguous_shell_surface"),
+                "{name} must name the failure a second surface produces: {description}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_shell_tool_states_the_contract_a_caller_would_otherwise_discover_by_pressing() {
+        let description = tool_definition("shell")["description"]
+            .as_str()
+            .expect("shell description")
+            .to_string();
+        // The mutation model is the part an agent cannot infer: enumeration is
+        // inert, and hidden tray icons only exist after *it* presses something.
+        assert!(description.contains("listing is live"), "{description}");
+        assert!(
+            description.contains("only while it is open"),
+            "a flyout is not a permanent surface: {description}"
+        );
+        assert!(
+            description.contains("never opens or presses anything"),
+            "enumeration must be stated as inert: {description}"
+        );
+        // The Windows overflow workflow, spelled out: an agent should not have
+        // to discover the mutation model by experiment.
+        assert!(description.contains("Show Hidden Icons"), "{description}");
+        assert!(description.contains("flyout"), "{description}");
+    }
+
+    #[test]
+    fn the_shell_tool_takes_no_arguments() {
+        let def = tool_definition("shell");
+        assert_eq!(def["inputSchema"]["type"], "object");
+        assert_eq!(def["inputSchema"]["additionalProperties"], false);
+        assert!(def["inputSchema"].get("properties").is_none());
+    }
+
+    #[test]
+    fn an_ambiguous_shell_surface_is_its_own_failure_kind_with_the_candidates() {
+        // The same call `action` makes for `ambiguous_selector`: refuse, and
+        // hand back the list that makes the retry a choice rather than a guess.
+        let err = CliError::AmbiguousShellSurface {
+            count: 2,
+            kind: "panel".into(),
+            diagnosis: Box::new(
+                crate::Diagnosis::new()
+                    .condition("exactly one panel shell surface")
+                    .last_observed("2 panel surfaces are present")
+                    .candidates(vec![
+                        "panel \"Top\" (pid=101)".into(),
+                        "panel \"Dock\" (pid=102)".into(),
+                    ]),
+            ),
+        };
+        let (text, structured) = describe_failure("find", &err);
+        assert_eq!(structured["kind"], "ambiguous_shell_surface");
+        assert_eq!(structured["match_count"], 2);
+        assert_eq!(structured["shell_kind"], "panel");
+        let candidates = structured["diagnosis"]["candidates"].as_array().unwrap();
+        assert_eq!(candidates.len(), 2);
+        // Readable off the message alone, for clients on a revision without
+        // structuredContent.
+        assert!(text.contains("pid=102"), "{text}");
+        assert!(text.contains("pid"), "{text}");
     }
 
     #[test]

@@ -260,6 +260,7 @@ def test_tools_list_is_complete_and_deterministic(mcp):
     assert first == second, "the spec asks for a deterministic order"
     assert first == [
         "apps",
+        "shell",
         "tree",
         "find",
         "action",
@@ -291,6 +292,151 @@ def test_unknown_tool_is_a_protocol_error(mcp):
     response = mcp.call_tool("teleport", {})
     assert "result" not in response
     assert response["error"]["code"] == -32602
+
+
+# ── Shell surfaces ───────────────────────────────────────────────────────────
+
+SHELL_KINDS = {
+    "menu_bar",
+    "status_items",
+    "taskbar",
+    "panel",
+    "dock",
+    "desktop",
+    "flyout",
+    "unknown",
+}
+
+
+def _surfaces(mcp) -> list[dict]:
+    """The `shell` listing, as rows of {kind, name, pid}."""
+    result = mcp.call_tool("shell")["result"]
+    assert result["isError"] is False, result["content"]
+    structured = result["structuredContent"]
+    assert structured["count"] == len(structured["surfaces"])
+    return structured["surfaces"]
+
+
+def test_shell_lists_surfaces_the_other_tools_can_target(mcp):
+    """Every row must be usable as a `shell` argument without translation.
+
+    No assertion on *which* surfaces exist: that is the runner's desktop, not
+    a property of the tool. A headless Linux cell legitimately reports none.
+    """
+    for surface in _surfaces(mcp):
+        assert surface["kind"] in SHELL_KINDS, surface
+        assert surface["name"], "a surface a caller has to recognise needs a name"
+        assert surface["pid"] is None or surface["pid"] > 0, surface
+
+
+def test_the_shell_tool_states_what_enumeration_does_and_does_not_do(mcp):
+    """The mutation model is the part an agent cannot infer by calling it.
+
+    Hidden tray icons do not exist until the caller presses the chevron, so
+    the description says so rather than leaving it to be discovered.
+    """
+    tools = {t["name"]: t for t in mcp.request(1, "tools/list")["result"]["tools"]}
+    description = tools["shell"]["description"]
+    assert "listing is live" in description
+    assert "only while it is open" in description, "a flyout is not permanent"
+    assert "never opens or presses anything" in description
+    assert "Show Hidden Icons" in description, "spell the overflow workflow out"
+
+
+def test_the_element_tools_offer_the_shell_argument_with_its_kinds(mcp):
+    tools = {t["name"]: t for t in mcp.request(1, "tools/list")["result"]["tools"]}
+    for name in ("tree", "find", "action"):
+        shell = tools[name]["inputSchema"]["properties"]["shell"]
+        assert set(shell["enum"]) == SHELL_KINDS, name
+        assert "Mutually exclusive with `app`" in shell["description"], name
+
+
+def test_app_and_shell_together_are_refused(mcp):
+    """Two different things to search: picking one silently acts on the wrong one."""
+    result = mcp.call_tool("find", {"selector": "button", "app": "X", "shell": "taskbar"})[
+        "result"
+    ]
+    assert result["isError"] is True
+    structured = result["structuredContent"]
+    assert structured["kind"] == "invalid_arguments"
+    assert '"app"' in structured["message"] and '"shell"' in structured["message"]
+    assert "--" not in structured["message"], "no flags exist on this surface"
+
+
+def test_an_unknown_shell_kind_names_the_kinds_that_exist(mcp):
+    """A typo is fixable, so it comes back as arguments to fix, not a failure."""
+    result = mcp.call_tool("find", {"selector": "button", "shell": "task_bar"})["result"]
+    assert result["isError"] is True
+    message = result["structuredContent"]["message"]
+    assert result["structuredContent"]["kind"] == "invalid_arguments"
+    assert "task_bar" in message, message
+    for kind in SHELL_KINDS:
+        assert kind in message, f"{kind} must be offered: {message}"
+
+
+def test_targeting_a_surface_that_is_not_there_reports_what_is(mcp):
+    """Tenet 6 on the shell: the candidate list is the way out of the miss."""
+    present = {s["kind"] for s in _surfaces(mcp)}
+    absent = sorted(SHELL_KINDS - present)
+    if not absent:
+        pytest.skip("this desktop vends every shell surface kind")
+
+    result = mcp.call_tool("find", {"selector": "*", "shell": absent[0]})["result"]
+    assert result["isError"] is True
+    structured = result["structuredContent"]
+    assert structured["kind"] == "no_match"
+    assert absent[0] in structured["message"], structured["message"]
+    if present:
+        candidates = " ".join(structured["diagnosis"]["candidates"])
+        assert any(kind in candidates for kind in present), candidates
+
+
+def test_find_can_search_a_listed_shell_surface(mcp):
+    """The claim the feature exists for: a surface is an ordinary search root."""
+    surfaces = _surfaces(mcp)
+    if not surfaces:
+        pytest.skip("this desktop vends no shell surfaces")
+    kinds = [s["kind"] for s in surfaces]
+    unique = next((k for k in kinds if kinds.count(k) == 1), None)
+    if unique is None:
+        pytest.skip("every listed surface shares its kind with another")
+
+    result = mcp.call_tool("find", {"selector": "*", "limit": 1, "shell": unique})["result"]
+    if result["isError"]:
+        # An empty surface is a legitimate answer; a rejected target is not.
+        assert result["structuredContent"]["kind"] == "no_match", result["structuredContent"]
+        return
+    structured = result["structuredContent"]
+    assert structured["shell"]["kind"] == unique
+    assert "application" not in structured, "a taskbar is not an application"
+
+
+def test_a_second_surface_of_one_kind_is_refused_with_its_pids(mcp):
+    """Ambiguity is refused rather than first-matched, as `action` already does."""
+    surfaces = _surfaces(mcp)
+    kinds = [s["kind"] for s in surfaces]
+    duplicated = next((k for k in kinds if kinds.count(k) > 1), None)
+    if duplicated is None:
+        pytest.skip("no two surfaces on this desktop share a kind")
+
+    result = mcp.call_tool("find", {"selector": "*", "shell": duplicated})["result"]
+    assert result["isError"] is True
+    structured = result["structuredContent"]
+    assert structured["kind"] == "ambiguous_shell_surface"
+    assert structured["shell_kind"] == duplicated
+    assert structured["match_count"] == kinds.count(duplicated)
+    assert structured["diagnosis"]["candidates"], "without the pids there is no way out"
+    assert "pid" in structured["message"]
+
+    # And the pid the candidate list points at is one the tool accepts.
+    pid = next(s["pid"] for s in surfaces if s["kind"] == duplicated)
+    if pid is None:
+        return
+    narrowed = mcp.call_tool(
+        "find", {"selector": "*", "limit": 1, "shell": duplicated, "pid": pid}
+    )["result"]
+    if narrowed["isError"]:
+        assert narrowed["structuredContent"]["kind"] != "ambiguous_shell_surface"
 
 
 def test_apps_lists_the_running_test_app(mcp, app_pid):
@@ -744,3 +890,52 @@ def test_operation_failures_exit_one_from_every_launcher(entry_point):
 def test_success_exits_zero_from_every_launcher(entry_point):
     result = _run(entry_point, "apps")
     assert result.returncode == 0, result.stderr
+
+
+# ── `xa11y shell` and `--shell` targeting ────────────────────────────────────
+
+
+def test_shell_lists_surfaces_in_tab_separated_columns(entry_point):
+    """`KIND\\tPID\\tNAME`, the same column contract `xa11y apps` keeps."""
+    result = _run(entry_point, "shell")
+    assert result.returncode == 0, result.stderr
+    lines = [line for line in result.stdout.splitlines() if line]
+    if lines == ["No shell surfaces found."]:
+        return
+    for line in lines:
+        kind, pid, name = line.split("\t")
+        assert kind in SHELL_KINDS, line
+        assert pid == "-" or pid.isdigit(), line
+        assert name, line
+
+
+def test_shell_and_app_are_mutually_exclusive_from_every_launcher(entry_point):
+    """Two targets is a malformed invocation, so exit 2 rather than picking one."""
+    result = _run(entry_point, "tree", "--shell", "taskbar", "--app", "NoSuchApplicationHere")
+    assert result.returncode == 2, result.stdout
+    assert "usage error:" in result.stderr
+    assert "--shell" in result.stderr and "--app" in result.stderr
+
+
+def test_an_unknown_shell_kind_is_a_usage_error_listing_the_kinds(entry_point):
+    result = _run(entry_point, "find", "button", "--shell", "task_bar")
+    assert result.returncode == 2, result.stdout
+    assert "task_bar" in result.stderr
+    for kind in SHELL_KINDS:
+        assert kind in result.stderr, result.stderr
+
+
+def test_a_missing_shell_surface_is_an_operation_failure_not_a_usage_error(entry_point):
+    """The invocation was well-formed; the surface simply is not on screen."""
+    listing = _run(entry_point, "shell")
+    assert listing.returncode == 0, listing.stderr
+    present = {
+        line.split("\t")[0] for line in listing.stdout.splitlines() if "\t" in line
+    }
+    absent = sorted(SHELL_KINDS - present)
+    if not absent:
+        pytest.skip("this desktop vends every shell surface kind")
+
+    result = _run(entry_point, "find", "*", "--shell", absent[0])
+    assert result.returncode == 1, result.stdout
+    assert absent[0] in result.stderr, result.stderr
