@@ -166,6 +166,21 @@ int safe_ax_get_pid(AXUIElementRef element, int *outPid) {
     }
 }
 
+// ── Messaging Timeout ───────────────────────────────────────────────────────
+
+// Safe wrapper for AXUIElementSetMessagingTimeout. The timeout applies to the
+// element it is set on and to no other element of the same process, so the
+// caller must set it on the very element it is about to query. The default is
+// ~1.5s per attribute, which is why the shell-surface scan bounds each probe.
+// Returns the AX error code, or -9999 if an ObjC exception was thrown.
+int safe_ax_set_messaging_timeout(AXUIElementRef element, float timeoutInSeconds) {
+    @try {
+        return AXUIElementSetMessagingTimeout(element, timeoutInSeconds);
+    } @catch (NSException *e) {
+        return -9999;
+    }
+}
+
 // ── AXValue Extraction ──────────────────────────────────────────────────────
 
 // Safe wrapper for AXValueGetValue.

@@ -102,6 +102,9 @@ mod stub {
         fn focused_app(&self) -> Result<ElementData> {
             unreachable!()
         }
+        fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
+            unreachable!()
+        }
         fn press(&self, _: &ElementData) -> Result<()> {
             unreachable!()
         }
