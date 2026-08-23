@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 # End-to-end validation for xa11y-linux's Wayland input-sim backend.
 #
-# The backend writes to /dev/uinput; CI runs this script inside the
+# The backend writes to /dev/uinput. `cargo xtask
+# test-integ-wayland-uinput-container` runs this script inside the
 # `xa11y-wayland-uinput` container with `--device /dev/uinput` so the
 # kernel uinput node is reachable. The container also has `libevdev` so
 # the test reader can scan /dev/input/event* for the virtual device the
 # backend registers.
+#
+# CI does not use this path: Docker's /dev tmpfs isolation hides the
+# udev-created /dev/input/event* nodes from inside the container, so the
+# `Linux Wayland (uinput)` job runs the same tests directly on the runner.
+# See the comment above that job in .github/workflows/ci.yml.
 #
 # Two test passes:
 #   1. cargo test -p xa11y-linux                   (lib + smoke)

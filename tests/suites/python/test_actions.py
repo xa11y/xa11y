@@ -291,7 +291,9 @@ def test_textfield_set_value(app, app_name, app_config):
             "egui's TextEdit advertises role text_field but does not implement "
             "AccessKit's SetValue action — text mutation goes through the "
             "keyboard event loop only. Setting text via the a11y API is a "
-            "tenet-2 question for egui upstream."
+            "tenet-2 question for egui upstream. Documented at "
+            "docs/site/src/content/docs/explanation/accessibility-quirks.mdx "
+            "under 'egui text fields accept SetValue and ignore it'."
         )
 
     loc = app.locator(sel)
@@ -452,7 +454,8 @@ def test_textfield_set_value_via_element(app, app_name, app_config):
     if app_name == "egui":
         pytest.skip(
             "egui's TextEdit does not implement AccessKit's SetValue "
-            "action (see test_textfield_set_value). On Linux the locator "
+            "action (see test_textfield_set_value and the accessibility-quirks "
+            "page it cites). On Linux the locator "
             "form returns ActionNotSupportedError and xfails; on macOS/Windows "
             "the call silently no-ops, so the assertion that follows fails."
         )

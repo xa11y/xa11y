@@ -40,7 +40,7 @@ echo "Using container runtime: $CONTAINER"
 # Build base image if it doesn't exist
 if ! "$CONTAINER" image inspect "$IMAGE" &>/dev/null; then
     echo "Building base image (one-time)..."
-    "$CONTAINER" build -t "$IMAGE" -f Containerfile.base .
+    "$CONTAINER" build -t "$IMAGE" -f scripts/Containerfile.base .
 fi
 
 # Create cargo cache volume if it doesn't exist

@@ -1,3 +1,7 @@
+# Build context excludes for the images in scripts/Containerfile.*.
+# This file stays at the repo root because that is the build context those
+# images are built with (`-f scripts/Containerfile.base .`), and both docker
+# and finch resolve .dockerignore relative to the context, not the -f path.
 target/
 .git/
 .claude/

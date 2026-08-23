@@ -364,6 +364,58 @@ fn do_test_integ(args: &[String]) -> bool {
     run_in("bash", &cmd_args, &root)
 }
 
+/// Pick a container runtime, mirroring `scripts/run_integ_container.sh`:
+/// an explicit `CONTAINER` override wins, otherwise finch is preferred over
+/// docker so the shell and xtask paths agree about which tool a developer
+/// with both installed ends up using.
+fn container_runtime() -> Option<String> {
+    if let Ok(explicit) = env::var("CONTAINER") {
+        if !explicit.is_empty() {
+            return Some(explicit);
+        }
+    }
+    for candidate in ["finch", "docker"] {
+        let found = Command::new(candidate)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if found {
+            return Some(candidate.to_string());
+        }
+    }
+    eprintln!("error: neither 'finch' nor 'docker' found on PATH.");
+    eprintln!("install one, or set CONTAINER=<tool> to override.");
+    None
+}
+
+/// Build `image` from `containerfile` if it isn't already present.
+fn ensure_container_image(
+    runtime: &str,
+    image: &str,
+    containerfile: &str,
+    root: &std::path::Path,
+) -> bool {
+    let exists = Command::new(runtime)
+        .args(["image", "inspect", image])
+        .current_dir(root)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if exists {
+        return true;
+    }
+    run_in(
+        runtime,
+        &["build", "-t", image, "-f", containerfile, "."],
+        root,
+    )
+}
+
 fn do_test_integ_container(args: &[String]) -> bool {
     heading("Integration tests (container)");
     let root = project_root();
@@ -376,32 +428,24 @@ fn do_test_integ_container(args: &[String]) -> bool {
 fn do_test_integ_wayland_container() -> bool {
     heading("Wayland portal screenshot tests (container)");
     let root = project_root();
-    // Build the Wayland container image (extends xa11y-base with sway +
-    // xdg-desktop-portal + pipewire) if it isn't already present.
-    let img_exists = std::process::Command::new("docker")
-        .args(["image", "inspect", "xa11y-wayland"])
-        .current_dir(&root)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !img_exists
-        && !run_in(
-            "docker",
-            &[
-                "build",
-                "-t",
-                "xa11y-wayland",
-                "-f",
-                "Containerfile.wayland",
-                ".",
-            ],
-            &root,
-        )
-    {
+    let Some(runtime) = container_runtime() else {
+        return false;
+    };
+    // Both images extend xa11y-base, so it has to exist first.
+    if !ensure_container_image(&runtime, "xa11y-base", "scripts/Containerfile.base", &root) {
+        return false;
+    }
+    // The Wayland image adds sway + xdg-desktop-portal + pipewire on top.
+    if !ensure_container_image(
+        &runtime,
+        "xa11y-wayland",
+        "scripts/Containerfile.wayland",
+        &root,
+    ) {
         return false;
     }
     run_in(
-        "docker",
+        &runtime,
         &[
             "run",
             "--rm",
@@ -420,32 +464,24 @@ fn do_test_integ_wayland_container() -> bool {
 fn do_test_integ_wayland_uinput_container() -> bool {
     heading("Wayland uinput input-sim e2e (container)");
     let root = project_root();
-    // Build the uinput container image (extends xa11y-base with libevdev
-    // + libxkbcommon) if it isn't already present.
-    let img_exists = std::process::Command::new("docker")
-        .args(["image", "inspect", "xa11y-wayland-uinput"])
-        .current_dir(&root)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if !img_exists
-        && !run_in(
-            "docker",
-            &[
-                "build",
-                "-t",
-                "xa11y-wayland-uinput",
-                "-f",
-                "Containerfile.wayland-uinput",
-                ".",
-            ],
-            &root,
-        )
-    {
+    let Some(runtime) = container_runtime() else {
+        return false;
+    };
+    // Both images extend xa11y-base, so it has to exist first.
+    if !ensure_container_image(&runtime, "xa11y-base", "scripts/Containerfile.base", &root) {
+        return false;
+    }
+    // The uinput image adds libevdev + libxkbcommon on top.
+    if !ensure_container_image(
+        &runtime,
+        "xa11y-wayland-uinput",
+        "scripts/Containerfile.wayland-uinput",
+        &root,
+    ) {
         return false;
     }
     run_in(
-        "docker",
+        &runtime,
         &[
             "run",
             "--rm",
@@ -470,8 +506,14 @@ fn do_test_integ_wayland_uinput_container() -> bool {
 fn do_test_integ_input_smoke_container() -> bool {
     heading("Linux X11 input smoke (container)");
     let root = project_root();
+    let Some(runtime) = container_runtime() else {
+        return false;
+    };
+    if !ensure_container_image(&runtime, "xa11y-base", "scripts/Containerfile.base", &root) {
+        return false;
+    }
     run_in(
-        "docker",
+        &runtime,
         &[
             "run",
             "--rm",

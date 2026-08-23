@@ -377,6 +377,34 @@ while current != target:
 Text fields and checkboxes are unaffected, and `set_value()` and `toggle()`
 work on Qt as expected.
 
+### egui text fields accept `SetValue` and ignore it
+
+egui's `TextEdit` declares an AccessKit role (`TextInput`,
+`MultilineTextInput`, or `PasswordInput`) but never drains the
+`Action::SetValue` requests that role invites. Its `DragValue` and `Slider`
+widgets do drain them, so the gap is per-widget rather than per-toolkit.
+
+What a caller sees depends on the platform, and none of the three is
+reporting incorrectly:
+
+- **macOS** returns success. `accesskit_macos` implements
+  `setAccessibilityValue:` as an ObjC `void` method that forwards to
+  `do_action`, and neither can signal failure back to the AX client.
+- **Windows** returns success. `accesskit_windows` implements
+  `IValueProvider::SetValue` on top of an `ActionHandler::do_action` that
+  returns `()`, so UIA reports `S_OK` once the request is *dispatched*, not
+  once the app applies it.
+- **Linux** raises. The AT-SPI bridge in `accesskit_unix` never exposes the
+  `EditableText` interface, only `Value.SetCurrentValue`, so the
+  `EditableText.SetTextContents` call xa11y makes is rejected with
+  `UnknownInterface` and surfaces as `TextValueNotSupported`.
+
+This is the general shape of the AccessKit action pipeline, not something
+specific to text: an action request is fire-and-forget on the two platforms
+whose native API has no failure channel. A success return from `set_value()`
+on an AccessKit-backed app means the request reached the app, so read the
+value back if you need to know it landed.
+
 ## Element references go stale, constantly
 
 ### All three backends mint a fresh handle on every read
@@ -591,6 +619,4 @@ In containers, Docker's `/dev` tmpfs isolation hides host-created
   [UIA_IsDialogPropertyId](https://learn.microsoft.com/en-us/windows/win32/winauto/uiauto-automation-element-propids)
 - [AccessKit](https://accesskit.dev/)
 - xa11y's own [Platform Details](/reference/platform-details/) and
-  [Testing in CI](/guides/ci/) guides, and the
-  [running list of upstream issues](https://github.com/xa11y/xa11y/blob/main/external-issues.md)
-  we've filed or documented.
+  [Testing in CI](/guides/ci/) guides.

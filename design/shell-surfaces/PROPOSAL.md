@@ -1,9 +1,10 @@
 # Shell surfaces — API proposal for xa11y#374
 
-**Status:** proposal, for review. Companion to the field report in
-`design/shell-surfaces/README.md` (branch `report/shell-surfaces-374`); every
-`§` citation below refers to that report. The report is measurement; this
-document is the design the measurements point at.
+**Status:** shipped in [#377](https://github.com/xa11y/xa11y/pull/377); kept as
+the design record for the feature. The `§` citations below refer to the field
+report that preceded it, which was measurement gathered on the
+`report/shell-surfaces-374` branch and is not part of this tree; this document
+is the design those measurements pointed at.
 
 **The request** ([#374](https://github.com/xa11y/xa11y/issues/374)): reach
 OS-owned UI — the macOS menu bar and status items, the Windows taskbar and

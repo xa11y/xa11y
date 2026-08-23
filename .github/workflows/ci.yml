@@ -65,7 +65,7 @@ jobs:
   #    /dev tmpfs isolation means udev's freshly-minted /dev/input/event*
   #    nodes for our virtual device aren't visible inside a container,
   #    even with --device /dev/uinput and -v /dev/input:/dev/input.
-  #    The Containerfile.wayland-uinput + xtask path is still useful for
+  #    The scripts/Containerfile.wayland-uinput + xtask path is still useful for
   #    developers running on non-Linux hosts.
   linux-wayland-uinput:
     name: Linux Wayland (uinput)
