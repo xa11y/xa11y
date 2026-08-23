@@ -369,6 +369,8 @@ js_only = [
     { method = "App::list", reason = "Binding-level convenience over App::list_with; mirrors `xa11y::AppExt::list`." },
     { method = "App::find", reason = "Binding-level convenience over App::try_find_with; implemented as a poll loop in index.js, declared in index.d.ts." },
     { method = "App::wait_for_event", reason = "JS-only convenience: temporary subscription + single-event wait, declared in index.d.ts." },
+    { method = "ShellSurface::list", reason = "Binding-level convenience over ShellSurface::list_with; mirrors `xa11y::ShellSurfaceExt::list`." },
+    { method = "ShellSurface::by_kind", reason = "Binding-level convenience over ShellSurface::by_kind_with; mirrors `xa11y::ShellSurfaceExt::by_kind`, taking the kind as a snake_case string and the timeout in milliseconds." },
 
     { method = "Element::subscribe", reason = "Binding convenience: subscribe to events for any element, delegating to provider.subscribe()." },
 

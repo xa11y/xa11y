@@ -244,6 +244,7 @@ test('the scan finds the declarations it is meant to check', () => {
     ['Element', [], ['press', 'tree', 'enabled']],
     ['InputSim', [], ['click', 'drag', 'keyDown', 'keyUp', 'mouseDown', 'mouseUp']],
     ['Locator', [], ['press', 'element', 'waitUntil']],
+    ['ShellSurface', ['list', 'byKind'], ['locator', 'children', 'tree', 'dump', 'kind']],
     ['Subscription', [], ['close', 'waitForEvent']],
   ]) {
     const decl = found.get(type);
@@ -324,4 +325,23 @@ test('the narrowed input-layer types survive the build', () => {
   ]) {
     assert.ok(native.includes(decl), `native.d.ts is missing: ${decl}`);
   }
+});
+
+test('the shell-surface kind union survives the build', () => {
+  // Same guard for the kind strings: a widened `kind` would let a typo'd
+  // literal type-check and fail only at runtime, against the one parameter
+  // whose whole contract is a fixed set of spellings.
+  const native = readFileSync(join(ROOT, 'native.d.ts'), 'utf8');
+  for (const decl of [
+    'export type ShellSurfaceKindName =',
+    "  | 'status_items'",
+    '  static byKind(kind: ShellSurfaceKindName,',
+    '  get kind(): ShellSurfaceKindName',
+  ]) {
+    assert.ok(native.includes(decl), `native.d.ts is missing: ${decl}`);
+  }
+  // ...and the package's own entry point forwards it, since `native.d.ts` is
+  // not what consumers import.
+  const index = readFileSync(join(ROOT, 'index.d.ts'), 'utf8');
+  assert.match(index, /^\s*ShellSurfaceKindName,$/m, 'index.d.ts must export ShellSurfaceKindName');
 });

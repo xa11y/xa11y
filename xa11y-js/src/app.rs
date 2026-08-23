@@ -224,7 +224,7 @@ impl App {
 /// falls back to the process-wide default (`setDefaultTimeout()` /
 /// `XA11Y_DEFAULT_TIMEOUT`, else 5 seconds) — matching the auto-wait
 /// timeout used elsewhere in the API (e.g. `Locator.waitAttached`).
-fn effective_timeout_ms(timeout_ms: Option<u32>) -> napi::Result<Duration> {
+pub(crate) fn effective_timeout_ms(timeout_ms: Option<u32>) -> napi::Result<Duration> {
     match timeout_ms {
         Some(ms) => Ok(Duration::from_millis(ms.into())),
         None => xa11y::default_timeout().map_err(map_err),

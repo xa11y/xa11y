@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use crate::app::App;
 use crate::locator::Locator;
+use crate::shell::{parse_kind, ShellSurface};
 use crate::subscription::NativeSubscription;
 
 /// Create a mock `Locator` rooted at the shared synthetic tree. Used only
@@ -104,6 +105,154 @@ impl TestActionProbe {
 pub fn make_test_action_probe() -> TestActionProbe {
     TestActionProbe {
         provider: xa11y::mock::build_provider(),
+    }
+}
+
+/// List the mock's fixture shell surfaces (`taskbar` "Taskbar" and `desktop`
+/// "Desktop"). Used only from the JS unit tests — the real
+/// `ShellSurface.list()` resolves the platform singleton provider, which no
+/// unit-test environment has. Not part of the public API.
+#[napi(js_name = "_makeTestShellSurfaces")]
+#[allow(
+    dead_code,
+    reason = "Exported via napi-derive for JS unit tests; the lib-test clippy build doesn't see the JS-side consumer"
+)]
+pub fn make_test_shell_surfaces() -> napi::Result<Vec<ShellSurface>> {
+    let provider = xa11y::mock::build_provider() as Arc<dyn xa11y::Provider>;
+    Ok(xa11y::ShellSurface::list_with(provider)
+        .map_err(crate::map_err)?
+        .into_iter()
+        .map(ShellSurface::from_core)
+        .collect())
+}
+
+/// Resolve one mock shell surface by kind, mirroring `ShellSurface.byKind`'s
+/// parse-then-look-up shape against the mock provider. Not part of the public
+/// API.
+#[napi(js_name = "_makeTestShellSurfaceByKind")]
+#[allow(
+    dead_code,
+    reason = "Exported via napi-derive for JS unit tests; the lib-test clippy build doesn't see the JS-side consumer"
+)]
+pub fn make_test_shell_surface_by_kind(kind: String) -> napi::Result<ShellSurface> {
+    let kind = parse_kind(&kind)?;
+    let provider = xa11y::mock::build_provider() as Arc<dyn xa11y::Provider>;
+    // `Duration::ZERO` — a fixture never materialises later, so waiting would
+    // only turn a miss into a slow miss.
+    xa11y::ShellSurface::by_kind_with(provider, kind, std::time::Duration::ZERO)
+        .map(ShellSurface::from_core)
+        .map_err(crate::map_err)
+}
+
+/// [`make_test_shell_surface_by_kind`] against a provider that reports the
+/// mock's taskbar twice — the ambiguous shell (two `panel` frames, status
+/// items from several processes, a leftover flyout). Not part of the public
+/// API.
+#[napi(js_name = "_makeTestAmbiguousShellSurfaceByKind")]
+#[allow(
+    dead_code,
+    reason = "Exported via napi-derive for JS unit tests; the lib-test clippy build doesn't see the JS-side consumer"
+)]
+pub fn make_test_ambiguous_shell_surface_by_kind(kind: String) -> napi::Result<ShellSurface> {
+    let kind = parse_kind(&kind)?;
+    let provider = Arc::new(DuplicateShellProvider {
+        inner: xa11y::mock::build_provider(),
+    }) as Arc<dyn xa11y::Provider>;
+    xa11y::ShellSurface::by_kind_with(provider, kind, std::time::Duration::ZERO)
+        .map(ShellSurface::from_core)
+        .map_err(crate::map_err)
+}
+
+/// Wraps the shared mock provider but reports the taskbar surface twice.
+/// Everything else delegates — the ambiguity is the only difference, so the
+/// JS test observes exactly the refusal core builds for a real duplicated
+/// surface.
+struct DuplicateShellProvider {
+    inner: Arc<xa11y::mock::MockProvider>,
+}
+
+impl xa11y::Provider for DuplicateShellProvider {
+    fn list_shell_surfaces(
+        &self,
+    ) -> xa11y::Result<Vec<(xa11y::ShellSurfaceKind, xa11y::ElementData)>> {
+        let mut all = self.inner.list_shell_surfaces()?;
+        let Some(dup) = all
+            .iter()
+            .find(|(k, _)| *k == xa11y::ShellSurfaceKind::Taskbar)
+            .cloned()
+        else {
+            return Err(xa11y::Error::selector_not_matched(
+                "the mock fixture's taskbar surface",
+            ));
+        };
+        all.push(dup);
+        Ok(all)
+    }
+    fn get_children(
+        &self,
+        e: Option<&xa11y::ElementData>,
+    ) -> xa11y::Result<Vec<xa11y::ElementData>> {
+        self.inner.get_children(e)
+    }
+    fn get_parent(&self, e: &xa11y::ElementData) -> xa11y::Result<Option<xa11y::ElementData>> {
+        self.inner.get_parent(e)
+    }
+    fn list_apps(&self) -> xa11y::Result<Vec<xa11y::ElementData>> {
+        self.inner.list_apps()
+    }
+    fn focused_app(&self) -> xa11y::Result<xa11y::ElementData> {
+        self.inner.focused_app()
+    }
+    fn press(&self, e: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.inner.press(e)
+    }
+    fn focus(&self, e: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.inner.focus(e)
+    }
+    fn blur(&self, e: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.inner.blur(e)
+    }
+    fn toggle(&self, e: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.inner.toggle(e)
+    }
+    fn select(&self, e: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.inner.select(e)
+    }
+    fn expand(&self, e: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.inner.expand(e)
+    }
+    fn collapse(&self, e: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.inner.collapse(e)
+    }
+    fn show_menu(&self, e: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.inner.show_menu(e)
+    }
+    fn increment(&self, e: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.inner.increment(e)
+    }
+    fn decrement(&self, e: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.inner.decrement(e)
+    }
+    fn scroll_into_view(&self, e: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.inner.scroll_into_view(e)
+    }
+    fn set_value(&self, e: &xa11y::ElementData, v: &str) -> xa11y::Result<()> {
+        self.inner.set_value(e, v)
+    }
+    fn set_numeric_value(&self, e: &xa11y::ElementData, v: f64) -> xa11y::Result<()> {
+        self.inner.set_numeric_value(e, v)
+    }
+    fn type_text(&self, e: &xa11y::ElementData, t: &str) -> xa11y::Result<()> {
+        self.inner.type_text(e, t)
+    }
+    fn set_text_selection(&self, e: &xa11y::ElementData, s: u32, end: u32) -> xa11y::Result<()> {
+        self.inner.set_text_selection(e, s, end)
+    }
+    fn perform_action(&self, e: &xa11y::ElementData, a: &str) -> xa11y::Result<()> {
+        self.inner.perform_action(e, a)
+    }
+    fn subscribe(&self, e: &xa11y::ElementData) -> xa11y::Result<xa11y::Subscription> {
+        self.inner.subscribe(e)
     }
 }
 

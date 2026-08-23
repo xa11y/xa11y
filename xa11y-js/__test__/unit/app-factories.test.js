@@ -69,6 +69,9 @@ require.cache[nativePath] = {
     Element: class {},
     Event: class {},
     Locator: class {},
+    // The index.js wrapper subclasses this one too, so the stub owes it a
+    // constructor even though these tests only exercise `App`.
+    ShellSurface: class {},
     _NativeSubscription: NativeSubscriptionStub,
     NativeSubscription: NativeSubscriptionStub,
     _makeTestLocator: () => {},

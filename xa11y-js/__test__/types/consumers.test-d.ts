@@ -9,6 +9,7 @@ import {
   InputSim,
   Locator,
   Screenshot,
+  ShellSurface,
   Subscription,
   XA11yError,
   SelectorNotMatchedError,
@@ -20,6 +21,8 @@ import {
   type EventTypeName,
   type Rect,
   type ScreenshotOptions,
+  type ShellSurfaceKindName,
+  type ShellSurfaceLookupOptions,
   type SubscribeOptions,
   type WaitForEventOptions,
 } from '../../index.js';
@@ -128,6 +131,28 @@ async function checks() {
   await sim.chord('a', ['Shift']);
   await sim.typeText('hello');
 
+  // ── ShellSurface ───────────────────────────────────────────────────
+  const surfaces: ShellSurface[] = await ShellSurface.list();
+  const taskbar: ShellSurface = await ShellSurface.byKind('taskbar', { timeout: 0 });
+  const shellOpts: ShellSurfaceLookupOptions = { timeout: 3000 };
+  const _flyout: ShellSurface = await ShellSurface.byKind('flyout', shellOpts);
+
+  // Narrowed by patch-native-dts: kinds are a literal union both ways.
+  const surfaceKind: ShellSurfaceKindName = taskbar.kind;
+  if (surfaceKind === 'taskbar' || surfaceKind === 'status_items') {
+    // OK -- literal narrowing works
+  }
+  // @ts-expect-error -- a kind that is not one of the eight spellings
+  await ShellSurface.byKind('task_bar');
+
+  const _surfaceName: string = taskbar.name;
+  const _surfacePid: number | null = taskbar.pid;
+  const _shellLoc: Locator = taskbar.locator("button[name='Show Hidden Icons']");
+  const _shellChildren: Element[] = await taskbar.children();
+  const _shellRoot: Element = taskbar.asElement();
+  const _shellDump: string = await taskbar.dump(2);
+  void (await taskbar.tree(1));
+
   // ── screenshot ─────────────────────────────────────────────────────
   const shot: Screenshot = await screenshot();
   const _w: number = shot.width;
@@ -158,6 +183,14 @@ async function checks() {
   void _png;
   void _shot2;
   void _shot3;
+  void surfaces;
+  void _flyout;
+  void _surfaceName;
+  void _surfacePid;
+  void _shellLoc;
+  void _shellChildren;
+  void _shellRoot;
+  void _shellDump;
 }
 
 void checks;

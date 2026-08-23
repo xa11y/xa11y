@@ -5,11 +5,14 @@
 //
 // Responsibilities:
 //   1. Prepend shared type aliases (`CheckedState`, `EventTypeName`,
-//      `MouseButtonName`, `AnchorName`) that the Rust side can't express.
+//      `MouseButtonName`, `AnchorName`, `ShellSurfaceKindName`) that the Rust
+//      side can't express.
 //   2. Narrow `Element.checked: string | null` -> `CheckedState | null`.
 //   3. Narrow `Event.type: string` -> `EventTypeName`.
 //   4. Narrow the input layer's button and anchor strings.
-//   5. Append a `;` to the napi-emitted `NativeSubscription` type alias
+//   5. Narrow `ShellSurface.kind` and `ShellSurface.byKind`'s parameter to
+//      `ShellSurfaceKindName`.
+//   6. Append a `;` to the napi-emitted `NativeSubscription` type alias
 //      (napi-rs omits terminators, which confuses the docs generator's
 //      multi-line type-alias parser).
 //
@@ -59,6 +62,17 @@ export type AnchorName =
   | 'bottom_left'
   | 'bottom_right';
 
+/** Kinds of OS shell surface, spelled as in Python, the CLI and MCP. */
+export type ShellSurfaceKindName =
+  | 'menu_bar'
+  | 'status_items'
+  | 'taskbar'
+  | 'panel'
+  | 'dock'
+  | 'desktop'
+  | 'flyout'
+  | 'unknown';
+
 `;
 
 /**
@@ -92,6 +106,23 @@ const REPLACEMENTS = [
     from: '(button?: string | undefined | null): Promise<void>',
     to: '(button?: MouseButtonName | undefined | null): Promise<void>',
     all: 2,
+  },
+  {
+    // The kind a caller writes as a literal, on the way in...
+    name: 'ShellSurface.byKind kind -> ShellSurfaceKindName',
+    from: '  static byKind(kind: string,',
+    to: '  static byKind(kind: ShellSurfaceKindName,',
+    all: 1,
+  },
+  {
+    // ...and the same union on the way back out. Test helpers
+    // (`_makeTestShellSurfaceByKind`) keep the wide `string`: they are
+    // internal, and narrowing them would make the count assertions above
+    // move whenever a test helper is added.
+    name: 'ShellSurface.kind -> ShellSurfaceKindName',
+    from: '  get kind(): string\n',
+    to: '  get kind(): ShellSurfaceKindName\n',
+    all: 1,
   },
   {
     name: 'ClickOptions.anchor -> AnchorName | [number, number]',

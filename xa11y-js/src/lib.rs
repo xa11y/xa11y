@@ -18,6 +18,7 @@ mod input;
 mod locator;
 mod mock;
 mod screenshot;
+mod shell;
 mod subscription;
 mod types;
 

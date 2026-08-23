@@ -475,6 +475,12 @@ pub struct ChildrenTask {
     provider: Arc<dyn xa11y::Provider>,
 }
 
+impl ChildrenTask {
+    pub(crate) fn new(data: xa11y::ElementData, provider: Arc<dyn xa11y::Provider>) -> Self {
+        Self { data, provider }
+    }
+}
+
 impl Task for ChildrenTask {
     type Output = Vec<xa11y::ElementData>;
     type JsValue = Vec<Element>;

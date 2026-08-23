@@ -42,6 +42,7 @@ export type {
   EventTypeName,
   MouseButtonName,
   Rect,
+  ShellSurfaceKindName,
 } from './native.js';
 import type {
   Element,
@@ -50,6 +51,7 @@ import type {
   Locator,
   Rect,
   Screenshot,
+  ShellSurfaceKindName,
   TreeNode,
 } from './native.js';
 
@@ -67,6 +69,18 @@ export interface AppLookupOptions {
    * {@link setDefaultTimeout}; 5000ms unless overridden) — pass `0` for a
    * single attempt with no waiting. Only "not found" errors trigger a
    * retry; permission errors and the like fail fast.
+   */
+  timeout?: number;
+}
+
+export interface ShellSurfaceLookupOptions {
+  /**
+   * Poll the accessibility API until exactly one surface of the kind
+   * appears, up to this many milliseconds. Defaults to the process-wide
+   * default timeout (see {@link setDefaultTimeout}; 5000ms unless
+   * overridden) — pass `0` for a single attempt with no waiting. Only "no
+   * such surface yet" triggers a retry; an enumeration failure, and an
+   * ambiguous shell, fail fast.
    */
   timeout?: number;
 }
@@ -303,6 +317,101 @@ export declare class App {
     type: EventTypeName | 'event',
     opts?: WaitForEventOptions,
   ): Promise<Event>;
+}
+
+// ── ShellSurface (full declaration; shadows the native class) ─────────────
+//
+// The native ShellSurface class is generated from Rust (native.d.ts). The JS
+// wrapper in index.js extends it and overrides the static factories so their
+// rejections carry typed errors. As with `App`, this declaration — not the
+// native one — is what consumers see, so every member lives here.
+
+export declare class ShellSurface {
+  /**
+   * List the OS shell surfaces currently on screen.
+   *
+   * The listing is live: `flyout` surfaces appear only while they are open,
+   * and enumerating never opens, closes, or presses anything. A platform with
+   * no surface of a given kind simply returns none.
+   */
+  static list(): Promise<ShellSurface[]>;
+
+  /**
+   * Wait for **exactly one** surface of `kind`.
+   *
+   * Polls until the surface exists or `options.timeout` (ms) elapses; see
+   * {@link App.byName} for the default-timeout behaviour. An unknown kind
+   * rejects with `InvalidActionDataError` before any accessibility call.
+   *
+   * Rejects with `SelectorNotMatchedError` both when no surface of `kind` is
+   * present and when **several** are — ambiguity is refused rather than
+   * first-matched, and the error's `candidates` name the surfaces that were
+   * found so the caller can disambiguate with {@link ShellSurface.list} and a
+   * pid.
+   *
+   * @example
+   * ```ts
+   * const taskbar = await ShellSurface.byKind('taskbar', { timeout: 0 });
+   * await taskbar.locator("button[name='Show Hidden Icons']").press();
+   * const flyout = await ShellSurface.byKind('flyout', { timeout: 3000 });
+   * ```
+   */
+  static byKind(
+    kind: ShellSurfaceKindName,
+    options?: ShellSurfaceLookupOptions,
+  ): Promise<ShellSurface>;
+
+  /** What this surface is (e.g. `'taskbar'`, `'status_items'`). */
+  get kind(): ShellSurfaceKindName;
+
+  /**
+   * Human-readable name: the owning app for per-app surfaces (`'Safari'` menu
+   * bar, `'Arq'` status items), the platform's own name otherwise
+   * (`'Taskbar'`, `'Dock'`). Falls back to the kind's spelling when the
+   * platform vends no name for the root.
+   */
+  get name(): string;
+
+  /**
+   * Owning process where the platform reports one honestly, else `null`.
+   *
+   * On macOS this is the true owner. On Windows it is the *host*
+   * (explorer.exe / ShellHost.exe) because UIA carries no per-icon owner —
+   * reported as the host, never faked. On Linux it is the panel process.
+   */
+  get pid(): number | null;
+
+  /** Create a `Locator` scoped to this surface's accessibility tree. */
+  locator(selector: string): Locator;
+
+  /** Get direct children of the surface root. */
+  children(): Promise<Element[]>;
+
+  /**
+   * Get an `Element` handle for the surface root.
+   *
+   * Useful for invoking Element-level methods (`children()`, `parent()`,
+   * etc.) without going through a locator. Synchronous — the surface already
+   * holds the root's accessibility data.
+   */
+  asElement(): Element;
+
+  /**
+   * Capture this surface's accessibility tree as a recursive snapshot, rooted
+   * at the surface element.
+   *
+   * `maxDepth` limits traversal depth: `0` = only the surface node, `1` =
+   * surface + direct children, and so on. Omit for the full subtree.
+   */
+  tree(maxDepth?: number | null): Promise<TreeNode>;
+
+  /**
+   * Render this surface's accessibility tree as an indented string.
+   *
+   * Returns the string without printing it. For the same output from the
+   * shell, use `xa11y tree --shell KIND`.
+   */
+  dump(maxDepth?: number | null): Promise<string>;
 }
 
 // ── Screenshot ────────────────────────────────────────────────────────────

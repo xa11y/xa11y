@@ -211,6 +211,7 @@ function patchPrototypeMethods(cls) {
 }
 
 patchPrototypeMethods(native.App);
+patchPrototypeMethods(native.ShellSurface);
 patchPrototypeMethods(native.Element);
 patchPrototypeMethods(native.Locator);
 patchPrototypeMethods(native.Event);
@@ -576,6 +577,46 @@ class App extends native.App {
   }
 }
 
+// ── ShellSurface wrapper ───────────────────────────────────────────────────
+
+/**
+ * User-facing `ShellSurface` class — the shell counterpart of `App`.
+ *
+ * Extends the native class so properties and instance methods behave
+ * identically, and overrides the two async static factories so their
+ * rejections carry the typed `XA11yError` subclasses. The napi statics are
+ * sealed (non-configurable), so overriding here is the only way to reach
+ * them — the same reason `App` wraps its own.
+ */
+class ShellSurface extends native.ShellSurface {
+  static [Symbol.hasInstance](instance) {
+    return instance instanceof native.ShellSurface;
+  }
+
+  static async list() {
+    try {
+      const surfaces = await native.ShellSurface.list();
+      for (const s of surfaces) Object.setPrototypeOf(s, ShellSurface.prototype);
+      return surfaces;
+    } catch (err) {
+      throw toTypedError(err);
+    }
+  }
+
+  static async byKind(kind, options) {
+    try {
+      // `byKind` parses `kind` before any accessibility call, so an unknown
+      // kind throws synchronously from native; inside this async static that
+      // surfaces as a rejection, like every other bad argument.
+      const s = await native.ShellSurface.byKind(kind, options);
+      Object.setPrototypeOf(s, ShellSurface.prototype);
+      return s;
+    } catch (err) {
+      throw toTypedError(err);
+    }
+  }
+}
+
 // ── Top-level locator ────────────────────────────────────────────────────────
 
 /**
@@ -662,6 +703,7 @@ module.exports = {
   InputSim: native.InputSim,
   Locator: native.Locator,
   Screenshot: native.Screenshot,
+  ShellSurface,
   Subscription,
   getDefaultTimeout,
   inputSim,
@@ -685,5 +727,12 @@ module.exports = {
   _makeTestApp: native._makeTestApp,
   _makeTestActionProbe: native._makeTestActionProbe,
   _makeDisconnectedSubscription: native._makeDisconnectedSubscription,
+  // Wrapped, unlike the helpers above: these lookups fail on purpose in the
+  // shell tests (no such surface / an ambiguous shell), and a test asserting
+  // the structured diagnosis must see the same typed error a consumer of
+  // `ShellSurface.byKind` gets.
+  _makeTestShellSurfaces: wrap(native._makeTestShellSurfaces),
+  _makeTestShellSurfaceByKind: wrap(native._makeTestShellSurfaceByKind),
+  _makeTestAmbiguousShellSurfaceByKind: wrap(native._makeTestAmbiguousShellSurfaceByKind),
   _Subscription: Subscription,
 };
