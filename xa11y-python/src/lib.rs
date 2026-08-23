@@ -1526,6 +1526,224 @@ impl App {
     }
 }
 
+// ── ShellSurface ────────────────────────────────────────────────────────────
+
+/// The `kind` spellings a caller may pass, named in the parse error.
+///
+/// `ShellSurfaceKind` is `#[non_exhaustive]` and derives its strings from
+/// strum, so parsing goes through `from_snake_case` rather than this list —
+/// the list only makes the error message say what is accepted, the same way
+/// `parse_button` / `parse_anchor` spell out their values.
+const SHELL_SURFACE_KINDS: &[&str] = &[
+    "menu_bar",
+    "status_items",
+    "taskbar",
+    "panel",
+    "dock",
+    "desktop",
+    "flyout",
+    "unknown",
+];
+
+/// Parse a snake_case shell-surface kind name.
+///
+/// Runs before the provider is resolved and before any OS call, per the
+/// "parse arguments before the first OS call" convention: an unknown kind is
+/// a `ValueError` whether or not accessibility is set up on the machine.
+fn parse_shell_kind(name: &str) -> PyResult<xa11y::ShellSurfaceKind> {
+    xa11y::ShellSurfaceKind::from_snake_case(name).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "unknown shell surface kind '{name}'; expected one of: {}",
+            SHELL_SURFACE_KINDS.join(", ")
+        ))
+    })
+}
+
+/// One OS-owned shell surface — the taskbar, a desktop panel, the dock, the
+/// menu bar, a process's status items, the desktop, or an open flyout.
+///
+/// `ShellSurface` is **not** an `Element`. It represents the surface as a
+/// whole and provides a `locator()` to search its accessibility tree, exactly
+/// as `App` does for an application.
+#[pyclass(frozen)]
+struct ShellSurface {
+    #[pyo3(get)]
+    kind: String,
+    #[pyo3(get)]
+    name: String,
+    #[pyo3(get)]
+    pid: Option<u32>,
+    inner_data: xa11y::ElementData,
+    provider: Arc<dyn xa11y::Provider>,
+}
+
+#[pymethods]
+impl ShellSurface {
+    /// List the OS shell surfaces currently on screen.
+    ///
+    /// Single enumeration, no polling. The listing is live: ``flyout``
+    /// surfaces appear only while they are open, and enumerating never opens,
+    /// closes, focuses, or presses anything. A platform with no surface of a
+    /// given kind simply returns none — that is honest scope, not a failure.
+    #[staticmethod]
+    fn list(py: Python<'_>) -> PyResult<Vec<Self>> {
+        let provider = get_provider()?;
+        Self::list_impl(py, provider)
+    }
+
+    /// Wait for exactly one shell surface of `kind`.
+    ///
+    /// `kind` is the snake_case name of the surface kind: `"menu_bar"`,
+    /// `"status_items"`, `"taskbar"`, `"panel"`, `"dock"`, `"desktop"`,
+    /// `"flyout"`, `"unknown"`. An unknown name raises `ValueError` before
+    /// the accessibility API is touched.
+    ///
+    /// Polls until a single surface of that kind exists or `timeout` (in
+    /// seconds) elapses; see `App.by_name` for `timeout` semantics
+    /// (`None` = the process-wide default, `0` = a single attempt with no
+    /// waiting). The wait is what makes the Windows overflow workflow a
+    /// one-liner: press the taskbar's "Show Hidden Icons" button, then wait
+    /// for the flyout to materialise.
+    ///
+    /// Raises `SelectorNotMatchedError` when no surface of that kind is
+    /// present *and* when several are — ambiguity is refused rather than
+    /// first-matched, with the candidates on the exception's `candidates`
+    /// attribute so the caller can disambiguate via `list()` and a pid.
+    #[staticmethod]
+    #[pyo3(signature = (kind, *, timeout=None))]
+    fn by_kind(py: Python<'_>, kind: &str, timeout: Option<f64>) -> PyResult<Self> {
+        // Both arguments are validated before the provider is resolved, so a
+        // bad kind or timeout is a crisp `ValueError` regardless of whether
+        // accessibility is set up.
+        let kind = parse_shell_kind(kind)?;
+        let timeout = effective_timeout(timeout)?;
+        let provider = get_provider()?;
+        Self::by_kind_impl(py, provider, kind, timeout)
+    }
+
+    /// Create a Locator scoped to this surface's accessibility tree.
+    fn locator(&self, selector: &str) -> Locator {
+        Locator {
+            inner: xa11y::Locator::new(
+                self.provider.clone(),
+                Some(self.inner_data.clone()),
+                selector,
+            ),
+        }
+    }
+
+    /// Get direct children of the surface root.
+    fn children(&self, py: Python<'_>) -> PyResult<Vec<Py<Element>>> {
+        let provider = self.provider.clone();
+        let data = self.inner_data.clone();
+        let children = py
+            .allow_threads(move || provider.get_children(Some(&data)))
+            .map_err(to_py_err)?;
+        children
+            .iter()
+            .map(|c| make_py_element(py, c, self.provider.clone()))
+            .collect()
+    }
+
+    /// Get an :class:`Element` handle for the surface root.
+    ///
+    /// Useful for invoking Element-level methods (``children()``,
+    /// ``parent()``, etc.) without going through a locator.
+    fn as_element(&self, py: Python<'_>) -> PyResult<Py<Element>> {
+        make_py_element(py, &self.inner_data, self.provider.clone())
+    }
+
+    /// Capture this surface's accessibility tree as a recursive dict snapshot.
+    ///
+    /// Each dict has keys ``role``, ``name``, ``value``, and ``children``
+    /// (a list of dicts with the same shape). ``max_depth`` limits traversal:
+    /// ``0`` = only the surface root, ``1`` = root + direct children,
+    /// ``None`` = full subtree.
+    ///
+    /// Equivalent to ``Element.tree(...)`` on the surface's root element.
+    #[pyo3(signature = (max_depth=None))]
+    fn tree(&self, py: Python<'_>, max_depth: Option<usize>) -> PyResult<PyObject> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        let node = py
+            .allow_threads(move || element.tree(max_depth))
+            .map_err(to_py_err)?;
+        tree_node_to_py(py, &node)
+    }
+
+    /// Render this surface's accessibility tree as an indented string.
+    ///
+    /// Returns the string without printing it. Same depth semantics as
+    /// ``tree()``. This is the primary inspection helper — call
+    /// ``print(surface.dump())`` to discover the role and name of every
+    /// element in the surface before writing selectors.
+    #[pyo3(signature = (max_depth=None))]
+    fn dump(&self, py: Python<'_>, max_depth: Option<usize>) -> PyResult<String> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.allow_threads(move || element.dump(max_depth))
+            .map_err(to_py_err)
+    }
+
+    fn __repr__(&self) -> String {
+        match self.pid {
+            Some(pid) => format!(
+                "ShellSurface(kind='{}', name='{}', pid={})",
+                self.kind, self.name, pid
+            ),
+            None => format!("ShellSurface(kind='{}', name='{}')", self.kind, self.name),
+        }
+    }
+
+    fn __str__(&self) -> String {
+        self.__repr__()
+    }
+}
+
+impl ShellSurface {
+    fn from_core(surface: &xa11y::ShellSurface, provider: Arc<dyn xa11y::Provider>) -> Self {
+        Self {
+            kind: surface.kind.to_snake_case().to_string(),
+            name: surface.name.clone(),
+            pid: surface.pid,
+            inner_data: surface.data.clone(),
+            provider,
+        }
+    }
+
+    /// Enumeration against an explicit provider. `list` supplies the platform
+    /// singleton; the mock-backed test helper supplies the mock, so both go
+    /// through the same GIL-release and error-mapping path.
+    fn list_impl(py: Python<'_>, provider: Arc<dyn xa11y::Provider>) -> PyResult<Vec<Self>> {
+        let enumerating = provider.clone();
+        // Enumeration blocks — on macOS it fans out over every running process
+        // — so it runs with the GIL released (tenet 5).
+        let surfaces = py
+            .allow_threads(move || xa11y::ShellSurface::list_with(enumerating))
+            .map_err(to_py_err)?;
+        Ok(surfaces
+            .iter()
+            .map(|s| Self::from_core(s, provider.clone()))
+            .collect())
+    }
+
+    /// Lookup against an explicit provider, with `kind` and `timeout` already
+    /// parsed by the caller (parse-before-OS-call).
+    fn by_kind_impl(
+        py: Python<'_>,
+        provider: Arc<dyn xa11y::Provider>,
+        kind: xa11y::ShellSurfaceKind,
+        timeout: Duration,
+    ) -> PyResult<Self> {
+        let polling = provider.clone();
+        // The poll loop sleeps between attempts; holding the GIL across it
+        // would freeze every other thread in the process for the whole
+        // timeout (tenet 5).
+        let surface = py
+            .allow_threads(move || xa11y::ShellSurface::by_kind_with(polling, kind, timeout))
+            .map_err(to_py_err)?;
+        Ok(Self::from_core(&surface, provider))
+    }
+}
+
 // ── Input simulation ────────────────────────────────────────────────────────
 //
 // The worked example for "Binding Shape Conventions" in AGENTS.md: core's
@@ -1993,6 +2211,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Locator>()?;
     m.add_class::<Rect>()?;
     m.add_class::<Screenshot>()?;
+    m.add_class::<ShellSurface>()?;
     m.add_class::<Subscription>()?;
 
     register_exception::<XA11yError>(m, "XA11yError")?;
@@ -2024,6 +2243,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Test helpers
     m.add_function(wrap_pyfunction!(_make_test_locator, m)?)?;
     m.add_function(wrap_pyfunction!(_make_test_app, m)?)?;
+    m.add_function(wrap_pyfunction!(_make_test_shell_surfaces, m)?)?;
+    m.add_function(wrap_pyfunction!(_find_test_shell_surface, m)?)?;
     m.add_function(wrap_pyfunction!(_make_disconnected_subscription, m)?)?;
     m.add_function(wrap_pyfunction!(_make_test_action_probe, m)?)?;
 
@@ -2078,6 +2299,32 @@ fn _make_test_app() -> PyResult<App> {
     })
     .map_err(to_py_err)?;
     Ok(App::from_core(app))
+}
+
+/// List the mock provider's shell surfaces (taskbar + desktop fixtures).
+///
+/// `ShellSurface.list()` resolves the platform singleton provider, which no
+/// CI runner without a desktop session has; this helper runs the identical
+/// binding path against the shared mock instead.
+#[pyfunction]
+fn _make_test_shell_surfaces(py: Python<'_>) -> PyResult<Vec<ShellSurface>> {
+    let provider = xa11y::mock::build_provider() as Arc<dyn xa11y::Provider>;
+    ShellSurface::list_impl(py, provider)
+}
+
+/// Resolve one mock shell surface by kind — the mock-backed counterpart of
+/// `ShellSurface.by_kind()`, with the same parse-then-poll path.
+#[pyfunction]
+#[pyo3(signature = (kind, *, timeout=None))]
+fn _find_test_shell_surface(
+    py: Python<'_>,
+    kind: &str,
+    timeout: Option<f64>,
+) -> PyResult<ShellSurface> {
+    let kind = parse_shell_kind(kind)?;
+    let timeout = effective_timeout(timeout)?;
+    let provider = xa11y::mock::build_provider() as Arc<dyn xa11y::Provider>;
+    ShellSurface::by_kind_impl(py, provider, kind, timeout)
 }
 
 /// Create a Subscription whose backing channel has already been disconnected.

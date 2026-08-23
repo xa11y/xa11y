@@ -31,6 +31,7 @@ import time
 
 import pytest
 import xa11y
+from xa11y._native import _find_test_shell_surface
 
 # A 1-second native wait. With the GIL released the 1 ms spin loop gets
 # hundreds of iterations; with the GIL held it gets approximately zero
@@ -90,6 +91,23 @@ def test_wait_detached_releases_gil(test_app):
     assert ticks >= _MIN_TICKS, (
         f"background thread made only {ticks} iterations during a "
         f"{_WAIT_S}s wait_detached — the wait is holding the GIL (tenet 5)"
+    )
+
+
+def test_shell_surface_by_kind_releases_gil():
+    """`ShellSurface.by_kind` polls the shell enumeration between 100 ms
+    sleeps. The public entry point resolves the platform provider, so this
+    exercises the same binding path against the mock, which vends no `dock`
+    surface and therefore waits out the full timeout."""
+
+    def blocked():
+        with pytest.raises(xa11y.SelectorNotMatchedError):
+            _find_test_shell_surface("dock", timeout=_WAIT_S)
+
+    ticks = _ticks_during(blocked)
+    assert ticks >= _MIN_TICKS, (
+        f"background thread made only {ticks} iterations during a "
+        f"{_WAIT_S}s by_kind wait — the poll loop is holding the GIL (tenet 5)"
     )
 
 

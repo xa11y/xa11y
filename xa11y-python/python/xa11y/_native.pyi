@@ -12,6 +12,19 @@ from typing import Literal
 MouseButtonName = Literal["left", "right", "middle"]
 AnchorName = Literal["center", "top_left", "top_right", "bottom_left", "bottom_right"]
 
+# Shell-surface kinds. Like roles and key names, these strings are identical in
+# the JS binding — a kind is a value the user writes as a literal.
+ShellSurfaceKindName = Literal[
+    "menu_bar",
+    "status_items",
+    "taskbar",
+    "panel",
+    "dock",
+    "desktop",
+    "flyout",
+    "unknown",
+]
+
 # ── Exceptions ───────────────────────────────────────────────────────────────
 
 class XA11yError(Exception):
@@ -330,6 +343,95 @@ class App:
         in the app before writing selectors.
 
         For the same output from the shell, use ``xa11y tree --app NAME``.
+        """
+    def __repr__(self) -> str: ...
+    def __str__(self) -> str: ...
+
+# ── ShellSurface ──────────────────────────────────────────────────────────────
+
+class ShellSurface:
+    """One OS-owned shell surface — the taskbar, a desktop panel, the dock, the
+    menu bar, a process's status items, the desktop, or an open flyout.
+
+    ``ShellSurface`` is **not** an :class:`Element`. It represents the surface
+    as a whole and provides a ``locator()`` to search its accessibility tree,
+    exactly as :class:`App` does for an application.
+    """
+
+    @property
+    def kind(self) -> ShellSurfaceKindName:
+        """What this surface is, as a snake_case string (``"taskbar"``,
+        ``"status_items"``, ...). The same spelling in both bindings, in the
+        CLI's ``--shell`` flag, and in the ``shell_kind`` raw attribute on the
+        surface root."""
+    @property
+    def name(self) -> str:
+        """The owning app for per-app surfaces (``"Safari"`` menu bar), the
+        platform's own name otherwise (``"Taskbar"``, ``"Dock"``). Falls back
+        to the kind when the platform vends no name for the root."""
+    @property
+    def pid(self) -> int | None:
+        """Owning process where the platform reports one honestly. On Windows
+        this is the shell *host* (explorer.exe), because UIA carries no
+        per-icon owner — documented as the host, never faked."""
+    @staticmethod
+    def list() -> list[ShellSurface]:
+        """List the OS shell surfaces currently on screen.
+
+        Single enumeration, no polling. The listing is live: ``flyout``
+        surfaces appear only while they are open, and enumerating never opens,
+        closes, focuses, or presses anything. A platform with no surface of a
+        given kind simply returns none — that is honest scope, not a failure.
+        """
+    @staticmethod
+    def by_kind(kind: ShellSurfaceKindName, *, timeout: float | None = None) -> ShellSurface:
+        """Wait for exactly one shell surface of ``kind``.
+
+        ``kind`` is the snake_case kind name (``"menu_bar"``,
+        ``"status_items"``, ``"taskbar"``, ``"panel"``, ``"dock"``,
+        ``"desktop"``, ``"flyout"``, ``"unknown"``); an unknown name raises
+        ``ValueError`` before the accessibility API is touched.
+
+        Polls until a single surface of that kind exists or ``timeout``
+        (seconds) elapses — see ``App.by_name`` for ``timeout`` semantics. The
+        wait is what makes the Windows overflow workflow a one-liner: press the
+        taskbar's "Show Hidden Icons" button, then wait for the flyout::
+
+            taskbar = xa11y.ShellSurface.by_kind("taskbar", timeout=0)
+            taskbar.locator("button[name='Show Hidden Icons']").press()
+            flyout = xa11y.ShellSurface.by_kind("flyout", timeout=3.0)
+
+        Raises :class:`SelectorNotMatchedError` both when no surface of that
+        kind is present and when *several* are — ambiguity is refused rather
+        than first-matched, with the candidates on the exception's
+        ``candidates`` attribute so the caller can disambiguate via
+        :meth:`list` and a pid.
+        """
+    def locator(self, selector: str) -> Locator:
+        """Create a Locator scoped to this surface's accessibility tree."""
+    def children(self) -> list[Element]:
+        """Get direct children of the surface root."""
+    def as_element(self) -> Element:
+        """Get an :class:`Element` handle for the surface root.
+
+        Useful for invoking Element-level methods (``children()``,
+        ``parent()``, etc.) without going through a locator.
+        """
+    def tree(self, max_depth: int | None = None) -> dict:
+        """Capture this surface's accessibility tree as a recursive dict.
+
+        Each dict has keys ``role``, ``name``, ``value``, and ``children``
+        (a list of dicts with the same shape). ``max_depth`` limits traversal:
+        ``0`` = only the surface root, ``1`` = root + direct children,
+        ``None`` = full subtree.
+        """
+    def dump(self, max_depth: int | None = None) -> str:
+        """Render this surface's accessibility tree as an indented string.
+
+        Returns the string without printing it. Same depth semantics as
+        :meth:`tree`. This is the primary inspection helper — call
+        ``print(surface.dump())`` to discover the role and name of every
+        element in the surface before writing selectors.
         """
     def __repr__(self) -> str: ...
     def __str__(self) -> str: ...
@@ -758,6 +860,10 @@ def _cli_main(args: list[str]) -> int:
 # ── Test helpers ─────────────────────────────────────────────────────────────
 
 def _make_test_locator() -> Locator: ...
+def _make_test_shell_surfaces() -> list[ShellSurface]: ...
+def _find_test_shell_surface(
+    kind: ShellSurfaceKindName, *, timeout: float | None = None
+) -> ShellSurface: ...
 def _make_disconnected_subscription() -> Subscription: ...
 
 class _TestActionProbe:
