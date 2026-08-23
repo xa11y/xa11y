@@ -339,9 +339,19 @@ input-simulation and screenshot commands take none of these flags.
 | `--pid PID` | Target by process ID |
 | `--shell KIND` | Target a shell surface by kind (see `xa11y shell`). Mutually exclusive with `--app`; combine with `--pid` to pick between same-kind surfaces |
 
-`tree`, `find`, and `action` accept `--shell` wherever they accept `--app`. A
-kind matching several surfaces is a usage error listing the candidates, exit
-code 2. The kinds are listed in [Shell surfaces](/reference/shell/#kinds).
+`tree`, `find`, and `action` accept `--shell` wherever they accept `--app`.
+The kinds are listed in [Shell surfaces](/reference/shell/#kinds).
+
+A kind matching several surfaces, and a kind matching none, are operation
+failures: exit code 1, with the candidate list on stderr. The invocation was
+well formed; the desktop held the wrong number of surfaces. Two argument
+mistakes are usage errors at exit code 2: `--shell` passed together with
+`--app`, and a kind string that is not a known kind.
+
+`--pid` is the only lever for choosing between same-kind surfaces, and it
+does not always separate them. Two Linux panels drawn by one panel process
+share a pid, so no `--pid` value narrows that match. The refusal says as
+much rather than picking one.
 
 ## Selectors
 

@@ -154,6 +154,8 @@ Notes:
   the kind shows up in `tree`/`dump` output and is matchable through the
   existing raw-attribute selector fallback (`[shell_kind='taskbar']`) with
   zero selector-engine changes and no per-backend drift.
+  **Amended post-review — see §12.1:** the stamp lands, but the selector
+  claim does not hold for a locator rooted at the surface.
 - **This is a new required trait method**, which breaks out-of-tree
   `Provider` implementations. That is the same accepted cost as a new
   `ElementParts` field — the trait is `#[doc(hidden)]` on the umbrella crate
@@ -260,7 +262,7 @@ flyout.locator("button[name*='Tailscale']").press()?;
 | `taskbar` | `Shell_TrayWnd` pane: task band + visible tray + chevron; pid = explorer (host) | — | — |
 | `panel` | — | — | each AT-SPI frame with `window-type:dock`; pid = panel process |
 | `dock` | — | the Dock process's application element | — |
-| `desktop` | `Progman` → `SysListView32` | Finder's `AXScrollArea` desc="desktop" (already in `AXChildren`, §1) | — |
+| `desktop` | `Progman` → `SysListView32` (amended post-review, §12.2) | Finder's `AXScrollArea` desc="desktop" (already in `AXChildren`, §1) | — |
 | `flyout` | tray overflow, Quick Settings, Notification Center, `PopupHost` shell menus — while open | shell processes' `AXSystemDialog` windows (opened Control Center / NC panels) — while open | — |
 
 Absence from a column is honest scope, not failure: `list()` on Linux simply
@@ -343,7 +345,8 @@ xa11y action ACTION SELECTOR --shell KIND [--pid PID]
 `--shell` joins `--app`/`--pid` in the target-resolution options and is
 mutually exclusive with `--app`; `--pid` alongside `--shell` disambiguates
 same-kind surfaces (usage error with the candidate list otherwise, exit code
-2 per the existing contract). `xa11y shell` mirrors `xa11y apps`' tab-column
+2 per the existing contract — **amended post-review, see §12.3**). `xa11y
+shell` mirrors `xa11y apps`' tab-column
 contract. One implementation in `cli.rs`, reached by all three launchers, per
 One CLI Three Launchers; the resolution helper is value-producing so MCP can
 share it (stdout-is-the-wire rule).
@@ -460,3 +463,81 @@ await bar.locator("menu_item[name='Save']").press()
 3. **Naming.** `ShellSurface` / `shell` follows the report's vocabulary and
    avoids overloading "app". Alternatives considered and dropped:
    `SystemSurface` (vague), reusing `App` (§3.3).
+
+## 12. Amendments (post-review)
+
+This proposal was approved as written. Implementation review then found three
+places where the approved text and the landed behaviour disagree, and in each
+the implementation is the one that is right. The sections above are left
+standing with a pointer here, so the record shows what changed and why rather
+than reading as if it had always said this.
+
+### 12.1 `raw["shell_kind"]` is readable, not selector-matchable (amends §3.2)
+
+§3.2 claims the stamped kind "is matchable through the existing raw-attribute
+selector fallback (`[shell_kind='taskbar']`)". The stamp itself is real and
+landed as described: `ShellSurface::list_with` writes the snake_case kind onto
+the surface root's raw map in one place, and it appears in `tree` and `dump`
+output.
+
+The selector half does not follow. A locator rooted at a surface searches that
+surface's descendants; the root is not among its own candidates, so
+`surface.locator("[shell_kind='taskbar']")` cannot match the surface it is
+rooted at. Every surface root carries the attribute and no descendant does,
+which leaves the raw key useful for reading and inspection and useless as a
+filter from the one root it is stamped on. The attribute is therefore
+documented as a read — `surface.as_element().raw["shell_kind"]` — with no
+selector promise attached.
+
+### 12.2 The Windows `desktop` surface root is the list view (amends §4)
+
+§4's Windows `desktop` cell reads `Progman` → `SysListView32`, which names the
+walk without saying which element becomes the surface root; §3's
+per-platform sketch says "`Progman` → `desktop`", which reads as the root
+being `Progman` itself.
+
+The landed behaviour resolves it to the list view. The backend walks
+`Progman` → `SHELLDLL_DefView` → `SysListView32` and uses the `SysListView32`
+element as the surface root, because that is the element that actually holds
+the desktop icons; `Progman` is a container two levels above them. When that
+chain is absent — a shell configuration with no desktop list view — the
+backend contributes no `desktop` surface at all rather than falling back to
+`Progman`, which would hand callers a root with nothing in it (tenet 1).
+
+### 12.3 Ambiguity is an operation failure, exit code 1 (amends §6)
+
+§6 specifies exit code 2, a usage error, when `--shell KIND` matches several
+surfaces. The landed behaviour is exit code 1, an operation failure, and it
+should be.
+
+An argument error is one the caller can fix by reading their own command line.
+`--shell flyout` is a well-formed invocation; whether it matches zero, one, or
+four surfaces is a fact about the desktop at that moment, and it can differ
+between two identical invocations a second apart. This is the case the CLI
+already had in `CliError::Ambiguous` for a selector matching several elements
+where one was required, and that is exit code 1. Splitting the two would have
+meant a script treating "your flags are wrong" and "the desktop had two
+panels" as the same class of failure, or as different classes depending on
+which of the two ambiguities it hit.
+
+The exit codes for `--shell` therefore read:
+
+| Condition | `CliError` variant | Exit |
+|---|---|---|
+| several surfaces of the kind | `AmbiguousShellSurface` | 1 |
+| no surface of the kind | `Xa11y(SelectorNotMatched)` | 1 |
+| `--shell` together with `--app` | `Usage` | 2 |
+| kind string is not a known kind | `Usage` | 2 |
+
+Both exit-1 cases carry a `Diagnosis` listing the surfaces that were
+enumerated, so the disambiguating pid — or the absence of any candidate — is
+readable off the failure (tenet 6).
+
+One consequence is worth stating, because §6 implies otherwise by offering
+`--pid` as the general remedy: `--pid` is the only lever, and it does not
+always separate the candidates. One Linux panel process can own several
+`panel` frames, which are then several surfaces with one pid. The ambiguity
+message distinguishes the two situations — "N surfaces are present; `xa11y
+shell` lists their pids" when no pid was given, and "N surfaces share pid P;
+this operation cannot pick between them" when one was and did not narrow it —
+rather than repeating advice the caller has already taken.

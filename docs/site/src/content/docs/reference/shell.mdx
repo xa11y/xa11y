@@ -32,15 +32,29 @@ spelling in Rust, Python, JavaScript, the CLI, and MCP.
 | `taskbar` | The `Shell_TrayWnd` pane, holding the task band and the visible tray row with its overflow chevron. | *(none)* | *(none)* |
 | `panel` | *(none)* | *(none)* | Each AT-SPI frame carrying `window-type:dock`. One surface per frame, so a panel and a dock row are two surfaces. |
 | `dock` | *(none)* | The Dock process's application element. | *(none)* |
-| `desktop` | `Progman` and its list view. | Finder's desktop scroll area. | *(none)* |
-| `flyout` | The tray overflow, Quick Settings, Notification Center, and shell context-menu popups, while open. | Opened Control Center and Notification Center panels, while open. | *(none)* |
-| `unknown` | A shell-owned window the backend could not classify. | Same. | Same. |
+| `desktop` | The `SysListView32` desktop list view, reached as `Progman` → `SHELLDLL_DefView` → `SysListView32`. A shell without that chain contributes no `desktop` surface. | Finder's desktop scroll area. | *(none)* |
+| `flyout` | The tray overflow, Quick Settings, and shell context-menu popups, while open. | *(none)*, not in v1. | *(none)* |
+| `unknown` | *(none)* | *(none)* | *(none)* |
 
-A cell reading *(none)* means the platform has no such object. `list()` on
+A cell reading *(none)* means the platform vends no such surface. `list()` on
 Linux returns no `taskbar`, and `by_kind` for a kind that platform lacks fails
 with `SelectorNotMatched` naming what was found instead. Windows has no
 per-process tray hosting, so tray icons live inside the `taskbar` and `flyout`
 surfaces rather than under `status_items`.
+
+Two of the empty cells are a scoping decision rather than a platform gap.
+macOS emits no `flyout` in v1: an opened Control Center or Notification
+Center panel is a shell process's `AXSystemDialog` window, whose enumeration
+contract differs from every other macOS surface. Windows leaves the
+Notification Center out of its `flyout` set, because its window class is the
+one ordinary UWP apps also use and separating them takes a process-image
+lookup the backend does not perform. An absent surface is honest; a
+misclassified application window is not.
+
+The `unknown` kind is a reserved fallback, so a shell window some future
+backend cannot classify degrades to reachable-but-untagged instead of
+vanishing from the listing. No backend emits it in v1, so `by_kind("unknown")`
+matches nothing today.
 
 The kind set grows as more shell UI is classified, so handle an unknown kind
 string the way you handle an unknown role.
@@ -62,6 +76,13 @@ string the way you handle an unknown role.
 always the process that drew the icon you are looking at. On macOS it is the
 true owner. On Windows it is the host process (`explorer.exe`), because UIA
 carries no per-icon owner. On Linux it is the panel process.
+
+The surface root also carries its kind in its raw platform attributes, under
+the key `shell_kind`, so it shows up in `tree()` and `dump()` output and reads
+back as `surface.as_element().raw["shell_kind"]`. That is a read, not a
+selector hook: a locator rooted at the surface matches the surface's
+descendants, never the root itself, so `surface.locator("[shell_kind='taskbar']")`
+does not match the surface it is rooted at.
 
 ## Discovery
 
@@ -112,6 +133,13 @@ carries no per-icon owner. On Linux it is the panel process.
 processes, several `panel` frames, or a second `flyout` produce
 `SelectorNotMatched` with a diagnosis listing every candidate by kind, name,
 and process id. Call `list()` and pick by process id to disambiguate.
+
+Process id is the only lever, and it does not always separate the candidates.
+One Linux panel process can draw two `panel` frames, which are then two
+surfaces sharing one `pid`, and no `pid` picks between them. A refusal in that
+state says so in its diagnosis rather than offering a filter that cannot work.
+`list()` still returns both surfaces, so a caller that walks the list can pick
+on whatever else tells them apart, such as the root element's bounds.
 
 ## Mutation model
 
