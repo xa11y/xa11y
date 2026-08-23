@@ -22,7 +22,7 @@ use serde_json::{json, Map, Value};
 use super::base64;
 use crate::cli::{
     self, parse_button, parse_held, parse_key_name, resolve_target, CliError, CliResult, Opts,
-    Target, ACTIONS_REQUIRING_VALUE, ACTION_NAMES, SHELL_KIND_NAMES,
+    Target, ACTIONS_REQUIRING_VALUE, ACTION_NAMES,
 };
 use crate::{
     App, AppExt, ClickOptions, ClickTarget, DragOptions, Element, Rect, ScrollDelta, ShellSurface,
@@ -309,7 +309,9 @@ fn app_target_properties() -> Map<String, Value> {
         PID.property(
             "Process id of the target application. Give this or `app`. Alongside \
              `shell` it picks between surfaces of one kind rather than naming an \
-             application."
+             application — and it is the *only* way to pick between them, so it \
+             cannot separate several surfaces owned by one process (two panel rows \
+             from one xfce4-panel). Those stay ambiguous and the call is refused."
                 .into(),
         ),
     );
@@ -317,7 +319,7 @@ fn app_target_properties() -> Map<String, Value> {
         "shell".into(),
         json!({
             "type": "string",
-            "enum": SHELL_KIND_NAMES,
+            "enum": cli::shell_kind_names(),
             "description": "Target an OS shell surface instead of an application: the \
                             taskbar, the desktop, a dock or panel, the menu bar, a \
                             process's status items, or an open flyout. Call the `shell` \
@@ -325,7 +327,10 @@ fn app_target_properties() -> Map<String, Value> {
                             `kind` here. Mutually exclusive with `app` — passing both \
                             is refused. When several surfaces share a kind, add `pid` \
                             to pick one; without it the call comes back as \
-                            `ambiguous_shell_surface` with the candidates.",
+                            `ambiguous_shell_surface` with the candidates. `pid` is \
+                            the only disambiguator there is: surfaces of one kind \
+                            owned by the same process cannot be told apart, and stay \
+                            refused whatever you pass.",
         }),
     );
     props
@@ -1507,6 +1512,58 @@ mod tests {
         v
     }
 
+    /// One shell surface from the shared mock, relabelled. `ShellSurface` has
+    /// no public constructor, so the mock fixture is the only way to reach a
+    /// `Target::Shell` without a desktop.
+    fn mock_shell_target(kind: crate::ShellSurfaceKind, name: &str, pid: Option<u32>) -> Target {
+        let provider: std::sync::Arc<dyn crate::Provider> = xa11y_core::mock::build_provider();
+        let mut surface = ShellSurface::list_with(provider)
+            .expect("the mock must list its shell surfaces")
+            .pop()
+            .expect("the mock fixture must vend at least one surface");
+        surface.kind = kind;
+        surface.name = name.to_string();
+        surface.pid = pid;
+        Target::Shell(surface)
+    }
+
+    #[test]
+    fn a_shell_target_is_reported_as_kind_name_and_pid() {
+        // The object every tool result carries for a `--shell` target. A model
+        // reads `shell.kind` to know it did not act on an application, and
+        // `shell.pid` is the only value it can pass back to disambiguate.
+        let mut out = Map::new();
+        target_fields(
+            &mock_shell_target(crate::ShellSurfaceKind::Panel, "Bottom Panel", Some(4242)),
+            &mut out,
+        );
+        assert_eq!(
+            out["shell"],
+            json!({ "kind": "panel", "name": "Bottom Panel", "pid": 4242 })
+        );
+        assert_eq!(out["pid"], json!(4242));
+        assert!(
+            !out.contains_key("application"),
+            "a panel is not an application: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_shell_target_without_a_pid_reports_null_rather_than_omitting_it() {
+        // A platform that vends no owner must not look like a missing field —
+        // the key is always there, and `null` is what "no honest owner" is.
+        let mut out = Map::new();
+        target_fields(
+            &mock_shell_target(crate::ShellSurfaceKind::Desktop, "Desktop", None),
+            &mut out,
+        );
+        assert_eq!(
+            out["shell"],
+            json!({ "kind": "desktop", "name": "Desktop", "pid": null })
+        );
+        assert_eq!(out["pid"], json!(null));
+    }
+
     #[test]
     fn every_listed_tool_has_a_definition_and_is_callable() {
         let host = Xa11yTools;
@@ -1878,7 +1935,7 @@ mod tests {
         assert_eq!(failure_kind(&err), "invalid_arguments");
         let msg = err.to_string();
         assert!(msg.contains("task_bar"), "must echo the bad value: {msg}");
-        for name in SHELL_KIND_NAMES {
+        for name in cli::shell_kind_names() {
             assert!(msg.contains(name), "{name} must be offered: {msg}");
         }
     }
@@ -1893,8 +1950,8 @@ mod tests {
             let listed = def["inputSchema"]["properties"]["shell"]["enum"]
                 .as_array()
                 .unwrap_or_else(|| panic!("{name} must offer the shell argument"));
-            assert_eq!(listed.len(), SHELL_KIND_NAMES.len(), "{name}");
-            for kind in SHELL_KIND_NAMES {
+            assert_eq!(listed.len(), cli::shell_kind_names().len(), "{name}");
+            for kind in cli::shell_kind_names() {
                 assert!(listed.iter().any(|v| v == kind), "{name} omits {kind}");
                 cli::parse_shell_kind(kind)
                     .unwrap_or_else(|e| panic!("{name} advertises {kind}, which fails: {e}"));

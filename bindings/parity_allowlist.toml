@@ -185,6 +185,25 @@ files = [
     { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "CheckedState" },
 ]
 
+# Every Rust-side list of kind spellings — the CLI's `--shell` help and error
+# message, MCP's `shell` enum, and both bindings' parse errors — is now derived
+# from `ShellSurfaceKind::ALL`, which core's `every_variant_is_in_all` test
+# guards with an exhaustive match. The two lists below cannot be: they are the
+# hand-written type declarations, where a missing kind is a literal a consumer's
+# type checker rejects even though the runtime accepts it.
+[[types.variant_coverage]]
+type = "ShellSurfaceKind"
+reason = "Kinds cross as identically-spelled snake_case string literals; the Python Literal and the TypeScript union are hand-maintained and would silently narrow a kind out of the typed API."
+files = [
+    # No `within`: a Python assignment has no `;` for the slicer to stop at,
+    # so this is whole-file — the same scope the EventKind entry above uses.
+    # It catches the case that matters (a new kind named nowhere in the stub);
+    # a kind deleted from the Literal while a docstring still quotes it can
+    # slip, which is why by_kind's docstring no longer lists them.
+    { path = "xa11y-python/python/xa11y/_native.pyi", spelling = "snake" },
+    { path = "xa11y-js/scripts/patch-native-dts.mjs", spelling = "snake", within = "ShellSurfaceKindName" },
+]
+
 [[types.variant_coverage]]
 type = "StateFlag"
 reason = "Each variant maps to a distinct state-name string in both bindings; an unmapped one would surface as 'unknown'."

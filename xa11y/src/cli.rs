@@ -199,11 +199,14 @@ Accessibility tree:
 TARGET — what tree/find/action search (--shell and --app are exclusive):
   --app NAME | --pid PID                    A running application
   --shell KIND [--pid PID]                  An OS shell surface, as listed by
-                                            `xa11y shell`. KIND is one of:
-                                            menu_bar, status_items, taskbar,
-                                            panel, dock, desktop, flyout,
-                                            unknown. Add --pid when several
-                                            surfaces share a kind.
+                                            `xa11y shell`. Add --pid when
+                                            several surfaces share a kind: it
+                                            is the only disambiguator, and it
+                                            cannot separate several surfaces
+                                            owned by one process (two panel
+                                            rows from one xfce4-panel).
+      KIND is one of:
+      {kinds}
 
 Input simulation (coords only — no selectors, no a11y):
   xa11y click  --at X,Y [--button left|right|middle] [--count N] [--held K,K]
@@ -234,7 +237,9 @@ Actions: press, focus, blur, toggle, expand, collapse, select, show-menu,
 Exit codes:
   0  success
   1  operation failed (app not found, no selector match, platform error)
-  2  usage error (unknown flag value, missing or invalid argument)"
+  2  usage error (unknown flag value, missing or invalid argument)",
+        // Derived, not spelled out: see `shell_kind_names`.
+        kinds = shell_kind_names().join(", ")
     );
 }
 
@@ -510,22 +515,22 @@ pub(crate) fn resolve_app(opts: &Opts) -> CliResult<App> {
 
 /// Every [`ShellSurfaceKind`] spelling `--shell` (MCP: `shell`) accepts.
 ///
-/// Single source of truth for the flag's error message, the help text, and the
-/// MCP schema's `enum`, so a kind cannot be advertised by one surface and
-/// rejected by another. `ShellSurfaceKind` is `#[non_exhaustive]` and derives
-/// its strings with strum, so this list is hand-maintained; every entry is
-/// round-tripped through [`ShellSurfaceKind::from_snake_case`] by
-/// `every_advertised_shell_kind_parses`, which fails if one is misspelled.
-pub(crate) const SHELL_KIND_NAMES: &[&str] = &[
-    "menu_bar",
-    "status_items",
-    "taskbar",
-    "panel",
-    "dock",
-    "desktop",
-    "flyout",
-    "unknown",
-];
+/// Single source of truth for the flag's error message, the usage text, and
+/// the MCP schema's `enum`, so a kind cannot be advertised by one surface and
+/// rejected by another. **Derived** from [`ShellSurfaceKind::ALL`] rather than
+/// written out again: `ShellSurfaceKind` is `#[non_exhaustive]`, so a `match`
+/// here could not fail to compile when a variant is added, and a hand-written
+/// list would silently keep advertising eight kinds out of nine. Core's
+/// `every_variant_is_in_all` test is the exhaustive `match` that guards `ALL`.
+pub(crate) fn shell_kind_names() -> &'static [&'static str] {
+    static NAMES: std::sync::LazyLock<Vec<&'static str>> = std::sync::LazyLock::new(|| {
+        ShellSurfaceKind::ALL
+            .iter()
+            .map(|k| k.to_snake_case())
+            .collect()
+    });
+    NAMES.as_slice()
+}
 
 /// Longest candidate list carried in a shell-lookup failure. Bounded per
 /// tenet 6 — diagnostics must not grow with the environment.
@@ -539,7 +544,7 @@ pub(crate) fn parse_shell_kind(raw: &str) -> CliResult<ShellSurfaceKind> {
     ShellSurfaceKind::from_snake_case(raw).ok_or_else(|| {
         CliError::Usage(format!(
             "unknown shell surface kind: {raw} (expected one of: {})",
-            SHELL_KIND_NAMES.join(", ")
+            shell_kind_names().join(", ")
         ))
     })
 }
@@ -590,21 +595,49 @@ fn bound_candidates(mut lines: Vec<String>) -> Vec<String> {
 ///   diagnosis naming every surface that *was* enumerated.
 pub(crate) fn resolve_shell_surface(kind_raw: &str, pid: Option<u32>) -> CliResult<ShellSurface> {
     let kind = parse_shell_kind(kind_raw)?;
+    select_shell_surface(ShellSurface::list()?, kind, pid)
+}
+
+/// Pick the one surface of `kind` (optionally owned by `pid`) out of an
+/// already-enumerated listing.
+///
+/// Split from [`resolve_shell_surface`] so the selection — which of match,
+/// ambiguity and absence a listing produces, and which hint each failure
+/// carries — is testable without a desktop. `resolve_shell_surface` is then
+/// just the singleton `ShellSurface::list()` call plus this.
+///
+/// # Errors
+///
+/// - [`CliError::AmbiguousShellSurface`] when several surfaces match. The
+///   diagnosis's hint depends on whether `pid` was already given: without one
+///   it points at `xa11y shell`; with one it says the operation cannot pick
+///   between them, because `pid` is the only lever there is and it does not
+///   separate surfaces owned by a single process.
+/// - [`CliError::Xa11y`] with [`Error::SelectorNotMatched`] when none do, its
+///   diagnosis naming every surface that *was* enumerated.
+pub(crate) fn select_shell_surface(
+    surfaces: Vec<ShellSurface>,
+    kind: ShellSurfaceKind,
+    pid: Option<u32>,
+) -> CliResult<ShellSurface> {
     let selector = match pid {
         Some(p) => format!("shell_surface[kind={kind}][pid={p}]"),
         None => format!("shell_surface[kind={kind}]"),
     };
 
-    let (mut matched, others): (Vec<ShellSurface>, Vec<ShellSurface>) = ShellSurface::list()?
+    let (mut matched, others): (Vec<ShellSurface>, Vec<ShellSurface>) = surfaces
         .into_iter()
         .partition(|s| s.kind == kind && pid.is_none_or(|p| s.pid == Some(p)));
 
     if matched.len() > 1 {
         let hint = match pid {
             // A pid was already given and did not narrow it: saying "add a
-            // pid" would send the caller somewhere they have been.
+            // pid" would send the caller somewhere they have been. There is
+            // no second lever — one process can own several surfaces of one
+            // kind (two xfce4-panel rows), and nothing distinguishes them.
             Some(p) => format!(
-                "{} {kind} surfaces share pid {p}; this operation cannot pick between them",
+                "{} {kind} surfaces share pid {p}; pid is the only disambiguator, so this \
+                 operation cannot pick between them",
                 matched.len()
             ),
             None => format!(
@@ -1576,16 +1609,153 @@ mod tests {
         assert_eq!(pos, vec![s("press"), s("button")]);
     }
 
+    // ── Shell surface selection ─────────────────────────────────────────
+    //
+    // `select_shell_surface` is the half of `resolve_shell_surface` that has
+    // no OS in it, which is the only reason these cases are reachable off a
+    // desktop. `ShellSurface` has no public constructor — its provider handle
+    // is private — so the fixtures come from the shared mock and are then
+    // relabelled; `kind`, `name` and `pid` are all the selection reads.
+
+    /// One mock-backed surface per `(kind, pid)` spec, in order.
+    fn mock_surfaces(specs: &[(ShellSurfaceKind, Option<u32>)]) -> Vec<ShellSurface> {
+        let provider: std::sync::Arc<dyn crate::Provider> = xa11y_core::mock::build_provider();
+        let mut out: Vec<ShellSurface> = Vec::new();
+        while out.len() < specs.len() {
+            let batch = ShellSurface::list_with(std::sync::Arc::clone(&provider))
+                .expect("the mock must list its shell surfaces");
+            assert!(!batch.is_empty(), "the mock fixture must vend surfaces");
+            out.extend(batch);
+        }
+        out.truncate(specs.len());
+        for (surface, (kind, pid)) in out.iter_mut().zip(specs) {
+            surface.kind = *kind;
+            surface.pid = *pid;
+            surface.name = match pid {
+                Some(p) => format!("{kind}-{p}"),
+                None => format!("{kind}-unowned"),
+            };
+        }
+        out
+    }
+
+    #[test]
+    fn select_shell_surface_picks_the_surface_with_the_matching_pid() {
+        let surfaces = mock_surfaces(&[
+            (ShellSurfaceKind::Panel, Some(11)),
+            (ShellSurfaceKind::Panel, Some(22)),
+            (ShellSurfaceKind::Taskbar, Some(33)),
+        ]);
+        let picked = select_shell_surface(surfaces, ShellSurfaceKind::Panel, Some(22))
+            .expect("a pid that matches exactly one surface must resolve");
+        assert_eq!(picked.kind, ShellSurfaceKind::Panel);
+        assert_eq!(picked.pid, Some(22));
+    }
+
+    #[test]
+    fn select_shell_surface_reports_a_pid_that_matches_nothing() {
+        let surfaces = mock_surfaces(&[
+            (ShellSurfaceKind::Panel, Some(11)),
+            (ShellSurfaceKind::Panel, Some(22)),
+        ]);
+        let err = select_shell_surface(surfaces, ShellSurfaceKind::Panel, Some(99))
+            .expect_err("no panel has pid 99");
+        let CliError::Xa11y(e) = &err else {
+            panic!("absence is a lookup failure, not ambiguity: {err:?}");
+        };
+        let diagnosis = e.diagnosis().expect("the terminal failure must diagnose");
+        assert!(
+            diagnosis
+                .last_observed
+                .as_deref()
+                .is_some_and(|s| s.contains("pid 99")),
+            "the failure must echo the pid that matched nothing: {diagnosis:?}"
+        );
+        // Tenet 6: the surfaces that *were* there are the way out.
+        assert_eq!(diagnosis.candidates.len(), 2, "{diagnosis:?}");
+    }
+
+    #[test]
+    fn select_shell_surface_reports_a_kind_that_is_not_present() {
+        let surfaces = mock_surfaces(&[(ShellSurfaceKind::Panel, Some(11))]);
+        let err = select_shell_surface(surfaces, ShellSurfaceKind::Dock, None)
+            .expect_err("there is no dock in this listing");
+        let CliError::Xa11y(e) = &err else {
+            panic!("absence is a lookup failure, not ambiguity: {err:?}");
+        };
+        assert!(matches!(e, Error::SelectorNotMatched { .. }), "{e:?}");
+        let diagnosis = e.diagnosis().expect("the terminal failure must diagnose");
+        assert_eq!(diagnosis.candidates, vec!["panel \"panel-11\" (pid=11)"]);
+        assert_eq!(err.exit_code(), 1);
+    }
+
+    #[test]
+    fn select_shell_surface_refuses_ambiguity_and_points_at_the_listing() {
+        let surfaces = mock_surfaces(&[
+            (ShellSurfaceKind::Panel, Some(11)),
+            (ShellSurfaceKind::Panel, Some(22)),
+        ]);
+        let err = select_shell_surface(surfaces, ShellSurfaceKind::Panel, None)
+            .expect_err("two panels must be refused, not first-matched");
+        let CliError::AmbiguousShellSurface {
+            count,
+            kind,
+            diagnosis,
+        } = &err
+        else {
+            panic!("expected AmbiguousShellSurface, got {err:?}");
+        };
+        assert_eq!(*count, 2);
+        assert_eq!(kind, "panel");
+        assert!(
+            diagnosis
+                .last_observed
+                .as_deref()
+                .is_some_and(|s| s.contains("xa11y shell")),
+            "without a pid the way out is the listing: {diagnosis:?}"
+        );
+        assert_eq!(diagnosis.candidates.len(), 2);
+    }
+
+    #[test]
+    fn select_shell_surface_says_a_pid_cannot_split_one_process() {
+        // The real case: two panel frames owned by one xfce4-panel process.
+        // `pid` is the only disambiguator, so the honest answer is that this
+        // operation cannot pick — never "add a pid", which the caller did.
+        let surfaces = mock_surfaces(&[
+            (ShellSurfaceKind::Panel, Some(4242)),
+            (ShellSurfaceKind::Panel, Some(4242)),
+        ]);
+        let err = select_shell_surface(surfaces, ShellSurfaceKind::Panel, Some(4242))
+            .expect_err("one pid cannot pick between two of its own surfaces");
+        let CliError::AmbiguousShellSurface { diagnosis, .. } = &err else {
+            panic!("expected AmbiguousShellSurface, got {err:?}");
+        };
+        let observed = diagnosis
+            .last_observed
+            .as_deref()
+            .expect("the hint is the whole point of this branch");
+        assert!(observed.contains("share pid 4242"), "{observed}");
+        assert!(
+            observed.contains("only disambiguator"),
+            "the hint must not send the caller back to --pid: {observed}"
+        );
+        assert!(
+            !observed.contains("xa11y shell"),
+            "listing pids helps nobody here: {observed}"
+        );
+    }
+
     #[test]
     fn every_advertised_shell_kind_parses() {
-        // `SHELL_KIND_NAMES` is hand-maintained (ShellSurfaceKind is
-        // `#[non_exhaustive]` and derives its strings with strum), so a
-        // misspelled entry would be advertised in the help text, the flag's
-        // error message and the MCP schema while being rejected on arrival.
-        for name in SHELL_KIND_NAMES {
+        // The advertised list is derived from `ShellSurfaceKind::ALL`, so this
+        // closes the loop: every name the help text, the flag's error message
+        // and the MCP schema offer must also parse back to the kind it names.
+        for name in shell_kind_names() {
             let kind = parse_shell_kind(name).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(kind.to_snake_case(), *name);
         }
+        assert_eq!(shell_kind_names().len(), ShellSurfaceKind::ALL.len());
     }
 
     #[test]
@@ -1595,7 +1765,7 @@ mod tests {
         assert_eq!(err.exit_code(), 2);
         let msg = format!("{err}");
         assert!(msg.contains("taskbr"), "must echo the bad value: {msg}");
-        for name in SHELL_KIND_NAMES {
+        for name in shell_kind_names() {
             assert!(msg.contains(name), "{name} must be offered: {msg}");
         }
     }

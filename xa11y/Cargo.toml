@@ -43,5 +43,9 @@ required-features = ["cli"]
 workspace = true
 
 [dev-dependencies]
-xa11y = { path = ".", features = ["testing"] }
+# `test-support` pulls in xa11y-core's shared mock Provider for this crate's
+# own unit tests: `ShellSurface` has no public constructor (its provider handle
+# is private), so `cli::select_shell_surface` is only testable against surfaces
+# the mock vends.
+xa11y = { path = ".", features = ["testing", "test-support"] }
 serde_json = { workspace = true }

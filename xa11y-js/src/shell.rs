@@ -65,12 +65,22 @@ impl ShellSurface {
 /// Python binding, the CLI's `--shell` flag and MCP's `shell` parameter use.
 /// Parsing happens before any provider call, so a bad argument can never reach
 /// the accessibility API.
+///
+/// The kinds the error names are derived from `ShellSurfaceKind::ALL` rather
+/// than written out: the enum is `#[non_exhaustive]`, so nothing here would
+/// fail to compile when a variant is added, and a hand-written list would keep
+/// naming eight kinds out of nine in the one message that says what is
+/// accepted.
 pub(crate) fn parse_kind(name: &str) -> napi::Result<xa11y::ShellSurfaceKind> {
     xa11y::ShellSurfaceKind::from_snake_case(name).ok_or_else(|| {
+        let expected = xa11y::ShellSurfaceKind::ALL
+            .iter()
+            .map(|k| format!("'{}'", k.to_snake_case()))
+            .collect::<Vec<_>>()
+            .join(", ");
         napi::Error::from_reason(format!(
             "XA11Y_INVALID_ACTION_DATA: unknown shell surface kind: {name}. Expected one of \
-             'menu_bar', 'status_items', 'taskbar', 'panel', 'dock', 'desktop', 'flyout', \
-             'unknown'"
+             {expected}"
         ))
     })
 }

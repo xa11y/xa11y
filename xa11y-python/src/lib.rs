@@ -1530,20 +1530,21 @@ impl App {
 
 /// The `kind` spellings a caller may pass, named in the parse error.
 ///
-/// `ShellSurfaceKind` is `#[non_exhaustive]` and derives its strings from
-/// strum, so parsing goes through `from_snake_case` rather than this list —
-/// the list only makes the error message say what is accepted, the same way
-/// `parse_button` / `parse_anchor` spell out their values.
-const SHELL_SURFACE_KINDS: &[&str] = &[
-    "menu_bar",
-    "status_items",
-    "taskbar",
-    "panel",
-    "dock",
-    "desktop",
-    "flyout",
-    "unknown",
-];
+/// Derived from `ShellSurfaceKind::ALL`, not written out: the enum is
+/// `#[non_exhaustive]`, so a `match` here could not fail to compile when a
+/// variant is added, and a hand-written list would go on naming eight kinds
+/// out of nine in an error whose whole job is to say what is accepted.
+/// Parsing itself goes through `from_snake_case`, the same way
+/// `parse_button` / `parse_anchor` work.
+fn shell_surface_kinds() -> &'static [&'static str] {
+    static KINDS: std::sync::LazyLock<Vec<&'static str>> = std::sync::LazyLock::new(|| {
+        xa11y::ShellSurfaceKind::ALL
+            .iter()
+            .map(|k| k.to_snake_case())
+            .collect()
+    });
+    KINDS.as_slice()
+}
 
 /// Parse a snake_case shell-surface kind name.
 ///
@@ -1554,7 +1555,7 @@ fn parse_shell_kind(name: &str) -> PyResult<xa11y::ShellSurfaceKind> {
     xa11y::ShellSurfaceKind::from_snake_case(name).ok_or_else(|| {
         PyValueError::new_err(format!(
             "unknown shell surface kind '{name}'; expected one of: {}",
-            SHELL_SURFACE_KINDS.join(", ")
+            shell_surface_kinds().join(", ")
         ))
     })
 }

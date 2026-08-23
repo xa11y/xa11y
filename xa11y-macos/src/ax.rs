@@ -1953,48 +1953,123 @@ impl MacOSProvider {
     // surfaces reach the same elements through a root the caller asked for
     // by name.
 
-    /// Messaging timeout for one status-item probe, in seconds.
+    /// Messaging timeout for one shell-surface probe, in seconds.
     ///
     /// The AX default is ~1.5s *per attribute*, so a handful of wedged
     /// processes otherwise dominate the whole scan (PROPOSAL §4, measured).
     /// `AXUIElementSetMessagingTimeout` applies to the element it is set on
     /// and to nothing else from the same process — so it is set on the very
-    /// element the probe then reads.
-    const STATUS_ITEM_PROBE_TIMEOUT_SECS: f32 = 0.25;
+    /// element each probe then reads.
+    ///
+    /// It bounds **every** application element the scan reads, not only the
+    /// status-item fan-out: the frontmost app for `AXMenuBar`, the Dock, and
+    /// Finder for its desktop scroll area. `ShellSurface::by_kind` polls at
+    /// 100ms, and a listing that can block for seconds per attribute makes
+    /// that contract false — a wedged Finder is enough.
+    const SHELL_PROBE_TIMEOUT_SECS: f32 = 0.25;
+
+    /// Bound `element`'s messaging timeout to
+    /// [`SHELL_PROBE_TIMEOUT_SECS`](Self::SHELL_PROBE_TIMEOUT_SECS).
+    ///
+    /// Returns `false` when the bound could not be established, which is the
+    /// scan's cue to skip the element rather than read it at the ~1.5s
+    /// default: an element whose cost cannot be bounded is not one this scan
+    /// can query inside its contract.
+    fn bound_shell_probe(element: &AXElement) -> bool {
+        let err = unsafe {
+            safe_ax_set_messaging_timeout(element.as_ptr(), Self::SHELL_PROBE_TIMEOUT_SECS)
+        };
+        err == AX_ERROR_SUCCESS
+    }
+
+    /// Release `element` back to the system-wide default messaging timeout.
+    ///
+    /// `0` means "no element-specific timeout", so the global default applies
+    /// again. Called on an element the scan hands out as a **surface root**:
+    /// bounding the scan must not leave the caller walking that surface at a
+    /// quarter of a second per attribute. The menu-bar, status-item and
+    /// desktop probes need no counterpart — the root each returns is a child
+    /// element that never carried the bound.
+    fn unbound_shell_probe(element: &AXElement) {
+        // The result genuinely does not matter: a failure here leaves the
+        // element on the scan's tighter bound, which is a slower walk and
+        // never a wrong answer. Failing the listing over it would trade a
+        // correct result for none.
+        let _err = unsafe { safe_ax_set_messaging_timeout(element.as_ptr(), 0.0_f32) };
+    }
 
     /// The frontmost application's `AXMenuBar`, tagged `MenuBar`.
     ///
     /// The macOS menu bar is per-application — there is no single system
     /// object — so the surface is whichever app is frontmost, named and
-    /// pid-attributed to that app. When nothing is frontmost, `focused_app`
-    /// reports [`Error::SelectorNotMatched`]; that means "no menu bar right
+    /// pid-attributed to that app. When nothing is frontmost, the system-wide
+    /// element vends no `AXFocusedApplication`; that means "no menu bar right
     /// now", so the surface is omitted rather than failing the listing.
-    fn menu_bar_surface(&self) -> Result<Option<(ShellSurfaceKind, ElementData)>> {
-        let app = match self.focused_app() {
-            Ok(app) => app,
-            // Nothing is frontmost (login window, screen saver). Omit the
-            // surface; the rest of the listing is unaffected.
-            Err(Error::SelectorNotMatched { .. }) => return Ok(None),
-            Err(e) => return Err(e),
+    ///
+    /// The frontmost application element is read from the system-wide element
+    /// here rather than through [`focused_app`](Provider::focused_app),
+    /// because this scan must **bound** that element's messaging timeout
+    /// before touching it. `focused_app` builds a full `ElementData` at the
+    /// AX default, and it is on the app-discovery path where that default is
+    /// the right one — bounding it there would change a contract this scan
+    /// has no business changing. The two calls read the same attribute of the
+    /// same system-wide element; only the cost bound differs. `apps` supplies
+    /// the CGWindowList name, exactly as `focused_app` looks it up.
+    fn menu_bar_surface(
+        &self,
+        apps: &[(i32, String)],
+    ) -> Result<Option<(ShellSurfaceKind, ElementData)>> {
+        let system_wide = AXElement::from_owned(unsafe { safe_ax_create_system_wide() });
+        if system_wide.is_null() {
+            return Err(Error::Platform {
+                code: -1,
+                message: "AXUIElementCreateSystemWide returned NULL".to_string(),
+            });
+        }
+        let app_ax = match probe_element_attr(system_wide.as_ptr(), "AXFocusedApplication") {
+            ElementProbe::Found(app) => app,
+            // Nothing is frontmost (login window, screen saver), or the
+            // system-wide element did not answer. `focused_app` reads both the
+            // same way — "nothing is foreground" — and for a live listing that
+            // is "no menu_bar surface", not a failure of the listing.
+            ElementProbe::Absent | ElementProbe::Unanswered(_) => return Ok(None),
         };
-        let app_ax = self.get_cached(app.handle)?;
+        // Bound the probe *before* making it, as the status-item fan-out does.
+        if !Self::bound_shell_probe(&app_ax) {
+            return Ok(None);
+        }
+
+        let mut pid: i32 = 0;
+        let pid_err = unsafe { safe_ax_get_pid(app_ax.as_ptr(), &mut pid) };
+        let app_pid = (pid_err == AX_ERROR_SUCCESS && pid > 0).then_some(pid as u32);
 
         match probe_element_attr(app_ax.as_ptr(), "AXMenuBar") {
             ElementProbe::Found(menu_bar) => {
-                let mut data = self.build_element_data(&menu_bar, app.pid);
+                // The bound was set on the app element alone, so `menu_bar` —
+                // the root handed to the caller — keeps the system-wide
+                // default and walking the menus is not crippled by the scan's
+                // quarter-second budget.
+                let mut data = self.build_element_data(&menu_bar, app_pid);
                 // An `AXMenuBar` carries no title of its own; the surface is
                 // named for the app whose menus it holds ("Safari"), which is
-                // the name `focused_app` already resolved from CGWindowList.
-                data.name = app.name.clone();
+                // the CGWindowList name `focused_app` also resolves. When the
+                // app owns no listed window the AX-reported name stands, the
+                // same policy `focused_app` applies.
+                if let Some((_, app_name)) =
+                    app_pid.and_then(|p| apps.iter().find(|(gp, _)| *gp == p as i32))
+                {
+                    data.name = Some(app_name.clone());
+                }
                 Ok(Some((ShellSurfaceKind::MenuBar, data)))
             }
             // The frontmost app answered and has no menu bar (a full-screen
             // game, a process with no AppKit menu). Honest absence.
             ElementProbe::Absent => Ok(None),
             // The same codes `app_by_pid` reads as "not reachable right now":
-            // the app went away between `focused_app` and this read, or its
-            // accessibility bridge is not answering. For a live listing that
-            // is "no menu_bar surface", not a failure of the listing.
+            // the app went away between the focused-app read and this one, its
+            // accessibility bridge is not answering, or it did not answer
+            // inside the bounded probe. For a live listing that is "no
+            // menu_bar surface", not a failure of the listing.
             ElementProbe::Unanswered(
                 AX_ERROR_CANNOT_COMPLETE | AX_ERROR_INVALID_UI_ELEMENT | AX_ERROR_NOT_IMPLEMENTED,
             ) => Ok(None),
@@ -2005,7 +2080,7 @@ impl MacOSProvider {
                 message: format!(
                     "AXUIElementCopyAttributeValue(AXMenuBar) failed on the frontmost \
                      application{}",
-                    app.pid.map(|p| format!(" (pid {p})")).unwrap_or_default()
+                    app_pid.map(|p| format!(" (pid {p})")).unwrap_or_default()
                 ),
             }),
         }
@@ -2041,13 +2116,7 @@ impl MacOSProvider {
                 // established the element is not one we can query within the
                 // scan's cost contract, so it is skipped rather than probed
                 // at the ~1.5s default.
-                let timeout_err = unsafe {
-                    safe_ax_set_messaging_timeout(
-                        app_element.as_ptr(),
-                        Self::STATUS_ITEM_PROBE_TIMEOUT_SECS,
-                    )
-                };
-                if timeout_err != AX_ERROR_SUCCESS {
+                if !Self::bound_shell_probe(&app_element) {
                     return None;
                 }
 
@@ -2088,13 +2157,24 @@ impl MacOSProvider {
     /// identifier instead would mean new NSWorkspace FFI for a process whose
     /// owner name Apple has not changed; the name match is the conservative
     /// choice, and a miss simply omits the surface.
+    ///
+    /// Reading it costs one `build_element_data` round-trip, bounded like
+    /// every other probe in this scan — a wedged Dock must not make the
+    /// listing's 100ms poll contract a fiction. The bound is released again
+    /// before the element is handed out, because here the application element
+    /// *is* the surface root: walking the Dock at a quarter-second per
+    /// attribute is not what bounding the scan was for.
     fn dock_surface(&self, apps: &[(i32, String)]) -> Option<(ShellSurfaceKind, ElementData)> {
         let (pid, name) = apps.iter().find(|(_, name)| name.as_str() == "Dock")?;
         let app_element = AXElement::from_owned(unsafe { safe_ax_create_application(*pid) });
         if app_element.is_null() {
             return None;
         }
+        if !Self::bound_shell_probe(&app_element) {
+            return None;
+        }
         let mut data = self.build_element_data(&app_element, Some(*pid as u32));
+        Self::unbound_shell_probe(&app_element);
         // Same name policy as `list_apps`: the CGWindowList owner name wins.
         data.name = Some(name.clone());
         Some((ShellSurfaceKind::Dock, data))
@@ -2109,10 +2189,19 @@ impl MacOSProvider {
     /// gives the scroll area (usually none), which `ShellSurface::list_with`
     /// then renders as the kind's own spelling — the desktop is the
     /// platform's surface, not Finder's window.
+    ///
+    /// Finder's application element is bounded before its `AXChildren` are
+    /// read: a wedged Finder is the case that makes the listing's 100ms poll
+    /// contract false, and it is the one process this scan cannot route
+    /// around. No release afterwards — the root handed to the caller is the
+    /// scroll area, a child element that never carried the bound.
     fn desktop_surface(&self, apps: &[(i32, String)]) -> Option<(ShellSurfaceKind, ElementData)> {
         let (pid, _) = apps.iter().find(|(_, name)| name.as_str() == "Finder")?;
         let app_element = AXElement::from_owned(unsafe { safe_ax_create_application(*pid) });
         if app_element.is_null() {
+            return None;
+        }
+        if !Self::bound_shell_probe(&app_element) {
             return None;
         }
         let desktop = ax_children(app_element.as_ptr())
@@ -2375,7 +2464,7 @@ impl Provider for MacOSProvider {
         }
 
         let mut surfaces: Vec<(ShellSurfaceKind, ElementData)> = Vec::new();
-        if let Some(menu_bar) = self.menu_bar_surface()? {
+        if let Some(menu_bar) = self.menu_bar_surface(&apps)? {
             surfaces.push(menu_bar);
         }
         surfaces.extend(self.status_item_surfaces(&apps));

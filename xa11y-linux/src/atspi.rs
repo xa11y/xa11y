@@ -1561,6 +1561,20 @@ impl Provider for LinuxProvider {
     /// registry walk, so it inherits that enumeration's empty-name filter: a
     /// panel that registers on the bus without a name is invisible here for
     /// the same reason it is invisible to `App::list`.
+    ///
+    /// # Errors
+    ///
+    /// A top-level that was just enumerated but will not answer `GetRoleName`
+    /// or `GetAttributes` fails the listing (tenet 1). Those two calls are how
+    /// a frame is classified, and `Panel` is the only kind Linux vends — so
+    /// treating a D-Bus failure as "not a panel" turns one broken process into
+    /// an empty listing that reads exactly like a desktop with no panels. The
+    /// error names the app and object path that would not answer.
+    ///
+    /// Enumerating one app's top-levels is the one step that still skips:
+    /// [`get_atspi_children`](Self::get_atspi_children) failing is how a
+    /// process that has left the bus presents, and `focused_app` already
+    /// treats it that way.
     fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
         let mut surfaces = Vec::new();
         for app in self.list_apps()? {
@@ -1576,17 +1590,16 @@ impl Provider for LinuxProvider {
                 .iter()
                 .filter(|t| t.path != "/org/a11y/atspi/null")
             {
-                // A top-level that won't answer GetRoleName or GetAttributes
-                // can't be classified. Skipping it is the same call as above:
-                // one unresponsive process must not blank the whole listing.
-                let role_name = match self.get_role_name(top) {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
-                let attributes = match self.get_attributes(top) {
-                    Ok(a) => a,
-                    Err(_) => continue,
-                };
+                // These two answer for a child the app has *just* enumerated,
+                // so a failure is a D-Bus failure, not absence — and "not a
+                // panel" is the wrong reading of it (tenet 1). Say which
+                // top-level of which app would not answer (tenet 6).
+                let role_name = self
+                    .get_role_name(top)
+                    .map_err(|e| classify_failure(&app, top, e))?;
+                let attributes = self
+                    .get_attributes(top)
+                    .map_err(|e| classify_failure(&app, top, e))?;
                 if is_dock_frame(&role_name, &attributes) {
                     surfaces.push((
                         ShellSurfaceKind::Panel,
@@ -2348,6 +2361,29 @@ fn is_dock_frame(role_name: &str, attributes: &HashMap<String, String>) -> bool 
     role_name == "frame" && attributes.get("window-type").is_some_and(|t| t == "dock")
 }
 
+/// Re-word a classification failure so it names the top-level that would not
+/// answer and the application that had just listed it.
+///
+/// The shell scan classifies a frame by two D-Bus reads, and either failing
+/// aborts the listing rather than being read as "not a panel" (tenet 1). What
+/// the raw `GetRoleName failed: …` does not say is *whose* window it was —
+/// which is the whole of what a consumer needs to know to go look (tenet 6).
+fn classify_failure(app: &ElementData, top: &AccessibleRef, err: Error) -> Error {
+    let name = app.name.as_deref().unwrap_or("<unnamed>");
+    let pid = app.pid.map(|p| format!(" pid={p}")).unwrap_or_default();
+    Error::Platform {
+        code: match &err {
+            Error::Platform { code, .. } => *code,
+            _ => -1,
+        },
+        message: format!(
+            "could not classify top-level {} of application \"{name}\"{pid} as a shell \
+             surface: {err}",
+            top.path
+        ),
+    }
+}
+
 /// Map an AT-SPI2 action name to its canonical `snake_case` xa11y action name.
 ///
 /// Toolkit-specific aliases are normalised to the single canonical name:
@@ -2794,5 +2830,62 @@ mod tests {
                 "{role:?} must not be reported as a shell surface"
             );
         }
+    }
+
+    /// A frame the scan could not classify must fail the listing, naming the
+    /// app and the object path. `Panel` is the only kind Linux vends, so
+    /// swallowing this would render a broken panel process as a desktop with
+    /// no panels at all — indistinguishable from the honest empty answer.
+    #[test]
+    fn a_classification_failure_names_the_app_and_the_top_level() {
+        let mut app = ElementData::for_role(Role::Application);
+        app.name = Some("xfce4-panel".to_string());
+        app.pid = Some(4242);
+        let top = AccessibleRef {
+            bus_name: ":1.42".to_string(),
+            path: "/org/a11y/atspi/accessible/7".to_string(),
+        };
+        let err = classify_failure(
+            &app,
+            &top,
+            Error::Platform {
+                code: -1,
+                message: "GetRoleName failed: connection closed".to_string(),
+            },
+        );
+        let Error::Platform { code, message } = err else {
+            panic!("a D-Bus failure must stay a platform error");
+        };
+        assert_eq!(code, -1);
+        assert!(message.contains("xfce4-panel"), "{message}");
+        assert!(message.contains("pid=4242"), "{message}");
+        assert!(
+            message.contains("/org/a11y/atspi/accessible/7"),
+            "{message}"
+        );
+        // Never masks the underlying D-Bus error (tenet 1).
+        assert!(message.contains("GetRoleName failed"), "{message}");
+    }
+
+    /// An unnamed application still produces a usable message — the object
+    /// path is what a consumer actually goes looking with.
+    #[test]
+    fn a_classification_failure_survives_an_unnamed_app() {
+        let app = ElementData::for_role(Role::Application);
+        let top = AccessibleRef {
+            bus_name: ":1.9".to_string(),
+            path: "/org/a11y/atspi/accessible/3".to_string(),
+        };
+        let err = classify_failure(
+            &app,
+            &top,
+            Error::Platform {
+                code: -1,
+                message: "GetAttributes failed".to_string(),
+            },
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("<unnamed>"), "{msg}");
+        assert!(msg.contains("/org/a11y/atspi/accessible/3"), "{msg}");
     }
 }

@@ -167,8 +167,9 @@ def test_as_element_exposes_the_surface_root(taskbar):
 
 
 def test_root_carries_the_kind_as_a_raw_attribute(taskbar):
-    # Stamped by core in one place so `tree`/`dump` show it and
-    # `[shell_kind='taskbar']` matches.
+    # Stamped by core in one place, on the surface root only. `as_element()`
+    # is where it is read back; it is not a selector, and `tree`/`dump` do not
+    # carry raw attributes.
     assert taskbar.as_element().raw["shell_kind"] == "taskbar"
 
 

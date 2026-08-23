@@ -45,8 +45,9 @@ test('list() returns the fixture surfaces with kind, name and pid', () => {
 });
 
 test('the surface kind is stamped onto the root element', async () => {
-  // `[shell_kind=...]` matchability is what the stamp buys; the raw map is
-  // where a consumer reads it back.
+  // The stamp is on the surface root only, and the raw map is where a
+  // consumer reads it back — it is not a selector (a rooted locator emits
+  // only descendants of its root, and a TreeNode carries no raw map).
   const taskbar = _makeTestShellSurfaceByKind('taskbar');
   assert.equal(taskbar.asElement().raw.shell_kind, 'taskbar');
   const node = await taskbar.tree(0);

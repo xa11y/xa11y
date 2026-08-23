@@ -133,7 +133,11 @@ pub trait Provider: Send + Sync {
     /// The kind is part of the primitive's contract, so it travels in the
     /// signature where the compiler sees it rather than being smuggled
     /// through `raw`. Backends return the platform root untouched;
-    /// `ShellSurface::list_with` stamps `raw["shell_kind"]` in one place.
+    /// `ShellSurface::list_with` additionally stamps `raw["shell_kind"]` on
+    /// the surface root, in one place, so a consumer holding only an
+    /// [`Element`](crate::Element) can read the kind back. That stamp is a
+    /// readback, not a selector: it is on the root alone, a rooted locator
+    /// only emits descendants of its root, and `TreeNode` carries no `raw`.
     fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>>;
 
     /// Search for elements matching a selector.

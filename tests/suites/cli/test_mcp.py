@@ -296,6 +296,10 @@ def test_unknown_tool_is_a_protocol_error(mcp):
 
 # ── Shell surfaces ───────────────────────────────────────────────────────────
 
+# The Rust side derives its advertised list from `ShellSurfaceKind::ALL`, so
+# this set is the assertion against it, not a copy of it: adding a core variant
+# fails `test_the_element_tools_offer_the_shell_argument_with_its_kinds` until
+# someone confirms the new kind belongs on the wire.
 SHELL_KINDS = {
     "menu_bar",
     "status_items",
@@ -432,6 +436,18 @@ def test_a_second_surface_of_one_kind_is_refused_with_its_pids(mcp):
     pid = next(s["pid"] for s in surfaces if s["kind"] == duplicated)
     if pid is None:
         return
+    # `pid` is the only disambiguator there is, so it cannot separate several
+    # surfaces owned by ONE process — the real case being two panel frames from
+    # a single xfce4-panel. Narrowing by pid then still comes back ambiguous,
+    # which is the honest answer the `--shell` help and the MCP `pid`
+    # description both state; asserting it succeeds would assert a lever that
+    # does not exist. An index/stable-id disambiguator is the follow-up.
+    same_kind_pids = [s["pid"] for s in surfaces if s["kind"] == duplicated]
+    if len(set(same_kind_pids)) < len(same_kind_pids):
+        pytest.skip(
+            f"the {duplicated} surfaces on this desktop share a pid "
+            f"({same_kind_pids}); pid cannot narrow same-process surfaces"
+        )
     narrowed = mcp.call_tool(
         "find", {"selector": "*", "limit": 1, "shell": duplicated, "pid": pid}
     )["result"]

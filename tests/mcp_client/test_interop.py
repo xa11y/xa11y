@@ -43,8 +43,10 @@ EXPECTED_TOOLS = [
 ]
 
 # Every `ShellSurfaceKind` spelling, as `shell` reports them and the `shell`
-# argument accepts them. Kept in step with `SHELL_KIND_NAMES` in
-# xa11y/src/cli.rs.
+# argument accepts them. The Rust side derives its list from
+# `ShellSurfaceKind::ALL`, so this set is not a copy of it but the assertion
+# against it (`set(shell["enum"]) == SHELL_KINDS` below): adding a core variant
+# fails here until someone confirms the new kind belongs on the wire.
 SHELL_KINDS = {
     "menu_bar",
     "status_items",

@@ -265,7 +265,9 @@ impl WindowsProvider {
     ///
     /// A failing COM call propagates rather than degrading to `false` — "the
     /// shell window could not be inspected" is not "the shell window is
-    /// closed" (tenet 1).
+    /// closed" (tenet 1). The caller re-wraps that failure with the surface it
+    /// was probing and the surfaces the scan had already classified, because
+    /// `Error::Platform` has no diagnosis field to attach one to (tenet 6).
     fn has_onscreen_child(&self, element: &IUIAutomationElement) -> Result<bool> {
         let true_cond = uia_call(|| unsafe { self.automation.CreateTrueCondition() })?;
         let children = uia_call(|| unsafe {
@@ -274,6 +276,40 @@ impl WindowsProvider {
         Ok((0..uia_len(&children))
             .filter_map(|i| uia_get(&children, i))
             .any(|child| uia_cached_bool(&child, UIA_IsOffscreenPropertyId) == Some(false)))
+    }
+
+    /// The first descendant of `root` whose `ClassName` is `class`, with the
+    /// batch cache populated so `build_element_data` can read it.
+    ///
+    /// `FindFirstBuildCache` with a `ClassName` property condition, the same
+    /// primitive [`app_by_pid`](Self::app_by_pid) uses against the desktop
+    /// root, scoped to a subtree instead. Used by
+    /// [`list_shell_surfaces`](Provider::list_shell_surfaces) to reach the
+    /// desktop icon list view under `Progman`.
+    ///
+    /// `Ok(None)` means the class genuinely is not in the subtree — windows-rs
+    /// surfaces UIA's "S_OK, null element" as an `Err` carrying an *ok*
+    /// HRESULT. A failing HRESULT is a real UIA error and propagates (tenet
+    /// 1): "the subtree could not be searched" is not "the class is absent".
+    fn descendant_by_class(
+        &self,
+        root: &IUIAutomationElement,
+        class: &str,
+    ) -> Result<Option<IUIAutomationElement>> {
+        let condition = uia_call(|| unsafe {
+            self.automation
+                .CreatePropertyCondition(UIA_ClassNamePropertyId, &VARIANT::from(class))
+        })?;
+        match unsafe {
+            root.FindFirstBuildCache(TreeScope_Descendants, &condition, &self.batch_request)
+        } {
+            Ok(el) => Ok(Some(el)),
+            Err(e) if e.code().is_ok() => Ok(None),
+            Err(e) => Err(Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("FindFirstBuildCache(ClassName={class}) failed: {e}"),
+            }),
+        }
     }
 
     /// Extract a UIA element's RuntimeId as a `Vec<i32>` for use as a stable
@@ -402,6 +438,47 @@ fn uia_call<T>(f: impl Fn() -> windows::core::Result<T>) -> Result<T> {
         code: e.code().0 as i64,
         message: e.to_string(),
     })
+}
+
+/// Class name of the desktop icon list view, the element
+/// [`ShellSurfaceKind::Desktop`] names.
+///
+/// It sits two levels under `Progman` (`Progman` → `SHELLDLL_DefView` →
+/// `SysListView32`), so the shell scan descends by class rather than by a
+/// fixed child index — the intermediate `SHELLDLL_DefView` is reparented to a
+/// `WorkerW` window when Active Desktop-style wallpaper hosts are in play, and
+/// depth is the one thing that varies.
+const DESKTOP_LIST_VIEW_CLASS: &str = "SysListView32";
+
+/// Longest candidate list a shell-scan failure carries. Bounded per tenet 6 —
+/// a diagnosis must not grow with the desktop.
+const DIAG_SHELL_CANDIDATE_LIMIT: usize = 20;
+
+/// Bounded `kind "name"` rendering of the shell surfaces a scan had already
+/// classified when it aborted.
+///
+/// The candidate list a consumer would otherwise reconstruct by re-running the
+/// listing under logging — except that a scan that aborts never returns one,
+/// which is exactly why the partial result belongs in the error.
+fn classified_so_far(surfaces: &[(u8, ShellSurfaceKind, ElementData)]) -> Vec<String> {
+    let mut out: Vec<String> = surfaces
+        .iter()
+        .take(DIAG_SHELL_CANDIDATE_LIMIT)
+        .map(|(_, kind, data)| {
+            format!(
+                "{} \"{}\"",
+                kind.to_snake_case(),
+                data.name.as_deref().unwrap_or("")
+            )
+        })
+        .collect();
+    if surfaces.len() > DIAG_SHELL_CANDIDATE_LIMIT {
+        out.push(format!(
+            "… (+{} more)",
+            surfaces.len() - DIAG_SHELL_CANDIDATE_LIMIT
+        ));
+    }
+    out
 }
 
 /// Read a BSTR VARIANT property from the element's pre-fetched snapshot.
@@ -861,7 +938,7 @@ impl Provider for WindowsProvider {
     /// | Class name | Kind |
     /// |---|---|
     /// | `Shell_TrayWnd` | [`Taskbar`](ShellSurfaceKind::Taskbar) — task band, visible tray row, overflow chevron |
-    /// | `Progman` | [`Desktop`](ShellSurfaceKind::Desktop) — the desktop icon host |
+    /// | `Progman` | [`Desktop`](ShellSurfaceKind::Desktop) — descended to its `SysListView32` icon list view; **no surface** if that is missing |
     /// | `TopLevelWindowForOverflowXamlIsland` | [`Flyout`](ShellSurfaceKind::Flyout) — the tray overflow |
     /// | `Microsoft.UI.Content.PopupWindowSiteBridge` | [`Flyout`](ShellSurfaceKind::Flyout) — a shell popup |
     /// | `ControlCenterWindow` | [`Flyout`](ShellSurfaceKind::Flyout) — Quick Settings, **only while its content is on screen** |
@@ -886,7 +963,10 @@ impl Provider for WindowsProvider {
     ///
     /// [`Error::Platform`] when the desktop root itself cannot be read or its
     /// children cannot be enumerated. Individual classes are never
-    /// error-skipped (tenet 1).
+    /// error-skipped (tenet 1): the one per-class probe — Quick Settings'
+    /// on-screen test — propagates too, wrapped so the message names the
+    /// surface it was probing and lists the surfaces classified before the
+    /// scan aborted.
     fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
         let root = uia_call(|| unsafe { self.automation.GetRootElement() })?;
         let true_cond = uia_call(|| unsafe { self.automation.CreateTrueCondition() })?;
@@ -920,12 +1000,56 @@ impl Provider for WindowsProvider {
                 // Presence therefore does not mean open — the content's
                 // `IsOffscreen` does.
                 "ControlCenterWindow" => {
-                    if !self.has_onscreen_child(&el)? {
+                    // The probe's COM failure still propagates (tenet 1 — a
+                    // window that could not be inspected is not a window that
+                    // is closed), but it must say what it was probing and how
+                    // far the scan got (tenet 6). `Error::Platform` carries no
+                    // structured diagnosis field, so the `Diagnosis` is
+                    // rendered into the message through its `Display` impl —
+                    // the same clauses a `SelectorNotMatched` would show.
+                    let on_screen = self.has_onscreen_child(&el).map_err(|e| {
+                        let diagnosis = xa11y_core::Diagnosis::new()
+                            .condition(
+                                "a Quick Settings flyout surface, if its content is on screen",
+                            )
+                            .last_observed(format!(
+                                "the probe failed with: {e}; {} shell surface(s) had been \
+                                 classified before the scan aborted",
+                                surfaces.len()
+                            ))
+                            .candidates(classified_so_far(&surfaces));
+                        Error::Platform {
+                            code: match &e {
+                                Error::Platform { code, .. } => *code,
+                                _ => -1,
+                            },
+                            message: format!(
+                                "probing whether Quick Settings (ControlCenterWindow) is on \
+                                 screen failed{diagnosis}"
+                            ),
+                        }
+                    })?;
+                    if !on_screen {
                         continue;
                     }
                     (2u8, ShellSurfaceKind::Flyout)
                 }
                 _ => continue,
+            };
+
+            // `Progman` is the desktop *host* pane; the surface
+            // `ShellSurfaceKind::Desktop` documents is the icon list view
+            // inside it (Progman → SHELLDLL_DefView → SysListView32), so a
+            // caller targeting `desktop` finds the icons as direct children.
+            // When the chain is absent no desktop surface is emitted at all —
+            // never the Progman pane as a stand-in (tenet 1).
+            let el = if kind == ShellSurfaceKind::Desktop {
+                match self.descendant_by_class(&el, DESKTOP_LIST_VIEW_CLASS)? {
+                    Some(list_view) => list_view,
+                    None => continue,
+                }
+            } else {
+                el
             };
 
             // The host process (explorer.exe, ShellHost.exe), never a
@@ -2615,6 +2739,35 @@ impl WindowsProvider {
 #[allow(non_upper_case_globals)]
 mod tests {
     use super::*;
+
+    /// Build a shell-scan partial result of `n` classified surfaces.
+    fn classified(n: usize) -> Vec<(u8, ShellSurfaceKind, ElementData)> {
+        (0..n)
+            .map(|i| {
+                let mut data = ElementData::for_role(Role::Group);
+                data.name = Some(format!("surface {i}"));
+                (0u8, ShellSurfaceKind::Taskbar, data)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_shell_scan_diagnosis_names_what_was_already_classified() {
+        let lines = classified_so_far(&classified(2));
+        assert_eq!(
+            lines,
+            vec!["taskbar \"surface 0\"", "taskbar \"surface 1\""]
+        );
+        assert!(classified_so_far(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_shell_scan_diagnosis_is_bounded() {
+        // Tenet 6: the failure path must not emit a line per desktop child.
+        let lines = classified_so_far(&classified(DIAG_SHELL_CANDIDATE_LIMIT + 5));
+        assert_eq!(lines.len(), DIAG_SHELL_CANDIDATE_LIMIT + 1);
+        assert_eq!(lines[DIAG_SHELL_CANDIDATE_LIMIT], "… (+5 more)");
+    }
 
     #[test]
     fn role_mapping_covers_common_types() {

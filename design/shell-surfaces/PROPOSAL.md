@@ -124,7 +124,8 @@ Following the `Role` precedent exactly: the enum crosses every binding as its
 `snake_case` string (`"menu_bar"`, `"status_items"`, …), identical spelling
 in Python and JS per the Binding Shape Conventions, converted mechanically
 via `to_snake_case` — so, like `Role` and unlike `Error`/`EventKind`, it
-needs **no** `[[types.variant_coverage]]` entry. Downstream matches carry a
+needs **no** `[[types.variant_coverage]]` entry (**amended post-review, see
+§12.4**). Downstream matches carry a
 `_` arm; per the extensibility table's test, a new variant requires no work
 in another crate (backends produce kinds, nothing must consume them
 exhaustively), so `#[non_exhaustive]` is the right choice, not exhaustive.
@@ -541,3 +542,16 @@ message distinguishes the two situations — "N surfaces are present; `xa11y
 shell` lists their pids" when no pid was given, and "N surfaces share pid P;
 this operation cannot pick between them" when one was and did not narrow it —
 rather than repeating advice the caller has already taken.
+
+### 12.4 `ShellSurfaceKind` does get variant coverage (amends §3.1)
+
+§3.1 argued the enum needs no `[[types.variant_coverage]]` entry "like
+`Role`". Review showed the analogy fails: `Role` has no hand-maintained
+closed list anywhere, while the kind strings ended up spelled out in the
+`.pyi` and `patch-native-dts.mjs` literal unions. The implementation
+therefore single-sources every derivable list from a new
+`ShellSurfaceKind::ALL` (the CLI/MCP enum and both bindings' parse errors),
+guards `ALL` itself with an exhaustive-match test, and covers the two
+remaining hand-written unions with a `[[types.variant_coverage]]` entry — so
+adding a variant without updating them fails the parity check instead of
+shipping a kind that TypeScript and schema-validating MCP clients reject.

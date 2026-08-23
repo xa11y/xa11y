@@ -56,10 +56,19 @@ const DIAG_SURFACE_LIST_LIMIT: usize = 20;
 
 /// Raw-attribute key carrying the surface kind on a surface root.
 ///
-/// [`ShellSurface::list_with`] stamps it in one place so the kind shows up in
-/// `tree` / `dump` output and is matchable through the existing raw-attribute
-/// selector fallback (`[shell_kind='taskbar']`) — no selector-engine change,
-/// and no per-backend drift.
+/// [`ShellSurface::list_with`] stamps it in one place — no backend can drift
+/// on the spelling — and it lands on the **surface root only**, nowhere else
+/// in the tree. A consumer reads it back through
+/// [`as_element`](ShellSurface::as_element):
+/// `surface.as_element().raw["shell_kind"]`.
+///
+/// It is deliberately *not* a way to find a surface. A rooted [`Locator`]
+/// emits only descendants of its root, so `[shell_kind='taskbar']` never
+/// matches the root that carries the stamp, and [`TreeNode`] carries no `raw`
+/// map, so `tree` / `dump` output does not show it either. The kind travels in
+/// [`ShellSurface::kind`] and in the
+/// [`list_shell_surfaces`](crate::provider::Provider::list_shell_surfaces)
+/// signature; the stamp is the same fact, readable from a bare [`Element`].
 const SHELL_KIND_RAW_KEY: &str = "shell_kind";
 
 /// What kind of OS shell surface a [`ShellSurface`] is.
@@ -80,6 +89,11 @@ const SHELL_KIND_RAW_KEY: &str = "shell_kind";
     strum::EnumString,
     strum::IntoStaticStr,
 )]
+// Test-only: `EnumIter` is what lets `every_variant_is_in_all` compare
+// [`ALL`](Self::ALL) against the real variant set instead of against a
+// hand-counted length. Gated so the generated iterator type stays out of the
+// public API (and out of the bindings-parity surface).
+#[cfg_attr(test, derive(strum::EnumIter))]
 #[strum(serialize_all = "snake_case")]
 #[non_exhaustive]
 pub enum ShellSurfaceKind {
@@ -113,6 +127,29 @@ pub enum ShellSurfaceKind {
 }
 
 impl ShellSurfaceKind {
+    /// Every kind, in the order the CLI, MCP and both bindings advertise them.
+    ///
+    /// The single source for every list of kind spellings outside this crate:
+    /// the CLI's `--shell` help and error message, MCP's `shell` enum, and
+    /// each binding's parse-failure message all derive from
+    /// `ALL` + [`to_snake_case`](Self::to_snake_case) rather than writing the
+    /// strings out again. `ShellSurfaceKind` is `#[non_exhaustive]`, so a
+    /// downstream `match` cannot be the thing that fails when a variant is
+    /// added; `every_variant_is_in_all` in this module's tests is. It matches
+    /// exhaustively (legal in the defining crate, so a new variant is a
+    /// compile error there) and compares this list against strum's derived
+    /// iterator, so `ALL` cannot quietly fall one kind behind the enum.
+    pub const ALL: &'static [ShellSurfaceKind] = &[
+        ShellSurfaceKind::MenuBar,
+        ShellSurfaceKind::StatusItems,
+        ShellSurfaceKind::Taskbar,
+        ShellSurfaceKind::Panel,
+        ShellSurfaceKind::Dock,
+        ShellSurfaceKind::Desktop,
+        ShellSurfaceKind::Flyout,
+        ShellSurfaceKind::Unknown,
+    ];
+
     /// Parse a snake_case kind name into a `ShellSurfaceKind` variant.
     /// Returns `None` if the name doesn't match any known kind.
     pub fn from_snake_case(s: &str) -> Option<Self> {
@@ -198,9 +235,9 @@ impl ShellSurface {
             .into_iter()
             .map(|(kind, mut data)| {
                 // The kind is stamped onto the root's raw map HERE — the one
-                // place — rather than in each backend, so `tree`/`dump` show
-                // it and `[shell_kind='taskbar']` matches without any backend
-                // being able to drift on the spelling.
+                // place — rather than in each backend, so no backend can drift
+                // on the spelling. It lands on the surface root only; see
+                // `SHELL_KIND_RAW_KEY` for what that does and does not buy.
                 data.raw.insert(
                     SHELL_KIND_RAW_KEY.to_string(),
                     serde_json::Value::String(kind.to_snake_case().to_string()),
@@ -547,21 +584,63 @@ mod tests {
         }
     }
 
+    /// `ShellSurfaceKind::ALL` must list every variant.
+    ///
+    /// This is the guard `#[non_exhaustive]` took away: outside this crate a
+    /// `match` needs a `_` arm, so nothing downstream fails to compile when a
+    /// variant is added. Inside the defining crate an exhaustive `match` is
+    /// still legal — so adding a variant without adding it to `ALL` is a
+    /// **compile error here**, and every derived list (the CLI's `--shell`
+    /// help and error text, MCP's `shell` enum, both bindings' parse errors)
+    /// picks the new kind up for free.
+    #[test]
+    fn every_variant_is_in_all() {
+        use strum::IntoEnumIterator;
+
+        // The derived iterator is the second, independent enumeration of the
+        // variants: `ALL` cannot silently fall behind it, because adding a
+        // variant changes what `iter()` yields whether or not anyone edits
+        // this file.
+        let declared: Vec<ShellSurfaceKind> = ShellSurfaceKind::iter().collect();
+        assert_eq!(
+            ShellSurfaceKind::ALL,
+            declared.as_slice(),
+            "ShellSurfaceKind::ALL must list every variant, in declaration order — \
+             every advertised kind list (the CLI's --shell help and error text, MCP's \
+             `shell` enum, both bindings' parse errors) is derived from it"
+        );
+
+        // And the exhaustive `match` that makes a new variant a compile error
+        // *here*, so the author is sent to this test rather than shipping a
+        // kind nothing advertises. No `_` arm, on purpose.
+        for kind in ShellSurfaceKind::ALL {
+            let named = match kind {
+                ShellSurfaceKind::MenuBar => "menu_bar",
+                ShellSurfaceKind::StatusItems => "status_items",
+                ShellSurfaceKind::Taskbar => "taskbar",
+                ShellSurfaceKind::Panel => "panel",
+                ShellSurfaceKind::Dock => "dock",
+                ShellSurfaceKind::Desktop => "desktop",
+                ShellSurfaceKind::Flyout => "flyout",
+                ShellSurfaceKind::Unknown => "unknown",
+            };
+            assert_eq!(kind.to_snake_case(), named);
+        }
+
+        // No duplicate spellings: `ALL` is what every advertised list, and
+        // every JSON Schema `enum`, is built from.
+        let unique: std::collections::BTreeSet<&str> = ShellSurfaceKind::ALL
+            .iter()
+            .map(|k| k.to_snake_case())
+            .collect();
+        assert_eq!(unique.len(), ShellSurfaceKind::ALL.len());
+    }
+
     #[test]
     fn all_kinds_roundtrip() {
         // Every kind must parse back from its own snake_case representation —
         // that string is what crosses the bindings, the CLI and MCP.
-        let kinds = [
-            ShellSurfaceKind::MenuBar,
-            ShellSurfaceKind::StatusItems,
-            ShellSurfaceKind::Taskbar,
-            ShellSurfaceKind::Panel,
-            ShellSurfaceKind::Dock,
-            ShellSurfaceKind::Desktop,
-            ShellSurfaceKind::Flyout,
-            ShellSurfaceKind::Unknown,
-        ];
-        for kind in kinds {
+        for &kind in ShellSurfaceKind::ALL {
             let s = kind.to_snake_case();
             assert_eq!(
                 ShellSurfaceKind::from_snake_case(s),
@@ -591,8 +670,8 @@ mod tests {
 
     #[test]
     fn list_with_stamps_the_kind_onto_the_root() {
-        // The stamp is what makes the kind visible in tree/dump output and
-        // matchable as `[shell_kind='taskbar']`.
+        // The stamp lands on the surface root, and `as_element().raw` is
+        // where a consumer reads it back — the only place it is visible.
         let surfaces = surfaces();
         for surface in &surfaces {
             assert_eq!(

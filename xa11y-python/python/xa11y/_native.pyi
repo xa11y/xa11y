@@ -387,10 +387,10 @@ class ShellSurface:
     def by_kind(kind: ShellSurfaceKindName, *, timeout: float | None = None) -> ShellSurface:
         """Wait for exactly one shell surface of ``kind``.
 
-        ``kind`` is the snake_case kind name (``"menu_bar"``,
-        ``"status_items"``, ``"taskbar"``, ``"panel"``, ``"dock"``,
-        ``"desktop"``, ``"flyout"``, ``"unknown"``); an unknown name raises
-        ``ValueError`` before the accessibility API is touched.
+        ``kind`` is the snake_case kind name — ``ShellSurfaceKindName`` above
+        is the full set, and is the only place this file spells them out. An
+        unknown name raises ``ValueError`` before the accessibility API is
+        touched.
 
         Polls until a single surface of that kind exists or ``timeout``
         (seconds) elapses — see ``App.by_name`` for ``timeout`` semantics. The
