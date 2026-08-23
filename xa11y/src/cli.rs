@@ -2527,7 +2527,10 @@ mod tests {
             live: Vec::new(),
         }
         .to_string();
-        assert!(unknown.contains("not a handle this server issued"), "{unknown}");
+        assert!(
+            unknown.contains("not a handle this server issued"),
+            "{unknown}"
+        );
         assert!(
             unknown.contains("no subscriptions are open"),
             "an empty list still has to read as a sentence: {unknown}"

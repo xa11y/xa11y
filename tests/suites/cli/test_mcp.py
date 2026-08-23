@@ -1165,13 +1165,24 @@ def test_a_missing_shell_surface_is_an_operation_failure_not_a_usage_error(entry
 # it is open, and stops resolving once it is closed. Those tests assert
 # strictly everywhere.
 #
-# Whether an event *arrives* is a different question. Bridge delivery for
+# Whether an event *arrives* is a platform question. Bridge delivery for
 # programmatic actions is unreliable on several app/platform combinations —
-# tests/suites/python/test_events.py documents which — so the one test that
-# waits for an event carries the same non-strict xfail rather than pretending
-# the MCP layer can make a bridge emit what it does not emit.
+# tests/suites/python/test_events.py documents which — so a bare "an event
+# shows up" assertion would flake, and an xfail around it would assert
+# nothing in either direction.
+#
+# The way out is a control. xa11y's own subscription, from this process,
+# watches the same application through the same bridge, and the test compares
+# the two: an event the library received and the MCP registry did not is a
+# defect in this layer, which is the only defect this layer can have. When the
+# bridge delivers to neither, there was nothing to carry and the test says so.
 
 TEST_APP = os.environ.get("XA11Y_TEST_APP", "tauri")
+
+# Longest the two subscribers are given to see the same action. Generous
+# because it is a failure deadline, not a wait: a delivering bridge answers in
+# well under a second.
+EVENT_DEADLINE = 15.0
 
 
 @pytest.fixture
@@ -1278,41 +1289,77 @@ def test_an_unknown_event_kind_is_refused_with_the_names_that_exist(mcp):
     assert "focus_changed" in result["structuredContent"]["message"]
 
 
-@pytest.mark.xfail(
-    reason=(
-        "Accessibility-event delivery for programmatic actions is unreliable "
-        "on several app/platform combinations (see the per-combo markers in "
-        "tests/suites/python/test_events.py). The subscription plumbing is "
-        "asserted strictly by the tests above; this one asserts that an event "
-        "the bridge does emit reaches a poll."
-    ),
-    strict=False,
-)
-def test_an_action_reaches_a_poll_as_a_shaped_event(mcp, app_pid):
-    """Start, act, poll — the order the tool descriptions tell a model to use."""
+@pytest.fixture
+def library_subscription(app):
+    """A second subscriber on the same application, from this process.
+
+    xa11y's own subscription, opened through the library rather than through
+    MCP, and living in a different process from the server's. It is the
+    control for `test_an_action_reaches_a_poll_as_a_shaped_event`.
+    """
+    with app.subscribe() as subscription:
+        yield subscription
+
+
+def test_an_action_reaches_a_poll_as_a_shaped_event(
+    mcp, app_pid, library_subscription
+):
+    """Whatever xa11y's own subscription receives, a poll has to receive too.
+
+    Start, act, poll — the order the tool descriptions tell a model to use.
+    Both subscribers are open before the action, and the assertion is
+    conditional on the control rather than on the platform: if the library
+    saw an event and the MCP registry did not, this layer dropped it.
+    """
     started = mcp.call_tool("events_start", {"pid": app_pid})["result"]
+    assert started["isError"] is False, started["content"]
     handle = started["structuredContent"]["subscription_id"]
     try:
+        # `OK` is the one button every test app has, and pressing it by name
+        # is what `test_action_presses_a_button` already does on all of them.
         acted = mcp.call_tool(
-            "action", {"action": "focus", "selector": "button", "pid": app_pid}
+            "action",
+            {"action": "press", "selector": 'button[name="OK"]', "pid": app_pid},
         )["result"]
         if acted["isError"]:
-            pytest.skip(f"the {TEST_APP} app has no focusable button to drive")
+            pytest.skip(f"the {TEST_APP} app did not accept a press on OK: {acted}")
 
-        events = []
-        deadline = time.monotonic() + 10
-        while not events and time.monotonic() < deadline:
+        library_events = []
+        mcp_events = []
+        deadline = time.monotonic() + EVENT_DEADLINE
+        while time.monotonic() < deadline and not (library_events and mcp_events):
+            event = library_subscription.try_recv()
+            if event is not None:
+                library_events.append(event)
             polled = mcp.call_tool(
-                "events_poll", {"subscription_id": handle, "timeout_ms": 2000}
+                "events_poll", {"subscription_id": handle, "timeout_ms": 250}
             )["result"]
             assert polled["isError"] is False, polled["content"]
-            events = polled["structuredContent"]["events"]
+            structured = polled["structuredContent"]
+            assert structured["dropped"] == 0, "a handful of events cannot overflow"
+            mcp_events.extend(structured["events"])
 
-        assert events, "no event arrived within 10s of a focus action"
-        first = events[0]
+        if not library_events:
+            pytest.skip(
+                f"the bridge delivered no event to xa11y's own subscription "
+                f"either, so there was nothing for MCP to carry ({TEST_APP} on "
+                f"{sys.platform}; tests/suites/python/test_events.py records "
+                f"which combinations deliver)"
+            )
+        assert mcp_events, (
+            f"xa11y's own subscription received {len(library_events)} event(s) "
+            f"from this action and the MCP subscription received none"
+        )
+
+        first = mcp_events[0]
         assert first["kind"], "every event names its kind"
         assert first["sequence"] == 0, "the first event of a subscription is 0"
-        assert "at_ms" in first
+        assert isinstance(first["at_ms"], int)
+        # The originating process as the backend reported it, which is not
+        # asserted equal to `app_pid`: that is the backend's business, and a
+        # disagreement there would be a finding about the provider rather than
+        # about this layer.
+        assert isinstance(first["pid"], int), "an event names where it came from"
         if "target" in first:
             assert first["target"]["role"], "a target is shaped like a find match"
     finally:

@@ -178,13 +178,19 @@ features:
       The `events_start` / `events_poll` / `events_stop` trio is covered the
       same way, split by what is platform-independent. The handle lifecycle —
       a handle is issued, resolves while open, and reports `subscription_expired`
-      once stopped — asserts strictly on every cell. Whether an event actually
-      *arrives* after an action does not: bridge delivery for programmatic
-      actions is unreliable on several app/platform combinations (see the
-      per-combo markers in tests/suites/python/test_events.py), so that one
-      test carries a non-strict xfail. Buffer bounds, drop accounting and
-      expiry are unit-tested in xa11y/src/mcp/events.rs, which needs no
-      display: the registry is driven by a plain channel.
+      once stopped — asserts strictly on every cell.
+      Whether an event *arrives* after an action is a platform question, and
+      delivery for programmatic actions is unreliable on several app/platform
+      combinations (see the per-combo markers in
+      tests/suites/python/test_events.py). Rather than xfail around that, which
+      would assert nothing in either direction, the test runs a control: xa11y's
+      own subscription, opened from the pytest process, watches the same app
+      through the same bridge, and the assertion is that an event the library
+      received also reached the MCP poll. It skips only when the bridge
+      delivered to neither, where there was nothing for MCP to lose.
+      Buffer bounds, drop accounting and expiry are unit-tested in
+      xa11y/src/mcp/events.rs, which needs no display: the registry is driven
+      by a plain channel.
       Separately, tests/mcp_client/ drives the server with the official MCP
       Python SDK in both protocol eras, on ubuntu-latest only (the `mcp-client`
       CI job). It is not per-app and needs no display: the server is
