@@ -20,7 +20,7 @@
 use serde_json::{json, Map, Value};
 
 use super::base64;
-use super::events::{Registry, BUFFER_CAPACITY, EXPIRY};
+use super::events::{Registry, BUFFER_CAPACITY, EXPIRY, MAX_SUBSCRIPTIONS};
 use crate::cli::{
     self, parse_button, parse_held, parse_key_name, resolve_app, resolve_target, CliError,
     CliResult, Opts, Target, ACTIONS_REQUIRING_VALUE, ACTION_NAMES,
@@ -852,7 +852,11 @@ fn events_start_description() -> String {
          The handle lives in this server process and no longer: it is reclaimed \
          after {} minutes without a poll, and a reclaimed handle comes back from \
          `events_poll` as a `subscription_expired` failure. Call `events_stop` when \
-         you are done.",
+         you are done — stopping a handle that was already reclaimed succeeds, so \
+         cleanup is always safe to call.\n\n\
+         At most {MAX_SUBSCRIPTIONS} subscriptions may be open at once; starting \
+         another is refused with the open handles named. Watch one application at \
+         a time and stop it before moving on rather than accumulating handles.",
         EXPIRY.as_secs() / 60,
     )
 }
@@ -870,9 +874,12 @@ fn events_poll_description() -> String {
          `state_changed` event also carries `state_flag` and `state_value`.\n\n\
          Two fields say what the events alone cannot. `dropped` counts events lost \
          to buffer eviction since the previous poll — poll more often, narrow \
-         `kinds`, or accept the gap. `live: false` means the source is gone (the \
-         application exited, or the platform dropped the subscription): drain what \
-         is left, then stop polling, because nothing further can arrive.\n\n\
+         `kinds`, or accept the gap. `live: false` means the platform dropped the \
+         subscription: drain what is left, then stop polling, because nothing \
+         further can arrive. It is not a liveness check on the application — no \
+         platform reports an application exiting as a dropped subscription, so an \
+         application that quits keeps returning `live: true` with no events. Use \
+         `apps` to find out whether it is still running.\n\n\
          An event is a snapshot from when it fired. Read the tree again to see the \
          UI as it is now."
     )

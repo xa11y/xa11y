@@ -71,6 +71,23 @@ pub(super) const EXPIRY: Duration = Duration::from_secs(300);
 /// How often the drainer re-checks its stop flag while waiting for an event.
 const DRAIN_TICK: Duration = Duration::from_millis(100);
 
+/// Subscriptions one session may hold open at once.
+///
+/// The buffer bounds how far behind a model may fall on *one* subscription;
+/// nothing bounded how many it could open. Each costs an OS thread, a buffer,
+/// and a platform registration — and on Windows that registration is a
+/// system-wide `AddFocusChangedEventHandler`, so a model looping `events_start`
+/// (it lost the handle, or retried past a poll error) degrades the whole
+/// desktop rather than just this process. Refusing is the bound; the error
+/// names the open handles so the caller can reuse or stop one.
+pub(super) const MAX_SUBSCRIPTIONS: usize = 8;
+
+/// Open handles listed back in a `subscription_not_found` diagnosis.
+///
+/// Bounded for the same reason the tree and find results are: the list is
+/// caller-controlled, and an unbounded one lands in a context window.
+const MAX_LISTED_SUBSCRIPTIONS: usize = 20;
+
 /// One buffered event, with the ordering data the poll result reports.
 struct Buffered {
     /// Monotonic per subscription, assigned before any eviction, so a gap in
@@ -208,6 +225,25 @@ impl Registry {
         kinds: Option<Vec<String>>,
     ) -> CliResult<Value> {
         self.sweep();
+        // Checked after the sweep, so an idle handle the caller forgot about
+        // does not count against them. Refused before the platform
+        // subscription is created: `sub` is already open here, and dropping it
+        // on the way out is what keeps a refusal from leaking a registration.
+        {
+            let subs = self.subs();
+            if subs.len() >= MAX_SUBSCRIPTIONS {
+                let open: Vec<String> = subs
+                    .iter()
+                    .take(MAX_LISTED_SUBSCRIPTIONS)
+                    .map(|e| format!("{} ({})", e.id, e.app_name))
+                    .collect();
+                return Err(CliError::Usage(format!(
+                    "at most {MAX_SUBSCRIPTIONS} event subscriptions may be open at once; \
+                     stop one with `events_stop` before starting another. Open now: {}",
+                    open.join(", ")
+                )));
+            }
+        }
         let id = format!("sub_{}", self.next_id.fetch_add(1, Ordering::Relaxed));
         let shared = Arc::new(Shared {
             queue: Mutex::new(Queue {
@@ -300,7 +336,27 @@ impl Registry {
     /// Close a subscription and report what it did.
     pub(super) fn stop(&self, id: &str) -> CliResult<Value> {
         self.sweep();
-        let entry = self.take(id)?;
+        let entry = match self.take(id) {
+            Ok(entry) => entry,
+            // A handle this session issued and has already reclaimed is
+            // *already* in the state `events_stop` exists to reach, so saying
+            // so is not a failure. A model that thought for six minutes and
+            // then dutifully cleaned up was being told its cleanup failed.
+            // An id that was never issued stays an error: that is a mistake
+            // about which handle is which, and worth surfacing.
+            Err(CliError::NoSubscription {
+                id, expired: true, ..
+            }) => {
+                return Ok(json!({
+                    "subscription_id": id,
+                    "stopped": true,
+                    "already_stopped": true,
+                    "note": "this subscription had already been reclaimed for idling; \
+                             nothing was left to stop",
+                }));
+            }
+            Err(other) => return Err(other),
+        };
         entry.shut_down();
         let queue = entry.shared.queue();
         Ok(json!({
@@ -342,7 +398,11 @@ impl Registry {
             // different mistake, and the model's next move differs. `next_id`
             // is the only record of what was issued once the entry is gone.
             expired: was_issued(id, self.next_id.load(Ordering::Relaxed)),
-            live: subs.iter().map(|e| e.id.clone()).collect(),
+            live: subs
+                .iter()
+                .take(MAX_LISTED_SUBSCRIPTIONS)
+                .map(|e| e.id.clone())
+                .collect(),
         }
     }
 
@@ -440,9 +500,21 @@ fn spawn_drainer(
                     }
                     RecvStatus::Timeout => continue,
                     RecvStatus::Disconnected => {
-                        // The application exited or the platform dropped the
-                        // subscription. Say so rather than leaving the caller
+                        // The platform dropped the subscription: its `Sender`
+                        // is gone. Say so rather than leaving the caller
                         // polling an empty buffer forever (tenet 1).
+                        //
+                        // This is NOT an application-exited signal, and the
+                        // tool description no longer claims it is. Every
+                        // backend keeps its `Sender` in state owned by the
+                        // cancel handle — Windows in the `EventContext` behind
+                        // the UIA handlers, macOS in a `Box::into_raw`'d
+                        // `ObserverContext`, Linux in an `Arc<EventContext>`
+                        // held by its worker — so an application quitting
+                        // drops nothing and this arm is not reached. Making
+                        // `live` mean liveness needs a per-poll pid check,
+                        // which is a platform capability question, not a
+                        // rewording of this branch.
                         shared.queue().live = false;
                         shared.ready.notify_all();
                         return;
@@ -502,6 +574,81 @@ mod tests {
             .expect("start reports a handle")
             .to_string();
         (registry, tx, id)
+    }
+
+    /// Open one more subscription on an existing registry.
+    fn start_one(registry: &Registry) -> CliResult<Value> {
+        let (_tx, rx) = mpsc::channel::<Event>();
+        let sub = Subscription::new(EventReceiver::new(rx), CancelHandle::noop());
+        registry.start("Test App", Some(4321), sub, None)
+    }
+
+    #[test]
+    fn subscriptions_are_capped_and_the_refusal_names_the_open_handles() {
+        let registry = Registry::new();
+        let mut ids = Vec::new();
+        for _ in 0..MAX_SUBSCRIPTIONS {
+            let started = start_one(&registry).expect("under the cap");
+            ids.push(
+                started["subscription_id"]
+                    .as_str()
+                    .expect("a handle")
+                    .to_string(),
+            );
+        }
+
+        let err = start_one(&registry).expect_err("the cap must refuse the next one");
+        let msg = err.to_string();
+        assert!(msg.contains(&MAX_SUBSCRIPTIONS.to_string()), "{msg}");
+        assert!(
+            msg.contains("events_stop"),
+            "the refusal must say how to recover: {msg}"
+        );
+        assert!(
+            msg.contains(&ids[0]),
+            "the refusal must name an open handle: {msg}"
+        );
+
+        // Stopping one makes room again — the cap bounds concurrency, it does
+        // not retire the session.
+        registry.stop(&ids[0]).expect("an open handle stops");
+        start_one(&registry).expect("a slot freed by stop is reusable");
+    }
+
+    #[test]
+    fn an_idle_subscription_does_not_count_against_the_cap() {
+        let registry = Registry::new();
+        for _ in 0..MAX_SUBSCRIPTIONS {
+            start_one(&registry).expect("under the cap");
+        }
+        // The sweep runs before the cap check, so handles already past EXPIRY
+        // are reclaimed rather than blocking a caller who did nothing wrong.
+        registry.sweep_idle(Duration::ZERO);
+        start_one(&registry).expect("reclaimed handles free their slots");
+    }
+
+    #[test]
+    fn stopping_an_expired_handle_succeeds_instead_of_reporting_failure() {
+        let (registry, _tx, id) = registry_with(None);
+        registry.sweep_idle(Duration::ZERO);
+
+        let result = registry
+            .stop(&id)
+            .expect("cleanup of an already-reclaimed handle is not a failure");
+        assert_eq!(result["stopped"], json!(true));
+        assert_eq!(result["already_stopped"], json!(true));
+    }
+
+    #[test]
+    fn stopping_a_handle_that_was_never_issued_is_still_an_error() {
+        let (registry, _tx, _id) = registry_with(None);
+        let err = registry
+            .stop("sub_does_not_exist")
+            .expect_err("an id this session never issued is a different mistake");
+        assert!(matches!(
+            err,
+            CliError::NoSubscription { expired: false, .. }
+        ));
     }
 
     fn event(kind: EventKind) -> Event {

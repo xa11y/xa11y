@@ -253,8 +253,10 @@ first event when you are expecting a specific one.
 
 Two fields say what the events cannot. `dropped` counts events lost to the
 buffer filling up since the previous poll: poll more often, narrow `kinds`, or
-accept the gap. `live: false` means the application is gone and no further
-event can arrive.
+accept the gap. `live: false` means the platform dropped the subscription, so
+no further event can arrive. It does not track whether the application is still
+running: no platform reports an exit that way, so an application that quits goes
+on reporting `live: true` with an empty `events` list. Call `apps` to check.
 
 Call `events_stop` when you are done. A subscription nobody polls for five
 minutes is reclaimed, and its handle then comes back as a
