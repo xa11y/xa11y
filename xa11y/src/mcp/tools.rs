@@ -370,7 +370,15 @@ fn app_target_properties() -> Map<String, Value> {
                             `ambiguous_shell_surface` with the candidates. `pid` is \
                             the only disambiguator there is: surfaces of one kind \
                             owned by the same process cannot be told apart, and stay \
-                            refused whatever you pass.",
+                            refused whatever you pass.\n\n\
+                            Kinds are platform-specific, and this list is the same on \
+                            every platform: `menu_bar`, `status_items` and `dock` exist \
+                            only on macOS, `taskbar` only on Windows, `panel` only on \
+                            Linux, `desktop` and `flyout` on macOS and Windows. Asking \
+                            for one the platform cannot produce is not an error — it \
+                            comes back as `no_match` after the wait, exactly like a \
+                            surface that is merely not open. Call `shell` first rather \
+                            than guessing a kind: it lists what actually exists here.",
         }),
     );
     props

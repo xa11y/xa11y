@@ -305,21 +305,54 @@ impl LinuxProvider {
             })
     }
 
-    /// Get the AT-SPI attribute set via `GetAttributes` (D-Bus `a{ss}`).
+    /// `GetRole` for the shell scan, separating "the peer left the bus" from
+    /// a genuine failure.
     ///
-    /// These are the free-form toolkit attributes libatspi renders as
-    /// `"key:value"` strings — `toolkit`, `window-type`, ARIA properties on
-    /// web content, and so on. Nothing else in the provider needs them yet;
-    /// `list_shell_surfaces` reads `window-type` to recognise panels.
+    /// `Ok(None)` means the owning application exited mid-scan; see
+    /// [`PEER_GONE_ERRORS`].
+    fn scan_role_number(&self, aref: &AccessibleRef) -> Result<Option<u32>> {
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
+        let reply = match proxy.call_method("GetRole", &()) {
+            Ok(reply) => reply,
+            Err(e) if is_peer_gone(&e) => return Ok(None),
+            Err(e) => {
+                return Err(Error::Platform {
+                    code: -1,
+                    message: format!("GetRole failed: {}", e),
+                })
+            }
+        };
+        reply
+            .body()
+            .deserialize::<u32>()
+            .map(Some)
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("GetRole deserialize failed: {}", e),
+            })
+    }
+
+    /// `GetAttributes` for the shell scan.
     ///
-    /// `Ok(None)` means the object does not implement `GetAttributes` at all
-    /// (see [`is_absent_member`]) — an attribute set that is *absent*, not one
-    /// that could not be read. Every other D-Bus failure is an error.
-    fn get_attributes(&self, aref: &AccessibleRef) -> Result<Option<HashMap<String, String>>> {
+    /// Three outcomes rather than two: `Ok(None)` is the peer having left the
+    /// bus, `Ok(Some(None))` is an object that does not implement
+    /// `GetAttributes` (an honest "not a panel"), and `Ok(Some(Some(_)))` is a
+    /// reply.
+    #[allow(
+        clippy::option_option,
+        reason = "The two Nones mean different things \
+        — peer gone versus member absent — and collapsing them would erase \
+        exactly the distinction this function exists to make."
+    )]
+    fn scan_attributes(
+        &self,
+        aref: &AccessibleRef,
+    ) -> Result<Option<Option<HashMap<String, String>>>> {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
         let reply = match proxy.call_method("GetAttributes", &()) {
             Ok(reply) => reply,
-            Err(e) if is_absent_member(&e) => return Ok(None),
+            Err(e) if is_peer_gone(&e) => return Ok(None),
+            Err(e) if is_absent_member(&e) => return Ok(Some(None)),
             Err(e) => {
                 return Err(Error::Platform {
                     code: -1,
@@ -330,7 +363,7 @@ impl LinuxProvider {
         reply
             .body()
             .deserialize::<HashMap<String, String>>()
-            .map(Some)
+            .map(|a| Some(Some(a)))
             .map_err(|e| Error::Platform {
                 code: -1,
                 message: format!("GetAttributes deserialize failed: {}", e),
@@ -1589,7 +1622,7 @@ impl Provider for LinuxProvider {
     /// treats it that way.
     fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
         let mut surfaces = Vec::new();
-        for app in self.list_apps()? {
+        'apps: for app in self.list_apps()? {
             let app_ref = self.get_cached(app.handle)?;
             let top_levels = match self.get_atspi_children(&app_ref) {
                 Ok(t) => t,
@@ -1612,9 +1645,16 @@ impl Provider for LinuxProvider {
                 // (egui, and the other AccessKit-backed toolkits) implements
                 // no `GetRoleName` at all — propagating that reply failed the
                 // whole listing for a desktop running one such app.
-                let role_number = self
-                    .get_role_number(top)
-                    .map_err(|e| classify_failure(&app, top, e))?;
+                let Some(role_number) = self
+                    .scan_role_number(top)
+                    .map_err(|e| classify_failure(&app, top, e))?
+                else {
+                    // The application exited between `list_apps()` and this
+                    // read. Its remaining top-levels are gone too, so move to
+                    // the next application rather than re-asking a bus name
+                    // that no longer has an owner.
+                    continue 'apps;
+                };
                 // The same absence/failure split on the second read: an object
                 // that does not implement `GetAttributes` cannot advertise
                 // `window-type`, which is an honest "not a panel" — the answer
@@ -1624,9 +1664,12 @@ impl Provider for LinuxProvider {
                 // outcome — ServiceUnknown, NoReply, a timeout, a dropped
                 // connection — still fails the listing.
                 let Some(attributes) = self
-                    .get_attributes(top)
+                    .scan_attributes(top)
                     .map_err(|e| classify_failure(&app, top, e))?
                 else {
+                    continue 'apps;
+                };
+                let Some(attributes) = attributes else {
                     continue;
                 };
                 if is_dock_frame(role_number, &attributes) {
@@ -2419,6 +2462,37 @@ const ABSENT_MEMBER_ERRORS: [&str; 3] = [
     "org.freedesktop.DBus.Error.UnknownObject",
 ];
 
+/// D-Bus error names that mean the *peer* is gone, as opposed to the call
+/// having failed.
+///
+/// The shell scan reads every top-level of every application on the bus, and an
+/// application that quits between `list_apps()` and those reads answers with
+/// one of these. That is genuine absence — the process and its surfaces are
+/// gone — not a failure to hide (tenet 1): there is nothing left to report and
+/// nothing a caller could do about it. A hung or broken application is a
+/// different outcome and stays a failure: it answers `NoReply` or `Timeout`, or
+/// does not answer at all.
+///
+/// Kept separate from [`ABSENT_MEMBER_ERRORS`] because the two are different
+/// axes — "this object does not implement that member" versus "this bus name
+/// has no owner any more".
+const PEER_GONE_ERRORS: [&str; 2] = [
+    "org.freedesktop.DBus.Error.ServiceUnknown",
+    "org.freedesktop.DBus.Error.NameHasNoOwner",
+];
+
+/// Whether a failed D-Bus call means the peer left the bus (see
+/// [`PEER_GONE_ERRORS`]).
+///
+/// Matches the structured error name for the same reason
+/// [`is_absent_member`] does, never a substring of a formatted message.
+fn is_peer_gone(err: &zbus::Error) -> bool {
+    match err {
+        zbus::Error::MethodError(name, ..) => PEER_GONE_ERRORS.contains(&name.as_str()),
+        _ => false,
+    }
+}
+
 /// Whether a failed D-Bus call means the member is absent (see
 /// [`ABSENT_MEMBER_ERRORS`]) rather than that the call failed.
 ///
@@ -2959,6 +3033,44 @@ mod tests {
 
     /// Everything else stays a failure — including the D-Bus errors that look
     /// superficially similar but mean the far end is broken or gone.
+    /// An application that quits between `list_apps()` and the shell scan's
+    /// reads answers `ServiceUnknown`. That is the process being gone, not a
+    /// failure worth aborting a whole-desktop listing for — and it used to
+    /// abort it, making `ShellSurface::list()` nondeterministic on a busy
+    /// desktop. A hung application is a different outcome and still fails.
+    #[test]
+    fn a_departed_peer_is_absence_not_failure() {
+        for name in [
+            "org.freedesktop.DBus.Error.ServiceUnknown",
+            "org.freedesktop.DBus.Error.NameHasNoOwner",
+        ] {
+            assert!(
+                is_peer_gone(&method_error(name)),
+                "{name} means the peer left"
+            );
+            // The two axes stay separate: a departed peer is not a statement
+            // about which members an object implements.
+            assert!(!is_absent_member(&method_error(name)), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_hung_or_broken_peer_is_still_a_failure() {
+        for name in [
+            "org.freedesktop.DBus.Error.NoReply",
+            "org.freedesktop.DBus.Error.Timeout",
+            "org.freedesktop.DBus.Error.Disconnected",
+            "org.freedesktop.DBus.Error.AccessDenied",
+            "org.freedesktop.DBus.Error.UnknownMethod",
+        ] {
+            assert!(
+                !is_peer_gone(&method_error(name)),
+                "{name} must not be read as the peer having left"
+            );
+        }
+        assert!(!is_peer_gone(&zbus::Error::InvalidReply));
+    }
+
     #[test]
     fn other_dbus_failures_are_not_absence() {
         for name in [

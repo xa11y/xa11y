@@ -255,6 +255,10 @@ TARGET — what tree/find/action search (--shell and --app are exclusive):
                                             rows from one xfce4-panel).
       KIND is one of:
       {kinds}
+      Kinds are platform-specific though the list is not: menu_bar,
+      status_items and dock are macOS only, taskbar is Windows only,
+      panel is Linux only, desktop and flyout are macOS and Windows.
+      `xa11y shell` lists what this machine actually has.
 
 Input simulation (coords only — no selectors, no a11y):
   xa11y click  --at X,Y [--button left|right|middle] [--count N] [--held K,K]
