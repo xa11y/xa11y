@@ -1231,7 +1231,12 @@ def test_a_blocking_poll_returns_within_its_timeout(mcp, subscription):
     )["result"]
     elapsed = time.monotonic() - start
     assert result["isError"] is False, result["content"]
-    assert elapsed < 20, f"a 500ms poll took {elapsed:.1f}s"
+    # Bounded near the value under test, not near the server's 15s cap: at
+    # `< 20` a handler that ignored `timeout_ms` entirely and slept the maximum
+    # would have passed, which is the whole of what this test is checking.
+    # The headroom is for process scheduling on a loaded CI runner, not for a
+    # different timeout being honoured.
+    assert elapsed < 5, f"a 500ms poll took {elapsed:.1f}s"
 
 
 def test_a_stopped_handle_reports_expiry_rather_than_a_generic_miss(mcp, app_pid):

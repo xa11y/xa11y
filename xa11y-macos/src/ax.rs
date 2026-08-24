@@ -1333,6 +1333,30 @@ pub struct MacOSProvider {
     handle_cache: Mutex<HashMap<u64, AXElement>>,
 }
 
+/// Holds a shell-probe messaging-timeout bound, releasing it on drop.
+///
+/// The bound is taken on an **application** element, and Apple documents
+/// `AXUIElementSetMessagingTimeout` on an application element as applying to
+/// every message sent to that application — not to that element alone. The
+/// scan therefore cannot leave one in place: the frontmost app, each
+/// status-item host and Finder would stay pinned at a quarter-second timeout
+/// for the life of the process, and a caller who then walked the menu bar or
+/// the desktop would see spurious `kAXErrorCannotComplete`.
+///
+/// A guard rather than a call at the end of each probe, because every one of
+/// those probes can leave early — `?` on a missing child, an unanswered
+/// attribute — and a release that is skipped on the failure path is the case
+/// that matters.
+struct ShellProbeBound<'a> {
+    element: &'a AXElement,
+}
+
+impl Drop for ShellProbeBound<'_> {
+    fn drop(&mut self) {
+        MacOSProvider::unbound_shell_probe(self.element);
+    }
+}
+
 impl MacOSProvider {
     pub fn new() -> Result<Self> {
         if !unsafe { safe_ax_is_process_trusted() } {
@@ -1985,17 +2009,25 @@ impl MacOSProvider {
     /// Release `element` back to the system-wide default messaging timeout.
     ///
     /// `0` means "no element-specific timeout", so the global default applies
-    /// again. Called on an element the scan hands out as a **surface root**:
-    /// bounding the scan must not leave the caller walking that surface at a
-    /// quarter of a second per attribute. The menu-bar, status-item and
-    /// desktop probes need no counterpart — the root each returns is a child
-    /// element that never carried the bound.
+    /// again. Every bound the scan takes is released, on every path — see
+    /// [`ShellProbeBound`].
     fn unbound_shell_probe(element: &AXElement) {
         // The result genuinely does not matter: a failure here leaves the
         // element on the scan's tighter bound, which is a slower walk and
         // never a wrong answer. Failing the listing over it would trade a
         // correct result for none.
         let _err = unsafe { safe_ax_set_messaging_timeout(element.as_ptr(), 0.0_f32) };
+    }
+
+    /// Bound `element` for the duration of a probe, releasing it on every exit
+    /// path.
+    ///
+    /// Returns `None` when the bound could not be established, which is the
+    /// scan's cue to skip the element (see [`bound_shell_probe`]).
+    ///
+    /// [`bound_shell_probe`]: Self::bound_shell_probe
+    fn shell_probe_bound(element: &AXElement) -> Option<ShellProbeBound<'_>> {
+        Self::bound_shell_probe(element).then(|| ShellProbeBound { element })
     }
 
     /// The frontmost application's `AXMenuBar`, tagged `MenuBar`.
@@ -2035,9 +2067,10 @@ impl MacOSProvider {
             ElementProbe::Absent | ElementProbe::Unanswered(_) => return Ok(None),
         };
         // Bound the probe *before* making it, as the status-item fan-out does.
-        if !Self::bound_shell_probe(&app_ax) {
+        // The guard releases it however this function exits.
+        let Some(_bound) = Self::shell_probe_bound(&app_ax) else {
             return Ok(None);
-        }
+        };
 
         let mut pid: i32 = 0;
         let pid_err = unsafe { safe_ax_get_pid(app_ax.as_ptr(), &mut pid) };
@@ -2045,10 +2078,10 @@ impl MacOSProvider {
 
         match probe_element_attr(app_ax.as_ptr(), "AXMenuBar") {
             ElementProbe::Found(menu_bar) => {
-                // The bound was set on the app element alone, so `menu_bar` —
-                // the root handed to the caller — keeps the system-wide
-                // default and walking the menus is not crippled by the scan's
-                // quarter-second budget.
+                // `menu_bar` is a child of the app element, and the bound on
+                // that app element is released by the guard when this function
+                // returns — so the root handed to the caller is walked at the
+                // system-wide default, not the scan's quarter-second budget.
                 let mut data = self.build_element_data(&menu_bar, app_pid);
                 // An `AXMenuBar` carries no title of its own; the surface is
                 // named for the app whose menus it holds ("Safari"), which is
@@ -2116,17 +2149,16 @@ impl MacOSProvider {
                 // established the element is not one we can query within the
                 // scan's cost contract, so it is skipped rather than probed
                 // at the ~1.5s default.
-                if !Self::bound_shell_probe(&app_element) {
-                    return None;
-                }
+                // Bound for the rest of this closure; the guard releases it.
+                let _bound = Self::shell_probe_bound(&app_element)?;
 
                 match probe_element_attr(app_element.as_ptr(), "AXExtrasMenuBar") {
                     ElementProbe::Found(extras) => {
-                        // The bound was set on the app element, so it applies
-                        // to that element alone: `extras` — the root handed
-                        // to the caller — keeps the system-wide default, and
-                        // walking the surface is not crippled by the scan's
-                        // quarter-second budget. Building its `ElementData`
+                        // `extras` is a child of the app element, and the
+                        // guard releases the bound on that app element when
+                        // this closure returns — so the root handed to the
+                        // caller is walked at the system-wide default, not the
+                        // scan's quarter-second budget. Building its `ElementData`
                         // costs one unbounded round-trip, to a process that
                         // just answered inside the bound.
                         let mut data = self.build_element_data(&extras, Some(*pid as u32));
@@ -2170,11 +2202,10 @@ impl MacOSProvider {
         if app_element.is_null() {
             return None;
         }
-        if !Self::bound_shell_probe(&app_element) {
-            return None;
-        }
-        let mut data = self.build_element_data(&app_element, Some(*pid as u32));
-        Self::unbound_shell_probe(&app_element);
+        let mut data = {
+            let _bound = Self::shell_probe_bound(&app_element)?;
+            self.build_element_data(&app_element, Some(*pid as u32))
+        };
         // Same name policy as `list_apps`: the CGWindowList owner name wins.
         data.name = Some(name.clone());
         Some((ShellSurfaceKind::Dock, data))
@@ -2201,9 +2232,7 @@ impl MacOSProvider {
         if app_element.is_null() {
             return None;
         }
-        if !Self::bound_shell_probe(&app_element) {
-            return None;
-        }
+        let _bound = Self::shell_probe_bound(&app_element)?;
         let desktop = ax_children(app_element.as_ptr())
             .into_iter()
             .find(|child| {

@@ -95,14 +95,39 @@ jobs:
       # check is what stands between a revert and PyPI, so it stays.
       - name: Refuse to publish with a placeholder dependency floor
         run: |
-          FLOOR=$(grep -oE '"xa11y>=[0-9.]+"' pytest-xa11y/pyproject.toml)
-          echo "declared floor: $FLOOR"
-          if [ "$FLOOR" = '"xa11y>=0.12"' ]; then
-            echo "::error::pytest-xa11y still declares the placeholder floor xa11y>=0.12."
-            echo "Raise it to the first released xa11y containing the App.find GIL fix"
-            echo "(xa11y/xa11y#359) before publishing. See pytest-xa11y/RELEASING.md."
-            exit 1
-          fi
+          # Compared as a version, not matched as a literal. The previous form
+          # tested equality against the exact string `"xa11y>=0.12"`, so a
+          # revert to >=0.11 — or a reformat to a bounded range — produced an
+          # empty match and passed silently, which is the opposite of what the
+          # comment above promises.
+          python3 - <<'PY'
+          import re, sys, tomllib
+          from packaging.requirements import Requirement
+          from packaging.version import Version
+
+          MINIMUM = Version("0.13.0")  # first release carrying the App.find GIL fix (#359)
+
+          manifest = tomllib.load(open("pytest-xa11y/pyproject.toml", "rb"))
+          dep = next(
+              (d for d in manifest["project"]["dependencies"] if Requirement(d).name == "xa11y"),
+              None,
+          )
+          if dep is None:
+              sys.exit("::error::pytest-xa11y declares no xa11y dependency.")
+          print(f"declared floor: {dep}")
+
+          floors = [
+              Version(spec.version)
+              for spec in Requirement(dep).specifier
+              if spec.operator in (">=", "==", "~=")
+          ]
+          if not floors or min(floors) < MINIMUM:
+              sys.exit(
+                  f"::error::pytest-xa11y declares {dep!r}, which admits an xa11y older "
+                  f"than {MINIMUM}. That predates the App.find GIL fix (xa11y/xa11y#359). "
+                  f"See pytest-xa11y/RELEASING.md."
+              )
+          PY
 
       # Note this resolves xa11y from PyPI, not from this workspace: the job
       # has no Rust toolchain. It therefore verifies the plugin against the

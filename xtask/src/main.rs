@@ -1148,7 +1148,26 @@ fn do_check_macos_ffi() -> bool {
         "CFNumberGetValue",
         "CFDictionaryGetValue",
         "CFArrayCreate",
+        // The AX family. `AXIsProcessTrusted` was the only one listed, so the
+        // wrapper rule AGENTS.md states for "a new CF or AX interop call" was
+        // unenforced for every other AX symbol — including the messaging-timeout
+        // call added with shell surfaces, which does go through its wrapper but
+        // was not held there by anything.
         "AXIsProcessTrusted",
+        "AXUIElementSetMessagingTimeout",
+        "AXUIElementCopyAttributeValue",
+        "AXUIElementCopyAttributeNames",
+        "AXUIElementSetAttributeValue",
+        "AXUIElementPerformAction",
+        "AXUIElementCopyActionNames",
+        "AXUIElementCreateApplication",
+        "AXUIElementCreateSystemWide",
+        "AXUIElementGetPid",
+        "AXValueGetValue",
+        "AXObserverCreate",
+        "AXObserverAddNotification",
+        "AXObserverRemoveNotification",
+        "AXObserverGetRunLoopSource",
     ];
     // Statics don't use `(`; match as whole identifiers.
     const FORBIDDEN_STATICS: &[&str] = &["kCFTypeArrayCallBacks"];
@@ -1163,9 +1182,13 @@ fn do_check_macos_ffi() -> bool {
     };
 
     let mut violations: Vec<(usize, String, String)> = Vec::new();
+    // Scanned with strings and comments blanked, so a symbol named in an error
+    // message is not mistaken for a call to it.
+    let scannable = blank_strings_and_comments(&src);
+    let raw: Vec<&str> = src.lines().collect();
 
-    for (lineno, line) in src.lines().enumerate() {
-        let code = strip_line_comment(line);
+    for (lineno, code) in scannable.lines().enumerate() {
+        let line = raw.get(lineno).copied().unwrap_or(code);
         if code.trim().is_empty() {
             continue;
         }
@@ -1214,6 +1237,118 @@ fn do_check_macos_ffi() -> bool {
 /// Strip a trailing `// ...` line comment from a Rust source line. Approximate
 /// (doesn't handle `/* */` blocks or raw strings) but good enough to skip
 /// documentation comments in the ax.rs header block.
+/// Blank out string literals and comments, preserving byte length and line
+/// breaks so line numbers still line up.
+///
+/// The forbidden-symbol scan needs to see *code*. `ax.rs` names the raw symbols
+/// constantly inside error messages — `"AXUIElementCopyAttributeValue(AXRole)
+/// failed while attaching to pid {pid}"` — and matching those would make the
+/// check unusable for the whole `AXUIElement*` family, which is exactly the
+/// family AGENTS.md says the wrapper rule covers. A per-line scan is not enough
+/// either: those messages are `format!` strings that wrap across lines, so a
+/// continuation line looks like bare code.
+///
+/// Handles line comments, nested block comments, ordinary strings with
+/// backslash escapes, raw strings with any hash count, and char literals.
+fn blank_strings_and_comments(src: &str) -> String {
+    let bytes = src.as_bytes();
+    let mut out = vec![b' '; bytes.len()];
+    let mut i = 0;
+
+    // Anything not blanked is copied through verbatim.
+    let keep = |out: &mut Vec<u8>, at: usize| out[at] = bytes[at];
+
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == b'\n' {
+            out[i] = b'\n';
+            i += 1;
+            continue;
+        }
+
+        // Line comment: blank to the newline.
+        if c == b'/' && bytes.get(i + 1) == Some(&b'/') {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+
+        // Block comment, nestable as Rust allows.
+        if c == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            let mut depth = 1;
+            i += 2;
+            while i < bytes.len() && depth > 0 {
+                if bytes[i] == b'\n' {
+                    out[i] = b'\n';
+                } else if bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*') {
+                    depth += 1;
+                    i += 1;
+                } else if bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                    depth -= 1;
+                    i += 1;
+                }
+                i += 1;
+            }
+            continue;
+        }
+
+        // Raw string: r, any number of #, then the quote.
+        if c == b'r' {
+            let mut hashes = 0;
+            while bytes.get(i + 1 + hashes) == Some(&b'#') {
+                hashes += 1;
+            }
+            if bytes.get(i + 1 + hashes) == Some(&b'"') {
+                i += 1 + hashes + 1;
+                loop {
+                    if i >= bytes.len() {
+                        break;
+                    }
+                    if bytes[i] == b'\n' {
+                        out[i] = b'\n';
+                    } else if bytes[i] == b'"' {
+                        let closing = (0..hashes).all(|h| bytes.get(i + 1 + h) == Some(&b'#'));
+                        if closing {
+                            i += 1 + hashes;
+                            break;
+                        }
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+        }
+
+        // Ordinary string.
+        if c == b'"' {
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    if bytes.get(i + 1) == Some(&b'\n') {
+                        out[i + 1] = b'\n';
+                    }
+                    i += 2;
+                    continue;
+                }
+                if bytes[i] == b'\n' {
+                    out[i] = b'\n';
+                } else if bytes[i] == b'"' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            continue;
+        }
+
+        keep(&mut out, i);
+        i += 1;
+    }
+
+    String::from_utf8(out).unwrap_or_else(|_| src.to_string())
+}
+
 fn strip_line_comment(line: &str) -> &str {
     let bytes = line.as_bytes();
     let mut in_str = false;

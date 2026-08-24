@@ -929,9 +929,13 @@ impl Provider for WindowsProvider {
     ///
     /// [`get_children(None)`](Self::get_children) filters the same children to
     /// `ControlType.Window`, which is exactly what hides the shell: every
-    /// surface below is a `Pane`. This walk therefore takes the raw child
-    /// list (`TreeScope_Children` + `TrueCondition`) and keeps only the
-    /// classes it recognises. Anything else — ordinary app windows and their
+    /// surface below is a `Pane`. This walk therefore drops the control-type
+    /// filter (`TreeScope_Children` + `TrueCondition`) and keeps only the
+    /// classes it recognises. Note this is still the **Control View**, not the
+    /// Raw View: `FindAllBuildCache` walks the control view unless given
+    /// `RawViewWalker`. It works because every shell pane below is a control
+    /// element — a shell window with `IsControlElement=false` would be
+    /// invisible here, and would need the raw walker to reach. Anything else — ordinary app windows and their
     /// panes — is skipped silently: it is not a shell surface, and it is
     /// already reachable through `list_apps`.
     ///
@@ -1054,7 +1058,18 @@ impl Provider for WindowsProvider {
 
             // The host process (explorer.exe, ShellHost.exe), never a
             // per-icon owner — UIA does not carry one.
-            let pid = unsafe { el.CachedProcessId() }.unwrap_or(0) as u32;
+            //
+            // A failed read is propagated rather than folded into the "no
+            // process" answer (tenet 1). `ShellSurface::pid` documents `None`
+            // as "the platform attributes no process to this surface", which is
+            // a real statement about the surface; a `CachedProcessId` that
+            // errored is a statement about the call, and reporting it as the
+            // former would let a broken cache read look like a shell-owned
+            // surface with no owner.
+            let pid = unsafe { el.CachedProcessId() }.map_err(|e| Error::Platform {
+                code: i64::from(e.code().0),
+                message: format!("CachedProcessId failed for the {kind} shell surface: {e}"),
+            })? as u32;
             // Mirror get_children(None): re-acquire via HWND so the window's
             // UIA provider is activated, then repopulate the snapshot that
             // build_element_data reads.
