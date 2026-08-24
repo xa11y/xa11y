@@ -2,6 +2,7 @@
 name = "xa11y-linux"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Linux accessibility backend for xa11y: AT-SPI2 introspection, X11/Wayland input simulation, and screen capture"

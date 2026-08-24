@@ -25,6 +25,12 @@ resolver = "2"
 [workspace.package]
 version = "0.13.0"
 edition = "2021"
+# Declared so a too-old toolchain fails with "requires rustc 1.88" rather than
+# an unresolved-method error deep in a provider. 1.88 is where `slice::as_chunks`
+# stabilised, which xa11y-linux's screenshot path uses; before this line the
+# floor was real but invisible, and a downstream build on an older toolchain had
+# nothing to diagnose it.
+rust-version = "1.88"
 license = "MIT"
 repository = "https://github.com/xa11y/xa11y"
 

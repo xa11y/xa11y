@@ -1747,7 +1747,13 @@ fn legend_bounds(b: &Rect) -> String {
 /// `screenshot_annotated` resolves groups in flag order and stops resolving
 /// at the cap, so nothing after the last group present in the legend was
 /// resolved to completion. Every group from there on is reported as possibly
-/// short; the ones before it are exact.
+/// short.
+///
+/// The boundary errs toward over-reporting, never under: a group whose matches
+/// were *all* omitted (every one lacking bounds) contributes no legend entry,
+/// so the maximum comes out lower and a group that was in fact resolved in full
+/// is flagged too. Wrongly warning that a group may be short is recoverable;
+/// wrongly claiming one is complete is not.
 ///
 /// Pure, so both renderings share one rule and cannot disagree about which
 /// groups are suspect.

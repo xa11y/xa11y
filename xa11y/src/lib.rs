@@ -94,7 +94,14 @@ fn get_provider_ref() -> Result<&'static dyn Provider> {
         .get_or_init(|| {
             create_provider_boxed()
                 .map(|b| &*Box::leak(b))
-                .map_err(|e| format!("{e}"))
+                // The cache holds a `String` because `Error` is not `Clone`,
+                // and the value is re-wrapped in `Error::Platform` below. Keep
+                // the inner *message* rather than the whole `Display`: a
+                // `Platform` error stringified in full and then re-wrapped
+                // renders its prefix twice — `Platform error (-1): Platform
+                // error (-1): Failed to connect to D-Bus session bus: …` is
+                // what every consumer saw on a machine with no a11y bus.
+                .map_err(cache_message)
         })
         .as_ref()
         .copied()
@@ -179,24 +186,38 @@ fn screenshot_backend() -> Result<Arc<dyn ScreenshotProvider>> {
         })
 }
 
+/// Flatten an [`Error`] for the `OnceLock<Result<_, String>>` caches.
+///
+/// Keeps a `Platform` error's *message* rather than its whole `Display`. Both
+/// caches re-wrap the stored string in `Error::Platform`, so storing the full
+/// rendering makes the prefix appear twice — `Platform error (-1): Platform
+/// error (-1): …`, which is what the CLI and every MCP `structuredContent`
+/// showed on a machine with no accessibility bus.
+fn cache_message(e: Error) -> String {
+    match e {
+        Error::Platform { message, .. } => message,
+        other => other.to_string(),
+    }
+}
+
 fn create_screenshot_backend() -> std::result::Result<Arc<dyn ScreenshotProvider>, String> {
     #[cfg(target_os = "macos")]
     {
         xa11y_macos::MacOSScreenshot::new()
             .map(|b| Arc::new(b) as Arc<dyn ScreenshotProvider>)
-            .map_err(|e| format!("{e}"))
+            .map_err(cache_message)
     }
     #[cfg(target_os = "windows")]
     {
         xa11y_windows::WindowsScreenshot::new()
             .map(|b| Arc::new(b) as Arc<dyn ScreenshotProvider>)
-            .map_err(|e| format!("{e}"))
+            .map_err(cache_message)
     }
     #[cfg(target_os = "linux")]
     {
         xa11y_linux::LinuxScreenshot::new()
             .map(|b| Arc::new(b) as Arc<dyn ScreenshotProvider>)
-            .map_err(|e| format!("{e}"))
+            .map_err(cache_message)
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
@@ -1541,5 +1562,49 @@ mod annotated_tests {
         }
         assert_eq!(json["bounds"]["width"], 3);
         assert_eq!(json["color"], serde_json::json!([230, 159, 0]));
+    }
+}
+
+#[cfg(test)]
+mod cache_message_tests {
+    use super::cache_message;
+    use crate::Error;
+
+    /// The provider caches hold a `String` (because `Error` is not `Clone`) and
+    /// re-wrap it in `Error::Platform` for the caller. Storing the whole
+    /// `Display` therefore rendered the prefix twice — `Platform error (-1):
+    /// Platform error (-1): Failed to connect to D-Bus session bus: …` was what
+    /// the CLI printed and what every MCP `structuredContent.message` carried on
+    /// a machine with no accessibility bus.
+    #[test]
+    fn a_platform_error_contributes_its_message_not_its_rendering() {
+        let stored = cache_message(Error::Platform {
+            code: -1,
+            message: "Failed to connect to D-Bus session bus".to_string(),
+        });
+        assert_eq!(stored, "Failed to connect to D-Bus session bus");
+
+        let round_tripped = Error::Platform {
+            code: -1,
+            message: stored,
+        }
+        .to_string();
+        assert_eq!(
+            round_tripped.matches("Platform error").count(),
+            1,
+            "the prefix must survive the cache exactly once: {round_tripped}"
+        );
+    }
+
+    /// Every other variant has no prefix to duplicate, so it keeps its full
+    /// rendering — dropping that would lose which failure it was.
+    #[test]
+    fn a_non_platform_error_keeps_its_full_rendering() {
+        let err = Error::Unsupported {
+            feature: "pointer warp without a portal grant".to_string(),
+        };
+        let expected = err.to_string();
+        assert_eq!(cache_message(err), expected);
+        assert!(expected.contains("portal grant"), "{expected}");
     }
 }
