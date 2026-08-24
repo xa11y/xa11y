@@ -30,7 +30,15 @@ import sys
 
 import gi
 
+# Both versions have to be pinned, not just Gtk. A machine that also has the
+# GTK 4 typelib installed — which any checkout running the `gtk` test app does
+# — resolves a bare `from gi.repository import Gdk` to Gdk 4.0, the newest
+# available, and Gtk 3.0 then fails to load against it with
+# `RepositoryError: Requiring namespace 'Gdk' version '3.0', but '4.0' is
+# already loaded`. The panel dies on import and the display vends no dock
+# frame.
 gi.require_version("Gtk", "3.0")
+gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, Gtk  # noqa: E402
 
 # The window title becomes the surface's name, since a frame's AT-SPI name is

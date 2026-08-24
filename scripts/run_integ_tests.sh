@@ -107,6 +107,32 @@ echo "Launching xa11y test panel ($PANEL_PY, log: $PANEL_LOG)..."
 "$PANEL_PY" test-apps/panel/panel.py > "$PANEL_LOG" 2>&1 &
 CLEANUP_PIDS+=($!)
 
+# Verify the fixture is actually up before running anything against it. A
+# panel that failed to start is a broken harness, and saying so here beats six
+# shell tests failing with "no shell surfaces at all" and a log nobody prints:
+# the first time this fixture ran on CI it died on a PyGObject version
+# conflict, and the traceback was sitting in $PANEL_LOG unread.
+echo "Waiting for the panel to register as a shell surface..."
+PANEL_READY=0
+for _ in $(seq 1 20); do
+    if ./target/debug/xa11y shell 2>/dev/null | grep -q "^panel"; then
+        PANEL_READY=1
+        break
+    fi
+    sleep 1
+done
+if [ "$PANEL_READY" != "1" ]; then
+    echo "error: the panel fixture never appeared as a shell surface." >&2
+    echo "--- $PANEL_LOG ---" >&2
+    cat "$PANEL_LOG" >&2 || true
+    echo "--- xa11y shell ---" >&2
+    ./target/debug/xa11y shell >&2 || true
+    echo "--- xa11y apps ---" >&2
+    ./target/debug/xa11y apps >&2 || true
+    exit 1
+fi
+./target/debug/xa11y shell
+
 # 5. Launch the test application (run binary directly, not via cargo run,
 #    because cargo run changes the process owner name in AT-SPI)
 echo "Launching xa11y-test-app..."
