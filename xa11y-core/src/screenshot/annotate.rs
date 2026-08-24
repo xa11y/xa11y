@@ -187,8 +187,9 @@ impl Screenshot {
     /// above its top-left corner, bottom edge touching the box's top edge —
     /// so it never covers the content the box points at. See [`badge_spot`]
     /// for the fallback order; a badge only lands inside the box when no
-    /// outside position is visible, which is what happens to a box that fills
-    /// the capture.
+    /// outside position is visible, and is clamped into the box's on-image
+    /// part when no position at all is — which is what happens to a box that
+    /// extends past every edge of the capture.
     ///
     /// Annotations are drawn largest-area-first so small elements land on top
     /// of the containers that hold them, and a badge that would cover one
@@ -546,9 +547,11 @@ impl BadgeMetrics {
 /// Each candidate is scored `(is visible at all, covers no placed badge, is
 /// wholly on-image, visible area)`, compared in that order, and the first
 /// candidate holding the best score wins. So an off-image preferred position
-/// yields to the next one that fits, a box filling the capture — which has no
-/// outside position on the image at all — falls through to the inner corners,
-/// and a badge still lands somewhere visible rather than nowhere.
+/// yields to the next one that fits, and a box filling the capture — which has
+/// no outside position on the image at all — falls through to the inner
+/// corners. A box that extends past *every* edge has no on-image candidate at
+/// all, and is clamped by [`clamped_spot`] so a badge still lands somewhere
+/// visible rather than nowhere.
 ///
 /// Collision avoidance is why the *placed* badges are consulted: nested
 /// elements (window ⊃ group ⊃ button) share corners, and without it every
@@ -594,9 +597,39 @@ fn badge_spot(
             best = Some((key, candidate));
         }
     }
-    // `candidates` is non-empty, so the loop always sets `best`; the fallback
-    // keeps that from being an `unwrap`.
-    best.map_or(candidates[0], |(_, spot)| spot)
+
+    match best {
+        // At least one candidate is on-image: the preference order decided.
+        Some((key, spot)) if key.0 => spot,
+        // None of the ten is on-image. That happens whenever the box extends
+        // past *every* edge by more than a badge — a `window` group on a
+        // cropped capture, or any maximised element. Every candidate then
+        // scores `(false, true, false, 0)`, the strict `>` keeps the first,
+        // and the badge is drawn entirely outside the buffer: zero pixels
+        // written, but the caller still gets a legend entry and no omission.
+        // That is exactly the "legend disagreeing with the picture with no way
+        // to find out why" that `Omission` exists to prevent, so clamp into
+        // the visible part of the box instead of placing nothing.
+        _ => clamped_spot(rect, width, height, stroke, image),
+    }
+}
+
+/// A badge position inside the on-image part of `rect`, for a box that has no
+/// on-image candidate position of its own.
+///
+/// The box is known to intersect the image (non-overlapping boxes are dropped
+/// before placement), so the clip is non-empty and the inset start is pulled
+/// back far enough to keep the badge on-image even when the visible sliver is
+/// narrower than the badge.
+fn clamped_spot(rect: PxRect, width: i64, height: i64, stroke: i64, image: PxRect) -> PxRect {
+    let visible = rect.clipped_to(image);
+    let start_x = visible.x0.saturating_add(stroke);
+    let start_y = visible.y0.saturating_add(stroke);
+    // `image.x1 - width` can precede `image.x0` on an image narrower than a
+    // badge; `max` then wins and the badge is clipped by `draw_badge` as usual.
+    let x = start_x.min(image.x1.saturating_sub(width)).max(image.x0);
+    let y = start_y.min(image.y1.saturating_sub(height)).max(image.y0);
+    PxRect::at(x, y, width, height)
 }
 
 // ── Contrast ─────────────────────────────────────────────────────────────
@@ -1804,6 +1837,46 @@ mod tests {
                 // 4×4 window is the box's interior and nothing else.
                 assert_eq!(px(&out, x, y), BG, "interior at ({x}, {y})");
             }
+        }
+    }
+
+    /// A tagged box that swallows the whole capture used to write **nothing**:
+    /// every stroke band and all ten badge candidates were off-image, so the
+    /// caller got a legend entry pointing at a picture with no mark in it and
+    /// no `Omission` explaining the absence.
+    ///
+    /// `a_box_larger_than_the_image_shows_only_its_interior` sits one pixel
+    /// inside this case and passed throughout, because `boxed()` carries an
+    /// empty tag and so never placed a badge at all.
+    #[test]
+    fn a_box_swallowing_the_capture_still_draws_its_badge() {
+        for inset in [30, 40, 1_000] {
+            let shot = blank(100, 100, 1.0);
+            let ann = Annotation::new(
+                rect(
+                    -inset,
+                    -inset,
+                    100 + 2 * inset as u32,
+                    100 + 2 * inset as u32,
+                ),
+                "A1",
+            )
+            .color(RED);
+            let (out, skipped) = annotate(&shot, &[ann]);
+
+            assert!(
+                skipped.is_empty(),
+                "inset {inset}: box intersects the image"
+            );
+            let drawn = (0..100)
+                .flat_map(|y| (0..100).map(move |x| (x, y)))
+                .filter(|&(x, y)| px(&out, x, y) != BG)
+                .count();
+            assert!(
+                drawn > 0,
+                "inset {inset}: a legend entry with nothing drawn is the failure \
+                 `omitted` exists to prevent"
+            );
         }
     }
 
