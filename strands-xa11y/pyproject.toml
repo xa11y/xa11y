@@ -50,8 +50,15 @@ classifiers = [
 dependencies = [
     "strands-agents>=1.0.0",
     "pydantic>=2.0.0",
-    # Pre-1.0: the accessibility surface is still moving, so pin to a minor range.
-    "xa11y>=0.13.0,<0.14.0",
+    # Pre-1.0: the accessibility surface is still moving, so the ceiling is a
+    # real bound rather than open-ended. It spans two minors deliberately —
+    # xa11y 0.14.0 is breaking for Rust consumers (a required `Provider`
+    # method, a changed `ScreenshotProvider` signature, `#[non_exhaustive]`)
+    # but purely additive on the Python surface this package reads, and a
+    # ceiling that excluded it would make `pip install strands-xa11y` refuse to
+    # co-install the xa11y it is built against. `check_real_surface.py` holds
+    # this line against the version actually built from the tree.
+    "xa11y>=0.13.0,<0.15.0",
 ]
 
 [project.optional-dependencies]

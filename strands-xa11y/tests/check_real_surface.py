@@ -116,6 +116,48 @@ def public_members(cls: type) -> set[str]:
     }
 
 
+def check_declared_bound(failures: list[str]) -> None:
+    """The declared `xa11y` bound must admit the xa11y that is installed.
+
+    The publish workflow checks only the *shape* of this line, so a bound that
+    excludes the current release passes every gate while `pip install
+    strands-xa11y` refuses to co-install the xa11y it is built against. That is
+    invisible until a user tries it, and it happens on exactly the release that
+    matters: the one whose surface this script just verified.
+    """
+    try:
+        from importlib.metadata import version
+
+        import tomllib
+        from packaging.requirements import Requirement
+    except ImportError as exc:  # pragma: no cover - present in every supported env
+        # Visible rather than silent: a check that quietly becomes a no-op is
+        # indistinguishable from one that passed.
+        print(f"note: skipping the xa11y bound check ({exc}).", file=sys.stderr)
+        return
+
+    pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+    # Parsed, not line-scanned: the keywords list contains a bare "xa11y" that
+    # a substring scan happily mistakes for the dependency, yielding an empty
+    # specifier that admits everything — a check that always passes.
+    manifest = tomllib.loads(pyproject.read_text())
+    declared = next(
+        (dep for dep in manifest["project"]["dependencies"] if Requirement(dep).name == "xa11y"),
+        None,
+    )
+    if declared is None:
+        failures.append("pyproject.toml declares no `xa11y` dependency to check.")
+        return
+
+    installed = version("xa11y")
+    if not Requirement(declared).specifier.contains(installed, prereleases=True):
+        failures.append(
+            f"pyproject declares {declared!r} but the xa11y built from this tree is "
+            f"{installed}. The bound would refuse to co-install the release whose "
+            f"surface this script just verified — widen it in the same change."
+        )
+
+
 def main() -> int:
     try:
         xa11y = importlib.import_module("xa11y")
@@ -139,6 +181,8 @@ def main() -> int:
     _GUIDANCE = load_errors_module()._GUIDANCE
 
     failures: list[str] = []
+
+    check_declared_bound(failures)
 
     # 1. Every exception name this package writes guidance for must exist, and
     #    must still be an xa11y error — a name that survived as something else

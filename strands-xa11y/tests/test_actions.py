@@ -266,11 +266,34 @@ def test_check_toggles_a_mixed_checkbox_towards_the_state_asked_for(editor, call
     assert called(calls, "toggle")
 
 
+def test_a_toggle_that_lands_somewhere_else_reports_where_it_landed(editor, calls):
+    """`toggle` flips; it does not set.
+
+    From a tri-state control it can land on the value that was not asked for,
+    and which one depends on the platform and the widget. Reporting the wanted
+    state as fact would state a result that was never observed — the whole
+    reason the outcome is re-read instead of assumed.
+    """
+    editor.as_element().children()[0]._children[1]._children[1].checked = "mixed"
+    result = run(ActAction(type="act", target=ElementTarget(app="TextEdit", selector="check_box"), verb="uncheck"))
+    body = text_of(result)
+
+    assert "it is now on, not off" in body, body
+    assert "read it again" in body, body
+    assert called(calls, "toggle")
+
+
 def test_unsupported_action_returns_guidance_not_a_traceback(editor):
     editor.as_element().children()[0]._children[2]._unsupported = ("expand",)
     result = run(ActAction(type="act", target=ElementTarget(app="TextEdit", selector="text_area"), verb="expand"))
     assert result["status"] == "error"
-    assert "does not expose that accessibility action" in text_of(result)
+    body = text_of(result)
+    # The verb-on-element branch of the guidance: read the actions list.
+    assert "does not expose that verb" in body
+    # And the branch that matters for Error::Unsupported, which xa11y maps onto
+    # this same exception class — telling a model to fall back to input there
+    # would send it at the mechanism that just reported itself unavailable.
+    assert "Unsupported" in body
 
 
 # ── Refs ─────────────────────────────────────────────────────────────────────

@@ -12,7 +12,7 @@ import platform
 import subprocess
 from typing import Any, Callable, Dict, List
 
-from . import models
+from . import _selectors, models
 from ._errors import ToolError, describe, error_result, success_result, xa11y
 from ._refs import REFS
 from ._session import (
@@ -109,7 +109,7 @@ def _find(action: models.FindAction) -> Dict[str, Any]:
     key = app_key(app)
     lines = []
     for position, element in enumerate(shown, start=1):
-        path = f"{action.selector}:nth({position})" if len(matches) > 1 else action.selector
+        path = _selectors.nth(action.selector, position) if len(matches) > 1 else action.selector
         ref = REFS.issue(
             key,
             element.role,
@@ -253,7 +253,18 @@ def _reconcile_checked(resolved: Resolved, wanted: str) -> Dict[str, Any]:
     if current == wanted:
         return success_result(f"{resolved.label} was already {wanted}; nothing to do.")
     resolved.actor.toggle()
-    return success_result(f"Toggled {resolved.label} from {current} to {wanted}.")
+    # Re-read rather than assert. `toggle` flips; it does not set. From a
+    # tri-state ("mixed") control it may land on either value depending on the
+    # platform and the widget, so reporting `wanted` as fact states a result
+    # that was never observed.
+    actual = resolved.as_element().checked
+    if actual == wanted:
+        return success_result(f"Toggled {resolved.label} from {current} to {wanted}.")
+    return success_result(
+        f"Toggled {resolved.label} from {current}; it is now {actual}, not {wanted}. "
+        f"Toggling flips the state rather than setting it, so a tri-state control may "
+        f"need another toggle — read it again before deciding."
+    )
 
 
 # ── Tier 3: synthesised input and pixels ─────────────────────────────────────

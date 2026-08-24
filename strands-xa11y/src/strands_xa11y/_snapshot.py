@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+from . import _selectors
 from ._refs import REFS, segment
 
 # Controls worth acting on.
@@ -115,7 +116,11 @@ def _join(base: Optional[str], step: str) -> Optional[str]:
     """
     if base is None:
         return None
-    return f"{base} > {step}" if base else step
+    if not base:
+        return step
+    # Distribute over clauses: a group base concatenated with " > step" would
+    # bind the step to the last clause alone. See _selectors.chain.
+    return _selectors.chain(base, " > ", step)
 
 
 def _child_segments(children: List[Any], role_of: Any, name_of: Any) -> List[str]:

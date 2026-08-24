@@ -28,9 +28,19 @@ _GUIDANCE = {
         "ACCESSIBILITY_ENABLED=1 in the environment). Relaunch the app that way, or fall back to "
         "screenshot plus point-targeted input."
     ),
+    # xa11y maps three distinct core errors onto this one class, and `describe`
+    # keys on the class name alone — so the guidance has to cover all three
+    # rather than assume the common one. Telling a model to "fall back to a
+    # click" after Error::Unsupported sends it back to the mechanism that just
+    # reported itself unavailable.
     "ActionNotSupportedError": (
-        "This element does not expose that accessibility action. Use 'read' to see its 'actions' "
-        "list, try a different verb, or fall back to a point-targeted click or a key press."
+        "Read the message before choosing a fallback. If it names an action on an element, that "
+        "element does not expose that verb: use 'read' to see its 'actions' list, try a different "
+        "verb, or fall back to a point-targeted click or a key press. If it begins 'Unsupported', "
+        "the operation has no implementation on this platform or session at all (for example "
+        "pointer warping on Wayland without a portal grant) — the input fallback is unavailable "
+        "too, so change approach rather than retrying. If it is about a text value, the element "
+        "accepts no text through the accessibility API; focus it and type instead."
     ),
     "InvalidSelectorError": (
         "Selector syntax is invalid. Roles are snake_case (button, text_field, check_box); "
