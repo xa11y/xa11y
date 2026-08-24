@@ -27,7 +27,7 @@ cd /xa11y
 echo "--- /dev/uinput probe ---"
 ls -l /dev/uinput || {
     echo "FAIL: /dev/uinput is not present in the container."
-    echo "      Re-run docker with --device /dev/uinput."
+    echo "      Re-run the container with --device /dev/uinput."
     exit 1
 }
 

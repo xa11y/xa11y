@@ -49,8 +49,10 @@ updates:
           - "*"
 
   # ── npm ────────────────────────────────────────────────────────────
-  # JS bindings, the docs site, and the Electron test app each carry their
-  # own lockfile.
+  # The JS bindings and the docs site each carry their own committed lockfile.
+  # The Electron test app does not (test-apps/electron/.gitignore ignores
+  # package-lock.json), so Dependabot can only widen its package.json ranges
+  # there — nothing pins its transitive tree.
   - package-ecosystem: "npm"
     directories:
       - "/xa11y-js"

@@ -667,5 +667,11 @@ Language-specific content is marked, in one of two forms:
 
 The recognised language names are `rust`, `python`, and `js` (`README_LANGS` in
 `xtask/src/main.rs`). A typo'd name fails `sync-readmes` instead of shipping a
-literal marker to a package registry. Hidden content must not contain `-->`,
-which would end the comment early and leak the rest into the root page.
+literal marker to a package registry.
+
+Hidden content must not contain `-->` at all. The renderer itself only treats a
+line that is *exactly* `-->` as the terminator, so a stray inline one passes
+`sync-readmes --check` — but the root README is source rather than generated,
+and GitHub, crates.io and PyPI all end an HTML comment at the first `-->`
+anywhere on the line. The looser rule is what the matcher implements; this is
+the rule that keeps the rendered page right.

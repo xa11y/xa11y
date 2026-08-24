@@ -926,9 +926,12 @@ const README_LANGS: &[&str] = &["rust", "python", "js"];
 /// -->
 /// ```
 ///
-/// Hidden content must not itself contain a line that is exactly `-->`, which
-/// would end the comment early and leak the remainder into the rendered root
-/// README.
+/// This matcher ends a hidden block only on a line that is exactly `-->`, so a
+/// stray inline one passes `sync-readmes --check`. Authors should still keep
+/// `-->` out of hidden content entirely: the root README is source rather than
+/// generated, and GitHub, crates.io and PyPI all end an HTML comment at the
+/// first inline `-->` — so a block this renderer walks straight past still
+/// leaks its remainder onto the rendered root page.
 #[derive(Clone, Copy)]
 enum BlockKind {
     Visible,

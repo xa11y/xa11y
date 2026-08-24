@@ -111,6 +111,9 @@ fuzz_target!(|input: FuzzInput| {
     assert!(skipped.iter().all(|&i| i < annotations.len()));
 
     // Encoding the result exercises the dimensions-vs-buffer agreement again.
+    // The result is deliberately discarded (tenet 1): this target is looking
+    // for a panic inside the encoder, and a fuzzer-built capture can legally
+    // fail to encode. A failure that matters here is a crash, not an `Err`.
     let _ = out.to_png();
 
     // A capture whose buffer disagrees with its dimensions is an error, never

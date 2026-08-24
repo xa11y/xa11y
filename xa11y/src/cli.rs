@@ -221,8 +221,14 @@ pub fn run(args: &[String]) -> CliResult<()> {
     }
 }
 
-fn print_usage() {
-    eprintln!(
+/// The `xa11y --help` text.
+///
+/// Built as a value so a test can hold it against [`ACTION_NAMES`]: this
+/// text carries its own hand-written action list, and `set-numeric-value`
+/// worked on both the CLI and MCP while appearing in neither it nor its
+/// value-requiring line.
+fn usage_text() -> String {
+    format!(
         "\
 xa11y — accessibility tree explorer
 
@@ -284,7 +290,7 @@ Compose a11y + input/screenshot via `find -o bounds|center`:
 Actions: press, focus, blur, toggle, expand, collapse, select, show-menu,
   scroll-into-view, increment, decrement,
   set-value (requires --value), type-text (requires --value),
-  select-text (requires --value START,END)
+  set-numeric-value (requires --value), select-text (requires --value START,END)
 
 Exit codes:
   0  success
@@ -292,7 +298,11 @@ Exit codes:
   2  usage error (unknown flag value, missing or invalid argument)",
         // Derived, not spelled out: see `shell_kind_names`.
         kinds = shell_kind_names().join(", ")
-    );
+    )
+}
+
+fn print_usage() {
+    eprintln!("{}", usage_text());
 }
 
 // ── Argument helpers ────────────────────────────────────────────────────────
@@ -1689,11 +1699,31 @@ fn hex_color(rgb: [u8; 3]) -> String {
     format!("#{:02X}{:02X}{:02X}", rgb[0], rgb[1], rgb[2])
 }
 
+/// Longest accessible name rendered in a text-legend column.
+///
+/// The text legend pads every row to the longest name, so one pathological
+/// name costs `MAX_ANNOTATIONS` times its length in spaces. That is not
+/// hypothetical: on AT-SPI a text area's accessible name is often its whole
+/// contents, so a 100 KB name produced megabytes of padding. `--legend json`
+/// and the MCP result do not pad and are not truncated here.
+const MAX_LEGEND_NAME: usize = 120;
+
 /// A name for a legend column: quoted and escaped, or `-` when the element has
 /// none. `-` rather than `""`, so a nameless element is distinguishable from
 /// one whose name is the empty string.
+///
+/// Truncation is marked with `…` inside the quotes, so a shortened name never
+/// reads as the element's real one — use `--legend json` for the full text.
 fn legend_name(name: Option<&str>) -> String {
     match name {
+        Some(n) if n.chars().count() > MAX_LEGEND_NAME => {
+            // Truncate by chars, not bytes, so a multi-byte name cannot be cut
+            // mid-codepoint. The ellipsis goes inside the quotes: `{:?}` keeps
+            // printable non-ASCII as-is, so it renders as part of the name.
+            let mut kept: String = n.chars().take(MAX_LEGEND_NAME).collect();
+            kept.push('…');
+            format!("{kept:?}")
+        }
         Some(n) => format!("{n:?}"),
         None => "-".to_string(),
     }
@@ -2745,10 +2775,76 @@ mod tests {
         }
     }
 
+    /// The text legend pads every row to the longest name, so an unbounded
+    /// name is multiplied by the row count. On AT-SPI a text area's accessible
+    /// name is routinely its whole contents.
+    #[test]
+    fn a_runaway_accessible_name_cannot_inflate_the_text_legend() {
+        let huge = "x".repeat(100_000);
+        let rendered = legend_name(Some(&huge));
+
+        assert!(
+            rendered.chars().count() < MAX_LEGEND_NAME + 8,
+            "a {}-char name rendered as {} chars",
+            huge.len(),
+            rendered.chars().count()
+        );
+        assert!(
+            rendered.ends_with("…\""),
+            "truncation must be visible: {rendered}"
+        );
+    }
+
+    #[test]
+    fn a_name_within_the_limit_is_left_exactly_as_it_is() {
+        assert_eq!(legend_name(Some("OK")), "\"OK\"");
+        assert_eq!(legend_name(None), "-");
+    }
+
+    /// Truncating by bytes would split a multi-byte character and panic.
+    #[test]
+    fn a_multibyte_name_truncates_on_a_character_boundary() {
+        let name = "\u{e9}".repeat(MAX_LEGEND_NAME + 50);
+        let rendered = legend_name(Some(&name));
+        assert!(rendered.ends_with("…\""), "{rendered}");
+    }
+
     #[test]
     fn set_numeric_value_is_offered_and_needs_a_value() {
         assert!(ACTION_NAMES.contains(&"set-numeric-value"));
         assert!(ACTIONS_REQUIRING_VALUE.contains(&"set-numeric-value"));
+    }
+
+    /// `ACTION_NAMES` is the single source of truth for what `action` accepts,
+    /// but `--help` spells its own list out. `set-numeric-value` shipped in
+    /// the dispatcher and the MCP schema while `--help` never mentioned it, so
+    /// the two lists are held together here rather than by convention.
+    #[test]
+    fn every_action_the_cli_accepts_appears_in_the_help_text() {
+        let usage = usage_text();
+        for action in ACTION_NAMES {
+            assert!(
+                usage.contains(action),
+                "`{action}` is dispatchable but missing from `xa11y --help`"
+            );
+        }
+    }
+
+    /// The same for the value-requiring split: a verb listed without
+    /// "(requires --value)" reads as callable bare, and fails at the platform.
+    #[test]
+    fn every_value_requiring_action_says_so_in_the_help_text() {
+        let usage = usage_text();
+        for action in ACTIONS_REQUIRING_VALUE {
+            let marked = usage
+                .lines()
+                .filter(|line| line.contains(action))
+                .any(|line| line.contains("requires --value"));
+            assert!(
+                marked,
+                "`{action}` needs a --value but `xa11y --help` does not say so"
+            );
+        }
     }
 
     #[test]

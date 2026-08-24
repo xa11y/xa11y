@@ -199,6 +199,14 @@ fn surface_candidates(surfaces: &[ShellSurface]) -> Vec<String> {
 /// `ShellSurface` is **not** an [`Element`] — it represents the surface as a
 /// whole and provides a [`locator`](ShellSurface::locator) to search its
 /// accessibility tree.
+#[allow(
+    clippy::exhaustive_structs,
+    reason = "The private `provider` field already forbids construction and \
+              exhaustive destructuring from other crates, so `#[non_exhaustive]` \
+              would add nothing and growth is not breaking. Recorded rather than \
+              left implicit: the lint stays quiet only because of that field, so \
+              without this the decision reads as never having been made."
+)]
 pub struct ShellSurface {
     /// What this surface is.
     pub kind: ShellSurfaceKind,

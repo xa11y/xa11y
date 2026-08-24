@@ -113,9 +113,15 @@ pub enum EventKind {
 
 /// Individual state flags used in [`EventKind::StateChanged`].
 ///
-/// `#[non_exhaustive]`: this enum tracks [`crate::StateSet`], which is itself
-/// `#[non_exhaustive]` — a new state there gains a flag here. Binding
-/// coverage is enforced by `cargo xtask check-bindings-parity`.
+/// `#[non_exhaustive]`: this enum names the states a platform reports a
+/// *change* to, which is a subset of [`crate::StateSet`] rather than a mirror
+/// of it — `StateSet::active` has no flag here, because no backend delivers an
+/// activation as a state-change event. A new `StateSet` field therefore does
+/// not automatically gain a flag; adding one is a per-backend decision about
+/// whether that state is observable as a change at all. Nothing enforces the
+/// correspondence, so do not read this list as complete coverage of
+/// `StateSet`. Binding coverage of the variants that *do* exist is enforced by
+/// `cargo xtask check-bindings-parity`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum StateFlag {
