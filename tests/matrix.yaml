@@ -149,6 +149,29 @@ features:
       Python: Tauri app. JS: Tauri + Electron apps. Rust: AccessKit app
       (rust_core).
 
+  shell:
+    description: "OS shell surfaces: enumeration, per-kind lookup, and searching a surface root"
+    per_app: false
+    tested_on: [accesskit]
+    notes: >
+      Not an app feature at all — the surfaces belong to the OS, so the app a
+      cell launched is irrelevant to it. Three vehicles carry it:
+      xa11y/tests/integ/shell.rs (the Rust integ suite: Linux in the `Linux`
+      job, Windows in the `windows` job, macOS locally via
+      run_integ_tests_macos.sh), and tests/suites/cli/test_mcp.py, whose shell
+      tests run in every cell that runs the cli suite.
+      Each platform declares what its desktop must vend and fails when it is
+      absent — Windows a `Shell_TrayWnd` taskbar, macOS the frontmost app's
+      menu bar (the cli suite asserts only that the listing is non-empty
+      there, since which kinds appear depends on what is frontmost), Linux a
+      `window-type:dock` frame. That declaration is the feature: #377 shipped
+      three hand-written classifiers whose whole test suite would have stayed
+      green if enumeration had returned nothing on every platform (#383).
+      The Linux frame comes from test-apps/panel/panel.py, a GTK3 dock window
+      the Rust integ harness launches — a bare Xvfb display has no desktop
+      environment and vends none. It is a fixture rather than a test app: no
+      suite targets it, and it has no cell of its own.
+
   mcp:
     description: "MCP stdio server: framing, dual-era handshake, tool schemas, tool contracts, event subscriptions, and identical behaviour from all three CLI launchers"
     per_app: false
@@ -202,7 +225,7 @@ features:
 # rust_core is the xa11y/tests/integ/ suite — separate from per-app compat suites.
 rust_core:
   app: accesskit
-  features: [compat, actions, events, screenshot]
+  features: [compat, actions, events, screenshot, shell]
   note: >
     Fast-path core validation. All tests are #[ignore] and run via `cargo xtask test-integ`.
     Platform-split event tests: events_linux.rs, events_macos.rs, events_windows.rs.
@@ -294,6 +317,23 @@ gaps:
     affects:
       apps: [tauri]
       features: [input_sim]
+
+  - id: shell_panel_only_in_rust_integ
+    description: >
+      The Linux desktop-panel fixture (test-apps/panel/panel.py) is launched
+      by scripts/run_integ_tests.sh only, so the Rust integ suite is the one
+      place a Linux `panel` surface is asserted to exist. The per-app
+      harness (scripts/run_app_suite.sh) brings up Xvfb with no panel, so the
+      shell tests in tests/suites/cli/test_mcp.py assert enumeration shape
+      there rather than a found surface — on macOS and Windows those same
+      tests do require the desktop's shell UI to be listed. Adding the panel
+      to the per-app harness would also put an extra process in every app
+      listing those suites read, which is why it stops at the Rust suite.
+    severity: low
+    workaround: "xa11y/tests/integ/shell.rs asserts the Linux panel surface end-to-end"
+    affects:
+      features: [shell]
+      language: cli
 
   - id: js_input_sim_per_app
     description: >

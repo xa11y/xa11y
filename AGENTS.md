@@ -10,6 +10,15 @@ When adding new tests:
 2. All integration tests must be `#[ignore]` and run via `cargo xtask test-integ`.
 3. Run `cargo xtask test-integ` to verify tests pass before committing.
 
+A test that needs something the *desktop* owns rather than the app is the one
+exception to "add it to the test app". `test-apps/panel/panel.py` is the
+precedent: `xa11y/tests/integ/shell.rs` needs a Linux `window-type:dock` frame
+and a bare Xvfb display has none, so `scripts/run_integ_tests.sh` launches a
+GTK 3 dock window as a fixture. It needs `python3-gi gir1.2-gtk-3.0`, and the
+harness fails rather than running without it — a shell test that skips on an
+empty enumeration passes just as well when the classifier is broken, which is
+the hole issue #383 was about.
+
 ### Test helpers
 
 Integration tests use shared helpers from `xa11y/tests/integ/mod.rs`:

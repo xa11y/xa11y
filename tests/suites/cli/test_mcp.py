@@ -315,6 +315,44 @@ SHELL_KINDS = {
 }
 
 
+# What the desktop this suite runs on must vend, per platform. The point is
+# that an empty listing fails here rather than passing as a quietly narrower
+# run: every shell assertion below used to sit behind a guard an empty listing
+# satisfied, so `list_shell_surfaces` returning `[]` on all three platforms
+# would have kept the whole file green (issue #383).
+#
+# * Windows — explorer.exe owns a `Shell_TrayWnd` taskbar in every interactive
+#   session, the same session property the UIA tests already rely on.
+# * macOS — the Dock and Finder always own windows in a live session; the AX
+#   backend says as much itself, treating an empty CGWindowList as a failed
+#   call rather than an empty desktop. Which *kinds* get listed depends on
+#   what is frontmost, so only presence is asserted here; the menu bar itself
+#   is pinned in xa11y/tests/integ/shell.rs.
+# * Linux — the app suites run on a bare Xvfb display, where nothing vends a
+#   `window-type:dock` frame. The Rust integ suite launches one
+#   (test-apps/panel/panel.py) and asserts strictly there instead.
+REQUIRED_SHELL_KINDS = {"taskbar"} if sys.platform == "win32" else set()
+SHELL_UI_EXPECTED = sys.platform in ("darwin", "win32")
+
+# A kind this platform's backend cannot classify at all: macOS never produces
+# a taskbar, and neither Windows nor Linux produces a menu bar. The miss-path
+# tests target it so the surface they ask for is absent by construction rather
+# than absent because nothing was listed.
+IMPOSSIBLE_SHELL_KIND = "taskbar" if sys.platform == "darwin" else "menu_bar"
+
+
+def _assert_shell_ui_is_listed(surfaces: list[dict]) -> None:
+    """Fail if the desktop owns shell UI the listing didn't report."""
+    kinds = sorted(s["kind"] for s in surfaces)
+    if SHELL_UI_EXPECTED:
+        assert surfaces, (
+            f"{sys.platform} owns shell UI, so an empty listing means the "
+            "platform classifier matched nothing"
+        )
+    for kind in sorted(REQUIRED_SHELL_KINDS):
+        assert kind in kinds, f"expected a {kind} surface; listed: {kinds}"
+
+
 def _surfaces(mcp) -> list[dict]:
     """The `shell` listing, as rows of {kind, name, pid}."""
     result = mcp.call_tool("shell")["result"]
@@ -324,11 +362,20 @@ def _surfaces(mcp) -> list[dict]:
     return structured["surfaces"]
 
 
+def test_the_shell_listing_reports_the_surfaces_this_desktop_owns(mcp):
+    """The claim the tool exists for, and the one an empty listing would hide.
+
+    See `REQUIRED_SHELL_KINDS` for what each platform owes and why.
+    """
+    _assert_shell_ui_is_listed(_surfaces(mcp))
+
+
 def test_shell_lists_surfaces_the_other_tools_can_target(mcp):
     """Every row must be usable as a `shell` argument without translation.
 
-    No assertion on *which* surfaces exist: that is the runner's desktop, not
-    a property of the tool. A headless Linux cell legitimately reports none.
+    No assertion on *which* surfaces exist here: that is the runner's desktop,
+    not a property of the tool. That the desktop's own shell UI is among them
+    is the test above.
     """
     for surface in _surfaces(mcp):
         assert surface["kind"] in SHELL_KINDS, surface
@@ -382,39 +429,64 @@ def test_an_unknown_shell_kind_names_the_kinds_that_exist(mcp):
 
 
 def test_targeting_a_surface_that_is_not_there_reports_what_is(mcp):
-    """Tenet 6 on the shell: the candidate list is the way out of the miss."""
-    present = {s["kind"] for s in _surfaces(mcp)}
-    absent = sorted(SHELL_KINDS - present)
-    if not absent:
-        pytest.skip("this desktop vends every shell surface kind")
+    """Tenet 6 on the shell: the candidate list is the way out of the miss.
 
-    result = mcp.call_tool("find", {"selector": "*", "shell": absent[0]})["result"]
+    The target is a kind this backend cannot classify at all, so the miss is
+    the same one on every runner — and on a desktop that owns shell UI the
+    candidate list has to name it, which is what an empty listing used to make
+    vacuously true.
+    """
+    surfaces = _surfaces(mcp)
+    _assert_shell_ui_is_listed(surfaces)
+    present = {s["kind"] for s in surfaces}
+    assert IMPOSSIBLE_SHELL_KIND not in present, (
+        f"{sys.platform} listed a {IMPOSSIBLE_SHELL_KIND} surface, which its "
+        f"backend has no branch for: {sorted(present)}"
+    )
+
+    result = mcp.call_tool("find", {"selector": "*", "shell": IMPOSSIBLE_SHELL_KIND})[
+        "result"
+    ]
     assert result["isError"] is True
     structured = result["structuredContent"]
     assert structured["kind"] == "no_match"
-    assert absent[0] in structured["message"], structured["message"]
+    assert IMPOSSIBLE_SHELL_KIND in structured["message"], structured["message"]
     if present:
         candidates = " ".join(structured["diagnosis"]["candidates"])
         assert any(kind in candidates for kind in present), candidates
 
 
 def test_find_can_search_a_listed_shell_surface(mcp):
-    """The claim the feature exists for: a surface is an ordinary search root."""
+    """The claim the feature exists for: a surface is an ordinary search root.
+
+    The target is a kind this platform must vend where there is one, so the
+    search runs against real shell UI rather than against whatever happened to
+    be listed. Only a desktop that owes no surface at all (Linux here) can
+    reach the skip.
+    """
     surfaces = _surfaces(mcp)
+    _assert_shell_ui_is_listed(surfaces)
     if not surfaces:
         pytest.skip("this desktop vends no shell surfaces")
     kinds = [s["kind"] for s in surfaces]
     unique = next((k for k in kinds if kinds.count(k) == 1), None)
-    if unique is None:
+    required = next((k for k in sorted(REQUIRED_SHELL_KINDS) if kinds.count(k) == 1), None)
+    target = required or unique
+    if target is None:
         pytest.skip("every listed surface shares its kind with another")
 
-    result = mcp.call_tool("find", {"selector": "*", "limit": 1, "shell": unique})["result"]
+    result = mcp.call_tool("find", {"selector": "*", "limit": 1, "shell": target})["result"]
     if result["isError"]:
-        # An empty surface is a legitimate answer; a rejected target is not.
+        # An empty surface is a legitimate answer for whatever this desktop
+        # happens to run; it is not one for the shell UI the platform owes,
+        # which always has a tree under it.
+        assert target != required, (
+            f"the {target} surface matched nothing: {result['structuredContent']}"
+        )
         assert result["structuredContent"]["kind"] == "no_match", result["structuredContent"]
         return
     structured = result["structuredContent"]
-    assert structured["shell"]["kind"] == unique
+    assert structured["shell"]["kind"] == target
     assert "application" not in structured, "a taskbar is not an application"
 
 
@@ -1119,12 +1191,17 @@ def test_shell_lists_surfaces_in_tab_separated_columns(entry_point):
     assert result.returncode == 0, result.stderr
     lines = [line for line in result.stdout.splitlines() if line]
     if lines == ["No shell surfaces found."]:
+        # An empty listing is a real answer on a desktop that owns no shell
+        # UI, and a regression on one that does — so it is checked, not
+        # returned past (issue #383).
+        _assert_shell_ui_is_listed([])
         return
     for line in lines:
         kind, pid, name = line.split("\t")
         assert kind in SHELL_KINDS, line
         assert pid == "-" or pid.isdigit(), line
         assert name, line
+    _assert_shell_ui_is_listed([{"kind": line.split("\t")[0]} for line in lines])
 
 
 def test_shell_and_app_are_mutually_exclusive_from_every_launcher(entry_point):
@@ -1144,19 +1221,22 @@ def test_an_unknown_shell_kind_is_a_usage_error_listing_the_kinds(entry_point):
 
 
 def test_a_missing_shell_surface_is_an_operation_failure_not_a_usage_error(entry_point):
-    """The invocation was well-formed; the surface simply is not on screen."""
+    """The invocation was well-formed; the surface simply is not on screen.
+
+    Targets the kind this backend cannot classify, so the exit code being
+    tested comes from a miss that every runner reproduces rather than from
+    whichever kinds this desktop happens to be short of.
+    """
     listing = _run(entry_point, "shell")
     assert listing.returncode == 0, listing.stderr
     present = {
         line.split("\t")[0] for line in listing.stdout.splitlines() if "\t" in line
     }
-    absent = sorted(SHELL_KINDS - present)
-    if not absent:
-        pytest.skip("this desktop vends every shell surface kind")
+    assert IMPOSSIBLE_SHELL_KIND not in present, listing.stdout
 
-    result = _run(entry_point, "find", "*", "--shell", absent[0])
+    result = _run(entry_point, "find", "*", "--shell", IMPOSSIBLE_SHELL_KIND)
     assert result.returncode == 1, result.stdout
-    assert absent[0] in result.stderr, result.stderr
+    assert IMPOSSIBLE_SHELL_KIND in result.stderr, result.stderr
 
 
 # ── Event subscriptions ──────────────────────────────────────────────────────

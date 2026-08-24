@@ -49,6 +49,15 @@ jobs:
           setup-display: "false"
           setup-atspi: "false"
 
+      # The desktop panel fixture (test-apps/panel/panel.py) that
+      # run_integ_tests.sh launches for the shell-surface tests. A bare Xvfb
+      # display vends no `window-type:dock` frame, so without this the Linux
+      # half of xa11y/tests/integ/shell.rs would have nothing to find — and
+      # the harness fails rather than running a quietly narrower suite.
+      # GTK 3 specifically: GTK 4 dropped window type hints.
+      - name: Install the panel fixture's GTK 3 bindings
+        run: sudo apt-get update && sudo apt-get install -y python3-gi gir1.2-gtk-3.0
+
       - name: Run unit tests
         run: cargo test --workspace
 

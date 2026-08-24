@@ -25,7 +25,7 @@ JavaScript, and the CLI. Roughly:
 | Suite | Approx. tests | Location | What it covers |
 | --- | --- | --- | --- |
 | Rust unit | ~60 | `xa11y/tests/unit_test.rs` | Selector engine, locators, roles, state sets, error mapping, serialization (against an in-memory mock provider) |
-| Rust integration | ~150 | `xa11y/tests/integ/` | Live tree reads, action dispatch, events, screenshots against a running app |
+| Rust integration | ~160 | `xa11y/tests/integ/` | Live tree reads, action dispatch, events, screenshots against a running app, and the OS shell surfaces |
 | Python binding unit | ~240 | `xa11y-python/tests/` | The PyO3 surface: types, actions, exceptions, GIL release, subscriptions |
 | Python integration | ~100 | `tests/suites/python/` | Per-app compat, actions, events, errors, input simulation, screenshots |
 | CLI integration | ~80 | `tests/suites/cli/` | The `xa11y` CLI end-to-end against running apps, plus the MCP server and its event subscriptions over every CLI launcher |
@@ -97,6 +97,24 @@ renderers, and two first-party Microsoft UIA providers rather than third-party
 bridges, by way of Windows Forms and WPF. The
 toolkit-specific quirks this surfaces are documented in
 [Accessibility Quirks](/explanation/accessibility-quirks/).
+
+## Shell surfaces are tested against a desktop that has them
+
+Shell surfaces (the taskbar, a menu bar, a desktop panel) are found by three
+hand-written classifiers, one per platform, each keyed on a platform constant:
+a window class name on Windows, an AX attribute name on macOS, an AT-SPI
+`window-type` attribute on Linux. A classifier that stops matching returns an
+empty list, which reads exactly like a desktop that owns no shell UI. A test
+that skips when nothing is listed passes just as happily when the feature is
+broken.
+
+So `xa11y/tests/integ/shell.rs` states what each platform's desktop must vend
+and fails when it is missing. Windows must have a `Shell_TrayWnd` taskbar,
+macOS the menu bar of whichever application is in front, Linux a
+`window-type:dock` frame. The Linux one needs a fixture: a bare Xvfb display runs no desktop
+environment, so the harness launches `test-apps/panel/panel.py`, a GTK 3 dock
+window, and the test asserts it can reach the panel's own button through the
+surface root.
 
 ## One suite, every binding
 

@@ -64,7 +64,50 @@ if [ "${BUILD_ONLY:-}" = "1" ]; then
     exit 0
 fi
 
-# 4. Launch the test application (run binary directly, not via cargo run,
+# 4. Launch the desktop panel fixture.
+#
+#    The Linux shell-surface classifier matches an AT-SPI frame carrying
+#    `window-type:dock`, and a bare Xvfb display vends none — no desktop
+#    environment runs here. Without this fixture the shell tests in
+#    xa11y/tests/integ/shell.rs could only skip on an empty enumeration,
+#    which is the coverage hole issue #383 is about, so the panel is a hard
+#    requirement rather than a best-effort extra.
+#
+#    It needs a Python with the GTK 3 typelib. That is deliberately not
+#    whichever `python3` is first on PATH: CI installs actions/setup-python,
+#    whose interpreter has no PyGObject, while the system one does.
+#
+#    Its output goes to a log rather than the terminal: GTK 3's ATK bridge
+#    emits a CRITICAL for every Text/Value probe against a widget that
+#    implements neither, so a tree read from the panel would interleave a
+#    dozen of them into the test output.
+PANEL_PY=""
+for candidate in "${XA11Y_PANEL_PYTHON:-}" /usr/bin/python3 /usr/bin/python3.12 python3; do
+    [ -n "$candidate" ] || continue
+    command -v "$candidate" >/dev/null 2>&1 || continue
+    if "$candidate" -c 'import gi; gi.require_version("Gtk", "3.0"); from gi.repository import Gtk' \
+        >/dev/null 2>&1; then
+        PANEL_PY="$candidate"
+        break
+    fi
+done
+if [ -z "$PANEL_PY" ]; then
+    echo "error: no Python with GTK 3 (PyGObject) found, so the desktop panel" >&2
+    echo "       fixture cannot start and the shell-surface tests would have" >&2
+    echo "       nothing to find." >&2
+    echo "       Install it:  sudo apt-get install -y python3-gi gir1.2-gtk-3.0" >&2
+    echo "       Or point at an interpreter that has it: XA11Y_PANEL_PYTHON=..." >&2
+    echo "       In the container flow, an image built before the panel landed" >&2
+    echo "       predates that package: rebuild it (<runtime> image rm xa11y-base)." >&2
+    exit 1
+fi
+PANEL_LOG="target/xa11y-test-panel.log"
+mkdir -p target
+echo "Launching xa11y test panel ($PANEL_PY, log: $PANEL_LOG)..."
+"$PANEL_PY" test-apps/panel/panel.py > "$PANEL_LOG" 2>&1 &
+CLEANUP_PIDS+=($!)
+
+# 5. Launch the test application (run binary directly, not via cargo run,
 #    because cargo run changes the process owner name in AT-SPI)
 echo "Launching xa11y-test-app..."
 ./target/debug/xa11y-test-app --headless &
@@ -74,7 +117,7 @@ CLEANUP_PIDS+=($!)
 echo "Waiting for test app to register with AT-SPI..."
 sleep 3
 
-# 5. Run integration tests
+# 6. Run integration tests
 echo "Running integration tests..."
 TEST_FILTER="${TEST_FILTER:-}"
 set +e

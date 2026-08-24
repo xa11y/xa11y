@@ -2,7 +2,12 @@ FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# System deps for AT-SPI2 + Xvfb + X11 (matches CI)
+# System deps for AT-SPI2 + Xvfb + X11 (matches CI).
+#
+# python3-gi + gir1.2-gtk-3.0 are for the desktop panel fixture
+# (test-apps/panel/panel.py) that scripts/run_integ_tests.sh launches: the
+# Linux shell-surface tests need a real `window-type:dock` frame on the
+# display, and nothing else here vends one.
 RUN apt-get update && apt-get install -y \
     curl build-essential pkg-config \
     xvfb dbus dbus-x11 \
@@ -15,6 +20,7 @@ RUN apt-get update && apt-get install -y \
     libxcb-shape0 libxcb-shape0-dev \
     libxcb-xfixes0 libxcb-xfixes0-dev \
     x11-utils \
+    python3-gi gir1.2-gtk-3.0 \
     && (apt-get install -y at-spi2-core || apt-get install -y at-spi2-common) \
     && rm -rf /var/lib/apt/lists/*
 
