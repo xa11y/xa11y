@@ -14,8 +14,10 @@ docs/site/src/content/docs/api/javascript.mdx
 # intentionally committed. These crates are binaries (test applications), and
 # Cargo's guidance is to commit lockfiles for binaries so builds are
 # reproducible. They live outside the workspace, so they carry their own
-# lockfiles rather than sharing the root one; Dependabot keeps them updated via
-# the per-directory cargo entries in .github/dependabot.yml. Leaving them
+# lockfiles rather than sharing the root one. The same applies to
+# xa11y-python/, xa11y-js/ and xa11y/fuzz/, whose lockfiles build the published
+# wheel and npm binary. Dependabot keeps all of them updated via the
+# per-directory cargo entries in .github/dependabot.yml. Leaving them
 # unpinned previously let an incompatible transitive release (alloc-no-stdlib
 # 3.0.0 via brotli) break CI on every PR.
 

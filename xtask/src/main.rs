@@ -47,6 +47,7 @@ COMMANDS:
     sync-readmes [--check]  Generate crates.io/PyPI READMEs from root README.md
     check-macos-ffi     Verify xa11y-macos/src/ax.rs only uses safe_* CF/AX wrappers
     check-mcp-stdout    Verify xa11y/src/mcp writes nothing to stdout but protocol
+    check-workspace-pins   Verify intra-workspace deps keep their `=` version pins
     check-bindings-parity  Verify Python/JS bindings mirror xa11y-core's public API
     check               Run ALL pre-PR checks (fmt, lint, test, test-python, test-js, test-harness, test-pytest-plugin, test-strands)
     help                Show this help
@@ -91,6 +92,7 @@ fn main() -> ExitCode {
         "sync-readmes" => do_sync_readmes(rest),
         "check-macos-ffi" => do_check_macos_ffi(),
         "check-mcp-stdout" => do_check_mcp_stdout(),
+        "check-workspace-pins" => do_check_workspace_pins(),
         "check-bindings-parity" => parity::check(&project_root()),
         "check" => do_check(),
         "help" | "--help" | "-h" => {

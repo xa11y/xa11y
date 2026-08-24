@@ -17,8 +17,50 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Nothing gated this workflow before: it bumped the version, pushed to main
+  # and published to three registries without running a single test. A crates.io
+  # release is immutable, so "CI was green on main when I dispatched it" is not
+  # a check — it is a memory. These are the fast, display-free gates; the integ
+  # matrix still belongs to CI on the merge commit.
+  preflight:
+    name: Preflight checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          components: clippy, rustfmt
+          cache-key: publish-preflight
+
+      - name: Install Linux system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: Run unit tests
+        run: cargo test --workspace
+
+      - name: Check MCP stdout purity
+        run: cargo xtask check-mcp-stdout
+
+      - name: Check macOS FFI exception safety
+        run: cargo xtask check-macos-ffi
+
+      - name: Check workspace dependency pins
+        run: cargo xtask check-workspace-pins
+
+      - name: Check READMEs are in sync
+        run: cargo xtask sync-readmes --check
+
   version-bump:
     name: Bump version
+    needs: [preflight]
     if: inputs.level != 'release'
     runs-on: ubuntu-latest
     permissions:
@@ -68,8 +110,9 @@ jobs:
 
   publish-crates:
     name: Publish to crates.io
-    needs: [version-bump]
-    if: always() && (needs.version-bump.result == 'success' || needs.version-bump.result == 'skipped')
+    needs: [preflight, version-bump]
+    if: always() && needs.preflight.result == 'success'
+      && (needs.version-bump.result == 'success' || needs.version-bump.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -114,8 +157,9 @@ jobs:
 
   build-wheels-linux:
     name: Build wheels (Linux)
-    needs: [version-bump]
-    if: always() && (needs.version-bump.result == 'success' || needs.version-bump.result == 'skipped')
+    needs: [preflight, version-bump]
+    if: always() && needs.preflight.result == 'success'
+      && (needs.version-bump.result == 'success' || needs.version-bump.result == 'skipped')
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -165,8 +209,9 @@ jobs:
 
   build-wheels-macos:
     name: Build wheels (macOS)
-    needs: [version-bump]
-    if: always() && (needs.version-bump.result == 'success' || needs.version-bump.result == 'skipped')
+    needs: [preflight, version-bump]
+    if: always() && needs.preflight.result == 'success'
+      && (needs.version-bump.result == 'success' || needs.version-bump.result == 'skipped')
     runs-on: macos-latest
     strategy:
       matrix:
@@ -193,8 +238,9 @@ jobs:
 
   build-wheels-windows:
     name: Build wheels (Windows)
-    needs: [version-bump]
-    if: always() && (needs.version-bump.result == 'success' || needs.version-bump.result == 'skipped')
+    needs: [preflight, version-bump]
+    if: always() && needs.preflight.result == 'success'
+      && (needs.version-bump.result == 'success' || needs.version-bump.result == 'skipped')
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
@@ -218,8 +264,9 @@ jobs:
 
   build-sdist:
     name: Build sdist
-    needs: [version-bump]
-    if: always() && (needs.version-bump.result == 'success' || needs.version-bump.result == 'skipped')
+    needs: [preflight, version-bump]
+    if: always() && needs.preflight.result == 'success'
+      && (needs.version-bump.result == 'success' || needs.version-bump.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -272,8 +319,9 @@ jobs:
 
   build-npm:
     name: Build npm (${{ matrix.settings.target }})
-    needs: [version-bump]
-    if: always() && (needs.version-bump.result == 'success' || needs.version-bump.result == 'skipped')
+    needs: [preflight, version-bump]
+    if: always() && needs.preflight.result == 'success'
+      && (needs.version-bump.result == 'success' || needs.version-bump.result == 'skipped')
     strategy:
       fail-fast: false
       matrix:

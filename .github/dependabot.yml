@@ -19,6 +19,14 @@ updates:
       - "/"
       - "/test-apps/tauri"
       - "/test-apps/egui"
+      # The binding crates sit outside the workspace and carry their own
+      # lockfiles — and those lockfiles are what build the published PyPI
+      # wheel and npm binary. Without these entries they drifted five zbus
+      # minors behind root (5.14.0 vs 5.19.0), so the shipped Linux AT-SPI
+      # transport was not the one CI tested.
+      - "/xa11y-python"
+      - "/xa11y-js"
+      - "/xa11y/fuzz"
     schedule:
       interval: "weekly"
       day: "monday"

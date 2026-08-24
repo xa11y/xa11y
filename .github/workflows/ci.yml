@@ -636,6 +636,22 @@ jobs:
       - name: Check READMEs are in sync
         run: cargo xtask sync-readmes --check
 
+      # These three are source greps, so they run anywhere. They guard
+      # invariants whose violation is invisible at runtime: a stray print
+      # macro corrupts an MCP stdio session with a parse error that points
+      # nowhere near the cause, a raw CF/AX call aborts the process when a
+      # misbehaving app throws, and a dropped `=` pin lets cargo pair a newer
+      # xa11y-core with an older provider in a downstream tree. They were
+      # reachable only through `cargo xtask check`, which no workflow runs.
+      - name: Check MCP stdout purity
+        run: cargo xtask check-mcp-stdout
+
+      - name: Check macOS FFI exception safety
+        run: cargo xtask check-macos-ffi
+
+      - name: Check workspace dependency pins
+        run: cargo xtask check-workspace-pins
+
       - name: Run clippy
         run: cargo clippy --workspace --all-targets
 
@@ -1115,7 +1131,7 @@ jobs:
         run: |
           cd xa11y/fuzz
           failed=""
-          for target in tree_ops selector; do
+          for target in tree_ops selector annotate_ops; do
             echo "=== Fuzzing $target for 10s ==="
             if ! cargo +nightly fuzz run "$target" -- -max_total_time=10; then
               echo "::error::fuzz target '$target' crashed (reproducer in xa11y/fuzz/artifacts/$target/)"
