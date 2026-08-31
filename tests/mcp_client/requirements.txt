@@ -6,7 +6,7 @@
 # requires, which is the whole point of testing against it — a lenient parser
 # would have accepted the `tools/list` result that was missing its mandatory
 # caching hints.
-mcp==2.0.0
+mcp==2.1.1
 
 # Used directly, to check each tool's inputSchema is valid JSON Schema.
 # Declared rather than leaned on as a transitive dep of mcp.
