@@ -6,11 +6,14 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use windows::core::{implement, BOOL};
 use windows::Win32::Foundation::*;
+use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT};
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, SetForegroundWindow, STATE_SYSTEM_SELECTED,
+    EnumWindows, GetForegroundWindow, GetWindow, GetWindowLongPtrW, GetWindowRect,
+    GetWindowThreadProcessId, IsWindow, IsWindowVisible, SetForegroundWindow, GWL_EXSTYLE,
+    GW_OWNER, STATE_SYSTEM_SELECTED, WS_EX_LAYERED, WS_EX_TRANSPARENT,
 };
 
 use xa11y_core::{
@@ -546,16 +549,22 @@ impl WindowsProvider {
         .into())
     }
 
-    /// Enumerate every top-level window (`ControlType.Window`) owned by `pid`
-    /// under the desktop root, in z-order.
+    /// Enumerate the interactive top-level windows owned by `pid` on the
+    /// calling thread's desktop, in z-order, whatever their control type.
     ///
-    /// This is the single window-discovery primitive now: [`list_apps`] /
-    /// [`get_children(None)`](Self::get_children) group its result by pid,
-    /// [`app_by_pid`](Self::app_by_pid) takes its first match as the
-    /// representative, and [`get_children(Some(app))`](Self::get_children)
-    /// answers with it. Requiring the Window control type keeps the answer
-    /// window-shaped even for a WebView2/wry host (Tauri, egui, Electron),
-    /// whose process owns several pid-matching desktop children.
+    /// A window is skipped when nothing in it can be interacted with (hidden,
+    /// cloaked, zero-sized, or click-through such as the `SysShadow` drop
+    /// shadow behind a popup), or when its owner is also in the result: UIA
+    /// parents an owned window under its owner, so listing it again would
+    /// make locators match its elements twice and deliver its events twice.
+    ///
+    /// [`get_children(Some(app))`](Self::get_children) and app subscriptions
+    /// answer with it. Windows are found with `EnumWindows` rather than the
+    /// UIA desktop root: UIA parents owned windows (dialogs, message boxes)
+    /// under their owner instead of the root, and popups such as menus and
+    /// combo box drop-downs are not `Window` control types.
+    /// [`app_by_pid`](Self::app_by_pid) still requires a `Window` desktop
+    /// child when choosing its representative.
     ///
     /// An empty result is a truth, not an error: the last window closing is
     /// exactly the state "no windows" must report. Length / GetElement
@@ -906,33 +915,68 @@ fn top_level_windows_of_pid_with(
     pid: u32,
     cache: &IUIAutomationCacheRequest,
 ) -> Result<Vec<IUIAutomationElement>> {
-    let root = uia_call(|| unsafe { autom.GetRootElement() })?;
-    let value = pid_variant(pid)?;
-    let pid_condition =
-        uia_call(|| unsafe { autom.CreatePropertyCondition(UIA_ProcessIdPropertyId, &value) })?;
-    let window_condition = uia_call(|| unsafe {
-        autom.CreatePropertyCondition(
-            UIA_ControlTypePropertyId,
-            &VARIANT::from(UIA_WindowControlTypeId.0),
-        )
+    unsafe extern "system" fn collect(hwnd: HWND, param: LPARAM) -> BOOL {
+        let (pid, handles) = unsafe { &mut *(param.0 as *mut (u32, Vec<HWND>)) };
+        let mut owner = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner)) };
+        if owner == *pid && is_interactive_top_level(hwnd) {
+            handles.push(hwnd);
+        }
+        true.into()
+    }
+
+    let mut state = (pid, Vec::new());
+    unsafe { EnumWindows(Some(collect), LPARAM((&raw mut state) as isize)) }.map_err(|e| {
+        Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("EnumWindows failed: {e}"),
+        }
     })?;
-    let condition =
-        uia_call(|| unsafe { autom.CreateAndCondition(&pid_condition, &window_condition) })?;
-    let found =
-        uia_call(|| unsafe { root.FindAllBuildCache(TreeScope_Children, &condition, cache) })?;
-    let len = uia_call(|| unsafe { found.Length() })?;
-    let mut out = Vec::with_capacity(len as usize);
-    for i in 0..len {
-        let el = uia_call(|| unsafe { found.GetElement(i) }).map_err(|e| match e {
-            Error::Platform { code, message } => Error::Platform {
-                code,
-                message: format!("IUIAutomationElementArray.GetElement({i}) failed: {message}"),
-            },
-            other => other,
-        })?;
-        out.push(el);
+    let mut handles: Vec<HWND> = state.1;
+    let listed: HashSet<usize> = handles.iter().map(|h| h.0 as usize).collect();
+    handles.retain(|&hwnd| match unsafe { GetWindow(hwnd, GW_OWNER) } {
+        Ok(owner) => !listed.contains(&(owner.0 as usize)),
+        Err(_) => true,
+    });
+    let mut out = Vec::with_capacity(handles.len());
+    for hwnd in handles {
+        match uia_call(|| unsafe { autom.ElementFromHandleBuildCache(hwnd, cache) }) {
+            Ok(el) => out.push(el),
+            Err(_) if !unsafe { IsWindow(Some(hwnd)) }.as_bool() => {}
+            Err(e) => return Err(e),
+        }
     }
     Ok(out)
+}
+
+/// Whether a top-level window can hold anything to interact with: visible,
+/// not cloaked by DWM (e.g. a suspended UWP frame), with a non-empty frame,
+/// and not click-through (layered and transparent together, as used by drop
+/// shadows and overlays).
+fn is_interactive_top_level(hwnd: HWND) -> bool {
+    if !unsafe { IsWindowVisible(hwnd) }.as_bool() {
+        return false;
+    }
+    let ex_style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+    let click_through = WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0;
+    if ex_style & click_through == click_through {
+        return false;
+    }
+    let mut cloaked = 0u32;
+    let cloaked_read = unsafe {
+        DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            (&raw mut cloaked).cast(),
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
+    if cloaked_read.is_ok() && cloaked != 0 {
+        return false;
+    }
+    let mut rect = RECT::default();
+    unsafe { GetWindowRect(hwnd, &mut rect) }
+        .is_ok_and(|()| rect.right > rect.left && rect.bottom > rect.top)
 }
 
 /// Enumerate a pid only while it still names the saved process generation.
@@ -1218,6 +1262,12 @@ fn build_snapshot_data(
         }
         if let Some(ref cn) = class_name {
             raw.insert("class_name".into(), serde_json::Value::String(cn.clone()));
+        }
+        if let Some(hwnd) = native_handle.filter(|h| !h.0.is_null()) {
+            raw.insert(
+                "native_window_handle".into(),
+                serde_json::Value::Number(serde_json::Number::from(hwnd.0 as usize)),
+            );
         }
         // Preserve unstripped originals so callers who need bidi marks can
         // recover them after the strip below.
@@ -1557,8 +1607,7 @@ impl Provider for WindowsProvider {
                 })?;
 
                 let mut windows: Vec<(IUIAutomationElement, u32)> = Vec::new();
-                // Strict iteration (the same shape `top_level_windows_of_pid`
-                // uses): `Length` and `GetElement` failures are real COM
+                // Strict iteration: `Length` and `GetElement` failures are real COM
                 // failures, not absent windows — propagating keeps a transient
                 // UIA failure from silently truncating the process list to
                 // zero or a partial subset (tenet 1). `uia_call` retries the
@@ -4710,9 +4759,9 @@ impl IUIAutomationEventHandler_Impl for WatchHandler_Impl {
 // Event IDs registered through `AddAutomationEventHandler` on *each* top-level
 // window's subtree. Kept as a shared constant so registration and removal
 // iterate the same list. `WindowOpened` / `WindowClosed` are deliberately NOT
-// here: a per-window subtree registration would deliver a top-level window's
-// open/close twice (once from its own subtree scope, once from the desktop
-// root's Children scope) — the open/close watch owns those two event IDs.
+// here: a per-window subtree registration would deliver a window's open/close
+// twice (once from its own subtree scope, once from the desktop root's
+// Subtree scope) — the open/close watch owns those two event IDs.
 const AUTOMATION_EVENT_IDS: &[UIA_EVENT_ID] = &[
     UIA_MenuOpenedEventId,
     UIA_MenuClosedEventId,
@@ -4730,8 +4779,10 @@ const AUTOMATION_EVENT_IDS: &[UIA_EVENT_ID] = &[
 ];
 
 // Event IDs registered through `AddAutomationEventHandler` on the *desktop
-// root* (TreeScope_Children): the open/close watch, whose handler reconciles
+// root* (TreeScope_Subtree): the open/close watch, whose handler reconciles
 // the per-window registrations with the pid's current top-level windows.
+// Subtree scope is required because UIA parents owned windows (dialogs,
+// message boxes) under their owner rather than the desktop root.
 const WATCH_EVENT_IDS: &[UIA_EVENT_ID] = &[
     UIA_Window_WindowOpenedEventId,
     UIA_Window_WindowClosedEventId,
@@ -4904,7 +4955,7 @@ impl WindowsProvider {
 
             for eid in WATCH_EVENT_IDS {
                 if let Err(e) = unsafe {
-                    autom.AddAutomationEventHandler(*eid, root, TreeScope_Children, cache, watch)
+                    autom.AddAutomationEventHandler(*eid, root, TreeScope_Subtree, cache, watch)
                 } {
                     return Err(cleanup_error(Error::Platform {
                         code: e.code().0 as i64,
