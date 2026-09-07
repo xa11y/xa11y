@@ -7,7 +7,7 @@
 //! Run with: cargo run -p xa11y-test-app -- --headless
 
 use accesskit::{
-    Action, ActionData, ActionRequest, Live, Node, NodeId, Rect, Role, Toggled, Tree, TreeId,
+    Action, ActionData, ActionRequest, Live, Node, NodeId, Rect, Role, Toggled, TreeId, TreeInfo,
     TreeUpdate,
 };
 use accesskit_winit::{Adapter, Event as AccessKitEvent, WindowEvent as AccessKitWindowEvent};
@@ -209,7 +209,7 @@ fn build_tree(state: &AppState) -> TreeUpdate {
 
     TreeUpdate {
         nodes,
-        tree: Some(Tree::new(WINDOW)),
+        tree: Some(TreeInfo::new(WINDOW)),
         tree_id: TreeId::ROOT,
         focus: state.focused_id,
     }
@@ -791,7 +791,7 @@ fn build_dialog_tree() -> TreeUpdate {
 
     TreeUpdate {
         nodes: vec![(DIALOG_ROOT, root), (CLOSE_DIALOG_BTN, close)],
-        tree: Some(Tree::new(DIALOG_ROOT)),
+        tree: Some(TreeInfo::new(DIALOG_ROOT)),
         tree_id: TreeId::ROOT,
         focus: CLOSE_DIALOG_BTN,
     }

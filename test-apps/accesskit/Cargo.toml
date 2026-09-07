@@ -11,6 +11,6 @@ name = "xa11y-test-app"
 path = "src/main.rs"
 
 [dependencies]
-accesskit = "0.24"
-accesskit_winit = "0.33"
+accesskit = "0.25"
+accesskit_winit = "0.34"
 winit = "0.30"
