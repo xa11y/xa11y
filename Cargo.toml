@@ -23,7 +23,7 @@ exclude = [
 resolver = "2"
 
 [workspace.package]
-version = "0.13.0"
+version = "0.14.0"
 edition = "2021"
 # Declared so a too-old toolchain fails with "requires rustc 1.88" rather than
 # an unresolved-method error deep in a provider. 1.88 is where `slice::as_chunks`
@@ -44,10 +44,10 @@ repository = "https://github.com/xa11y/xa11y"
 # `shared-version = true`); this makes cargo enforce it. `cargo xtask check`
 # verifies the pins survive cargo-release's `dependent-version = "upgrade"`
 # rewrite.
-xa11y-core = { path = "xa11y-core", version = "=0.13.0", default-features = false }
-xa11y-macos = { path = "xa11y-macos", version = "=0.13.0" }
-xa11y-windows = { path = "xa11y-windows", version = "=0.13.0" }
-xa11y-linux = { path = "xa11y-linux", version = "=0.13.0" }
+xa11y-core = { path = "xa11y-core", version = "=0.14.0", default-features = false }
+xa11y-macos = { path = "xa11y-macos", version = "=0.14.0" }
+xa11y-windows = { path = "xa11y-windows", version = "=0.14.0" }
+xa11y-linux = { path = "xa11y-linux", version = "=0.14.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

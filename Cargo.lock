@@ -2865,7 +2865,7 @@ checksum = "acf4d1bc32aa46eec18caa634ec3cf4c05bfa151f12b93b510b15190f69a1ca8"
 
 [[package]]
 name = "xa11y"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2878,7 +2878,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-core"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "png",
  "serde",
@@ -2889,14 +2889,14 @@ dependencies = [
 
 [[package]]
 name = "xa11y-example-end-to-end"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "xa11y",
 ]
 
 [[package]]
 name = "xa11y-fuzz"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "rand",
  "xa11y",
@@ -2905,7 +2905,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-linux"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "evdev",
  "png",
@@ -2922,7 +2922,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-macos"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "cc",
  "core-foundation 0.10.1",
@@ -2933,7 +2933,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-test-app"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -2942,7 +2942,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-windows"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "serde_json",
  "windows",
@@ -2988,7 +2988,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xtask"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "proc-macro2",
  "quote",
