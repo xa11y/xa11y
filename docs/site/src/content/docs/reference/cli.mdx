@@ -43,6 +43,16 @@ Columns are tab-separated: process ID, then name. The foreground application
 carries a third column, the literal token `focused`. An application whose
 process ID cannot be resolved shows `-` in the first column.
 
+On macOS, when the accessibility permission is missing, the command's error is
+followed by an interactive prompt offering to open System Settings on the
+matching pane (`open` on the deep link). The pane is named for the running
+macOS version: `Privacy & Security → Accessibility` through macOS 26, and
+`Privacy & Security → Device Control and Data Access` on macOS 27 and newer,
+where the `Accessibility` entry no longer exists. The prompt only appears when
+standard input is a terminal; scripts and pipes get the error message alone.
+The same prompt follows the equivalent failure of every other command that
+reads the accessibility tree.
+
 ### `xa11y shell`
 
 List the OS shell surfaces currently present.
@@ -65,6 +75,35 @@ anything.
 The kind column, what each kind maps to per platform, and the query API in
 every language are in [Shell surfaces](/reference/shell/).
 
+### `xa11y windows`
+
+List top-level windows.
+
+```bash
+xa11y windows --pid 1234
+```
+
+```
+window "Calculator" [enabled visible] bounds=(0,0,400,600)
+window "Settings" [enabled visible] bounds=(20,20,300,200)
+(2 windows)
+```
+
+Without `--app` / `--pid` every running application is enumerated and all
+top-level windows are listed; with either filter only that application's
+windows are shown. Every window is listed exactly once. On macOS a single
+Application entry covers the process and each enumerated window keys
+uniquely, so a window is never dropped for sharing an identity with another
+(macOS `AXIdentifier` is not unique per window). On Linux, where AT-SPI may
+register several Application entries for one process (a main entry plus
+per-event-loop pieces), the same-pid entries are deduplicated by the
+`(bus_name, stable_id)` identity, so a process's windows are process-complete
+rather than the entries themselves being one-per-process. Each line is one
+window rendered like `xa11y find` renders elements, with its `actions`
+including the window verbs below. A window state the platform cannot report
+(`minimized`, `maximized`, `fullscreen`) is simply absent from the line
+rather than shown as a guessed `false`.
+
 ### `xa11y tree`
 
 Print the full accessibility tree for an application.
@@ -74,7 +113,7 @@ xa11y tree --app Calculator
 ```
 
 ```
-application "Calculator" [enabled visible] bounds=(0,0,400,600)
+application "Calculator" [enabled visible]
 ├── window "Calculator" [enabled visible] bounds=(0,0,400,600)
 │   ├── group "Display" [enabled visible]
 │   │   └── static_text "Result" value="42" [enabled visible]
@@ -142,10 +181,26 @@ xa11y action type-text "text_field[name='Message']" --app Slack --value "ship it
 xa11y action select-text "text_field" --app TextEdit --value "0,5"
 ```
 
+Window actions use `--at` and `--size` instead:
+
+```bash
+xa11y action raise "window" --pid 1234
+xa11y action move-to "window[name='Dialog']" --pid 1234 --at 100,200
+xa11y action resize-to "window[name='Dialog']" --pid 1234 --size 640,480
+```
+
 `set-value` writes text. A slider, spin button, or progress bar carries a
 number instead, and rejects text with `TextValueNotSupported`; use
 `set-numeric-value`, which takes any finite number and does in one call what
 `increment` would take a step at a time.
+
+Window verbs are only meaningful on window-like elements: `window`, or
+`dialog`, which every platform surfaces as a top-level window. `move-to` and
+`resize-to` take **logical** screen coordinates (the same space as the
+`bounds=()` in `xa11y find` output). Where a platform has no accessibility
+API for a verb — Linux cannot minimize, maximize, restore, or close a
+window — the command exits non-zero with `Unsupported`; it never falls back
+to input simulation.
 
 #### Available actions
 
@@ -166,6 +221,13 @@ number instead, and rejects text with `TextValueNotSupported`; use
 | `set-numeric-value` | Set numeric value, for sliders and spin buttons (requires `--value N`) |
 | `type-text` | Type text as keystrokes (requires `--value`) |
 | `select-text` | Select a text range (requires `--value START,END`) |
+| `raise` | Bring the window to the foreground |
+| `minimize` | Minimize the window |
+| `maximize` | Maximize the window |
+| `restore` | Restore the window from minimized/maximized |
+| `close` | Close the window |
+| `move-to` | Move the window (requires `--at X,Y`) |
+| `resize-to` | Resize the window (requires `--size W,H`) |
 
 ### `xa11y events`
 
@@ -348,9 +410,10 @@ gives it selectors to resolve.
 | --- | --- |
 | `apps` | none |
 | `shell` | none |
+| `windows` | `app`, `pid`, `limit` |
 | `tree` | `app`, `pid`, `shell`, `max_depth` |
 | `find` | `selector`, `app`, `pid`, `shell`, `limit` |
-| `action` | `action`, `selector`, `app`, `pid`, `shell`, `value` |
+| `action` | `action`, `selector`, `app`, `pid`, `shell`, `value`, `at`, `size` |
 | `click` | `x`, `y`, `button`, `count`, `held` |
 | `move` | `x`, `y` |
 | `drag` | `from_x`, `from_y`, `to_x`, `to_y`, `button`, `duration_ms`, `held` |
@@ -371,6 +434,11 @@ with `pid`. A kind matching several surfaces comes back as an
 `ambiguous_shell_surface` failure with the candidates listed. See
 [Shell surfaces](/reference/shell/).
 
+The `windows` tool is the MCP counterpart of [`xa11y windows`](#xa11y-windows):
+without `app`/`pid` it lists the top-level windows of every running
+application, with either it lists those of that one. Results are capped at
+`limit` (default 50) and report `truncated` when anything was dropped.
+
 `annotate` is an array of selectors, one annotation group per entry, and it is
 `screenshot`'s counterpart to the CLI's repeatable `--annotate`. Every element
 a selector matches gets an outlined box and a tag drawn on the capture, and the
@@ -390,9 +458,13 @@ the first of several. Narrow the selector or pick one with `:nth(n)`.
 Both surfaces auto-wait: the element has to exist, be visible, and be enabled
 before the action runs, within the default timeout (5 seconds, or
 `XA11Y_DEFAULT_TIMEOUT` seconds when that is set in the server's environment).
-A call that is going to fail therefore takes that long, and no MCP argument
-shortens it. `ok: true` reports that the application accepted the call, not
-that anything changed; read the tree again to confirm an effect.
+The window verbs (`raise`, `minimize`, `maximize`, `restore`, `close`,
+`move-to`, `resize-to`) and `scroll-into-view` are the one exception: they wait
+only for `enabled`, because a minimized window is legitimately not visible and
+must still be reachable by the very verbs that restore or raise it. A call that
+is going to fail therefore takes that long, and no MCP argument shortens it.
+`ok: true` reports that the application accepted the call, not that anything
+changed; read the tree again to confirm an effect.
 
 An element's `actions` field reports what the application advertises through
 the platform's action interface. It is not the set of verbs `action` accepts,

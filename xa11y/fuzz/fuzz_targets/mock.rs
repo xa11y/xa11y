@@ -64,6 +64,13 @@ pub const ALL_ACTIONS: &[&str] = &[
     "blur",
     "set_text_selection",
     "type_text",
+    "raise",
+    "minimize",
+    "maximize",
+    "restore",
+    "close",
+    "move_to",
+    "resize_to",
 ];
 
 // ── Fuzz element types ────────────────────────────────────────────────────────
@@ -90,6 +97,9 @@ pub struct FuzzStateSet {
     pub modal: bool,
     pub required: bool,
     pub busy: bool,
+    pub minimized: Option<bool>,
+    pub maximized: Option<bool>,
+    pub fullscreen: Option<bool>,
 }
 
 #[derive(Arbitrary, Debug)]
@@ -196,6 +206,13 @@ impl Provider for FuzzProvider {
     fn type_text(&self, _: &ElementData, _: &str) -> Result<()> { Ok(()) }
     fn set_text_selection(&self, _: &ElementData, _: u32, _: u32) -> Result<()> { Ok(()) }
     fn perform_action(&self, _: &ElementData, _: &str) -> Result<()> { Ok(()) }
+    fn raise(&self, _: &ElementData) -> Result<()> { Ok(()) }
+    fn minimize(&self, _: &ElementData) -> Result<()> { Ok(()) }
+    fn maximize(&self, _: &ElementData) -> Result<()> { Ok(()) }
+    fn restore(&self, _: &ElementData) -> Result<()> { Ok(()) }
+    fn close(&self, _: &ElementData) -> Result<()> { Ok(()) }
+    fn move_to(&self, _: &ElementData, _: i32, _: i32) -> Result<()> { Ok(()) }
+    fn resize_to(&self, _: &ElementData, _: u32, _: u32) -> Result<()> { Ok(()) }
 
     fn subscribe(&self, _: &ElementData) -> Result<Subscription> {
         Err(Error::Platform {
@@ -213,6 +230,9 @@ pub fn make_state(s: &FuzzStateSet) -> StateSet {
         visible: s.visible,
         focused: s.focused,
         active: false,
+        minimized: s.minimized,
+        maximized: s.maximized,
+        fullscreen: s.fullscreen,
         checked: s.checked.map(|v| match v % 3 {
             0 => Toggled::Off,
             1 => Toggled::On,

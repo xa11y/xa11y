@@ -164,7 +164,7 @@ UIA provides COM event handler interfaces registered against the `IUIAutomation`
 | `UIA_LiveRegionChangedEventId` | sender | Live region updated |
 | `UIA_SystemAlertEventId` | sender | System alert |
 
-**Watchable property IDs (for PropertyChanged):** `Name`, `IsEnabled`, `HasKeyboardFocus`, `ToggleState`, `Value_Value`, `RangeValue_Value`, `ExpandCollapseState`, `SelectionItem_IsSelected`, `BoundingRectangle`, `IsOffscreen`.
+**Watchable property IDs (for PropertyChanged):** `Name`, `IsEnabled`, `HasKeyboardFocus`, `ToggleState`, `Value_Value`, `RangeValue_Value`, `ExpandCollapseState`, `WindowVisualState`, `SelectionItem_IsSelected`, `BoundingRectangle`, `IsOffscreen`.
 
 **`StructureChangeType` enum:** `ChildAdded`, `ChildRemoved`, `ChildrenInvalidated`, `ChildrenBulkAdded`, `ChildrenBulkRemoved`, `ChildrenReordered`.
 
@@ -185,7 +185,7 @@ UIA provides COM event handler interfaces registered against the `IUIAutomation`
 | **Focus changed** | `AXFocusedUIElementChanged` | `Object:StateChanged(focused)` + `Focus:Focus` | `AddFocusChangedEventHandler` |
 | **Value changed** | `AXValueChanged` | `Value:ValueChanged` + `Object:StateChanged` | `PropertyChanged(Value/RangeValue/Toggle)` |
 | **Name changed** | `AXTitleChanged` | `Object:PropertyChange(Name)` | `PropertyChanged(Name)` |
-| **State changed** | Separate per-state notifications¹ | `Object:StateChanged(state, value)` | `PropertyChanged(IsEnabled/ToggleState/etc.)` |
+| **State changed** | Separate per-state notifications¹ | `Object:StateChanged(state, value)` | `PropertyChanged(IsEnabled/ToggleState/ExpandCollapseState/WindowVisualState)` |
 | **Structure changed** | `AXUIElementDestroyed` (app) / `AXCreated` (elem only) | `Object:ChildrenChanged` | `StructureChangedEventHandler` |
 | **Window opened** | `AXWindowCreated` | `Window:Create` | `UIA_Window_WindowOpenedEventId` |
 | **Window closed** | `AXUIElementDestroyed` on window | `Window:Destroy` | `UIA_Window_WindowClosedEventId` |
@@ -519,12 +519,13 @@ All handlers use `TreeScope_Subtree` on the application's root element (obtained
 - `AddAutomationEventHandler(UIA_SelectionItem_ElementSelectedEventId)` → `SelectionChanged`
 - `AddAutomationEventHandler(UIA_NotificationEventId)` → `Announcement`
 - `AddAutomationEventHandler(UIA_LiveRegionChangedEventId)` → `Announcement`
-- `AddPropertyChangedEventHandler([Name, IsEnabled, ToggleState, RangeValue_Value, Value_Value, ExpandCollapseState])`:
+- `AddPropertyChangedEventHandler([Name, IsEnabled, ToggleState, RangeValue_Value, Value_Value, ExpandCollapseState, WindowVisualState])`:
   - `Name` → `NameChanged`
   - `IsEnabled` → `StateChanged { Enabled, newValue }`
   - `ToggleState` → `StateChanged { Checked, newValue == ToggleState_On }` + `ValueChanged`
   - `RangeValue_Value` / `Value_Value` → `ValueChanged`
   - `ExpandCollapseState` → `StateChanged { Expanded, newValue == Expanded }`
+  - `WindowVisualState` → `StateChanged { Minimized }` / `StateChanged { Maximized }` for the flag(s) whose observed value changed, per window, against its own previous state (see the delta contract in the implementation notes below)
 
 **Cache request:** Pre-fetch `Name`, `ControlType`, `BoundingRectangle`, `IsEnabled`, `HasKeyboardFocus` in the cache request passed to all registration calls to avoid extra COM round-trips in handlers.
 
@@ -568,12 +569,12 @@ Implemented in `xa11y-macos/src/ax.rs`:
 
 Implemented in `xa11y-windows/src/uia.rs`:
 
-- Four COM event handlers are registered via the `IUIAutomation` root object: `AddFocusChangedEventHandler` (system-wide focus), `AddAutomationEventHandler` (window open/close, menu open/close, text changed, selection-item changes, live-region, notification, and system-alert events), `AddPropertyChangedEventHandler` (name, IsEnabled, ToggleState, Value, RangeValue, ExpandCollapseState), and `AddStructureChangedEventHandler`. All scoped handlers target `TreeScope_Subtree` on the app root resolved via `find_app_by_pid`.
+- Four COM event handlers are registered via the `IUIAutomation` root object: `AddFocusChangedEventHandler` (system-wide focus), `AddAutomationEventHandler` (menu open/close, text changed, selection-item changes, live-region, notification, and system-alert events), `AddPropertyChangedEventHandler` (name, IsEnabled, ToggleState, Value, RangeValue, ExpandCollapseState, WindowVisualState), and `AddStructureChangedEventHandler`. The scoped handlers target `TreeScope_Subtree` on **every current top-level window of the pid** — resolving a single representative via `find_app_by_pid` would leave same-pid sibling windows (a dialog next to the main window) outside every handler scope, so their events were never delivered. A desktop-root `TreeScope_Children` watch registered for `WindowOpened` / `WindowClosed` reconciles that set as windows come and go: a window opened after subscribe is attached (and its visual-state baseline seeded); a closed window's handlers are detached and its baseline dropped, so a reused HWND cannot inherit a stale one.
 - `UIA_SystemAlertEventId` is registered alongside `UIA_NotificationEventId` and `UIA_LiveRegionChangedEventId`; all three map to `EventKind::Announcement`. Pre-Windows-10 alert providers raise `SystemAlert` only, so dropping it would silently lose announcements from legacy apps.
 - `WindowActivated` / `WindowDeactivated` are deliberately **not emitted on Windows**. UIA has no first-class event for window activation, and inferring from focus changes was considered and rejected: it misses alt-tab (focused element doesn't move), misses tool windows that open without taking element focus, and fires spuriously on in-app focus moves across multiple windows. The honest surface is to admit UIA has no such event.
 - Handlers are COM-implementable via the `#[implement(...)]` macro from `windows-core`. Each wraps an `Arc<EventContext>` that holds the `mpsc::Sender<Event>` (protected by a `Mutex` because `std::sync::mpsc::Sender` is `!Sync`), the application name, PID, and a shared cache request.
 - Handlers filter by PID inside the callback (the focus-changed registration has no scope parameter, and scoped handlers occasionally deliver events from neighbouring processes), then build a full `ElementData` snapshot via `build_snapshot_data` — the same free function the tree-read path uses — and queue an `Event` on the channel. `event.target` is therefore a durable snapshot, not a handle to a COM pointer that may become invalid as UIA cleans up.
-- `PropertyChanged(ToggleState)` emits both `StateChanged { Checked }` and `ValueChanged` so consumers can filter on either; `PropertyChanged(ExpandCollapseState)` emits `StateChanged { Expanded, new == Expanded }`; `PropertyChanged(IsEnabled)` emits `StateChanged { Enabled, new }`. VARIANT payloads are decoded via the `TryFrom<&VARIANT>` impls provided by `windows::Win32::System::Variant`.
+- `PropertyChanged(ToggleState)` emits both `StateChanged { Checked }` and `ValueChanged` so consumers can filter on either; `PropertyChanged(ExpandCollapseState)` emits `StateChanged { Expanded, new == Expanded }`; `PropertyChanged(IsEnabled)` emits `StateChanged { Enabled, new }`; `PropertyChanged(WindowVisualState)` emits `StateChanged { Minimized }` / `StateChanged { Maximized }` only for the flag whose observed value changed, per window, against a baseline captured at subscribe time — UIA reports the whole visual state rather than a delta, so `StateChanged`'s change-promise is enforced by comparing each event to that window's own previous observation, and a Normal→Minimized transition claims `Minimized` only, not `Maximized` also clearing. The derivation is the same `window_visual_state_to_flags` mapping `parse_states` uses for snapshots. VARIANT payloads are decoded via the `TryFrom<&VARIANT>` impls provided by `windows::Win32::System::Variant`.
 - The `Subscription`'s `CancelHandle` holds the four handler COM pointers + automation/root via a `ComSend<T>` wrapper (an explicit `unsafe impl Send for ComSend<T>` whose safety rests on the same MTA guarantee that backs the existing `unsafe impl Send for WindowsProvider`, with a private inner field so Rust 2021 disjoint captures don't peel the wrapper back). On drop, the closure calls each `RemoveXxxEventHandler` synchronously — when those return, UIA guarantees no further handler invocations, so a subsequent `subscribe()` call starts with a clean slate.
 
 ### Linux — shipping

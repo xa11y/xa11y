@@ -351,6 +351,14 @@ pub(crate) fn signal_to_kinds(
                     flag: StateFlag::Required,
                     value,
                 }],
+                // The AT-SPI state for "this window was iconified/restored".
+                // Not emitted by every toolkit, but wiring it here is the only
+                // way a subscriber learns of a window minimization — without
+                // it the public StateFlag::Minimized is dead on Linux.
+                "iconified" => vec![EventKind::StateChanged {
+                    flag: StateFlag::Minimized,
+                    value,
+                }],
                 _ => vec![],
             }
         }
@@ -467,8 +475,15 @@ fn build_event_snapshot(
     };
 
     // State bits (used both for role refinement and for StateSet).
-    let state_bits = get_state(conn, aref).unwrap_or_default();
-    let bits = bits_from_u32s(&state_bits);
+    // A failed GetState is `None` — preserve that as `state_read_ok = false`
+    // rather than collapsing it into an empty bitset: an unread state is not
+    // a state read as absent (same rule `LinuxProvider::parse_states_with_bits`
+    // applies via `state_bits`), and `states_from_bits` needs it to leave
+    // `minimized` unknown instead of reporting `Some(false)`.
+    let (bits, state_read_ok) = match get_state(conn, aref) {
+        Some(state_bits) => (bits_from_u32s(&state_bits), true),
+        None => (0, false),
+    };
 
     // Refine TextArea → TextField for single-line text widgets (mirrors
     // the role-resolution logic on the main query path).
@@ -491,7 +506,7 @@ fn build_event_snapshot(
         (None, None, None)
     };
 
-    let states = states_from_bits(bits, role);
+    let states = states_from_bits(bits, role, state_read_ok);
 
     let raw = {
         let raw_role = if role_name.is_empty() {
@@ -657,8 +672,19 @@ fn bits_from_u32s(state_bits: &[u32]) -> u64 {
     }
 }
 
-fn states_from_bits(bits: u64, role: Role) -> StateSet {
+/// Convert an AT-SPI2 state bitfield into a [`StateSet`].
+///
+/// `state_read_ok` reports whether the bits came from a successful `GetState`
+/// read. When it is `false` the read produced no evidence, and the window
+/// flags must stay tri-state-unknown (`None`) rather than read-as-absent —
+/// the same rule `LinuxProvider::parse_states_with_bits` applies through
+/// `state_bits`, kept in sync here.
+fn states_from_bits(bits: u64, role: Role, state_read_ok: bool) -> StateSet {
     // Same bit positions as `LinuxProvider::parse_states` — kept in sync.
+    // Each constant is `1 << ordinal` of the `AtspiStateType` enum in
+    // at-spi2-core's `atspi/atspi-constants.h` (e.g. ICONIFIED=15,
+    // MODAL=16, VISIBLE=30); the state set arrives packed as one bit per
+    // state ordinal.
     const ACTIVE: u64 = 1 << 1;
     const BUSY: u64 = 1 << 3;
     const CHECKED: u64 = 1 << 4;
@@ -668,6 +694,7 @@ fn states_from_bits(bits: u64, role: Role) -> StateSet {
     const EXPANDED: u64 = 1 << 10;
     const FOCUSABLE: u64 = 1 << 11;
     const FOCUSED: u64 = 1 << 12;
+    const ICONIFIED: u64 = 1 << 15;
     const MODAL: u64 = 1 << 16;
     const SELECTED: u64 = 1 << 23;
     const SENSITIVE: u64 = 1 << 24;
@@ -713,6 +740,19 @@ fn states_from_bits(bits: u64, role: Role) -> StateSet {
         modal: (bits & MODAL) != 0,
         required: (bits & REQUIRED) != 0,
         busy: (bits & BUSY) != 0,
+        minimized: if matches!(role, Role::Window | Role::Dialog) {
+            if state_read_ok {
+                Some((bits & ICONIFIED) != 0)
+            } else {
+                // Could not read the state: say so, don't misreport the
+                // window as not-minimized (mirrors `parse_states_with_bits`).
+                None
+            }
+        } else {
+            None
+        },
+        maximized: None,
+        fullscreen: None,
     }
     .into()
 }
@@ -816,6 +856,30 @@ mod tests {
                     value: true
                 }],
                 "state '{name}' should map to Enabled"
+            );
+        }
+    }
+
+    #[test]
+    fn state_changed_iconified_maps_to_minimized() {
+        // Wiring Object:StateChanged(iconified) is the only thing that makes
+        // the public StateFlag::Minimized observable on Linux — without it
+        // the flag would only ever surface as a snapshot, never as an event.
+        for value in [0, 1] {
+            let kinds = signal_to_kinds(
+                "org.a11y.atspi.Event.Object",
+                "StateChanged",
+                "iconified",
+                value,
+                None,
+            );
+            assert_eq!(
+                kinds,
+                vec![EventKind::StateChanged {
+                    flag: StateFlag::Minimized,
+                    value: value != 0,
+                }],
+                "iconified={value}"
             );
         }
     }
@@ -1031,9 +1095,9 @@ mod tests {
         // `Checked` only makes sense on checkbox-like roles — other roles
         // should leave it as None even when the bit is set.
         const CHECKED: u64 = 1 << 4;
-        let s = states_from_bits(CHECKED, Role::Button);
+        let s = states_from_bits(CHECKED, Role::Button, true);
         assert!(s.checked.is_none());
-        let s = states_from_bits(CHECKED, Role::CheckBox);
+        let s = states_from_bits(CHECKED, Role::CheckBox, true);
         assert_eq!(s.checked, Some(Toggled::On));
     }
 
@@ -1042,8 +1106,26 @@ mod tests {
         const ENABLED: u64 = 1 << 8;
         const SENSITIVE: u64 = 1 << 24;
         // Either bit on its own should flip the enabled flag.
-        assert!(states_from_bits(ENABLED, Role::Button).enabled);
-        assert!(states_from_bits(SENSITIVE, Role::Button).enabled);
-        assert!(!states_from_bits(0, Role::Button).enabled);
+        assert!(states_from_bits(ENABLED, Role::Button, true).enabled);
+        assert!(states_from_bits(SENSITIVE, Role::Button, true).enabled);
+        assert!(!states_from_bits(0, Role::Button, true).enabled);
+    }
+
+    #[test]
+    fn states_from_bits_leaves_minimized_unknown_when_read_failed() {
+        // A failed GetState is not evidence the window is not minimized:
+        // `state_read_ok = false` must leave `minimized` as None (tri-state
+        // contract, mirrored with `parse_states_with_bits`), not report
+        // `Some(false)` from the defaulted zero bitset.
+        const ICONIFIED: u64 = 1 << 15;
+        let read_ok = states_from_bits(ICONIFIED, Role::Window, true);
+        assert_eq!(read_ok.minimized, Some(true));
+        let read_ok = states_from_bits(0, Role::Window, true);
+        assert_eq!(read_ok.minimized, Some(false));
+        let failed = states_from_bits(0, Role::Window, false);
+        assert_eq!(failed.minimized, None, "unread state must stay unknown");
+        // Role guard is unchanged: a non-window role stays None regardless.
+        let failed = states_from_bits(0, Role::Group, false);
+        assert_eq!(failed.minimized, None);
     }
 }

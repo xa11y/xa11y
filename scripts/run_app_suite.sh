@@ -12,7 +12,14 @@
 #   scripts/run_app_suite.sh <app> [suite ...]
 #
 #   <app>    qt | gtk | cocoa | tauri | electron | accesskit | egui | winforms | wpf
-#   [suite]  python | js | cli   (default: python js cli, matching CI)
+#   [suite]  python | js | cli | python-window | js-window
+#            (default: python js cli js-window python-window, matching CI)
+#
+# The mutating window suites (js-window / python-window) run last by default:
+# every suite shares one app process, and the window-state verbs churn the
+# UIA/AX cache in a way that made a following suite's action tests flaky.
+# js-window runs before python-window so the Cocoa fullscreen test (which
+# cannot complete its exit transition in a harness) stays last.
 #
 # Notes:
 #   * Running the js suite needs Node + the xa11y-js bindings; the cli suite
@@ -34,7 +41,7 @@ shift || true
 
 SUITES=("$@")
 if [ ${#SUITES[@]} -eq 0 ]; then
-    SUITES=(python js cli)
+    SUITES=(python js cli js-window python-window)
 fi
 
 case "$APP" in

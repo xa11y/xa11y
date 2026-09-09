@@ -287,6 +287,7 @@ rust_only = [
     { method = "App::by_pid_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
     { method = "App::foreground_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
     { method = "App::list_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "App::windows_with", reason = "Explicit-provider plumbing; bindings expose the per-app `App::windows()` instance method instead." },
     { method = "App::find_with", reason = "Binding uses the singleton provider; exposed to Python as `App.find`." },
     { method = "App::try_find_with", reason = "Fallible-predicate variant of find_with; `App.find` routes through it and re-raises predicate errors." },
     { method = "App::provider", reason = "Internal plumbing for provider implementors, not user API." },
@@ -297,6 +298,11 @@ rust_only = [
     { method = "ShellSurface::list_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
     { method = "ShellSurface::by_kind_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
     { method = "ShellSurface::data", reason = "Internal plumbing for provider implementors, not user API." },
+    # Window verbs renamed because `raise` is a Python keyword — not internal
+    # plumbing. The Python side ships `raise_` (see [python.python_only]); the
+    # platform action dispatched is still "raise".
+    { method = "Element::raise", reason = "`raise` is a Python keyword, so a method of that name cannot exist in the stub; Python exposes `Element.raise_` instead. The platform action dispatched is still \"raise\"." },
+    { method = "Locator::raise", reason = "`raise` is a Python keyword, so a method of that name cannot exist in the stub; Python exposes `Locator.raise_` instead. The platform action dispatched is still \"raise\"." },
 
     # Internal Rust constructors / accessors.
     { method = "Locator::new", reason = "Internal Rust constructor; bindings build Locators via App.locator() / module-level locator()." },
@@ -362,6 +368,12 @@ python_only = [
     { method = "Element::subscribe", reason = "Binding convenience: subscribe to events for any element, delegating to provider.subscribe()." },
     { method = "Subscription::close", reason = "Python context-manager idiom; pairs with __enter__ / __exit__ for explicit cleanup." },
 
+    # `raise` is a Python keyword, so the window verb ships as `raise_` (PEP 8
+    # trailing-underscore convention). See Element::raise / Locator::raise in
+    # rust_only for the other half of the rename.
+    { method = "Element::raise_", reason = "Python cannot name a method `raise` (keyword); the window verb is `raise_`. The platform action dispatched is still \"raise\"." },
+    { method = "Locator::raise_", reason = "Python cannot name a method `raise` (keyword); the window verb is `raise_`. The platform action dispatched is still \"raise\"." },
+
     # Event: core's `kind: EventKind` enum is destructured into flat string
     # attributes at the boundary.
     { method = "Event::event_type", reason = "Flattened from EventKind: the variant name as a string (`focus_changed`, `state_changed`, ...)." },
@@ -377,6 +389,7 @@ rust_only = [
     { method = "App::by_pid_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
     { method = "App::foreground_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
     { method = "App::list_with", reason = "Binding uses the singleton provider; `_with` variants are Rust-only plumbing for explicit provider injection." },
+    { method = "App::windows_with", reason = "Explicit-provider plumbing; bindings expose the per-app `App::windows()` instance method instead." },
     { method = "App::find_with", reason = "Binding uses the singleton provider; exposed to JS as `App.find`, a poll loop in index.js." },
     { method = "App::try_find_with", reason = "Fallible-predicate variant of find_with; the JS App.find poll loop propagates predicate errors directly." },
     { method = "App::provider", reason = "Internal plumbing for provider implementors, not user API." },

@@ -42,3 +42,6 @@ htmlcov/
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+
+# Built test-app binaries (make output, one per test app)
+/test-apps/cocoa/xa11y-cocoa-test-app

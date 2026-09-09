@@ -141,18 +141,10 @@ mod tests {
         // ACTIVE state on Linux, AXMain on macOS, the foreground HWND on
         // Windows).
         let app = h::app_root();
-        // On Windows (UIA) the app root IS the window, so check it directly.
-        // Elsewhere the window is a descendant element; a scoped locator only
-        // matches descendants of its root, so the state-attr selector below is
-        // exercised on the platforms where the window is nested.
-        if app.data.role == Role::Window {
-            assert!(
-                app.as_element().states.active,
-                "the foreground window (app root) must report active. App: {app}"
-            );
-            return;
-        }
-        let windows = app.locator("window").elements().unwrap();
+        // `App::windows()` returns the process's top-level windows on every
+        // platform (from the synthesized Application node on Windows); the
+        // state-attr selector is exercised against the same set.
+        let windows = app.windows().expect("App::windows must succeed");
         assert!(
             windows.iter().any(|w| w.states.active),
             "the test app's foreground window must report active. Windows: {:?}",
@@ -172,6 +164,60 @@ mod tests {
         );
     }
 
+    #[test]
+    #[ignore]
+    fn window_state_attributes_are_selectable_when_known() {
+        // The `minimized` / `maximized` / `fullscreen` attributes are usable
+        // in selectors without error, and a state the platform reports as
+        // known must be selectable by its literal value. An unknown state
+        // (None) is absent rather than guessed `false` — neither literal is
+        // required to match it.
+        let app = h::app_root();
+        let main = app
+            .windows()
+            .expect("App::windows must succeed")
+            .into_iter()
+            .find(|w| {
+                w.name
+                    .as_deref()
+                    .is_some_and(|n| n.contains("xa11y Test App"))
+            })
+            .expect("the main window must be enumerated");
+        for (state, value) in [
+            ("minimized", main.states.minimized),
+            ("maximized", main.states.maximized),
+            ("fullscreen", main.states.fullscreen),
+        ] {
+            // The selector must always resolve (no error), whatever the state.
+            for flag in ["true", "false"] {
+                let selector = format!("window[{state}=\"{flag}\"]");
+                assert!(
+                    app.locator(&selector).elements().is_ok(),
+                    "selector {selector} must resolve"
+                );
+            }
+            // A reported Some(v) must be selectable by that literal.
+            if let Some(v) = value {
+                let literal = if v { "true" } else { "false" };
+                let selector = format!("window[{state}=\"{literal}\"]");
+                let matched = app.locator(&selector).elements().unwrap();
+                assert!(
+                    matched.iter().any(|e| e
+                        .name
+                        .as_deref()
+                        .is_some_and(|n| n.contains("xa11y Test App"))),
+                    "{selector} must match the window reporting {state}={literal}, \
+                     got: {}",
+                    matched
+                        .iter()
+                        .map(|e| e.name.as_deref().unwrap_or("<unnamed>"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
+    }
+
     // ════════════════════════════════════════════════════════════════
     // Tree Structure — Element Discovery (14 tests)
     // ════════════════════════════════════════════════════════════════
@@ -180,8 +226,9 @@ mod tests {
     #[ignore]
     fn tree_has_root_node() {
         let app = h::app_root();
-        assert!(
-            app.data.role == Role::Application || app.data.role == Role::Window,
+        assert_eq!(
+            app.data.role,
+            Role::Application,
             "Root role: {:?}",
             app.data.role
         );
@@ -191,11 +238,6 @@ mod tests {
     #[ignore]
     fn tree_has_window() {
         let app = h::app_root();
-        // On Windows (UIA), the app root IS the window — there's no nested
-        // Window child element. Verify root is a Window or find child windows.
-        if app.data.role == Role::Window {
-            return; // App root is the window — pass
-        }
         let windows = app.locator("window").elements().unwrap();
         assert!(!windows.is_empty(), "No windows found. App: {}", app);
     }
@@ -943,13 +985,13 @@ mod tests {
     #[ignore]
     fn element_bounds_none_for_non_component_elements() {
         let app = h::app_root();
-        // On Linux/macOS, Application elements don't implement Component so
-        // bounds is None. On Windows (UIA), the app root is a Window element
-        // that does have bounds.
-        #[cfg(not(target_os = "windows"))]
+        // The Application node has no geometry on any platform: Linux/macOS
+        // apps don't implement the Component geometry interface, and Windows
+        // synthesizes the process node without bounds (UIA has no process
+        // geometry).
         assert!(
             app.data.bounds.is_none(),
-            "Application root should not have bounds (no Component interface)"
+            "Application root should not have bounds"
         );
         // But a visible widget like a button should still have bounds
         let submit = h::named(&app, "Submit");
@@ -1250,12 +1292,13 @@ mod tests {
     #[ignore]
     fn sel_descendant_combinator() {
         let app = h::app_root();
-        // On Windows (UIA), the app root IS the window, so "window button"
-        // won't find anything within the app's tree. Use "group button" which
-        // works on all platforms (buttons are inside group containers).
+        // The app entry is an Application node on every platform, so
+        // "window button" (the app's window child, then its button
+        // descendants) is the same shape everywhere; "group button" covers
+        // the flattened-container case some adapters produce.
         let results = app.locator("group button").elements().unwrap();
         if results.is_empty() {
-            // Fall back to "window button" for Linux/macOS
+            // Fall back to "window button"
             let results = app.locator("window button").elements().unwrap();
             assert!(!results.is_empty());
             for r in &results {
@@ -1302,10 +1345,9 @@ mod tests {
     #[ignore]
     fn sel_complex_chain() {
         let app = h::app_root();
-        // Multi-segment selector: role + name attribute chain.
-        // On Windows (UIA), the app root is the window and AccessKit containers
-        // may flatten, so "window button" or "group button" may not work.
-        // Use "menu_bar menu_item" which is nested on all platforms.
+        // Multi-segment selector: role + name attribute chain. "menu_bar
+        // menu_item" is nested on all platforms (the synthetic Application
+        // node does not change the shape below the window).
         let results = app
             .locator(r#"menu_bar menu_item[name="File"]"#)
             .elements()
@@ -1341,13 +1383,30 @@ mod tests {
         }
         #[cfg(target_os = "windows")]
         {
-            let control_type_id = _app
+            // The Windows app entry is the synthesized Application node (no
+            // live UIA element), so its raw marker is `uia_synthesized` and
+            // the executable path is recorded when readable; real window
+            // elements carry `control_type_id` instead.
+            let synthesized = _app
                 .data
                 .raw
-                .get("control_type_id")
-                .and_then(|v| v.as_i64())
-                .expect("Expected control_type_id in raw data");
-            assert!(control_type_id > 0);
+                .get("uia_synthesized")
+                .and_then(|v| v.as_bool())
+                .expect("Expected uia_synthesized in raw data");
+            assert!(
+                synthesized,
+                "the Windows app entry must be marked synthesized"
+            );
+            let name_source = _app
+                .data
+                .raw
+                .get("uia_name_source")
+                .and_then(|v| v.as_str())
+                .expect("Expected uia_name_source in raw data");
+            assert!(
+                name_source == "process" || name_source == "window_title",
+                "uia_name_source must record the name source, got {name_source:?}"
+            );
         }
     }
 

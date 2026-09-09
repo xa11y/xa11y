@@ -105,6 +105,7 @@ internal sealed class TestWindow : Window
     private readonly TextBlock _statusLabel;
     private readonly DataGrid _usersTable;
     private Window? _sampleDialog;
+    private Window? _sampleSibling;
 
     public TestWindow()
     {
@@ -308,8 +309,10 @@ internal sealed class TestWindow : Window
     {
         var open = MakeButton("Open Dialog");
         open.Click += (_, _) => OpenSampleDialog();
+        var openSibling = MakeButton("Open Sibling");
+        openSibling.Click += (_, _) => OpenSampleSibling();
 
-        return MakeGroup("Dialogs", Orientation.Vertical, open);
+        return MakeGroup("Dialogs", Orientation.Vertical, open, openSibling);
     }
 
     /// <summary>
@@ -350,6 +353,47 @@ internal sealed class TestWindow : Window
 
         _sampleDialog.Show();
         _sampleDialog.Activate();
+    }
+
+    /// <summary>
+    ///  Shows a second non-modal, non-dialog top-level window of this process.
+    ///  Event-subscription coverage needs a same-pid *sibling* top-level
+    ///  window: xa11y-windows registers UIA handlers per top-level window of
+    ///  the pid (and attaches new ones as windows come and go), so a sibling's
+    ///  minimize must raise the same PropertyChanged(WindowVisualState) the
+    ///  main window does. It is a plain Window — no IsDialog — so it maps to
+    ///  Role::Window and is listed by App::windows() alongside the main window.
+    ///  Hide rather than destroy, mirroring OpenSampleDialog, so the suites can
+    ///  open it more than once a run.
+    /// </summary>
+    private void OpenSampleSibling()
+    {
+        if (_sampleSibling is null)
+        {
+            var close = MakeButton("Close Sibling");
+            var sibling = new Window
+            {
+                Title = "Sample Sibling",
+                Width = 320,
+                Height = 160,
+                WindowStartupLocation = WindowStartupLocation.CenterScreen,
+                ShowInTaskbar = false,
+                Content = new StackPanel { Margin = new Thickness(16), Children = { close } },
+            };
+            AutomationProperties.SetName(sibling, "Sample Sibling");
+
+            close.Click += (_, _) => sibling.Hide();
+            sibling.Closing += (_, e) =>
+            {
+                e.Cancel = true;
+                sibling.Hide();
+            };
+
+            _sampleSibling = sibling;
+        }
+
+        _sampleSibling.Show();
+        _sampleSibling.Activate();
     }
 
     // ── Chrome ───────────────────────────────────────────────────────────

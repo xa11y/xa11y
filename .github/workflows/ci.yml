@@ -257,8 +257,20 @@ jobs:
   # Each matrix cell starts the test app once, then runs the Python, JS, and
   # CLI suites against it via tests/harness/launch.py — the same entry point
   # `cargo xtask test-<app>` uses locally (scripts/run_app_suite.sh), so local
-  # and CI share one code path. This replaced the old per-language per-app
-  # per-OS jobs and their run_<app>_tests.sh scripts.
+  # and CI share one code path. The mutating window suites (js-window /
+  # python-window) run last, deliberately: every suite shares one app process,
+  # and the window-state verbs churn the UIA/AX cache in a way that made a
+  # following suite's action tests flaky. This is not something a suite split
+  # inside a language can express — the mutating tests test the verbs
+  # themselves (minimize/restore/resize are the behavior under test, tenet 3),
+  # so they must mutate, and the churn is cache invalidation on the provider
+  # side that a following *any* suite would inherit from the same app process.
+  # Running them in their own suites after python/js/cli is the cheapest
+  # correct order; the alternative (restart the app between suites) costs
+  # more app launches for zero coverage gain. js-window runs before
+  # python-window so the Cocoa fullscreen test (which cannot complete its exit
+  # transition in a harness) stays last. This replaced the old per-language
+  # per-app per-OS jobs and their run_<app>_tests.sh scripts.
   #
   # Each cell builds the workspace itself; the shared sccache in setup-rust
   # keeps that cheap (warm rustc cache reused across cells and runs) without
@@ -525,20 +537,20 @@ jobs:
         if: runner.os == 'Linux'
         env:
           XA11Y_REQUIRE_ALL_CLI: "1"
-        run: .venv-integ/bin/python tests/harness/launch.py ${{ matrix.app }} python js cli
+        run: .venv-integ/bin/python tests/harness/launch.py ${{ matrix.app }} python js cli js-window python-window
 
       - name: Run integration harness (macOS)
         if: runner.os == 'macOS'
         env:
           XA11Y_REQUIRE_ALL_CLI: "1"
-        run: .venv-integ/bin/python tests/harness/launch.py ${{ matrix.app }} python js cli
+        run: .venv-integ/bin/python tests/harness/launch.py ${{ matrix.app }} python js cli js-window python-window
 
       - name: Run integration harness (Windows)
         if: runner.os == 'Windows'
         shell: bash
         env:
           XA11Y_REQUIRE_ALL_CLI: "1"
-        run: .venv-integ/Scripts/python.exe tests/harness/launch.py ${{ matrix.app }} python js cli
+        run: .venv-integ/Scripts/python.exe tests/harness/launch.py ${{ matrix.app }} python js cli js-window python-window
 
   # ── Published end-to-end examples (issue #192) ─────────────────────
   #
@@ -1125,7 +1137,11 @@ jobs:
 
       - name: Install cargo-fuzz
         if: steps.cache-cargo-fuzz.outputs.cache-hit != 'true'
-        run: cargo install cargo-fuzz
+        # --force: hosted ubuntu images now ship a cargo-fuzz binary in
+        # ~/.cargo/bin, and `cargo install` refuses to overwrite an existing
+        # binary even though this step only runs on a cache miss. Overwrite
+        # it; the result is the same binary and this unblocks every run.
+        run: cargo install cargo-fuzz --force
 
       - name: Run fuzz targets
         # A libFuzzer crash exits non-zero and writes a reproducer under

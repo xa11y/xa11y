@@ -34,12 +34,27 @@ pub trait Provider: Send + Sync {
 
     /// Enumerate top-level applications visible to this provider.
     ///
-    /// Backends return one `ElementData` per application — typically with
-    /// `role=Application`, but Windows returns `role=Window` for top-level
-    /// HWNDs because UIA exposes applications as their top-level window. On
-    /// Windows a multi-window process therefore yields one entry per top-level
-    /// window (main window + modal dialog are separate entries; issue #304),
-    /// whereas macOS and Linux return one `Application` element per process.
+    /// Backends return one `ElementData` per application, always with
+    /// `role=Application` as the **enumeration** contract. The direct-attach
+    /// path ([`app_by_pid`](Self::app_by_pid)) is the one exception: macOS
+    /// deliberately preserves `Role::Unknown` for a process that exposes no
+    /// AX application (Window Server), so that `windows()` fails honestly
+    /// instead of pretending the process has no windows. Windows synthesizes
+    /// one Application node per
+    /// process (UIA exposes applications as their top-level windows; the
+    /// provider groups them by pid — and calls the process's first window the
+    /// node's representative — see `xa11y-windows`), so a multi-window process
+    /// yields exactly one entry there, same as macOS. **Linux is the one
+    /// exception**: AT-SPI registers one Application entry per app instance
+    /// that connects, and a single process can appear as several entries
+    /// sharing one pid (compositors, toolkits with per-window registrations),
+    /// each potentially exposing distinct windows. `list_apps` therefore
+    /// returns all of them on Linux, and consumers that need one entry per
+    /// process (window listings, `App::by_pid`-style lookups) must
+    /// deduplicate by process identity (pid + stable element identity) rather
+    /// than assume the list is already one-per-pid. The application's top-level
+    /// windows are its `get_children` results, so `App::windows` is the same
+    /// `get_children` + `Window|Dialog` filter on every platform.
     /// This is the dedicated discovery primitive: it replaces the previous
     /// `find_elements(None, application_selector, .., depth=0)` idiom and
     /// lets each backend batch the platform-specific enumeration (CGWindowList
@@ -51,6 +66,24 @@ pub trait Provider: Send + Sync {
     /// profiles, and silently routing app discovery through `get_children`
     /// would hide the difference from implementors.
     fn list_apps(&self) -> Result<Vec<ElementData>>;
+
+    /// Whether [`list_apps`](Self::list_apps) can expose more than one
+    /// `Application` entry for a single process id.
+    ///
+    /// Only the AT-SPI backend can (a per-process entry plus per-event-loop
+    /// pieces such as a tray or a tooltip context); macOS and Windows
+    /// guarantee one entry per pid. When `false`, [`App::windows_with`]
+    /// skips the same-pid merge — and the full `list_apps` re-enumeration it
+    /// requires — because the calling entry's descendants already cover the
+    /// process, so no cross-entry merge can add anything.
+    ///
+    /// Defaults to `false`. A provider that overrides this with `true` must
+    /// answer `get_children` per same-pid entry and give each entry (and its
+    /// windows) a stable identity durable across `list_apps` calls, since
+    /// the merge deduplicates by that identity.
+    fn splits_app_across_entries(&self) -> bool {
+        false
+    }
 
     /// Find the application owning process `pid` — one attempt, no polling.
     ///
@@ -323,6 +356,60 @@ pub trait Provider: Send + Sync {
     /// here — providers should delegate to the corresponding method.
     fn perform_action(&self, element: &ElementData, action: &str) -> Result<()>;
 
+    // ── Window management ──────────────────────────────────────────
+
+    /// The windows of an application are the `get_children` results of its
+    /// Application element filtered to `Role::Window | Role::Dialog`.
+    /// `App::windows` is that filter; no provider exposes its own
+    /// window-discovery path anymore, because macOS and Windows report one
+    /// Application node per process whose top-level windows are its children
+    /// (Windows synthesizes that Application node and answers
+    /// `get_children(Some(app))` from a process-wide UIA query; see
+    /// `xa11y-windows`).
+    ///
+    /// Linux refines the contract: an app may register several AT-SPI
+    /// Application entries (per-process instance plus per-event-loop pieces
+    /// such as a tray or the GTK IM context), so `App::windows_with` starts
+    /// from this entry's filtered children, then merges the filtered children
+    /// of every same-pid Application entry and deduplicates by stable id (see
+    /// `same_window_identity`). The result is process-complete rather than a
+    /// strict direct-children filter, and merged windows are not this node's
+    /// children, so no single z-order spans them. Providers that split an app
+    /// across entries must answer `get_children` per entry; the merge is
+    /// core's job.
+    ///
+    /// The filter lives in `App::windows_with`, so adding a provider never
+    /// requires an implementation here; `get_children` is the single
+    /// window-discovery primitive on every platform.
+    ///
+    /// Raise / activate the window to the foreground.
+    ///
+    /// Required: every `Provider` implements this explicitly. There is no
+    /// portable default — each platform's activation mechanism is unique
+    /// (AXRaise on macOS, `SetForegroundWindow` on Windows, GrabFocus on
+    /// Linux), and a silent no-op default would hide an unimplemented
+    /// backend (tenet 1).
+    fn raise(&self, element: &ElementData) -> Result<()>;
+
+    /// Minimize the window.
+    fn minimize(&self, element: &ElementData) -> Result<()>;
+
+    /// Maximize the window.
+    fn maximize(&self, element: &ElementData) -> Result<()>;
+
+    /// Restore the window to its normal state (from minimized/maximized).
+    fn restore(&self, element: &ElementData) -> Result<()>;
+
+    /// Close the window.
+    fn close(&self, element: &ElementData) -> Result<()>;
+
+    /// Move the window to the given **logical** screen coordinates (top-left
+    /// origin, same space as [`ElementData::bounds`]).
+    fn move_to(&self, element: &ElementData, x: i32, y: i32) -> Result<()>;
+
+    /// Resize the window to the given **logical** width and height.
+    fn resize_to(&self, element: &ElementData, width: u32, height: u32) -> Result<()>;
+
     // ── Events ──────────────────────────────────────────────────────
 
     /// Subscribe to all accessibility events for an application.
@@ -348,6 +435,13 @@ impl<T: Provider + ?Sized> Provider for &T {
     }
     fn list_apps(&self) -> Result<Vec<ElementData>> {
         (**self).list_apps()
+    }
+    // Delegated explicitly (despite having a default impl) so a concrete
+    // provider's override isn't bypassed when it's used through a shared
+    // reference — the default body on `&T` would re-route and silently
+    // answer `false` for a Linux provider passed by reference.
+    fn splits_app_across_entries(&self) -> bool {
+        (**self).splits_app_across_entries()
     }
     // Delegated explicitly (despite having a default impl) so a concrete
     // provider's PID-direct override isn't bypassed when it's used through a
@@ -436,6 +530,27 @@ impl<T: Provider + ?Sized> Provider for &T {
     }
     fn perform_action(&self, element: &ElementData, action: &str) -> Result<()> {
         (**self).perform_action(element, action)
+    }
+    fn raise(&self, element: &ElementData) -> Result<()> {
+        (**self).raise(element)
+    }
+    fn minimize(&self, element: &ElementData) -> Result<()> {
+        (**self).minimize(element)
+    }
+    fn maximize(&self, element: &ElementData) -> Result<()> {
+        (**self).maximize(element)
+    }
+    fn restore(&self, element: &ElementData) -> Result<()> {
+        (**self).restore(element)
+    }
+    fn close(&self, element: &ElementData) -> Result<()> {
+        (**self).close(element)
+    }
+    fn move_to(&self, element: &ElementData, x: i32, y: i32) -> Result<()> {
+        (**self).move_to(element, x, y)
+    }
+    fn resize_to(&self, element: &ElementData, width: u32, height: u32) -> Result<()> {
+        (**self).resize_to(element, width, height)
     }
     fn subscribe(&self, element: &ElementData) -> Result<Subscription> {
         (**self).subscribe(element)

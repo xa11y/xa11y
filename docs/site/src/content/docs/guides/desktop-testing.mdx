@@ -61,7 +61,7 @@ app = xa11y.App.by_pid(proc.pid, timeout=60.0)
 
 A PID is not always enough on its own.
 
-- **The UI may register as more than one accessibility app.** Some toolkits register top-level windows as *separate* accessibility applications sharing the host PID. On Windows UIA, a Qt dialog can appear as its own app rather than under the main window's tree (see [Accessibility API Quirks](/explanation/accessibility-quirks/)). Match it with a predicate instead of polling `App.list()` by hand:
+- **The UI may register as more than one accessibility application.** Linux can surface *more than one* application node for one host PID — a toolkit may register an extra top-level window as a separate accessibility application under its own app entry (see [Accessibility API Quirks](/explanation/accessibility-quirks/)). On Windows and macOS the process maps to exactly one Application node, so a PID there is unambiguous; on Linux match a specific node with a predicate instead of polling `App.list()` by hand:
 
   ```python
   dialog_app = xa11y.App.find(

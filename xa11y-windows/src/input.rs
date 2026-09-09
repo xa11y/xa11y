@@ -279,11 +279,10 @@ impl InputProvider for WindowsInputProvider {
         // `to` is in logical coordinates (the cross-platform contract, same
         // space as `Element::bounds`). SendInput's absolute normalization runs
         // against the physical virtual-desktop metrics (we are Per-Monitor-V2
-        // aware), so convert logical -> physical first using the DPI of the
-        // monitor under the point.
-        let scale = crate::dpi::scale_for_logical_point(to.x, to.y);
-        let phys = to.to_physical(scale);
-        let (ax, ay) = to_absolute(phys.x, phys.y);
+        // aware), so convert logical -> physical first using the
+        // origin-preserving per-monitor mapping — see `crate::dpi`.
+        let (phys_x, phys_y) = crate::dpi::logical_point_to_physical(to.x, to.y)?;
+        let (ax, ay) = to_absolute(phys_x, phys_y);
         let input = mouse_input(
             MOUSEEVENTF_MOVE.0 | MOUSEEVENTF_ABSOLUTE.0 | MOUSEEVENTF_VIRTUALDESK.0,
             ax,

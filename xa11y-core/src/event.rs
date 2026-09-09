@@ -39,9 +39,11 @@ pub enum EventKind {
     ///   PropertyChanged events. Per-item selection is NOT among them; it
     ///   arrives as `SelectionChanged` from
     ///   UIA_SelectionItem_ElementSelectedEventId instead.
-    /// - macOS: Checked (via AXValueChanged on checkbox/radio) and Busy
-    ///   (via AXElementBusyChanged). Enabled is NOT deliverable via any
-    ///   public app-level macOS notification and will never fire on macOS.
+    /// - macOS: Checked (via AXValueChanged on checkbox/radio), Busy
+    ///   (via AXElementBusyChanged), and Minimized (via
+    ///   AXWindowMiniaturized / AXWindowDeminiaturized). Enabled is NOT
+    ///   deliverable via any public app-level macOS notification and will
+    ///   never fire on macOS.
     StateChanged { flag: StateFlag, value: bool },
 
     /// Children were added to or removed from an element, or the tree
@@ -136,6 +138,18 @@ pub enum StateFlag {
     Modal,
     Required,
     Busy,
+    /// The window was minimized (iconified).
+    Minimized,
+    /// The window was maximized.
+    Maximized,
+    /// The window entered fullscreen.
+    ///
+    /// Never raised: no platform reports a fullscreen state change. The
+    /// Accessibility API has no fullscreen notification, UIA's
+    /// `WindowVisualState` has no fullscreen value, and AT-SPI has no
+    /// fullscreen state bit. macOS exposes fullscreen as the read-only
+    /// `fullscreen` window state (`AXFullScreen`) instead.
+    Fullscreen,
 }
 
 reader_writer_pair! {

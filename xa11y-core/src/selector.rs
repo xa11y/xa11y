@@ -610,6 +610,12 @@ fn resolve_attr(element: &ElementData, name: &str) -> Option<String> {
         "required" => Some(element.states.required.to_string()),
         "busy" => Some(element.states.busy.to_string()),
         "expanded" => element.states.expanded.map(|b| b.to_string()),
+        // Window states are Option<bool>: a platform that cannot report the
+        // state yields `None`, which matches nothing (the same semantics as
+        // `expanded` for non-expandable elements).
+        "minimized" => element.states.minimized.map(|b| b.to_string()),
+        "maximized" => element.states.maximized.map(|b| b.to_string()),
+        "fullscreen" => element.states.fullscreen.map(|b| b.to_string()),
         "checked" => element.states.checked.map(|c| {
             match c {
                 Toggled::On => "on",
@@ -1766,6 +1772,23 @@ mod tests {
         assert_eq!(resolve_attr(&el, "expanded").as_deref(), Some("true"));
         el.states.expanded = Some(false);
         assert_eq!(resolve_attr(&el, "expanded").as_deref(), Some("false"));
+    }
+
+    #[test]
+    fn resolve_window_states_tri_state() {
+        // Window states are Option<bool> like `expanded`: None (unknown,
+        // not a window) matches nothing; a known value is matchable by its
+        // literal.
+        let mut el = element_default();
+        assert_eq!(resolve_attr(&el, "minimized"), None);
+        assert_eq!(resolve_attr(&el, "maximized"), None);
+        assert_eq!(resolve_attr(&el, "fullscreen"), None);
+        el.states.minimized = Some(true);
+        el.states.maximized = Some(false);
+        el.states.fullscreen = Some(true);
+        assert_eq!(resolve_attr(&el, "minimized").as_deref(), Some("true"));
+        assert_eq!(resolve_attr(&el, "maximized").as_deref(), Some("false"));
+        assert_eq!(resolve_attr(&el, "fullscreen").as_deref(), Some("true"));
     }
 
     #[test]

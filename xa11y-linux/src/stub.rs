@@ -168,6 +168,34 @@ impl Provider for LinuxProvider {
         Err(unavailable())
     }
 
+    fn raise(&self, _: &ElementData) -> Result<()> {
+        Err(unavailable())
+    }
+
+    fn minimize(&self, _: &ElementData) -> Result<()> {
+        Err(unavailable())
+    }
+
+    fn maximize(&self, _: &ElementData) -> Result<()> {
+        Err(unavailable())
+    }
+
+    fn restore(&self, _: &ElementData) -> Result<()> {
+        Err(unavailable())
+    }
+
+    fn close(&self, _: &ElementData) -> Result<()> {
+        Err(unavailable())
+    }
+
+    fn move_to(&self, _: &ElementData, _: i32, _: i32) -> Result<()> {
+        Err(unavailable())
+    }
+
+    fn resize_to(&self, _: &ElementData, _: u32, _: u32) -> Result<()> {
+        Err(unavailable())
+    }
+
     fn subscribe(&self, _: &ElementData) -> Result<Subscription> {
         Err(unavailable())
     }

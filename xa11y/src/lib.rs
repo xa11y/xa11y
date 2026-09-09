@@ -718,10 +718,11 @@ mod app_ext {
         /// `timeout` elapses. Pass `Duration::ZERO` for a single attempt with
         /// no waiting. Unlike [`find`](Self::find) with a `|d| d.states.focused`
         /// predicate, this queries the platform foreground mechanism directly,
-        /// so on Windows it returns the exact foreground window even when the
-        /// process owns several top-level windows. See [`App::foreground_with`]
-        /// for the full contract and [`by_name`](Self::by_name) for retry
-        /// semantics.
+        /// so the result is the foreground *process*'s Application node — not
+        /// the exact window holding the foreground; on Windows that is the
+        /// process's synthesized node even when it owns several top-level
+        /// windows. See [`App::foreground_with`] for the full contract and
+        /// [`by_name`](Self::by_name) for retry semantics.
         fn foreground(timeout: Duration) -> Result<Self>;
         /// List all running applications using the global singleton provider.
         fn list() -> Result<Vec<Self>>;
@@ -996,6 +997,28 @@ mod annotated_tests {
 
         fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
             Ok(Vec::new())
+        }
+
+        fn raise(&self, _: &ElementData) -> Result<()> {
+            Err(unsupported_in_fixture())
+        }
+        fn minimize(&self, _: &ElementData) -> Result<()> {
+            Err(unsupported_in_fixture())
+        }
+        fn maximize(&self, _: &ElementData) -> Result<()> {
+            Err(unsupported_in_fixture())
+        }
+        fn restore(&self, _: &ElementData) -> Result<()> {
+            Err(unsupported_in_fixture())
+        }
+        fn close(&self, _: &ElementData) -> Result<()> {
+            Err(unsupported_in_fixture())
+        }
+        fn move_to(&self, _: &ElementData, _: i32, _: i32) -> Result<()> {
+            Err(unsupported_in_fixture())
+        }
+        fn resize_to(&self, _: &ElementData, _: u32, _: u32) -> Result<()> {
+            Err(unsupported_in_fixture())
         }
 
         // This fixture is a tree reader, not an action target: every mutating

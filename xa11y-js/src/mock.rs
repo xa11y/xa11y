@@ -188,6 +188,27 @@ impl xa11y::Provider for DuplicateShellProvider {
         all.push(dup);
         Ok(all)
     }
+    fn raise(&self, e: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.inner.raise(e)
+    }
+    fn minimize(&self, e: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.inner.minimize(e)
+    }
+    fn maximize(&self, e: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.inner.maximize(e)
+    }
+    fn restore(&self, e: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.inner.restore(e)
+    }
+    fn close(&self, e: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.inner.close(e)
+    }
+    fn move_to(&self, e: &xa11y::ElementData, x: i32, y: i32) -> xa11y::Result<()> {
+        self.inner.move_to(e, x, y)
+    }
+    fn resize_to(&self, e: &xa11y::ElementData, w: u32, h: u32) -> xa11y::Result<()> {
+        self.inner.resize_to(e, w, h)
+    }
     fn get_children(
         &self,
         e: Option<&xa11y::ElementData>,

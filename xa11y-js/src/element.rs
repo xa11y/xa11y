@@ -209,6 +209,26 @@ impl Element {
         self.data.states.busy
     }
 
+    /// Whether the window is minimized, or `null` if unknown / not a window.
+    /// A platform that cannot report the state says `null` rather than
+    /// guessing `false`.
+    #[napi(getter)]
+    pub fn minimized(&self) -> Option<bool> {
+        self.data.states.minimized
+    }
+
+    /// Whether the window is maximized, or `null` if unknown / not a window.
+    #[napi(getter)]
+    pub fn maximized(&self) -> Option<bool> {
+        self.data.states.maximized
+    }
+
+    /// Whether the window is fullscreen, or `null` if unknown / not a window.
+    #[napi(getter)]
+    pub fn fullscreen(&self) -> Option<bool> {
+        self.data.states.fullscreen
+    }
+
     // ── Async navigation ────────────────────────────────────────────────
 
     /// Get direct children (lazy — each call re-queries the provider).
@@ -466,6 +486,97 @@ impl Element {
             action,
         ))
     }
+
+    // ── Window management (act on the captured snapshot) ──────────────
+
+    /// Raise this window to the foreground.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn raise(&self) -> AsyncTask<ElementActionTask> {
+        AsyncTask::new(ElementActionTask::nullary(
+            self.data.clone(),
+            self.provider.clone(),
+            ElementActionKind::Raise,
+        ))
+    }
+
+    /// Minimize this window.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn minimize(&self) -> AsyncTask<ElementActionTask> {
+        AsyncTask::new(ElementActionTask::nullary(
+            self.data.clone(),
+            self.provider.clone(),
+            ElementActionKind::Minimize,
+        ))
+    }
+
+    /// Maximize this window.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn maximize(&self) -> AsyncTask<ElementActionTask> {
+        AsyncTask::new(ElementActionTask::nullary(
+            self.data.clone(),
+            self.provider.clone(),
+            ElementActionKind::Maximize,
+        ))
+    }
+
+    /// Restore this window to its normal state (from minimized/maximized).
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn restore(&self) -> AsyncTask<ElementActionTask> {
+        AsyncTask::new(ElementActionTask::nullary(
+            self.data.clone(),
+            self.provider.clone(),
+            ElementActionKind::Restore,
+        ))
+    }
+
+    /// Close this window.
+    #[napi(ts_return_type = "Promise<void>")]
+    pub fn close(&self) -> AsyncTask<ElementActionTask> {
+        AsyncTask::new(ElementActionTask::nullary(
+            self.data.clone(),
+            self.provider.clone(),
+            ElementActionKind::Close,
+        ))
+    }
+
+    /// Move this window to the given logical screen coordinates (top-left
+    /// origin, the same space as `bounds`). Rejects with
+    /// `InvalidActionDataError` unless both coordinates are finite whole
+    /// numbers in the 32-bit signed range.
+    #[napi(
+        ts_args_type = "x: number, y: number",
+        ts_return_type = "Promise<void>"
+    )]
+    pub fn move_to(&self, x: f64, y: f64) -> napi::Result<AsyncTask<ElementActionTask>> {
+        let x = crate::checked_window_coord(x, "x")?;
+        let y = crate::checked_window_coord(y, "y")?;
+        Ok(AsyncTask::new(ElementActionTask::with_point(
+            self.data.clone(),
+            self.provider.clone(),
+            ElementActionKind::MoveTo,
+            x,
+            y,
+        )))
+    }
+
+    /// Resize this window to the given logical width and height. Rejects
+    /// with `InvalidActionDataError` unless both dimensions are positive
+    /// whole numbers (and no larger than the 32-bit unsigned range).
+    #[napi(
+        ts_args_type = "width: number, height: number",
+        ts_return_type = "Promise<void>"
+    )]
+    pub fn resize_to(&self, width: f64, height: f64) -> napi::Result<AsyncTask<ElementActionTask>> {
+        let width = crate::checked_window_dimension(width, "width")?;
+        let height = crate::checked_window_dimension(height, "height")?;
+        Ok(AsyncTask::new(ElementActionTask::with_size(
+            self.data.clone(),
+            self.provider.clone(),
+            ElementActionKind::ResizeTo,
+            width,
+            height,
+        )))
+    }
 }
 
 // ── Task implementations ────────────────────────────────────────────────
@@ -623,6 +734,13 @@ pub enum ElementActionKind {
     TypeText,
     SelectText,
     PerformAction,
+    Raise,
+    Minimize,
+    Maximize,
+    Restore,
+    Close,
+    MoveTo,
+    ResizeTo,
 }
 
 pub struct ElementActionTask {
@@ -632,6 +750,8 @@ pub struct ElementActionTask {
     text: Option<String>,
     num: Option<f64>,
     range: Option<(u32, u32)>,
+    point: Option<(i32, i32)>,
+    size: Option<(u32, u32)>,
 }
 
 impl ElementActionTask {
@@ -647,6 +767,8 @@ impl ElementActionTask {
             text: None,
             num: None,
             range: None,
+            point: None,
+            size: None,
         }
     }
     fn with_text(
@@ -662,6 +784,8 @@ impl ElementActionTask {
             text: Some(text),
             num: None,
             range: None,
+            point: None,
+            size: None,
         }
     }
     fn with_num(
@@ -677,6 +801,8 @@ impl ElementActionTask {
             text: None,
             num: Some(num),
             range: None,
+            point: None,
+            size: None,
         }
     }
     fn with_range(
@@ -693,6 +819,44 @@ impl ElementActionTask {
             text: None,
             num: None,
             range: Some((start, end)),
+            point: None,
+            size: None,
+        }
+    }
+    fn with_point(
+        data: xa11y::ElementData,
+        provider: Arc<dyn xa11y::Provider>,
+        kind: ElementActionKind,
+        x: i32,
+        y: i32,
+    ) -> Self {
+        Self {
+            data,
+            provider,
+            kind,
+            text: None,
+            num: None,
+            range: None,
+            point: Some((x, y)),
+            size: None,
+        }
+    }
+    fn with_size(
+        data: xa11y::ElementData,
+        provider: Arc<dyn xa11y::Provider>,
+        kind: ElementActionKind,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        Self {
+            data,
+            provider,
+            kind,
+            text: None,
+            num: None,
+            range: None,
+            point: None,
+            size: Some((width, height)),
         }
     }
 }
@@ -726,6 +890,27 @@ impl Task for ElementActionTask {
             }
             ElementActionKind::PerformAction => {
                 element.perform_action(self.text.as_deref().unwrap_or(""))
+            }
+            ElementActionKind::Raise => element.raise(),
+            ElementActionKind::Minimize => element.minimize(),
+            ElementActionKind::Maximize => element.maximize(),
+            ElementActionKind::Restore => element.restore(),
+            ElementActionKind::Close => element.close(),
+            ElementActionKind::MoveTo => {
+                // `(0, 0)` is a valid coordinate, so a missing payload must
+                // fail loudly rather than silently relocate the window
+                // (tenet 1). The public `move_to` always supplies a point;
+                // reaching here is a task-construction bug.
+                let (x, y) = self.point.ok_or_else(|| {
+                    napi::Error::from_reason("MoveTo task requires a point payload")
+                })?;
+                element.move_to(x, y)
+            }
+            ElementActionKind::ResizeTo => {
+                let (w, h) = self.size.ok_or_else(|| {
+                    napi::Error::from_reason("ResizeTo task requires a size payload")
+                })?;
+                element.resize_to(w, h)
             }
         };
         r.map_err(map_err)

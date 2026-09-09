@@ -8,7 +8,8 @@ CLI usage:
     python tests/harness/launch.py <app> [suite ...]
 
     <app>     one of: qt, gtk, cocoa, tauri, electron, accesskit, egui, winforms, wpf
-    [suite]   optional subset: python js cli  (default: all applicable)
+    [suite]   optional subset: python js cli js-window python-window
+              (default: all applicable)
 
 Programmatic usage:
     from tests.harness.launch import run
@@ -56,6 +57,14 @@ STARTUP_TIMEOUT = float(
 CONTENT_READY_TIMEOUT = float(
     os.environ.get("XA11Y_TEST_CONTENT_TIMEOUT", STARTUP_TIMEOUT)
 )
+
+# Per-suite wall-clock budget. Every suite is a subprocess against the shared
+# app, and a test that blocks in a native accessibility call waiting on a
+# wedged app has no timeout to interrupt it — the suite would hang the whole
+# cell (a macOS cell once ran out a suite for 35+ minutes). The budget turns
+# that into a hard failure with the wedged suite named. Generous: the longest
+# healthy suite (the python suite, ~100 tests) finishes in minutes.
+SUITE_TIMEOUT_S = float(os.environ.get("XA11Y_TEST_SUITE_TIMEOUT", "900"))
 
 # Apps with a real, activatable macOS window whose tests depend on holding the
 # frontmost slot — input_sim delivers CGEvents to the frontmost app, and focus
@@ -524,6 +533,19 @@ def _suite_command(suite: str, report_path: Path) -> list[str]:
     if suite == "python":
         return [
             sys.executable, "-m", "pytest", "tests/suites/python/", "-v",
+            "-m", "not window_mutating",
+            f"--junitxml={report_path}",
+        ]
+    if suite == "python-window":
+        # The mutating window verbs live in their own pytest run, ordered
+        # after every other suite: the harness runs all suites against one
+        # shared app instance, and minimize/restore/resize churn the
+        # UIA/AX cache in a way that made the *next* suite's action tests
+        # flaky (see tests/suites/python/test_window_mutating.py).
+        return [
+            sys.executable, "-m", "pytest",
+            "tests/suites/python/test_window_mutating.py", "-v",
+            "-m", "window_mutating",
             f"--junitxml={report_path}",
         ]
     if suite == "cli":
@@ -535,10 +557,26 @@ def _suite_command(suite: str, report_path: Path) -> list[str]:
         js_files = sorted(
             str(p.relative_to(PROJECT_ROOT))
             for p in (PROJECT_ROOT / "tests" / "suites" / "js").glob("*.test.js")
+            if "mutating" not in p.name
         )
         # Two reporters: `spec` keeps the human-readable log on stdout (the
         # default reporter is replaced as soon as --test-reporter is passed),
         # `junit` gives us the machine-readable copy to audit.
+        return [
+            "node", "--test",
+            "--test-reporter=spec", "--test-reporter-destination=stdout",
+            "--test-reporter=junit", f"--test-reporter-destination={report_path}",
+            *js_files,
+        ]
+    if suite == "js-window":
+        # Same final-position rationale as the python-window suite; see
+        # tests/suites/js/07_window_mutating.test.js.
+        js_files = [
+            str(
+                (PROJECT_ROOT / "tests" / "suites" / "js" / "07_window_mutating.test.js")
+                .relative_to(PROJECT_ROOT)
+            )
+        ]
         return [
             "node", "--test",
             "--test-reporter=spec", "--test-reporter-destination=stdout",
@@ -613,9 +651,12 @@ def declared_suite_skips(app: str) -> set[str]:
     """
     if app != "accesskit":
         return set()
-    skips = {"cli", "js"}
+    # The mutating window suites target the same bindings as their plain
+    # siblings, so they inherit the same declared skips: the CLI/JS surfaces
+    # never run for AccessKit, and the Python surface runs on Linux only.
+    skips = {"cli", "js", "js-window"}
     if sys.platform != "linux":
-        skips.add("python")
+        skips.update({"python", "python-window"})
     return skips
 
 
@@ -713,7 +754,27 @@ def _run_suites(
 
         _sample_content_state(proc.pid, content_ready_selector, f"before {suite}")
         print(f"\n=== Running {suite} suite against {app} ===\n")
-        result = subprocess.run(cmd, env=suite_env, cwd=str(PROJECT_ROOT))
+        try:
+            result = subprocess.run(cmd, env=suite_env, cwd=str(PROJECT_ROOT), timeout=SUITE_TIMEOUT_S)
+        except subprocess.TimeoutExpired:
+            # A suite that outlives the budget is wedged — either the app's
+            # accessibility backend stopped answering (blocking AX calls have
+            # no interruptible timeout of their own) or the suite's own poll
+            # loop is stuck. The app is in an unknown state, so stop it here:
+            # running the remaining suites against it would each burn their
+            # own full budget failing the same way.
+            print(
+                f"\nERROR: {suite} suite exceeded {SUITE_TIMEOUT_S:.0f}s and was killed; "
+                f"the {app} app looks wedged, aborting the remaining suites."
+            )
+            _kill_app(proc)
+            ledger.append((suite, _RAN, f"failed (timeout after {SUITE_TIMEOUT_S:.0f}s)"))
+            for rest in suites[suites.index(suite) + 1 :]:
+                if rest in declared_skips:
+                    continue
+                ledger.append((rest, _DID_NOT_RUN, "aborted: earlier suite timed out (app wedged)"))
+            worst_rc = max(worst_rc, 1)
+            break
         _sample_content_state(proc.pid, content_ready_selector, f"after {suite}")
         rc = result.returncode
         if rc == 0:
@@ -749,7 +810,17 @@ VALID_APPS = (
     "winforms",
     "wpf",
 )
-VALID_SUITES = ("python", "js", "cli")
+VALID_SUITES = ("python", "js", "cli", "js-window", "python-window")
+# The mutating window suites deliberately run last: every suite shares one
+# app process, and window-state verbs churn the UIA/AX cache in a way that
+# made a following suite's action tests flaky.
+#
+# js-window runs before python-window because the Cocoa python-window suite
+# ends by entering fullscreen and the harness window server never completes
+# the exit transition (see test_fullscreen_state_enters_and_reads_true),
+# leaving the app fullscreen for whatever runs after it. python-window is
+# last so the fullscreen state is the final thing the harness observes
+# before tearing the app down.
 DEFAULT_SUITES = list(VALID_SUITES)
 
 
@@ -758,7 +829,7 @@ def run(app_name: str, suites: Sequence[str] | None = None) -> int:
 
     Args:
         app_name: One of the supported app identifiers.
-        suites:   Ordered list of suite names to run. Defaults to all three.
+        suites:   Ordered list of suite names to run. Defaults to all five.
 
     Returns:
         The worst (highest) exit code from all suite runs, or 0 if all passed.
@@ -817,7 +888,7 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="suite",
         help=(
             f"Suites to run: {', '.join(VALID_SUITES)}. "
-            "Defaults to all three if omitted."
+            "Defaults to all five if omitted."
         ),
     )
     return parser

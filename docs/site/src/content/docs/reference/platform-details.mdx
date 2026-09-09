@@ -15,7 +15,7 @@ xa11y normalizes platform-specific APIs into a unified interface. This page docu
 | xa11y Role | macOS (AX) | Linux (AT-SPI) | Windows (UIA) |
 | --- | --- | --- | --- |
 | `Window` | AXWindow, AXDrawer | window, frame | WindowControlType |
-| `Application` | AXApplication | application | *(root element)* |
+| `Application` | AXApplication | application | *(synthesized per process; UIA has no Application accessible)* |
 | `Button` | AXButton | push button | ButtonControlType |
 | `CheckBox` | AXCheckBox | check box, check menu item | CheckBoxControlType |
 | `RadioButton` | AXRadioButton | radio button, radio menu item | RadioButtonControlType |
@@ -74,11 +74,59 @@ Roles not recognized by a platform map to `Unknown`.
 | `ShowMenu` | AXShowMenu | menu, showmenu, popup | ExpandCollapsePattern |
 | `ScrollIntoView` | *(no-op, no AX equivalent)* | Component.ScrollTo | ScrollItemPattern |
 
+Window verbs map differently again, because each platform's window control
+API is separate from its element-action interface:
+
+| xa11y Action | macOS | Linux (AT-SPI) | Windows (UIA) |
+| --- | --- | --- | --- |
+| `Raise` | activate app *(set AXFrontmost)*, restore if minimized, then AXRaise | Component.GrabFocus *(same path as Focus)* | restore if minimized, then SetForegroundWindow and SetFocus |
+| `Minimize` | set AXMinimized=true | *(unsupported)* | WindowPattern.SetWindowVisualState(Minimized) |
+| `Maximize` | press the window's AXZoomButton | *(unsupported)* | WindowPattern.SetWindowVisualState(Maximized) |
+| `Restore` | clear AXMinimized; clear AXFullScreen *(the zoom press's state)* | *(unsupported)* | WindowPattern.SetWindowVisualState(Normal) |
+| `Close` | press the AXCloseButton | *(unsupported)* | WindowPattern.Close |
+| `MoveTo` | set AXPosition | *(unsupported)* | TransformPattern.Move *(physical pixel conversion)* |
+| `ResizeTo` | set AXSize | *(unsupported)* | TransformPattern.Resize *(physical pixel conversion)* |
+
+Window state reads follow the same split. `minimized`, `maximized`, and
+`fullscreen` are `Option<bool>`: `None` means *unknown*, either because the
+element is not a window or because the platform cannot report the state.
+macOS reads `minimized` and `fullscreen`
+(`AXMinimized` / `AXFullScreen`) on window-like elements; there is no AX
+attribute for the zoom state, so `maximized` is always `None` on macOS.
+After a `maximize`, `fullscreen` reports the state instead.
+Windows reads `minimized` and `maximized` from
+`WindowPattern.CurrentWindowVisualState` but cannot report `fullscreen`;
+Linux reads `minimized` from the AT-SPI `ICONIFIED` bit and cannot report
+`maximized` or `fullscreen`. `modal` is `WindowPattern.CurrentIsModal` on
+Windows and `AXModal` on macOS.
+
 ## Platform caveats
 
 ### ScrollIntoView
 
 macOS has no direct equivalent, so this action is a **no-op**. On Linux it uses `Component.ScrollTo` with top-edge alignment. On Windows it uses `ScrollItemPattern.ScrollIntoView`.
+
+### Raise: AXRaise does not activate
+
+`AXRaise` on a window only re-raises the window within the window list of its
+own app, and it answers success even while the app sits in the background. A
+raise performed on a background app's window visibly does nothing. `Raise` on
+macOS activates the app first (sets `AXFrontmost` on the application element),
+then raises the window. A failure to activate is a surfaceable error, never a
+silent success.
+
+### `Maximize`: the zoom button is the zoom surface
+
+macOS exposes the window's zoom through its **zoom button** (`AXZoomButton`,
+the documented convenience attribute that every window with a zoom button
+exposes), not through a zoom-state attribute: `Maximize` presses it, and the
+state the press leaves behind is `AXFullScreen`, which `Restore` clears.
+Windows that expose no `AXZoomButton` report `maximize` and `restore` as
+`ActionNotSupported`, never a silent no-op. `maximized` cannot be read back
+on macOS. The state is reported as `fullscreen` instead. There is no
+zoom-state AX attribute: `AXZoomed` matches the AppKit *property*
+`NSWindow.isZoomed`, is not declared in the SDK headers, and live windows
+answer `kAXErrorAttributeUnsupported` for it.
 
 ### SetValue: text vs numeric
 
@@ -104,7 +152,7 @@ Text is inserted through the accessibility API. Keyboard events are never simula
 All platforms report bounds as logical (device-independent) screen coordinates with origin at the top-left of the primary display, and `Screenshot.scale` carries the physical-to-logical ratio for mapping bounds onto captured pixels. Note:
 
 - **macOS** reports in points, its native logical unit. On Retina displays, 1 point = 2 physical pixels.
-- **Windows** reports device-independent pixels (DIPs), and `scale` is the display's DPI scaling (e.g. `1.5` at 150%).
+- **Windows** reports device-independent pixels (DIPs), and `scale` is the display's DPI scaling (e.g. `1.5` at 150%). On a mixed-DPI multi-monitor desktop each monitor keeps its **physical origin** in the logical space and only its extent is divided by that monitor's scale, so monitor logical rectangles are non-overlapping. A scaled monitor left of or above the primary keeps its own origin, so a gap sits between its logical rectangle and the primary's. A point in a gap resolves via the physical query, whose answer is approximate there. A window on a 200% secondary monitor at physical x = 2000 reports logical x = 1960, not 1000.
 - **Linux** reports logical pixels where the HiDPI scale is reliably detectable, and falls back to physical at scale `1.0` otherwise. See [Coordinates and HiDPI](/reference/platform-details/#coordinates-and-hidpi) for exactly when.
 - Multi-monitor setups can produce negative coordinates for displays positioned left of or above the primary.
 
@@ -115,6 +163,36 @@ Platforms use different attributes to determine an element's `name`:
 - **macOS** uses AXTitle, then AXDescription, then AXValue (for text elements).
 - **Linux** uses Accessible.Name, then Description. For `StaticText` with no name, the first portion of the value is used.
 - **Windows** uses the CurrentName property.
+
+### Application nodes (Windows)
+
+UI Automation has no `Application` accessible. Processes surface only as
+their top-level windows, so xa11y-windows *synthesizes* one `Application`
+node per process (the unified shape every platform reports), with the
+process's windows as its children. The node carries no bounds (UIA has no
+process geometry) and no window actions or window-state flags. Its handle
+is a tagged synthetic identifier and backs no live UIA element, so acting
+on the app node itself is refused with `ActionNotSupported` (the core role
+guard rejects it before any provider is reached, on every platform);
+enumerate the windows and act on a window child instead. The handle is
+not PID-encoded: the PID is the node's `pid` field, and the handle itself
+is a per-run counter tagged as synthetic.
+
+The node's `raw` map records how it was built:
+
+| raw key | Value |
+|---|---|
+| `uia_synthesized` | `true`. The marker for a node that was synthesized and backs no live UIA element. |
+| `uia_name_source` | `"process"` (executable stem from `OpenProcess` + `QueryFullProcessImageNameW`), or `"window_title"` (the representative window's title, used when the process cannot be opened) |
+| `uia_process_name` | full executable path, when the process could be queried |
+
+The representative window is the process's first top-level window in z-order.
+
+Windows subscriptions register their UIA handlers on every current top-level
+window of the process, and a desktop-scoped open/close watch attaches windows
+opened after `subscribe` (and drops closed ones, so a closed window stops
+producing state deltas). Events from sibling windows follow the
+same "the process" semantics as the main window.
 
 ### Checked state
 

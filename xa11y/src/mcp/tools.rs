@@ -23,7 +23,8 @@ use super::base64;
 use super::events::{Registry, BUFFER_CAPACITY, EXPIRY, MAX_SUBSCRIPTIONS};
 use crate::cli::{
     self, parse_button, parse_held, parse_key_name, resolve_app, resolve_target, CliError,
-    CliResult, Opts, Target, ACTIONS_REQUIRING_VALUE, ACTION_NAMES,
+    CliResult, Opts, Target, ACTIONS_REQUIRING_AT, ACTIONS_REQUIRING_SIZE, ACTIONS_REQUIRING_VALUE,
+    ACTION_NAMES,
 };
 use crate::{
     App, AppExt, ClickOptions, ClickTarget, DragOptions, Element, Locator, Rect, ScrollDelta,
@@ -176,7 +177,10 @@ match in document order, 1-based, and is the only pseudo-class — `:checked`, \
 ordinary attributes: `checked` takes `\"on\"` / `\"off\"` / `\"mixed\"`, and \
 `\"true\"` / `\"false\"` work for `enabled`, `visible`, `focused`, \
 `focusable`, `selected`, `editable`, `expanded`, `required`, `busy`, \
-`modal` and `active`.";
+`modal`, `active`, and the window states `minimized`, `maximized`, and \
+`fullscreen`. A window state that the platform cannot report reads as absent \
+(no attribute) rather than `\"false\"`, so match `minimized=\"true\"` if you \
+need to be sure the state is known.";
 
 /// What one tool call produced.
 #[derive(Debug)]
@@ -272,6 +276,7 @@ impl Xa11yTools {
 const TOOL_NAMES: &[&str] = &[
     "apps",
     "shell",
+    "windows",
     "tree",
     "find",
     "action",
@@ -303,6 +308,7 @@ impl ToolHost for Xa11yTools {
         match name {
             "apps" => tool_apps(),
             "shell" => tool_shell(),
+            "windows" => tool_windows(args),
             "tree" => tool_tree(args),
             "find" => tool_find(args),
             "action" => tool_action(args),
@@ -327,9 +333,9 @@ impl ToolHost for Xa11yTools {
 
 // ── Tool definitions ────────────────────────────────────────────────────────
 
-/// Properties naming the target — an application or a shell surface — shared
-/// by every a11y tool.
-fn app_target_properties() -> Map<String, Value> {
+/// Properties naming the *application* half of a target — `app` and `pid` —
+/// shared by every a11y tool.
+fn app_properties() -> Map<String, Value> {
     let mut props = Map::new();
     props.insert(
         "app".into(),
@@ -355,6 +361,13 @@ fn app_target_properties() -> Map<String, Value> {
                 .into(),
         ),
     );
+    props
+}
+
+/// Properties naming the target — an application or a shell surface — shared
+/// by every a11y tool.
+fn app_target_properties() -> Map<String, Value> {
+    let mut props = app_properties();
     props.insert(
         "shell".into(),
         json!({
@@ -437,6 +450,44 @@ fn tool_definition(name: &str) -> Value {
              again, and target the flyout that has appeared with `shell: \"flyout\"`.",
             json!({ "type": "object", "additionalProperties": false }),
         ),
+        "windows" => {
+            // Application-only target: `windows` lists application windows,
+            // never shell surfaces, so `shell` is not advertised here (it is
+            // a real filter the handler does not implement — advertising it
+            // and then ignoring it would let a model's `{"shell": "taskbar"}`
+            // silently widen into "all windows"). The handler rejects it
+            // defensively too, in case a client sends it anyway.
+            let mut props = app_properties();
+            props.insert(
+                "limit".into(),
+                FIND_LIMIT.property(format!(
+                    "Maximum windows to return. Default {FIND_DEFAULT_LIMIT}."
+                )),
+            );
+            tool(
+                "windows",
+                "List top-level windows",
+                "List the top-level windows of one application (give `app` or \
+                 `pid`) or of every running application when neither is given. \
+                 Each window reports its `name`, `bounds`, `states` (including \
+                 `minimized` / `maximized` when the platform can report them) \
+                 and the actions it advertises — the same shape `find` returns \
+                 for elements. Results are capped at the `limit`, and \
+                 `truncated` in the result says whether anything was dropped. \
+                 If one application cannot be enumerated, it is skipped and \
+                 reported in `errors` (with `count` covering only the windows \
+                 that made it), rather than failing the whole listing. \
+                 `errors` is capped at the same `limit`, with \
+                 `errors_truncated` saying whether error entries were \
+                 dropped. \
+                 Windows whose state is unknown to the platform simply omit \
+                 those states rather than reporting a guessed value.\n\n\
+                 The verbs `action` accepts (a window selector) cover this \
+                 surface: `raise`, `minimize`, `maximize`, `restore`, `close`, \
+                 `move-to` (with `at`) and `resize-to` (with `size`).",
+                object_schema(props, &[]),
+            )
+        }
         "tree" => {
             let mut props = app_target_properties();
             props.insert(
@@ -506,8 +557,13 @@ fn tool_definition(name: &str) -> Value {
                     "type": "string",
                     "enum": ACTION_NAMES,
                     "description": format!(
-                        "Accessibility action to perform. These require `value`: {}.",
-                        ACTIONS_REQUIRING_VALUE.join(", ")
+                        "Accessibility action to perform. These require `value`: {}. \
+                         `{at_verb}` requires `at` (X,Y) and `{size_verb}` requires \
+                         `size` (W,H): the platform needs coordinates and cannot be \
+                         told a feature off the action name alone.",
+                        ACTIONS_REQUIRING_VALUE.join(", "),
+                        at_verb = ACTIONS_REQUIRING_AT[0],
+                        size_verb = ACTIONS_REQUIRING_SIZE[0],
                     ),
                 }),
             );
@@ -522,7 +578,7 @@ fn tool_definition(name: &str) -> Value {
                          than acted on. Narrow it with an attribute filter or pick \
                          one with `:nth(n)`. Examples: `button[name=\"Save As\"]`, \
                          `text_field[name=\"Search\"]`, `check_box[checked=\"off\"]`, \
-                         `radio_button:nth(2)`.\n\n{SELECTOR_SYNTAX}"
+                         `radio_button:nth(2)`, `window[name=\"Settings\"]`.\n\n{SELECTOR_SYNTAX}"
                     ),
                 }),
             );
@@ -534,6 +590,22 @@ fn tool_definition(name: &str) -> Value {
                                     and `type-text`, a number for `set-numeric-value` (e.g. \
                                     \"88\", within the element's `min_value`..`max_value`), or \
                                     `START,END` character offsets for `select-text`.",
+                }),
+            );
+            props.insert(
+                "at".into(),
+                json!({
+                    "type": "string",
+                    "description": "`X,Y` screen coordinates (logical points) for `move-to`. \
+                                    Required for `move-to`; ignored otherwise.",
+                }),
+            );
+            props.insert(
+                "size".into(),
+                json!({
+                    "type": "string",
+                    "description": "`W,H` logical dimensions for `resize-to`, both positive. \
+                                    Required for `resize-to`; ignored otherwise.",
                 }),
             );
             tool(
@@ -548,7 +620,12 @@ fn tool_definition(name: &str) -> Value {
                      several is refused with an `ambiguous_selector` failure listing \
                      what it matched, rather than applied to the first of them.\n\n\
                      Auto-waits for the selector to match an element that is visible and \
-                     enabled, re-resolving as it polls, and only then acts. The wait runs \
+                     enabled, re-resolving as it polls, and only then acts. The window verbs \
+                     (`raise`, `minimize`, `maximize`, `restore`, `close`, `move-to`, \
+                     `resize-to`) and `scroll-into-view` are the one exception: they wait \
+                     only for `enabled`, because a minimized window is legitimately not \
+                     visible and must still be reachable by the very verbs that restore or \
+                     raise it. The wait runs \
                      up to the default timeout, currently {timeout}. Set {timeout_env} \
                      (in seconds) in the environment the server is launched with to \
                      change it; no tool argument does. A call that is going to fail \
@@ -1160,6 +1237,26 @@ fn target(args: &Value) -> CliResult<Target> {
     resolve_target(&opts)
 }
 
+/// Parse the target application arguments (`app` / `pid`) into an [`Opts`],
+/// naming the surface's own error instead of the CLI's `--app` / `--pid`
+/// flags — which this surface does not have, and a model reading one has
+/// nothing to reach for. Resolution itself stays in the CLI's `resolve_app`
+/// / `resolve_apps`, so the two surfaces cannot drift on what `app` means.
+fn target_opts(args: &Value) -> CliResult<Opts> {
+    let opts = Opts {
+        app: opt_str(args, "app")?.map(str::to_string),
+        pid: pid_arg(args)?,
+        ..Default::default()
+    };
+    if opts.app.is_none() && opts.pid.is_none() {
+        return Err(usage(
+            "specify \"app\" (application name, matched exactly) or \"pid\" \
+             (process id); the `apps` tool lists both for every running application",
+        ));
+    }
+    Ok(opts)
+}
+
 /// The target's identity, as every element-returning result reports it.
 ///
 /// An application keeps the `application` / `pid` fields it has always
@@ -1346,8 +1443,28 @@ fn tool_action(args: &Value) -> CliResult<ToolOutput> {
     let action = req_str(args, "action")?;
     let selector = req_str(args, "selector")?;
     let value = opt_str(args, "value")?;
+    let at = opt_str(args, "at")?;
+    let size = opt_str(args, "size")?;
+    // Field parsing and the action-payload parse come before target
+    // resolution (parse arguments before the first OS call): a malformed
+    // `at` / `size` / `value` is a usage error, and it must win over an
+    // app-resolution failure rather than be masked by one — a model that
+    // typed a bad point must be told the point is bad, not that an app was
+    // not found.
+    let action_args = cli::parse_action_args(action, value, at, size)?;
     let target = target(args)?;
+    tool_action_parsed(&target, action, selector, &action_args)
+}
 
+/// The resolving-and-dispatching half of [`tool_action`] against an explicit
+/// target — the unit-testable sibling, which is what lets the mock provider
+/// exercise the geometry arguments off a real desktop.
+fn tool_action_parsed(
+    target: &Target,
+    action: &str,
+    selector: &str,
+    action_args: &cli::ActionArgs,
+) -> CliResult<ToolOutput> {
     let locator = target.locator(selector);
     // The schema promises "must match exactly one element", so enforce it here
     // rather than letting the locator's document-order first-match stand in
@@ -1362,7 +1479,7 @@ fn tool_action(args: &Value) -> CliResult<ToolOutput> {
         return Err(ambiguous(selector, &matches));
     }
 
-    cli::perform_action(&locator, action, value)?;
+    cli::perform_action(&locator, action, action_args)?;
 
     // `ok` reports that the platform accepted the call. Whether the
     // application did anything with it is only knowable by re-reading, which
@@ -1371,8 +1488,92 @@ fn tool_action(args: &Value) -> CliResult<ToolOutput> {
     out.insert("ok".into(), json!(true));
     out.insert("action".into(), json!(action));
     out.insert("selector".into(), json!(selector));
-    target_fields(&target, &mut out);
+    target_fields(target, &mut out);
     Ok(ToolOutput::json(Value::Object(out)))
+}
+
+/// `windows` tool — enumerate top-level windows (winlenium's list-windows).
+///
+/// Without `app`/`pid` this lists the windows of every running application;
+/// with either it lists those of that one application. Each application is
+/// one process node whose `windows()` are its top-level windows. Bounded by
+/// `limit` with an explicit `truncated` flag: a silently shortened result
+/// reads as a complete one, which is worse than no result.
+fn tool_windows(args: &Value) -> CliResult<ToolOutput> {
+    // `windows` enumerates application windows; a shell target is not one.
+    // The schema does not advertise `shell`, but a client may send it anyway
+    // (MCP input schemas are not always enforced) — refuse it rather than
+    // silently falling into the unfiltered all-apps listing (tenet 1).
+    if args.get("shell").is_some() {
+        return Err(usage(
+            "`windows` lists application windows, not shell surfaces; call `shell` and \
+             pass the result to `tree` / `find` / `action`",
+        ));
+    }
+    let limit = opt_usize(args, "limit", FIND_DEFAULT_LIMIT, FIND_LIMIT)?;
+    let apps = if args.get("app").is_some() || args.get("pid").is_some() {
+        // Both filters resolve to one App entry: `pid` goes through
+        // `App::by_pid` directly (no foreground query), and the entry's
+        // `windows()` is process-complete on Linux because
+        // `App::windows_with` merges every same-PID AT-SPI entry itself —
+        // the stable-identity dedup in tool_windows_with then only guards
+        // against listing the same process twice.
+        cli::resolve_apps(&target_opts(args)?)?
+    } else {
+        App::list()?
+    };
+    tool_windows_with(&apps, limit)
+}
+
+/// The window-listing half against an explicit app list — the unit-testable
+/// sibling of [`tool_windows`], which only resolves where the apps come from.
+fn tool_windows_with(apps: &[App], limit: usize) -> CliResult<ToolOutput> {
+    let mut windows: Vec<Element> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    for app in apps {
+        // A transient failure in one app (dying process, flaky bridge) must
+        // not abort a listing that already holds healthy windows: skip it,
+        // keep the successful windows, and surface the failure in `errors`
+        // so the partial result is honest, not silently shortened.
+        //
+        // One Application node per process is the contract on Windows/macOS,
+        // but Linux multi-registration can surface several entries for one
+        // pid whose windows overlap — deduplicate by stable identity (same
+        // key `cmd_windows` uses) BEFORE the limit, so duplicates cannot
+        // burn a slot or inflate `count`.
+        match app.windows() {
+            Ok(ws) => windows.extend(ws),
+            Err(e) => errors.push(format!("{}: {e}", app.name)),
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    windows.retain(|w| seen.insert(cli::window_key(w.data())));
+
+    let total = windows.len();
+    let listed: Vec<Value> = windows
+        .iter()
+        .take(limit)
+        .map(|w| element_data_json(w))
+        .collect();
+
+    // The error list is capped like the window list: each entry carries an
+    // `Error` whose diagnosis can be large (a bounded snapshot, but a
+    // snapshot), and one entry per inaccessible/dying process on a busy
+    // desktop is unbounded — a silently complete-looking result with an
+    // arbitrarily large payload violates the bounded-result contract.
+    // Truncation is reported explicitly, never silently.
+    let total_errors = errors.len();
+    let listed_errors: Vec<String> = errors.into_iter().take(limit).collect();
+
+    Ok(ToolOutput::json(json!({
+        "count": total,
+        "returned": listed.len(),
+        "truncated": total > listed.len(),
+        "windows": listed,
+        "errors": listed_errors,
+        "errors_truncated": total_errors > listed_errors.len(),
+    })))
 }
 
 /// One line naming a candidate, carrying only what tells it apart from its
@@ -1868,6 +2069,17 @@ fn states_json(states: &crate::StateSet) -> Value {
     }
     if let Some(expanded) = states.expanded {
         out.insert("expanded".into(), json!(expanded));
+    }
+    // Window states are Option<bool>: `None` means "the platform cannot
+    // report this" — send only what is known, never a guessed false.
+    for (key, value) in [
+        ("minimized", states.minimized),
+        ("maximized", states.maximized),
+        ("fullscreen", states.fullscreen),
+    ] {
+        if let Some(v) = value {
+            out.insert(key.into(), json!(v));
+        }
     }
     Value::Object(out)
 }
@@ -2927,6 +3139,203 @@ mod tests {
         assert!(
             description.contains("not that anything changed"),
             "{description}"
+        );
+    }
+
+    // ── Window management ───────────────────────────────────────────────────
+
+    /// One mock-backed app target plus the provider handle, so a test can
+    /// inspect exactly what reached the provider.
+    fn mock_target_app() -> (Target, std::sync::Arc<xa11y_core::mock::MockProvider>) {
+        let provider = xa11y_core::mock::build_provider();
+        // Coerce to the trait object explicitly: `App::list_with` takes
+        // `Arc<dyn Provider>`, and `Arc::clone` would otherwise infer its
+        // target from the parameter and reject the concrete handle.
+        let trait_provider: std::sync::Arc<dyn xa11y_core::Provider> = provider.clone();
+        let app = App::list_with(trait_provider)
+            .expect("the mock must list its app")
+            .into_iter()
+            .next()
+            .expect("the mock must vend one app");
+        (Target::App(app), provider)
+    }
+
+    #[test]
+    fn windows_tool_lists_the_mock_windows_with_an_honest_bounded_response() {
+        let (target, _provider) = mock_target_app();
+        let Target::App(app) = target else {
+            panic!("the mock target must be an app");
+        };
+        let apps = vec![app];
+        let out =
+            tool_windows_with(&apps, FIND_DEFAULT_LIMIT).expect("the windows listing must succeed");
+        let structured = out.structured.expect("windows results are structured");
+        assert_eq!(structured["count"], json!(1), "{structured}");
+        assert_eq!(structured["returned"], json!(1), "{structured}");
+        assert_eq!(structured["truncated"], json!(false), "{structured}");
+        assert_eq!(structured["errors"], json!([]), "{structured}");
+        // The mock app's single window must be the one listed.
+        let listed = structured["windows"]
+            .as_array()
+            .expect("windows is an array")
+            .clone();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0]["name"], json!("Main Window"), "{structured}");
+        // Bounding: a limit below the count truncates and says so.
+        let truncated =
+            tool_windows_with(&apps, 0).expect("a zero-limit listing is still a valid call");
+        let structured = truncated.structured.expect("structured");
+        assert_eq!(structured["count"], json!(1), "{structured}");
+        assert_eq!(structured["returned"], json!(0), "{structured}");
+        assert_eq!(structured["truncated"], json!(true), "{structured}");
+    }
+
+    #[test]
+    fn windows_tool_surfaces_non_application_entries_in_errors() {
+        // The app-node unification made window/dialog entry shapes impossible
+        // from `App::list` — and it also took away the per-pid dedup that
+        // existed only to collapse those window-like entries. A forged
+        // window entry passed straight at the listing is therefore surfaced
+        // in `errors` (`ActionNotSupported`, role named) rather than
+        // silently reporting "no windows" or being quietly deduplicated
+        // away: the partial result stays honest (tenet 1).
+        let provider = xa11y_core::mock::build_provider();
+        let trait_provider: std::sync::Arc<dyn xa11y_core::Provider> = provider.clone();
+        let mut main = App::list_with(trait_provider)
+            .expect("mock must list its app")
+            .into_iter()
+            .next()
+            .expect("mock must vend one app");
+        main.data.role = crate::Role::Window;
+        let out = tool_windows_with(&[main], FIND_DEFAULT_LIMIT).expect("the listing must succeed");
+        let structured = out.structured.expect("structured");
+        assert_eq!(structured["count"], json!(0), "{structured}");
+        let errors = structured["errors"].as_array().expect("errors is an array");
+        assert!(
+            !errors.is_empty(),
+            "a non-application entry must surface in errors"
+        );
+        assert!(
+            errors[0]
+                .as_str()
+                .expect("error renderings are strings")
+                .contains("ActionNotSupported")
+                || errors[0]
+                    .as_str()
+                    .expect("error renderings are strings")
+                    .contains("not supported"),
+            "the error must name the refused action, got: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn windows_tool_deduplicates_overlapping_entries_of_one_pid() {
+        // Linux multi-registration: one process surfaces several Application
+        // entries whose windows() overlap. Two entries backed by the same
+        // provider are exactly that shape — same pid, same windows() result —
+        // and the dedup must collapse them before the limit so a duplicate
+        // can neither appear in the result nor burn a slot.
+        let provider = xa11y_core::mock::build_provider();
+        let trait_provider: std::sync::Arc<dyn xa11y_core::Provider> = provider.clone();
+        let first = App::list_with(trait_provider.clone())
+            .expect("mock must list its app")
+            .into_iter()
+            .next()
+            .expect("mock must vend one app");
+        let pid = first.pid.expect("mock app must carry a pid");
+        let second = App::by_pid_with(trait_provider, pid, std::time::Duration::ZERO)
+            .expect("mock must resolve its app by pid");
+        assert_eq!(first.pid, second.pid, "both entries must share the pid");
+
+        let out = tool_windows_with(&[first, second], FIND_DEFAULT_LIMIT)
+            .expect("the listing must succeed");
+        let structured = out.structured.expect("windows results are structured");
+        let windows = structured["windows"]
+            .as_array()
+            .expect("windows is an array");
+        assert_eq!(structured["count"], json!(1), "{structured}");
+        assert_eq!(windows.len(), 1, "{structured}");
+        assert_eq!(structured["truncated"], json!(false), "{structured}");
+        assert_eq!(structured["errors"], json!([]), "{structured}");
+    }
+
+    #[test]
+    fn windows_tool_schema_has_no_shell_property() {
+        // `windows` lists application windows and does not implement shell
+        // targets; advertising `shell` and then ignoring it would let a
+        // model's `{"shell": "taskbar"}` silently widen into "all windows".
+        let props = tool_definition("windows")["inputSchema"]["properties"].clone();
+        assert!(
+            props.get("shell").is_none(),
+            "the windows schema must not advertise shell: {props}"
+        );
+        assert!(props.get("app").is_some(), "app must be available: {props}");
+        assert!(props.get("pid").is_some(), "pid must be available: {props}");
+        assert!(
+            props.get("limit").is_some(),
+            "limit must be available: {props}"
+        );
+    }
+
+    #[test]
+    fn windows_tool_rejects_a_shell_target() {
+        // A client that sends `shell` anyway (MCP input schemas are not
+        // always enforced) gets a refusal naming the flag, not the
+        // unfiltered all-apps listing.
+        let err = tool_windows(&json!({ "shell": "taskbar" }))
+            .expect_err("a shell target must be refused by `windows`");
+        assert!(err.to_string().contains("shell"), "{err}");
+    }
+
+    #[test]
+    fn action_geometry_rejects_malformed_at_during_parse_before_the_provider_is_touched() {
+        // `parse_action_args` runs before the target is resolved (parse
+        // arguments before the first OS call) — a malformed `at` is a usage
+        // error, and no verb reaches the provider.
+        let (_target, provider) = mock_target_app();
+        let err = cli::parse_action_args("move-to", None, Some("12,not-a-number"), None)
+            .expect_err("malformed --at must be refused");
+        assert!(err.to_string().contains("--at"), "{err}");
+        assert!(
+            provider.actions().is_empty(),
+            "no action may reach the provider: {:?}",
+            provider.actions()
+        );
+        // The same ordering at the tool boundary: a malformed payload is
+        // refused before target resolution.
+        let tool_err = tool_action(&json!({
+            "action": "move-to",
+            "selector": "window",
+            "at": "12,not-a-number",
+        }))
+        .expect_err("malformed --at must be refused");
+        assert!(tool_err.to_string().contains("--at"), "{tool_err}");
+    }
+
+    #[test]
+    fn action_geometry_reaches_the_window_verb_with_valid_arguments() {
+        let (target, provider) = mock_target_app();
+        let move_args = cli::parse_action_args("move-to", None, Some("10,20"), None)
+            .expect("a valid move-to must parse");
+        tool_action_parsed(&target, "move-to", "window", &move_args)
+            .expect("a valid move-to must succeed");
+        let resize_args = cli::parse_action_args("resize-to", None, None, Some("800,600"))
+            .expect("a valid resize-to must parse");
+        tool_action_parsed(&target, "resize-to", "window", &resize_args)
+            .expect("a valid resize-to must succeed");
+        let actions = provider.actions();
+        assert!(
+            actions
+                .iter()
+                .any(|(_, name, data)| name == "move_to" && data.as_deref() == Some("10,20")),
+            "the dispatching must reach the move_to verb with the parsed point: {actions:?}"
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|(_, name, data)| name == "resize_to" && data.as_deref() == Some("800x600")),
+            "the dispatching must reach the resize_to verb with the parsed size: {actions:?}"
         );
     }
 

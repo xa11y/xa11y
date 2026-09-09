@@ -449,6 +449,27 @@ mod tests {
             all.push(dup);
             Ok(all)
         }
+        fn raise(&self, e: &ElementData) -> Result<()> {
+            self.inner.raise(e)
+        }
+        fn minimize(&self, e: &ElementData) -> Result<()> {
+            self.inner.minimize(e)
+        }
+        fn maximize(&self, e: &ElementData) -> Result<()> {
+            self.inner.maximize(e)
+        }
+        fn restore(&self, e: &ElementData) -> Result<()> {
+            self.inner.restore(e)
+        }
+        fn close(&self, e: &ElementData) -> Result<()> {
+            self.inner.close(e)
+        }
+        fn move_to(&self, e: &ElementData, x: i32, y: i32) -> Result<()> {
+            self.inner.move_to(e, x, y)
+        }
+        fn resize_to(&self, e: &ElementData, w: u32, h: u32) -> Result<()> {
+            self.inner.resize_to(e, w, h)
+        }
         fn get_children(&self, e: Option<&ElementData>) -> Result<Vec<ElementData>> {
             self.inner.get_children(e)
         }
@@ -526,6 +547,27 @@ mod tests {
                 code: 55,
                 message: "shell enumeration failed".to_string(),
             })
+        }
+        fn raise(&self, e: &ElementData) -> Result<()> {
+            self.inner.raise(e)
+        }
+        fn minimize(&self, e: &ElementData) -> Result<()> {
+            self.inner.minimize(e)
+        }
+        fn maximize(&self, e: &ElementData) -> Result<()> {
+            self.inner.maximize(e)
+        }
+        fn restore(&self, e: &ElementData) -> Result<()> {
+            self.inner.restore(e)
+        }
+        fn close(&self, e: &ElementData) -> Result<()> {
+            self.inner.close(e)
+        }
+        fn move_to(&self, e: &ElementData, x: i32, y: i32) -> Result<()> {
+            self.inner.move_to(e, x, y)
+        }
+        fn resize_to(&self, e: &ElementData, w: u32, h: u32) -> Result<()> {
+            self.inner.resize_to(e, w, h)
         }
         fn get_children(&self, e: Option<&ElementData>) -> Result<Vec<ElementData>> {
             self.inner.get_children(e)
@@ -706,6 +748,27 @@ mod tests {
                     data.name = None;
                 }
                 Ok(all)
+            }
+            fn raise(&self, e: &ElementData) -> Result<()> {
+                self.inner.raise(e)
+            }
+            fn minimize(&self, e: &ElementData) -> Result<()> {
+                self.inner.minimize(e)
+            }
+            fn maximize(&self, e: &ElementData) -> Result<()> {
+                self.inner.maximize(e)
+            }
+            fn restore(&self, e: &ElementData) -> Result<()> {
+                self.inner.restore(e)
+            }
+            fn close(&self, e: &ElementData) -> Result<()> {
+                self.inner.close(e)
+            }
+            fn move_to(&self, e: &ElementData, x: i32, y: i32) -> Result<()> {
+                self.inner.move_to(e, x, y)
+            }
+            fn resize_to(&self, e: &ElementData, w: u32, h: u32) -> Result<()> {
+                self.inner.resize_to(e, w, h)
             }
             fn get_children(&self, e: Option<&ElementData>) -> Result<Vec<ElementData>> {
                 self.inner.get_children(e)

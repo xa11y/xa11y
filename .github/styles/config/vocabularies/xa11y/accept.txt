@@ -99,6 +99,7 @@ runtime
 stdout
 subprocess
 substring
+surfaceable
 surfaceably
 teardown
 tearoff

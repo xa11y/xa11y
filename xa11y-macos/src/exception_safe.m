@@ -447,6 +447,26 @@ CFTypeRef safe_ax_value_create_cf_range(CFIndex location, CFIndex length) {
     }
 }
 
+// Create an AXValue containing a CGPoint (for AXPosition).
+CFTypeRef safe_ax_value_create_cg_point(double x, double y) {
+    @try {
+        CGPoint point = CGPointMake(x, y);
+        return AXValueCreate(kAXValueCGPointType, &point);
+    } @catch (NSException *e) {
+        return NULL;
+    }
+}
+
+// Create an AXValue containing a CGSize (for AXSize).
+CFTypeRef safe_ax_value_create_cg_size(double width, double height) {
+    @try {
+        CGSize size = CGSizeMake(width, height);
+        return AXValueCreate(kAXValueCGSizeType, &size);
+    } @catch (NSException *e) {
+        return NULL;
+    }
+}
+
 // ── Screen Capture (ScreenCaptureKit) ────────────────────────────────────────
 
 // Capture the primary display (or a sub-rect in logical screen points) into an

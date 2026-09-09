@@ -30,6 +30,7 @@ pytestmark = pytest.mark.timeout(120)
 EXPECTED_TOOLS = [
     "apps",
     "shell",
+    "windows",
     "tree",
     "find",
     "action",
@@ -305,6 +306,62 @@ def test_the_shell_tool_states_its_contract(run_client):
     assert "only while it is open" in description
     assert "never opens or presses anything" in description
     assert "Show Hidden Icons" in description, "spell the overflow workflow out"
+
+
+def test_the_windows_tool_round_trips_through_a_real_client(run_client):
+    """Either answer is informative: this suite runs with no desktop at all.
+
+    The `windows` tool's structured response (count/returned/truncated/errors/
+    windows) must parse through the SDK whether it enumerates the desktop or
+    fails — a truncated flag a model cannot parse is a silently shortened
+    result, and an omitted `errors` field reads as "no failures".
+    """
+    result = run_client(lambda c: c.call_tool("windows", {}))
+    structured = result.structured_content
+    assert structured is not None, "the SDK must be able to parse structuredContent"
+    if result.is_error:
+        assert structured["kind"] and structured["message"]
+        return
+    assert structured["count"] == len(structured["windows"])
+    assert structured["returned"] == len(structured["windows"])
+    assert isinstance(structured["truncated"], bool)
+    assert isinstance(structured["errors"], list)
+    assert all(w["role"] for w in structured["windows"]), (
+        "a listed window carries at least its role"
+    )
+
+
+def test_the_windows_tool_takes_the_app_and_pid_arguments(run_client):
+    """The filtered path must be valid against the schema a client checks."""
+    schema = _tool(run_client, "windows").input_schema
+    jsonschema.validate({"pid": 1}, schema)
+    jsonschema.validate({"limit": 10}, schema)
+    jsonschema.validate({"pid": 1, "limit": 10}, schema)
+    # `limit` below the declared minimum must be rejected by a validating
+    # client before it ever reaches the server.
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate({"limit": 0}, schema)
+
+
+def test_the_action_schema_declares_the_geometry_arguments(run_client):
+    """A validating client may send `at`/`size`; the handler must accept them.
+
+    The dispatch is what `tests/suites/cli/test_actions.py` and the mock-level
+    Rust tests guard; here the schema contract is the question — a model that
+    cannot send a move without discovering the argument exists spends calls
+    doing it.
+    """
+    action = _tool(run_client, "action")
+    properties = action.input_schema["properties"]
+    assert "at" in properties, "move-to needs its X,Y"
+    assert "size" in properties, "resize-to needs its W,H"
+    jsonschema.validate(
+        {"action": "move-to", "selector": "window", "at": "10,20"}, action.input_schema
+    )
+    jsonschema.validate(
+        {"action": "resize-to", "selector": "window", "size": "800,600"},
+        action.input_schema,
+    )
 
 
 def test_the_element_tools_take_a_shell_surface_as_a_target(run_client):

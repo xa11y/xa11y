@@ -24,6 +24,7 @@
 //!     PropertyChanged(Name)                → NameChanged
 //!     PropertyChanged(IsEnabled)           → StateChanged{Enabled}
 //!     PropertyChanged(ExpandCollapseState) → StateChanged{Expanded}
+//!     PropertyChanged(WindowVisualState)   → StateChanged{Minimized|Maximized}
 //!     UIA_Text_TextChangedEventId          → TextChanged
 //!     UIA_NotificationEventId              → Announcement
 //!     UIA_LiveRegionChangedEventId         → Announcement
@@ -34,6 +35,15 @@
 //! only native Win32/WPF controls would raise — notably the menu
 //! open/close pair (UIA_MenuOpenedEventId / UIA_MenuClosedEventId).
 //! Our provider still registers them so non-AccessKit apps get them.
+//!
+//! The same holds for the window visual state: AccessKit's IWindowProvider
+//! returns `not_supported` for `WindowVisualState` and `invalid_operation`
+//! for `SetVisualState` (it supports the pattern for dialogs only), so the
+//! AccessKit app can neither be minimized through UIA nor raise the
+//! `PropertyChanged(WindowVisualState)` the provider now watches. The
+//! registration/translation wiring is unit-tested in `xa11y-windows` and
+//! end-to-end coverage lives with the native-framework apps (the
+//! `windows-latest × wpf` / `× winforms` pytest cells).
 //!
 //! Unlike the macOS tests, these tests MUST NOT catch Error::Timeout
 //! and pass silently — a hard panic on timeout is the only way to

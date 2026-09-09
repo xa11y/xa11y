@@ -157,6 +157,18 @@ State flags, matched as the strings `'true'` and `'false'`:
 | `busy` | |
 | `expanded` | Absent on elements with no expand/collapse concept, which then match nothing |
 
+Window states are also `Option<bool>`: `None` means the platform cannot
+report that state (Linux cannot report `maximized` or `fullscreen` at all,
+and Windows cannot report `fullscreen`). An element whose state is unknown
+matches nothing, so `[minimized='false']` and `[minimized='true']` both
+exclude windows the platform cannot describe:
+
+| Attribute | Notes |
+| --- | --- |
+| `minimized` | Absent when unknown / not a window |
+| `maximized` | Absent when unknown / not a window |
+| `fullscreen` | Absent when unknown / not a window |
+
 One tri-state flag:
 
 | Attribute | Values |

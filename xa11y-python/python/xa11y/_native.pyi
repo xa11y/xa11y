@@ -236,11 +236,13 @@ class App:
         :meth:`list` and :meth:`find`. A point-in-time snapshot taken when the
         ``App`` was resolved.
 
-        On Windows apps are top-level windows, so the foreground process can own
-        several entries; tagging is window-precise, so only the entry actually
-        in the foreground reports ``is_foreground`` — not every window of the
-        process. Use :meth:`foreground` to resolve the exact foreground window
-        directly.
+        Tagging is window-precise. On Windows apps surface as one synthesized
+        ``Application`` node per process, so a pid match there is unambiguous;
+        on Linux the AT-SPI registry can surface several entries for one pid,
+        and only the entry reporting the window-level ``active`` flag gets
+        ``is_foreground``. Use :meth:`foreground` to resolve the foreground
+        application directly, then pick the exact foreground window from its
+        ``windows()``.
         """
     @property
     def focused(self) -> bool:
@@ -302,10 +304,15 @@ class App:
     def foreground(*, timeout: float | None = None) -> App:
         """Resolve the application that currently holds the system foreground.
 
-        Queries the platform's foreground mechanism directly, so it returns the
-        exact foreground window on Windows and stays reliable when an app shows
-        a modal dialog. "Nothing focused" retries until ``timeout``; see
-        ``by_name`` for ``timeout`` semantics. The returned app has
+        Queries the platform's foreground mechanism directly rather than
+        enumerating and tagging by pid. The result is the foreground
+        *process*'s ``Application`` node — one per process on every platform —
+        not the exact window holding the focus; on Windows that is the
+        synthesized node of the foreground process (the modal case, issues
+        #304/#305), and this stays reliable when an app shows a modal dialog.
+        To reach the exact foreground window, call ``windows()`` and pick the
+        entry reporting ``active``. "Nothing focused" retries until ``timeout``;
+        see ``by_name`` for ``timeout`` semantics. The returned app has
         ``is_foreground == True``.
         """
     @staticmethod
@@ -322,6 +329,21 @@ class App:
         """Subscribe to accessibility events from this application."""
     def children(self) -> list[Element]:
         """Get direct children (typically windows) of this application."""
+    def windows(self) -> list[Element]:
+        """List the top-level windows of this application.
+
+        Each call queries the provider; results are not cached. The windows
+        are the application's top-level windows with role ``window`` or
+        ``dialog``, in enumeration order. On Windows the application entry is
+        a synthesized process node whose children are the process's top-level
+        windows (main window plus modal dialogs). On Linux the answer is
+        process-complete: ``App::windows_with`` merges the filtered children
+        of every same-pid AT-SPI Application entry (an app that registers
+        several entries reports its whole process), so the results need not
+        be the direct children of this node and no single z-order spans them.
+        Calling ``windows`` on a non-application element fails with
+        ``ActionNotSupportedError``.
+        """
     def as_element(self) -> Element:
         """Get an :class:`Element` handle for the application root.
 
@@ -516,6 +538,19 @@ class Element:
     def required(self) -> bool: ...
     @property
     def busy(self) -> bool: ...
+    @property
+    def minimized(self) -> bool | None:
+        """Whether the window is minimized.
+
+        ``None`` means unknown (the element is not a window, or the platform
+        cannot report the state). Never a guessed ``False``.
+        """
+    @property
+    def maximized(self) -> bool | None:
+        """Whether the window is maximized. ``None`` = unknown / not a window."""
+    @property
+    def fullscreen(self) -> bool | None:
+        """Whether the window is fullscreen. ``None`` = unknown / not a window."""
     def children(self) -> list[Element]:
         """Get direct children (lazy — each call queries the provider)."""
     def parent(self) -> Element | None:
@@ -576,6 +611,28 @@ class Element:
         """Select the text range from ``start`` to ``end`` (0-based offsets)."""
     def perform_action(self, action: str) -> None:
         """Perform an action by ``snake_case`` name."""
+    def raise_(self) -> None:
+        """Raise this window to the foreground.
+
+        Named with a trailing underscore because ``raise`` is a Python
+        keyword. The platform action recorded is still ``"raise"``.
+        """
+    def minimize(self) -> None:
+        """Minimize this window."""
+    def maximize(self) -> None:
+        """Maximize this window."""
+    def restore(self) -> None:
+        """Restore this window to its normal state (from minimized/maximized)."""
+    def close(self) -> None:
+        """Close this window."""
+    def move_to(self, x: int, y: int) -> None:
+        """Move this window to the given logical screen coordinates (top-left origin)."""
+    def resize_to(self, width: int, height: int) -> None:
+        """Resize this window to the given logical width and height.
+
+        Raises ``InvalidActionDataError`` if either dimension is 0.
+        ``OverflowError`` if either is negative or exceeds ``u32``.
+        """
     def __repr__(self) -> str: ...
     def __str__(self) -> str: ...
 
@@ -661,6 +718,29 @@ class Locator:
         """Select a text range within the matched element (0-based offsets)."""
     def perform_action(self, action: str) -> None:
         """Perform an action by snake_case name."""
+    def raise_(self) -> None:
+        """Raise the matched window to the foreground.
+
+        Named with a trailing underscore because ``raise`` is a Python
+        keyword. The platform action recorded is still ``"raise"``.
+        """
+    def minimize(self) -> None:
+        """Minimize the matched window."""
+    def maximize(self) -> None:
+        """Maximize the matched window."""
+    def restore(self) -> None:
+        """Restore the matched window to its normal state."""
+    def close(self) -> None:
+        """Close the matched window."""
+    def move_to(self, x: int, y: int) -> None:
+        """Move the matched window to the given logical screen coordinates (top-left origin)."""
+    def resize_to(self, width: int, height: int) -> None:
+        """Resize the matched window to the given logical dimensions.
+
+        Raises ``InvalidActionDataError`` if either dimension is 0, before
+        any auto-wait polling begins. ``OverflowError`` if either is negative
+        or exceeds ``u32``.
+        """
     def wait_visible(self, timeout: float | None = None) -> Element:
         """Wait until the element is visible, polling the provider.
 

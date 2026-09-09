@@ -17,6 +17,7 @@
 //!     Object:StateChanged(focused,true)     → FocusChanged + StateChanged{Focused}
 //!     Object:StateChanged(checked,_)        → StateChanged{Checked}
 //!     Object:StateChanged(enabled,_)        → StateChanged{Enabled}
+//!     Object:StateChanged(iconified,_)      → StateChanged{Minimized}
 //!     Object:PropertyChange(accessible-name) → NameChanged
 //!     Object:ValueChanged (slider/range)    → ValueChanged
 //!     Object:ValueChanged (text role)       → ValueChanged + TextChanged

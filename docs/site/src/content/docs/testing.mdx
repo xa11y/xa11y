@@ -48,15 +48,15 @@ UI Automation tree, not a fixture shaped to match the code.
 
 | Test app | Toolkit | Linux | macOS | Windows | Features covered |
 | --- | --- | :---: | :---: | :---: | --- |
-| `accesskit` | Rust + winit (AccessKit) | ✓ | ✓&nbsp;† | ✓ | compat, actions, events, errors, screenshot |
-| `qt` | PySide6 (Qt 6) | ✓ | ✓ | ✓ | compat, actions, events, errors |
-| `gtk` | GTK4 (PyGObject) | ✓ | ○ | ○ | compat, actions, events, errors |
-| `cocoa` | Swift / AppKit | ○ | ✓ | ○ | compat, actions, events, errors |
-| `tauri` | Rust + WebView | ✓ | ✓ | ✓ | compat, actions, events, errors, input_sim, screenshot |
-| `electron` | Chromium / Node | ✓ | ○ | ○ | compat, actions, errors, input_sim, screenshot |
-| `egui` | Rust immediate-mode (eframe) | ✓ | ✓ | ✓ | compat, actions, events, errors |
-| `winforms` | .NET Windows Forms | ○ | ○ | ✓ | compat, actions, events, errors |
-| `wpf` | .NET WPF | ○ | ○ | ✓ | compat, actions, events, errors |
+| `accesskit` | Rust + winit (AccessKit) | ✓ | ✓&nbsp;† | ✓ | compat, actions, events, errors, screenshot, windows |
+| `qt` | PySide6 (Qt 6) | ✓ | ✓ | ✓ | compat, actions, events, errors, windows |
+| `gtk` | GTK4 (PyGObject) | ✓ | ○ | ○ | compat, actions, events, errors, windows |
+| `cocoa` | Swift / AppKit | ○ | ✓ | ○ | compat, actions, events, errors, windows |
+| `tauri` | Rust + WebView | ✓ | ✓ | ✓ | compat, actions, events, errors, input_sim, screenshot, windows |
+| `electron` | Chromium / Node | ✓ | ○ | ○ | compat, actions, errors, input_sim, screenshot, windows |
+| `egui` | Rust immediate-mode (eframe) | ✓ | ✓ | ✓ | compat, actions, events, errors, windows |
+| `winforms` | .NET Windows Forms | ○ | ○ | ✓ | compat, actions, events, errors, windows |
+| `wpf` | .NET WPF | ○ | ○ | ✓ | compat, actions, events, errors, windows |
 
 A hollow circle means the combination is not run in CI. † AccessKit on macOS
 runs locally through `./scripts/run_integ_tests_macos.sh` rather than in CI,
@@ -67,9 +67,11 @@ Reading the feature column: `compat` is tree structure, roles, and widget
 discovery; `actions` is press, focus, toggle, type, and expand/collapse;
 `events` is subscription and state-change detection; `errors` is invalid
 selectors, selector misses, wait timeouts, and unsupported actions;
-`input_sim` and `screenshot` are the platform input and capture surfaces. Not
-every language suite covers every feature listed for an app. The per-language
-breakdown is in [`tests/matrix.yaml`](https://github.com/xa11y/xa11y/blob/main/tests/matrix.yaml),
+`input_sim` and `screenshot` are the platform input and capture surfaces;
+`windows` is window discovery, state inspection, and the window verbs
+(`raise`, `minimize`, `maximize`, `restore`, `close`, and move/resize). Not
+every language suite covers every feature listed for an app. The
+per-language breakdown is in [`tests/matrix.yaml`](https://github.com/xa11y/xa11y/blob/main/tests/matrix.yaml),
 which is the authoritative index and the file this table summarises.
 
 Which suite drives which app varies. Qt, GTK, Cocoa, Tauri, WinForms, and WPF

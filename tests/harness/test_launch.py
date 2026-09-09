@@ -153,6 +153,40 @@ def test_ledger_reports_every_requested_suite(monkeypatch, capsys):
         assert suite in out
 
 
+# ── Per-suite hang bound ─────────────────────────────────────────────────────
+
+
+def test_suite_timeout_kills_the_app_and_aborts_remaining_suites(monkeypatch, capsys):
+    """A wedged suite must not hang the cell: the budget kills it, the app is
+    stopped, and the remaining suites are reported as intentionally not run."""
+    killed = []
+
+    def run_that_times_out(cmd, *args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd, launch.SUITE_TIMEOUT_S)
+
+    monkeypatch.setattr(launch.subprocess, "run", run_that_times_out)
+    monkeypatch.setattr(launch, "find_cli_binary", lambda: None)
+    monkeypatch.setattr(launch, "_kill_app", lambda proc: killed.append(proc.pid))
+
+    rc = launch._run_suites("qt", ["python", "js", "cli"], _FakeProc(), "app")
+
+    assert rc == 1
+    assert killed == [4242], "the wedged app must be stopped before the run ends"
+    out = capsys.readouterr().out
+    assert "exceeded" in out
+    assert "aborting the remaining suites" in out
+    assert "python" in out and "failed (timeout" in out
+    assert "js" in out and "DID NOT RUN" in out
+    assert "cli" in out and "DID NOT RUN" in out
+
+
+def test_suite_timeout_is_env_overridable():
+    """A slow runner must be able to buy more time without a code change —
+    the same surface the two startup budgets use."""
+    source = inspect.getsource(launch)
+    assert "XA11Y_TEST_SUITE_TIMEOUT" in source
+
+
 # ── Zero-executed-test guard ─────────────────────────────────────────────────
 
 

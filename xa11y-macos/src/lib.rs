@@ -8,6 +8,8 @@ mod input;
 mod screenshot;
 
 #[cfg(target_os = "macos")]
+pub use ax::accessibility_grant_instructions;
+#[cfg(target_os = "macos")]
 pub use ax::MacOSProvider;
 #[cfg(target_os = "macos")]
 pub use input::MacOSInputProvider;
@@ -151,6 +153,27 @@ mod stub {
             unreachable!()
         }
         fn perform_action(&self, _: &ElementData, _: &str) -> Result<()> {
+            unreachable!()
+        }
+        fn raise(&self, _: &ElementData) -> Result<()> {
+            unreachable!()
+        }
+        fn minimize(&self, _: &ElementData) -> Result<()> {
+            unreachable!()
+        }
+        fn maximize(&self, _: &ElementData) -> Result<()> {
+            unreachable!()
+        }
+        fn restore(&self, _: &ElementData) -> Result<()> {
+            unreachable!()
+        }
+        fn close(&self, _: &ElementData) -> Result<()> {
+            unreachable!()
+        }
+        fn move_to(&self, _: &ElementData, _: i32, _: i32) -> Result<()> {
+            unreachable!()
+        }
+        fn resize_to(&self, _: &ElementData, _: u32, _: u32) -> Result<()> {
             unreachable!()
         }
         fn subscribe(&self, _: &ElementData) -> Result<Subscription> {

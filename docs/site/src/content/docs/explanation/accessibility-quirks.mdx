@@ -165,6 +165,12 @@ dialog, transient system popups (**UAC prompts, credential dialogs, Windows
 Update**) will flip a window's role out from under you. Desktop state is not
 deterministic.
 
+Because UIA has no `Application` accessible, xa11y groups a process's
+top-level HWNDs into **one synthesized `Application` node** whose children are
+those windows — so the window role is still what you see in `App.windows()`,
+but it is never the app entry itself (see [Application nodes
+(Windows)](/reference/platform-details/#application-nodes-windows)).
+
 ### Windows: `ControlType.Custom` often means "no control type at all"
 
 UIA's default value for the `ControlType` property is `Custom` (50025), so an
@@ -239,16 +245,54 @@ text role directly. Derive single-line vs multi-line from the `MULTI_LINE`
 state bit, which is consistent across GTK (`GtkEntry`/`GtkTextView`),
 Qt (`QLineEdit`/`QPlainTextEdit`), and every WebKit version.
 
-## One process, several "applications"
+## One process, several windows
 
-### Windows: Qt registers dialogs as separate UIA apps
+### Windows: Qt dialogs are top-level windows of the process
 
 A `QDialog` opened inside a host process (e.g. a Qt submitter dialog inside
-a C++ DCC application) can register with UIA as its **own top-level
-"application"**, sharing the host's PID but living outside the host app's
-element tree. Searching the host app for the dialog finds nothing, and you
-must attach to the dialog's own app. Predicate-based discovery handles this
-without hand-rolling an enumeration loop:
+a C++ DCC application) registers with UIA as its **own top-level window**,
+sharing the host's PID but living outside the host app's element tree. UIA
+has no `Application` accessible, so xa11y groups a process's top-level
+windows into one synthesized Application node — the dialog is therefore
+reachable through the host app's `App.windows()`, not through
+`App.find(...)` by the dialog's name. Do not rely on an app-name lookup
+for such a dialog anyway: the synthesized node is named by the process
+executable stem when the process can be opened, but falls back to the
+representative window's title when it cannot (a restricted or
+inaccessible process); either way the dialog name is not the discovery
+key. Discovery goes through the process's window list:
+
+```python
+app = xa11y.App.by_pid(proc.pid)
+dialog = next(
+    w for w in app.windows() if w.name.startswith("My Submitter")
+)
+```
+
+On macOS AX the same dialog is an ordinary child window of the host app, so
+a process's `App.windows()` finds it there too.
+
+Both of the following are confirmed against live trees:
+
+- **The dialog's accessible name is the `QApplication` display name, not
+  `windowTitle()`.** The dialog window surfaces
+  `QGuiApplication::applicationDisplayName()` (typically the app name +
+  version), so match on a name *prefix* rather than the window title you
+  see in the title bar.
+- **Child popups may be hosted elsewhere.** A `QMessageBox` shown from such
+  a dialog can appear in the *host* application's tree, not the dialog's
+  own subtree. When the owner is unpredictable, search from the system root
+  (module-level `xa11y.locator(...)`) and wait for the popup's body text.
+
+### Linux: more than one app node per PID
+
+Linux can surface **more than one application node for one host PID**: the
+AT-SPI registry may register an extra top-level window as a separate
+accessibility application of its own. `App.list()` can then list two entries
+for one process, and a pid match alone cannot tell which one is the
+foreground — the entry-level `active` flag disambiguates (`App.find` with a
+`focused` predicate sees the same flag). Match a specific node by name when
+the platform hands back several:
 
 ```python
 dialog_app = xa11y.App.find(
@@ -257,21 +301,17 @@ dialog_app = xa11y.App.find(
 )
 ```
 
-On macOS AX the same dialog is an ordinary child window of the host app, and
-so dialog discovery is one of the few places where platform-specific code
-is legitimately required.
-
-Both of the following are confirmed against live trees:
-
-- **The dialog's accessible name is the `QApplication` display name, not
-  `windowTitle()`.** Both the UIA "app" and the dialog window inside it
-  surface `QGuiApplication::applicationDisplayName()` (typically the app
-  name + version), so match on a name *prefix* rather than the window
-  title you see in the title bar.
-- **Child popups may be hosted elsewhere.** A `QMessageBox` shown from such
-  a dialog can appear in the *host* application's tree, not the dialog's UIA
-  app. When the owner is unpredictable, search from the system root
-  (module-level `xa11y.locator(...)`) and wait for the popup's body text.
+Both claims are exercised by the Rust integration suite: with a second window
+open, `foreground_scenario_two_windows` (`xa11y/tests/integ/multi_window.rs`)
+asserts that every pid-matching `App.list()` entry is an `Application` node
+and that `active` disambiguates — the pid-matching entries report
+`is_foreground()` on the one the platform deems frontmost — and
+`find_by_focused_resolves_foreground_app` (`xa11y/tests/integ/tree.rs`)
+covers the `App.find` with a `focused` predicate. Neither test asserts the
+entry count: the multi-registration shape is toolkit-dependent, so the count
+is deliberately not part of the contract (see
+`by_pid_windows_are_process_complete_on_linux` for the dialog-as-own-node
+variant).
 
 ### Qt forms don't label their fields
 
@@ -600,9 +640,16 @@ In containers, Docker's `/dev` tmpfs isolation hides host-created
   pixels, so hit-testing against a screenshot taken in pixels will be off by the
   scale factor.
 - **Windows and Linux report logical (device-independent) coordinates**, with
-  `Screenshot.scale` bridging to physical pixels. On Linux the scale is exact
-  where reliably detectable and falls back to `1.0` (coordinates then physical)
-  otherwise. See [platform details](/reference/platform-details/#coordinates-and-hidpi).
+  `Screenshot.scale` bridging to physical pixels. On Windows a mixed-DPI
+  multi-monitor desktop preserves each monitor's physical origin in the
+  logical space (only its extent is divided by that monitor's scale), so the
+  monitors' logical rects are non-overlapping; a scaled monitor placed left of
+  or above the primary preserves its origin but not the full span toward the
+  primary, so its rect stops short and can leave a logical gap (gap points
+  resolve via the physical query). On Linux the
+  scale is exact where reliably detectable and falls back to `1.0`
+  (coordinates then physical) otherwise. See
+  [platform details](/reference/platform-details/#coordinates-and-hidpi).
   Multi-monitor setups produce negative coordinates for displays positioned
   left of or above the primary.
 
