@@ -29,6 +29,8 @@ if let path = pidFile {
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
+    var statusItem: NSStatusItem!
+    var statusMenu: NSMenu!
 
     func applicationDidFinishLaunching(_: Notification) {
         let contentRect = NSRect(x: 0, y: 0, width: 700, height: 800)
@@ -44,6 +46,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if headless {
             NSApp.setActivationPolicy(.accessory)
         }
+
+        // A genuine NSStatusItem fixture for shell-surface integration tests.
+        // The test locates and pointer-clicks this actual menu-bar element.
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem.button?.title = "xa11y status fixture"
+        statusMenu = NSMenu(title: "xa11y status menu")
+        let statusAction = NSMenuItem(
+            title: "xa11y Status Action",
+            action: #selector(AppDelegate.onStatusAction),
+            keyEquivalent: ""
+        )
+        statusAction.target = self
+        statusMenu.addItem(statusAction)
+        statusItem.menu = statusMenu
 
         let scroll = NSScrollView(frame: contentRect)
         scroll.hasVerticalScroller = true
@@ -349,6 +365,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func onOKPressed() {
         cancelButton.isEnabled = true
+    }
+
+    @objc func onStatusAction() {
+        // The integration test presses this real NSMenuItem to close the menu.
     }
 
     @objc func onSubmitPressed() {

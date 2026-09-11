@@ -33,7 +33,7 @@ spelling in Rust, Python, JavaScript, the CLI, and MCP.
 | `panel` | *(none)* | *(none)* | Each AT-SPI frame carrying `window-type:dock`. One surface per frame, so a panel and a dock row are two surfaces. |
 | `dock` | *(none)* | The Dock process's application element. | *(none)* |
 | `desktop` | The `SysListView32` desktop list view, reached as `Progman` → `SHELLDLL_DefView` → `SysListView32`. A shell without that chain contributes no `desktop` surface. | Finder's desktop scroll area. | *(none)* |
-| `flyout` | The tray overflow, Quick Settings, and shell context-menu popups, while open. | *(none)*, not in v1. | *(none)* |
+| `flyout` | The tray overflow, Quick Settings, and native popup menus, while open. | A native status-item menu exposed through `AXShownMenuUIElement`, while open. | *(none)* |
 | `unknown` | *(none)* | *(none)* | *(none)* |
 
 A cell reading *(none)* means the platform vends no such surface. `list()` on
@@ -42,14 +42,13 @@ with `SelectorNotMatched` naming what was found instead. Windows has no
 per-process tray hosting, so tray icons live inside the `taskbar` and `flyout`
 surfaces rather than under `status_items`.
 
-Two of the empty cells are a scoping decision rather than a platform gap.
-macOS emits no `flyout` in v1: an opened Control Center or Notification
-Center panel is a shell process's `AXSystemDialog` window, whose enumeration
-contract differs from every other macOS surface. Windows leaves the
-Notification Center out of its `flyout` set, because its window class is the
-one ordinary UWP apps also use and separating them takes a process-image
-lookup the backend does not perform. An absent surface is honest; a
-misclassified application window is not.
+Some omitted flyouts are a scoping decision rather than a platform gap. On
+macOS, an opened Control Center or Notification Center panel is a shell
+process's `AXSystemDialog` window, whose enumeration contract differs from a
+status item's shown menu. Windows leaves Notification Center out because its
+window class is also used by ordinary UWP apps, and separating them takes a
+process-image lookup the backend does not perform. An absent surface is
+honest. A misclassified application window is not.
 
 The `unknown` kind is a reserved fallback, so a shell window some future
 backend cannot classify degrades to reachable-but-untagged instead of
@@ -74,8 +73,9 @@ string the way you handle an unknown role.
 
 `pid` reports the process the platform attributes the surface to, which is not
 always the process that drew the icon you are looking at. On macOS it is the
-true owner. On Windows it is the host process (`explorer.exe`), because UIA
-carries no per-icon owner. On Linux it is the panel process.
+true owner. On Windows it is the process hosting the surface: a native popup's
+owner, or the shell host (`explorer.exe`) for taskbar and tray-icon elements
+because UIA carries no per-icon owner. On Linux it is the panel process.
 
 The surface root also carries its kind in its raw platform attributes, under
 the key `shell_kind`, so it shows up in `tree()` and `dump()` output and reads

@@ -16,15 +16,25 @@ Write-Host "Building workspace..."
 cargo build --workspace 2>&1 | Write-Host
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-# 2. Launch the test application
-Write-Host "Launching xa11y-test-app..."
-$testApp = Start-Process -FilePath ".\target\debug\xa11y-test-app.exe" -ArgumentList "--headless" -PassThru -WindowStyle Hidden
-
-# Wait for accessibility registration
-Write-Host "Waiting for test app to register..."
-Start-Sleep -Seconds 3
-
+$testExit = 1
+$trayFixture = $null
+$testApp = $null
 try {
+    # 2. Launch the background fixture before the test app. PowerShell can
+    # briefly become the foreground process as it initializes WinForms; the
+    # test app must launch last to preserve the harness's foreground contract.
+    Write-Host "Launching native notification-area fixture..."
+    # Windows PowerShell hosts the .NET Framework WinForms implementation;
+    # its legacy ContextMenu is backed by a native HMENU/#32768 popup.
+    $trayFixture = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-File", ".\test-apps\windows-tray\app.ps1" -PassThru -WindowStyle Hidden
+
+    Write-Host "Launching xa11y-test-app..."
+    $testApp = Start-Process -FilePath ".\target\debug\xa11y-test-app.exe" -ArgumentList "--headless" -PassThru -WindowStyle Hidden
+
+    # Wait for accessibility registration
+    Write-Host "Waiting for test app and tray fixture to register..."
+    Start-Sleep -Seconds 3
+
     # 3. Run integration tests
     Write-Host "Running integration tests..."
     if ($testFilter) {
@@ -36,8 +46,14 @@ try {
 } finally {
     # 4. Cleanup
     Write-Host "Cleaning up..."
-    Stop-Process -Id $testApp.Id -Force -ErrorAction SilentlyContinue
-    Wait-Process -Id $testApp.Id -Timeout 5 -ErrorAction SilentlyContinue
+    if ($null -ne $testApp) {
+        Stop-Process -Id $testApp.Id -Force -ErrorAction SilentlyContinue
+        Wait-Process -Id $testApp.Id -Timeout 5 -ErrorAction SilentlyContinue
+    }
+    if ($null -ne $trayFixture) {
+        Stop-Process -Id $trayFixture.Id -Force -ErrorAction SilentlyContinue
+        Wait-Process -Id $trayFixture.Id -Timeout 5 -ErrorAction SilentlyContinue
+    }
 }
 
 Write-Host "=== Integration tests finished (exit code: $testExit) ==="

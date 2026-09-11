@@ -216,9 +216,11 @@ pub struct ShellSurface {
     /// the platform vends no name for the root.
     pub name: String,
     /// Owning process where the platform reports one honestly. On macOS this
-    /// is always the true owner. On Windows it is the *host* (explorer.exe /
-    /// ShellHost.exe) because UIA carries no per-icon owner — documented as
-    /// the host, never faked. On Linux it is the panel process.
+    /// is always the true owner. On Windows it is the process that hosts the
+    /// surface: explorer.exe / ShellHost.exe for shell chrome, or the owning
+    /// application for a native popup menu. UIA carries no per-icon owner, so
+    /// taskbar and tray-icon elements still report their shell host, never a
+    /// guessed application. On Linux it is the panel process.
     pub pid: Option<u32>,
     /// The surface's root element data.
     pub data: ElementData,
