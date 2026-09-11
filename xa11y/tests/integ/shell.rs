@@ -331,6 +331,70 @@ mod tests {
         );
     }
 
+    /// Windows: a native context menu opened from the real notification area
+    /// is discoverable as a flyout, including its actionable menu items.
+    ///
+    /// The widest visible `SystemTrayIcon` is the clock/date control on the
+    /// Windows 11 taskbar. Its text is locale-dependent, so the test selects
+    /// it by the shell's stable automation id and geometry rather than its
+    /// English name. Right-clicking it opens a native `#32768` popup menu,
+    /// which is the window shape tray applications use too.
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore]
+    fn a_native_taskbar_popup_exposes_visible_menu_items_as_a_flyout() {
+        struct DismissMenu(xa11y::InputSim);
+
+        impl Drop for DismissMenu {
+            fn drop(&mut self) {
+                if let Err(e) = self.0.keyboard().press(xa11y::Key::Escape) {
+                    eprintln!("failed to dismiss the taskbar popup during cleanup: {e}");
+                }
+            }
+        }
+
+        let taskbar = ShellSurface::by_kind(ShellSurfaceKind::Taskbar, LOOKUP_TIMEOUT)
+            .unwrap_or_else(|e| panic!("no taskbar surface: {e}"));
+        let tray_controls = taskbar
+            .locator("button[stable_id='SystemTrayIcon'][visible='true']")
+            .elements()
+            .unwrap_or_else(|e| panic!("notification-area controls: {e}"));
+        let clock = tray_controls
+            .iter()
+            .filter_map(|element| element.bounds.map(|bounds| (element, bounds)))
+            .max_by_key(|(_, bounds)| bounds.width)
+            .map(|(element, _)| element)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the real taskbar has no bounded visible SystemTrayIcon control; dump:\n{}",
+                    taskbar.dump(Some(5)).unwrap_or_default()
+                )
+            });
+
+        let input = xa11y::input_sim().unwrap_or_else(|e| panic!("create input backend: {e}"));
+        input
+            .mouse()
+            .right_click(clock)
+            .unwrap_or_else(|e| panic!("right-click the taskbar clock: {e}"));
+        let _dismiss = DismissMenu(input);
+
+        let flyout = ShellSurface::by_kind(ShellSurfaceKind::Flyout, LOOKUP_TIMEOUT)
+            .unwrap_or_else(|e| panic!("the open native taskbar menu was not listed: {e}"));
+        let items = flyout
+            .locator("menu_item[visible='true']")
+            .elements()
+            .unwrap_or_else(|e| panic!("search the native taskbar menu: {e}"));
+        assert!(
+            !items.is_empty(),
+            "the open native taskbar menu exposes no visible menu items; dump:\n{}",
+            flyout.dump(Some(3)).unwrap_or_default()
+        );
+        assert!(
+            items.iter().any(|item| item.name.is_some()),
+            "the native taskbar menu has no addressable item: {items:?}"
+        );
+    }
+
     /// Linux: the panel surface is the harness's dock frame, and its widgets
     /// are reachable through it.
     ///
