@@ -312,6 +312,56 @@ impl WindowsProvider {
         }
     }
 
+    /// Direct Raw View children of the UIA desktop root, with the batch cache
+    /// populated on every element.
+    ///
+    /// A `FindAllBuildCache(TreeScope_Children, ...)` query navigates Control
+    /// View even when the cache request itself uses a Raw View tree filter.
+    /// Native `#32768` popup-menu windows are not guaranteed to be control
+    /// elements, so the shell scan must navigate with `RawViewWalker` too.
+    fn raw_children_with_cache(
+        &self,
+        root: &IUIAutomationElement,
+    ) -> Result<Vec<IUIAutomationElement>> {
+        let mut current = match retry_transient(|| unsafe {
+            self.raw_walker
+                .GetFirstChildElementBuildCache(root, &self.batch_request)
+        }) {
+            Ok(element) => element,
+            Err(e) if e.code().is_ok() => return Ok(Vec::new()),
+            Err(e) => {
+                return Err(Error::Platform {
+                    code: i64::from(e.code().0),
+                    message: format!("RawViewWalker.GetFirstChildElementBuildCache failed: {e}"),
+                });
+            }
+        };
+        let mut children = Vec::new();
+
+        loop {
+            children.push(current.clone());
+            current = match retry_transient(|| unsafe {
+                self.raw_walker
+                    .GetNextSiblingElementBuildCache(&current, &self.batch_request)
+            }) {
+                Ok(element) => element,
+                Err(e) if e.code().is_ok() => break,
+                Err(e) => {
+                    return Err(Error::Platform {
+                        code: i64::from(e.code().0),
+                        message: format!(
+                            "RawViewWalker.GetNextSiblingElementBuildCache failed after {} \
+                             desktop child(ren): {e}",
+                            children.len()
+                        ),
+                    });
+                }
+            };
+        }
+
+        Ok(children)
+    }
+
     /// Extract a UIA element's RuntimeId as a `Vec<i32>` for use as a stable
     /// cross-call identity key. `GetRuntimeId` returns a SAFEARRAY of i32 that
     /// uniquely identifies an element within the UIA tree session — the only
@@ -927,17 +977,12 @@ impl Provider for WindowsProvider {
     /// Enumerate the Windows shell surfaces by classifying the UIA desktop
     /// root's **direct** children by class name.
     ///
-    /// [`get_children(None)`](Self::get_children) filters the same children to
-    /// `ControlType.Window`, which is exactly what hides the shell: every
-    /// surface below is a `Pane`. This walk therefore drops the control-type
-    /// filter (`TreeScope_Children` + `TrueCondition`) and keeps only the
-    /// classes it recognises. Note this is still the **Control View**, not the
-    /// Raw View: `FindAllBuildCache` walks the control view unless given
-    /// `RawViewWalker`. It works because every shell pane below is a control
-    /// element — a shell window with `IsControlElement=false` would be
-    /// invisible here, and would need the raw walker to reach. Anything else — ordinary app windows and their
-    /// panes — is skipped silently: it is not a shell surface, and it is
-    /// already reachable through `list_apps`.
+    /// [`get_children(None)`](Self::get_children) filters desktop children to
+    /// `ControlType.Window`, which hides the shell panes and native popup-menu
+    /// hosts. This scan walks the desktop root's direct **Raw View** children
+    /// and keeps only the classes it recognises. Anything else — ordinary app
+    /// windows and their panes — is skipped: it is not a shell surface, and it
+    /// is already reachable through `list_apps`.
     ///
     /// | Class name | Kind |
     /// |---|---|
@@ -946,6 +991,7 @@ impl Provider for WindowsProvider {
     /// | `TopLevelWindowForOverflowXamlIsland` | [`Flyout`](ShellSurfaceKind::Flyout) — the tray overflow |
     /// | `Microsoft.UI.Content.PopupWindowSiteBridge` | [`Flyout`](ShellSurfaceKind::Flyout) — a shell popup |
     /// | `ControlCenterWindow` | [`Flyout`](ShellSurfaceKind::Flyout) — Quick Settings, **only while its content is on screen** |
+    /// | `#32768` | [`Flyout`](ShellSurfaceKind::Flyout) — a native Win32 popup menu, while open |
     ///
     /// Two shell classes are deliberately *not* listed:
     ///
@@ -973,22 +1019,15 @@ impl Provider for WindowsProvider {
     /// scan aborted.
     fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
         let root = uia_call(|| unsafe { self.automation.GetRootElement() })?;
-        let true_cond = uia_call(|| unsafe { self.automation.CreateTrueCondition() })?;
-        let found = uia_call(|| unsafe {
-            root.FindAllBuildCache(TreeScope_Children, &true_cond, &self.batch_request)
-        })?;
+        let found = self.raw_children_with_cache(&root)?;
 
         // (rank, kind, data) — rank groups the output; the stable sort below
         // keeps enumeration order within a group.
         let mut surfaces: Vec<(u8, ShellSurfaceKind, ElementData)> = Vec::new();
 
-        for i in 0..uia_len(&found) {
-            let Some(el) = uia_get(&found, i) else {
-                continue;
-            };
-            let Some(class_name) = uia_cached_bstr(&el, UIA_ClassNamePropertyId) else {
-                continue;
-            };
+        for el in found {
+            let class_name = uia_cached_bstr(&el, UIA_ClassNamePropertyId).unwrap_or_default();
+            let control_type = uia_cached_i32(&el, UIA_ControlTypePropertyId);
 
             let (rank, kind) = match class_name.as_str() {
                 "Shell_TrayWnd" => (0u8, ShellSurfaceKind::Taskbar),
@@ -997,7 +1036,13 @@ impl Provider for WindowsProvider {
                 // the flyout is open, so its presence is the open signal.
                 // The XAML popup site bridge behaves the same way.
                 "TopLevelWindowForOverflowXamlIsland"
-                | "Microsoft.UI.Content.PopupWindowSiteBridge" => (2u8, ShellSurfaceKind::Flyout),
+                | "Microsoft.UI.Content.PopupWindowSiteBridge"
+                // Win32 creates a top-level window of the system menu class
+                // for TrackPopupMenu-style menus. It exists only while the
+                // menu is open and exposes its commands as UIA menu items.
+                // Native notification-area menus use this path rather than
+                // either of the XAML popup hosts above.
+                | "#32768" => (2u8, ShellSurfaceKind::Flyout),
                 // Quick Settings is the exception: its host window persists as
                 // a desktop-root child after dismissal, keeping the bounds it
                 // had while open, and only its XAML content goes offscreen.
@@ -1036,6 +1081,13 @@ impl Provider for WindowsProvider {
                     if !on_screen {
                         continue;
                     }
+                    (2u8, ShellSurfaceKind::Flyout)
+                }
+                // Windows 11 shell controls do not consistently use the
+                // Win32 system-menu class. UIA's top-level Menu control type
+                // is the stable accessibility signal for those popup hosts;
+                // direct Raw View scope keeps ordinary in-app menus out.
+                _ if control_type == Some(UIA_MenuControlTypeId.0) => {
                     (2u8, ShellSurfaceKind::Flyout)
                 }
                 _ => continue,

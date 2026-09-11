@@ -331,6 +331,103 @@ mod tests {
         );
     }
 
+    /// Windows: a native context menu opened from the real notification area
+    /// is discoverable as a flyout, including its actionable menu items.
+    ///
+    /// The Windows harness registers a real `NotifyIcon` with Explorer. A new
+    /// icon may land in the taskbar's visible tray row or its overflow, so the
+    /// test handles both placements before right-clicking it. Its legacy
+    /// WinForms `ContextMenu` is a native `#32768` Win32 popup.
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore]
+    fn a_native_taskbar_popup_exposes_visible_menu_items_as_a_flyout() {
+        struct DismissMenu {
+            input: xa11y::InputSim,
+            app: xa11y::Element,
+        }
+
+        impl Drop for DismissMenu {
+            fn drop(&mut self) {
+                for surface in ["native tray menu", "notification overflow"] {
+                    if let Err(e) = self.input.keyboard().press(xa11y::Key::Escape) {
+                        eprintln!("failed to dismiss the {surface} during cleanup: {e}");
+                    }
+                }
+                if let Err(e) = self.app.focus() {
+                    eprintln!("failed to restore the test app's focus during cleanup: {e}");
+                }
+            }
+        }
+
+        let taskbar = ShellSurface::by_kind(ShellSurfaceKind::Taskbar, LOOKUP_TIMEOUT)
+            .unwrap_or_else(|e| panic!("no taskbar surface: {e}"));
+        let mut fixture_icons = taskbar
+            .locator("[name*='xa11y tray fixture'][visible='true']")
+            .elements()
+            .unwrap_or_else(|e| panic!("search the real taskbar for the tray fixture: {e}"));
+
+        if fixture_icons.is_empty() {
+            taskbar
+                .locator("button[name='Show Hidden Icons']")
+                .press()
+                .unwrap_or_else(|e| panic!("open the real notification overflow: {e}"));
+            let overflow = ShellSurface::by_kind(ShellSurfaceKind::Flyout, LOOKUP_TIMEOUT)
+                .unwrap_or_else(|e| panic!("the notification overflow did not open: {e}"));
+            fixture_icons = overflow
+                .locator("[name*='xa11y tray fixture'][visible='true']")
+                .elements()
+                .unwrap_or_else(|e| panic!("search the notification overflow: {e}"));
+        }
+
+        let fixture_icon = fixture_icons.into_iter().next().unwrap_or_else(|| {
+            panic!(
+                "the harness's real NotifyIcon appeared in neither taskbar placement; dump:\n{}",
+                taskbar.dump(Some(5)).unwrap_or_default()
+            )
+        });
+
+        let input = xa11y::input_sim().unwrap_or_else(|e| panic!("create input backend: {e}"));
+        input
+            .mouse()
+            .right_click(&fixture_icon)
+            .unwrap_or_else(|e| panic!("right-click the real notification icon: {e}"));
+        let _dismiss = DismissMenu {
+            input,
+            app: crate::integ::app_root().as_element(),
+        };
+
+        let deadline = std::time::Instant::now() + LOOKUP_TIMEOUT;
+        loop {
+            let found = listing()
+                .into_iter()
+                .filter(|surface| surface.kind == ShellSurfaceKind::Flyout)
+                .find_map(|surface| {
+                    let items = surface
+                        .locator("menu_item[name*='xa11y tray action'][visible='true']")
+                        .elements()
+                        .unwrap_or_else(|e| panic!("search a listed flyout for tray items: {e}"));
+                    (items.len() == 2).then_some((surface, items))
+                });
+            if let Some((flyout, items)) = found {
+                assert!(
+                    items
+                        .iter()
+                        .all(|item| item.actions.iter().any(|a| a == "press")),
+                    "the native tray menu items are not actionable: {items:?}; dump:\n{}",
+                    flyout.dump(Some(3)).unwrap_or_default()
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the native tray menu never exposed its two visible menu items; listing: {}",
+                describe(&listing())
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
     /// Linux: the panel surface is the harness's dock frame, and its widgets
     /// are reachable through it.
     ///
