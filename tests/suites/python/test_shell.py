@@ -30,9 +30,15 @@ def test_cocoa_status_item_menu_is_a_flyout(app_name, app):
                 break
             time.sleep(0.1)
 
+        status_items = next(
+            surface
+            for surface in xa11y.ShellSurface.list()
+            if surface.kind == "status_items" and surface.pid == app.pid
+        )
         assert len(flyouts) == 1, (
             "the Cocoa fixture opened a native status menu, but no flyout was "
-            f"reported for pid {app.pid}; surfaces={xa11y.ShellSurface.list()!r}"
+            f"reported for pid {app.pid}; surfaces={xa11y.ShellSurface.list()!r}; "
+            f"status tree:\n{status_items.dump(max_depth=6)}"
         )
 
         action = flyouts[0].locator('menu_item[name="xa11y Status Action"]').element()
