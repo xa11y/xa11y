@@ -20,6 +20,10 @@ def test_cocoa_status_item_menu_is_a_flyout(app_name, app):
         for surface in xa11y.ShellSurface.list()
         if surface.kind == "status_items" and surface.pid == app.pid
     )
+    assert not any(
+        surface.kind == "flyout" and surface.pid == app.pid
+        for surface in xa11y.ShellSurface.list()
+    ), "the Cocoa fixture's closed status menu must not be listed as a flyout"
     status_icon = status_items.locator('[name="xa11y status fixture"]').element()
     xa11y.input_sim().click(status_icon)
     menu_closed = False
