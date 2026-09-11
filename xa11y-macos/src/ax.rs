@@ -2182,6 +2182,59 @@ impl MacOSProvider {
         surfaces
     }
 
+    /// Native menus currently shown by status-item surfaces, as transient
+    /// `Flyout` roots.
+    ///
+    /// AppKit does not put an open status-item menu in `AXChildren`, which is
+    /// why walking either the owning app or its `AXExtrasMenuBar` cannot find
+    /// it. The accessibility API exposes that detached menu through
+    /// `AXShownMenuUIElement` on the object providing it. Probe the extras bar
+    /// and each of its direct status-item children because both shapes are
+    /// used by status-item implementations.
+    ///
+    /// Each probe carries the same per-element timeout as the rest of shell
+    /// discovery. An app that does not answer contributes no flyout, matching
+    /// the documented failure policy of the status-item fan-out above.
+    fn shown_status_menu_surfaces(
+        &self,
+        status_items: &[(ShellSurfaceKind, ElementData)],
+    ) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
+        let mut surfaces = Vec::new();
+        let mut seen_menus: Vec<AXElement> = Vec::new();
+
+        for (_, status_data) in status_items {
+            let extras = self.get_cached(status_data.handle)?;
+            let mut providers = vec![extras.clone()];
+            providers.extend(ax_children(extras.as_ptr()));
+
+            for provider in providers {
+                let shown_menu = {
+                    let Some(_bound) = Self::shell_probe_bound(&provider) else {
+                        continue;
+                    };
+                    match probe_element_attr(provider.as_ptr(), "AXShownMenuUIElement") {
+                        ElementProbe::Found(menu) => menu,
+                        ElementProbe::Absent | ElementProbe::Unanswered(_) => continue,
+                    }
+                };
+
+                if seen_menus.iter().any(|menu| unsafe {
+                    safe_cf_equal(menu.as_ptr() as CFTypeRef, shown_menu.as_ptr() as CFTypeRef)
+                }) {
+                    continue;
+                }
+
+                let mut data = self.build_element_data(&shown_menu, status_data.pid);
+                data.name = status_data.name.clone();
+                seen_menus.push(shown_menu);
+                surfaces.push((ShellSurfaceKind::Flyout, data));
+            }
+        }
+
+        surfaces.sort_by_key(|(_, data)| data.pid);
+        Ok(surfaces)
+    }
+
     /// The Dock's application element, tagged `Dock`.
     ///
     /// Identified by the CGWindowList owner name, which is what the existing
@@ -2452,23 +2505,24 @@ impl Provider for MacOSProvider {
     }
 
     /// Enumerate the macOS shell surfaces: the frontmost application's menu
-    /// bar, each process's status items, the Dock, and Finder's desktop.
+    /// bar, each process's status items, the Dock, Finder's desktop, and
+    /// native status-item menus while they are open.
     ///
     /// Order is fixed — `menu_bar`, `status_items` by ascending pid, `dock`,
-    /// `desktop` — so repeated listings are comparable even though the
-    /// status-item scan fans out in parallel.
+    /// `desktop`, then open `flyout` menus by ascending pid — so repeated
+    /// listings are comparable even though the status-item scan fans out in
+    /// parallel.
     ///
     /// Reading is the whole of it: nothing here opens, closes, focuses, or
     /// presses anything, and the app-tree `AXMenuBar` filter (PROPOSAL §5) is
     /// untouched — these surfaces reach those elements through their own
     /// roots.
     ///
-    /// `Flyout` is deliberately not implemented on macOS in v1. The macOS
-    /// flyouts are shell processes' `AXSystemDialog` windows (an opened
-    /// Control Center or Notification Center panel), whose enumeration
-    /// contract differs from every other surface here — PROPOSAL §4 and the
-    /// §10-adjacent trade-offs leave it out rather than ship a kind that is
-    /// right on Windows and approximate here.
+    /// `Flyout` covers native status-item menus through the platform's
+    /// `AXShownMenuUIElement` relationship. Control Center and Notification
+    /// Center remain out of scope: those are shell processes'
+    /// `AXSystemDialog` windows, whose enumeration contract differs from the
+    /// status-item roots already available here.
     ///
     /// # Errors
     ///
@@ -2496,13 +2550,16 @@ impl Provider for MacOSProvider {
         if let Some(menu_bar) = self.menu_bar_surface(&apps)? {
             surfaces.push(menu_bar);
         }
-        surfaces.extend(self.status_item_surfaces(&apps));
+        let status_items = self.status_item_surfaces(&apps);
+        let shown_menus = self.shown_status_menu_surfaces(&status_items)?;
+        surfaces.extend(status_items);
         if let Some(dock) = self.dock_surface(&apps) {
             surfaces.push(dock);
         }
         if let Some(desktop) = self.desktop_surface(&apps) {
             surfaces.push(desktop);
         }
+        surfaces.extend(shown_menus);
         Ok(surfaces)
     }
 

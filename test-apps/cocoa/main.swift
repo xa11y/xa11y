@@ -29,6 +29,8 @@ if let path = pidFile {
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
+    var statusItem: NSStatusItem!
+    var statusMenu: NSMenu!
 
     func applicationDidFinishLaunching(_: Notification) {
         let contentRect = NSRect(x: 0, y: 0, width: 700, height: 800)
@@ -44,6 +46,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if headless {
             NSApp.setActivationPolicy(.accessory)
         }
+
+        // A genuine NSStatusItem fixture for shell-surface integration tests.
+        // Its menu is deliberately opened from an ordinary app button below:
+        // AXPress must return before AppKit enters menu tracking, so the test
+        // process remains free to enumerate AXShownMenuUIElement.
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem.button?.title = "XA"
+        statusItem.button?.setAccessibilityLabel("xa11y status fixture")
+        statusMenu = NSMenu(title: "xa11y status menu")
+        let statusAction = NSMenuItem(
+            title: "xa11y Status Action",
+            action: #selector(AppDelegate.onStatusAction),
+            keyEquivalent: ""
+        )
+        statusAction.target = self
+        statusMenu.addItem(statusAction)
+        statusItem.menu = statusMenu
 
         let scroll = NSScrollView(frame: contentRect)
         scroll.hasVerticalScroller = true
@@ -84,6 +103,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         cancelButton.setAccessibilityLabel("Cancel")
         cancelButton.isEnabled = false
         btnBox.addSubview(cancelButton)
+
+        let openStatusMenuButton = NSButton(frame: NSRect(x: 280, y: 20, width: 180, height: 32))
+        openStatusMenuButton.bezelStyle = .rounded
+        openStatusMenuButton.title = "Open Status Menu"
+        openStatusMenuButton.setAccessibilityLabel("Open Status Menu")
+        openStatusMenuButton.action = #selector(AppDelegate.onOpenStatusMenuPressed)
+        openStatusMenuButton.target = self
+        btnBox.addSubview(openStatusMenuButton)
 
         // ── Checkboxes ───────────────────────────────────────────────────
         let chkBox = NSBox(frame: NSRect(x: 12, y: y - 100, width: 656, height: 100))
@@ -336,6 +363,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func onOKPressed() {
         cancelButton.isEnabled = true
+    }
+
+    @objc func onOpenStatusMenuPressed() {
+        // Enter menu tracking after AXPress has returned to its caller. Opening
+        // synchronously here would block that accessibility request until the
+        // menu closes, leaving no opportunity for the test to inspect it.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+            self?.statusItem.button?.performClick(nil)
+        }
+    }
+
+    @objc func onStatusAction() {
+        // The integration test presses this real NSMenuItem to close the menu.
     }
 
     @objc func onSubmitPressed() {
