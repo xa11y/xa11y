@@ -50,8 +50,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // A genuine NSStatusItem fixture for shell-surface integration tests.
         // The test locates and pointer-clicks this actual menu-bar element.
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "XA"
-        statusItem.button?.setAccessibilityLabel("xa11y status fixture")
+        statusItem.button?.title = "xa11y status fixture"
         statusMenu = NSMenu(title: "xa11y status menu")
         let statusAction = NSMenuItem(
             title: "xa11y Status Action",
