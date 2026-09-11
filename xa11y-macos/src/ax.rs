@@ -375,8 +375,8 @@ fn ax_number_i64(element: AXUIElementRef, attribute: &str) -> Option<i64> {
     }
 }
 
-fn ax_element_array(element: AXUIElementRef, attribute: &str) -> Vec<AXElement> {
-    let value = match ax_attr(element, attribute) {
+fn ax_children(element: AXUIElementRef) -> Vec<AXElement> {
+    let value = match ax_attr(element, "AXChildren") {
         Some(v) => v,
         None => return vec![],
     };
@@ -426,18 +426,6 @@ enum ElementProbe {
     Unanswered(i32),
 }
 
-fn ax_children(element: AXUIElementRef) -> Vec<AXElement> {
-    ax_element_array(element, "AXChildren")
-}
-
-/// Outcome of reading an AX attribute containing one or more accessibility
-/// elements.
-enum ElementListProbe {
-    Found(Vec<AXElement>),
-    Absent,
-    Unanswered,
-}
-
 /// Read an attribute whose value is an `AXUIElement`, distinguishing "absent"
 /// from "unanswered" by AXError code.
 ///
@@ -463,50 +451,6 @@ fn probe_element_attr(element: AXUIElementRef, attribute: &str) -> ElementProbe 
         // timeout surfaces as), kAXErrorInvalidUIElement, an ObjC exception
         // caught by the wrapper — means we did not get an answer.
         _ => ElementProbe::Unanswered(err),
-    }
-}
-
-/// Read an AX attribute containing an accessibility element or an array of
-/// accessibility elements.
-///
-/// AppKit's `AXShownMenu` is element-valued, while the Carbon
-/// `AXShownMenuUIElement` contract is array-valued. Each returned value is
-/// owned independently of the copied attribute value.
-fn probe_element_list_attr(element: AXUIElementRef, attribute: &str) -> ElementListProbe {
-    let attr = CFString::new(attribute);
-    let mut value: CFTypeRef = std::ptr::null();
-    let err =
-        ffi_copy_attribute_value(element, attr.as_concrete_TypeRef() as CFTypeRef, &mut value);
-    match err {
-        AX_ERROR_SUCCESS => {
-            if value.is_null() {
-                return ElementListProbe::Absent;
-            }
-            if unsafe { safe_cf_get_type_id(value) } != unsafe { safe_cf_array_get_type_id() } {
-                return ElementListProbe::Found(vec![AXElement::from_owned(
-                    value as AXUIElementRef,
-                )]);
-            }
-            let elements = unsafe {
-                let count = safe_cf_array_get_count(value);
-                let mut elements = Vec::with_capacity(count as usize);
-                for i in 0..count {
-                    let element = safe_cf_array_get_value(value, i);
-                    if !element.is_null() {
-                        elements.push(AXElement::from_borrowed(element));
-                    }
-                }
-                safe_cf_release(value);
-                elements
-            };
-            if elements.is_empty() {
-                ElementListProbe::Absent
-            } else {
-                ElementListProbe::Found(elements)
-            }
-        }
-        AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE => ElementListProbe::Absent,
-        _ => ElementListProbe::Unanswered,
     }
 }
 
@@ -2238,86 +2182,6 @@ impl MacOSProvider {
         surfaces
     }
 
-    /// Native menus currently shown by status-item surfaces, as transient
-    /// `Flyout` roots.
-    ///
-    /// AppKit may keep a status-item menu permanently in `AXChildren`, even
-    /// while it is closed. An open attached menu either enters
-    /// `AXVisibleChildren` or gains its non-empty on-screen frame. Other
-    /// implementations expose a detached menu through AppKit's `AXShownMenu`
-    /// or Carbon's `AXShownMenuUIElement`. Probe the owning application,
-    /// extras bar, and each direct status-item child because those provider
-    /// shapes vary across implementations.
-    ///
-    /// Each probe carries the same per-element timeout as the rest of shell
-    /// discovery. An app that does not answer contributes no flyout, matching
-    /// the documented failure policy of the status-item fan-out above.
-    fn shown_status_menu_surfaces(
-        &self,
-        status_items: &[(ShellSurfaceKind, ElementData)],
-    ) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
-        let mut surfaces = Vec::new();
-        let mut seen_menus: Vec<AXElement> = Vec::new();
-
-        for (_, status_data) in status_items {
-            let extras = self.get_cached(status_data.handle)?;
-            let mut providers = vec![extras.clone()];
-            if let Some(pid) = status_data.pid {
-                providers.push(AXElement::from_owned(unsafe {
-                    safe_ax_create_application(pid as i32)
-                }));
-            }
-            providers.extend(ax_children(extras.as_ptr()));
-
-            for provider in providers {
-                let Some(_bound) = Self::shell_probe_bound(&provider) else {
-                    continue;
-                };
-                let visible_children = ax_element_array(provider.as_ptr(), "AXVisibleChildren")
-                    .into_iter()
-                    .filter(|child| {
-                        ax_string(child.as_ptr(), "AXRole").as_deref() == Some("AXMenu")
-                    })
-                    .collect::<Vec<_>>();
-                let mut shown_menus = visible_children;
-                for attached_menu in ax_children(provider.as_ptr()).into_iter().filter(|child| {
-                    ax_string(child.as_ptr(), "AXRole").as_deref() == Some("AXMenu")
-                }) {
-                    let data = self.build_element_data(&attached_menu, status_data.pid);
-                    if data.states.visible
-                        && data
-                            .bounds
-                            .is_some_and(|bounds| bounds.width > 0 && bounds.height > 0)
-                    {
-                        shown_menus.push(attached_menu);
-                    }
-                }
-                for attribute in ["AXShownMenu", "AXShownMenuUIElement"] {
-                    match probe_element_list_attr(provider.as_ptr(), attribute) {
-                        ElementListProbe::Found(menus) => shown_menus.extend(menus),
-                        ElementListProbe::Absent | ElementListProbe::Unanswered => {}
-                    }
-                }
-
-                for shown_menu in shown_menus {
-                    if seen_menus.iter().any(|menu| unsafe {
-                        safe_cf_equal(menu.as_ptr() as CFTypeRef, shown_menu.as_ptr() as CFTypeRef)
-                    }) {
-                        continue;
-                    }
-
-                    let mut data = self.build_element_data(&shown_menu, status_data.pid);
-                    data.name = status_data.name.clone();
-                    seen_menus.push(shown_menu);
-                    surfaces.push((ShellSurfaceKind::Flyout, data));
-                }
-            }
-        }
-
-        surfaces.sort_by_key(|(_, data)| data.pid);
-        Ok(surfaces)
-    }
-
     /// The Dock's application element, tagged `Dock`.
     ///
     /// Identified by the CGWindowList owner name, which is what the existing
@@ -2588,24 +2452,23 @@ impl Provider for MacOSProvider {
     }
 
     /// Enumerate the macOS shell surfaces: the frontmost application's menu
-    /// bar, each process's status items, the Dock, Finder's desktop, and
-    /// native status-item menus while they are open.
+    /// bar, each process's status items, the Dock, and Finder's desktop.
     ///
     /// Order is fixed — `menu_bar`, `status_items` by ascending pid, `dock`,
-    /// `desktop`, then open `flyout` menus by ascending pid — so repeated
-    /// listings are comparable even though the status-item scan fans out in
-    /// parallel.
+    /// `desktop` — so repeated listings are comparable even though the
+    /// status-item scan fans out in parallel.
     ///
     /// Reading is the whole of it: nothing here opens, closes, focuses, or
     /// presses anything, and the app-tree `AXMenuBar` filter (PROPOSAL §5) is
     /// untouched — these surfaces reach those elements through their own
     /// roots.
     ///
-    /// `Flyout` covers native status-item menus through the platform's
-    /// `AXShownMenuUIElement` relationship. Control Center and Notification
-    /// Center remain out of scope: those are shell processes'
-    /// `AXSystemDialog` windows, whose enumeration contract differs from the
-    /// status-item roots already available here.
+    /// `Flyout` is deliberately not implemented on macOS in v1. The macOS
+    /// flyouts are shell processes' `AXSystemDialog` windows (an opened
+    /// Control Center or Notification Center panel), whose enumeration
+    /// contract differs from every other surface here — PROPOSAL §4 and the
+    /// §10-adjacent trade-offs leave it out rather than ship a kind that is
+    /// right on Windows and approximate here.
     ///
     /// # Errors
     ///
@@ -2633,16 +2496,13 @@ impl Provider for MacOSProvider {
         if let Some(menu_bar) = self.menu_bar_surface(&apps)? {
             surfaces.push(menu_bar);
         }
-        let status_items = self.status_item_surfaces(&apps);
-        let shown_menus = self.shown_status_menu_surfaces(&status_items)?;
-        surfaces.extend(status_items);
+        surfaces.extend(self.status_item_surfaces(&apps));
         if let Some(dock) = self.dock_surface(&apps) {
             surfaces.push(dock);
         }
         if let Some(desktop) = self.desktop_surface(&apps) {
             surfaces.push(desktop);
         }
-        surfaces.extend(shown_menus);
         Ok(surfaces)
     }
 
