@@ -15,7 +15,13 @@ def test_cocoa_status_item_menu_is_a_flyout(app_name, app):
     if sys.platform != "darwin" or app_name != "cocoa":
         pytest.skip("the native NSStatusItem fixture belongs to the macOS Cocoa cell")
 
-    app.locator('button[name="Open Status Menu"]').press()
+    status_items = next(
+        surface
+        for surface in xa11y.ShellSurface.list()
+        if surface.kind == "status_items" and surface.pid == app.pid
+    )
+    status_icon = status_items.locator('[name="xa11y status fixture"]').element()
+    xa11y.input_sim().click(status_icon)
     menu_closed = False
     try:
         deadline = time.monotonic() + 5.0
@@ -30,11 +36,6 @@ def test_cocoa_status_item_menu_is_a_flyout(app_name, app):
                 break
             time.sleep(0.1)
 
-        status_items = next(
-            surface
-            for surface in xa11y.ShellSurface.list()
-            if surface.kind == "status_items" and surface.pid == app.pid
-        )
         assert len(flyouts) == 1, (
             "the Cocoa fixture opened a native status menu, but no flyout was "
             f"reported for pid {app.pid}; surfaces={xa11y.ShellSurface.list()!r}; "
