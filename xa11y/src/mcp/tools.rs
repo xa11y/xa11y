@@ -483,7 +483,7 @@ fn tool_definition(name: &str) -> Value {
                  Windows whose state is unknown to the platform simply omit \
                  those states rather than reporting a guessed value.\n\n\
                  The verbs `action` accepts (a window selector) cover this \
-                 surface: `raise`, `minimize`, `maximize`, `restore`, `close`, \
+                 surface: `activate`, `minimize`, `maximize`, `restore`, `close`, \
                  `move-to` (with `at`) and `resize-to` (with `size`).",
                 object_schema(props, &[]),
             )
@@ -621,11 +621,11 @@ fn tool_definition(name: &str) -> Value {
                      what it matched, rather than applied to the first of them.\n\n\
                      Auto-waits for the selector to match an element that is visible and \
                      enabled, re-resolving as it polls, and only then acts. The window verbs \
-                     (`raise`, `minimize`, `maximize`, `restore`, `close`, `move-to`, \
+                     (`activate`, `minimize`, `maximize`, `restore`, `close`, `move-to`, \
                      `resize-to`) and `scroll-into-view` are the one exception: they wait \
                      only for `enabled`, because a minimized window is legitimately not \
                      visible and must still be reachable by the very verbs that restore or \
-                     raise it. The wait runs \
+                     activate it. The wait runs \
                      up to the default timeout, currently {timeout}. Set {timeout_env} \
                      (in seconds) in the environment the server is launched with to \
                      change it; no tool argument does. A call that is going to fail \

@@ -122,16 +122,16 @@ features:
 
   windows:
     description: >
-      window management: enumerate windows, window verbs (raise, minimize,
+      window management: enumerate windows, window verbs (activate, minimize,
       restore, maximize, move_to, resize_to, close), window state
       (minimized, maximized, fullscreen), and window StateChanged events
     per_app: true
     notes: >
       Per-app because window verb support differs by toolkit and adapter:
-      raise is advertised only on Windows and macOS — AT-SPI deliberately
+      activate is advertised only on Windows and macOS — AT-SPI deliberately
       never advertises it (the adapters disagree about a frame GrabFocus and
-      no interface probe discriminates them; the python/JS raise suites
-      therefore skip every Linux cell, see the linux_raise_not_advertised
+      no interface probe discriminates them; the python/JS activate suites
+      therefore skip every Linux cell, see the linux_activate_not_advertised
       gap), minimize and restore demand WindowPattern, and some toolkits
       cannot move or resize a top-level window at all. The suites adapt via
       the app config: python test_window.py + test_window_mutating.py, JS
@@ -248,7 +248,7 @@ rust_core:
     Fast-path core validation. All tests are #[ignore] and run via `cargo xtask test-integ`.
     Platform-split event tests: events_linux.rs, events_macos.rs, events_windows.rs.
     windows.rs covers window management verbs + App::windows() against the
-    AccessKit app. Success-path coverage is split: enumerate/raise everywhere;
+    AccessKit app. Success-path coverage is split: enumerate/activate everywhere;
     minimize/restore/close on macOS + Windows; maximize and move/resize geometry
     are macOS-only today. Windows TransformPattern move is covered end to end
     on the windows-latest winforms cell: the python-window suite's
@@ -402,23 +402,23 @@ gaps:
     affects:
       apps: [qt, gtk, cocoa]
 
-  - id: linux_raise_not_advertised
+  - id: linux_activate_not_advertised
     description: >
-      Linux raise is Component.GrabFocus on the top-level frame, and the
+      Linux activate is Component.GrabFocus on the top-level frame, and the
       AT-SPI adapters disagree about implementing it: the GTK widget adapter
       answers true while Chromium (Electron), WebKitGTK (Tauri — whose
       bridge reports ToolkitName "GTK", so even a toolkit gate cannot
       separate it from the GTK widget app) and Qt answer false despite
       exposing the Component interface (round-4 CI). No interface or toolkit
       probe discriminates them, and a snapshot-side GrabFocus probe would
-      raise windows as a side effect, so xa11y-linux deliberately does NOT
-      advertise `raise` (see build_element_data in atspi.rs). The call itself
-      stays honest on every toolkit — a false reply or D-Bus NotSupported
-      error is ActionNotSupported — and the python/JS raise suites therefore
-      skip on the Linux cells instead of failing an advertised action their
-      window then declines.
+      activate windows as a side effect, so xa11y-linux deliberately does NOT
+      advertise `activate` (see build_element_data in atspi.rs). The call
+      itself stays honest on every toolkit — a false reply or D-Bus
+      NotSupported error is ActionNotSupported — and the python/JS activate
+      suites therefore skip on the Linux cells instead of failing an
+      advertised action their window then declines.
     severity: low
-    workaround: "Windows/macOS integ cells cover advertised raise; Linux explicit raise() returns ActionNotSupported where the adapter declines and succeeds on GTK"
+    workaround: "Windows/macOS integ cells cover advertised activate; Linux explicit activate() returns ActionNotSupported where the adapter declines and succeeds on GTK"
     affects:
       apps: [qt, tauri, electron, gtk]
       language: [python, js]

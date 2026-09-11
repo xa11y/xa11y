@@ -27,10 +27,8 @@ def _last_action(probe):
 def test_element_window_verbs_record_names():
     probe = _make_test_action_probe()
     win = _window(probe)
-    # `raise` is a Python keyword — the binding exposes it as `raise_`; the
-    # platform action it dispatches is still "raise".
     for method, action in (
-        ("raise_", "raise"),
+        ("activate", "activate"),
         ("minimize", "minimize"),
         ("maximize", "maximize"),
         ("restore", "restore"),

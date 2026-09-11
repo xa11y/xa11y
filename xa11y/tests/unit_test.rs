@@ -135,8 +135,8 @@ impl Provider for MockProvider {
         Ok(())
     }
 
-    fn raise(&self, element: &ElementData) -> Result<()> {
-        *self.last_action.lock().unwrap() = Some((element.handle, "raise".to_string()));
+    fn activate(&self, element: &ElementData) -> Result<()> {
+        *self.last_action.lock().unwrap() = Some((element.handle, "activate".to_string()));
         Ok(())
     }
     fn minimize(&self, element: &ElementData) -> Result<()> {
@@ -1118,7 +1118,7 @@ impl Provider for MultiAppMockProvider {
         Ok(())
     }
 
-    fn raise(&self, _: &ElementData) -> Result<()> {
+    fn activate(&self, _: &ElementData) -> Result<()> {
         Ok(())
     }
     fn minimize(&self, _: &ElementData) -> Result<()> {
@@ -1416,8 +1416,8 @@ impl Provider for DelayedProvider {
     fn perform_action(&self, e: &ElementData, a: &str) -> Result<()> {
         self.inner.perform_action(e, a)
     }
-    fn raise(&self, e: &ElementData) -> Result<()> {
-        self.inner.raise(e)
+    fn activate(&self, e: &ElementData) -> Result<()> {
+        self.inner.activate(e)
     }
     fn minimize(&self, e: &ElementData) -> Result<()> {
         self.inner.minimize(e)
@@ -1596,8 +1596,8 @@ impl Provider for AppByPidOverrideProvider {
     fn perform_action(&self, e: &ElementData, a: &str) -> Result<()> {
         self.inner.perform_action(e, a)
     }
-    fn raise(&self, e: &ElementData) -> Result<()> {
-        self.inner.raise(e)
+    fn activate(&self, e: &ElementData) -> Result<()> {
+        self.inner.activate(e)
     }
     fn minimize(&self, e: &ElementData) -> Result<()> {
         self.inner.minimize(e)
@@ -1762,8 +1762,8 @@ impl Provider for GhostAppProvider {
     fn perform_action(&self, e: &ElementData, a: &str) -> Result<()> {
         self.inner.perform_action(e, a)
     }
-    fn raise(&self, e: &ElementData) -> Result<()> {
-        self.inner.raise(e)
+    fn activate(&self, e: &ElementData) -> Result<()> {
+        self.inner.activate(e)
     }
     fn minimize(&self, e: &ElementData) -> Result<()> {
         self.inner.minimize(e)

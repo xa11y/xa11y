@@ -188,8 +188,8 @@ impl xa11y::Provider for DuplicateShellProvider {
         all.push(dup);
         Ok(all)
     }
-    fn raise(&self, e: &xa11y::ElementData) -> xa11y::Result<()> {
-        self.inner.raise(e)
+    fn activate(&self, e: &xa11y::ElementData) -> xa11y::Result<()> {
+        self.inner.activate(e)
     }
     fn minimize(&self, e: &xa11y::ElementData) -> xa11y::Result<()> {
         self.inner.minimize(e)

@@ -45,19 +45,21 @@ def test_app_windows_lists_the_main_window(app, app_name) -> None:
             assert value is None or isinstance(value, bool), (name, value)
 
 
-def test_window_raise_reaches_the_platform(app) -> None:
-    """``raise_`` (Python's trailing-underscore rename for ``raise``).
+def test_window_activate_reaches_the_platform(app) -> None:
+    """``activate`` genuinely activates the window.
 
-    Only exercised on a window whose `actions` advertise ``raise`` — tenet 3:
+    Only exercised on a window whose `actions` advertise ``activate`` — tenet 3:
     an action name reported by the platform must dispatch to the platform
     action, and a real window is what verifies the binding keeps that promise.
-    Raise is focus-only, the least invasive window verb, so it stays in this
-    suite; the mutating verbs (minimize/restore/resize) live in the
-    window-mutating suites, which the harness orders after the action suites
-    (`python js cli js-window python-window`), so a minimized or moved window
-    cannot disturb the compatibility and action tests before them.
+    On the non-minimized shared window `activate` only changes focus/stacking
+    (no state to restore: a minimized window is restored first on Windows and
+    macOS), so it stays in this suite; the mutating verbs
+    (minimize/restore/resize) live in the window-mutating suites, which the
+    harness orders after the action suites (`python js cli js-window
+    python-window`), so a minimized or moved window cannot disturb the
+    compatibility and action tests before them.
     """
-    windows = [w for w in app.windows() if "raise" in w.actions]
+    windows = [w for w in app.windows() if "activate" in w.actions]
     if not windows:
-        pytest.skip("this app's windows advertise no raise action")
-    windows[0].raise_()
+        pytest.skip("this app's windows advertise no activate action")
+    windows[0].activate()

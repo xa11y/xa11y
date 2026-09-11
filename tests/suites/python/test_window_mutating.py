@@ -646,21 +646,22 @@ def test_locator_maximize_and_restore(app: xa11y.App) -> None:
         raise
 
 
-def test_locator_raise(app: xa11y.App) -> None:
-    """``Locator.raise_`` reaches the platform.
+def test_locator_activate(app: xa11y.App) -> None:
+    """``Locator.activate`` reaches the platform.
 
-    ``raise`` mutates nothing (no state to restore), and is advertised for
-    top-level windows on Windows (any top-level HWND) and macOS (AXRaise).
+    On a non-minimized window ``activate`` only changes focus/stacking (no
+    state to restore; a minimized window is restored first), and is advertised
+    for top-level windows on Windows (any top-level HWND) and macOS (AXRaise).
     AT-SPI deliberately never advertises it — the adapters disagree about a
     frame GrabFocus and no interface probe discriminates them — so the Linux
     cells skip here (``_window_advertising`` returns none; see the
-    ``linux_raise_not_advertised`` gap in tests/matrix.yaml).
+    ``linux_activate_not_advertised`` gap in tests/matrix.yaml).
     """
-    win = _window_advertising(app, "raise")
+    win = _window_advertising(app, "activate")
     if win is None:
-        pytest.skip("no window advertises raise")
+        pytest.skip("no window advertises activate")
     locator = _locator_for_window(app, win)
-    locator.raise_()
+    locator.activate()
 
 
 def test_locator_move_to_restores_the_original_position(app: xa11y.App) -> None:

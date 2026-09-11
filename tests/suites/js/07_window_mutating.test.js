@@ -280,16 +280,17 @@ test('Locator maximize()/restore() dispatch through the async binding', async ()
   }
 });
 
-test('Locator raise() dispatches through the async binding', async () => {
+test('Locator activate() dispatches through the async binding', async () => {
   const app = await getApp();
-  const win = await windowAdvertising(app, 'raise');
+  const win = await windowAdvertising(app, 'activate');
   if (!win) {
-    return; // no window advertises raise on this app/platform
+    return; // no window advertises activate on this app/platform
   }
   const locator = locatorForWindow(app, win);
   if (!locator) return;
-  // raise mutates nothing, so there is nothing to restore afterwards.
-  await locator.raise();
+  // A non-minimized window has nothing to restore: activate only changes
+  // focus/stacking (a minimized window is restored first).
+  await locator.activate();
 });
 
 test('Locator moveTo() dispatches and puts the window back where it was', async () => {

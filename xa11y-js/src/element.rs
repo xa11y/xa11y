@@ -489,13 +489,13 @@ impl Element {
 
     // ── Window management (act on the captured snapshot) ──────────────
 
-    /// Raise this window to the foreground.
+    /// Activate this window: bring it to the foreground and give it focus.
     #[napi(ts_return_type = "Promise<void>")]
-    pub fn raise(&self) -> AsyncTask<ElementActionTask> {
+    pub fn activate(&self) -> AsyncTask<ElementActionTask> {
         AsyncTask::new(ElementActionTask::nullary(
             self.data.clone(),
             self.provider.clone(),
-            ElementActionKind::Raise,
+            ElementActionKind::Activate,
         ))
     }
 
@@ -734,7 +734,7 @@ pub enum ElementActionKind {
     TypeText,
     SelectText,
     PerformAction,
-    Raise,
+    Activate,
     Minimize,
     Maximize,
     Restore,
@@ -891,7 +891,7 @@ impl Task for ElementActionTask {
             ElementActionKind::PerformAction => {
                 element.perform_action(self.text.as_deref().unwrap_or(""))
             }
-            ElementActionKind::Raise => element.raise(),
+            ElementActionKind::Activate => element.activate(),
             ElementActionKind::Minimize => element.minimize(),
             ElementActionKind::Maximize => element.maximize(),
             ElementActionKind::Restore => element.restore(),

@@ -299,7 +299,7 @@ Actions: press, focus, blur, toggle, expand, collapse, select, show-menu,
   scroll-into-view, increment, decrement,
   set-value (requires --value), type-text (requires --value),
   set-numeric-value (requires --value), select-text (requires --value START,END),
-  minimize, maximize, restore, close, raise,
+  minimize, maximize, restore, close, activate,
   move-to (requires --at X,Y), resize-to (requires --size W,H)
 
 Exit codes:
@@ -1470,7 +1470,7 @@ pub(crate) const ACTION_NAMES: &[&str] = &[
     "maximize",
     "restore",
     "close",
-    "raise",
+    "activate",
     "move-to",
     "resize-to",
 ];
@@ -1607,7 +1607,7 @@ pub(crate) fn perform_action(
                 "maximize" => locator.maximize()?,
                 "restore" => locator.restore()?,
                 "close" => locator.close()?,
-                "raise" => locator.raise()?,
+                "activate" => locator.activate()?,
                 "move-to" => {
                     let (x, y) = args.at.ok_or_else(|| {
                         CliError::Usage(format!("{action_name} requires --at X,Y"))

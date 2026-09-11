@@ -254,10 +254,10 @@ def _dispatch_window_verb(
     return True
 
 
-def test_action_raise_dispatches(run_cli, app_pid):
-    """``action raise`` is dispatched for a window-like selector."""
+def test_action_activate_dispatches(run_cli, app_pid):
+    """``action activate`` is dispatched for a window-like selector."""
     _require_windows(run_cli, app_pid)
-    _dispatch_window_verb(run_cli, app_pid, "raise")
+    _dispatch_window_verb(run_cli, app_pid, "activate")
 
 
 def test_action_minimize_restore_round_trip_dispatches(run_cli, app_pid):

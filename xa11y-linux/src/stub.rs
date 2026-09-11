@@ -168,7 +168,7 @@ impl Provider for LinuxProvider {
         Err(unavailable())
     }
 
-    fn raise(&self, _: &ElementData) -> Result<()> {
+    fn activate(&self, _: &ElementData) -> Result<()> {
         Err(unavailable())
     }
 

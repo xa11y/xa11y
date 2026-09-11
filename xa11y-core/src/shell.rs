@@ -449,8 +449,8 @@ mod tests {
             all.push(dup);
             Ok(all)
         }
-        fn raise(&self, e: &ElementData) -> Result<()> {
-            self.inner.raise(e)
+        fn activate(&self, e: &ElementData) -> Result<()> {
+            self.inner.activate(e)
         }
         fn minimize(&self, e: &ElementData) -> Result<()> {
             self.inner.minimize(e)
@@ -548,8 +548,8 @@ mod tests {
                 message: "shell enumeration failed".to_string(),
             })
         }
-        fn raise(&self, e: &ElementData) -> Result<()> {
-            self.inner.raise(e)
+        fn activate(&self, e: &ElementData) -> Result<()> {
+            self.inner.activate(e)
         }
         fn minimize(&self, e: &ElementData) -> Result<()> {
             self.inner.minimize(e)
@@ -749,8 +749,8 @@ mod tests {
                 }
                 Ok(all)
             }
-            fn raise(&self, e: &ElementData) -> Result<()> {
-                self.inner.raise(e)
+            fn activate(&self, e: &ElementData) -> Result<()> {
+                self.inner.activate(e)
             }
             fn minimize(&self, e: &ElementData) -> Result<()> {
                 self.inner.minimize(e)

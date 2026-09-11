@@ -755,7 +755,7 @@ impl Locator {
         // carry payloads the generic path cannot hand them, so they stay
         // here — the providers reject them surfaceably before any OS call.
         match action {
-            "raise" => return self.raise(),
+            "activate" => return self.activate(),
             "minimize" => return self.minimize(),
             "maximize" => return self.maximize(),
             "restore" => return self.restore(),
@@ -771,14 +771,16 @@ impl Locator {
     // Window verbs wait only on `enabled`, not `visible` (we reuse
     // [`Actionability::ENABLED`]): a minimized window is legitimately
     // not visible, and gate the very verbs that must act on it —
-    // `minimize`, `restore`, and `raise` all need to reach an invisible
+    // `minimize`, `restore`, and `activate` all need to reach an invisible
     // window. The same argument that relaxed `scroll_into_view` (issue
     // #350) applies here, so the gate is documented once on
     // [`Actionability::ENABLED`].
 
-    /// Raise the matched window to the foreground.
-    pub fn raise(&self) -> Result<()> {
-        self.auto_wait("raise", Actionability::ENABLED)?.raise()
+    /// Activate the matched window: bring it to the foreground and give it
+    /// focus.
+    pub fn activate(&self) -> Result<()> {
+        self.auto_wait("activate", Actionability::ENABLED)?
+            .activate()
     }
 
     /// Minimize the matched window.
@@ -1524,8 +1526,8 @@ mod tests {
         fn perform_action(&self, e: &crate::element::ElementData, action: &str) -> Result<()> {
             self.inner.perform_action(e, action)
         }
-        fn raise(&self, e: &crate::element::ElementData) -> Result<()> {
-            self.inner.raise(e)
+        fn activate(&self, e: &crate::element::ElementData) -> Result<()> {
+            self.inner.activate(e)
         }
         fn minimize(&self, e: &crate::element::ElementData) -> Result<()> {
             self.inner.minimize(e)

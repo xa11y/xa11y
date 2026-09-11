@@ -382,14 +382,14 @@ pub trait Provider: Send + Sync {
     /// requires an implementation here; `get_children` is the single
     /// window-discovery primitive on every platform.
     ///
-    /// Raise / activate the window to the foreground.
+    /// Activate the window: bring it to the foreground and give it focus.
     ///
     /// Required: every `Provider` implements this explicitly. There is no
     /// portable default — each platform's activation mechanism is unique
     /// (AXRaise on macOS, `SetForegroundWindow` on Windows, GrabFocus on
     /// Linux), and a silent no-op default would hide an unimplemented
     /// backend (tenet 1).
-    fn raise(&self, element: &ElementData) -> Result<()>;
+    fn activate(&self, element: &ElementData) -> Result<()>;
 
     /// Minimize the window.
     fn minimize(&self, element: &ElementData) -> Result<()>;
@@ -531,8 +531,8 @@ impl<T: Provider + ?Sized> Provider for &T {
     fn perform_action(&self, element: &ElementData, action: &str) -> Result<()> {
         (**self).perform_action(element, action)
     }
-    fn raise(&self, element: &ElementData) -> Result<()> {
-        (**self).raise(element)
+    fn activate(&self, element: &ElementData) -> Result<()> {
+        (**self).activate(element)
     }
     fn minimize(&self, element: &ElementData) -> Result<()> {
         (**self).minimize(element)

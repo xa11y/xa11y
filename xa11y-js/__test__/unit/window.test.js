@@ -38,7 +38,7 @@ function lastAction(probe) {
 
 test('window verbs record their action names', async () => {
   const { probe, el } = await probeWindow((e) => e.role === 'window');
-  for (const verb of ['raise', 'minimize', 'maximize', 'restore', 'close']) {
+  for (const verb of ['activate', 'minimize', 'maximize', 'restore', 'close']) {
     probe.clear();
     await el[verb]();
     assert.equal(lastAction(probe)[1], verb);

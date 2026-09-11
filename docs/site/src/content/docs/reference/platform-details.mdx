@@ -79,7 +79,7 @@ API is separate from its element-action interface:
 
 | xa11y Action | macOS | Linux (AT-SPI) | Windows (UIA) |
 | --- | --- | --- | --- |
-| `Raise` | activate app *(set AXFrontmost)*, restore if minimized, then AXRaise | Component.GrabFocus *(same path as Focus)* | restore if minimized, then SetForegroundWindow and SetFocus |
+| `Activate` | activate app *(set AXFrontmost)*, restore if minimized, then AXRaise | Component.GrabFocus *(same path as Focus)* | restore if minimized, then SetForegroundWindow and SetFocus |
 | `Minimize` | set AXMinimized=true | *(unsupported)* | WindowPattern.SetWindowVisualState(Minimized) |
 | `Maximize` | press the window's AXZoomButton | *(unsupported)* | WindowPattern.SetWindowVisualState(Maximized) |
 | `Restore` | clear AXMinimized; clear AXFullScreen *(the zoom press's state)* | *(unsupported)* | WindowPattern.SetWindowVisualState(Normal) |
@@ -106,14 +106,14 @@ Windows and `AXModal` on macOS.
 
 macOS has no direct equivalent, so this action is a **no-op**. On Linux it uses `Component.ScrollTo` with top-edge alignment. On Windows it uses `ScrollItemPattern.ScrollIntoView`.
 
-### Raise: AXRaise does not activate
+### Activate: AXRaise alone does not activate
 
 `AXRaise` on a window only re-raises the window within the window list of its
-own app, and it answers success even while the app sits in the background. A
-raise performed on a background app's window visibly does nothing. `Raise` on
-macOS activates the app first (sets `AXFrontmost` on the application element),
-then raises the window. A failure to activate is a surfaceable error, never a
-silent success.
+own app, and it answers success even while the app sits in the background. An
+activation performed on a background app's window visibly does nothing.
+`Activate` on macOS brings the app forward first (sets `AXFrontmost` on the
+application element), then raises the window. A failure to activate is a
+surfaceable error, never a silent success.
 
 ### `Maximize`: the zoom button is the zoom surface
 

@@ -303,7 +303,7 @@ impl Provider for MockProvider {
         // the generic escape hatch and fail surfaceably with how to call
         // them, mirroring the real providers' contract (see uia.rs; tenet 1).
         match action {
-            "raise" => self.raise(el),
+            "activate" => self.activate(el),
             "minimize" => self.minimize(el),
             "maximize" => self.maximize(el),
             "restore" => self.restore(el),
@@ -326,9 +326,9 @@ impl Provider for MockProvider {
     // The mock models window state mutations in place so tests can verify
     // minimize → state → restore round-trips without a real platform.
 
-    fn raise(&self, el: &ElementData) -> Result<()> {
+    fn activate(&self, el: &ElementData) -> Result<()> {
         self.live_window(el)?;
-        self.record(el, "raise", None)
+        self.record(el, "activate", None)
     }
 
     fn minimize(&self, el: &ElementData) -> Result<()> {
@@ -497,7 +497,7 @@ pub fn build_provider() -> Arc<MockProvider> {
                 height: 600,
             }),
             vec![
-                "raise",
+                "activate",
                 "minimize",
                 "maximize",
                 "restore",

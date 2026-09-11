@@ -64,7 +64,7 @@ pub const ALL_ACTIONS: &[&str] = &[
     "blur",
     "set_text_selection",
     "type_text",
-    "raise",
+    "activate",
     "minimize",
     "maximize",
     "restore",
@@ -206,7 +206,7 @@ impl Provider for FuzzProvider {
     fn type_text(&self, _: &ElementData, _: &str) -> Result<()> { Ok(()) }
     fn set_text_selection(&self, _: &ElementData, _: u32, _: u32) -> Result<()> { Ok(()) }
     fn perform_action(&self, _: &ElementData, _: &str) -> Result<()> { Ok(()) }
-    fn raise(&self, _: &ElementData) -> Result<()> { Ok(()) }
+    fn activate(&self, _: &ElementData) -> Result<()> { Ok(()) }
     fn minimize(&self, _: &ElementData) -> Result<()> { Ok(()) }
     fn maximize(&self, _: &ElementData) -> Result<()> { Ok(()) }
     fn restore(&self, _: &ElementData) -> Result<()> { Ok(()) }

@@ -184,7 +184,7 @@ xa11y action select-text "text_field" --app TextEdit --value "0,5"
 Window actions use `--at` and `--size` instead:
 
 ```bash
-xa11y action raise "window" --pid 1234
+xa11y action activate "window" --pid 1234
 xa11y action move-to "window[name='Dialog']" --pid 1234 --at 100,200
 xa11y action resize-to "window[name='Dialog']" --pid 1234 --size 640,480
 ```
@@ -206,7 +206,7 @@ to input simulation.
 
 | Action | Description |
 | --- | --- |
-| `press` | Press a button or activate a control |
+| `press` | Press a button or invoke a control |
 | `focus` | Move focus to the element |
 | `blur` | Remove focus from the element |
 | `toggle` | Toggle a checkbox or switch |
@@ -221,7 +221,7 @@ to input simulation.
 | `set-numeric-value` | Set numeric value, for sliders and spin buttons (requires `--value N`) |
 | `type-text` | Type text as keystrokes (requires `--value`) |
 | `select-text` | Select a text range (requires `--value START,END`) |
-| `raise` | Bring the window to the foreground |
+| `activate` | Bring the window to the foreground and focus it |
 | `minimize` | Minimize the window |
 | `maximize` | Maximize the window |
 | `restore` | Restore the window from minimized/maximized |
@@ -458,10 +458,10 @@ the first of several. Narrow the selector or pick one with `:nth(n)`.
 Both surfaces auto-wait: the element has to exist, be visible, and be enabled
 before the action runs, within the default timeout (5 seconds, or
 `XA11Y_DEFAULT_TIMEOUT` seconds when that is set in the server's environment).
-The window verbs (`raise`, `minimize`, `maximize`, `restore`, `close`,
+The window verbs (`activate`, `minimize`, `maximize`, `restore`, `close`,
 `move-to`, `resize-to`) and `scroll-into-view` are the one exception: they wait
 only for `enabled`, because a minimized window is legitimately not visible and
-must still be reachable by the very verbs that restore or raise it. A call that
+must still be reachable by the very verbs that restore or activate it. A call that
 is going to fail therefore takes that long, and no MCP argument shortens it.
 `ok: true` reports that the application accepted the call, not that anything
 changed; read the tree again to confirm an effect.

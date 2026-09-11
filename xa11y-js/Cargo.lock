@@ -1619,7 +1619,7 @@ checksum = "acf4d1bc32aa46eec18caa634ec3cf4c05bfa151f12b93b510b15190f69a1ca8"
 
 [[package]]
 name = "xa11y"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1631,7 +1631,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-core"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "png",
  "serde",
@@ -1642,7 +1642,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-js"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "napi",
  "napi-build",
@@ -1653,7 +1653,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-linux"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "evdev",
  "png",
@@ -1669,7 +1669,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-macos"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "cc",
  "core-foundation",
@@ -1680,7 +1680,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-windows"
-version = "0.13.0"
+version = "0.14.0"
 dependencies = [
  "serde_json",
  "windows",

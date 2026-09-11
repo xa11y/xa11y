@@ -6,8 +6,8 @@
 // async binding, the napi task payloads, and the provider boundary — so that
 // `App.windows()` and the state getters are verified end to end.
 //
-// Only the read-only surface and `raise` (focus-only, least invasive) run
-// here: the suite shares the app instance with the python and cli suites,
+// Only the read-only surface and `activate` run here: the shared app is not
+// minimized, so activate only changes focus/stacking (no state to restore),
 // and the mutating window verbs (minimize / restore / resize) churn the
 // UIA/AX cache in a way that made a following suite's action tests flaky.
 // minimize / restore / maximize and moveTo / resizeTo run in
@@ -46,15 +46,15 @@ test('App.windows() reaches the provider with the promised state getters', async
   }
 });
 
-test('a window that advertises raise gets it dispatched to the platform', async () => {
+test('a window that advertises activate gets it dispatched to the platform', async () => {
   const app = await getApp();
   const windows = await app.windows();
-  const win = windows.find((w) => w.actions.includes('raise'));
+  const win = windows.find((w) => w.actions.includes('activate'));
   if (!win) {
     // The per-platform matrix is the Rust suite's ground truth; here the
     // point is the boundary, and a window that advertises nothing cannot
     // verify it.
     return;
   }
-  await win.raise();
+  await win.activate();
 });

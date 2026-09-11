@@ -755,8 +755,8 @@ mod tests {
         fn perform_action(&self, e: &ElementData, a: &str) -> Result<()> {
             self.inner.perform_action(e, a)
         }
-        fn raise(&self, e: &ElementData) -> Result<()> {
-            self.inner.raise(e)
+        fn activate(&self, e: &ElementData) -> Result<()> {
+            self.inner.activate(e)
         }
         fn minimize(&self, e: &ElementData) -> Result<()> {
             self.inner.minimize(e)
@@ -927,8 +927,8 @@ mod tests {
         fn perform_action(&self, e: &ElementData, a: &str) -> Result<()> {
             self.inner.perform_action(e, a)
         }
-        fn raise(&self, e: &ElementData) -> Result<()> {
-            self.inner.raise(e)
+        fn activate(&self, e: &ElementData) -> Result<()> {
+            self.inner.activate(e)
         }
         fn minimize(&self, e: &ElementData) -> Result<()> {
             self.inner.minimize(e)
@@ -1067,8 +1067,8 @@ mod tests {
         fn perform_action(&self, e: &ElementData, a: &str) -> Result<()> {
             self.inner.perform_action(e, a)
         }
-        fn raise(&self, e: &ElementData) -> Result<()> {
-            self.inner.raise(e)
+        fn activate(&self, e: &ElementData) -> Result<()> {
+            self.inner.activate(e)
         }
         fn minimize(&self, e: &ElementData) -> Result<()> {
             self.inner.minimize(e)
@@ -1264,8 +1264,8 @@ mod tests {
         fn perform_action(&self, e: &ElementData, a: &str) -> Result<()> {
             self.inner.perform_action(e, a)
         }
-        fn raise(&self, e: &ElementData) -> Result<()> {
-            self.inner.raise(e)
+        fn activate(&self, e: &ElementData) -> Result<()> {
+            self.inner.activate(e)
         }
         fn minimize(&self, e: &ElementData) -> Result<()> {
             self.inner.minimize(e)
@@ -1704,7 +1704,7 @@ mod tests {
         // success (which would let stale-handle regressions pass against the
         // mock, tenet 1).
         for action in [
-            "raise",
+            "activate",
             "minimize",
             "maximize",
             "restore",
@@ -1713,9 +1713,9 @@ mod tests {
             "resize_to",
         ] {
             let err = match action {
-                "raise" => window
-                    .raise()
-                    .expect_err("raise on a closed window must fail"),
+                "activate" => window
+                    .activate()
+                    .expect_err("activate on a closed window must fail"),
                 "minimize" => window
                     .minimize()
                     .expect_err("minimize on a closed window must fail"),
@@ -1896,8 +1896,8 @@ mod tests {
             fn perform_action(&self, e: &ElementData, a: &str) -> Result<()> {
                 self.inner.perform_action(e, a)
             }
-            fn raise(&self, e: &ElementData) -> Result<()> {
-                self.inner.raise(e)
+            fn activate(&self, e: &ElementData) -> Result<()> {
+                self.inner.activate(e)
             }
             fn minimize(&self, e: &ElementData) -> Result<()> {
                 self.inner.minimize(e)

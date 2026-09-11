@@ -155,7 +155,7 @@ mod stub {
         fn perform_action(&self, _: &ElementData, _: &str) -> Result<()> {
             unreachable!()
         }
-        fn raise(&self, _: &ElementData) -> Result<()> {
+        fn activate(&self, _: &ElementData) -> Result<()> {
             unreachable!()
         }
         fn minimize(&self, _: &ElementData) -> Result<()> {

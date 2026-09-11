@@ -472,12 +472,12 @@ impl Element {
     /// list that don't have a dedicated method. Well-known names (`"press"`,
     /// `"focus"`, etc.) also work — providers delegate to the named methods.
     /// The nullary window verbs are routed through the typed methods so the
-    /// shared role guard applies on this path too: `perform_action("raise")`
-    /// on a non-window element must fail exactly like `raise()` does, however
+    /// shared role guard applies on this path too: `perform_action("activate")`
+    /// on a non-window element must fail exactly like `activate()` does, however
     /// the generic escape hatch is reached.
     pub fn perform_action(&self, action: &str) -> crate::error::Result<()> {
         match action {
-            "raise" => self.raise(),
+            "activate" => self.activate(),
             "minimize" => self.minimize(),
             "maximize" => self.maximize(),
             "restore" => self.restore(),
@@ -494,7 +494,7 @@ impl Element {
     // These verbs operate on top-level window targets. The shared layer keeps
     // the obvious non-window roles out before delegation: inside a provider
     // the same call on a button has platform-dependent semantics (Linux
-    // `raise` would GrabFocus it and report success; the mock would accept any
+    // `activate` would GrabFocus it and report success; the mock would accept any
     // live node). Providers then enforce the stronger identity check for the
     // window-like roles whose meaning is broader than a real OS window (for
     // example `Role::Dialog` can be an in-page ARIA dialog).
@@ -502,7 +502,7 @@ impl Element {
     // Multiple windows can be managed from any window element, not just the
     // app root. The platform semantics are:
     // - `minimize`/`maximize`/`restore`/`close`: window state operations.
-    // - `raise`: bring the window to the foreground (activation).
+    // - `activate`: bring the window to the foreground (activation).
     // - `move_to`/`resize_to`: geometry operations in logical coordinates.
 
     /// Reject a window verb whose target is not a plausible top-level window.
@@ -517,7 +517,13 @@ impl Element {
         let has_window_signal = self.data.actions.iter().any(|a| {
             matches!(
                 a.as_str(),
-                "raise" | "minimize" | "maximize" | "restore" | "close" | "move_to" | "resize_to"
+                "activate"
+                    | "minimize"
+                    | "maximize"
+                    | "restore"
+                    | "close"
+                    | "move_to"
+                    | "resize_to"
             )
         }) || self.data.states.minimized.is_some()
             || self.data.states.maximized.is_some()
@@ -534,10 +540,10 @@ impl Element {
         }
     }
 
-    /// Raise this window to the foreground.
-    pub fn raise(&self) -> crate::error::Result<()> {
-        self.require_window_like("raise")?;
-        self.provider.raise(&self.data)
+    /// Activate this window: bring it to the foreground and give it focus.
+    pub fn activate(&self) -> crate::error::Result<()> {
+        self.require_window_like("activate")?;
+        self.provider.activate(&self.data)
     }
 
     /// Minimize this window.
@@ -1142,7 +1148,7 @@ mod tests {
     fn window_verbs_record_correct_name() {
         let provider = build_provider();
         let cases = [
-            ("window", "raise" as &str),
+            ("window", "activate" as &str),
             ("window", "minimize"),
             ("window", "maximize"),
             ("window", "restore"),
@@ -1152,7 +1158,7 @@ mod tests {
             provider.clear_actions();
             let el = find_element(&provider, selector);
             match action {
-                "raise" => el.raise().unwrap(),
+                "activate" => el.activate().unwrap(),
                 "minimize" => el.minimize().unwrap(),
                 "maximize" => el.maximize().unwrap(),
                 "restore" => el.restore().unwrap(),
@@ -1189,13 +1195,13 @@ mod tests {
     #[test]
     fn window_verbs_reject_non_window_targets() {
         // The role guard lives in the shared Element layer so behavior is
-        // identical across platforms: Linux `raise` would otherwise reach a
+        // identical across platforms: Linux `activate` would otherwise reach a
         // button's GrabFocus and report success, and the mock would accept
         // any live node — a test that passed here could fail everywhere.
         let provider = build_provider();
         let button = find_element(&provider, r#"button[name="Back"]"#);
         let errors = [
-            button.raise(),
+            button.activate(),
             button.minimize(),
             button.maximize(),
             button.restore(),
@@ -1213,10 +1219,10 @@ mod tests {
         // the typed methods, so it cannot dodge the role guard.
         assert!(
             matches!(
-                button.perform_action("raise"),
+                button.perform_action("activate"),
                 Err(Error::ActionNotSupported { .. })
             ),
-            "perform_action(\"raise\") on a button must fail like raise() does"
+            "perform_action(\"activate\") on a button must fail like activate() does"
         );
         assert!(
             matches!(
@@ -1237,7 +1243,7 @@ mod tests {
         let provider_dyn: Arc<dyn Provider> = provider.clone();
         let dialog = Element::new(ElementData::for_role(Role::Dialog), provider_dyn);
         let errors = [
-            dialog.raise(),
+            dialog.activate(),
             dialog.minimize(),
             dialog.maximize(),
             dialog.restore(),
@@ -1253,10 +1259,10 @@ mod tests {
         }
         assert!(
             matches!(
-                dialog.perform_action("raise"),
+                dialog.perform_action("activate"),
                 Err(Error::ActionNotSupported { .. })
             ),
-            "perform_action(\"raise\") on a non-window dialog must fail like raise() does"
+            "perform_action(\"activate\") on a non-window dialog must fail like activate() does"
         );
         assert!(
             provider.actions().is_empty(),

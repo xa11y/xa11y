@@ -464,7 +464,7 @@ impl Element {
     // These act on the captured snapshot rather than re-resolving the selector
     // (contrast with Locator, which re-queries the provider on every call).
 
-    /// Press (default activate) this element.
+    /// Click / invoke this element.
     fn press(&self, py: Python<'_>) -> PyResult<()> {
         let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
         py.detach(move || element.press()).map_err(to_py_err)
@@ -553,32 +553,25 @@ impl Element {
 
     // ── Window management ──
 
-    /// Raise this window to the foreground.
-    ///
-    /// Named ``raise_`` with a trailing underscore: ``raise`` is a Python
-    /// keyword, so the method cannot exist under that name. The recorded
-    /// platform action is still ``"raise"``.
-    fn raise_(&self, py: Python<'_>) -> PyResult<()> {
+    /// Activate this window: bring it to the foreground and give it focus.
+    fn activate(&self, py: Python<'_>) -> PyResult<()> {
         let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
-        py.detach(move || element.raise()).map_err(to_py_err)
+        py.detach(move || element.activate()).map_err(to_py_err)
     }
     /// Minimize this window.
     fn minimize(&self, py: Python<'_>) -> PyResult<()> {
         let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
-        py.detach(move || element.minimize())
-            .map_err(to_py_err)
+        py.detach(move || element.minimize()).map_err(to_py_err)
     }
     /// Maximize this window.
     fn maximize(&self, py: Python<'_>) -> PyResult<()> {
         let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
-        py.detach(move || element.maximize())
-            .map_err(to_py_err)
+        py.detach(move || element.maximize()).map_err(to_py_err)
     }
     /// Restore this window to its normal state (from minimized/maximized).
     fn restore(&self, py: Python<'_>) -> PyResult<()> {
         let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
-        py.detach(move || element.restore())
-            .map_err(to_py_err)
+        py.detach(move || element.restore()).map_err(to_py_err)
     }
     /// Close this window.
     fn close(&self, py: Python<'_>) -> PyResult<()> {
@@ -588,8 +581,7 @@ impl Element {
     /// Move this window to the given logical screen coordinates (top-left origin).
     fn move_to(&self, py: Python<'_>, x: i32, y: i32) -> PyResult<()> {
         let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
-        py.detach(move || element.move_to(x, y))
-            .map_err(to_py_err)
+        py.detach(move || element.move_to(x, y)).map_err(to_py_err)
     }
     /// Resize this window to the given logical width and height.
     ///
@@ -806,26 +798,21 @@ impl Locator {
     // window is legitimately not visible, and these actions are exactly what
     // must reach it.
 
-    /// Raise the matched window to the foreground.
-    ///
-    /// Named ``raise_`` with a trailing underscore: ``raise`` is a Python
-    /// keyword, so the method cannot exist under that name. The recorded
-    /// platform action is still ``"raise"``.
-    fn raise_(&self, py: Python<'_>) -> PyResult<()> {
+    /// Activate the matched window: bring it to the foreground and give it
+    /// focus.
+    fn activate(&self, py: Python<'_>) -> PyResult<()> {
         let inner = self.inner.clone();
-        py.detach(move || inner.raise()).map_err(to_py_err)
+        py.detach(move || inner.activate()).map_err(to_py_err)
     }
     /// Minimize the matched window.
     fn minimize(&self, py: Python<'_>) -> PyResult<()> {
         let inner = self.inner.clone();
-        py.detach(move || inner.minimize())
-            .map_err(to_py_err)
+        py.detach(move || inner.minimize()).map_err(to_py_err)
     }
     /// Maximize the matched window.
     fn maximize(&self, py: Python<'_>) -> PyResult<()> {
         let inner = self.inner.clone();
-        py.detach(move || inner.maximize())
-            .map_err(to_py_err)
+        py.detach(move || inner.maximize()).map_err(to_py_err)
     }
     /// Restore the matched window to its normal state.
     fn restore(&self, py: Python<'_>) -> PyResult<()> {
@@ -841,8 +828,7 @@ impl Locator {
     /// (top-left origin).
     fn move_to(&self, py: Python<'_>, x: i32, y: i32) -> PyResult<()> {
         let inner = self.inner.clone();
-        py.detach(move || inner.move_to(x, y))
-            .map_err(to_py_err)
+        py.detach(move || inner.move_to(x, y)).map_err(to_py_err)
     }
     /// Resize the matched window to the given logical dimensions.
     ///

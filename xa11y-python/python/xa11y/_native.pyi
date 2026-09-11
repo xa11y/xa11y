@@ -580,7 +580,7 @@ class Element:
     def subscribe(self) -> Subscription:
         """Subscribe to accessibility events for this element (typically an app)."""
     def press(self) -> None:
-        """Press (default activate) this element."""
+        """Click / invoke this element."""
     def focus(self) -> None:
         """Move keyboard focus to this element."""
     def blur(self) -> None:
@@ -611,12 +611,8 @@ class Element:
         """Select the text range from ``start`` to ``end`` (0-based offsets)."""
     def perform_action(self, action: str) -> None:
         """Perform an action by ``snake_case`` name."""
-    def raise_(self) -> None:
-        """Raise this window to the foreground.
-
-        Named with a trailing underscore because ``raise`` is a Python
-        keyword. The platform action recorded is still ``"raise"``.
-        """
+    def activate(self) -> None:
+        """Activate this window: bring it to the foreground and give it focus."""
     def minimize(self) -> None:
         """Minimize this window."""
     def maximize(self) -> None:
@@ -718,12 +714,8 @@ class Locator:
         """Select a text range within the matched element (0-based offsets)."""
     def perform_action(self, action: str) -> None:
         """Perform an action by snake_case name."""
-    def raise_(self) -> None:
-        """Raise the matched window to the foreground.
-
-        Named with a trailing underscore because ``raise`` is a Python
-        keyword. The platform action recorded is still ``"raise"``.
-        """
+    def activate(self) -> None:
+        """Activate the matched window: bring it to the foreground and give it focus."""
     def minimize(self) -> None:
         """Minimize the matched window."""
     def maximize(self) -> None:

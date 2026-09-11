@@ -999,7 +999,7 @@ mod annotated_tests {
             Ok(Vec::new())
         }
 
-        fn raise(&self, _: &ElementData) -> Result<()> {
+        fn activate(&self, _: &ElementData) -> Result<()> {
             Err(unsupported_in_fixture())
         }
         fn minimize(&self, _: &ElementData) -> Result<()> {

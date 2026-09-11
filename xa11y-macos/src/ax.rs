@@ -1474,8 +1474,8 @@ fn owning_app_element(el_ptr: AXUIElementRef, action: &str, role: Role) -> Resul
 /// API: the application element's `AXFrontmost` attribute.
 ///
 /// `AXRaise` on a window only re-raises it within the window list of its own
-/// app and answers success while the app sits in the background, so a raise
-/// on a background app's window appears to do nothing. The application
+/// app and answers success while the app sits in the background, so activating
+/// a background app's window appears to do nothing. The application
 /// element is built from the element's owning PID (`AXUIElementGetPid`), the
 /// same addressing `App::by_pid` uses, and the attribute is the one
 /// `osascript`'s "set frontmost of process" sets — activation without input
@@ -1487,7 +1487,7 @@ fn activate_owning_app(el_ptr: AXUIElementRef, action: &str, role: Role) -> Resu
 
 /// Clear a boolean attribute when it currently reads `true`.
 ///
-/// The deminiaturize half of `raise` / `maximize`: neither `AXRaise` nor
+/// The deminiaturize half of `activate` / `maximize`: neither `AXRaise` nor
 /// pressing the zoom button clears `AXMinimized`, so a minimized window must
 /// have its minimized flag cleared first or the verb returns success while
 /// the window stays in the Dock. Error-preserving: only a definitive
@@ -1860,7 +1860,7 @@ fn ax_action_to_name(ax_name: &str) -> Option<&'static str> {
         "AXShowMenu" => Some("show_menu"),
         "AXIncrement" => Some("increment"),
         "AXDecrement" => Some("decrement"),
-        "AXRaise" => Some("raise"),
+        "AXRaise" => Some("activate"),
         _ => None,
     }
 }
@@ -2557,7 +2557,7 @@ fn build_snapshot_data(
             actions.push(toggle_str);
         }
 
-        // Window verbs: `raise` is advertised from the native action list
+        // Window verbs: `activate` is advertised from the native action list
         // (AXRaise is a real AX action for windows); the attribute-backed
         // verbs are advertised from settability, the same way `expand` /
         // `collapse` decide theirs. The probes preserve their errors: a
@@ -2574,7 +2574,7 @@ fn build_snapshot_data(
                 }
             };
             if ax_actions.iter().any(|a| a == "AXRaise") {
-                push(&mut actions, "raise");
+                push(&mut actions, "activate");
             }
             // Probe the window-state capabilities once each — every probe is
             // an AX FFI round-trip, and the same results feed both the verb
@@ -3636,21 +3636,21 @@ impl Provider for MacOSProvider {
 
     // ── Window management ──────────────────────────────────────────
 
-    fn raise(&self, element: &ElementData) -> Result<()> {
+    fn activate(&self, element: &ElementData) -> Result<()> {
         let ax = self.get_cached(element.handle)?;
         // AXRaise does not deminiaturize, so a minimized window would answer
         // Ok while staying in the Dock — the fidelity gap the Windows backend
         // avoids by restoring first. Clear AXMinimized when it is true,
         // error-preserving (see `clear_bool_attr_if_true`).
-        clear_bool_attr_if_true(ax.as_ptr(), "AXMinimized", "raise", element.role)?;
+        clear_bool_attr_if_true(ax.as_ptr(), "AXMinimized", "activate", element.role)?;
         // AXRaise alone only re-raises the window within its own app's window
         // list and answers Ok while the app stays in the background, so a
         // background app's window never appears on screen — the report that
-        // `xa11y action raise` "does nothing". Activate the app first through
+        // `xa11y action activate` "does nothing". Activate the app first through
         // the accessibility API (the application element's AXFrontmost), then
-        // raise the window.
-        activate_owning_app(ax.as_ptr(), "raise", element.role)?;
-        perform_ax_action(ax.as_ptr(), "AXRaise", "raise", element.role)
+        // activate the window.
+        activate_owning_app(ax.as_ptr(), "activate", element.role)?;
+        perform_ax_action(ax.as_ptr(), "AXRaise", "activate", element.role)
     }
 
     fn minimize(&self, element: &ElementData) -> Result<()> {
@@ -3676,7 +3676,7 @@ impl Provider for MacOSProvider {
         // window would return success while the window stays in the Dock. The
         // window-state contract (see the shared mock) has maximize clear
         // `minimized` and bring the window back on-screen, so clear it first —
-        // error-preserving, the same `raise()` handling (tenet 1).
+        // error-preserving, the same `activate()` handling (tenet 1).
         match zoom {
             WindowZoom::None => Err(Error::ActionNotSupported {
                 action: "maximize".to_string(),
@@ -3911,7 +3911,7 @@ impl Provider for MacOSProvider {
             "increment" => self.increment(element),
             "decrement" => self.decrement(element),
             "scroll_into_view" => self.scroll_into_view(element),
-            "raise" => self.raise(element),
+            "activate" => self.activate(element),
             "minimize" => self.minimize(element),
             "maximize" => self.maximize(element),
             "restore" => self.restore(element),
@@ -4592,7 +4592,7 @@ mod tests {
         assert_eq!(ax_action_to_name("AXShowMenu"), Some("show_menu"));
         assert_eq!(ax_action_to_name("AXIncrement"), Some("increment"));
         assert_eq!(ax_action_to_name("AXDecrement"), Some("decrement"));
-        assert_eq!(ax_action_to_name("AXRaise"), Some("raise"));
+        assert_eq!(ax_action_to_name("AXRaise"), Some("activate"));
     }
 
     #[test]

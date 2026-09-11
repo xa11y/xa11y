@@ -790,19 +790,19 @@ impl LinuxProvider {
             }
         }
 
-        // `raise` is deliberately NOT advertised on AT-SPI. It is a real
+        // `activate` is deliberately NOT advertised on AT-SPI. It is a real
         // Linux window verb (Component.GrabFocus on the top-level frame —
-        // see `raise`), and Windows/macOS advertise theirs unconditionally,
+        // see `activate`), and Windows/macOS advertise theirs unconditionally,
         // but the AT-SPI adapters disagree about implementing a *frame*
         // GrabFocus: the GTK widget adapter answers true, while Chromium
         // (Electron), WebKitGTK (Tauri — whose bridge reports itself as
         // ToolkitName "GTK", so even a toolkit gate cannot separate it from
         // the GTK widget app) and Qt answer false. No interface or toolkit
         // probe discriminates them, and a snapshot-side GrabFocus probe
-        // would raise windows as a side effect. Advertising anyway would
+        // would activate windows as a side effect. Advertising anyway would
         // promise an action the call then declines — the false-promise shape
         // the integration suites exist to catch (round-4 CI: it failed the
-        // raise suites on electron, tauri and qt; only the GTK cell passed).
+        // activate suites on electron, tauri and qt; only the GTK cell passed).
         // The action stays callable on every toolkit, and the call reports a
         // `false` reply or a D-Bus NotSupported error honestly as
         // ActionNotSupported (tenet 3; tenet 1 — no silent fallback — is
@@ -1113,7 +1113,7 @@ impl LinuxProvider {
             })?;
         // AT-SPI's DoAction returns a boolean: true means the action ran. A
         // false reply means the provider declined — reporting Ok would let
-        // raise()/focus() claim success while the window was never raised.
+        // activate()/focus() claim success while the window was never activated.
         let performed: bool = reply.body().deserialize().map_err(|e| Error::Platform {
             code: -1,
             message: format!("DoAction({}) reply decode failed: {}", index, e),
@@ -2000,7 +2000,7 @@ impl Provider for LinuxProvider {
         // `get_actions`'s note: "focus" is only ever reported when explicitly
         // in the AT-SPI Action interface). Keeping the dead lookup here would
         // pretend to a second mechanism that never succeeds — the same
-        // decision `raise` documents above (tenet 1).
+        // decision `activate` documents above (tenet 1).
         let proxy = self
             .make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")
             .map_err(|e| Error::Platform {
@@ -2202,7 +2202,7 @@ impl Provider for LinuxProvider {
 
     // ── Window management ──────────────────────────────────────────
     //
-    // AT-SPI exposes exactly one of these verbs: `raise` (Component.GrabFocus
+    // AT-SPI exposes exactly one of these verbs: `activate` (Component.GrabFocus
     // on the frame — same path as `focus`). There is no AT-SPI API to alter
     // window state or geometry (no minimize/maximize/close/move/resize), and
     // implementing them via input simulation would violate tenet 2, so those
@@ -2211,21 +2211,21 @@ impl Provider for LinuxProvider {
     // Window discovery is `App::windows` — `get_children(app)` filtered to
     // Window|Dialog — as on every platform.
 
-    fn raise(&self, element: &ElementData) -> Result<()> {
-        // The AT-SPI implementation of "raise this window" is the same
+    fn activate(&self, element: &ElementData) -> Result<()> {
+        // The AT-SPI implementation of "activate this window" is the same
         // Component.GrabFocus path `focus` uses: the frame that receives
-        // focus becomes the active window. No separate raise API exists.
+        // focus becomes the active window. No separate activate API exists.
         //
         // Implemented here rather than delegating to `focus` so a failure
-        // reports the verb the caller requested — `raise` — not `focus`'s
+        // reports the verb the caller requested — `activate` — not `focus`'s
         // name (the two share a mechanism, not an identity).
         //
-        // A GrabFocus(false) reply is an honest "cannot raise this window",
+        // A GrabFocus(false) reply is an honest "cannot activate this window",
         // reported as ActionNotSupported: the action-index fallback that
         // `focus` carries cannot fire for window-like roles, because
         // `action_indices` is populated only for roles in `role_has_actions`
         // (Window/Dialog excluded) and `map_atspi_action_name` maps no
-        // "focus" action name. Unlike Windows/macOS, `raise` is deliberately
+        // "focus" action name. Unlike Windows/macOS, `activate` is deliberately
         // NOT advertised on AT-SPI — the adapters disagree about a frame
         // GrabFocus and no interface probe discriminates them (see the
         // reasons in `build_element_data`); advertised or not, the call here
@@ -2235,29 +2235,29 @@ impl Provider for LinuxProvider {
         // actual focus-named Action interface entry (issue #98), the right
         // fix is a direct Action probe on this failure path, not a cache
         // lookup the role/name mapping rules can never fill.
-        self.ensure_top_level_window_target(element, "raise")?;
+        self.ensure_top_level_window_target(element, "activate")?;
         let target = self.get_cached(element.handle)?;
         let proxy = self
             .make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")
             .map_err(|e| Error::Platform {
                 code: -1,
-                message: format!("Component proxy while raising failed: {}", e),
+                message: format!("Component proxy while activating failed: {}", e),
             })?;
         let reply = grab_focus_result(
             proxy.call_method("GrabFocus", &()),
-            "raising",
-            "raise",
+            "activating",
+            "activate",
             element.role,
         )?;
         let grabbed: bool = reply.body().deserialize().map_err(|e| Error::Platform {
             code: -1,
-            message: format!("Component.GrabFocus reply while raising failed: {}", e),
+            message: format!("Component.GrabFocus reply while activating failed: {}", e),
         })?;
         if grabbed {
             return Ok(());
         }
         Err(Error::ActionNotSupported {
-            action: "raise".to_string(),
+            action: "activate".to_string(),
             role: element.role,
         })
     }
@@ -2428,7 +2428,7 @@ impl Provider for LinuxProvider {
             "increment" => self.increment(element),
             "decrement" => self.decrement(element),
             "scroll_into_view" => self.scroll_into_view(element),
-            "raise" => self.raise(element),
+            "activate" => self.activate(element),
             "minimize" => self.minimize(element),
             "maximize" => self.maximize(element),
             "restore" => self.restore(element),
@@ -2485,7 +2485,7 @@ fn role_has_value(role: Role) -> bool {
 /// Container and display-only roles are skipped to save D-Bus round-trips.
 ///
 /// Window and Dialog are deliberately excluded: their semantic verbs do not
-/// come from the Action interface. `raise` (the one Linux supports) is also
+/// come from the Action interface. `activate` (the one Linux supports) is also
 /// deliberately NOT advertised — see the note in `build_element_data` on why
 /// (the AT-SPI adapters disagree about implementing a frame GrabFocus, so
 /// advertising it would promise an action the call then declines); it stays
@@ -2516,9 +2516,9 @@ fn role_has_actions(role: Role) -> bool {
 }
 
 /// Classify a `Component.GrabFocus` call result, used by
-/// [`focus`](LinuxProvider::focus) and [`raise`](LinuxProvider::raise).
+/// [`focus`](LinuxProvider::focus) and [`activate`](LinuxProvider::activate).
 ///
-/// The two verbs share the AT-SPI mechanism (there is no separate raise API),
+/// The two verbs share the AT-SPI mechanism (there is no separate activate API),
 /// and an adapter signals "this element cannot take focus" in one of two
 /// honest shapes: a `false` reply (checked by both callers) or the D-Bus
 /// `NotSupported` error, which is what the GTK4 adapter raises for
@@ -2966,8 +2966,8 @@ mod tests {
 
         let broken = grab_focus_error(
             "org.freedesktop.DBus.Error.UnknownMethod".into(),
-            "raising",
-            "raise",
+            "activating",
+            "activate",
             Role::Window,
         );
         match broken {

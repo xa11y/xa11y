@@ -1206,7 +1206,7 @@ fn uia_stable_id(native_handle: Option<HWND>, automation_id: Option<String>) -> 
 /// known-absent HRESULTs (see [`is_pattern_absent`]) mean the element has no
 /// such pattern, and thus `ActionNotSupported`; every other COM error — a dead
 /// element, a wedged provider — is a platform failure and must propagate
-/// (tenet 1), exactly as the `raise` path below does.
+/// (tenet 1), exactly as the `activate` path below does.
 fn pattern_acquisition_error(err: &windows::core::Error, verb: &str, role: Role) -> Error {
     if is_pattern_absent(err) {
         Error::ActionNotSupported {
@@ -2443,18 +2443,18 @@ impl Provider for WindowsProvider {
     // canonical accessibility interfaces for window state and geometry. No
     // input simulation is involved (tenet 2).
 
-    fn raise(&self, element: &ElementData) -> Result<()> {
+    fn activate(&self, element: &ElementData) -> Result<()> {
         let uia = self.get_cached(element.handle)?;
-        ensure_top_level_window_target(&uia, "raise", element.role)?;
+        ensure_top_level_window_target(&uia, "activate", element.role)?;
         // winlenium parity: if minimized, restore; then bring the HWND to the
         // foreground; then complete with a UIA SetFocus so UIA-backed
         // providers treat the window as focused.
         //
-        // Only a genuinely absent WindowPattern is a skip — raise's fore/focus
+        // Only a genuinely absent WindowPattern is a skip — activate's fore/focus
         // work does not need the pattern. Every other pattern-acquisition
         // error (a dead element, a wedged provider) propagates, and so does a
         // failed visual-state read: a minimized window whose state could not
-        // be read must not be reported as successfully raised while it stays
+        // be read must not be reported as successfully activated while it stays
         // minimized (tenet 1).
         match unsafe { uia.GetCurrentPatternAs::<IUIAutomationWindowPattern>(UIA_WindowPatternId) }
         {
@@ -2464,7 +2464,7 @@ impl Provider for WindowsProvider {
                         |e| Error::Platform {
                             code: e.code().0 as i64,
                             message: format!(
-                                "WindowPattern.SetWindowVisualState(Normal) while raising failed: {e}"
+                                "WindowPattern.SetWindowVisualState(Normal) while activating failed: {e}"
                             ),
                         },
                     )?;
@@ -2483,7 +2483,7 @@ impl Provider for WindowsProvider {
             Err(e) => {
                 return Err(Error::Platform {
                     code: e.code().0 as i64,
-                    message: format!("acquiring WindowPattern while raising failed: {e}"),
+                    message: format!("acquiring WindowPattern while activating failed: {e}"),
                 });
             }
         }
@@ -2494,7 +2494,7 @@ impl Provider for WindowsProvider {
         if hwnd.0.is_null() {
             return Err(Error::Platform {
                 code: -1,
-                message: "window has no native handle; cannot raise".to_string(),
+                message: "window has no native handle; cannot activate".to_string(),
             });
         }
         if !unsafe { SetForegroundWindow(hwnd) }.as_bool() {
@@ -2504,13 +2504,13 @@ impl Provider for WindowsProvider {
             return Err(Error::Platform {
                 code: -1,
                 message: "SetForegroundWindow was denied (foreground lock); the window may not \
-                          have been raised"
+                          have been activated"
                     .to_string(),
             });
         }
         unsafe { uia.SetFocus() }.map_err(|e| Error::Platform {
             code: e.code().0 as i64,
-            message: format!("SetFocus during raise failed: {e}"),
+            message: format!("SetFocus during activate failed: {e}"),
         })?;
         Ok(())
     }
@@ -2828,7 +2828,7 @@ impl Provider for WindowsProvider {
             "increment" => self.increment(element),
             "decrement" => self.decrement(element),
             "scroll_into_view" => self.scroll_into_view(element),
-            "raise" => self.raise(element),
+            "activate" => self.activate(element),
             "minimize" => self.minimize(element),
             "maximize" => self.maximize(element),
             "restore" => self.restore(element),
@@ -3030,10 +3030,10 @@ fn get_actions(
             actions.push("resize_to".to_string());
         }
     }
-    // `raise` works on any top-level HWND window (SetForegroundWindow +
+    // `activate` works on any top-level HWND window (SetForegroundWindow +
     // UIA SetFocus), independent of the pattern set.
-    if !actions.iter().any(|a| a == "raise") && is_top_level_window_control(element)? {
-        actions.push("raise".to_string());
+    if !actions.iter().any(|a| a == "activate") && is_top_level_window_control(element)? {
+        actions.push("activate".to_string());
     }
 
     Ok(actions)

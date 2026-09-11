@@ -313,10 +313,14 @@ impl Locator {
     // minimized window is legitimately not visible, and these actions are
     // exactly what must reach it.
 
-    /// Raise the matched window to the foreground.
+    /// Activate the matched window: bring it to the foreground and give it
+    /// focus.
     #[napi(ts_return_type = "Promise<void>")]
-    pub fn raise(&self) -> AsyncTask<ActionTask> {
-        AsyncTask::new(ActionTask::nullary(self.inner.clone(), ActionKind::Raise))
+    pub fn activate(&self) -> AsyncTask<ActionTask> {
+        AsyncTask::new(ActionTask::nullary(
+            self.inner.clone(),
+            ActionKind::Activate,
+        ))
     }
 
     /// Minimize the matched window.
@@ -620,7 +624,7 @@ pub enum ActionKind {
     TypeText,
     SelectText,
     PerformAction,
-    Raise,
+    Activate,
     Minimize,
     Maximize,
     Restore,
@@ -735,7 +739,7 @@ impl Task for ActionTask {
             ActionKind::PerformAction => self
                 .inner
                 .perform_action(self.text.as_deref().unwrap_or("")),
-            ActionKind::Raise => self.inner.raise(),
+            ActionKind::Activate => self.inner.activate(),
             ActionKind::Minimize => self.inner.minimize(),
             ActionKind::Maximize => self.inner.maximize(),
             ActionKind::Restore => self.inner.restore(),

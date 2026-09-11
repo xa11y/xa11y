@@ -3,7 +3,7 @@
 //! Screenshot is **separate from** both the accessibility action layer
 //! ([`crate::Provider`]) and the input-synthesis layer ([`crate::InputProvider`]).
 //! Backends that only capture pixels do not know how to read the a11y tree,
-//! synthesise input, or raise/activate windows — they are pure pixel readers.
+//! synthesise input, or activate windows — they are pure pixel readers.
 //!
 //! # What you get
 //!
@@ -16,11 +16,11 @@
 //! the ratio. Call [`Screenshot::to_png`] or [`Screenshot::save_png`] to
 //! encode.
 //!
-//! # No auto-raise
+//! # No auto-activation
 //!
 //! Capturing an element that is occluded or off-screen returns whatever pixels
-//! are at those coordinates — the target window is **not** raised or
-//! activated. If you need the element in the foreground, do that explicitly
+//! are at those coordinates — the target window is **not** activated. If you
+//! need the element in the foreground, do that explicitly
 //! before calling `xa11y::screenshot_element`.
 //!
 //! # Annotation
