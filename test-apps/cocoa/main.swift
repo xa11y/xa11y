@@ -48,9 +48,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         // A genuine NSStatusItem fixture for shell-surface integration tests.
-        // Its menu is deliberately opened from an ordinary app button below:
-        // AXPress must return before AppKit enters menu tracking, so the test
-        // process remains free to enumerate AXShownMenuUIElement.
+        // The test locates and pointer-clicks this actual menu-bar element.
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "XA"
         statusItem.button?.setAccessibilityLabel("xa11y status fixture")
@@ -103,14 +101,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         cancelButton.setAccessibilityLabel("Cancel")
         cancelButton.isEnabled = false
         btnBox.addSubview(cancelButton)
-
-        let openStatusMenuButton = NSButton(frame: NSRect(x: 280, y: 20, width: 180, height: 32))
-        openStatusMenuButton.bezelStyle = .rounded
-        openStatusMenuButton.title = "Open Status Menu"
-        openStatusMenuButton.setAccessibilityLabel("Open Status Menu")
-        openStatusMenuButton.action = #selector(AppDelegate.onOpenStatusMenuPressed)
-        openStatusMenuButton.target = self
-        btnBox.addSubview(openStatusMenuButton)
 
         // ── Checkboxes ───────────────────────────────────────────────────
         let chkBox = NSBox(frame: NSRect(x: 12, y: y - 100, width: 656, height: 100))
@@ -363,21 +353,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func onOKPressed() {
         cancelButton.isEnabled = true
-    }
-
-    @objc func onOpenStatusMenuPressed() {
-        // Enter menu tracking after AXPress has returned to its caller. Opening
-        // synchronously here would block that accessibility request until the
-        // menu closes, leaving no opportunity for the test to inspect it.
-        // One second keeps the menu's nested tracking loop clear of the AX
-        // request/response window on slower hosted runners.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            guard let self, let button = self.statusItem.button else { return }
-            // Open the actual NSMenu explicitly. performClick is allowed to be
-            // ignored for a synthetic event on hosted macOS sessions even
-            // though the status button remains accessibility-visible.
-            self.statusMenu.popUp(positioning: nil, at: .zero, in: button)
-        }
     }
 
     @objc func onStatusAction() {
