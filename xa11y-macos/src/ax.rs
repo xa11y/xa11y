@@ -458,6 +458,14 @@ enum ElementProbe {
     Unanswered(i32),
 }
 
+/// Outcome of reading an array-valued AX attribute whose members are
+/// accessibility elements.
+enum ElementArrayProbe {
+    Found(Vec<AXElement>),
+    Absent,
+    Unanswered,
+}
+
 /// Read an attribute whose value is an `AXUIElement`, distinguishing "absent"
 /// from "unanswered" by AXError code.
 ///
@@ -483,6 +491,47 @@ fn probe_element_attr(element: AXUIElementRef, attribute: &str) -> ElementProbe 
         // timeout surfaces as), kAXErrorInvalidUIElement, an ObjC exception
         // caught by the wrapper — means we did not get an answer.
         _ => ElementProbe::Unanswered(err),
+    }
+}
+
+/// Read an AX attribute containing an array of accessibility elements.
+///
+/// `kAXShownMenuUIElementAttribute` uses this shape despite its singular
+/// name. Each returned member is retained before the owning array is released.
+fn probe_element_array_attr(element: AXUIElementRef, attribute: &str) -> ElementArrayProbe {
+    let attr = CFString::new(attribute);
+    let mut value: CFTypeRef = std::ptr::null();
+    let err =
+        ffi_copy_attribute_value(element, attr.as_concrete_TypeRef() as CFTypeRef, &mut value);
+    match err {
+        AX_ERROR_SUCCESS => {
+            if value.is_null() {
+                return ElementArrayProbe::Absent;
+            }
+            let elements = unsafe {
+                if safe_cf_get_type_id(value) != safe_cf_array_get_type_id() {
+                    safe_cf_release(value);
+                    return ElementArrayProbe::Unanswered;
+                }
+                let count = safe_cf_array_get_count(value);
+                let mut elements = Vec::with_capacity(count as usize);
+                for i in 0..count {
+                    let element = safe_cf_array_get_value(value, i);
+                    if !element.is_null() {
+                        elements.push(AXElement::from_borrowed(element));
+                    }
+                }
+                safe_cf_release(value);
+                elements
+            };
+            if elements.is_empty() {
+                ElementArrayProbe::Absent
+            } else {
+                ElementArrayProbe::Found(elements)
+            }
+        }
+        AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE => ElementArrayProbe::Absent,
+        _ => ElementArrayProbe::Unanswered,
     }
 }
 

@@ -343,12 +343,18 @@ mod tests {
     #[test]
     #[ignore]
     fn a_native_taskbar_popup_exposes_visible_menu_items_as_a_flyout() {
-        struct DismissMenu(xa11y::InputSim);
+        struct DismissMenu {
+            input: xa11y::InputSim,
+            app: xa11y::Element,
+        }
 
         impl Drop for DismissMenu {
             fn drop(&mut self) {
-                if let Err(e) = self.0.keyboard().press(xa11y::Key::Escape) {
+                if let Err(e) = self.input.keyboard().press(xa11y::Key::Escape) {
                     eprintln!("failed to dismiss the taskbar popup during cleanup: {e}");
+                }
+                if let Err(e) = self.app.focus() {
+                    eprintln!("failed to restore the test app's focus during cleanup: {e}");
                 }
             }
         }
@@ -376,7 +382,10 @@ mod tests {
             .mouse()
             .right_click(clock)
             .unwrap_or_else(|e| panic!("right-click the taskbar clock: {e}"));
-        let _dismiss = DismissMenu(input);
+        let _dismiss = DismissMenu {
+            input,
+            app: crate::integ::app_root().as_element(),
+        };
 
         let flyout = ShellSurface::by_kind(ShellSurfaceKind::Flyout, LOOKUP_TIMEOUT)
             .unwrap_or_else(|e| panic!("the open native taskbar menu was not listed: {e}"));
