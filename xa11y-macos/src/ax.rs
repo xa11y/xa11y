@@ -2241,8 +2241,9 @@ impl MacOSProvider {
     /// why walking either the owning app or its `AXExtrasMenuBar` cannot find
     /// it. The accessibility API exposes that detached menu through AppKit's
     /// `AXShownMenu` or Carbon's `AXShownMenuUIElement` on the object providing
-    /// it. Probe the extras bar and each of its direct status-item children
-    /// because both shapes are used by status-item implementations.
+    /// it. Probe the owning application, extras bar, and each direct
+    /// status-item child because those provider shapes vary across AppKit and
+    /// Carbon implementations.
     ///
     /// Each probe carries the same per-element timeout as the rest of shell
     /// discovery. An app that does not answer contributes no flyout, matching
@@ -2257,6 +2258,11 @@ impl MacOSProvider {
         for (_, status_data) in status_items {
             let extras = self.get_cached(status_data.handle)?;
             let mut providers = vec![extras.clone()];
+            if let Some(pid) = status_data.pid {
+                providers.push(AXElement::from_owned(unsafe {
+                    safe_ax_create_application(pid as i32)
+                }));
+            }
             providers.extend(ax_children(extras.as_ptr()));
 
             for provider in providers {

@@ -372,7 +372,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // One second keeps the menu's nested tracking loop clear of the AX
         // request/response window on slower hosted runners.
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-            self?.statusItem.button?.performClick(nil)
+            guard let self, let button = self.statusItem.button else { return }
+            // Open the actual NSMenu explicitly. performClick is allowed to be
+            // ignored for a synthetic event on hosted macOS sessions even
+            // though the status button remains accessibility-visible.
+            self.statusMenu.popUp(positioning: nil, at: .zero, in: button)
         }
     }
 
