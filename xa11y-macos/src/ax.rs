@@ -426,9 +426,9 @@ enum ElementProbe {
     Unanswered(i32),
 }
 
-/// Outcome of reading an array-valued AX attribute whose members are
-/// accessibility elements.
-enum ElementArrayProbe {
+/// Outcome of reading an AX attribute containing one or more accessibility
+/// elements.
+enum ElementListProbe {
     Found(Vec<AXElement>),
     Absent,
     Unanswered,
@@ -462,11 +462,13 @@ fn probe_element_attr(element: AXUIElementRef, attribute: &str) -> ElementProbe 
     }
 }
 
-/// Read an AX attribute containing an array of accessibility elements.
+/// Read an AX attribute containing an accessibility element or an array of
+/// accessibility elements.
 ///
-/// `kAXShownMenuUIElementAttribute` uses this shape despite its singular
-/// name. Each returned member is retained before the owning array is released.
-fn probe_element_array_attr(element: AXUIElementRef, attribute: &str) -> ElementArrayProbe {
+/// AppKit's `AXShownMenu` is element-valued, while the Carbon
+/// `AXShownMenuUIElement` contract is array-valued. Each returned value is
+/// owned independently of the copied attribute value.
+fn probe_element_list_attr(element: AXUIElementRef, attribute: &str) -> ElementListProbe {
     let attr = CFString::new(attribute);
     let mut value: CFTypeRef = std::ptr::null();
     let err =
@@ -474,13 +476,14 @@ fn probe_element_array_attr(element: AXUIElementRef, attribute: &str) -> Element
     match err {
         AX_ERROR_SUCCESS => {
             if value.is_null() {
-                return ElementArrayProbe::Absent;
+                return ElementListProbe::Absent;
+            }
+            if unsafe { safe_cf_get_type_id(value) } != unsafe { safe_cf_array_get_type_id() } {
+                return ElementListProbe::Found(vec![AXElement::from_owned(
+                    value as AXUIElementRef,
+                )]);
             }
             let elements = unsafe {
-                if safe_cf_get_type_id(value) != safe_cf_array_get_type_id() {
-                    safe_cf_release(value);
-                    return ElementArrayProbe::Unanswered;
-                }
                 let count = safe_cf_array_get_count(value);
                 let mut elements = Vec::with_capacity(count as usize);
                 for i in 0..count {
@@ -493,13 +496,13 @@ fn probe_element_array_attr(element: AXUIElementRef, attribute: &str) -> Element
                 elements
             };
             if elements.is_empty() {
-                ElementArrayProbe::Absent
+                ElementListProbe::Absent
             } else {
-                ElementArrayProbe::Found(elements)
+                ElementListProbe::Found(elements)
             }
         }
-        AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE => ElementArrayProbe::Absent,
-        _ => ElementArrayProbe::Unanswered,
+        AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE => ElementListProbe::Absent,
+        _ => ElementListProbe::Unanswered,
     }
 }
 
@@ -2236,10 +2239,10 @@ impl MacOSProvider {
     ///
     /// AppKit does not put an open status-item menu in `AXChildren`, which is
     /// why walking either the owning app or its `AXExtrasMenuBar` cannot find
-    /// it. The accessibility API exposes that detached menu through
-    /// `AXShownMenuUIElement` on the object providing it. Probe the extras bar
-    /// and each of its direct status-item children because both shapes are
-    /// used by status-item implementations.
+    /// it. The accessibility API exposes that detached menu through AppKit's
+    /// `AXShownMenu` or Carbon's `AXShownMenuUIElement` on the object providing
+    /// it. Probe the extras bar and each of its direct status-item children
+    /// because both shapes are used by status-item implementations.
     ///
     /// Each probe carries the same per-element timeout as the rest of shell
     /// discovery. An app that does not answer contributes no flyout, matching
@@ -2257,15 +2260,16 @@ impl MacOSProvider {
             providers.extend(ax_children(extras.as_ptr()));
 
             for provider in providers {
-                let shown_menus = {
+                let mut shown_menus = Vec::new();
+                for attribute in ["AXShownMenu", "AXShownMenuUIElement"] {
                     let Some(_bound) = Self::shell_probe_bound(&provider) else {
                         continue;
                     };
-                    match probe_element_array_attr(provider.as_ptr(), "AXShownMenuUIElement") {
-                        ElementArrayProbe::Found(menus) => menus,
-                        ElementArrayProbe::Absent | ElementArrayProbe::Unanswered => continue,
+                    match probe_element_list_attr(provider.as_ptr(), attribute) {
+                        ElementListProbe::Found(menus) => shown_menus.extend(menus),
+                        ElementListProbe::Absent | ElementListProbe::Unanswered => {}
                     }
-                };
+                }
 
                 for shown_menu in shown_menus {
                     if seen_menus.iter().any(|menu| unsafe {

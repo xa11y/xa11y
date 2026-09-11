@@ -20,11 +20,18 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 Write-Host "Launching xa11y-test-app..."
 $testApp = Start-Process -FilePath ".\target\debug\xa11y-test-app.exe" -ArgumentList "--headless" -PassThru -WindowStyle Hidden
 
-# Wait for accessibility registration
-Write-Host "Waiting for test app to register..."
-Start-Sleep -Seconds 3
-
+$testExit = 1
+$trayFixture = $null
 try {
+    Write-Host "Launching native notification-area fixture..."
+    # Windows PowerShell hosts the .NET Framework WinForms implementation;
+    # its legacy ContextMenu is backed by a native HMENU/#32768 popup.
+    $trayFixture = Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-File", ".\test-apps\windows-tray\app.ps1" -PassThru -WindowStyle Hidden
+
+    # Wait for accessibility registration
+    Write-Host "Waiting for test app and tray fixture to register..."
+    Start-Sleep -Seconds 3
+
     # 3. Run integration tests
     Write-Host "Running integration tests..."
     if ($testFilter) {
@@ -38,6 +45,10 @@ try {
     Write-Host "Cleaning up..."
     Stop-Process -Id $testApp.Id -Force -ErrorAction SilentlyContinue
     Wait-Process -Id $testApp.Id -Timeout 5 -ErrorAction SilentlyContinue
+    if ($null -ne $trayFixture) {
+        Stop-Process -Id $trayFixture.Id -Force -ErrorAction SilentlyContinue
+        Wait-Process -Id $trayFixture.Id -Timeout 5 -ErrorAction SilentlyContinue
+    }
 }
 
 Write-Host "=== Integration tests finished (exit code: $testExit) ==="
