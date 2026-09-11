@@ -369,7 +369,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Enter menu tracking after AXPress has returned to its caller. Opening
         // synchronously here would block that accessibility request until the
         // menu closes, leaving no opportunity for the test to inspect it.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
+        // One second keeps the menu's nested tracking loop clear of the AX
+        // request/response window on slower hosted runners.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.statusItem.button?.performClick(nil)
         }
     }
