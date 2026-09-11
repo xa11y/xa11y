@@ -3136,7 +3136,7 @@ impl MacOSProvider {
                 for attached_menu in ax_children(provider.as_ptr()).into_iter().filter(|child| {
                     ax_string(child.as_ptr(), "AXRole").as_deref() == Some("AXMenu")
                 }) {
-                    let data = self.build_element_data(&attached_menu, status_data.pid);
+                    let data = self.build_element_data(&attached_menu, status_data.pid)?;
                     if data.states.visible
                         && data
                             .bounds
@@ -3159,7 +3159,7 @@ impl MacOSProvider {
                         continue;
                     }
 
-                    let mut data = self.build_element_data(&shown_menu, status_data.pid);
+                    let mut data = self.build_element_data(&shown_menu, status_data.pid)?;
                     data.name = status_data.name.clone();
                     seen_menus.push(shown_menu);
                     surfaces.push((ShellSurfaceKind::Flyout, data));
