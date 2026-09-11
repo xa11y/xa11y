@@ -189,9 +189,10 @@ features:
       `window-type:dock` frame. That declaration is the feature: #377 shipped
       three hand-written classifiers whose whole test suite would have stayed
       green if enumeration had returned nothing on every platform (#383).
-      The Windows Rust suite also right-clicks a real notification-area
-      control and requires the resulting native popup's visible menu items to
-      be reachable through a `flyout` surface.
+      The Windows Rust harness registers a native NotifyIcon in Explorer's
+      real notification area. The suite right-clicks that taskbar or overflow
+      icon and requires its native popup's visible menu items to be reachable
+      through a `flyout` surface.
       The Linux frame comes from test-apps/panel/panel.py, a GTK3 dock window
       the Rust integ harness launches — a bare Xvfb display has no desktop
       environment and vends none. It is a fixture rather than a test app: no
