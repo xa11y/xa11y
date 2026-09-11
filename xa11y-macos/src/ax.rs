@@ -375,8 +375,8 @@ fn ax_number_i64(element: AXUIElementRef, attribute: &str) -> Option<i64> {
     }
 }
 
-fn ax_children(element: AXUIElementRef) -> Vec<AXElement> {
-    let value = match ax_attr(element, "AXChildren") {
+fn ax_element_array(element: AXUIElementRef, attribute: &str) -> Vec<AXElement> {
+    let value = match ax_attr(element, attribute) {
         Some(v) => v,
         None => return vec![],
     };
@@ -424,6 +424,10 @@ enum ElementProbe {
     /// element / process is gone. Carries the AXError code so a caller that
     /// treats this as a failure can report which.
     Unanswered(i32),
+}
+
+fn ax_children(element: AXUIElementRef) -> Vec<AXElement> {
+    ax_element_array(element, "AXChildren")
 }
 
 /// Outcome of reading an AX attribute containing one or more accessibility
@@ -2237,13 +2241,12 @@ impl MacOSProvider {
     /// Native menus currently shown by status-item surfaces, as transient
     /// `Flyout` roots.
     ///
-    /// AppKit does not put an open status-item menu in `AXChildren`, which is
-    /// why walking either the owning app or its `AXExtrasMenuBar` cannot find
-    /// it. The accessibility API exposes that detached menu through AppKit's
-    /// `AXShownMenu` or Carbon's `AXShownMenuUIElement` on the object providing
-    /// it. Probe the owning application, extras bar, and each direct
-    /// status-item child because those provider shapes vary across AppKit and
-    /// Carbon implementations.
+    /// AppKit may keep a status-item menu permanently in `AXChildren`, even
+    /// while it is closed, and place it in `AXVisibleChildren` only while it
+    /// is open. Other implementations expose a detached menu through AppKit's
+    /// `AXShownMenu` or Carbon's `AXShownMenuUIElement`. Probe the owning
+    /// application, extras bar, and each direct status-item child because
+    /// those provider shapes vary across implementations.
     ///
     /// Each probe carries the same per-element timeout as the rest of shell
     /// discovery. An app that does not answer contributes no flyout, matching
@@ -2266,11 +2269,17 @@ impl MacOSProvider {
             providers.extend(ax_children(extras.as_ptr()));
 
             for provider in providers {
-                let mut shown_menus = Vec::new();
+                let Some(_bound) = Self::shell_probe_bound(&provider) else {
+                    continue;
+                };
+                let mut shown_menus: Vec<AXElement> =
+                    ax_element_array(provider.as_ptr(), "AXVisibleChildren")
+                        .into_iter()
+                        .filter(|child| {
+                            ax_string(child.as_ptr(), "AXRole").as_deref() == Some("AXMenu")
+                        })
+                        .collect();
                 for attribute in ["AXShownMenu", "AXShownMenuUIElement"] {
-                    let Some(_bound) = Self::shell_probe_bound(&provider) else {
-                        continue;
-                    };
                     match probe_element_list_attr(provider.as_ptr(), attribute) {
                         ElementListProbe::Found(menus) => shown_menus.extend(menus),
                         ElementListProbe::Absent | ElementListProbe::Unanswered => {}
