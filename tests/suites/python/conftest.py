@@ -15,8 +15,8 @@ import os
 import sys
 
 import pytest
-import xa11y
 
+import xa11y
 from tests.launchers import launcher_for
 
 # ---------------------------------------------------------------------------
@@ -489,9 +489,7 @@ APP_CONFIGS: dict[str, dict] = {
             "WinForms Forms do not set UIA_IsDialogPropertyId, so a dialog is "
             "indistinguishable from any other top-level window"
         ),
-        "dialog_name": unsupported(
-            "WinForms Forms do not set UIA_IsDialogPropertyId"
-        ),
+        "dialog_name": unsupported("WinForms Forms do not set UIA_IsDialogPropertyId"),
         "ok_button_name": "OK",
         "cancel_button_name": "Cancel",
         # Not asserted: the app sets AccessibleDescription on OK, but WinForms
@@ -585,6 +583,15 @@ APP_CONFIGS: dict[str, dict] = {
         # exactly UIA_IsDialogPropertyId — so the native-dialog role test runs.
         "dialog_button_name": "Open Dialog",
         "dialog_name": "Sample Dialog",
+        # Same-process non-modal sibling top-level window: the C1 sibling-event
+        # coverage (per-window UIA handlers + open/close re-attachment) needs a
+        # second top-level window that is NOT a dialog, so it can be minimized
+        # independently and its PropertyChanged(WindowVisualState) observed on
+        # an app subscription. Only the WPF test app has this window (see
+        # OpenSampleSibling in test-apps/wpf/Program.cs); other apps omit the
+        # keys and the suite skips.
+        "sibling_button_name": "Open Sibling",
+        "sibling_name": "Sample Sibling",
         "ok_button_name": "OK",
         "cancel_button_name": "Cancel",
         # WPF routes AutomationProperties.HelpText to UIA HelpText, one of the
@@ -815,6 +822,6 @@ def tauri_input_app(app_name, app):
         try:
             app.locator('button[name="Back to widgets"]').press()
             app.locator('button[name="OK"]').wait_attached(timeout=5.0)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110
             # Best-effort restoration — never fail the run on teardown.
             pass

@@ -327,6 +327,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         removeItemButton.action = #selector(AppDelegate.onRemoveItemPressed)
         dynBox.addSubview(removeItemButton)
 
+        // Fullscreen toggle: the one window state only macOS can report
+        // (AXFullScreen — UIA and AT-SPI have no fullscreen state, and the
+        // Accessibility API has no fullscreen notification, so fullscreen is
+        // a state-only capability on macOS). Pressing it drives the
+        // fullscreen state entry test, ordered last in the suite.
+        let fullscreenButton = NSButton(frame: NSRect(x: 16, y: 10, width: 160, height: 24))
+        fullscreenButton.bezelStyle = .rounded
+        fullscreenButton.title = "Toggle Fullscreen"
+        fullscreenButton.setAccessibilityLabel("Toggle Fullscreen")
+        fullscreenButton.target = self
+        fullscreenButton.action = #selector(AppDelegate.onToggleFullscreenPressed)
+        dynBox.addSubview(fullscreenButton)
+
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -357,6 +370,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             rowCount -= 1
             listTable.reloadData()
         }
+    }
+
+    @objc func onToggleFullscreenPressed() {
+        // Native fullscreen (the Spaces transition the fullscreen state test
+        // drives) is only available to regular-policy apps; the harness
+        // launches this app accessory (--headless) so every suite before the
+        // fullscreen test keeps it out of the frontmost slot. Lift the
+        // policy for the transition — the fullscreen test runs in the last
+        // suite (python-window), after which nothing depends on accessory
+        // policy.
+        if NSApp.activationPolicy() != .regular {
+            NSApp.setActivationPolicy(.regular)
+            NSApp.activate(ignoringOtherApps: true)
+            window.makeKeyAndOrderFront(nil)
+        }
+        // AppKit documents that `toggleFullScreen:` "may simply do nothing"
+        // without FullScreenPrimary/FullScreenAuxiliary in collectionBehavior.
+        // The harness window servers complete the ENTRY transition but never
+        // the EXIT one (the test asserts entry only), so the insert is here
+        // for correctness on real sessions and for manual debugging.
+        window.collectionBehavior.insert(.fullScreenPrimary)
+        window.toggleFullScreen(nil)
     }
 
     // References to controls that need state changes

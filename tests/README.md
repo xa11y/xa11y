@@ -98,8 +98,12 @@ cargo xtask test-apps
 # Rust core suite (AccessKit app, fast-path)
 cargo xtask test-integ
 
-# Per-app suites. Each launches the app once and runs the python, js and cli
-# suites against it — the same tests/harness/launch.py entry point CI uses.
+# Per-app suites. Each launches the app once and runs the python, js, cli
+# and mutating window suites against it — the same tests/harness/launch.py
+# entry point CI uses. The window suites (js-window / python-window) run
+# last: every suite shares one app process, and the window-state verbs churn
+# the UIA/AX cache in a way that made a following suite's action tests flaky.
+# js-window runs before python-window so the Cocoa fullscreen test stays last.
 # Pass an explicit suite list to narrow it, e.g. `cargo xtask test-qt python`.
 cargo xtask test-qt          # Qt/PySide6
 cargo xtask test-gtk         # GTK4

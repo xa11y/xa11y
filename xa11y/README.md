@@ -72,7 +72,7 @@ Query accessibility trees with CSS-like selectors:
 
 | Action | Description |
 | --- | --- |
-| `press` | Click / activate |
+| `press` | Click / invoke |
 | `focus` / `blur` | Move or remove keyboard focus |
 | `toggle` | Toggle a checkbox or switch |
 | `expand` / `collapse` | Expand or collapse a disclosure |

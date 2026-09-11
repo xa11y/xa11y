@@ -93,6 +93,9 @@ pub fn state_flag_to_str(flag: xa11y::StateFlag) -> &'static str {
         xa11y::StateFlag::Modal => "modal",
         xa11y::StateFlag::Required => "required",
         xa11y::StateFlag::Busy => "busy",
+        xa11y::StateFlag::Minimized => "minimized",
+        xa11y::StateFlag::Maximized => "maximized",
+        xa11y::StateFlag::Fullscreen => "fullscreen",
         // `StateFlag` is `#[non_exhaustive]`; coverage is enforced by
         // `cargo xtask check-bindings-parity`, not by the compiler.
         _ => "unknown",

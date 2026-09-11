@@ -18,10 +18,10 @@
 //!
 //! Regions are captured in **physical** pixels. `capture_region` receives a
 //! rectangle in **logical** coordinates (the cross-platform contract, matching
-//! `Element::bounds`) and converts it to physical using the DPI of the monitor
-//! under its origin; the resulting [`Screenshot::scale`] carries the
-//! physical-to-logical ratio so callers can map logical bounds onto captured
-//! pixels. Multi-monitor setups with mixed DPI are handled per-monitor; see
+//! `Element::bounds`) and converts it to physical via the origin-preserving
+//! per-monitor mapping in [`crate::dpi`]; the resulting [`Screenshot::scale`]
+//! carries the physical-to-logical ratio so callers can map logical bounds onto
+//! captured pixels. Mixed-DPI multi-monitor setups are handled per-monitor; see
 //! [`crate::dpi`] for the boundary-straddling caveat.
 //!
 //! `capture_full` covers the whole **virtual desktop**, so it can span several
@@ -77,6 +77,8 @@ impl ScreenshotProvider for WindowsScreenshot {
 }
 
 #[cfg(target_os = "windows")]
+use windows::Win32::Foundation::RECT;
+#[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
     ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC,
@@ -124,25 +126,26 @@ impl ScreenshotProvider for WindowsScreenshot {
         // the *virtual desktop*, not of the primary monitor. `vx`/`vy` go
         // negative as soon as a monitor is arranged left of or above the
         // primary one, and every consumer that maps logical bounds onto these
-        // pixels has to subtract that. Convert through `Rect::to_logical` so
-        // the rounding matches `Rect::to_physical`, which is what the
-        // annotation math applies on the way back.
-        let logical = Rect {
-            x: vx,
-            y: vy,
-            width: 0,
-            height: 0,
-        }
-        .to_logical(scale);
-        Ok((shot, Point::new(logical.x, logical.y)))
+        // pixels has to subtract that. Convert through the origin-preserving
+        // mapping so the rounding matches `logical_rect_to_physical`, which
+        // is what the annotation math applies on the way back.
+        let logical_origin = crate::dpi::physical_rect_to_logical(RECT {
+            left: vx,
+            top: vy,
+            right: vx,
+            bottom: vy,
+        });
+        Ok((shot, Point::new(logical_origin.x, logical_origin.y)))
     }
 
     fn capture_region(&self, rect: Rect) -> Result<Screenshot> {
         // `rect` arrives in logical coordinates (the cross-platform contract,
         // matching `Element::bounds`). Convert to the physical pixels BitBlt
-        // works in, using the DPI of the monitor under the rect's origin.
-        let scale = crate::dpi::scale_for_logical_point(rect.x, rect.y);
-        let phys = rect.to_physical(scale);
+        // works in via the origin-preserving per-monitor mapping (`crate::dpi`)
+        // — the inverse of the bounds production, so a window's bounds fed
+        // back in capture the exact region it occupies (within rounding).
+        let phys = crate::dpi::logical_rect_to_physical(rect)?;
+        let scale = crate::dpi::scale_for_physical_point(phys.x, phys.y);
         if phys.width == 0 || phys.height == 0 {
             return Err(Error::Platform {
                 code: -1,

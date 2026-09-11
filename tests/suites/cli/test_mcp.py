@@ -261,6 +261,7 @@ def test_tools_list_is_complete_and_deterministic(mcp):
     assert first == [
         "apps",
         "shell",
+        "windows",
         "tree",
         "find",
         "action",
@@ -544,6 +545,71 @@ def test_apps_lists_the_running_test_app(mcp, app_pid):
     listed = {a["pid"]: a for a in structured["applications"]}
     assert app_pid in listed, f"pid {app_pid} not among {sorted(listed)}"
     assert listed[app_pid]["name"], "a listed application must carry a name"
+
+
+def test_windows_lists_the_test_apps_windows(mcp, app_pid, app_name):
+    """The `windows` tool must enumerate the test app's top-level windows.
+
+    The filtered (by pid) and unfiltered paths must both be exercised: the
+    dedup-by-pid logic that keeps a window/dialog pair from listing the same
+    process twice only runs on the unfiltered path, and only the filtered path
+    pins the listing to one app for the assertions below.
+
+    Not every app exposes a window-like element (the GTK app's AT-SPI tree
+    starts at a plain group), so a count of zero is the provider answering
+    honestly — skip, since the per-app matrix is the Rust integ suite's
+    ground truth and this file's point is the wire shape.
+    """
+    by_pid = mcp.call_tool("windows", {"pid": app_pid})["result"]
+    assert by_pid["isError"] is False, by_pid["content"]
+    structured = by_pid["structuredContent"]
+    assert structured["count"] == len(structured["windows"])
+    assert structured["returned"] == structured["count"], structured
+    assert structured["truncated"] is False, structured
+    assert structured["errors"] == [], structured
+    windows = structured["windows"]
+    if not windows:
+        pytest.skip(f"{app_name!r} exposes no window-like element")
+    # A window carries its role; `name` may legitimately be absent (an
+    # unnamed egui window), so it must not be required.
+    for w in windows:
+        assert w["role"], "a listed window always carries a role"
+
+    # The unfiltered listing must contain the same window set; names are
+    # matched when present, since the pid filter is not carried in the
+    # window payloads.
+    unfiltered = mcp.call_tool("windows")["result"]
+    assert unfiltered["isError"] is False, unfiltered["content"]
+    all_names = {
+        w["name"] for w in unfiltered["structuredContent"]["windows"] if w.get("name")
+    }
+    named = [w["name"] for w in windows if w.get("name")]
+    missing = [n for n in named if n not in all_names]
+    assert not missing, f"unfiltered listing lost the test app windows: {missing}"
+
+
+def test_windows_tool_reports_limit_truncation_honestly(mcp, app_pid):
+    """A `limit` below the count must say it truncated, never silently shorten.
+
+    The test app usually has a single window, in which case a limit of 1
+    returns everything and the truncated flag is simply false — the contract
+    fields must be present either way, so a model cannot mistake an absent
+    field for a complete result.
+    """
+    structured = mcp.call_tool("windows", {"pid": app_pid, "limit": 1})["result"]
+    assert structured["isError"] is False, structured["content"]
+    payload = structured["structuredContent"]
+    assert "truncated" in payload, "truncation status must be explicit"
+    assert "errors" in payload, "partial failures must be reported, not hidden"
+    assert payload["returned"] == len(payload["windows"])
+    if payload["count"] > 1:
+        assert payload["truncated"] is True, payload
+        assert payload["returned"] == 1, payload
+        assert any(
+            c["text"] for c in structured["content"]
+        ), "the serialized result must reach the text channel"
+    else:
+        assert payload["truncated"] is False, payload
 
 
 def test_the_app_argument_resolves_the_same_application_as_pid(mcp, app_pid):

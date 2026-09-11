@@ -120,6 +120,24 @@ features:
     description: "error paths: invalid selectors, selector misses, wait timeouts, unsupported actions"
     per_app: true
 
+  windows:
+    description: >
+      window management: enumerate windows, window verbs (activate, minimize,
+      restore, maximize, move_to, resize_to, close), window state
+      (minimized, maximized, fullscreen), and window StateChanged events
+    per_app: true
+    notes: >
+      Per-app because window verb support differs by toolkit and adapter:
+      activate is advertised only on Windows and macOS — AT-SPI deliberately
+      never advertises it (the adapters disagree about a frame GrabFocus and
+      no interface probe discriminates them; the python/JS activate suites
+      therefore skip every Linux cell, see the linux_activate_not_advertised
+      gap), minimize and restore demand WindowPattern, and some toolkits
+      cannot move or resize a top-level window at all. The suites adapt via
+      the app config: python test_window.py + test_window_mutating.py, JS
+      06_window.test.js + 07_window_mutating.test.js, and the Rust integ
+      suite's windows.rs cover rust_core.
+
   input_sim:
     description: "input simulation: click, double-click, right-click, drag, key press, chord, type, scroll"
     per_app: false
@@ -225,10 +243,22 @@ features:
 # rust_core is the xa11y/tests/integ/ suite — separate from per-app compat suites.
 rust_core:
   app: accesskit
-  features: [compat, actions, events, screenshot, shell]
+  features: [compat, actions, events, screenshot, shell, windows]
   note: >
     Fast-path core validation. All tests are #[ignore] and run via `cargo xtask test-integ`.
     Platform-split event tests: events_linux.rs, events_macos.rs, events_windows.rs.
+    windows.rs covers window management verbs + App::windows() against the
+    AccessKit app. Success-path coverage is split: enumerate/activate everywhere;
+    minimize/restore/close on macOS + Windows; maximize and move/resize geometry
+    are macOS-only today. Windows TransformPattern move is covered end to end
+    on the windows-latest winforms cell: the python-window suite's
+    test_move_to_and_resize_to_are_enforced_on_winforms requires move_to
+    advertised, dispatched, and the reported bounds changed. TransformPattern
+    resize is *not* end to end covered there (the same test asserts
+    advertisement + dispatch, but the winforms form's bounds never change
+    after a successful Resize — see the winforms_transform_resize_noop gap
+    below), and the CLI suite's test_window.py dispatch tests tolerate
+    "unsupported" (see the rust_core_windows_geometry gap below).
 
 # coverage[app][language] = list of features covered, or [] for none.
 coverage:
@@ -237,51 +267,62 @@ coverage:
     # harness gates this on sys.platform). The events module also runs but its
     # assertions are xfail-guarded. On macOS/Windows the Rust integ suite stays
     # the canonical AccessKit coverage. See note below.
-    python: [compat, actions, events, errors]
+    python: [compat, actions, events, errors, windows]
     # JS input_sim/screenshot are gated to Tauri + Electron in the test files
-    # (one-per-renderer-family strategy); they self-skip for AccessKit.
+    # (one-per-renderer-family strategy); they self-skip for AccessKit. The
+    # harness declares js/js-window skipped for AccessKit
+    # (declared_suite_skips in tests/harness/launch.py), so no AccessKit
+    # harness cell runs the JS window-mutating suite — the JS AccessKit
+    # surface is the `cargo xtask test-js-integ` vehicle (scripts/
+    # run_js_tests.sh, whose default --app is accesskit), which covers
+    # compat/actions only. Window-verb coverage for JS lives on the other
+    # matrix apps' cells.
     js: [compat, actions]
-    cli: [compat, actions]  # CLI is Rust — natural to test against the Rust test app
+    # The cli suite is declared-skipped for AccessKit too, and no other
+    # vehicle runs the CLI against the AccessKit app — so unlike the JS
+    # surface there is no honest claim to make for any feature. CLI
+    # window-verb coverage is the qt/winforms/wpf cells.
+    cli: []
 
   qt:
-    python: [compat, actions, events, errors]
-    js: [compat, actions]
-    cli: [compat, actions, mcp]
+    python: [compat, actions, events, errors, windows]
+    js: [compat, actions, windows]
+    cli: [compat, actions, mcp, windows]
 
   gtk:
-    python: [compat, actions, events, errors]
-    js: [compat, actions]
-    cli: [compat, actions, mcp]
+    python: [compat, actions, events, errors, windows]
+    js: [compat, actions, windows]
+    cli: [compat, actions, mcp, windows]
 
   cocoa:
-    python: [compat, actions, events, errors]
-    js: [compat, actions]
-    cli: [compat, actions, mcp]
+    python: [compat, actions, events, errors, windows]
+    js: [compat, actions, windows]
+    cli: [compat, actions, mcp, windows]
 
   tauri:
-    python: [compat, actions, events, errors, input_sim, screenshot]
-    js: [compat, actions, input_sim, screenshot]
-    cli: [compat, actions, input_sim, screenshot, mcp]
+    python: [compat, actions, events, errors, input_sim, screenshot, windows]
+    js: [compat, actions, input_sim, screenshot, windows]
+    cli: [compat, actions, input_sim, screenshot, mcp, windows]
 
   electron:
-    python: [compat, actions, errors]
+    python: [compat, actions, errors, windows]
     js: [compat, actions, input_sim, screenshot]
-    cli: [compat, actions, mcp]
+    cli: [compat, actions, mcp, windows]
 
   egui:
-    python: [compat, actions, events, errors]
-    js: [compat, actions]
-    cli: [compat, actions, mcp]
+    python: [compat, actions, events, errors, windows]
+    js: [compat, actions, windows]
+    cli: [compat, actions, mcp, windows]
 
   winforms:
-    python: [compat, actions, events, errors]
-    js: [compat, actions]
-    cli: [compat, actions, mcp]
+    python: [compat, actions, events, errors, windows]
+    js: [compat, actions, windows]
+    cli: [compat, actions, mcp, windows]
 
   wpf:
-    python: [compat, actions, events, errors]
-    js: [compat, actions]
-    cli: [compat, actions, mcp]
+    python: [compat, actions, events, errors, windows]
+    js: [compat, actions, windows]
+    cli: [compat, actions, mcp, windows]
 
 gaps:
   - id: accesskit_python_suite_non_linux
@@ -298,6 +339,21 @@ gaps:
     affects:
       apps: [accesskit]
       language: python
+
+  - id: accesskit_cli_suite_declared_skip
+    description: >
+      The CLI suite is declared-skipped for the AccessKit app (see
+      declared_suite_skips in tests/harness/launch.py): the AccessKit widget
+      schema differs from the shared OK-button fixtures the CLI suite's
+      shared tests assume, and no other vehicle runs the CLI against the
+      AccessKit app. The CLI's window-verb and action coverage comes from the
+      qt/winforms/wpf cells instead; the AccessKit app's CLI-facing surface
+      is the Rust integ suite, which exercises the same xa11y crate.
+    severity: low
+    workaround: "qt/winforms/wpf integ cells cover the CLI surface; Rust integ suite covers the AccessKit app"
+    affects:
+      apps: [accesskit]
+      language: cli
 
   - id: macos_input_sim_wire_level
     description: >
@@ -345,8 +401,91 @@ gaps:
     workaround: "Python covers input_sim+screenshot on Tauri; JS covers on Tauri+Electron"
     affects:
       apps: [qt, gtk, cocoa]
-      language: js
-      features: [input_sim, screenshot]
+
+  - id: linux_activate_not_advertised
+    description: >
+      Linux activate is Component.GrabFocus on the top-level frame, and the
+      AT-SPI adapters disagree about implementing it: the GTK widget adapter
+      answers true while Chromium (Electron), WebKitGTK (Tauri — whose
+      bridge reports ToolkitName "GTK", so even a toolkit gate cannot
+      separate it from the GTK widget app) and Qt answer false despite
+      exposing the Component interface (round-4 CI). No interface or toolkit
+      probe discriminates them, and a snapshot-side GrabFocus probe would
+      activate windows as a side effect, so xa11y-linux deliberately does NOT
+      advertise `activate` (see build_element_data in atspi.rs). The call
+      itself stays honest on every toolkit — a false reply or D-Bus
+      NotSupported error is ActionNotSupported — and the python/JS activate
+      suites therefore skip on the Linux cells instead of failing an
+      advertised action their window then declines.
+    severity: low
+    workaround: "Windows/macOS integ cells cover advertised activate; Linux explicit activate() returns ActionNotSupported where the adapter declines and succeeds on GTK"
+    affects:
+      apps: [qt, tauri, electron, gtk]
+      language: [python, js]
+      features: [windows]
+
+  - id: rust_core_windows_geometry
+    description: >
+      The Rust integ suite's window-geometry tests (xa11y/tests/integ/
+      windows.rs) are macOS-only: `move_to` / `resize_to` / `maximize` are
+      asserted for real only against the AccessKit app on macOS, and the
+      suite never runs against the WinForms app. The Windows TransformPattern
+      path is exercised elsewhere — the CLI suite's test_window.py dispatches
+      move-to/resize-to on the windows-latest winforms cell, and the
+      python-window / js-window suites drive the same verbs through the
+      bindings there — but the Rust suite's own per-platform matrix for
+      geometry is a gap.
+    severity: low
+    workaround: "CLI suite test_window.py + python-window/js-window suites (winforms cell) exercise the Windows TransformPattern path; binding-level close wiring stays mock+CLI-covered (closing the shared app window would kill it mid-run)"
+    affects:
+      apps: [accesskit, winforms]
+      language: rust
+      features: [windows]
+
+  - id: windows_dpi_awareness_embedding
+    description: >
+      xa11y-windows assumes the process is Per-Monitor-V2 aware
+      (ensure_process_dpi_aware sets it, and the dpi.rs transforms treat UIA
+      bounds/BitBlt/SendInput coordinates as physical). A host that pinned a
+      lower awareness (SYSTEM_DPI_AWARE / DPI_UNAWARE) before xa11y loads
+      gets ERROR_ACCESS_DENIED from SetProcessDpiAwarenessContext, which is
+      currently ignored — the monitor-lookup and physical/logical transforms
+      then run against virtualized coordinates, so move_to / click /
+      screenshot can land on the wrong monitor. Accepted for now (copilot
+      review round on PR #3): the exposure is confined to embedding hosts
+      that pinned a lower awareness, while standalone binaries and the
+      language bindings set Per-Monitor-V2 themselves. A hard constructor
+      failure would also break embedded hosts that work today on uniform-DPI
+      desktops, so the fix is deferred. When picked up: make
+      ensure_process_dpi_aware fallible, query the effective awareness on
+      ERROR_ACCESS_DENIED, fail only when it is below per-monitor, and
+      decide fail-at-init vs fail-at-transform-boundary after verifying
+      SYSTEM_DPI_AWARE coordinate semantics on uniform and mixed-DPI
+      desktops.
+    severity: low
+    workaround: "Not covered by any cell: reproducing requires a host process that pinned lower DPI awareness before loading xa11y. Standalone CLI/binding cells run the common path where the set succeeds."
+    affects:
+      language: rust
+      features: [windows]
+
+  - id: winforms_transform_resize_noop
+    description: >
+      The WinForms UIA provider answers TransformPattern.Resize with success
+      but the form's bounds never change: the python-window suite's enforced
+      geometry test dispatches resize_to (advertised, succeeds) on the
+      winforms cell and observes the reported bounds stay exactly the same
+      (e.g. Resize(1094, 838) after a window reported 1044x788 leaves the
+      reported size at 1044x788 on repeated reads over 5s). TransformPattern
+      Move on the same form works (bounds change), so this is a WinForms
+      resize-specific gap, not missing TransformPattern support. The CLI
+      dispatch tests tolerate "unsupported" so the gap stayed invisible
+      until the enforced test was added.
+    severity: low
+    workaround: "move_to's bounds change is enforced on winforms; resize_to advertisement + dispatch are asserted, the bounds-update half is an honest skip. WPF / macOS AX cover real resize paths (the Rust integ suite's geometry test is macOS-only)."
+    affects:
+      apps: [winforms]
+      language: python
+      features: [windows]
 
 # Resolved gaps (kept here briefly for provenance):
 #   windows_input_sim — input simulation had no automated coverage of any kind

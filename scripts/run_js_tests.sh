@@ -280,17 +280,54 @@ set +e
 # Capture the output so we can also surface it in the GitHub step summary
 # when the raw logs aren't easily reachable.
 NODE_TEST_LOG="$JS_DIR/.node-test-output.log"
+# The mutating window suite churns the UIA/AX cache and must never run
+# concurrently with the ordinary action tests: `node --test` runs files in
+# parallel within one process, so a single glob over every file would
+# recreate the flakiness the js-window split exists to prevent. Mirror the
+# harness ordering in tests/harness/launch.py: every non-mutating file in
+# the broad run, then the mutating file(s) afterwards, serially. Collect the
+# lists into arrays rather than newline-joined strings so each path expands
+# as one quoted argument (`"${arr[@]}"`): a checkout path containing spaces
+# would otherwise be word-split into several Node arguments. bash 3.2 (stock
+# macOS) has no `mapfile`, so fill the arrays in a read loop.
+JS_TEST_FILES=()
+while IFS= read -r file; do
+    JS_TEST_FILES+=("$file")
+done < <(
+    find "$PROJECT_ROOT/tests/suites/js" \
+        \( -name '*mutating*' -prune \) -o -name '*.test.js' -print | sort
+)
+JS_MUTATING_FILES=()
+while IFS= read -r file; do
+    JS_MUTATING_FILES+=("$file")
+done < <(
+    find "$PROJECT_ROOT/tests/suites/js" -name '*mutating*.test.js' -print | sort
+)
 # GNU `timeout` is present on Linux and Git-Bash-on-Windows but not on
 # stock macOS. Fall back to an un-bounded run there; --test-timeout still
 # caps each individual file.
 if command -v timeout >/dev/null 2>&1; then
     timeout 180 node --test --test-timeout=60000 --test-reporter=spec \
-        "$PROJECT_ROOT/tests/suites/js/**/*.test.js" 2>&1 | tee "$NODE_TEST_LOG"
+        "${JS_TEST_FILES[@]}" 2>&1 | tee "$NODE_TEST_LOG"
 else
     node --test --test-timeout=60000 --test-reporter=spec \
-        "$PROJECT_ROOT/tests/suites/js/**/*.test.js" 2>&1 | tee "$NODE_TEST_LOG"
+        "${JS_TEST_FILES[@]}" 2>&1 | tee "$NODE_TEST_LOG"
 fi
 TEST_EXIT=${PIPESTATUS[0]}
+if [ ${#JS_MUTATING_FILES[@]} -gt 0 ]; then
+    MUTATING_LOG="$JS_DIR/.node-test-mutating-output.log"
+    if command -v timeout >/dev/null 2>&1; then
+        timeout 180 node --test --test-timeout=60000 --test-reporter=spec \
+            "${JS_MUTATING_FILES[@]}" 2>&1 | tee "$MUTATING_LOG"
+    else
+        node --test --test-timeout=60000 --test-reporter=spec \
+            "${JS_MUTATING_FILES[@]}" 2>&1 | tee "$MUTATING_LOG"
+    fi
+    MUTATING_EXIT=${PIPESTATUS[0]}
+    if [ "$MUTATING_EXIT" -ne 0 ] && [ "$TEST_EXIT" -eq 0 ]; then
+        TEST_EXIT=$MUTATING_EXIT
+    fi
+fi
 set -e
 
 if [ "$TEST_EXIT" -ne 0 ] && [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
@@ -299,6 +336,9 @@ if [ "$TEST_EXIT" -ne 0 ] && [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
         echo ""
         echo '```'
         tail -200 "$NODE_TEST_LOG"
+        if [ ${#JS_MUTATING_FILES[@]} -gt 0 ]; then
+            tail -200 "$MUTATING_LOG"
+        fi
         echo '```'
     } >>"$GITHUB_STEP_SUMMARY"
     echo "::error title=JS integration tests failed::See the Run JS integration tests step (exit code $TEST_EXIT) for details."

@@ -47,6 +47,47 @@ pub(crate) fn effective_timeout_secs(
     }
 }
 
+/// Validate a JS-supplied logical window coordinate.
+///
+/// The napi `i32` conversion applies JavaScript `ToInt32` *before* Rust sees
+/// the value — `NaN`, fractions, and out-of-range numbers wrap or truncate
+/// silently (`2147483648` becomes `-2147483648`), which would move a window
+/// somewhere it was never asked to go. The binding therefore takes the raw
+/// `f64` and checks finiteness, integrality, and the `i32` range itself,
+/// before any task or OS call is built (AGENTS.md: parse before the first
+/// OS call).
+pub(crate) fn checked_window_coord(value: f64, what: &str) -> napi::Result<i32> {
+    if value.is_finite()
+        && value.fract() == 0.0
+        && value >= f64::from(i32::MIN)
+        && value <= f64::from(i32::MAX)
+    {
+        Ok(value as i32)
+    } else {
+        Err(crate::errors::map_err(xa11y::Error::InvalidActionData {
+            message: format!("{what} must be a finite whole number in the i32 range, got {value}"),
+        }))
+    }
+}
+
+/// Validate a JS-supplied logical window dimension.
+///
+/// Same coercion hazard as [`checked_window_coord`] on the `u32` side:
+/// `resizeTo(-1, 100)` would become a width of `4294967295` and pass the
+/// core nonzero validation. Reject non-finite, fractional, non-positive, or
+/// oversized values from the uncoerced number.
+pub(crate) fn checked_window_dimension(value: f64, what: &str) -> napi::Result<u32> {
+    if value.is_finite() && value.fract() == 0.0 && value >= 1.0 && value <= f64::from(u32::MAX) {
+        Ok(value as u32)
+    } else {
+        Err(crate::errors::map_err(xa11y::Error::InvalidActionData {
+            message: format!(
+                "{what} must be a positive whole number in the u32 range (1-4294967295), got {value}"
+            ),
+        }))
+    }
+}
+
 /// Set the process-wide default timeout, in seconds.
 ///
 /// Becomes the default for every auto-waiting action method, `wait*` call,

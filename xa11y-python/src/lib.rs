@@ -233,6 +233,9 @@ fn make_py_element(
             modal: data.states.modal,
             required: data.states.required,
             busy: data.states.busy,
+            minimized: data.states.minimized,
+            maximized: data.states.maximized,
+            fullscreen: data.states.fullscreen,
             inner_data: data.clone(),
             provider,
         },
@@ -346,6 +349,16 @@ struct Element {
     required: bool,
     #[pyo3(get)]
     busy: bool,
+    /// Whether the window is minimized. ``None`` = unknown / not a window —
+    /// a platform that cannot report the state says so rather than guessing.
+    #[pyo3(get)]
+    minimized: Option<bool>,
+    /// Whether the window is maximized. ``None`` = unknown / not a window.
+    #[pyo3(get)]
+    maximized: Option<bool>,
+    /// Whether the window is fullscreen. ``None`` = unknown / not a window.
+    #[pyo3(get)]
+    fullscreen: Option<bool>,
 
     /// The underlying Rust ElementData (for provider calls).
     inner_data: xa11y::ElementData,
@@ -451,7 +464,7 @@ impl Element {
     // These act on the captured snapshot rather than re-resolving the selector
     // (contrast with Locator, which re-queries the provider on every call).
 
-    /// Press (default activate) this element.
+    /// Click / invoke this element.
     fn press(&self, py: Python<'_>) -> PyResult<()> {
         let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
         py.detach(move || element.press()).map_err(to_py_err)
@@ -535,6 +548,48 @@ impl Element {
     fn perform_action(&self, py: Python<'_>, action: &str) -> PyResult<()> {
         let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
         py.detach(move || element.perform_action(action))
+            .map_err(to_py_err)
+    }
+
+    // ── Window management ──
+
+    /// Activate this window: bring it to the foreground and give it focus.
+    fn activate(&self, py: Python<'_>) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.detach(move || element.activate()).map_err(to_py_err)
+    }
+    /// Minimize this window.
+    fn minimize(&self, py: Python<'_>) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.detach(move || element.minimize()).map_err(to_py_err)
+    }
+    /// Maximize this window.
+    fn maximize(&self, py: Python<'_>) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.detach(move || element.maximize()).map_err(to_py_err)
+    }
+    /// Restore this window to its normal state (from minimized/maximized).
+    fn restore(&self, py: Python<'_>) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.detach(move || element.restore()).map_err(to_py_err)
+    }
+    /// Close this window.
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.detach(move || element.close()).map_err(to_py_err)
+    }
+    /// Move this window to the given logical screen coordinates (top-left origin).
+    fn move_to(&self, py: Python<'_>, x: i32, y: i32) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.detach(move || element.move_to(x, y)).map_err(to_py_err)
+    }
+    /// Resize this window to the given logical width and height.
+    ///
+    /// Raises ``InvalidActionDataError`` if ``width`` or ``height`` is 0.
+    /// ``OverflowError`` if either is negative or exceeds ``u32``.
+    fn resize_to(&self, py: Python<'_>, width: u32, height: u32) -> PyResult<()> {
+        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
+        py.detach(move || element.resize_to(width, height))
             .map_err(to_py_err)
     }
 
@@ -737,6 +792,55 @@ impl Locator {
             .map_err(to_py_err)
     }
 
+    // ── Window management ──
+    //
+    // Window verbs wait only for the window to be `enabled`: a minimized
+    // window is legitimately not visible, and these actions are exactly what
+    // must reach it.
+
+    /// Activate the matched window: bring it to the foreground and give it
+    /// focus.
+    fn activate(&self, py: Python<'_>) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.detach(move || inner.activate()).map_err(to_py_err)
+    }
+    /// Minimize the matched window.
+    fn minimize(&self, py: Python<'_>) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.detach(move || inner.minimize()).map_err(to_py_err)
+    }
+    /// Maximize the matched window.
+    fn maximize(&self, py: Python<'_>) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.detach(move || inner.maximize()).map_err(to_py_err)
+    }
+    /// Restore the matched window to its normal state.
+    fn restore(&self, py: Python<'_>) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.detach(move || inner.restore()).map_err(to_py_err)
+    }
+    /// Close the matched window.
+    fn close(&self, py: Python<'_>) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.detach(move || inner.close()).map_err(to_py_err)
+    }
+    /// Move the matched window to the given logical screen coordinates
+    /// (top-left origin).
+    fn move_to(&self, py: Python<'_>, x: i32, y: i32) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.detach(move || inner.move_to(x, y)).map_err(to_py_err)
+    }
+    /// Resize the matched window to the given logical dimensions.
+    ///
+    /// Raises ``InvalidActionDataError`` if ``width`` or ``height`` is 0,
+    /// before any auto-wait polling begins. ``OverflowError`` if either is
+    /// negative or exceeds ``u32``.
+    fn resize_to(&self, py: Python<'_>, width: u32, height: u32) -> PyResult<()> {
+        let inner = self.inner.clone();
+        py.detach(move || inner.resize_to(width, height))
+            .map_err(to_py_err)
+    }
+
     // ── Wait operations ──
     //
     // `timeout=None` (the default) resolves to the process-wide default —
@@ -926,6 +1030,9 @@ fn state_flag_to_str(flag: xa11y::StateFlag) -> &'static str {
         xa11y::StateFlag::Modal => "modal",
         xa11y::StateFlag::Required => "required",
         xa11y::StateFlag::Busy => "busy",
+        xa11y::StateFlag::Minimized => "minimized",
+        xa11y::StateFlag::Maximized => "maximized",
+        xa11y::StateFlag::Fullscreen => "fullscreen",
         // See the note on `to_py_err`: variant coverage is enforced by
         // `cargo xtask check-bindings-parity`, not by the compiler.
         _ => "unknown",
@@ -1260,10 +1367,15 @@ impl App {
 
     /// Resolve the application that currently holds the system foreground.
     ///
-    /// Queries the platform's foreground mechanism directly, so it returns the
-    /// exact foreground window on Windows and stays reliable when an app shows
-    /// a modal dialog. "Nothing focused" retries until `timeout`; see
-    /// `by_name` for timeout semantics. The returned app has
+    /// Queries the platform's foreground mechanism directly rather than
+    /// enumerating and tagging by pid. The result is the foreground
+    /// *process*'s ``Application`` node — one per process on every platform —
+    /// not the exact window holding the focus; on Windows that is the
+    /// synthesized node of the foreground process (the modal case, issues
+    /// #304/#305), and this stays reliable when an app shows a modal dialog.
+    /// To reach the exact foreground window, call ``windows()`` and pick the
+    /// entry reporting ``active``. "Nothing focused" retries until `timeout`;
+    /// see `by_name` for timeout semantics. The returned app has
     /// `is_foreground == True`.
     #[staticmethod]
     #[pyo3(signature = (*, timeout=None))]
@@ -1369,11 +1481,13 @@ impl App {
     /// ``App.list()`` and the predicate finders (``App.find()``). A
     /// point-in-time snapshot taken when the ``App`` was resolved.
     ///
-    /// On Windows apps are top-level windows, so the foreground process can own
-    /// several entries; tagging is window-precise, so only the entry actually
-    /// in the foreground reports ``is_foreground`` — not every window of the
-    /// process. Use ``App.foreground()`` to resolve the exact foreground window
-    /// directly.
+    /// Tagging is window-precise. On Windows apps surface as one synthesized
+    /// ``Application`` node per process, so a pid match there is unambiguous;
+    /// on Linux the AT-SPI registry can surface several entries for one pid,
+    /// and only the entry reporting the window-level ``active`` flag gets
+    /// ``is_foreground``. Use ``App.foreground()`` to resolve the foreground
+    /// application directly, then pick the exact foreground window from its
+    /// ``windows()``.
     #[getter]
     fn is_foreground(&self) -> bool {
         self.inner_data.states.focused
@@ -1429,6 +1543,31 @@ impl App {
         children
             .iter()
             .map(|c| make_py_element(py, c, self.provider.clone()))
+            .collect()
+    }
+
+    /// List the top-level windows of this application.
+    ///
+    /// Each call queries the provider; results are not cached. The windows
+    /// are the application's top-level windows with role ``window`` or
+    /// ``dialog``, in enumeration order. On Windows the application entry is
+    /// a synthesized process node whose children are the process's top-level
+    /// windows (main window plus modal dialogs). On Linux the answer is
+    /// process-complete: ``App::windows_with`` merges the filtered children
+    /// of every same-pid AT-SPI Application entry (an app that registers
+    /// several entries reports its whole process), so the results need not
+    /// be the direct children of this node and no single z-order spans them.
+    /// Calling ``windows`` on a non-application element fails with
+    /// ``ActionNotSupportedError``.
+    fn windows(&self, py: Python<'_>) -> PyResult<Vec<Py<Element>>> {
+        let provider = self.provider.clone();
+        let data = self.inner_data.clone();
+        let windows = py
+            .detach(move || xa11y::App::windows_with(provider, &data))
+            .map_err(to_py_err)?;
+        windows
+            .iter()
+            .map(|w| make_py_element(py, w.data(), w.provider().clone()))
             .collect()
     }
 

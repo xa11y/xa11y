@@ -65,6 +65,7 @@ FEATURE_FILES: dict[str, dict[str, list[str]]] = {
         "errors": ["test_errors.py"],
         "input_sim": ["test_input_sim.py"],
         "screenshot": ["test_screenshot.py"],
+        "windows": ["test_window.py"],
     },
     "cli": {
         # CLI "compat" is split across the tree-dump and find commands.
@@ -76,6 +77,7 @@ FEATURE_FILES: dict[str, dict[str, list[str]]] = {
         # binary — parametrized over all three launchers rather than just the
         # one `cli_bin` resolves.
         "mcp": ["test_mcp.py"],
+        "windows": ["test_window.py"],
     },
     "js": {
         # JS suite files are numbered (e.g. 01_compat.test.js); match on the
@@ -84,6 +86,7 @@ FEATURE_FILES: dict[str, dict[str, list[str]]] = {
         "actions": ["actions"],
         "input_sim": ["input_sim"],
         "screenshot": ["screenshot"],
+        "windows": ["window"],
     },
 }
 

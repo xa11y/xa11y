@@ -8,7 +8,7 @@
 'use strict';
 
 const xa11y = require('../../../xa11y-js/index.js');
-const { App, SelectorNotMatchedError, PlatformError, TimeoutError } = xa11y;
+const { App, SelectorNotMatchedError, PlatformError, TimeoutError, ActionNotSupportedError } = xa11y;
 
 // ---------------------------------------------------------------------------
 // Per-app configuration
@@ -31,6 +31,9 @@ const APP_CONFIG = {
     minButtons: 2,
     hasCheckbox: true,
     hasRadio: true,
+    // Secondary dialog window (mirrors the Python APP_CONFIGS keys).
+    dialogButtonName: 'Open Dialog',
+    dialogName: 'Sample Dialog',
   },
   gtk: {
     okButtonName: 'OK',
@@ -38,6 +41,8 @@ const APP_CONFIG = {
     minButtons: 2,
     hasCheckbox: true,
     hasRadio: true,
+    dialogButtonName: 'Open Dialog',
+    dialogName: 'Sample Dialog',
   },
   cocoa: {
     okButtonName: 'OK',
@@ -80,6 +85,8 @@ const APP_CONFIG = {
     minButtons: 2,
     hasCheckbox: true,
     hasRadio: true,
+    dialogButtonName: 'Open Dialog',
+    dialogName: 'Sample Dialog',
   },
 };
 
@@ -187,6 +194,7 @@ module.exports = {
   TimeoutError,
   SelectorNotMatchedError,
   PlatformError,
+  ActionNotSupportedError,
   getApp,
   one,
   named,

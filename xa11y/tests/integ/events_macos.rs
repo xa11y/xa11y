@@ -33,6 +33,17 @@
 //!     MenuOpened / MenuClosed              (NSMenu only)
 //!     WindowOpened / WindowClosed          (multi-window required)
 //!     WindowActivated / WindowDeactivated  (key-window change required)
+//!     StateChanged { Minimized }           (AXWindowMiniaturized —
+//!                                           same native-window restriction;
+//!                                           the macOS provider maps it to
+//!                                           StateChanged{Minimized, true}
+//!                                           and AXWindowDeminiaturized to
+//!                                           StateChanged{Minimized, false},
+//!                                           so a native AppKit test app
+//!                                           drives the e2e part;
+//!                                           miniaturization is not an
+//!                                           activation change, so no
+//!                                           WindowActivated/Deactivated)
 //!     StateChanged { Busy } (and other flags not backed by value-changes)
 //!
 //! IMPORTANT: these tests MUST fail on timeout. A previous iteration

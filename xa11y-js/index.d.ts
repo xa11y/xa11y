@@ -201,10 +201,14 @@ export declare class App {
    * Resolve the application that currently holds the system foreground.
    *
    * Uses the platform's direct foreground query rather than enumerating and
-   * tagging by pid, so on Windows it returns the exact foreground window and
-   * stays reliable when an app shows a modal dialog. Polls while nothing holds
-   * focus; see `byName` for the `options.timeout` behaviour. The returned app
-   * has `isForeground === true`.
+   * tagging by pid. The result is the foreground process's `Application` node
+   * — one per process on every platform — not the exact window holding focus;
+   * on Windows that is the synthesized node of the foreground process (the
+   * modal case, issues #304/#305), and this stays reliable when an app shows
+   * a modal dialog. To reach the exact foreground window, call `windows()` and
+   * pick the entry reporting `active`. Polls while nothing holds focus; see
+   * `byName` for the `options.timeout` behaviour. The returned app has
+   * `isForeground === true`.
    */
   static foreground(options?: AppLookupOptions): Promise<App>;
   /** List all running applications with an accessibility tree. */
@@ -237,11 +241,13 @@ export declare class App {
    * Whether this application is the foreground application.
    *
    * Named `isForeground` because "focused" is reserved for element-level
-   * keyboard focus (`Element.focused`) elsewhere in the API. On Windows,
-   * where apps are top-level windows, tagging is window-precise: only the
-   * entry actually in the foreground reports `isForeground`, not every window
-   * of the process. Use {@link App.foreground} to resolve the exact
-   * foreground window directly.
+   * keyboard focus (`Element.focused`) elsewhere in the API. Tagging is
+   * window-precise: on Windows apps surface as one synthesized `Application`
+   * node per process, so a pid match there is unambiguous; on Linux the AT-SPI
+   * registry can surface several entries for one pid, and only the entry
+   * reporting the window-level `active` flag gets `isForeground`. Use
+   * {@link App.foreground} to resolve the foreground application directly,
+   * then pick the exact foreground window from its `windows()`.
    */
   get isForeground(): boolean;
 
@@ -257,6 +263,22 @@ export declare class App {
   locator(selector: string): Locator;
   /** Get direct children (typically windows) of this application. */
   children(): Promise<Element[]>;
+  /**
+   * List the top-level windows of this application.
+   *
+   * Each call queries the provider — results are not cached. The windows
+   * are the application's top-level windows with role `window` or
+   * `dialog`, in enumeration order. On Windows the application entry is a
+   * synthesized process node whose children are the process's top-level
+   * windows (main window plus modal dialogs). On Linux the answer is
+   * process-complete: the windows of every same-pid AT-SPI Application
+   * entry are merged (an app that registers several entries reports its
+   * whole process), so the results need not be the direct children of
+   * this node and no single z-order spans them.
+   * Calling `windows` on a non-application element fails with
+   * `ActionNotSupportedError`.
+   */
+  windows(): Promise<Element[]>;
 
   /**
    * Get an `Element` handle for the application root.

@@ -51,14 +51,15 @@ and `Announcement` carries no text because Windows
 | --- | --- |
 | `MenuOpened` / `MenuClosed` | Not reliably emitted on Linux. These will not fire there. |
 | `WindowActivated` / `WindowDeactivated` | Not emitted on Windows. UIA has no first-class event, and inferring it from focus changes was tried and removed as lossy. |
-| `StateChanged` | Linux delivers all state bits. Windows delivers `IsEnabled`, `ToggleState`, and `ExpandCollapseState`; per-item selection arrives as `SelectionChanged` rather than as a state flag. macOS delivers `Checked` and `Busy` alone. No public app-level macOS notification reports `Enabled`, so it will never fire there. |
+| `StateChanged` | Linux delivers all state bits. Windows delivers `IsEnabled`, `ToggleState`, `ExpandCollapseState`, and window visual state (`minimized` / `maximized`, via `PropertyChanged(WindowVisualState)`). Per-item selection arrives as `SelectionChanged` rather than as a state flag. macOS delivers `Checked`, `Busy`, and `Minimized` (via `AXWindowMiniaturized` / `AXWindowDeminiaturized`). macOS reads the `fullscreen` window state from `AXFullScreen`, but no platform can raise `StateChanged{fullscreen}`: the Accessibility API has no `fullscreen` notification and UIA and AT-SPI report no `fullscreen` state. No public app-level macOS notification reports `Enabled`, so it will never fire there. |
 
 ## State flags
 
 The `flag` carried by `StateChanged`:
 
 `enabled`, `visible`, `focused`, `checked`, `selected`, `expanded`, `editable`,
-`focusable`, `modal`, `required`, `busy`.
+`focusable`, `modal`, `required`, `busy`, `minimized`, `maximized`,
+`fullscreen`.
 
 ## Event fields
 

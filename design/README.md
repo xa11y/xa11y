@@ -533,7 +533,7 @@ macOS exposes some operations as AX actions (performed via `AXUIElementPerformAc
 | `set_text_selection` | Set `AXSelectedTextRange` |
 | `scroll_into_view` | Not supported (no AX equivalent) |
 
-For **reading** which actions an element supports: the provider calls `AXUIElementCopyActionNames` to get the element's action list (e.g. `["AXPress", "AXShowMenu", "AXCustomThing"]`). Known AX action names map to their standard `snake_case` name (e.g. `"AXPress"` → `"press"`). All other actions have the `AX` prefix stripped and are converted from `PascalCase` to `snake_case` (e.g. `"AXRaise"` → `"raise"`, `"AXCustomThing"` → `"custom_thing"`). No actions are silently hidden — if the platform reports it, it appears in `element.actions`.
+For **reading** which actions an element supports: the provider calls `AXUIElementCopyActionNames` to get the element's action list (e.g. `["AXPress", "AXShowMenu", "AXCustomThing"]`). Known AX action names map to their standard `snake_case` name (e.g. `"AXPress"` → `"press"`, `"AXRaise"` → `"activate"`). All other actions have the `AX` prefix stripped and are converted from `PascalCase` to `snake_case` (e.g. `"AXCustomThing"` → `"custom_thing"`). No actions are silently hidden — if the platform reports it, it appears in `element.actions`.
 
 The provider also adds implicit actions based on settable attributes (e.g. if `AXFocused` is present, add `"focus"`; if the role is a text field or slider, add `"set_value"`).
 

@@ -25,7 +25,7 @@ COMMANDS:
     test-integ-wayland-container  Run Linux Wayland portal screenshot tests in container
     test-integ-wayland-uinput-container  Run Linux Wayland uinput input-sim e2e tests in container
     test-integ-input-smoke-container  Run Linux XTest input smoke in container
-    test-qt [SUITE..]   Run Qt (PySide6) integration tests (default suites: python js cli)
+    test-qt [SUITE..]   Run Qt (PySide6) integration tests (default suites: python js cli js-window python-window)
     test-gtk [SUITE..]  Run GTK4 integration tests
     test-cocoa [SUITE..]  Run Cocoa/AppKit integration tests (macOS only)
     test-tauri [SUITE..]  Run Tauri integration tests
@@ -534,7 +534,8 @@ fn do_test_integ_input_smoke_container() -> bool {
 // The per-app test commands all funnel through the same shared runner
 // (scripts/run_app_suite.sh), which sets up the environment, builds the app,
 // and hands off to tests/harness/launch.py — the same harness CI invokes. Any
-// trailing args are passed through as the suite list (default: python js cli).
+// trailing args are passed through as the suite list (default: python js cli
+// js-window python-window).
 fn do_test_app_suite(app: &str, suites: &[String], label: &str) -> bool {
     heading(label);
     let root = project_root();
@@ -577,9 +578,10 @@ fn do_test_wpf(rest: &[String]) -> bool {
 
 fn do_test_apps() -> bool {
     heading("All app integration tests");
-    // Run the Python suite for each app (the historical `test-apps` scope).
-    // Use the per-app commands directly for js/cli coverage on one app.
-    let py = [String::from("python")];
+    // Run the Python suite (incl. the mutating window suite) for each app
+    // (the historical `test-apps` scope). Use the per-app commands directly
+    // for js/cli coverage on one app.
+    let py = [String::from("python"), String::from("python-window")];
     let mut ok = true;
     if !do_test_qt(&py) {
         ok = false;
