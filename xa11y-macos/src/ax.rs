@@ -3095,11 +3095,12 @@ impl MacOSProvider {
     /// `Flyout` roots.
     ///
     /// AppKit may keep a status-item menu permanently in `AXChildren`, even
-    /// while it is closed, and place it in `AXVisibleChildren` only while it
-    /// is open. Other implementations expose a detached menu through AppKit's
-    /// `AXShownMenu` or Carbon's `AXShownMenuUIElement`. Probe the owning
-    /// application, extras bar, and each direct status-item child because
-    /// those provider shapes vary across implementations.
+    /// while it is closed. An open attached menu either enters
+    /// `AXVisibleChildren` or gains its non-empty on-screen frame. Other
+    /// implementations expose a detached menu through AppKit's `AXShownMenu`
+    /// or Carbon's `AXShownMenuUIElement`. Probe the owning application,
+    /// extras bar, and each direct status-item child because those provider
+    /// shapes vary across implementations.
     ///
     /// Each probe carries the same per-element timeout as the rest of shell
     /// discovery. An app that does not answer contributes no flyout, matching
@@ -3125,13 +3126,25 @@ impl MacOSProvider {
                 let Some(_bound) = Self::shell_probe_bound(&provider) else {
                     continue;
                 };
-                let mut shown_menus: Vec<AXElement> =
-                    ax_element_array(provider.as_ptr(), "AXVisibleChildren")
-                        .into_iter()
-                        .filter(|child| {
-                            ax_string(child.as_ptr(), "AXRole").as_deref() == Some("AXMenu")
-                        })
-                        .collect();
+                let visible_children = ax_element_array(provider.as_ptr(), "AXVisibleChildren")
+                    .into_iter()
+                    .filter(|child| {
+                        ax_string(child.as_ptr(), "AXRole").as_deref() == Some("AXMenu")
+                    })
+                    .collect::<Vec<_>>();
+                let mut shown_menus = visible_children;
+                for attached_menu in ax_children(provider.as_ptr()).into_iter().filter(|child| {
+                    ax_string(child.as_ptr(), "AXRole").as_deref() == Some("AXMenu")
+                }) {
+                    let data = self.build_element_data(&attached_menu, status_data.pid);
+                    if data.states.visible
+                        && data
+                            .bounds
+                            .is_some_and(|bounds| bounds.width > 0 && bounds.height > 0)
+                    {
+                        shown_menus.push(attached_menu);
+                    }
+                }
                 for attribute in ["AXShownMenu", "AXShownMenuUIElement"] {
                     match probe_element_list_attr(provider.as_ptr(), attribute) {
                         ElementListProbe::Found(menus) => shown_menus.extend(menus),
