@@ -369,7 +369,7 @@ mod tests {
 
         if fixture_icons.is_empty() {
             taskbar
-                .locator("button[name='Show Hidden Icons']")
+                .locator("button[name*='Show Hidden Icons']")
                 .press()
                 .unwrap_or_else(|e| panic!("open the real notification overflow: {e}"));
             let overflow = ShellSurface::by_kind(ShellSurfaceKind::Flyout, LOOKUP_TIMEOUT)
