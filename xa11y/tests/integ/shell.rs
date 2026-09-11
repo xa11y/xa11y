@@ -344,7 +344,7 @@ mod tests {
     fn a_native_taskbar_popup_exposes_visible_menu_items_as_a_flyout() {
         struct DismissMenu {
             input: xa11y::InputSim,
-            app: xa11y::Element,
+            window: xa11y::Element,
         }
 
         impl Drop for DismissMenu {
@@ -354,8 +354,8 @@ mod tests {
                         eprintln!("failed to dismiss the {surface} during cleanup: {e}");
                     }
                 }
-                if let Err(e) = self.app.focus() {
-                    eprintln!("failed to restore the test app's focus during cleanup: {e}");
+                if let Err(e) = self.window.activate() {
+                    eprintln!("failed to reactivate the test app during cleanup: {e}");
                 }
             }
         }
@@ -387,15 +387,20 @@ mod tests {
             )
         });
 
+        let app = crate::integ::app_root();
+        let window = app
+            .windows()
+            .expect("enumerate the test app's windows for cleanup")
+            .into_iter()
+            .next()
+            .expect("the test app must have a window to reactivate during cleanup");
+
         let input = xa11y::input_sim().unwrap_or_else(|e| panic!("create input backend: {e}"));
         input
             .mouse()
             .right_click(&fixture_icon)
             .unwrap_or_else(|e| panic!("right-click the real notification icon: {e}"));
-        let _dismiss = DismissMenu {
-            input,
-            app: crate::integ::app_root().as_element(),
-        };
+        let _dismiss = DismissMenu { input, window };
 
         let deadline = std::time::Instant::now() + LOOKUP_TIMEOUT;
         loop {
