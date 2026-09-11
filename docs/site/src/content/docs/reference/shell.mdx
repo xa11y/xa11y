@@ -48,7 +48,7 @@ process's `AXSystemDialog` window, whose enumeration contract differs from a
 status item's shown menu. Windows leaves Notification Center out because its
 window class is also used by ordinary UWP apps, and separating them takes a
 process-image lookup the backend does not perform. An absent surface is
-honest; a misclassified application window is not.
+honest. A misclassified application window is not.
 
 The `unknown` kind is a reserved fallback, so a shell window some future
 backend cannot classify degrades to reachable-but-untagged instead of
