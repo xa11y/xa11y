@@ -1026,9 +1026,8 @@ impl Provider for WindowsProvider {
         let mut surfaces: Vec<(u8, ShellSurfaceKind, ElementData)> = Vec::new();
 
         for el in found {
-            let Some(class_name) = uia_cached_bstr(&el, UIA_ClassNamePropertyId) else {
-                continue;
-            };
+            let class_name = uia_cached_bstr(&el, UIA_ClassNamePropertyId).unwrap_or_default();
+            let control_type = uia_cached_i32(&el, UIA_ControlTypePropertyId);
 
             let (rank, kind) = match class_name.as_str() {
                 "Shell_TrayWnd" => (0u8, ShellSurfaceKind::Taskbar),
@@ -1082,6 +1081,13 @@ impl Provider for WindowsProvider {
                     if !on_screen {
                         continue;
                     }
+                    (2u8, ShellSurfaceKind::Flyout)
+                }
+                // Windows 11 shell controls do not consistently use the
+                // Win32 system-menu class. UIA's top-level Menu control type
+                // is the stable accessibility signal for those popup hosts;
+                // direct Raw View scope keeps ordinary in-app menus out.
+                _ if control_type == Some(UIA_MenuControlTypeId.0) => {
                     (2u8, ShellSurfaceKind::Flyout)
                 }
                 _ => continue,
