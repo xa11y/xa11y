@@ -31,6 +31,12 @@ updates:
       interval: "weekly"
       day: "monday"
       time: "06:00"
+    # `windows-core` must match the `windows` crate because the latter's
+    # generated `#[implement]` code targets its exact core API. The 0.100
+    # core crates shipped before `windows` itself, so upgrade them together
+    # once a compatible `windows` release is available.
+    ignore:
+      - dependency-name: "windows-core"
     groups:
       cargo:
         patterns:
