@@ -29,7 +29,7 @@ windows = { version = "0.62", features = [
 # Needed by the `#[implement]` macro, whose generated code references
 # `::windows_core::*` paths directly rather than going through the `windows`
 # re-export.
-windows-core = "0.62"
+windows-core = "0.100"
 
 [target.'cfg(target_os = "windows")'.dev-dependencies]
 # tests/send_input_wire.rs installs WH_KEYBOARD_LL / WH_MOUSE_LL hooks to read
