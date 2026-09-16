@@ -2202,11 +2202,11 @@ impl Provider for LinuxProvider {
 
     // ── Window management ──────────────────────────────────────────
     //
-    // AT-SPI exposes exactly one of these verbs: `activate` (Component.GrabFocus
-    // on the frame — same path as `focus`). There is no AT-SPI API to alter
-    // window state or geometry (no minimize/maximize/close/move/resize), and
-    // implementing them via input simulation would violate tenet 2, so those
-    // fail surfaceably as `Unsupported` at the call site.
+    // AT-SPI exposes `activate` (Component.GrabFocus on the frame — same path
+    // as `focus`) and two geometry setters on Component: SetPosition and
+    // SetSize. There is no AT-SPI API to alter window state or close a window,
+    // and implementing those verbs via input simulation would violate tenet 2,
+    // so they fail surfaceably as `Unsupported` at the call site.
     //
     // Window discovery is `App::windows` — `get_children(app)` filtered to
     // Window|Dialog — as on every platform.
@@ -2302,24 +2302,86 @@ impl Provider for LinuxProvider {
         })
     }
 
-    fn move_to(&self, element: &ElementData, _x: i32, _y: i32) -> Result<()> {
+    fn move_to(&self, element: &ElementData, x: i32, y: i32) -> Result<()> {
         self.ensure_top_level_window_target(element, "move_to")?;
-        Err(Error::Unsupported {
-            feature: format!(
-                "move_to on {}: AT-SPI has no API to move a window",
-                element.role.to_snake_case()
-            ),
-        })
+        let target = self.get_cached(element.handle)?;
+        let proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")?;
+        let scale = crate::scale::coordinate_scale();
+        let point = xa11y_core::Point::new(x, y).to_physical(scale);
+        // coord_type 0 is screen coordinates, matching GetExtents above.
+        let reply = proxy
+            .call_method("SetPosition", &(point.x, point.y, 0u32))
+            .map_err(|e| {
+                if is_absent_member(&e) {
+                    Error::ActionNotSupported {
+                        action: "move_to".to_string(),
+                        role: element.role,
+                    }
+                } else {
+                    Error::Platform {
+                        code: -1,
+                        message: format!("Component.SetPosition while moving window failed: {e}"),
+                    }
+                }
+            })?;
+        let moved: bool = reply.body().deserialize().map_err(|e| Error::Platform {
+            code: -1,
+            message: format!("Component.SetPosition reply while moving window failed: {e}"),
+        })?;
+        if moved {
+            Ok(())
+        } else {
+            Err(Error::ActionNotSupported {
+                action: "move_to".to_string(),
+                role: element.role,
+            })
+        }
     }
 
-    fn resize_to(&self, element: &ElementData, _w: u32, _h: u32) -> Result<()> {
+    fn resize_to(&self, element: &ElementData, w: u32, h: u32) -> Result<()> {
         self.ensure_top_level_window_target(element, "resize_to")?;
-        Err(Error::Unsupported {
-            feature: format!(
-                "resize_to on {}: AT-SPI has no API to resize a window",
-                element.role.to_snake_case()
-            ),
-        })
+        let target = self.get_cached(element.handle)?;
+        let proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")?;
+        let physical = Rect {
+            x: 0,
+            y: 0,
+            width: w,
+            height: h,
+        }
+        .to_physical(crate::scale::coordinate_scale());
+        let width = i32::try_from(physical.width).map_err(|_| Error::InvalidActionData {
+            message: format!("resize width {w} is too large for AT-SPI"),
+        })?;
+        let height = i32::try_from(physical.height).map_err(|_| Error::InvalidActionData {
+            message: format!("resize height {h} is too large for AT-SPI"),
+        })?;
+        let reply = proxy
+            .call_method("SetSize", &(width, height))
+            .map_err(|e| {
+                if is_absent_member(&e) {
+                    Error::ActionNotSupported {
+                        action: "resize_to".to_string(),
+                        role: element.role,
+                    }
+                } else {
+                    Error::Platform {
+                        code: -1,
+                        message: format!("Component.SetSize while resizing window failed: {e}"),
+                    }
+                }
+            })?;
+        let resized: bool = reply.body().deserialize().map_err(|e| Error::Platform {
+            code: -1,
+            message: format!("Component.SetSize reply while resizing window failed: {e}"),
+        })?;
+        if resized {
+            Ok(())
+        } else {
+            Err(Error::ActionNotSupported {
+                action: "resize_to".to_string(),
+                role: element.role,
+            })
+        }
     }
 
     fn set_value(&self, element: &ElementData, value: &str) -> Result<()> {

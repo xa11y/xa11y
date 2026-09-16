@@ -2,13 +2,14 @@
 //!
 //! Runs against the AccessKit test app on macOS, Windows, and Linux. Where a
 //! verb has no platform API (Linux cannot minimize / maximize / restore /
-//! close / move / resize a window) the test asserts the surfaceable
+//! close a window) the test asserts the surfaceable
 //! `Unsupported` error instead of the effect — these verbs must never fall
 //! back to input simulation (tenet 2).
 //!
 //! Success-path coverage per platform: minimize/restore round-trip and close
 //! run on macOS and Windows; activate runs everywhere; geometry (`move_to` /
-//! `resize_to`) and maximize success are macOS-only today — Windows
+//! `resize_to`) and maximize success are macOS-only for the AccessKit app —
+//! its Linux adapter omits the AT-SPI Component geometry setters. Windows
 //! TransformPattern move/resize is not exercised by this suite, and that gap
 //! is tracked in `tests/matrix.yaml` as coverage to add on the Windows side.
 //!
@@ -26,11 +27,8 @@ mod tests {
 
     /// Poll `f` until it yields `Some`, or panic after `timeout`.
     ///
-    /// On Linux the window verbs fail with `Unsupported` (asserted inline in
-    /// the tests), so the dialog / guard / poll helpers below are never
-    /// constructed there and are gated `#[cfg(not(target_os = "linux"))]`
-    /// item by item, so the Linux build does not trip `dead_code` under
-    /// `-Dwarnings`.
+    /// Helpers that are platform-specific are gated item by item so the
+    /// Linux build does not trip `dead_code` under `-Dwarnings`.
     #[cfg(not(target_os = "linux"))]
     fn wait_until<T>(timeout: Duration, what: &str, mut f: impl FnMut() -> Option<T>) -> T {
         let deadline = Instant::now() + timeout;
@@ -210,7 +208,7 @@ mod tests {
     #[ignore]
     #[cfg(target_os = "linux")]
     fn linux_window_verbs_are_unsupported_not_faked() {
-        // AT-SPI has no API to alter window state or geometry. Every window
+        // AT-SPI has no API to alter window state or close a window. Every
         // verb must fail surfaceably with the same `Unsupported` error rather
         // than falling back to input simulation (tenet 2) — including the
         // verbs a previous revision omitted from the assertion set.
@@ -221,13 +219,23 @@ mod tests {
             ("maximize", win.maximize()),
             ("restore", win.restore()),
             ("close", win.close()),
-            ("move_to", win.move_to(0, 0)),
-            ("resize_to", win.resize_to(100, 100)),
         ] {
             let err = result.expect_err(&format!("{label} must be unsupported on Linux"));
             assert!(
                 matches!(err, Error::Unsupported { .. }),
                 "{label}: expected Unsupported, got {err:?}"
+            );
+        }
+        for (label, result) in [
+            ("move_to", win.move_to(0, 0)),
+            ("resize_to", win.resize_to(100, 100)),
+        ] {
+            let err = result.expect_err(&format!(
+                "{label} must report that AccessKit omits the AT-SPI setter"
+            ));
+            assert!(
+                matches!(err, Error::ActionNotSupported { .. }),
+                "{label}: expected ActionNotSupported, got {err:?}"
             );
         }
     }
@@ -341,14 +349,13 @@ mod tests {
     #[ignore]
     #[cfg(target_os = "macos")]
     fn move_and_resize_window() {
-        // macOS: AXPosition / AXSize are settable on the winit window. The
+        // macOS AXPosition / AXSize are settable on the winit window. The
         // read-back is polled because the bridge can round-trip asynchronously.
         // On Windows the winit window does not reliably expose
         // TransformPattern, so TransformPattern move/resize coverage lives in
         // the CLI suite's test_window.py (driven on the windows-latest
         // winforms cell) and the python-window / js-window mutating suites —
-        // the same coverage tests/matrix.yaml records. Only the macOS
-        // geometry path is exercised here.
+        // the same coverage tests/matrix.yaml records.
         //
         // The suite shares one app instance, so the move and the grow must be
         // undone before the test returns — on the success path AND on panic

@@ -44,8 +44,6 @@
 //! stay in the same space); it only means bounds are physical and scale is not
 //! upscaled on those configurations.
 
-#![cfg(target_os = "linux")]
-
 use std::sync::OnceLock;
 
 use wayland_client::protocol::{wl_output, wl_registry};

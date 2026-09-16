@@ -22,7 +22,7 @@ COMMANDS:
     test-js-integ       Run JS integration tests against the AccessKit test app
     test-integ          Run integration tests (delegates to scripts/)
     test-integ-container  Run Linux X11 integration tests in container
-    test-integ-wayland-container  Run Linux Wayland portal screenshot tests in container
+    test-integ-wayland-container  Run Linux integration tests under native Wayland
     test-integ-wayland-uinput-container  Run Linux Wayland uinput input-sim e2e tests in container
     test-integ-input-smoke-container  Run Linux XTest input smoke in container
     test-qt [SUITE..]   Run Qt (PySide6) integration tests (default suites: python js cli js-window python-window)
@@ -428,7 +428,7 @@ fn do_test_integ_container(args: &[String]) -> bool {
 }
 
 fn do_test_integ_wayland_container() -> bool {
-    heading("Wayland portal screenshot tests (container)");
+    heading("Native Wayland integration tests (container)");
     let root = project_root();
     let Some(runtime) = container_runtime() else {
         return false;

@@ -2,18 +2,19 @@
 # Force unbuffered output — docker run otherwise batches diagnostic prints
 # from this wrapper with the `cargo test` output at the end.
 exec 1> >(stdbuf -o0 cat) 2>&1
-# Drive the Linux Wayland portal-Screenshot path end-to-end inside the
+# Drive Linux accessibility and the portal-Screenshot path end-to-end inside the
 # xa11y-wayland container:
 #   1. start a D-Bus session bus
 #   2. start sway (wlroots) with the headless backend
 #   3. start xdg-desktop-portal + xdg-desktop-portal-wlr
-#   4. run the xa11y-linux screenshot tests with WAYLAND_DISPLAY set and
-#      DISPLAY unset, forcing the portal code path
+#   4. run the complete Rust integration suite with WAYLAND_DISPLAY set and
+#      DISPLAY unset, forcing native Wayland window discovery, actions,
+#      events, and the portal screenshot path
 #
 # The portal-wlr backend auto-approves screenshot requests for clients it
 # can identify, which is what we need in non-interactive CI. If consent is
-# asked for, the call will block forever — the harness applies a 30s
-# timeout to each `cargo test` to surface that case cleanly.
+# asked for, the call will block forever — the harness applies a bounded
+# timeout to the integration run to surface that case cleanly.
 set -euo pipefail
 
 if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
@@ -187,8 +188,12 @@ CLEANUP_PIDS+=($!)
 sleep 3
 
 set +e
-timeout 60 cargo test -p xa11y --test integ_test --features strict-roles \
-    -- --ignored --test-threads=1 --nocapture capture_
+# The shell-surface tests are intentionally excluded. They exercise desktop-
+# owned panels and menus, while this hermetic sway session is deliberately a
+# bare compositor. Everything owned by the app, including window discovery,
+# actions, and AT-SPI events, runs here under native Wayland.
+timeout 240 cargo test -p xa11y --test integ_test --features strict-roles \
+    -- --ignored --test-threads=1 --nocapture --skip integ::shell
 rc=$?
 set -e
 

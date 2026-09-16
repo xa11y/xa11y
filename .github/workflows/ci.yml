@@ -64,6 +64,23 @@ jobs:
       - name: Run integration tests
         run: ./scripts/run_integ_tests.sh
 
+  # Native Wayland coverage: a headless sway compositor with DISPLAY unset,
+  # so winit, AT-SPI, window management, events, and screenshots cannot
+  # silently fall back to X11/XWayland.
+  linux-wayland:
+    name: Linux Wayland
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          cache-key: wayland
+
+      - name: Run native Wayland integration tests
+        run: cargo xtask test-integ-wayland-container
+
   # ── Linux Wayland uinput: e2e input-sim coverage. Drives
   #    LinuxInputProvider through its public API on the runner, then
   #    reads events back via libevdev and asserts the wire-level codes/

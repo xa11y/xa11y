@@ -27,6 +27,7 @@ cannot perform it".
 from __future__ import annotations
 
 import os
+import sys
 import time
 
 import pytest
@@ -190,6 +191,33 @@ def test_python_window_suite_resolves_the_app(app: xa11y.App) -> None:
     executes and keeps the cell honest.
     """
     assert isinstance(app.windows(), list)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="AT-SPI is Linux-only")
+def test_atspi_geometry_capability_is_measured_for_gtk_and_qt(app: xa11y.App) -> None:
+    """Pin the GTK/Qt results that decide whether geometry is advertised.
+
+    Qt exports Component.SetPosition and Component.SetSize on its top-level
+    accessible, but returns ``false`` from both. GTK's adapter exposes no
+    top-level window accessible in this fixture. Neither therefore provides
+    a capability xa11y can honestly advertise.
+    """
+    if APP not in {"gtk", "qt"}:
+        pytest.skip("this probe is specifically for the GTK and Qt adapters")
+    windows = app.windows()
+    if APP == "gtk":
+        assert windows == [], "GTK unexpectedly gained a targetable AT-SPI window"
+        return
+    assert windows, "Qt must expose its top-level window through AT-SPI"
+    win = windows[0]
+    assert "move_to" not in win.actions
+    assert "resize_to" not in win.actions
+    bounds = win.bounds
+    assert bounds is not None
+    with pytest.raises(xa11y.ActionNotSupportedError):
+        win.move_to(bounds.x + 10, bounds.y + 10)
+    with pytest.raises(xa11y.ActionNotSupportedError):
+        win.resize_to(bounds.width + 10, bounds.height + 10)
 
 
 def test_minimize_and_restore(app: xa11y.App) -> None:
