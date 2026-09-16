@@ -530,6 +530,11 @@ test('Locator maximize()/restore() dispatch through the async binding', async (t
       t.skip('AppKit zoom has no observable maximized/fullscreen state');
       return;
     }
+    if (appEnv === 'qt' && process.platform === 'darwin') {
+      await win.restore();
+      t.skip('Qt/macOS Locator maximize has no observable state change (qt_macos_locator_maximize_noop)');
+      return;
+    }
     await waitUntil(async () => {
       const current = await currentWindow(app, win, 'maximize');
       return current !== null && (current.maximized === true || current.fullscreen === true);

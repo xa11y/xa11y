@@ -583,6 +583,20 @@ gaps:
       apps: [cocoa]
       features: [windows]
 
+  - id: qt_macos_locator_maximize_noop
+    description: >
+      The Qt macOS window's retained Element reports an observable maximize
+      transition, but maximize dispatched through a freshly resolved JS
+      Locator leaves the reported state unchanged. The Locator action is
+      dispatched and explicitly skipped; the retained-Element test enforces
+      the state transition and restoration in the same integration cell.
+    severity: low
+    workaround: "Retain the discovered Element when maximizing a Qt window on macOS."
+    affects:
+      apps: [qt]
+      language: javascript
+      features: [windows]
+
   - id: qt_windows_geometry_offsets
     description: >
       Qt's Windows UIA TransformPattern applies move and resize requests in
