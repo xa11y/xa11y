@@ -791,13 +791,22 @@ mod tests {
     /// `active`, the window-level foreground flag.
     struct MultiWindowProvider {
         inner: Arc<crate::mock::MockProvider>,
+        windows: std::sync::Mutex<Vec<ElementData>>,
     }
 
     impl MultiWindowProvider {
         fn new() -> Self {
             Self {
                 inner: build_provider(),
+                windows: std::sync::Mutex::new(vec![
+                    Self::window("Main", 100, false),
+                    Self::window("Modal", 101, true),
+                ]),
             }
+        }
+
+        fn replace_windows(&self, windows: Vec<ElementData>) {
+            *self.windows.lock().unwrap_or_else(|e| e.into_inner()) = windows;
         }
 
         /// The Application node for the shared process (pid 42).
@@ -866,10 +875,11 @@ mod tests {
             match e {
                 // The Application node's children are the process's top-level
                 // windows — main + modal, in enumeration (z-) order.
-                Some(el) if matches!(el.role, Role::Application) && el.pid == Some(42) => Ok(vec![
-                    Self::window("Main", 100, false),
-                    Self::window("Modal", 101, true),
-                ]),
+                Some(el) if matches!(el.role, Role::Application) && el.pid == Some(42) => Ok(self
+                    .windows
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone()),
                 _ => self.inner.get_children(e),
             }
         }
@@ -1577,6 +1587,90 @@ mod tests {
             .map(|w| w.data().name.as_deref().unwrap_or_default())
             .collect();
         assert_eq!(names2, vec!["Main", "Modal"]);
+    }
+
+    #[test]
+    fn windows_keep_distinct_windows_with_duplicate_titles() {
+        // Window titles are presentation, never identity. Two sibling or
+        // modal windows may legitimately have the same title, and discovery
+        // must preserve both so a caller can disambiguate with :nth or other
+        // attributes instead of silently losing one.
+        let provider = Arc::new(MultiWindowProvider::new());
+        provider.replace_windows(vec![
+            MultiWindowProvider::window("Untitled", 100, false),
+            MultiWindowProvider::window("Untitled", 101, true),
+        ]);
+        let any: Arc<dyn Provider> = provider;
+        let app = App::by_pid_with(any, 42, Duration::ZERO)
+            .expect("the duplicate-title app must resolve");
+
+        let windows = app
+            .windows()
+            .expect("duplicate-title windows must enumerate");
+        assert_eq!(windows.len(), 2, "titles must not be used as a dedup key");
+        assert_ne!(windows[0].data().handle, windows[1].data().handle);
+        assert_eq!(
+            app.locator(r#"window[name="Untitled"]"#)
+                .count()
+                .expect("both titled windows must be selectable"),
+            2
+        );
+    }
+
+    #[test]
+    fn locator_re_resolves_when_the_matching_window_changes() {
+        // A Locator is a live query, not a saved Element handle. Model the
+        // common window-churn case: the first matching window disappears (or
+        // changes title) and a sibling becomes the match between operations.
+        let provider = Arc::new(MultiWindowProvider::new());
+        provider.replace_windows(vec![
+            MultiWindowProvider::window("Target", 100, true),
+            MultiWindowProvider::window("Other", 101, false),
+        ]);
+        let any: Arc<dyn Provider> = provider.clone();
+        let app = App::by_pid_with(any, 42, Duration::ZERO)
+            .expect("the changing-window app must resolve");
+        let locator = app
+            .locator(r#"window[name="Target"]"#)
+            .with_timeout(Duration::ZERO);
+        let first = locator.element().expect("the first target must resolve");
+        assert_eq!(first.data().handle, 100);
+
+        provider.replace_windows(vec![
+            MultiWindowProvider::window("Other", 100, false),
+            MultiWindowProvider::window("Target", 101, true),
+        ]);
+        let second = locator
+            .element()
+            .expect("the locator must resolve the replacement target");
+        assert_eq!(second.data().handle, 101);
+        assert_ne!(first.data().handle, second.data().handle);
+    }
+
+    #[test]
+    fn windows_keep_provider_reported_invisible_windows_discoverable() {
+        // Once a platform provider reports a live top-level window, core
+        // discovery filters only by role. It must not apply a second
+        // visibility filter: minimized windows commonly report visible=false,
+        // while closed windows are removed by the provider (and are covered
+        // by closed_window_leaves_windows_enumeration).
+        let provider = Arc::new(MultiWindowProvider::new());
+        let mut hidden = MultiWindowProvider::window("Provider-reported", 100, false);
+        hidden.states.visible = false;
+        hidden.states.minimized = Some(false);
+        let mut minimized = MultiWindowProvider::window("Minimized", 101, false);
+        minimized.states.visible = false;
+        minimized.states.minimized = Some(true);
+        provider.replace_windows(vec![hidden, minimized]);
+        let any: Arc<dyn Provider> = provider;
+        let app = App::by_pid_with(any, 42, Duration::ZERO)
+            .expect("the invisible-window app must resolve");
+
+        let windows = app.windows().expect("reported windows must enumerate");
+        assert_eq!(windows.len(), 2);
+        assert!(windows.iter().all(|w| !w.states.visible));
+        assert_eq!(windows[0].states.minimized, Some(false));
+        assert_eq!(windows[1].states.minimized, Some(true));
     }
 
     #[test]

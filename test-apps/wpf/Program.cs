@@ -31,6 +31,7 @@
 // Launch:  xa11y-wpf-test-app.exe [--pid-file PATH]
 // The optional --pid-file writes the PID so a test harness can kill it.
 
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Automation;
@@ -106,6 +107,7 @@ internal sealed class TestWindow : Window
     private readonly DataGrid _usersTable;
     private Window? _sampleDialog;
     private Window? _sampleSibling;
+    private readonly List<Window> _duplicateWindows = new();
 
     public TestWindow()
     {
@@ -311,8 +313,10 @@ internal sealed class TestWindow : Window
         open.Click += (_, _) => OpenSampleDialog();
         var openSibling = MakeButton("Open Sibling");
         openSibling.Click += (_, _) => OpenSampleSibling();
+        var openDuplicates = MakeButton("Open Duplicate Windows");
+        openDuplicates.Click += (_, _) => OpenDuplicateWindows();
 
-        return MakeGroup("Dialogs", Orientation.Vertical, open, openSibling);
+        return MakeGroup("Dialogs", Orientation.Vertical, open, openSibling, openDuplicates);
     }
 
     /// <summary>
@@ -394,6 +398,46 @@ internal sealed class TestWindow : Window
 
         _sampleSibling.Show();
         _sampleSibling.Activate();
+    }
+
+    /// <summary>
+    ///  Shows two top-level windows with the same accessible title. These are
+    ///  deliberately indistinguishable by name so discovery must preserve
+    ///  both native handles and a Locator must re-resolve after one hides.
+    /// </summary>
+    private void OpenDuplicateWindows()
+    {
+        if (_duplicateWindows.Count == 0)
+        {
+            for (int i = 1; i <= 2; i++)
+            {
+                var close = MakeButton($"Close Duplicate {i}");
+                var duplicate = new Window
+                {
+                    Title = "Duplicate Window",
+                    Width = 320,
+                    Height = 160,
+                    Left = Left + 40 * i,
+                    Top = Top + 40 * i,
+                    ShowInTaskbar = false,
+                    Content = new StackPanel { Margin = new Thickness(16), Children = { close } },
+                };
+                AutomationProperties.SetName(duplicate, "Duplicate Window");
+                close.Click += (_, _) => duplicate.Hide();
+                duplicate.Closing += (_, e) =>
+                {
+                    e.Cancel = true;
+                    duplicate.Hide();
+                };
+                _duplicateWindows.Add(duplicate);
+            }
+        }
+
+        foreach (var duplicate in _duplicateWindows)
+        {
+            duplicate.Show();
+        }
+        _duplicateWindows[^1].Activate();
     }
 
     // ── Chrome ───────────────────────────────────────────────────────────

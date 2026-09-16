@@ -30,12 +30,13 @@ const assert = require('node:assert/strict');
 
 const { getApp } = require('./helpers.js');
 
-test('App.windows() reaches the provider with the promised state getters', async () => {
+test('App.windows() reaches the provider with the promised state getters', async (t) => {
   const app = await getApp();
   const windows = await app.windows();
   assert.ok(Array.isArray(windows), 'windows() is an array');
   if (windows.length === 0) {
-    return; // the app exposes no window-like element; skip is the honest answer
+    t.skip('the app exposes no window-like element');
+    return;
   }
   for (const w of windows) {
     assert.ok(w.role, 'a listed window always carries its role');
@@ -46,7 +47,7 @@ test('App.windows() reaches the provider with the promised state getters', async
   }
 });
 
-test('a window that advertises activate gets it dispatched to the platform', async () => {
+test('a window that advertises activate gets it dispatched to the platform', async (t) => {
   const app = await getApp();
   const windows = await app.windows();
   const win = windows.find((w) => w.actions.includes('activate'));
@@ -54,6 +55,7 @@ test('a window that advertises activate gets it dispatched to the platform', asy
     // The per-platform matrix is the Rust suite's ground truth; here the
     // point is the boundary, and a window that advertises nothing cannot
     // verify it.
+    t.skip('no window advertises activate on this app/platform');
     return;
   }
   await win.activate();

@@ -830,7 +830,9 @@ def test_fullscreen_state_enters_and_reads_true(app: xa11y.App) -> None:
     the exit half is asserted nowhere. This test is ordered last in the file
     so nothing after it depends on the window's frame; the harness tears the
     app down at cell end, which returns the Space. The transition is
-    animated (Spaces), so the state is polled rather than read once.
+    animated (Spaces), so the state is polled rather than read once. The app
+    also opens ``Space Companion`` immediately before entry; it stays on the
+    original Space and must remain present in the app-wide window listing.
     """
     button = app.locator('button[name="Toggle Fullscreen"]')
     try:
@@ -838,12 +840,16 @@ def test_fullscreen_state_enters_and_reads_true(app: xa11y.App) -> None:
         deadline = time.monotonic() + 15.0
         while time.monotonic() < deadline:
             windows = app.windows()
-            if windows and windows[0].fullscreen is True:
+            names = {w.name for w in windows}
+            if (
+                any(w.fullscreen is True for w in windows)
+                and "Space Companion" in names
+            ):
                 return
             time.sleep(0.2)
         raise AssertionError(
-            "fullscreen state did not become True; "
-            f"last read: {windows[0].fullscreen if windows else None!r}"
+            "fullscreen state and off-Space companion were not both discoverable; "
+            f"last read: {[(w.name, w.fullscreen) for w in windows]!r}"
         )
     except Exception:
         # Best-effort: the entry raised, so nothing is left to clean up on

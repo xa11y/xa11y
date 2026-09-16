@@ -140,7 +140,9 @@ features:
       cannot move or resize a top-level window at all. The suites adapt via
       the app config: python test_window.py + test_window_mutating.py, JS
       06_window.test.js + 07_window_mutating.test.js, and the Rust integ
-      suite's windows.rs cover rust_core.
+      suite's windows.rs cover rust_core. The WPF js-window cell subscribes
+      before opening a non-modal sibling and strictly verifies WindowOpened,
+      minimized true/false StateChanged, and WindowClosed delivery.
 
   input_sim:
     description: "input simulation: click, double-click, right-click, drag, key press, chord, type, scroll"

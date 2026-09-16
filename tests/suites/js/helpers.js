@@ -87,6 +87,10 @@ const APP_CONFIG = {
     hasRadio: true,
     dialogButtonName: 'Open Dialog',
     dialogName: 'Sample Dialog',
+    siblingButtonName: 'Open Sibling',
+    siblingName: 'Sample Sibling',
+    duplicateButtonName: 'Open Duplicate Windows',
+    duplicateWindowName: 'Duplicate Window',
   },
 };
 

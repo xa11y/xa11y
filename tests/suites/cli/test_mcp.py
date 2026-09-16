@@ -612,6 +612,227 @@ def test_windows_tool_reports_limit_truncation_honestly(mcp, app_pid):
         assert payload["truncated"] is False, payload
 
 
+def _mcp_window_target(mcp, app_pid: int, *required_actions: str) -> tuple[dict, str]:
+    """Return a uniquely nameable window advertising every requested action."""
+    result = mcp.call_tool("windows", {"pid": app_pid})["result"]
+    assert result["isError"] is False, result["content"]
+    windows = result["structuredContent"]["windows"]
+    names = [w.get("name") for w in windows]
+    for window in windows:
+        name = window.get("name")
+        actions = window.get("actions", [])
+        if (
+            name
+            and '"' not in name
+            and names.count(name) == 1
+            and all(action in actions for action in required_actions)
+        ):
+            selector = f'{window["role"]}[name="{name}"]'
+            return window, selector
+    pytest.skip(
+        "no uniquely named window advertises " + ", ".join(required_actions)
+    )
+
+
+def _mcp_window_by_selector(mcp, app_pid: int, selector: str) -> dict | None:
+    result = mcp.call_tool(
+        "find", {"pid": app_pid, "selector": selector, "limit": 2}
+    )["result"]
+    if result["isError"]:
+        return None
+    matches = result["structuredContent"]["matches"]
+    assert len(matches) <= 1, f"the mutation target stopped being unique: {matches}"
+    return matches[0] if matches else None
+
+
+def _wait_for_mcp_window(mcp, app_pid: int, selector: str, predicate, what: str) -> dict:
+    deadline = time.monotonic() + 5.0
+    last = None
+    while time.monotonic() < deadline:
+        last = _mcp_window_by_selector(mcp, app_pid, selector)
+        if last is not None and predicate(last):
+            return last
+        time.sleep(0.1)
+    pytest.fail(f"timed out waiting for {what}; last window payload: {last}")
+
+
+def _best_effort_mcp_action(mcp, payload: dict) -> None:
+    """Run cleanup without replacing the assertion or transport error."""
+    try:
+        mcp.call_tool("action", payload)
+    except BaseException:  # noqa: BLE001, S110 - cleanup must never win
+        pass
+
+
+def test_mcp_minimize_restore_mutates_and_reports_window_state(mcp, app_pid):
+    """MCP window actions must change observable state, not merely return ok."""
+    window, selector = _mcp_window_target(mcp, app_pid, "minimize", "restore")
+    assert "minimize" in window["actions"] and "restore" in window["actions"]
+    needs_restore = False
+    try:
+        minimized = mcp.call_tool(
+            "action",
+            {"pid": app_pid, "action": "minimize", "selector": selector},
+        )["result"]
+        assert minimized["isError"] is False, minimized["content"]
+        assert minimized["structuredContent"]["ok"] is True
+        needs_restore = True
+        _wait_for_mcp_window(
+            mcp,
+            app_pid,
+            selector,
+            lambda w: w["states"].get("minimized") is True,
+            "MCP minimize to report minimized=true",
+        )
+
+        restored = mcp.call_tool(
+            "action",
+            {"pid": app_pid, "action": "restore", "selector": selector},
+        )["result"]
+        assert restored["isError"] is False, restored["content"]
+        _wait_for_mcp_window(
+            mcp,
+            app_pid,
+            selector,
+            lambda w: w["states"].get("minimized") is False,
+            "MCP restore to report minimized=false",
+        )
+        needs_restore = False
+    finally:
+        # A failed assertion must not leave the shared fixture minimized.
+        if needs_restore:
+            _best_effort_mcp_action(
+                mcp,
+                {"pid": app_pid, "action": "restore", "selector": selector},
+            )
+
+
+def test_mcp_move_to_mutates_and_restores_window_bounds(mcp, app_pid):
+    """The MCP geometry payload must reach the platform and move the window."""
+    window, selector = _mcp_window_target(mcp, app_pid, "move_to")
+    bounds = window.get("bounds")
+    if not bounds:
+        pytest.skip("the move_to window reports no restorable bounds")
+    original = (bounds["x"], bounds["y"])
+    moved_to = (original[0] + 10, original[1] + 10)
+    try:
+        moved = mcp.call_tool(
+            "action",
+            {
+                "pid": app_pid,
+                "action": "move-to",
+                "selector": selector,
+                "at": f"{moved_to[0]},{moved_to[1]}",
+            },
+        )["result"]
+        assert moved["isError"] is False, moved["content"]
+        _wait_for_mcp_window(
+            mcp,
+            app_pid,
+            selector,
+            lambda w: abs(w["bounds"]["x"] - moved_to[0]) <= 2
+            and abs(w["bounds"]["y"] - moved_to[1]) <= 2,
+            "MCP move-to to change the reported bounds",
+        )
+        restored = mcp.call_tool(
+            "action",
+            {
+                "pid": app_pid,
+                "action": "move-to",
+                "selector": selector,
+                "at": f"{original[0]},{original[1]}",
+            },
+        )["result"]
+        assert restored["isError"] is False, restored["content"]
+        _wait_for_mcp_window(
+            mcp,
+            app_pid,
+            selector,
+            lambda w: abs(w["bounds"]["x"] - original[0]) <= 2
+            and abs(w["bounds"]["y"] - original[1]) <= 2,
+            "MCP move-to to restore the original bounds",
+        )
+    except BaseException:
+        # Best-effort cleanup; the original assertion/error wins.
+        _best_effort_mcp_action(
+            mcp,
+            {
+                "pid": app_pid,
+                "action": "move-to",
+                "selector": selector,
+                "at": f"{original[0]},{original[1]}",
+            },
+        )
+        raise
+
+
+def test_mcp_resize_to_mutates_and_restores_window_bounds(mcp, app_pid, app_name):
+    """MCP's size payload must reach the provider and change reported bounds."""
+    window, selector = _mcp_window_target(mcp, app_pid, "resize_to")
+    bounds = window.get("bounds")
+    if not bounds:
+        pytest.skip("the resize_to window reports no restorable bounds")
+    original = (bounds["width"], bounds["height"])
+    resized_to = (original[0] + 50, original[1] + 50)
+    needs_restore = False
+    try:
+        resized = mcp.call_tool(
+            "action",
+            {
+                "pid": app_pid,
+                "action": "resize-to",
+                "selector": selector,
+                "size": f"{resized_to[0]},{resized_to[1]}",
+            },
+        )["result"]
+        assert resized["isError"] is False, resized["content"]
+        assert resized["structuredContent"]["ok"] is True
+        needs_restore = True
+        if app_name == "winforms":
+            pytest.skip(
+                "WinForms accepts Resize without changing bounds "
+                "(winforms_transform_resize_noop)"
+            )
+        _wait_for_mcp_window(
+            mcp,
+            app_pid,
+            selector,
+            lambda w: abs(w["bounds"]["width"] - resized_to[0]) <= 2
+            and abs(w["bounds"]["height"] - resized_to[1]) <= 2,
+            "MCP resize-to to change the reported bounds",
+        )
+        restored = mcp.call_tool(
+            "action",
+            {
+                "pid": app_pid,
+                "action": "resize-to",
+                "selector": selector,
+                "size": f"{original[0]},{original[1]}",
+            },
+        )["result"]
+        assert restored["isError"] is False, restored["content"]
+        _wait_for_mcp_window(
+            mcp,
+            app_pid,
+            selector,
+            lambda w: abs(w["bounds"]["width"] - original[0]) <= 2
+            and abs(w["bounds"]["height"] - original[1]) <= 2,
+            "MCP resize-to to restore the original bounds",
+        )
+        needs_restore = False
+    finally:
+        if needs_restore:
+            _best_effort_mcp_action(
+                mcp,
+                {
+                    "pid": app_pid,
+                    "action": "resize-to",
+                    "selector": selector,
+                    "size": f"{original[0]},{original[1]}",
+                },
+            )
+
+
 def test_the_app_argument_resolves_the_same_application_as_pid(mcp, app_pid):
     """Both targeting arguments must reach the same application.
 

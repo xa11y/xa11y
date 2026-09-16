@@ -31,11 +31,35 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 
-const { getApp, appConfig, ActionNotSupportedError, TimeoutError, sleep } = require('./helpers.js');
+const {
+  getApp,
+  appConfig,
+  appEnv,
+  ActionNotSupportedError,
+  TimeoutError,
+  sleep,
+} = require('./helpers.js');
+
+const WINDOW_STATE_TIMEOUT_MS = appEnv === 'cocoa' ? 15_000 : 5_000;
 
 async function windowAdvertising(app, verb) {
   const windows = await app.windows();
   return windows.find((w) => w.actions.includes(verb)) || null;
+}
+
+async function currentWindow(app, original, verb) {
+  const windows = await app.windows();
+  if (original.name) {
+    const sameName = windows.find((w) => w.name === original.name);
+    if (sameName) return sameName;
+  }
+  return windows.find((w) => w.actions.includes(verb)) || null;
+}
+
+function boundsNear(actual, expected, fields, tolerance = 2) {
+  return actual != null && fields.every(
+    (field) => Math.abs(actual[field] - expected[field]) <= tolerance,
+  );
 }
 
 async function waitUntil(predicate, timeoutMs, what) {
@@ -80,6 +104,58 @@ async function closeDialogBestEffort(app) {
   }
 }
 
+async function actionAndWait(sub, predicate, action) {
+  const controller = new AbortController();
+  const pending = sub.waitFor(predicate, {
+    timeout: WINDOW_STATE_TIMEOUT_MS,
+    signal: controller.signal,
+  });
+  try {
+    await action();
+    return await pending;
+  } catch (err) {
+    controller.abort();
+    try {
+      await pending;
+    } catch (_cancelled) {
+      // Consume the cancelled waiter so it cannot reject after this test ends.
+    }
+    throw err;
+  }
+}
+
+async function closeSiblingBestEffort(app) {
+  const siblingName = appConfig.siblingName;
+  if (!siblingName) return;
+  try {
+    const sibling = (await app.windows()).find((w) => w.name === siblingName);
+    if (!sibling) return;
+    if (sibling.actions.includes('restore')) await sibling.restore();
+    await app.locator('button[name="Close Sibling"]').press();
+  } catch (_e) {
+    // best-effort cleanup; the original error wins
+  }
+}
+
+async function closeDuplicatesBestEffort(app) {
+  if (!appConfig.duplicateWindowName) return;
+  try {
+    const duplicates = (await app.windows()).filter(
+      (w) => w.name === appConfig.duplicateWindowName,
+    );
+    for (const duplicate of duplicates) {
+      if (duplicate.actions.includes('close')) await duplicate.close();
+    }
+  } catch (_e) {
+    // best-effort cleanup; the original error wins
+  }
+}
+
+async function siblingWindow(app) {
+  if (!appConfig.siblingName) return null;
+  return (await app.windows()).find((w) => w.name === appConfig.siblingName) || null;
+}
+
 async function openDialog(app) {
   // Press the app's "Open Dialog" button and wait for the dialog window.
   // Returns the dialog element; returns null when the app has no dialog
@@ -122,17 +198,28 @@ test('js-window suite resolves the shared app', async () => {
   assert.ok(Array.isArray(windows), 'windows() returns an array');
 });
 
-test('a window that advertises minimize is minimized and restored', async () => {
+test('a window that advertises minimize is minimized and restored', async (t) => {
   const app = await getApp();
   const win = await windowAdvertising(app, 'minimize');
   if (!win || !win.actions.includes('restore')) {
-    return; // no window advertises the verb on this app/platform
+    t.skip('no window advertises both minimize and restore');
+    return;
   }
   try {
     await win.minimize();
+    await waitUntil(async () => {
+      const current = await currentWindow(app, win, 'minimize');
+      return current !== null && current.minimized === true;
+    }, 5000, 'the minimized state to become true');
     // Advertised restore must succeed; a failure leaves the app minimized and
     // is a real provider failure, never swallowed.
-    await win.restore();
+    const minimized = await currentWindow(app, win, 'minimize');
+    assert.ok(minimized, 'the minimized window stays discoverable');
+    await minimized.restore();
+    await waitUntil(async () => {
+      const current = await currentWindow(app, win, 'restore');
+      return current !== null && current.minimized === false;
+    }, 5000, 'the minimized state to become false after restore');
   } catch (err) {
     // Never leave the shared app minimized for the suite after this one:
     // restore from the element path, then re-throw the original failure.
@@ -149,15 +236,26 @@ test('a window that advertises minimize is minimized and restored', async () => 
   }
 });
 
-test('a window that advertises maximize is maximized and restored', async () => {
+test('a window that advertises maximize is maximized and restored', async (t) => {
   const app = await getApp();
   const win = await windowAdvertising(app, 'maximize');
   if (!win || !win.actions.includes('restore')) {
+    t.skip('no window advertises both maximize and restore');
     return;
   }
   try {
     await win.maximize();
-    await win.restore();
+    await waitUntil(async () => {
+      const current = await currentWindow(app, win, 'maximize');
+      return current !== null && (current.maximized === true || current.fullscreen === true);
+    }, WINDOW_STATE_TIMEOUT_MS, 'the maximized/fullscreen state to become true');
+    const maximized = await currentWindow(app, win, 'maximize');
+    assert.ok(maximized, 'the maximized window stays discoverable');
+    await maximized.restore();
+    await waitUntil(async () => {
+      const current = await currentWindow(app, win, 'restore');
+      return current !== null && current.maximized !== true && current.fullscreen !== true;
+    }, WINDOW_STATE_TIMEOUT_MS, 'the maximized/fullscreen state to clear after restore');
   } catch (err) {
     try {
       const current = await windowAdvertising(app, 'maximize');
@@ -171,17 +269,29 @@ test('a window that advertises maximize is maximized and restored', async () => 
   }
 });
 
-test('moveTo() dispatches and puts the window back where it was', async () => {
+test('moveTo() changes the reported bounds and puts the window back', async (t) => {
   const app = await getApp();
   const win = await windowAdvertising(app, 'move_to');
   if (!win || !win.bounds) {
-    return; // no window (or no bounds to restore from)
+    t.skip('no window advertises move_to with restorable bounds');
+    return;
   }
-  const { x, y, width, height } = win.bounds;
+  const { x, y } = win.bounds;
+  const movedBounds = { x: x + 10, y: y + 10 };
   try {
-    await win.moveTo(x + 10, y + 10);
+    await win.moveTo(movedBounds.x, movedBounds.y);
+    await waitUntil(async () => {
+      const current = await currentWindow(app, win, 'move_to');
+      return current !== null && boundsNear(current.bounds, movedBounds, ['x', 'y']);
+    }, 5000, 'moveTo() to change the reported position');
     // Restoring keeps the shared app usable for what follows.
-    await win.moveTo(x, y);
+    const moved = await currentWindow(app, win, 'move_to');
+    assert.ok(moved, 'the moved window stays discoverable');
+    await moved.moveTo(x, y);
+    await waitUntil(async () => {
+      const current = await currentWindow(app, win, 'move_to');
+      return current !== null && boundsNear(current.bounds, { x, y }, ['x', 'y']);
+    }, 5000, 'moveTo() to restore the original position');
   } catch (err) {
     // Never leave the shared app moved: best-effort move back, then the
     // original failure surfaces.
@@ -197,16 +307,41 @@ test('moveTo() dispatches and puts the window back where it was', async () => {
   }
 });
 
-test('resizeTo() dispatches and restores the original size', async () => {
+test('resizeTo() changes the reported bounds and restores the original size', async (t) => {
   const app = await getApp();
   const win = await windowAdvertising(app, 'resize_to');
   if (!win || !win.bounds) {
+    t.skip('no window advertises resize_to with restorable bounds');
     return;
   }
   const { width, height } = win.bounds;
+  const resizedBounds = { width: width + 50, height: height + 50 };
   try {
-    await win.resizeTo(width + 50, height + 50);
-    await win.resizeTo(width, height);
+    await win.resizeTo(resizedBounds.width, resizedBounds.height);
+    if (appEnv === 'winforms') {
+      // The provider advertises and accepts TransformPattern.Resize, but the
+      // framework leaves its bounds unchanged. Keep the dispatch covered and
+      // report the known gap honestly instead of passing on the no-op.
+      try {
+        const current = await currentWindow(app, win, 'resize_to');
+        if (current) await current.resizeTo(width, height);
+      } catch (_cleanup) {
+        // best-effort cleanup before reporting the known platform gap
+      }
+      t.skip('WinForms accepts Resize without changing bounds (winforms_transform_resize_noop)');
+      return;
+    }
+    await waitUntil(async () => {
+      const current = await currentWindow(app, win, 'resize_to');
+      return current !== null && boundsNear(current.bounds, resizedBounds, ['width', 'height']);
+    }, 5000, 'resizeTo() to change the reported size');
+    const resized = await currentWindow(app, win, 'resize_to');
+    assert.ok(resized, 'the resized window stays discoverable');
+    await resized.resizeTo(width, height);
+    await waitUntil(async () => {
+      const current = await currentWindow(app, win, 'resize_to');
+      return current !== null && boundsNear(current.bounds, { width, height }, ['width', 'height']);
+    }, 5000, 'resizeTo() to restore the original size');
   } catch (err) {
     // Same failure-preserving cleanup as moveTo: the shared app must not be
     // left resized for the suites after this one.
@@ -222,10 +357,71 @@ test('resizeTo() dispatches and restores the original size', async () => {
   }
 });
 
-test('Locator window verbs dispatch through the async binding', async () => {
+test('a real sibling window emits opened, minimized state, restored state, and closed events', async (t) => {
+  const app = await getApp();
+  if (!appConfig.siblingButtonName || !appConfig.siblingName) {
+    t.skip('this app has no sibling-window event fixture');
+    return;
+  }
+
+  const sub = await app.subscribe();
+  try {
+    const opened = await actionAndWait(
+      sub,
+      (event) => event.type === 'windowOpened',
+      () => app.locator(`button[name="${appConfig.siblingButtonName}"]`).press(),
+    );
+    assert.equal(opened.type, 'windowOpened');
+
+    await waitUntil(async () => (await siblingWindow(app)) !== null, 5000,
+      `sibling ${appConfig.siblingName} to appear`);
+    let sibling = await siblingWindow(app);
+    assert.ok(sibling, 'the opened sibling must be discoverable');
+    assert.ok(sibling.actions.includes('minimize'), 'the sibling advertises minimize');
+    assert.ok(sibling.actions.includes('restore'), 'the sibling advertises restore');
+
+    const minimized = await actionAndWait(
+      sub,
+      (event) => event.type === 'stateChanged' &&
+        event.stateFlag === 'minimized' && event.stateValue === true,
+      () => sibling.minimize(),
+    );
+    assert.equal(minimized.stateFlag, 'minimized');
+    assert.equal(minimized.stateValue, true);
+    await waitUntil(async () => (await siblingWindow(app))?.minimized === true, 5000,
+      'the sibling snapshot to report minimized=true');
+
+    sibling = await siblingWindow(app);
+    assert.ok(sibling, 'a minimized sibling stays discoverable');
+    const restored = await actionAndWait(
+      sub,
+      (event) => event.type === 'stateChanged' &&
+        event.stateFlag === 'minimized' && event.stateValue === false,
+      () => sibling.restore(),
+    );
+    assert.equal(restored.stateValue, false);
+    await waitUntil(async () => (await siblingWindow(app))?.minimized === false, 5000,
+      'the sibling snapshot to report minimized=false');
+
+    const closed = await actionAndWait(
+      sub,
+      (event) => event.type === 'windowClosed',
+      () => app.locator('button[name="Close Sibling"]').press(),
+    );
+    assert.equal(closed.type, 'windowClosed');
+    await waitUntil(async () => (await siblingWindow(app)) === null, 5000,
+      `sibling ${appConfig.siblingName} to disappear`);
+  } finally {
+    sub.close();
+    await closeSiblingBestEffort(app);
+  }
+});
+
+test('Locator window verbs dispatch through the async binding', async (t) => {
   const app = await getApp();
   const win = await windowAdvertising(app, 'minimize');
   if (!win || !win.actions.includes('restore')) {
+    t.skip('no window advertises both minimize and restore');
     return;
   }
   // The Locator carries the selector + auto-wait machinery, so its dispatch
@@ -234,10 +430,21 @@ test('Locator window verbs dispatch through the async binding', async () => {
   // a Role::Dialog (the Qt and Cocoa apps' top level is a dialog), while
   // App.windows() lists both, so the selector must accept both.
   const locator = locatorForWindow(app, win);
-  if (!locator) return;
+  if (!locator) {
+    t.skip('the target window has no name for a unique Locator');
+    return;
+  }
   try {
     await locator.minimize();
+    await waitUntil(async () => {
+      const current = await currentWindow(app, win, 'minimize');
+      return current !== null && current.minimized === true;
+    }, 5000, 'Locator.minimize() to report minimized=true');
     await locator.restore();
+    await waitUntil(async () => {
+      const current = await currentWindow(app, win, 'restore');
+      return current !== null && current.minimized === false;
+    }, 5000, 'Locator.restore() to report minimized=false');
   } catch (err) {
     // Never leave the shared app minimized: restore from the element path,
     // then re-throw the original failure. The cleanup lookup sits inside the
@@ -256,17 +463,29 @@ test('Locator window verbs dispatch through the async binding', async () => {
   }
 });
 
-test('Locator maximize()/restore() dispatch through the async binding', async () => {
+test('Locator maximize()/restore() dispatch through the async binding', async (t) => {
   const app = await getApp();
   const win = await windowAdvertising(app, 'maximize');
   if (!win || !win.actions.includes('restore')) {
+    t.skip('no window advertises both maximize and restore');
     return;
   }
   const locator = locatorForWindow(app, win);
-  if (!locator) return;
+  if (!locator) {
+    t.skip('the target window has no name for a unique Locator');
+    return;
+  }
   try {
     await locator.maximize();
+    await waitUntil(async () => {
+      const current = await currentWindow(app, win, 'maximize');
+      return current !== null && (current.maximized === true || current.fullscreen === true);
+    }, WINDOW_STATE_TIMEOUT_MS, 'Locator.maximize() to change the reported state');
     await locator.restore();
+    await waitUntil(async () => {
+      const current = await currentWindow(app, win, 'restore');
+      return current !== null && current.maximized !== true && current.fullscreen !== true;
+    }, WINDOW_STATE_TIMEOUT_MS, 'Locator.restore() to clear the maximized/fullscreen state');
   } catch (err) {
     try {
       const current = await windowAdvertising(app, 'maximize');
@@ -280,31 +499,49 @@ test('Locator maximize()/restore() dispatch through the async binding', async ()
   }
 });
 
-test('Locator activate() dispatches through the async binding', async () => {
+test('Locator activate() dispatches through the async binding', async (t) => {
   const app = await getApp();
   const win = await windowAdvertising(app, 'activate');
   if (!win) {
-    return; // no window advertises activate on this app/platform
+    t.skip('no window advertises activate on this app/platform');
+    return;
   }
   const locator = locatorForWindow(app, win);
-  if (!locator) return;
+  if (!locator) {
+    t.skip('the target window has no name for a unique Locator');
+    return;
+  }
   // A non-minimized window has nothing to restore: activate only changes
   // focus/stacking (a minimized window is restored first).
   await locator.activate();
 });
 
-test('Locator moveTo() dispatches and puts the window back where it was', async () => {
+test('Locator moveTo() dispatches and puts the window back where it was', async (t) => {
   const app = await getApp();
   const win = await windowAdvertising(app, 'move_to');
   if (!win || !win.bounds) {
+    t.skip('no window advertises move_to with restorable bounds');
     return;
   }
   const locator = locatorForWindow(app, win);
-  if (!locator) return;
+  if (!locator) {
+    t.skip('the target window has no name for a unique Locator');
+    return;
+  }
   const { x, y } = win.bounds;
   try {
     await locator.moveTo(x + 10, y + 10);
+    await waitUntil(async () => {
+      const current = await currentWindow(app, win, 'move_to');
+      return current !== null && boundsNear(
+        current.bounds, { x: x + 10, y: y + 10 }, ['x', 'y'],
+      );
+    }, 5000, 'Locator.moveTo() to change the reported position');
     await locator.moveTo(x, y);
+    await waitUntil(async () => {
+      const current = await currentWindow(app, win, 'move_to');
+      return current !== null && boundsNear(current.bounds, { x, y }, ['x', 'y']);
+    }, 5000, 'Locator.moveTo() to restore the original position');
   } catch (err) {
     // Never leave the shared app moved: best-effort move back, then the
     // original failure surfaces.
@@ -320,18 +557,46 @@ test('Locator moveTo() dispatches and puts the window back where it was', async 
   }
 });
 
-test('Locator resizeTo() dispatches and restores the original size', async () => {
+test('Locator resizeTo() dispatches and restores the original size', async (t) => {
   const app = await getApp();
   const win = await windowAdvertising(app, 'resize_to');
   if (!win || !win.bounds) {
+    t.skip('no window advertises resize_to with restorable bounds');
     return;
   }
   const locator = locatorForWindow(app, win);
-  if (!locator) return;
+  if (!locator) {
+    t.skip('the target window has no name for a unique Locator');
+    return;
+  }
   const { width, height } = win.bounds;
   try {
     await locator.resizeTo(width + 50, height + 50);
+    if (appEnv === 'winforms') {
+      try {
+        const current = await currentWindow(app, win, 'resize_to');
+        if (current) await current.resizeTo(width, height);
+      } catch (_cleanup) {
+        // best-effort cleanup before reporting the known platform gap
+      }
+      t.skip('WinForms accepts Resize without changing bounds (winforms_transform_resize_noop)');
+      return;
+    }
+    await waitUntil(async () => {
+      const current = await currentWindow(app, win, 'resize_to');
+      return current !== null && boundsNear(
+        current.bounds,
+        { width: width + 50, height: height + 50 },
+        ['width', 'height'],
+      );
+    }, 5000, 'Locator.resizeTo() to change the reported size');
     await locator.resizeTo(width, height);
+    await waitUntil(async () => {
+      const current = await currentWindow(app, win, 'resize_to');
+      return current !== null && boundsNear(
+        current.bounds, { width, height }, ['width', 'height'],
+      );
+    }, 5000, 'Locator.resizeTo() to restore the original size');
   } catch (err) {
     try {
       const current = await windowAdvertising(app, 'resize_to');
@@ -345,11 +610,42 @@ test('Locator resizeTo() dispatches and restores the original size', async () =>
   }
 });
 
-test('Element.close() dispatches on a secondary dialog', async () => {
+test('duplicate titles are preserved and a Locator re-resolves after one hides', async (t) => {
+  const app = await getApp();
+  if (!appConfig.duplicateButtonName || !appConfig.duplicateWindowName) {
+    t.skip('this app has no duplicate-window fixture');
+    return;
+  }
+  const selector = `window[name="${appConfig.duplicateWindowName}"]`;
+  try {
+    await app.locator(`button[name="${appConfig.duplicateButtonName}"]`).press();
+    await waitUntil(async () => (await app.locator(selector).elements()).length === 2,
+      5000, 'both same-titled windows to be discoverable');
+
+    const firstLocator = app.locator(selector).first();
+    const first = await firstLocator.element();
+    assert.ok(first.bounds, 'the first duplicate has comparable bounds');
+    assert.ok(first.actions.includes('close'), 'the duplicate advertises close');
+    const firstX = first.bounds.x;
+    await first.close();
+
+    await waitUntil(async () => (await app.locator(selector).elements()).length === 1,
+      5000, 'the hidden duplicate to leave discovery');
+    const replacement = await firstLocator.element();
+    assert.equal(replacement.name, appConfig.duplicateWindowName);
+    assert.notEqual(replacement.bounds?.x, firstX,
+      'the same Locator resolves the other native window after the first hides');
+  } finally {
+    await closeDuplicatesBestEffort(app);
+  }
+});
+
+test('Element.close() dispatches on a secondary dialog', async (t) => {
   const app = await getApp();
   const dlg = await openDialog(app);
   if (!dlg) {
-    return; // this app has no dialog config
+    t.skip('this app has no secondary-dialog fixture');
+    return;
   }
   try {
     if (dlg.actions.includes('close')) {
@@ -367,15 +663,19 @@ test('Element.close() dispatches on a secondary dialog', async () => {
   }
 });
 
-test('Locator.close() dispatches on a secondary dialog', async () => {
+test('Locator.close() dispatches on a secondary dialog', async (t) => {
   const app = await getApp();
   const dlg = await openDialog(app);
   if (!dlg) {
+    t.skip('this app has no secondary-dialog fixture');
     return;
   }
   try {
     const locator = locatorForWindow(app, dlg);
-    if (!locator) return;
+    if (!locator) {
+      t.skip('the dialog has no name for a unique Locator');
+      return;
+    }
     if (dlg.actions.includes('close')) {
       await locator.close();
       await waitUntil(async () => (await dialogWindow(app)) === null, 5000,
