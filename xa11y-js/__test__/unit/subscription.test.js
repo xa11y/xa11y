@@ -46,7 +46,15 @@ test('waitFor rejects with TimeoutError when no event arrives', async () => {
   try {
     await assert.rejects(
       sub.waitFor(() => true, { timeout: 50 }),
-      (err) => err instanceof TimeoutError,
+      (err) => {
+        assert.ok(err instanceof TimeoutError);
+        assert.equal(err.condition, "event 'event' matching predicate");
+        assert.equal(err.lastObserved, '0 event(s) received, none matched');
+        assert.equal(err.elapsedMs, 50);
+        assert.match(err.message, /waiting for: event 'event' matching predicate/);
+        assert.match(err.message, /last observed: 0 event\(s\) received, none matched/);
+        return true;
+      },
     );
   } finally {
     sub.close();

@@ -178,6 +178,38 @@ function toTypedError(err) {
   return typed;
 }
 
+/**
+ * Construct a JS-side terminal error with the same structured diagnosis and
+ * human-readable rendering that native errors receive through `toTypedError`.
+ * Retry-signal errors may be empty internally, but anything thrown to a
+ * consumer from a JS poll loop routes through this helper.
+ */
+function diagnosedError(ErrorClass, summary, diagnosis) {
+  const {
+    selector = null,
+    condition = null,
+    lastObserved = null,
+    candidates = [],
+    scope = null,
+    elapsedMs = null,
+  } = diagnosis;
+  let message = summary;
+  if (condition) message += `; waiting for: ${condition}`;
+  if (selector) message += `; selector: ${selector}`;
+  if (lastObserved) message += `; last observed: ${lastObserved}`;
+  if (candidates.length > 0) message += `; candidates: ${candidates.join(', ')}`;
+  if (scope) message += `\nsearch scope (bounded):\n${scope}`;
+
+  const err = new ErrorClass(message);
+  err.selector = selector;
+  err.condition = condition;
+  err.lastObserved = lastObserved;
+  err.candidates = candidates;
+  err.scope = scope;
+  err.elapsedMs = elapsedMs;
+  return err;
+}
+
 /** Wrap a function so any thrown (or rejected) napi error becomes typed. */
 function wrap(fn) {
   return function wrapped(...args) {
@@ -249,18 +281,16 @@ Object.defineProperty(native.Locator.prototype, 'waitUntil', {
       }
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
-        const err = new TimeoutError(
-          `Timeout after ${timeout}ms waiting for predicate on '${this.selector}'`,
-        );
         // Mirror the structured diagnosis fields native timeouts carry
         // (tenet 6); `el` is the final poll's observation.
-        err.condition = 'custom predicate';
-        err.selector = this.selector;
-        err.lastObserved = el
-          ? `matched ${el.role}${el.name ? ` "${el.name}"` : ''}`
-          : 'selector never matched';
-        err.elapsedMs = timeout;
-        throw err;
+        throw diagnosedError(TimeoutError, `Timeout after ${timeout}ms`, {
+          condition: 'custom predicate',
+          selector: this.selector,
+          lastObserved: el
+            ? `matched ${el.role}${el.name ? ` "${el.name}"` : ''}`
+            : 'selector never matched',
+          elapsedMs: timeout,
+        });
       }
 
       await new Promise((resolve, reject) => {
@@ -348,6 +378,7 @@ class Subscription extends EventEmitter {
       }
 
       let timer = null;
+      let seen = 0;
 
       const cleanup = () => {
         if (timer) clearTimeout(timer);
@@ -356,7 +387,10 @@ class Subscription extends EventEmitter {
       };
 
       const onEvent = (ev) => {
-        if (predicate && !predicate(ev)) return;
+        if (predicate && !predicate(ev)) {
+          seen += 1;
+          return;
+        }
         cleanup();
         resolve(ev);
       };
@@ -377,7 +411,13 @@ class Subscription extends EventEmitter {
       if (timeout > 0) {
         timer = setTimeout(() => {
           cleanup();
-          reject(new TimeoutError(`Timeout after ${timeout}ms waiting for '${type}'`));
+          reject(
+            diagnosedError(TimeoutError, `Timeout after ${timeout}ms`, {
+              condition: predicate ? `event '${type}' matching predicate` : `event '${type}'`,
+              lastObserved: `${seen} event(s) received, none matched`,
+              elapsedMs: timeout,
+            }),
+          );
         }, timeout);
       }
 
@@ -402,6 +442,33 @@ class Subscription extends EventEmitter {
 }
 
 // ── App wrapper ────────────────────────────────────────────────────────────
+
+// Keep App.find's failure snapshot aligned with the native app lookup
+// diagnostics in xa11y-core/src/app.rs. The final row reports truncation, so
+// the snapshot never implies that it contains the complete application list.
+const APP_FIND_DIAG_LIMIT = 20;
+
+function appFindScope(apps) {
+  const rows = apps.slice(0, APP_FIND_DIAG_LIMIT).map((app) => {
+    const pid = app.pid ?? 'unknown';
+    const name = JSON.stringify(app.name ?? '');
+    return `pid=${pid} name=${name}`;
+  });
+  if (apps.length > APP_FIND_DIAG_LIMIT) {
+    rows.push(`… (+${apps.length - APP_FIND_DIAG_LIMIT} more)`);
+  }
+  return rows.length > 0 ? rows.join('\n') : '(no applications enumerated)';
+}
+
+function appFindTimeoutError(timeout, condition, apps) {
+  const lastObserved = `${apps.length} application${apps.length === 1 ? '' : 's'} enumerated; none satisfied the predicate`;
+  const scope = appFindScope(apps);
+  return diagnosedError(
+    SelectorNotMatchedError,
+    `No application matched predicate after ${timeout}ms`,
+    { condition, lastObserved, scope },
+  );
+}
 
 /**
  * User-facing `App` class. Extends the native class so properties and
@@ -468,6 +535,7 @@ class App extends native.App {
    * @param {(app: App) => boolean | Promise<boolean>} predicate
    * @param {object} [options]
    * @param {number} [options.timeout] - Timeout in milliseconds; defaults to the process-wide default timeout (see `setDefaultTimeout`)
+   * @param {string} [options.condition] - Human-readable description of the application being sought
    * @param {AbortSignal} [options.signal] - Abort signal for cancellation
    * @returns {Promise<App>}
    * @example
@@ -481,7 +549,11 @@ class App extends native.App {
   static async find(predicate, options = {}) {
     // Default resolves from the process-wide setting (setDefaultTimeout /
     // XA11Y_DEFAULT_TIMEOUT, else 5s); an explicit options.timeout wins.
-    const { timeout = native.getDefaultTimeout() * 1000, signal } = options;
+    const {
+      timeout = native.getDefaultTimeout() * 1000,
+      condition = 'application matching predicate',
+      signal,
+    } = options;
     const deadline = Date.now() + timeout;
 
     if (signal && signal.aborted) {
@@ -499,9 +571,7 @@ class App extends native.App {
       }
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
-        throw new SelectorNotMatchedError(
-          `No application matched predicate after ${timeout}ms`,
-        );
+        throw appFindTimeoutError(timeout, condition, apps);
       }
 
       await new Promise((resolve, reject) => {

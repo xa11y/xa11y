@@ -166,11 +166,46 @@ test('App.find() supports an async predicate', async () => {
   assert.equal(app.name, 'Target');
 });
 
-test('App.find() rejects with SelectorNotMatchedError on timeout', async () => {
-  NativeAppStub.__listReturn = [Object.assign(new NativeAppStub(), { name: 'Nope', pid: 1 })];
+test('App.find() timeout carries a diagnosis of the final application list', async () => {
+  NativeAppStub.__listReturn = [
+    Object.assign(new NativeAppStub(), { name: 'Nope', pid: 1 }),
+    Object.assign(new NativeAppStub(), { name: 'Still nope', pid: 2 }),
+  ];
   await assert.rejects(
-    () => App.find(() => false, { timeout: 20 }),
-    (err) => err instanceof SelectorNotMatchedError,
+    () => App.find(() => false, { timeout: 20, condition: 'application with the test pid' }),
+    (err) => {
+      assert.ok(err instanceof SelectorNotMatchedError);
+      assert.equal(err.selector, null);
+      assert.equal(err.condition, 'application with the test pid');
+      assert.equal(
+        err.lastObserved,
+        '2 applications enumerated; none satisfied the predicate',
+      );
+      assert.deepEqual(err.candidates, []);
+      assert.equal(err.scope, 'pid=1 name="Nope"\npid=2 name="Still nope"');
+      assert.match(err.message, /waiting for: application with the test pid/);
+      assert.match(err.message, /last observed: 2 applications enumerated/);
+      assert.match(err.message, /search scope \(bounded\):\npid=1 name="Nope"/);
+      return true;
+    },
+  );
+});
+
+test('App.find() bounds its timeout scope and reports omitted apps', async () => {
+  NativeAppStub.__listReturn = Array.from({ length: 22 }, (_, i) =>
+    Object.assign(new NativeAppStub(), { name: `App ${i + 1}`, pid: i + 1 }),
+  );
+  await assert.rejects(
+    () => App.find(() => false, { timeout: 0 }),
+    (err) => {
+      assert.ok(err instanceof SelectorNotMatchedError);
+      assert.equal(err.condition, 'application matching predicate');
+      assert.equal(err.scope.split('\n').length, 21);
+      assert.match(err.scope, /^pid=1 name="App 1"/);
+      assert.match(err.scope, /pid=20 name="App 20"\n… \(\+2 more\)$/);
+      assert.doesNotMatch(err.scope, /App 21/);
+      return true;
+    },
   );
 });
 

@@ -114,6 +114,12 @@ export interface FindOptions {
    * `SelectorNotMatchedError` if no application matches in time.
    */
   timeout?: number;
+  /**
+   * Human-readable description of the application being sought. Included in
+   * timeout error messages and in `SelectorNotMatchedError.condition`.
+   * Default: `"application matching predicate"`.
+   */
+  condition?: string;
   /** Abort signal for cancellation. Rejects with `AbortError`. */
   signal?: AbortSignal;
 }

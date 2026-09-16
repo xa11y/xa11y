@@ -14,6 +14,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const { readFileSync } = require('node:fs');
 
 const xa11y = require('../../index.js');
 const {
@@ -39,6 +40,16 @@ const PUBLIC_ERROR_CLASSES = [
   'InvalidActionDataError',
   'PlatformError',
 ];
+
+test('JS terminal timeout and not-found paths use the diagnosis helper', () => {
+  const source = readFileSync(require.resolve('../../index.js'), 'utf8');
+  const directConstructions = source.match(/new (?:SelectorNotMatchedError|TimeoutError)\s*\(/g);
+  assert.equal(
+    directConstructions,
+    null,
+    'construct terminal diagnosis errors through diagnosedError()',
+  );
+});
 
 test('every documented error class is exported and named publicly', () => {
   for (const name of PUBLIC_ERROR_CLASSES) {
