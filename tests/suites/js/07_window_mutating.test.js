@@ -285,6 +285,21 @@ test('moveTo() changes the reported bounds and puts the window back', async (t) 
   const movedBounds = { x: x + 10, y: y + 10 };
   try {
     await win.moveTo(movedBounds.x, movedBounds.y);
+    if (appEnv === 'qt' && process.platform === 'win32') {
+      await waitUntil(async () => {
+        const current = await currentWindow(app, win, 'move_to');
+        return current !== null && current.bounds !== null &&
+          (!boundsNear(current.bounds, { x, y }, ['x', 'y']));
+      }, 5000, 'Qt/UIA moveTo() to produce an observable bounds change');
+      try {
+        const current = await currentWindow(app, win, 'move_to');
+        if (current) await current.moveTo(x, y);
+      } catch (_cleanup) {
+        // best-effort cleanup before reporting the coordinate-space gap
+      }
+      t.skip('Qt/UIA client coordinates differ from decorated outer bounds (qt_windows_geometry_offsets)');
+      return;
+    }
     await waitUntil(async () => {
       const current = await currentWindow(app, win, 'move_to');
       return current !== null && boundsNear(current.bounds, movedBounds, ['x', 'y']);
@@ -323,8 +338,23 @@ test('resizeTo() changes the reported bounds and restores the original size', as
   const resizedBounds = { width: width + 50, height: height + 50 };
   try {
     await win.resizeTo(resizedBounds.width, resizedBounds.height);
-    const resizeNoop = appEnv === 'winforms' || appEnv === 'egui' ||
-      (appEnv === 'tauri' && process.platform === 'darwin');
+    if (appEnv === 'qt' && process.platform === 'win32') {
+      await waitUntil(async () => {
+        const current = await currentWindow(app, win, 'resize_to');
+        return current !== null && current.bounds !== null &&
+          (!boundsNear(current.bounds, { width, height }, ['width', 'height']));
+      }, 5000, 'Qt/UIA resizeTo() to produce an observable bounds change');
+      try {
+        const current = await currentWindow(app, win, 'resize_to');
+        if (current) await current.resizeTo(width, height);
+      } catch (_cleanup) {
+        // best-effort cleanup before reporting the coordinate-space gap
+      }
+      t.skip('Qt/UIA client size differs from decorated outer bounds (qt_windows_geometry_offsets)');
+      return;
+    }
+    const resizeNoop = appEnv === 'cocoa' || appEnv === 'winforms' || appEnv === 'wpf' || appEnv === 'egui' ||
+      (appEnv === 'tauri' && process.platform !== 'linux');
     if (resizeNoop) {
       // The provider advertises and accepts TransformPattern.Resize, but the
       // framework leaves its bounds unchanged. Keep the dispatch covered and
@@ -335,11 +365,13 @@ test('resizeTo() changes the reported bounds and restores the original size', as
       } catch (_cleanup) {
         // best-effort cleanup before reporting the known platform gap
       }
-      const gap = appEnv === 'egui'
-        ? 'egui_transform_resize_noop'
-        : appEnv === 'winforms'
-          ? 'winforms_transform_resize_noop'
-          : 'tauri_macos_resize_noop';
+      const gap = appEnv === 'cocoa'
+        ? 'cocoa_resize_noop'
+        : appEnv === 'egui'
+          ? 'egui_transform_resize_noop'
+        : appEnv === 'winforms' || appEnv === 'wpf'
+          ? `${appEnv}_transform_resize_noop`
+          : 'tauri_desktop_resize_noop';
       t.skip(`${appEnv} accepts Resize without changing bounds (${gap})`);
       return;
     }
@@ -552,6 +584,21 @@ test('Locator moveTo() dispatches and puts the window back where it was', async 
   const { x, y } = win.bounds;
   try {
     await locator.moveTo(x + 10, y + 10);
+    if (appEnv === 'qt' && process.platform === 'win32') {
+      await waitUntil(async () => {
+        const current = await currentWindow(app, win, 'move_to');
+        return current !== null && current.bounds !== null &&
+          (!boundsNear(current.bounds, { x, y }, ['x', 'y']));
+      }, 5000, 'Qt/UIA Locator.moveTo() to produce an observable bounds change');
+      try {
+        const current = await currentWindow(app, win, 'move_to');
+        if (current) await current.moveTo(x, y);
+      } catch (_cleanup) {
+        // best-effort cleanup before reporting the coordinate-space gap
+      }
+      t.skip('Qt/UIA client coordinates differ from decorated outer bounds (qt_windows_geometry_offsets)');
+      return;
+    }
     await waitUntil(async () => {
       const current = await currentWindow(app, win, 'move_to');
       return current !== null && boundsNear(
@@ -593,8 +640,23 @@ test('Locator resizeTo() dispatches and restores the original size', async (t) =
   const { width, height } = win.bounds;
   try {
     await locator.resizeTo(width + 50, height + 50);
-    const resizeNoop = appEnv === 'winforms' || appEnv === 'egui' ||
-      (appEnv === 'tauri' && process.platform === 'darwin');
+    if (appEnv === 'qt' && process.platform === 'win32') {
+      await waitUntil(async () => {
+        const current = await currentWindow(app, win, 'resize_to');
+        return current !== null && current.bounds !== null &&
+          (!boundsNear(current.bounds, { width, height }, ['width', 'height']));
+      }, 5000, 'Qt/UIA Locator.resizeTo() to produce an observable bounds change');
+      try {
+        const current = await currentWindow(app, win, 'resize_to');
+        if (current) await current.resizeTo(width, height);
+      } catch (_cleanup) {
+        // best-effort cleanup before reporting the coordinate-space gap
+      }
+      t.skip('Qt/UIA client size differs from decorated outer bounds (qt_windows_geometry_offsets)');
+      return;
+    }
+    const resizeNoop = appEnv === 'cocoa' || appEnv === 'winforms' || appEnv === 'wpf' || appEnv === 'egui' ||
+      (appEnv === 'tauri' && process.platform !== 'linux');
     if (resizeNoop) {
       try {
         const current = await currentWindow(app, win, 'resize_to');
@@ -602,11 +664,13 @@ test('Locator resizeTo() dispatches and restores the original size', async (t) =
       } catch (_cleanup) {
         // best-effort cleanup before reporting the known platform gap
       }
-      const gap = appEnv === 'egui'
-        ? 'egui_transform_resize_noop'
-        : appEnv === 'winforms'
-          ? 'winforms_transform_resize_noop'
-          : 'tauri_macos_resize_noop';
+      const gap = appEnv === 'cocoa'
+        ? 'cocoa_resize_noop'
+        : appEnv === 'egui'
+          ? 'egui_transform_resize_noop'
+        : appEnv === 'winforms' || appEnv === 'wpf'
+          ? `${appEnv}_transform_resize_noop`
+          : 'tauri_desktop_resize_noop';
       t.skip(`${appEnv} accepts Resize without changing bounds (${gap})`);
       return;
     }

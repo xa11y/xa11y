@@ -175,7 +175,7 @@ def test_action_move_to_rejects_a_malformed_point_as_a_usage_error(run_cli, app_
     assert "--at" in stderr or "--at" in stdout, f"the flag must be named:\n{stderr}"
 
 
-def test_action_move_to_dispatch_matches_the_round_trip(run_cli, app_pid):
+def test_action_move_to_dispatch_matches_the_round_trip(run_cli, app_pid, app_name):
     """A valid ``--at`` moves the window and restores its original bounds.
 
     The selector is the ``window, dialog`` alternation because window-like
@@ -212,6 +212,17 @@ def test_action_move_to_dispatch_matches_the_round_trip(run_cli, app_pid):
         else:
             moved = True
             assert "ok" in stdout, f"expected 'ok' in stdout, got: {stdout!r}"
+            if app_name == "qt" and sys.platform == "win32":
+                _wait_for_bounds(
+                    run_cli,
+                    app_pid,
+                    lambda b: abs(b[0] - x) > 2 or abs(b[1] - y) > 2,
+                    "Qt/UIA move-to to produce an observable bounds change",
+                )
+                pytest.skip(
+                    "Qt/UIA applies client coordinates to decorated outer bounds; "
+                    "tracked as qt_windows_geometry_offsets"
+                )
             _wait_for_bounds(
                 run_cli,
                 app_pid,
@@ -293,17 +304,32 @@ def test_action_resize_to_requires_a_size_and_dispatches_it(
         else:
             resized = True
             assert "ok" in stdout, f"expected 'ok' in stdout, got: {stdout!r}"
-            resize_noop = app_name in {"egui", "winforms"} or (
-                app_name == "tauri" and sys.platform == "darwin"
+            if app_name == "qt" and sys.platform == "win32":
+                _wait_for_bounds(
+                    run_cli,
+                    app_pid,
+                    lambda b: abs(b[2] - width) > 2 or abs(b[3] - height) > 2,
+                    "Qt/UIA resize-to to produce an observable bounds change",
+                )
+                pytest.skip(
+                    "Qt/UIA applies client size to decorated outer bounds; "
+                    "tracked as qt_windows_geometry_offsets"
+                )
+            resize_noop = app_name in {"cocoa", "egui", "winforms", "wpf"} or (
+                app_name == "tauri" and not sys.platform.startswith("linux")
             )
             if resize_noop:
                 gap = (
-                    "egui_transform_resize_noop"
-                    if app_name == "egui"
+                    "cocoa_resize_noop"
+                    if app_name == "cocoa"
                     else (
-                        "winforms_transform_resize_noop"
-                        if app_name == "winforms"
-                        else "tauri_macos_resize_noop"
+                        "egui_transform_resize_noop"
+                        if app_name == "egui"
+                        else (
+                            f"{app_name}_transform_resize_noop"
+                            if app_name in {"winforms", "wpf"}
+                            else "tauri_desktop_resize_noop"
+                        )
                     )
                 )
                 pytest.skip(

@@ -491,10 +491,23 @@ gaps:
       dispatch tests tolerate "unsupported" so the gap stayed invisible
       until the enforced test was added.
     severity: low
-    workaround: "move_to's bounds change is enforced on winforms; resize_to advertisement + dispatch are asserted, the bounds-update half is an honest skip. WPF / macOS AX cover real resize paths (the Rust integ suite's geometry test is macOS-only)."
+    workaround: "move_to's bounds change is enforced on winforms; resize_to advertisement + dispatch are asserted, the bounds-update half is an honest skip. The Qt macOS cell covers a real resize path (the Rust integ suite's geometry test is macOS-only)."
     affects:
       apps: [winforms]
       language: python
+      features: [windows]
+
+  - id: wpf_transform_resize_noop
+    description: >
+      WPF advertises UIA TransformPattern.Resize and accepts dispatch, but the
+      test window's reported outer bounds stay unchanged. CLI, MCP, and JS
+      dispatch the action and explicitly skip the bounds postcondition; the
+      same WPF cell enforces move_to plus duplicate-title, Locator-retargeting,
+      and lifecycle-event coverage.
+    severity: low
+    workaround: "Exact resize bounds are enforced by the Qt macOS cell."
+    affects:
+      apps: [wpf]
       features: [windows]
 
   - id: egui_transform_resize_noop
@@ -504,7 +517,7 @@ gaps:
       MCP, and JS mutation suites dispatch the action and record an explicit
       skip rather than passing a no-op as mutation coverage.
     severity: low
-    workaround: "move_to is enforced on egui; resize_to is enforced on WPF and native AppKit windows."
+    workaround: "move_to is enforced on egui; resize_to is enforced by the Qt macOS cell."
     affects:
       apps: [egui]
       features: [windows]
@@ -517,7 +530,7 @@ gaps:
       delta instead of restoring it exactly. The CLI suite verifies the first
       mutation and explicitly skips the exact round-trip assertion.
     severity: low
-    workaround: "Real resize and exact restoration are enforced by the WPF and AppKit cells."
+    workaround: "Real resize and exact restoration are enforced by the Qt macOS cell."
     affects:
       apps: [tauri]
       features: [windows]
@@ -535,13 +548,13 @@ gaps:
     affects:
       features: [windows]
 
-  - id: tauri_macos_resize_noop
+  - id: tauri_desktop_resize_noop
     description: >
-      Tauri on macOS advertises resize_to and accepts the native action, but
-      the reported bounds remain unchanged. MCP, CLI, and JS dispatch the action
-      and explicitly skip the bounds mutation assertion.
+      Tauri on macOS and Windows advertises resize_to and accepts the native
+      action, but the reported bounds remain unchanged. MCP, CLI, and JS
+      dispatch the action and explicitly skip the bounds mutation assertion.
     severity: low
-    workaround: "Resize mutation is enforced on Qt/WPF and native AppKit fixtures."
+    workaround: "Resize mutation is enforced by the Qt macOS fixture."
     affects:
       apps: [tauri]
       features: [windows]
@@ -556,6 +569,32 @@ gaps:
     workaround: "Fullscreen state is enforced through the Cocoa fixture's native Toggle Fullscreen action."
     affects:
       apps: [cocoa]
+      features: [windows]
+
+  - id: cocoa_resize_noop
+    description: >
+      The native Cocoa fixture advertises AX resize and accepts dispatch, but
+      fresh app-wide enumeration continues to report unchanged bounds in the
+      CLI, MCP, and JS suites. Those surfaces dispatch then explicitly skip;
+      move_to remains an enforced observable geometry mutation.
+    severity: low
+    workaround: "Exact resize bounds are enforced by the Qt macOS fixture."
+    affects:
+      apps: [cocoa]
+      features: [windows]
+
+  - id: qt_windows_geometry_offsets
+    description: >
+      Qt's Windows UIA TransformPattern applies move and resize requests in
+      client geometry while xa11y reports decorated outer bounds. The actions
+      produce observable changes, but the resulting coordinates and dimensions
+      differ from the requested outer values and do not round-trip exactly.
+      CLI, MCP, and JS assert that mutation occurred before explicitly skipping
+      the exact-value postcondition.
+    severity: low
+    workaround: "Exact Windows move postconditions are enforced by WPF; exact resize is enforced by the Qt macOS cell."
+    affects:
+      apps: [qt]
       features: [windows]
 
 # Resolved gaps (kept here briefly for provenance):

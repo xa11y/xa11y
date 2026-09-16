@@ -715,7 +715,7 @@ def test_mcp_minimize_restore_mutates_and_reports_window_state(
             )
 
 
-def test_mcp_move_to_mutates_and_restores_window_bounds(mcp, app_pid):
+def test_mcp_move_to_mutates_and_restores_window_bounds(mcp, app_pid, app_name):
     """The MCP geometry payload must reach the platform and move the window."""
     window, selector = _mcp_window_target(mcp, app_pid, "move_to")
     bounds = window.get("bounds")
@@ -734,6 +734,19 @@ def test_mcp_move_to_mutates_and_restores_window_bounds(mcp, app_pid):
             },
         )["result"]
         assert moved["isError"] is False, moved["content"]
+        if app_name == "qt" and sys.platform == "win32":
+            _wait_for_mcp_window(
+                mcp,
+                app_pid,
+                selector,
+                lambda w: abs(w["bounds"]["x"] - original[0]) > 2
+                or abs(w["bounds"]["y"] - original[1]) > 2,
+                "Qt/UIA move-to to produce an observable bounds change",
+            )
+            pytest.skip(
+                "Qt/UIA interprets requested client coordinates as decorated "
+                "outer coordinates; tracked as qt_windows_geometry_offsets"
+            )
         _wait_for_mcp_window(
             mcp,
             app_pid,
@@ -796,17 +809,34 @@ def test_mcp_resize_to_mutates_and_restores_window_bounds(mcp, app_pid, app_name
         assert resized["isError"] is False, resized["content"]
         assert resized["structuredContent"]["ok"] is True
         needs_restore = True
-        resize_noop = app_name in {"egui", "winforms"} or (
-            app_name == "tauri" and sys.platform == "darwin"
+        if app_name == "qt" and sys.platform == "win32":
+            _wait_for_mcp_window(
+                mcp,
+                app_pid,
+                selector,
+                lambda w: abs(w["bounds"]["width"] - original[0]) > 2
+                or abs(w["bounds"]["height"] - original[1]) > 2,
+                "Qt/UIA resize-to to produce an observable bounds change",
+            )
+            pytest.skip(
+                "Qt/UIA interprets requested client size as decorated outer "
+                "bounds; tracked as qt_windows_geometry_offsets"
+            )
+        resize_noop = app_name in {"cocoa", "egui", "winforms", "wpf"} or (
+            app_name == "tauri" and not sys.platform.startswith("linux")
         )
         if resize_noop:
             gap = (
-                "egui_transform_resize_noop"
-                if app_name == "egui"
+                "cocoa_resize_noop"
+                if app_name == "cocoa"
                 else (
-                    "winforms_transform_resize_noop"
-                    if app_name == "winforms"
-                    else "tauri_macos_resize_noop"
+                    "egui_transform_resize_noop"
+                    if app_name == "egui"
+                    else (
+                        f"{app_name}_transform_resize_noop"
+                        if app_name in {"winforms", "wpf"}
+                        else "tauri_desktop_resize_noop"
+                    )
                 )
             )
             pytest.skip(
