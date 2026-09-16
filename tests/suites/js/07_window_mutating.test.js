@@ -478,6 +478,10 @@ test('Locator window verbs dispatch through the async binding', async (t) => {
     t.skip('the target window has no name for a unique Locator');
     return;
   }
+  if (process.platform === 'darwin') {
+    t.skip('macOS drops minimized windows from app-wide Locator discovery');
+    return;
+  }
   try {
     await locator.minimize();
     await waitUntil(async () => {
@@ -517,10 +521,6 @@ test('Locator maximize()/restore() dispatch through the async binding', async (t
   const locator = locatorForWindow(app, win);
   if (!locator) {
     t.skip('the target window has no name for a unique Locator');
-    return;
-  }
-  if (process.platform === 'darwin') {
-    t.skip('macOS drops minimized windows from app-wide Locator discovery');
     return;
   }
   try {
