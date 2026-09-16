@@ -597,6 +597,21 @@ gaps:
       language: javascript
       features: [windows]
 
+  - id: tauri_macos_locator_maximize_restore_failure
+    description: >
+      A maximize dispatched through a freshly resolved Locator enters
+      fullscreen in the Tauri macOS fixture, but Locator restore cannot settle
+      back to a non-fullscreen state and leaves the shared integration app
+      poisoned for later tests. Python and JS explicitly skip this unsafe
+      Locator round trip; both bindings enforce maximize and restoration via
+      the retained Element path in the same cell.
+    severity: low
+    workaround: "Retain the discovered Element when maximizing a Tauri window on macOS."
+    affects:
+      apps: [tauri]
+      language: [python, javascript]
+      features: [windows]
+
   - id: qt_windows_geometry_offsets
     description: >
       Qt's Windows UIA TransformPattern applies move and resize requests in
