@@ -50,6 +50,12 @@ PANEL_TITLE = "xa11y-test-panel"
 # root is an ordinary search root, not just a node that enumerates.
 PANEL_BUTTON_LABEL = "Panel Button"
 
+# A GTK3 submenu entry exercises the role ambiguity from issue #412. GTK's
+# ATK adapter reports this MenuItem as AT-SPI `menu` because it owns a submenu;
+# xa11y must still expose the activatable entry as normalized `menu_item`.
+PANEL_MENU_LABEL = "Panel Menu"
+PANEL_MENU_ACTION_LABEL = "Panel Menu Action"
+
 
 def main() -> int:
     window = Gtk.Window(title=PANEL_TITLE)
@@ -61,6 +67,14 @@ def main() -> int:
     row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
     row.pack_start(Gtk.Label(label="xa11y panel"), False, False, 8)
     row.pack_start(Gtk.Button(label=PANEL_BUTTON_LABEL), False, False, 8)
+
+    menu_bar = Gtk.MenuBar()
+    menu_entry = Gtk.MenuItem(label=PANEL_MENU_LABEL)
+    submenu = Gtk.Menu()
+    submenu.append(Gtk.MenuItem(label=PANEL_MENU_ACTION_LABEL))
+    menu_entry.set_submenu(submenu)
+    menu_bar.append(menu_entry)
+    row.pack_start(menu_bar, False, False, 0)
     window.add(row)
 
     window.connect("destroy", Gtk.main_quit)

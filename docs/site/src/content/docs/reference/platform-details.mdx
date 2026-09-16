@@ -25,8 +25,8 @@ xa11y normalizes platform-specific APIs into a unified interface. This page docu
 | `ComboBox` | AXComboBox, AXPopUpButton | combo box | ComboBoxControlType |
 | `List` | AXList, AXOutline | list, list box | ListControlType, TreeControlType |
 | `ListItem` | *(via AXRow)* | list item | ListItemControlType |
-| `Menu` | AXMenu | menu | MenuControlType |
-| `MenuItem` | AXMenuItem, AXMenuBarItem | menu item, tearoff menu item | MenuItemControlType |
+| `Menu` | AXMenu | menu *(container)* | MenuControlType |
+| `MenuItem` | AXMenuItem, AXMenuBarItem | menu item, tearoff menu item; GTK `menu` with a native activation action | MenuItemControlType |
 | `MenuBar` | AXMenuBar, AXMenuBarExtra | menu bar | MenuBarControlType |
 | `Tab` | *(subrole AXTabButton)* | page tab | TabItemControlType |
 | `TabGroup` | AXTabGroup | page tab list | TabControlType |

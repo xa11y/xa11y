@@ -33,6 +33,8 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     use xa11y::AppExt;
+    #[cfg(target_os = "linux")]
+    use xa11y::Role;
     use xa11y::{Error, ShellSurface, ShellSurfaceExt, ShellSurfaceKind};
 
     /// The surface kinds the desktop under test must vend. See the module
@@ -202,6 +204,43 @@ mod tests {
                 "a locator rooted at the {kind} surface matched nothing"
             );
         }
+    }
+
+    /// Linux/GTK3: a MenuItem that owns a submenu reports the raw AT-SPI role
+    /// `menu`, the same role as the popup container. Its native `click` action
+    /// is the positive evidence that it is an entry, so both selector matching
+    /// and the returned snapshot must expose normalized `menu_item`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore]
+    fn gtk3_submenu_entry_is_a_menu_item() {
+        let panel = ShellSurface::by_kind(ShellSurfaceKind::Panel, LOOKUP_TIMEOUT)
+            .unwrap_or_else(|e| panic!("no test panel surface: {e}"));
+
+        let entries = panel
+            .locator(r#"menu_item[name="Panel Menu"]"#)
+            .elements()
+            .unwrap_or_else(|e| panic!("finding GTK3 submenu entry: {e}"));
+        assert_eq!(
+            entries.len(),
+            1,
+            "expected one normalized GTK3 submenu entry; panel dump:\n{}",
+            panel.dump(Some(4)).unwrap_or_default()
+        );
+
+        let entry = &entries[0];
+        assert_eq!(entry.role, Role::MenuItem);
+        assert_eq!(
+            entry.raw.get("atspi_role").and_then(|value| value.as_str()),
+            Some("menu"),
+            "the fixture must exercise GTK3's overloaded raw role"
+        );
+        assert!(
+            entry.actions.iter().any(|action| action == "press"),
+            "the role refinement requires GTK's native click/press evidence: \
+             {:?}",
+            entry.actions
+        );
     }
 
     /// The miss path, on a kind the backend cannot produce: it must say what

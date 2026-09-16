@@ -690,7 +690,7 @@ impl LinuxProvider {
     fn build_element_data(&self, aref: &AccessibleRef, pid: Option<u32>) -> ElementData {
         let role_name = self.get_role_name(aref).unwrap_or_default();
         let role_num = self.get_role_number(aref).unwrap_or(0);
-        let role = {
+        let coarse_role = {
             let by_name = if !role_name.is_empty() {
                 map_atspi_role(&role_name)
             } else {
@@ -703,6 +703,24 @@ impl LinuxProvider {
             };
             self.refine_text_role(coarse, aref)
         };
+        // GTK 3 overloads AT-SPI's `menu` role: both a popup menu container
+        // and the MenuItem that opens a submenu report `menu`. The entry is
+        // distinguishable by its native activation action (`click`, normalized
+        // to `press`); GtkMenu itself has no Action interface. Fetch once here
+        // so role refinement and the advertised action list use the same
+        // evidence without a second D-Bus round trip.
+        let prefetched_menu_actions = if coarse_role == Role::Menu {
+            Some(self.get_actions(aref))
+        } else {
+            None
+        };
+        let role = refine_menu_role(
+            coarse_role,
+            prefetched_menu_actions
+                .as_ref()
+                .map(|(actions, _)| actions.as_slice())
+                .unwrap_or(&[]),
+        );
 
         // Fetch all independent properties in parallel.
         // Left tree: (name+value, description)
@@ -745,7 +763,9 @@ impl LinuxProvider {
                     || {
                         rayon::join(
                             || {
-                                if role_has_actions(role) {
+                                if let Some(actions) = prefetched_menu_actions.as_ref() {
+                                    actions.clone()
+                                } else if role_has_actions(role) {
                                     self.get_actions(aref)
                                 } else {
                                     (vec![], HashMap::new())
@@ -1171,7 +1191,8 @@ impl LinuxProvider {
         None
     }
 
-    /// Resolve the mapped Role for an accessible ref (1-3 D-Bus calls).
+    /// Resolve the mapped Role for an accessible ref (1-3 D-Bus calls, plus
+    /// an Action probe for AT-SPI `menu`, whose meaning is ambiguous on GTK 3).
     fn resolve_role(&self, aref: &AccessibleRef) -> Role {
         let role_name = self.get_role_name(aref).unwrap_or_default();
         let by_name = if !role_name.is_empty() {
@@ -1186,7 +1207,13 @@ impl LinuxProvider {
             let role_num = self.get_role_number(aref).unwrap_or(0);
             map_atspi_role_number(role_num)
         };
-        self.refine_text_role(coarse, aref)
+        let role = self.refine_text_role(coarse, aref);
+        if role == Role::Menu {
+            let (actions, _) = self.get_actions(aref);
+            refine_menu_role(role, &actions)
+        } else {
+            role
+        }
     }
 
     /// AT-SPI role-name probe for top-level decisions: is `parent` the
@@ -2974,6 +3001,21 @@ fn map_atspi_action_name(action_name: &str) -> Option<String> {
     Some(canonical.to_string())
 }
 
+/// Resolve AT-SPI's overloaded `menu` role using positive activation evidence.
+///
+/// GTK 3 reports both popup menu containers and submenu-bearing entries as
+/// `menu`. Its entries implement Action with `click`, while the GtkMenu
+/// container does not implement Action. Parentage and children cannot separate
+/// the two: GTK reparents the popup under its owning entry and exposes submenu
+/// items directly as children of that same entry.
+fn refine_menu_role(role: Role, actions: &[String]) -> Role {
+    if role == Role::Menu && actions.iter().any(|action| action == "press") {
+        Role::MenuItem
+    } else {
+        role
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2992,6 +3034,35 @@ mod tests {
         assert_eq!(map_atspi_role("slider"), Role::Slider);
         assert_eq!(map_atspi_role("panel"), Role::Group);
         assert_eq!(map_atspi_role("unknown_thing"), Role::Unknown);
+    }
+
+    #[test]
+    fn menu_with_native_activation_is_a_menu_item() {
+        assert_eq!(
+            refine_menu_role(Role::Menu, &["press".to_string()]),
+            Role::MenuItem
+        );
+    }
+
+    #[test]
+    fn non_activatable_menu_stays_a_container() {
+        assert_eq!(refine_menu_role(Role::Menu, &[]), Role::Menu);
+        assert_eq!(
+            refine_menu_role(Role::Menu, &["show_menu".to_string()]),
+            Role::Menu
+        );
+    }
+
+    #[test]
+    fn activation_does_not_change_other_roles() {
+        assert_eq!(
+            refine_menu_role(Role::MenuBar, &["press".to_string()]),
+            Role::MenuBar
+        );
+        assert_eq!(
+            refine_menu_role(Role::MenuItem, &["press".to_string()]),
+            Role::MenuItem
+        );
     }
 
     #[test]
