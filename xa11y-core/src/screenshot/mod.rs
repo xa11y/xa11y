@@ -93,6 +93,32 @@ pub trait ScreenshotProvider: Send + Sync {
     /// capture the pixels at `rect`, so the capture's pixel `(0, 0)` is at
     /// `(rect.x, rect.y)` by contract.
     fn capture_region(&self, rect: Rect) -> Result<Screenshot>;
+
+    /// Map a logical screen rectangle onto physical pixels in a capture.
+    ///
+    /// `capture_origin` is the logical screen coordinate represented by pixel
+    /// `(0, 0)`, and `capture_scale` is the scalar recorded on the screenshot.
+    /// The default mapping is suitable for a single-scale capture. Backends
+    /// whose full-screen image spans independently scaled displays override
+    /// this so annotations use the same per-display transform as element
+    /// bounds, pointer input, and region capture.
+    ///
+    /// The returned rectangle is relative to the capture and is expressed in
+    /// physical pixels.
+    fn map_annotation_rect(
+        &self,
+        rect: Rect,
+        capture_origin: Point,
+        capture_scale: f32,
+    ) -> Result<Rect> {
+        Ok(Rect {
+            x: rect.x.saturating_sub(capture_origin.x),
+            y: rect.y.saturating_sub(capture_origin.y),
+            width: rect.width,
+            height: rect.height,
+        }
+        .to_physical(f64::from(capture_scale)))
+    }
 }
 
 /// A captured image: raw RGBA8 pixels plus dimensions and scale.

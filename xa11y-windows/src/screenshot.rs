@@ -33,14 +33,12 @@
 //!   That offset is returned alongside the capture, per
 //!   [`ScreenshotProvider::capture_full`].
 //! - Its [`Screenshot::scale`] is a single scalar and is the effective scale
-//!   of the monitor **at that virtual origin**. On a uniform-DPI desktop that
-//!   is every monitor's scale and the mapping is exact. On a mixed-DPI desktop
-//!   it is exact only on the origin monitor; logical coordinates on the others
-//!   map to physical pixels by their own factor, so anything drawn from
-//!   logical bounds (annotation boxes) is misplaced there by the DPI ratio.
-//!   This is the same single-scalar limitation `capture_region` already
-//!   carries at a DPI seam; capturing per-monitor is the fix, and it would
-//!   change the capture contract rather than this backend.
+//!   of the monitor **at that virtual origin**. Consumers that only inspect
+//!   this scalar cannot infer a mixed-DPI desktop transform. The backend's
+//!   [`ScreenshotProvider::map_annotation_rect`] implementation therefore
+//!   maps annotation bounds per monitor and relative to the physical virtual
+//!   origin; full-desktop annotated captures remain exact across both equal-
+//!   and mixed-DPI monitor layouts.
 //!
 //! # Active session required
 //!
@@ -161,6 +159,21 @@ impl ScreenshotProvider for WindowsScreenshot {
             message: "rect height out of i32 range".into(),
         })?;
         capture_rect(phys.x, phys.y, w, h, scale as f32)
+    }
+
+    fn map_annotation_rect(
+        &self,
+        rect: Rect,
+        capture_origin: Point,
+        _capture_scale: f32,
+    ) -> Result<Rect> {
+        // UIA bounds use the origin-preserving, per-monitor logical space in
+        // `dpi`. Map both the element and the capture origin back through that
+        // same transform. A single `Screenshot::scale` cannot express a full
+        // virtual desktop: even equal-DPI monitors can have non-zero or
+        // negative origins, and mixed-DPI monitors additionally need their
+        // own extent scaling.
+        crate::dpi::annotation_rect_to_physical(rect, capture_origin)
     }
 }
 

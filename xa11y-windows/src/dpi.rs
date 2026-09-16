@@ -76,7 +76,7 @@ use windows::Win32::UI::HiDpi::{
     MDT_EFFECTIVE_DPI,
 };
 
-use xa11y_core::{Error, Rect, Result};
+use xa11y_core::{Error, Point, Rect, Result};
 
 /// The DPI value Windows treats as "100%": one logical unit == one physical
 /// pixel. `scale = effective_dpi / USER_DEFAULT_SCREEN_DPI`.
@@ -197,6 +197,56 @@ pub fn logical_rect_to_physical(rect: Rect) -> Result<Rect> {
         Some(m) => Ok(logical_rect_to_physical_with((m.rect, m.scale), rect)),
         None => Ok(rect.to_physical(scale_for_point(rect.x, rect.y))),
     }
+}
+
+/// Map logical accessibility bounds to capture-relative physical pixels.
+///
+/// Both the rectangle and capture origin are resolved against one monitor
+/// snapshot. This is the full-desktop annotation transform: using the
+/// capture's single scalar scale would misplace rectangles on another
+/// monitor, while resolving the two values from different enumerations could
+/// observe a display reconfiguration between them.
+pub fn annotation_rect_to_physical(rect: Rect, capture_origin: Point) -> Result<Rect> {
+    let monitors = monitor_geometry()?;
+    if let Some(mapped) =
+        annotation_rect_to_physical_with(&monitors, rect, capture_origin.x, capture_origin.y)
+    {
+        return Ok(mapped);
+    }
+
+    // A point in an origin-preserving logical gap has no monitor identity.
+    // Preserve the documented nearest-physical-monitor fallback used by the
+    // standalone point/rect conversion functions.
+    let physical = logical_rect_to_physical(rect)?;
+    let (origin_x, origin_y) = logical_point_to_physical(capture_origin.x, capture_origin.y)?;
+    Ok(Rect {
+        x: physical.x.saturating_sub(origin_x),
+        y: physical.y.saturating_sub(origin_y),
+        width: physical.width,
+        height: physical.height,
+    })
+}
+
+fn annotation_rect_to_physical_with(
+    monitors: &[MonitorGeometry],
+    rect: Rect,
+    origin_x: i32,
+    origin_y: i32,
+) -> Option<Rect> {
+    let rect_monitor = monitor_for_logical_point(monitors, rect.x, rect.y)?;
+    let origin_monitor = monitor_for_logical_point(monitors, origin_x, origin_y)?;
+    let physical = logical_rect_to_physical_with((rect_monitor.rect, rect_monitor.scale), rect);
+    let (physical_origin_x, physical_origin_y) = logical_to_physical_with(
+        (origin_monitor.rect, origin_monitor.scale),
+        origin_x,
+        origin_y,
+    );
+    Some(Rect {
+        x: physical.x.saturating_sub(physical_origin_x),
+        y: physical.y.saturating_sub(physical_origin_y),
+        width: physical.width,
+        height: physical.height,
+    })
 }
 
 /// Convert a **physical** UIA rectangle to the origin-preserving logical
@@ -492,6 +542,51 @@ mod tests {
         assert_eq!(logical_to_physical_with(secondary, 2000, 100), (2080, 200));
         // Seam: the secondary's own transform.
         assert_eq!(logical_to_physical_with(secondary, 1920, 100), (1920, 200));
+    }
+
+    #[test]
+    fn full_desktop_annotation_uses_secondary_origin_at_identical_dpi() {
+        let monitors = [
+            monitor(-1920, 0, 0, 1080, 1.0),
+            monitor(0, 0, 1920, 1080, 1.0),
+        ];
+        let mapped = annotation_rect_to_physical_with(
+            &monitors,
+            Rect {
+                x: 100,
+                y: 50,
+                width: 200,
+                height: 100,
+            },
+            -1920,
+            0,
+        )
+        .expect("both points are on monitors");
+        assert_eq!(mapped.x, 2020);
+        assert_eq!(mapped.y, 50);
+        assert_eq!(mapped.width, 200);
+        assert_eq!(mapped.height, 100);
+    }
+
+    #[test]
+    fn full_desktop_annotation_uses_bounds_monitors_scale() {
+        let monitors = primary_plus_secondary();
+        let mapped = annotation_rect_to_physical_with(
+            &monitors,
+            Rect {
+                x: 2000,
+                y: 100,
+                width: 300,
+                height: 120,
+            },
+            0,
+            0,
+        )
+        .expect("both points are on monitors");
+        assert_eq!(mapped.x, 2080);
+        assert_eq!(mapped.y, 200);
+        assert_eq!(mapped.width, 600);
+        assert_eq!(mapped.height, 240);
     }
 
     #[test]

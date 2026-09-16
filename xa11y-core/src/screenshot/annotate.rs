@@ -210,6 +210,34 @@ impl Screenshot {
         annotations: &[Annotation],
         origin: Point,
     ) -> Result<(Screenshot, Vec<usize>)> {
+        let scale = sane_scale(f64::from(self.scale));
+        let physical: Vec<Annotation> = annotations
+            .iter()
+            .map(|ann| {
+                let translated = Rect {
+                    x: ann.rect.x.saturating_sub(origin.x),
+                    y: ann.rect.y.saturating_sub(origin.y),
+                    width: ann.rect.width,
+                    height: ann.rect.height,
+                };
+                Annotation::new(translated.to_physical(scale), ann.tag.clone()).color(ann.color)
+            })
+            .collect();
+        self.annotate_physical(&physical)
+    }
+
+    /// Draw annotations whose rectangles are already capture-relative
+    /// physical pixels.
+    ///
+    /// Platform composition code uses this after applying a per-display
+    /// coordinate transform. It is hidden from generated API documentation:
+    /// callers normally want [`Screenshot::annotate`], whose rectangles are
+    /// in the same logical coordinate space as accessibility bounds.
+    #[doc(hidden)]
+    pub fn annotate_physical(
+        &self,
+        annotations: &[Annotation],
+    ) -> Result<(Screenshot, Vec<usize>)> {
         let expected = (self.width as usize)
             .checked_mul(self.height as usize)
             .and_then(|n| n.checked_mul(4))
@@ -252,16 +280,7 @@ impl Screenshot {
         let mut skipped = Vec::new();
         let mut visible: Vec<(usize, &Annotation, PxRect)> = Vec::new();
         for (i, ann) in annotations.iter().enumerate() {
-            // Saturating: a rect at `i32::MIN` translated by a positive
-            // origin stays at `i32::MIN`, which is still far outside any
-            // image, so saturation cannot pull an off-screen box into view.
-            let translated = Rect {
-                x: ann.rect.x.saturating_sub(origin.x),
-                y: ann.rect.y.saturating_sub(origin.y),
-                width: ann.rect.width,
-                height: ann.rect.height,
-            };
-            let physical = PxRect::from_rect(translated.to_physical(scale));
+            let physical = PxRect::from_rect(ann.rect);
             if physical.overlaps(bounds) {
                 visible.push((i, ann, physical));
             } else {

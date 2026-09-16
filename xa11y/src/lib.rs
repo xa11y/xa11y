@@ -383,11 +383,23 @@ pub fn screenshot_annotated(region: Option<Rect>, groups: &[Locator]) -> Result<
     // the coordinate-space origin. Assuming (0, 0) drew every box a monitor's
     // width out of place and reported nothing, because the shifted rects still
     // landed inside the wider image.
+    let backend = screenshot_backend()?;
     let (shot, origin) = match region {
-        Some(rect) => (screenshot_region(rect)?, Point::new(rect.x, rect.y)),
-        None => screenshot_backend()?.capture_full()?,
+        Some(rect) => (backend.capture_region(rect)?, Point::new(rect.x, rect.y)),
+        None => backend.capture_full()?,
     };
-    let drawn = draw_and_reconcile(&shot, origin, &annotations, &mut legend, &mut omitted)?;
+    let physical_annotations = annotations
+        .iter()
+        .map(|annotation| {
+            backend
+                .map_annotation_rect(annotation.rect, origin, shot.scale)
+                .map(|rect| {
+                    screenshot::Annotation::new(rect, annotation.tag.clone())
+                        .color(annotation.color)
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let drawn = draw_and_reconcile(&shot, &physical_annotations, &mut legend, &mut omitted)?;
 
     Ok(Annotated::for_capture(drawn, legend, omitted, truncated))
 }
@@ -413,23 +425,15 @@ pub fn screenshot_annotated(region: Option<Rect>, groups: &[Locator]) -> Result<
 /// against a synthetic [`Screenshot`], with no display and no permissions.
 fn draw_and_reconcile(
     shot: &Screenshot,
-    origin: Point,
-    annotations: &[screenshot::Annotation],
+    physical_annotations: &[screenshot::Annotation],
     legend: &mut Vec<LegendEntry>,
     omitted: &mut Vec<Omission>,
 ) -> Result<Screenshot> {
-    let (drawn, skipped) = shot.annotate(annotations, origin)?;
-    // The same clamp `Rect::to_physical` applies internally: a non-finite or
-    // non-positive scale is identity, never garbage.
-    let scale = if shot.scale.is_finite() && shot.scale > 0.0 {
-        f64::from(shot.scale)
-    } else {
-        1.0
-    };
+    let (drawn, skipped) = shot.annotate_physical(physical_annotations)?;
     // Descending, so each removal cannot shift an index still to be removed.
     for i in skipped.iter().rev() {
         let entry = legend.remove(*i);
-        let physical = entry.bounds.to_physical(scale);
+        let physical = physical_annotations[*i].rect;
         let reason = if physical.width == 0 || physical.height == 0 {
             OmissionReason::ZeroArea
         } else {
@@ -881,6 +885,31 @@ mod annotated_tests {
             vec![0; (width as usize) * (height as usize) * 4],
             scale,
         )
+    }
+
+    fn map_uniform(
+        shot: &Screenshot,
+        origin: Point,
+        annotations: &[screenshot::Annotation],
+    ) -> Vec<screenshot::Annotation> {
+        let scale = if shot.scale.is_finite() && shot.scale > 0.0 {
+            f64::from(shot.scale)
+        } else {
+            1.0
+        };
+        annotations
+            .iter()
+            .map(|annotation| {
+                let translated = Rect {
+                    x: annotation.rect.x.saturating_sub(origin.x),
+                    y: annotation.rect.y.saturating_sub(origin.y),
+                    width: annotation.rect.width,
+                    height: annotation.rect.height,
+                };
+                screenshot::Annotation::new(translated.to_physical(scale), annotation.tag.clone())
+                    .color(annotation.color)
+            })
+            .collect()
     }
 
     // ── A two-application desktop ────────────────────────────────────────
@@ -1469,14 +1498,9 @@ mod annotated_tests {
 
         // A capture covering only the first button's column.
         let shot = blank(60, 60);
-        let drawn = draw_and_reconcile(
-            &shot,
-            Point::new(100, 50),
-            &annotations,
-            &mut legend,
-            &mut omitted,
-        )
-        .expect("a well-formed capture must annotate");
+        let physical = map_uniform(&shot, Point::new(100, 50), &annotations);
+        let drawn = draw_and_reconcile(&shot, &physical, &mut legend, &mut omitted)
+            .expect("a well-formed capture must annotate");
 
         assert_eq!(drawn.width, 60);
         assert_eq!(legend.len(), 1, "only the visible button keeps its entry");
@@ -1496,14 +1520,9 @@ mod annotated_tests {
         let (annotations, mut legend, mut omitted) = plan_annotations(&out);
 
         let shot = blank(400, 300);
-        let drawn = draw_and_reconcile(
-            &shot,
-            Point::new(100, 50),
-            &annotations,
-            &mut legend,
-            &mut omitted,
-        )
-        .expect("annotate");
+        let physical = map_uniform(&shot, Point::new(100, 50), &annotations);
+        let drawn =
+            draw_and_reconcile(&shot, &physical, &mut legend, &mut omitted).expect("annotate");
 
         assert_eq!(legend.len(), 2);
         assert!(omitted.is_empty());
@@ -1521,14 +1540,8 @@ mod annotated_tests {
         assert_eq!(annotations.len(), 1, "1x1 logical is drawable on its face");
 
         let shot = blank_scaled(40, 40, 0.25);
-        draw_and_reconcile(
-            &shot,
-            Point::new(0, 0),
-            &annotations,
-            &mut legend,
-            &mut omitted,
-        )
-        .expect("annotate");
+        let physical = map_uniform(&shot, Point::new(0, 0), &annotations);
+        draw_and_reconcile(&shot, &physical, &mut legend, &mut omitted).expect("annotate");
 
         assert!(legend.is_empty());
         assert_eq!(omitted.len(), 1);
@@ -1547,14 +1560,8 @@ mod annotated_tests {
         let (annotations, mut legend, mut omitted) = plan_annotations(&planned);
 
         let shot = blank(40, 40);
-        draw_and_reconcile(
-            &shot,
-            Point::new(0, 0),
-            &annotations,
-            &mut legend,
-            &mut omitted,
-        )
-        .expect("annotate");
+        let physical = map_uniform(&shot, Point::new(0, 0), &annotations);
+        draw_and_reconcile(&shot, &physical, &mut legend, &mut omitted).expect("annotate");
 
         assert_eq!(legend.len(), 1);
         assert_eq!(legend[0].index, 2);

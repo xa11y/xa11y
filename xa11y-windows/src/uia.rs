@@ -1,6 +1,6 @@
 //! Windows UI Automation accessibility provider.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -34,6 +34,61 @@ static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
 /// of the same process never collide.
 const SYNTHETIC_APP_TAG: u64 = 1 << 63;
 
+/// Upper bounds for provider-owned COM references and synthetic identities.
+///
+/// Handles are opaque, session-local capabilities. Keeping the newest 65K
+/// real elements preserves several large tree snapshots for normal action
+/// flows while preventing repeated enumeration from retaining every UIA COM
+/// object for the lifetime of the process. Synthetic apps are much smaller,
+/// but process churn is unbounded too, so they have their own cap.
+const MAX_CACHED_ELEMENTS: usize = 65_536;
+const MAX_SYNTHETIC_APPS: usize = 4_096;
+
+/// Insertion-order-bounded handle table with refresh-on-update.
+///
+/// Handle values are never reused, so insertion order is enough: an evicted
+/// capability becomes stale and can never accidentally resolve to a newer
+/// object. Updating an existing key refreshes its age, which lets repeated
+/// app enumeration keep a still-live synthetic identity resident while old
+/// process generations age out.
+struct BoundedHandleCache<T> {
+    entries: HashMap<u64, T>,
+    order: VecDeque<u64>,
+    capacity: usize,
+}
+
+impl<T> BoundedHandleCache<T> {
+    fn new(capacity: usize) -> Self {
+        debug_assert!(capacity > 0);
+        Self {
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            capacity,
+        }
+    }
+
+    fn insert(&mut self, handle: u64, value: T) {
+        if self.entries.insert(handle, value).is_some() {
+            self.order.retain(|candidate| *candidate != handle);
+        }
+        self.order.push_back(handle);
+        while self.entries.len() > self.capacity {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+    }
+
+    fn get(&self, handle: &u64) -> Option<&T> {
+        self.entries.get(handle)
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+
 /// True for every handle in the synthetic Application-node tag space.
 fn is_synthetic_handle(handle: u64) -> bool {
     handle & SYNTHETIC_APP_TAG != 0
@@ -51,13 +106,38 @@ fn is_synthetic_handle(handle: u64) -> bool {
 struct SyntheticAppIdentity {
     pid: u32,
     /// FILETIME creation timestamp (100ns since 1601-01-01), or `None` when
-    /// the process could not be opened at synthesis time (access denied, or
-    /// it exited between enumeration and query). `None` disables the
-    /// generation check — a guard that cannot capture its baseline cannot
-    /// verify one, and refusing to synthesize the node would break
-    /// `App::list` for exactly the processes (permission-guarded, transient)
-    /// the name fallback already tolerates.
+    /// the process could not be opened at synthesis time. Such a node may be
+    /// listed, but any later operation that would resolve its pid fails stale:
+    /// an unverifiable pid must never target a different process after reuse.
     creation_time: Option<u64>,
+}
+
+/// A saved synthetic node together with the handle used in stale diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SavedSyntheticAppIdentity {
+    handle: u64,
+    identity: SyntheticAppIdentity,
+}
+
+/// Return a stable handle for a process generation whose identity could be
+/// verified, or mint a fresh fail-closed handle when it could not.
+fn cache_synthetic_app_identity(
+    synthetic_apps: &mut BoundedHandleCache<SyntheticAppIdentity>,
+    identity: SyntheticAppIdentity,
+) -> u64 {
+    // Repeated App::list calls must not grow the table for a live process.
+    // An unverifiable identity is deliberately never deduplicated by pid:
+    // doing so could make a new process inherit an old process's handle.
+    let existing = identity.creation_time.and_then(|_| {
+        synthetic_apps
+            .entries
+            .iter()
+            .find_map(|(handle, candidate)| (*candidate == identity).then_some(*handle))
+    });
+    let handle =
+        existing.unwrap_or_else(|| SYNTHETIC_APP_TAG | NEXT_HANDLE.fetch_add(1, Ordering::Relaxed));
+    synthetic_apps.insert(handle, identity);
+    handle
 }
 
 /// `EVENT_E_ALL_SUBSCRIBERS_FAILED` (0x80040201) — returned by UIA when an
@@ -99,13 +179,13 @@ pub struct WindowsProvider {
     /// the probe sees the same tree the traversal does.
     raw_walker: IUIAutomationTreeWalker,
     /// UIA elements retained for action dispatch (keyed by handle ID).
-    handle_cache: Mutex<HashMap<u64, IUIAutomationElement>>,
+    handle_cache: Mutex<BoundedHandleCache<IUIAutomationElement>>,
     /// Identities of the synthesized Application nodes this provider minted,
     /// keyed by their tagged handle. `get_children(Some(app))` validates the
     /// identity (creation time) before enumerating, so a stale `App` whose
     /// process exited and whose PID was reused by another process surfaces an
     /// error rather than silently retargeting to the new process.
-    synthetic_apps: Mutex<HashMap<u64, SyntheticAppIdentity>>,
+    synthetic_apps: Mutex<BoundedHandleCache<SyntheticAppIdentity>>,
 }
 
 // IUIAutomation is COM and thread-safe via proxy
@@ -144,8 +224,8 @@ impl WindowsProvider {
             automation,
             batch_request,
             raw_walker,
-            handle_cache: Mutex::new(HashMap::new()),
-            synthetic_apps: Mutex::new(HashMap::new()),
+            handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
+            synthetic_apps: Mutex::new(BoundedHandleCache::new(MAX_SYNTHETIC_APPS)),
         })
     }
 
@@ -242,6 +322,27 @@ impl WindowsProvider {
             .unwrap_or_else(|e| e.into_inner())
             .get(&handle)
             .copied()
+    }
+
+    /// Resolve a tagged synthetic handle without ever falling back to the pid
+    /// embedded in caller-owned `ElementData`.
+    ///
+    /// A missing entry means the bounded identity table evicted this saved
+    /// capability (or it came from another provider instance). Either way it
+    /// is stale: trusting `ElementData::pid` here would defeat both eviction
+    /// safety and the process-generation guard.
+    fn synthetic_app_identity_checked(&self, handle: u64) -> Result<Option<SyntheticAppIdentity>> {
+        if !is_synthetic_handle(handle) {
+            return Ok(None);
+        }
+        self.synthetic_app_identity(handle)
+            .map(Some)
+            .ok_or_else(|| Error::ElementStale {
+                selector: format!(
+                    "handle:{handle}; the synthetic Application identity expired, so its pid \
+                     can no longer be resolved safely"
+                ),
+            })
     }
 
     /// Query UIA patterns from the element once, sharing across
@@ -373,10 +474,11 @@ impl WindowsProvider {
     /// synthesized marker and the full executable path when known — the
     /// fallback is explicit, not silent (tenet 1).
     ///
-    /// The handle is minted from the shared [`NEXT_HANDLE`] counter, so two
-    /// syntheses of the same pid in one provider session never share a handle
-    /// — each records its own process creation time, which is how a stale
-    /// `App` node is distinguished from a live process that reuses the pid.
+    /// Verified syntheses of the same process generation share a handle, so
+    /// repeated enumeration remains bounded. A different creation time (or
+    /// an unavailable one) gets a fresh handle from [`NEXT_HANDLE`], which is
+    /// how a stale `App` node stays distinct from a process that reuses its
+    /// pid.
     fn build_synthetic_app_data(
         &self,
         pid: u32,
@@ -407,17 +509,15 @@ impl WindowsProvider {
                 (title, "window_title", None)
             }
         };
-        let handle = SYNTHETIC_APP_TAG | NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
-        self.synthetic_apps
+        let identity = SyntheticAppIdentity {
+            pid,
+            creation_time: process_creation_time(pid),
+        };
+        let mut synthetic_apps = self
+            .synthetic_apps
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                handle,
-                SyntheticAppIdentity {
-                    pid,
-                    creation_time: process_creation_time(pid),
-                },
-            );
+            .unwrap_or_else(|e| e.into_inner());
+        let handle = cache_synthetic_app_identity(&mut synthetic_apps, identity);
         let mut raw = HashMap::new();
         raw.insert("uia_synthesized".into(), serde_json::Value::Bool(true));
         raw.insert(
@@ -835,6 +935,31 @@ fn top_level_windows_of_pid_with(
     Ok(out)
 }
 
+/// Enumerate a pid only while it still names the saved process generation.
+///
+/// Checking on both sides closes the useful PID-reuse race: a replacement
+/// that appears before or during the PID-filtered UIA query is rejected, and
+/// the returned COM elements are thereafter bound to the enumerated windows
+/// rather than resolved again by PID.
+fn top_level_windows_of_saved_app_with(
+    autom: &IUIAutomation,
+    cache: &IUIAutomationCacheRequest,
+    saved: SavedSyntheticAppIdentity,
+) -> Result<Vec<IUIAutomationElement>> {
+    validate_synthetic_app_identity(
+        saved.handle,
+        saved.identity,
+        process_creation_time(saved.identity.pid),
+    )?;
+    let windows = top_level_windows_of_pid_with(autom, saved.identity.pid, cache)?;
+    validate_synthetic_app_identity(
+        saved.handle,
+        saved.identity,
+        process_creation_time(saved.identity.pid),
+    )?;
+    Ok(windows)
+}
+
 /// Resolve the executable image path of `pid` via
 /// `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` +
 /// `QueryFullProcessImageNameW`.
@@ -914,31 +1039,39 @@ fn process_creation_time(pid: u32) -> Option<u64> {
     Some((u64::from(creation.dwHighDateTime) << 32) | u64::from(creation.dwLowDateTime))
 }
 
-/// Whether a synthesized `App` node's captured process generation no longer
-/// matches the process occupying its pid.
+/// Verify that a saved synthetic app still names the same process generation.
 ///
-/// A `None` on either side is "no verdict", not "stale": the guard runs only
-/// when both the baseline and the current read are available, so a process
-/// that could not be opened at synthesis (or has since become unopenable) is
-/// left to the enumeration itself rather than falsely declared dead.
-fn synthetic_app_is_stale(stored: Option<u64>, current: Option<u64>) -> bool {
-    match (stored, current) {
-        (Some(stored), Some(current)) => stored != current,
-        _ => false,
-    }
-}
-
-/// The error a stale synthesized `App` node returns: its process exited and
-/// Windows reused its pid, so the node no longer names anything the caller
-/// asked for. The message carries the diagnosis (pid + handle + why), per
-/// tenet 6 — reading "Element stale: could not relocate element for
-/// selector: handle:… (pid …)" must be enough to understand the failure.
-fn synthetic_app_stale_error(handle: u64, pid: u32) -> Error {
-    Error::ElementStale {
-        selector: format!(
-            "handle:{handle} (pid {pid}); the process exited and Windows reused its pid, \
-             so this Application node is stale"
-        ),
+/// Failure to read either side is a stale result, not permission to proceed:
+/// a pid with no verifiable generation can be reused, and enumerating it would
+/// silently retarget the saved `App` to an unrelated process.
+fn validate_synthetic_app_identity(
+    handle: u64,
+    identity: SyntheticAppIdentity,
+    current: Option<u64>,
+) -> Result<()> {
+    match (identity.creation_time, current) {
+        (Some(stored), Some(current)) if stored == current => Ok(()),
+        (Some(_), Some(_)) => Err(Error::ElementStale {
+            selector: format!(
+                "handle:{handle} (pid {}); the process exited and Windows reused its pid, \
+                 so this Application node is stale",
+                identity.pid
+            ),
+        }),
+        (None, _) => Err(Error::ElementStale {
+            selector: format!(
+                "handle:{handle} (pid {}); the process identity could not be captured when \
+                 this Application node was created, so resolving the pid would be unsafe",
+                identity.pid
+            ),
+        }),
+        (Some(_), None) => Err(Error::ElementStale {
+            selector: format!(
+                "handle:{handle} (pid {}); the current process identity could not be verified, \
+                 so resolving the pid would be unsafe",
+                identity.pid
+            ),
+        }),
     }
 }
 
@@ -1507,22 +1640,18 @@ impl Provider for WindowsProvider {
                 // children" answer is what makes `App::windows` identical
                 // across platforms, and an empty result is the truth of a
                 // process whose last window closed.
-                if let Some(identity) = self.synthetic_app_identity(element_data.handle) {
-                    // Stale-process guard: the pid may have been reused since
-                    // this node was synthesized. Re-read the process
-                    // creation time and refuse to enumerate a different
-                    // process — the alternative is silently retargeting an
-                    // `App` that no longer names anything (tenet 1). A guard
-                    // that never captured a baseline (`None`) cannot verify
-                    // one, and the mismatch case is ElementStale: the node is
-                    // stale, not the window list empty.
-                    if synthetic_app_is_stale(
-                        identity.creation_time,
-                        process_creation_time(identity.pid),
-                    ) {
-                        return Err(synthetic_app_stale_error(element_data.handle, identity.pid));
-                    }
-                    let windows = self.top_level_windows_of_pid(identity.pid)?;
+                if let Some(identity) = self.synthetic_app_identity_checked(element_data.handle)? {
+                    // Validate both before and after the PID-filtered query.
+                    // A replacement process appearing during enumeration is
+                    // rejected rather than returned as this saved App.
+                    let windows = top_level_windows_of_saved_app_with(
+                        &self.automation,
+                        &self.batch_request,
+                        SavedSyntheticAppIdentity {
+                            handle: element_data.handle,
+                            identity,
+                        },
+                    )?;
                     let mut data = Vec::with_capacity(windows.len());
                     for el in windows {
                         // Strict path: re-acquire via HWND to activate
@@ -1531,16 +1660,44 @@ impl Provider for WindowsProvider {
                         // real COM failure — the fallback would silently hand
                         // back a window whose provider was never activated
                         // (tenet 1).
-                        let el = self
-                            .reacquire_via_hwnd(&el)
-                            .and_then(|e| self.populate_cache(&e))
-                            .map_err(|e| Error::Platform {
+                        let el = self.reacquire_via_hwnd(&el).map_err(|e| Error::Platform {
+                            code: e.code().0 as i64,
+                            message: format!(
+                                "re-acquiring a top-level window via HWND failed: {e}"
+                            ),
+                        })?;
+                        let reacquired_pid =
+                            unsafe { el.CurrentProcessId() }.map_err(|e| Error::Platform {
                                 code: e.code().0 as i64,
                                 message: format!(
-                                    "re-acquiring a top-level window via HWND and populating \
-                                     its cache failed: {e}"
+                                    "reading the process id of a re-acquired top-level window \
+                                     failed: {e}"
                                 ),
-                            })?;
+                            })? as u32;
+                        if reacquired_pid != identity.pid {
+                            return Err(Error::ElementStale {
+                                selector: format!(
+                                    "handle:{} (pid {}); top-level window HWND was reused by \
+                                     pid {reacquired_pid}",
+                                    element_data.handle, identity.pid
+                                ),
+                            });
+                        }
+                        // Re-check the process generation after resolving the
+                        // numeric HWND. HWNDs are reusable too; together these
+                        // checks ensure ElementFromHandle cannot redirect this
+                        // saved App to another process or process generation.
+                        validate_synthetic_app_identity(
+                            element_data.handle,
+                            identity,
+                            process_creation_time(reacquired_pid),
+                        )?;
+                        let el = self.populate_cache(&el).map_err(|e| Error::Platform {
+                            code: e.code().0 as i64,
+                            message: format!(
+                                "populating the re-acquired top-level window cache failed: {e}"
+                            ),
+                        })?;
                         let mut window_data = self.build_element_data(&el, Some(identity.pid))?;
                         if window_data.name.is_none() {
                             // Error-preserving live name read (tenet 1): a
@@ -2910,19 +3067,29 @@ impl Provider for WindowsProvider {
         // stale-process guard runs: subscribing to a reused pid would attach
         // the handler to an unrelated process, the same silent retarget the
         // children path guards against (tenet 1).
-        let identity = if let Some(identity) = self.synthetic_app_identity(element.handle) {
-            if synthetic_app_is_stale(identity.creation_time, process_creation_time(identity.pid)) {
-                return Err(synthetic_app_stale_error(element.handle, identity.pid));
-            }
-            identity.pid
-        } else {
-            element.pid.ok_or(Error::Platform {
+        let saved_app =
+            if let Some(identity) = self.synthetic_app_identity_checked(element.handle)? {
+                validate_synthetic_app_identity(
+                    element.handle,
+                    identity,
+                    process_creation_time(identity.pid),
+                )?;
+                Some(SavedSyntheticAppIdentity {
+                    handle: element.handle,
+                    identity,
+                })
+            } else {
+                None
+            };
+        let pid = match saved_app {
+            Some(saved) => saved.identity.pid,
+            None => element.pid.ok_or(Error::Platform {
                 code: -1,
                 message: "Element has no PID for subscribe".to_string(),
-            })?
+            })?,
         };
         let app_name = element.name.clone().unwrap_or_default();
-        self.subscribe_impl(identity, app_name)
+        self.subscribe_impl(pid, app_name, saved_app)
     }
 }
 
@@ -3519,6 +3686,10 @@ struct SubscriptionState {
     /// Current `WindowVisualState` per top-level window; shared with
     /// [`PropertyHandler`] so the delta map and the add/remove paths agree.
     visual_states: Arc<Mutex<HashMap<usize, i32>>>,
+    /// Process-generation guard retained for the entire subscription. A
+    /// desktop-scoped watch must never attach to a later process that reuses
+    /// the subscribed app's pid.
+    saved_app: Option<SavedSyntheticAppIdentity>,
     /// Serializes the whole reconcile sequence (enumerate, diff, register,
     /// tear down) against concurrent reconcile runs and against the cancel
     /// closure. UIA event handlers can be invoked concurrently, so without
@@ -3673,6 +3844,7 @@ fn register_window_handlers(
                 property,
                 structure,
             );
+            remove_visual_state(visual_states, hwnd);
             return Err(err);
         }
         automation_ids.push(*eid);
@@ -3698,6 +3870,7 @@ fn register_window_handlers(
             property,
             structure,
         );
+        remove_visual_state(visual_states, hwnd);
         return Err(err);
     }
     if let Err(e) = unsafe {
@@ -3716,6 +3889,7 @@ fn register_window_handlers(
             property,
             structure,
         );
+        remove_visual_state(visual_states, hwnd);
         return Err(err);
     }
 
@@ -3724,6 +3898,13 @@ fn register_window_handlers(
         hwnd,
         automation_ids,
     })
+}
+
+fn remove_visual_state(visual_states: &Mutex<HashMap<usize, i32>>, hwnd: usize) {
+    visual_states
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&hwnd);
 }
 
 /// Remove a window's previously registered handlers. Removal errors are
@@ -3774,10 +3955,16 @@ fn sync_registrations(state: &SubscriptionState, cache: &IUIAutomationCacheReque
         return;
     }
     let autom = state.automation.get();
-    let current = match top_level_windows_of_pid_with(autom, pid, cache) {
+    let current = match state.saved_app {
+        Some(saved) => top_level_windows_of_saved_app_with(autom, cache, saved),
+        None => top_level_windows_of_pid_with(autom, pid, cache),
+    };
+    let current = match current {
         Ok(w) => w,
         Err(e) => {
-            eprintln!("window-reconciliation enumeration failed for pid {pid}: {e:?}");
+            eprintln!(
+                "window-reconciliation identity check or enumeration failed for pid {pid}: {e:?}"
+            );
             return;
         }
     };
@@ -3911,6 +4098,11 @@ fn cleanup_registrations(
             state.structure_handler.get(),
         );
     }
+    state
+        .visual_states
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
 }
 
 /// Shared context passed to every UIA event handler.
@@ -3923,6 +4115,10 @@ struct EventContext {
     sender: Mutex<std::sync::mpsc::Sender<Event>>,
     app_name: String,
     app_pid: u32,
+    /// The saved generation for a synthetic App subscription. Global focus
+    /// and desktop watch handlers re-check it for every event; plain element
+    /// subscriptions have no saved-app identity and retain PID-only behavior.
+    saved_app: Option<SavedSyntheticAppIdentity>,
     /// Clone of the provider's raw-view walker, so event-target snapshots
     /// resolve DataItem cells the same way tree traversal does. COM in MTA
     /// serializes access via proxies (see `ComCallbackWrapper`), so sharing
@@ -3957,9 +4153,18 @@ impl EventContext {
     /// and scoped handlers occasionally leak events for sibling processes —
     /// checking the sender's PID keeps each subscription clean.
     fn matches_pid(&self, sender: &IUIAutomationElement) -> bool {
-        unsafe { sender.CurrentProcessId() }
+        let sender_matches = unsafe { sender.CurrentProcessId() }
             .map(|p| p as u32 == self.app_pid)
-            .unwrap_or(false)
+            .unwrap_or(false);
+        sender_matches
+            && self.saved_app.is_none_or(|saved| {
+                validate_synthetic_app_identity(
+                    saved.handle,
+                    saved.identity,
+                    process_creation_time(saved.identity.pid),
+                )
+                .is_ok()
+            })
     }
 
     /// Build a full ElementData snapshot from a UIA sender element.
@@ -4397,7 +4602,12 @@ const PROPERTY_CHANGE_IDS: &[UIA_PROPERTY_ID] = &[
 ];
 
 impl WindowsProvider {
-    fn subscribe_impl(&self, pid: u32, app_name: String) -> Result<Subscription> {
+    fn subscribe_impl(
+        &self,
+        pid: u32,
+        app_name: String,
+        saved_app: Option<SavedSyntheticAppIdentity>,
+    ) -> Result<Subscription> {
         let (tx, rx) = std::sync::mpsc::channel::<Event>();
 
         // Enumerate every current top-level window of the pid up front and
@@ -4408,7 +4618,12 @@ impl WindowsProvider {
         // main window, issue #304) were never delivered. The desktop-scoped
         // open/close watch below keeps the set in step as windows come and
         // go, so "app subscription" now means "the process".
-        let windows = self.top_level_windows_of_pid(pid)?;
+        let windows = match saved_app {
+            Some(saved) => {
+                top_level_windows_of_saved_app_with(&self.automation, &self.batch_request, saved)?
+            }
+            None => self.top_level_windows_of_pid(pid)?,
+        };
         if windows.is_empty() {
             // Not reachable yet (or its last window just closed): surface it
             // as a selector miss so core's poll loop retries, matching
@@ -4423,6 +4638,7 @@ impl WindowsProvider {
             sender: Mutex::new(tx),
             app_name,
             app_pid: pid,
+            saved_app,
             walker: self.raw_walker.clone(),
         });
 
@@ -4470,6 +4686,7 @@ impl WindowsProvider {
             structure_handler: ComSend::new(structure.clone()),
             registered: Mutex::new(HashMap::new()),
             visual_states,
+            saved_app,
             reconciliation: Mutex::new(()),
             cancelled: AtomicBool::new(false),
         });
@@ -4607,6 +4824,15 @@ impl WindowsProvider {
                     state_c.structure_handler.get(),
                 );
             }
+            // RemoveXxx is synchronous, so no property callback can repopulate
+            // the map after this point. Clearing it bounds retained state even
+            // if a third-party COM reference keeps a handler alive past
+            // cancellation.
+            state_c
+                .visual_states
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
         });
 
         Ok(Subscription::new(EventReceiver::new(rx), cancel))
@@ -4880,17 +5106,82 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_app_is_stale_only_on_timestamp_mismatch() {
-        // Same creation time = the same process instance: not stale even if
-        // the node was minted in an earlier list pass.
-        assert!(!synthetic_app_is_stale(Some(1000), Some(1000)));
-        // A different creation time = the pid was reused by another process.
-        assert!(synthetic_app_is_stale(Some(1000), Some(2000)));
-        // No baseline or no current read = no verdict, not "stale": the guard
-        // only fires when both sides are known (tenet 1).
-        assert!(!synthetic_app_is_stale(Some(1000), None));
-        assert!(!synthetic_app_is_stale(None, Some(1000)));
-        assert!(!synthetic_app_is_stale(None, None));
+    fn synthetic_app_requires_matching_process_timestamps() {
+        let verified = SyntheticAppIdentity {
+            pid: 42,
+            creation_time: Some(1000),
+        };
+        assert!(validate_synthetic_app_identity(7, verified, Some(1000)).is_ok());
+        assert!(matches!(
+            validate_synthetic_app_identity(7, verified, Some(2000)),
+            Err(Error::ElementStale { .. })
+        ));
+
+        let unverified = SyntheticAppIdentity {
+            pid: 42,
+            creation_time: None,
+        };
+        for (identity, current) in [
+            (verified, None),
+            (unverified, Some(1000)),
+            (unverified, None),
+        ] {
+            assert!(matches!(
+                validate_synthetic_app_identity(7, identity, current),
+                Err(Error::ElementStale { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn bounded_handle_cache_evicts_oldest_without_reusing_handles() {
+        let mut cache = BoundedHandleCache::new(3);
+        for handle in 1..=100 {
+            cache.insert(handle, handle * 10);
+            assert!(cache.len() <= 3);
+        }
+        assert!(cache.get(&97).is_none());
+        assert_eq!(cache.get(&98), Some(&980));
+        assert_eq!(cache.get(&100), Some(&1000));
+    }
+
+    #[test]
+    fn bounded_handle_cache_does_not_grow_when_a_key_is_updated() {
+        let mut cache = BoundedHandleCache::new(2);
+        cache.insert(1, "old");
+        cache.insert(2, "other");
+        cache.insert(1, "new");
+        cache.insert(3, "newest");
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.get(&1), Some(&"new"));
+        assert!(cache.get(&2).is_none(), "refreshing 1 must make 2 oldest");
+    }
+
+    #[test]
+    fn repeated_app_enumeration_and_process_churn_stay_bounded() {
+        let mut cache = BoundedHandleCache::new(3);
+        let live = SyntheticAppIdentity {
+            pid: 42,
+            creation_time: Some(1_000),
+        };
+        let first = cache_synthetic_app_identity(&mut cache, live);
+        for _ in 0..10_000 {
+            assert_eq!(cache_synthetic_app_identity(&mut cache, live), first);
+            assert_eq!(cache.len(), 1, "a live process generation must be reused");
+        }
+
+        // Simulate a pid being reused by many successive process generations.
+        for creation_time in 1_001..11_001 {
+            let handle = cache_synthetic_app_identity(
+                &mut cache,
+                SyntheticAppIdentity {
+                    pid: 42,
+                    creation_time: Some(creation_time),
+                },
+            );
+            assert_ne!(handle, first, "a reused pid must get a distinct handle");
+            assert!(cache.len() <= 3);
+        }
     }
 
     #[test]
@@ -4946,6 +5237,25 @@ mod tests {
             matches!(&err, Error::Unsupported { feature } if feature.contains("pid 42")),
             "error must name the synthesized node's pid and the remedy, got {err:?}"
         );
+    }
+
+    #[test]
+    fn expired_synthetic_identity_never_falls_back_to_element_pid() {
+        let Some(provider) = try_provider() else {
+            return;
+        };
+        let mut app = ElementData::for_role(Role::Application);
+        app.handle = SYNTHETIC_APP_TAG | 9_999_999;
+        app.pid = Some(std::process::id());
+
+        assert!(matches!(
+            provider.get_children(Some(&app)),
+            Err(Error::ElementStale { .. })
+        ));
+        assert!(matches!(
+            provider.subscribe(&app),
+            Err(Error::ElementStale { .. })
+        ));
     }
 
     #[test]
@@ -5389,12 +5699,19 @@ mod tests {
             return;
         };
         let el = dummy_element(app.pid);
-        // Two sequential subscriptions must both succeed; the first's cancel
-        // must not break the second (RemoveXxx is scoped per handler).
-        let sub1 = provider.subscribe(&el);
-        drop(sub1);
-        let sub2 = provider.subscribe(&el);
-        drop(sub2);
+        // Repeated subscribe/cancel cycles must remain independent. This also
+        // exercises teardown after the handler state maps have been seeded:
+        // no cancelled subscription may poison or retain the next one.
+        let Ok(first) = provider.subscribe(&el) else {
+            return;
+        };
+        drop(first);
+        for _ in 0..32 {
+            let sub = provider
+                .subscribe(&el)
+                .expect("a prior cancellation must not break a new subscription");
+            drop(sub);
+        }
     }
 
     #[test]
@@ -5436,6 +5753,22 @@ mod tests {
         let (to_add, to_remove) = plan_window_registration_diff(&registered, &current);
         assert_eq!(to_add, vec![0x11]);
         assert!(to_remove.is_empty());
+    }
+
+    #[test]
+    fn registration_diff_stays_bounded_under_repeated_window_churn() {
+        let mut registered = HashSet::new();
+        for generation in 0..10_000usize {
+            let current: HashSet<usize> =
+                (0..4).map(|offset| 0x1000 + generation + offset).collect();
+            let (to_add, to_remove) = plan_window_registration_diff(&registered, &current);
+            for hwnd in to_remove {
+                registered.remove(&hwnd);
+            }
+            registered.extend(to_add);
+            assert_eq!(registered, current);
+            assert_eq!(registered.len(), 4);
+        }
     }
 
     #[test]
