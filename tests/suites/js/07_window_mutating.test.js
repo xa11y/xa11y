@@ -318,7 +318,7 @@ test('resizeTo() changes the reported bounds and restores the original size', as
   const resizedBounds = { width: width + 50, height: height + 50 };
   try {
     await win.resizeTo(resizedBounds.width, resizedBounds.height);
-    if (appEnv === 'winforms') {
+    if (appEnv === 'winforms' || appEnv === 'egui') {
       // The provider advertises and accepts TransformPattern.Resize, but the
       // framework leaves its bounds unchanged. Keep the dispatch covered and
       // report the known gap honestly instead of passing on the no-op.
@@ -328,7 +328,10 @@ test('resizeTo() changes the reported bounds and restores the original size', as
       } catch (_cleanup) {
         // best-effort cleanup before reporting the known platform gap
       }
-      t.skip('WinForms accepts Resize without changing bounds (winforms_transform_resize_noop)');
+      const gap = appEnv === 'egui'
+        ? 'egui_transform_resize_noop'
+        : 'winforms_transform_resize_noop';
+      t.skip(`${appEnv} accepts Resize without changing bounds (${gap})`);
       return;
     }
     await waitUntil(async () => {
@@ -572,14 +575,17 @@ test('Locator resizeTo() dispatches and restores the original size', async (t) =
   const { width, height } = win.bounds;
   try {
     await locator.resizeTo(width + 50, height + 50);
-    if (appEnv === 'winforms') {
+    if (appEnv === 'winforms' || appEnv === 'egui') {
       try {
         const current = await currentWindow(app, win, 'resize_to');
         if (current) await current.resizeTo(width, height);
       } catch (_cleanup) {
         // best-effort cleanup before reporting the known platform gap
       }
-      t.skip('WinForms accepts Resize without changing bounds (winforms_transform_resize_noop)');
+      const gap = appEnv === 'egui'
+        ? 'egui_transform_resize_noop'
+        : 'winforms_transform_resize_noop';
+      t.skip(`${appEnv} accepts Resize without changing bounds (${gap})`);
       return;
     }
     await waitUntil(async () => {

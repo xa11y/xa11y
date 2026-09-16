@@ -788,10 +788,14 @@ def test_mcp_resize_to_mutates_and_restores_window_bounds(mcp, app_pid, app_name
         assert resized["isError"] is False, resized["content"]
         assert resized["structuredContent"]["ok"] is True
         needs_restore = True
-        if app_name == "winforms":
+        if app_name in {"egui", "winforms"}:
+            gap = (
+                "egui_transform_resize_noop"
+                if app_name == "egui"
+                else "winforms_transform_resize_noop"
+            )
             pytest.skip(
-                "WinForms accepts Resize without changing bounds "
-                "(winforms_transform_resize_noop)"
+                f"{app_name} accepts Resize without changing bounds ({gap})"
             )
         _wait_for_mcp_window(
             mcp,

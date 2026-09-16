@@ -16,6 +16,7 @@ line-format check both accept.
 from __future__ import annotations
 
 import re
+import sys
 import time
 
 import pytest
@@ -257,9 +258,9 @@ def test_action_resize_to_requires_a_size_and_dispatches_it(
     Splitting requirement and dispatch keeps the malformed case deterministic
     on every platform: parsing a missing argument fails before any OS call.
     Like the move-to test, the valid call changes the requested geometry,
-    verifies the read-back, and restores it. WinForms is an explicit skip
-    after dispatch because its UIA provider accepts Resize but leaves the
-    bounds unchanged (the recorded ``winforms_transform_resize_noop`` gap).
+    verifies the read-back, and restores it. WinForms and egui are explicit
+    skips after dispatch because their providers accept Resize but leave the
+    bounds unchanged (recorded transform-resize gaps).
     """
     rc, stdout, stderr = run_cli(
         "action", "resize-to", "window, dialog", "--pid", str(app_pid)
@@ -292,10 +293,15 @@ def test_action_resize_to_requires_a_size_and_dispatches_it(
         else:
             resized = True
             assert "ok" in stdout, f"expected 'ok' in stdout, got: {stdout!r}"
-            if app_name == "winforms":
+            if app_name in {"egui", "winforms"}:
+                gap = (
+                    "egui_transform_resize_noop"
+                    if app_name == "egui"
+                    else "winforms_transform_resize_noop"
+                )
                 pytest.skip(
-                    "WinForms UIA accepts Resize without changing bounds; "
-                    "tracked as winforms_transform_resize_noop"
+                    f"{app_name} accepts Resize without changing bounds; "
+                    f"tracked as {gap}"
                 )
             _wait_for_bounds(
                 run_cli,
@@ -314,6 +320,12 @@ def test_action_resize_to_requires_a_size_and_dispatches_it(
                 str(app_pid),
             )
             assert rc == 0, f"failed to restore window size: {stderr}"
+            if app_name == "tauri" and sys.platform.startswith("linux"):
+                pytest.skip(
+                    "Tauri/Wayland maps requested client size to decorated outer "
+                    "bounds and cannot exactly round-trip the original size; "
+                    "tracked as tauri_wayland_resize_outer_bounds"
+                )
             resized = False
             _wait_for_bounds(
                 run_cli,

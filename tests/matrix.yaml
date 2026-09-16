@@ -497,6 +497,31 @@ gaps:
       language: python
       features: [windows]
 
+  - id: egui_transform_resize_noop
+    description: >
+      egui windows advertise the native resize action and accept its dispatch,
+      but their reported bounds remain unchanged on Windows and macOS. The CLI,
+      MCP, and JS mutation suites dispatch the action and record an explicit
+      skip rather than passing a no-op as mutation coverage.
+    severity: low
+    workaround: "move_to is enforced on egui; resize_to is enforced on WPF and native AppKit windows."
+    affects:
+      apps: [egui]
+      features: [windows]
+
+  - id: tauri_wayland_resize_outer_bounds
+    description: >
+      Tauri on Wayland applies resize_to as a client-area request while xa11y
+      reports decorated outer bounds. The mutation is observable, but sending
+      the reported original outer size back grows the window by its decoration
+      delta instead of restoring it exactly. The CLI suite verifies the first
+      mutation and explicitly skips the exact round-trip assertion.
+    severity: low
+    workaround: "Real resize and exact restoration are enforced by the WPF and AppKit cells."
+    affects:
+      apps: [tauri]
+      features: [windows]
+
 # Resolved gaps (kept here briefly for provenance):
 #   windows_input_sim — input simulation had no automated coverage of any kind
 #   on Windows: input_sim is carried by tauri and electron, and neither had a
