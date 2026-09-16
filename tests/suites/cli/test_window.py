@@ -293,11 +293,18 @@ def test_action_resize_to_requires_a_size_and_dispatches_it(
         else:
             resized = True
             assert "ok" in stdout, f"expected 'ok' in stdout, got: {stdout!r}"
-            if app_name in {"egui", "winforms"}:
+            resize_noop = app_name in {"egui", "winforms"} or (
+                app_name == "tauri" and sys.platform == "darwin"
+            )
+            if resize_noop:
                 gap = (
                     "egui_transform_resize_noop"
                     if app_name == "egui"
-                    else "winforms_transform_resize_noop"
+                    else (
+                        "winforms_transform_resize_noop"
+                        if app_name == "winforms"
+                        else "tauri_macos_resize_noop"
+                    )
                 )
                 pytest.skip(
                     f"{app_name} accepts Resize without changing bounds; "

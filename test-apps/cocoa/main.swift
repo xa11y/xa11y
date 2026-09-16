@@ -427,7 +427,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // the EXIT one (the test asserts entry only), so the insert is here
         // for correctness on real sessions and for manual debugging.
         window.collectionBehavior.insert(.fullScreenPrimary)
-        window.toggleFullScreen(nil)
+        // Give the provider poll one deterministic chance to observe both
+        // windows before the asynchronous Space transition begins.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.window.toggleFullScreen(nil)
+        }
     }
 
     // References to controls that need state changes

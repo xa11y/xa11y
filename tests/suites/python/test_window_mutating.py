@@ -831,24 +831,30 @@ def test_fullscreen_state_enters_and_reads_true(app: xa11y.App) -> None:
     so nothing after it depends on the window's frame; the harness tears the
     app down at cell end, which returns the Space. The transition is
     animated (Spaces), so the state is polled rather than read once. The app
-    also opens ``Space Companion`` immediately before entry; it stays on the
-    original Space and must remain present in the app-wide window listing.
+    also opens ``Space Companion`` immediately before entry. The companion is
+    observed during the transition, then must leave the app-wide listing once
+    it remains behind on the original Space. This characterizes the provider's
+    active-Space boundary instead of assuming off-Space AX windows enumerate.
     """
     button = app.locator('button[name="Toggle Fullscreen"]')
     try:
         button.press()
         deadline = time.monotonic() + 15.0
+        companion_seen = False
         while time.monotonic() < deadline:
             windows = app.windows()
             names = {w.name for w in windows}
-            if (
-                any(w.fullscreen is True for w in windows)
-                and "Space Companion" in names
-            ):
+            companion_seen = companion_seen or "Space Companion" in names
+            if any(w.fullscreen is True for w in windows):
+                assert companion_seen, "the companion was never discoverable before Space entry"
+                assert "Space Companion" not in names, (
+                    "the original-Space companion unexpectedly remained in the "
+                    "active-Space window listing"
+                )
                 return
             time.sleep(0.2)
         raise AssertionError(
-            "fullscreen state and off-Space companion were not both discoverable; "
+            "fullscreen state did not become true; "
             f"last read: {[(w.name, w.fullscreen) for w in windows]!r}"
         )
     except Exception:

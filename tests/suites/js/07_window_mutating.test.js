@@ -245,6 +245,11 @@ test('a window that advertises maximize is maximized and restored', async (t) =>
   }
   try {
     await win.maximize();
+    if (appEnv === 'cocoa') {
+      await win.restore();
+      t.skip('AppKit zoom has no observable maximized/fullscreen state');
+      return;
+    }
     await waitUntil(async () => {
       const current = await currentWindow(app, win, 'maximize');
       return current !== null && (current.maximized === true || current.fullscreen === true);
@@ -318,7 +323,9 @@ test('resizeTo() changes the reported bounds and restores the original size', as
   const resizedBounds = { width: width + 50, height: height + 50 };
   try {
     await win.resizeTo(resizedBounds.width, resizedBounds.height);
-    if (appEnv === 'winforms' || appEnv === 'egui') {
+    const resizeNoop = appEnv === 'winforms' || appEnv === 'egui' ||
+      (appEnv === 'tauri' && process.platform === 'darwin');
+    if (resizeNoop) {
       // The provider advertises and accepts TransformPattern.Resize, but the
       // framework leaves its bounds unchanged. Keep the dispatch covered and
       // report the known gap honestly instead of passing on the no-op.
@@ -330,7 +337,9 @@ test('resizeTo() changes the reported bounds and restores the original size', as
       }
       const gap = appEnv === 'egui'
         ? 'egui_transform_resize_noop'
-        : 'winforms_transform_resize_noop';
+        : appEnv === 'winforms'
+          ? 'winforms_transform_resize_noop'
+          : 'tauri_macos_resize_noop';
       t.skip(`${appEnv} accepts Resize without changing bounds (${gap})`);
       return;
     }
@@ -478,8 +487,17 @@ test('Locator maximize()/restore() dispatch through the async binding', async (t
     t.skip('the target window has no name for a unique Locator');
     return;
   }
+  if (process.platform === 'darwin') {
+    t.skip('macOS drops minimized windows from app-wide Locator discovery');
+    return;
+  }
   try {
     await locator.maximize();
+    if (appEnv === 'cocoa') {
+      await locator.restore();
+      t.skip('AppKit zoom has no observable maximized/fullscreen state');
+      return;
+    }
     await waitUntil(async () => {
       const current = await currentWindow(app, win, 'maximize');
       return current !== null && (current.maximized === true || current.fullscreen === true);
@@ -575,7 +593,9 @@ test('Locator resizeTo() dispatches and restores the original size', async (t) =
   const { width, height } = win.bounds;
   try {
     await locator.resizeTo(width + 50, height + 50);
-    if (appEnv === 'winforms' || appEnv === 'egui') {
+    const resizeNoop = appEnv === 'winforms' || appEnv === 'egui' ||
+      (appEnv === 'tauri' && process.platform === 'darwin');
+    if (resizeNoop) {
       try {
         const current = await currentWindow(app, win, 'resize_to');
         if (current) await current.resizeTo(width, height);
@@ -584,7 +604,9 @@ test('Locator resizeTo() dispatches and restores the original size', async (t) =
       }
       const gap = appEnv === 'egui'
         ? 'egui_transform_resize_noop'
-        : 'winforms_transform_resize_noop';
+        : appEnv === 'winforms'
+          ? 'winforms_transform_resize_noop'
+          : 'tauri_macos_resize_noop';
       t.skip(`${appEnv} accepts Resize without changing bounds (${gap})`);
       return;
     }

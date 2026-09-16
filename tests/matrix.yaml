@@ -522,6 +522,42 @@ gaps:
       apps: [tauri]
       features: [windows]
 
+  - id: macos_window_enumeration_boundaries
+    description: >
+      AX app-wide window enumeration omits a minimized window and windows left
+      on another Space. Retained Element handles can still drive the supported
+      minimize/restore path, but a fresh MCP request or Locator cannot rediscover
+      the minimized target. The Cocoa fullscreen fixture observes its companion
+      before Space entry and asserts that the off-Space window then leaves the
+      listing.
+    severity: low
+    workaround: "Use a retained Element to restore a minimized macOS window; switch Spaces before locating an off-Space window."
+    affects:
+      features: [windows]
+
+  - id: tauri_macos_resize_noop
+    description: >
+      Tauri on macOS advertises resize_to and accepts the native action, but
+      the reported bounds remain unchanged. MCP, CLI, and JS dispatch the action
+      and explicitly skip the bounds mutation assertion.
+    severity: low
+    workaround: "Resize mutation is enforced on Qt/WPF and native AppKit fixtures."
+    affects:
+      apps: [tauri]
+      features: [windows]
+
+  - id: cocoa_maximize_state_unobservable
+    description: >
+      AppKit zoom is exposed as maximize, but AXFullScreen remains false and
+      macOS has no separate maximized state attribute. JS dispatches maximize
+      and restores the retained Element, then explicitly skips the unavailable
+      state postcondition.
+    severity: low
+    workaround: "Fullscreen state is enforced through the Cocoa fixture's native Toggle Fullscreen action."
+    affects:
+      apps: [cocoa]
+      features: [windows]
+
 # Resolved gaps (kept here briefly for provenance):
 #   windows_input_sim — input simulation had no automated coverage of any kind
 #   on Windows: input_sim is carried by tauri and electron, and neither had a
