@@ -4355,11 +4355,16 @@ impl Provider for MacOSProvider {
         // enter fullscreen on a fullscreen-capable window — so there is no
         // absolute set to make repeated calls idempotent, and substituting
         // fullscreen would blur two distinct operations (see
-        // `enter_fullscreen`). Refuse surfaceably instead (tenet 1, tenet 3);
-        // the `actions` advertisement never lists `maximize` here.
-        Err(Error::ActionNotSupported {
-            action: "maximize".to_string(),
-            role: element.role,
+        // `enter_fullscreen`). This is a platform-wide missing capability,
+        // not an action this particular element lacks, so classify it as
+        // `Unsupported` consistently with Windows/Linux `enter_fullscreen`
+        // and Linux `maximize`. The `actions` advertisement never lists
+        // `maximize` here (tenet 1, tenet 3).
+        Err(Error::Unsupported {
+            feature: format!(
+                "maximize on {}: macOS Accessibility has no readable or writable zoom state",
+                element.role.to_snake_case()
+            ),
         })
     }
 
@@ -5063,6 +5068,23 @@ mod tests {
     fn objc_exception_is_caught_by_c_wrapper() {
         let result = unsafe { test_throw_and_catch_nsexception() };
         assert_eq!(result, 1, "C wrapper should have caught the NSException");
+    }
+
+    #[test]
+    fn maximize_is_platform_unsupported() {
+        let provider = MacOSProvider::new().expect("provider construction must succeed");
+        let window = ElementData::for_role(Role::Window);
+        let err = provider
+            .maximize(&window)
+            .expect_err("macOS has no accessible maximize operation");
+        assert!(
+            matches!(
+                err,
+                Error::Unsupported { ref feature }
+                    if feature.starts_with("maximize on window:")
+            ),
+            "got {err:?}"
+        );
     }
 
     #[test]

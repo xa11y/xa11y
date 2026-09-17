@@ -136,7 +136,7 @@ window is not fullscreen and cannot be set fullscreen, the verb reports
 classic zoom state has no readable or writable accessibility surface:
 `AXZoomed` is unsupported, and the green button's `AXPress` / `AXZoomWindow`
 actions are toggles with no readable state. The provider refuses the verb
-with `ActionNotSupported` and never advertises it. Substituting fullscreen
+with `Unsupported` and never advertises it. Substituting fullscreen
 for a `maximize` request would blur two distinct operations. Windows is the
 reverse: `Maximize` drives `WindowVisualState_Maximized`, while
 `EnterFullscreen` is unsupported because UIA has no fullscreen surface.

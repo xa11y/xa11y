@@ -400,10 +400,7 @@ mod tests {
         let err = fullscreen_window(&app)
             .maximize()
             .expect_err("maximize must be unsupported on macOS");
-        assert!(
-            matches!(err, Error::ActionNotSupported { .. }),
-            "got {err:?}"
-        );
+        assert!(matches!(err, Error::Unsupported { .. }), "got {err:?}");
 
         // enter_fullscreen commits.
         fullscreen_window(&app)
