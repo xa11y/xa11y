@@ -197,11 +197,12 @@ number instead, and rejects text with `TextValueNotSupported`; use
 Window verbs are only meaningful on window-like elements: `window`, or
 `dialog`, which every platform surfaces as a top-level window. `move-to` and
 `resize-to` take **logical** screen coordinates (the same space as the
-`bounds=()` in `xa11y find` output). Where a platform has no accessibility
-API for a verb — Linux cannot minimize, maximize, enter-fullscreen, restore,
-or close a window; macOS cannot maximize and Windows cannot enter fullscreen
-— the command exits non-zero with `Unsupported`; it never falls back to input
-simulation.
+`bounds=()` in `xa11y find` output). Window verbs use either an accessibility
+API or a capability-detected native window-manager API. X11 supports EWMH and
+ICCCM operations. Sway supports activation, fullscreen, restore, and close;
+its model has no minimize or distinct maximize state. macOS cannot maximize,
+and Windows cannot enter fullscreen. An unavailable operation exits non-zero
+with `Unsupported`; it never falls back to input simulation.
 
 `restore` is the inverse of all three entry verbs (`minimize`, `maximize`,
 `enter-fullscreen`): it leaves whichever special state is set. There is no

@@ -11,6 +11,8 @@ use xa11y_core::{
 };
 use zbus::blocking::{Connection, Proxy};
 
+use crate::window::WindowManager;
+
 /// Global handle counter for mapping ElementData back to AccessibleRefs.
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
 
@@ -49,6 +51,9 @@ pub struct LinuxProvider {
     /// Cached AT-SPI2 action indices keyed by element handle.
     /// Maps each action name (snake_case) to the integer index used by `DoAction(i)`.
     action_indices: Mutex<HashMap<u64, HashMap<String, i32>>>,
+    /// Native X11/Wayland window-manager channel, selected independently of
+    /// the AT-SPI accessibility connection.
+    window_manager: WindowManager,
 }
 
 /// AT-SPI2 accessible reference: (bus_name, object_path).
@@ -69,6 +74,7 @@ impl LinuxProvider {
             a11y_bus,
             handle_cache: Mutex::new(HashMap::new()),
             action_indices: Mutex::new(HashMap::new()),
+            window_manager: WindowManager::new(),
         })
     }
 
@@ -810,9 +816,10 @@ impl LinuxProvider {
             }
         }
 
-        // `activate` is deliberately NOT advertised on AT-SPI. It is a real
-        // Linux window verb (Component.GrabFocus on the top-level frame —
-        // see `activate`), and Windows/macOS advertise theirs unconditionally,
+        // `activate` is deliberately not advertised from AT-SPI alone. A real
+        // native window backend may add it below after proving identity and
+        // checking capabilities. The AT-SPI-only path is Component.GrabFocus
+        // on the top-level frame, and Windows/macOS advertise theirs unconditionally,
         // but the AT-SPI adapters disagree about implementing a *frame*
         // GrabFocus: the GTK widget adapter answers true, while Chromium
         // (Electron), WebKitGTK (Tauri — whose bridge reports itself as
@@ -883,7 +890,7 @@ impl LinuxProvider {
                 .insert(handle, action_index_map);
         }
 
-        ElementParts {
+        let mut data: ElementData = ElementParts {
             role,
             name,
             value,
@@ -899,7 +906,68 @@ impl LinuxProvider {
             raw,
             handle,
         }
-        .into()
+        .into();
+
+        if matches!(role, Role::Window | Role::Dialog) && self.is_top_level_window_ref(aref) {
+            let facts = self.window_manager.facts(&data);
+            for action in &facts.actions {
+                if !data.actions.iter().any(|existing| existing == action) {
+                    data.actions.push((*action).to_string());
+                }
+            }
+            if facts.minimized.is_some() {
+                data.states.minimized = facts.minimized;
+            }
+            if facts.maximized.is_some() {
+                data.states.maximized = facts.maximized;
+            }
+            if facts.fullscreen.is_some() {
+                data.states.fullscreen = facts.fullscreen;
+            }
+            if let Some(backend) = facts.backend {
+                data.raw.insert(
+                    "window_backend".to_string(),
+                    serde_json::Value::String(backend.to_string()),
+                );
+            }
+            if let Some(version) = facts.protocol_version {
+                data.raw.insert(
+                    "window_protocol_version".to_string(),
+                    serde_json::Value::Number(version.into()),
+                );
+            }
+            let capabilities = [
+                "activate",
+                "minimize",
+                "maximize",
+                "enter_fullscreen",
+                "restore",
+                "close",
+                "move_to",
+                "resize_to",
+            ]
+            .into_iter()
+            .map(|action| {
+                let status = if facts.backend.is_none() {
+                    "unknown"
+                } else if facts.actions.contains(&action) {
+                    "supported"
+                } else {
+                    "unsupported"
+                };
+                (
+                    action.to_string(),
+                    serde_json::Value::String(status.to_string()),
+                )
+            })
+            .collect();
+            data.raw.insert(
+                "window_capabilities".to_string(),
+                serde_json::Value::Object(capabilities),
+            );
+        }
+
+        data
     }
 
     /// Get the AT-SPI parent of an accessible ref.
@@ -1264,6 +1332,14 @@ impl LinuxProvider {
                 action: action.to_string(),
                 role: element.role,
             })
+        }
+    }
+
+    fn is_top_level_window_ref(&self, target: &AccessibleRef) -> bool {
+        match self.get_atspi_parent(target) {
+            Ok(None) => true,
+            Ok(Some(parent)) => self.parent_role_is_application(&parent).unwrap_or(false),
+            Err(_) => false,
         }
     }
 
@@ -2229,11 +2305,10 @@ impl Provider for LinuxProvider {
 
     // ── Window management ──────────────────────────────────────────
     //
-    // AT-SPI exposes `activate` (Component.GrabFocus on the frame — same path
-    // as `focus`) and two geometry setters on Component: SetPosition and
-    // SetSize. There is no AT-SPI API to alter window state or close a window,
-    // and implementing those verbs via input simulation would violate tenet 2,
-    // so they fail surfaceably as `Unsupported` at the call site.
+    // Native X11/Sway window-manager requests handle the verbs they advertise.
+    // On Wayland compositors without a native provider, AT-SPI still exposes
+    // `activate` (Component.GrabFocus on the frame) and two geometry setters:
+    // SetPosition and SetSize. There is no simulated-shortcut path.
     //
     // Window discovery is `App::windows` — `get_children(app)` filtered to
     // Window|Dialog — as on every platform.
@@ -2263,6 +2338,9 @@ impl Provider for LinuxProvider {
         // fix is a direct Action probe on this failure path, not a cache
         // lookup the role/name mapping rules can never fill.
         self.ensure_top_level_window_target(element, "activate")?;
+        if self.window_manager.uses_x11() {
+            return self.window_manager.activate(element);
+        }
         let target = self.get_cached(element.handle)?;
         let proxy = self
             .make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")
@@ -2291,56 +2369,34 @@ impl Provider for LinuxProvider {
 
     fn minimize(&self, element: &ElementData) -> Result<()> {
         self.ensure_top_level_window_target(element, "minimize")?;
-        Err(Error::Unsupported {
-            feature: format!(
-                "minimize on {}: AT-SPI has no API to alter window state",
-                element.role.to_snake_case()
-            ),
-        })
+        self.window_manager.minimize(element)
     }
 
     fn maximize(&self, element: &ElementData) -> Result<()> {
         self.ensure_top_level_window_target(element, "maximize")?;
-        Err(Error::Unsupported {
-            feature: format!(
-                "maximize on {}: AT-SPI has no API to alter window state",
-                element.role.to_snake_case()
-            ),
-        })
+        self.window_manager.maximize(element)
     }
 
     fn enter_fullscreen(&self, element: &ElementData) -> Result<()> {
         self.ensure_top_level_window_target(element, "enter_fullscreen")?;
-        Err(Error::Unsupported {
-            feature: format!(
-                "enter_fullscreen on {}: AT-SPI has no API to alter window state",
-                element.role.to_snake_case()
-            ),
-        })
+        self.window_manager.enter_fullscreen(element)
     }
 
     fn restore(&self, element: &ElementData) -> Result<()> {
         self.ensure_top_level_window_target(element, "restore")?;
-        Err(Error::Unsupported {
-            feature: format!(
-                "restore on {}: AT-SPI has no API to alter window state",
-                element.role.to_snake_case()
-            ),
-        })
+        self.window_manager.restore(element)
     }
 
     fn close(&self, element: &ElementData) -> Result<()> {
         self.ensure_top_level_window_target(element, "close")?;
-        Err(Error::Unsupported {
-            feature: format!(
-                "close on {}: AT-SPI has no API to close a window",
-                element.role.to_snake_case()
-            ),
-        })
+        self.window_manager.close(element)
     }
 
     fn move_to(&self, element: &ElementData, x: i32, y: i32) -> Result<()> {
         self.ensure_top_level_window_target(element, "move_to")?;
+        if self.window_manager.uses_x11() {
+            return self.window_manager.move_to(element, x, y);
+        }
         let target = self.get_cached(element.handle)?;
         let proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")?;
         let scale = crate::scale::coordinate_scale();
@@ -2377,6 +2433,9 @@ impl Provider for LinuxProvider {
 
     fn resize_to(&self, element: &ElementData, w: u32, h: u32) -> Result<()> {
         self.ensure_top_level_window_target(element, "resize_to")?;
+        if self.window_manager.uses_x11() {
+            return self.window_manager.resize_to(element, w, h);
+        }
         let target = self.get_cached(element.handle)?;
         let proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Component")?;
         let physical = Rect {

@@ -41,7 +41,15 @@ The mechanisms are not bridged. A failed accessibility action never falls back t
 
 On macOS, input simulation usually also requires the target window to be foregrounded. Activate the window explicitly before synthesising input.
 
-xa11y picks the Linux backend at runtime: if `DISPLAY` is set we drive XTest, and otherwise we use uinput. There is no compile-time feature flag, and both backends are always built into `xa11y-linux`. The uinput path is compositor-agnostic, so it works on every Wayland desktop (GNOME, KDE Plasma, sway, Hyprland, Cosmic, weston) and also on headless Linux servers. Errors from a missing `input` group surface as `PermissionDenied` with a message saying what to do about it. A missing `uinput` kernel module surfaces as `Unsupported`.
+xa11y picks the Linux backend at runtime. Pure X11 sessions use XTest;
+Wayland and mixed Wayland/XWayland sessions use uinput. Headless Linux also
+uses uinput. Set `XA11Y_LINUX_INPUT_BACKEND=x11|wayland` to override that
+choice. There is no compile-time feature flag, and both backends are always
+built into `xa11y-linux`. The uinput path is compositor-agnostic, so it works
+on every Wayland desktop (GNOME, KDE Plasma, sway, Hyprland, Cosmic, weston)
+and on headless Linux servers. Errors from a missing `input` group surface as
+`PermissionDenied` with a message saying what to do about it. A missing
+`uinput` kernel module surfaces as `Unsupported`.
 
 ## Basic usage
 
@@ -289,7 +297,7 @@ Drag-and-drop has no accessibility equivalent on most platforms. Resolve both en
 Input simulation raises five of xa11y's error variants:
 
 - `PermissionDenied` when the OS denied the synthesis permission, such as macOS Input Monitoring.
-- `Unsupported` when the platform has no backend for the operation, such as a Linux session with neither `DISPLAY` nor `WAYLAND_DISPLAY` set.
+- `Unsupported` when the platform has no backend for the operation, or when the Linux `uinput` kernel module is unavailable.
 - `NoElementBounds` when the target `Element` has no bounds. Re-fetch it, or anchor on a point.
 - `InvalidActionData` for an uppercase `Char` key, a malformed key name, or a bad target tuple.
 - `Platform` for a raw OS failure such as an FFI return code.

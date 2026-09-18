@@ -54,6 +54,7 @@ weston
 widget
 winit
 wlroots
+wlr
 
 # ── Tooling and ecosystem names ─────────────────────────────────────
 Appium
@@ -110,3 +111,5 @@ unparsable
 unstripped
 upscaled
 viewport
+toplevels?
+postconditions?

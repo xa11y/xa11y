@@ -1,18 +1,18 @@
 //! Window-management integration tests.
 //!
 //! Runs against the AccessKit test app on macOS, Windows, and Linux. Where a
-//! verb has no platform API (Linux cannot minimize / maximize /
-//! enter_fullscreen / restore / close a window) the test asserts the
-//! surfaceable `Unsupported` error instead of the effect — these verbs must
-//! never fall back to input simulation (tenet 2).
+//! verb has no selected platform API, the test asserts a surfaceable
+//! `Unsupported` error. Linux X11 and Sway use native window-manager requests;
+//! other Wayland compositors never fall back to simulated input (tenet 2).
 //!
 //! Success-path coverage per platform: minimize/restore round-trip and close
-//! run on macOS and Windows; activate runs everywhere; geometry (`move_to` /
-//! `resize_to`) and enter-fullscreen success are macOS-only for the AccessKit
-//! app — its Linux adapter omits the AT-SPI Component geometry setters.
-//! Windows TransformPattern move/resize is not exercised by this suite, and
-//! that gap is tracked in `tests/matrix.yaml` as coverage to add on the
-//! Windows side.
+//! run on macOS, Windows, and X11; activation runs everywhere a selected
+//! backend advertises it. X11 additionally covers maximize, fullscreen, and
+//! geometry through EWMH. Sway covers activation and fullscreen through its
+//! native IPC after the wlr foreign-toplevel protocol is detected. macOS
+//! covers fullscreen and geometry through AX. Windows TransformPattern
+//! move/resize is not exercised by this suite, and that remaining gap is
+//! tracked in `tests/matrix.yaml`.
 //!
 //! Window-state verbs are asserted with a single read wherever the provider
 //! commits the state before the call returns: macOS settles
@@ -30,7 +30,6 @@
 
 #[cfg(test)]
 mod tests {
-    #[cfg(not(target_os = "linux"))]
     use std::time::{Duration, Instant};
 
     use crate::integ as h;
@@ -40,7 +39,6 @@ mod tests {
     ///
     /// Helpers that are platform-specific are gated item by item so the
     /// Linux build does not trip `dead_code` under `-Dwarnings`.
-    #[cfg(not(target_os = "linux"))]
     fn wait_until<T>(timeout: Duration, what: &str, mut f: impl FnMut() -> Option<T>) -> T {
         let deadline = Instant::now() + timeout;
         loop {
@@ -62,7 +60,6 @@ mod tests {
     /// `WindowVisualState` directly and promises only that the set call
     /// succeeded, so it keeps the short poll the suite used before the macOS
     /// settle made it unnecessary.
-    #[cfg(not(target_os = "linux"))]
     fn assert_minimized(app: &App, want: bool, what: &str) {
         let matches = |win: &Element| win.states.minimized == Some(want);
         if cfg!(target_os = "macos") {
@@ -90,7 +87,6 @@ mod tests {
     /// as "the dialog is gone" — that would let `close_dialog_via_window_verb`
     /// pass while the dialog is still open. The `Drop` paths use
     /// [`dialog_in`], which cannot panic.
-    #[cfg(not(target_os = "linux"))]
     fn dialog_window() -> Option<Element> {
         let app = h::app_root();
         dialog_window_result(&app).expect("App::windows() enumeration must succeed")
@@ -99,7 +95,6 @@ mod tests {
     /// Strict lookup, as a `Result`: `Ok(None)` means the app really has no
     /// dialog; an enumeration failure is `Err` and must not masquerade as an
     /// absent dialog.
-    #[cfg(not(target_os = "linux"))]
     fn dialog_window_result(app: &App) -> Result<Option<Element>> {
         Ok(app.windows()?.into_iter().find(|w| {
             w.name
@@ -111,7 +106,6 @@ mod tests {
     /// Like [`dialog_window_result`], but lossy and cannot panic — usable
     /// from the `Drop` paths below, where a panic would abort the process and
     /// an enumeration failure is indistinguishable from "no dialog".
-    #[cfg(not(target_os = "linux"))]
     fn dialog_in(app: &App) -> Option<Element> {
         app.windows().ok()?.into_iter().find(|w| {
             w.name
@@ -123,7 +117,6 @@ mod tests {
     /// Best-effort close of the test-app dialog, if one is open. Returns
     /// `Ok(())` when there is nothing to close. Cannot panic: used from
     /// `Drop`, where a panic would abort the process.
-    #[cfg(not(target_os = "linux"))]
     fn close_dialog_best_effort() -> Result<()> {
         let names = ["xa11y-test-app", "xa11y Test App"];
         let Ok(app) = App::find(Duration::from_secs(2), |d| {
@@ -144,10 +137,8 @@ mod tests {
     /// suite's shared app instance. Same convention as `DialogGuard` in
     /// `multi_window.rs` — this file opens the dialog inline, so the guard
     /// owns only the cleanup.
-    #[cfg(not(target_os = "linux"))]
     struct DialogCloseGuard;
 
-    #[cfg(not(target_os = "linux"))]
     impl Drop for DialogCloseGuard {
         fn drop(&mut self) {
             // Best-effort, non-panicking: `Drop` must not unwind, and a
@@ -161,12 +152,10 @@ mod tests {
     /// `restore()`s the main window, so a failure here cannot leave the
     /// shared app instance minimized for every subsequent test. Same
     /// convention as `WindowBoundsGuard` in [`move_and_resize_window`].
-    #[cfg(not(target_os = "linux"))]
     struct RestoreGuard {
         win: Element,
     }
 
-    #[cfg(not(target_os = "linux"))]
     impl Drop for RestoreGuard {
         fn drop(&mut self) {
             // Best-effort: `Drop` must not unwind, and a failed restore only
@@ -204,18 +193,23 @@ mod tests {
     fn minimize_restore_roundtrip() {
         #[cfg(target_os = "linux")]
         {
-            // AT-SPI has no API to alter window state; the verb must fail
-            // surfaceably, not silently no-op.
             let app = h::app_root();
             let win = h::one(&app, "window");
-            let err = win
-                .minimize()
-                .expect_err("minimize must be unsupported on Linux");
-            assert!(matches!(err, Error::Unsupported { .. }), "got {err:?}");
-            assert!(
-                matches!(win.restore(), Err(Error::Unsupported { .. })),
-                "restore must also be unsupported on Linux"
-            );
+            if win.actions.iter().any(|action| action == "minimize") {
+                let _restore_guard = RestoreGuard { win: win.clone() };
+                win.minimize().expect("native Linux minimize must succeed");
+                assert_minimized(&app, true, "the X11 window to report minimized");
+                win.restore().expect("native Linux restore must succeed");
+                assert_minimized(&app, false, "the X11 window to report restored");
+            } else {
+                let err = win
+                    .minimize()
+                    .expect_err("minimize must fail when the backend omits it");
+                assert!(
+                    matches!(err, Error::Unsupported { .. }),
+                    "expected Unsupported, got {err:?}"
+                );
+            }
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -237,35 +231,153 @@ mod tests {
     #[ignore]
     #[cfg(target_os = "linux")]
     fn linux_window_verbs_are_unsupported_not_faked() {
-        // AT-SPI has no API to alter window state or close a window. Every
-        // verb must fail surfaceably with the same `Unsupported` error rather
-        // than falling back to input simulation (tenet 2) — including the
-        // verbs a previous revision omitted from the assertion set.
+        // The selected native backend advertises only what it can perform.
+        // Every absent verb fails surfaceably instead of falling back to a
+        // shortcut or another backend.
         let app = h::app_root();
         let win = h::one(&app, "window");
-        for (label, result) in [
-            ("minimize", win.minimize()),
-            ("maximize", win.maximize()),
-            ("enter_fullscreen", win.enter_fullscreen()),
-            ("restore", win.restore()),
-            ("close", win.close()),
-        ] {
-            let err = result.expect_err(&format!("{label} must be unsupported on Linux"));
+        for label in ["minimize", "maximize", "move_to", "resize_to"] {
+            if win.actions.iter().any(|action| action == label) {
+                continue;
+            }
+            let result = match label {
+                "minimize" => win.minimize(),
+                "maximize" => win.maximize(),
+                "move_to" => win.move_to(0, 0),
+                "resize_to" => win.resize_to(100, 100),
+                _ => unreachable!("fixed verb list"),
+            };
+            let err = result.expect_err(&format!("{label} must fail when not advertised"));
             assert!(
                 matches!(err, Error::Unsupported { .. }),
                 "{label}: expected Unsupported, got {err:?}"
             );
         }
-        for (label, result) in [
-            ("move_to", win.move_to(0, 0)),
-            ("resize_to", win.resize_to(100, 100)),
-        ] {
-            let err = result.expect_err(&format!(
-                "{label} must report that AccessKit omits the AT-SPI setter"
-            ));
+    }
+
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "linux")]
+    fn sway_fullscreen_roundtrip_and_capabilities() {
+        if std::env::var("XDG_CURRENT_DESKTOP").as_deref() != Ok("sway") {
+            return;
+        }
+        let app = h::app_root();
+        let window = h::one(&app, "window");
+        assert_eq!(
+            window
+                .raw
+                .get("window_backend")
+                .and_then(|value| value.as_str()),
+            Some("wayland-sway-wlr-foreign-toplevel")
+        );
+        let capabilities = window
+            .raw
+            .get("window_capabilities")
+            .and_then(|value| value.as_object())
+            .expect("Sway window must report tri-state capabilities");
+        assert_eq!(
+            capabilities
+                .get("enter_fullscreen")
+                .and_then(|v| v.as_str()),
+            Some("supported")
+        );
+        assert_eq!(
+            capabilities.get("maximize").and_then(|v| v.as_str()),
+            Some("unsupported")
+        );
+        for action in ["activate", "enter_fullscreen", "restore", "close"] {
             assert!(
-                matches!(err, Error::ActionNotSupported { .. }),
-                "{label}: expected ActionNotSupported, got {err:?}"
+                window.actions.iter().any(|candidate| candidate == action),
+                "Sway window must advertise {action}: {:?}",
+                window.actions
+            );
+        }
+        for action in ["minimize", "maximize", "move_to", "resize_to"] {
+            assert!(
+                !window.actions.iter().any(|candidate| candidate == action),
+                "tiled Sway window must not advertise {action}: {:?}",
+                window.actions
+            );
+        }
+
+        window
+            .enter_fullscreen()
+            .expect("Sway fullscreen request must be accepted");
+        wait_until(Duration::from_secs(5), "Sway fullscreen state", || {
+            let fresh = h::one(&app, "window");
+            (fresh.states.fullscreen == Some(true)).then_some(())
+        });
+        h::one(&app, "window")
+            .restore()
+            .expect("Sway fullscreen restore must be accepted");
+        wait_until(Duration::from_secs(5), "Sway restored state", || {
+            let fresh = h::one(&app, "window");
+            (fresh.states.fullscreen == Some(false)).then_some(())
+        });
+    }
+
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "linux")]
+    fn x11_maximize_and_fullscreen_are_distinct() {
+        let app = h::app_root();
+        let window = h::one(&app, "window");
+        if window
+            .raw
+            .get("window_backend")
+            .and_then(|value| value.as_str())
+            != Some("x11-ewmh")
+        {
+            return;
+        }
+        let _restore_guard = RestoreGuard {
+            win: window.clone(),
+        };
+
+        if window.actions.iter().any(|action| action == "maximize") {
+            window.maximize().expect("EWMH maximize must be accepted");
+            wait_until(Duration::from_secs(5), "EWMH maximized state", || {
+                let fresh = h::one(&app, "window");
+                (fresh.states.maximized == Some(true) && fresh.states.fullscreen == Some(false))
+                    .then_some(())
+            });
+            window
+                .maximize()
+                .expect("repeated EWMH maximize must be accepted");
+            window
+                .restore()
+                .expect("EWMH maximize restore must succeed");
+            wait_until(
+                Duration::from_secs(5),
+                "EWMH restored maximize state",
+                || (h::one(&app, "window").states.maximized == Some(false)).then_some(()),
+            );
+        }
+
+        if window
+            .actions
+            .iter()
+            .any(|action| action == "enter_fullscreen")
+        {
+            window
+                .enter_fullscreen()
+                .expect("EWMH fullscreen must be accepted");
+            wait_until(Duration::from_secs(5), "EWMH fullscreen state", || {
+                let fresh = h::one(&app, "window");
+                (fresh.states.fullscreen == Some(true) && fresh.states.maximized == Some(false))
+                    .then_some(())
+            });
+            window
+                .enter_fullscreen()
+                .expect("repeated EWMH fullscreen must be accepted");
+            window
+                .restore()
+                .expect("EWMH fullscreen restore must succeed");
+            wait_until(
+                Duration::from_secs(5),
+                "EWMH restored fullscreen state",
+                || (h::one(&app, "window").states.fullscreen == Some(false)).then_some(()),
             );
         }
     }
@@ -460,8 +572,25 @@ mod tests {
         {
             let app = h::app_root();
             let win = h::one(&app, "window");
-            let err = win.close().expect_err("close must be unsupported on Linux");
-            assert!(matches!(err, Error::Unsupported { .. }), "got {err:?}");
+            if win.actions.iter().any(|action| action == "close") {
+                let _guard = DialogCloseGuard;
+                h::try_act(&h::named(&app, "Open Dialog"), "press").expect("press 'Open Dialog'");
+                wait_until(Duration::from_secs(5), "the dialog to appear", || {
+                    dialog_window().map(|_| ())
+                });
+                dialog_window()
+                    .expect("dialog element must resolve")
+                    .close()
+                    .expect("native close must succeed on the dialog");
+                wait_until(Duration::from_secs(5), "the dialog to disappear", || {
+                    dialog_window().is_none().then_some(())
+                });
+            } else {
+                let err = win
+                    .close()
+                    .expect_err("close must fail when no native backend advertises it");
+                assert!(matches!(err, Error::Unsupported { .. }), "got {err:?}");
+            }
             // No `return;` here: on Linux the cfg below removes the
             // non-Linux block, so this is already the last statement.
             // A trailing `return;` is `needless_return` under `-D warnings`.
@@ -489,7 +618,7 @@ mod tests {
 
     #[test]
     #[ignore]
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn move_and_resize_window() {
         // macOS AXPosition / AXSize are settable on the winit window. The
         // read-back is polled because the bridge can round-trip asynchronously.
@@ -521,6 +650,12 @@ mod tests {
 
         let app = h::app_root();
         let win = h::one(&app, "window");
+        if cfg!(target_os = "linux")
+            && (!win.actions.iter().any(|action| action == "move_to")
+                || !win.actions.iter().any(|action| action == "resize_to"))
+        {
+            return;
+        }
 
         // Move by the window's own bounds origin delta so the test is
         // deterministic regardless of where the app was placed — but move

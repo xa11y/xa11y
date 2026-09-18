@@ -14,7 +14,7 @@ xa11y can capture pixel-level snapshots of the screen alongside its accessibilit
 
 The entry points are:
 
-- **Full screen** captures whatever the platform treats as the whole screen. On Windows that is the virtual desktop, which spans every monitor. macOS captures one display, and Linux the X11 root window.
+- **Full screen** captures whatever the platform treats as the whole screen. On Windows that is the virtual desktop, which spans every monitor. macOS captures one display. Linux captures the X11 root window or the Wayland portal's desktop image.
 - **Region** captures an explicit rectangle in logical screen coordinates.
 - **Element** captures the pixels under an accessibility element's current bounds.
 

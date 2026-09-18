@@ -42,9 +42,9 @@ Anti-patterns this rules out:
 
 If multiple mechanisms really do need to be tried, do it explicitly with logged reasoning, not silent fall-through.
 
-### 2. Only expose what accessibility APIs support
+### 2. Semantic platform APIs
 
-If a platform has no accessibility interface for an operation, don't paper over it with input simulation. Leave the action out of the element's `actions` list. Input simulation lives in its own surface (`InputSim`) and is never reached from `locator.press()` automatically.
+Element actions use the platform accessibility API by default. Window actions may use a native window-manager protocol when accessibility has no equivalent. That backend must report its capability and prove the accessibility element's native-window identity before it mutates anything. If no semantic API is available, leave the action out of the element's `actions` list. Input simulation lives in its own surface (`InputSim`) and is never reached from an element or window action.
 
 ### 3. Action fidelity
 

@@ -47,6 +47,19 @@ sleep 1
 export DISPLAY="$XVFB_DISPLAY"
 echo "DISPLAY=$DISPLAY"
 
+# A real EWMH/ICCCM window manager is part of the X11 window-management
+# contract. Xvfb alone is only an X server and exposes no _NET_SUPPORTED or
+# _NET_CLIENT_LIST, so running without fluxbox would quietly skip every native
+# X11 verb.
+if ! command -v fluxbox >/dev/null 2>&1; then
+    echo "error: fluxbox is required for native X11 window integration tests" >&2
+    exit 1
+fi
+echo "Starting fluxbox..."
+fluxbox >/tmp/xa11y-fluxbox.log 2>&1 &
+CLEANUP_PIDS+=($!)
+sleep 1
+
 # 2. Start AT-SPI2 (bus launcher + registryd) and flip the Status flags.
 #    Single source of truth — shared with the per-app harness and the
 #    setup-a11y CI action. The daemons it backgrounds live for the rest of

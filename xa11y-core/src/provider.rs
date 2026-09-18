@@ -384,6 +384,20 @@ pub trait Provider: Send + Sync {
     ///
     /// Activate the window: bring it to the foreground and give it focus.
     ///
+    /// Window verbs may use the platform accessibility API or a native
+    /// window-manager protocol. A native provider must establish a durable
+    /// association from this accessibility element to exactly one native
+    /// window before it mutates state; process lifetime, destroyed/reused
+    /// identifiers, and same-process ambiguity are errors rather than guesses.
+    /// Titles are never sufficient identity by themselves.
+    ///
+    /// Unless a backend documents a stronger postcondition, success means the
+    /// semantic platform request was accepted for delivery. Window managers
+    /// commonly apply it asynchronously; consumers can re-read the element's
+    /// tri-state window flags or bounds to observe completion. Unsupported
+    /// capabilities and refused requests must remain distinct errors, and a
+    /// backend must never substitute simulated input.
+    ///
     /// Required: every `Provider` implements this explicitly. There is no
     /// portable default — each platform's activation mechanism is unique
     /// (AXRaise on macOS, `SetForegroundWindow` on Windows, GrabFocus on

@@ -135,12 +135,11 @@ features:
     per_app: true
     notes: >
       Per-app because window verb support differs by toolkit and adapter:
-      activate is advertised only on Windows and macOS — AT-SPI deliberately
-      never advertises it (the adapters disagree about a frame GrabFocus and
-      no interface probe discriminates them; the python/JS activate suites
-      therefore skip every Linux cell, see the linux_activate_not_advertised
-      gap), minimize and restore demand WindowPattern, and some toolkits
-      cannot move or resize a top-level window at all. The suites adapt via
+      Native X11 and Sway actions are advertised only after PID-backed window
+      identity and capability checks. AT-SPI alone does not advertise
+      activate because adapters disagree about frame GrabFocus. Sway has no
+      minimize or distinct maximize state, while some toolkit accessibility
+      adapters cannot move or resize a top-level window. The suites adapt via
       the app config: python test_window.py + test_window_mutating.py, JS
       06_window.test.js + 07_window_mutating.test.js, and the Rust integ
       suite's windows.rs cover rust_core. The WPF js-window cell subscribes
@@ -262,9 +261,11 @@ rust_core:
     Platform-split event tests: events_linux.rs, events_macos.rs, events_windows.rs.
     windows.rs covers window management verbs + App::windows() against the
     AccessKit app. Success-path coverage is split: enumerate/activate everywhere;
-    minimize/restore/close on macOS + Windows; enter_fullscreen and move/resize
-    geometry are macOS-only today (macOS has no accessible maximize, Windows has
-    no fullscreen API). Windows TransformPattern move is covered end to end
+    minimize/restore/close on macOS + Windows + Linux X11; Linux X11 additionally
+    covers maximize, fullscreen, and move/resize through EWMH, while headless Sway
+    covers native activation/fullscreen and explicit unsupported capabilities.
+    macOS covers enter_fullscreen and move/resize through AX (macOS has no
+    accessible maximize, Windows has no fullscreen API). Windows TransformPattern move is covered end to end
     on the windows-latest winforms cell: the python-window suite's
     test_move_to_and_resize_to_are_enforced_on_winforms requires move_to
     advertised, dispatched, and the reported bounds changed. TransformPattern
@@ -416,9 +417,9 @@ gaps:
     affects:
       apps: [qt, gtk, cocoa]
 
-  - id: linux_activate_not_advertised
+  - id: linux_atspi_activate_not_advertised
     description: >
-      Linux activate is Component.GrabFocus on the top-level frame, and the
+      Linux without a native X11/Sway provider uses Component.GrabFocus on the top-level frame, and the
       AT-SPI adapters disagree about implementing it: the GTK widget adapter
       answers true while Chromium (Electron), WebKitGTK (Tauri — whose
       bridge reports ToolkitName "GTK", so even a toolkit gate cannot
@@ -426,13 +427,15 @@ gaps:
       exposing the Component interface (round-4 CI). No interface or toolkit
       probe discriminates them, and a snapshot-side GrabFocus probe would
       activate windows as a side effect, so xa11y-linux deliberately does NOT
-      advertise `activate` (see build_element_data in atspi.rs). The call
+      advertise `activate` from AT-SPI alone (see build_element_data in
+      atspi.rs). Native X11 and Sway backends advertise activation after
+      proving the target's window identity. The AT-SPI call
       itself stays honest on every toolkit — a false reply or D-Bus
       NotSupported error is ActionNotSupported — and the python/JS activate
       suites therefore skip on the Linux cells instead of failing an
       advertised action their window then declines.
     severity: low
-    workaround: "Windows/macOS integ cells cover advertised activate; Linux explicit activate() returns ActionNotSupported where the adapter declines and succeeds on GTK"
+    workaround: "X11/Sway, Windows, and macOS cover advertised activation; AT-SPI-only explicit activate() reports adapter refusal"
     affects:
       apps: [qt, tauri, electron, gtk]
       language: [python, js]
@@ -441,15 +444,14 @@ gaps:
   - id: rust_core_windows_geometry
     description: >
       The Rust integ suite's window-geometry tests (xa11y/tests/integ/
-      windows.rs) are macOS-only: `move_to` / `resize_to` /
-      `enter_fullscreen` are asserted for real only against the AccessKit app
-      on macOS, and the
-      suite never runs against the WinForms app. The Windows TransformPattern
+      windows.rs) exercise `move_to` / `resize_to` against the AccessKit app
+      on macOS and Linux X11, plus native fullscreen on macOS, X11, and Sway.
+      The suite still never runs against the WinForms app. The Windows TransformPattern
       path is exercised elsewhere — the CLI suite's test_window.py dispatches
       move-to/resize-to on the windows-latest winforms cell, and the
       python-window / js-window suites drive the same verbs through the
       bindings there — but the Rust suite's own per-platform matrix for
-      geometry is a gap.
+      geometry remains a Windows-specific gap.
     severity: low
     workaround: "CLI suite test_window.py + python-window/js-window suites (winforms cell) exercise the Windows TransformPattern path; binding-level close wiring stays mock+CLI-covered (closing the shared app window would kill it mid-run)"
     affects:

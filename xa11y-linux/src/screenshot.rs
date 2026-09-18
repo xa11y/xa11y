@@ -28,6 +28,8 @@ use zbus::MatchRule;
 
 use xa11y_core::{Error, Point, Rect, Result, Screenshot, ScreenshotProvider};
 
+use crate::session::{select_backend, DesktopBackend};
+
 /// Choose the Linux screenshot backend based on session environment.
 pub struct LinuxScreenshot {
     backend: Backend,
@@ -51,46 +53,42 @@ struct X11Backend {
 
 impl LinuxScreenshot {
     pub fn new() -> Result<Self> {
-        let display_set = std::env::var_os("DISPLAY").is_some();
-        let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
-
-        if display_set {
-            let (conn, screen_num) =
-                RustConnection::connect(None).map_err(|e| Error::Platform {
+        match select_backend("XA11Y_LINUX_SCREENSHOT_BACKEND", "screenshot capture")? {
+            DesktopBackend::X11 => {
+                let (conn, screen_num) =
+                    RustConnection::connect(None).map_err(|e| Error::Platform {
+                        code: -1,
+                        message: format!("X11 connect: {e}"),
+                    })?;
+                let screen = conn
+                    .setup()
+                    .roots
+                    .get(screen_num)
+                    .ok_or_else(|| Error::Platform {
+                        code: -1,
+                        message: "X server reported no screens".into(),
+                    })?;
+                let root = screen.root;
+                let root_width = screen.width_in_pixels;
+                let root_height = screen.height_in_pixels;
+                Ok(Self {
+                    backend: Backend::X11(Box::new(X11Backend {
+                        conn: Mutex::new(conn),
+                        root,
+                        root_width,
+                        root_height,
+                    })),
+                })
+            }
+            DesktopBackend::Wayland => {
+                let conn = ZbusConnection::session().map_err(|e| Error::Platform {
                     code: -1,
-                    message: format!("X11 connect: {e}"),
+                    message: format!("session bus connect for Wayland screenshot portal: {e}"),
                 })?;
-            let screen = conn
-                .setup()
-                .roots
-                .get(screen_num)
-                .ok_or_else(|| Error::Platform {
-                    code: -1,
-                    message: "X server reported no screens".into(),
-                })?;
-            let root = screen.root;
-            let root_width = screen.width_in_pixels;
-            let root_height = screen.height_in_pixels;
-            Ok(Self {
-                backend: Backend::X11(Box::new(X11Backend {
-                    conn: Mutex::new(conn),
-                    root,
-                    root_width,
-                    root_height,
-                })),
-            })
-        } else if wayland {
-            let conn = ZbusConnection::session().map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("session bus connect: {e}"),
-            })?;
-            Ok(Self {
-                backend: Backend::Wayland { conn },
-            })
-        } else {
-            Err(Error::Unsupported {
-                feature: "screenshot (no DISPLAY or WAYLAND_DISPLAY set)".into(),
-            })
+                Ok(Self {
+                    backend: Backend::Wayland { conn },
+                })
+            }
         }
     }
 

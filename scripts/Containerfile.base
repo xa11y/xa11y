@@ -10,7 +10,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # display, and nothing else here vends one.
 RUN apt-get update && apt-get install -y \
     curl build-essential pkg-config \
-    xvfb dbus dbus-x11 \
+    xvfb fluxbox dbus dbus-x11 \
     libxkbcommon-x11-0 libxkbcommon-x11-dev libxkbcommon-dev \
     libxcursor1 libxcursor-dev \
     libxrandr2 libxrandr-dev \

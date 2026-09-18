@@ -41,7 +41,12 @@ Integration tests use shared helpers from `xa11y/tests/integ/mod.rs`:
    - `if let Ok(x) = some_call() { ... } // else fall through` — this treats a real error as "no match". Match on the specific expected variant (e.g. `Err(Error::SelectorNotMatched)`) and propagate the rest.
    - Fallback chains: try A, on failure try B, on failure try C. Each step hides the original failure and changes effective behavior. If multiple mechanisms genuinely need to be tried, do it explicitly with logged reasoning, not silent fall-through.
 
-2. **Only expose what accessibility APIs support.** If a platform has no accessibility interface for an operation, don't implement it with input simulation — leave it out.
+2. **Use semantic platform APIs, never simulated input.** Element actions use
+   the platform accessibility API by default. Window actions may use a native
+   window-manager protocol when accessibility has no equivalent, provided the
+   backend reports the capability and proves accessibility-to-window identity
+   before mutating. Never implement an element or window action with simulated
+   keyboard or pointer input; leave it out when no semantic API is available.
 
 3. **Action fidelity.** If an element reports an action name in its `actions` list, calling that action must invoke the original platform action — not a substitute or alias.
 

@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Linux accessibility backend for xa11y: AT-SPI2 introspection, X11/Wayland input simulation, and screen capture"
+description = "Linux backend for xa11y: AT-SPI2, native window management, input simulation, and screen capture"
 
 [dependencies]
 xa11y-core = { workspace = true }

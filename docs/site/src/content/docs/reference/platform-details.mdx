@@ -77,16 +77,16 @@ Roles not recognized by a platform map to `Unknown`.
 Window verbs map differently again, because each platform's window control
 API is separate from its element-action interface:
 
-| xa11y Action | macOS | Linux (AT-SPI) | Windows (UIA) |
-| --- | --- | --- | --- |
-| `Activate` | activate app *(set AXFrontmost)*, restore if minimized, then AXRaise | Component.GrabFocus *(same path as Focus)* | restore if minimized, then SetForegroundWindow and SetFocus |
-| `Minimize` | clear AXFullScreen when fullscreen, then set AXMinimized=true | *(unsupported)* | WindowPattern.SetWindowVisualState(Minimized) |
-| `Maximize` | *(unsupported)* | *(unsupported)* | WindowPattern.SetWindowVisualState(Maximized) |
-| `EnterFullscreen` | set AXFullScreen=true | *(unsupported)* | *(unsupported)* |
-| `Restore` | clear AXMinimized; set AXFullScreen=false | *(unsupported)* | WindowPattern.SetWindowVisualState(Normal) |
-| `Close` | press the AXCloseButton | *(unsupported)* | WindowPattern.Close |
-| `MoveTo` | set AXPosition | *(unsupported)* | TransformPattern.Move *(physical pixel conversion)* |
-| `ResizeTo` | set AXSize | *(unsupported)* | TransformPattern.Resize *(physical pixel conversion)* |
+| xa11y Action | macOS | Linux X11 | Linux Wayland (Sway) | Windows (UIA) |
+| --- | --- | --- | --- | --- |
+| `Activate` | activate app, restore if minimized, then AXRaise | `_NET_ACTIVE_WINDOW` | Sway `focus` | restore if minimized, then SetForegroundWindow and SetFocus |
+| `Minimize` | clear AXFullScreen when fullscreen, then set AXMinimized=true | ICCCM `WM_CHANGE_STATE(IconicState)` | unsupported | WindowPattern.SetWindowVisualState(Minimized) |
+| `Maximize` | unsupported | `_NET_WM_STATE_MAXIMIZED_HORZ` + `_VERT` | unsupported | WindowPattern.SetWindowVisualState(Maximized) |
+| `EnterFullscreen` | set AXFullScreen=true | `_NET_WM_STATE_FULLSCREEN` | Sway `fullscreen enable` | unsupported |
+| `Restore` | clear AXMinimized; set AXFullScreen=false | map and remove fullscreen/maximized EWMH states | Sway `fullscreen disable` | WindowPattern.SetWindowVisualState(Normal) |
+| `Close` | press the AXCloseButton | `_NET_CLOSE_WINDOW` | Sway `kill` | WindowPattern.Close |
+| `MoveTo` | set AXPosition | `_NET_MOVERESIZE_WINDOW` | Sway `move position` for floating windows | TransformPattern.Move |
+| `ResizeTo` | set AXSize | `_NET_MOVERESIZE_WINDOW` | Sway `resize set` for floating windows | TransformPattern.Resize |
 
 `Maximize` and `EnterFullscreen` are distinct operations, not two names for
 one state: macOS has no accessible `maximize` (see below) and Windows has no
@@ -103,9 +103,34 @@ windows answer `kAXErrorAttributeUnsupported` for it), so `maximized` is
 always `None` on macOS. Entries into native fullscreen report through
 `fullscreen`. Windows reads `minimized` and `maximized` from
 `WindowPattern.CurrentWindowVisualState` but cannot report `fullscreen`;
-Linux reads `minimized` from the AT-SPI `ICONIFIED` bit and cannot report
-`maximized` or `fullscreen`. `modal` is `WindowPattern.CurrentIsModal` on
-Windows and `AXModal` on macOS.
+Linux X11 reads all three states from `_NET_WM_STATE`. Sway reports
+`fullscreen`; `minimized` and `maximized` stay unknown because Sway has no
+such states. Other Wayland compositors retain the AT-SPI `ICONIFIED` reading
+for `minimized` and leave the other states unknown. `modal` is
+`WindowPattern.CurrentIsModal` on Windows and `AXModal` on macOS.
+
+An advertised window verb means the current native backend reported support
+and the accessibility target resolved to one native window. A missing verb is
+unsupported or unresolved for that snapshot. A direct call returns
+`Unsupported` with the missing capability or identity reason. Window states
+are tri-state: `Some(true)` and `Some(false)` are observed values, while
+`None` is unknown.
+
+Linux snapshots also expose `raw.window_capabilities`, with one of
+`supported`, `unsupported`, or `unknown` for each window verb. `unknown` means
+no native backend or reliable identity was available. `raw.window_backend`
+names the provider when resolution succeeded (`x11-ewmh` or
+`wayland-sway-wlr-foreign-toplevel`). These raw fields are diagnostic; the
+portable dispatch contract remains the `actions` list plus the method error.
+On Sway, `raw.window_protocol_version` records the advertised wlr protocol
+version used for capability detection.
+
+X11 and Sway success means the native request was accepted for delivery. The
+window manager applies requests asynchronously, so callers that require an
+observed postcondition should fetch a new snapshot and wait for the state or
+bounds. A compositor refusal or stale target is an error, as is ambiguous identity.
+Maximized and fullscreen remain separate states. `Restore` clears every state
+that the selected backend can represent.
 
 ## Platform caveats
 
@@ -265,12 +290,43 @@ xa11y supports both X11 and Wayland Linux sessions. Backends are selected at run
 | Accessibility (AT-SPI2) | D-Bus, no display-server dependency | D-Bus, no display-server dependency |
 | Input simulation | `XTest` extension (no setup) | `/dev/uinput` virtual evdev device (requires `input` group) |
 | Screen capture | `GetImage` on the root window | PNG URI from `org.freedesktop.portal.Screenshot` |
+| Window management | EWMH/ICCCM | Sway native IPC, gated by `zwlr_foreign_toplevel_manager_v1` |
 
-The selection rule:
+Auto selection uses these rules independently for input, screenshots, and
+window management:
 
-- `DISPLAY` set → X11 (regardless of `WAYLAND_DISPLAY`).
-- Otherwise → Wayland: uinput for input, screenshot portal for capture.
-- Screenshot also returns `Unsupported` if neither `DISPLAY` nor `WAYLAND_DISPLAY` is set.
+- A usable `XDG_SESSION_TYPE` identifies the desktop session.
+- When both display variables are present, xa11y selects Wayland because
+  `DISPLAY` names the XWayland compatibility endpoint in that configuration.
+- A stale session type falls back to the live endpoint.
+- No endpoint returns an `Unsupported` error that explains the missing endpoint.
+
+Set `XA11Y_LINUX_INPUT_BACKEND`, `XA11Y_LINUX_SCREENSHOT_BACKEND`, or
+`XA11Y_LINUX_WINDOW_BACKEND` to `x11` or `wayland` for an explicit route.
+`auto` restores detection. Each override is independent, and a missing
+endpoint is an error instead of a fallback to another backend.
+
+#### Native window identity and support
+
+X11 resolves AT-SPI windows against `_NET_CLIENT_LIST`. It requires an exact
+`_NET_WM_PID` match. For a process with multiple windows, live frame geometry
+and then the title narrow the candidates within that PID. Title is never identity on its own.
+Every action resolves again, which catches destroyed windows and XID reuse.
+
+The initial native Wayland backend targets Sway. It requires Sway's IPC socket
+and the compositor's advertised wlr foreign-toplevel protocol. The wlr
+protocol has no PID or accessibility identifier, so xa11y uses the Sway tree
+to prove PID-backed identity and to issue the compositor request. That tree
+contains native Wayland and XWayland toplevels, and duplicate candidates fail
+as ambiguous. Other compositors such as GNOME and KDE Plasma currently report
+native window actions as unsupported. They do not receive simulated shortcuts.
+
+Sway supports activation, fullscreen entry and exit, and close. Its model has
+no minimized state or maximized state distinct from fullscreen. Move and resize
+are advertised only for floating containers. X11 capabilities come from the
+window manager's `_NET_SUPPORTED` list. Linux window-state events still come
+from AT-SPI; EWMH and Sway state changes without a corresponding AT-SPI event
+must be observed by reading a new snapshot.
 
 #### Why uinput instead of libei + portal RemoteDesktop?
 
@@ -286,14 +342,14 @@ The Screenshot portal usually auto-approves for non-interactive callers (`intera
 
 `Element.bounds` and input `Point`s are logical (device-independent) coordinates, matching the cross-platform contract, and `Screenshot.scale` reports the physical-to-logical ratio. The scale is detected best-effort and is exact where it can be read reliably:
 
-- **Pure X11, integer scaling.** Read from `Xft.dpi` in the X `RESOURCE_MANAGER` (the same signal GTK/Qt use). AT-SPI extents and `XTest` are physical, so bounds are divided and input points multiplied by it.
+- **X11, integer scaling.** Read from `Xft.dpi` in the X `RESOURCE_MANAGER` (the same signal GTK/Qt use). AT-SPI extents and `XTest` are physical, so bounds are divided and input points multiplied by it.
 - **Single-output Wayland, integer or fractional.** The exact ratio `physical_mode / logical_size` from `xdg-output` (e.g. `1920 / 1280 = 1.5`), rather than the rounded `wl_output.scale`.
 
 Every other configuration fails closed to `1.0`, so the data is never wrong. There, bounds stay physical and the scale is not upscaled, but capture and input round-trips remain correct because bounds and pixels stay in the same space:
 
 - **Fractional X11.** GTK's X11 window scale is integer-only, so a fractional `Xft.dpi` scales fonts, not the coordinate space.
 - **Multi-monitor mixed-DPI Wayland.** A single scalar can't represent per-monitor scales, so it falls back to the largest integer `wl_output.scale` (the Windows backend has the same limitation).
-- **XWayland** (both `DISPLAY` and `WAYLAND_DISPLAY` set) runs capture through the X11 backend, so the reported scale follows the X11 source and stays `1.0`, consistent with that backend.
+- **XWayland in a Wayland session.** Auto selection uses the Wayland screenshot portal and output scale. An explicit screenshot override of `x11` uses the X11 source, which stays `1.0` under XWayland.
 
 `Point` arguments to input simulation, after the logical→physical conversion, are mapped onto the uinput virtual coordinate range. Override the assumed screen size (default 1920×1080) with `XA11Y_SCREEN_WIDTH` / `XA11Y_SCREEN_HEIGHT` env vars if your setup differs.
 

@@ -9,8 +9,8 @@
 //!   or surfaces `PermissionDenied`/`Unsupported`, but **never** the old
 //!   "no backend on Wayland" `Unsupported` that the libei-only backend
 //!   used to return.
-//! - The screenshot provider picks the Wayland branch when only
-//!   `WAYLAND_DISPLAY` is set, and the X11 branch when `DISPLAY` is set.
+//! - The screenshot provider picks Wayland when `WAYLAND_DISPLAY` is set and
+//!   X11 for a pure `DISPLAY` session.
 //!
 //! Env mutation is serialised by `ENV_LOCK` and each test save/restore
 //! the prior values, so they're safe to run as part of
