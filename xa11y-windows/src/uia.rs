@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use windows::core::{implement, BOOL};
 use windows::Win32::Foundation::*;
@@ -3646,8 +3646,7 @@ fn map_uia_control_type(control_type: UIA_CONTROLTYPE_ID) -> Role {
 /// Moves a COM interface into a `Send` closure. COM in MTA (the apartment
 /// xa11y uses) serializes access via proxies, so transferring a raw pointer
 /// across threads is safe as long as every dereference happens under MTA —
-/// which is the case for the cancel closure, run from the subscriber's
-/// thread on Subscription drop.
+/// which is the case for the shared registration worker and UIA callbacks.
 ///
 /// Mirrors the `unsafe impl Send for WindowsProvider` assertion in this file:
 /// the same MTA guarantee holds for every COM type we need to capture.
@@ -3658,6 +3657,97 @@ fn map_uia_control_type(control_type: UIA_CONTROLTYPE_ID) -> Role {
 /// forces the full wrapper to be captured.
 struct ComSend<T> {
     inner: T,
+}
+
+type RegistrationJob = Box<dyn FnOnce() + Send + 'static>;
+
+#[derive(Clone)]
+struct RegistrationWorkerError {
+    code: i64,
+    message: String,
+}
+
+static REGISTRATION_WORKER: OnceLock<
+    std::result::Result<std::sync::mpsc::Sender<RegistrationJob>, RegistrationWorkerError>,
+> = OnceLock::new();
+
+/// Return the process-wide UIA registration worker.
+///
+/// UI Automation requires every event-handler registration and removal to be
+/// made from the same thread. Providers and subscriptions can be created and
+/// dropped from arbitrary runtime threads, so the worker is process-wide,
+/// long-lived, and explicitly enters the MTA before accepting work.
+fn registration_worker() -> Result<std::sync::mpsc::Sender<RegistrationJob>> {
+    REGISTRATION_WORKER
+        .get_or_init(|| {
+            let (jobs_tx, jobs_rx) = std::sync::mpsc::channel::<RegistrationJob>();
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
+            std::thread::Builder::new()
+                .name("xa11y-uia-registration".to_string())
+                .spawn(move || {
+                    let initialized =
+                        ensure_com_initialized().map_err(|e| RegistrationWorkerError {
+                            code: e.code().0 as i64,
+                            message: format!(
+                                "COM initialization failed on UIA registration worker: {e}"
+                            ),
+                        });
+                    if ready_tx.send(initialized.clone()).is_err() || initialized.is_err() {
+                        return;
+                    }
+                    for job in jobs_rx {
+                        job();
+                    }
+                })
+                .map_err(|e| RegistrationWorkerError {
+                    code: -1,
+                    message: format!("Failed to start UIA registration worker: {e}"),
+                })?;
+            ready_rx.recv().map_err(|e| RegistrationWorkerError {
+                code: -1,
+                message: format!("UIA registration worker exited during startup: {e}"),
+            })??;
+            Ok(jobs_tx)
+        })
+        .clone()
+        .map_err(|e| Error::Platform {
+            code: e.code,
+            message: e.message,
+        })
+}
+
+/// Run one registration operation on the shared worker and wait for its
+/// result. Callbacks never use this synchronous form: a removal can wait for
+/// an in-flight callback, so making a callback wait for the worker would form
+/// a UIA callback/removal deadlock.
+fn on_registration_worker<T, F>(operation: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    let worker = registration_worker()?;
+    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(0);
+    worker
+        .send(Box::new(move || {
+            let _ = result_tx.send(operation());
+        }))
+        .map_err(|e| Error::Platform {
+            code: -1,
+            message: format!("UIA registration worker is unavailable: {e}"),
+        })?;
+    result_rx.recv().map_err(|e| Error::Platform {
+        code: -1,
+        message: format!("UIA registration worker stopped before completing an operation: {e}"),
+    })?
+}
+
+fn queue_registration_job(operation: impl FnOnce() + Send + 'static) -> Result<()> {
+    registration_worker()?
+        .send(Box::new(operation))
+        .map_err(|e| Error::Platform {
+            code: -1,
+            message: format!("UIA registration worker is unavailable: {e}"),
+        })
 }
 unsafe impl<T> Send for ComSend<T> {}
 
@@ -3712,12 +3802,11 @@ struct SubscriptionState {
     /// desktop-scoped watch must never attach to a later process that reuses
     /// the subscribed app's pid.
     saved_app: Option<SavedSyntheticAppIdentity>,
-    /// Serializes the whole reconcile sequence (enumerate, diff, register,
-    /// tear down) against concurrent reconcile runs and against the cancel
-    /// closure. UIA event handlers can be invoked concurrently, so without
-    /// this two reconciles could compute the same `to_add` and attach one
-    /// window's handlers twice, and cancel could drain the map while a
-    /// reconcile re-registers a window (leaking its handlers).
+    /// Keeps each subscription's bookkeeping transaction explicit. Native
+    /// Add*/Remove* work is already serialized across *all* subscriptions by
+    /// the process-wide registration worker; this lock also documents and
+    /// protects the state transaction if non-UIA bookkeeping is later called
+    /// from another path.
     reconciliation: Mutex<()>,
     /// Set once, under `reconciliation`, when the subscription is cancelled.
     /// An in-flight reconcile that started before the flag was set finishes
@@ -3736,8 +3825,8 @@ unsafe impl Sync for SubscriptionState {}
 /// whose handle cannot be read must not collapse into one registration key,
 /// which would lose one window's handlers and tear down the wrong
 /// registration. The subscribe-time path propagates the error (tenet 1);
-/// background reconciliation logs it and skips the window, and the next
-/// open/close event re-runs the sync.
+/// background reconciliation retries it and disconnects the event source if
+/// readiness still cannot be established.
 fn window_handle(el: &IUIAutomationElement) -> Result<usize> {
     match unsafe { el.CurrentNativeWindowHandle() } {
         Ok(h) => Ok(h.0 as usize),
@@ -4026,47 +4115,31 @@ fn remove_handlers_of(
 ///
 /// Used by the open/close watch after each event and once by `subscribe_impl`
 /// right after the watch is registered, so a window that opened during the
-/// subscribe-time enumeration is attached too. Failures here cannot reach a
-/// caller (the watch is fire-and-forget), so they are diagnosed on stderr
-/// (tenet 1: log what a background path cannot propagate — the next
-/// open/close event re-runs the sync).
+/// subscribe-time enumeration is attached too. The caller decides whether a
+/// failure can be returned (subscribe) or should be retried and diagnosed
+/// (the asynchronous watch path).
 fn sync_registrations(
     state: &SubscriptionState,
     cache: &IUIAutomationCacheRequest,
     ctx: &EventContext,
     pid: u32,
-) {
-    // The whole diff/register/teardown sequence is serialized: UIA event
-    // handlers may run concurrently, and two reconciles that both compute
-    // the same `to_add` would attach the same window's handlers twice
-    // (delivering every event twice) then race on the same map slot. The
-    // cancel closure takes the same lock, so it either finishes first — in
-    // which case `cancelled` is set and this reconcile registers nothing —
-    // or waits until this reconcile has registered everything, then drains
-    // it. (UIA delivers events asynchronously from its worker threads, so
-    // the handler-add calls under this lock cannot re-enter
-    // `sync_registrations` on the same thread.)
+) -> Result<bool> {
+    // The process-wide worker serializes native registration operations
+    // across subscriptions. This per-subscription guard makes the associated
+    // diff and bookkeeping one transaction as well.
     let _guard = state
         .reconciliation
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     if state.cancelled.load(Ordering::SeqCst) {
-        return;
+        return Ok(false);
     }
     let autom = state.automation.get();
     let current = match state.saved_app {
         Some(saved) => top_level_windows_of_saved_app_with(autom, cache, saved),
         None => top_level_windows_of_pid_with(autom, pid, cache),
     };
-    let current = match current {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!(
-                "window-reconciliation identity check or enumeration failed for pid {pid}: {e:?}"
-            );
-            return;
-        }
-    };
+    let current = current?;
     // Resolve every window's native handle once, building the map the
     // add-pass needs so no handle is read a second time (a second failure
     // would silently leave a newly opened window unregistered until some
@@ -4078,19 +4151,8 @@ fn sync_registrations(
     // adds — teardown is skipped so an existing registration survives until a
     // sync that sees every window cleanly.
     let mut current_by_hwnd: HashMap<usize, &IUIAutomationElement> = HashMap::new();
-    let mut unreadable = 0usize;
     for w in &current {
-        match window_handle(w) {
-            Ok(h) => {
-                current_by_hwnd.insert(h, w);
-            }
-            Err(e) => {
-                unreadable += 1;
-                eprintln!(
-                    "window-reconciliation: pid {pid} window with unreadable handle (preserving any registration): {e:?}"
-                );
-            }
-        }
+        current_by_hwnd.insert(window_handle(w)?, w);
     }
     let current_hwnds: HashSet<usize> = current_by_hwnd.keys().copied().collect();
     let registered_hwnds: HashSet<usize> = {
@@ -4101,40 +4163,33 @@ fn sync_registrations(
 
     // Tear down closed windows first: any subsequent open keeps the remaining
     // registrations intact, and a closed window cannot accept new handlers.
-    // Skipped entirely when any window could not be identified — see above.
-    if unreadable == 0 {
-        for hwnd in to_remove {
-            let reg = {
-                let mut m = state.registered.lock().unwrap_or_else(|e| e.into_inner());
-                m.remove(&hwnd)
-            };
-            if let Some(reg) = reg {
-                remove_handlers_of(
-                    autom,
-                    reg.element.get(),
-                    &reg.automation_ids,
-                    state.automation_handler.get(),
-                    state.property_handler.get(),
-                    state.structure_handler.get(),
-                );
-            }
-            let mut states = state
-                .visual_states
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            states.remove(&hwnd);
+    for hwnd in to_remove {
+        let reg = {
+            let mut m = state.registered.lock().unwrap_or_else(|e| e.into_inner());
+            m.remove(&hwnd)
+        };
+        if let Some(reg) = reg {
+            remove_handlers_of(
+                autom,
+                reg.element.get(),
+                &reg.automation_ids,
+                state.automation_handler.get(),
+                state.property_handler.get(),
+                state.structure_handler.get(),
+            );
         }
-    } else if !to_remove.is_empty() {
-        eprintln!(
-            "window-reconciliation: skipping teardown for pid {pid}: {unreadable} window(s) had an unreadable handle"
-        );
+        let mut states = state
+            .visual_states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        states.remove(&hwnd);
     }
 
     for hwnd in to_add {
         let Some(window) = current_by_hwnd.get(&hwnd).copied() else {
             continue;
         };
-        match register_window_handlers(
+        let reg = register_window_handlers(
             autom,
             window,
             hwnd,
@@ -4144,16 +4199,11 @@ fn sync_registrations(
             state.property_handler.get(),
             state.structure_handler.get(),
             &state.visual_states,
-        ) {
-            Ok(reg) => {
-                let mut m = state.registered.lock().unwrap_or_else(|e| e.into_inner());
-                m.insert(reg.hwnd, reg);
-            }
-            Err(e) => {
-                eprintln!("failed to attach event handlers to pid {pid} window {hwnd:#x}: {e:?}");
-            }
-        }
+        )?;
+        let mut m = state.registered.lock().unwrap_or_else(|e| e.into_inner());
+        m.insert(reg.hwnd, reg);
     }
+    Ok(true)
 }
 
 /// Best-effort removal of every registration of a subscription: the desktop
@@ -4168,13 +4218,10 @@ fn cleanup_registrations(
     focus: &IUIAutomationFocusChangedEventHandler,
     state: &SubscriptionState,
 ) {
-    // Stop reconciles from registering anything further, and drain the
-    // per-window records — atomically under the reconciliation lock, the
-    // same critical section `sync_registrations` runs in. Remove* calls
-    // happen *outside* the lock: UIA's RemoveXxx waits for in-flight handler
-    // callbacks, and a WatchHandler callback running `sync_registrations`
-    // itself waits for the reconciliation lock — holding the lock across
-    // Remove* would deadlock teardown on that callback.
+    // Stop reconciles from registering anything further and drain the
+    // per-window records under the same bookkeeping guard used by sync.
+    // Remove* stays outside that guard because UIA may wait for in-flight
+    // callbacks; callbacks only enqueue worker jobs and never wait for them.
     let regs: Vec<RegisteredWindow> = {
         let _guard = state
             .reconciliation
@@ -4207,12 +4254,11 @@ fn cleanup_registrations(
 
 /// Shared context passed to every UIA event handler.
 ///
-/// `sender` is wrapped in a `Mutex` because `mpsc::Sender` is `!Sync`
-/// (its internal inner is `UnsafeCell`-like), while handler callbacks may be
-/// invoked concurrently from the UIA MTA background thread. The lock is only
-/// held for the duration of a single channel push, so contention is trivial.
+/// `sender` is optional so a terminal background-registration failure can
+/// disconnect the stream and become visible to a waiting consumer. The mutex
+/// keeps that transition atomic with concurrent callback sends.
 struct EventContext {
-    sender: Mutex<std::sync::mpsc::Sender<Event>>,
+    sender: Mutex<Option<std::sync::mpsc::Sender<Event>>>,
     app_name: String,
     app_pid: u32,
     /// The saved generation for a synthetic App subscription. Global focus
@@ -4243,10 +4289,23 @@ impl EventContext {
             timestamp: std::time::Instant::now(),
         }
         .into();
-        if let Ok(tx) = self.sender.lock() {
+        if let Some(tx) = self
+            .sender
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
             // Receiver may be dropped after close(); lost event is expected then.
             let _ = tx.send(event);
         }
+    }
+
+    /// Make a terminal background-registration failure visible to consumers.
+    /// `wait_for` reports the disconnected source immediately rather than
+    /// timing out against a subscription that can no longer meet its event
+    /// contract.
+    fn disconnect(&self) {
+        self.sender.lock().unwrap_or_else(|e| e.into_inner()).take();
     }
 
     /// Best-effort PID filter. `AddFocusChangedEventHandler` is process-wide,
@@ -4667,15 +4726,50 @@ impl IUIAutomationEventHandler_Impl for WatchHandler_Impl {
                 } else {
                     EventKind::WindowClosed
                 };
-                // Reconcile *before* emitting: a consumer that reacts to
-                // WindowOpened by driving the new window (minimize, close)
-                // must find its handlers already attached and its baseline
-                // seeded, or that first transition's event is raised to
-                // nobody. `sync_registrations` is idempotent and serialized
-                // by its own lock, so a concurrent reconcile is safe.
-                sync_registrations(&self.state, &self.cache, &self.ctx, self.ctx.app_pid);
                 let target = self.ctx.snapshot_or_log(el, &self.cache);
-                self.ctx.emit(kind, target);
+                let state = Arc::clone(&self.state);
+                let ctx = Arc::clone(&self.ctx);
+                let failure_ctx = Arc::clone(&self.ctx);
+                let cache = ComSend::new(self.cache.clone());
+                let pid = self.ctx.app_pid;
+
+                // Never register from a UIA callback thread. Queue the whole
+                // reconcile on the process-wide MTA worker and return so a
+                // concurrent Remove* cannot wait on a callback that is itself
+                // waiting for removal. WindowOpened is emitted only after the
+                // new window's handlers and visual-state baseline are ready;
+                // a consumer can therefore minimize it immediately without
+                // racing attachment. A newly created provider can be briefly
+                // unavailable, so retry the complete idempotent reconcile.
+                if let Err(e) = queue_registration_job(move || {
+                    const READY_ATTEMPTS: usize = 4;
+                    let mut last_error = None;
+                    for attempt in 0..READY_ATTEMPTS {
+                        match sync_registrations(&state, cache.get(), &ctx, pid) {
+                            Ok(true) => {
+                                ctx.emit(kind, target);
+                                return;
+                            }
+                            Ok(false) => return,
+                            Err(e) => last_error = Some(e),
+                        }
+                        if attempt + 1 < READY_ATTEMPTS {
+                            std::thread::sleep(std::time::Duration::from_millis(25));
+                        }
+                    }
+                    if let Some(e) = last_error {
+                        eprintln!(
+                            "window-reconciliation failed after {READY_ATTEMPTS} attempts for pid {pid}; suppressing {kind:?} because event readiness was not established: {e:?}"
+                        );
+                        ctx.disconnect();
+                    }
+                }) {
+                    eprintln!(
+                        "failed to queue window-reconciliation for pid {}: {e:?}",
+                        self.ctx.app_pid
+                    );
+                    failure_ctx.disconnect();
+                }
             }
             _ => {}
         }
@@ -4762,7 +4856,7 @@ impl WindowsProvider {
         }
 
         let ctx = Arc::new(EventContext {
-            sender: Mutex::new(tx),
+            sender: Mutex::new(Some(tx)),
             app_name,
             app_pid: pid,
             saved_app,
@@ -4824,82 +4918,78 @@ impl WindowsProvider {
         }
         .into();
 
-        // Focus handler is system-wide (UIA has no scope parameter here) —
-        // the handler filters by PID.
-        unsafe { self.automation.AddFocusChangedEventHandler(&cache, &focus) }.map_err(|e| {
-            Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("AddFocusChangedEventHandler failed: {}", e),
-            }
-        })?;
+        // Every Add* call, including initial setup, runs on the same
+        // process-wide MTA worker used by reconciliation and cancellation.
+        // This is stricter than merely serializing each subscription: UIA's
+        // registration contract is thread-affine across subscriptions too.
+        let initial_automation = ComSend::new(self.automation.clone());
+        let initial_windows = ComSend::new(windows);
+        let initial_cache = ComSend::new(cache.clone());
+        let initial_focus = ComSend::new(focus.clone());
+        let initial_watch = ComSend::new(watch.clone());
+        let initial_root = ComSend::new(root.clone());
+        let initial_automation_handler = ComSend::new(automation_handler);
+        let initial_property = ComSend::new(property);
+        let initial_structure = ComSend::new(structure);
+        let initial_state = Arc::clone(&state);
+        let initial_ctx = Arc::clone(&ctx);
+        on_registration_worker(move || {
+            let autom = initial_automation.get();
+            let cache = initial_cache.get();
+            let focus = initial_focus.get();
+            let watch = initial_watch.get();
+            let root = initial_root.get();
 
-        // The desktop-scoped open/close watch is registered *after* the
-        // per-window handlers: while a WindowOpened/WindowClosed event can
-        // only arrive once the watch is live, nothing else can trigger a
-        // reconciliation during the initial registration, so the loop below
-        // cannot race a `sync_registrations` run. If any registration fails,
-        // events of that type would never arrive — the caller must know
-        // (tenet 1). Clean up what was already registered before returning so
-        // no native handler leaks on a half-built subscription.
-        let cleanup_error = |e: Error| {
-            cleanup_registrations(&self.automation, &root, &watch, &focus, &state);
-            e
-        };
-
-        // Per-window handlers on every top-level window of the pid. Each
-        // window's baseline is seeded by register_window_handlers, so the
-        // first WindowVisualState notification is already a true delta. A
-        // window whose native handle cannot be read fails the subscription —
-        // keying it with a sentinel would alias it with every other unreadable
-        // window (see `window_handle`).
-        for window in &windows {
-            let hwnd = window_handle(window).map_err(&cleanup_error)?;
-            match register_window_handlers(
-                &self.automation,
-                window,
-                hwnd,
-                &cache,
-                &ctx,
-                &automation_handler,
-                &property,
-                &structure,
-                &state.visual_states,
-            ) {
-                Ok(reg) => {
-                    let mut m = state.registered.lock().unwrap_or_else(|e| e.into_inner());
-                    m.insert(reg.hwnd, reg);
-                }
-                Err(e) => return Err(cleanup_error(e)),
-            }
-        }
-
-        for eid in WATCH_EVENT_IDS {
-            if let Err(e) = unsafe {
-                self.automation.AddAutomationEventHandler(
-                    *eid,
-                    &root,
-                    TreeScope_Children,
-                    &cache,
-                    &watch,
-                )
-            } {
-                return Err(cleanup_error(Error::Platform {
+            unsafe { autom.AddFocusChangedEventHandler(cache, focus) }.map_err(|e| {
+                Error::Platform {
                     code: e.code().0 as i64,
-                    message: format!(
-                        "AddAutomationEventHandler({:?}) on desktop root failed: {e}",
-                        eid
-                    ),
-                }));
-            }
-        }
+                    message: format!("AddFocusChangedEventHandler failed: {e}"),
+                }
+            })?;
 
-        // A window that opened between the enumeration above and the watch
-        // registration has no WindowOpened event to trigger reconciliation —
-        // sync once after the watch is live. (A window that opened and closed
-        // in the gap is irrelevant: it is gone again. If a watch event fires
-        // concurrently with this sync, the reconciliation lock serializes
-        // them.)
-        sync_registrations(&state, &cache, &ctx, pid);
+            let cleanup_error = |e: Error| {
+                cleanup_registrations(autom, root, watch, focus, &initial_state);
+                e
+            };
+            for window in initial_windows.get() {
+                let hwnd = window_handle(window).map_err(&cleanup_error)?;
+                let reg = register_window_handlers(
+                    autom,
+                    window,
+                    hwnd,
+                    cache,
+                    &initial_ctx,
+                    initial_automation_handler.get(),
+                    initial_property.get(),
+                    initial_structure.get(),
+                    &initial_state.visual_states,
+                )
+                .map_err(&cleanup_error)?;
+                let mut registrations = initial_state
+                    .registered
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                registrations.insert(reg.hwnd, reg);
+            }
+
+            for eid in WATCH_EVENT_IDS {
+                if let Err(e) = unsafe {
+                    autom.AddAutomationEventHandler(*eid, root, TreeScope_Children, cache, watch)
+                } {
+                    return Err(cleanup_error(Error::Platform {
+                        code: e.code().0 as i64,
+                        message: format!(
+                            "AddAutomationEventHandler({eid:?}) on desktop root failed: {e}"
+                        ),
+                    }));
+                }
+            }
+
+            // Close the enumeration/watch gap before subscribe returns.
+            sync_registrations(&initial_state, cache, &initial_ctx, pid)
+                .map(|_| ())
+                .map_err(cleanup_error)
+        })?;
 
         // Each captured COM interface is wrapped in ComSend so the cancel
         // closure satisfies CancelHandle::new's `Send` bound. See ComSend's
@@ -4909,58 +4999,18 @@ impl WindowsProvider {
         let watch_c = ComSend::new(watch);
         let state_c = Arc::clone(&state);
         let cancel = CancelHandle::new(move || {
-            // Mark cancelled and drain the per-window records atomically
-            // under the reconciliation lock: a reconcile in flight finishes
-            // first and its registrations are drained here, while one that
-            // acquires the lock afterwards observes the flag and registers
-            // nothing — a window can never be re-registered after the drain.
-            // All Remove* calls happen *outside* the lock: UIA's RemoveXxx
-            // waits for in-flight handler callbacks, and a WatchHandler
-            // callback running `sync_registrations` itself waits for this
-            // lock — holding it across Remove* would deadlock teardown on
-            // that callback (remove waits for the callback, the callback
-            // waits for the lock).
-            let regs: Vec<RegisteredWindow> = {
-                let _guard = state_c
-                    .reconciliation
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner());
-                state_c.cancelled.store(true, Ordering::SeqCst);
-                let mut m = state_c.registered.lock().unwrap_or_else(|e| e.into_inner());
-                m.drain().map(|(_, r)| r).collect()
-            };
-            // RemoveXxx is synchronous: when it returns, UIA guarantees no
-            // further callbacks for this handler. We ignore errors because
-            // there's nothing useful to do in a cancel path (a window that
-            // closed during the subscription answers Remove* with an error
-            // there is nothing to do about).
-            let automation = state_c.automation.get();
-            let root = root_c.get();
-            unsafe {
-                let _ = automation.RemoveFocusChangedEventHandler(focus_c.get());
-                for eid in WATCH_EVENT_IDS {
-                    let _ = automation.RemoveAutomationEventHandler(*eid, root, watch_c.get());
-                }
-            }
-            for reg in regs {
-                remove_handlers_of(
-                    automation,
-                    reg.element.get(),
-                    &reg.automation_ids,
-                    state_c.automation_handler.get(),
-                    state_c.property_handler.get(),
-                    state_c.structure_handler.get(),
+            if let Err(e) = on_registration_worker(move || {
+                cleanup_registrations(
+                    state_c.automation.get(),
+                    root_c.get(),
+                    watch_c.get(),
+                    focus_c.get(),
+                    &state_c,
                 );
+                Ok(())
+            }) {
+                eprintln!("UIA subscription cancellation failed: {e:?}");
             }
-            // RemoveXxx is synchronous, so no property callback can repopulate
-            // the map after this point. Clearing it bounds retained state even
-            // if a third-party COM reference keeps a handler alive past
-            // cancellation.
-            state_c
-                .visual_states
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .clear();
         });
 
         Ok(Subscription::new(EventReceiver::new(rx), cancel))
@@ -5850,6 +5900,29 @@ mod tests {
         struct NotSend(std::rc::Rc<()>);
         assert_send::<ComSend<NotSend>>();
         assert_send::<ComSend<*mut u8>>();
+    }
+
+    #[test]
+    fn registration_worker_serializes_callers_on_one_thread() {
+        // Model concurrent subscriptions/cancellations without fabricating
+        // COM handlers: every caller must execute on the same long-lived
+        // worker, even when they arrive from different runtime threads.
+        let callers: Vec<_> = (0..16)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    on_registration_worker(|| Ok(std::thread::current().id()))
+                        .expect("registration worker must accept a job")
+                })
+            })
+            .collect();
+        let worker_threads: Vec<_> = callers
+            .into_iter()
+            .map(|caller| caller.join().expect("caller thread must not panic"))
+            .collect();
+        assert!(
+            worker_threads.windows(2).all(|pair| pair[0] == pair[1]),
+            "every registration job must run on one shared thread"
+        );
     }
 
     #[test]

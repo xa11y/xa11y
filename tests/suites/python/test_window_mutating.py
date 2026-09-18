@@ -684,6 +684,7 @@ def test_state_changed_minimized_on_minimize_restore(app: xa11y.App) -> None:
     if win is None or "restore" not in win.actions:
         pytest.skip("this app's windows advertise no minimize/restore")
 
+    cancelled_sub = app.subscribe()
     try:
         with app.subscribe() as sub:
             win.minimize()
@@ -751,16 +752,19 @@ def test_state_changed_minimized_on_sibling_window(
             except xa11y.TimeoutError:
                 pytest.skip(f"no button named {sibling_btn!r} in this app's tree")
 
-            # Minimize as soon as the window is enumerable: the provider
-            # attaches the new window's handlers asynchronously, so this is
-            # the race the seed→attach baseline reconciliation exists for. A
-            # slow poll would let the attach win and stop exercising it.
-            sibling = None
-            deadline = time.monotonic() + 5.0
-            while sibling is None and time.monotonic() < deadline:
-                sibling = _window_named(app, sibling_name)
-                if sibling is None:
-                    time.sleep(0.01)
+            # WindowOpened is the readiness barrier: when it is observable,
+            # the new window's property handlers and visual-state baseline
+            # must already be attached. Minimize immediately after it rather
+            # than polling/sleeping around the registration race (#424).
+            cancelled_sub.wait_for(
+                lambda e: e.event_type == xa11y.EventType.WINDOW_OPENED,
+                timeout=5.0,
+            )
+            sub.wait_for(
+                lambda e: e.event_type == xa11y.EventType.WINDOW_OPENED,
+                timeout=5.0,
+            )
+            sibling = _window_named(app, sibling_name)
             if sibling is None:
                 raise AssertionError(
                     f"no window named {sibling_name!r} appeared after "
@@ -787,24 +791,27 @@ def test_state_changed_minimized_on_sibling_window(
                     timeout=5.0,
                 )
 
+            # Cancel one of two concurrent subscriptions while the new window
+            # is live. Its teardown and the surviving subscription's handlers
+            # share the registration worker, so cancellation must neither
+            # deadlock nor remove the survivor's handlers.
+            cancelled_sub.close()
             sibling.minimize()
-            try:
-                event = wait_minimized(True)
-            except xa11y.TimeoutError:
-                # The open/close watch attaches a newly opened sibling's
-                # per-window handlers asynchronously, so the first minimize
-                # can outrun the attachment: the verb lands (or not) and its
-                # StateChanged is never delivered. Retry now that the
-                # handlers are attached — restore only if the first minimize
-                # actually landed, so the retry's minimize always raises a
-                # fresh true event. A persistent gap still fails below.
-                sibling = _window_named(app, sibling_name) or sibling
-                if sibling.minimized:
-                    sibling.restore()
-                    wait_minimized(False)
-                sibling.minimize()
-                event = wait_minimized(True)
+            event = wait_minimized(True)
             assert event.state_value is True
+
+            # One property transition produces one event for this
+            # subscription; duplicate native registrations would leave an
+            # immediately queued second minimized=true event.
+            time.sleep(0.1)
+            duplicate = sub.try_recv()
+            while duplicate is not None:
+                assert not (
+                    duplicate.event_type == xa11y.EventType.STATE_CHANGED
+                    and duplicate.state_flag == "minimized"
+                    and duplicate.state_value is True
+                ), "minimize was delivered more than once"
+                duplicate = sub.try_recv()
 
             # Re-resolve after minimize: the sibling is still in App.windows()
             # (the UIA Window control survives minimize), and the fresh
@@ -827,6 +834,7 @@ def test_state_changed_minimized_on_sibling_window(
                 timeout=5.0,
             )
     finally:
+        cancelled_sub.close()
         # Never leave the sibling minimized or open for the suites that
         # follow: best-effort restore + hide, original failure wins. By now
         # the sibling is closed in the happy path, so the helper is a no-op.
