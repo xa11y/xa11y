@@ -916,12 +916,35 @@ impl X11WindowBackend {
             height,
         }
         .to_physical(crate::scale::coordinate_scale());
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let window = self.resolve(&conn, element)?;
+        // EWMH's moveresize width and height describe the client window,
+        // while xa11y's bounds contract reports the decorated outer frame.
+        // Remove the current frame extents so a requested outer size reads
+        // back as that same size after the window manager applies it.
+        let extents = property_u32(
+            &conn,
+            window,
+            self.atoms.net_frame_extents,
+            AtomEnum::CARDINAL.into(),
+        )?;
+        let (horizontal, vertical) = match extents.as_slice() {
+            [left, right, top, bottom, ..] => {
+                (left.saturating_add(*right), top.saturating_add(*bottom))
+            }
+            _ => (0, 0),
+        };
+        let client_width = physical.width.saturating_sub(horizontal).max(1);
+        let client_height = physical.height.saturating_sub(vertical).max(1);
         let flags = (1_u32 << 10) | (1_u32 << 11) | (SOURCE_APPLICATION << 12);
-        self.send_for(
-            element,
+        send_client_message(
+            &conn,
+            self.root,
+            window,
             self.atoms.net_moveresize_window,
-            [flags, 0, 0, physical.width, physical.height],
-        )
+            [flags, 0, 0, client_width, client_height],
+        )?;
+        conn.flush().map_err(platform)
     }
 
     fn change_state(
