@@ -35,6 +35,7 @@ const STATE_ADD: u32 = 1;
 #[derive(Debug, Default)]
 pub(crate) struct WindowFacts {
     pub(crate) actions: Vec<&'static str>,
+    pub(crate) bounds: Option<Rect>,
     pub(crate) minimized: Option<bool>,
     pub(crate) maximized: Option<bool>,
     pub(crate) fullscreen: Option<bool>,
@@ -228,6 +229,7 @@ impl SwayWindowBackend {
         }
         Ok(WindowFacts {
             actions,
+            bounds: target.bounds,
             // Sway does not implement minimize or a maximized state distinct
             // from fullscreen. Unknown is different from false.
             minimized: None,
@@ -670,6 +672,7 @@ impl X11WindowBackend {
 
         Ok(WindowFacts {
             actions,
+            bounds: self.window_bounds(&conn, window).ok(),
             minimized: Some(state.contains(&self.atoms.net_wm_state_hidden)),
             maximized: Some(
                 state.contains(&self.atoms.net_wm_state_max_horz)

@@ -910,6 +910,9 @@ impl LinuxProvider {
 
         if matches!(role, Role::Window | Role::Dialog) && self.is_top_level_window_ref(aref) {
             let facts = self.window_manager.facts(&data);
+            if facts.bounds.is_some() {
+                data.bounds = facts.bounds;
+            }
             for action in &facts.actions {
                 if !data.actions.iter().any(|existing| existing == action) {
                     data.actions.push((*action).to_string());
@@ -1360,6 +1363,7 @@ impl LinuxProvider {
         &self,
         aref: &AccessibleRef,
         simple: &xa11y_core::selector::SimpleSelector,
+        pid: Option<u32>,
     ) -> bool {
         // Resolve role only if the selector needs it (for either the role
         // segment or any role/checked filter — checked depends on role).
@@ -1436,7 +1440,6 @@ impl LinuxProvider {
                     // matcher handle every remaining filter — it dispatches
                     // to `ElementData` fields and the `raw` map identically
                     // to the default tree-traversal path.
-                    let pid = None; // pid isn't selector-addressable
                     let data = self.build_element_data(aref, pid);
                     return xa11y_core::selector::matches_simple(&data, simple);
                 }
@@ -1462,6 +1465,7 @@ impl LinuxProvider {
         depth: u32,
         max_depth: u32,
         limit: Option<usize>,
+        pid: Option<u32>,
     ) -> Result<Vec<(usize, AccessibleRef)>> {
         if depth > max_depth {
             return Ok(vec![]);
@@ -1535,12 +1539,18 @@ impl LinuxProvider {
             .map(|child| {
                 let mut child_results: Vec<(usize, AccessibleRef)> = Vec::new();
                 for (idx, simple) in clauses.iter().enumerate() {
-                    if self.matches_ref(child, simple) {
+                    if self.matches_ref(child, simple, pid) {
                         child_results.push((idx, child.clone()));
                     }
                 }
-                match self.collect_matching_refs_group(child, clauses, depth + 1, max_depth, limit)
-                {
+                match self.collect_matching_refs_group(
+                    child,
+                    clauses,
+                    depth + 1,
+                    max_depth,
+                    limit,
+                    pid,
+                ) {
                     Ok(sub) => {
                         child_results.extend(sub);
                         (child_results, None)
@@ -1710,10 +1720,15 @@ impl Provider for LinuxProvider {
             None
         };
 
-        let phase1: Vec<(usize, AccessibleRef)> =
-            self.collect_matching_refs_group(&start_ref, &firsts, 0, max_depth_val, phase1_limit)?;
-
         let pid_from_root = root.pid;
+        let phase1: Vec<(usize, AccessibleRef)> = self.collect_matching_refs_group(
+            &start_ref,
+            &firsts,
+            0,
+            max_depth_val,
+            phase1_limit,
+            pid_from_root,
+        )?;
 
         // Bucket phase-1 hits by clause so each clause's tail can narrow
         // independently. `walk_pos` preserves the doc-order rank from the
