@@ -685,7 +685,6 @@ def test_state_changed_minimized_on_minimize_restore(app: xa11y.App) -> None:
     if win is None or "restore" not in win.actions:
         pytest.skip("this app's windows advertise no minimize/restore")
 
-    cancelled_sub = app.subscribe()
     try:
         with app.subscribe() as sub:
             win.minimize()
@@ -743,6 +742,7 @@ def test_state_changed_minimized_on_sibling_window(
     if not sibling_btn or not sibling_name:
         pytest.skip("app config has no sibling window")
 
+    cancelled_sub = app.subscribe()
     try:
         with app.subscribe() as sub:
             # Open the sibling only after the subscription is live, so the
