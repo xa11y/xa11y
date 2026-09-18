@@ -17,19 +17,22 @@ exec 1> >(stdbuf -o0 cat) 2>&1
 # timeout to the integration run to surface that case cleanly.
 set -euo pipefail
 
+# The D-Bus activation environment is captured when dbus-run-session starts.
+# Set the session identity and runtime directory before re-exec so an
+# auto-activated portal backend can connect to the same session.
+export XDG_RUNTIME_DIR=/run/user/0
+export XDG_SESSION_TYPE=wayland
+export XDG_CURRENT_DESKTOP=sway
+mkdir -p "$XDG_RUNTIME_DIR"
+chmod 700 "$XDG_RUNTIME_DIR"
+
 if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ]; then
     exec dbus-run-session -- bash "$0" "$@"
 fi
 
-export XDG_RUNTIME_DIR=/run/user/0
-mkdir -p "$XDG_RUNTIME_DIR"
-chmod 700 "$XDG_RUNTIME_DIR"
-
 # Suppress the "can't start the accessibility bus" chatter from sway — it's
 # not relevant to the screenshot path.
 export NO_AT_BRIDGE=1
-export XDG_SESSION_TYPE=wayland
-export XDG_CURRENT_DESKTOP=sway
 
 CLEANUP_PIDS=()
 cleanup() {
@@ -68,6 +71,27 @@ fi
 export WAYLAND_DISPLAY="$(basename "$sock")"
 unset DISPLAY
 echo "WAYLAND_DISPLAY=$WAYLAND_DISPLAY"
+
+# Sway does not export its IPC path back into the parent shell. Discover the
+# socket it just created so xa11y's native Wayland backend can prove window
+# identity and issue compositor requests.
+for _ in $(seq 1 30); do
+    SWAYSOCK="$(find "$XDG_RUNTIME_DIR" -maxdepth 1 -name 'sway-ipc.*.sock' -print -quit)"
+    [ -n "$SWAYSOCK" ] && break
+    sleep 0.2
+done
+if [ -z "${SWAYSOCK:-}" ]; then
+    echo "sway failed to create its IPC socket. Log:" >&2
+    cat /tmp/sway.log >&2 || true
+    exit 1
+fi
+export SWAYSOCK
+echo "SWAYSOCK=$SWAYSOCK"
+
+# Services activated by the session bus need the display values that became
+# known only after Sway started.
+dbus-update-activation-environment \
+    XDG_RUNTIME_DIR XDG_SESSION_TYPE XDG_CURRENT_DESKTOP WAYLAND_DISPLAY SWAYSOCK
 
 # 1b. Start pipewire — xdg-desktop-portal-wlr will fail to expose its
 # Screenshot and ScreenCast interfaces if it can't talk to a pipewire core
@@ -113,6 +137,29 @@ EOF
 CLEANUP_PIDS+=($!)
 /usr/libexec/xdg-desktop-portal-gtk >/tmp/portal-gtk.log 2>&1 &
 CLEANUP_PIDS+=($!)
+
+# Do not let the frontend race D-Bus activation of environment-less backend
+# processes. Wait until both manually launched implementations own their
+# well-known names before the frontend asks for proxies.
+for service in org.freedesktop.impl.portal.desktop.wlr org.freedesktop.impl.portal.desktop.gtk; do
+    ready=0
+    for _ in $(seq 1 50); do
+        if dbus-send --session --print-reply \
+            --dest=org.freedesktop.DBus /org/freedesktop/DBus \
+            org.freedesktop.DBus.NameHasOwner string:"$service" 2>/dev/null \
+            | grep -q 'boolean true'; then
+            ready=1
+            break
+        fi
+        sleep 0.2
+    done
+    if [ "$ready" != "1" ]; then
+        echo "portal backend $service did not acquire its D-Bus name" >&2
+        cat /tmp/portal-wlr.log >&2 || true
+        cat /tmp/portal-gtk.log >&2 || true
+        exit 1
+    fi
+done
 /usr/libexec/xdg-desktop-portal -v >/tmp/portal.log 2>&1 &
 CLEANUP_PIDS+=($!)
 

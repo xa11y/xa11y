@@ -11,7 +11,7 @@ FROM xa11y-base
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y \
-        sway xdg-desktop-portal xdg-desktop-portal-wlr \
+        sway xwayland xdg-desktop-portal xdg-desktop-portal-wlr \
         xdg-desktop-portal-gtk \
         wayland-protocols libwayland-dev libwayland-client0 \
         grim \

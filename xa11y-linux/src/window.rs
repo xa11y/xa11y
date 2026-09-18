@@ -80,8 +80,11 @@ impl WindowManager {
         }
     }
 
-    pub(crate) fn uses_x11(&self) -> bool {
-        matches!(&self.backend, WindowBackend::X11(_))
+    pub(crate) fn uses_native(&self) -> bool {
+        matches!(
+            &self.backend,
+            WindowBackend::X11(_) | WindowBackend::Sway(_)
+        )
     }
 
     pub(crate) fn activate(&self, element: &ElementData) -> Result<()> {

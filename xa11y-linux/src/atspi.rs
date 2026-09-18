@@ -2353,7 +2353,7 @@ impl Provider for LinuxProvider {
         // fix is a direct Action probe on this failure path, not a cache
         // lookup the role/name mapping rules can never fill.
         self.ensure_top_level_window_target(element, "activate")?;
-        if self.window_manager.uses_x11() {
+        if self.window_manager.uses_native() {
             return self.window_manager.activate(element);
         }
         let target = self.get_cached(element.handle)?;
@@ -2409,7 +2409,7 @@ impl Provider for LinuxProvider {
 
     fn move_to(&self, element: &ElementData, x: i32, y: i32) -> Result<()> {
         self.ensure_top_level_window_target(element, "move_to")?;
-        if self.window_manager.uses_x11() {
+        if self.window_manager.uses_native() {
             return self.window_manager.move_to(element, x, y);
         }
         let target = self.get_cached(element.handle)?;
@@ -2448,7 +2448,7 @@ impl Provider for LinuxProvider {
 
     fn resize_to(&self, element: &ElementData, w: u32, h: u32) -> Result<()> {
         self.ensure_top_level_window_target(element, "resize_to")?;
-        if self.window_manager.uses_x11() {
+        if self.window_manager.uses_native() {
             return self.window_manager.resize_to(element, w, h);
         }
         let target = self.get_cached(element.handle)?;
