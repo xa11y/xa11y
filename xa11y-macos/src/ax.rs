@@ -2521,7 +2521,7 @@ use xa11y_core::selector::{match_op, SimpleSelector};
 /// ElementData (15-20 AX API calls) for elements that will be discarded.
 #[cfg(test)]
 fn matches_ax(ax: AXUIElementRef, simple: &SimpleSelector) -> bool {
-    matches_ax_with_role(ax, simple, None)
+    matches_ax_with_role(ax, simple, None, None)
 }
 
 /// Attributes the lightweight `matches_ax_with_role` fast path knows how to
@@ -2532,12 +2532,13 @@ fn matches_ax(ax: AXUIElementRef, simple: &SimpleSelector) -> bool {
 /// still match correctly.
 const FAST_PATH_ATTRS: &[&str] = &["role", "name", "value", "description"];
 
-/// Like `matches_ax` but accepts a pre-resolved role to avoid redundant
-/// AX API calls when the caller already fetched the role.
+/// Like `matches_ax` but accepts a pre-resolved role to avoid redundant AX
+/// API calls and the owning pid needed to resolve process-scoped state.
 fn matches_ax_with_role(
     ax: AXUIElementRef,
     simple: &SimpleSelector,
     precomputed_role: Option<Role>,
+    pid: Option<u32>,
 ) -> bool {
     // If any filter targets an attr the fast path can't resolve, fall through
     // to a full snapshot + canonical core matcher. This keeps selectors like
@@ -2553,10 +2554,12 @@ fn matches_ax_with_role(
         }
         // Snapshot handle is 0 — this path is only used to decide whether to
         // keep a candidate; callers re-resolve via the provider cache after
-        // the match set is assembled. A snapshot that cannot be built is a
-        // candidate that does not match (the selector engines treat an
-        // unreadable node as absent, not as a hard failure).
-        let data = match build_snapshot_data(ax, None, 0) {
+        // the match set is assembled. Preserve `pid`: state such as `active`
+        // depends on the owning process and must match the final snapshot. A
+        // snapshot that cannot be built is a candidate that does not match
+        // (the selector engines treat an unreadable node as absent, not as a
+        // hard failure).
+        let data = match build_snapshot_data(ax, pid, 0) {
             Ok(d) => d,
             Err(_) => return false,
         };
@@ -3389,6 +3392,7 @@ impl MacOSProvider {
         parent_role: Role,
         parent_name: Option<&str>,
         clauses: &[&SimpleSelector],
+        pid: Option<u32>,
         depth: u32,
         max_depth: u32,
         limit: Option<usize>,
@@ -3422,7 +3426,7 @@ impl MacOSProvider {
                 let child_role = map_ax_role(&role_str, subrole_str.as_deref());
 
                 for (idx, simple) in clauses.iter().enumerate() {
-                    if matches_ax_with_role(child.as_ptr(), simple, Some(child_role)) {
+                    if matches_ax_with_role(child.as_ptr(), simple, Some(child_role), pid) {
                         child_results.push((idx, child.clone()));
                     }
                 }
@@ -3434,6 +3438,7 @@ impl MacOSProvider {
                     child_role,
                     child_name.as_deref(),
                     clauses,
+                    pid,
                     depth + 1,
                     max_depth,
                     limit,
@@ -3985,6 +3990,7 @@ impl Provider for MacOSProvider {
                 root_data.role,
                 root_data.name.as_deref(),
                 &firsts,
+                root_data.pid,
                 0,
                 max_depth_val,
                 walk_limit,
