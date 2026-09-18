@@ -3,7 +3,7 @@
 //! Returns physical (device) pixels as RGBA8. Requires the Screen Recording
 //! TCC permission — checked at construction time, same as `MacOSProvider`.
 
-use xa11y_core::{Error, Point, Rect, Result, Screenshot, ScreenshotProvider};
+use xa11y_core::{CaptureMapping, Error, Point, Rect, Result, Screenshot, ScreenshotProvider};
 
 use crate::ax::MacOSProvider;
 
@@ -144,7 +144,8 @@ impl MacOSScreenshot {
         let origin = Point::new(origin_x.round() as i32, origin_y.round() as i32);
 
         Ok((
-            Screenshot::new(width, height, pixels_vec, scale as f32),
+            Screenshot::new(width, height, pixels_vec, scale as f32)
+                .with_mapping(CaptureMapping::single(origin, width, height, scale as f32)),
             origin,
         ))
     }

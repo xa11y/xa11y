@@ -364,12 +364,17 @@ valid bounds that fall outside the image and arrives in `omitted` with
 `outside_capture`. Linux captures the X11 root window, or whatever the Wayland
 portal hands back.
 
-**A capture carries one scale factor.** On a desktop where the monitors differ
-in DPI, that factor is right for the monitor the capture starts at and wrong
-for the others, so a box drawn on another monitor is misplaced by the ratio
-between the two. A Wayland session with per-monitor scale factors has the same
-limit. Capture the window you care about with `region` or `element` to stay on
-one monitor.
+**The capture owns annotation coordinates.** Full-desktop and region captures
+carry one mapping segment per captured display, so the public `annotate`
+primitive and the locator-based annotated screenshot path place and omit the
+same rectangles. A box crossing displays is split into image rectangles and
+gets one badge. `scale` remains for compatibility; it is not used as a
+whole-desktop transform.
+
+Wayland is the remaining platform limitation: the screenshot portal returns a
+composited image without a standardized per-output transform. xa11y exposes
+the portal image's best-known 1:1 mapping, which can be approximate under
+per-monitor fractional scaling.
 
 **An occluded element still gets a box.** The accessibility tree carries no
 z-order, so an element behind another window has bounds and gets a box drawn

@@ -23,8 +23,8 @@
 //!    **logical** coordinates ([`physical_rect_to_logical`]) so that
 //!    `Element::bounds` matches the cross-platform contract (logical points,
 //!    same as macOS), and the screenshot/input backends convert back up to
-//!    physical at the OS boundary ([`logical_point_to_physical`] /
-//!    [`logical_rect_to_physical`]).
+//!    physical at the OS boundary ([`logical_point_to_physical`] and the
+//!    capture planning functions below).
 //!
 //! # Multi-monitor — origin-preserving logical space
 //!
@@ -55,15 +55,15 @@
 //! answers, `DEFAULTTONEAREST`), and the transform is only approximate there.
 //! Gaps are strictly better than overlaps: membership is never ambiguous.
 //!
-//! A rectangle that straddles a DPI boundary is converted by the monitor under
-//! its **origin** (the same rule as before): the origin is preserved and the
-//! extent is scaled by that monitor's factor, which can be off by the DPI
-//! ratio near the seam. Mixed-DPI straddling windows are rare and this is
-//! documented rather than silently "corrected". Uniform-DPI desktops are
-//! unaffected: with scale 1 everywhere the mapping is an identity.
+//! Rectangles that straddle a DPI boundary are split at display edges, each
+//! piece is transformed with that display's scale, and the pieces are bounded
+//! again when a scalar [`Rect`] is required. Screenshot mappings keep the
+//! pieces, so annotations and explicit conversions do not lose the seam.
 
 #![cfg(target_os = "windows")]
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::sync::Once;
 
 use windows::Win32::Foundation::{LPARAM, POINT, RECT};
@@ -76,7 +76,7 @@ use windows::Win32::UI::HiDpi::{
     MDT_EFFECTIVE_DPI,
 };
 
-use xa11y_core::{Error, Point, Rect, Result};
+use xa11y_core::{CaptureMapping, CaptureMappingSegment, Error, Rect, Result};
 
 /// The DPI value Windows treats as "100%": one logical unit == one physical
 /// pixel. `scale = effective_dpi / USER_DEFAULT_SCREEN_DPI`.
@@ -185,72 +185,41 @@ pub fn logical_point_to_physical(x: i32, y: i32) -> Result<(i32, i32)> {
     }
 }
 
-/// Convert a logical rectangle back to physical (`BitBlt` capture regions).
+/// Resolve a full-desktop capture from one monitor snapshot.
 ///
-/// The monitor is resolved from the rect's logical origin — the same
-/// origin-monitor rule [`physical_rect_to_logical`] applies in the other
-/// direction, so a rect that rounds-trips within one monitor is exact. A
-/// rect that straddles monitors is scaled by its origin monitor's factor and
-/// is approximate near the seam (documented in the module doc).
-pub fn logical_rect_to_physical(rect: Rect) -> Result<Rect> {
-    match monitor_for_logical_point(&monitor_geometry()?, rect.x, rect.y) {
-        Some(m) => Ok(logical_rect_to_physical_with((m.rect, m.scale), rect)),
-        None => Ok(rect.to_physical(scale_for_point(rect.x, rect.y))),
-    }
-}
-
-/// Map logical accessibility bounds to capture-relative physical pixels.
-///
-/// Both the rectangle and capture origin are resolved against one monitor
-/// snapshot. This is the full-desktop annotation transform: using the
-/// capture's single scalar scale would misplace rectangles on another
-/// monitor, while resolving the two values from different enumerations could
-/// observe a display reconfiguration between them.
-pub fn annotation_rect_to_physical(rect: Rect, capture_origin: Point) -> Result<Rect> {
+/// The physical bounds, compatibility scale, and coordinate mapping are
+/// deliberately produced together so a display reconfiguration cannot mix
+/// metadata from two enumerations.
+pub fn full_capture_plan() -> Result<(Rect, f32, CaptureMapping)> {
     let monitors = monitor_geometry()?;
-    if let Some(mapped) =
-        annotation_rect_to_physical_with(&monitors, rect, capture_origin.x, capture_origin.y)
-    {
-        return Ok(mapped);
-    }
-
-    // A point in an origin-preserving logical gap has no monitor identity.
-    // Preserve the documented nearest-physical-monitor fallback used by the
-    // standalone point/rect conversion functions.
-    let physical = logical_rect_to_physical(rect)?;
-    let (origin_x, origin_y) = logical_point_to_physical(capture_origin.x, capture_origin.y)?;
-    Ok(Rect {
-        x: physical.x.saturating_sub(origin_x),
-        y: physical.y.saturating_sub(origin_y),
-        width: physical.width,
-        height: physical.height,
-    })
+    let physical = bounding_rect(monitors.iter().map(|monitor| Rect {
+        x: monitor.rect.left,
+        y: monitor.rect.top,
+        width: (monitor.rect.right - monitor.rect.left).max(0) as u32,
+        height: (monitor.rect.bottom - monitor.rect.top).max(0) as u32,
+    }))
+    .ok_or_else(|| Error::Platform {
+        code: -1,
+        message: "no displays were found for screenshot capture".into(),
+    })?;
+    let scale = scale_for_physical_point_with(&monitors, physical.x, physical.y);
+    let mapping = capture_mapping_with(&monitors, physical)?;
+    Ok((physical, scale as f32, mapping))
 }
 
-fn annotation_rect_to_physical_with(
-    monitors: &[MonitorGeometry],
-    rect: Rect,
-    origin_x: i32,
-    origin_y: i32,
-) -> Option<Rect> {
-    let rect_monitor = monitor_for_logical_point(monitors, rect.x, rect.y)?;
-    let origin_monitor = monitor_for_logical_point(monitors, origin_x, origin_y)?;
-    let physical = logical_rect_to_physical_with((rect_monitor.rect, rect_monitor.scale), rect);
-    let (physical_origin_x, physical_origin_y) = logical_to_physical_with(
-        (origin_monitor.rect, origin_monitor.scale),
-        origin_x,
-        origin_y,
-    );
-    Some(Rect {
-        x: physical.x.saturating_sub(physical_origin_x),
-        y: physical.y.saturating_sub(physical_origin_y),
-        width: physical.width,
-        height: physical.height,
-    })
+/// Resolve a logical region capture from one monitor snapshot.
+pub fn region_capture_plan(rect: Rect) -> Result<(Rect, f32, CaptureMapping)> {
+    let monitors = monitor_geometry()?;
+    let parts = logical_rect_to_physical_parts_with(&monitors, rect);
+    let physical = bounding_rect(parts.into_iter())
+        .unwrap_or_else(|| rect.to_physical(scale_for_point(rect.x, rect.y)));
+    let scale = scale_for_physical_point_with(&monitors, physical.x, physical.y);
+    let mapping = capture_mapping_with(&monitors, physical)?;
+    Ok((physical, scale as f32, mapping))
 }
 
 /// Convert a **physical** UIA rectangle to the origin-preserving logical
-/// space (the inverse of [`logical_rect_to_physical`] / [`logical_point_to_physical`]).
+/// space (the inverse of the capture transform / [`logical_point_to_physical`]).
 ///
 /// The monitor under the rect's physical origin decides the conversion (the
 /// same origin rule the old single-scalar mapping used); that monitor's
@@ -259,18 +228,167 @@ fn annotation_rect_to_physical_with(
 /// reports logical x = 1960 — not 1000 — and `Element::bounds` on a
 /// mixed-DPI desktop is a continuous, non-overlapping space.
 pub fn physical_rect_to_logical(rect: RECT) -> Rect {
-    match monitor_containing_physical_point(rect.left, rect.top) {
-        Some((m, scale)) => physical_to_logical_with((m, scale), rect),
-        // The physical origin is not on any monitor (should not happen for a
-        // real window): there is no monitor to preserve or scale by, so the
-        // rect is reported as-is — the documented approximate fallback.
-        None => Rect {
+    if let Ok(monitors) = monitor_geometry() {
+        let parts = physical_rect_to_logical_parts_with(&monitors, rect);
+        if let Some(bounds) = bounding_rect(parts.into_iter()) {
+            return bounds;
+        }
+    }
+    Rect {
+        x: rect.left,
+        y: rect.top,
+        width: (rect.right - rect.left).max(0) as u32,
+        height: (rect.bottom - rect.top).max(0) as u32,
+    }
+}
+
+fn capture_mapping_with(monitors: &[MonitorGeometry], capture: Rect) -> Result<CaptureMapping> {
+    let segments = capture_segments_with(monitors, capture);
+    if segments.is_empty() {
+        return Err(Error::Platform {
+            code: -1,
+            message: "captured rectangle does not intersect any display".into(),
+        });
+    }
+    Ok(CaptureMapping::with_layout_validation(
+        segments,
+        layout_token(monitors),
+        validate_layout_token,
+    ))
+}
+
+fn scale_for_physical_point_with(monitors: &[MonitorGeometry], x: i32, y: i32) -> f64 {
+    monitors
+        .iter()
+        .find(|monitor| {
+            x >= monitor.rect.left
+                && x < monitor.rect.right
+                && y >= monitor.rect.top
+                && y < monitor.rect.bottom
+        })
+        .map_or(1.0, |monitor| monitor.scale)
+}
+
+fn validate_layout_token(expected: u64) -> Result<bool> {
+    Ok(layout_token(&monitor_geometry()?) == expected)
+}
+
+fn layout_token(monitors: &[MonitorGeometry]) -> u64 {
+    let mut values: Vec<_> = monitors
+        .iter()
+        .map(|m| {
+            (
+                m.rect.left,
+                m.rect.top,
+                m.rect.right,
+                m.rect.bottom,
+                m.scale.to_bits(),
+            )
+        })
+        .collect();
+    values.sort_unstable();
+    let mut hasher = DefaultHasher::new();
+    values.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn capture_segments_with(
+    monitors: &[MonitorGeometry],
+    capture: Rect,
+) -> Vec<CaptureMappingSegment> {
+    let capture_right = i64::from(capture.x) + i64::from(capture.width);
+    let capture_bottom = i64::from(capture.y) + i64::from(capture.height);
+    monitors
+        .iter()
+        .filter_map(|monitor| {
+            let left = i64::from(monitor.rect.left).max(i64::from(capture.x));
+            let top = i64::from(monitor.rect.top).max(i64::from(capture.y));
+            let right = i64::from(monitor.rect.right).min(capture_right);
+            let bottom = i64::from(monitor.rect.bottom).min(capture_bottom);
+            if right <= left || bottom <= top {
+                return None;
+            }
+            let physical = RECT {
+                left: left as i32,
+                top: top as i32,
+                right: right as i32,
+                bottom: bottom as i32,
+            };
+            Some(CaptureMappingSegment {
+                desktop: physical_to_logical_with((monitor.rect, monitor.scale), physical),
+                image: Rect {
+                    x: (left - i64::from(capture.x)) as i32,
+                    y: (top - i64::from(capture.y)) as i32,
+                    width: (right - left) as u32,
+                    height: (bottom - top) as u32,
+                },
+            })
+        })
+        .collect()
+}
+
+fn physical_rect_to_logical_parts_with(monitors: &[MonitorGeometry], rect: RECT) -> Vec<Rect> {
+    capture_segments_with(
+        monitors,
+        Rect {
             x: rect.left,
             y: rect.top,
-            width: (rect.right - rect.left) as u32,
-            height: (rect.bottom - rect.top) as u32,
+            width: (rect.right - rect.left).max(0) as u32,
+            height: (rect.bottom - rect.top).max(0) as u32,
         },
-    }
+    )
+    .into_iter()
+    .map(|segment| segment.desktop)
+    .collect()
+}
+
+fn logical_rect_to_physical_parts_with(monitors: &[MonitorGeometry], rect: Rect) -> Vec<Rect> {
+    monitors
+        .iter()
+        .filter_map(|monitor| {
+            let logical = physical_to_logical_with((monitor.rect, monitor.scale), monitor.rect);
+            let clipped = intersect(rect, logical)?;
+            Some(logical_rect_to_physical_with(
+                (monitor.rect, monitor.scale),
+                clipped,
+            ))
+        })
+        .collect()
+}
+
+fn intersect(a: Rect, b: Rect) -> Option<Rect> {
+    let left = i64::from(a.x).max(i64::from(b.x));
+    let top = i64::from(a.y).max(i64::from(b.y));
+    let right = (i64::from(a.x) + i64::from(a.width)).min(i64::from(b.x) + i64::from(b.width));
+    let bottom = (i64::from(a.y) + i64::from(a.height)).min(i64::from(b.y) + i64::from(b.height));
+    (right > left && bottom > top).then_some(Rect {
+        x: left as i32,
+        y: top as i32,
+        width: (right - left) as u32,
+        height: (bottom - top) as u32,
+    })
+}
+
+fn bounding_rect(rects: impl Iterator<Item = Rect>) -> Option<Rect> {
+    rects.fold(None, |bounds, rect| {
+        Some(match bounds {
+            None => rect,
+            Some(bounds) => {
+                let left = bounds.x.min(rect.x);
+                let top = bounds.y.min(rect.y);
+                let right = (i64::from(bounds.x) + i64::from(bounds.width))
+                    .max(i64::from(rect.x) + i64::from(rect.width));
+                let bottom = (i64::from(bounds.y) + i64::from(bounds.height))
+                    .max(i64::from(rect.y) + i64::from(rect.height));
+                Rect {
+                    x: left,
+                    y: top,
+                    width: (right - i64::from(left)) as u32,
+                    height: (bottom - i64::from(top)) as u32,
+                }
+            }
+        })
+    })
 }
 
 /// Pure physical→logical transform given the monitor (physical rect + scale)
@@ -326,6 +444,7 @@ pub fn logical_rect_contains(rect: RECT, scale: f64, x: i32, y: i32) -> bool {
 
 /// One monitor's physical rect and its effective-DPI scale. Used to build the
 /// per-monitor logical rects that [`scale_for_logical_point`] matches against.
+#[derive(Clone, Copy)]
 struct MonitorGeometry {
     rect: RECT,
     scale: f64,
@@ -532,6 +651,83 @@ mod tests {
     }
 
     #[test]
+    fn spanning_bounds_are_split_at_the_dpi_boundary() {
+        let monitors = primary_plus_secondary();
+        let logical = physical_rect_to_logical_parts_with(&monitors, rect(1800, 0, 2200, 401));
+        assert_eq!(
+            logical,
+            vec![
+                Rect {
+                    x: 1800,
+                    y: 0,
+                    width: 120,
+                    height: 401
+                },
+                Rect {
+                    x: 1920,
+                    y: 0,
+                    width: 140,
+                    height: 201
+                },
+            ]
+        );
+        let bounds = bounding_rect(logical.into_iter()).unwrap();
+        assert_eq!(
+            bounds,
+            Rect {
+                x: 1800,
+                y: 0,
+                width: 260,
+                height: 401
+            }
+        );
+
+        // The ordinary center anchor now resolves through the secondary to a
+        // point inside the original physical element, rather than 80px past
+        // the intended logical position as the origin-monitor width did.
+        let center = xa11y_core::anchor_point(&bounds, xa11y_core::Anchor::Center);
+        let monitor = monitor_for_logical_point(&monitors, center.x, center.y).unwrap();
+        let physical = logical_to_physical_with((monitor.rect, monitor.scale), center.x, center.y);
+        assert!((1800..2200).contains(&physical.0));
+        assert!((0..401).contains(&physical.1));
+    }
+
+    #[test]
+    fn capture_segments_reproduce_issue_425_without_hardware() {
+        let monitors = vec![
+            monitor(0, 0, 3840, 2160, 2.0),
+            monitor(3840, 0, 7680, 2160, 2.0),
+        ];
+        let segments = capture_segments_with(
+            &monitors,
+            Rect {
+                x: 0,
+                y: 0,
+                width: 7680,
+                height: 2160,
+            },
+        );
+        assert_eq!(
+            segments[1].desktop,
+            Rect {
+                x: 3840,
+                y: 0,
+                width: 1920,
+                height: 1080
+            }
+        );
+        assert_eq!(
+            segments[1].image,
+            Rect {
+                x: 3840,
+                y: 0,
+                width: 3840,
+                height: 2160
+            }
+        );
+    }
+
+    #[test]
     fn logical_points_round_trip_per_monitor() {
         let primary = (rect(0, 0, 1920, 1080), 1.0);
         let secondary = (rect(1920, 0, 4480, 1080), 2.0);
@@ -542,51 +738,6 @@ mod tests {
         assert_eq!(logical_to_physical_with(secondary, 2000, 100), (2080, 200));
         // Seam: the secondary's own transform.
         assert_eq!(logical_to_physical_with(secondary, 1920, 100), (1920, 200));
-    }
-
-    #[test]
-    fn full_desktop_annotation_uses_secondary_origin_at_identical_dpi() {
-        let monitors = [
-            monitor(-1920, 0, 0, 1080, 1.0),
-            monitor(0, 0, 1920, 1080, 1.0),
-        ];
-        let mapped = annotation_rect_to_physical_with(
-            &monitors,
-            Rect {
-                x: 100,
-                y: 50,
-                width: 200,
-                height: 100,
-            },
-            -1920,
-            0,
-        )
-        .expect("both points are on monitors");
-        assert_eq!(mapped.x, 2020);
-        assert_eq!(mapped.y, 50);
-        assert_eq!(mapped.width, 200);
-        assert_eq!(mapped.height, 100);
-    }
-
-    #[test]
-    fn full_desktop_annotation_uses_bounds_monitors_scale() {
-        let monitors = primary_plus_secondary();
-        let mapped = annotation_rect_to_physical_with(
-            &monitors,
-            Rect {
-                x: 2000,
-                y: 100,
-                width: 300,
-                height: 120,
-            },
-            0,
-            0,
-        )
-        .expect("both points are on monitors");
-        assert_eq!(mapped.x, 2080);
-        assert_eq!(mapped.y, 200);
-        assert_eq!(mapped.width, 600);
-        assert_eq!(mapped.height, 240);
     }
 
     #[test]

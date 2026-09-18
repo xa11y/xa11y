@@ -93,8 +93,9 @@ impl From<xa11y::Omission> for Omission {
 
 /// A captured image: raw RGBA8 pixels plus dimensions and scale.
 ///
-/// `width` and `height` are in physical pixels. `scale` is the physical-to-
-/// logical ratio (1.0 on standard displays, 2.0 on typical Retina).
+/// `width` and `height` are pixels in the returned image. `scale` is a
+/// compatibility hint for simple single-display captures; use the explicit
+/// coordinate methods for mixed-DPI, cropped, or resized images.
 /// `pixels.length` equals `width * height * 4`.
 ///
 /// `legend`, `omitted` and `truncated` describe what `annotate` drew. They
@@ -132,20 +133,91 @@ impl Screenshot {
 
 #[napi]
 impl Screenshot {
-    /// Image width in physical pixels.
+    /// Whether desktop/image coordinate conversion metadata is available.
+    #[napi(getter)]
+    pub fn mapping_available(&self) -> bool {
+        self.inner.mapping_available()
+    }
+
+    /// Convert a desktop point to an image pixel, returned as `[x, y]`.
+    #[napi]
+    pub fn desktop_to_image(&self, x: i32, y: i32) -> napi::Result<Vec<i32>> {
+        let point = self
+            .inner
+            .desktop_to_image(xa11y::Point::new(x, y))
+            .map_err(map_err)?;
+        Ok(vec![point.x, point.y])
+    }
+
+    /// Convert an image pixel to a desktop point, returned as `[x, y]`.
+    #[napi]
+    pub fn image_to_desktop(&self, x: i32, y: i32) -> napi::Result<Vec<i32>> {
+        let point = self
+            .inner
+            .image_to_desktop(xa11y::Point::new(x, y))
+            .map_err(map_err)?;
+        Ok(vec![point.x, point.y])
+    }
+
+    /// Convert a desktop rectangle to one image rectangle per display piece.
+    #[napi]
+    pub fn desktop_rect_to_image(&self, rect: Rect) -> napi::Result<Vec<Rect>> {
+        let width = u32::try_from(rect.width)
+            .map_err(|_| napi::Error::from_reason("rect.width must be non-negative"))?;
+        let height = u32::try_from(rect.height)
+            .map_err(|_| napi::Error::from_reason("rect.height must be non-negative"))?;
+        self.inner
+            .desktop_rect_to_image(xa11y::Rect {
+                x: rect.x,
+                y: rect.y,
+                width,
+                height,
+            })
+            .map(|rects| rects.into_iter().map(Into::into).collect())
+            .map_err(map_err)
+    }
+
+    /// Crop by image pixels and preserve coordinate mapping metadata.
+    #[napi]
+    pub fn crop(&self, rect: Rect) -> napi::Result<Screenshot> {
+        let width = u32::try_from(rect.width)
+            .map_err(|_| napi::Error::from_reason("rect.width must be non-negative"))?;
+        let height = u32::try_from(rect.height)
+            .map_err(|_| napi::Error::from_reason("rect.height must be non-negative"))?;
+        self.inner
+            .crop(xa11y::Rect {
+                x: rect.x,
+                y: rect.y,
+                width,
+                height,
+            })
+            .map(Screenshot::new)
+            .map_err(map_err)
+    }
+
+    /// Resize image pixels and scale coordinate mapping metadata with them.
+    #[napi]
+    pub fn resize(&self, width: u32, height: u32) -> napi::Result<Screenshot> {
+        self.inner
+            .resize(width, height)
+            .map(Screenshot::new)
+            .map_err(map_err)
+    }
+
+    /// Width in pixels of the actual returned image.
     #[napi(getter)]
     pub fn width(&self) -> u32 {
         self.inner.width
     }
 
-    /// Image height in physical pixels.
+    /// Height in pixels of the actual returned image.
     #[napi(getter)]
     pub fn height(&self) -> u32 {
         self.inner.height
     }
 
-    /// Physical-to-logical pixel ratio (1.0 on standard displays, 2.0 on
-    /// typical Retina, 1.5 / 1.75 / 2.0 on common Windows / Linux HiDPI).
+    /// Compatibility physical-to-logical ratio for simple single-display
+    /// captures. Use the coordinate methods for authoritative mapping.
     #[napi(getter)]
     pub fn scale(&self) -> f64 {
         self.inner.scale as f64

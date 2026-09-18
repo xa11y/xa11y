@@ -154,11 +154,11 @@ impl Screenshot {
     /// and macOS captures a display that need not be the one at the
     /// coordinate-space origin.
     ///
-    /// Each annotation's rect is translated by `-origin` and then scaled to
-    /// physical pixels by [`Screenshot::scale`]. Passing `(0, 0)` for a
-    /// capture that does not start there shifts every box by the difference,
-    /// and nothing here can detect it: the shifted rects still land inside a
-    /// capture that wide, so they are drawn over the wrong pixels.
+    /// Captured screenshots use their frozen, per-display mapping. A
+    /// rectangle crossing displays is drawn as multiple image rectangles with
+    /// one badge. For a raw [`Screenshot::new`] without mapping metadata, the
+    /// legacy `origin` + [`Screenshot::scale`] transform remains available for
+    /// compatibility and is exact only for a single-scale capture.
     ///
     /// Returns a **new** [`Screenshot`] (the pixels are cloned; `self` is
     /// never mutated) and the indices of the annotations that were not drawn.
@@ -211,19 +211,51 @@ impl Screenshot {
         origin: Point,
     ) -> Result<(Screenshot, Vec<usize>)> {
         let scale = sane_scale(f64::from(self.scale));
-        let physical: Vec<Annotation> = annotations
-            .iter()
-            .map(|ann| {
+        let mut physical = Vec::new();
+        let mut owners = Vec::new();
+        let mut skipped = Vec::new();
+        for (index, ann) in annotations.iter().enumerate() {
+            let parts = if self.mapping_available() {
+                self.desktop_rect_to_image(ann.rect)?
+            } else {
                 let translated = Rect {
                     x: ann.rect.x.saturating_sub(origin.x),
                     y: ann.rect.y.saturating_sub(origin.y),
                     width: ann.rect.width,
                     height: ann.rect.height,
                 };
-                Annotation::new(translated.to_physical(scale), ann.tag.clone()).color(ann.color)
-            })
-            .collect();
-        self.annotate_physical(&physical)
+                vec![translated.to_physical(scale)]
+            };
+            if parts.is_empty() {
+                skipped.push(index);
+                continue;
+            }
+            for (part_index, rect) in parts.into_iter().enumerate() {
+                // A spanning element is one annotation. Draw every display
+                // fragment, but put its badge on only the first fragment.
+                let tag = if part_index == 0 {
+                    ann.tag.clone()
+                } else {
+                    String::new()
+                };
+                physical.push(Annotation::new(rect, tag).color(ann.color));
+                owners.push(index);
+            }
+        }
+        let (drawn, fragment_skips) = self.annotate_physical(&physical)?;
+        let mut visible = vec![false; annotations.len()];
+        for (fragment, owner) in owners.iter().enumerate() {
+            if !fragment_skips.contains(&fragment) {
+                visible[*owner] = true;
+            }
+        }
+        for (index, is_visible) in visible.into_iter().enumerate() {
+            if !is_visible && !skipped.contains(&index) {
+                skipped.push(index);
+            }
+        }
+        skipped.sort_unstable();
+        Ok((drawn, skipped))
     }
 
     /// Draw annotations whose rectangles are already capture-relative
@@ -314,10 +346,9 @@ impl Screenshot {
             }
         }
 
-        Ok((
-            Screenshot::new(self.width, self.height, canvas.pixels, self.scale),
-            skipped,
-        ))
+        let mut drawn = self.clone();
+        drawn.pixels = canvas.pixels;
+        Ok((drawn, skipped))
     }
 }
 

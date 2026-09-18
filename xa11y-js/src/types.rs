@@ -30,8 +30,9 @@ impl From<xa11y::TreeNode> for TreeNode {
 /// the primary display; negative `x` / `y` are valid on multi-monitor setups.
 ///
 /// This is the same space accepted by `screenshotRegion` and the input layer,
-/// so bounds can be passed straight through. To map onto captured pixels,
-/// multiply by the screenshot's `scale` (`physical = logical × scale`).
+/// so bounds can be passed straight through. To map onto captured pixels, use
+/// `Screenshot.desktopRectToImage`; a single scale is insufficient on a
+/// mixed-DPI desktop or after resizing.
 #[napi(object)]
 #[derive(Clone)]
 pub struct Rect {

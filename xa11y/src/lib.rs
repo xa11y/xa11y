@@ -388,18 +388,8 @@ pub fn screenshot_annotated(region: Option<Rect>, groups: &[Locator]) -> Result<
         Some(rect) => (backend.capture_region(rect)?, Point::new(rect.x, rect.y)),
         None => backend.capture_full()?,
     };
-    let physical_annotations = annotations
-        .iter()
-        .map(|annotation| {
-            backend
-                .map_annotation_rect(annotation.rect, origin, shot.scale)
-                .map(|rect| {
-                    screenshot::Annotation::new(rect, annotation.tag.clone())
-                        .color(annotation.color)
-                })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let drawn = draw_and_reconcile(&shot, &physical_annotations, &mut legend, &mut omitted)?;
+    let (drawn, skipped) = shot.annotate(&annotations, origin)?;
+    reconcile_skipped(&shot, &annotations, skipped, &mut legend, &mut omitted)?;
 
     Ok(Annotated::for_capture(drawn, legend, omitted, truncated))
 }
@@ -423,6 +413,7 @@ pub fn screenshot_annotated(region: Option<Rect>, groups: &[Locator]) -> Result<
 ///
 /// Split out from [`screenshot_annotated`] so the reconciliation is testable
 /// against a synthetic [`Screenshot`], with no display and no permissions.
+#[cfg(test)]
 fn draw_and_reconcile(
     shot: &Screenshot,
     physical_annotations: &[screenshot::Annotation],
@@ -447,6 +438,38 @@ fn draw_and_reconcile(
         ));
     }
     Ok(drawn)
+}
+
+fn reconcile_skipped(
+    shot: &Screenshot,
+    annotations: &[screenshot::Annotation],
+    skipped: Vec<usize>,
+    legend: &mut Vec<LegendEntry>,
+    omitted: &mut Vec<Omission>,
+) -> Result<()> {
+    for i in skipped.iter().rev() {
+        let entry = legend.remove(*i);
+        let rect = annotations[*i].rect;
+        let mapped_zero_area = if shot.mapping_available() {
+            let parts = shot.desktop_rect_to_image(rect)?;
+            !parts.is_empty() && parts.iter().all(|part| part.width == 0 || part.height == 0)
+        } else {
+            let physical = rect.to_physical(f64::from(shot.scale));
+            physical.width == 0 || physical.height == 0
+        };
+        let reason = if rect.width == 0 || rect.height == 0 || mapped_zero_area {
+            OmissionReason::ZeroArea
+        } else {
+            OmissionReason::OutsideCapture
+        };
+        omitted.push(Omission::new(
+            entry.selector,
+            entry.role,
+            entry.name,
+            reason,
+        ));
+    }
+    Ok(())
 }
 
 /// One matched element, with everything both a legend entry and an omission

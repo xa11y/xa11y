@@ -953,11 +953,12 @@ class Omission:
     def __repr__(self) -> str: ...
 
 class Screenshot:
-    """A captured image: raw RGBA8 pixels plus dimensions and scale.
+    """A captured image: raw RGBA8 pixels plus dimensions and mapping.
 
-    ``width`` and ``height`` are in physical pixels. ``scale`` is the
-    physical-to-logical ratio (1.0 on standard displays, 2.0 on typical
-    Retina). ``pixels`` has length ``width * height * 4``.
+    ``width`` and ``height`` describe the actual returned image. ``scale`` is
+    a compatibility hint for simple single-display captures; use the explicit
+    coordinate methods for mixed-DPI, cropped, or resized images. ``pixels``
+    has length ``width * height * 4``.
 
     ``legend``, ``omitted`` and ``truncated`` describe what ``annotate=``
     drew. They are ``[]``, ``[]`` and ``0`` on an unannotated capture, so
@@ -970,6 +971,9 @@ class Screenshot:
     def height(self) -> int: ...
     @property
     def scale(self) -> float: ...
+    @property
+    def mapping_available(self) -> bool:
+        """Whether desktop/image coordinate conversion metadata is available."""
     @property
     def pixels(self) -> bytes:
         """Raw RGBA8 pixel bytes (``width * height * 4``)."""
@@ -988,6 +992,16 @@ class Screenshot:
         """Encode the image as a PNG and return the bytes."""
     def save_png(self, path: str | bytes | object) -> None:
         """Encode as PNG and write to ``path``. Accepts ``str``, ``bytes`` or ``os.PathLike``."""
+    def desktop_to_image(self, x: int, y: int) -> tuple[int, int]:
+        """Convert a desktop point to a pixel in this image."""
+    def image_to_desktop(self, x: int, y: int) -> tuple[int, int]:
+        """Convert an image pixel to a desktop point suitable for input."""
+    def desktop_rect_to_image(self, x: int, y: int, width: int, height: int) -> list[Rect]:
+        """Convert a desktop rectangle to one image rectangle per display piece."""
+    def crop(self, x: int, y: int, width: int, height: int) -> Screenshot:
+        """Crop by image pixels while preserving coordinate mapping."""
+    def resize(self, width: int, height: int) -> Screenshot:
+        """Resize image pixels while scaling coordinate mapping."""
     def __repr__(self) -> str: ...
 
 # ── Module-level functions ───────────────────────────────────────────────────

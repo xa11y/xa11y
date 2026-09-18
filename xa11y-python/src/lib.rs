@@ -2333,9 +2333,10 @@ impl Omission {
 
 /// A captured image: raw RGBA8 pixels plus dimensions and scale.
 ///
-/// `width` and `height` are in physical pixels. `scale` is the physical-to-
-/// logical ratio (1.0 on standard displays, 2.0 on typical Retina). `pixels`
-/// length is `width * height * 4` (RGBA).
+/// `width` and `height` are pixels in the returned image. `scale` is a
+/// compatibility hint for simple single-display captures; use the explicit
+/// coordinate conversion methods for mixed-DPI, cropped, or resized images.
+/// `pixels` length is `width * height * 4` (RGBA).
 ///
 /// `legend`, `omitted` and `truncated` describe what `annotate=` drew. They
 /// are `[]`, `[]` and `0` on an unannotated capture, so consumers need no
@@ -2400,6 +2401,80 @@ impl Screenshot {
 
 #[pymethods]
 impl Screenshot {
+    /// Whether desktop/image coordinate conversion metadata is available.
+    #[getter]
+    fn mapping_available(&self) -> bool {
+        self.inner.mapping_available()
+    }
+
+    /// Convert a desktop point to an image pixel.
+    fn desktop_to_image(&self, x: i32, y: i32) -> PyResult<(i32, i32)> {
+        let point = self
+            .inner
+            .desktop_to_image(xa11y::Point::new(x, y))
+            .map_err(to_py_err)?;
+        Ok((point.x, point.y))
+    }
+
+    /// Convert an image pixel to a desktop point suitable for input.
+    fn image_to_desktop(&self, x: i32, y: i32) -> PyResult<(i32, i32)> {
+        let point = self
+            .inner
+            .image_to_desktop(xa11y::Point::new(x, y))
+            .map_err(to_py_err)?;
+        Ok((point.x, point.y))
+    }
+
+    /// Convert a desktop rectangle to one or more image rectangles.
+    fn desktop_rect_to_image(
+        &self,
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    ) -> PyResult<Vec<Rect>> {
+        self.inner
+            .desktop_rect_to_image(xa11y::Rect {
+                x,
+                y,
+                width,
+                height,
+            })
+            .map(|rects| {
+                rects
+                    .into_iter()
+                    .map(|rect| Rect {
+                        x: rect.x,
+                        y: rect.y,
+                        width: rect.width,
+                        height: rect.height,
+                    })
+                    .collect()
+            })
+            .map_err(to_py_err)
+    }
+
+    /// Crop by image pixels and preserve coordinate mapping metadata.
+    fn crop(&self, x: i32, y: i32, width: u32, height: u32) -> PyResult<Self> {
+        self.inner
+            .crop(xa11y::Rect {
+                x,
+                y,
+                width,
+                height,
+            })
+            .map(Self::plain)
+            .map_err(to_py_err)
+    }
+
+    /// Resize image pixels and scale coordinate mapping metadata with them.
+    fn resize(&self, width: u32, height: u32) -> PyResult<Self> {
+        self.inner
+            .resize(width, height)
+            .map(Self::plain)
+            .map_err(to_py_err)
+    }
+
     /// Raw RGBA8 pixel bytes (`width * height * 4`).
     #[getter]
     fn pixels<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {

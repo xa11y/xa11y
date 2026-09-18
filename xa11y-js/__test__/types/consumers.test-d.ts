@@ -164,6 +164,12 @@ async function checks() {
   const _px: Buffer = shot.pixels;
   const _png: Buffer = shot.toPng();
   shot.savePng('/tmp/out.png');
+  const _mapped: boolean = shot.mappingAvailable;
+  const _imagePoint: number[] = shot.desktopToImage(10, 20);
+  const _desktopPoint: number[] = shot.imageToDesktop(10, 20);
+  const _imageRects: Rect[] = shot.desktopRectToImage({ x: 0, y: 0, width: 10, height: 10 });
+  const _cropped: Screenshot = shot.crop({ x: 0, y: 0, width: 10, height: 10 });
+  const _resized: Screenshot = shot.resize(5, 5);
   const shotOpts: ScreenshotOptions = {
     region: { x: 0, y: 0, width: 10, height: 10 },
   };

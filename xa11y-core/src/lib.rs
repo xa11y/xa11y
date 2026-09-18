@@ -40,6 +40,8 @@ pub use input::{
 pub use locator::Locator;
 pub use provider::Provider;
 pub use role::{unknown_role, Role};
+#[doc(hidden)]
+pub use screenshot::{CaptureMapping, CaptureMappingSegment};
 pub use screenshot::{Screenshot, ScreenshotProvider};
 pub use selector::{Selector, SelectorGroup};
 pub use shell::{ShellSurface, ShellSurfaceKind};

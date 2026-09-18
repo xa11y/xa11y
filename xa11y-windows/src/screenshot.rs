@@ -19,10 +19,9 @@
 //! Regions are captured in **physical** pixels. `capture_region` receives a
 //! rectangle in **logical** coordinates (the cross-platform contract, matching
 //! `Element::bounds`) and converts it to physical via the origin-preserving
-//! per-monitor mapping in [`crate::dpi`]; the resulting [`Screenshot::scale`]
-//! carries the physical-to-logical ratio so callers can map logical bounds onto
-//! captured pixels. Mixed-DPI multi-monitor setups are handled per-monitor; see
-//! [`crate::dpi`] for the boundary-straddling caveat.
+//! per-monitor mapping in [`crate::dpi`]. The returned screenshot owns the
+//! exact capture-time transform; [`Screenshot::scale`] remains a compatibility
+//! hint and must not be used as a whole-desktop transform.
 //!
 //! `capture_full` covers the whole **virtual desktop**, so it can span several
 //! monitors at once. Two consequences follow, and both are reported rather
@@ -33,12 +32,9 @@
 //!   That offset is returned alongside the capture, per
 //!   [`ScreenshotProvider::capture_full`].
 //! - Its [`Screenshot::scale`] is a single scalar and is the effective scale
-//!   of the monitor **at that virtual origin**. Consumers that only inspect
-//!   this scalar cannot infer a mixed-DPI desktop transform. The backend's
-//!   [`ScreenshotProvider::map_annotation_rect`] implementation therefore
-//!   maps annotation bounds per monitor and relative to the physical virtual
-//!   origin; full-desktop annotated captures remain exact across both equal-
-//!   and mixed-DPI monitor layouts.
+//!   of the monitor **at that virtual origin**. The capture-owned mapping has
+//!   one segment per display, so annotation and public conversion remain exact
+//!   across equal- and mixed-DPI layouts.
 //!
 //! # Active session required
 //!
@@ -75,18 +71,11 @@ impl ScreenshotProvider for WindowsScreenshot {
 }
 
 #[cfg(target_os = "windows")]
-use windows::Win32::Foundation::RECT;
-#[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
     ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC,
     HGDIOBJ, SRCCOPY,
 };
-#[cfg(target_os = "windows")]
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-};
-
 #[cfg(target_os = "windows")]
 impl WindowsScreenshot {
     pub fn new() -> Result<Self> {
@@ -102,38 +91,20 @@ impl WindowsScreenshot {
 #[cfg(target_os = "windows")]
 impl ScreenshotProvider for WindowsScreenshot {
     fn capture_full(&self) -> Result<(Screenshot, Point)> {
-        // With Per-Monitor-V2 awareness the virtual-screen metrics are already
-        // physical pixels, so no logical->physical conversion is needed here.
-        let vx = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
-        let vy = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
-        let vw = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
-        let vh = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
-        if vw <= 0 || vh <= 0 {
-            return Err(Error::Platform {
-                code: -1,
-                message: format!("virtual screen has non-positive size: {vw}x{vh}"),
-            });
-        }
-        // Report the scale of the monitor at the virtual-desktop origin. The
-        // full capture may span mixed-DPI monitors; `scale` is a single scalar
-        // by contract, so we report the origin monitor's factor.
-        let scale = crate::dpi::scale_for_physical_point(vx, vy);
-        let shot = capture_rect(vx, vy, vw, vh, scale as f32)?;
+        let (physical, scale, mapping) = crate::dpi::full_capture_plan()?;
+        let w = i32::try_from(physical.width)
+            .map_err(|_| platform("virtual screen width is out of i32 range"))?;
+        let h = i32::try_from(physical.height)
+            .map_err(|_| platform("virtual screen height is out of i32 range"))?;
+        let shot = capture_rect(physical.x, physical.y, w, h, scale)?.with_mapping(mapping);
 
         // Pixel (0, 0) of this capture is physical (vx, vy) — the top-left of
         // the *virtual desktop*, not of the primary monitor. `vx`/`vy` go
         // negative as soon as a monitor is arranged left of or above the
         // primary one, and every consumer that maps logical bounds onto these
-        // pixels has to subtract that. Convert through the origin-preserving
-        // mapping so the rounding matches `logical_rect_to_physical`, which
-        // is what the annotation math applies on the way back.
-        let logical_origin = crate::dpi::physical_rect_to_logical(RECT {
-            left: vx,
-            top: vy,
-            right: vx,
-            bottom: vy,
-        });
-        Ok((shot, Point::new(logical_origin.x, logical_origin.y)))
+        // pixels has to subtract that. The origin-preserving contract keeps a
+        // display origin unchanged; exact conversions use the owned mapping.
+        Ok((shot, Point::new(physical.x, physical.y)))
     }
 
     fn capture_region(&self, rect: Rect) -> Result<Screenshot> {
@@ -142,8 +113,7 @@ impl ScreenshotProvider for WindowsScreenshot {
         // works in via the origin-preserving per-monitor mapping (`crate::dpi`)
         // — the inverse of the bounds production, so a window's bounds fed
         // back in capture the exact region it occupies (within rounding).
-        let phys = crate::dpi::logical_rect_to_physical(rect)?;
-        let scale = crate::dpi::scale_for_physical_point(phys.x, phys.y);
+        let (phys, scale, mapping) = crate::dpi::region_capture_plan(rect)?;
         if phys.width == 0 || phys.height == 0 {
             return Err(Error::Platform {
                 code: -1,
@@ -158,22 +128,7 @@ impl ScreenshotProvider for WindowsScreenshot {
             code: -1,
             message: "rect height out of i32 range".into(),
         })?;
-        capture_rect(phys.x, phys.y, w, h, scale as f32)
-    }
-
-    fn map_annotation_rect(
-        &self,
-        rect: Rect,
-        capture_origin: Point,
-        _capture_scale: f32,
-    ) -> Result<Rect> {
-        // UIA bounds use the origin-preserving, per-monitor logical space in
-        // `dpi`. Map both the element and the capture origin back through that
-        // same transform. A single `Screenshot::scale` cannot express a full
-        // virtual desktop: even equal-DPI monitors can have non-zero or
-        // negative origins, and mixed-DPI monitors additionally need their
-        // own extent scaling.
-        crate::dpi::annotation_rect_to_physical(rect, capture_origin)
+        Ok(capture_rect(phys.x, phys.y, w, h, scale)?.with_mapping(mapping))
     }
 }
 

@@ -59,6 +59,20 @@ def test_capture_region_matches_requested_size_at_scale(app, xa11y_capabilities)
     assert abs(shot.height - expected_h) <= 1
     assert len(shot.pixels) == shot.width * shot.height * 4
 
+    assert shot.mapping_available
+    image_point = shot.desktop_to_image(rect[0], rect[1])
+    assert abs(image_point[0]) <= 1
+    assert abs(image_point[1]) <= 1
+    desktop_point = shot.image_to_desktop(*image_point)
+    assert abs(desktop_point[0] - rect[0]) <= 1
+    assert abs(desktop_point[1] - rect[1]) <= 1
+
+    cropped = shot.crop(0, 0, min(shot.width, 20), min(shot.height, 20))
+    resized = cropped.resize(10, 10)
+    assert (resized.width, resized.height) == (10, 10)
+    assert resized.mapping_available
+    assert len(resized.desktop_rect_to_image(*rect)) >= 1
+
 
 def test_capture_element_uses_element_bounds(app, xa11y_capabilities):
     # Submit is the first button on the widgets page; it appears in the a11y

@@ -26,7 +26,7 @@ use zbus::message::Type as MessageType;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Value};
 use zbus::MatchRule;
 
-use xa11y_core::{Error, Point, Rect, Result, Screenshot, ScreenshotProvider};
+use xa11y_core::{CaptureMapping, Error, Point, Rect, Result, Screenshot, ScreenshotProvider};
 
 use crate::session::{select_backend, DesktopBackend};
 
@@ -308,6 +308,13 @@ impl ScreenshotProvider for LinuxScreenshot {
             Backend::Wayland { conn } => self.capture_wayland(conn, None),
         }?;
         shot.scale = scale as f32;
+        let (width, height, shot_scale) = (shot.width, shot.height, shot.scale);
+        shot = shot.with_mapping(CaptureMapping::single(
+            Point::new(0, 0),
+            width,
+            height,
+            shot_scale,
+        ));
         // Both paths start at the coordinate-space origin, so unlike Windows
         // and macOS there is no offset to subtract: X11 reads the root window,
         // whose top-left is (0, 0) by definition, and the portal hands back the
@@ -329,6 +336,13 @@ impl ScreenshotProvider for LinuxScreenshot {
             Backend::Wayland { conn } => self.capture_wayland(conn, Some(phys)),
         }?;
         shot.scale = scale as f32;
+        let (width, height, shot_scale) = (shot.width, shot.height, shot.scale);
+        shot = shot.with_mapping(CaptureMapping::single(
+            Point::new(rect.x, rect.y),
+            width,
+            height,
+            shot_scale,
+        ));
         Ok(shot)
     }
 }

@@ -101,7 +101,20 @@ Screenshots are decoupled from the accessibility and input layers. Capture never
 
 ## Working with the pixel buffer
 
-A `Screenshot` carries raw RGBA8 pixels along with dimensions and a scale factor. `width` and `height` are **physical** (device) pixels, the same resolution the compositor renders at, so on HiDPI displays they exceed the logical bounds passed in. `scale` records the physical-to-logical ratio (1.0 on standard displays, 2.0 on typical Retina, 1.5 / 1.75 / 2.0 on common Windows and Linux HiDPI configurations). `pixels.len()` equals `width * height * 4`.
+A `Screenshot` carries raw RGBA8 pixels, dimensions, a compatibility scale,
+and the mapping frozen when the pixels were captured. `width` and `height`
+always describe the **actual returned image** — including a crop or resize —
+and `pixels.len()` equals `width * height * 4`. `scale` remains useful for old
+single-display code, but one scalar cannot describe a mixed-DPI desktop or a
+non-uniform resize. Use `desktop_to_image` / `image_to_desktop` (camelCase in
+JavaScript) for points and `desktop_rect_to_image` for rectangles. A rectangle
+that crosses displays can produce multiple image rectangles.
+
+The conversion methods fail explicitly when mapping is unavailable (for
+example, a Rust `Screenshot::new` built from arbitrary pixels). On Windows
+they also reject a capture after the display layout or DPI arrangement has
+changed; capture a fresh image before using one of its pixels as an input
+target. This does not detect an ordinary app or window moving.
 
 <Tabs syncKey="lang">
   <TabItem label="Rust">
@@ -117,6 +130,13 @@ A `Screenshot` carries raw RGBA8 pixels along with dimensions and a scale factor
 
     // Raw RGBA for custom processing
     let rgba: &[u8] = &shot.pixels;
+
+    // Pixel in this exact image -> desktop point suitable for input.
+    let target = shot.image_to_desktop(Point::new(20, 30))?;
+
+    // Cropping and resizing carry the mapping forward.
+    let thumbnail = shot.crop(Rect { x: 0, y: 0, width: 800, height: 600 })?
+        .resize(400, 300)?;
     ```
   </TabItem>
   <TabItem label="Python">
@@ -132,6 +152,9 @@ A `Screenshot` carries raw RGBA8 pixels along with dimensions and a scale factor
 
     # Raw RGBA for custom processing
     rgba: bytes = shot.pixels
+
+    target = shot.image_to_desktop(20, 30)
+    thumbnail = shot.crop(0, 0, 800, 600).resize(400, 300)
     ```
   </TabItem>
   <TabItem label="JavaScript">
@@ -147,9 +170,28 @@ A `Screenshot` carries raw RGBA8 pixels along with dimensions and a scale factor
 
     // Raw RGBA for custom processing
     const rgba = shot.pixels;                     // Buffer
+    const target = shot.imageToDesktop(20, 30);   // [desktopX, desktopY]
+    const thumbnail = shot.crop({ x: 0, y: 0, width: 800, height: 600 })
+                          .resize(400, 300);
     ```
   </TabItem>
 </Tabs>
+
+## Migrating from v0.14
+
+Code that treated `Screenshot.scale` as a universal desktop-to-image multiplier
+should use `desktop_to_image`, `image_to_desktop`, and
+`desktop_rect_to_image` instead. A single scale cannot represent a capture that
+crosses displays with different DPI settings. Captured screenshots now retain
+the exact mapping that produced their pixels, and `crop` and `resize` carry
+that mapping forward. `scale` remains for compatibility and describes the
+primary capture scale only.
+
+On Windows, desktop bounds remain in logical coordinates and preserve their
+desktop origin. Full-screen image dimensions are the actual returned pixel
+dimensions, so they can differ from the logical desktop extent. Right and
+bottom input anchors select the last point inside the element's half-open
+bounds rather than the first point outside it.
 
 ## Example: screenshot on test failure
 

@@ -152,10 +152,9 @@ reader_writer_pair! {
         /// [`crate::input::Point`], so bounds can be fed directly to
         /// `screenshot_element` / `click` without conversion.
         ///
-        /// To map to physical device pixels (e.g. to index into a captured image),
-        /// multiply by the [`crate::Screenshot::scale`] reported for that display:
-        /// `physical = logical × scale`. See [`Rect::to_physical`] /
-        /// [`Rect::to_logical`].
+        /// To map into an actual captured image, use
+        /// [`crate::Screenshot::desktop_rect_to_image`]. One scalar scale is
+        /// insufficient when bounds cross displays or the image was resized.
         pub bounds: Option<Rect>,
 
         /// Available actions reported by the platform.

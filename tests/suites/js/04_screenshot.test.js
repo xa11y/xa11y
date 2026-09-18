@@ -87,6 +87,26 @@ test('screenshot({ region }) respects scale', async (t) => {
   assert.ok(Math.abs(shot.width - expectedW) <= 1);
   assert.ok(Math.abs(shot.height - expectedH) <= 1);
   assert.equal(shot.pixels.length, shot.width * shot.height * 4);
+
+  assert.equal(shot.mappingAvailable, true);
+  const imagePoint = shot.desktopToImage(region.x, region.y);
+  assert.ok(Math.abs(imagePoint[0]) <= 1);
+  assert.ok(Math.abs(imagePoint[1]) <= 1);
+  const desktopPoint = shot.imageToDesktop(imagePoint[0], imagePoint[1]);
+  assert.ok(Math.abs(desktopPoint[0] - region.x) <= 1);
+  assert.ok(Math.abs(desktopPoint[1] - region.y) <= 1);
+
+  const cropped = shot.crop({
+    x: 0,
+    y: 0,
+    width: Math.min(shot.width, 20),
+    height: Math.min(shot.height, 20),
+  });
+  const resized = cropped.resize(10, 10);
+  assert.equal(resized.width, 10);
+  assert.equal(resized.height, 10);
+  assert.equal(resized.mappingAvailable, true);
+  assert.ok(resized.desktopRectToImage(region).length >= 1);
 });
 
 test('screenshot({ element }) uses the element bounds', async (t) => {
