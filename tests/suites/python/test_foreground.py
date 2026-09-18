@@ -181,10 +181,17 @@ def test_active_window(app, app_config):
         assert len(active_windows) == 1, (
             "app is frontmost but no window reports active=True"
         )
-        # The selector form must resolve to that same single active window.
-        by_selector = app.locator('window[active="true"]').elements()
+
+    # This is a second native snapshot, so give it its own foreground
+    # sandwich. Reusing `frontmost` from the first snapshot races any focus
+    # change between the two provider calls.
+    by_selector, selector_frontmost = _observe_with_stable_foreground(
+        app, lambda: app.locator('window[active="true"]').elements()
+    )
+    assert len(by_selector) <= 1
+    assert all(window.active is True for window in by_selector)
+    if selector_frontmost:
         assert len(by_selector) == 1
-        assert by_selector[0].active is True
 
     # A non-window descendant (a button) is never the active window.
     ok_name = app_config.get("ok_button_name")

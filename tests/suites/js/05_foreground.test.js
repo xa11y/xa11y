@@ -151,9 +151,19 @@ test('active window reports active; descendants do not', async () => {
       1,
       'app is frontmost but no window reports active=true',
     );
-    const bySelector = await app.locator('window[active="true"]').elements();
+  }
+
+  // This is a second native snapshot, so give it its own foreground
+  // sandwich. Reusing `frontmost` from the first snapshot races any focus
+  // change between the two provider calls.
+  const selectorReading = await observeWithStableForeground(app, () =>
+    app.locator('window[active="true"]').elements(),
+  );
+  const bySelector = selectorReading.value;
+  assert.ok(bySelector.length <= 1);
+  assert.ok(bySelector.every((window) => window.active === true));
+  if (selectorReading.frontmost) {
     assert.equal(bySelector.length, 1);
-    assert.equal(bySelector[0].active, true);
   }
 
   // A non-window descendant (a button) is never the active window.
