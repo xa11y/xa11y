@@ -4,7 +4,7 @@ description: Capture the screen, a region, or the pixels behind any accessibilit
 pageType: how-to
 ---
 
-{/* DIATAXIS: how-to — a goal-oriented recipe for a reader who already knows
+{/* DIATAXIS: how-to, a goal-oriented recipe for a reader who already knows
     what they want. Steps and decisions only. Concepts go to explanation/,
     exhaustive option lists go to reference/. */}
 
@@ -103,11 +103,12 @@ Screenshots are decoupled from the accessibility and input layers. Capture never
 
 A `Screenshot` carries raw RGBA8 pixels, dimensions, a compatibility scale,
 and the mapping frozen when the pixels were captured. `width` and `height`
-always describe the **actual returned image** — including a crop or resize —
+always describe the **actual returned image**, including a crop or resize,
 and `pixels.len()` equals `width * height * 4`. `scale` remains useful for old
 single-display code, but one scalar cannot describe a mixed-DPI desktop or a
-non-uniform resize. Use `desktop_to_image` / `image_to_desktop` (camelCase in
-JavaScript) for points and `desktop_rect_to_image` for rectangles. A rectangle
+non-uniform resize. Use `desktop_to_image` / `image_to_desktop` for points and
+`desktop_rect_to_image` for rectangles. JavaScript uses `desktopToImage`,
+`imageToDesktop`, and `desktopRectToImage`. A rectangle
 that crosses displays can produce multiple image rectangles.
 
 The conversion methods fail explicitly when mapping is unavailable (for
