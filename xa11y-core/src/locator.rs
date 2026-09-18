@@ -134,6 +134,9 @@ pub struct Locator {
     provider: Arc<dyn Provider>,
     /// Root element for scoped searches. `None` = system root (all apps).
     root: Option<ElementData>,
+    /// Additional native roots in the same application process.
+    additional_roots: Vec<ElementData>,
+    process_scope: bool,
     selector: String,
     /// Which match to select (0-based). `None` means first match.
     nth: Option<usize>,
@@ -152,10 +155,40 @@ impl Locator {
         Self {
             provider,
             root,
+            additional_roots: Vec::new(),
+            process_scope: false,
             selector: selector.to_string(),
             nth: None,
             timeout: None,
         }
+    }
+
+    /// Create a locator scoped to a process represented by several native
+    /// application roots.
+    #[doc(hidden)]
+    pub fn new_for_roots(
+        provider: Arc<dyn Provider>,
+        roots: Vec<ElementData>,
+        selector: &str,
+    ) -> Self {
+        let root = roots.first().cloned();
+        Self {
+            provider,
+            root,
+            additional_roots: roots,
+            process_scope: false,
+            selector: selector.to_string(),
+            nth: None,
+            timeout: None,
+        }
+    }
+
+    /// Create a locator whose scope is the whole process owning `root`.
+    #[doc(hidden)]
+    pub fn new_for_app(provider: Arc<dyn Provider>, root: ElementData, selector: &str) -> Self {
+        let mut locator = Self::new(provider, Some(root), selector);
+        locator.process_scope = true;
+        locator
     }
 
     /// Return a new Locator with a custom auto-wait timeout for action
@@ -262,7 +295,36 @@ impl Locator {
         limit: Option<usize>,
     ) -> Result<Vec<ElementData>> {
         if let Some(root) = self.root.as_ref() {
-            return self.provider.find_elements_group(root, group, limit, None);
+            let process_roots;
+            let roots: &[ElementData] = if self.process_scope {
+                process_roots = self.provider.app_roots(root)?;
+                &process_roots
+            } else {
+                &self.additional_roots
+            };
+            if roots.is_empty() {
+                return self.provider.find_elements_group(root, group, limit, None);
+            }
+            let mut out = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for root in roots {
+                for data in self.provider.find_elements_group(root, group, None, None)? {
+                    let key = data.stable_id.clone().map_or_else(
+                        || format!("h{}", data.handle),
+                        |id| match data.raw.get("bus_name") {
+                            Some(serde_json::Value::String(bus)) => format!("{bus}:{id}"),
+                            _ => id,
+                        },
+                    );
+                    if seen.insert(key) {
+                        out.push(data);
+                    }
+                }
+            }
+            if let Some(limit) = limit {
+                out.truncate(limit);
+            }
+            return Ok(out);
         }
 
         // Rootless: search across all apps. We can't push the outer `limit`

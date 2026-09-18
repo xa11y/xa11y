@@ -1063,7 +1063,8 @@ impl LinuxProvider {
     ///
     /// Used by `subscribe` to resolve the target app's D-Bus sender name so
     /// signal match rules can be scoped to it.
-    pub(crate) fn find_app_by_pid(&self, pid: u32) -> Result<AccessibleRef> {
+    pub(crate) fn find_apps_by_pid(&self, pid: u32) -> Result<Vec<AccessibleRef>> {
+        let mut matches = Vec::new();
         let registry = AccessibleRef {
             bus_name: "org.a11y.atspi.Registry".to_string(),
             path: "/org/a11y/atspi/accessible/root".to_string(),
@@ -1081,7 +1082,8 @@ impl LinuxProvider {
             // against Application.Id alone misses real processes.
             if let Some(app_pid) = self.get_dbus_pid(&child.bus_name) {
                 if app_pid == pid {
-                    return Ok(child.clone());
+                    matches.push(child.clone());
+                    continue;
                 }
             }
             // Fall back to Application.Id for adapters that do set it to pid.
@@ -1090,16 +1092,13 @@ impl LinuxProvider {
             {
                 if let Ok(app_pid) = proxy.get_property::<i32>("Id") {
                     if app_pid as u32 == pid {
-                        return Ok(child.clone());
+                        matches.push(child.clone());
                     }
                 }
             }
         }
 
-        Err(Error::Platform {
-            code: -1,
-            message: format!("No application found with PID {}", pid),
-        })
+        Ok(matches)
     }
 
     /// Get PID via D-Bus GetConnectionUnixProcessID.
@@ -1844,6 +1843,21 @@ impl Provider for LinuxProvider {
     /// stable identities it deduplicates by live in `xa11y-core`.
     fn splits_app_across_entries(&self) -> bool {
         true
+    }
+
+    fn app_roots(&self, app: &ElementData) -> Result<Vec<ElementData>> {
+        let Some(pid) = app.pid else {
+            return Ok(vec![app.clone()]);
+        };
+        let mut roots: Vec<_> = self
+            .list_apps()?
+            .into_iter()
+            .filter(|candidate| candidate.pid == Some(pid))
+            .collect();
+        if roots.is_empty() {
+            roots.push(app.clone());
+        }
+        Ok(roots)
     }
 
     /// Enumerate top-level applications by listing direct children of the

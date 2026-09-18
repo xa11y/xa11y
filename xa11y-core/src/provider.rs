@@ -43,16 +43,10 @@ pub trait Provider: Send + Sync {
     /// one Application node per
     /// process (UIA exposes applications as their top-level windows; the
     /// provider groups them by pid — and calls the process's first window the
-    /// node's representative — see `xa11y-windows`), so a multi-window process
-    /// yields exactly one entry there, same as macOS. **Linux is the one
-    /// exception**: AT-SPI registers one Application entry per app instance
-    /// that connects, and a single process can appear as several entries
-    /// sharing one pid (compositors, toolkits with per-window registrations),
-    /// each potentially exposing distinct windows. `list_apps` therefore
-    /// returns all of them on Linux, and consumers that need one entry per
-    /// process (window listings, `App::by_pid`-style lookups) must
-    /// deduplicate by process identity (pid + stable element identity) rather
-    /// than assume the list is already one-per-pid. The application's top-level
+    /// node's representative — see `xa11y-windows`). AT-SPI can return several
+    /// native registrations sharing a pid; the core collapses those into one
+    /// public `App` and uses [`app_roots`](Self::app_roots) for process-wide
+    /// traversal. The application's top-level
     /// windows are its `get_children` results, so `App::windows` is the same
     /// `get_children` + `Window|Dialog` filter on every platform.
     /// This is the dedicated discovery primitive: it replaces the previous
@@ -83,6 +77,16 @@ pub trait Provider: Send + Sync {
     /// the merge deduplicates by that identity.
     fn splits_app_across_entries(&self) -> bool {
         false
+    }
+
+    /// Return every native application root that belongs to the same process
+    /// as `app`.
+    ///
+    /// Most accessibility APIs expose exactly one root per process, so the
+    /// default is the supplied root. AT-SPI providers override this because a
+    /// process may register several independent roots.
+    fn app_roots(&self, app: &ElementData) -> Result<Vec<ElementData>> {
+        Ok(vec![app.clone()])
     }
 
     /// Find the application owning process `pid` — one attempt, no polling.
@@ -456,6 +460,9 @@ impl<T: Provider + ?Sized> Provider for &T {
     // answer `false` for a Linux provider passed by reference.
     fn splits_app_across_entries(&self) -> bool {
         (**self).splits_app_across_entries()
+    }
+    fn app_roots(&self, app: &ElementData) -> Result<Vec<ElementData>> {
+        (**self).app_roots(app)
     }
     // Delegated explicitly (despite having a default impl) so a concrete
     // provider's PID-direct override isn't bypassed when it's used through a

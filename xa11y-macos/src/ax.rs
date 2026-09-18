@@ -327,6 +327,44 @@ fn ax_bool(element: AXUIElementRef, attribute: &str) -> Option<bool> {
     }
 }
 
+/// Whether `window` is the owning process's focused (key) window.
+fn focused_window_is(window: AXUIElementRef, pid: u32) -> bool {
+    let system = AXElement::from_owned(unsafe { safe_ax_create_system_wide() });
+    if system.is_null() {
+        return false;
+    }
+    let focused_app_attribute = CFString::new("AXFocusedApplication");
+    let mut focused_app: CFTypeRef = std::ptr::null();
+    if ffi_copy_attribute_value(
+        system.as_ptr(),
+        focused_app_attribute.as_concrete_TypeRef() as CFTypeRef,
+        &mut focused_app,
+    ) != AX_ERROR_SUCCESS
+        || focused_app.is_null()
+    {
+        return false;
+    }
+    let app = AXElement::from_owned(focused_app as AXUIElementRef);
+    let mut focused_pid = 0;
+    if unsafe { safe_ax_get_pid(app.as_ptr(), &mut focused_pid) } != AX_ERROR_SUCCESS
+        || focused_pid != pid as i32
+    {
+        return false;
+    }
+    let attribute = CFString::new("AXFocusedWindow");
+    let mut focused: CFTypeRef = std::ptr::null();
+    let err = ffi_copy_attribute_value(
+        app.as_ptr(),
+        attribute.as_concrete_TypeRef() as CFTypeRef,
+        &mut focused,
+    );
+    if err != AX_ERROR_SUCCESS || focused.is_null() {
+        return false;
+    }
+    let focused = AXElement::from_owned(focused as AXUIElementRef);
+    unsafe { safe_cf_equal(window as CFTypeRef, focused.as_ptr() as CFTypeRef) }
+}
+
 fn ax_number_f64(element: AXUIElementRef, attribute: &str) -> Option<f64> {
     let value = ax_attr(element, attribute)?;
     unsafe {
@@ -3036,14 +3074,12 @@ fn build_snapshot_data(
                 | Role::Switch
         ) || attrs.focused.is_some();
 
-        // `AXMain` marks the app's main (active) window. Only window-like
-        // elements (Window / Dialog / Sheet — the latter maps to `Role::Dialog`)
-        // carry it, so gate on role to avoid an extra AX IPC round-trip for
-        // every non-window element. `ax_bool` routes through the exception-safe
-        // wrappers and owns its CFRelease; a missing / error / non-boolean
-        // attribute yields `false`, matching how the other state reads degrade.
+        // "Active" means the window currently receiving input, not the main
+        // document window. Cocoa deliberately distinguishes key and main
+        // windows (a floating panel can be key while the document stays main),
+        // so compare against the owning application's AXFocusedWindow.
         let active = matches!(role, Role::Window | Role::Dialog)
-            && ax_bool(element, "AXMain").unwrap_or(false);
+            && pid.is_some_and(|pid| focused_window_is(element, pid));
 
         let states: StateSet = StateParts {
             enabled: attrs.enabled.unwrap_or(true),

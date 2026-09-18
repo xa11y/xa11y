@@ -98,23 +98,27 @@ fn merge_diagnosis(err: Error, extra: Diagnosis) -> Error {
 /// swallowed (tenet 1) — on every backend the focus query needs no more access
 /// than the enumeration that produced `apps`.
 fn tag_focused(provider: &Arc<dyn Provider>, apps: &mut [ElementData]) -> Result<()> {
-    let focused_pid = match provider.focused_app() {
-        Ok(data) => data.pid,
+    let focused = match provider.focused_app() {
+        Ok(data) => Some(data),
         Err(Error::SelectorNotMatched { .. }) => None,
         Err(e) => return Err(e),
     };
-    // How many enumerated entries share the foreground pid. One match → pid
-    // alone is unambiguous; several → disambiguate by the entry-level
-    // `active` flag (the Linux AT-SPI multi-registration case).
-    let n_matches = apps
-        .iter()
-        .filter(|a| focused_pid.is_some() && a.pid == focused_pid)
-        .count();
     for app in apps.iter_mut() {
-        let pid_match = focused_pid.is_some() && app.pid == focused_pid;
-        app.states.focused = pid_match && (n_matches == 1 || app.states.active);
+        app.states.focused = focused.as_ref().is_some_and(|f| {
+            same_window_identity(app, f) || (app.pid.is_some() && app.pid == f.pid)
+        });
     }
     Ok(())
+}
+
+/// Collapse native registrations into the process-level applications exposed
+/// by the public API. Entries without a PID cannot be proven equivalent and
+/// remain distinct.
+fn dedup_processes(apps: Vec<ElementData>) -> Vec<ElementData> {
+    let mut seen = std::collections::HashSet::new();
+    apps.into_iter()
+        .filter(|app| app.pid.is_none_or(|pid| seen.insert(pid)))
+        .collect()
 }
 
 /// Bounded "what *is* running" snapshot for application-lookup failures:
@@ -272,7 +276,7 @@ impl App {
                 // "app not found" from "accessibility is broken". A predicate
                 // error propagates for the same reason — `poll_lookup` only
                 // retries `SelectorNotMatched`, so anything else fails fast.
-                let mut apps = provider.list_apps()?;
+                let mut apps = dedup_processes(provider.list_apps()?);
                 if tag_focus {
                     tag_focused(&provider, &mut apps)?;
                 }
@@ -419,12 +423,9 @@ impl App {
     /// Prefer `App::list` from the `xa11y` crate which uses the global
     /// singleton provider.
     pub fn list_with(provider: Arc<dyn Provider>) -> Result<Vec<Self>> {
-        // `list_apps()` returns one Application node per process on macOS and
-        // Windows (Windows synthesizes it); Linux's AT-SPI registry can
-        // register several entries for one pid, and the list returns them
-        // all — consumers that need process-complete window listings merge
-        // them by stable identity (see `windows_with`).
-        let mut datas = provider.list_apps()?;
+        // Collapse platform registrations by pid: a public App consistently
+        // represents a process on every backend.
+        let mut datas = dedup_processes(provider.list_apps()?);
         // Mark the foreground app (one focus query) so `App::focused` is
         // populated across the returned list without an extra call per app.
         tag_focused(&provider, &mut datas)?;
@@ -472,7 +473,15 @@ impl App {
                 role: data.role,
             });
         }
-        let mut children = provider.get_children(Some(data))?;
+        let roots = provider.app_roots(data)?;
+        let mut children = Vec::new();
+        for root in &roots {
+            for child in provider.get_children(Some(root))? {
+                if !children.iter().any(|c| same_window_identity(c, &child)) {
+                    children.push(child);
+                }
+            }
+        }
         // Only providers that can expose several Application entries per pid
         // need the cross-entry merge. On macOS and Windows one entry covers
         // the process, so re-enumerating `list_apps` here would be pure waste
@@ -480,20 +489,22 @@ impl App {
         // windows without an AXIdentifier would no longer deduplicate and
         // `windows()` would report each window twice. See
         // `Provider::splits_app_across_entries`.
-        if let Some(pid) = data.pid {
-            if provider.splits_app_across_entries() {
-                for entry in provider.list_apps()? {
-                    // Skip the calling entry itself (its children are already in
-                    // the list) — identified by the same stable-identity key, not
-                    // by handle: entries are rebuilt per query on Linux, so the
-                    // handle differs across calls while the stable identity
-                    // (D-Bus object path scoped by bus name) does not.
-                    if entry.pid != Some(pid) || same_window_identity(&entry, data) {
-                        continue;
-                    }
-                    for child in provider.get_children(Some(&entry))? {
-                        if !children.iter().any(|c| same_window_identity(c, &child)) {
-                            children.push(child);
+        if roots.len() == 1 {
+            if let Some(pid) = data.pid {
+                if provider.splits_app_across_entries() {
+                    for entry in provider.list_apps()? {
+                        // Skip the calling entry itself (its children are already in
+                        // the list) — identified by the same stable-identity key, not
+                        // by handle: entries are rebuilt per query on Linux, so the
+                        // handle differs across calls while the stable identity
+                        // (D-Bus object path scoped by bus name) does not.
+                        if entry.pid != Some(pid) || same_window_identity(&entry, data) {
+                            continue;
+                        }
+                        for child in provider.get_children(Some(&entry))? {
+                            if !children.iter().any(|c| same_window_identity(c, &child)) {
+                                children.push(child);
+                            }
                         }
                     }
                 }
@@ -539,11 +550,7 @@ impl App {
 
     /// Create a [`Locator`] to search this application's accessibility tree.
     pub fn locator(&self, selector: &str) -> Locator {
-        Locator::new(
-            Arc::clone(&self.provider),
-            Some(self.data.clone()),
-            selector,
-        )
+        Locator::new_for_app(Arc::clone(&self.provider), self.data.clone(), selector)
     }
 
     /// Subscribe to accessibility events from this application.
@@ -553,7 +560,14 @@ impl App {
 
     /// Get direct children (typically windows) of this application.
     pub fn children(&self) -> Result<Vec<Element>> {
-        let children = self.provider.get_children(Some(&self.data))?;
+        let mut children = Vec::new();
+        for root in self.provider.app_roots(&self.data)? {
+            for child in self.provider.get_children(Some(&root))? {
+                if !children.iter().any(|c| same_window_identity(c, &child)) {
+                    children.push(child);
+                }
+            }
+        }
         Ok(children
             .into_iter()
             .map(|d| Element::new(d, Arc::clone(&self.provider)))
@@ -566,7 +580,18 @@ impl App {
     /// Equivalent to `self.as_element().tree(max_depth)`. See
     /// [`Element::tree`] for `max_depth` semantics.
     pub fn tree(&self, max_depth: Option<usize>) -> Result<TreeNode> {
-        self.as_element().tree(max_depth)
+        let roots = self.provider.app_roots(&self.data)?;
+        let mut trees = roots
+            .into_iter()
+            .map(|root| Element::new(root, Arc::clone(&self.provider)).tree(max_depth));
+        let mut tree = trees
+            .next()
+            .transpose()?
+            .unwrap_or_else(|| TreeNode::new("application"));
+        for sibling in trees {
+            tree.children.extend(sibling?.children);
+        }
+        Ok(tree)
     }
 
     /// Render the application's accessibility tree as an indented string,
@@ -603,12 +628,8 @@ impl App {
     /// [`by_pid_with`](Self::by_pid_with) carry the platform's raw app-element
     /// focus state instead (typically `false`).
     ///
-    /// Tagging is window-precise. On Linux the AT-SPI registry can surface
-    /// several `Application` entries for one pid, so only the entry actually
-    /// in the foreground — the one reporting the platform's window-level
-    /// `active` flag — reports `is_foreground`, not every entry of the
-    /// process. macOS and Windows report one node per pid/process, so there
-    /// this mirrors the foreground process.
+    /// This identifies the foreground process. The window-level `active`
+    /// state identifies the exact foreground window returned by `windows()`.
     /// Use [`foreground_with`](Self::foreground_with) (or `App::foreground`
     /// from the `xa11y` crate) to resolve the foreground application directly,
     /// then pick the exact foreground window from its [`windows`](Self::windows)
@@ -1196,6 +1217,13 @@ mod tests {
         fn splits_app_across_entries(&self) -> bool {
             self.claims_split
         }
+        fn app_roots(&self, app: &ElementData) -> Result<Vec<ElementData>> {
+            if self.claims_split {
+                Ok(vec![Self::app(700), Self::app(701)])
+            } else {
+                Ok(vec![app.clone()])
+            }
+        }
         fn list_apps(&self) -> Result<Vec<ElementData>> {
             self.list_apps_calls
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -1331,6 +1359,19 @@ mod tests {
             names,
             vec!["Main", "Modal"],
             "both entries' windows must list"
+        );
+        assert_eq!(
+            app.locator("window")
+                .count()
+                .expect("locator must search every process registration"),
+            2
+        );
+        assert_eq!(
+            app.tree(Some(1))
+                .expect("tree must include every process registration")
+                .children
+                .len(),
+            2
         );
     }
 
@@ -1890,7 +1931,7 @@ mod tests {
     }
 
     #[test]
-    fn list_with_tags_only_the_active_window_of_a_shared_pid() {
+    fn list_with_collapses_shared_pid_registrations_into_one_process() {
         // Regression for issue #304: a process owning several top-level
         // windows (main window + modal dialog) must surface as one entry per
         // registration sharing the pid in `App::list_with` — the old pid
@@ -1900,30 +1941,9 @@ mod tests {
         // `is_foreground()`, not every entry of the process.
         let provider: Arc<dyn Provider> = Arc::new(SharedPidAppProvider::new());
         let apps = App::list_with(provider).expect("list must succeed");
-        assert_eq!(
-            apps.len(),
-            2,
-            "both registrations of the shared pid must appear"
-        );
-        let names: Vec<&str> = apps.iter().map(|a| a.name.as_str()).collect();
-        assert!(
-            names.contains(&"Main"),
-            "main window must be listed: {names:?}"
-        );
-        assert!(
-            names.contains(&"Modal"),
-            "modal window must be listed: {names:?}"
-        );
-        let foreground: Vec<&str> = apps
-            .iter()
-            .filter(|a| a.is_foreground())
-            .map(|a| a.name.as_str())
-            .collect();
-        assert_eq!(
-            foreground,
-            vec!["Modal"],
-            "only the active entry must be tagged foreground, got {foreground:?}"
-        );
+        assert_eq!(apps.len(), 1, "App is process-scoped");
+        assert_eq!(apps[0].pid, Some(42));
+        assert!(apps[0].is_foreground());
     }
 
     #[test]
@@ -2039,10 +2059,10 @@ mod tests {
             inner: build_provider(),
         });
         let apps = App::list_with(provider).expect("list must succeed");
-        assert_eq!(apps.len(), 2);
+        assert_eq!(apps.len(), 1);
         assert!(
-            apps.iter().all(|a| !a.is_foreground()),
-            "no window may be tagged foreground when none is active"
+            apps[0].is_foreground(),
+            "foreground identity comes from focused_app"
         );
     }
 

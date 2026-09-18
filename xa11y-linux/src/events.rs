@@ -62,8 +62,17 @@ pub(crate) fn subscribe_for_pid(
     pid: u32,
     app_name: String,
 ) -> Result<Subscription> {
-    let app_ref = provider.find_app_by_pid(pid)?;
-    let sender_bus = app_ref.bus_name;
+    let sender_buses: Vec<String> = provider
+        .find_apps_by_pid(pid)?
+        .into_iter()
+        .map(|app| app.bus_name)
+        .collect();
+    if sender_buses.is_empty() {
+        return Err(Error::Platform {
+            code: -1,
+            message: format!("No application found with PID {pid}"),
+        });
+    }
 
     // Dedicated Connection per subscription. Dropping it (after we've
     // removed every match rule) cleanly tears the subscription down and
@@ -77,34 +86,37 @@ pub(crate) fn subscribe_for_pid(
         message: format!("DBusProxy: {e}"),
     })?;
 
-    let mut rules: Vec<MatchRule<'static>> = Vec::with_capacity(EVENT_INTERFACES.len());
-    for iface in EVENT_INTERFACES {
-        // Pass owned Strings so the produced MatchRule is `'static` and
-        // can be moved into the cancel closure alongside other owned state.
-        let rule = MatchRule::builder()
-            .msg_type(MessageType::Signal)
-            .sender(sender_bus.clone())
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("sender match rule: {e}"),
-            })?
-            .interface((*iface).to_string())
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("interface match rule: {e}"),
-            })?
-            .build();
-        dbus.add_match_rule(rule.clone())
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("add_match_rule({iface}): {e}"),
-            })?;
-        rules.push(rule);
+    let mut rules: Vec<MatchRule<'static>> =
+        Vec::with_capacity(EVENT_INTERFACES.len() * sender_buses.len());
+    for sender_bus in &sender_buses {
+        for iface in EVENT_INTERFACES {
+            // Pass owned Strings so the produced MatchRule is `'static` and
+            // can be moved into the cancel closure alongside other owned state.
+            let rule = MatchRule::builder()
+                .msg_type(MessageType::Signal)
+                .sender(sender_bus.clone())
+                .map_err(|e| Error::Platform {
+                    code: -1,
+                    message: format!("sender match rule: {e}"),
+                })?
+                .interface((*iface).to_string())
+                .map_err(|e| Error::Platform {
+                    code: -1,
+                    message: format!("interface match rule: {e}"),
+                })?
+                .build();
+            dbus.add_match_rule(rule.clone())
+                .map_err(|e| Error::Platform {
+                    code: -1,
+                    message: format!("add_match_rule({iface}): {e}"),
+                })?;
+            rules.push(rule);
+        }
     }
 
     let (tx, rx) = std::sync::mpsc::channel::<Event>();
     let ctx = Arc::new(EventContext {
-        sender_bus: sender_bus.clone(),
+        sender_buses: sender_buses.clone(),
         app_name,
         app_pid: pid,
         tx: Mutex::new(tx),
@@ -176,7 +188,7 @@ pub(crate) fn subscribe_for_pid(
 /// `tx` is wrapped in `Mutex` because `std::sync::mpsc::Sender` is `!Sync`;
 /// contention is trivial (one lock per emitted event).
 struct EventContext {
-    sender_bus: String,
+    sender_buses: Vec<String>,
     app_name: String,
     app_pid: u32,
     tx: Mutex<std::sync::mpsc::Sender<Event>>,
@@ -211,7 +223,7 @@ impl EventContext {
         let Some(sender) = header.sender() else {
             return;
         };
-        if sender.as_str() != self.sender_bus {
+        if !self.sender_buses.iter().any(|bus| bus == sender.as_str()) {
             return;
         }
 
@@ -239,7 +251,7 @@ impl EventContext {
         };
 
         let target_ref = AccessibleRef {
-            bus_name: self.sender_bus.clone(),
+            bus_name: sender.as_str().to_string(),
             path: path.to_string(),
         };
         // Snapshot the source element synchronously so consumers receive a

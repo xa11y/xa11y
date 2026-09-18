@@ -288,24 +288,18 @@ Both of the following are confirmed against live trees:
 
 Linux can surface **more than one application node for one host PID**: the
 AT-SPI registry may register an extra top-level window as a separate
-accessibility application of its own. `App.list()` can then list two entries
-for one process, and a pid match alone cannot tell which one is the
-foreground — the entry-level `active` flag disambiguates (`App.find` with a
-`focused` predicate sees the same flag). Match a specific node by name when
-the platform hands back several:
-
-```python
-dialog_app = xa11y.App.find(
-    lambda a: a.pid == proc.pid and a.name.startswith("My Submitter"),
-    timeout=60.0,
-)
-```
+accessibility application of its own. Since 0.14, `App` consistently means
+the whole process: `App.list()` returns one entry per resolved PID, and
+`windows()`, `children()`, `tree()`, locators, and subscriptions include all
+of that process's native registrations. Code that previously selected one
+same-PID registration by its name should instead select the process and use a
+window or descendant selector.
 
 Both claims are exercised by the Rust integration suite: with a second window
 open, `foreground_scenario_two_windows` (`xa11y/tests/integ/multi_window.rs`)
-asserts that every pid-matching `App.list()` entry is an `Application` node
-and that `active` disambiguates — the pid-matching entries report
-`is_foreground()` on the one the platform deems frontmost — and
+asserts that the pid-matching `App.list()` entry is an `Application` node,
+that the complete window set remains reachable, and that `active` identifies
+the platform's frontmost window. The
 `find_by_focused_resolves_foreground_app` (`xa11y/tests/integ/tree.rs`)
 covers the `App.find` with a `focused` predicate. Neither test asserts the
 entry count: the multi-registration shape is toolkit-dependent, so the count
