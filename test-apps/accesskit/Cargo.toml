@@ -14,3 +14,8 @@ path = "src/main.rs"
 accesskit = "0.25"
 accesskit_winit = "0.34"
 winit = "0.30"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# A committed buffer is required before a native Wayland surface becomes a
+# compositor-visible toplevel. X11 maps the otherwise renderer-free fixture.
+softbuffer = "0.4.8"

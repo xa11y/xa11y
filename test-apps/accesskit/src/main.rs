@@ -11,6 +11,11 @@ use accesskit::{
     TreeUpdate,
 };
 use accesskit_winit::{Adapter, Event as AccessKitEvent, WindowEvent as AccessKitWindowEvent};
+#[cfg(target_os = "linux")]
+use softbuffer::{Context, Surface};
+#[cfg(target_os = "linux")]
+use std::num::NonZeroU32;
+use std::rc::Rc;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -943,17 +948,42 @@ fn handle_action(request: &ActionRequest, state: &mut AppState) -> bool {
 // ── Winit Application ─────────────────────────────────────────────────────────
 
 struct WindowState {
-    window: Window,
+    window: Rc<Window>,
     adapter: Adapter,
     state: AppState,
+    #[cfg(target_os = "linux")]
+    surface: Surface<Rc<Window>, Rc<Window>>,
 }
 
 /// The dialog window (opened by "Open Dialog"). Unlike the main window it has
 /// no mutable widgets, so it carries no `AppState` — its tree is stateless
 /// (`build_dialog_tree`).
 struct DialogState {
-    window: Window,
+    window: Rc<Window>,
     adapter: Adapter,
+    #[cfg(target_os = "linux")]
+    surface: Surface<Rc<Window>, Rc<Window>>,
+}
+
+#[cfg(target_os = "linux")]
+fn create_surface(window: Rc<Window>) -> Surface<Rc<Window>, Rc<Window>> {
+    let context = Context::new(window.clone()).expect("Failed to create rendering context");
+    Surface::new(&context, window).expect("Failed to create rendering surface")
+}
+
+#[cfg(target_os = "linux")]
+fn draw_surface(surface: &mut Surface<Rc<Window>, Rc<Window>>, window: &Window) {
+    let size = window.inner_size();
+    let width = NonZeroU32::new(size.width.max(1)).unwrap();
+    let height = NonZeroU32::new(size.height.max(1)).unwrap();
+    surface
+        .resize(width, height)
+        .expect("Failed to resize rendering surface");
+    let mut buffer = surface
+        .buffer_mut()
+        .expect("Failed to acquire frame buffer");
+    buffer.fill(0x00f4_f4f4);
+    buffer.present().expect("Failed to present frame buffer");
 }
 
 struct Application {
@@ -974,12 +1004,23 @@ impl Application {
         let window_attributes = Window::default_attributes()
             .with_title(DIALOG_TITLE)
             .with_visible(false);
-        let window = event_loop
-            .create_window(window_attributes)
-            .expect("Failed to create dialog window");
+        let window = Rc::new(
+            event_loop
+                .create_window(window_attributes)
+                .expect("Failed to create dialog window"),
+        );
         let adapter = Adapter::with_event_loop_proxy(event_loop, &window, self.proxy.clone());
+        #[cfg(target_os = "linux")]
+        let surface = create_surface(window.clone());
         window.set_visible(true);
-        self.dialog = Some(DialogState { window, adapter });
+        #[cfg(target_os = "linux")]
+        window.request_redraw();
+        self.dialog = Some(DialogState {
+            window,
+            adapter,
+            #[cfg(target_os = "linux")]
+            surface,
+        });
         // The dialog takes host focus; the main window yields it. This is what
         // moves the AT-SPI ACTIVE state (AXMain / foreground HWND on the other
         // platforms) from the main window onto the dialog.
@@ -1024,13 +1065,19 @@ impl ApplicationHandler<AccessKitEvent> for Application {
             .with_title(WINDOW_TITLE)
             .with_visible(false);
 
-        let window = event_loop
-            .create_window(window_attributes)
-            .expect("Failed to create window");
+        let window = Rc::new(
+            event_loop
+                .create_window(window_attributes)
+                .expect("Failed to create window"),
+        );
 
         let mut adapter = Adapter::with_event_loop_proxy(event_loop, &window, self.proxy.clone());
+        #[cfg(target_os = "linux")]
+        let surface = create_surface(window.clone());
 
         window.set_visible(true);
+        #[cfg(target_os = "linux")]
+        window.request_redraw();
 
         // Synthesise host focus on startup — see `sync_focus` for why this is
         // needed under headless Xvfb.
@@ -1040,6 +1087,8 @@ impl ApplicationHandler<AccessKitEvent> for Application {
             window,
             adapter,
             state: AppState::new(),
+            #[cfg(target_os = "linux")]
+            surface,
         });
     }
 
@@ -1064,6 +1113,10 @@ impl ApplicationHandler<AccessKitEvent> for Application {
         {
             let main = self.main.as_mut().unwrap();
             main.adapter.process_event(&main.window, &event);
+            #[cfg(target_os = "linux")]
+            if let WindowEvent::RedrawRequested = event {
+                draw_surface(&mut main.surface, &main.window);
+            }
             if let WindowEvent::CloseRequested = event {
                 // Closing the main window quits the app.
                 self.main = None;
@@ -1075,6 +1128,10 @@ impl ApplicationHandler<AccessKitEvent> for Application {
         {
             let dialog = self.dialog.as_mut().unwrap();
             dialog.adapter.process_event(&dialog.window, &event);
+            #[cfg(target_os = "linux")]
+            if let WindowEvent::RedrawRequested = event {
+                draw_surface(&mut dialog.surface, &dialog.window);
+            }
             if let WindowEvent::CloseRequested = event {
                 self.close_dialog();
             }

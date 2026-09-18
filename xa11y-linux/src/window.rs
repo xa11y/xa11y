@@ -387,7 +387,8 @@ fn collect_sway_candidates(node: &serde_json::Value, output: &mut Vec<SwayCandid
         .and_then(|value| u32::try_from(value).ok());
     let is_container = node.get("type").and_then(serde_json::Value::as_str) == Some("con");
     let is_toplevel = node.get("app_id").is_some_and(|value| !value.is_null())
-        || node.get("window").is_some_and(|value| !value.is_null());
+        || node.get("window").is_some_and(|value| !value.is_null())
+        || node.get("shell").is_some_and(|value| !value.is_null());
     if let (Some(id), Some(pid), true, true) = (id, pid, is_container, is_toplevel) {
         let bounds = node.get("rect").and_then(sway_rect);
         let floating = node
@@ -1211,8 +1212,9 @@ mod tests {
                         "type": "con",
                         "pid": 42,
                         "name": "Native",
-                        "app_id": "org.example.Native",
+                        "app_id": null,
                         "window": null,
+                        "shell": "xdg_shell",
                         "floating": "auto_off",
                         "fullscreen_mode": 1,
                         "rect": {"x": 0, "y": 0, "width": 800, "height": 600},
