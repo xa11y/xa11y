@@ -344,11 +344,20 @@ fn focused_window_is(window: AXUIElementRef, pid: u32) -> bool {
     {
         return false;
     }
-    let app = AXElement::from_owned(focused_app as AXUIElementRef);
+    let frontmost_app = AXElement::from_owned(focused_app as AXUIElementRef);
     let mut focused_pid = 0;
-    if unsafe { safe_ax_get_pid(app.as_ptr(), &mut focused_pid) } != AX_ERROR_SUCCESS
+    if unsafe { safe_ax_get_pid(frontmost_app.as_ptr(), &mut focused_pid) } != AX_ERROR_SUCCESS
         || focused_pid != pid as i32
     {
+        return false;
+    }
+    // Query the canonical per-process application element. The object
+    // returned by AXFocusedApplication identifies the frontmost process, but
+    // some accessibility bridges do not vend its application attributes on
+    // that particular proxy. AXUIElementCreateApplication is the stable root
+    // the rest of this provider uses for AXWindows and app-level attributes.
+    let app = AXElement::from_owned(unsafe { safe_ax_create_application(focused_pid) });
+    if app.is_null() {
         return false;
     }
     let attribute = CFString::new("AXFocusedWindow");
