@@ -1598,6 +1598,20 @@ const WINDOW_FULLSCREEN_SETTLE_GRACE: Duration = Duration::from_millis(700);
 const WINDOW_MINIMIZED_SETTLE_BUDGET: Duration = Duration::from_secs(5);
 const WINDOW_MINIMIZED_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
 
+/// How long `move_to` waits for an `AXPosition` write to become observable,
+/// and the poll cadence during the wait.
+///
+/// Some toolkit bridges acknowledge `AXPosition` before their event loop has
+/// applied it, and can drop that first write while the window is settling
+/// from another transition. Re-issuing the absolute position is idempotent
+/// and turns the accepted write into the promise `move_to` exposes.
+const WINDOW_POSITION_SETTLE_BUDGET: Duration = Duration::from_secs(5);
+const WINDOW_POSITION_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
+/// AX bridges can round logical coordinates while crossing the native
+/// boundary. This matches the tolerance used by the cross-binding integration
+/// tests and is small enough to distinguish their 10-point move.
+const WINDOW_POSITION_TOLERANCE: f64 = 2.0;
+
 /// Read a boolean AX attribute with the tenet-1 distinction: a failed read is
 /// an error (the state is unknown, not false), an absent / unsupported
 /// attribute is `Ok(None)`.
@@ -2144,6 +2158,144 @@ fn settle_bool_attr(
             ));
         }
         std::thread::sleep(WINDOW_MINIMIZED_SETTLE_INTERVAL);
+    }
+}
+
+// ── Window Position Settling ──────────────────────────────────────────────────
+
+/// Read `AXPosition` without collapsing a failed or malformed response into
+/// "no position". Snapshot construction may leave optional bounds absent,
+/// but an action that is verifying its own write must surface why the promise
+/// could not be checked (tenet 1, tenet 6).
+fn read_window_position(
+    el_ptr: AXUIElementRef,
+    action: &str,
+    role: Role,
+) -> Result<Option<(f64, f64)>> {
+    match read_raw_attr(el_ptr, "AXPosition") {
+        RawAttr::Value(value) => {
+            let mut point = CGPoint::default();
+            let ok = unsafe {
+                safe_ax_value_get_value(
+                    value,
+                    AX_VALUE_CGPOINT,
+                    &mut point as *mut _ as *mut c_void,
+                )
+            };
+            unsafe { safe_cf_release(value) };
+            if ok {
+                Ok(Some((point.x, point.y)))
+            } else {
+                Err(Error::Platform {
+                    code: -1,
+                    message: format!(
+                        "AXPosition returned a non-point value while handling {action} on a \
+                         {role}; the position is unknown"
+                    ),
+                })
+            }
+        }
+        RawAttr::Absent => Ok(None),
+        RawAttr::Unanswered(code) => Err(Error::Platform {
+            code: code as i64,
+            message: format!(
+                "AXPosition read failed while handling {action} on a {role} (AXError {code}); \
+                 the position is unknown"
+            ),
+        }),
+    }
+}
+
+/// Set the window's absolute AX position once.
+fn set_window_position(
+    el_ptr: AXUIElementRef,
+    x: i32,
+    y: i32,
+    action: &str,
+    role: Role,
+) -> Result<()> {
+    let value = unsafe { safe_ax_value_create_cg_point(f64::from(x), f64::from(y)) };
+    if value.is_null() {
+        return Err(Error::Platform {
+            code: -1,
+            message: "Failed to create CGPoint AXValue for window move".to_string(),
+        });
+    }
+    let attr = CFString::new("AXPosition");
+    let err = do_set_attribute(el_ptr, &attr, value);
+    unsafe { safe_cf_release(value) };
+    if err != AX_ERROR_SUCCESS {
+        return Err(action_error(err, action, role, "Set AXPosition failed"));
+    }
+    Ok(())
+}
+
+fn position_near(actual: (f64, f64), expected: (f64, f64)) -> bool {
+    (actual.0 - expected.0).abs() <= WINDOW_POSITION_TOLERANCE
+        && (actual.1 - expected.1).abs() <= WINDOW_POSITION_TOLERANCE
+}
+
+/// Wait until `AXPosition` reflects the requested logical coordinates,
+/// re-issuing the absolute write while it does not.
+///
+/// macOS can return success before a toolkit bridge applies the write, and an
+/// egui window settling from an earlier transition can discard that accepted
+/// first write. A caller-side sleep cannot recover a dropped write; retrying
+/// the idempotent absolute set can. Invalidated elements are refreshed from
+/// the owning application's window list, while every non-churn failure keeps
+/// its original error instead of turning into a generic timeout (tenet 1).
+fn settle_window_position(
+    el_ptr: AXUIElementRef,
+    x: i32,
+    y: i32,
+    action: &str,
+    role: Role,
+) -> Result<()> {
+    let app = owning_app_element(el_ptr, action, role)?;
+    let deadline = Instant::now() + WINDOW_POSITION_SETTLE_BUDGET;
+    let expected = (f64::from(x), f64::from(y));
+    let mut last_observed: Option<String> = None;
+    let mut fresh: Option<AXElement> = None;
+    loop {
+        let target = fresh.as_ref().map_or(el_ptr, |el| el.as_ptr());
+        let failure = match read_window_position(target, action, role) {
+            Ok(Some(actual)) => {
+                last_observed = Some(format!("AXPosition reads ({}, {})", actual.0, actual.1));
+                if position_near(actual, expected) {
+                    return Ok(());
+                }
+                set_window_position(target, x, y, action, role).err()
+            }
+            Ok(None) => {
+                last_observed = Some("the window has no AXPosition attribute".to_string());
+                set_window_position(target, x, y, action, role).err()
+            }
+            Err(err) => Some(err),
+        };
+        if let Some(err) = failure {
+            match classify_element_churn(&err) {
+                ElementChurn::Gone => {
+                    last_observed = Some(err.to_string());
+                    if let Some(found) = fresh_target_in_app(app.as_ptr(), el_ptr)? {
+                        fresh = Some(found);
+                    }
+                }
+                ElementChurn::Unreachable | ElementChurn::Fatal => return Err(err),
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(Error::timeout(WINDOW_POSITION_SETTLE_BUDGET).diagnose(
+                xa11y_core::Diagnosis::new()
+                    .condition(format!(
+                        "window reaches position ({x}, {y}) within {} points",
+                        WINDOW_POSITION_TOLERANCE
+                    ))
+                    .last_observed(last_observed.unwrap_or_else(|| {
+                        "AXPosition could not be observed before the deadline".to_string()
+                    })),
+            ));
+        }
+        std::thread::sleep(WINDOW_POSITION_SETTLE_INTERVAL);
     }
 }
 
@@ -4463,25 +4615,7 @@ impl Provider for MacOSProvider {
                 role: element.role,
             });
         }
-        let value = unsafe { safe_ax_value_create_cg_point(f64::from(x), f64::from(y)) };
-        if value.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "Failed to create CGPoint AXValue for window move".to_string(),
-            });
-        }
-        let attr = CFString::new("AXPosition");
-        let err = do_set_attribute(ax.as_ptr(), &attr, value);
-        unsafe { safe_cf_release(value) };
-        if err != AX_ERROR_SUCCESS {
-            return Err(action_error(
-                err,
-                "move_to",
-                element.role,
-                "Set AXPosition failed",
-            ));
-        }
-        Ok(())
+        settle_window_position(ax.as_ptr(), x, y, "move_to", element.role)
     }
 
     fn resize_to(&self, element: &ElementData, width: u32, height: u32) -> Result<()> {
@@ -5142,6 +5276,22 @@ mod tests {
             Role::Window,
         );
         assert!(matches!(result, Err(Error::Platform { .. })));
+    }
+
+    #[test]
+    fn settle_window_position_propagates_unreadable_element() {
+        // The move settle resolves the owning application before polling, so
+        // an unreadable target must surface its platform failure rather than
+        // being retried into a timeout.
+        let result = settle_window_position(std::ptr::null(), 10, 20, "move_to", Role::Window);
+        assert!(matches!(result, Err(Error::Platform { .. })));
+    }
+
+    #[test]
+    fn position_near_allows_only_the_documented_rounding_tolerance() {
+        assert!(position_near((12.0, 18.0), (10.0, 20.0)));
+        assert!(!position_near((12.1, 18.0), (10.0, 20.0)));
+        assert!(!position_near((12.0, 17.9), (10.0, 20.0)));
     }
 
     /// An enumerated target sample holding `fullscreen` / `settable`.
