@@ -351,8 +351,8 @@ const SCREEN_FILL_OPERATIONS = [
 ];
 
 async function screenFillOperation(app) {
-  // Prefer enterFullscreen over maximize: no platform advertises both for the
-  // same window (macOS refuses maximize, Windows has no fullscreen verb).
+  // Prefer enterFullscreen over maximize. Linux/X11 can advertise both for
+  // the same window; macOS refuses maximize and Windows has no fullscreen verb.
   for (const spec of SCREEN_FILL_OPERATIONS) {
     const win = await windowAdvertising(app, spec.action);
     if (win && win.actions.includes('restore')) return spec;
@@ -362,17 +362,14 @@ async function screenFillOperation(app) {
 
 async function assertScreenFill(app, spec, want, what) {
   // One settled read (see `settledWindow`): macOS reads once, Windows polls.
-  // The *other* state must stay unknown (null) — macOS cannot report
-  // `maximized` and Windows cannot report `fullscreen`, which is exactly the
-  // separation between the two operations.
+  // The *other* state must not be active. It stays unknown (null) on macOS and
+  // Windows, while Linux/X11 can prove that it is false.
   const win = await settledWindow(
     app, spec.action, (w) => w[spec.state] === want, `${what}: ${spec.state}`);
   const other = spec.state === 'fullscreen' ? 'maximized' : 'fullscreen';
-  assert.strictEqual(
-    win[other],
-    null,
-    `${what}: ${other} must stay unknown — ${spec.method} is not that operation`
-  );
+  assert.notStrictEqual(
+    win[other], true,
+    `${what}: ${other} must not be active — ${spec.method} is a distinct operation`);
 }
 
 test('the screen-filling verb and minimize run back-to-back', async (t) => {

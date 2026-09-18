@@ -47,6 +47,7 @@ QT = APP == "qt"
 # animation, and runs for every macOS test app (cocoa, egui, qt, tauri), not
 # just one.
 MACOS = sys.platform == "darwin"
+LINUX = sys.platform.startswith("linux")
 
 # `close` is only exercised against a *secondary* dialog window (opened via
 # the app's "Open Dialog" button, see `_open_dialog`): closing the shared
@@ -405,8 +406,8 @@ SCREEN_FILL_OPERATIONS = (
 def _screen_fill_operation(app: xa11y.App) -> tuple[str, str] | None:
     """The ``(verb, state)`` this platform exposes, or None.
 
-    ``enter_fullscreen`` is preferred over ``maximize`` because no platform
-    advertises both for the same window: macOS refuses ``maximize`` and
+    ``enter_fullscreen`` is preferred over ``maximize``. Linux/X11 can
+    advertise both for the same window; macOS refuses ``maximize`` and
     Windows has no fullscreen operation.
     """
     for verb, state in SCREEN_FILL_OPERATIONS:
@@ -422,16 +423,15 @@ def _assert_screen_fill(
     """Assert the platform's screen-fill state after one settled read.
 
     ``_settled_window`` reads once on macOS and polls briefly on Windows (see
-    there). The *other* state must stay unknown (``None``): macOS cannot report
-    ``maximized`` and Windows cannot report ``fullscreen`` — that is exactly
-    the separation between the two operations.
+    there). The *other* state must not be active. It stays unknown (``None``)
+    on macOS and Windows, while Linux/X11 can prove that it is ``False``.
     """
     win = _settled_window(
         app, verb, lambda w: getattr(w, state) is want, f"{what}: {state}"
     )
     other = "maximized" if state == "fullscreen" else "fullscreen"
-    assert getattr(win, other) is None, (
-        f"{what}: {other} must stay unknown — {verb} is not that operation"
+    assert getattr(win, other) is not True, (
+        f"{what}: {other} must not be active — {verb} is a distinct operation"
     )
 
 
@@ -653,11 +653,11 @@ def test_move_to_and_resize_to_are_enforced_on_winforms(
 
 
 @pytest.mark.skipif(
-    QT,
+    QT or LINUX,
     reason=(
         "Qt does not reliably emit StateChanged events for programmatic "
-        "accessibility actions across AT-SPI2 / UIA / AX (known-bad; see "
-        "tests/suites/python/test_events.py)."
+        "accessibility actions (known-bad; see tests/suites/python/test_events.py); "
+        "Linux native window-manager requests do not synthesize AT-SPI events."
     ),
 )
 def test_state_changed_minimized_on_minimize_restore(app: xa11y.App) -> None:
@@ -670,8 +670,9 @@ def test_state_changed_minimized_on_minimize_restore(app: xa11y.App) -> None:
     event — the AccessKit app cannot (its ``IWindowProvider`` returns
     ``not_supported`` for visual state), so the Rust integ suite has no
     surface for it. On macOS the same pair arrives via
-    ``AXWindowMiniaturized`` / ``AXWindowDeminiaturized``; Linux windows do
-    not advertise the verbs, which skips the Linux cells.
+    ``AXWindowMiniaturized`` / ``AXWindowDeminiaturized``. Linux now advertises
+    native window-manager verbs, but EWMH/Sway state changes do not synthesize
+    corresponding AT-SPI events, so Linux skips this accessibility-event test.
 
     ``minimize`` must deliver ``{minimized: true}`` and ``restore``
     ``{minimized: false}`` — the false half is what proves event and

@@ -807,6 +807,23 @@ impl X11WindowBackend {
                 feature: "minimize: no ICCCM/EWMH window manager is active".to_string(),
             });
         }
+        // Keep the entry verbs distinct and absolute. Some window managers
+        // preserve EWMH fullscreen/maximized atoms while iconifying, which
+        // would otherwise make a later restore or screen-fill operation start
+        // from two active states.
+        if self.supports_state(self.atoms.net_wm_state_fullscreen) {
+            self.change_state(element, STATE_REMOVE, self.atoms.net_wm_state_fullscreen, 0)?;
+        }
+        if self.supports_state(self.atoms.net_wm_state_max_horz)
+            && self.supports_state(self.atoms.net_wm_state_max_vert)
+        {
+            self.change_state(
+                element,
+                STATE_REMOVE,
+                self.atoms.net_wm_state_max_horz,
+                self.atoms.net_wm_state_max_vert,
+            )?;
+        }
         self.send_for(
             element,
             self.atoms.wm_change_state,
