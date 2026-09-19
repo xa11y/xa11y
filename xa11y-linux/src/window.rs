@@ -844,6 +844,9 @@ impl X11WindowBackend {
     }
 
     fn with_server_grab<T>(&self, action: impl FnOnce(&RustConnection) -> Result<T>) -> Result<T> {
+        // The first scale lookup may open a separate X connection. Complete it
+        // before the grab; a different client cannot answer while grabbed.
+        crate::scale::coordinate_scale();
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         conn.grab_server()
             .map_err(platform)?
