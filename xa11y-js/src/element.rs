@@ -271,6 +271,7 @@ impl Element {
             data: self.data.clone(),
             provider: self.provider.clone(),
             max_depth: max_depth.map(|d| d as usize),
+            process_scope: false,
         })
     }
 
@@ -286,6 +287,7 @@ impl Element {
             data: self.data.clone(),
             provider: self.provider.clone(),
             max_depth: max_depth.map(|d| d as usize),
+            process_scope: false,
         })
     }
 
@@ -669,9 +671,20 @@ pub struct TreeTask {
     data: xa11y::ElementData,
     provider: Arc<dyn xa11y::Provider>,
     max_depth: Option<usize>,
+    process_scope: bool,
 }
 
 impl TreeTask {
+    pub fn new_for_app(
+        data: xa11y::ElementData,
+        provider: Arc<dyn xa11y::Provider>,
+        max_depth: Option<usize>,
+    ) -> Self {
+        let mut task = Self::new(data, provider, max_depth);
+        task.process_scope = true;
+        task
+    }
+
     pub fn new(
         data: xa11y::ElementData,
         provider: Arc<dyn xa11y::Provider>,
@@ -681,6 +694,7 @@ impl TreeTask {
             data,
             provider,
             max_depth,
+            process_scope: false,
         }
     }
 }
@@ -690,6 +704,11 @@ impl Task for TreeTask {
     type JsValue = TreeNode;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
+        if self.process_scope {
+            return xa11y::App::from_data(self.provider.clone(), self.data.clone())
+                .tree(self.max_depth)
+                .map_err(map_err);
+        }
         let element = xa11y::Element::new(self.data.clone(), self.provider.clone());
         element.tree(self.max_depth).map_err(map_err)
     }
@@ -703,9 +722,20 @@ pub struct DumpTask {
     data: xa11y::ElementData,
     provider: Arc<dyn xa11y::Provider>,
     max_depth: Option<usize>,
+    process_scope: bool,
 }
 
 impl DumpTask {
+    pub fn new_for_app(
+        data: xa11y::ElementData,
+        provider: Arc<dyn xa11y::Provider>,
+        max_depth: Option<usize>,
+    ) -> Self {
+        let mut task = Self::new(data, provider, max_depth);
+        task.process_scope = true;
+        task
+    }
+
     pub fn new(
         data: xa11y::ElementData,
         provider: Arc<dyn xa11y::Provider>,
@@ -715,6 +745,7 @@ impl DumpTask {
             data,
             provider,
             max_depth,
+            process_scope: false,
         }
     }
 }
@@ -724,6 +755,11 @@ impl Task for DumpTask {
     type JsValue = String;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
+        if self.process_scope {
+            return xa11y::App::from_data(self.provider.clone(), self.data.clone())
+                .dump(self.max_depth)
+                .map_err(map_err);
+        }
         let element = xa11y::Element::new(self.data.clone(), self.provider.clone());
         element.dump(self.max_depth).map_err(map_err)
     }

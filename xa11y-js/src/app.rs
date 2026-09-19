@@ -151,9 +151,9 @@ impl App {
     /// API.
     #[napi]
     pub fn locator(&self, selector: String) -> Locator {
-        Locator::from_inner(xa11y::Locator::new(
+        Locator::from_inner(xa11y::Locator::new_for_app(
             self.provider.clone(),
-            Some(self.data.clone()),
+            self.data.clone(),
             &selector,
         ))
     }
@@ -218,7 +218,7 @@ impl App {
         ts_return_type = "Promise<TreeNode>"
     )]
     pub fn tree(&self, max_depth: Option<u32>) -> AsyncTask<TreeTask> {
-        AsyncTask::new(TreeTask::new(
+        AsyncTask::new(TreeTask::new_for_app(
             self.data.clone(),
             self.provider.clone(),
             max_depth.map(|d| d as usize),
@@ -237,7 +237,7 @@ impl App {
         ts_return_type = "Promise<string>"
     )]
     pub fn dump(&self, max_depth: Option<u32>) -> AsyncTask<DumpTask> {
-        AsyncTask::new(DumpTask::new(
+        AsyncTask::new(DumpTask::new_for_app(
             self.data.clone(),
             self.provider.clone(),
             max_depth.map(|d| d as usize),
@@ -343,8 +343,14 @@ impl Task for AppChildrenTask {
     type JsValue = Vec<Element>;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        self.provider
-            .get_children(Some(&self.data))
+        xa11y::App::from_data(self.provider.clone(), self.data.clone())
+            .children()
+            .map(|children| {
+                children
+                    .into_iter()
+                    .map(|child| child.data().clone())
+                    .collect()
+            })
             .map_err(map_err)
     }
 

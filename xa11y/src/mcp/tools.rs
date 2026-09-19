@@ -1336,7 +1336,14 @@ fn tool_tree(args: &Value) -> CliResult<ToolOutput> {
 
     let mut budget = TREE_MAX_NODES;
     let mut depth_capped = false;
-    let node = build_node(&root, max_depth, 0, &mut budget, &mut depth_capped);
+    let node = build_node(
+        &root,
+        max_depth,
+        0,
+        &mut budget,
+        &mut depth_capped,
+        Some(&target),
+    );
 
     let mut out = Map::new();
     target_fields(&target, &mut out);
@@ -1365,6 +1372,7 @@ fn build_node(
     depth: usize,
     budget: &mut usize,
     depth_capped: &mut bool,
+    scope: Option<&cli::Target>,
 ) -> Value {
     // `Element` derefs to `ElementData`, so the leaf encoding is shared with
     // `find` and the two cannot describe the same element differently.
@@ -1381,7 +1389,7 @@ fn build_node(
         return node;
     }
 
-    match element.children() {
+    match scope.map_or_else(|| element.children(), cli::Target::children) {
         Ok(children) => {
             let mut encoded = Vec::new();
             for child in &children {
@@ -1395,6 +1403,7 @@ fn build_node(
                     depth + 1,
                     budget,
                     depth_capped,
+                    None,
                 ));
             }
             if !encoded.is_empty() {
@@ -2234,6 +2243,39 @@ fn failure_kind(err: &CliError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn process_tree_includes_sibling_roots_without_bypassing_budgets() {
+        let provider: std::sync::Arc<dyn crate::Provider> =
+            xa11y_core::mock::build_split_provider();
+        let app = crate::App::by_pid_with(provider, 1234, std::time::Duration::ZERO).unwrap();
+        let target = cli::Target::App(app);
+        let mut budget = 20;
+        let mut capped = false;
+        let tree = build_node(
+            &target.root(),
+            1,
+            0,
+            &mut budget,
+            &mut capped,
+            Some(&target),
+        );
+        let children = tree["children"].as_array().unwrap();
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[1]["name"], "Second Window");
+        assert!(children.iter().all(|child| child.get("children").is_none()));
+        let mut budget = 1;
+        let tree = build_node(
+            &target.root(),
+            5,
+            0,
+            &mut budget,
+            &mut capped,
+            Some(&target),
+        );
+        assert_eq!(tree["children"].as_array().unwrap().len(), 1);
+        assert_eq!(budget, 0);
+    }
 
     fn args(v: Value) -> Value {
         v
