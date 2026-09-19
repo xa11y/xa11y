@@ -14,6 +14,7 @@ serde_json = { workspace = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 png = "0.18"
 rayon = "1"
+nix = { version = "0.29", features = ["socket"] }
 zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
 # X11 + XTest for the X11 input-simulation backend.
 x11rb = { version = "0.14", default-features = false, features = ["xtest"] }

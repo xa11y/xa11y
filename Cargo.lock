@@ -1250,6 +1250,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset",
 ]
 
 [[package]]
@@ -3114,6 +3115,7 @@ name = "xa11y-linux"
 version = "0.14.0"
 dependencies = [
  "evdev",
+ "nix",
  "png",
  "rayon",
  "serde_json",

@@ -8,13 +8,13 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
-use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
 use wayland_client::protocol::wl_registry;
 use wayland_client::{Connection as WaylandConnection, Dispatch, QueueHandle};
+use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ClientMessageData, ClientMessageEvent, ConnectionExt as _, EventMask, Window,
@@ -192,20 +192,19 @@ struct NativeBinding<Id> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ServerIdentity {
     X11(Window),
-    Sway {
-        device: u64,
-        inode: u64,
-        changed_at: (i64, i64),
-    },
+    Sway { pid: u32, process_start: u64 },
 }
 
-fn sway_server_identity(socket: &std::path::Path) -> Result<ServerIdentity> {
-    let metadata = std::fs::metadata(socket).map_err(sway_io)?;
-    Ok(ServerIdentity::Sway {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-        changed_at: (metadata.ctime(), metadata.ctime_nsec()),
-    })
+fn sway_server_identity(stream: &UnixStream) -> Result<ServerIdentity> {
+    let credentials = getsockopt(stream, PeerCredentials).map_err(|error| Error::Platform {
+        code: error as i32 as i64,
+        message: format!("read Sway IPC peer credentials: {error}"),
+    })?;
+    let pid = u32::try_from(credentials.pid()).map_err(|_| Error::Platform {
+        code: -1,
+        message: "Sway IPC peer has an invalid process id".to_string(),
+    })?;
+    Ok(ServerIdentity::Sway { pid, process_start: process_start(pid)? })
 }
 
 fn process_start(pid: u32) -> Result<u64> {
@@ -327,7 +326,7 @@ impl SwayWindowBackend {
                 feature: "move_to: Sway only positions floating windows".to_string(),
             });
         }
-        self.command(target.id, &format!("move position {x} {y}"))
+        self.command(element, target.id, &format!("move position {x} {y}"))
     }
 
     fn resize_to(&self, element: &ElementData, width: u32, height: u32) -> Result<()> {
@@ -338,6 +337,7 @@ impl SwayWindowBackend {
             });
         }
         self.command(
+            element,
             target.id,
             &format!("resize set width {width} px height {height} px"),
         )
@@ -345,12 +345,17 @@ impl SwayWindowBackend {
 
     fn command_for(&self, element: &ElementData, command: &str) -> Result<()> {
         let target = self.resolve(element)?;
-        self.command(target.id, command)
+        self.command(element, target.id, command)
     }
 
-    fn command(&self, id: u64, command: &str) -> Result<()> {
+    fn command(&self, element: &ElementData, id: u64, command: &str) -> Result<()> {
+        let binding = *self.bindings.lock().unwrap_or_else(|e| e.into_inner())
+            .get(&element.handle).ok_or_else(|| lost_identity("Wayland", element.handle))?;
+        if binding.id != id {
+            return Err(lost_identity("Wayland", element.handle));
+        }
         let payload = format!("[con_id={id}] {command}");
-        let reply = self.request(SWAY_IPC_COMMAND, payload.as_bytes())?;
+        let (reply, _) = self.request(SWAY_IPC_COMMAND, payload.as_bytes(), Some(binding.server_identity))?;
         let results = reply.as_array().ok_or_else(|| Error::Platform {
             code: -1,
             message: "Sway command reply was not an array".to_string(),
@@ -389,13 +394,12 @@ impl SwayWindowBackend {
         let pid = element.pid.ok_or_else(|| Error::Unsupported {
             feature: "native Wayland window identity: AT-SPI target has no process id".to_string(),
         })?;
-        let tree = self.request(SWAY_IPC_GET_TREE, &[])?;
+        let (tree, server_identity) = self.request(SWAY_IPC_GET_TREE, &[], None)?;
         let mut candidates = Vec::new();
         collect_sway_candidates(&tree, &mut candidates);
         candidates.retain(|candidate| candidate.pid == pid);
         let target =
             choose_sway_candidate(pid, element.name.as_deref(), element.bounds, &candidates)?;
-        let server_identity = sway_server_identity(&self.socket)?;
         let binding = NativeBinding {
             id: target.id,
             pid,
@@ -419,26 +423,27 @@ impl SwayWindowBackend {
             .unwrap_or_else(|e| e.into_inner())
             .get(&element.handle)
             .ok_or_else(|| lost_identity("Wayland", element.handle))?;
-        if element.pid != Some(binding.pid)
-            || process_start(binding.pid)? != binding.process_start
-            || sway_server_identity(&self.socket)? != binding.server_identity
-        {
+        if element.pid != Some(binding.pid) || process_start(binding.pid)? != binding.process_start {
             return Err(lost_identity("Wayland", element.handle));
         }
         // Sway's node_init assigns IDs from a monotonic process-local counter.
-        // The socket fingerprint rejects a restarted compositor, where that
-        // counter would start over and could reuse a retained con_id.
-        let tree = self.request(SWAY_IPC_GET_TREE, &[])?;
+        // The connected peer's PID and start time reject a restarted
+        // compositor, where that counter could start over.
+        let (tree, _) = self.request(SWAY_IPC_GET_TREE, &[], Some(binding.server_identity))?;
         let mut candidates = Vec::new();
         collect_sway_candidates(&tree, &mut candidates);
         bound_sway_candidate(binding, element.handle, &candidates)
     }
 
-    fn request(&self, message_type: u32, payload: &[u8]) -> Result<serde_json::Value> {
+    fn request(&self, message_type: u32, payload: &[u8], expected: Option<ServerIdentity>) -> Result<(serde_json::Value, ServerIdentity)> {
         let mut stream = UnixStream::connect(&self.socket).map_err(|error| Error::Platform {
             code: -1,
             message: format!("connect Sway IPC {}: {error}", self.socket.display()),
         })?;
+        let server_identity = sway_server_identity(&stream)?;
+        if expected.is_some_and(|identity| identity != server_identity) {
+            return Err(Error::Unsupported { feature: "native Wayland window identity: Sway compositor session changed".to_string() });
+        }
         let length = u32::try_from(payload.len()).map_err(|_| Error::InvalidActionData {
             message: "Sway IPC request is too large".to_string(),
         })?;
@@ -479,10 +484,11 @@ impl SwayWindowBackend {
         }
         let mut response = vec![0_u8; response_length];
         stream.read_exact(&mut response).map_err(sway_io)?;
-        serde_json::from_slice(&response).map_err(|error| Error::Platform {
+        let value = serde_json::from_slice(&response).map_err(|error| Error::Platform {
             code: -1,
             message: format!("decode Sway IPC JSON: {error}"),
-        })
+        })?;
+        Ok((value, server_identity))
     }
 }
 
@@ -763,10 +769,13 @@ impl X11WindowBackend {
     }
 
     fn facts(&self, element: &ElementData) -> Result<WindowFacts> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let window = self.bind(&conn, element)?;
+        self.with_server_grab(|conn| self.facts_with_connection(conn, element))
+    }
+
+    fn facts_with_connection(&self, conn: &RustConnection, element: &ElementData) -> Result<WindowFacts> {
+        let window = self.bind(conn, element)?;
         let state: HashSet<Atom> = property_u32(
-            &conn,
+            conn,
             window,
             self.atoms.net_wm_state,
             AtomEnum::ATOM.into(),
@@ -802,7 +811,7 @@ impl X11WindowBackend {
 
         Ok(WindowFacts {
             actions,
-            bounds: self.window_bounds(&conn, window).ok(),
+            bounds: self.window_bounds(conn, window).ok(),
             minimized: Some(state.contains(&self.atoms.net_wm_state_hidden)),
             maximized: Some(
                 state.contains(&self.atoms.net_wm_state_max_horz)
@@ -812,6 +821,23 @@ impl X11WindowBackend {
             backend: Some("x11-ewmh"),
             protocol_version: None,
         })
+    }
+
+    fn with_server_grab<T>(&self, action: impl FnOnce(&RustConnection) -> Result<T>) -> Result<T> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        conn.grab_server().map_err(platform)?.check().map_err(platform)?;
+        let result = action(&conn);
+        let release = conn.ungrab_server().map_err(platform)
+            .and_then(|cookie| cookie.check().map_err(platform))
+            .and_then(|()| conn.flush().map_err(platform));
+        match (result, release) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), Ok(())) | (Ok(_), Err(error)) => Err(error),
+            (Err(action_error), Err(release_error)) => Err(Error::Platform {
+                code: -1,
+                message: format!("native X11 action failed: {action_error}; releasing server grab failed: {release_error}"),
+            }),
+        }
     }
 
     fn supports(&self, atom: Atom) -> bool {
@@ -1104,8 +1130,8 @@ impl X11WindowBackend {
     }
 
     fn restore(&self, element: &ElementData) -> Result<()> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let window = self.resolve(&conn, element)?;
+        self.with_server_grab(|conn| {
+        let window = self.resolve(conn, element)?;
         // De-iconification is the ICCCM MapWindow request. EWMH state removal
         // is separate and explicit: fullscreen and the two maximize atoms are
         // distinct states, and restore clears all of them.
@@ -1142,6 +1168,7 @@ impl X11WindowBackend {
             )?;
         }
         conn.flush().map_err(platform)
+        })
     }
 
     fn close(&self, element: &ElementData) -> Result<()> {
@@ -1173,8 +1200,8 @@ impl X11WindowBackend {
             height,
         }
         .to_physical(crate::scale::coordinate_scale());
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let window = self.resolve(&conn, element)?;
+        self.with_server_grab(|conn| {
+        let window = self.resolve(conn, element)?;
         // EWMH's moveresize width and height describe the client window,
         // while xa11y's bounds contract reports the decorated outer frame.
         // Remove the current frame extents so a requested outer size reads
@@ -1202,6 +1229,7 @@ impl X11WindowBackend {
             [flags, 0, 0, client_width, client_height],
         )?;
         conn.flush().map_err(platform)
+        })
     }
 
     fn change_state(
@@ -1219,10 +1247,11 @@ impl X11WindowBackend {
     }
 
     fn send_for(&self, element: &ElementData, type_: Atom, data: [u32; 5]) -> Result<()> {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let window = self.resolve(&conn, element)?;
-        send_client_message(&conn, self.root, window, type_, data)?;
-        conn.flush().map_err(platform)
+        self.with_server_grab(|conn| {
+            let window = self.resolve(conn, element)?;
+            send_client_message(conn, self.root, window, type_, data)?;
+            conn.flush().map_err(platform)
+        })
     }
 }
 
@@ -1592,9 +1621,8 @@ mod tests {
             pid: original.pid,
             process_start: 1,
             server_identity: super::ServerIdentity::Sway {
-                device: 1,
-                inode: 1,
-                changed_at: (1, 1),
+                pid: 1,
+                process_start: 1,
             },
         };
         let mut moved = original.clone();
