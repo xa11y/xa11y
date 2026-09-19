@@ -25,7 +25,7 @@ impl From<xa11y::TreeNode> for TreeNode {
     }
 }
 
-/// A bounding rectangle in **logical** screen coordinates
+/// A bounding rectangle in desktop coordinates (physical pixels on Windows)
 /// (device-independent points) on every platform. Origin is the top-left of
 /// the primary display; negative `x` / `y` are valid on multi-monitor setups.
 ///

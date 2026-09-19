@@ -582,7 +582,7 @@ pub(crate) fn parse_point_arg(s: &str, ctx: &str) -> CliResult<Point> {
     Ok(Point::new(x, y))
 }
 
-/// Parse a `W,H` size for `resize-to`. Width and height are logical units and
+/// Parse a `W,H` size for `resize-to`. Width and height use desktop units and
 /// must be positive — a 0-sized window is not a valid resize request.
 pub(crate) fn parse_size_arg(s: &str, ctx: &str) -> CliResult<(u32, u32)> {
     let parts: Vec<&str> = s.split(',').collect();

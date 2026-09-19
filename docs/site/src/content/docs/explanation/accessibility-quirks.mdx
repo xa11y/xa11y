@@ -633,17 +633,13 @@ In containers, Docker's `/dev` tmpfs isolation hides host-created
 - **macOS reports points, not pixels.** On a Retina display 1 point = 2 physical
   pixels, so hit-testing against a screenshot taken in pixels will be off by the
   scale factor.
-- **Windows and Linux report logical (device-independent) coordinates.** Use a
-  screenshot's explicit coordinate conversion methods to bridge them to the
-  actual returned image; `Screenshot.scale` is only a single-display
-  compatibility hint. On Windows a mixed-DPI
-  multi-monitor desktop preserves each monitor's physical origin in the
-  logical space (only its extent is divided by that monitor's scale), so the
-  monitors' logical rects are non-overlapping; a scaled monitor placed left of
-  or above the primary preserves its origin but not the full span toward the
-  primary, so its rect stops short and can leave a logical gap (gap points
-  resolve via the physical query). On Linux the
-  scale is exact where reliably detectable and falls back to `1.0`
+- **Windows reports physical desktop pixels.** Bounds, input, window geometry,
+  and capture regions share one continuous pixel space across displays.
+  `Screenshot.scale` is `1.0`.
+- **Linux reports logical coordinates where it can detect the scale.** Use a
+  screenshot's explicit coordinate methods to map them to image pixels.
+  `Screenshot.scale` is a compatibility hint; Linux uses `1.0` when it cannot
+  detect a reliable scale.
   (coordinates then physical) otherwise. See
   [platform details](/reference/platform-details/#coordinates-and-hidpi).
   Multi-monitor setups produce negative coordinates for displays positioned

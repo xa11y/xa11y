@@ -435,11 +435,11 @@ pub trait Provider: Send + Sync {
     /// Close the window.
     fn close(&self, element: &ElementData) -> Result<()>;
 
-    /// Move the window to the given **logical** screen coordinates (top-left
-    /// origin, same space as [`ElementData::bounds`]).
+    /// Move the window in the coordinates of [`ElementData::bounds`]
+    /// (physical pixels on Windows, logical points elsewhere).
     fn move_to(&self, element: &ElementData, x: i32, y: i32) -> Result<()>;
 
-    /// Resize the window to the given **logical** width and height.
+    /// Resize the window in the units of [`ElementData::bounds`].
     fn resize_to(&self, element: &ElementData, width: u32, height: u32) -> Result<()>;
 
     // ── Events ──────────────────────────────────────────────────────

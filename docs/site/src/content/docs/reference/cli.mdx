@@ -292,7 +292,7 @@ xa11y screenshot [--region X,Y,W,H] --out PATH
 | Flag | Description |
 | --- | --- |
 | `--out PATH` | Required. Writes the PNG to `PATH`, or to stdout for `-` |
-| `--region X,Y,W,H` | Captures this rectangle in logical screen coordinates. Omitted, the capture is whatever the platform treats as the whole screen: the virtual desktop on Windows, one display on macOS, the root window on Linux |
+| `--region X,Y,W,H` | Captures this rectangle in desktop coordinates (physical pixels on Windows, logical points elsewhere). Omitted, the capture is whatever the platform treats as the whole screen: the virtual desktop on Windows, one display on macOS, the root window on Linux |
 | `--app NAME` / `--pid PID` / `--shell KIND` | The target whose tree `--annotate` searches, as described under [Flags](#flags) |
 | `--annotate SELECTOR` | Repeatable. One annotation group per occurrence |
 | `--legend text\|json\|none` | Legend format on stdout. Defaults to `text` |

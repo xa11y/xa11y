@@ -27,7 +27,6 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
-use windows::Win32::UI::HiDpi::GetDpiForSystem;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     VIRTUAL_KEY, VK_7, VK_A, VK_BACK, VK_CONTROL, VK_DELETE, VK_END, VK_ESCAPE, VK_F24, VK_F5,
     VK_HOME, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_MENU, VK_NEXT, VK_OEM_1,
@@ -299,14 +298,6 @@ fn wheel_delta(mouse_data: u32) -> i32 {
     i32::from(((mouse_data >> 16) as u16) as i16)
 }
 
-/// System DPI scale. The backend converts logical points to physical ones with
-/// the DPI of the monitor under the point; on the single-monitor runners this
-/// job targets, that is the system DPI.
-fn system_scale() -> f64 {
-    // SAFETY: GetDpiForSystem takes no arguments and cannot fail.
-    f64::from(unsafe { GetDpiForSystem() }) / 96.0
-}
-
 /// Press and release one key, returning the two events it produced.
 #[track_caller]
 fn tap(sim: &WindowsInputProvider, key: &Key) -> Vec<Wire> {
@@ -521,13 +512,11 @@ fn pointer_move_lands_on_the_requested_point() {
 
     // The backend normalises to the 0..=65535 virtual-desktop range and the
     // system maps it back to a pixel, so allow a pixel of rounding either way.
-    let scale = system_scale();
-    let expected_x = (f64::from(TARGET.x) * scale).round() as i32;
-    let expected_y = (f64::from(TARGET.y) * scale).round() as i32;
+    let expected_x = TARGET.x;
+    let expected_y = TARGET.y;
     assert!(
         (x - expected_x).abs() <= 2 && (y - expected_y).abs() <= 2,
-        "pointer landed at ({x}, {y}), expected ~({expected_x}, {expected_y}) \
-         at scale {scale}: {events:?}"
+        "pointer landed at ({x}, {y}), expected ~({expected_x}, {expected_y}): {events:?}"
     );
 }
 

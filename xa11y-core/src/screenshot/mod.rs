@@ -11,8 +11,8 @@
 //! (`xa11y::screenshot()`, `xa11y::screenshot_region()`,
 //! `xa11y::screenshot_element()`) all return a [`Screenshot`] carrying raw
 //! RGBA8 pixels in **physical** (device) pixels — the same resolution the
-//! compositor renders at. On HiDPI displays that means pixel dimensions
-//! exceed the logical bounds you passed in; [`Screenshot::scale`] records a
+//! compositor renders at. On macOS and scaled Linux displays, pixel dimensions
+//! can exceed the logical bounds you passed in; [`Screenshot::scale`] records a
 //! compatibility ratio for simple one-display consumers. It is not a desktop
 //! transform: use the screenshot's explicit coordinate methods for mixed-DPI,
 //! cropped, or resized images. Call [`Screenshot::to_png`] or
@@ -28,7 +28,7 @@
 //! # Annotation
 //!
 //! [`annotate`] draws boxes and tags onto a capture: [`Screenshot::annotate`]
-//! takes [`Annotation`]s in logical screen coordinates, plus the logical
+//! takes [`Annotation`]s in desktop coordinates, plus the desktop
 //! coordinate the capture's own pixel `(0, 0)` sits at, and returns a new
 //! capture with them drawn in. That second argument is why
 //! [`ScreenshotProvider::capture_full`] returns a pair: what a full capture
@@ -72,8 +72,9 @@ pub struct CaptureMappingSegment {
 
 /// Mapping metadata frozen at capture time.
 ///
-/// Backends provide one segment per display portion present in the returned
-/// image. A layout token and validator are optional; Windows supplies both so
+/// Backends provide affine segments for the portions present in the returned
+/// image. Windows uses one identity segment for the whole capture. A layout
+/// token and validator are optional; Windows supplies both so
 /// conversions fail after a relevant display-layout change instead of using a
 /// stale transform.
 #[doc(hidden)]
@@ -167,7 +168,7 @@ pub trait ScreenshotProvider: Send + Sync {
     /// Capture everything this backend treats as "the screen", and report
     /// **where** those pixels are.
     ///
-    /// The returned [`Point`] is the logical screen coordinate that the
+    /// The returned [`Point`] is the desktop coordinate that the
     /// capture's pixel `(0, 0)` sits at. It is not always the origin:
     ///
     /// - Windows captures the whole **virtual desktop**, whose top-left is
@@ -184,7 +185,7 @@ pub trait ScreenshotProvider: Send + Sync {
     /// monitor's width out of place with nothing to report it.
     fn capture_full(&self) -> Result<(Screenshot, Point)>;
 
-    /// Capture a sub-rectangle specified in logical screen coordinates
+    /// Capture a sub-rectangle specified in desktop coordinates
     /// (the same coordinate space as [`Rect`] in `Element::bounds`).
     ///
     /// No origin is returned because `rect` **is** it: an implementation must
@@ -197,7 +198,8 @@ pub trait ScreenshotProvider: Send + Sync {
 ///
 /// `width` and `height` are in **image** pixels. `scale` is the compatibility ratio of
 /// physical to logical (1.0 on standard displays, 2.0 on typical Retina /
-/// 1.5/1.75/2.0 on common Windows/Linux HiDPI configurations). A single value
+/// 1.5/1.75/2.0 on common Linux HiDPI configurations). Windows uses physical
+/// desktop coordinates and reports `1.0`. A single value
 /// cannot describe mixed-DPI displays or non-uniform resizing; use
 /// [`Screenshot::desktop_to_image`] and related methods for coordinates.
 /// `pixels.len()` equals `width * height * 4`.
@@ -286,10 +288,10 @@ impl Screenshot {
 
     /// Convert a desktop rectangle into the image rectangles it covers.
     ///
-    /// A rectangle crossing independently scaled displays produces one image
-    /// rectangle per display. Empty intersections are omitted. Returning a
-    /// vector is deliberate: one scalar scale and one rectangle cannot encode
-    /// a mixed-DPI seam without guessing.
+    /// A rectangle crossing independently scaled display segments can produce
+    /// one image rectangle per segment. Windows uses a continuous physical
+    /// desktop space, so its captures produce one image rectangle. Empty
+    /// intersections are omitted.
     pub fn desktop_rect_to_image(&self, rect: Rect) -> Result<Vec<Rect>> {
         let mapping = self.mapping()?;
         mapping.validate()?;

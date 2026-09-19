@@ -16,12 +16,9 @@
 //! been set (for example by a host application), the call is a no-op and we
 //! keep the existing awareness — we never downgrade.
 //!
-//! Regions are captured in **physical** pixels. `capture_region` receives a
-//! rectangle in **logical** coordinates (the cross-platform contract, matching
-//! `Element::bounds`) and converts it to physical via the origin-preserving
-//! per-monitor mapping in [`crate::dpi`]. The returned screenshot owns the
-//! exact capture-time transform; [`Screenshot::scale`] remains a compatibility
-//! hint and must not be used as a whole-desktop transform.
+//! Windows `Element::bounds`, input points, and capture regions all use
+//! physical desktop pixels. The returned screenshot has an identity desktop
+//! mapping and [`Screenshot::scale`] is `1.0`.
 //!
 //! `capture_full` covers the whole **virtual desktop**, so it can span several
 //! monitors at once. Two consequences follow, and both are reported rather
@@ -31,10 +28,8 @@
 //!   is negative whenever a monitor sits left of or above the primary one.
 //!   That offset is returned alongside the capture, per
 //!   [`ScreenshotProvider::capture_full`].
-//! - Its [`Screenshot::scale`] is a single scalar and is the effective scale
-//!   of the monitor **at that virtual origin**. The capture-owned mapping has
-//!   one segment per display, so annotation and public conversion remain exact
-//!   across equal- and mixed-DPI layouts.
+//! - Its [`Screenshot::scale`] is `1.0` because desktop units and image pixels
+//!   are the same on Windows.
 //!
 //! # Active session required
 //!
@@ -101,18 +96,12 @@ impl ScreenshotProvider for WindowsScreenshot {
         // Pixel (0, 0) of this capture is physical (vx, vy) — the top-left of
         // the *virtual desktop*, not of the primary monitor. `vx`/`vy` go
         // negative as soon as a monitor is arranged left of or above the
-        // primary one, and every consumer that maps logical bounds onto these
-        // pixels has to subtract that. The origin-preserving contract keeps a
-        // display origin unchanged; exact conversions use the owned mapping.
+        // primary one. The capture mapping subtracts this desktop origin.
         Ok((shot, Point::new(physical.x, physical.y)))
     }
 
     fn capture_region(&self, rect: Rect) -> Result<Screenshot> {
-        // `rect` arrives in logical coordinates (the cross-platform contract,
-        // matching `Element::bounds`). Convert to the physical pixels BitBlt
-        // works in via the origin-preserving per-monitor mapping (`crate::dpi`)
-        // — the inverse of the bounds production, so a window's bounds fed
-        // back in capture the exact region it occupies (within rounding).
+        // `rect` already uses the physical desktop pixels BitBlt reads.
         let (phys, scale, mapping) = crate::dpi::region_capture_plan(rect)?;
         if phys.width == 0 || phys.height == 0 {
             return Err(Error::Platform {
@@ -136,8 +125,7 @@ impl ScreenshotProvider for WindowsScreenshot {
 ///
 /// `x`/`y` are **physical** virtual-screen coordinates (may be negative on
 /// multi-monitor setups); `w`/`h` are positive physical pixel dimensions.
-/// `scale` is the physical-to-logical ratio recorded on the returned
-/// `Screenshot` so callers can map logical bounds to captured pixels.
+/// `scale` is `1.0` for Windows desktop coordinates.
 #[cfg(target_os = "windows")]
 fn capture_rect(x: i32, y: i32, w: i32, h: i32, scale: f32) -> Result<Screenshot> {
     let width = w as u32;

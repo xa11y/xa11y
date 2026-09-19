@@ -603,7 +603,7 @@ fn tool_definition(name: &str) -> Value {
                 "at".into(),
                 json!({
                     "type": "string",
-                    "description": "`X,Y` screen coordinates (logical points) for `move-to`. \
+                    "description": "`X,Y` desktop coordinates (physical pixels on Windows, logical points elsewhere) for `move-to`. \
                                     Required for `move-to`; ignored otherwise.",
                 }),
             );
@@ -611,7 +611,7 @@ fn tool_definition(name: &str) -> Value {
                 "size".into(),
                 json!({
                     "type": "string",
-                    "description": "`W,H` logical dimensions for `resize-to`, both positive. \
+                    "description": "`W,H` desktop dimensions (physical pixels on Windows, logical points elsewhere) for `resize-to`, both positive. \
                                     Required for `resize-to`; ignored otherwise.",
                 }),
             );

@@ -38,7 +38,7 @@ pub struct LegendEntry {
     pub role: String,
     /// The element's accessible name, when it has one.
     pub name: Option<String>,
-    /// The element's bounds in logical screen coordinates.
+    /// The element's bounds in desktop coordinates (physical pixels on Windows).
     pub bounds: Rect,
     /// The box colour as an `[r, g, b]` triple, for correlating a box with
     /// its entry by eye.
@@ -311,7 +311,7 @@ pub fn screenshot_full() -> AsyncTask<CaptureTask> {
     })
 }
 
-/// Capture a sub-rectangle given as `{ x, y, width, height }` in logical
+/// Capture a sub-rectangle given as `{ x, y, width, height }` in desktop
 /// screen coordinates (same coordinate space as `Element.bounds`).
 #[napi(js_name = "_screenshotRegion", ts_return_type = "Promise<Screenshot>")]
 #[allow(

@@ -43,19 +43,19 @@ use crate::error::{Error, Result};
 
 // ── Geometry ────────────────────────────────────────────────────────
 
-/// A 2D point in **logical** screen coordinates (device-independent points).
+/// A 2D point in desktop coordinates: physical pixels on Windows and logical
+/// points on macOS and Linux.
 ///
 /// This is the same coordinate space as [`crate::element::Rect`] in
 /// `Element::bounds`, so anchor points computed from an element's bounds are
 /// already in the right space. Origin is top-left of the primary display;
 /// negative values are valid on multi-monitor setups.
 ///
-/// Each [`InputProvider`] converts logical points to whatever its OS input API
-/// requires at the FFI boundary: macOS uses points natively (identity), while
-/// Windows and Linux multiply by the target display's scale factor to reach
-/// physical device pixels before dispatching the event. Consumers never see
-/// physical pixels here — a point that lands on an element's centre is
-/// `anchor_point(&element.bounds, Anchor::Center)`, unscaled.
+/// Each [`InputProvider`] uses the same units as its element bounds. Windows
+/// and macOS pass these coordinates to native input without DPI conversion;
+/// Linux converts logical points when its display scale is known. A point
+/// that lands on an element's centre is
+/// `anchor_point(&element.bounds, Anchor::Center)`.
 #[allow(
     clippy::exhaustive_structs,
     reason = "Closed domain: a 2D screen point is an x and a y. Literal \

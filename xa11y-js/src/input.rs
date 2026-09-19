@@ -20,7 +20,7 @@ use napi::Either;
 use crate::element::Element;
 use crate::map_err;
 
-/// A target for a pointer operation: an `[x, y]` tuple in logical screen
+/// A target for a pointer operation: an `[x, y]` tuple in desktop
 /// coordinates, or an `Element` (anchored inside its bounds).
 type Target<'a> = Either<Vec<i32>, &'a Element>;
 
@@ -57,7 +57,7 @@ pub struct DragOptions {
 /// Synthesises OS-level pointer and keyboard events.
 ///
 /// Constructed via the module-level `inputSim()` function. Targets are
-/// either an `[x, y]` tuple in logical screen coordinates (same space as
+/// either an `[x, y]` tuple in desktop coordinates (same space as
 /// `Element.bounds`), or an `Element` (centred on its bounds). Each backend
 /// converts to physical device pixels at the OS boundary. Key values are
 /// strings: printable characters are literal

@@ -373,7 +373,7 @@ impl Locator {
         AsyncTask::new(ActionTask::nullary(self.inner.clone(), ActionKind::Close))
     }
 
-    /// Move the matched window to the given logical screen coordinates.
+    /// Move the matched window to the given desktop coordinates.
     /// Rejects with `InvalidActionDataError` unless both coordinates are
     /// finite whole numbers in the 32-bit signed range.
     #[napi(
@@ -391,7 +391,7 @@ impl Locator {
         )))
     }
 
-    /// Resize the matched window to the given logical dimensions. Rejects
+    /// Resize the matched window to the given desktop dimensions. Rejects
     /// with `InvalidActionDataError` unless both dimensions are positive
     /// whole numbers (and no larger than the 32-bit unsigned range), before
     /// any auto-wait polling begins.

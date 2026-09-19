@@ -47,7 +47,7 @@ pub(crate) fn effective_timeout_secs(
     }
 }
 
-/// Validate a JS-supplied logical window coordinate.
+/// Validate a JS-supplied desktop window coordinate.
 ///
 /// The napi `i32` conversion applies JavaScript `ToInt32` *before* Rust sees
 /// the value — `NaN`, fractions, and out-of-range numbers wrap or truncate
@@ -70,7 +70,7 @@ pub(crate) fn checked_window_coord(value: f64, what: &str) -> napi::Result<i32> 
     }
 }
 
-/// Validate a JS-supplied logical window dimension.
+/// Validate a JS-supplied desktop window dimension.
 ///
 /// Same coercion hazard as [`checked_window_coord`] on the `u32` side:
 /// `resizeTo(-1, 100)` would become a width of `4294967295` and pass the

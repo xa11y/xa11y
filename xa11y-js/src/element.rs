@@ -558,7 +558,7 @@ impl Element {
         ))
     }
 
-    /// Move this window to the given logical screen coordinates (top-left
+    /// Move this window to the given desktop coordinates (top-left
     /// origin, the same space as `bounds`). Rejects with
     /// `InvalidActionDataError` unless both coordinates are finite whole
     /// numbers in the 32-bit signed range.
@@ -578,7 +578,7 @@ impl Element {
         )))
     }
 
-    /// Resize this window to the given logical width and height. Rejects
+    /// Resize this window to the given desktop width and height. Rejects
     /// with `InvalidActionDataError` unless both dimensions are positive
     /// whole numbers (and no larger than the 32-bit unsigned range).
     #[napi(

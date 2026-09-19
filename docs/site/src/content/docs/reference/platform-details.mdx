@@ -216,10 +216,10 @@ Text is inserted through the accessibility API. Keyboard events are never simula
 
 ### Coordinates
 
-All platforms report bounds as logical (device-independent) screen coordinates with origin at the top-left of the primary display, and `Screenshot.scale` carries the physical-to-logical ratio for mapping bounds onto captured pixels. Note:
+Bounds use desktop coordinates with origin at the top-left of the primary display. Windows uses physical pixels; macOS and Linux use logical points where available. Use a screenshot's coordinate methods to map bounds onto captured pixels. Note:
 
 - **macOS** reports in points, its native logical unit. On Retina displays, 1 point = 2 physical pixels.
-- **Windows** reports device-independent pixels (DIPs), and `scale` is the display's DPI scaling (e.g. `1.5` at 150%). On a mixed-DPI multi-monitor desktop each monitor keeps its **physical origin** in the logical space and only its extent is divided by that monitor's scale, so monitor logical rectangles are non-overlapping. A scaled monitor left of or above the primary keeps its own origin, so a gap sits between its logical rectangle and the primary's. A point in a gap resolves via the physical query, whose answer is approximate there. A window on a 200% secondary monitor at physical x = 2000 reports logical x = 1960, not 1000.
+- **Windows** reports physical desktop pixels for bounds, input points, window moves and sizes, and capture regions. `Screenshot.scale` is `1.0`. A window crossing a display seam has continuous bounds and its center remains inside the window, regardless of each display's DPI scaling. Code that stored Windows DIP coordinates must convert them to physical desktop pixels before passing them to xa11y.
 - **Linux** reports logical pixels where the HiDPI scale is reliably detectable, and falls back to physical at scale `1.0` otherwise. See [Coordinates and HiDPI](/reference/platform-details/#coordinates-and-hidpi) for exactly when.
 - Multi-monitor setups can produce negative coordinates for displays positioned left of or above the primary.
 
@@ -348,7 +348,7 @@ The Screenshot portal usually auto-approves for non-interactive callers (`intera
 Every other configuration fails closed to `1.0`, so the data is never wrong. There, bounds stay physical and the scale is not upscaled, but capture and input round-trips remain correct because bounds and pixels stay in the same space:
 
 - **Fractional X11.** GTK's X11 window scale is integer-only, so a fractional `Xft.dpi` scales fonts, not the coordinate space.
-- **Multi-monitor mixed-DPI Wayland.** A single scalar can't represent per-monitor scales, so it falls back to the largest integer `wl_output.scale` (the Windows backend has the same limitation).
+- **Multi-monitor mixed-DPI Wayland.** A single scalar can't represent per-monitor scales, so it falls back to the largest integer `wl_output.scale`.
 - **XWayland in a Wayland session.** Auto selection uses the Wayland screenshot portal and output scale. An explicit screenshot override of `x11` uses the X11 source, which stays `1.0` under XWayland.
 
 `Point` arguments to input simulation, after the logical→physical conversion, are mapped onto the uinput virtual coordinate range. Override the assumed screen size (default 1920×1080) with `XA11Y_SCREEN_WIDTH` / `XA11Y_SCREEN_HEIGHT` env vars if your setup differs.

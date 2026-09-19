@@ -594,12 +594,12 @@ impl Element {
         let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
         py.detach(move || element.close()).map_err(to_py_err)
     }
-    /// Move this window to the given logical screen coordinates (top-left origin).
+    /// Move this window in desktop coordinates (physical pixels on Windows).
     fn move_to(&self, py: Python<'_>, x: i32, y: i32) -> PyResult<()> {
         let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
         py.detach(move || element.move_to(x, y)).map_err(to_py_err)
     }
-    /// Resize this window to the given logical width and height.
+    /// Resize this window in desktop units (physical pixels on Windows).
     ///
     /// Raises ``InvalidActionDataError`` if ``width`` or ``height`` is 0.
     /// ``OverflowError`` if either is negative or exceeds ``u32``.
@@ -857,13 +857,13 @@ impl Locator {
         let inner = self.inner.clone();
         py.detach(move || inner.close()).map_err(to_py_err)
     }
-    /// Move the matched window to the given logical screen coordinates
+    /// Move the matched window to the given desktop coordinates
     /// (top-left origin).
     fn move_to(&self, py: Python<'_>, x: i32, y: i32) -> PyResult<()> {
         let inner = self.inner.clone();
         py.detach(move || inner.move_to(x, y)).map_err(to_py_err)
     }
-    /// Resize the matched window to the given logical dimensions.
+    /// Resize the matched window to the given desktop dimensions.
     ///
     /// Raises ``InvalidActionDataError`` if ``width`` or ``height`` is 0,
     /// before any auto-wait polling begins. ``OverflowError`` if either is
@@ -2222,7 +2222,7 @@ fn input_sim() -> PyResult<InputSim> {
 /// One drawn annotation box: the tag in the image, and the element it came
 /// from.
 ///
-/// `bounds` is in logical screen coordinates — the same space as
+/// `bounds` is in desktop coordinates — the same space as
 /// `Element.bounds`, not the capture's pixel space. `color` is the RGB triple
 /// the box was drawn in, for correlating a box with its entry by eye.
 #[pyclass(frozen, from_py_object)]
@@ -2247,7 +2247,7 @@ struct LegendEntry {
     /// The element's accessible name, when it has one.
     #[pyo3(get)]
     name: Option<String>,
-    /// The element's bounds in logical screen coordinates.
+    /// The element's bounds in desktop coordinates (physical pixels on Windows).
     #[pyo3(get)]
     bounds: Rect,
     /// The box colour as an ``(r, g, b)`` tuple.
@@ -2531,7 +2531,7 @@ fn parse_annotate_group(item: &Bound<'_, PyAny>) -> PyResult<xa11y::Locator> {
 ///
 /// With no arguments, captures the full primary display. Pass `element=` to
 /// capture the pixels under an element's current bounds, or `region=(x, y,
-/// width, height)` to capture an explicit rectangle in logical screen
+/// width, height)` to capture an explicit rectangle in desktop
 /// coordinates.
 ///
 /// `annotate=` draws a numbered box over every element each locator matches

@@ -15,7 +15,7 @@ xa11y can capture pixel-level snapshots of the screen alongside its accessibilit
 The entry points are:
 
 - **Full screen** captures whatever the platform treats as the whole screen. On Windows that is the virtual desktop, which spans every monitor. macOS captures one display. Linux captures the X11 root window or the Wayland portal's desktop image.
-- **Region** captures an explicit rectangle in logical screen coordinates.
+- **Region** captures an explicit rectangle in desktop coordinates (physical pixels on Windows, logical points elsewhere).
 - **Element** captures the pixels under an accessibility element's current bounds.
 
 Screenshots are decoupled from the accessibility and input layers. Capture never raises or activates the target window. Whatever pixels sit at the requested coordinates are returned, including any occluding windows. Bring the target to the foreground yourself if you need a clean capture.
@@ -185,14 +185,15 @@ should use `desktop_to_image`, `image_to_desktop`, and
 `desktop_rect_to_image` instead. A single scale cannot represent a capture that
 crosses displays with different DPI settings. Captured screenshots now retain
 the exact mapping that produced their pixels, and `crop` and `resize` carry
-that mapping forward. `scale` remains for compatibility and describes the
-primary capture scale only.
+that mapping forward. `scale` remains for compatibility; it is `1.0` on
+Windows and a single scale hint elsewhere.
 
-On Windows, desktop bounds remain in logical coordinates and preserve their
-desktop origin. Full-screen image dimensions are the actual returned pixel
-dimensions, so they can differ from the logical desktop extent. Right and
-bottom input anchors select the last point inside the element's half-open
-bounds rather than the first point outside it.
+On Windows, bounds, input, window moves and sizes, and capture regions now use
+physical desktop pixels. This is a breaking coordinate change from v0.14's
+logical Windows units: convert any stored DIP coordinates before passing them
+to xa11y. `Screenshot.scale` is `1.0` on Windows, and full-screen image
+dimensions match the physical virtual desktop extent. Right and bottom input
+anchors select the last point inside the element's half-open bounds.
 
 ## Example: screenshot on test failure
 

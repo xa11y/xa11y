@@ -145,9 +145,9 @@ reader_writer_pair! {
         /// See [`crate::text::strip_bidi`].
         pub description: Option<String>,
 
-        /// Bounding rectangle in **logical** screen coordinates
-        /// (device-independent points), origin at the top-left of the primary
-        /// display. This is the same coordinate space accepted by
+        /// Bounding rectangle in desktop coordinates: physical pixels on
+        /// Windows and logical points on macOS and Linux. The origin is the
+        /// top-left of the primary display. This is the space accepted by
         /// [`crate::ScreenshotProvider::capture_region`] and by the input layer's
         /// [`crate::input::Point`], so bounds can be fed directly to
         /// `screenshot_element` / `click` without conversion.
@@ -593,14 +593,14 @@ impl Element {
         self.provider.close(&self.data)
     }
 
-    /// Move this window to the given **logical** screen coordinates (top-left
-    /// origin, same space as [`ElementData::bounds`]).
+    /// Move this window in the coordinates of [`ElementData::bounds`]
+    /// (physical pixels on Windows, logical points elsewhere).
     pub fn move_to(&self, x: i32, y: i32) -> crate::error::Result<()> {
         self.require_window_like("move_to")?;
         self.provider.move_to(&self.data, x, y)
     }
 
-    /// Resize this window to the given **logical** width and height.
+    /// Resize this window in the units of [`ElementData::bounds`].
     ///
     /// Returns [`Error::InvalidActionData`] if either dimension is 0.
     pub fn resize_to(&self, width: u32, height: u32) -> crate::error::Result<()> {

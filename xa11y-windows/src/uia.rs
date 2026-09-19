@@ -1184,12 +1184,8 @@ fn build_snapshot_data(
             if width == 0 && height == 0 {
                 None
             } else {
-                // Under Per-Monitor-V2 awareness UIA reports physical pixels.
-                // Convert to logical coordinates (origin-preserving per
-                // monitor — see `crate::dpi`) so `Element::bounds` matches the
-                // cross-platform contract and a mixed-DPI desktop produces a
-                // non-overlapping logical space.
-                Some(crate::dpi::physical_rect_to_logical(r))
+                // Per-Monitor-V2 UIA bounds are physical desktop pixels.
+                Some(crate::dpi::physical_rect_to_desktop(r))
             }
         });
 
@@ -2867,15 +2863,8 @@ impl Provider for WindowsProvider {
                 role: element.role,
             });
         }
-        // UIA TransformPattern works in physical pixels; the core contract is
-        // logical coordinates. Convert at the target position (origin
-        // preserved per monitor — see `crate::dpi`): the monitors' logical
-        // rects never overlap, so a target resolves to exactly one monitor,
-        // and a target inside the window's own monitor keeps that monitor's
-        // transform (the window-identity preference the previous model needed
-        // to disambiguate the seam).
-        let (px, py) = window_logical_to_physical(&uia, x, y)?;
-        unsafe { pattern.Move(f64::from(px), f64::from(py)) }.map_err(|e| Error::Platform {
+        // Windows desktop coordinates match TransformPattern's pixels.
+        unsafe { pattern.Move(f64::from(x), f64::from(y)) }.map_err(|e| Error::Platform {
             code: e.code().0 as i64,
             message: format!("TransformPattern.Move({x}, {y}) failed: {e}"),
         })?;
@@ -2901,40 +2890,13 @@ impl Provider for WindowsProvider {
                 role: element.role,
             });
         }
-        // Logical → physical (see move_to). The scale is the monitor the
-        // window currently sits on, resolved from the live physical rect —
-        // unambiguous even on a mixed-DPI desktop, and independent of how
-        // the snapshot's logical origin is interpreted. A minimized window
-        // reports a 0×0 live rect (UIA gives it no geometry), so fall back
-        // to the snapshot's logical origin resolved monitor-aware; with no
-        // bounds either, the physical query on the zero rect degrades to the
-        // primary's scale, the pre-existing behavior for a window this
-        // degenerate.
-        let scale = {
-            let rect = unsafe { uia.CurrentBoundingRectangle() }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("CurrentBoundingRectangle failed while resizing: {e}"),
-            })?;
-            let has_geometry =
-                rect.left != 0 || rect.top != 0 || rect.right != 0 || rect.bottom != 0;
-            if has_geometry {
-                crate::dpi::scale_for_physical_point(rect.left, rect.top)
-            } else {
-                match element.bounds {
-                    Some(b) => crate::dpi::scale_for_logical_point(b.x, b.y)?,
-                    // No geometry at all: the physical query on the zero rect
-                    // degrades to the primary's scale, the pre-existing
-                    // behavior for a window this degenerate.
-                    None => crate::dpi::scale_for_physical_point(rect.left, rect.top),
-                }
-            }
-        };
-        unsafe { pattern.Resize(f64::from(width) * scale, f64::from(height) * scale) }.map_err(
-            |e| Error::Platform {
+        // Width and height use the same physical desktop units as bounds.
+        unsafe { pattern.Resize(f64::from(width), f64::from(height)) }.map_err(|e| {
+            Error::Platform {
                 code: e.code().0 as i64,
                 message: format!("TransformPattern.Resize({width}, {height}) failed: {e}"),
-            },
-        )?;
+            }
+        })?;
         Ok(())
     }
 
@@ -4379,38 +4341,6 @@ fn variant_i32(v: &VARIANT) -> Option<i32> {
 /// Unpack a UIA `VT_BOOL` VARIANT (used by `IsEnabled`) into a `bool`.
 fn variant_bool(v: &VARIANT) -> Option<bool> {
     bool::try_from(v).ok()
-}
-
-/// Resolve a logical target point to physical for the window-transform verbs.
-///
-/// The window's own monitor — resolved from its live physical rect — is the
-/// identity its logical bounds were reported in, so a target inside *that
-/// monitor's* logical rect is converted by that monitor even when a
-/// different-DPI neighbor's logical rect also contains the number (under the
-/// origin-preserving model the rects never overlap, so this is the identity
-/// preference rather than a disambiguation). The window's own bounding rect is
-/// not the test: a point outside the old frame but still on the monitor must
-/// not fall through. A target outside the window's monitor falls back to the
-/// global origin-preserving mapping.
-fn window_logical_to_physical(uia: &IUIAutomationElement, x: i32, y: i32) -> Result<(i32, i32)> {
-    let rect = unsafe { uia.CurrentBoundingRectangle() }.map_err(|e| Error::Platform {
-        code: e.code().0 as i64,
-        message: format!("CurrentBoundingRectangle failed while converting the target: {e}"),
-    })?;
-    let has_geometry = rect.left != 0 || rect.top != 0 || rect.right != 0 || rect.bottom != 0;
-    if has_geometry {
-        if let Some((monitor_rect, scale)) =
-            crate::dpi::monitor_containing_physical_point(rect.left, rect.top)
-        {
-            if crate::dpi::logical_rect_contains(monitor_rect, scale, x, y) {
-                return Ok((
-                    monitor_rect.left + ((f64::from(x - monitor_rect.left)) * scale).round() as i32,
-                    monitor_rect.top + ((f64::from(y - monitor_rect.top)) * scale).round() as i32,
-                ));
-            }
-        }
-    }
-    crate::dpi::logical_point_to_physical(x, y)
 }
 
 /// Map a UIA `WindowVisualState` value (VT_I4, from either a
