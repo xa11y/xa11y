@@ -12,9 +12,9 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use wayland_client::protocol::wl_registry;
 use wayland_client::{Connection as WaylandConnection, Dispatch, QueueHandle};
-use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ClientMessageData, ClientMessageEvent, ConnectionExt as _, EventMask, Window,
@@ -204,7 +204,10 @@ fn sway_server_identity(stream: &UnixStream) -> Result<ServerIdentity> {
         code: -1,
         message: "Sway IPC peer has an invalid process id".to_string(),
     })?;
-    Ok(ServerIdentity::Sway { pid, process_start: process_start(pid)? })
+    Ok(ServerIdentity::Sway {
+        pid,
+        process_start: process_start(pid)?,
+    })
 }
 
 fn process_start(pid: u32) -> Result<u64> {
@@ -349,13 +352,21 @@ impl SwayWindowBackend {
     }
 
     fn command(&self, element: &ElementData, id: u64, command: &str) -> Result<()> {
-        let binding = *self.bindings.lock().unwrap_or_else(|e| e.into_inner())
-            .get(&element.handle).ok_or_else(|| lost_identity("Wayland", element.handle))?;
+        let binding = *self
+            .bindings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&element.handle)
+            .ok_or_else(|| lost_identity("Wayland", element.handle))?;
         if binding.id != id {
             return Err(lost_identity("Wayland", element.handle));
         }
         let payload = format!("[con_id={id}] {command}");
-        let (reply, _) = self.request(SWAY_IPC_COMMAND, payload.as_bytes(), Some(binding.server_identity))?;
+        let (reply, _) = self.request(
+            SWAY_IPC_COMMAND,
+            payload.as_bytes(),
+            Some(binding.server_identity),
+        )?;
         let results = reply.as_array().ok_or_else(|| Error::Platform {
             code: -1,
             message: "Sway command reply was not an array".to_string(),
@@ -423,7 +434,8 @@ impl SwayWindowBackend {
             .unwrap_or_else(|e| e.into_inner())
             .get(&element.handle)
             .ok_or_else(|| lost_identity("Wayland", element.handle))?;
-        if element.pid != Some(binding.pid) || process_start(binding.pid)? != binding.process_start {
+        if element.pid != Some(binding.pid) || process_start(binding.pid)? != binding.process_start
+        {
             return Err(lost_identity("Wayland", element.handle));
         }
         // Sway's node_init assigns IDs from a monotonic process-local counter.
@@ -435,14 +447,22 @@ impl SwayWindowBackend {
         bound_sway_candidate(binding, element.handle, &candidates)
     }
 
-    fn request(&self, message_type: u32, payload: &[u8], expected: Option<ServerIdentity>) -> Result<(serde_json::Value, ServerIdentity)> {
+    fn request(
+        &self,
+        message_type: u32,
+        payload: &[u8],
+        expected: Option<ServerIdentity>,
+    ) -> Result<(serde_json::Value, ServerIdentity)> {
         let mut stream = UnixStream::connect(&self.socket).map_err(|error| Error::Platform {
             code: -1,
             message: format!("connect Sway IPC {}: {error}", self.socket.display()),
         })?;
         let server_identity = sway_server_identity(&stream)?;
         if expected.is_some_and(|identity| identity != server_identity) {
-            return Err(Error::Unsupported { feature: "native Wayland window identity: Sway compositor session changed".to_string() });
+            return Err(Error::Unsupported {
+                feature: "native Wayland window identity: Sway compositor session changed"
+                    .to_string(),
+            });
         }
         let length = u32::try_from(payload.len()).map_err(|_| Error::InvalidActionData {
             message: "Sway IPC request is too large".to_string(),
@@ -772,16 +792,16 @@ impl X11WindowBackend {
         self.with_server_grab(|conn| self.facts_with_connection(conn, element))
     }
 
-    fn facts_with_connection(&self, conn: &RustConnection, element: &ElementData) -> Result<WindowFacts> {
+    fn facts_with_connection(
+        &self,
+        conn: &RustConnection,
+        element: &ElementData,
+    ) -> Result<WindowFacts> {
         let window = self.bind(conn, element)?;
-        let state: HashSet<Atom> = property_u32(
-            conn,
-            window,
-            self.atoms.net_wm_state,
-            AtomEnum::ATOM.into(),
-        )?
-        .into_iter()
-        .collect();
+        let state: HashSet<Atom> =
+            property_u32(conn, window, self.atoms.net_wm_state, AtomEnum::ATOM.into())?
+                .into_iter()
+                .collect();
 
         let mut actions = Vec::new();
         if self.supports(self.atoms.net_active_window) {
@@ -825,9 +845,14 @@ impl X11WindowBackend {
 
     fn with_server_grab<T>(&self, action: impl FnOnce(&RustConnection) -> Result<T>) -> Result<T> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        conn.grab_server().map_err(platform)?.check().map_err(platform)?;
+        conn.grab_server()
+            .map_err(platform)?
+            .check()
+            .map_err(platform)?;
         let result = action(&conn);
-        let release = conn.ungrab_server().map_err(platform)
+        let release = conn
+            .ungrab_server()
+            .map_err(platform)
             .and_then(|cookie| cookie.check().map_err(platform))
             .and_then(|()| conn.flush().map_err(platform));
         match (result, release) {
@@ -1131,43 +1156,43 @@ impl X11WindowBackend {
 
     fn restore(&self, element: &ElementData) -> Result<()> {
         self.with_server_grab(|conn| {
-        let window = self.resolve(conn, element)?;
-        // De-iconification is the ICCCM MapWindow request. EWMH state removal
-        // is separate and explicit: fullscreen and the two maximize atoms are
-        // distinct states, and restore clears all of them.
-        conn.map_window(window)
-            .map_err(platform)?
-            .check()
-            .map_err(platform)?;
-        if self.supports(self.atoms.net_wm_state) {
-            send_client_message(
-                &conn,
-                self.root,
-                window,
-                self.atoms.net_wm_state,
-                [
-                    STATE_REMOVE,
-                    self.atoms.net_wm_state_fullscreen,
-                    0,
-                    SOURCE_APPLICATION,
-                    0,
-                ],
-            )?;
-            send_client_message(
-                &conn,
-                self.root,
-                window,
-                self.atoms.net_wm_state,
-                [
-                    STATE_REMOVE,
-                    self.atoms.net_wm_state_max_horz,
-                    self.atoms.net_wm_state_max_vert,
-                    SOURCE_APPLICATION,
-                    0,
-                ],
-            )?;
-        }
-        conn.flush().map_err(platform)
+            let window = self.resolve(conn, element)?;
+            // De-iconification is the ICCCM MapWindow request. EWMH state removal
+            // is separate and explicit: fullscreen and the two maximize atoms are
+            // distinct states, and restore clears all of them.
+            conn.map_window(window)
+                .map_err(platform)?
+                .check()
+                .map_err(platform)?;
+            if self.supports(self.atoms.net_wm_state) {
+                send_client_message(
+                    conn,
+                    self.root,
+                    window,
+                    self.atoms.net_wm_state,
+                    [
+                        STATE_REMOVE,
+                        self.atoms.net_wm_state_fullscreen,
+                        0,
+                        SOURCE_APPLICATION,
+                        0,
+                    ],
+                )?;
+                send_client_message(
+                    conn,
+                    self.root,
+                    window,
+                    self.atoms.net_wm_state,
+                    [
+                        STATE_REMOVE,
+                        self.atoms.net_wm_state_max_horz,
+                        self.atoms.net_wm_state_max_vert,
+                        SOURCE_APPLICATION,
+                        0,
+                    ],
+                )?;
+            }
+            conn.flush().map_err(platform)
         })
     }
 
@@ -1201,34 +1226,34 @@ impl X11WindowBackend {
         }
         .to_physical(crate::scale::coordinate_scale());
         self.with_server_grab(|conn| {
-        let window = self.resolve(conn, element)?;
-        // EWMH's moveresize width and height describe the client window,
-        // while xa11y's bounds contract reports the decorated outer frame.
-        // Remove the current frame extents so a requested outer size reads
-        // back as that same size after the window manager applies it.
-        let extents = property_u32(
-            &conn,
-            window,
-            self.atoms.net_frame_extents,
-            AtomEnum::CARDINAL.into(),
-        )?;
-        let (horizontal, vertical) = match extents.as_slice() {
-            [left, right, top, bottom, ..] => {
-                (left.saturating_add(*right), top.saturating_add(*bottom))
-            }
-            _ => (0, 0),
-        };
-        let client_width = physical.width.saturating_sub(horizontal).max(1);
-        let client_height = physical.height.saturating_sub(vertical).max(1);
-        let flags = (1_u32 << 10) | (1_u32 << 11) | (SOURCE_APPLICATION << 12);
-        send_client_message(
-            &conn,
-            self.root,
-            window,
-            self.atoms.net_moveresize_window,
-            [flags, 0, 0, client_width, client_height],
-        )?;
-        conn.flush().map_err(platform)
+            let window = self.resolve(conn, element)?;
+            // EWMH's moveresize width and height describe the client window,
+            // while xa11y's bounds contract reports the decorated outer frame.
+            // Remove the current frame extents so a requested outer size reads
+            // back as that same size after the window manager applies it.
+            let extents = property_u32(
+                conn,
+                window,
+                self.atoms.net_frame_extents,
+                AtomEnum::CARDINAL.into(),
+            )?;
+            let (horizontal, vertical) = match extents.as_slice() {
+                [left, right, top, bottom, ..] => {
+                    (left.saturating_add(*right), top.saturating_add(*bottom))
+                }
+                _ => (0, 0),
+            };
+            let client_width = physical.width.saturating_sub(horizontal).max(1);
+            let client_height = physical.height.saturating_sub(vertical).max(1);
+            let flags = (1_u32 << 10) | (1_u32 << 11) | (SOURCE_APPLICATION << 12);
+            send_client_message(
+                conn,
+                self.root,
+                window,
+                self.atoms.net_moveresize_window,
+                [flags, 0, 0, client_width, client_height],
+            )?;
+            conn.flush().map_err(platform)
         })
     }
 
@@ -1713,5 +1738,261 @@ mod tests {
             .expect("activate retained window");
         server.join().expect("fake Sway IPC server");
         std::fs::remove_file(socket).expect("remove fake socket");
+    }
+
+    #[test]
+    fn sway_rejects_changed_session_before_sending_action() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+
+        let socket =
+            std::env::temp_dir().join(format!("xa11y-sway-session-{}.sock", std::process::id()));
+        let listener = UnixListener::bind(&socket).expect("bind fake Sway IPC socket");
+        let pid = std::process::id();
+        let server = std::thread::spawn(move || {
+            for index in 0..2 {
+                let (mut stream, _) = listener.accept().expect("Sway IPC connection");
+                if index == 1 {
+                    let mut first = [0_u8; 1];
+                    assert_eq!(
+                        stream
+                            .read(&mut first)
+                            .expect("read after identity rejection"),
+                        0,
+                        "no command may be sent to a different compositor session"
+                    );
+                    break;
+                }
+                let mut header = [0_u8; 14];
+                stream.read_exact(&mut header).expect("tree request header");
+                let tree = serde_json::json!({"id": 1, "type": "root", "nodes": [
+                    {"id": 20, "type": "con", "pid": pid, "name": "A", "shell": "xdg_shell",
+                     "rect": {"x": 0, "y": 0, "width": 300, "height": 200}}
+                ]});
+                let bytes = serde_json::to_vec(&tree).expect("tree JSON");
+                let mut reply = Vec::from(&b"i3-ipc"[..]);
+                reply.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                reply.extend_from_slice(&4_u32.to_le_bytes());
+                reply.extend_from_slice(&bytes);
+                stream.write_all(&reply).expect("tree reply");
+            }
+        });
+        let backend = super::SwayWindowBackend {
+            socket: socket.clone(),
+            protocol_version: 1,
+            bindings: std::sync::Mutex::new(std::collections::HashMap::new()),
+        };
+        let mut element = xa11y_core::ElementData::for_role(xa11y_core::Role::Window);
+        element.handle = 72;
+        element.pid = Some(pid);
+        element.name = Some("A".to_string());
+        backend.bind(&element).expect("bind window");
+        let binding = backend.bindings.lock().unwrap_or_else(|e| e.into_inner());
+        let mut wrong = binding
+            .get(&element.handle)
+            .copied()
+            .expect("stored binding");
+        drop(binding);
+        wrong.server_identity = super::ServerIdentity::Sway {
+            pid: 1,
+            process_start: 1,
+        };
+        backend
+            .bindings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(element.handle, wrong);
+        let error = backend
+            .activate(&element)
+            .expect_err("different session must be rejected");
+        assert!(error.to_string().contains("session changed"));
+        server.join().expect("fake Sway IPC server");
+        std::fs::remove_file(socket).expect("remove fake socket");
+    }
+
+    #[test]
+    #[ignore = "requires Xvfb; run through scripts/run_integ_tests.sh"]
+    fn x11_retained_action_survives_swap_and_rejects_reused_xid() {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+        use x11rb::connection::Connection as _;
+        use x11rb::protocol::xproto::ConnectionExt as _;
+        use x11rb::protocol::xproto::{
+            ChangeWindowAttributesAux, ConfigureWindowAux, CreateWindowAux, WindowClass,
+        };
+        use x11rb::wrapper::ConnectionExt as _;
+
+        struct Xvfb(std::process::Child);
+        impl Drop for Xvfb {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut xvfb = Xvfb(
+            Command::new("Xvfb")
+                .args([
+                    "-displayfd",
+                    "1",
+                    "-screen",
+                    "0",
+                    "1024x768x24",
+                    "-nolisten",
+                    "unix",
+                    "-listen",
+                    "tcp",
+                    "-ac",
+                ])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("start isolated Xvfb"),
+        );
+        let mut display_number = String::new();
+        BufReader::new(xvfb.0.stdout.take().expect("Xvfb displayfd"))
+            .read_line(&mut display_number)
+            .expect("read Xvfb display number");
+        let display = format!("localhost:{}", display_number.trim());
+        let (observer, screen) = x11rb::rust_connection::RustConnection::connect(Some(&display))
+            .expect("connect isolated Xvfb");
+        let (backend_conn, backend_screen) =
+            x11rb::rust_connection::RustConnection::connect(Some(&display))
+                .expect("connect backend to isolated Xvfb");
+        assert_eq!(screen, backend_screen);
+        let root = observer.setup().roots[screen].root;
+        let atoms = super::X11Atoms::new(&backend_conn).expect("X11 atoms");
+        let pid = std::process::id();
+        let a = observer.generate_id().expect("XID A");
+        let b = observer.generate_id().expect("XID B");
+        let create = |window, x| {
+            observer
+                .create_window(
+                    0,
+                    window,
+                    root,
+                    x,
+                    0,
+                    300,
+                    200,
+                    0,
+                    WindowClass::INPUT_OUTPUT,
+                    0,
+                    &CreateWindowAux::new(),
+                )
+                .expect("create window")
+                .check()
+                .expect("created window");
+            observer
+                .change_property32(
+                    x11rb::protocol::xproto::PropMode::REPLACE,
+                    window,
+                    atoms.net_wm_pid,
+                    x11rb::protocol::xproto::AtomEnum::CARDINAL,
+                    &[pid],
+                )
+                .expect("set PID")
+                .check()
+                .expect("PID stored");
+            observer
+                .change_property8(
+                    x11rb::protocol::xproto::PropMode::REPLACE,
+                    window,
+                    atoms.net_wm_name,
+                    atoms.utf8_string,
+                    b"Same",
+                )
+                .expect("set title")
+                .check()
+                .expect("title stored");
+        };
+        create(a, 0);
+        create(b, 400);
+        observer
+            .change_property32(
+                x11rb::protocol::xproto::PropMode::REPLACE,
+                root,
+                atoms.net_client_list,
+                x11rb::protocol::xproto::AtomEnum::WINDOW,
+                &[a, b],
+            )
+            .expect("client list")
+            .check()
+            .expect("client list stored");
+        observer
+            .change_window_attributes(
+                root,
+                &ChangeWindowAttributesAux::new()
+                    .event_mask(x11rb::protocol::xproto::EventMask::SUBSTRUCTURE_NOTIFY),
+            )
+            .expect("watch root")
+            .check()
+            .expect("root watched");
+        observer.flush().expect("flush setup");
+        let backend = super::X11WindowBackend {
+            conn: std::sync::Mutex::new(backend_conn),
+            bindings: std::sync::Mutex::new(std::collections::HashMap::new()),
+            destroyed_handles: std::sync::Mutex::new(std::collections::HashSet::new()),
+            root,
+            atoms,
+            supported: [atoms.net_active_window].into_iter().collect(),
+            has_window_manager: true,
+        };
+        let element = |handle, x| {
+            let mut data = xa11y_core::ElementData::for_role(xa11y_core::Role::Window);
+            data.handle = handle;
+            data.pid = Some(pid);
+            data.name = Some("Same".to_string());
+            data.bounds = Some(Rect {
+                x,
+                y: 0,
+                width: 300,
+                height: 200,
+            });
+            data
+        };
+        let retained_a = element(101, 0);
+        let retained_b = element(102, 400);
+        backend.facts(&retained_a).expect("bind A");
+        backend.facts(&retained_b).expect("bind B");
+        observer
+            .configure_window(a, &ConfigureWindowAux::new().x(400))
+            .expect("move A")
+            .check()
+            .expect("A moved");
+        observer
+            .configure_window(b, &ConfigureWindowAux::new().x(0))
+            .expect("move B")
+            .check()
+            .expect("B moved");
+        observer.flush().expect("flush movement");
+        backend
+            .activate(&retained_a)
+            .expect("activate original A after swap");
+        let target = loop {
+            if let x11rb::protocol::Event::ClientMessage(event) =
+                observer.wait_for_event().expect("native event")
+            {
+                break event.window;
+            }
+        };
+        assert_eq!(
+            target, a,
+            "retained A must not activate B at A's old position"
+        );
+        observer
+            .destroy_window(a)
+            .expect("destroy A")
+            .check()
+            .expect("A destroyed");
+        create(a, 400);
+        observer.flush().expect("flush XID replacement");
+        let error = backend
+            .activate(&retained_a)
+            .expect_err("reused XID must be tombstoned");
+        assert!(error.to_string().contains("identity was lost"));
+        // A fresh accessibility snapshot may bind the replacement separately.
+        backend
+            .facts(&element(103, 400))
+            .expect("bind replacement from a fresh handle");
     }
 }

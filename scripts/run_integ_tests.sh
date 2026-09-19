@@ -170,6 +170,13 @@ else
     cargo test -p xa11y --features strict-roles --test integ_test -- --ignored --test-threads=1 $NOCAPTURE_ARG 2>&1
 fi
 TEST_EXIT=$?
+if [ -z "$TEST_FILTER" ]; then
+    cargo test -p xa11y-linux --lib x11_retained_action_survives_swap_and_rejects_reused_xid -- --ignored --test-threads=1 2>&1
+    X11_IDENTITY_EXIT=$?
+    if [ "$X11_IDENTITY_EXIT" -ne 0 ]; then
+        TEST_EXIT=$X11_IDENTITY_EXIT
+    fi
+fi
 set -e
 
 echo "=== Integration tests finished (exit code: $TEST_EXIT) ==="
