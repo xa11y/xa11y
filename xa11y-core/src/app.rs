@@ -74,23 +74,9 @@ fn merge_diagnosis(err: Error, extra: Diagnosis) -> Error {
 /// foreground status for apps obtained through `list`/`find` without a per-app
 /// focus query.
 ///
-/// Tagging is *window-precise*. One pid can surface several `Application`
-/// entries — the Linux AT-SPI registry can register several accessibles for
-/// one process (a main application plus a dialog it exposes as a second app
-/// node), so a single process can contribute several entries that all share
-/// the foreground pid. macOS synthesizes exactly one node per pid and
-/// Windows one per process, so there a pid match alone is unambiguous. Where
-/// several entries share the foreground pid, the platform's window-level
-/// `active` flag picks the one actually in the foreground. Concretely, an
-/// entry is tagged when its pid matches *and* either it is the only
-/// pid-matching entry (the unambiguous case) or it reports `active`.
-///
-/// If several entries share the foreground pid and none reports `active` (the
-/// foreground window wasn't enumerable), none is tagged — that's honest, not a
-/// fallback (tenet 1). When the exact foreground window matters, resolve the
-/// foreground application via [`App::foreground_with`], then pick the window
-/// reporting [`active`](crate::element::StateSet::active) from its
-/// [`App::windows`].
+/// Tagging is process-scoped: all native registrations with the foreground
+/// PID represent the same public application. To identify the exact window,
+/// inspect the `active` flag on [`App::windows`] instead.
 ///
 /// "Nothing is focused" ([`Error::SelectorNotMatched`]) is not an error here:
 /// it leaves every entry untagged (`focused = false`). Any other error is a
@@ -163,7 +149,7 @@ fn running_apps_diagnosis(provider: &Arc<dyn Provider>) -> Diagnosis {
 /// handle, which is unique per built node within one enumeration — distinct
 /// windows are never merged on presentation data like a shared title and
 /// bounds.
-fn same_window_identity(a: &ElementData, b: &ElementData) -> bool {
+pub(crate) fn same_window_identity(a: &ElementData, b: &ElementData) -> bool {
     fn key(d: &ElementData) -> String {
         d.stable_id
             .clone()
@@ -537,7 +523,10 @@ impl App {
         Self::windows_with(Arc::clone(&self.provider), &self.data)
     }
 
-    fn from_data(provider: Arc<dyn Provider>, data: ElementData) -> Self {
+    /// Reconstruct an application snapshot in a language binding without
+    /// repeating discovery or losing the process-scoped core operations.
+    #[doc(hidden)]
+    pub fn from_data(provider: Arc<dyn Provider>, data: ElementData) -> Self {
         let name = data.name.clone().unwrap_or_default();
         let pid = data.pid;
         Self {
@@ -577,19 +566,15 @@ impl App {
     /// Capture the application's accessibility tree as a recursive snapshot,
     /// rooted at the application element.
     ///
-    /// Equivalent to `self.as_element().tree(max_depth)`. See
+    /// Includes children from every native registration of the process. See
     /// [`Element::tree`] for `max_depth` semantics.
     pub fn tree(&self, max_depth: Option<usize>) -> Result<TreeNode> {
-        let roots = self.provider.app_roots(&self.data)?;
-        let mut trees = roots
-            .into_iter()
-            .map(|root| Element::new(root, Arc::clone(&self.provider)).tree(max_depth));
-        let mut tree = trees
-            .next()
-            .transpose()?
-            .unwrap_or_else(|| TreeNode::new("application"));
-        for sibling in trees {
-            tree.children.extend(sibling?.children);
+        let mut tree = self.as_element().tree(Some(0))?;
+        if max_depth != Some(0) {
+            let child_depth = max_depth.map(|depth| depth - 1);
+            for child in self.children()? {
+                tree.children.push(child.tree(child_depth)?);
+            }
         }
         Ok(tree)
     }
@@ -598,17 +583,19 @@ impl App {
     /// rooted at the application element.
     ///
     /// The primary inspection helper for figuring out the role/name of every
-    /// element in an app before writing selectors. Equivalent to
-    /// `self.as_element().dump(max_depth)`. See [`Element::dump`] for the
-    /// output format.
+    /// element in an app before writing selectors. Includes all process
+    /// registrations, like [`Self::tree`]. See [`Element::dump`] for the output format.
     pub fn dump(&self, max_depth: Option<usize>) -> Result<String> {
-        self.as_element().dump(max_depth)
+        let mut out = String::new();
+        crate::element::write_tree_node(&self.tree(max_depth)?, 0, &mut out);
+        Ok(out)
     }
 
     /// Get an [`Element`] handle for the application root.
     ///
-    /// Useful when you want to use Element-level methods (e.g. `tree`,
-    /// `dump`, `children`) without going through a locator.
+    /// This represents one native root. On a platform with several roots per
+    /// process, use App-level `tree`, `dump`, `children`, and `locator` for the
+    /// complete process scope.
     pub fn as_element(&self) -> Element {
         Element::new(self.data.clone(), Arc::clone(&self.provider))
     }
@@ -1373,6 +1360,16 @@ mod tests {
                 .len(),
             2
         );
+        assert!(app.dump(Some(1)).unwrap().contains("Modal"));
+        assert_eq!(app.locator("window:nth(1)").count().unwrap(), 1);
+        assert_eq!(
+            app.locator("window:nth(2)")
+                .element()
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("Modal")
+        );
     }
 
     #[test]
@@ -1393,6 +1390,7 @@ mod tests {
             vec!["Main"],
             "a window shared by entries must list once"
         );
+        assert_eq!(app.tree(Some(1)).unwrap().children.len(), 1);
     }
 
     #[test]

@@ -638,7 +638,7 @@ fn build_tree_node(
     })
 }
 
-fn write_tree_node(node: &TreeNode, depth: usize, out: &mut String) {
+pub(crate) fn write_tree_node(node: &TreeNode, depth: usize, out: &mut String) {
     use fmt::Write as _;
     let indent = "  ".repeat(depth);
     write!(out, "{}{}", indent, node.role).unwrap();

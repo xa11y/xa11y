@@ -220,13 +220,23 @@ impl Provider for MockProvider {
     }
 
     fn list_apps(&self) -> Result<Vec<ElementData>> {
-        // The mock tree's root is a single Application node; expose it as
-        // the lone "app" so Locator's rootless path enumerates it.
         let nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
-        if nodes.is_empty() {
-            return Ok(vec![]);
+        Ok(nodes
+            .iter()
+            .filter(|node| node.data.role == Role::Application && !node.closed)
+            .map(|node| node.data.clone())
+            .collect())
+    }
+
+    fn app_roots(&self, app: &ElementData) -> Result<Vec<ElementData>> {
+        if app.pid.is_none() {
+            return Ok(vec![app.clone()]);
         }
-        Ok(vec![nodes[0].data.clone()])
+        Ok(self
+            .list_apps()?
+            .into_iter()
+            .filter(|root| root.pid == app.pid)
+            .collect())
     }
 
     fn focused_app(&self) -> Result<ElementData> {
@@ -927,6 +937,29 @@ pub fn build_provider() -> Arc<MockProvider> {
         nodes: Mutex::new(nodes),
         actions: Mutex::new(Vec::new()),
     })
+}
+
+/// Build two native application roots for one process, each with a window.
+/// Exercises process scope through the actual Python and JavaScript bindings.
+pub fn build_split_provider() -> Arc<MockProvider> {
+    let provider = build_provider();
+    {
+        let mut nodes = provider.nodes.lock().unwrap_or_else(|e| e.into_inner());
+        let root_index = nodes.len();
+        let window_index = root_index + 1;
+        let mut root = nodes[0].clone();
+        root.data.handle = root_index as u64;
+        root.data.stable_id = Some("second-app-root".into());
+        root.children = vec![window_index];
+        let mut window = nodes[1].clone();
+        window.data.handle = window_index as u64;
+        window.data.stable_id = Some("second-window".into());
+        window.data.name = Some("Second Window".into());
+        window.children.clear();
+        window.parent = Some(root_index);
+        nodes.extend([root, window]);
+    }
+    provider
 }
 
 /// Build a [`Subscription`] whose underlying sender has already been dropped.

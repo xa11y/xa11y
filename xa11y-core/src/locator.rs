@@ -305,26 +305,40 @@ impl Locator {
             if roots.is_empty() {
                 return self.provider.find_elements_group(root, group, limit, None);
             }
-            let mut out = Vec::new();
-            let mut seen = std::collections::HashSet::new();
-            for root in roots {
-                for data in self.provider.find_elements_group(root, group, None, None)? {
-                    let key = data.stable_id.clone().map_or_else(
-                        || format!("h{}", data.handle),
-                        |id| match data.raw.get("bus_name") {
-                            Some(serde_json::Value::String(bus)) => format!("{bus}:{id}"),
-                            _ => id,
-                        },
-                    );
-                    if seen.insert(key) {
-                        out.push(data);
+            if roots.len() == 1 {
+                // Preserve the native backend's limit pushdown for the common
+                // single-root case (including first-match auto-wait actions).
+                return self
+                    .provider
+                    .find_elements_group(&roots[0], group, limit, None);
+            }
+            // Evaluate selectors once over the process's combined children.
+            // Applying :nth independently to each registration returns the
+            // wrong match set, e.g. two first windows and no second window.
+            let mut children = Vec::new();
+            for native_root in roots {
+                for child in self.provider.get_children(Some(native_root))? {
+                    if !children
+                        .iter()
+                        .any(|existing| crate::app::same_window_identity(existing, &child))
+                    {
+                        children.push(child);
                     }
                 }
             }
-            if let Some(limit) = limit {
-                out.truncate(limit);
-            }
-            return Ok(out);
+            return crate::selector::find_elements_in_tree_group(
+                |element| {
+                    if element.is_some_and(|element| element.handle == root.handle) {
+                        Ok(children.clone())
+                    } else {
+                        self.provider.get_children(element)
+                    }
+                },
+                Some(root),
+                group,
+                limit,
+                None,
+            );
         }
 
         // Rootless: search across all apps. We can't push the outer `limit`

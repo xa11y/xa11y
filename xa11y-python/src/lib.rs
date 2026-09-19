@@ -1514,13 +1514,9 @@ impl App {
     /// ``App.list()`` and the predicate finders (``App.find()``). A
     /// point-in-time snapshot taken when the ``App`` was resolved.
     ///
-    /// Tagging is window-precise. On Windows apps surface as one synthesized
-    /// ``Application`` node per process, so a pid match there is unambiguous;
-    /// on Linux the AT-SPI registry can surface several entries for one pid,
-    /// and only the entry reporting the window-level ``active`` flag gets
-    /// ``is_foreground``. Use ``App.foreground()`` to resolve the foreground
-    /// application directly, then pick the exact foreground window from its
-    /// ``windows()``.
+    /// This identifies the foreground process, including all of its native
+    /// registrations. Use ``App.foreground()`` to resolve that process, then
+    /// inspect ``active`` on its ``windows()`` for the exact foreground window.
     #[getter]
     fn is_foreground(&self) -> bool {
         self.inner_data.states.focused
@@ -1545,9 +1541,9 @@ impl App {
     /// Create a Locator scoped to this application's accessibility tree.
     fn locator(&self, selector: &str) -> Locator {
         Locator {
-            inner: xa11y::Locator::new(
+            inner: xa11y::Locator::new_for_app(
                 self.provider.clone(),
-                Some(self.inner_data.clone()),
+                self.inner_data.clone(),
                 selector,
             ),
         }
@@ -1571,11 +1567,11 @@ impl App {
         let provider = self.provider.clone();
         let data = self.inner_data.clone();
         let children = py
-            .detach(move || provider.get_children(Some(&data)))
+            .detach(move || xa11y::App::from_data(provider, data).children())
             .map_err(to_py_err)?;
         children
             .iter()
-            .map(|c| make_py_element(py, c, self.provider.clone()))
+            .map(|c| make_py_element(py, c.data(), self.provider.clone()))
             .collect()
     }
 
@@ -1619,13 +1615,11 @@ impl App {
     /// ``0`` = only the application node, ``1`` = application + direct
     /// children (typically windows), ``None`` = full subtree.
     ///
-    /// Equivalent to ``Element.tree(...)`` on the application's root element.
+    /// Includes every native application registration belonging to the process.
     #[pyo3(signature = (max_depth=None))]
     fn tree(&self, py: Python<'_>, max_depth: Option<usize>) -> PyResult<Py<PyAny>> {
-        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
-        let node = py
-            .detach(move || element.tree(max_depth))
-            .map_err(to_py_err)?;
+        let app = xa11y::App::from_data(self.provider.clone(), self.inner_data.clone());
+        let node = py.detach(move || app.tree(max_depth)).map_err(to_py_err)?;
         tree_node_to_py(py, &node)
     }
 
@@ -1639,9 +1633,8 @@ impl App {
     /// For the same output from the shell, use ``xa11y tree --app NAME``.
     #[pyo3(signature = (max_depth=None))]
     fn dump(&self, py: Python<'_>, max_depth: Option<usize>) -> PyResult<String> {
-        let element = xa11y::Element::new(self.inner_data.clone(), self.provider.clone());
-        py.detach(move || element.dump(max_depth))
-            .map_err(to_py_err)
+        let app = xa11y::App::from_data(self.provider.clone(), self.inner_data.clone());
+        py.detach(move || app.dump(max_depth)).map_err(to_py_err)
     }
 
     fn __repr__(&self) -> String {
@@ -2751,8 +2744,13 @@ fn _make_test_locator() -> PyResult<Locator> {
 
 /// Create a test App backed by the shared mock provider (resolves "TestApp").
 #[pyfunction]
-fn _make_test_app() -> PyResult<App> {
-    let provider = xa11y::mock::build_provider() as Arc<dyn xa11y::Provider>;
+#[pyo3(signature = (split=false))]
+fn _make_test_app(split: bool) -> PyResult<App> {
+    let provider = if split {
+        xa11y::mock::build_split_provider()
+    } else {
+        xa11y::mock::build_provider()
+    } as Arc<dyn xa11y::Provider>;
     // Resolve via the predicate finder (not `by_name_with`) so the returned
     // app is foreground-tagged — the mock reports its root as the focused app,
     // letting `App.is_foreground` tests observe a `True` value.

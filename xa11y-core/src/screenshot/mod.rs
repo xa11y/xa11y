@@ -80,6 +80,11 @@ pub struct CaptureMappingSegment {
 #[derive(Clone)]
 pub struct CaptureMapping {
     segments: Vec<CaptureMappingSegment>,
+    // Keep capture-time segments immutable. Requantizing their desktop
+    // rectangles after an odd-pixel HiDPI crop loses the fractional origin.
+    // Current image coordinates are (capture coordinates - origin) * scale.
+    origin: (f64, f64),
+    image_scale: (f64, f64),
     layout_token: Option<u64>,
     validator: Option<fn(u64) -> Result<bool>>,
 }
@@ -98,6 +103,8 @@ impl CaptureMapping {
     pub fn new(segments: Vec<CaptureMappingSegment>) -> Self {
         Self {
             segments,
+            origin: (0.0, 0.0),
+            image_scale: (1.0, 1.0),
             layout_token: None,
             validator: None,
         }
@@ -132,6 +139,8 @@ impl CaptureMapping {
     ) -> Self {
         Self {
             segments,
+            origin: (0.0, 0.0),
+            image_scale: (1.0, 1.0),
             layout_token: Some(layout_token),
             validator: Some(validator),
         }
@@ -258,7 +267,23 @@ impl Screenshot {
         mapping
             .segments
             .iter()
-            .find_map(|segment| map_point(point, segment.desktop, segment.image))
+            .filter_map(|segment| {
+                map_point_f64(
+                    (f64::from(point.x), f64::from(point.y)),
+                    segment.desktop,
+                    segment.image,
+                )
+            })
+            .map(|(x, y)| {
+                (
+                    (x - mapping.origin.0) * mapping.image_scale.0,
+                    (y - mapping.origin.1) * mapping.image_scale.1,
+                )
+            })
+            .find(|&(x, y)| {
+                x >= 0.0 && y >= 0.0 && x < f64::from(self.width) && y < f64::from(self.height)
+            })
+            .map(|(x, y)| Point::new(x.floor() as i32, y.floor() as i32))
             .ok_or_else(|| mapping_error("desktop point is outside the captured display areas"))
     }
 
@@ -280,7 +305,17 @@ impl Screenshot {
         mapping
             .segments
             .iter()
-            .find_map(|segment| map_point(point, segment.image, segment.desktop))
+            .find_map(|segment| {
+                map_point_f64(
+                    (
+                        f64::from(point.x) / mapping.image_scale.0 + mapping.origin.0,
+                        f64::from(point.y) / mapping.image_scale.1 + mapping.origin.1,
+                    ),
+                    segment.image,
+                    segment.desktop,
+                )
+            })
+            .map(|(x, y)| Point::new(x.floor() as i32, y.floor() as i32))
             .ok_or_else(|| mapping_error("image point does not belong to a captured display"))
     }
 
@@ -296,7 +331,40 @@ impl Screenshot {
         Ok(mapping
             .segments
             .iter()
-            .filter_map(|segment| map_rect(rect, segment.desktop, segment.image))
+            .filter_map(|segment| {
+                if segment.image.width == 0 || segment.image.height == 0 {
+                    return None;
+                }
+                let clipped = intersect_rect(rect, segment.desktop)?;
+                let from = segment.desktop;
+                let to = segment.image;
+                let x = |v: f64| {
+                    ((f64::from(to.x)
+                        + (v - f64::from(from.x)) * f64::from(to.width) / f64::from(from.width))
+                        - mapping.origin.0)
+                        * mapping.image_scale.0
+                };
+                let y = |v: f64| {
+                    ((f64::from(to.y)
+                        + (v - f64::from(from.y)) * f64::from(to.height) / f64::from(from.height))
+                        - mapping.origin.1)
+                        * mapping.image_scale.1
+                };
+                let x0 = x(f64::from(clipped.x)).max(0.0).floor();
+                let y0 = y(f64::from(clipped.y)).max(0.0).floor();
+                let x1 = x(f64::from(clipped.x) + f64::from(clipped.width))
+                    .min(f64::from(self.width))
+                    .ceil();
+                let y1 = y(f64::from(clipped.y) + f64::from(clipped.height))
+                    .min(f64::from(self.height))
+                    .ceil();
+                (x1 > x0 && y1 > y0).then_some(Rect {
+                    x: x0 as i32,
+                    y: y0 as i32,
+                    width: (x1 - x0) as u32,
+                    height: (y1 - y0) as u32,
+                })
+            })
             .collect())
     }
 
@@ -319,29 +387,15 @@ impl Screenshot {
         }
         let mut pixels = Vec::with_capacity(expected_len(crop.width, crop.height)?);
         for row in 0..crop.height {
-            let start = (((crop.y as u32 + row) * self.width + crop.x as u32) * 4) as usize;
+            let start =
+                ((crop.y as usize + row as usize) * self.width as usize + crop.x as usize) * 4;
             let end = start + crop.width as usize * 4;
             pixels.extend_from_slice(&self.pixels[start..end]);
         }
-        let mapping = self.mapping.as_ref().map(|mapping| CaptureMapping {
-            segments: mapping
-                .segments
-                .iter()
-                .filter_map(|segment| {
-                    let image = intersect_rect(segment.image, crop)?;
-                    Some(CaptureMappingSegment {
-                        desktop: map_rect(image, segment.image, segment.desktop)?,
-                        image: Rect {
-                            x: image.x - crop.x,
-                            y: image.y - crop.y,
-                            width: image.width,
-                            height: image.height,
-                        },
-                    })
-                })
-                .collect(),
-            layout_token: mapping.layout_token,
-            validator: mapping.validator,
+        let mapping = self.mapping.clone().map(|mut mapping| {
+            mapping.origin.0 += f64::from(crop.x) / mapping.image_scale.0;
+            mapping.origin.1 += f64::from(crop.y) / mapping.image_scale.1;
+            mapping
         });
         Ok(Screenshot {
             width: crop.width,
@@ -370,22 +424,15 @@ impl Screenshot {
             let sy = (u64::from(y) * u64::from(self.height) / u64::from(height)) as u32;
             for x in 0..width {
                 let sx = (u64::from(x) * u64::from(self.width) / u64::from(width)) as u32;
-                let src = ((sy * self.width + sx) * 4) as usize;
-                let dst = ((y * width + x) * 4) as usize;
+                let src = (sy as usize * self.width as usize + sx as usize) * 4;
+                let dst = (y as usize * width as usize + x as usize) * 4;
                 pixels[dst..dst + 4].copy_from_slice(&self.pixels[src..src + 4]);
             }
         }
-        let mapping = self.mapping.as_ref().map(|mapping| CaptureMapping {
-            segments: mapping
-                .segments
-                .iter()
-                .map(|segment| CaptureMappingSegment {
-                    desktop: segment.desktop,
-                    image: scale_rect(segment.image, self.width, self.height, width, height),
-                })
-                .collect(),
-            layout_token: mapping.layout_token,
-            validator: mapping.validator,
+        let mapping = self.mapping.clone().map(|mut mapping| {
+            mapping.image_scale.0 *= f64::from(width) / f64::from(self.width);
+            mapping.image_scale.1 *= f64::from(height) / f64::from(self.height);
+            mapping
         });
         Ok(Screenshot {
             width,
@@ -471,27 +518,22 @@ fn mapping_error(message: &str) -> Error {
     }
 }
 
-fn contains(rect: Rect, point: Point) -> bool {
-    let right = i64::from(rect.x) + i64::from(rect.width);
-    let bottom = i64::from(rect.y) + i64::from(rect.height);
-    i64::from(point.x) >= i64::from(rect.x)
-        && i64::from(point.y) >= i64::from(rect.y)
-        && i64::from(point.x) < right
-        && i64::from(point.y) < bottom
-}
-
-fn map_point(point: Point, from: Rect, to: Rect) -> Option<Point> {
-    if !contains(from, point) || from.width == 0 || from.height == 0 {
+fn map_point_f64(point: (f64, f64), from: Rect, to: Rect) -> Option<(f64, f64)> {
+    let (x, y) = point;
+    if from.width == 0
+        || from.height == 0
+        || to.width == 0
+        || to.height == 0
+        || x < f64::from(from.x)
+        || y < f64::from(from.y)
+        || x >= f64::from(from.x) + f64::from(from.width)
+        || y >= f64::from(from.y) + f64::from(from.height)
+    {
         return None;
     }
-    let x = i64::from(to.x)
-        + ((i64::from(point.x) - i64::from(from.x)) * i64::from(to.width) / i64::from(from.width));
-    let y = i64::from(to.y)
-        + ((i64::from(point.y) - i64::from(from.y)) * i64::from(to.height)
-            / i64::from(from.height));
-    Some(Point::new(
-        x.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
-        y.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32,
+    Some((
+        f64::from(to.x) + (x - f64::from(from.x)) * f64::from(to.width) / f64::from(from.width),
+        f64::from(to.y) + (y - f64::from(from.y)) * f64::from(to.height) / f64::from(from.height),
     ))
 }
 
@@ -509,52 +551,6 @@ fn intersect_rect(a: Rect, b: Rect) -> Option<Rect> {
         width: (right - left) as u32,
         height: (bottom - top) as u32,
     })
-}
-
-fn map_rect(rect: Rect, from: Rect, to: Rect) -> Option<Rect> {
-    let clipped = intersect_rect(rect, from)?;
-    if from.width == 0 || from.height == 0 {
-        return None;
-    }
-    let map_x = |x: i64| {
-        i64::from(to.x) + (x - i64::from(from.x)) * i64::from(to.width) / i64::from(from.width)
-    };
-    let map_y = |y: i64| {
-        i64::from(to.y) + (y - i64::from(from.y)) * i64::from(to.height) / i64::from(from.height)
-    };
-    let x0 = map_x(i64::from(clipped.x));
-    let y0 = map_y(i64::from(clipped.y));
-    let x1 = map_x(i64::from(clipped.x) + i64::from(clipped.width));
-    let y1 = map_y(i64::from(clipped.y) + i64::from(clipped.height));
-    Some(Rect {
-        x: clamp_i32(x0),
-        y: clamp_i32(y0),
-        width: clamp_u32((x1 - x0).max(0)),
-        height: clamp_u32((y1 - y0).max(0)),
-    })
-}
-
-fn scale_rect(rect: Rect, old_w: u32, old_h: u32, new_w: u32, new_h: u32) -> Rect {
-    let x0 = i64::from(rect.x) * i64::from(new_w) / i64::from(old_w.max(1));
-    let y0 = i64::from(rect.y) * i64::from(new_h) / i64::from(old_h.max(1));
-    let x1 =
-        (i64::from(rect.x) + i64::from(rect.width)) * i64::from(new_w) / i64::from(old_w.max(1));
-    let y1 =
-        (i64::from(rect.y) + i64::from(rect.height)) * i64::from(new_h) / i64::from(old_h.max(1));
-    Rect {
-        x: clamp_i32(x0),
-        y: clamp_i32(y0),
-        width: clamp_u32((x1 - x0).max(0)),
-        height: clamp_u32((y1 - y0).max(0)),
-    }
-}
-
-fn clamp_i32(value: i64) -> i32 {
-    value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
-}
-
-fn clamp_u32(value: i64) -> u32 {
-    value.clamp(0, i64::from(u32::MAX)) as u32
 }
 
 fn png_err(e: png::EncodingError) -> Error {
@@ -580,6 +576,121 @@ mod mapping_tests {
             1.0,
         )
         .with_mapping(mapping)
+    }
+
+    #[test]
+    fn odd_pixel_crop_preserves_the_original_transform() {
+        let shot = blank(
+            20,
+            20,
+            CaptureMapping::single(Point::new(0, 0), 20, 20, 2.0),
+        );
+        let crop = shot
+            .crop(Rect {
+                x: 1,
+                y: 1,
+                width: 10,
+                height: 10,
+            })
+            .unwrap();
+        assert_eq!(
+            crop.desktop_to_image(Point::new(1, 1)).unwrap(),
+            Point::new(1, 1)
+        );
+        assert_eq!(
+            crop.image_to_desktop(Point::new(1, 1)).unwrap(),
+            Point::new(1, 1)
+        );
+        assert!(crop.desktop_to_image(Point::new(0, 0)).is_err());
+    }
+
+    #[test]
+    fn single_pixel_hidpi_crop_keeps_a_mapping() {
+        let shot = blank(
+            20,
+            20,
+            CaptureMapping::single(Point::new(0, 0), 20, 20, 2.0),
+        );
+        let crop = shot
+            .crop(Rect {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1,
+            })
+            .unwrap();
+        assert_eq!(
+            crop.desktop_to_image(Point::new(0, 0)).unwrap(),
+            Point::new(0, 0)
+        );
+        assert_eq!(
+            crop.image_to_desktop(Point::new(0, 0)).unwrap(),
+            Point::new(0, 0)
+        );
+    }
+
+    #[test]
+    fn cropped_rectangles_are_clipped_and_nonuniform_resize_preserves_origin() {
+        let shot = blank(
+            20,
+            20,
+            CaptureMapping::single(Point::new(-10, -10), 20, 20, 2.0),
+        );
+        let transformed = shot
+            .crop(Rect {
+                x: 1,
+                y: 1,
+                width: 10,
+                height: 10,
+            })
+            .unwrap()
+            .resize(20, 30)
+            .unwrap();
+        assert_eq!(
+            transformed.desktop_to_image(Point::new(-9, -9)).unwrap(),
+            Point::new(2, 3)
+        );
+        assert_eq!(
+            transformed.image_to_desktop(Point::new(2, 3)).unwrap(),
+            Point::new(-9, -9)
+        );
+        assert_eq!(
+            transformed
+                .desktop_rect_to_image(Rect {
+                    x: -10,
+                    y: -10,
+                    width: 10,
+                    height: 10
+                })
+                .unwrap(),
+            vec![Rect {
+                x: 0,
+                y: 0,
+                width: 20,
+                height: 30
+            }]
+        );
+        assert!(transformed
+            .desktop_rect_to_image(Rect {
+                x: -4,
+                y: -4,
+                width: 2,
+                height: 2
+            })
+            .unwrap()
+            .is_empty());
+        let cropped_again = transformed
+            .crop(Rect {
+                x: 2,
+                y: 3,
+                width: 5,
+                height: 5,
+            })
+            .unwrap();
+        assert_eq!(
+            cropped_again.desktop_to_image(Point::new(-9, -9)).unwrap(),
+            Point::new(0, 0)
+        );
     }
 
     #[test]

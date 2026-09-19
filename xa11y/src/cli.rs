@@ -908,6 +908,14 @@ pub(crate) enum Target {
 }
 
 impl Target {
+    /// Direct children of the public scope, including all app registrations.
+    pub(crate) fn children(&self) -> crate::Result<Vec<Element>> {
+        match self {
+            Target::App(app) => app.children(),
+            Target::Shell(surface) => surface.children(),
+        }
+    }
+
     /// A [`Locator`] rooted at the target.
     pub(crate) fn locator(&self, selector: &str) -> Locator {
         match self {
@@ -1081,7 +1089,13 @@ pub(crate) fn format_element_oneline(el: &ElementData) -> String {
     parts.join(" ")
 }
 
-fn print_tree_recursive(el: &Element, prefix: &str, is_last: bool, is_root: bool) {
+fn print_tree_recursive(
+    el: &Element,
+    prefix: &str,
+    is_last: bool,
+    is_root: bool,
+    scope: Option<&Target>,
+) {
     let connector = if is_root {
         ""
     } else if is_last {
@@ -1091,7 +1105,7 @@ fn print_tree_recursive(el: &Element, prefix: &str, is_last: bool, is_root: bool
     };
     println!("{prefix}{connector}{}", format_element_oneline(el));
 
-    let children = match el.children() {
+    let children = match scope.map_or_else(|| el.children(), Target::children) {
         Ok(c) => c,
         Err(e) => {
             let child_prefix = if is_root {
@@ -1116,7 +1130,7 @@ fn print_tree_recursive(el: &Element, prefix: &str, is_last: bool, is_root: bool
 
     for (i, child) in children.iter().enumerate() {
         let child_is_last = i == children.len() - 1;
-        print_tree_recursive(child, &child_prefix, child_is_last, false);
+        print_tree_recursive(child, &child_prefix, child_is_last, false, None);
     }
 }
 
@@ -1312,7 +1326,7 @@ fn cmd_windows(args: &[String]) -> CliResult<()> {
 fn cmd_tree(args: &[String]) -> CliResult<()> {
     let (opts, _pos) = parse_opts(args)?;
     let target = resolve_target(&opts)?;
-    print_tree_recursive(&target.root(), "", true, true);
+    print_tree_recursive(&target.root(), "", true, true, Some(&target));
     Ok(())
 }
 
