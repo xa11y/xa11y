@@ -13,9 +13,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::Once;
 
 use windows::Win32::Foundation::{LPARAM, RECT};
-use windows::Win32::Graphics::Gdi::{
-    EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
-};
+use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
@@ -53,34 +51,57 @@ pub fn full_capture_plan() -> Result<(Rect, f32, CaptureMapping)> {
             code: -1,
             message: "no displays were found for screenshot capture".into(),
         })?;
-    let mapping = capture_mapping(&monitors, physical);
+    let mapping = capture_mapping(&monitors, physical)?;
     Ok((physical, 1.0, mapping))
 }
 
 /// A requested region is already in physical desktop pixels.
 pub fn region_capture_plan(rect: Rect) -> Result<(Rect, f32, CaptureMapping)> {
     let monitors = monitor_rects()?;
-    Ok((rect, 1.0, capture_mapping(&monitors, rect)))
+    Ok((rect, 1.0, capture_mapping(&monitors, rect)?))
 }
 
-fn capture_mapping(monitors: &[RECT], capture: Rect) -> CaptureMapping {
-    CaptureMapping::with_layout_validation(
-        vec![capture_segment(capture)],
+fn capture_mapping(monitors: &[RECT], capture: Rect) -> Result<CaptureMapping> {
+    let segments = capture_segments(monitors, capture);
+    if segments.is_empty() {
+        return Err(Error::Platform {
+            code: -1,
+            message: "captured rectangle does not intersect any display".into(),
+        });
+    }
+    Ok(CaptureMapping::with_layout_validation(
+        segments,
         layout_token(monitors),
         validate_layout_token,
-    )
+    ))
 }
 
-fn capture_segment(capture: Rect) -> CaptureMappingSegment {
-    CaptureMappingSegment {
-        desktop: capture,
-        image: Rect {
-            x: 0,
-            y: 0,
-            width: capture.width,
-            height: capture.height,
-        },
-    }
+fn capture_segments(monitors: &[RECT], capture: Rect) -> Vec<CaptureMappingSegment> {
+    monitors
+        .iter()
+        .filter_map(|monitor| {
+            let left = i64::from(monitor.left).max(i64::from(capture.x));
+            let top = i64::from(monitor.top).max(i64::from(capture.y));
+            let right =
+                i64::from(monitor.right).min(i64::from(capture.x) + i64::from(capture.width));
+            let bottom =
+                i64::from(monitor.bottom).min(i64::from(capture.y) + i64::from(capture.height));
+            (right > left && bottom > top).then_some(CaptureMappingSegment {
+                desktop: Rect {
+                    x: left as i32,
+                    y: top as i32,
+                    width: (right - left) as u32,
+                    height: (bottom - top) as u32,
+                },
+                image: Rect {
+                    x: (left - i64::from(capture.x)) as i32,
+                    y: (top - i64::from(capture.y)) as i32,
+                    width: (right - left) as u32,
+                    height: (bottom - top) as u32,
+                },
+            })
+        })
+        .collect()
 }
 
 fn validate_layout_token(expected: u64) -> Result<bool> {
@@ -143,19 +164,15 @@ fn monitor_rects() -> Result<Vec<RECT>> {
 }
 
 unsafe extern "system" fn collect_monitor(
-    hmonitor: HMONITOR,
+    _hmonitor: HMONITOR,
     _hdc: HDC,
-    _lprc: *mut RECT,
+    lprc: *mut RECT,
     user_data: LPARAM,
 ) -> windows::core::BOOL {
     let monitors = unsafe { &mut *(user_data.0 as *mut Vec<RECT>) };
-    let mut info = MONITORINFO {
-        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-        ..Default::default()
-    };
-    if unsafe { GetMonitorInfoW(hmonitor, &mut info) }.as_bool() {
-        monitors.push(info.rcMonitor);
-    }
+    // A null HDC makes the supplied rectangle use virtual-screen pixels.
+    // EnumDisplayMonitors keeps this pointer valid for the callback.
+    monitors.push(unsafe { *lprc });
     windows::core::BOOL(1)
 }
 
@@ -200,20 +217,11 @@ mod tests {
     #[test]
     fn capture_region_mapping_is_identity_across_seam() {
         let region = physical_rect_to_desktop(rect(3800, 100, 4000, 300));
-        assert_eq!(
-            capture_segment(region),
-            CaptureMappingSegment {
-                desktop: region,
-                image: Rect {
-                    x: 0,
-                    y: 0,
-                    width: 200,
-                    height: 200
-                },
-            }
-        );
+        let monitors = [rect(0, 0, 3840, 2160), rect(3840, 0, 7680, 2160)];
+        let segments = capture_segments(&monitors, region);
+        assert_eq!(segments.len(), 2);
         let shot = Screenshot::new(200, 200, vec![0; 200 * 200 * 4], 1.0)
-            .with_mapping(CaptureMapping::new(vec![capture_segment(region)]));
+            .with_mapping(CaptureMapping::new(segments));
         assert_eq!(
             shot.desktop_to_image(Point::new(3900, 200)).unwrap(),
             Point::new(100, 100)
@@ -225,12 +233,51 @@ mod tests {
         assert_eq!(
             shot.desktop_rect_to_image(physical_rect_to_desktop(rect(3820, 120, 3980, 280)))
                 .unwrap(),
-            vec![Rect {
-                x: 20,
-                y: 20,
-                width: 160,
-                height: 160
-            }]
+            vec![
+                Rect {
+                    x: 20,
+                    y: 20,
+                    width: 20,
+                    height: 160
+                },
+                Rect {
+                    x: 40,
+                    y: 20,
+                    width: 140,
+                    height: 160
+                },
+            ]
         );
+    }
+
+    #[test]
+    fn capture_mapping_excludes_holes_and_offscreen_pixels() {
+        let monitors = [rect(-1920, 0, 0, 1080), rect(0, -1080, 1920, 0)];
+        let capture = Rect {
+            x: -1920,
+            y: -1080,
+            width: 3840,
+            height: 2160,
+        };
+        let segments = capture_segments(&monitors, capture);
+        assert_eq!(segments.len(), 2);
+        let shot =
+            Screenshot::new(3840, 2160, vec![], 1.0).with_mapping(CaptureMapping::new(segments));
+        assert_eq!(
+            shot.desktop_to_image(Point::new(-100, 100)).unwrap(),
+            Point::new(1820, 1180)
+        );
+        assert!(shot.image_to_desktop(Point::new(100, 100)).is_err());
+        assert!(shot.desktop_to_image(Point::new(100, 100)).is_err());
+        assert!(capture_mapping(
+            &monitors,
+            Rect {
+                x: 3000,
+                y: 3000,
+                width: 100,
+                height: 100
+            }
+        )
+        .is_err());
     }
 }

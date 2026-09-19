@@ -216,7 +216,7 @@ Text is inserted through the accessibility API. Keyboard events are never simula
 
 ### Coordinates
 
-Bounds use desktop coordinates with origin at the top-left of the primary display. Windows uses physical pixels; macOS and Linux use logical points where available. Use a screenshot's coordinate methods to map bounds onto captured pixels. Note:
+Bounds use desktop coordinates with origin at the top-left of the primary display. Windows uses physical pixels. macOS and Linux use logical points where available. Use the screenshot coordinate methods to map bounds onto captured pixels. Note:
 
 - **macOS** reports in points, its native logical unit. On Retina displays, 1 point = 2 physical pixels.
 - **Windows** reports physical desktop pixels for bounds, input points, window moves and sizes, and capture regions. `Screenshot.scale` is `1.0`. A window crossing a display seam has continuous bounds and its center remains inside the window, regardless of each display's DPI scaling. Code that stored Windows DIP coordinates must convert them to physical desktop pixels before passing them to xa11y.

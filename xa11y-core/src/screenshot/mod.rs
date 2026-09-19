@@ -73,7 +73,7 @@ pub struct CaptureMappingSegment {
 /// Mapping metadata frozen at capture time.
 ///
 /// Backends provide affine segments for the portions present in the returned
-/// image. Windows uses one identity segment for the whole capture. A layout
+/// image. Windows uses identity segments clipped to each display. A layout
 /// token and validator are optional; Windows supplies both so
 /// conversions fail after a relevant display-layout change instead of using a
 /// stale transform.
@@ -288,10 +288,10 @@ impl Screenshot {
 
     /// Convert a desktop rectangle into the image rectangles it covers.
     ///
-    /// A rectangle crossing independently scaled display segments can produce
-    /// one image rectangle per segment. Windows uses a continuous physical
-    /// desktop space, so its captures produce one image rectangle. Empty
-    /// intersections are omitted.
+    /// A rectangle crossing display segments can produce one image rectangle
+    /// per display. Windows uses continuous physical desktop coordinates, but
+    /// keeps segments separate to exclude pixels in display-layout holes.
+    /// Empty intersections are omitted.
     pub fn desktop_rect_to_image(&self, rect: Rect) -> Result<Vec<Rect>> {
         let mapping = self.mapping()?;
         mapping.validate()?;

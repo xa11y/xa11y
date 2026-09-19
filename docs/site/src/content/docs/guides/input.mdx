@@ -127,7 +127,7 @@ and on headless Linux servers. Errors from a missing `input` group surface as
 
 Every pointer method accepts either a screen-space point or an `Element`:
 
-- **Point** is an absolute desktop coordinate. Windows uses physical pixels; macOS uses points. Linux uses logical pixels, or physical pixels where the HiDPI scale can't be read reliably (see [platform details](/reference/platform-details/#coordinates-and-hidpi)). Origin is the top-left of the primary display, and negative values are valid on multi-monitor setups.
+- **Point** is an absolute desktop coordinate. Windows uses physical pixels. macOS uses points. Linux uses logical pixels, or physical pixels where the HiDPI scale can't be read reliably (see [platform details](/reference/platform-details/#coordinates-and-hidpi)). Origin is the top-left of the primary display, and negative values are valid on multi-monitor setups.
 - **Element** uses the centre of the element's `bounds` at the time of the call. Rectangles are half-open. Right and bottom anchors use the last coordinate inside the bounds rather than the exclusive far edge. `InputSim` does not re-read the accessibility tree for you, so re-fetch via a locator first if the UI may have moved.
 
 To click a location selected from a screenshot, convert the image pixel with
