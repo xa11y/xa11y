@@ -2,12 +2,13 @@
 //!
 //! Accessibility remains the source of the element tree. This module owns
 //! the separate window-manager channel and resolves an AT-SPI top-level to a
-//! native window before it advertises or performs a mutation. Identity is
-//! never inferred from a title alone: X11 first requires an exact process id,
-//! then disambiguates same-process windows with live geometry and title.
+//! native window before it advertises or performs a mutation. A snapshot binds
+//! to one native ID. Later mutations validate that binding instead of matching
+//! the snapshot's old title and geometry again.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -19,6 +20,7 @@ use x11rb::protocol::xproto::{
     Atom, AtomEnum, ClientMessageData, ClientMessageEvent, ConnectionExt as _, EventMask, Window,
     CLIENT_MESSAGE_EVENT,
 };
+use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
 use xa11y_core::{ElementData, Error, Point, Rect, Result};
 
@@ -176,6 +178,64 @@ const MAX_SWAY_REPLY: usize = 32 * 1024 * 1024;
 struct SwayWindowBackend {
     socket: PathBuf,
     protocol_version: u32,
+    bindings: Mutex<HashMap<u64, NativeBinding<u64>>>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NativeBinding<Id> {
+    id: Id,
+    pid: u32,
+    process_start: u64,
+    server_identity: ServerIdentity,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ServerIdentity {
+    X11(Window),
+    Sway {
+        device: u64,
+        inode: u64,
+        changed_at: (i64, i64),
+    },
+}
+
+fn sway_server_identity(socket: &std::path::Path) -> Result<ServerIdentity> {
+    let metadata = std::fs::metadata(socket).map_err(sway_io)?;
+    Ok(ServerIdentity::Sway {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        changed_at: (metadata.ctime(), metadata.ctime_nsec()),
+    })
+}
+
+fn process_start(pid: u32) -> Result<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).map_err(|error| {
+        Error::Unsupported {
+            feature: format!(
+                "native window identity: process {pid} is no longer available: {error}"
+            ),
+        }
+    })?;
+    let (_, fields) = stat.rsplit_once(") ").ok_or_else(|| Error::Platform {
+        code: -1,
+        message: format!("native window identity: invalid /proc/{pid}/stat"),
+    })?;
+    fields
+        .split_whitespace()
+        .nth(19)
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| Error::Platform {
+            code: -1,
+            message: format!("native window identity: missing start time for process {pid}"),
+        })
+}
+
+fn lost_identity(backend: &str, handle: u64) -> Error {
+    Error::Unsupported {
+        feature: format!(
+            "native {backend} window identity was lost for accessibility handle {handle}"
+        ),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -214,6 +274,7 @@ impl SwayWindowBackend {
         Ok(Self {
             socket,
             protocol_version,
+            bindings: Mutex::new(HashMap::new()),
         })
     }
 
@@ -224,7 +285,7 @@ impl SwayWindowBackend {
                     .to_string(),
             });
         }
-        let target = self.resolve(element)?;
+        let target = self.bind(element)?;
         let mut actions = vec!["activate", "enter_fullscreen", "restore", "close"];
         if target.floating {
             actions.push("move_to");
@@ -316,7 +377,15 @@ impl SwayWindowBackend {
         Ok(())
     }
 
-    fn resolve(&self, element: &ElementData) -> Result<SwayCandidate> {
+    fn bind(&self, element: &ElementData) -> Result<SwayCandidate> {
+        if self
+            .bindings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&element.handle)
+        {
+            return self.resolve(element);
+        }
         let pid = element.pid.ok_or_else(|| Error::Unsupported {
             feature: "native Wayland window identity: AT-SPI target has no process id".to_string(),
         })?;
@@ -324,7 +393,45 @@ impl SwayWindowBackend {
         let mut candidates = Vec::new();
         collect_sway_candidates(&tree, &mut candidates);
         candidates.retain(|candidate| candidate.pid == pid);
-        choose_sway_candidate(pid, element.name.as_deref(), element.bounds, &candidates)
+        let target =
+            choose_sway_candidate(pid, element.name.as_deref(), element.bounds, &candidates)?;
+        let server_identity = sway_server_identity(&self.socket)?;
+        let binding = NativeBinding {
+            id: target.id,
+            pid,
+            process_start: process_start(pid)?,
+            server_identity,
+        };
+        let mut bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
+        if let std::collections::hash_map::Entry::Vacant(entry) = bindings.entry(element.handle) {
+            entry.insert(binding);
+        } else {
+            drop(bindings);
+            return self.resolve(element);
+        }
+        Ok(target)
+    }
+
+    fn resolve(&self, element: &ElementData) -> Result<SwayCandidate> {
+        let binding = *self
+            .bindings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&element.handle)
+            .ok_or_else(|| lost_identity("Wayland", element.handle))?;
+        if element.pid != Some(binding.pid)
+            || process_start(binding.pid)? != binding.process_start
+            || sway_server_identity(&self.socket)? != binding.server_identity
+        {
+            return Err(lost_identity("Wayland", element.handle));
+        }
+        // Sway's node_init assigns IDs from a monotonic process-local counter.
+        // The socket fingerprint rejects a restarted compositor, where that
+        // counter would start over and could reuse a retained con_id.
+        let tree = self.request(SWAY_IPC_GET_TREE, &[])?;
+        let mut candidates = Vec::new();
+        collect_sway_candidates(&tree, &mut candidates);
+        bound_sway_candidate(binding, element.handle, &candidates)
     }
 
     fn request(&self, message_type: u32, payload: &[u8]) -> Result<serde_json::Value> {
@@ -455,6 +562,9 @@ fn choose_sway_candidate(
             })
             .collect();
         if by_bounds.len() == 1 {
+            if title.is_some_and(|title| by_bounds[0].title.as_deref() != Some(title)) {
+                return Err(Error::Unsupported { feature: format!("native Wayland window identity is ambiguous: process {pid} has conflicting title and geometry") });
+            }
             return Ok(by_bounds[0].clone());
         }
         if let Some(title) = title {
@@ -482,6 +592,18 @@ fn choose_sway_candidate(
             candidates.len()
         ),
     })
+}
+
+fn bound_sway_candidate(
+    binding: NativeBinding<u64>,
+    handle: u64,
+    candidates: &[SwayCandidate],
+) -> Result<SwayCandidate> {
+    candidates
+        .iter()
+        .find(|candidate| candidate.id == binding.id && candidate.pid == binding.pid)
+        .cloned()
+        .ok_or_else(|| lost_identity("Wayland", handle))
 }
 
 #[derive(Default)]
@@ -593,6 +715,8 @@ impl X11Atoms {
 
 struct X11WindowBackend {
     conn: Mutex<RustConnection>,
+    bindings: Mutex<HashMap<u64, NativeBinding<Window>>>,
+    destroyed_handles: Mutex<HashSet<u64>>,
     root: Window,
     atoms: X11Atoms,
     supported: HashSet<Atom>,
@@ -629,6 +753,8 @@ impl X11WindowBackend {
         .is_empty();
         Ok(Self {
             conn: Mutex::new(conn),
+            bindings: Mutex::new(HashMap::new()),
+            destroyed_handles: Mutex::new(HashSet::new()),
             root,
             atoms,
             supported,
@@ -638,7 +764,7 @@ impl X11WindowBackend {
 
     fn facts(&self, element: &ElementData) -> Result<WindowFacts> {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        let window = self.resolve(&conn, element)?;
+        let window = self.bind(&conn, element)?;
         let state: HashSet<Atom> = property_u32(
             &conn,
             window,
@@ -706,7 +832,16 @@ impl X11WindowBackend {
         }
     }
 
-    fn resolve(&self, conn: &RustConnection, element: &ElementData) -> Result<Window> {
+    fn bind(&self, conn: &RustConnection, element: &ElementData) -> Result<Window> {
+        if self
+            .bindings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&element.handle)
+        {
+            return self.resolve(conn, element);
+        }
+        self.drain_destroy_events(conn)?;
         let pid = element.pid.ok_or_else(|| Error::Unsupported {
             feature: "native X11 window identity: AT-SPI target has no process id".to_string(),
         })?;
@@ -723,15 +858,116 @@ impl X11WindowBackend {
                         .to_string(),
             });
         }
+        // Subscribe before reading candidate properties. A destruction after
+        // this point is observable even when the XID is immediately reused.
+        for &window in &clients {
+            conn.change_window_attributes(
+                window,
+                &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
+                    .event_mask(EventMask::STRUCTURE_NOTIFY),
+            )
+            .map_err(platform)?
+            .check()
+            .map_err(platform)?;
+        }
+        let destroyed_before_read = self.drain_destroy_events(conn)?;
         let mut candidates = Vec::new();
         for window in clients {
+            if destroyed_before_read.contains(&window) {
+                continue;
+            }
             if let Some(candidate) = self.candidate(conn, window)? {
                 if candidate.pid == pid {
                     candidates.push(candidate);
                 }
             }
         }
-        choose_candidate(pid, element.name.as_deref(), element.bounds, &candidates)
+        let window = choose_candidate(pid, element.name.as_deref(), element.bounds, &candidates)?;
+        if self.drain_destroy_events(conn)?.contains(&window) {
+            return Err(lost_identity("X11", element.handle));
+        }
+        let binding = NativeBinding {
+            id: window,
+            pid,
+            process_start: process_start(pid)?,
+            server_identity: ServerIdentity::X11(self.root),
+        };
+        let mut bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
+        if let std::collections::hash_map::Entry::Vacant(entry) = bindings.entry(element.handle) {
+            entry.insert(binding);
+        } else {
+            drop(bindings);
+            return self.resolve(conn, element);
+        }
+        Ok(window)
+    }
+
+    fn resolve(&self, conn: &RustConnection, element: &ElementData) -> Result<Window> {
+        let binding = *self
+            .bindings
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&element.handle)
+            .ok_or_else(|| lost_identity("X11", element.handle))?;
+        if element.pid != Some(binding.pid)
+            || process_start(binding.pid)? != binding.process_start
+            || binding.server_identity != ServerIdentity::X11(self.root)
+        {
+            return Err(lost_identity("X11", element.handle));
+        }
+        self.drain_destroy_events(conn)?;
+        if self
+            .destroyed_handles
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&element.handle)
+        {
+            return Err(lost_identity("X11", element.handle));
+        }
+        let clients = property_u32(
+            conn,
+            self.root,
+            self.atoms.net_client_list,
+            AtomEnum::WINDOW.into(),
+        )?;
+        if !clients.contains(&binding.id) {
+            return Err(lost_identity("X11", element.handle));
+        }
+        let actual_pid = property_u32(
+            conn,
+            binding.id,
+            self.atoms.net_wm_pid,
+            AtomEnum::CARDINAL.into(),
+        )?;
+        if actual_pid.first().copied() != Some(binding.pid) {
+            return Err(lost_identity("X11", element.handle));
+        }
+        Ok(binding.id)
+    }
+
+    fn drain_destroy_events(&self, conn: &RustConnection) -> Result<HashSet<Window>> {
+        // A round trip orders all prior destroy notifications before this check.
+        conn.get_input_focus()
+            .map_err(platform)?
+            .reply()
+            .map_err(platform)?;
+        let mut destroyed_windows = HashSet::new();
+        while let Some(event) = conn.poll_for_event().map_err(platform)? {
+            if let Event::DestroyNotify(event) = event {
+                destroyed_windows.insert(event.window);
+                let bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
+                let mut destroyed = self
+                    .destroyed_handles
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                for (&handle, binding) in bindings.iter() {
+                    if binding.id == event.window {
+                        destroyed.insert(handle);
+                    }
+                }
+            }
+        }
+        Ok(destroyed_windows)
     }
 
     fn candidate(&self, conn: &RustConnection, window: Window) -> Result<Option<X11Candidate>> {
@@ -1015,6 +1251,9 @@ fn choose_candidate(
             })
             .collect();
         if by_bounds.len() == 1 {
+            if title.is_some_and(|title| by_bounds[0].title.as_deref() != Some(title)) {
+                return Err(Error::Unsupported { feature: format!("native X11 window identity is ambiguous: process {pid} has conflicting title and geometry") });
+            }
             return Ok(by_bounds[0].window);
         }
         if by_bounds.len() > 1 {
@@ -1216,6 +1455,32 @@ mod tests {
     }
 
     #[test]
+    fn conflicting_title_and_geometry_cannot_bind_a_different_window() {
+        let a = candidate(
+            10,
+            "A",
+            Rect {
+                x: 0,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+        );
+        let b = candidate(
+            11,
+            "B",
+            Rect {
+                x: 200,
+                y: 0,
+                width: 100,
+                height: 100,
+            },
+        );
+        let error = choose_candidate(7, Some("A"), b.bounds, &[a, b]).unwrap_err();
+        assert!(error.to_string().contains("conflicting title and geometry"));
+    }
+
+    #[test]
     fn sway_tree_covers_native_and_xwayland_toplevels() {
         let tree = serde_json::json!({
             "id": 1,
@@ -1298,5 +1563,127 @@ mod tests {
         let error = choose_sway_candidate(42, Some("Same"), Some(bounds), &candidates)
             .expect_err("indistinguishable Sway windows must not be guessed");
         assert!(error.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn retained_sway_identity_survives_movement_and_rename_but_not_replacement() {
+        let original = super::SwayCandidate {
+            id: 20,
+            pid: 42,
+            title: Some("A".to_string()),
+            bounds: Some(Rect {
+                x: 0,
+                y: 0,
+                width: 300,
+                height: 200,
+            }),
+            floating: true,
+            fullscreen: false,
+        };
+        let mut other = original.clone();
+        other.id = 21;
+        other.title = Some("B".to_string());
+        other.bounds = Some(Rect {
+            x: 400,
+            ..original.bounds.expect("bounds")
+        });
+        let binding = super::NativeBinding {
+            id: original.id,
+            pid: original.pid,
+            process_start: 1,
+            server_identity: super::ServerIdentity::Sway {
+                device: 1,
+                inode: 1,
+                changed_at: (1, 1),
+            },
+        };
+        let mut moved = original.clone();
+        moved.title = Some("Renamed".to_string());
+        moved.bounds = other.bounds;
+        other.bounds = original.bounds;
+        other.title = moved.title.clone();
+        assert_eq!(
+            super::bound_sway_candidate(binding, 1, &[other.clone(), moved])
+                .unwrap()
+                .id,
+            20
+        );
+        assert!(super::bound_sway_candidate(binding, 1, &[other.clone()]).is_err());
+        let mut replacement = other;
+        replacement.id = 22;
+        assert!(super::bound_sway_candidate(binding, 1, &[replacement]).is_err());
+    }
+
+    #[test]
+    fn sway_action_uses_bound_id_after_windows_swap_positions() {
+        use std::io::{Read, Write};
+        use std::os::unix::net::UnixListener;
+
+        let socket = std::env::temp_dir().join(format!(
+            "xa11y-sway-identity-{}-{}.sock",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("test")
+        ));
+        let listener = UnixListener::bind(&socket).expect("bind fake Sway IPC socket");
+        let pid = std::process::id();
+        let tree = move |swapped: bool| {
+            let positions = if swapped { [400, 0] } else { [0, 400] };
+            serde_json::json!({
+                "id": 1, "type": "root", "nodes": [
+                    {"id": 20, "type": "con", "pid": pid, "name": "Same",
+                     "shell": "xdg_shell", "floating": "user_on", "fullscreen_mode": 0,
+                     "rect": {"x": positions[0], "y": 0, "width": 300, "height": 200}},
+                    {"id": 21, "type": "con", "pid": pid, "name": "Same",
+                     "shell": "xdg_shell", "floating": "user_on", "fullscreen_mode": 0,
+                     "rect": {"x": positions[1], "y": 0, "width": 300, "height": 200}}
+                ]
+            })
+        };
+        let server = std::thread::spawn(move || {
+            for (index, expected_type) in [4_u32, 4, 0].into_iter().enumerate() {
+                let (mut stream, _) = listener.accept().expect("Sway IPC request");
+                let mut header = [0_u8; 14];
+                stream.read_exact(&mut header).expect("request header");
+                assert_eq!(&header[..6], b"i3-ipc");
+                let length = u32::from_le_bytes(header[6..10].try_into().expect("length"));
+                let message_type = u32::from_le_bytes(header[10..14].try_into().expect("type"));
+                assert_eq!(message_type, expected_type);
+                let mut payload = vec![0_u8; length as usize];
+                stream.read_exact(&mut payload).expect("request payload");
+                let response = if index == 2 {
+                    assert_eq!(payload, b"[con_id=20] focus");
+                    serde_json::json!([{"success": true}])
+                } else {
+                    tree(index == 1)
+                };
+                let bytes = serde_json::to_vec(&response).expect("response JSON");
+                let mut reply = Vec::from(&b"i3-ipc"[..]);
+                reply.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                reply.extend_from_slice(&message_type.to_le_bytes());
+                reply.extend_from_slice(&bytes);
+                stream.write_all(&reply).expect("Sway IPC reply");
+            }
+        });
+        let backend = super::SwayWindowBackend {
+            socket: socket.clone(),
+            protocol_version: 1,
+            bindings: std::sync::Mutex::new(std::collections::HashMap::new()),
+        };
+        let mut element = xa11y_core::ElementData::for_role(xa11y_core::Role::Window);
+        element.handle = 71;
+        element.pid = Some(pid);
+        element.name = Some("Same".to_string());
+        element.bounds = Some(Rect {
+            x: 0,
+            y: 0,
+            width: 300,
+            height: 200,
+        });
+        backend.bind(&element).expect("bind first Sway window");
+        backend
+            .activate(&element)
+            .expect("activate retained window");
+        server.join().expect("fake Sway IPC server");
+        std::fs::remove_file(socket).expect("remove fake socket");
     }
 }
