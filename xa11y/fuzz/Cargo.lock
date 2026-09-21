@@ -355,7 +355,7 @@ dependencies = [
  "bitvec",
  "cfg-if",
  "libc",
- "nix",
+ "nix 0.29.0",
 ]
 
 [[package]]
@@ -525,9 +525,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.183"
+version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b5b646652bf6661599e1da8901b3b9522896f01e736bad5f723fe7a3a27f899d"
+checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
 name = "libfuzzer-sys"
@@ -589,6 +589,19 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+]
+
+[[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+dependencies = [
+ "bitflags",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+ "memoffset",
 ]
 
 [[package]]
@@ -777,7 +790,7 @@ checksum = "e7a5d71263a5a7d47b41f6b3f06ba276f10cc18b0931f1799f710578e2309348"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.5",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -872,9 +885,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "3.0.5"
+version = "3.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12df2e0110f65b775f769bb17ef989067a1d931b2eb822bd4346631eeada89f9"
+checksum = "8593e8e72159ed2257d083c7a454a85cbf854f37a0966d8d483aff8c8a3ebcee"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -917,7 +930,7 @@ checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 3.0.5",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -1282,7 +1295,7 @@ checksum = "acf4d1bc32aa46eec18caa634ec3cf4c05bfa151f12b93b510b15190f69a1ca8"
 
 [[package]]
 name = "xa11y"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1294,7 +1307,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-core"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "png",
  "serde",
@@ -1315,9 +1328,10 @@ dependencies = [
 
 [[package]]
 name = "xa11y-linux"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "evdev",
+ "nix 0.31.3",
  "png",
  "rayon",
  "serde_json",
@@ -1331,7 +1345,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-macos"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "cc",
  "core-foundation",
@@ -1342,7 +1356,7 @@ dependencies = [
 
 [[package]]
 name = "xa11y-windows"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "serde_json",
  "windows",
@@ -1411,7 +1425,7 @@ dependencies = [
  "proc-macro-crate",
  "proc-macro2",
  "quote",
- "syn 3.0.5",
+ "syn 3.0.6",
  "zbus_names",
  "zvariant",
  "zvariant_utils",
@@ -1467,7 +1481,7 @@ dependencies = [
  "proc-macro-crate",
  "proc-macro2",
  "quote",
- "syn 3.0.5",
+ "syn 3.0.6",
  "zvariant_utils",
 ]
 
@@ -1480,6 +1494,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "serde",
- "syn 3.0.5",
+ "syn 3.0.6",
  "winnow",
 ]
