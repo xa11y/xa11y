@@ -254,6 +254,11 @@ from `pytest_xa11y`.
 | `AppLaunchError` | The application could not be launched, found, or made ready. Carries the exit code and output tail for a process that exited during startup. |
 | `AppDied` | The application exited mid-run. Raised between tests, and it stops the run for the session application. |
 
+A missing platform permission is not a launch failure. When the accessibility
+provider cannot be constructed, `start()` propagates the underlying
+`xa11y.PermissionDeniedError` with its grant instructions, after stopping the
+process it spawned.
+
 ## Lower-level pieces
 
 `AppSession(launcher, *, startup_timeout, critical=True)` is the object behind

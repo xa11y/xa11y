@@ -87,19 +87,24 @@ def test_unrecognised_platform_error_propagates_rather_than_skipping(monkeypatch
         Capabilities().check(SCREENSHOT)
 
 
-def test_headless_linux_signature_is_recognised(monkeypatch):
+def test_headless_linux_backend_is_reported_as_unsupported(monkeypatch):
+    # No DISPLAY or WAYLAND_DISPLAY: `select_backend` returns Error::Unsupported,
+    # which crosses the binding as ActionNotSupportedError rather than as a
+    # stringified Platform error. The probe must treat that as unavailable.
     monkeypatch.setattr(
         xa11y,
         "screenshot",
         _raiser(
-            xa11y.PlatformError(
-                "Platform error (-1): Unsupported: screenshot (no DISPLAY or WAYLAND_DISPLAY set)"
+            xa11y.ActionNotSupportedError(
+                "Unsupported: screenshot capture: no usable desktop endpoint; set "
+                "WAYLAND_DISPLAY or DISPLAY, or set XA11Y_LINUX_SCREENSHOT_BACKEND=wayland|x11 "
+                "explicitly"
             )
         ),
     )
     available, reason = Capabilities().check(SCREENSHOT)
     assert available is False
-    assert "no capture path" in reason
+    assert "unsupported" in reason
 
 
 def test_probe_captures_the_full_display_not_a_region(monkeypatch):

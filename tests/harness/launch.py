@@ -317,6 +317,15 @@ def _launch_app(
 
     try:
         app = xa11y.App.find(_is_test_app, timeout=STARTUP_TIMEOUT)
+    except xa11y.PermissionDeniedError:
+        # No lookup happened: the provider could not be constructed because
+        # accessibility (or, on macOS 26+, Screen Recording) is not granted to
+        # this process. That is neither "crashed on launch" nor "never
+        # registered", so report it as itself rather than wrapping it in a
+        # launch failure — but reap the app we spawned, because `run()`'s
+        # `finally` only sees a `proc` this function returned.
+        _kill_app(proc)
+        raise
     except (xa11y.SelectorNotMatchedError, xa11y.PlatformError) as exc:
         # Distinguish "app crashed on launch" from "app never registered".
         if proc.poll() is not None:

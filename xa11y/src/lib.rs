@@ -87,28 +87,28 @@ pub use shell_ext::ShellSurfaceExt;
 
 // ── Internal singleton ──────────────────────────────────────────────────────
 
-static PROVIDER: OnceLock<std::result::Result<&'static dyn Provider, String>> = OnceLock::new();
+static PROVIDER: OnceLock<std::result::Result<&'static dyn Provider, Error>> = OnceLock::new();
+
+/// Clone a memoized construction result out of a process-wide cache.
+///
+/// The caches hold the `Error` itself rather than a stringified form: the
+/// variant is part of the contract. A construction failure that is
+/// `PermissionDenied` must reach the CLI, MCP, and both bindings as that
+/// variant, not as a generic `Platform(-1)`. A stringified `Platform` error
+/// re-wrapped in `Platform` also renders its prefix twice
+/// (`Platform error (-1): Platform error (-1): …`), which is why the old
+/// stringifying cache stripped a `Platform` prefix before storing.
+fn cached<T: Clone>(
+    cell: &OnceLock<std::result::Result<T, Error>>,
+    init: impl FnOnce() -> std::result::Result<T, Error>,
+) -> Result<T> {
+    cell.get_or_init(init).clone()
+}
 
 fn get_provider_ref() -> Result<&'static dyn Provider> {
-    PROVIDER
-        .get_or_init(|| {
-            create_provider_boxed()
-                .map(|b| &*Box::leak(b))
-                // The cache holds a `String` because `Error` is not `Clone`,
-                // and the value is re-wrapped in `Error::Platform` below. Keep
-                // the inner *message* rather than the whole `Display`: a
-                // `Platform` error stringified in full and then re-wrapped
-                // renders its prefix twice — `Platform error (-1): Platform
-                // error (-1): Failed to connect to D-Bus session bus: …` is
-                // what every consumer saw on a machine with no a11y bus.
-                .map_err(cache_message)
-        })
-        .as_ref()
-        .copied()
-        .map_err(|msg| Error::Platform {
-            code: -1,
-            message: msg.clone(),
-        })
+    cached(&PROVIDER, || {
+        create_provider_boxed().map(|b| &*Box::leak(b))
+    })
 }
 
 #[doc(hidden)]
@@ -172,59 +172,35 @@ pub fn input_sim() -> Result<InputSim> {
 // - [`Error::Unsupported`] on Linux if neither `DISPLAY` nor `WAYLAND_DISPLAY`
 //   is set, and on older Windows contexts where `BitBlt` is unavailable.
 
-static SCREENSHOT_BACKEND: OnceLock<std::result::Result<Arc<dyn ScreenshotProvider>, String>> =
+static SCREENSHOT_BACKEND: OnceLock<std::result::Result<Arc<dyn ScreenshotProvider>, Error>> =
     OnceLock::new();
 
 fn screenshot_backend() -> Result<Arc<dyn ScreenshotProvider>> {
-    SCREENSHOT_BACKEND
-        .get_or_init(create_screenshot_backend)
-        .as_ref()
-        .cloned()
-        .map_err(|msg| Error::Platform {
-            code: -1,
-            message: msg.clone(),
-        })
+    cached(&SCREENSHOT_BACKEND, create_screenshot_backend)
 }
 
-/// Flatten an [`Error`] for the `OnceLock<Result<_, String>>` caches.
-///
-/// Keeps a `Platform` error's *message* rather than its whole `Display`. Both
-/// caches re-wrap the stored string in `Error::Platform`, so storing the full
-/// rendering makes the prefix appear twice — `Platform error (-1): Platform
-/// error (-1): …`, which is what the CLI and every MCP `structuredContent`
-/// showed on a machine with no accessibility bus.
-fn cache_message(e: Error) -> String {
-    match e {
-        Error::Platform { message, .. } => message,
-        other => other.to_string(),
-    }
-}
-
-fn create_screenshot_backend() -> std::result::Result<Arc<dyn ScreenshotProvider>, String> {
+fn create_screenshot_backend() -> std::result::Result<Arc<dyn ScreenshotProvider>, Error> {
     #[cfg(target_os = "macos")]
     {
-        xa11y_macos::MacOSScreenshot::new()
-            .map(|b| Arc::new(b) as Arc<dyn ScreenshotProvider>)
-            .map_err(cache_message)
+        xa11y_macos::MacOSScreenshot::new().map(|b| Arc::new(b) as Arc<dyn ScreenshotProvider>)
     }
     #[cfg(target_os = "windows")]
     {
-        xa11y_windows::WindowsScreenshot::new()
-            .map(|b| Arc::new(b) as Arc<dyn ScreenshotProvider>)
-            .map_err(cache_message)
+        xa11y_windows::WindowsScreenshot::new().map(|b| Arc::new(b) as Arc<dyn ScreenshotProvider>)
     }
     #[cfg(target_os = "linux")]
     {
-        xa11y_linux::LinuxScreenshot::new()
-            .map(|b| Arc::new(b) as Arc<dyn ScreenshotProvider>)
-            .map_err(cache_message)
+        xa11y_linux::LinuxScreenshot::new().map(|b| Arc::new(b) as Arc<dyn ScreenshotProvider>)
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
-        Err(format!(
-            "Screenshot not available on platform: {}",
-            std::env::consts::OS
-        ))
+        Err(Error::Platform {
+            code: -1,
+            message: format!(
+                "Screenshot not available on platform: {}",
+                std::env::consts::OS
+            ),
+        })
     }
 }
 
@@ -1622,45 +1598,46 @@ mod annotated_tests {
 }
 
 #[cfg(test)]
-mod cache_message_tests {
-    use super::cache_message;
-    use crate::Error;
+mod cached_error_tests {
+    use super::*;
 
-    /// The provider caches hold a `String` (because `Error` is not `Clone`) and
-    /// re-wrap it in `Error::Platform` for the caller. Storing the whole
-    /// `Display` therefore rendered the prefix twice — `Platform error (-1):
-    /// Platform error (-1): Failed to connect to D-Bus session bus: …` was what
-    /// the CLI printed and what every MCP `structuredContent.message` carried on
-    /// a machine with no accessibility bus.
+    /// The caches hold the `Error` itself, so a construction failure's variant
+    /// reaches callers unchanged. This is what makes a missing macOS grant
+    /// surface as `PermissionDenied` in the CLI, MCP, and both bindings
+    /// instead of a generic `Platform(-1)`.
     #[test]
-    fn a_platform_error_contributes_its_message_not_its_rendering() {
-        let stored = cache_message(Error::Platform {
-            code: -1,
-            message: "Failed to connect to D-Bus session bus".to_string(),
-        });
-        assert_eq!(stored, "Failed to connect to D-Bus session bus");
-
-        let round_tripped = Error::Platform {
-            code: -1,
-            message: stored,
-        }
-        .to_string();
-        assert_eq!(
-            round_tripped.matches("Platform error").count(),
-            1,
-            "the prefix must survive the cache exactly once: {round_tripped}"
+    fn a_cached_construction_error_keeps_its_variant() {
+        let cell: OnceLock<std::result::Result<(), Error>> = OnceLock::new();
+        let err = cached(&cell, || {
+            Err(Error::PermissionDenied {
+                instructions: "grant Accessibility".to_string(),
+            })
+        })
+        .expect_err("the cached construction error must come back out");
+        assert!(
+            matches!(err, Error::PermissionDenied { .. }),
+            "the cache must not flatten the variant: {err:?}"
         );
     }
 
-    /// Every other variant has no prefix to duplicate, so it keeps its full
-    /// rendering — dropping that would lose which failure it was.
+    /// A cached `Platform` error is handed out as-is. Stringifying it and
+    /// re-wrapping it in `Platform` rendered the prefix twice:
+    /// `Platform error (-1): Platform error (-1): …`.
     #[test]
-    fn a_non_platform_error_keeps_its_full_rendering() {
-        let err = Error::Unsupported {
-            feature: "pointer warp without a portal grant".to_string(),
-        };
-        let expected = err.to_string();
-        assert_eq!(cache_message(err), expected);
-        assert!(expected.contains("portal grant"), "{expected}");
+    fn a_cached_platform_error_renders_its_prefix_once() {
+        let cell: OnceLock<std::result::Result<(), Error>> = OnceLock::new();
+        let err = cached(&cell, || {
+            Err(Error::Platform {
+                code: -1,
+                message: "Failed to connect to D-Bus session bus".to_string(),
+            })
+        })
+        .expect_err("the cached construction error must come back out");
+        let rendered = err.to_string();
+        assert_eq!(
+            rendered.matches("Platform error").count(),
+            1,
+            "the prefix must survive the cache exactly once: {rendered}"
+        );
     }
 }

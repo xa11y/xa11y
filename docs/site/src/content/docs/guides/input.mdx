@@ -300,7 +300,7 @@ Drag-and-drop has no accessibility equivalent on most platforms. Resolve both en
 
 Input simulation raises five of xa11y's error variants:
 
-- `PermissionDenied` when the OS denied the synthesis permission, such as macOS Input Monitoring.
+- `PermissionDenied` when the OS denied the synthesis permission. On Linux this is the missing `input` group; macOS cannot report a missing Input Monitoring grant, so the events are dropped silently instead.
 - `Unsupported` when the platform has no backend for the operation, or when the Linux `uinput` kernel module is unavailable.
 - `NoElementBounds` when the target `Element` has no bounds. Re-fetch it, or anchor on a point.
 - `InvalidActionData` for an uppercase `Char` key, a malformed key name, or a bad target tuple.

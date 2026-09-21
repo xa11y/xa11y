@@ -1,4 +1,4 @@
-//! macOS screen capture backend via CGDisplayCreateImage.
+//! macOS screen capture backend via ScreenCaptureKit.
 //!
 //! Returns physical (device) pixels as RGBA8. Requires the Screen Recording
 //! TCC permission — checked at construction time, same as `MacOSProvider`.

@@ -50,7 +50,7 @@ surface:
 
 | Surface | Variants it raises |
 | --- | --- |
-| [Input simulation](/guides/input/) | `PermissionDenied` (the OS denied synthesis, such as macOS Input Monitoring), `Unsupported`, `NoElementBounds`, `InvalidActionData`, `Platform` |
+| [Input simulation](/guides/input/) | `Unsupported`, `NoElementBounds`, `InvalidActionData`, `Platform`; on Linux, `PermissionDenied` when the `input` group is missing. macOS cannot report a missing Input Monitoring grant, so it drops the events silently |
 | [Screenshots](/guides/screenshots/) | `PermissionDenied` (macOS Screen Recording not granted, or the Wayland portal denied consent), `Unsupported` (no capture backend for the session), `NoElementBounds`, `Platform` (capture or PNG encode failure) |
 | [Selectors](/reference/selectors/) | `InvalidSelector` at parse time, `SelectorNotMatched` or `Timeout` at resolve time |
 | [Events](/reference/events/) | `Timeout` from `wait_for` |

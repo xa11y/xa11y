@@ -39,12 +39,16 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
 ## Install the CLI
 
 The `xa11y` command-line tool is the fastest way to inspect an application
-before writing selectors against it, and both of these install the same binary:
+before writing selectors against it. All three installs provide the same
+`xa11y` command, but the process that runs it differs:
 
 ```bash
-cargo install xa11y        # from crates.io
-pip install xa11y          # the Python package includes the CLI binary
+cargo install xa11y                # native binary
+pip install xa11y                  # Python package, runs in the Python interpreter
+npm install @crowecawcaw/xa11y     # Node package, runs in the Node process
 ```
+
+That difference matters for the macOS permission grants below.
 
 See [CLI](/reference/cli/) for the command reference.
 
@@ -56,6 +60,14 @@ macOS needs two permissions:
 
 1. **Accessibility**, under System Settings → Privacy & Security. The pane is named **Accessibility** through macOS 26 and **Device Control and Data Access** on macOS 27 and newer. Grant permission to your terminal (or IDE).
 2. **Screen & System Audio Recording** (macOS 26+), under System Settings → Privacy & Security → Screen & System Audio Recording. Grant permission to your terminal. Without it, the accessibility API exposes menu bars alone. Window content such as buttons and text fields stays invisible.
+
+Grant the permissions to the process that runs xa11y, which is usually your
+terminal or IDE. When a script, agent, or CI job launches xa11y instead, grant
+that process: the resolved Python interpreter for `pip install`
+(`python -c 'import sys; print(sys.executable)'`), the Node process for the
+npm package, or the `xa11y` binary for `cargo install`. TCC matches the
+resolved on-disk binary, not the symlink, so grant the real interpreter path
+rather than a virtualenv `python` symlink.
 
 After changing permissions, restart your terminal for them to take effect. `App::by_name()` (Rust) or `xa11y.App.by_name()` (Python) will return a `PermissionDenied` error with setup instructions if either permission is missing.
 

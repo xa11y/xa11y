@@ -8,7 +8,13 @@ use pyo3::types::{PyDict, PyList};
 // ── Singleton provider ─────────────────────────────────────────────────────
 
 fn get_provider() -> PyResult<Arc<dyn xa11y::Provider>> {
-    xa11y::provider().map_err(|e| PlatformError::new_err(format!("{e}")))
+    // `to_py_err`, not a flattened `PlatformError`. Provider construction is
+    // where macOS reports a missing Accessibility or Screen Recording grant,
+    // and the documented Python surface is `PermissionDeniedError` for that
+    // (see the error reference and `how-it-works`). Stringifying here turned
+    // every construction failure into `Platform(-1)` — a second, inconsistent
+    // mapping next to the `to_py_err` every other binding path uses.
+    xa11y::provider().map_err(to_py_err)
 }
 
 // ── Exceptions ──────────────────────────────────────────────────────────────

@@ -365,16 +365,9 @@ fn offer_accessibility_settings_hint(_command: &str, _error: &CliError) {}
 /// drifting.
 #[cfg(target_os = "macos")]
 fn is_accessibility_permission_denied(error: &CliError) -> bool {
-    let instructions = xa11y_macos::accessibility_grant_instructions();
     match error {
-        CliError::Xa11y(crate::Error::PermissionDenied {
-            instructions: given,
-        }) => given == &instructions,
-        // Provider-init failures cross the provider singleton stringified:
-        // xa11y::get_provider_ref stores `format!("{e}")` and re-raises it as
-        // Platform(-1, message). The wrapped form carries the same stable text.
-        CliError::Xa11y(crate::Error::Platform { code: -1, message }) => {
-            message.contains(&instructions)
+        CliError::Xa11y(crate::Error::PermissionDenied { instructions }) => {
+            instructions == &xa11y_macos::accessibility_grant_instructions()
         }
         _ => false,
     }
@@ -4215,19 +4208,8 @@ mod tests {
     fn the_accessibility_denial_is_recognized_but_the_screen_recording_is_not() {
         let instructions = xa11y_macos::accessibility_grant_instructions();
 
-        // The shape the CLI actually sees: provider-init failures cross the
-        // singleton as Platform(-1, "<rendered error>").
-        let wrapped = CliError::Xa11y(crate::Error::Platform {
-            code: -1,
-            message: format!("Permission denied: {instructions}"),
-        });
-        assert!(
-            is_accessibility_permission_denied(&wrapped),
-            "the wrapped singleton shape must be recognized"
-        );
-
-        // The direct variant (e.g. a future provider boundary that stops
-        // stringifying) must be recognized too.
+        // Provider-init failures reach the CLI as the `PermissionDenied` the
+        // provider constructs — the singleton cache preserves the variant.
         let direct = CliError::Xa11y(crate::Error::PermissionDenied { instructions });
         assert!(
             is_accessibility_permission_denied(&direct),

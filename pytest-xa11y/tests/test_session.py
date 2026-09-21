@@ -63,6 +63,7 @@ def _fake_xa11y(*, find, listed=()):
         TimeoutError=xa11y.TimeoutError,
         SelectorNotMatchedError=xa11y.SelectorNotMatchedError,
         PlatformError=xa11y.PlatformError,
+        PermissionDeniedError=xa11y.PermissionDeniedError,
         XA11yError=xa11y.XA11yError,
     )
 
@@ -148,6 +149,24 @@ def test_platform_errors_during_startup_are_reported_not_discarded(monkeypatch):
         session.start()
     assert "last accessibility error" in str(excinfo.value)
     assert "bus not ready" in str(excinfo.value)
+
+
+def test_permission_denied_during_startup_is_reported_and_reaped(monkeypatch):
+    # Provider construction failed, so nothing was ever looked up. The grant
+    # instructions are the diagnosis and the caller may act on the exception
+    # class, so it is not flattened into AppLaunchError — but the process
+    # spawned by start() must not outlive the failed start.
+    def find(predicate, timeout=None):
+        raise xa11y.PermissionDeniedError(
+            "Enable Accessibility in System Settings → Privacy & Security."
+        )
+
+    monkeypatch.setattr(session_module, "xa11y", _fake_xa11y(find=find))
+    session = AppSession(AppLauncher(command=ALIVE), startup_timeout=0.3)
+    with pytest.raises(xa11y.PermissionDeniedError, match="Enable Accessibility"):
+        session.start()
+    assert session.process is not None
+    assert session.process.poll() is not None
 
 
 def test_readiness_selector_gates_startup(finds_immediately, monkeypatch):

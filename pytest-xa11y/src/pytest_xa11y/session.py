@@ -247,6 +247,16 @@ class AppSession:
                 # that discards them pays for one per iteration.
                 bus_error_was_terminal = False
                 break
+            except xa11y.PermissionDeniedError:
+                # Provider construction failed, so `App.find` never looked:
+                # accessibility (or, on macOS 26+, Screen Recording) is not
+                # granted to this process. The grant instructions are the
+                # diagnosis, so report the error as itself rather than as a
+                # launch failure — but tear down first, as `_fail_not_found`
+                # and `_await_ready` do, so a session that failed to start
+                # does not leave the process it spawned running.
+                self.stop()
+                raise
             except xa11y.PlatformError as exc:
                 # The accessibility bus can legitimately error mid-registration
                 # (AT-SPI in particular), and core propagates that immediately

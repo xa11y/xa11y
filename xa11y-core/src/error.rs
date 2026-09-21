@@ -187,7 +187,7 @@ fn diagnosis_suffix(diagnosis: &Option<Box<Diagnosis>>) -> String {
 /// `cargo xtask check-bindings-parity`, which fails when a variant is not
 /// referenced by both binding error mappers (see `[[types.variant_coverage]]`
 /// in `bindings/parity_allowlist.toml`).
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
     /// Accessibility permissions not granted.

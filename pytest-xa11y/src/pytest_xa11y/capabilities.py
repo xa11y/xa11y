@@ -44,11 +44,12 @@ KNOWN_CAPABILITIES = tuple(member.value for member in Capability)
 
 # Platform errors that mean "this session has no usable capture path", as
 # opposed to "capture is broken". Matched on message because the platform
-# layer reports them as a generic Error::Platform with the OS's own wording:
+# layer reports these as a generic Error::Platform with the OS's own wording:
 # X11 rejects a region capture outside the root window's reported extents
-# under a bare Xvfb, macOS surfaces a ScreenCaptureKit failure the same way,
-# and a headless Linux session reports an unsupported backend inside a
-# Platform error rather than as Error::Unsupported.
+# under a bare Xvfb, and macOS surfaces a ScreenCaptureKit failure the same
+# way. A session with no backend at all is deliberately *not* here: that is
+# Error::Unsupported, which crosses the binding as ActionNotSupportedError and
+# is handled by its own branch in `guard()` and `_probe_screenshot`.
 #
 # This list is the whole definition of "unavailable". Anything else is a real
 # failure and is re-raised — a capture pipeline that has genuinely broken must
@@ -57,8 +58,6 @@ _CAPTURE_UNAVAILABLE_MARKERS = (
     "GetImage",
     "BadMatch",
     "SCScreenshotManager",
-    "no DISPLAY or WAYLAND_DISPLAY",
-    "Unsupported: screenshot",
 )
 
 
