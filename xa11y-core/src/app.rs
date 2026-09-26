@@ -432,7 +432,7 @@ impl App {
     /// windows. On Windows the children of the synthetic `Application` node
     /// *are* the process's top-level windows, so this returns them in
     /// enumeration (z-) order; on macOS and Linux it is the same
-    /// `get_children` + `Window|Dialog` filter applied to the platform's
+    /// `app_windows` + `Window|Dialog` filter applied to the platform's
     /// Application node.
     ///
     /// The listing is **process-complete**: macOS and Windows guarantee one
@@ -462,7 +462,7 @@ impl App {
         let roots = provider.app_roots(data)?;
         let mut children = Vec::new();
         for root in &roots {
-            for child in provider.get_children(Some(root))? {
+            for child in provider.app_windows(root)? {
                 if !children.iter().any(|c| same_window_identity(c, &child)) {
                     children.push(child);
                 }
@@ -487,7 +487,7 @@ impl App {
                         if entry.pid != Some(pid) || same_window_identity(&entry, data) {
                             continue;
                         }
-                        for child in provider.get_children(Some(&entry))? {
+                        for child in provider.app_windows(&entry)? {
                             if !children.iter().any(|c| same_window_identity(c, &child)) {
                                 children.push(child);
                             }
@@ -508,8 +508,8 @@ impl App {
     /// Each call queries the provider — results are not cached. The windows
     /// are the application's top-level windows with role `window` or
     /// `dialog`, in enumeration order. On Windows the application entry is a
-    /// synthesized process node whose children are the process's top-level
-    /// windows (main window plus modal dialogs); macOS's own Application node
+    /// synthesized process node; this listing includes native dialogs even
+    /// when UIA nests them below a main window. macOS's Application node
     /// has the same one-entry-per-process property. On Linux the answer is
     /// process-complete: [`App::windows_with`] merges the filtered children of
     /// every same-pid AT-SPI Application entry (an app that registers several
@@ -793,16 +793,14 @@ mod tests {
     }
 
     /// Provider modelling the Windows modal case (issue #304): one process
-    /// owning two top-level windows. `list_apps` returns ONE Application node
-    /// (pid 42) for the whole process, and its `get_children` answer is both
-    /// windows — the shape every platform reports after the app-node
-    /// unification (Windows synthesizes the Application node and answers
-    /// `get_children(Some(app))` from a process-wide UIA query; macOS reads
-    /// `AXWindows`, Linux filters the AT-SPI walk). Only the dialog reports
-    /// `active`, the window-level foreground flag.
+    /// owning two top-level windows. By default both are tree roots. One
+    /// test instead lists both native windows while keeping only the main
+    /// window as an app tree root, as Windows UIA can nest a dialog below it.
+    /// Only the dialog reports `active`, the window-level foreground flag.
     struct MultiWindowProvider {
         inner: Arc<crate::mock::MockProvider>,
         windows: std::sync::Mutex<Vec<ElementData>>,
+        native_dialog_below_tree_root: bool,
     }
 
     impl MultiWindowProvider {
@@ -813,6 +811,7 @@ mod tests {
                     Self::window("Main", 100, false),
                     Self::window("Modal", 101, true),
                 ]),
+                native_dialog_below_tree_root: false,
             }
         }
 
@@ -886,13 +885,29 @@ mod tests {
             match e {
                 // The Application node's children are the process's top-level
                 // windows — main + modal, in enumeration (z-) order.
-                Some(el) if matches!(el.role, Role::Application) && el.pid == Some(42) => Ok(self
+                Some(el) if matches!(el.role, Role::Application) && el.pid == Some(42) => {
+                    let mut windows = self
+                        .windows
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone();
+                    if self.native_dialog_below_tree_root {
+                        windows.truncate(1);
+                    }
+                    Ok(windows)
+                }
+                _ => self.inner.get_children(e),
+            }
+        }
+        fn app_windows(&self, app: &ElementData) -> Result<Vec<ElementData>> {
+            if self.native_dialog_below_tree_root && app.pid == Some(42) {
+                return Ok(self
                     .windows
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .clone()),
-                _ => self.inner.get_children(e),
+                    .clone());
             }
+            self.get_children(Some(app))
         }
         fn get_parent(&self, e: &ElementData) -> Result<Option<ElementData>> {
             if matches!(e.role, Role::Window | Role::Dialog) && e.pid == Some(42) {
@@ -1755,6 +1770,23 @@ mod tests {
         let windows = app.windows().expect("windows must succeed");
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].data().name.as_deref(), Some("Main Window"));
+    }
+
+    #[test]
+    fn windows_can_list_native_dialog_without_adding_an_app_tree_root() {
+        let mut provider = MultiWindowProvider::new();
+        provider.native_dialog_below_tree_root = true;
+        let provider: Arc<dyn Provider> = Arc::new(provider);
+        let app = App::by_pid_with(provider, 42, Duration::ZERO).unwrap();
+
+        let names: Vec<_> = app
+            .windows()
+            .unwrap()
+            .into_iter()
+            .map(|w| w.name.clone())
+            .collect();
+        assert_eq!(names, [Some("Main".into()), Some("Modal".into())]);
+        assert_eq!(app.tree(Some(1)).unwrap().children.len(), 1);
     }
 
     #[test]

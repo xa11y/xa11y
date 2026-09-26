@@ -27,6 +27,12 @@ pub trait Provider: Send + Sync {
     /// If `element` is `None`, returns top-level application elements.
     fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>>;
 
+    /// List an application's windows. Backends whose native window list is
+    /// wider than their accessibility tree roots can override this.
+    fn app_windows(&self, app: &ElementData) -> Result<Vec<ElementData>> {
+        self.get_children(Some(app))
+    }
+
     /// Get the parent of an element.
     ///
     /// Returns `None` for top-level (application) elements.
@@ -47,8 +53,7 @@ pub trait Provider: Send + Sync {
     /// native registrations sharing a pid; the core collapses those into one
     /// public `App` and uses [`app_roots`](Self::app_roots) for process-wide
     /// traversal. The application's top-level
-    /// windows are its `get_children` results, so `App::windows` is the same
-    /// `get_children` + `Window|Dialog` filter on every platform.
+    /// windows are its `app_windows` results, filtered to `Window|Dialog`.
     /// This is the dedicated discovery primitive: it replaces the previous
     /// `find_elements(None, application_selector, .., depth=0)` idiom and
     /// lets each backend batch the platform-specific enumeration (CGWindowList
@@ -362,14 +367,11 @@ pub trait Provider: Send + Sync {
 
     // ── Window management ──────────────────────────────────────────
 
-    /// The windows of an application are the `get_children` results of its
-    /// Application element filtered to `Role::Window | Role::Dialog`.
-    /// `App::windows` is that filter; no provider exposes its own
-    /// window-discovery path anymore, because macOS and Windows report one
-    /// Application node per process whose top-level windows are its children
-    /// (Windows synthesizes that Application node and answers
-    /// `get_children(Some(app))` from a process-wide UIA query; see
-    /// `xa11y-windows`).
+    /// `App::windows` filters `app_windows` to `Role::Window | Role::Dialog`.
+    /// By default `app_windows` returns the Application node's children.
+    /// Windows overrides it because native dialogs can be UIA descendants
+    /// of another window; listing them does not make them separate roots
+    /// for an app-wide tree walk.
     ///
     /// Linux refines the contract: an app may register several AT-SPI
     /// Application entries (per-process instance plus per-event-loop pieces
@@ -379,12 +381,11 @@ pub trait Provider: Send + Sync {
     /// `same_window_identity`). The result is process-complete rather than a
     /// strict direct-children filter, and merged windows are not this node's
     /// children, so no single z-order spans them. Providers that split an app
-    /// across entries must answer `get_children` per entry; the merge is
+    /// across entries must answer `app_windows` per entry; the merge is
     /// core's job.
     ///
-    /// The filter lives in `App::windows_with`, so adding a provider never
-    /// requires an implementation here; `get_children` is the single
-    /// window-discovery primitive on every platform.
+    /// The filter lives in `App::windows_with`; backends only override
+    /// `app_windows` when native window listing differs from tree navigation.
     ///
     /// Activate the window: bring it to the foreground and give it focus.
     ///
@@ -461,6 +462,9 @@ pub trait Provider: Send + Sync {
 impl<T: Provider + ?Sized> Provider for &T {
     fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
         (**self).get_children(element)
+    }
+    fn app_windows(&self, app: &ElementData) -> Result<Vec<ElementData>> {
+        (**self).app_windows(app)
     }
     fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
         (**self).get_parent(element)
