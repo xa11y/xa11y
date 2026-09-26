@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -89,6 +89,7 @@ class TestWindow(QMainWindow):
         file_menu.addAction("&Save")
         file_menu.addSeparator()
         file_menu.addAction("E&xit")
+        self.file_menu = file_menu
 
         edit_menu = mb.addMenu("&Edit")
         edit_menu.addAction("&Undo")
@@ -130,11 +131,19 @@ class TestWindow(QMainWindow):
         lay.addWidget(self.cancel_btn)
 
         self.ok_btn.clicked.connect(self._on_ok_clicked)
+
+        open_file_menu_btn = QPushButton("Open File Menu")
+        open_file_menu_btn.setAccessibleName("Open File Menu")
+        open_file_menu_btn.clicked.connect(self._open_file_menu)
+        lay.addWidget(open_file_menu_btn)
         parent_layout.addWidget(grp)
 
     def _on_ok_clicked(self) -> None:
         self.cancel_btn.setEnabled(not self.cancel_btn.isEnabled())
         self.statusBar().showMessage("OK clicked")
+
+    def _open_file_menu(self) -> None:
+        self.file_menu.popup(self.mapToGlobal(QPoint(20, 40)))
 
     def _add_checkboxes(self, parent_layout: QVBoxLayout) -> None:
         grp = QGroupBox("Checkboxes")
@@ -283,7 +292,9 @@ class TestWindow(QMainWindow):
         # Select a single cell so the suites can assert that per-cell
         # selection state survives every platform bridge (UIA SelectionItem,
         # AT-SPI selected state, AX container selection on macOS).
-        self.users_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectItems)
+        self.users_table.setSelectionBehavior(
+            QTableWidget.SelectionBehavior.SelectItems
+        )
         self.users_table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.users_table.setCurrentCell(0, 0)
         self.users_table.setMaximumHeight(120)
@@ -359,7 +370,6 @@ class TestWindow(QMainWindow):
         if count > 0:
             self.list_widget.takeItem(count - 1)
 
-
     def _add_dialogs(self, parent_layout: QVBoxLayout) -> None:
         grp = QGroupBox("Dialogs")
         grp.setAccessibleName("Dialogs")
@@ -390,6 +400,21 @@ class TestWindow(QMainWindow):
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pid-file", help="Write PID to this file")
+    parser.add_argument(
+        "--open-fruit-popup",
+        action="store_true",
+        help="Open the Fruit combo box after launch for popup accessibility probes",
+    )
+    parser.add_argument(
+        "--open-sample-dialog",
+        action="store_true",
+        help="Open an owned dialog after launch for window hierarchy probes",
+    )
+    parser.add_argument(
+        "--open-file-menu",
+        action="store_true",
+        help="Open the File menu after launch for popup accessibility probes",
+    )
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
@@ -403,6 +428,12 @@ def main() -> None:
 
     window = TestWindow()
     window.show()
+    if args.open_fruit_popup:
+        QTimer.singleShot(500, window.combo.showPopup)
+    if args.open_sample_dialog:
+        QTimer.singleShot(500, window._open_sample_dialog)
+    if args.open_file_menu:
+        QTimer.singleShot(500, window._open_file_menu)
     sys.exit(app.exec())
 
 
