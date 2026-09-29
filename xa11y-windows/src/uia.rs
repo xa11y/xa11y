@@ -1335,7 +1335,7 @@ fn build_snapshot_data(
         .filter(|s| !s.is_empty());
 
     let patterns = WindowsProvider::query_patterns(role, element)?;
-    let value = get_value(role, &patterns);
+    let (value, observed_range_value) = get_value(role, &patterns);
 
     // Try FullDescription first (AccessKit's description), then HelpText
     let description = uia_cached_bstr(element, UIA_FullDescriptionPropertyId)
@@ -1412,7 +1412,10 @@ fn build_snapshot_data(
     ) {
         if let Some(ref pattern) = patterns.range_value {
             (
-                unsafe { pattern.CurrentValue() }.ok(),
+                // Reuse the value already read for `value` so the string and
+                // numeric fields describe the same observation. If that read
+                // failed, retain the existing second attempt for this field.
+                observed_range_value.or_else(|| unsafe { pattern.CurrentValue() }.ok()),
                 unsafe { pattern.CurrentMinimum() }.ok(),
                 unsafe { pattern.CurrentMaximum() }.ok(),
             )
@@ -3271,17 +3274,18 @@ impl Provider for WindowsProvider {
 
 // ── Helper Functions ─────────────────────────────────────────────────────────
 
-/// Get the value of an element from its pre-fetched pattern snapshot.
-fn get_value(role: Role, patterns: &ElementPatterns) -> Option<String> {
+/// Read the value through a pre-fetched pattern interface. Keep a successful
+/// range read for the numeric field of the same element snapshot.
+fn get_value(role: Role, patterns: &ElementPatterns) -> (Option<String>, Option<f64>) {
     // For checkboxes/radios, value is handled by state — skip
     if matches!(role, Role::CheckBox | Role::RadioButton) {
-        return None;
+        return (None, None);
     }
 
     // Try RangeValuePattern first (sliders, progress bars, spinners)
     if let Some(ref pattern) = patterns.range_value {
         if let Ok(v) = unsafe { pattern.CurrentValue() } {
-            return Some(v.to_string());
+            return (Some(v.to_string()), Some(v));
         }
     }
 
@@ -3290,12 +3294,12 @@ fn get_value(role: Role, patterns: &ElementPatterns) -> Option<String> {
         if let Ok(v) = unsafe { pattern.CurrentValue() } {
             let s = v.to_string();
             if !s.is_empty() {
-                return Some(s);
+                return (Some(s), None);
             }
         }
     }
 
-    None
+    (None, None)
 }
 
 /// Determine available actions from pre-queried UIA patterns.
