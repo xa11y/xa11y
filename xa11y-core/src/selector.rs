@@ -31,7 +31,8 @@
 //! asked, but it is not cheap: see the "Cost" section of the selector
 //! reference in the docs site.
 
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 
 use crate::element::{ElementData, Toggled};
 use crate::error::{Error, Result};
@@ -786,18 +787,17 @@ pub fn find_elements_in_tree(
 
 /// Multi-clause variant of [`find_elements_in_tree`].
 ///
-/// Runs each clause in `group` independently, then returns the **union** of
-/// matches in **document order**, deduplicated by tree position. A single-
-/// clause group is forwarded straight to `find_elements_in_tree` with no
-/// extra work.
+/// Evaluates each clause in `group`, then returns the **union** of matches in
+/// **document order**, deduplicated by tree position. Children are fetched
+/// from the provider at most once per parent for the whole group; subsequent
+/// clause walks reuse that query-local snapshot. A single-clause group is
+/// forwarded straight to `find_elements_in_tree` with no extra work.
 ///
 /// Identity for dedup and ordering is the path-from-root (sequence of child
-/// indices). This is the only identifier that's stable across multiple
-/// `get_children_fn` walks — `ElementData.handle` is *not*, because every
-/// real platform backend (Windows/UIA, macOS/AX, Linux/AT-SPI2) allocates a
-/// fresh handle on each `cache_element` call, so the same logical node sees
-/// disjoint handle values across the per-clause walks. Identifying by path
-/// keeps the union correct without requiring providers to stabilise handles.
+/// indices). Provider handles can change on each fetch, so the query-local
+/// child cache keeps the handle assigned on the first fetch for later clause
+/// walks. Paths still define document order and deduplication independently
+/// of provider handle allocation.
 pub fn find_elements_in_tree_group<F>(
     get_children_fn: F,
     root: Option<&ElementData>,
@@ -812,21 +812,34 @@ where
         return find_elements_in_tree(get_children_fn, root, &group.clauses[0], limit, max_depth);
     }
 
-    // Run each clause via the path-tracking walker. The per-clause results
-    // are (path, snapshot) pairs where `path` is the sequence of child
-    // indices from `root` to the matched node — stable across walks because
-    // it's derived purely from `get_children_fn`'s iteration order, not from
-    // any platform-allocated identity.
-    let f = &get_children_fn;
+    // Reusing fetched children is important on cross-process backends: a
+    // comma group must not multiply UIA/AX/AT-SPI calls by its clause count.
+    // The first fetch supplies handles for the rest of this query, so a
+    // provider that allocates a fresh handle on every fetch remains safe.
+    let children_by_parent: RefCell<HashMap<Option<u64>, Vec<ElementData>>> =
+        RefCell::new(HashMap::new());
+    let cached_children = |parent: Option<&ElementData>| -> Result<Vec<ElementData>> {
+        let key = parent.map(|data| data.handle);
+        if let Some(children) = children_by_parent.borrow().get(&key) {
+            return Ok(children.clone());
+        }
+        let children = get_children_fn(parent)?;
+        children_by_parent
+            .borrow_mut()
+            .insert(key, children.clone());
+        Ok(children)
+    };
+
+    // Each clause's path-tracking walker now traverses the same query-local
+    // snapshot. The path is the sequence of child indices from `root`.
     let mut by_path: std::collections::BTreeMap<Vec<u32>, ElementData> =
         std::collections::BTreeMap::new();
     for clause in &group.clauses {
-        let clause_results = find_elements_in_tree_with_paths(f, root, clause, max_depth)?;
+        let clause_results =
+            find_elements_in_tree_with_paths(cached_children, root, clause, max_depth)?;
         for (path, data) in clause_results {
-            // First clause that matched at this path wins the snapshot —
-            // matches `find_elements_in_tree`'s first-write-wins on the
-            // single-clause path, and means later clauses' state-drifted
-            // re-reads of the same node don't shadow earlier ones.
+            // First clause that matched at this path wins. The query-local
+            // cache gives every clause the same snapshot of this node.
             by_path.entry(path).or_insert(data);
         }
     }
@@ -2381,6 +2394,34 @@ mod tests {
         )
         .unwrap();
         assert_eq!(names(&results), vec!["Clear", "Search"]);
+    }
+
+    #[test]
+    fn group_fetches_each_parent_once_across_clauses() {
+        // A provider call may cross a process boundary. Five clauses, one of
+        // them with a child combinator and one with :nth, must not mean five
+        // full sets of platform child queries. The provider mints fresh handles on
+        // every call, as real backends do.
+        let tree = group_fixture();
+        let provider = fresh_handle_get_children(&tree);
+        let calls = std::cell::Cell::new(0);
+        let get_children = |parent: Option<&ElementData>| {
+            calls.set(calls.get() + 1);
+            provider(parent)
+        };
+        let group = SelectorGroup::parse(
+            r#"button, text_field, dialog > button, button[name="Clear"], button:nth(2)"#,
+        )
+        .unwrap();
+
+        let results = find_elements_in_tree_group(get_children, None, &group, None, None).unwrap();
+        assert_eq!(
+            names(&results),
+            vec!["Clear", "Search", "Save", "Cancel", "Password"]
+        );
+        // None is the system root, followed by each of the eight fixture
+        // nodes (including leaves, whose empty child lists are cached).
+        assert_eq!(calls.get(), tree.len() + 1);
     }
 
     // ── SelectorGroup parsing — additional edge cases ──────────────────────
