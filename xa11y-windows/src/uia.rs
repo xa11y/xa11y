@@ -348,29 +348,24 @@ impl WindowsProvider {
             })
     }
 
-    /// Query UIA patterns from the element once, sharing across
-    /// `get_value`, `get_actions`, and `parse_states` to avoid duplicate COM calls.
+    /// Read the patterns included in the element's bulk-query cache, sharing
+    /// them across `get_value`, `get_actions`, and `parse_states`.
     ///
-    /// WindowPattern / TransformPattern exist only on top-level window
-    /// elements, and `GetCurrentPatternAs` is a live COM round-trip — not
-    /// served from the snapshot cache — so they are queried only for
-    /// window/dialog roles. Every other element previously paid two failed
-    /// provider calls per snapshot for patterns nothing consults.
+    /// `GetCachedPatternAs` avoids six live cross-process pattern probes per
+    /// element after `FindAllBuildCache`. WindowPattern / TransformPattern are
+    /// only needed on window/dialog roles, so their live acquisition stays
+    /// role-gated instead of adding two patterns to every node's bulk request.
+    /// The pattern's `Current*` properties remain live where callers need them.
     ///
-    /// Only the known "pattern absent" HRESULTs (see [`is_pattern_absent`])
-    /// become `None`. A stale element or wedged provider is a real COM
-    /// failure and must not bleed into the snapshot as "no window actions and
-    /// unknown window states" — the same distinction the window verbs make via
-    /// [`pattern_acquisition_error`] (tenet 1).
+    /// For WindowPattern / TransformPattern, only the known "pattern absent"
+    /// HRESULTs (see [`is_pattern_absent`]) become `None`. A stale element or
+    /// wedged provider is a real COM failure and must not bleed into the
+    /// snapshot as "no window actions and unknown window states" — the same
+    /// distinction the window verbs make via [`pattern_acquisition_error`]
+    /// (tenet 1).
     ///
-    /// These acquisitions run for *every* Window/Dialog element in every
-    /// snapshot, and `GetCurrentPatternAs` is a cross-process COM call into
-    /// a foreign app that can be momentarily busy (`RPC_E_CALL_REJECTED` and
-    /// friends — see [`is_com_server_busy`]). Unlike the window verbs, a
-    /// transient rejection here has no caller left to retry: it would fail
-    /// the whole `get_children` walk. So the acquisitions are wrapped in
-    /// [`retry_transient`], which re-issues only the classified transient
-    /// HRESULTs and propagates everything else unchanged.
+    /// Window/transform live calls can fail, so they keep the existing
+    /// absence classification and transient retry behavior.
     fn query_patterns(role: Role, element: &IUIAutomationElement) -> Result<ElementPatterns> {
         let window = if matches!(role, Role::Window | Role::Dialog) {
             match retry_transient(|| unsafe {
@@ -410,30 +405,30 @@ impl WindowsProvider {
         };
         Ok(ElementPatterns {
             invoke: unsafe {
-                element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
+                element.GetCachedPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
             }
             .ok(),
             toggle: unsafe {
-                element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
+                element.GetCachedPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
             }
             .ok(),
             expand_collapse: unsafe {
-                element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
+                element.GetCachedPatternAs::<IUIAutomationExpandCollapsePattern>(
                     UIA_ExpandCollapsePatternId,
                 )
             }
             .ok(),
             value: unsafe {
-                element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
+                element.GetCachedPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
             }
             .ok(),
             range_value: unsafe {
                 element
-                    .GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId)
+                    .GetCachedPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId)
             }
             .ok(),
             selection_item: unsafe {
-                element.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
+                element.GetCachedPatternAs::<IUIAutomationSelectionItemPattern>(
                     UIA_SelectionItemPatternId,
                 )
             }
@@ -1462,6 +1457,12 @@ fn create_batch_request(automation: &IUIAutomation) -> Result<IUIAutomationCache
             message: format!("AddProperty({:?}) failed: {e}", prop),
         })?;
     }
+    for pattern in BATCH_PATTERNS {
+        unsafe { request.AddPattern(*pattern) }.map_err(|e| Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("AddPattern({pattern:?}) failed: {e}"),
+        })?;
+    }
 
     // Use raw view (TrueCondition) so FindAllBuildCache sees all UIA elements,
     // including virtual/fragment elements from Qt, AccessKit, etc. that don't
@@ -1497,6 +1498,18 @@ const BATCH_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     // MSAA role — the only role signal for providers that publish no UIA
     // control type (see `map_msaa_role`).
     UIA_LegacyIAccessibleRolePropertyId,
+];
+
+/// Interfaces needed while turning a cached UIA element into ElementData.
+/// Adding them to the bulk request avoids a live pattern acquisition for
+/// every node in a subtree query.
+const BATCH_PATTERNS: &[UIA_PATTERN_ID] = &[
+    UIA_InvokePatternId,
+    UIA_TogglePatternId,
+    UIA_ExpandCollapsePatternId,
+    UIA_ValuePatternId,
+    UIA_RangeValuePatternId,
+    UIA_SelectionItemPatternId,
 ];
 
 /// Safe wrapper for IUIAutomationElementArray::Length.
