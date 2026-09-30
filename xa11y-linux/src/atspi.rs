@@ -275,10 +275,7 @@ impl LinuxProvider {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
         let reply = proxy
             .call_method("GetChildren", &())
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("GetChildren failed: {}", e),
-            })?;
+            .map_err(|e| children_call_error(e, aref))?;
         let children: Vec<(String, zbus::zvariant::OwnedObjectPath)> =
             reply.body().deserialize().map_err(|e| Error::Platform {
                 code: -1,
@@ -291,6 +288,16 @@ impl LinuxProvider {
                 path: path.to_string(),
             })
             .collect())
+    }
+
+    /// Read a live subtree, distinguishing a destroyed object from an empty
+    /// child list. Only `UnknownObject` is absence; broken peers still fail.
+    fn live_atspi_children(&self, aref: &AccessibleRef) -> Result<Option<Vec<AccessibleRef>>> {
+        match self.get_atspi_children(aref) {
+            Ok(children) => Ok(Some(children)),
+            Err(Error::ElementStale { .. }) => Ok(None),
+            Err(err) => Err(err),
+        }
     }
 
     /// Get the state set as raw u32 values.
@@ -1470,7 +1477,9 @@ impl LinuxProvider {
             return Ok(vec![]);
         }
 
-        let children = self.get_atspi_children(parent)?;
+        let Some(children) = self.live_atspi_children(parent)? else {
+            return Ok(Vec::new());
+        };
 
         // Filter invalid refs. Application-node flattening (collapsing a
         // redundant `application` accessible into its grandchildren) is only
@@ -1599,16 +1608,12 @@ impl Provider for LinuxProvider {
             }
             Some(element_data) => {
                 let aref = self.get_cached(element_data.handle)?;
-                // Propagate, never default to an empty list (tenet 1): this
-                // path backs `App::windows()` / `Element::children()`, and a
-                // D-Bus/AT-SPI failure must surface as the error the CLI
-                // and MCP partial-error reporting expect. An `Ok([])` read as
-                // "the app has no windows" would print "No windows found."
-                // over a live failure. (The selector-search path
-                // `find_elements_group` keeps its own documented tolerance —
-                // a flaky sibling must not fail a whole locator query — but
-                // this is a direct enumeration, not a search.)
-                let children = self.get_atspi_children(&aref)?;
+                // A node destroyed after its snapshot has no live descendants.
+                // Keep genuine D-Bus failures visible; do not run the Chromium
+                // empty-tree diagnostic on a vanished window.
+                let Some(children) = self.live_atspi_children(&aref)? else {
+                    return Ok(Vec::new());
+                };
                 let pid = element_data.pid;
 
                 // Pre-filter invalid refs and flatten nested application nodes,
@@ -1623,10 +1628,11 @@ impl Provider for LinuxProvider {
                     }
                     let child_role = self.get_role_name(child_ref).unwrap_or_default();
                     if child_role == "application" {
-                        // Same rule as above: dropping the nested app's
-                        // windows on a failure would quietly return a partial
-                        // `windows()` list that reads as complete.
-                        let grandchildren = self.get_atspi_children(child_ref)?;
+                        // Nested application objects can also disappear between
+                        // enumeration and this read. Prune only confirmed absence.
+                        let Some(grandchildren) = self.live_atspi_children(child_ref)? else {
+                            continue;
+                        };
                         for gc_ref in grandchildren {
                             if gc_ref.path == "/org/a11y/atspi/null"
                                 || gc_ref.bus_name.is_empty()
@@ -2979,6 +2985,26 @@ fn is_dock_frame(role_number: u32, attributes: &HashMap<String, String>) -> bool
     role_number == ATSPI_ROLE_FRAME && attributes.get("window-type").is_some_and(|t| t == "dock")
 }
 
+/// Classify the structured reply before rendering it. `UnknownObject` means
+/// this exact accessible was destroyed, not that the peer timed out or that
+/// `GetChildren` is unimplemented. Direct reads retain the stale-element error;
+/// live traversals prune it through `live_atspi_children`.
+fn children_call_error(err: zbus::Error, aref: &AccessibleRef) -> Error {
+    match &err {
+        zbus::Error::MethodError(name, ..)
+            if name.as_str() == "org.freedesktop.DBus.Error.UnknownObject" =>
+        {
+            Error::ElementStale {
+                selector: format!("{}{}", aref.bus_name, aref.path),
+            }
+        }
+        _ => Error::Platform {
+            code: -1,
+            message: format!("GetChildren failed: {err}"),
+        },
+    }
+}
+
 /// D-Bus error names that mean the member was never there, as opposed to the
 /// call having failed.
 ///
@@ -3622,6 +3648,206 @@ mod tests {
             .build(&"boom")
             .expect("build error reply");
         zbus::Error::from(reply)
+    }
+
+    #[test]
+    fn children_errors_classify_only_unknown_object_as_stale() {
+        let aref = AccessibleRef {
+            bus_name: ":1.42".into(),
+            path: "/org/a11y/atspi/accessible/7".into(),
+        };
+        let err = children_call_error(
+            method_error("org.freedesktop.DBus.Error.UnknownObject"),
+            &aref,
+        );
+        assert!(matches!(err, Error::ElementStale { selector }
+            if selector.contains(&aref.bus_name) && selector.contains(&aref.path)));
+        for name in [
+            "org.freedesktop.DBus.Error.UnknownMethod",
+            "org.freedesktop.DBus.Error.UnknownInterface",
+            "org.freedesktop.DBus.Error.NoReply",
+            "org.freedesktop.DBus.Error.Timeout",
+            "org.freedesktop.DBus.Error.AccessDenied",
+            "org.freedesktop.DBus.Error.ServiceUnknown",
+            "org.freedesktop.DBus.Error.NameHasNoOwner",
+        ] {
+            assert!(
+                matches!(children_call_error(method_error(name), &aref),
+                Error::Platform { message, .. } if message.contains(name)),
+                "{name}"
+            );
+        }
+        // Text resembling an error name is never enough to prune a subtree.
+        assert!(matches!(
+            children_call_error(
+                zbus::Error::Failure("org.freedesktop.DBus.Error.UnknownObject".into()),
+                &aref
+            ),
+            Error::Platform { .. }
+        ));
+    }
+
+    /// Minimal AT-SPI peer: the first child disappears when its children are
+    /// read, while a later sibling stays live. Exercises the real D-Bus reply
+    /// path deterministically instead of relying on a scheduling race in Qt.
+    struct LiveTreePeer {
+        name: &'static str,
+        role: &'static str,
+        children: Vec<&'static str>,
+        children_error: Option<&'static str>,
+    }
+
+    #[zbus::interface(name = "org.a11y.atspi.Accessible")]
+    impl LiveTreePeer {
+        fn get_children(
+            &self,
+        ) -> zbus::fdo::Result<Vec<(String, zbus::zvariant::OwnedObjectPath)>> {
+            if let Some(error) = self.children_error {
+                return Err(match error {
+                    "UnknownObject" => zbus::fdo::Error::UnknownObject("destroyed".into()),
+                    "NoReply" => zbus::fdo::Error::NoReply("unresponsive".into()),
+                    _ => panic!("unsupported test error"),
+                });
+            }
+            Ok(self
+                .children
+                .iter()
+                .map(|path| {
+                    (
+                        "org.test.LiveTree".into(),
+                        zbus::zvariant::OwnedObjectPath::try_from(*path).expect("test path"),
+                    )
+                })
+                .collect())
+        }
+
+        fn get_role_name(&self) -> &str {
+            self.role
+        }
+
+        #[zbus(property)]
+        fn name(&self) -> &str {
+            self.name
+        }
+    }
+
+    fn live_tree_peer(
+        error: &'static str,
+        vanished_role: &'static str,
+    ) -> (Connection, std::sync::Arc<LinuxProvider>, ElementData) {
+        let (server_socket, client_socket) =
+            std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let server = std::thread::spawn(move || {
+            zbus::blocking::connection::Builder::async_io_unix_stream(server_socket)
+                .server(zbus::Guid::generate())
+                .expect("server GUID")
+                .p2p()
+                .serve_at(
+                    "/root",
+                    LiveTreePeer {
+                        name: "App",
+                        role: "application",
+                        children: vec!["/vanished", "/survivor"],
+                        children_error: None,
+                    },
+                )
+                .expect("root interface")
+                .serve_at(
+                    "/vanished",
+                    LiveTreePeer {
+                        name: "Vanished",
+                        role: vanished_role,
+                        children: vec![],
+                        children_error: Some(error),
+                    },
+                )
+                .expect("vanished interface")
+                .serve_at(
+                    "/survivor",
+                    LiveTreePeer {
+                        name: "Survivor",
+                        role: "push button",
+                        children: vec![],
+                        children_error: None,
+                    },
+                )
+                .expect("survivor interface")
+                .build()
+                .expect("server connection")
+        });
+        let connection = zbus::blocking::connection::Builder::async_io_unix_stream(client_socket)
+            .p2p()
+            .build()
+            .expect("client connection");
+        let server = server.join().expect("server thread");
+        let provider = std::sync::Arc::new(LinuxProvider {
+            a11y_bus: connection,
+            handle_cache: Mutex::new(HashMap::new()),
+            action_indices: Mutex::new(HashMap::new()),
+            window_manager: WindowManager::new(),
+        });
+        let root_ref = AccessibleRef {
+            bus_name: "org.test.LiveTree".into(),
+            path: "/root".into(),
+        };
+        let root = provider.build_element_data(&root_ref, None);
+        (server, provider, root)
+    }
+
+    #[test]
+    fn dump_tree_and_locators_survive_a_vanished_subtree() {
+        let (_server, provider, root) = live_tree_peer("UnknownObject", "panel");
+        let app = xa11y_core::App::from_data(provider.clone(), root);
+        let tree = app.tree(None).expect("tree prunes vanished descendants");
+        assert!(tree
+            .children
+            .iter()
+            .any(|child| child.name.as_deref() == Some("Survivor")));
+        let dump = app.dump(None).expect("dump survives UnknownObject");
+        assert!(dump.contains("Survivor"));
+        assert_eq!(
+            app.locator("button")
+                .elements()
+                .expect("locator survives")
+                .len(),
+            1
+        );
+        let vanished = app
+            .children()
+            .expect("children")
+            .into_iter()
+            .find(|child| child.name.as_deref() == Some("Vanished"))
+            .expect("vanished snapshot");
+        assert!(vanished
+            .children()
+            .expect("destroyed node has no live children")
+            .is_empty());
+        assert!(matches!(
+            provider.get_atspi_children(&AccessibleRef {
+                bus_name: "org.test.LiveTree".into(),
+                path: "/vanished".into(),
+            }),
+            Err(Error::ElementStale { .. })
+        ));
+    }
+
+    #[test]
+    fn nested_application_disappearance_does_not_drop_live_siblings() {
+        let (_server, provider, root) = live_tree_peer("UnknownObject", "application");
+        let app = xa11y_core::App::from_data(provider, root);
+        let dump = app.dump(None).expect("nested application pruned");
+        assert!(dump.contains("Survivor"));
+        assert!(!dump.contains("Vanished"));
+    }
+
+    #[test]
+    fn dump_and_tree_preserve_real_children_failures() {
+        let (_server, provider, root) = live_tree_peer("NoReply", "panel");
+        let app = xa11y_core::App::from_data(provider, root);
+        for result in [app.tree(None).map(|_| ()), app.dump(None).map(|_| ())] {
+            assert!(matches!(result, Err(Error::Platform { message, .. })
+                if message.contains("NoReply")));
+        }
     }
 
     /// An object that does not implement the method it was asked for is
