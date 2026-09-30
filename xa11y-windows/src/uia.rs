@@ -842,6 +842,26 @@ fn uia_call<T>(f: impl Fn() -> windows::core::Result<T>) -> Result<T> {
     })
 }
 
+/// A candidate invalidated during a live tree/query snapshot is no longer
+/// part of that snapshot. Restrict pruning to UIA's exact unavailable HRESULT;
+/// busy/disconnected providers and saved process-identity failures still fail.
+///
+/// Apply this only after the operation's existing transient retries. The same
+/// numeric HRESULT also names EVENT_E_ALL_SUBSCRIBERS_FAILED, so a provider
+/// that recovers during the retry budget still contributes its snapshot.
+/// Direct reads and actions retain their existing error behavior.
+fn live_snapshot<T>(result: Result<T>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(Error::Platform { code, .. })
+            if code == i64::from(UIA_E_ELEMENTNOTAVAILABLE as i32) =>
+        {
+            Ok(None)
+        }
+        Err(err) => Err(err),
+    }
+}
+
 /// Class name of the desktop icon list view, the element
 /// [`ShellSurfaceKind::Desktop`] names.
 ///
@@ -1740,75 +1760,89 @@ impl WindowsProvider {
         )?;
         let mut data = Vec::with_capacity(windows.len());
         for el in windows {
-            // Strict path: re-acquire via HWND to activate
-            // AccessKit's provider, then populate the snapshot
-            // that build_element_data reads. A failure here is a
-            // real COM failure — the fallback would silently hand
-            // back a window whose provider was never activated
-            // (tenet 1).
-            let el = self.reacquire_via_hwnd(&el).map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("re-acquiring a top-level window via HWND failed: {e}"),
-            })?;
-            let reacquired_pid = unsafe { el.CurrentProcessId() }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!(
-                    "reading the process id of a re-acquired top-level window failed: {e}"
-                ),
-            })? as u32;
-            if reacquired_pid != identity.pid {
-                return Err(Error::ElementStale {
-                    selector: format!(
-                        "handle:{} (pid {}); top-level window HWND was reused by pid {reacquired_pid}",
-                        app.handle, identity.pid
-                    ),
-                });
+            // The enumerated window may close during any live snapshot read.
+            // A vanished candidate contributes no subtree; all other failures,
+            // including process-generation mismatches, still abort enumeration.
+            if let Some(window) = live_snapshot(self.build_app_window(&el, app, identity))? {
+                data.push(window);
             }
-            // Re-check the process generation after resolving the
-            // numeric HWND. HWNDs are reusable too; together these
-            // checks ensure ElementFromHandle cannot redirect this
-            // saved App to another process or process generation.
-            validate_synthetic_app_identity(
-                app.handle,
-                identity,
-                process_creation_time(reacquired_pid),
-            )?;
-            let el = self.populate_cache(&el).map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("populating the re-acquired top-level window cache failed: {e}"),
-            })?;
-            let mut window_data = self.build_element_data(&el, Some(identity.pid))?;
-            if window_data.name.is_none() {
-                // Error-preserving live name read (tenet 1): a
-                // CurrentName COM failure must not collapse into
-                // an honestly unnamed window via `.ok()` — the
-                // result would be indistinguishable from "this
-                // window has no name" in listings and selectors.
-                // A successfully read empty string IS the "no
-                // name" answer.
-                window_data.name = match unsafe { el.CurrentName() } {
-                    Ok(s) => {
-                        let s = s.to_string();
-                        if s.is_empty() {
-                            None
-                        } else {
-                            Some(s)
-                        }
-                    }
-                    Err(e) => {
-                        return Err(Error::Platform {
-                            code: e.code().0 as i64,
-                            message: format!(
-                                "CurrentName failed while listing a top-level window of pid {}: {e}",
-                                identity.pid
-                            ),
-                        });
-                    }
-                };
-            }
-            data.push(window_data);
         }
         Ok(data)
+    }
+
+    fn build_app_window(
+        &self,
+        el: &IUIAutomationElement,
+        app: &ElementData,
+        identity: SyntheticAppIdentity,
+    ) -> Result<ElementData> {
+        // Strict path: re-acquire via HWND to activate
+        // AccessKit's provider, then populate the snapshot
+        // that build_element_data reads. A failure here is a
+        // real COM failure — the fallback would silently hand
+        // back a window whose provider was never activated
+        // (tenet 1).
+        let el = self.reacquire_via_hwnd(el).map_err(|e| Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("re-acquiring a top-level window via HWND failed: {e}"),
+        })?;
+        let reacquired_pid = unsafe { el.CurrentProcessId() }.map_err(|e| Error::Platform {
+            code: e.code().0 as i64,
+            message: format!(
+                "reading the process id of a re-acquired top-level window failed: {e}"
+            ),
+        })? as u32;
+        if reacquired_pid != identity.pid {
+            return Err(Error::ElementStale {
+                selector: format!(
+                    "handle:{} (pid {}); top-level window HWND was reused by pid {reacquired_pid}",
+                    app.handle, identity.pid
+                ),
+            });
+        }
+        // Re-check the process generation after resolving the
+        // numeric HWND. HWNDs are reusable too; together these
+        // checks ensure ElementFromHandle cannot redirect this
+        // saved App to another process or process generation.
+        validate_synthetic_app_identity(
+            app.handle,
+            identity,
+            process_creation_time(reacquired_pid),
+        )?;
+        let el = self.populate_cache(&el).map_err(|e| Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("populating the re-acquired top-level window cache failed: {e}"),
+        })?;
+        let mut window_data = self.build_element_data(&el, Some(identity.pid))?;
+        if window_data.name.is_none() {
+            // Error-preserving live name read (tenet 1): a
+            // CurrentName COM failure must not collapse into
+            // an honestly unnamed window via `.ok()` — the
+            // result would be indistinguishable from "this
+            // window has no name" in listings and selectors.
+            // A successfully read empty string IS the "no
+            // name" answer.
+            window_data.name = match unsafe { el.CurrentName() } {
+                Ok(s) => {
+                    let s = s.to_string();
+                    if s.is_empty() {
+                        None
+                    } else {
+                        Some(s)
+                    }
+                }
+                Err(e) => {
+                    return Err(Error::Platform {
+                        code: e.code().0 as i64,
+                        message: format!(
+                            "CurrentName failed while listing a top-level window of pid {}: {e}",
+                            identity.pid
+                        ),
+                    });
+                }
+            };
+        }
+        Ok(window_data)
     }
 }
 
@@ -1928,7 +1962,9 @@ impl Provider for WindowsProvider {
                 let pid = element_data.pid;
                 let mut data = Vec::with_capacity(children.len());
                 for child in children {
-                    data.push(self.build_element_data(&child, pid)?);
+                    if let Some(child) = live_snapshot(self.build_element_data(&child, pid))? {
+                        data.push(child);
+                    }
                 }
                 Ok(data)
             }
@@ -2421,7 +2457,9 @@ impl Provider for WindowsProvider {
         }
 
         // One COM call fetches the whole subtree in doc order.
-        let subtree = self.find_all_subtree(&uia_root)?;
+        let Some(subtree) = live_snapshot(self.find_all_subtree(&uia_root))? else {
+            return Ok(Vec::new());
+        };
         let count = uia_len(&subtree);
 
         // Single-pass: visit every subtree element once and check every
@@ -2444,7 +2482,9 @@ impl Provider for WindowsProvider {
             };
             // Build ElementData once; reuse for every clause check. The
             // handle assigned here is stable for the rest of this call.
-            let data = self.build_element_data(&el, pid)?;
+            let Some(data) = live_snapshot(self.build_element_data(&el, pid))? else {
+                continue;
+            };
 
             for (idx, clause) in group.clauses.iter().enumerate() {
                 if matches_simple(&data, &clause.segments[0].simple) {
@@ -6408,6 +6448,72 @@ mod tests {
             Err(Error::Platform { code, .. }) => assert_eq!(code, e_fail.0 as i64),
             other => panic!("expected Error::Platform, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn live_snapshot_prunes_unavailable_candidates_and_keeps_siblings() {
+        let unavailable = || Error::Platform {
+            code: i64::from(UIA_E_ELEMENTNOTAVAILABLE as i32),
+            message: "WindowPattern acquisition: element vanished".into(),
+        };
+        let candidates = [Ok("first"), Err(unavailable()), Ok("last")];
+        let mut snapshots = Vec::new();
+        for candidate in candidates {
+            if let Some(snapshot) = live_snapshot(candidate).expect("live traversal") {
+                snapshots.push(snapshot);
+            }
+        }
+        assert_eq!(snapshots, ["first", "last"]);
+    }
+
+    #[test]
+    fn live_snapshot_preserves_other_failures_and_process_identity_errors() {
+        for hr in [
+            E_FAIL,
+            E_ACCESSDENIED,
+            RPC_E_DISCONNECTED,
+            RPC_E_SERVERCALL_RETRYLATER,
+        ] {
+            let result: Result<()> = Err(Error::Platform {
+                code: i64::from(hr.0),
+                message: "snapshot failed".into(),
+            });
+            assert!(
+                matches!(live_snapshot(result), Err(Error::Platform { code, .. })
+                if code == i64::from(hr.0))
+            );
+        }
+        let result: Result<()> = Err(Error::ElementStale {
+            selector: "saved App pid was reused".into(),
+        });
+        assert!(matches!(
+            live_snapshot(result),
+            Err(Error::ElementStale { .. })
+        ));
+        // A formatted message cannot masquerade as a vanished element.
+        let result: Result<()> = Err(Error::Platform {
+            code: i64::from(E_FAIL.0),
+            message: "UIA_E_ELEMENTNOTAVAILABLE".into(),
+        });
+        assert!(live_snapshot(result).is_err());
+    }
+
+    #[test]
+    fn live_snapshot_keeps_a_candidate_that_recovers_during_retry() {
+        let calls = std::cell::Cell::new(0);
+        let result = live_snapshot(uia_call(|| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                Err(windows::core::HRESULT(UIA_E_ELEMENTNOTAVAILABLE as i32)
+                    .ok()
+                    .expect_err("unavailable HRESULT"))
+            } else {
+                Ok("recovered")
+            }
+        }))
+        .expect("recovered snapshot");
+        assert_eq!(result, Some("recovered"));
+        assert_eq!(calls.get(), 2);
     }
 
     // ── COM server-busy retry ───────────────────────────────────────────────
