@@ -20,5 +20,5 @@ crate-type = ["cdylib"]
 # production-only builds; we always enable it here because the Python wheel
 # already carries the `_make_test_locator()` helper for `tests/` to import.
 xa11y = { path = "../xa11y", features = ["test-support"] }
-pyo3 = { version = "0.29", features = ["abi3-py39"] }
+pyo3 = { version = "0.30", features = ["abi3-py39"] }
 serde_json = "1"
