@@ -721,10 +721,12 @@ fn do_test_mcp_client() -> bool {
 /// The harness decides which suites run in every CI matrix cell and
 /// `matrix_check.py` decides whether the coverage index is believed, so a bug
 /// in either is invisible: it just stops covering something and the cell stays
-/// green (issues #327 and #348). These tests never launch an app — plain
-/// pytest, no venv, no bindings required.
+/// green (issues #327 and #348). The glibc-floor guard that gates the npm
+/// linux-gnu prebuilds (#462) has the same property, so its tests run here
+/// too. These tests never launch an app — plain pytest, no venv, no bindings
+/// required.
 fn do_test_harness() -> bool {
-    heading("Integ harness + coverage-index self-tests");
+    heading("Integ harness, coverage-index and glibc-floor self-tests");
     let root = project_root();
     run_in(
         "python",
@@ -733,6 +735,7 @@ fn do_test_harness() -> bool {
             "pytest",
             "tests/harness",
             "tests/test_matrix_check.py",
+            ".github/scripts/test_check_glibc_floor.py",
             "-v",
         ],
         &root,

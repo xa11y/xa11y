@@ -810,6 +810,12 @@ jobs:
       - name: Run integ-harness and coverage-index self-tests
         run: .venv/bin/pytest tests/harness tests/test_matrix_check.py -v
 
+      # The glibc-floor guard gates every linux-gnu npm prebuild (issue #462);
+      # a parser bug there passes every binary, so it is tested like the
+      # harness: here, with no bindings and no display.
+      - name: Run glibc-floor guard self-tests
+        run: .venv/bin/pytest .github/scripts/test_check_glibc_floor.py -v
+
       # pytest-xa11y rides along in this job because its tests need `xa11y`
       # importable and this is where the bindings were just built. Testing it
       # against a PyPI xa11y instead would let the plugin drift from the
@@ -1100,9 +1106,47 @@ jobs:
         working-directory: xa11y-js
         run: cargo fmt -- --check
 
+      # On Linux, build the binding the way publish.yml's build-npm job does:
+      # with the napi-rs cross toolchain (glibc 2.17 sysroot), then fail if
+      # the `.node` needs a newer glibc. Issue #462 shipped because the only
+      # place that toolchain choice was made was the release workflow, so a
+      # binary that would not load on RHEL 9 passed every PR check. The unit
+      # tests below then exercise the same kind of binary users install.
+      # See publish.yml for why libxkbcommon gets its own link directory.
+      - name: Expose libxkbcommon to the cross linker
+        if: runner.os == 'Linux'
+        run: |
+          dir="$RUNNER_TEMP/xkb-link"
+          mkdir -p "$dir"
+          ln -sf /usr/lib/x86_64-linux-gnu/libxkbcommon.so "$dir/libxkbcommon.so"
+          test -e "$dir/libxkbcommon.so"
+          echo "RUSTFLAGS=-L native=$dir" >> "$GITHUB_ENV"
+
       - name: Build native binding (debug)
         working-directory: xa11y-js
-        run: npx napi build --platform --js native.js --dts native.d.ts
+        shell: bash
+        run: npx napi build --platform ${{ runner.os == 'Linux' && '--use-napi-cross --target x86_64-unknown-linux-gnu' || '' }} --js native.js --dts native.d.ts
+
+      - name: Check glibc floor
+        if: runner.os == 'Linux'
+        run: python3 .github/scripts/check_glibc_floor.py --max 2.17 xa11y-js/*.node
+
+      # The floor check reads symbol versions; this proves the dynamic loader
+      # agrees, on the distribution #462 was reported against (AlmaLinux 9,
+      # i.e. RHEL 9, glibc 2.34). The runner's own node is mounted in: the
+      # official Node binaries need only glibc 2.28, so the image does not
+      # have to ship one.
+      - name: Load the binding on an older glibc
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "$PWD/xa11y-js:/w:ro" -w /w \
+            -v "$(dirname "$(command -v node)"):/nodebin:ro" \
+            almalinux:9 sh -ec '
+              dnf install -y -q libxkbcommon >/dev/null
+              ldd --version | head -n 1
+              /nodebin/node -e "const b = require(\"./xa11y.linux-x64-gnu.node\"); console.log(Object.keys(b).length + \" exports loaded\")"
+            '
 
       - name: Patch native.d.ts
         working-directory: xa11y-js

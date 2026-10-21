@@ -316,20 +316,36 @@ jobs:
   # time. We build the six supported triples in a fan-out matrix, upload
   # each `.node` as an artifact, then fan back in for a single publish
   # job.
+  #
+  # The two linux-gnu triples build with napi-rs's `--use-napi-cross`, a GCC
+  # toolchain whose sysroot is glibc 2.17 — the same floor the Python wheels
+  # get from maturin-action's `manylinux: auto` (manylinux2014). Building
+  # against the runner's own glibc instead stamps the binary with whatever
+  # ubuntu-latest ships (2.39 at the time of #462), and the package then fails
+  # to load on RHEL 9, AL2023 and Debian 12. `check_glibc_floor.py` reads the
+  # built `.node` and fails the job if anything above the floor got in.
 
   build-npm:
     name: Build npm (${{ matrix.settings.target }})
     needs: [preflight, version-bump]
     if: always() && needs.preflight.result == 'success'
       && (needs.version-bump.result == 'success' || needs.version-bump.result == 'skipped')
+    env:
+      # Highest glibc symbol version a linux-gnu `.node` may require. Matches
+      # the napi-rs cross toolchain's sysroot and the manylinux2014 wheels.
+      GLIBC_FLOOR: "2.17"
     strategy:
       fail-fast: false
       matrix:
         settings:
           - host: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            napi_flags: --use-napi-cross
+            multiarch: x86_64-linux-gnu
           - host: ubuntu-latest
             target: aarch64-unknown-linux-gnu
+            napi_flags: --use-napi-cross
+            multiarch: aarch64-linux-gnu
           - host: macos-latest
             target: x86_64-apple-darwin
           - host: macos-latest
@@ -356,17 +372,20 @@ jobs:
           targets: ${{ matrix.settings.target }}
 
       # xa11y-linux links libxkbcommon for the Wayland input backend; the
-      # Linux native bindings pull it in transitively.
+      # Linux native bindings pull it in transitively. Only the shared
+      # object is used, for linking: see "Expose libxkbcommon to the cross
+      # linker" below.
       - name: Install libxkbcommon (x86_64 Linux)
         if: matrix.settings.target == 'x86_64-unknown-linux-gnu'
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev
 
-      # aarch64 Linux: cross-compile via gcc-aarch64-linux-gnu, plus arm64
-      # libxkbcommon from the Ubuntu Ports mirror via dpkg multiarch.
+      # aarch64 Linux: the compiler and glibc come from the napi-rs cross
+      # toolchain; only arm64 libxkbcommon is needed from the system, from
+      # the Ubuntu Ports mirror via dpkg multiarch.
       # archive.ubuntu.com / security.ubuntu.com don't host arm64, so the
       # default DEB822 sources need `Architectures: amd64` added (they
       # don't carry one by default) to keep apt-get update from 404'ing.
-      - name: Set up arm64 cross toolchain + libxkbcommon
+      - name: Install arm64 libxkbcommon
         if: matrix.settings.target == 'aarch64-unknown-linux-gnu'
         run: |
           codename=$(lsb_release -cs)
@@ -394,7 +413,22 @@ jobs:
           Architectures: arm64
           EOF
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu libxkbcommon-dev:arm64
+          sudo apt-get install -y libxkbcommon-dev:arm64
+
+      # xkbcommon's `#[link(name = "xkbcommon")]` needs a libxkbcommon.so on
+      # the linker's search path, and the cross toolchain's sysroot has none.
+      # Pointing `-L` at /usr/lib/<multiarch> would also put the runner's
+      # libc.so ahead of the sysroot's and undo the glibc floor, so expose
+      # that one library from a directory that holds nothing else.
+      - name: Expose libxkbcommon to the cross linker
+        if: matrix.settings.multiarch
+        shell: bash
+        run: |
+          dir="$RUNNER_TEMP/xkb-link"
+          mkdir -p "$dir"
+          ln -sf "/usr/lib/${{ matrix.settings.multiarch }}/libxkbcommon.so" "$dir/libxkbcommon.so"
+          test -e "$dir/libxkbcommon.so"
+          echo "RUSTFLAGS=-L native=$dir" >> "$GITHUB_ENV"
 
       - name: Install JS dev dependencies
         working-directory: xa11y-js
@@ -403,23 +437,21 @@ jobs:
       - name: Build native binding (release)
         working-directory: xa11y-js
         shell: bash
-        # Env vars for aarch64 Linux cross-compile. No-ops on other targets.
-        # PKG_CONFIG_* points the xkbcommon -sys build at the arm64 .pc file
-        # installed via the multiarch setup step.
-        env:
-          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
-          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-          PKG_CONFIG_ALLOW_CROSS: "1"
-          PKG_CONFIG_PATH_aarch64_unknown_linux_gnu: /usr/lib/aarch64-linux-gnu/pkgconfig
-          PKG_CONFIG_LIBDIR_aarch64_unknown_linux_gnu: /usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+        # No linker / CC environment here on purpose: `--use-napi-cross` only
+        # fills in CARGO_TARGET_<triple>_LINKER, TARGET_CC and friends when
+        # they are unset, so a leftover `aarch64-linux-gnu-gcc` would quietly
+        # link against the runner's glibc again.
         # Inline the build steps rather than `npm run build` because the
         # build script chains `napi build && patch-native-dts`, and `npm
         # run build -- --target X` appends the flag to the trailing node
         # command, not to napi build.
         run: |
-          npx napi build --platform --release --target ${{ matrix.settings.target }} --js native.js --dts native.d.ts
+          npx napi build --platform --release ${{ matrix.settings.napi_flags }} --target ${{ matrix.settings.target }} --js native.js --dts native.d.ts
           node scripts/patch-native-dts.mjs
+
+      - name: Check glibc floor
+        if: contains(matrix.settings.target, '-linux-gnu')
+        run: python3 .github/scripts/check_glibc_floor.py --max "$GLIBC_FLOOR" xa11y-js/*.node
 
       - name: Upload .node binary
         uses: actions/upload-artifact@v7
