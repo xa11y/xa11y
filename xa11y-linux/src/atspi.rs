@@ -63,6 +63,48 @@ pub(crate) struct AccessibleRef {
     pub(crate) path: String,
 }
 
+/// The optional AT-SPI interfaces an object reports via
+/// `Accessible.GetInterfaces`, read once per node so every property fetch
+/// that depends on one can be gated without another round trip.
+///
+/// Gating matters beyond the round trips: atk-bridge answers `Text`,
+/// `Value` and `Component` reads on *every* object and its handlers log a
+/// `CRITICAL` assertion for each one whose `AtkObject` lacks the interface
+/// (issue #465 for Text/Value; GTK TreeView cell renderers for Component).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Interfaces {
+    pub(crate) component: bool,
+    pub(crate) text: bool,
+    pub(crate) value: bool,
+}
+
+impl Interfaces {
+    pub(crate) fn from_names<S: AsRef<str>>(names: &[S]) -> Self {
+        let has = |iface: &str| names.iter().any(|n| n.as_ref() == iface);
+        Self {
+            component: has("org.a11y.atspi.Component"),
+            text: has("org.a11y.atspi.Text"),
+            value: has("org.a11y.atspi.Value"),
+        }
+    }
+}
+
+/// Call `GetInterfaces` on a proxy for an object's
+/// `org.a11y.atspi.Accessible` interface.
+pub(crate) fn read_interfaces(accessible: &Proxy<'_>) -> Result<Interfaces> {
+    let reply = accessible
+        .call_method("GetInterfaces", &())
+        .map_err(|e| Error::Platform {
+            code: -1,
+            message: format!("GetInterfaces failed: {}", e),
+        })?;
+    let names: Vec<String> = reply.body().deserialize().map_err(|e| Error::Platform {
+        code: -1,
+        message: format!("GetInterfaces deserialize failed: {}", e),
+    })?;
+    Ok(Interfaces::from_names(&names))
+}
+
 impl LinuxProvider {
     /// Create a new Linux accessibility provider.
     ///
@@ -138,22 +180,11 @@ impl LinuxProvider {
             })
     }
 
-    /// Check whether an accessible object implements a given interface.
-    /// Queries the AT-SPI GetInterfaces method on the Accessible interface.
-    fn has_interface(&self, aref: &AccessibleRef, iface: &str) -> bool {
-        let proxy = match self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible") {
-            Ok(p) => p,
-            Err(_) => return false,
-        };
-        let reply = match proxy.call_method("GetInterfaces", &()) {
-            Ok(r) => r,
-            Err(_) => return false,
-        };
-        let interfaces: Vec<String> = match reply.body().deserialize() {
-            Ok(v) => v,
-            Err(_) => return false,
-        };
-        interfaces.iter().any(|i| i.contains(iface))
+    /// Read the interfaces an accessible object reports via
+    /// `Accessible.GetInterfaces`.
+    fn get_interfaces(&self, aref: &AccessibleRef) -> Result<Interfaces> {
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
+        read_interfaces(&proxy)
     }
 
     /// Get the numeric AT-SPI role via GetRole method.
@@ -424,10 +455,10 @@ impl LinuxProvider {
     }
 
     /// Get bounds via Component interface.
-    /// Checks for Component support first to avoid GTK CRITICAL warnings
+    /// Gated on the node reporting Component, to avoid GTK CRITICAL warnings
     /// on objects (e.g. TreeView cell renderers) that don't implement it.
-    fn get_extents(&self, aref: &AccessibleRef) -> Option<Rect> {
-        if !self.has_interface(aref, "Component") {
+    fn get_extents(&self, aref: &AccessibleRef, ifaces: Interfaces) -> Option<Rect> {
+        if !ifaces.component {
             return None;
         }
         let proxy = self
@@ -639,20 +670,25 @@ impl LinuxProvider {
         (bits & (SHOWING | VISIBLE | SENSITIVE)) == (SHOWING | VISIBLE | SENSITIVE)
     }
 
-    /// Get value via Value or Text interface.
-    /// Probes interfaces directly rather than relying on the Interfaces property.
-    fn get_value(&self, aref: &AccessibleRef) -> Option<String> {
+    /// Get value via the Text or Value interface, asking only for the ones
+    /// the node reports (see [`Interfaces`] for why an unreported interface
+    /// must not be read).
+    fn get_value(&self, aref: &AccessibleRef, ifaces: Interfaces) -> Option<String> {
         // Try Text interface first for text content (text fields, labels, combo boxes).
         // This must come before Value because some AT-SPI adapters (e.g. AccessKit)
         // may expose both interfaces, and Value.CurrentValue returns 0.0 for text elements.
-        let text_value = self.get_text_content(aref);
-        if text_value.is_some() {
-            return text_value;
+        if ifaces.text {
+            let text_value = self.get_text_content(aref);
+            if text_value.is_some() {
+                return text_value;
+            }
         }
         // Try Value interface (sliders, progress bars, scroll bars, spinners)
-        if let Ok(proxy) = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Value") {
-            if let Ok(val) = proxy.get_property::<f64>("CurrentValue") {
-                return Some(val.to_string());
+        if ifaces.value {
+            if let Ok(proxy) = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Value") {
+                if let Ok(val) = proxy.get_property::<f64>("CurrentValue") {
+                    return Some(val.to_string());
+                }
             }
         }
         None
@@ -701,8 +737,21 @@ impl LinuxProvider {
     /// After resolving the role (1-3 sequential D-Bus calls), all remaining
     /// property fetches are independent and run in parallel via rayon::join.
     fn build_element_data(&self, aref: &AccessibleRef, pid: Option<u32>) -> ElementData {
-        let role_name = self.get_role_name(aref).unwrap_or_default();
-        let role_num = self.get_role_number(aref).unwrap_or(0);
+        // GetInterfaces runs alongside the role reads so it costs no extra
+        // latency, and its result gates every Text / Value / Component read
+        // below. A failed read gates them all off: like the other per-field
+        // reads in this snapshot, an unreadable object degrades to absent
+        // fields, and probing the interfaces anyway is exactly the unguarded
+        // read issue #465 removed.
+        let ((role_name, role_num), ifaces) = rayon::join(
+            || {
+                (
+                    self.get_role_name(aref).unwrap_or_default(),
+                    self.get_role_number(aref).unwrap_or(0),
+                )
+            },
+            || self.get_interfaces(aref).unwrap_or_default(),
+        );
         let coarse_role = {
             let by_name = if !role_name.is_empty() {
                 map_atspi_role(&role_name)
@@ -750,7 +799,7 @@ impl LinuxProvider {
                     || {
                         let name = self.get_name(aref).ok().filter(|s| !s.is_empty());
                         let value = if role_has_value(role) {
-                            self.get_value(aref)
+                            self.get_value(aref, ifaces)
                         } else {
                             None
                         };
@@ -766,7 +815,7 @@ impl LinuxProvider {
                             || self.parse_states_with_bits(aref, role),
                             || {
                                 if role != Role::Application {
-                                    self.get_extents(aref)
+                                    self.get_extents(aref, ifaces)
                                 } else {
                                     None
                                 }
@@ -785,13 +834,15 @@ impl LinuxProvider {
                                 }
                             },
                             || {
-                                if matches!(
-                                    role,
-                                    Role::Slider
-                                        | Role::ProgressBar
-                                        | Role::ScrollBar
-                                        | Role::SpinButton
-                                ) {
+                                if ifaces.value
+                                    && matches!(
+                                        role,
+                                        Role::Slider
+                                            | Role::ProgressBar
+                                            | Role::ScrollBar
+                                            | Role::SpinButton
+                                    )
+                                {
                                     if let Ok(proxy) = self.make_proxy(
                                         &aref.bus_name,
                                         &aref.path,
@@ -1401,6 +1452,14 @@ impl LinuxProvider {
         }
 
         let mut state_set: Option<StateSet> = None;
+        // Fetched at most once per match, and only if a filter reads Text /
+        // Value; a failed read gates both off, as in build_element_data.
+        let mut ifaces: Option<Interfaces> = None;
+        let mut value_of = |aref: &AccessibleRef| {
+            let ifaces =
+                *ifaces.get_or_insert_with(|| self.get_interfaces(aref).unwrap_or_default());
+            self.get_value(aref, ifaces)
+        };
 
         for filter in &simple.filters {
             let attr = filter.attr.as_str();
@@ -1411,13 +1470,13 @@ impl LinuxProvider {
                     // Mirror build_element_data: StaticText carries its name
                     // in the Text interface's Value when Name is empty.
                     let resolved = if name.is_none() && role == Some(Role::StaticText) {
-                        self.get_value(aref)
+                        value_of(aref)
                     } else {
                         name
                     };
                     Some(resolved)
                 }
-                "value" => Some(self.get_value(aref)),
+                "value" => Some(value_of(aref)),
                 "description" => Some(self.get_description(aref).ok().filter(|s| !s.is_empty())),
                 "enabled" | "visible" | "focused" | "active" | "focusable" | "selected"
                 | "editable" | "modal" | "required" | "busy" | "expanded" | "checked" => {
@@ -3979,5 +4038,286 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("<unnamed>"), "{msg}");
         assert!(msg.contains("/org/a11y/atspi/accessible/3"), "{msg}");
+    }
+
+    /// Per-object counters for the Text / Value reads a fake atk-bridge
+    /// object answers even when it does not report those interfaces.
+    #[derive(Default)]
+    struct InterfaceProbes {
+        text: std::sync::atomic::AtomicUsize,
+        value: std::sync::atomic::AtomicUsize,
+    }
+
+    impl InterfaceProbes {
+        fn text(&self) -> usize {
+            self.text.load(Ordering::SeqCst)
+        }
+        fn value(&self) -> usize {
+            self.value.load(Ordering::SeqCst)
+        }
+    }
+
+    /// AT-SPI peer whose `GetInterfaces` reply is configurable.
+    struct InterfacePeer {
+        name: &'static str,
+        role: &'static str,
+        children: Vec<&'static str>,
+        interfaces: Vec<&'static str>,
+    }
+
+    #[zbus::interface(name = "org.a11y.atspi.Accessible")]
+    impl InterfacePeer {
+        fn get_children(&self) -> Vec<(String, zbus::zvariant::OwnedObjectPath)> {
+            self.children
+                .iter()
+                .map(|path| {
+                    (
+                        "org.test.Ifaces".into(),
+                        zbus::zvariant::OwnedObjectPath::try_from(*path).expect("test path"),
+                    )
+                })
+                .collect()
+        }
+
+        fn get_role_name(&self) -> &str {
+            self.role
+        }
+
+        fn get_interfaces(&self) -> Vec<String> {
+            self.interfaces.iter().map(|s| s.to_string()).collect()
+        }
+
+        #[zbus(property)]
+        fn name(&self) -> &str {
+            self.name
+        }
+    }
+
+    /// Text interface served on every object, the way atk-bridge registers
+    /// its handlers regardless of what the underlying AtkObject implements.
+    /// Each read is counted so a test can prove it was never issued.
+    struct FakeText {
+        text: &'static str,
+        probes: std::sync::Arc<InterfaceProbes>,
+    }
+
+    #[zbus::interface(name = "org.a11y.atspi.Text")]
+    impl FakeText {
+        fn get_text(&self, start: i32, end: i32) -> String {
+            self.probes.text.fetch_add(1, Ordering::SeqCst);
+            self.text
+                .chars()
+                .skip(start.max(0) as usize)
+                .take((end - start).max(0) as usize)
+                .collect()
+        }
+
+        #[zbus(property)]
+        fn character_count(&self) -> i32 {
+            self.probes.text.fetch_add(1, Ordering::SeqCst);
+            self.text.chars().count() as i32
+        }
+    }
+
+    struct FakeValue {
+        value: f64,
+        probes: std::sync::Arc<InterfaceProbes>,
+    }
+
+    #[zbus::interface(name = "org.a11y.atspi.Value")]
+    impl FakeValue {
+        #[zbus(property)]
+        fn current_value(&self) -> f64 {
+            self.probes.value.fetch_add(1, Ordering::SeqCst);
+            self.value
+        }
+
+        #[zbus(property)]
+        fn minimum_value(&self) -> f64 {
+            self.probes.value.fetch_add(1, Ordering::SeqCst);
+            0.0
+        }
+
+        #[zbus(property)]
+        fn maximum_value(&self) -> f64 {
+            self.probes.value.fetch_add(1, Ordering::SeqCst);
+            100.0
+        }
+    }
+
+    struct InterfaceFixture {
+        _server: Connection,
+        provider: std::sync::Arc<LinuxProvider>,
+        root: ElementData,
+        /// Push button: reports neither Text nor Value.
+        plain: std::sync::Arc<InterfaceProbes>,
+        /// Text field: reports Text *and* Value, like AccessKit, whose
+        /// CurrentValue is a meaningless 0.0 on text.
+        entry: std::sync::Arc<InterfaceProbes>,
+        /// Slider: reports Value only.
+        slider: std::sync::Arc<InterfaceProbes>,
+    }
+
+    fn interface_peer() -> InterfaceFixture {
+        const ACC: &str = "org.a11y.atspi.Accessible";
+        const TEXT: &str = "org.a11y.atspi.Text";
+        const VALUE: &str = "org.a11y.atspi.Value";
+        let plain = std::sync::Arc::new(InterfaceProbes::default());
+        let entry = std::sync::Arc::new(InterfaceProbes::default());
+        let slider = std::sync::Arc::new(InterfaceProbes::default());
+        let (server_socket, client_socket) =
+            std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let objects = [
+            (
+                "/plain",
+                "push button",
+                "OK",
+                vec![ACC],
+                "",
+                7.0,
+                plain.clone(),
+            ),
+            (
+                "/entry",
+                "entry",
+                "Entry",
+                vec![ACC, TEXT, VALUE],
+                "hello",
+                0.0,
+                entry.clone(),
+            ),
+            (
+                "/slider",
+                "slider",
+                "Volume",
+                vec![ACC, VALUE],
+                "",
+                42.0,
+                slider.clone(),
+            ),
+        ];
+        let server = std::thread::spawn(move || {
+            let mut builder =
+                zbus::blocking::connection::Builder::async_io_unix_stream(server_socket)
+                    .server(zbus::Guid::generate())
+                    .expect("server GUID")
+                    .p2p()
+                    .serve_at(
+                        "/root",
+                        InterfacePeer {
+                            name: "App",
+                            role: "application",
+                            children: vec!["/plain", "/entry", "/slider"],
+                            interfaces: vec![ACC],
+                        },
+                    )
+                    .expect("root interface");
+            for (path, role, name, interfaces, text, value, probes) in objects {
+                builder = builder
+                    .serve_at(
+                        path,
+                        InterfacePeer {
+                            name,
+                            role,
+                            children: vec![],
+                            interfaces,
+                        },
+                    )
+                    .expect("accessible")
+                    .serve_at(
+                        path,
+                        FakeText {
+                            text,
+                            probes: probes.clone(),
+                        },
+                    )
+                    .expect("text")
+                    .serve_at(path, FakeValue { value, probes })
+                    .expect("value");
+            }
+            builder.build().expect("server connection")
+        });
+        let connection = zbus::blocking::connection::Builder::async_io_unix_stream(client_socket)
+            .p2p()
+            .build()
+            .expect("client connection");
+        let server = server.join().expect("server thread");
+        let provider = std::sync::Arc::new(LinuxProvider {
+            a11y_bus: connection,
+            handle_cache: Mutex::new(HashMap::new()),
+            action_indices: Mutex::new(HashMap::new()),
+            window_manager: WindowManager::new(),
+        });
+        let root = provider.build_element_data(
+            &AccessibleRef {
+                bus_name: "org.test.Ifaces".into(),
+                path: "/root".into(),
+            },
+            None,
+        );
+        InterfaceFixture {
+            _server: server,
+            provider,
+            root,
+            plain,
+            entry,
+            slider,
+        }
+    }
+
+    /// Issue #465: atk-bridge answers Text / Value reads on every object and
+    /// logs a CRITICAL for each one whose AtkObject lacks the interface. A
+    /// tree read must only ask a node for the interfaces it reports, while
+    /// still reading values from the nodes that do.
+    #[test]
+    fn tree_reads_only_probe_interfaces_the_node_reports() {
+        let fx = interface_peer();
+        let app = xa11y_core::App::from_data(fx.provider.clone(), fx.root.clone());
+        let tree = app.tree(None).expect("tree");
+        let child = |name: &str| {
+            tree.children
+                .iter()
+                .find(|c| c.name.as_deref() == Some(name))
+                .unwrap_or_else(|| panic!("{name} in tree"))
+        };
+
+        assert_eq!(child("OK").value, None);
+        assert_eq!(fx.plain.text(), 0, "Text read on a node without Text");
+        assert_eq!(fx.plain.value(), 0, "Value read on a node without Value");
+
+        // Text is still preferred over Value where both are reported.
+        assert_eq!(child("Entry").value.as_deref(), Some("hello"));
+        assert!(fx.entry.text() > 0);
+
+        assert_eq!(child("Volume").value.as_deref(), Some("42"));
+        let slider = app
+            .children()
+            .expect("children")
+            .into_iter()
+            .find(|c| c.name.as_deref() == Some("Volume"))
+            .expect("slider element");
+        assert_eq!(slider.numeric_value, Some(42.0));
+        assert_eq!(slider.max_value, Some(100.0));
+        assert_eq!(fx.slider.text(), 0, "Text read on a Value-only node");
+
+        // The selector fast path resolves `value` without building the
+        // whole element, and must obey the same gate.
+        assert_eq!(
+            app.locator(r#"[value="hello"]"#)
+                .elements()
+                .expect("value locator")
+                .len(),
+            1
+        );
+        assert_eq!(
+            fx.plain.text(),
+            0,
+            "matcher read Text on a node without Text"
+        );
+        assert_eq!(
+            fx.plain.value(),
+            0,
+            "matcher read Value on a node without Value"
+        );
     }
 }

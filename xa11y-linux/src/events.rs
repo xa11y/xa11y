@@ -36,7 +36,10 @@ use xa11y_core::{
     Result, Role, StateFlag, StateParts, StateSet, Subscription, Toggled,
 };
 
-use crate::atspi::{map_atspi_role, map_atspi_role_number, AccessibleRef, LinuxProvider};
+use crate::atspi::{
+    map_atspi_role, map_atspi_role_number, read_interfaces, AccessibleRef, Interfaces,
+    LinuxProvider,
+};
 
 /// AT-SPI2 event-interface names we subscribe to via match rules.
 ///
@@ -506,13 +509,19 @@ fn build_event_snapshot(
         }
     }
 
-    let name = get_name(conn, aref).filter(|s| !s.is_empty());
-    let value = get_value(conn, aref, role);
+    // Gates the Text / Value reads below; see `Interfaces` for why an
+    // unreported interface must not be read. A failed read gates them off,
+    // like every other best-effort field of this snapshot.
+    let ifaces = get_interfaces(conn, aref).unwrap_or_default();
 
-    let (numeric_value, min_value, max_value) = if matches!(
-        role,
-        Role::Slider | Role::ProgressBar | Role::ScrollBar | Role::SpinButton
-    ) {
+    let name = get_name(conn, aref).filter(|s| !s.is_empty());
+    let value = get_value(conn, aref, role, ifaces);
+
+    let (numeric_value, min_value, max_value) = if ifaces.value
+        && matches!(
+            role,
+            Role::Slider | Role::ProgressBar | Role::ScrollBar | Role::SpinButton
+        ) {
         get_numeric(conn, aref)
     } else {
         (None, None, None)
@@ -619,7 +628,22 @@ fn get_state(conn: &Connection, aref: &AccessibleRef) -> Option<Vec<u32>> {
     reply.body().deserialize::<Vec<u32>>().ok()
 }
 
-fn get_value(conn: &Connection, aref: &AccessibleRef, role: Role) -> Option<String> {
+fn get_interfaces(conn: &Connection, aref: &AccessibleRef) -> Option<Interfaces> {
+    let proxy = make_proxy(
+        conn,
+        &aref.bus_name,
+        &aref.path,
+        "org.a11y.atspi.Accessible",
+    )?;
+    read_interfaces(&proxy).ok()
+}
+
+fn get_value(
+    conn: &Connection,
+    aref: &AccessibleRef,
+    role: Role,
+    ifaces: Interfaces,
+) -> Option<String> {
     if matches!(
         role,
         Role::Application
@@ -639,8 +663,13 @@ fn get_value(conn: &Connection, aref: &AccessibleRef, role: Role) -> Option<Stri
 
     // Prefer Text.GetText for roles that carry text (text fields, labels,
     // combo boxes) — Value.CurrentValue returns 0.0 for text elements on
-    // some AT-SPI adapters.
-    if let Some(proxy) = make_proxy(conn, &aref.bus_name, &aref.path, "org.a11y.atspi.Text") {
+    // some AT-SPI adapters. Only interfaces the node reports are read.
+    let proxy_for = |reported: bool, iface: &str| {
+        reported
+            .then(|| make_proxy(conn, &aref.bus_name, &aref.path, iface))
+            .flatten()
+    };
+    if let Some(proxy) = proxy_for(ifaces.text, "org.a11y.atspi.Text") {
         if let Ok(char_count) = proxy.get_property::<i32>("CharacterCount") {
             if char_count > 0 {
                 if let Ok(reply) = proxy.call_method("GetText", &(0i32, char_count)) {
@@ -654,7 +683,7 @@ fn get_value(conn: &Connection, aref: &AccessibleRef, role: Role) -> Option<Stri
         }
     }
 
-    if let Some(proxy) = make_proxy(conn, &aref.bus_name, &aref.path, "org.a11y.atspi.Value") {
+    if let Some(proxy) = proxy_for(ifaces.value, "org.a11y.atspi.Value") {
         if let Ok(v) = proxy.get_property::<f64>("CurrentValue") {
             return Some(v.to_string());
         }
