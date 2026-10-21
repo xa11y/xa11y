@@ -428,7 +428,8 @@ jobs:
           mkdir -p "$dir"
           ln -sf "/usr/lib/${{ matrix.settings.multiarch }}/libxkbcommon.so" "$dir/libxkbcommon.so"
           test -e "$dir/libxkbcommon.so"
-          echo "RUSTFLAGS=-L native=$dir" >> "$GITHUB_ENV"
+          # Append: replacing RUSTFLAGS would drop the workflow-level -Dwarnings.
+          echo "RUSTFLAGS=${RUSTFLAGS:+$RUSTFLAGS }-L native=$dir" >> "$GITHUB_ENV"
 
       - name: Install JS dev dependencies
         working-directory: xa11y-js
