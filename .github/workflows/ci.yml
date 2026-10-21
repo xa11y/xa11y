@@ -690,6 +690,12 @@ jobs:
       - name: Check workspace dependency pins
         run: cargo xtask check-workspace-pins
 
+      # Every place the release version is written (workspace, bindings,
+      # package.json, and each Cargo.lock's path-crate entries) must agree.
+      # The publish workflow re-runs this with --expect before tagging (#463).
+      - name: Check release version fields agree
+        run: cargo xtask check-versions
+
       - name: Run clippy
         run: cargo clippy --workspace --all-targets
 

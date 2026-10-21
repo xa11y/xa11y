@@ -6,6 +6,7 @@ mod api;
 mod binding_api;
 mod parity;
 mod rustdoc_api;
+mod versions;
 
 const HELP: &str = "\
 cargo xtask — development workflow commands
@@ -48,6 +49,7 @@ COMMANDS:
     check-macos-ffi     Verify xa11y-macos/src/ax.rs only uses safe_* CF/AX wrappers
     check-mcp-stdout    Verify xa11y/src/mcp writes nothing to stdout but protocol
     check-workspace-pins   Verify intra-workspace deps keep their `=` version pins
+    check-versions [--expect X.Y.Z]  Verify every release version field (crates, bindings, lockfiles) agrees
     check-bindings-parity  Verify Python/JS bindings mirror xa11y-core's public API
     check               Run ALL pre-PR checks (fmt, lint, test, test-python, test-js, test-harness, test-pytest-plugin, test-strands)
     help                Show this help
@@ -93,6 +95,7 @@ fn main() -> ExitCode {
         "check-macos-ffi" => do_check_macos_ffi(),
         "check-mcp-stdout" => do_check_mcp_stdout(),
         "check-workspace-pins" => do_check_workspace_pins(),
+        "check-versions" => do_check_versions(rest),
         "check-bindings-parity" => parity::check(&project_root()),
         "check" => do_check(),
         "help" | "--help" | "-h" => {
@@ -1492,8 +1495,19 @@ fn do_check_workspace_pins() -> bool {
     ok
 }
 
+fn do_check_versions(args: &[String]) -> bool {
+    heading("Release version consistency");
+    versions::check_cmd(&project_root(), args)
+}
+
 fn do_check() -> bool {
     let mut ok = true;
+
+    heading("PRE-PR CHECK: versions");
+    if !do_check_versions(&[]) {
+        eprintln!("!! Version consistency check failed. See above for details.");
+        ok = false;
+    }
 
     heading("PRE-PR CHECK: workspace-pins");
     if !do_check_workspace_pins() {

@@ -1,15 +1,24 @@
 allow-branch = ["main"]
 consolidate-commits = true
 shared-version = true
+# The publish workflow writes this tag and message itself (`git tag -a`), in
+# its "Commit, tag and push" step; keep the two in step.
 tag-name = "v{{version}}"
 tag-message = "Release {{version}}"
 
 # cargo-release will update workspace.dependencies version fields automatically
 dependent-version = "upgrade"
 
-# Push the version bump commit and tag
-push = true
-tag = true
+# The publish workflow runs only `cargo release version <level>`. It then
+# syncs the fields cargo-release cannot see (xa11y-python, xa11y-js, and the
+# lockfiles outside the workspace) with .github/scripts/sync_release_versions.sh,
+# verifies them with `cargo xtask check-versions --expect vX.Y.Z`, and commits,
+# tags and pushes that one commit. cargo-release's own commit/tag/push would run
+# before that sync and tag a tree whose bindings and lockfiles still carry the
+# previous version, which is issue #463. They stay off so a full local
+# `cargo release` cannot cut such a tag either.
+push = false
+tag = false
 
 # Don't publish from local — the GH Actions workflow handles that
 publish = false

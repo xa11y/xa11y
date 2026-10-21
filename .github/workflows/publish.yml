@@ -13,6 +13,12 @@ on:
           - minor
           - major
 
+# Two concurrent publishes would race on the version bump, the tag, and the
+# registries.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -55,16 +61,35 @@ jobs:
       - name: Check workspace dependency pins
         run: cargo xtask check-workspace-pins
 
+      # On level=release nothing is bumped, so the tree being published must
+      # already agree with itself; on a bump this catches drift before the
+      # bump job builds on it.
+      - name: Check release version fields agree
+        run: cargo xtask check-versions
+
       - name: Check READMEs are in sync
         run: cargo xtask sync-readmes --check
 
+  # Bump every version field, verify them, then commit and tag that one commit.
+  #
+  # This used to run `cargo release <level>`, whose full pipeline commits, tags
+  # and pushes in one step, and then sync xa11y-python and xa11y-js in two
+  # follow-up commits. Those crates are excluded from the workspace, so
+  # cargo-release never saw them: v0.15.0 and v0.15.2 point at trees whose
+  # bindings still said the previous version, and whose out-of-workspace
+  # lockfiles (never refreshed at all) recorded older path-crate versions, so
+  # `cargo build --locked` failed from the tag (#463). The tag now goes on the
+  # commit that carries every field, and only after `check-versions` agrees.
   version-bump:
-    name: Bump version
+    name: Bump version and tag
     needs: [preflight]
     if: inputs.level != 'release'
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -86,27 +111,40 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Bump version
-        run: cargo release ${{ inputs.level }} --execute --no-confirm
+      # The `version` step only: rewrites the workspace manifests, the `=`
+      # pins in [workspace.dependencies], and the root Cargo.lock. No commit,
+      # no tag, no push; those happen below once everything else has caught up.
+      - name: Bump workspace version
+        run: cargo release version ${{ inputs.level }} --execute --no-confirm
 
-      - name: Sync Python package version
+      # xa11y-python / xa11y-js manifests, package.json, package-lock.json,
+      # and every lockfile outside the workspace that records the path crates.
+      - name: Sync version fields outside the workspace
+        run: .github/scripts/sync_release_versions.sh
+
+      - name: Read new version
+        id: version
         run: |
           VERSION=$(sed -n '/\[workspace\.package\]/,/\[/{s/^version = "\(.*\)"/\1/p}' Cargo.toml)
-          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" xa11y-python/Cargo.toml
-          git add xa11y-python/Cargo.toml
-          git commit -m "chore: sync xa11y-python version to $VERSION"
-          git push
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
 
-      # xa11y-js is excluded from the Cargo workspace, so cargo-release doesn't
-      # touch its Cargo.toml / package.json. Sync them manually here.
-      - name: Sync JS bindings version
+      - name: Refuse to tag a tree whose versions disagree
+        run: cargo xtask check-versions --expect "${{ steps.version.outputs.tag }}"
+
+      # Tag name and message follow release.toml (`v{{version}}`,
+      # `Release {{version}}`). `--atomic` lands main and the tag together or
+      # not at all, so a rejected push (main moved since checkout) cannot
+      # leave a tag on a commit main never received.
+      - name: Commit, tag and push
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
-          VERSION=$(sed -n '/\[workspace\.package\]/,/\[/{s/^version = "\(.*\)"/\1/p}' Cargo.toml)
-          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" xa11y-js/Cargo.toml
-          (cd xa11y-js && npm version "$VERSION" --no-git-tag-version --allow-same-version)
-          git add xa11y-js/Cargo.toml xa11y-js/package.json xa11y-js/package-lock.json
-          git commit -m "chore: sync xa11y-js version to $VERSION"
-          git push
+          git add -u
+          git commit -m "chore: Release $VERSION"
+          git tag -a "$TAG" -m "Release $VERSION"
+          git push --atomic origin HEAD:main "refs/tags/$TAG"
 
   publish-crates:
     name: Publish to crates.io
@@ -115,9 +153,13 @@ jobs:
       && (needs.version-bump.result == 'success' || needs.version-bump.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
+      # Every build and publish job checks out the tag when there was a bump,
+      # else main. Checking out `main` unconditionally would publish whatever
+      # else had landed there after the bump push, so the artifacts would not
+      # be the tree the tag points at.
       - uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ needs.version-bump.outputs.tag || 'main' }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -167,7 +209,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ needs.version-bump.outputs.tag || 'main' }}
 
       - uses: actions/setup-python@v7
         with:
@@ -219,7 +261,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ needs.version-bump.outputs.tag || 'main' }}
 
       - uses: actions/setup-python@v7
         with:
@@ -245,7 +287,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ needs.version-bump.outputs.tag || 'main' }}
 
       - uses: actions/setup-python@v7
         with:
@@ -271,7 +313,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ needs.version-bump.outputs.tag || 'main' }}
 
       - uses: PyO3/maturin-action@v1
         with:
@@ -342,7 +384,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ needs.version-bump.outputs.tag || 'main' }}
 
       - uses: actions/setup-node@v7
         with:
@@ -444,7 +486,7 @@ jobs:
 
   publish-npm:
     name: Publish to npm
-    needs: [build-npm]
+    needs: [version-bump, build-npm]
     if: always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     permissions:
@@ -455,7 +497,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ needs.version-bump.outputs.tag || 'main' }}
 
       # Node 24 ships with npm 11.x which supports OIDC trusted publishing.
       # Do NOT set registry-url here — setup-node injects a NODE_AUTH_TOKEN
@@ -512,7 +554,7 @@ jobs:
   # ── GitHub Release ─────────────────────────────────────────────────
   create-release:
     name: Create GitHub Release
-    needs: [publish-crates, publish-pypi, publish-npm]
+    needs: [version-bump, publish-crates, publish-pypi, publish-npm]
     if: always() && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
     runs-on: ubuntu-latest
     permissions:
@@ -523,7 +565,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: main
+          ref: ${{ needs.version-bump.outputs.tag || 'main' }}
           fetch-depth: 0
 
       - uses: actions/setup-node@v7
