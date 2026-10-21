@@ -158,8 +158,13 @@ def _window_named(app: xa11y.App, dialog_name: str) -> xa11y.Element | None:
         if sys.platform == "darwin" and "AXError -25202" in str(exc):
             return None
         raise
+    # Only a *visible* window counts: the Qt fixture hides its dialog rather
+    # than destroying it, and Qt keeps the hidden node in the AT-SPI tree with
+    # no X11 window behind it. Counting it would make "the dialog closed"
+    # unobservable and hand the next test a stale node before the reopened
+    # dialog is shown.
     for w in windows:
-        if w.name and dialog_name in w.name:
+        if w.visible and w.name and dialog_name in w.name:
             return w
     return None
 
@@ -175,7 +180,8 @@ def _tree_dialog(app: xa11y.App, dialog_name: str) -> xa11y.Element | None:
     if not dialog_name:
         return None
     results = app.locator(
-        f'window[name*="{dialog_name}"], dialog[name*="{dialog_name}"]'
+        f'window[name*="{dialog_name}"][visible="true"], '
+        f'dialog[name*="{dialog_name}"][visible="true"]'
     ).elements()
     return results[0] if results else None
 

@@ -1443,8 +1443,31 @@ fn choose_candidate(
     bounds: Option<Rect>,
     candidates: &[X11Candidate],
 ) -> Result<Window> {
-    if candidates.len() == 1 {
-        return Ok(candidates[0].window);
+    if let [only] = candidates {
+        // The PID match is sufficient unless the lone window contradicts the
+        // target. A same-process window that is merely the last one left (a
+        // hidden dialog whose X window is unmapped, beside a still-mapped main
+        // window) must not stand in for it: closing that "dialog" would close
+        // the main window. The accessible name may legitimately differ from
+        // the X11 title, so agreeing geometry still proves identity.
+        let title_conflicts =
+            title.is_some_and(|title| only.title.as_deref().is_some_and(|actual| actual != title));
+        let bounds_agree = bounds
+            .zip(only.bounds)
+            .is_some_and(|(expected, actual)| rect_near(actual, expected, 2));
+        if title_conflicts && !bounds_agree {
+            return Err(Error::Unsupported {
+                feature: format!(
+                    "native X11 window identity: the only top-level window of process {pid} \
+                     is {:#x} titled {:?}, which matches neither the title {:?} nor the \
+                     geometry of the target (the target's own window may be unmapped)",
+                    only.window,
+                    only.title.as_deref().unwrap_or_default(),
+                    title.unwrap_or_default(),
+                ),
+            });
+        }
+        return Ok(only.window);
     }
     if candidates.is_empty() {
         return Err(Error::Unsupported {
@@ -1653,6 +1676,50 @@ mod tests {
             },
         )];
         assert_eq!(choose_candidate(7, None, None, &candidates).unwrap(), 10);
+    }
+
+    #[test]
+    fn a_lone_candidate_that_contradicts_the_title_is_not_identity() {
+        // A hidden Qt dialog keeps its AT-SPI node but has no mapped X window.
+        // The process's only remaining top-level is the main window, and
+        // binding the dialog to it made `close` on the hidden dialog quit the
+        // whole app (PR #467's Qt CI failure).
+        let main = Rect {
+            x: 0,
+            y: 0,
+            width: 800,
+            height: 600,
+        };
+        let dialog = Rect {
+            x: 336,
+            y: 238,
+            width: 108,
+            height: 45,
+        };
+        let candidates = [candidate(10, "xa11y-qt-test-app", main)];
+        let error = choose_candidate(7, Some("Sample Dialog"), Some(dialog), &candidates)
+            .expect_err("a contradicting lone candidate must not bind");
+        assert!(
+            error.to_string().contains("Sample Dialog"),
+            "the error names what was being resolved: {error}"
+        );
+        // Unknown geometry does not rescue a contradicting title.
+        assert!(choose_candidate(7, Some("Sample Dialog"), None, &candidates).is_err());
+        // Agreeing geometry does: the accessible name may legitimately differ
+        // from the X11 title.
+        assert_eq!(
+            choose_candidate(7, Some("Renamed"), Some(main), &candidates).unwrap(),
+            10
+        );
+        // A matching title, or no title at all, keeps the PID match sufficient.
+        assert_eq!(
+            choose_candidate(7, Some("xa11y-qt-test-app"), Some(dialog), &candidates).unwrap(),
+            10
+        );
+        assert_eq!(
+            choose_candidate(7, None, Some(dialog), &candidates).unwrap(),
+            10
+        );
     }
 
     #[test]

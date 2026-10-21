@@ -126,13 +126,22 @@ async function dialogWindow(app) {
   // the in-tree dialog node — the GTK app's AT-SPI tree has no top-level
   // window node, but its dialog is a Role::Dialog child (the same shape the
   // shared Python dialog test relies on).
+  //
+  // Only a *visible* dialog counts. The Qt fixture hides its dialog rather
+  // than destroying it, and Qt keeps the hidden node in the AT-SPI tree
+  // (state not visible) with no X11 window behind it. Counting that node
+  // would make "the dialog disappeared" unobservable, and would hand the next
+  // test a stale hidden node before the reopened dialog is shown.
   const dialogName = appConfig.dialogName;
   if (!dialogName) return null;
   const windows = await app.windows();
-  const top = windows.find((w) => w.name && w.name.includes(dialogName));
+  const top = windows.find((w) => w.visible && w.name && w.name.includes(dialogName));
   if (top) return top;
   const results = await app
-    .locator(`window[name*="${dialogName}"], dialog[name*="${dialogName}"]`)
+    .locator(
+      `window[name*="${dialogName}"][visible='true'], ` +
+      `dialog[name*="${dialogName}"][visible='true']`,
+    )
     .elements();
   return results[0] || null;
 }
