@@ -171,7 +171,11 @@ else
 fi
 TEST_EXIT=$?
 if [ -z "$TEST_FILTER" ]; then
-    cargo test -p xa11y-linux --lib x11_retained_action_survives_swap_and_rejects_reused_xid -- --ignored --test-threads=1 2>&1
+    # The xa11y-linux X11 window tests start their own isolated Xvfb with no
+    # window manager, which the fluxbox display above cannot provide: native
+    # identity retention, and close() through ICCCM WM_DELETE_WINDOW on a
+    # bare X server (issue #464), including against the real winit test app.
+    cargo test -p xa11y-linux --lib window::tests::x11_ -- --ignored --test-threads=1 2>&1
     X11_IDENTITY_EXIT=$?
     if [ "$X11_IDENTITY_EXIT" -ne 0 ]; then
         TEST_EXIT=$X11_IDENTITY_EXIT

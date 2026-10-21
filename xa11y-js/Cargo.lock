@@ -1669,6 +1669,7 @@ name = "xa11y-linux"
 version = "0.15.2"
 dependencies = [
  "evdev",
+ "log",
  "nix 0.31.3",
  "png",
  "rayon",

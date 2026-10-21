@@ -84,7 +84,7 @@ API is separate from its element-action interface:
 | `Maximize` | unsupported | `_NET_WM_STATE_MAXIMIZED_HORZ` + `_VERT` | unsupported | WindowPattern.SetWindowVisualState(Maximized) |
 | `EnterFullscreen` | set AXFullScreen=true | `_NET_WM_STATE_FULLSCREEN` | Sway `fullscreen enable` | unsupported |
 | `Restore` | clear AXMinimized; set AXFullScreen=false | map and remove fullscreen/maximized EWMH states | Sway `fullscreen disable` | WindowPattern.SetWindowVisualState(Normal) |
-| `Close` | press the AXCloseButton | `_NET_CLOSE_WINDOW` | Sway `kill` | WindowPattern.Close |
+| `Close` | press the AXCloseButton | `_NET_CLOSE_WINDOW`; ICCCM `WM_DELETE_WINDOW` when the window manager does not advertise it | Sway `kill` | WindowPattern.Close |
 | `MoveTo` | set AXPosition | `_NET_MOVERESIZE_WINDOW` | Sway `move position` for floating windows | TransformPattern.Move |
 | `ResizeTo` | set AXSize | `_NET_MOVERESIZE_WINDOW` | Sway `resize set` for floating windows | TransformPattern.Resize |
 
@@ -119,8 +119,8 @@ are tri-state: `Some(true)` and `Some(false)` are observed values, while
 Linux snapshots also expose `raw.window_capabilities`, with one of
 `supported`, `unsupported`, or `unknown` for each window verb. `unknown` means
 no native backend or reliable identity was available. `raw.window_backend`
-names the provider when resolution succeeded (`x11-ewmh` or
-`wayland-sway-wlr-foreign-toplevel`). These raw fields are diagnostic; the
+names the provider when resolution succeeded (`x11-ewmh`, `x11-icccm` when
+no X11 window manager is running, or `wayland-sway-wlr-foreign-toplevel`). These raw fields are diagnostic; the
 portable dispatch contract remains the `actions` list plus the method error.
 On Sway, `raw.window_protocol_version` records the advertised wlr protocol
 version used for capability detection.
@@ -308,7 +308,10 @@ endpoint is an error instead of a fallback to another backend.
 
 #### Native window identity and support
 
-X11 resolves AT-SPI windows against `_NET_CLIENT_LIST`. It requires an exact
+X11 resolves AT-SPI windows against `_NET_CLIENT_LIST`. With no window manager
+running, as on a bare Xvfb display, nothing maintains that list, so xa11y
+resolves against the root window's mapped, non-override-redirect children,
+which ICCCM defines as the top-level windows. Either way it requires an exact
 `_NET_WM_PID` match. For a process with multiple windows, live frame geometry
 and then the title narrow the candidates within that PID. Title is never identity on its own.
 Every action resolves again, which catches destroyed windows and XID reuse.
@@ -324,7 +327,18 @@ native window actions as unsupported. They do not receive simulated shortcuts.
 Sway supports activation, fullscreen entry and exit, and close. Its model has
 no minimized state or maximized state distinct from fullscreen. Move and resize
 are advertised only for floating containers. X11 capabilities come from the
-window manager's `_NET_SUPPORTED` list. Linux window-state events still come
+window manager's `_NET_SUPPORTED` list.
+
+X11 `Close` picks its mechanism before sending anything. When
+`_NET_SUPPORTED` lists `_NET_CLOSE_WINDOW`, the window manager receives that
+request. Otherwise, when the window's `WM_PROTOCOLS` lists `WM_DELETE_WINDOW`,
+xa11y sends the client the `WM_DELETE_WINDOW` message that a window manager
+would forward. That message is a polite request the app may answer with a
+save prompt. When neither applies, `close` is not advertised and a direct call
+returns `Unsupported` naming both missing capabilities. xa11y never retries a
+failed request through the other mechanism, and never force-closes a client
+with `XKillClient`. Without a window manager, `close` is the only X11 window
+verb, and the window states read as unknown. Linux window-state events still come
 from AT-SPI; EWMH and Sway state changes without a corresponding AT-SPI event
 must be observed by reading a new snapshot.
 

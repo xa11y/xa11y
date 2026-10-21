@@ -17,8 +17,8 @@ use wayland_client::protocol::wl_registry;
 use wayland_client::{Connection as WaylandConnection, Dispatch, QueueHandle};
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
-    Atom, AtomEnum, ClientMessageData, ClientMessageEvent, ConnectionExt as _, EventMask, Window,
-    CLIENT_MESSAGE_EVENT,
+    Atom, AtomEnum, ClientMessageData, ClientMessageEvent, ConnectionExt as _, EventMask, MapState,
+    Window, CLIENT_MESSAGE_EVENT,
 };
 use x11rb::protocol::Event;
 use x11rb::rust_connection::RustConnection;
@@ -30,6 +30,9 @@ const SOURCE_APPLICATION: u32 = 1;
 const ICONIC_STATE: u32 = 3;
 const STATE_REMOVE: u32 = 0;
 const STATE_ADD: u32 = 1;
+/// ICCCM `CurrentTime`. A window manager forwarding `WM_DELETE_WINDOW` stamps
+/// it with the triggering event's time; xa11y has no triggering event.
+const CURRENT_TIME: u32 = 0;
 
 /// Snapshot-side native window facts. A missing action is not advertised;
 /// direct calls still return the backend's precise unsupported or identity
@@ -707,6 +710,8 @@ struct X11Atoms {
     net_close_window: Atom,
     net_moveresize_window: Atom,
     wm_change_state: Atom,
+    wm_protocols: Atom,
+    wm_delete_window: Atom,
 }
 
 impl X11Atoms {
@@ -735,6 +740,8 @@ impl X11Atoms {
             net_close_window: atom(conn, b"_NET_CLOSE_WINDOW")?,
             net_moveresize_window: atom(conn, b"_NET_MOVERESIZE_WINDOW")?,
             wm_change_state: atom(conn, b"WM_CHANGE_STATE")?,
+            wm_protocols: atom(conn, b"WM_PROTOCOLS")?,
+            wm_delete_window: atom(conn, b"WM_DELETE_WINDOW")?,
         })
     }
 }
@@ -759,7 +766,14 @@ struct X11Candidate {
 
 impl X11WindowBackend {
     fn new() -> Result<Self> {
-        let (conn, screen_num) = RustConnection::connect(None).map_err(platform)?;
+        Self::connect(None)
+    }
+
+    /// Connect to `display` (`None` reads `$DISPLAY`) and read the window
+    /// manager's capabilities once. The isolated-Xvfb tests pass their own
+    /// display so they exercise the same detection as production.
+    fn connect(display: Option<&str>) -> Result<Self> {
+        let (conn, screen_num) = RustConnection::connect(display).map_err(platform)?;
         let root = conn
             .setup()
             .roots
@@ -821,7 +835,9 @@ impl X11WindowBackend {
         if self.has_window_manager || self.supports(self.atoms.net_wm_state) {
             actions.push("restore");
         }
-        if self.supports(self.atoms.net_close_window) {
+        // Advertised exactly when `close` would pick a mechanism, so the
+        // capability and the verb cannot disagree.
+        if self.close_mechanism(conn, window)?.is_some() {
             actions.push("close");
         }
         if self.supports(self.atoms.net_moveresize_window) {
@@ -829,16 +845,23 @@ impl X11WindowBackend {
             actions.push("resize_to");
         }
 
+        // Without a window manager nobody maintains _NET_WM_STATE, so its
+        // absence is not an observed "not minimized": the states are unknown.
+        let observed = |value: bool| self.has_window_manager.then_some(value);
         Ok(WindowFacts {
             actions,
             bounds: self.window_bounds(conn, window).ok(),
-            minimized: Some(state.contains(&self.atoms.net_wm_state_hidden)),
-            maximized: Some(
+            minimized: observed(state.contains(&self.atoms.net_wm_state_hidden)),
+            maximized: observed(
                 state.contains(&self.atoms.net_wm_state_max_horz)
                     && state.contains(&self.atoms.net_wm_state_max_vert),
             ),
-            fullscreen: Some(state.contains(&self.atoms.net_wm_state_fullscreen)),
-            backend: Some("x11-ewmh"),
+            fullscreen: observed(state.contains(&self.atoms.net_wm_state_fullscreen)),
+            backend: Some(if self.has_window_manager {
+                "x11-ewmh"
+            } else {
+                "x11-icccm"
+            }),
             protocol_version: None,
         })
     }
@@ -899,17 +922,17 @@ impl X11WindowBackend {
         let pid = element.pid.ok_or_else(|| Error::Unsupported {
             feature: "native X11 window identity: AT-SPI target has no process id".to_string(),
         })?;
-        let clients = property_u32(
-            conn,
-            self.root,
-            self.atoms.net_client_list,
-            AtomEnum::WINDOW.into(),
-        )?;
+        let clients = self.top_level_windows(conn)?;
         if clients.is_empty() {
             return Err(Error::Unsupported {
-                feature:
+                feature: if self.has_window_manager {
                     "native X11 window identity: the window manager exposes no _NET_CLIENT_LIST"
-                        .to_string(),
+                        .to_string()
+                } else {
+                    "native X11 window identity: no window manager is running and the root \
+                     window has no mapped top-level children"
+                        .to_string()
+                },
             });
         }
         // Subscribe before reading candidate properties. A destruction after
@@ -978,12 +1001,7 @@ impl X11WindowBackend {
         {
             return Err(lost_identity("X11", element.handle));
         }
-        let clients = property_u32(
-            conn,
-            self.root,
-            self.atoms.net_client_list,
-            AtomEnum::WINDOW.into(),
-        )?;
+        let clients = self.top_level_windows(conn)?;
         if !clients.contains(&binding.id) {
             return Err(lost_identity("X11", element.handle));
         }
@@ -997,6 +1015,81 @@ impl X11WindowBackend {
             return Err(lost_identity("X11", element.handle));
         }
         Ok(binding.id)
+    }
+
+    /// The top-level client windows identity is resolved against.
+    ///
+    /// The source is fixed by whether a window manager runs, which is read
+    /// once at connection time; it is not a second attempt after the first
+    /// fails. With one, `_NET_CLIENT_LIST` is authoritative: a reparenting
+    /// manager makes the root's children its frames, not the clients. With
+    /// none, nothing maintains `_NET_CLIENT_LIST`, and the ICCCM top-levels
+    /// are the mapped, non-override-redirect children of the root. Either way
+    /// the candidates then go through the same `_NET_WM_PID`, process-start,
+    /// and geometry/title proof.
+    ///
+    /// Callers hold the server grab, so no window can vanish between the
+    /// tree query and the attribute reads.
+    fn top_level_windows(&self, conn: &RustConnection) -> Result<Vec<Window>> {
+        if self.has_window_manager {
+            return property_u32(
+                conn,
+                self.root,
+                self.atoms.net_client_list,
+                AtomEnum::WINDOW.into(),
+            );
+        }
+        let children = conn
+            .query_tree(self.root)
+            .map_err(platform)?
+            .reply()
+            .map_err(platform)?
+            .children;
+        let mut top_levels = Vec::new();
+        for window in children {
+            let attributes = conn
+                .get_window_attributes(window)
+                .map_err(platform)?
+                .reply()
+                .map_err(platform)?;
+            if !attributes.override_redirect && attributes.map_state == MapState::VIEWABLE {
+                top_levels.push(window);
+            }
+        }
+        Ok(top_levels)
+    }
+
+    /// Choose how `close` reaches `window`, before anything is sent. `None`
+    /// means neither mechanism applies; [`Self::close_unsupported`] says why.
+    fn close_mechanism(
+        &self,
+        conn: &RustConnection,
+        window: Window,
+    ) -> Result<Option<CloseMechanism>> {
+        let wm_advertises_close = self.supports(self.atoms.net_close_window);
+        // Read WM_PROTOCOLS only when it decides the outcome.
+        let client_accepts_delete = !wm_advertises_close
+            && property_u32(conn, window, self.atoms.wm_protocols, AtomEnum::ATOM.into())?
+                .contains(&self.atoms.wm_delete_window);
+        Ok(select_close_mechanism(
+            wm_advertises_close,
+            client_accepts_delete,
+        ))
+    }
+
+    fn close_unsupported(&self, window: Window) -> Error {
+        let manager = if self.has_window_manager {
+            "the running window manager does not list _NET_CLOSE_WINDOW in _NET_SUPPORTED"
+        } else {
+            "no window manager is running, so nothing provides _NET_CLOSE_WINDOW"
+        };
+        Error::Unsupported {
+            feature: format!(
+                "close: no X11 close mechanism is available: {manager}, and client window \
+                 {window:#x} does not list WM_DELETE_WINDOW in WM_PROTOCOLS (xa11y does not \
+                 force-close with XKillClient)"
+            ),
+        }
     }
 
     fn drain_destroy_events(&self, conn: &RustConnection) -> Result<HashSet<Window>> {
@@ -1200,12 +1293,39 @@ impl X11WindowBackend {
     }
 
     fn close(&self, element: &ElementData) -> Result<()> {
-        self.require(self.atoms.net_close_window, "close")?;
-        self.send_for(
-            element,
-            self.atoms.net_close_window,
-            [0, SOURCE_APPLICATION, 0, 0, 0],
-        )
+        self.with_server_grab(|conn| {
+            let window = self.resolve(conn, element)?;
+            // The mechanism is chosen from what the window manager and the
+            // client advertise, before anything is sent; a failed send is
+            // returned, never retried through the other mechanism.
+            match self.close_mechanism(conn, window)? {
+                Some(CloseMechanism::EwmhCloseWindow) => {
+                    log::debug!("close {window:#x}: EWMH _NET_CLOSE_WINDOW via the window manager");
+                    send_client_message(
+                        conn,
+                        self.root,
+                        window,
+                        self.atoms.net_close_window,
+                        [CURRENT_TIME, SOURCE_APPLICATION, 0, 0, 0],
+                    )?;
+                }
+                Some(CloseMechanism::IcccmDeleteWindow) => {
+                    log::debug!(
+                        "close {window:#x}: ICCCM WM_DELETE_WINDOW sent to the client, since \
+                         _NET_CLOSE_WINDOW is not advertised (window manager running: {})",
+                        self.has_window_manager
+                    );
+                    send_wm_protocol(
+                        conn,
+                        window,
+                        self.atoms.wm_protocols,
+                        self.atoms.wm_delete_window,
+                    )?;
+                }
+                None => return Err(self.close_unsupported(window)),
+            }
+            conn.flush().map_err(platform)
+        })
     }
 
     fn move_to(&self, element: &ElementData, x: i32, y: i32) -> Result<()> {
@@ -1283,6 +1403,40 @@ impl X11WindowBackend {
     }
 }
 
+/// How `close` asks an X11 client to close. Both are polite requests the
+/// client may answer with a save prompt or a refusal; neither kills it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseMechanism {
+    /// EWMH `_NET_CLOSE_WINDOW` to the root window. The window manager
+    /// carries it out, usually by sending the client `WM_DELETE_WINDOW`.
+    EwmhCloseWindow,
+    /// ICCCM `WM_PROTOCOLS` / `WM_DELETE_WINDOW` sent straight to the client:
+    /// the message a window manager would forward, for a client that lists
+    /// the protocol. This is how a bare X server (no window manager, as under
+    /// plain Xvfb) closes a window at all.
+    IcccmDeleteWindow,
+}
+
+/// The close mechanism for a window, decided from advertised capabilities
+/// alone. The window manager's request comes first whenever it is advertised:
+/// it is the EWMH contract, and the manager may do more than the client
+/// message (end a session-managed client, update its own lists). The ICCCM
+/// message is chosen only when the manager does not offer one. Choosing up
+/// front is what keeps this from being a fallback chain (tenet 1): a failed
+/// send is an error, not a cue to try the other mechanism.
+fn select_close_mechanism(
+    wm_advertises_close_window: bool,
+    client_accepts_delete_window: bool,
+) -> Option<CloseMechanism> {
+    if wm_advertises_close_window {
+        Some(CloseMechanism::EwmhCloseWindow)
+    } else if client_accepts_delete_window {
+        Some(CloseMechanism::IcccmDeleteWindow)
+    } else {
+        None
+    }
+}
+
 fn choose_candidate(
     pid: u32,
     title: Option<&str>,
@@ -1294,7 +1448,9 @@ fn choose_candidate(
     }
     if candidates.is_empty() {
         return Err(Error::Unsupported {
-            feature: format!("native X11 window identity: no EWMH client has process id {pid}"),
+            feature: format!(
+                "native X11 window identity: no top-level client window has process id {pid}"
+            ),
         });
     }
 
@@ -1379,6 +1535,30 @@ fn send_client_message(
     .map_err(platform)
 }
 
+/// Send an ICCCM `WM_PROTOCOLS` message to the client that owns `window`.
+/// ICCCM §4.2.8 addresses it to the client window itself with an empty event
+/// mask, which delivers it to the window's creator rather than to whoever
+/// selects substructure redirection on the root.
+fn send_wm_protocol(
+    conn: &RustConnection,
+    window: Window,
+    wm_protocols: Atom,
+    protocol: Atom,
+) -> Result<()> {
+    let event = ClientMessageEvent {
+        response_type: CLIENT_MESSAGE_EVENT,
+        format: 32,
+        sequence: 0,
+        window,
+        type_: wm_protocols,
+        data: ClientMessageData::from([protocol, CURRENT_TIME, 0, 0, 0]),
+    };
+    conn.send_event(false, window, EventMask::NO_EVENT, event)
+        .map_err(platform)?
+        .check()
+        .map_err(platform)
+}
+
 fn property_u32(
     conn: &RustConnection,
     window: Window,
@@ -1424,8 +1604,32 @@ fn platform(error: impl std::fmt::Display) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{choose_candidate, choose_sway_candidate, collect_sway_candidates, X11Candidate};
+    use super::{
+        choose_candidate, choose_sway_candidate, collect_sway_candidates, select_close_mechanism,
+        CloseMechanism, X11Candidate,
+    };
     use xa11y_core::Rect;
+
+    #[test]
+    fn close_prefers_the_window_managers_request_when_advertised() {
+        // Whatever the client lists, an advertised _NET_CLOSE_WINDOW wins:
+        // the ICCCM message is never a second attempt behind it.
+        for client_accepts_delete in [false, true] {
+            assert_eq!(
+                select_close_mechanism(true, client_accepts_delete),
+                Some(CloseMechanism::EwmhCloseWindow)
+            );
+        }
+    }
+
+    #[test]
+    fn close_without_net_close_window_uses_icccm_only_for_willing_clients() {
+        assert_eq!(
+            select_close_mechanism(false, true),
+            Some(CloseMechanism::IcccmDeleteWindow)
+        );
+        assert_eq!(select_close_mechanism(false, false), None);
+    }
 
     fn candidate(window: u32, title: &str, bounds: Rect) -> X11Candidate {
         X11Candidate {
@@ -1816,8 +2020,6 @@ mod tests {
     #[test]
     #[ignore = "requires Xvfb; run through scripts/run_integ_tests.sh"]
     fn x11_retained_action_survives_swap_and_rejects_reused_xid() {
-        use std::io::{BufRead, BufReader};
-        use std::process::{Command, Stdio};
         use x11rb::connection::Connection as _;
         use x11rb::protocol::xproto::ConnectionExt as _;
         use x11rb::protocol::xproto::{
@@ -1825,37 +2027,7 @@ mod tests {
         };
         use x11rb::wrapper::ConnectionExt as _;
 
-        struct Xvfb(std::process::Child);
-        impl Drop for Xvfb {
-            fn drop(&mut self) {
-                let _ = self.0.kill();
-                let _ = self.0.wait();
-            }
-        }
-        let mut xvfb = Xvfb(
-            Command::new("Xvfb")
-                .args([
-                    "-displayfd",
-                    "1",
-                    "-screen",
-                    "0",
-                    "1024x768x24",
-                    "-nolisten",
-                    "unix",
-                    "-listen",
-                    "tcp",
-                    "-ac",
-                ])
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-                .expect("start isolated Xvfb"),
-        );
-        let mut display_number = String::new();
-        BufReader::new(xvfb.0.stdout.take().expect("Xvfb displayfd"))
-            .read_line(&mut display_number)
-            .expect("read Xvfb display number");
-        let display = format!("localhost:{}", display_number.trim());
+        let (_xvfb, display) = isolated_xvfb();
         let (observer, screen) = x11rb::rust_connection::RustConnection::connect(Some(&display))
             .expect("connect isolated Xvfb");
         let (backend_conn, backend_screen) =
@@ -1997,5 +2169,306 @@ mod tests {
         backend
             .facts(&element(103, 400))
             .expect("bind replacement from a fresh handle");
+    }
+
+    /// An Xvfb private to one test, killed on drop. It runs no window
+    /// manager, so it is exactly the "bare X server" case of issue #464.
+    struct Xvfb(std::process::Child);
+    impl Drop for Xvfb {
+        fn drop(&mut self) {
+            // Teardown of a test fixture: a failed kill means it already exited.
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    fn isolated_xvfb() -> (Xvfb, String) {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+        let mut xvfb = Xvfb(
+            Command::new("Xvfb")
+                .args([
+                    "-displayfd",
+                    "1",
+                    "-screen",
+                    "0",
+                    "1024x768x24",
+                    "-nolisten",
+                    "tcp",
+                    "-ac",
+                ])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("start isolated Xvfb"),
+        );
+        let mut display_number = String::new();
+        BufReader::new(xvfb.0.stdout.take().expect("Xvfb displayfd"))
+            .read_line(&mut display_number)
+            .expect("read Xvfb display number");
+        // The local socket, as the harness's own Xvfb uses: TCP needs a loopback
+        // listener that sandboxed runners do not always permit.
+        let display = format!(":{}", display_number.trim());
+        (xvfb, display)
+    }
+
+    fn intern(conn: &x11rb::rust_connection::RustConnection, name: &[u8]) -> u32 {
+        use x11rb::protocol::xproto::ConnectionExt as _;
+        conn.intern_atom(false, name)
+            .expect("intern atom")
+            .reply()
+            .expect("atom reply")
+            .atom
+    }
+
+    #[test]
+    #[ignore = "requires Xvfb; run through scripts/run_integ_tests.sh"]
+    fn x11_close_without_window_manager_sends_icccm_delete_window() {
+        use x11rb::connection::Connection as _;
+        use x11rb::protocol::xproto::{
+            AtomEnum, ConnectionExt as _, CreateWindowAux, PropMode, WindowClass,
+        };
+        use x11rb::wrapper::ConnectionExt as _;
+
+        let (_xvfb, display) = isolated_xvfb();
+        let (observer, screen) = x11rb::rust_connection::RustConnection::connect(Some(&display))
+            .expect("connect isolated Xvfb");
+        let root = observer.setup().roots[screen].root;
+        let backend =
+            super::X11WindowBackend::connect(Some(&display)).expect("X11 backend on bare Xvfb");
+        assert!(
+            !backend.has_window_manager && backend.supported.is_empty(),
+            "fixture: the isolated Xvfb must run no window manager"
+        );
+        let net_wm_pid = intern(&observer, b"_NET_WM_PID");
+        let net_wm_name = intern(&observer, b"_NET_WM_NAME");
+        let utf8_string = intern(&observer, b"UTF8_STRING");
+        let wm_protocols = intern(&observer, b"WM_PROTOCOLS");
+        let wm_delete_window = intern(&observer, b"WM_DELETE_WINDOW");
+        let wm_take_focus = intern(&observer, b"WM_TAKE_FOCUS");
+        let pid = std::process::id();
+
+        // Two mapped top-levels of this process, told apart by geometry. Only
+        // the first participates in WM_DELETE_WINDOW.
+        let create = |x: i16, title: &[u8], protocols: &[u32]| {
+            let window = observer.generate_id().expect("XID");
+            observer
+                .create_window(
+                    0,
+                    window,
+                    root,
+                    x,
+                    0,
+                    300,
+                    200,
+                    0,
+                    WindowClass::INPUT_OUTPUT,
+                    0,
+                    &CreateWindowAux::new(),
+                )
+                .expect("create window")
+                .check()
+                .expect("created window");
+            observer
+                .change_property32(
+                    PropMode::REPLACE,
+                    window,
+                    net_wm_pid,
+                    AtomEnum::CARDINAL,
+                    &[pid],
+                )
+                .expect("set PID")
+                .check()
+                .expect("PID stored");
+            observer
+                .change_property8(PropMode::REPLACE, window, net_wm_name, utf8_string, title)
+                .expect("set title")
+                .check()
+                .expect("title stored");
+            if !protocols.is_empty() {
+                observer
+                    .change_property32(
+                        PropMode::REPLACE,
+                        window,
+                        wm_protocols,
+                        AtomEnum::ATOM,
+                        protocols,
+                    )
+                    .expect("set WM_PROTOCOLS")
+                    .check()
+                    .expect("WM_PROTOCOLS stored");
+            }
+            observer
+                .map_window(window)
+                .expect("map window")
+                .check()
+                .expect("window mapped");
+            window
+        };
+        let deletable = create(0, b"Deletable", &[wm_take_focus, wm_delete_window]);
+        let undeletable = create(400, b"Undeletable", &[wm_take_focus]);
+        observer.flush().expect("flush setup");
+
+        let element = |handle, x, title: &str| {
+            let mut data = xa11y_core::ElementData::for_role(xa11y_core::Role::Window);
+            data.handle = handle;
+            data.pid = Some(pid);
+            data.name = Some(title.to_string());
+            data.bounds = Some(Rect {
+                x,
+                y: 0,
+                width: 300,
+                height: 200,
+            });
+            data
+        };
+        let deletable_element = element(201, 0, "Deletable");
+        let undeletable_element = element(202, 400, "Undeletable");
+
+        // Capability reporting follows the mechanism: advertised only where
+        // the client accepts WM_DELETE_WINDOW.
+        let facts = backend
+            .facts(&deletable_element)
+            .expect("bind a top-level without a window manager");
+        assert!(
+            facts.actions.contains(&"close"),
+            "close must be advertised for a WM_DELETE_WINDOW client: {:?}",
+            facts.actions
+        );
+        assert_eq!(
+            facts.actions,
+            vec!["close"],
+            "nothing else works without a WM"
+        );
+        assert_eq!(facts.backend, Some("x11-icccm"));
+        let facts = backend
+            .facts(&undeletable_element)
+            .expect("bind the second top-level");
+        assert!(
+            !facts.actions.contains(&"close"),
+            "close must not be advertised without WM_DELETE_WINDOW: {:?}",
+            facts.actions
+        );
+
+        backend
+            .close(&deletable_element)
+            .expect("close must use ICCCM WM_DELETE_WINDOW without a window manager");
+        let message = loop {
+            if let x11rb::protocol::Event::ClientMessage(event) =
+                observer.wait_for_event().expect("native event")
+            {
+                break event;
+            }
+        };
+        assert_eq!(message.window, deletable, "sent to the bound window");
+        assert_eq!(message.type_, wm_protocols, "an ICCCM WM_PROTOCOLS message");
+        assert_eq!(message.format, 32);
+        assert_eq!(message.data.as_data32()[0], wm_delete_window);
+
+        let error = backend
+            .close(&undeletable_element)
+            .expect_err("no mechanism is available for this client");
+        assert!(
+            matches!(error, xa11y_core::Error::Unsupported { .. }),
+            "got {error:?}"
+        );
+        let text = error.to_string();
+        for needle in ["_NET_CLOSE_WINDOW", "no window manager", "WM_DELETE_WINDOW"] {
+            assert!(text.contains(needle), "{needle:?} missing from: {text}");
+        }
+        // Nothing reached the undeletable client: no substitute was tried.
+        observer
+            .get_input_focus()
+            .expect("round trip")
+            .reply()
+            .expect("round trip reply");
+        while let Some(event) = observer.poll_for_event().expect("poll") {
+            if let x11rb::protocol::Event::ClientMessage(event) = event {
+                panic!(
+                    "unexpected ClientMessage to {:#x} (undeletable is {undeletable:#x})",
+                    event.window
+                );
+            }
+        }
+    }
+
+    /// The real thing: the AccessKit + winit test app on a bare X server, with
+    /// no window manager to forward a close. winit lists WM_DELETE_WINDOW and
+    /// turns it into `CloseRequested`, on which the test app exits.
+    #[test]
+    #[ignore = "requires Xvfb and a built xa11y-test-app; run through scripts/run_integ_tests.sh"]
+    fn x11_close_without_window_manager_closes_winit_test_app() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let app_bin = std::env::var_os("XA11Y_TEST_APP_BIN")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../target/debug/xa11y-test-app")
+            });
+        assert!(
+            app_bin.exists(),
+            "{} not found: build the workspace first (or set XA11Y_TEST_APP_BIN)",
+            app_bin.display()
+        );
+        let (_xvfb, display) = isolated_xvfb();
+        struct App(std::process::Child);
+        impl Drop for App {
+            fn drop(&mut self) {
+                // Teardown: the app normally exited already; kill is a no-op then.
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut app = App(Command::new(&app_bin)
+            .arg("--headless")
+            .env("DISPLAY", &display)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn xa11y-test-app"));
+        let backend =
+            super::X11WindowBackend::connect(Some(&display)).expect("X11 backend on bare Xvfb");
+        assert!(
+            !backend.has_window_manager,
+            "fixture: the isolated Xvfb must run no window manager"
+        );
+        let mut element = xa11y_core::ElementData::for_role(xa11y_core::Role::Window);
+        element.handle = 301;
+        element.pid = Some(app.0.id());
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        let facts = loop {
+            match backend.facts(&element) {
+                Ok(facts) => break facts,
+                // The window maps asynchronously after spawn; until then no
+                // top-level has the app's pid.
+                Err(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(error) => panic!("test app window never bound: {error}"),
+            }
+        };
+        assert!(
+            facts.actions.contains(&"close"),
+            "winit lists WM_DELETE_WINDOW, so close must be advertised: {:?}",
+            facts.actions
+        );
+        backend
+            .close(&element)
+            .expect("close must be accepted without a window manager");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = app.0.try_wait().expect("poll test app") {
+                break status;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "test app still running 10s after close()"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        assert!(status.success(), "test app exited with {status}");
     }
 }
