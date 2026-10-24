@@ -40,6 +40,17 @@ test('exports the public API surface', () => {
   assert.equal(typeof screenshot, 'function');
 });
 
+test('every export is an ESM named export', async () => {
+  // Node finds a CommonJS module's named exports by scanning its source, so
+  // an export the scan misses fails `import { screenshot } from
+  // '@crowecawcaw/xa11y'` with a SyntaxError and is reachable only through
+  // the default import.
+  const esm = await import('../../index.js');
+  for (const name of Object.keys(xa11y)) {
+    assert.equal(esm[name], xa11y[name], `import { ${name} } from '@crowecawcaw/xa11y'`);
+  }
+});
+
 test('Subscription extends EventEmitter', () => {
   assert.ok(Subscription.prototype instanceof EventEmitter);
 });

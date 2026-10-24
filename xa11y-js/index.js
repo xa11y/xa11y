@@ -819,13 +819,36 @@ function screenshot(options) {
 
 // ── Re-exports ──────────────────────────────────────────────────────────────
 
+// Node's ESM loader finds this module's named exports by statically scanning
+// the object literal below, and stops reading it at the first value that is
+// not a plain identifier. Keep every value a local name, or `import {
+// screenshot } from '@crowecawcaw/xa11y'` fails with a SyntaxError.
+const {
+  Element,
+  Event,
+  InputSim,
+  Locator,
+  Screenshot,
+  _makeTestLocator,
+  _makeTestApp,
+  _makeTestActionProbe,
+  _makeDisconnectedSubscription,
+} = native;
+// Wrapped, unlike the helpers above: these lookups fail on purpose in the
+// shell tests (no such surface / an ambiguous shell), and a test asserting
+// the structured diagnosis must see the same typed error a consumer of
+// `ShellSurface.byKind` gets.
+const _makeTestShellSurfaces = wrap(native._makeTestShellSurfaces);
+const _makeTestShellSurfaceByKind = wrap(native._makeTestShellSurfaceByKind);
+const _makeTestAmbiguousShellSurfaceByKind = wrap(native._makeTestAmbiguousShellSurfaceByKind);
+
 module.exports = {
   App,
-  Element: native.Element,
-  Event: native.Event,
-  InputSim: native.InputSim,
-  Locator: native.Locator,
-  Screenshot: native.Screenshot,
+  Element,
+  Event,
+  InputSim,
+  Locator,
+  Screenshot,
   ShellSurface,
   Subscription,
   getDefaultTimeout,
@@ -846,16 +869,12 @@ module.exports = {
   PlatformError,
 
   // @internal -- used by unit tests
-  _makeTestLocator: native._makeTestLocator,
-  _makeTestApp: native._makeTestApp,
-  _makeTestActionProbe: native._makeTestActionProbe,
-  _makeDisconnectedSubscription: native._makeDisconnectedSubscription,
-  // Wrapped, unlike the helpers above: these lookups fail on purpose in the
-  // shell tests (no such surface / an ambiguous shell), and a test asserting
-  // the structured diagnosis must see the same typed error a consumer of
-  // `ShellSurface.byKind` gets.
-  _makeTestShellSurfaces: wrap(native._makeTestShellSurfaces),
-  _makeTestShellSurfaceByKind: wrap(native._makeTestShellSurfaceByKind),
-  _makeTestAmbiguousShellSurfaceByKind: wrap(native._makeTestAmbiguousShellSurfaceByKind),
+  _makeTestLocator,
+  _makeTestApp,
+  _makeTestActionProbe,
+  _makeDisconnectedSubscription,
+  _makeTestShellSurfaces,
+  _makeTestShellSurfaceByKind,
+  _makeTestAmbiguousShellSurfaceByKind,
   _Subscription: Subscription,
 };
