@@ -214,6 +214,10 @@ Text is inserted through the accessibility API. Keyboard events are never simula
 - **macOS** sets `AXFocused` to false on the element.
 - **Linux and Windows** have no direct API equivalent, so the action is unsupported.
 
+### Unresponsive apps (macOS)
+
+xa11y caps each accessibility message it sends at 2 seconds, where the system default is about 6. A read or action on an app that doesn't answer in time fails with `Error::Platform` carrying `kAXErrorCannotComplete` (-25204). The error message names the app and its PID.
+
 ### Coordinates
 
 Bounds use desktop coordinates with origin at the top-left of the primary display. Windows uses physical pixels. macOS and Linux use logical points where available. Use the screenshot coordinate methods to map bounds onto captured pixels. Note:
