@@ -641,7 +641,63 @@ fn read_raw_attr(element: AXUIElementRef, attribute: &str) -> RawAttr {
 /// platform failure and propagates (tenet 1), never an empty success that
 /// reads as "no windows".
 fn ax_windows(element: AXUIElementRef) -> Result<Vec<AXElement>> {
-    let attr = CFString::new("AXWindows");
+    ax_element_list_strict(element, "AXWindows")
+}
+
+/// The top-level children of an application element: its `AXWindows`, then
+/// any app-level `AXMenu` from `AXChildren` that is not one of them.
+///
+/// An open context menu is an `AXMenu` child of the application, never an
+/// entry in `AXWindows`. Search walks `AXChildren`, so a listing built from
+/// `AXWindows` alone missed a menu that a selector found (issue #518). The
+/// menu bar stays out, as it does for search (`should_filter_child_with_role`).
+/// Both reads are error-preserving, like [`ax_windows`]: a child that vanished
+/// between the reads is dropped, any other unreadable role is an error.
+fn app_top_level_children(app: AXUIElementRef) -> Result<Vec<AXElement>> {
+    let mut out = ax_windows(app)?;
+    let windows = out.len();
+    for child in ax_element_list_strict(app, "AXChildren")? {
+        let is_menu = match read_raw_attr(child.as_ptr(), "AXRole") {
+            RawAttr::Value(v) => {
+                if unsafe { safe_cf_get_type_id(v) } == unsafe { safe_cf_string_get_type_id() } {
+                    // Adopts the +1 retain; released when the CFString drops.
+                    let role = unsafe { CFString::wrap_under_create_rule(v as *const _) };
+                    role == "AXMenu"
+                } else {
+                    // Not a role string, so not a menu; release the copy.
+                    unsafe { safe_cf_release(v) };
+                    false
+                }
+            }
+            RawAttr::Absent => false,
+            RawAttr::Unanswered(code) => match classify_element_churn_code(i64::from(code)) {
+                ElementChurn::Gone => false,
+                ElementChurn::Unreachable | ElementChurn::Fatal => {
+                    return Err(Error::Platform {
+                        code: i64::from(code),
+                        message: format!(
+                            "AXRole read of an application child failed (AXError {code}); \
+                             cannot tell whether it is a menu"
+                        ),
+                    })
+                }
+            },
+        };
+        let already_listed = out[..windows].iter().any(|w| unsafe {
+            safe_cf_equal(w.as_ptr() as CFTypeRef, child.as_ptr() as CFTypeRef)
+        });
+        if is_menu && !already_listed {
+            out.push(child);
+        }
+    }
+    Ok(out)
+}
+
+/// Read an attribute holding an array of accessibility elements, preserving
+/// its AXError: absent / no value is an empty list, anything unanswered or
+/// malformed is an error. Each element is retained via `from_borrowed`.
+fn ax_element_list_strict(element: AXUIElementRef, attribute: &str) -> Result<Vec<AXElement>> {
+    let attr = CFString::new(attribute);
     let mut value: CFTypeRef = std::ptr::null();
     let err =
         ffi_copy_attribute_value(element, attr.as_concrete_TypeRef() as CFTypeRef, &mut value);
@@ -655,9 +711,10 @@ fn ax_windows(element: AXUIElementRef) -> Result<Vec<AXElement>> {
                     safe_cf_release(value);
                     return Err(Error::Platform {
                         code: -1,
-                        message: "AXWindows returned a non-array value; the provider answered \
-                                  malformed, not empty"
-                            .to_string(),
+                        message: format!(
+                            "{attribute} returned a non-array value; the provider answered \
+                             malformed, not empty"
+                        ),
                     });
                 }
                 let count = safe_cf_array_get_count(value);
@@ -673,14 +730,14 @@ fn ax_windows(element: AXUIElementRef) -> Result<Vec<AXElement>> {
             }
         }
         // The process answered and said it has no such attribute / no value:
-        // an application without windows, honestly reported as an empty list.
+        // e.g. an application without windows, honestly an empty list.
         AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE => Ok(vec![]),
         // Everything else — kAXErrorCannotComplete (the code a messaging
         // timeout surfaces as), kAXErrorInvalidUIElement, an ObjC exception
         // caught by the wrapper — means we did not get an answer.
         code => Err(Error::Platform {
             code: code as i64,
-            message: format!("AXUIElementCopyAttributeValue(AXWindows) failed (AXError {code})"),
+            message: format!("AXUIElementCopyAttributeValue({attribute}) failed (AXError {code})"),
         }),
     }
 }
@@ -3750,6 +3807,44 @@ impl MacOSProvider {
         false
     }
 
+    /// Snapshot `children` of `parent`, dropping system chrome.
+    ///
+    /// Filters first (cheap string checks), then builds ElementData in
+    /// parallel (each build is an IPC round-trip). A child that vanished
+    /// between the children read and its snapshot (macOS invalidates a
+    /// window's AX object during fullscreen transitions and on close) is no
+    /// longer part of this parent's live surface, so it is dropped. A child
+    /// the process did not answer for is *not* a fact about the tree —
+    /// reporting a smaller one would be indistinguishable from a genuine
+    /// subtree, so the walk fails with the platform error (tenet 1).
+    fn snapshot_children(
+        &self,
+        parent: &ElementData,
+        children: &[AXElement],
+    ) -> Result<Vec<ElementData>> {
+        let role = parent.role;
+        let name = parent.name.as_deref();
+        let filtered: Vec<&AXElement> = children
+            .iter()
+            .filter(|child| !Self::should_filter_child(role, name, child))
+            .collect();
+        let built: Vec<Result<ElementData>> = filtered
+            .par_iter()
+            .map(|child| self.build_element_data(child, parent.pid))
+            .collect();
+        let mut results: Vec<ElementData> = Vec::with_capacity(built.len());
+        for data in built {
+            match data {
+                Ok(data) => results.push(data),
+                Err(err) => match classify_element_churn(&err) {
+                    ElementChurn::Gone => {}
+                    ElementChurn::Unreachable | ElementChurn::Fatal => return Err(err),
+                },
+            }
+        }
+        Ok(results)
+    }
+
     /// Convenience wrapper that fetches role/subrole before filtering.
     fn should_filter_child(
         parent_role: Role,
@@ -4258,53 +4353,34 @@ impl Provider for MacOSProvider {
             }
             Some(element_data) => {
                 let ax = self.get_cached(element_data.handle)?;
-                let role = element_data.role;
-                let name = element_data.name.as_deref();
 
-                // An Application element's children are its top-level windows:
-                // `AXWindows` is the single canonical window-discovery source
-                // (the same answer `App::windows` now reads on every platform).
-                // Every other role keeps the raw `AXChildren` walk. The read is
-                // error-preserving on purpose — a dead app must report its
-                // failure, not an empty window list (tenet 1).
-                let ax_children_list = match role {
-                    Role::Application => ax_windows(ax.as_ptr())?,
+                // An Application element's children are its top-level
+                // windows (`AXWindows`) followed by any app-level `AXMenu`,
+                // such as an open context menu, which search reaches through
+                // `AXChildren` and `AXWindows` never lists (see
+                // `app_top_level_children`). Every other role keeps the raw
+                // `AXChildren` walk. The application read is error-preserving
+                // on purpose: a dead app must report its failure, not an
+                // empty list (tenet 1).
+                let ax_children_list = match element_data.role {
+                    Role::Application => app_top_level_children(ax.as_ptr())?,
                     _ => ax_children(ax.as_ptr()),
                 };
-
-                // Filter first (cheap string checks), then build ElementData
-                // in parallel (each build_element_data is an IPC round-trip).
-                let filtered: Vec<&AXElement> = ax_children_list
-                    .iter()
-                    .filter(|child| !Self::should_filter_child(role, name, child))
-                    .collect();
-
-                // A child that vanished between the children read and its
-                // snapshot (macOS invalidates a window's AX object during
-                // fullscreen transitions and on close) is no longer part of
-                // this parent's live surface, so it is dropped. A child the
-                // process did not answer for is *not* a fact about the tree —
-                // reporting a smaller one would be indistinguishable from a
-                // genuine subtree, so the walk fails with the platform error
-                // (tenet 1).
-                let built: Vec<Result<ElementData>> = filtered
-                    .par_iter()
-                    .map(|child| self.build_element_data(child, element_data.pid))
-                    .collect();
-                let mut results: Vec<ElementData> = Vec::with_capacity(built.len());
-                for data in built {
-                    match data {
-                        Ok(data) => results.push(data),
-                        Err(err) => match classify_element_churn(&err) {
-                            ElementChurn::Gone => {}
-                            ElementChurn::Unreachable | ElementChurn::Fatal => return Err(err),
-                        },
-                    }
-                }
-
-                Ok(results)
+                self.snapshot_children(element_data, &ax_children_list)
             }
         }
+    }
+
+    /// `App::windows` reads `AXWindows` alone: windows are all it keeps, so
+    /// the app-level menu read `get_children` adds would only cost an IPC
+    /// round-trip and a failure mode.
+    fn app_windows(&self, app: &ElementData) -> Result<Vec<ElementData>> {
+        if app.role != Role::Application {
+            return self.get_children(Some(app));
+        }
+        let ax = self.get_cached(app.handle)?;
+        let windows = ax_windows(ax.as_ptr())?;
+        self.snapshot_children(app, &windows)
     }
 
     fn find_elements_group(
