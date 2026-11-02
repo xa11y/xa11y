@@ -883,7 +883,12 @@ class InputSim:
     def key_up(self, key: str) -> None:
         """Release a key previously pressed with :meth:`key_down`."""
     def type_text(self, text: str) -> None:
-        """Type literal text into the currently focused control."""
+        """Type literal text into the currently focused control.
+
+        ``"\\r\\n"``, ``"\\r"`` and ``"\\n"`` each type one Return/Enter
+        keypress, so in a single-line field this may activate the default
+        button.
+        """
 
 # ── Screenshot ───────────────────────────────────────────────────────────────
 

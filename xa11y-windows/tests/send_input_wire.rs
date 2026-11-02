@@ -517,6 +517,23 @@ fn type_text_sends_a_crlf_line_break_as_one_enter_tap() {
 
 #[test]
 #[ignore = "injects input; run via the Windows (SendInput) CI job"]
+fn type_text_sends_a_lone_lf_or_cr_as_one_enter_tap() {
+    for text in ["a\nb", "a\rb"] {
+        let _guard = capture();
+        provider().type_text(text).expect("type_text failed");
+        let events = wait_for(6);
+        assert_eq!(
+            events.len(),
+            6,
+            "{text:?}: a, Enter, b as pairs: {events:?}"
+        );
+        let (_, vk, _, _) = expect_key(events[2]);
+        assert_eq!(vk, u32::from(VK_RETURN.0), "{text:?}: {events:?}");
+    }
+}
+
+#[test]
+#[ignore = "injects input; run via the Windows (SendInput) CI job"]
 fn type_text_of_empty_string_sends_nothing() {
     let _guard = capture();
     provider().type_text("").expect("type_text failed");

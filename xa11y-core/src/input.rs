@@ -524,6 +524,10 @@ pub trait InputProvider: Send + Sync {
     ///
     /// Backends should prefer the OS's text-input path (with IME support)
     /// over synthesising individual key presses where possible.
+    ///
+    /// Line breaks are the exception, and part of the contract: `"\r\n"`,
+    /// `"\r"` and `"\n"` each type one Return/Enter keypress, so in a
+    /// single-line field this may activate the default button.
     fn type_text(&self, text: &str) -> Result<()>;
 
     // ── Pointer (provided, override for platform fidelity) ──────────
@@ -779,6 +783,9 @@ impl Keyboard<'_> {
     /// active keyboard layout before the first key event is sent: if any
     /// character cannot be typed, the call returns [`Error::Unsupported`]
     /// naming it and its index, and nothing is typed.
+    ///
+    /// `"\r\n"`, `"\r"` and `"\n"` each type one Return/Enter keypress, so
+    /// in a single-line field this may activate the default button.
     pub fn type_text(&self, text: &str) -> Result<()> {
         self.backend.type_text(text)
     }
