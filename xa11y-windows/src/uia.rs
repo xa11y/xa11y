@@ -2318,6 +2318,7 @@ impl Provider for WindowsProvider {
         max_depth: u32,
         limit: Option<usize>,
     ) -> Result<Vec<ElementData>> {
+        xa11y_core::selector::validate_tail_segments(segments)?;
         for segment in segments {
             let mut next_candidates = Vec::new();
             for candidate in &candidates {
@@ -2348,7 +2349,8 @@ impl Provider for WindowsProvider {
                         )?;
                         next_candidates.append(&mut sub_results);
                     }
-                    Combinator::Root => unreachable!(),
+                    // `validate_tail_segments` above rejects a Root here.
+                    Combinator::Root => unreachable!("validated: no Root in tail segments"),
                 }
             }
             let mut seen = std::collections::HashSet::new();
@@ -2378,15 +2380,10 @@ impl Provider for WindowsProvider {
         limit: Option<usize>,
         max_depth: Option<u32>,
     ) -> Result<Vec<ElementData>> {
-        if group.clauses.is_empty() {
-            return Ok(vec![]);
-        }
-        // Reject any clause with zero segments early — `clause.segments[0]`
-        // below would otherwise panic. The parser doesn't produce empty
-        // clauses, but be defensive against direct `SelectorGroup` builders.
-        if group.clauses.iter().any(|c| c.segments.is_empty()) {
-            return Ok(vec![]);
-        }
+        // The AST's fields are public, so a hand-built group can break the
+        // invariants the walk below indexes on (`clause.segments[0]`, Root
+        // only first, 1-based `:nth`). Reject it before traversal.
+        group.validate()?;
 
         let max_depth_val = max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH);
 
@@ -5936,7 +5933,7 @@ mod tests {
     }
 
     #[test]
-    fn find_elements_empty_selector_returns_empty() {
+    fn find_elements_empty_selector_is_invalid() {
         let Some(provider) = try_provider() else {
             return;
         };
@@ -5947,10 +5944,11 @@ mod tests {
             return;
         };
         let empty_selector = Selector { segments: vec![] };
-        let result = provider
-            .find_elements(&root, &empty_selector, None, None)
-            .unwrap();
-        assert!(result.is_empty());
+        let result = provider.find_elements(&root, &empty_selector, None, None);
+        assert!(
+            matches!(result, Err(Error::InvalidSelector { .. })),
+            "an empty selector must be rejected, got {result:?}"
+        );
     }
 
     #[test]

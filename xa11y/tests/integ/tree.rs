@@ -673,6 +673,79 @@ mod tests {
 
     #[test]
     #[ignore]
+    fn hand_built_malformed_selector_ast_is_invalid_on_real_provider() {
+        // Issue #474: the selector AST has public fields, so a Rust caller
+        // can hand a backend shapes the parser never produces. Each backend's
+        // native `find_elements_group` / `narrow_multi_segment` override must
+        // reject them with `InvalidSelector` rather than panic in a fast path
+        // or silently match nothing.
+        use xa11y_core::selector::{Combinator, SelectorGroup};
+
+        let app = h::app_root();
+        let provider = app.provider();
+        // The app root (synthetic on Windows) and a real window, so the
+        // native subtree path is exercised as well as the walk fallback.
+        let window = app
+            .locator("window")
+            .first()
+            .element()
+            .expect("test app must expose a window");
+        let roots = [app.data.clone(), window.data().clone()];
+
+        let parse = |s: &str| xa11y_core::Selector::parse(s).expect("valid selector");
+
+        let mut root_after_first = parse("window button");
+        root_after_first.segments[1].combinator = Combinator::Root;
+        let mut nth_zero = parse("button");
+        nth_zero.segments[0].simple.nth = Some(0);
+
+        for root in &roots {
+            // Control: the same root answers a well-formed query, so an
+            // `InvalidSelector` below is the validator, not an empty walk.
+            let ok = provider
+                .find_elements_group(
+                    root,
+                    &SelectorGroup::parse("button").expect("valid group"),
+                    None,
+                    None,
+                )
+                .expect("well-formed group must succeed");
+            assert!(!ok.is_empty(), "fixture must have buttons under {root:?}");
+
+            let cases = [
+                (
+                    "Root after first segment",
+                    SelectorGroup {
+                        clauses: vec![parse("button"), root_after_first.clone()],
+                    },
+                ),
+                ("empty clauses", SelectorGroup { clauses: vec![] }),
+                (
+                    ":nth(0)",
+                    SelectorGroup {
+                        clauses: vec![nth_zero.clone()],
+                    },
+                ),
+            ];
+            for (label, group) in &cases {
+                let result = provider.find_elements_group(root, group, None, None);
+                assert!(
+                    matches!(result, Err(Error::InvalidSelector { .. })),
+                    "{label}: expected InvalidSelector, got {result:?}"
+                );
+            }
+
+            let tail = root_after_first.segments[1..].to_vec();
+            let result = provider.narrow_multi_segment(vec![root.clone()], &tail, 10, None);
+            assert!(
+                matches!(result, Err(Error::InvalidSelector { .. })),
+                "narrow_multi_segment with a Root tail: expected InvalidSelector, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
     fn selector_group_single_clause_equals_bare_selector() {
         // Single-clause groups must take the fast path and produce identical
         // results to a bare selector — no commas, no parser surprises.
