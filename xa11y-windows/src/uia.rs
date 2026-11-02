@@ -270,6 +270,9 @@ impl WindowsProvider {
                 code: e.code().0 as i64,
                 message: format!("Failed to create IUIAutomation: {}", e),
             })?;
+            // Before the warm-up, so the first cross-process call is
+            // already bounded.
+            set_uia_timeouts(&automation)?;
             // The warm-up call is part of the first touch: it is what races
             // when made concurrently, so it runs under the lock too. Its
             // failure is the provider's failure.
@@ -1189,6 +1192,177 @@ fn top_level_windows_of_pid_with(
     distinct_uia_roots(autom, cache, candidates)
 }
 
+/// How long UIA waits to *connect* to a provider before giving up.
+///
+/// Set explicitly rather than inherited from `CUIAutomation8`'s defaults, so
+/// the bound on a hung provider is a documented property of xa11y, not of the
+/// OS build (issue #507).
+const UIA_CONNECTION_TIMEOUT_MS: u32 = 2_000;
+/// How long one UIA call (a property read, a FindAll) may take once
+/// connected.
+const UIA_TRANSACTION_TIMEOUT_MS: u32 = 20_000;
+/// How long Windows lets a window go without pumping messages before
+/// `IsHungAppWindow` reports it hung. Reported as the `Timeout` elapsed time,
+/// since it is the wait the OS already observed.
+const OS_HUNG_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Apply [`UIA_CONNECTION_TIMEOUT_MS`] / [`UIA_TRANSACTION_TIMEOUT_MS`].
+///
+/// `CUIAutomation8` always implements `IUIAutomation2`, so a failed cast or
+/// setter is a real platform failure and propagates (tenet 1).
+fn set_uia_timeouts(automation: &IUIAutomation) -> Result<()> {
+    let automation2: IUIAutomation2 =
+        windows::core::Interface::cast(automation).map_err(|e| Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("IUIAutomation does not implement IUIAutomation2: {e}"),
+        })?;
+    unsafe { automation2.SetConnectionTimeout(UIA_CONNECTION_TIMEOUT_MS) }.map_err(|e| {
+        Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("IUIAutomation2.SetConnectionTimeout failed: {e}"),
+        }
+    })?;
+    unsafe { automation2.SetTransactionTimeout(UIA_TRANSACTION_TIMEOUT_MS) }.map_err(|e| {
+        Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("IUIAutomation2.SetTransactionTimeout failed: {e}"),
+        }
+    })?;
+    Ok(())
+}
+
+/// Whether Windows already considers a top-level window hung.
+///
+/// `IsHungAppWindow` is the OS's own verdict (no message pumped for
+/// [`OS_HUNG_THRESHOLD`]), read without sending the window anything. A window
+/// that is merely busy for a moment is not hung by this test, so its reads go
+/// on into UIA, which the transaction timeout bounds; only a window the OS
+/// has given up on fails fast (issue #507).
+fn window_is_hung(hwnd: HWND) -> bool {
+    unsafe { IsHungAppWindow(hwnd) }.as_bool()
+}
+
+/// A top-level window Windows considers hung.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HungWindow {
+    hwnd: HWND,
+    pid: u32,
+}
+
+/// Every interactive top-level window on the desktop that Windows considers
+/// hung, found before the desktop-wide UIA enumeration so the listing can
+/// fail fast instead of stalling on one for the transaction timeout.
+fn hung_top_level_windows() -> Result<Vec<HungWindow>> {
+    unsafe extern "system" fn collect(hwnd: HWND, param: LPARAM) -> BOOL {
+        let all = unsafe { &mut *(param.0 as *mut Vec<HWND>) };
+        all.push(hwnd);
+        true.into()
+    }
+    let mut all: Vec<HWND> = Vec::new();
+    unsafe { EnumWindows(Some(collect), LPARAM((&raw mut all) as isize)) }.map_err(|e| {
+        Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("EnumWindows failed while checking for hung windows: {e}"),
+        }
+    })?;
+    let mut hung = Vec::new();
+    for hwnd in all {
+        // Only windows a listing would read; a closed one is skipped.
+        let interactive = match is_interactive_top_level(hwnd) {
+            Ok(interactive) => interactive,
+            Err(_) if !unsafe { IsWindow(Some(hwnd)) }.as_bool() => continue,
+            Err(e) => return Err(e),
+        };
+        if interactive && window_is_hung(hwnd) {
+            let mut pid = 0u32;
+            unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+            hung.push(HungWindow { hwnd, pid });
+        }
+    }
+    Ok(hung)
+}
+
+/// Longest list of hung windows a diagnosis carries (tenet 6: bounded).
+const DIAG_HUNG_WINDOW_LIMIT: usize = 10;
+
+/// One hung window, described for a diagnosis: HWND, title, pid, executable.
+fn describe_hung_window(window: HungWindow) -> String {
+    let exe = process_image_name(window.pid)
+        .and_then(|path| {
+            std::path::Path::new(&path)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "<executable unreadable>".to_string());
+    format!(
+        "HWND {:#x} \"{}\" (pid {}, {exe})",
+        window.hwnd.0 as usize,
+        hwnd_title(window.hwnd),
+        window.pid
+    )
+}
+
+/// The [`Error::Timeout`] for a read that needs windows Windows considers
+/// hung, the same shape the Linux backend reports for an unresponsive peer.
+fn hung_windows_error(condition: String, hung: &[HungWindow]) -> Error {
+    let mut listed: Vec<String> = hung
+        .iter()
+        .take(DIAG_HUNG_WINDOW_LIMIT)
+        .map(|w| describe_hung_window(*w))
+        .collect();
+    if hung.len() > DIAG_HUNG_WINDOW_LIMIT {
+        listed.push(format!("… (+{} more)", hung.len() - DIAG_HUNG_WINDOW_LIMIT));
+    }
+    Error::timeout(OS_HUNG_THRESHOLD).diagnose(
+        xa11y_core::Diagnosis::new()
+            .condition(condition)
+            .last_observed(format!(
+                "Windows reports {} top-level window(s) not responding (IsHungAppWindow: no \
+                 message pumped for {:?}, the OS threshold, which is the elapsed time this \
+                 error reports; xa11y did not wait): {}",
+                hung.len(),
+                OS_HUNG_THRESHOLD,
+                listed.join("; ")
+            ))
+            .candidates(listed),
+    )
+}
+
+/// Map a UIA call that ran out its transaction timeout to the same
+/// [`Error::Timeout`] form; every other error passes through unchanged.
+///
+/// Applied at the app-discovery call sites (desktop listing, a pid's
+/// windows, `app_by_pid`, `focused_app`), which are where one hung app
+/// stalls everything. Element-level calls keep reporting `UIA_E_TIMEOUT` as
+/// the `Platform` error it arrives as.
+fn uia_timeout_as_timeout(err: Error, condition: impl FnOnce() -> String) -> Error {
+    match err {
+        Error::Platform { code, message } if code == i64::from(UIA_E_TIMEOUT as i32) => {
+            Error::timeout(std::time::Duration::from_millis(u64::from(
+                UIA_TRANSACTION_TIMEOUT_MS,
+            )))
+            .diagnose(
+                xa11y_core::Diagnosis::new()
+                    .condition(condition())
+                    .last_observed(format!(
+                        "no answer within the {UIA_TRANSACTION_TIMEOUT_MS} ms UIA transaction \
+                         timeout (UIA_E_TIMEOUT): {message}"
+                    )),
+            )
+        }
+        other => other,
+    }
+}
+
+/// A window's title without sending it a message (`GetWindowTextW` reads
+/// another process's caption from the window manager), so it is safe on a
+/// hung window. Empty when untitled or unreadable; the HWND identifies it.
+fn hwnd_title(hwnd: HWND) -> String {
+    let mut buf = [0u16; 256];
+    let len = unsafe { GetWindowTextW(hwnd, &mut buf) };
+    String::from_utf16_lossy(&buf[..usize::try_from(len).unwrap_or(0).min(buf.len())])
+}
+
 /// Resolve every interactive top-level HWND of a process through UIA. The
 /// returned set is native-window discovery, before UIA tree deduplication.
 fn native_windows_of_pid_with(
@@ -1226,10 +1400,27 @@ fn native_windows_of_pid_with(
         if !interactive {
             continue;
         }
+        // Reading a window Windows already considers hung blocks for the
+        // transaction timeout and then fails anyway; fail now, naming it
+        // (issue #507). A merely busy window goes on into UIA.
+        if window_is_hung(hwnd) {
+            return Err(hung_windows_error(
+                format!("the top-level windows of pid {pid} to respond"),
+                &[HungWindow { hwnd, pid }],
+            ));
+        }
         match uia_call(|| unsafe { autom.ElementFromHandleBuildCache(hwnd, cache) }) {
             Ok(el) => out.push(el),
             Err(_) if !unsafe { IsWindow(Some(hwnd)) }.as_bool() => {}
-            Err(e) => return Err(e),
+            Err(e) => {
+                return Err(uia_timeout_as_timeout(e, || {
+                    format!(
+                        "HWND {:#x} \"{}\" of pid {pid} to answer UIA",
+                        hwnd.0 as usize,
+                        hwnd_title(hwnd)
+                    )
+                }))
+            }
         }
     }
     Ok(out)
@@ -2245,6 +2436,17 @@ impl Provider for WindowsProvider {
                 // grouping now reports one Application node per process on
                 // every platform, and the windows are the node's children.
                 let root = uia_call(|| unsafe { self.automation.GetRootElement() })?;
+                // A desktop-wide UIA query that reaches a hung app stalls
+                // for the transaction timeout. Check first and fail the
+                // listing with every hung window named, as the Linux backend
+                // does, rather than stall or drop the app (issue #507).
+                let hung = hung_top_level_windows()?;
+                if !hung.is_empty() {
+                    return Err(hung_windows_error(
+                        "every top-level window on the desktop to respond".to_string(),
+                        &hung,
+                    ));
+                }
                 let condition = uia_call(|| unsafe {
                     self.automation.CreatePropertyCondition(
                         UIA_ControlTypePropertyId,
@@ -2253,6 +2455,9 @@ impl Provider for WindowsProvider {
                 })?;
                 let found = uia_call(|| unsafe {
                     root.FindAllBuildCache(TreeScope_Children, &condition, &self.batch_request)
+                })
+                .map_err(|e| {
+                    uia_timeout_as_timeout(e, || "the desktop's top-level windows".to_string())
                 })?;
 
                 let mut windows: Vec<(IUIAutomationElement, u32)> = Vec::new();
@@ -2615,6 +2820,18 @@ impl Provider for WindowsProvider {
     /// missing-entry shape: the process's windows, not its first window,
     /// are what the pid means).
     fn app_by_pid(&self, pid: u32) -> Result<ElementData> {
+        // A hung window of this pid would stall the UIA search below for the
+        // transaction timeout; fail fast naming it instead (issue #507).
+        let hung: Vec<HungWindow> = hung_top_level_windows()?
+            .into_iter()
+            .filter(|w| w.pid == pid)
+            .collect();
+        if !hung.is_empty() {
+            return Err(hung_windows_error(
+                format!("the top-level windows of pid {pid} to respond"),
+                &hung,
+            ));
+        }
         let root = uia_call(|| unsafe { self.automation.GetRootElement() })?;
         let value = pid_variant(pid)?;
         let pid_condition = uia_call(|| unsafe {
@@ -2660,10 +2877,13 @@ impl Provider for WindowsProvider {
                 );
             }
             Err(e) => {
-                return Err(Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!("FindFirstBuildCache(ProcessId={pid}) failed: {e}"),
-                });
+                return Err(uia_timeout_as_timeout(
+                    Error::Platform {
+                        code: e.code().0 as i64,
+                        message: format!("FindFirstBuildCache(ProcessId={pid}) failed: {e}"),
+                    },
+                    || format!("a top-level window of pid {pid}"),
+                ));
             }
         };
         // The representative window serves only the fallback name source of
@@ -2690,22 +2910,35 @@ impl Provider for WindowsProvider {
         if hwnd.0.is_null() {
             return Err(Error::selector_not_matched("focused application"));
         }
-        let el = uia_call(|| unsafe { self.automation.ElementFromHandle(hwnd) })?;
-        // A failing read propagates with its HRESULT; this branch is reserved
-        // for a *successfully returned* zero pid (an honest "no owning
-        // process", tenet 1 — not "no foreground app").
-        let pid = unsafe { el.CurrentProcessId() }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!(
-                "IUIAutomationElement.CurrentProcessId failed for the foreground window: {e}"
-            ),
-        })? as u32;
+        // The pid comes from the window manager, which answers even when the
+        // app cannot.
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        // A window whose owner the window manager cannot name (an honest "no
+        // owning process", tenet 1 — not "no foreground app").
         if pid == 0 {
             return Err(Error::Platform {
                 code: -1,
                 message: "foreground window returns pid 0 (no owning process)".to_string(),
             });
         }
+        // `App::list` / `App::find` tag the foreground app through here, so a
+        // hung foreground app must fail fast rather than stall them in UIA.
+        if window_is_hung(hwnd) {
+            return Err(hung_windows_error(
+                "the foreground window to respond".to_string(),
+                &[HungWindow { hwnd, pid }],
+            ));
+        }
+        let el = uia_call(|| unsafe { self.automation.ElementFromHandle(hwnd) }).map_err(|e| {
+            uia_timeout_as_timeout(e, || {
+                format!(
+                    "the foreground window HWND {:#x} \"{}\" (pid {pid}) to answer UIA",
+                    hwnd.0 as usize,
+                    hwnd_title(hwnd)
+                )
+            })
+        })?;
         // The foreground window is the representative; only its title can
         // fall back as the name source of the synthesized node.
         self.build_synthetic_app_data(pid, &el)
@@ -5786,6 +6019,68 @@ mod tests {
     fn provider_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<WindowsProvider>();
+    }
+
+    #[test]
+    fn uia_timeouts_are_set_explicitly() {
+        let Some(provider) = try_provider() else {
+            return;
+        };
+        let automation2: IUIAutomation2 = windows::core::Interface::cast(&provider.automation)
+            .expect("CUIAutomation8 implements IUIAutomation2");
+        assert_eq!(
+            unsafe { automation2.ConnectionTimeout() }.expect("ConnectionTimeout reads"),
+            UIA_CONNECTION_TIMEOUT_MS
+        );
+        assert_eq!(
+            unsafe { automation2.TransactionTimeout() }.expect("TransactionTimeout reads"),
+            UIA_TRANSACTION_TIMEOUT_MS
+        );
+    }
+
+    #[test]
+    fn hung_windows_error_is_a_timeout_naming_each_window() {
+        let windows: Vec<HungWindow> = (1..=12)
+            .map(|i| HungWindow {
+                hwnd: HWND(i as *mut core::ffi::c_void),
+                pid: 4000 + i,
+            })
+            .collect();
+        let err = hung_windows_error("the desktop to respond".into(), &windows);
+        let Error::Timeout { elapsed, diagnosis } = &err else {
+            panic!("expected Timeout, got {err:?}");
+        };
+        assert_eq!(*elapsed, OS_HUNG_THRESHOLD);
+        let d = diagnosis.as_deref().expect("diagnosis attached");
+        assert_eq!(d.condition.as_deref(), Some("the desktop to respond"));
+        let observed = d.last_observed.as_deref().expect("last_observed");
+        assert!(observed.contains("12 top-level window(s)"), "{observed}");
+        assert!(observed.contains("pid 4001"), "{observed}");
+        // Bounded: ten listed plus a remainder line.
+        assert_eq!(d.candidates.len(), DIAG_HUNG_WINDOW_LIMIT + 1);
+        assert!(d.candidates.last().is_some_and(|c| c.contains("+2 more")));
+    }
+
+    #[test]
+    fn uia_timeout_maps_to_timeout_and_others_pass_through() {
+        let timed_out = Error::Platform {
+            code: i64::from(UIA_E_TIMEOUT as i32),
+            message: "FindAll".into(),
+        };
+        let err = uia_timeout_as_timeout(timed_out, || "the desktop".into());
+        assert!(matches!(err, Error::Timeout { .. }), "{err:?}");
+        assert_eq!(
+            err.diagnosis().and_then(|d| d.condition.clone()).as_deref(),
+            Some("the desktop")
+        );
+        let other = Error::Platform {
+            code: -1,
+            message: "x".into(),
+        };
+        assert!(matches!(
+            uia_timeout_as_timeout(other, || unreachable!()),
+            Error::Platform { code: -1, .. }
+        ));
     }
 
     #[test]

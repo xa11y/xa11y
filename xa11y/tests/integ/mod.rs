@@ -23,6 +23,8 @@
 //!   AX messaging timeout and name the app (macOS-only, gated the same way).
 //! * `unresponsive_linux` — enumeration with a `SIGSTOP`ped app on the
 //!   AT-SPI bus (Linux-only, gated the same way).
+//! * `unresponsive_windows` — enumeration with a hung window on the desktop
+//!   (Windows-only, gated the same way).
 //!
 //! The helpers in this file (`app_root`, `one`, `named`, `act`, `try_act`)
 //! are reached from submodule tests via `use crate::integ as h;`.
@@ -43,6 +45,9 @@ pub mod unresponsive_macos;
 
 #[cfg(target_os = "windows")]
 pub mod events_windows;
+
+#[cfg(target_os = "windows")]
+pub mod unresponsive_windows;
 
 #[cfg(target_os = "linux")]
 pub mod events_linux;
