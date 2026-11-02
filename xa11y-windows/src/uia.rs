@@ -1638,13 +1638,33 @@ fn build_snapshot_data(
 /// Build the batch request that describes which properties and patterns
 /// to pre-fetch. Created once per provider, used on every query.
 fn create_batch_request(automation: &IUIAutomation) -> Result<IUIAutomationCacheRequest> {
+    create_cache_request(automation, BATCH_PROPERTIES)
+}
+
+/// EXPERIMENT (#545 winforms heap corruption): the event handlers' cache
+/// request without the two properties #545 added.
+fn create_event_cache_request(automation: &IUIAutomation) -> Result<IUIAutomationCacheRequest> {
+    let props: Vec<UIA_PROPERTY_ID> = BATCH_PROPERTIES
+        .iter()
+        .copied()
+        .filter(|p| {
+            *p != UIA_LegacyIAccessibleDefaultActionPropertyId && *p != UIA_FrameworkIdPropertyId
+        })
+        .collect();
+    create_cache_request(automation, &props)
+}
+
+fn create_cache_request(
+    automation: &IUIAutomation,
+    properties: &[UIA_PROPERTY_ID],
+) -> Result<IUIAutomationCacheRequest> {
     let request = uia_call(|| unsafe { automation.CreateCacheRequest() })?;
 
     // The property list is a fixed constant array of valid UIA property IDs.
     // If AddProperty ever fails here, something is structurally wrong with the
     // UIA environment (e.g. COM state corrupted). Propagate rather than
     // silently producing a half-configured cache request (tenet 1).
-    for prop in BATCH_PROPERTIES {
+    for prop in properties {
         unsafe { request.AddProperty(*prop) }.map_err(|e| Error::Platform {
             code: e.code().0 as i64,
             message: format!("AddProperty({:?}) failed: {e}", prop),
@@ -5374,7 +5394,7 @@ impl WindowsProvider {
         // with our standard batch of properties pre-fetched. We clone the
         // provider's shared request so we don't rely on a mutable handle
         // held elsewhere.
-        let cache = create_batch_request(&self.automation)?;
+        let cache = create_event_cache_request(&self.automation)?;
 
         let focus: IUIAutomationFocusChangedEventHandler = FocusHandler {
             ctx: ctx.clone(),
