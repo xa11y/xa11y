@@ -287,11 +287,13 @@ def test_action_resize_to_requires_a_size_and_dispatches_it(
     _, _, width, height = _window_bounds(run_cli, app_pid)
     resized = False
     try:
+        # Shrink rather than grow: a window already filling a small display's
+        # visible frame cannot grow (see the MCP resize test in test_mcp.py).
         rc, stdout, stderr = run_cli(
             "action",
             "resize-to",
             "--size",
-            f"{width + 50},{height + 50}",
+            f"{width - 50},{height - 50}",
             "window, dialog",
             "--pid",
             str(app_pid),
@@ -339,8 +341,8 @@ def test_action_resize_to_requires_a_size_and_dispatches_it(
             _wait_for_bounds(
                 run_cli,
                 app_pid,
-                lambda b: abs(b[2] - (width + 50)) <= 2
-                and abs(b[3] - (height + 50)) <= 2,
+                lambda b: abs(b[2] - (width - 50)) <= 2
+                and abs(b[3] - (height - 50)) <= 2,
                 "resize-to to change the reported size",
             )
             rc, _, stderr = run_cli(

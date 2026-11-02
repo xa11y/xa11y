@@ -869,7 +869,12 @@ def test_mcp_resize_to_mutates_and_restores_window_bounds(mcp, app_pid, app_name
     if not bounds:
         pytest.skip("the resize_to window reports no restorable bounds")
     original = (bounds["width"], bounds["height"])
-    resized_to = (original[0] + 50, original[1] + 50)
+    # Shrink, never grow: the window server keeps a window inside the screen's
+    # visible frame, and on a small runner display the test app opens already
+    # filling the visible height, so a grown target is refused (the Qt/macOS
+    # cell failed exactly that way). A smaller rect always fits; every fixture
+    # stays above its minimum size 50 points down.
+    resized_to = (original[0] - 50, original[1] - 50)
     needs_restore = False
     try:
         resized = mcp.call_tool(

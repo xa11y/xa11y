@@ -2547,6 +2547,161 @@ fn settle_window_position(
     }
 }
 
+// ── Window Size Settling ──────────────────────────────────────────────────────
+
+/// Read `AXSize` with the same failure distinction as
+/// [`read_window_position`]: a failed or malformed read is an error, and only
+/// a genuinely absent attribute is `None`.
+fn read_window_size(
+    el_ptr: AXUIElementRef,
+    action: &str,
+    role: Role,
+) -> Result<Option<(f64, f64)>> {
+    match read_raw_attr(el_ptr, "AXSize") {
+        RawAttr::Value(value) => {
+            let mut size = CGSize::default();
+            let ok = unsafe {
+                safe_ax_value_get_value(value, AX_VALUE_CGSIZE, &mut size as *mut _ as *mut c_void)
+            };
+            unsafe { safe_cf_release(value) };
+            if ok {
+                Ok(Some((size.width, size.height)))
+            } else {
+                Err(Error::Platform {
+                    code: -1,
+                    message: format!(
+                        "AXSize returned a non-size value while handling {action} on a \
+                         {role}; the size is unknown"
+                    ),
+                })
+            }
+        }
+        RawAttr::Absent => Ok(None),
+        RawAttr::Unanswered(code) => Err(Error::Platform {
+            code: code as i64,
+            message: format!(
+                "AXSize read failed while handling {action} on a {role} (AXError {code}); \
+                 the size is unknown"
+            ),
+        }),
+    }
+}
+
+/// Set the window's absolute AX size once.
+fn set_window_size(
+    el_ptr: AXUIElementRef,
+    width: u32,
+    height: u32,
+    action: &str,
+    role: Role,
+) -> Result<()> {
+    let value = unsafe { safe_ax_value_create_cg_size(f64::from(width), f64::from(height)) };
+    if value.is_null() {
+        return Err(Error::Platform {
+            code: -1,
+            message: "Failed to create CGSize AXValue for window resize".to_string(),
+        });
+    }
+    let attr = CFString::new("AXSize");
+    let err = do_set_attribute(el_ptr, &attr, value);
+    unsafe { safe_cf_release(value) };
+    if err != AX_ERROR_SUCCESS {
+        return Err(action_error(el_ptr, err, action, role, "Set AXSize failed"));
+    }
+    Ok(())
+}
+
+/// What `resize_to` saw when the window would not take the requested size:
+/// the requested rect and the one the window actually reports, so the error
+/// says which way it was refused without a re-run.
+fn describe_refused_resize(
+    width: u32,
+    height: u32,
+    observed_size: (f64, f64),
+    origin: &str,
+) -> String {
+    let (ow, oh) = observed_size;
+    format!(
+        "requested {width}x{height} at origin {origin} but the window reports {ow}x{oh}; \
+         AXSize accepted the write and the window refused it. The window server \
+         constrains windows to the screen's visible frame (and the app to its own \
+         minimum/maximum size), so a size that does not fit there is refused"
+    )
+}
+
+/// Wait until `AXSize` reflects the requested size, re-issuing the absolute
+/// write while it does not — the `resize_to` counterpart of
+/// [`settle_window_position`].
+///
+/// `AXUIElementSetAttributeValue(AXSize)` returns success when the window
+/// *received* the request, not when it applied it, and macOS silently keeps
+/// the old frame for a size the window cannot take (one already filling the
+/// visible height cannot grow taller). Without this read-back `resize_to`
+/// reported `ok` for a resize that never happened (tenet 1). Element churn is
+/// handled exactly as in the move settle.
+fn settle_window_size(
+    el_ptr: AXUIElementRef,
+    width: u32,
+    height: u32,
+    action: &str,
+    role: Role,
+) -> Result<()> {
+    let app = owning_app_element(el_ptr, action, role)?;
+    let deadline = Instant::now() + WINDOW_POSITION_SETTLE_BUDGET;
+    let expected = (f64::from(width), f64::from(height));
+    let mut last_observed: Option<String> = None;
+    let mut fresh: Option<AXElement> = None;
+    loop {
+        let target = fresh.as_ref().map_or(el_ptr, |el| el.as_ptr());
+        let failure = match read_window_size(target, action, role) {
+            Ok(Some(actual)) => {
+                if position_near(actual, expected) {
+                    return Ok(());
+                }
+                // The origin is context for the error only, so a failed
+                // origin read is reported in that context rather than
+                // replacing the size the window did report.
+                let origin = match read_window_position(target, action, role) {
+                    Ok(Some((x, y))) => format!("({x}, {y})"),
+                    Ok(None) => "(no AXPosition)".to_string(),
+                    Err(err) => format!("(origin unreadable: {err})"),
+                };
+                last_observed = Some(describe_refused_resize(width, height, actual, &origin));
+                set_window_size(target, width, height, action, role).err()
+            }
+            Ok(None) => {
+                last_observed = Some("the window has no AXSize attribute".to_string());
+                set_window_size(target, width, height, action, role).err()
+            }
+            Err(err) => Some(err),
+        };
+        if let Some(err) = failure {
+            match classify_element_churn(&err) {
+                ElementChurn::Gone => {
+                    last_observed = Some(err.to_string());
+                    if let Some(found) = fresh_target_in_app(app.as_ptr(), el_ptr)? {
+                        fresh = Some(found);
+                    }
+                }
+                ElementChurn::Unreachable | ElementChurn::Fatal => return Err(err),
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(Error::timeout(WINDOW_POSITION_SETTLE_BUDGET).diagnose(
+                xa11y_core::Diagnosis::new()
+                    .condition(format!(
+                        "window reaches size {width}x{height} within {} points",
+                        WINDOW_POSITION_TOLERANCE
+                    ))
+                    .last_observed(last_observed.unwrap_or_else(|| {
+                        "AXSize could not be observed before the deadline".to_string()
+                    })),
+            ));
+        }
+        std::thread::sleep(WINDOW_POSITION_SETTLE_INTERVAL);
+    }
+}
+
 // ── Role Mapping ──────────────────────────────────────────────────────────────
 
 fn map_ax_role(role: &str, subrole: Option<&str>) -> Role {
@@ -4878,26 +5033,8 @@ impl Provider for MacOSProvider {
                 role: element.role,
             });
         }
-        let value = unsafe { safe_ax_value_create_cg_size(f64::from(width), f64::from(height)) };
-        if value.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "Failed to create CGSize AXValue for window resize".to_string(),
-            });
-        }
-        let attr = CFString::new("AXSize");
-        let err = do_set_attribute(ax.as_ptr(), &attr, value);
-        unsafe { safe_cf_release(value) };
-        if err != AX_ERROR_SUCCESS {
-            return Err(action_error(
-                ax.as_ptr(),
-                err,
-                "resize_to",
-                element.role,
-                "Set AXSize failed",
-            ));
-        }
-        Ok(())
+        set_window_size(ax.as_ptr(), width, height, "resize_to", element.role)?;
+        settle_window_size(ax.as_ptr(), width, height, "resize_to", element.role)
     }
 
     // ── Typed operations ────────────────────────────────────────────
@@ -5542,6 +5679,22 @@ mod tests {
         // being retried into a timeout.
         let result = settle_window_position(std::ptr::null(), 10, 20, "move_to", Role::Window);
         assert!(matches!(result, Err(Error::Platform { .. })));
+    }
+
+    #[test]
+    fn settle_window_size_propagates_unreadable_element() {
+        // Same contract as the move settle: an unreadable target surfaces its
+        // platform failure instead of a resize reported as applied.
+        let result = settle_window_size(std::ptr::null(), 900, 700, "resize_to", Role::Window);
+        assert!(matches!(result, Err(Error::Platform { .. })));
+    }
+
+    #[test]
+    fn refused_resize_names_the_requested_and_observed_rects() {
+        let msg = describe_refused_resize(900, 723, (850.0, 673.0), "(0, 31)");
+        assert!(msg.contains("requested 900x723 at origin (0, 31)"), "{msg}");
+        assert!(msg.contains("window reports 850x673"), "{msg}");
+        assert!(msg.contains("visible frame"), "{msg}");
     }
 
     #[test]

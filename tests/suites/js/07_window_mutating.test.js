@@ -497,7 +497,9 @@ test('resizeTo() changes the reported bounds and restores the original size', as
     return;
   }
   const { width, height } = win.bounds;
-  const resizedBounds = { width: width + 50, height: height + 50 };
+  // Shrink rather than grow: a window filling a small display's visible
+  // frame cannot grow, and macOS resizeTo() now reports that refusal.
+  const resizedBounds = { width: width - 50, height: height - 50 };
   try {
     await win.resizeTo(resizedBounds.width, resizedBounds.height);
     if (appEnv === 'qt' && process.platform === 'win32') {
@@ -783,7 +785,7 @@ test('Locator resizeTo() dispatches and restores the original size', async (t) =
   }
   const { width, height } = win.bounds;
   try {
-    await locator.resizeTo(width + 50, height + 50);
+    await locator.resizeTo(width - 50, height - 50);
     if (appEnv === 'qt' && process.platform === 'win32') {
       await waitUntil(async () => {
         const current = await currentWindow(app, win, 'resize_to');
@@ -822,7 +824,7 @@ test('Locator resizeTo() dispatches and restores the original size', async (t) =
       const current = await currentWindow(app, win, 'resize_to');
       return current !== null && boundsNear(
         current.bounds,
-        { width: width + 50, height: height + 50 },
+        { width: width - 50, height: height - 50 },
         ['width', 'height'],
       );
     }, 5000, 'Locator.resizeTo() to change the reported size');
