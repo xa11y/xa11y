@@ -59,7 +59,7 @@ Roles not recognized by a platform map to `Unknown`.
 
 | xa11y Action | macOS | Linux (AT-SPI) | Windows (UIA) |
 | --- | --- | --- | --- |
-| `Press` | AXPress *(AXOpen when the element has AXOpen and no AXPress)* | click, activate, press, invoke | InvokePattern |
+| `Press` | AXPress *(AXOpen when the element has AXOpen and no AXPress)* | click, activate, press, invoke | InvokePattern, TogglePattern, SelectionItemPattern, or ExpandCollapsePattern. LegacyIAccessible.DoDefaultAction only for an element with none of those and a non-empty MSAA default action |
 | `Focus` | set AXFocused=true | Component.GrabFocus | SetFocus |
 | `Blur` | set AXFocused=false | *(not directly supported)* | *(not directly supported)* |
 | `Toggle` | AXPress *(on checkbox)* | toggle, check, uncheck | TogglePattern |
@@ -73,6 +73,8 @@ Roles not recognized by a platform map to `Unknown`.
 | `Decrement` | AXDecrement | decrement *(or Value -step)* | RangeValuePattern *(-step)* |
 | `ShowMenu` | AXShowMenu | menu, showmenu, popup | ExpandCollapsePattern |
 | `ScrollIntoView` | AXScrollToVisible *(when advertised)* | Component.ScrollTo | ScrollItemPattern |
+
+On Windows, the MSAA default action stands in for `Press` only on an element served through MSAA, where the UIA `FrameworkId` is `Win32`, `WinForm`, or empty. Native UIA providers such as Chromium keep their own choice. Each Windows element's `raw` map lists the UIA activation patterns it has under `uia_activation_patterns`, and its provider under `uia_framework_id`.
 
 Window verbs map differently again, because each platform's window control
 API is separate from its element-action interface:
