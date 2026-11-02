@@ -12,5 +12,5 @@ mcp==2.3.0
 # Declared rather than leaned on as a transitive dep of mcp.
 jsonschema>=4.26.0
 
-pytest>=9.1.1
+pytest>=9.2.0
 pytest-timeout>=2.4.0
