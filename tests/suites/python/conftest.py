@@ -566,6 +566,13 @@ APP_CONFIGS: dict[str, dict] = {
         # nameless remainder of the tree is not verified clean yet, so the
         # opt-in whole-tree guard stays off.
         "expect_no_unknown_roles": False,
+        # An element whose only activation is the MSAA default action (no
+        # Invoke/Toggle/SelectionItem/ExpandCollapse) — LegacyTile in
+        # test-apps/winforms/Program.cs. Each press bumps the status label's
+        # count. Only this app has one; other configs omit the keys and
+        # test_legacy_default_action_press skips.
+        "legacy_press_name": "Legacy Tile",
+        "legacy_press_status_prefix": "Legacy activations: ",
         "window_name_contains": "xa11y-winforms-test-app",
         "submit_button_name": "Submit",
         "add_item_button_name": "Add Item",

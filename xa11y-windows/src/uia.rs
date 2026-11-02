@@ -1564,6 +1564,29 @@ fn build_snapshot_data(
         if let Some(ref d) = description {
             raw.insert("uia_help_text".into(), serde_json::Value::String(d.clone()));
         }
+        if let Some(framework) = uia_cached_bstr(element, UIA_FrameworkIdPropertyId) {
+            raw.insert(
+                "uia_framework_id".into(),
+                serde_json::Value::String(framework),
+            );
+        }
+        // Which UIA activation patterns `press` could dispatch to, so a
+        // caller (and the integ suite) can tell which mechanism a `press`
+        // advertisement stands for.
+        let activation: Vec<serde_json::Value> = [
+            ("invoke", patterns.invoke.is_some()),
+            ("toggle", patterns.toggle.is_some()),
+            ("selection_item", patterns.selection_item.is_some()),
+            ("expand_collapse", patterns.expand_collapse.is_some()),
+        ]
+        .into_iter()
+        .filter(|(_, present)| *present)
+        .map(|(name, _)| serde_json::Value::String(name.into()))
+        .collect();
+        raw.insert(
+            "uia_activation_patterns".into(),
+            serde_json::Value::Array(activation),
+        );
         raw
     };
 
@@ -1668,6 +1691,13 @@ const BATCH_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     // MSAA role — the only role signal for providers that publish no UIA
     // control type (see `map_msaa_role`).
     UIA_LegacyIAccessibleRolePropertyId,
+    // MSAA default action — advertises `press` on elements whose only
+    // activation is LegacyIAccessible.DoDefaultAction (see `get_actions`).
+    UIA_LegacyIAccessibleDefaultActionPropertyId,
+    // Which provider framework serves the element. Gates the MSAA default
+    // action as `press` to MSAA-proxied elements (see
+    // `legacy_default_action_is_activation`).
+    UIA_FrameworkIdPropertyId,
 ];
 
 /// Interfaces needed while turning a cached UIA element into ElementData.
@@ -1711,6 +1741,59 @@ fn uia_get(arr: &IUIAutomationElementArray, index: i32) -> Option<IUIAutomationE
 fn is_pattern_absent(err: &windows::core::Error) -> bool {
     let code = err.code().0;
     code == E_NOINTERFACE.0 || code == UIA_E_INVALIDOPERATION as i32 || code == 0
+}
+
+/// Acquire a live pattern, mapping "the element has no such pattern" to
+/// `Ok(None)` and every other failure to `Error::Platform` (tenet 1).
+fn current_pattern<T: windows::core::Interface>(
+    element: &IUIAutomationElement,
+    id: UIA_PATTERN_ID,
+    what: &str,
+) -> Result<Option<T>> {
+    match unsafe { element.GetCurrentPatternAs::<T>(id) } {
+        Ok(pattern) => Ok(Some(pattern)),
+        Err(e) if is_pattern_absent(&e) => Ok(None),
+        Err(e) => Err(Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("acquiring {what} failed: {e}"),
+        }),
+    }
+}
+
+/// Whether `LegacyIAccessible.DoDefaultAction` is this element's `press`.
+///
+/// Only when it is the *sole* activation of an element exposed through MSAA:
+/// the element has none of Invoke, Toggle, SelectionItem, or ExpandCollapse,
+/// MSAA reports a non-empty default action, and the element is served by the
+/// MSAA side of UIA (see [`is_msaa_framework`]). An element with a UIA
+/// activation pattern keeps that pattern as its `press`; the default action is
+/// never a second try after it (issue #505, tenet 1). A native UIA provider
+/// that withheld every activation pattern did so on purpose (Chromium's
+/// "click ancestor" default action is not this element's activation), so its
+/// default action is not promoted either.
+///
+/// Advertisement (`get_actions`) and dispatch (`press`) both call this, so
+/// they cannot disagree.
+fn legacy_default_action_is_activation(
+    has_activation_pattern: bool,
+    default_action: Option<&str>,
+    framework_id: Option<&str>,
+) -> bool {
+    !has_activation_pattern
+        && is_msaa_framework(framework_id)
+        && default_action.is_some_and(|a| !a.trim().is_empty())
+}
+
+/// Whether a UIA `FrameworkId` names an element exposed through MSAA rather
+/// than a native UIA provider: the Win32 MSAA proxy (`"Win32"`), WinForms
+/// accessible objects (`"WinForm"`), or a proxied element that reports none.
+/// Native providers name themselves (`"Chrome"`, `"XAML"`, `"WPF"`, `"Qt"`,
+/// `"DirectUI"`, …) and are excluded.
+fn is_msaa_framework(framework_id: Option<&str>) -> bool {
+    matches!(
+        framework_id.map(str::trim),
+        None | Some("" | "Win32" | "WinForm")
+    )
 }
 
 /// The stable identity of a UIA element, or `None` when it has none.
@@ -2813,11 +2896,16 @@ impl Provider for WindowsProvider {
         // applies to the *semantic* verb (`press` = "activate this element"),
         // not the underlying API — each branch below is Windows' canonical
         // implementation of that semantic for the element's pattern.
+        //
+        // Each lookup distinguishes "pattern absent" (try the next) from a
+        // real COM failure (propagate): a wedged provider must not fall
+        // through to a different activation (tenet 1).
         let uia_element = self.get_cached(element.handle)?;
-        // Try InvokePattern (buttons, menu items)
-        if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId)
-        } {
+        if let Some(pattern) = current_pattern::<IUIAutomationInvokePattern>(
+            &uia_element,
+            UIA_InvokePatternId,
+            "InvokePattern",
+        )? {
             unsafe { pattern.Invoke() }.or_else(|e| {
                 if is_event_subscriber_failure(&e) {
                     Ok(())
@@ -2830,10 +2918,11 @@ impl Provider for WindowsProvider {
             })?;
             return Ok(());
         }
-        // Try TogglePattern (checkboxes, switches)
-        if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
-        } {
+        if let Some(pattern) = current_pattern::<IUIAutomationTogglePattern>(
+            &uia_element,
+            UIA_TogglePatternId,
+            "TogglePattern",
+        )? {
             unsafe { pattern.Toggle() }.or_else(|e| {
                 if is_event_subscriber_failure(&e) {
                     Ok(())
@@ -2846,12 +2935,11 @@ impl Provider for WindowsProvider {
             })?;
             return Ok(());
         }
-        // Try SelectionItemPattern (list items, radio buttons)
-        if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
-                UIA_SelectionItemPatternId,
-            )
-        } {
+        if let Some(pattern) = current_pattern::<IUIAutomationSelectionItemPattern>(
+            &uia_element,
+            UIA_SelectionItemPatternId,
+            "SelectionItemPattern",
+        )? {
             unsafe { pattern.Select() }.or_else(|e| {
                 if is_event_subscriber_failure(&e) {
                     Ok(())
@@ -2864,12 +2952,11 @@ impl Provider for WindowsProvider {
             })?;
             return Ok(());
         }
-        // Try ExpandCollapsePattern (combo boxes, tree items)
-        if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
-                UIA_ExpandCollapsePatternId,
-            )
-        } {
+        if let Some(pattern) = current_pattern::<IUIAutomationExpandCollapsePattern>(
+            &uia_element,
+            UIA_ExpandCollapsePatternId,
+            "ExpandCollapsePattern",
+        )? {
             let state =
                 unsafe { pattern.CurrentExpandCollapseState() }.map_err(|e| Error::Platform {
                     code: e.code().0 as i64,
@@ -2890,6 +2977,47 @@ impl Provider for WindowsProvider {
                 }
             }
             return Ok(());
+        }
+        // None of the four activation patterns exists. For an element
+        // exposed only through MSAA, the MSAA default action *is* its primary
+        // activation, so `press` dispatches to it (issue #505). Reached only
+        // when every lookup above reported the pattern absent — never after
+        // one of them failed (tenet 1).
+        if let Some(pattern) = current_pattern::<IUIAutomationLegacyIAccessiblePattern>(
+            &uia_element,
+            UIA_LegacyIAccessiblePatternId,
+            "LegacyIAccessiblePattern",
+        )? {
+            let default_action =
+                unsafe { pattern.CurrentDefaultAction() }.map_err(|e| Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("LegacyIAccessible.CurrentDefaultAction failed: {e}"),
+                })?;
+            let framework_id =
+                unsafe { uia_element.CurrentFrameworkId() }.map_err(|e| Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!("CurrentFrameworkId failed: {e}"),
+                })?;
+            if legacy_default_action_is_activation(
+                false,
+                Some(&default_action.to_string()),
+                Some(&framework_id.to_string()),
+            ) {
+                unsafe { pattern.DoDefaultAction() }.or_else(|e| {
+                    if is_event_subscriber_failure(&e) {
+                        Ok(())
+                    } else {
+                        Err(Error::Platform {
+                            code: e.code().0 as i64,
+                            message: format!(
+                                "LegacyIAccessible.DoDefaultAction (\"{default_action}\") \
+                                 failed: {e}"
+                            ),
+                        })
+                    }
+                })?;
+                return Ok(());
+            }
         }
         Err(Error::ActionNotSupported {
             action: "press".to_string(),
@@ -3591,6 +3719,18 @@ fn get_actions(
             actions.push("press".to_string());
         }
         actions.push("select".to_string());
+    }
+
+    let has_activation_pattern = patterns.invoke.is_some()
+        || patterns.toggle.is_some()
+        || patterns.selection_item.is_some()
+        || patterns.expand_collapse.is_some();
+    if legacy_default_action_is_activation(
+        has_activation_pattern,
+        uia_cached_bstr(element, UIA_LegacyIAccessibleDefaultActionPropertyId).as_deref(),
+        uia_cached_bstr(element, UIA_FrameworkIdPropertyId).as_deref(),
+    ) {
+        actions.push("press".to_string());
     }
 
     // Advertise `focus` iff focusing would have an observable effect: the
@@ -5720,6 +5860,60 @@ mod tests {
             assert_ne!(handle, first, "a reused pid must get a distinct handle");
             assert!(cache.len() <= 3);
         }
+    }
+
+    #[test]
+    fn legacy_default_action_is_press_only_as_the_sole_activation() {
+        // MSAA-only element with a default action: press is DoDefaultAction.
+        for framework in [Some("Win32"), Some("WinForm"), Some(""), None] {
+            assert!(
+                legacy_default_action_is_activation(false, Some("Activate"), framework),
+                "{framework:?} is MSAA-proxied"
+            );
+        }
+        // Any UIA activation pattern wins; the default action is never a
+        // second mechanism behind it.
+        assert!(!legacy_default_action_is_activation(
+            true,
+            Some("Activate"),
+            Some("Win32")
+        ));
+        // No default action, or a blank one, is nothing to press.
+        assert!(!legacy_default_action_is_activation(
+            false,
+            None,
+            Some("Win32")
+        ));
+        assert!(!legacy_default_action_is_activation(
+            false,
+            Some(""),
+            Some("Win32")
+        ));
+        assert!(!legacy_default_action_is_activation(
+            false,
+            Some("  "),
+            Some("Win32")
+        ));
+        // A native UIA provider that withheld activation keeps it withheld,
+        // whatever its MSAA default action says (Chromium's "click ancestor").
+        for framework in ["Chrome", "XAML", "WPF", "Qt", "DirectUI"] {
+            assert!(
+                !legacy_default_action_is_activation(
+                    false,
+                    Some("click ancestor"),
+                    Some(framework)
+                ),
+                "{framework} is a native UIA provider"
+            );
+        }
+    }
+
+    #[test]
+    fn default_action_is_batched_for_advertisement() {
+        assert!(
+            BATCH_PROPERTIES.contains(&UIA_LegacyIAccessibleDefaultActionPropertyId),
+            "LegacyIAccessible.DefaultAction must be cached so get_actions can advertise press"
+        );
     }
 
     #[test]

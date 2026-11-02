@@ -53,6 +53,51 @@ def test_button_press_ok_enables_cancel(app, app_config):
         assert isinstance(cancel_after.enabled, bool)
 
 
+def test_legacy_default_action_press(app, app_config):
+    """``press`` on an MSAA-only element reaches its default action.
+
+    The element has no Invoke/Toggle/SelectionItem/ExpandCollapse pattern,
+    only LegacyIAccessible with a default action. ``press`` must be advertised
+    and must run that default action, which the app counts in a status label
+    (issue #505).
+    """
+    name = app_config.get("legacy_press_name")
+    if not name:
+        pytest.skip("app has no element whose only activation is the MSAA default action")
+    prefix = app_config["legacy_press_status_prefix"]
+
+    tile = app.locator(f'[name="{name}"]')
+    element = tile.element()
+    # Guard: the tile must have no UIA activation pattern, or the press below
+    # would go through Invoke/Toggle/... and never reach DoDefaultAction.
+    patterns = element.raw.get("uia_activation_patterns")
+    assert patterns == [], (
+        f"{name!r} must expose no UIA activation pattern so press reaches "
+        f"LegacyIAccessible.DoDefaultAction; it has {patterns!r}"
+    )
+    actions = element.actions
+    assert "press" in actions, f"{name!r} must advertise press; actions were {actions}"
+
+    def count() -> int:
+        labels = [
+            e.name for e in app.locator(f'[name^="{prefix}"]').elements() if e.name
+        ]
+        assert len(labels) == 1, f"expected one {prefix!r} label, found {labels}"
+        return int(labels[0][len(prefix) :])
+
+    before = count()
+    tile.press()
+    deadline = time.monotonic() + 3.0
+    after = count()
+    while after == before and time.monotonic() < deadline:
+        time.sleep(0.05)
+        after = count()
+    assert after == before + 1, (
+        f"press on {name!r} should run its default action exactly once; "
+        f"activation count went {before} -> {after}"
+    )
+
+
 def test_perform_action_press_equivalent(app, app_config):
     """perform_action('press') behaves like press() on a button."""
     ok_name = app_config["ok_button_name"]
