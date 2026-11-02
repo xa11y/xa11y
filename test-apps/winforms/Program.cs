@@ -105,9 +105,14 @@ internal sealed class TestForm : Form
         page.Controls.Add(BuildList());
         page.Controls.Add(BuildTable());
         page.Controls.Add(BuildDynamic());
-        page.Controls.Add(BuildLegacy());
         page.Controls.Add(BuildScrollPanel());
         page.Controls.Add(BuildLongPane());
+        // Last, after a group that ends in a button: WinForms names an
+        // unnamed control after the Label just before it in tab order, so a
+        // group placed after one ending in a Label ("Panel Filler", "Legacy
+        // activations: N") lends its inner panel that label's name, and the
+        // legacy test's unique-label lookup then finds two.
+        page.Controls.Add(BuildLegacy());
 
         Controls.Add(page);
         Controls.Add(BuildToolStrip());
