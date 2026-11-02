@@ -553,16 +553,23 @@ jobs:
       # script, the Node bin) is missing. Without it the suite would narrow
       # itself to whatever happened to be built, and a cell that exercised one
       # launcher would look exactly like one that exercised three.
+      #
+      # XA11Y_REQUIRE_FRONTMOST (tests/suites/python/conftest.py) makes an
+      # @pytest.mark.xa11y_frontmost test whose app cannot claim the macOS
+      # front slot fail instead of skip, so a cell cannot quietly stop running
+      # them. Elsewhere the claim is a no-op and the variable changes nothing.
       - name: Run integration harness (Linux)
         if: runner.os == 'Linux'
         env:
           XA11Y_REQUIRE_ALL_CLI: "1"
+          XA11Y_REQUIRE_FRONTMOST: "1"
         run: .venv-integ/bin/python tests/harness/launch.py ${{ matrix.app }} python js cli js-window python-window
 
       - name: Run integration harness (macOS)
         if: runner.os == 'macOS'
         env:
           XA11Y_REQUIRE_ALL_CLI: "1"
+          XA11Y_REQUIRE_FRONTMOST: "1"
         run: .venv-integ/bin/python tests/harness/launch.py ${{ matrix.app }} python js cli js-window python-window
 
       - name: Run integration harness (Windows)
@@ -570,6 +577,7 @@ jobs:
         shell: bash
         env:
           XA11Y_REQUIRE_ALL_CLI: "1"
+          XA11Y_REQUIRE_FRONTMOST: "1"
         run: .venv-integ/Scripts/python.exe tests/harness/launch.py ${{ matrix.app }} python js cli js-window python-window
 
   # ── Published end-to-end examples (issue #192) ─────────────────────

@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 import pytest
+import pytest_xa11y
 
 import xa11y
 from tests.launchers import launcher_for
@@ -732,10 +734,51 @@ def _tauri_input_sim_reprobe(app) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Strict frontmost (XA11Y_REQUIRE_FRONTMOST)
+# ---------------------------------------------------------------------------
+#
+# pytest-xa11y skips an `xa11y_frontmost` test whose app cannot claim the
+# macOS front slot. That is the right default for a consumer, and the wrong
+# one for CI: a cell whose app can never be frontmost reports those tests as
+# skipped forever, and a skip reads as "not applicable" rather than "never
+# ran". The integ cells set XA11Y_REQUIRE_FRONTMOST so the failed claim
+# fails the test instead — the same reasoning as XA11Y_REQUIRE_ALL_CLI.
+
+_PYTEST_XA11Y_DIR = Path(pytest_xa11y.__file__).resolve().parent
+
+
+def _is_frontmost_claim_skip(item, call) -> bool:
+    """True when ``call`` was skipped by pytest-xa11y's frontmost claim."""
+    if item.get_closest_marker("xa11y_frontmost") is None or call.excinfo is None:
+        return False
+    if not call.excinfo.errisinstance(pytest.skip.Exception):
+        return False
+    # The claim is the only skip pytest-xa11y raises from inside the call
+    # phase of a marked test; a skip the test body raises itself (e.g. "this
+    # fixture belongs to another cell") has no plugin frame in its traceback.
+    return any(
+        Path(str(entry.path)).resolve().is_relative_to(_PYTEST_XA11Y_DIR)
+        for entry in call.excinfo.traceback
+    )
+
+
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield
     rep = outcome.get_result()
+    if (
+        rep.when == "call"
+        and rep.skipped
+        and os.environ.get("XA11Y_REQUIRE_FRONTMOST")
+        and _is_frontmost_claim_skip(item, call)
+    ):
+        rep.outcome = "failed"
+        rep.longrepr = (
+            f"XA11Y_REQUIRE_FRONTMOST is set, and this @pytest.mark.xa11y_frontmost "
+            f"test could not claim the macOS frontmost slot: {call.excinfo.value}"
+        )
+        return
     global _INPUT_SIM_DIAGNOSTICS_EMITTED
     if (
         rep.when != "call"
