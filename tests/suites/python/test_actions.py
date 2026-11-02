@@ -306,6 +306,37 @@ def test_textfield_set_value(app, app_name, app_config):
     time.sleep(ACTION_SETTLE)
 
 
+@pytest.mark.parametrize(
+    "text",
+    ["café naïve", "emoji 😀 ok", "日本語"],
+    ids=["accented", "non_bmp_emoji", "cjk"],
+)
+def test_textfield_type_text_non_ascii_round_trips(app, app_name, app_config, text):
+    """type_text() with non-ASCII text reads back exactly (issue #493).
+
+    On Linux ``type_text`` is AT-SPI ``EditableText.InsertText``, whose
+    ``length`` argument is in the toolkit's own unit: bytes for GTK, UTF-16
+    code units for Qt. A wrong unit pads the text with NULs or splits a
+    surrogate pair, so the read-back differs from what was written.
+    """
+    if not sys.platform.startswith("linux") or app_name not in ("qt", "gtk"):
+        pytest.skip("InsertText length units are an AT-SPI toolkit concern (Qt, GTK)")
+    sel = app_config.get("textfield_selector")
+    if not sel:
+        pytest.skip("app has no text_field widget")
+    loc = app.locator(sel)
+    try:
+        loc.set_value("")
+        time.sleep(ACTION_SETTLE)
+        loc.type_text(text)
+        time.sleep(ACTION_SETTLE)
+        assert loc.element().value == text
+    finally:
+        initial = app_config.get("textfield_initial_value") or "hello world"
+        loc.set_value(initial)
+        time.sleep(ACTION_SETTLE)
+
+
 # ---------------------------------------------------------------------------
 # Element-bound action variants
 #

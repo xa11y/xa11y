@@ -549,6 +549,59 @@ impl LinuxProvider {
         .unwrap_or(false)
     }
 
+    /// Refuse a text write the element's own state rules out, before
+    /// calling into the toolkit.
+    ///
+    /// GTK 3 and others answer an `EditableText` write on a read-only field
+    /// with success and change nothing, so the state is the only honest
+    /// signal: `READ_ONLY` set, or `EDITABLE` clear, is
+    /// [`Error::ActionNotSupported`] for `action`. A state read that fails
+    /// is returned as-is rather than read as "writable".
+    fn ensure_text_writable(
+        &self,
+        target: &AccessibleRef,
+        element: &ElementData,
+        action: &str,
+    ) -> Result<()> {
+        let bits = self.get_state(target).map(|words| {
+            words
+                .iter()
+                .take(2)
+                .enumerate()
+                .fold(0u64, |acc, (i, w)| acc | ((*w as u64) << (32 * i)))
+        })?;
+        if text_writable(bits) {
+            Ok(())
+        } else {
+            Err(Error::ActionNotSupported {
+                action: action.to_string(),
+                role: element.role,
+            })
+        }
+    }
+
+    /// The `length` argument for `EditableText.InsertText`, in the unit the
+    /// target's toolkit reads it in.
+    ///
+    /// libatspi documents it in bytes, which is what at-spi2-atk (GTK 3)
+    /// hands to `gtk_editable_insert_text`. Qt's adaptor instead resizes the
+    /// `QString` to `length`, i.e. UTF-16 code units: a byte count pads
+    /// non-ASCII text with NULs and a character count splits a surrogate
+    /// pair (issue #493). The toolkit is read from
+    /// `Application.ToolkitName`; one that cannot be read keeps the
+    /// documented byte count.
+    fn insert_text_length(&self, target: &AccessibleRef, text: &str) -> i32 {
+        let toolkit = self
+            .make_proxy(
+                &target.bus_name,
+                "/org/a11y/atspi/accessible/root",
+                "org.a11y.atspi.Application",
+            )
+            .ok()
+            .and_then(|proxy| proxy.get_property::<String>("ToolkitName").ok());
+        insert_text_length_for(toolkit.as_deref(), text)
+    }
+
     /// GTK press-fallback resolver.
     ///
     /// Walks the accessible's descendants (BFS, depth-capped) looking for a
@@ -2576,6 +2629,7 @@ impl Provider for LinuxProvider {
 
     fn set_value(&self, element: &ElementData, value: &str) -> Result<()> {
         let target = self.get_cached(element.handle)?;
+        self.ensure_text_writable(&target, element, "set_value")?;
         let proxy = self
             .make_proxy(
                 &target.bus_name,
@@ -2583,33 +2637,29 @@ impl Provider for LinuxProvider {
                 "org.a11y.atspi.EditableText",
             )
             .map_err(|_| Error::TextValueNotSupported)?;
-        // Try SetTextContents first (WebKit2GTK exposes this but not InsertText).
-        if proxy.call_method("SetTextContents", &(value,)).is_ok() {
-            return Ok(());
-        }
-        // Fall back to delete-then-insert for other AT-SPI2 implementations.
-        // Capture the underlying D-Bus error so callers can distinguish an
-        // absent `EditableText` interface (common on Chromium — the Chrome
-        // URL bar only exposes read-only `Text`; see issue #101) from other
-        // failures. Collapsing to `TextValueNotSupported` hides the reason.
-        let classify_editable_text_error = |op: &str, e: zbus::Error| -> Error {
-            let msg = e.to_string();
-            if msg.contains("UnknownMethod") || msg.contains("UnknownInterface") {
-                Error::TextValueNotSupported
-            } else {
-                Error::Platform {
-                    code: -1,
-                    message: format!("EditableText.{} failed: {}", op, msg),
-                }
+        // SetTextContents is the one-call replace. A bridge whose
+        // EditableText lacks just that method answers UnknownMethod — an
+        // answer about the object, not a failure — and only then is the value
+        // written as DeleteText + InsertText. An absent interface
+        // (UnknownInterface) is TextValueNotSupported straight away. Every other outcome of SetTextContents,
+        // including a FALSE reply, is the result of the write (tenet 1).
+        match proxy.call_method("SetTextContents", &(value,)) {
+            Ok(reply) => {
+                return editable_text_reply(reply, "SetTextContents", &target, element);
             }
-        };
-        if let Err(e) = proxy.call_method("DeleteText", &(0i32, i32::MAX)) {
-            return Err(classify_editable_text_error("DeleteText", e));
+            Err(zbus::Error::MethodError(name, ..))
+                if name.as_str() == "org.freedesktop.DBus.Error.UnknownMethod" => {}
+            Err(e) => return Err(editable_text_call_error("SetTextContents", e, &target)),
         }
-        if let Err(e) = proxy.call_method("InsertText", &(0i32, value, value.len() as i32)) {
-            return Err(classify_editable_text_error("InsertText", e));
-        }
-        Ok(())
+        let reply = proxy
+            .call_method("DeleteText", &(0i32, i32::MAX))
+            .map_err(|e| editable_text_call_error("DeleteText", e, &target))?;
+        editable_text_reply(reply, "DeleteText", &target, element)?;
+        let length = self.insert_text_length(&target, value);
+        let reply = proxy
+            .call_method("InsertText", &(0i32, value, length))
+            .map_err(|e| editable_text_call_error("InsertText", e, &target))?;
+        editable_text_reply(reply, "InsertText", &target, element)
     }
 
     fn set_numeric_value(&self, element: &ElementData, value: f64) -> Result<()> {
@@ -2625,8 +2675,11 @@ impl Provider for LinuxProvider {
 
     fn type_text(&self, element: &ElementData, text: &str) -> Result<()> {
         let target = self.get_cached(element.handle)?;
+        self.ensure_text_writable(&target, element, "type_text")?;
         // Insert text via EditableText interface (accessibility API, not input simulation).
         // Get cursor position from Text interface, then insert at that position.
+        // The caret offset comes back in the toolkit's own offset unit and
+        // goes straight back into InsertText, so it needs no conversion.
         let text_proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Text");
         let insert_pos = text_proxy
             .as_ref()
@@ -2646,25 +2699,38 @@ impl Provider for LinuxProvider {
         } else {
             i32::MAX
         };
-        proxy
-            .call_method("InsertText", &(pos, text, text.len() as i32))
-            .map_err(|e| Error::Platform {
-                code: -1,
-                message: format!("EditableText.InsertText failed: {}", e),
-            })?;
-        Ok(())
+        let length = self.insert_text_length(&target, text);
+        let reply = proxy
+            .call_method("InsertText", &(pos, text, length))
+            .map_err(|e| editable_text_call_error("InsertText", e, &target))?;
+        editable_text_reply(reply, "InsertText", &target, element)
     }
 
     fn set_text_selection(&self, element: &ElementData, start: u32, end: u32) -> Result<()> {
         let target = self.get_cached(element.handle)?;
         let proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Text")?;
-        proxy
+        let reply = proxy
             .call_method("SetSelection", &(0i32, start as i32, end as i32))
             .map_err(|e| Error::Platform {
                 code: -1,
                 message: format!("Text.SetSelection failed: {}", e),
             })?;
-        Ok(())
+        let applied: bool = reply.body().deserialize().map_err(|e| Error::Platform {
+            code: -1,
+            message: format!("Text.SetSelection reply decode failed: {e}"),
+        })?;
+        if applied {
+            Ok(())
+        } else {
+            Err(Error::Platform {
+                code: -1,
+                message: format!(
+                    "Text.SetSelection({start}, {end}) on {} {}{} returned FALSE: the toolkit \
+                     refused the selection",
+                    element.role, target.bus_name, target.path
+                ),
+            })
+        }
     }
 
     fn perform_action(&self, element: &ElementData, action: &str) -> Result<()> {
@@ -3064,6 +3130,87 @@ fn children_call_error(err: zbus::Error, aref: &AccessibleRef) -> Error {
     }
 }
 
+/// AT-SPI `READ_ONLY` (`AtspiStateType` 43) and `EDITABLE` (7).
+const STATE_READ_ONLY: u64 = 1 << 43;
+const STATE_EDITABLE: u64 = 1 << 7;
+
+/// Whether an element's state bits allow a text write: `EDITABLE` set and
+/// `READ_ONLY` clear.
+fn text_writable(bits: u64) -> bool {
+    bits & STATE_EDITABLE != 0 && bits & STATE_READ_ONLY == 0
+}
+
+/// `InsertText`'s `length` for `text` under `toolkit` (see
+/// `LinuxProvider::insert_text_length`). Saturates rather than wrapping for
+/// text longer than `i32::MAX` units.
+fn insert_text_length_for(toolkit: Option<&str>, text: &str) -> i32 {
+    let units = match toolkit {
+        Some(t) if t.eq_ignore_ascii_case("Qt") => text.encode_utf16().count(),
+        _ => text.len(),
+    };
+    i32::try_from(units).unwrap_or(i32::MAX)
+}
+
+/// Decode an `EditableText` write's boolean reply. `FALSE` is the toolkit
+/// refusing the write, so it is an error naming the method and the element,
+/// never `Ok` (issue #486).
+fn editable_text_reply(
+    reply: zbus::Message,
+    method: &str,
+    target: &AccessibleRef,
+    element: &ElementData,
+) -> Result<()> {
+    let applied: bool = reply.body().deserialize().map_err(|e| Error::Platform {
+        code: -1,
+        message: format!("EditableText.{method} reply decode failed: {e}"),
+    })?;
+    if applied {
+        Ok(())
+    } else {
+        Err(Error::Platform {
+            code: -1,
+            message: format!(
+                "EditableText.{method} on {} {}{} returned FALSE: the toolkit refused the write",
+                element.role, target.bus_name, target.path
+            ),
+        })
+    }
+}
+
+/// Map a failed `EditableText` call. A missing member or interface is
+/// [`Error::TextValueNotSupported`] (common on Chromium, whose URL bar only
+/// exposes read-only `Text`; issue #101); anything else, including no reply,
+/// is a platform error naming the method and the object — the write may or
+/// may not have landed, and that is not success.
+fn editable_text_call_error(method: &str, e: zbus::Error, target: &AccessibleRef) -> Error {
+    if is_unimplemented(&e) {
+        Error::TextValueNotSupported
+    } else {
+        Error::Platform {
+            code: -1,
+            message: format!(
+                "EditableText.{method} on {}{} failed: {e}",
+                target.bus_name, target.path
+            ),
+        }
+    }
+}
+
+/// `UnknownMethod` / `UnknownInterface`: the object exists but does not
+/// implement the call. Narrower than [`is_absent_member`], which also counts
+/// `UnknownObject` — for a write, a destroyed target is a stale element, not
+/// an element that cannot take text.
+fn is_unimplemented(err: &zbus::Error) -> bool {
+    match err {
+        zbus::Error::MethodError(name, ..) => matches!(
+            name.as_str(),
+            "org.freedesktop.DBus.Error.UnknownMethod"
+                | "org.freedesktop.DBus.Error.UnknownInterface"
+        ),
+        _ => false,
+    }
+}
+
 /// D-Bus error names that mean the member was never there, as opposed to the
 /// call having failed.
 ///
@@ -3203,6 +3350,101 @@ fn refine_menu_role(role: Role, actions: &[String]) -> Role {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── #486 / #493: EditableText writes ─────────────────────────────────
+
+    fn bool_reply(value: bool) -> zbus::Message {
+        let call = zbus::Message::method_call("/org/a11y/atspi/accessible/9", "InsertText")
+            .expect("method-call builder")
+            .serial(std::num::NonZeroU32::new(1).expect("nonzero"))
+            .build(&())
+            .expect("build method call");
+        zbus::Message::method_return(&call.header())
+            .expect("reply builder")
+            .serial(std::num::NonZeroU32::new(2).expect("nonzero"))
+            .build(&value)
+            .expect("build reply")
+    }
+
+    fn text_target() -> (AccessibleRef, ElementData) {
+        (
+            AccessibleRef {
+                bus_name: ":1.9".into(),
+                path: "/org/a11y/atspi/accessible/9".into(),
+            },
+            ElementData::for_role(Role::TextField),
+        )
+    }
+
+    #[test]
+    fn false_editable_text_reply_is_an_error_naming_method_and_element() {
+        let (target, element) = text_target();
+        assert!(editable_text_reply(bool_reply(true), "InsertText", &target, &element).is_ok());
+        let err = editable_text_reply(bool_reply(false), "InsertText", &target, &element)
+            .expect_err("FALSE is the toolkit refusing the write");
+        let msg = err.to_string();
+        assert!(msg.contains("EditableText.InsertText"), "{msg}");
+        assert!(msg.contains(":1.9/org/a11y/atspi/accessible/9"), "{msg}");
+        assert!(msg.contains("FALSE"), "{msg}");
+    }
+
+    #[test]
+    fn editable_text_call_errors_keep_the_reason() {
+        let (target, _) = text_target();
+        let unimplemented = zbus::Error::MethodError(
+            zbus::names::OwnedErrorName::try_from("org.freedesktop.DBus.Error.UnknownInterface")
+                .expect("error name"),
+            None,
+            bool_reply(true),
+        );
+        assert!(matches!(
+            editable_text_call_error("InsertText", unimplemented, &target),
+            Error::TextValueNotSupported
+        ));
+        // A destroyed object or an unanswered call is not "cannot take text".
+        for name in [
+            "org.freedesktop.DBus.Error.UnknownObject",
+            "org.freedesktop.DBus.Error.NoReply",
+            "org.freedesktop.DBus.Error.NotSupported",
+        ] {
+            let e = zbus::Error::MethodError(
+                zbus::names::OwnedErrorName::try_from(name).expect("error name"),
+                None,
+                bool_reply(true),
+            );
+            assert!(
+                matches!(editable_text_call_error("InsertText", e, &target),
+                    Error::Platform { message, .. } if message.contains(name)),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_writes_require_editable_and_not_read_only() {
+        assert!(text_writable(STATE_EDITABLE));
+        assert!(!text_writable(0));
+        assert!(!text_writable(STATE_READ_ONLY));
+        assert!(!text_writable(STATE_EDITABLE | STATE_READ_ONLY));
+        // READ_ONLY lives in the second state word (bit 43 = word 1, bit 11).
+        assert_eq!(STATE_READ_ONLY >> 32, 1 << 11);
+    }
+
+    #[test]
+    fn insert_text_length_uses_utf16_units_for_qt_only() {
+        // ASCII: every convention agrees.
+        assert_eq!(insert_text_length_for(Some("Qt"), "abc"), 3);
+        assert_eq!(insert_text_length_for(Some("GTK"), "abc"), 3);
+        // Accented: 1 UTF-16 unit, 2 UTF-8 bytes.
+        assert_eq!(insert_text_length_for(Some("Qt"), "é"), 1);
+        assert_eq!(insert_text_length_for(Some("GTK"), "é"), 2);
+        // Non-BMP emoji: a surrogate pair in UTF-16, 4 bytes in UTF-8.
+        assert_eq!(insert_text_length_for(Some("Qt"), "a😀"), 3);
+        assert_eq!(insert_text_length_for(Some("qt"), "a😀"), 3);
+        assert_eq!(insert_text_length_for(Some("GTK"), "a😀"), 5);
+        // Unknown toolkit keeps libatspi's documented byte count.
+        assert_eq!(insert_text_length_for(None, "a😀"), 5);
+    }
 
     #[test]
     fn test_role_mapping() {

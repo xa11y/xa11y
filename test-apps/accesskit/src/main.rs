@@ -119,6 +119,10 @@ const BIDI_BUTTON: NodeId = NodeId(74);
 // #304/#305 foreground/active-window changes exist for.
 const OPEN_DIALOG_BTN: NodeId = NodeId(75);
 
+// A read-only text input. AT-SPI writes to it must be refused from its
+// READ_ONLY state rather than reported as success (issue #486).
+const READONLY_FIELD: NodeId = NodeId(76);
+
 // Dynamic items start at NodeId(100) to leave room for future static nodes
 const DYNAMIC_ITEM_BASE: u64 = 100;
 
@@ -705,6 +709,7 @@ fn build_extra_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
         SPLIT_GROUP_NODE,
         ANNOUNCE_BTN,
         ANNOUNCE_LIVE_REGION,
+        READONLY_FIELD,
     ]);
     nodes.push((EXTRA_PANEL, extra_panel));
 
@@ -724,6 +729,12 @@ fn build_extra_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
     live.set_value(state.announcement_text.as_str());
     live.set_live(Live::Polite);
     nodes.push((ANNOUNCE_LIVE_REGION, live));
+
+    let mut readonly_field = Node::new(Role::TextInput);
+    readonly_field.set_label("Read-only Field");
+    readonly_field.set_value("locked");
+    readonly_field.set_read_only();
+    nodes.push((READONLY_FIELD, readonly_field));
 
     let mut link = Node::new(Role::Link);
     link.set_label("Visit Example");
