@@ -377,6 +377,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         fullscreenButton.action = #selector(AppDelegate.onToggleFullscreenPressed)
         dynBox.addSubview(fullscreenButton)
 
+        // An element whose only action is AXOpen (the Finder-sidebar shape):
+        // `press` must be advertised on it and dispatch to AXOpen.
+        let openTarget = OpenOnlyHost(frame: NSRect(x: 420, y: 44, width: 200, height: 24))
+        dynBox.addSubview(openTarget)
+
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -467,6 +472,62 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var statusLabel: NSTextField!
     var rowCount: Int = 5
     let users = [["Alice", "Admin"], ["Bob", "User"]]
+}
+
+// ── AXOpen-only element ───────────────────────────────────────────────────────
+
+/// Exposes `AXOpen` and no `AXPress`, like a Finder sidebar item. Each AXOpen
+/// bumps the value, which is what the test reads back.
+///
+/// The action list and dispatch come from the legacy informal protocol,
+/// because the NSAccessibility protocol has no `accessibilityPerformOpen`.
+/// This is an `NSAccessibilityElement` (an NSObject), not an NSView: on an
+/// NSView, AppKit listed the legacy AXOpen but answered a perform with
+/// kAXErrorAttributeUnsupported (-25205) without calling
+/// `accessibilityPerformAction:`. AccessKit's macOS adapter mixes the two
+/// protocols the same way on plain NSObjects, for `AXScrollToVisible`.
+class OpenOnlyElement: NSAccessibilityElement {
+    static let openAction = NSAccessibility.Action(rawValue: "AXOpen")
+    private var openCount = 0
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .group }
+    override func accessibilityLabel() -> String? { "Open Target" }
+    override func accessibilityValue() -> Any? { "opened \(openCount)" }
+
+    override func accessibilityActionNames() -> [NSAccessibility.Action] {
+        [OpenOnlyElement.openAction]
+    }
+
+    override func isAccessibilitySelectorAllowed(_ selector: Selector) -> Bool {
+        if selector == #selector(OpenOnlyElement.accessibilityPerformAction(_:)) {
+            return true
+        }
+        return super.isAccessibilitySelectorAllowed(selector)
+    }
+
+    override func accessibilityPerformAction(_ action: NSAccessibility.Action) {
+        if action == OpenOnlyElement.openAction {
+            openCount += 1
+        }
+    }
+}
+
+/// Hosts the AXOpen-only element: an ignored view whose one accessibility
+/// child is the element, framed to the view's bounds.
+class OpenOnlyHost: NSView {
+    private lazy var element: OpenOnlyElement = {
+        let element = OpenOnlyElement()
+        element.setAccessibilityParent(self)
+        return element
+    }()
+
+    override func isAccessibilityElement() -> Bool { false }
+
+    override func accessibilityChildren() -> [Any]? {
+        element.setAccessibilityFrameInParentSpace(bounds)
+        return [element]
+    }
 }
 
 // ── NSTableViewDataSource ─────────────────────────────────────────────────────

@@ -988,13 +988,41 @@ fn container_selection_contains(element: AXUIElementRef, max_hops: usize) -> boo
     false
 }
 
+/// The element's native action names, with every failure read as "none".
+/// For snapshots, where a missing action list only narrows `actions`.
+/// Dispatch decisions use [`try_ax_action_names`].
 fn ax_action_names(element: AXUIElementRef) -> Vec<String> {
+    try_ax_action_names(element).unwrap_or_default()
+}
+
+/// The element's native action names, error-preserving: an element that
+/// answered with no actions is `Ok(vec![])`, while an unanswered or malformed
+/// reply is `Error::Platform`. A dispatch that picks its AX action from this
+/// list must not mistake a failed read for an empty one (tenet 1).
+fn try_ax_action_names(element: AXUIElementRef) -> Result<Vec<String>> {
     let mut names: CFArrayRef = std::ptr::null();
     let err = ffi_copy_action_names(element, &mut names);
-    if err != AX_ERROR_SUCCESS || names.is_null() {
-        return vec![];
+    match err {
+        AX_ERROR_SUCCESS => {}
+        AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE => return Ok(vec![]),
+        code => {
+            return Err(Error::Platform {
+                code: i64::from(code),
+                message: format!("AXUIElementCopyActionNames failed (AXError {code})"),
+            })
+        }
     }
-    unsafe {
+    if names.is_null() {
+        return Ok(vec![]);
+    }
+    if unsafe { safe_cf_get_type_id(names) } != unsafe { safe_cf_array_get_type_id() } {
+        unsafe { safe_cf_release(names) };
+        return Err(Error::Platform {
+            code: -1,
+            message: "AXUIElementCopyActionNames returned a non-array value".to_string(),
+        });
+    }
+    Ok(unsafe {
         let count = safe_cf_array_get_count(names);
         let mut result = Vec::with_capacity(count as usize);
         for i in 0..count {
@@ -1006,7 +1034,7 @@ fn ax_action_names(element: AXUIElementRef) -> Vec<String> {
         }
         safe_cf_release(names);
         result
-    }
+    })
 }
 
 fn ax_position(element: AXUIElementRef) -> Option<(f64, f64)> {
@@ -2914,6 +2942,24 @@ fn ax_action_to_name(ax_name: &str) -> Option<&'static str> {
     }
 }
 
+/// The AX action `press` dispatches to, given the element's native action
+/// names.
+///
+/// `AXPress` when the element has it. Otherwise `AXOpen` when that is the
+/// element's activation action: Finder sidebar items, for example, advertise
+/// `AXOpen` and no `AXPress`. This is the primary-activation reading of
+/// tenet 3, the same way Windows `press` dispatches to the element's
+/// activation pattern. Nothing is tried after a failure (tenet 1). Every other
+/// shape keeps `AXPress`, which is what `press` has always sent.
+fn press_ax_action(ax_actions: &[String]) -> &'static str {
+    let has = |name: &str| ax_actions.iter().any(|a| a == name);
+    if !has("AXPress") && has("AXOpen") {
+        "AXOpen"
+    } else {
+        "AXPress"
+    }
+}
+
 /// Convert an `AXPascalCase` name to `snake_case`, stripping the `AX` prefix.
 ///
 /// `"AXCustomThing"` → `"custom_thing"`
@@ -3621,6 +3667,14 @@ fn build_snapshot_data(
                     actions.push(snake);
                 }
             }
+        }
+
+        // `press` on an element whose only activation action is `AXOpen`
+        // dispatches to it (see `press_ax_action`), so it is advertised too.
+        // `open` stays listed: it is the element's native action.
+        let press_str = "press".to_string();
+        if press_ax_action(&ax_actions) == "AXOpen" && !actions.contains(&press_str) {
+            actions.push(press_str);
         }
 
         // Implicit actions from settable attributes.
@@ -4870,7 +4924,14 @@ impl Provider for MacOSProvider {
             });
         }
         let ax = self.get_cached(element.handle)?;
-        perform_ax_action(ax.as_ptr(), "AXPress", "press", element.role)
+        // The snapshot's `press` cannot say which AX action it came from
+        // (`AXPress` + `AXOpen` and `AXOpen` alone both list `press` and
+        // `open`), so the dispatch target is read from the live action list.
+        // That read must not fail open: an empty list would pick AXPress,
+        // which AppKit acknowledges on an AXOpen-only element without doing
+        // anything.
+        let ax_name = press_ax_action(&try_ax_action_names(ax.as_ptr())?);
+        perform_ax_action(ax.as_ptr(), ax_name, "press", element.role)
     }
 
     fn toggle(&self, element: &ElementData) -> Result<()> {
@@ -6402,6 +6463,15 @@ mod tests {
     }
 
     #[test]
+    fn try_ax_action_names_reports_a_failed_read() {
+        // A null element is an AX error, not "no actions".
+        assert!(matches!(
+            try_ax_action_names(std::ptr::null()),
+            Err(Error::Platform { .. })
+        ));
+    }
+
+    #[test]
     fn container_selection_probe_gated_to_selectable_item_roles() {
         // Only roles that live inside AXSelectedChildren-style containers
         // may trigger the (IPC-costly) ancestor probe.
@@ -6545,6 +6615,22 @@ mod tests {
         assert_eq!(map_ax_role("AXValueIndicator", None), Role::ScrollThumb);
         // AXMenuButton with AXSegment subrole is a segmented control button
         assert_eq!(map_ax_role("AXMenuButton", Some("AXSegment")), Role::Button);
+    }
+
+    #[test]
+    fn press_dispatches_to_axopen_only_when_it_is_the_activation_action() {
+        let names = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(press_ax_action(&names(&["AXOpen"])), "AXOpen");
+        assert_eq!(press_ax_action(&names(&["AXShowMenu", "AXOpen"])), "AXOpen");
+        // AXPress wins whenever the element has it (issue #517 decision).
+        assert_eq!(press_ax_action(&names(&["AXOpen", "AXPress"])), "AXPress");
+        assert_eq!(press_ax_action(&names(&["AXPress"])), "AXPress");
+        // No AXOpen: unchanged from before.
+        assert_eq!(press_ax_action(&names(&["AXConfirm"])), "AXPress");
+        // AXConfirm does not count as AXPress: an element with AXConfirm and
+        // AXOpen but no AXPress opens.
+        assert_eq!(press_ax_action(&names(&["AXConfirm", "AXOpen"])), "AXOpen");
+        assert_eq!(press_ax_action(&[]), "AXPress");
     }
 
     #[test]
