@@ -623,6 +623,16 @@ fn build_lists_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
             // test reads back to prove the platform action reached the app.
             item.add_action(Action::ScrollIntoView);
             item.set_description(format!("Scroll requests: {}", state.cherry_scroll_requests));
+            // AccessKit's AT-SPI bridge exposes the Component interface (and
+            // with it Component.ScrollTo) only on nodes that have bounds, so
+            // the fixture needs a rect for Linux to have a scroll action at
+            // all. Placed below the image, clear of every other bounded node.
+            item.set_bounds(Rect {
+                x0: 16.0,
+                y0: 460.0,
+                x1: 196.0,
+                y1: 480.0,
+            });
         }
         if state.selected_list_item == Some(idx) {
             item.set_selected(true);
