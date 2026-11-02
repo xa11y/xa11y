@@ -120,6 +120,8 @@ fn key_input(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> INPUT {
 /// CR and a `WM_CHAR` LF into a line break, so sending `"\r\n"` unit by unit
 /// typed two of them. A lone CR or a lone LF still sends its one tap: only
 /// the pair collapses, so `"\n\r"` and `"\r\r"` are two breaks as written.
+/// The collapse is per call: a CR ending one `type_text` call and an LF
+/// starting the next are two separate taps.
 fn typed_code_units(text: &str) -> Vec<u16> {
     const CR: u16 = b'\r' as u16;
     const LF: u16 = b'\n' as u16;

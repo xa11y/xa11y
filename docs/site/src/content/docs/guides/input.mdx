@@ -261,6 +261,8 @@ On Windows, letters and digits are positional virtual keys (`VK_A`, `VK_1`), as 
   </TabItem>
 </Tabs>
 
+On Windows, `type_text` types a `"\r\n"` pair as one line break, and a lone `"\r"` or `"\n"` as one line break each.
+
 ## Example: drag-and-drop
 
 Drag-and-drop has no accessibility equivalent on most platforms. Resolve both endpoints via the a11y tree first, then synthesise the drag.
