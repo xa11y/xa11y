@@ -44,10 +44,9 @@ STARTUP_TIMEOUT = float(_STARTUP_TIMEOUT_ENV) if _STARTUP_TIMEOUT_ENV else None
 
 # Apps with a real, activatable macOS window whose tests depend on holding the
 # frontmost slot — input simulation delivers CGEvents there, and focus
-# assertions read it. Excluded: cocoa (runs headless as an accessory app, so
-# it cannot be frontmost) and accesskit (synthesises its own focus events).
+# assertions read it. Excluded: accesskit (synthesises its own focus events).
 # Mirrors _MACOS_FRONTMOST_APPS in tests/harness/launch.py.
-FRONTMOST_APPS = {"tauri", "qt", "electron", "egui"}
+FRONTMOST_APPS = {"tauri", "qt", "electron", "egui", "cocoa"}
 
 
 def _build(what: str, command: list[str], cwd: Path) -> None:
@@ -85,8 +84,9 @@ def _cocoa() -> AppLauncher:
         if sys.platform != "darwin":
             pytest.skip("Cocoa test app is macOS-only")
         _build("Cocoa", ["make", "build"], binary.parent)
+    # No --headless: an accessory app cannot be frontmost (see FRONTMOST_APPS).
     return AppLauncher(
-        command=[str(binary), "--headless"],
+        command=[str(binary)],
         app_names=["xa11y-cocoa-test-app"],
     )
 

@@ -70,11 +70,12 @@ SUITE_TIMEOUT_S = float(os.environ.get("XA11Y_TEST_SUITE_TIMEOUT", "900"))
 # frontmost slot — input_sim delivers CGEvents to the frontmost app, and focus
 # assertions read OS focus state. We actively claim the front before tests run
 # (see pytest_xa11y.ensure_macos_frontmost) instead of reactively killing a
-# hardcoded list of focus-stealing onboarding processes (issue #230). Excluded:
-# cocoa (--headless, accessory app — can't be frontmost) and accesskit
-# (synthesises its own focus events; its macOS coverage is the Rust integ
-# suite, and the Python harness skips all its suites on macOS anyway).
-_MACOS_FRONTMOST_APPS = {"tauri", "qt", "electron", "egui"}
+# hardcoded list of focus-stealing onboarding processes (issue #230). Cocoa is
+# launched without --headless, so it is a regular (activatable) app like the
+# rest. Excluded: accesskit (synthesises its own focus events; its macOS
+# coverage is the Rust integ suite, and the Python harness skips all its
+# suites on macOS anyway).
+_MACOS_FRONTMOST_APPS = {"tauri", "qt", "electron", "egui", "cocoa"}
 
 
 # ---------------------------------------------------------------------------
@@ -112,8 +113,10 @@ def _app_command(app: str) -> tuple[list[str], dict[str, str], list[str], str | 
         if sys.platform != "darwin":
             raise ValueError("cocoa app is only supported on macOS")
         binary = str(PROJECT_ROOT / "test-apps" / "cocoa" / "xa11y-cocoa-test-app")
+        # No --headless: an accessory app can never be frontmost, and every
+        # @pytest.mark.xa11y_frontmost test would skip (see _MACOS_FRONTMOST_APPS).
         return (
-            [binary, "--headless"],
+            [binary],
             {},
             ["xa11y-cocoa-test-app"],
             None,

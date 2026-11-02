@@ -13,10 +13,14 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 import pytest
+import pytest_xa11y.plugin
+from pytest_xa11y.frontmost import macos_visible_processes
 
 import xa11y
+from tests import strict_frontmost
 from tests.launchers import launcher_for
 
 # ---------------------------------------------------------------------------
@@ -777,10 +781,18 @@ def _tauri_input_sim_reprobe(app) -> str:
     return "\n".join(lines)
 
 
+# Strict frontmost: see tests/strict_frontmost.py.
+_PYTEST_XA11Y_PLUGIN = Path(pytest_xa11y.plugin.__file__)
+
+
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield
     rep = outcome.get_result()
+    if strict_frontmost.enforce(
+        item, call, rep, _PYTEST_XA11Y_PLUGIN, macos_visible_processes
+    ):
+        return
     global _INPUT_SIM_DIAGNOSTICS_EMITTED
     if (
         rep.when != "call"
