@@ -2470,6 +2470,24 @@ fn ax_action_to_name(ax_name: &str) -> Option<&'static str> {
     }
 }
 
+/// The AX action `press` dispatches to, given the element's native action
+/// names.
+///
+/// `AXPress` when the element has it. Otherwise `AXOpen` when that is the
+/// element's activation action: Finder sidebar items, for example, advertise
+/// `AXOpen` and no `AXPress`. This is the primary-activation reading of
+/// tenet 3, the same way Windows `press` dispatches to the element's
+/// activation pattern. Nothing is tried after a failure (tenet 1). Every other
+/// shape keeps `AXPress`, which is what `press` has always sent.
+fn press_ax_action(ax_actions: &[String]) -> &'static str {
+    let has = |name: &str| ax_actions.iter().any(|a| a == name);
+    if !has("AXPress") && has("AXOpen") {
+        "AXOpen"
+    } else {
+        "AXPress"
+    }
+}
+
 /// Convert an `AXPascalCase` name to `snake_case`, stripping the `AX` prefix.
 ///
 /// `"AXCustomThing"` → `"custom_thing"`
@@ -3165,6 +3183,14 @@ fn build_snapshot_data(
                     actions.push(snake);
                 }
             }
+        }
+
+        // `press` on an element whose only activation action is `AXOpen`
+        // dispatches to it (see `press_ax_action`), so it is advertised too.
+        // `open` stays listed: it is the element's native action.
+        let press_str = "press".to_string();
+        if press_ax_action(&ax_actions) == "AXOpen" && !actions.contains(&press_str) {
+            actions.push(press_str);
         }
 
         // Implicit actions from settable attributes.
@@ -4399,7 +4425,11 @@ impl Provider for MacOSProvider {
             });
         }
         let ax = self.get_cached(element.handle)?;
-        perform_ax_action(ax.as_ptr(), "AXPress", "press", element.role)
+        // The snapshot's `press` cannot say which AX action it came from
+        // (`AXPress` + `AXOpen` and `AXOpen` alone both list `press` and
+        // `open`), so the dispatch target is read from the live action list.
+        let ax_name = press_ax_action(&ax_action_names(ax.as_ptr()));
+        perform_ax_action(ax.as_ptr(), ax_name, "press", element.role)
     }
 
     fn toggle(&self, element: &ElementData) -> Result<()> {
@@ -5925,6 +5955,19 @@ mod tests {
         assert_eq!(map_ax_role("AXValueIndicator", None), Role::ScrollThumb);
         // AXMenuButton with AXSegment subrole is a segmented control button
         assert_eq!(map_ax_role("AXMenuButton", Some("AXSegment")), Role::Button);
+    }
+
+    #[test]
+    fn press_dispatches_to_axopen_only_when_it_is_the_activation_action() {
+        let names = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(press_ax_action(&names(&["AXOpen"])), "AXOpen");
+        assert_eq!(press_ax_action(&names(&["AXShowMenu", "AXOpen"])), "AXOpen");
+        // AXPress wins whenever the element has it (issue #517 decision).
+        assert_eq!(press_ax_action(&names(&["AXOpen", "AXPress"])), "AXPress");
+        assert_eq!(press_ax_action(&names(&["AXPress"])), "AXPress");
+        // No AXOpen: unchanged from before.
+        assert_eq!(press_ax_action(&names(&["AXConfirm"])), "AXPress");
+        assert_eq!(press_ax_action(&[]), "AXPress");
     }
 
     #[test]

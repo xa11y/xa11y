@@ -357,6 +357,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         fullscreenButton.action = #selector(AppDelegate.onToggleFullscreenPressed)
         dynBox.addSubview(fullscreenButton)
 
+        // An element whose only action is AXOpen (the Finder-sidebar shape):
+        // `press` must be advertised on it and dispatch to AXOpen.
+        let openTarget = OpenOnlyView(frame: NSRect(x: 420, y: 44, width: 200, height: 24))
+        dynBox.addSubview(openTarget)
+
         window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -443,6 +448,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var statusLabel: NSTextField!
     var rowCount: Int = 5
     let users = [["Alice", "Admin"], ["Bob", "User"]]
+}
+
+// ── AXOpen-only element ───────────────────────────────────────────────────────
+
+/// Exposes `AXOpen` and no `AXPress`, like a Finder sidebar item. The action
+/// list comes from the legacy informal protocol, because the NSAccessibility
+/// protocol has no `accessibilityPerformOpen`; AppKit merges both (AccessKit's
+/// macOS adapter relies on the same thing for `AXScrollToVisible`). Each
+/// AXOpen bumps the value, which is what the test reads back.
+class OpenOnlyView: NSView {
+    private static let openAction = NSAccessibility.Action(rawValue: "AXOpen")
+    private var openCount = 0
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .group }
+    override func accessibilityLabel() -> String? { "Open Target" }
+    override func accessibilityValue() -> Any? { "opened \(openCount)" }
+
+    override func accessibilityActionNames() -> [NSAccessibility.Action] {
+        [OpenOnlyView.openAction]
+    }
+
+    override func accessibilityPerformAction(_ action: NSAccessibility.Action) {
+        if action == OpenOnlyView.openAction {
+            openCount += 1
+        }
+    }
 }
 
 // ── NSTableViewDataSource ─────────────────────────────────────────────────────

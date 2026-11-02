@@ -500,3 +500,35 @@ def test_snapshot_bound_element_press_twice(app, app_name, app_config):
     except xa11y.ActionNotSupportedError:
         pytest.xfail("press() not exposed for button on this platform")
     time.sleep(ACTION_SETTLE)
+
+
+# ---------------------------------------------------------------------------
+# press → AXOpen (macOS)
+# ---------------------------------------------------------------------------
+
+
+def test_press_dispatches_to_axopen_when_it_is_the_only_activation(app, app_name):
+    """An element exposing only AXOpen advertises press, and press fires AXOpen.
+
+    The Cocoa fixture's "Open Target" lists AXOpen and no AXPress (the Finder
+    sidebar shape) and counts each AXOpen in its value (issue #517).
+    """
+    if sys.platform != "darwin" or app_name != "cocoa":
+        pytest.skip("the AXOpen-only fixture belongs to the macOS Cocoa cell")
+
+    target = app.locator('[name="Open Target"]')
+    el = target.element()
+    assert "press" in el.actions, f"press not advertised; actions={el.actions!r}"
+    assert "open" in el.actions, f"native open not listed; actions={el.actions!r}"
+    before = int((el.value or "").removeprefix("opened "))
+
+    el.press()
+
+    deadline = time.monotonic() + 2.0
+    value = el.value
+    while time.monotonic() < deadline:
+        value = target.element().value
+        if value == f"opened {before + 1}":
+            break
+        time.sleep(0.05)
+    assert value == f"opened {before + 1}", f"AXOpen never arrived; value={value!r}"
