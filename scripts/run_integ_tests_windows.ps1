@@ -43,6 +43,14 @@ try {
         cargo test -p xa11y --test integ_test -- --ignored --test-threads=1 2>&1 | Write-Host
     }
     $testExit = $LASTEXITCODE
+
+    # A provider created on a non-pumping STA thread, used from others,
+    # issue #499. Needs windows on the desktop; its own binary.
+    if (-not $testFilter) {
+        Write-Host "Running STA-host test..."
+        cargo test -p xa11y-windows --test sta_host -- --ignored --test-threads=1 --nocapture 2>&1 | Write-Host
+        if ($LASTEXITCODE -ne 0 -and $testExit -eq 0) { $testExit = $LASTEXITCODE }
+    }
 } finally {
     # 4. Cleanup
     Write-Host "Cleaning up..."

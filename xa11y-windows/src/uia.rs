@@ -213,7 +213,11 @@ pub struct WindowsProvider {
     synthetic_apps: Mutex<BoundedHandleCache<SyntheticAppIdentity>>,
 }
 
-// IUIAutomation is COM and thread-safe via proxy
+// UIA's client objects (IUIAutomation, elements, cache requests, walkers)
+// are agile: they aggregate the free-threaded marshaler, so any thread may
+// call them directly whatever apartment created them, with no proxy and no
+// message pump needed (see `ensure_com_initialized`, issue #499;
+// tests/sta_host.rs checks it).
 unsafe impl Send for WindowsProvider {}
 unsafe impl Sync for WindowsProvider {}
 
@@ -3863,13 +3867,13 @@ fn map_uia_control_type(control_type: UIA_CONTROLTYPE_ID) -> Role {
 
 // ── Event subscription (native UIA event handlers) ───────────────────────────
 
-/// Moves a COM interface into a `Send` closure. COM in MTA (the apartment
-/// xa11y uses) serializes access via proxies, so transferring a raw pointer
-/// across threads is safe as long as every dereference happens under MTA —
-/// which is the case for the shared registration worker and UIA callbacks.
+/// Moves a COM interface into a `Send` closure. The UIA client objects
+/// captured this way are agile (they aggregate the free-threaded
+/// marshaler), so the pointer is valid on any thread; the registration
+/// worker and the UIA callback threads that dereference it are also MTA.
 ///
 /// Mirrors the `unsafe impl Send for WindowsProvider` assertion in this file:
-/// the same MTA guarantee holds for every COM type we need to capture.
+/// the same agility holds for every COM type we need to capture.
 ///
 /// Note the private inner field + accessor method: Rust 2021's disjoint
 /// closure captures will grab `wrapper.0` (the inner `T`) if it's reachable,
@@ -4486,16 +4490,15 @@ struct EventContext {
     /// subscriptions have no saved-app identity and retain PID-only behavior.
     saved_app: Option<SavedSyntheticAppIdentity>,
     /// Clone of the provider's raw-view walker, so event-target snapshots
-    /// resolve DataItem cells the same way tree traversal does. COM in MTA
-    /// serializes access via proxies (see `ComCallbackWrapper`), so sharing
-    /// the interface pointer with UIA callback threads is safe.
+    /// resolve DataItem cells the same way tree traversal does. The walker
+    /// is agile (free-threaded marshaler), so sharing the interface pointer
+    /// with UIA callback threads is safe.
     walker: IUIAutomationTreeWalker,
 }
 
 // The COM walker pointer keeps EventContext from auto-deriving Send/Sync
-// (it's shared via Arc with UIA's MTA callback threads). The same MTA proxy
-// guarantee behind `unsafe impl Send for WindowsProvider` covers it: every
-// dereference happens under MTA.
+// (it's shared via Arc with UIA's MTA callback threads). The same agility
+// behind `unsafe impl Send for WindowsProvider` covers it.
 unsafe impl Send for EventContext {}
 unsafe impl Sync for EventContext {}
 
