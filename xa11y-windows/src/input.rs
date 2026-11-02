@@ -6,6 +6,7 @@
 //! go through virtual-key codes so downstream apps see normal `WM_KEYDOWN`
 //! messages (and modifiers compose with `chord`).
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use windows::Win32::Foundation::GetLastError;
@@ -42,6 +43,14 @@ const WHEEL_DELTA: i32 = 120;
 #[derive(Default)]
 pub struct WindowsInputProvider {
     lock: Mutex<()>,
+    /// The virtual key each held `Key::Char` was pressed as.
+    ///
+    /// A character's key depends on the keyboard layout, which can change
+    /// between `key_down` and `key_up` (the user switches layout, or focus
+    /// moves to a window with another one). Releasing whatever the new layout
+    /// says would leave the original key stuck down, so `key_up` releases the
+    /// key `key_down` actually pressed.
+    held_chars: Mutex<HashMap<char, VIRTUAL_KEY>>,
 }
 
 impl WindowsInputProvider {
@@ -256,6 +265,11 @@ fn vk_for_char(c: char) -> Result<VIRTUAL_KEY> {
 
 /// Resolve `c` to a virtual key on the keyboard layout of the foreground
 /// window's thread, which is the layout that will interpret the key press.
+///
+/// The foreground window's thread is not always the thread that owns
+/// keyboard focus (`GetGUIThreadInfo` would name that one), but within one
+/// window the two share a layout in practice, and the foreground thread is
+/// the one Windows switches layouts for.
 fn vk_on_active_layout(c: char) -> Result<VIRTUAL_KEY> {
     let mut units = [0u16; 2];
     let encoded = c.encode_utf16(&mut units);
@@ -389,16 +403,43 @@ impl InputProvider for WindowsInputProvider {
         if extended {
             flags |= KEYEVENTF_EXTENDEDKEY;
         }
-        self.send(&[key_input(vk, flags)])
+        self.send(&[key_input(vk, flags)])?;
+        if let Key::Char(c) = key {
+            self.held_chars
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(*c, vk);
+        }
+        Ok(())
     }
 
     fn key_up(&self, key: &Key) -> Result<()> {
-        let (vk, extended) = vk_for(key)?;
+        // Release the key `key_down` pressed, not what the layout says now.
+        let held = match key {
+            Key::Char(c) => self
+                .held_chars
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(c)
+                .copied(),
+            _ => None,
+        };
+        let (vk, extended) = match held {
+            Some(vk) => (vk, false),
+            None => vk_for(key)?,
+        };
         let mut flags = KEYEVENTF_KEYUP;
         if extended {
             flags |= KEYEVENTF_EXTENDEDKEY;
         }
-        self.send(&[key_input(vk, flags)])
+        self.send(&[key_input(vk, flags)])?;
+        if let Key::Char(c) = key {
+            self.held_chars
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(c);
+        }
+        Ok(())
     }
 
     fn type_text(&self, text: &str) -> Result<()> {
