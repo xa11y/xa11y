@@ -13,6 +13,7 @@ does not include a particular widget type.
 from __future__ import annotations
 
 import sys
+import time
 import warnings
 
 import pytest
@@ -675,15 +676,29 @@ def test_locator_dump_shorthand(app, app_config):
     assert "button" in text
 
 
+
+def _scrolled_list_visibility(app, list_name: str, first: str, last: str):
+    """The first and last entries' ``visible``, read both ways the provider
+    computes it: a selector search, which takes the one-pass subtree fetch,
+    and ``children()``, which clips each level to its parent."""
+    found = {
+        name: app.locator(f'[name="{name}"]').element().visible
+        for name in (first, last)
+    }
+    lst = app.locator(f'[name="{list_name}"]').element()
+    listed = {c.name: c.visible for c in lst.children() if c.name in (first, last)}
+    return found, listed
+
+
 def test_items_scrolled_out_of_a_list_are_not_visible(app, app_config):
     """An item scrolled out of its list reports ``visible == False``.
 
     WinForms leaves ``IsOffscreen`` false on list items scrolled out of the
     viewport, so without the provider's own clipping they counted as visible
     and an auto-waiting action would act on an item nobody can see (issue
-    #502). Checked through both of the provider's paths: a selector search,
-    which leaves the one-pass subtree fetch when anything scrolls, and a
-    plain ``children()`` read, which clips each level to its parent.
+    #502). The scrolled-out entry's ``raw["uia_is_offscreen"]`` is reported as
+    a warning so the CI log shows that premise holds, and with it that the
+    test fails without the fix.
     """
     list_name = app_config.get("scrolled_list_name")
     if not list_name:
@@ -691,16 +706,84 @@ def test_items_scrolled_out_of_a_list_are_not_visible(app, app_config):
     first = app_config["scrolled_list_first_item"]
     last = app_config["scrolled_list_last_item"]
 
-    found = {
-        name: app.locator(f'[name="{name}"]').element().visible
-        for name in (first, last)
-    }
-    assert found == {first: True, last: False}, (
-        f"selector search: the first entry must be visible and the last scrolled out; got {found}"
+    # A warning, so it lands in the run's summary even when the test passes.
+    hidden = app.locator(f'[name="{last}"]').element()
+    warnings.warn(
+        f"issue #502 premise: {last!r} uia_is_offscreen="
+        f"{hidden.raw.get('uia_is_offscreen')!r} visible={hidden.visible!r} "
+        f"bounds={hidden.bounds!r}",
+        stacklevel=1,
     )
 
-    lst = app.locator(f'[name="{list_name}"]').element()
-    listed = {c.name: c.visible for c in lst.children() if c.name in (first, last)}
-    assert listed == {first: True, last: False}, (
-        f"children(): the first entry must be visible and the last scrolled out; got {listed}"
+    found, listed = _scrolled_list_visibility(app, list_name, first, last)
+    expected = {first: True, last: False}
+    assert found == expected, (
+        f"selector search: the first entry must be visible and the last "
+        f"scrolled out; got {found}"
     )
+    assert listed == expected, (
+        f"children(): the first entry must be visible and the last scrolled "
+        f"out; got {listed}"
+    )
+
+
+def test_scrolling_a_list_flips_which_items_are_visible(app, app_config):
+    """After ``scroll_into_view`` on the last entry, it reports visible and
+    the first does not: the clip follows the scroll position rather than a
+    remembered answer."""
+    list_name = app_config.get("scrolled_list_name")
+    if not list_name:
+        pytest.skip("this app has no list longer than its viewport yet")
+    first = app_config["scrolled_list_first_item"]
+    last = app_config["scrolled_list_last_item"]
+    expected = {first: False, last: True}
+
+    app.locator(f'[name="{last}"]').scroll_into_view()
+    try:
+        deadline = time.monotonic() + 5.0
+        while True:
+            found, listed = _scrolled_list_visibility(app, list_name, first, last)
+            settled = found == expected and listed == expected
+            if settled or time.monotonic() > deadline:
+                break
+            time.sleep(0.2)
+        assert found == expected, (
+            f"selector search after scrolling to the last entry: got {found}"
+        )
+        assert listed == expected, (
+            f"children() after scrolling to the last entry: got {listed}"
+        )
+    finally:
+        # Put the shared app back for the test above, whatever the order.
+        app.locator(f'[name="{first}"]').scroll_into_view()
+
+
+def test_open_dropdown_in_a_scrolled_panel_is_visible(app, app_config):
+    """An open drop-down's entries report visible although they lie outside
+    the overflowing panel that holds the combo box.
+
+    The drop-down is a popup window, drawn above the panel, but UIA lists it
+    under the combo in the raw view. Clipping it to the panel would leave the
+    entries not visible and time out any auto-waiting action on them.
+    """
+    combo_name = app_config.get("scrolled_panel_combo_name")
+    if not combo_name:
+        pytest.skip("this app has no combo box in an overflowing panel yet")
+    entry = app_config["scrolled_panel_combo_last_item"]
+
+    combo = app.locator(f'[name="{combo_name}"]')
+    combo.expand()
+    try:
+        el = app.locator(f'[name="{entry}"]').element()
+        warnings.warn(
+            f"open drop-down: {entry!r} uia_is_offscreen="
+            f"{el.raw.get('uia_is_offscreen')!r} visible={el.visible!r} "
+            f"bounds={el.bounds!r}",
+            stacklevel=1,
+        )
+        assert el.visible is True, (
+            f"an open drop-down entry must be visible, not clipped to the "
+            f"scrolling panel; got visible={el.visible!r} bounds={el.bounds!r}"
+        )
+    finally:
+        combo.collapse()
