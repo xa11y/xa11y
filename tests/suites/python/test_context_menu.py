@@ -1,9 +1,11 @@
 """An open context menu is reachable both by listing and by search (macOS).
 
-A macOS context menu is an app-level ``AXMenu`` child of the application,
-never an entry in ``AXWindows``. Search walks ``AXChildren`` while the
-application's listing read ``AXWindows`` alone, so a selector found a menu
-that ``App.children()`` did not show (issue #518).
+Issue #518 reported that search could find an open context menu the
+listing did not show. An ``NSView`` context menu on the macOS runner is not
+an app-level ``AXMenu``, though: it opens inside the window's subtree
+(``window > group > group > menu``). So the listing half is a bounded
+``children()`` walk down from ``App.children()``, and it must reach the very
+item search found.
 """
 
 from __future__ import annotations
@@ -19,13 +21,66 @@ import xa11y
 CONTEXT_ACTION = 'menu_item[name="xa11y Context Action"]'
 
 
-def _context_menus(app: xa11y.App) -> list[xa11y.Element]:
-    """The app's listed top-level menus that hold the fixture's item."""
-    return [
-        child
-        for child in app.children()
-        if child.role == "menu" and child.locator(CONTEXT_ACTION).count() == 1
-    ]
+# Bounds on the listing walk. The fixture's tree is a few hundred nodes; the
+# caps only stop a regression (a cycle, a runaway subtree) from hanging the
+# run, and hitting one is reported rather than read as "not found".
+_WALK_MAX_DEPTH = 12
+_WALK_MAX_NODES = 3000
+
+
+def _signature(element: xa11y.Element) -> tuple:
+    """Role, name and bounds of the element and each ancestor.
+
+    ``Element`` has no identity comparison across routes, so two elements
+    reached by different routes are the same node when this whole path agrees.
+    """
+    path = []
+    node: xa11y.Element | None = element
+    while node is not None and len(path) < _WALK_MAX_DEPTH + 2:
+        b = node.bounds
+        path.append(
+            (node.role, node.name, None if b is None else (b.x, b.y, b.width, b.height))
+        )
+        node = node.parent()
+    return tuple(path)
+
+
+def _walk_to_context_item(app: xa11y.App) -> tuple[list[xa11y.Element], str]:
+    """Breadth-first ``children()`` walk from ``App.children()``.
+
+    Returns every ``menu_item`` named like the fixture's action that sits
+    under a ``menu``, plus a description of how far the walk got (for the
+    failure message).
+    """
+    item_name = "xa11y Context Action"
+    frontier: list[tuple[xa11y.Element, int]] = [(c, 1) for c in app.children()]
+    hits: list[xa11y.Element] = []
+    visited = 0
+    deepest = 0
+    capped_depth = 0
+    while frontier and visited < _WALK_MAX_NODES:
+        node, depth = frontier.pop(0)
+        visited += 1
+        deepest = max(deepest, depth)
+        if depth >= _WALK_MAX_DEPTH:
+            capped_depth += 1
+            continue
+        children = node.children()
+        for child in children:
+            if (
+                child.role == "menu_item"
+                and child.name == item_name
+                and node.role == "menu"
+            ):
+                hits.append(child)
+            frontier.append((child, depth + 1))
+    left = [f"{n.role} {n.name!r}@{d}" for n, d in frontier[:8]]
+    summary = (
+        f"visited {visited} nodes (cap {_WALK_MAX_NODES}), deepest level {deepest} "
+        f"(cap {_WALK_MAX_DEPTH}), {capped_depth} nodes stopped at the depth cap, "
+        f"{len(frontier)} left unvisited{': ' + ', '.join(left) if left else ''}"
+    )
+    return hits, summary
 
 
 def _ancestry(element: xa11y.Element, limit: int = 12) -> str:
@@ -183,11 +238,9 @@ def test_cocoa_context_menu_is_listed_and_searchable(app_name, app):
         xa11y.input_sim().click(target, button="right")
         deadline = time.monotonic() + 5.0
         found = 0
-        listed: list[xa11y.Element] = []
         while time.monotonic() < deadline:
             found = app.locator(CONTEXT_ACTION).count()
-            listed = _context_menus(app)
-            if found and listed:
+            if found:
                 break
             time.sleep(0.1)
 
@@ -197,16 +250,20 @@ def test_cocoa_context_menu_is_listed_and_searchable(app_name, app):
             f"children={[(c.role, c.name) for c in app.children()]!r}; "
             f"app tree:\n{app.dump(max_depth=3)}"
         )
-        if len(listed) != 1:
-            found_item = app.locator(CONTEXT_ACTION).element()
-            raise AssertionError(
-                "search found the open context menu's item, but App.children() "
-                f"lists {len(listed)} menus holding it; children="
-                f"{[(c.role, c.name) for c in app.children()]!r}; "
-                f"the found item's ancestry: {_ancestry(found_item)}"
-            )
-        # The listing is a navigable route to the item, not just a node.
-        item = listed[0].locator(CONTEXT_ACTION).element()
+        searched = app.locator(CONTEXT_ACTION).element()
+        listed, walk = _walk_to_context_item(app)
+        assert len(listed) == 1, (
+            f"search found the open context menu's item, but a children() walk "
+            f"from App.children() reached {len(listed)} of it; walk: {walk}; "
+            f"children={[(c.role, c.name) for c in app.children()]!r}; "
+            f"the searched item's ancestry: {_ancestry(searched)}"
+        )
+        # The listing is a navigable route to the same node search found.
+        item = listed[0]
+        assert _signature(item) == _signature(searched), (
+            "the children() walk and search reached different context-menu items: "
+            f"walk={_ancestry(item)}; search={_ancestry(searched)}"
+        )
         # Not a window, so App.windows() keeps leaving it out.
         assert all(w.role in ("window", "dialog") for w in app.windows())
         item.press()
