@@ -116,6 +116,58 @@ pub(crate) fn char_keysym(c: char) -> u32 {
     }
 }
 
+/// One planned key press for `type_text`: the keycode to tap, and the Shift
+/// keycode to hold around it when the character is on the shifted level.
+pub(crate) type Keystroke<K> = (K, Option<K>);
+
+/// Resolve every character of `text` to a keystroke **before** any event is
+/// sent, so a character the layout cannot produce fails the whole call with
+/// nothing typed (issue #494). Typing the prefix and then failing would leave
+/// the caller with half-entered text and no way to know how much landed.
+///
+/// `lookup` maps a keysym to `(keycode, needs_shift)` in the backend's
+/// keymap; `layout` names that keymap in the error. The error names the
+/// character, its code point and its index (in characters) within `text`.
+pub(crate) fn plan_keystrokes<K: Copy>(
+    text: &str,
+    layout: &str,
+    lookup: impl Fn(u32) -> Option<(K, bool)>,
+) -> Result<Vec<Keystroke<K>>> {
+    let mut shift: Option<K> = None;
+    let mut plan = Vec::with_capacity(text.len());
+    for (index, c) in text.chars().enumerate() {
+        let keysym = char_keysym(c);
+        let (keycode, needs_shift) = lookup(keysym).ok_or_else(|| Error::Unsupported {
+            feature: format!(
+                "typing character '{c}' (U+{:04X}, keysym 0x{keysym:04x}) at index {index} of \
+                 the text: it has no keycode in the current {layout}; nothing was typed",
+                c as u32
+            ),
+        })?;
+        let held = if needs_shift {
+            let shift_kc = match shift {
+                Some(kc) => kc,
+                None => {
+                    let (kc, _) = lookup(XK_SHIFT_L).ok_or_else(|| Error::Unsupported {
+                        feature: format!(
+                            "typing character '{c}' at index {index} of the text needs Shift, \
+                             but Shift_L has no keycode in the current {layout}; nothing was \
+                             typed"
+                        ),
+                    })?;
+                    shift = Some(kc);
+                    kc
+                }
+            };
+            Some(shift_kc)
+        } else {
+            None
+        };
+        plan.push((keycode, held));
+    }
+    Ok(plan)
+}
+
 /// Keymap snapshot built from `GetKeyboardMapping`. For each keysym we care
 /// about we store the keycode plus whether it lives in the shifted column
 /// (column 1) rather than the unshifted column (column 0).
@@ -293,33 +345,23 @@ impl X11InputBackend {
     }
 
     fn type_text(&self, text: &str) -> Result<()> {
-        // For each character, look up its keysym; if the keymap has it in the
-        // shifted column, hold Shift for that press. This is the X11 analogue
-        // of the KEYEVENTF_UNICODE path on Windows — both aim to be robust
-        // against the active keyboard layout.
-        for c in text.chars() {
-            let keysym = char_keysym(c);
-            let (keycode, needs_shift) = {
-                let map = self.keymap.read().unwrap_or_else(|e| e.into_inner());
-                match map.lookup(keysym) {
-                    Some(v) => v,
-                    None => {
-                        return Err(Error::Unsupported {
-                            feature: format!(
-                                "character '{c}' (keysym 0x{keysym:04x}) has no keycode \
-                                 in the current X keyboard layout"
-                            ),
-                        });
-                    }
-                }
-            };
-            if needs_shift {
-                self.key_event(XK_SHIFT_L, true)?;
+        // Every character is resolved against the keymap before the first
+        // event goes out; see `plan_keystrokes`. A character in the shifted
+        // column is typed with Shift held. This is the X11 analogue of the
+        // KEYEVENTF_UNICODE path on Windows — both aim to be robust against
+        // the active keyboard layout.
+        let plan = {
+            let map = self.keymap.read().unwrap_or_else(|e| e.into_inner());
+            plan_keystrokes(text, "X keyboard layout", |keysym| map.lookup(keysym))?
+        };
+        for (keycode, shift) in plan {
+            if let Some(shift) = shift {
+                self.send(KEY_PRESS_EVENT, shift, 0, 0)?;
             }
             self.send(KEY_PRESS_EVENT, keycode, 0, 0)?;
             self.send(KEY_RELEASE_EVENT, keycode, 0, 0)?;
-            if needs_shift {
-                self.key_event(XK_SHIFT_L, false)?;
+            if let Some(shift) = shift {
+                self.send(KEY_RELEASE_EVENT, shift, 0, 0)?;
             }
         }
         Ok(())
@@ -461,5 +503,58 @@ fn button_number(button: MouseButton) -> u8 {
         MouseButton::Left => 1,
         MouseButton::Middle => 2,
         MouseButton::Right => 3,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A two-column X keymap starting at keycode 8:
+    /// `a/A`, `b/B`, `Shift_L`.
+    fn keymap(with_shift: bool) -> Keymap {
+        let shift = if with_shift { XK_SHIFT_L } else { 0 };
+        Keymap {
+            min_keycode: 8,
+            syms_per_code: 2,
+            syms: vec![
+                'a' as u32, 'A' as u32, //
+                'b' as u32, 'B' as u32, //
+                shift, 0,
+            ],
+        }
+    }
+
+    #[test]
+    fn plan_resolves_every_character_with_shift_where_needed() {
+        let map = keymap(true);
+        let plan = plan_keystrokes("aBa", "X keyboard layout", |k| map.lookup(k))
+            .expect("all characters map");
+        assert_eq!(plan, vec![(8, None), (9, Some(10)), (8, None)]);
+    }
+
+    #[test]
+    fn unmapped_character_mid_string_plans_nothing() {
+        let map = keymap(true);
+        let err = plan_keystrokes("ab\u{65e5}ba", "X keyboard layout", |k| map.lookup(k))
+            .expect_err("an unmapped character must fail the whole plan");
+        let Error::Unsupported { feature } = err else {
+            panic!("expected Unsupported, got {err:?}");
+        };
+        assert!(feature.contains('\u{65e5}'), "{feature}");
+        assert!(feature.contains("U+65E5"), "{feature}");
+        assert!(feature.contains("index 2"), "{feature}");
+        assert!(feature.contains("nothing was typed"), "{feature}");
+    }
+
+    #[test]
+    fn missing_shift_fails_before_any_keystroke() {
+        let map = keymap(false);
+        // `a` alone needs no Shift and plans fine…
+        assert!(plan_keystrokes("a", "X keyboard layout", |k| map.lookup(k)).is_ok());
+        // …but a later capital fails the plan, so the `a` is never sent.
+        let err = plan_keystrokes("aB", "X keyboard layout", |k| map.lookup(k))
+            .expect_err("Shift_L is missing");
+        assert!(err.to_string().contains("Shift_L"), "{err}");
     }
 }

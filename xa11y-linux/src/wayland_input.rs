@@ -48,7 +48,7 @@ use xkbcommon::xkb;
 use xa11y_core::input::{Key as XaKey, MouseButton, Point, ScrollDelta};
 use xa11y_core::{Error, Result};
 
-use crate::input::{char_keysym, key_to_keysym, XK_SHIFT_L};
+use crate::input::{key_to_keysym, plan_keystrokes};
 
 /// Virtual coordinate range for the absolute pointer. Compositors scale
 /// this onto the active virtual screen — same convention used by graphics
@@ -303,35 +303,37 @@ impl WaylandInputBackend {
 
     pub(crate) fn type_text(&self, text: &str) -> Result<()> {
         let mut s = self.lock();
-        let shift_kc = s
-            .keymap
-            .lookup(XK_SHIFT_L)
-            .ok_or_else(|| Error::Unsupported {
-                feature: "no Shift_L in xkb keymap".into(),
-            })?
-            .0;
-
-        for c in text.chars() {
-            let keysym = char_keysym(c);
-            let (kc, needs_shift) = s.keymap.lookup(keysym).ok_or_else(|| Error::Unsupported {
-                feature: format!(
-                    "character '{c}' (keysym 0x{keysym:04x}) has no keycode \
-                     in the current xkb keyboard layout"
-                ),
-            })?;
-            let mut frame = vec![];
-            if needs_shift {
-                frame.push(InputEvent::new(EventType::KEY.0, shift_kc, 1));
-            }
-            frame.push(InputEvent::new(EventType::KEY.0, kc, 1));
-            frame.push(InputEvent::new(EventType::KEY.0, kc, 0));
-            if needs_shift {
-                frame.push(InputEvent::new(EventType::KEY.0, shift_kc, 0));
-            }
+        // Resolve the whole string before emitting anything, so an
+        // untypeable character fails the call with nothing typed.
+        let frames = typing_frames(&s.keymap, text)?;
+        for frame in frames {
             emit(&mut s.device, &frame)?;
         }
         Ok(())
     }
+}
+
+/// The evdev frames that type `text`, one per character (Shift press, key
+/// press, key release, Shift release). Fails without producing any frame if
+/// one character is missing from the keymap; see
+/// [`crate::input::plan_keystrokes`].
+fn typing_frames(keymap: &ReverseKeymap, text: &str) -> Result<Vec<Vec<InputEvent>>> {
+    let plan = plan_keystrokes(text, "xkb keyboard layout", |keysym| keymap.lookup(keysym))?;
+    Ok(plan
+        .into_iter()
+        .map(|(kc, shift)| {
+            let mut frame = Vec::with_capacity(4);
+            if let Some(shift) = shift {
+                frame.push(InputEvent::new(EventType::KEY.0, shift, 1));
+            }
+            frame.push(InputEvent::new(EventType::KEY.0, kc, 1));
+            frame.push(InputEvent::new(EventType::KEY.0, kc, 0));
+            if let Some(shift) = shift {
+                frame.push(InputEvent::new(EventType::KEY.0, shift, 0));
+            }
+            frame
+        })
+        .collect())
 }
 
 fn emit(dev: &mut VirtualDevice, events: &[InputEvent]) -> Result<()> {
@@ -395,12 +397,31 @@ fn detect_screen_size() -> (i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::{char_keysym, XK_SHIFT_L};
     use xa11y_core::input::Key as XaKey;
 
     fn default_keymap() -> xkb::Keymap {
         let ctx = xkb::Context::new(xkb::CONTEXT_NO_FLAGS);
         xkb::Keymap::new_from_names(&ctx, "", "", "us", "", None, xkb::KEYMAP_COMPILE_NO_FLAGS)
             .expect("US keymap should compile from xkbcommon defaults")
+    }
+
+    #[test]
+    fn typing_frames_reject_an_unmapped_character_with_no_frames() {
+        let reverse = ReverseKeymap::from_xkb(&default_keymap());
+        assert_eq!(
+            typing_frames(&reverse, "aB")
+                .expect("US letters type")
+                .len(),
+            2
+        );
+        let err = typing_frames(&reverse, "ab\u{65e5}c")
+            .expect_err("a CJK character is not in the US layout");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("index 2") && msg.contains("nothing was typed"),
+            "{msg}"
+        );
     }
 
     #[test]
