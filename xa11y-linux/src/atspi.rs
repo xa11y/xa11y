@@ -679,25 +679,33 @@ impl LinuxProvider {
         }
     }
 
-    /// Get bounds via Component interface.
+    /// Bounds via the Component interface: `Ok(None)` for an object without
+    /// one or with sentinel extents, `Err` for a read that failed.
     /// Gated on the node reporting Component, to avoid GTK CRITICAL warnings
     /// on objects (e.g. TreeView cell renderers) that don't implement it.
-    fn get_extents(&self, aref: &AccessibleRef, ifaces: Interfaces) -> Option<Rect> {
+    fn read_extents(&self, aref: &AccessibleRef, ifaces: Interfaces) -> Result<Option<Rect>> {
         if !ifaces.component {
-            return None;
+            return Ok(None);
         }
-        let proxy = self
-            .make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Component")
-            .ok()?;
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Component")?;
         // GetExtents(coord_type: u32) -> (x, y, width, height)
         // coord_type 0 = screen coordinates
-        let reply = proxy.call_method("GetExtents", &(0u32,)).ok()?;
-        let (x, y, w, h): (i32, i32, i32, i32) = reply.body().deserialize().ok()?;
+        let reply = proxy
+            .call_method("GetExtents", &(0u32,))
+            .map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("GetExtents failed: {e}"),
+            })?;
+        let (x, y, w, h): (i32, i32, i32, i32) =
+            reply.body().deserialize().map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("GetExtents deserialize failed: {e}"),
+            })?;
         // AT-SPI screen extents are physical device pixels. Convert to logical
         // coordinates (the cross-platform contract, same space as the
         // screenshot/input layers) using the detected display scale. On the
         // common 1.0 case this is a no-op. See `crate::scale`.
-        extents_to_rect(x, y, w, h).map(|r| r.to_logical(crate::scale::coordinate_scale()))
+        Ok(extents_to_rect(x, y, w, h).map(|r| r.to_logical(crate::scale::coordinate_scale())))
     }
 
     /// Get available actions via Action interface, returning both the action list
@@ -1018,6 +1026,18 @@ impl LinuxProvider {
     /// After resolving the role (1-3 sequential D-Bus calls), all remaining
     /// property fetches are independent and run in parallel via rayon::join.
     fn build_element_data(&self, aref: &AccessibleRef, pid: Option<u32>) -> ElementData {
+        self.build_element_data_in(aref, pid, &AncestorMemo::default())
+    }
+
+    /// [`build_element_data`](Self::build_element_data) sharing `memo` with
+    /// the other elements built in the same call, so siblings settling why
+    /// they are hidden read their common ancestors once.
+    fn build_element_data_in(
+        &self,
+        aref: &AccessibleRef,
+        pid: Option<u32>,
+        memo: &AncestorMemo,
+    ) -> ElementData {
         // GetInterfaces runs alongside the role reads so it costs no extra
         // latency, and its result gates every Text / Value / Component read
         // below. A failed read gates them all off: like the other per-field
@@ -1059,7 +1079,7 @@ impl LinuxProvider {
         let (
             ((mut name, value), description),
             (
-                ((states, state_bits), bounds),
+                ((states, state_bits), bounds_read),
                 ((actions, action_index_map), (numeric_value, min_value, max_value)),
             ),
         ) = rayon::join(
@@ -1090,9 +1110,9 @@ impl LinuxProvider {
                             },
                             || {
                                 if role != Role::Application {
-                                    self.get_extents(aref, ifaces)
+                                    self.read_extents(aref, ifaces)
                                 } else {
-                                    None
+                                    Ok(None)
                                 }
                             },
                         )
@@ -1223,10 +1243,23 @@ impl LinuxProvider {
                 .insert(handle, action_index_map);
         }
 
+        let bounds = match &bounds_read {
+            Ok(bounds) => *bounds,
+            Err(_) => None,
+        };
         let mut states = states;
-        if states.hidden_reason == Some(HiddenReason::Unknown) {
-            states.hidden_reason = Some(self.ancestor_hidden_reason(aref, bounds.as_ref()));
-        }
+        states.hidden_reason = match states.hidden_reason {
+            // VISIBLE without SHOWING: the answer is above it.
+            Some(HiddenReason::Unknown) => {
+                Some(self.ancestor_hidden_reason(aref, &bounds_read, memo))
+            }
+            // VISIBLE cleared, which is also how a Qt item view reports a
+            // row scrolled out of it.
+            Some(HiddenReason::NotShowing) if state_bits & ATSPI_VISIBLE == 0 => {
+                Some(self.item_view_hidden_reason(aref, &bounds_read, memo))
+            }
+            reason => reason,
+        };
 
         let mut data: ElementData = ElementParts {
             role,
@@ -1317,48 +1350,139 @@ impl LinuxProvider {
     /// is above it. Climb to the first ancestor that is drawn (or minimized):
     ///
     /// - a minimized (`ICONIFIED`) frame on the way: `WindowMinimized`;
-    /// - a drawn ancestor whose extents the object lies entirely outside:
-    ///   `ScrolledOut`. Laid out but beyond the area its nearest drawn
-    ///   container shows is what an item scrolled out of a list or a
-    ///   scrolled window looks like (Qt item views and GTK 3 tree views
-    ///   clear `SHOWING` on exactly those);
-    /// - a drawn ancestor it overlaps, or no bounds to compare: `NotShowing`
-    ///   (a collapsed panel, an inactive tab page);
-    /// - no drawn ancestor at all: `NotShowing`.
+    /// - a drawn ancestor whose extents the object lies entirely outside,
+    ///   with a scrolling container (see [`is_scrolling_container_role`])
+    ///   among the ancestors climbed, the drawn one included: `ScrolledOut`.
+    ///   That is an item scrolled out of a list or a scrolled window (GTK 3
+    ///   tree views clear `SHOWING` on exactly those). Geometry alone is not
+    ///   enough: a control laid out beyond a container that only clips it
+    ///   is not scrolled anywhere;
+    /// - anything else with no read failing: `NotShowing` (a collapsed
+    ///   panel, an inactive tab page, no drawn ancestor at all).
     ///
     /// It runs only for hidden objects, so a tree of visible ones pays
-    /// nothing. A failed read on the way returns `Unknown` rather than a
-    /// guess: the snapshot reads every other property the same way, an
-    /// unreadable one degrading to absent, and `Unknown` is the reason's
-    /// "absent".
-    fn ancestor_hidden_reason(&self, aref: &AccessibleRef, bounds: Option<&Rect>) -> HiddenReason {
-        let mut current = aref.clone();
+    /// nothing. Any read on the way that fails, the object's own bounds
+    /// included, returns `Unknown` rather than a guess; an object without a
+    /// Component, or with sentinel extents, has no bounds to compare and is
+    /// `NotShowing`.
+    fn ancestor_hidden_reason(
+        &self,
+        aref: &AccessibleRef,
+        bounds: &Result<Option<Rect>>,
+        memo: &AncestorMemo,
+    ) -> HiddenReason {
+        let mut current = match self.get_atspi_parent(aref) {
+            Ok(Some(parent)) => parent,
+            Ok(None) => return HiddenReason::NotShowing,
+            Err(_) => return HiddenReason::Unknown,
+        };
+        let mut scrolling = false;
         for _ in 0..HIDDEN_REASON_MAX_WALK {
-            let parent = match self.get_atspi_parent(&current) {
-                Ok(Some(parent)) => parent,
-                Ok(None) => return HiddenReason::NotShowing,
-                Err(_) => return HiddenReason::Unknown,
-            };
-            let (bits, read_ok) = self.state_bits(&parent);
-            if !read_ok {
+            let Some(facts) = self.ancestor_facts(&current, memo) else {
                 return HiddenReason::Unknown;
-            }
-            if bits & ATSPI_ICONIFIED != 0 {
+            };
+            if facts.iconified {
                 return HiddenReason::WindowMinimized;
             }
-            if atspi_visible(bits) {
-                let Some(bounds) = bounds else {
-                    return HiddenReason::NotShowing;
-                };
-                let ifaces = self.get_interfaces(&parent).unwrap_or_default();
-                return match self.get_extents(&parent, ifaces) {
-                    Some(viewport) if !shows_within(bounds, &viewport) => HiddenReason::ScrolledOut,
-                    _ => HiddenReason::NotShowing,
-                };
+            scrolling |= facts.scrolling;
+            if facts.drawn {
+                return clipped_reason(bounds, facts.extents.as_ref(), scrolling);
             }
-            current = parent;
+            match facts.parent {
+                Some(parent) => current = parent,
+                None => return HiddenReason::NotShowing,
+            }
         }
         HiddenReason::Unknown
+    }
+
+    /// Why an object whose toolkit cleared `VISIBLE` is not drawn.
+    ///
+    /// Usually because its toolkit hid it (`NotShowing`), but Qt item views
+    /// also clear `VISIBLE`, not just `SHOWING`, on a row or cell outside the
+    /// view's viewport (`QAccessibleTableCell::state` marks it `invisible`).
+    /// So an object whose parent is a drawn scrolling container, and which
+    /// lies entirely outside that parent's extents, is `ScrolledOut`. Only
+    /// the parent is consulted: a hidden widget further down is hidden by
+    /// its toolkit whatever scrolls above it. Read failures are `Unknown`,
+    /// as in [`ancestor_hidden_reason`](Self::ancestor_hidden_reason).
+    fn item_view_hidden_reason(
+        &self,
+        aref: &AccessibleRef,
+        bounds: &Result<Option<Rect>>,
+        memo: &AncestorMemo,
+    ) -> HiddenReason {
+        match bounds {
+            // A hidden widget usually reports sentinel extents: nothing to
+            // compare, and no reason to read its parent.
+            Ok(None) => return HiddenReason::NotShowing,
+            Err(_) => return HiddenReason::Unknown,
+            Ok(Some(_)) => {}
+        }
+        let parent = match self.get_atspi_parent(aref) {
+            Ok(Some(parent)) => parent,
+            Ok(None) => return HiddenReason::NotShowing,
+            Err(_) => return HiddenReason::Unknown,
+        };
+        match self.ancestor_facts(&parent, memo) {
+            None => HiddenReason::Unknown,
+            Some(facts) if facts.drawn && !facts.iconified => {
+                clipped_reason(bounds, facts.extents.as_ref(), facts.scrolling)
+            }
+            Some(_) => HiddenReason::NotShowing,
+        }
+    }
+
+    /// What the hidden-reason climb needs from one ancestor, from `memo` when
+    /// an element built earlier in the same call already asked. `None` when
+    /// a read failed, which the callers answer with `Unknown`: the error
+    /// itself is not reported, because an unreadable property in a snapshot
+    /// degrades to absent and `Unknown` is the reason's "absent".
+    fn ancestor_facts(&self, aref: &AccessibleRef, memo: &AncestorMemo) -> Option<AncestorFacts> {
+        let key = (aref.bus_name.clone(), aref.path.clone());
+        if let Some(facts) = memo.0.lock().unwrap_or_else(|e| e.into_inner()).get(&key) {
+            return facts.clone();
+        }
+        // Two threads building siblings may both read the same ancestor
+        // before either stores it; the answers are the same, so the second
+        // insert is harmless.
+        let facts = self.read_ancestor_facts(aref).ok();
+        memo.0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, facts.clone());
+        facts
+    }
+
+    fn read_ancestor_facts(&self, aref: &AccessibleRef) -> Result<AncestorFacts> {
+        let (bits, read_ok) = self.state_bits(aref);
+        if !read_ok {
+            return Err(Error::Platform {
+                code: -1,
+                message: format!("GetState on {}{} failed", aref.bus_name, aref.path),
+            });
+        }
+        let iconified = bits & ATSPI_ICONIFIED != 0;
+        let drawn = atspi_visible(bits);
+        let scrolling = is_scrolling_container_role(self.get_role_number(aref)?);
+        let extents = if drawn && !iconified {
+            let ifaces = self.get_interfaces(aref)?;
+            self.read_extents(aref, ifaces)?
+        } else {
+            None
+        };
+        let parent = if drawn || iconified {
+            None
+        } else {
+            self.get_atspi_parent(aref)?
+        };
+        Ok(AncestorFacts {
+            iconified,
+            drawn,
+            scrolling,
+            extents,
+            parent,
+        })
     }
 
     /// Get the AT-SPI parent of an accessible ref.
@@ -2168,9 +2292,10 @@ impl Provider for LinuxProvider {
                     self.check_chromium_a11y_enabled(&aref, Some(element_data.role))?;
                 }
 
+                let memo = AncestorMemo::default();
                 let results: Vec<ElementData> = to_build
                     .par_iter()
-                    .map(|r| self.build_element_data(r, pid))
+                    .map(|r| self.build_element_data_in(r, pid, &memo))
                     .collect();
 
                 Ok(results)
@@ -2267,13 +2392,14 @@ impl Provider for LinuxProvider {
             }
             let clause = &group.clauses[clause_idx];
             // Build ElementData for this clause's phase-1 hits in parallel.
+            let memo = AncestorMemo::default();
             let phase1_data: Vec<(usize, ElementData)> = hits
                 .par_iter()
                 .map(|(pos, aref)| {
                     // `root` is always present now, so the PID comes from
                     // the root element. No need to re-resolve via
                     // `get_app_pid` / `get_dbus_pid`.
-                    (*pos, self.build_element_data(aref, pid_from_root))
+                    (*pos, self.build_element_data_in(aref, pid_from_root, &memo))
                 })
                 .collect();
 
@@ -3661,6 +3787,56 @@ pub(crate) fn hidden_reason_from_bits(bits: u64) -> Option<HiddenReason> {
 /// How many ancestors [`LinuxProvider::ancestor_hidden_reason`] climbs
 /// looking for a drawn one before it gives up and says `Unknown`.
 const HIDDEN_REASON_MAX_WALK: usize = 32;
+
+/// One ancestor's answers to what the hidden-reason climb asks of it.
+#[derive(Clone)]
+struct AncestorFacts {
+    iconified: bool,
+    /// `VISIBLE` and `SHOWING`.
+    drawn: bool,
+    /// Its role is a scrolling container ([`is_scrolling_container_role`]).
+    scrolling: bool,
+    /// Read only for a drawn ancestor. `None` without a Component or with
+    /// sentinel extents.
+    extents: Option<Rect>,
+    /// Read only for an ancestor the climb passes through (neither drawn nor
+    /// minimized). `None` at the root.
+    parent: Option<AccessibleRef>,
+}
+
+/// [`AncestorFacts`] keyed by `(bus_name, path)`, shared by the elements
+/// built in one provider call: every row of a long list climbs through the
+/// same ancestors, which then cost one read each instead of one per row.
+/// `None` records a failed read. Scoped to the call, so it never serves an
+/// answer older than the snapshot it is part of.
+#[derive(Default)]
+struct AncestorMemo(Mutex<HashMap<(String, String), Option<AncestorFacts>>>);
+
+/// AT-SPI roles that scroll their content: `List` (31), `ScrollPane` (49),
+/// `Table` (55), `Tree` (65), `TreeTable` (66), `Viewport` (68) and
+/// `ListBox` (98). Several map to [`Role::Group`], so the raw number is what
+/// says it.
+fn is_scrolling_container_role(role: u32) -> bool {
+    matches!(role, 31 | 49 | 55 | 65 | 66 | 68 | 98)
+}
+
+/// `ScrolledOut` when the object lies entirely outside a drawn ancestor's
+/// extents and a scrolling container was on the way to it; `NotShowing`
+/// when either is missing; `Unknown` when the object's own bounds could not
+/// be read.
+fn clipped_reason(
+    bounds: &Result<Option<Rect>>,
+    viewport: Option<&Rect>,
+    scrolling: bool,
+) -> HiddenReason {
+    match (bounds, viewport) {
+        (Err(_), _) => HiddenReason::Unknown,
+        (Ok(Some(bounds)), Some(viewport)) if scrolling && !shows_within(bounds, viewport) => {
+            HiddenReason::ScrolledOut
+        }
+        _ => HiddenReason::NotShowing,
+    }
+}
 
 /// Whether `inner` shows through `outer` at all: some area in common, or, for
 /// a zero-width or zero-height `inner` (a separator), lying on or within
@@ -6209,5 +6385,313 @@ mod tests {
             Err(Error::ElementStale { .. })
         ));
         assert!(provider.get_action_index(handle, "press").is_err());
+    }
+
+    /// One node of the #590 hidden-reason fixture: a role number, a state
+    /// set, a parent link and extents, any of which can fail to read.
+    struct ClimbPeer {
+        parent: &'static str,
+        role: u32,
+        state: u64,
+        extents: (i32, i32, i32, i32),
+        /// Reject `GetExtents` the way a hung or destroyed peer does.
+        extents_error: bool,
+        /// Counts `GetState` calls, to tell a memoized answer from a re-read.
+        state_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[zbus::interface(name = "org.a11y.atspi.Accessible")]
+    impl ClimbPeer {
+        fn get_role(&self) -> u32 {
+            self.role
+        }
+
+        fn get_state(&self) -> Vec<u32> {
+            self.state_reads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            vec![self.state as u32, (self.state >> 32) as u32]
+        }
+
+        fn get_interfaces(&self) -> Vec<String> {
+            vec![
+                "org.a11y.atspi.Accessible".into(),
+                "org.a11y.atspi.Component".into(),
+            ]
+        }
+
+        #[zbus(property)]
+        fn parent(&self) -> (String, zbus::zvariant::OwnedObjectPath) {
+            (
+                "org.test.Climb".into(),
+                zbus::zvariant::OwnedObjectPath::try_from(self.parent).expect("test path"),
+            )
+        }
+    }
+
+    struct ClimbComponent {
+        extents: (i32, i32, i32, i32),
+        extents_error: bool,
+    }
+
+    #[zbus::interface(name = "org.a11y.atspi.Component")]
+    impl ClimbComponent {
+        fn get_extents(&self, _coord_type: u32) -> zbus::fdo::Result<(i32, i32, i32, i32)> {
+            if self.extents_error {
+                Err(zbus::fdo::Error::NoReply("unresponsive".into()))
+            } else {
+                Ok(self.extents)
+            }
+        }
+    }
+
+    const CLIMB_DRAWN: u64 = ATSPI_VISIBLE | ATSPI_SHOWING;
+    const ROLE_FILLER: u32 = 20;
+    const ROLE_LAYERED_PANE: u32 = 28;
+    const ROLE_LIST: u32 = 31;
+    const ROLE_SCROLL_PANE: u32 = 49;
+
+    /// A viewport-sized ancestor; the hidden object below sits far beneath it.
+    const VIEWPORT: (i32, i32, i32, i32) = (0, 0, 200, 100);
+    const BELOW: Rect = Rect {
+        x: 0,
+        y: 500,
+        width: 200,
+        height: 20,
+    };
+    const INSIDE: Rect = Rect {
+        x: 0,
+        y: 10,
+        width: 200,
+        height: 20,
+    };
+
+    fn climb_peer(parent: &'static str, role: u32, state: u64) -> ClimbPeer {
+        ClimbPeer {
+            parent,
+            role,
+            state,
+            extents: VIEWPORT,
+            extents_error: false,
+            state_reads: Default::default(),
+        }
+    }
+
+    /// Serve `peers` and return a provider connected to them.
+    fn climb_provider(peers: Vec<(&'static str, ClimbPeer)>) -> (Connection, LinuxProvider) {
+        let (server_socket, client_socket) =
+            std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let server = std::thread::spawn(move || {
+            let mut builder =
+                zbus::blocking::connection::Builder::async_io_unix_stream(server_socket)
+                    .server(zbus::Guid::generate())
+                    .expect("server GUID")
+                    .p2p();
+            for (path, peer) in peers {
+                let component = ClimbComponent {
+                    extents: peer.extents,
+                    extents_error: peer.extents_error,
+                };
+                builder = builder
+                    .serve_at(path, peer)
+                    .expect("accessible interface")
+                    .serve_at(path, component)
+                    .expect("component interface");
+            }
+            builder.build().expect("server connection")
+        });
+        let connection = zbus::blocking::connection::Builder::async_io_unix_stream(client_socket)
+            .p2p()
+            .build()
+            .expect("client connection");
+        let server = server.join().expect("server thread");
+        let provider = LinuxProvider {
+            a11y_bus: Mutex::new(connection),
+            handle_cache: Mutex::new(HashMap::new()),
+            action_indices: Mutex::new(HashMap::new()),
+            window_manager: WindowManager::new(),
+        };
+        (server, provider)
+    }
+
+    fn climb_ref(path: &str) -> AccessibleRef {
+        AccessibleRef {
+            bus_name: "org.test.Climb".into(),
+            path: path.into(),
+        }
+    }
+
+    /// `VISIBLE` without `SHOWING`, settled by the climb from `/item`.
+    fn climb_reason(provider: &LinuxProvider, bounds: Result<Option<Rect>>) -> HiddenReason {
+        provider.ancestor_hidden_reason(&climb_ref("/item"), &bounds, &AncestorMemo::default())
+    }
+
+    /// Geometry alone is not "scrolled out": an object beyond a drawn
+    /// container that does not scroll is `NotShowing`. The same layout
+    /// under a scroll pane is `ScrolledOut`, whether the scroll pane is the
+    /// drawn ancestor or one the climb passes through on the way to it.
+    #[test]
+    fn scrolled_out_needs_a_scrolling_container_on_the_climb() {
+        let (_server, provider) = climb_provider(vec![
+            ("/item", climb_peer("/panel", 43, ATSPI_VISIBLE)),
+            (
+                "/panel",
+                climb_peer("/org/a11y/atspi/null", ROLE_FILLER, CLIMB_DRAWN),
+            ),
+        ]);
+        assert_eq!(
+            climb_reason(&provider, Ok(Some(BELOW))),
+            HiddenReason::NotShowing
+        );
+
+        let (_server, provider) = climb_provider(vec![
+            ("/item", climb_peer("/pane", 43, ATSPI_VISIBLE)),
+            (
+                "/pane",
+                climb_peer("/org/a11y/atspi/null", ROLE_SCROLL_PANE, CLIMB_DRAWN),
+            ),
+        ]);
+        assert_eq!(
+            climb_reason(&provider, Ok(Some(BELOW))),
+            HiddenReason::ScrolledOut
+        );
+        // Inside the viewport, something else hides it.
+        assert_eq!(
+            climb_reason(&provider, Ok(Some(INSIDE))),
+            HiddenReason::NotShowing
+        );
+        // No bounds to compare.
+        assert_eq!(climb_reason(&provider, Ok(None)), HiddenReason::NotShowing);
+
+        let (_server, provider) = climb_provider(vec![
+            ("/item", climb_peer("/pane", 43, ATSPI_VISIBLE)),
+            (
+                "/pane",
+                climb_peer("/panel", ROLE_SCROLL_PANE, ATSPI_VISIBLE),
+            ),
+            (
+                "/panel",
+                climb_peer("/org/a11y/atspi/null", ROLE_FILLER, CLIMB_DRAWN),
+            ),
+        ]);
+        assert_eq!(
+            climb_reason(&provider, Ok(Some(BELOW))),
+            HiddenReason::ScrolledOut
+        );
+    }
+
+    /// A read that fails on the climb, the object's own bounds included, is
+    /// `Unknown`, never a guessed `NotShowing`.
+    #[test]
+    fn a_failed_read_on_the_climb_is_unknown() {
+        let mut pane = climb_peer("/org/a11y/atspi/null", ROLE_SCROLL_PANE, CLIMB_DRAWN);
+        pane.extents_error = true;
+        let (_server, provider) = climb_provider(vec![
+            ("/item", climb_peer("/pane", 43, ATSPI_VISIBLE)),
+            ("/pane", pane),
+        ]);
+        assert_eq!(
+            climb_reason(&provider, Ok(Some(BELOW))),
+            HiddenReason::Unknown
+        );
+
+        let (_server, provider) = climb_provider(vec![
+            ("/item", climb_peer("/pane", 43, ATSPI_VISIBLE)),
+            (
+                "/pane",
+                climb_peer("/org/a11y/atspi/null", ROLE_SCROLL_PANE, CLIMB_DRAWN),
+            ),
+        ]);
+        let unreadable = Err(Error::Platform {
+            code: -1,
+            message: "GetExtents failed".into(),
+        });
+        assert_eq!(climb_reason(&provider, unreadable), HiddenReason::Unknown);
+
+        // A parent that is not served at all fails its reads.
+        let (_server, provider) =
+            climb_provider(vec![("/item", climb_peer("/missing", 43, ATSPI_VISIBLE))]);
+        assert_eq!(
+            climb_reason(&provider, Ok(Some(BELOW))),
+            HiddenReason::Unknown
+        );
+    }
+
+    /// A minimized frame on the climb answers before any geometry.
+    #[test]
+    fn a_minimized_frame_on_the_climb_is_window_minimized() {
+        let (_server, provider) = climb_provider(vec![
+            ("/item", climb_peer("/frame", 43, ATSPI_VISIBLE)),
+            (
+                "/frame",
+                climb_peer("/org/a11y/atspi/null", 23, ATSPI_VISIBLE | ATSPI_ICONIFIED),
+            ),
+        ]);
+        assert_eq!(
+            climb_reason(&provider, Ok(Some(BELOW))),
+            HiddenReason::WindowMinimized
+        );
+    }
+
+    /// Qt clears `VISIBLE` on an item-view row outside the viewport: under
+    /// a drawn list, beyond its extents, that is `ScrolledOut`. A widget
+    /// hidden by a non-scrolling container (an inactive tab page) stays
+    /// `NotShowing`, and so does one with no bounds at all.
+    #[test]
+    fn a_hidden_row_beyond_its_list_is_scrolled_out() {
+        let (_server, provider) = climb_provider(vec![
+            ("/row", climb_peer("/list", 32, 0)),
+            (
+                "/list",
+                climb_peer("/org/a11y/atspi/null", ROLE_LIST, CLIMB_DRAWN),
+            ),
+            ("/page", climb_peer("/tabs", 43, 0)),
+            (
+                "/tabs",
+                climb_peer("/org/a11y/atspi/null", ROLE_LAYERED_PANE, CLIMB_DRAWN),
+            ),
+        ]);
+        let memo = AncestorMemo::default();
+        let reason =
+            |path, bounds| provider.item_view_hidden_reason(&climb_ref(path), &bounds, &memo);
+        assert_eq!(reason("/row", Ok(Some(BELOW))), HiddenReason::ScrolledOut);
+        assert_eq!(reason("/row", Ok(Some(INSIDE))), HiddenReason::NotShowing);
+        assert_eq!(reason("/page", Ok(Some(BELOW))), HiddenReason::NotShowing);
+        assert_eq!(reason("/page", Ok(None)), HiddenReason::NotShowing);
+    }
+
+    /// Siblings built in one call read their shared ancestors once.
+    #[test]
+    fn siblings_share_one_read_of_each_ancestor() {
+        let pane = climb_peer("/panel", ROLE_SCROLL_PANE, ATSPI_VISIBLE);
+        let panel = climb_peer("/org/a11y/atspi/null", ROLE_FILLER, CLIMB_DRAWN);
+        let (pane_reads, panel_reads) = (pane.state_reads.clone(), panel.state_reads.clone());
+        let (_server, provider) = climb_provider(vec![
+            ("/a", climb_peer("/pane", 43, ATSPI_VISIBLE)),
+            ("/b", climb_peer("/pane", 43, ATSPI_VISIBLE)),
+            ("/pane", pane),
+            ("/panel", panel),
+        ]);
+        let memo = AncestorMemo::default();
+        for path in ["/a", "/b"] {
+            assert_eq!(
+                provider.ancestor_hidden_reason(&climb_ref(path), &Ok(Some(BELOW)), &memo),
+                HiddenReason::ScrolledOut
+            );
+        }
+        let reads = |n: &std::sync::Arc<std::sync::atomic::AtomicUsize>| {
+            n.load(std::sync::atomic::Ordering::SeqCst)
+        };
+        assert_eq!((reads(&pane_reads), reads(&panel_reads)), (1, 1));
+    }
+
+    #[test]
+    fn scrolling_container_roles_are_the_ones_that_scroll() {
+        for role in [31, 49, 55, 65, 66, 68, 98] {
+            assert!(is_scrolling_container_role(role), "{role}");
+        }
+        // Filler, panel, layered pane, page tab, frame.
+        for role in [20, 39, 28, 37, 23] {
+            assert!(!is_scrolling_container_role(role), "{role}");
+        }
     }
 }

@@ -54,8 +54,8 @@ where
 
 /// Attach the structured diagnosis fields (tenet 6) as attributes on an
 /// exception instance, so harnesses can read `e.selector`, `e.condition`,
-/// `e.last_observed`, `e.hidden_reason`, `e.candidates`, `e.scope` (and `e.elapsed` on
-/// timeouts) instead of parsing the message. Every attribute is always set
+/// `e.last_observed`, `e.hidden_reason`, `e.candidates`, `e.scope` (and
+/// `e.elapsed` on timeouts) instead of parsing the message. Every attribute is always set
 /// (`None` / `[]` when absent) so consumers don't need `hasattr` guards.
 fn attach_diagnosis_attrs(
     err: PyErr,
@@ -65,9 +65,10 @@ fn attach_diagnosis_attrs(
 ) -> PyErr {
     Python::attach(|py| {
         let value = err.value(py);
-        // Best-effort by design: the rendered message already carries the
-        // same content, and replacing the original exception with an
-        // attribute-setting failure would mask the real error.
+        // Every `let _` below is best-effort by design: the rendered message
+        // already carries the same content, and replacing the original
+        // exception with an attribute-setting failure would mask the real
+        // error.
         let _ = value.setattr("selector", selector);
         let _ = value.setattr("elapsed", elapsed_secs);
         let _ = value.setattr("condition", diagnosis.and_then(|d| d.condition.clone()));

@@ -7,8 +7,8 @@
 use arbitrary::Arbitrary;
 use std::sync::Arc;
 use xa11y::{
-    ElementData, ElementParts, Error, Provider, Rect, Result, Role, ShellSurfaceKind, StateParts,
-    StateSet, Subscription, Toggled,
+    ElementData, ElementParts, Error, HiddenReason, Provider, Rect, Result, Role, ShellSurfaceKind,
+    StateParts, StateSet, Subscription, Toggled,
 };
 
 // ── Role and Action tables ────────────────────────────────────────────────────
@@ -248,6 +248,8 @@ pub fn make_state(s: &FuzzStateSet) -> StateSet {
         required: s.required,
         busy: s.busy,
         password: s.password,
+        // Set exactly when not visible, as every provider does.
+        hidden_reason: (!s.visible).then_some(HiddenReason::NotShowing),
     }
     .into()
 }
