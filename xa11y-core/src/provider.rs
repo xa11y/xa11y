@@ -256,6 +256,7 @@ pub trait Provider: Send + Sync {
         max_depth: u32,
         limit: Option<usize>,
     ) -> Result<Vec<ElementData>> {
+        crate::selector::validate_tail_segments(segments)?;
         for segment in segments {
             let mut next_candidates = Vec::new();
             for candidate in &candidates {
@@ -279,7 +280,8 @@ pub trait Provider: Send + Sync {
                             self.find_elements(candidate, &sub_selector, None, Some(max_depth))?;
                         next_candidates.append(&mut sub_results);
                     }
-                    Combinator::Root => unreachable!(),
+                    // `validate_tail_segments` above rejects a Root here.
+                    Combinator::Root => unreachable!("validated: no Root in tail segments"),
                 }
             }
             let mut seen = std::collections::HashSet::new();

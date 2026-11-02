@@ -19,6 +19,8 @@
 //! * `events_{macos,windows,linux}` — platform-specific event subscription
 //!   end-to-end tests. The `#[cfg(target_os = "…")]` gate lives on the
 //!   module declaration below so individual tests don't need it.
+//! * `unresponsive_macos` — actions on a `SIGSTOP`ped app are bounded by the
+//!   AX messaging timeout and name the app (macOS-only, gated the same way).
 //!
 //! The helpers in this file (`app_root`, `one`, `named`, `act`, `try_act`)
 //! are reached from submodule tests via `use crate::integ as h;`.
@@ -33,6 +35,9 @@ pub mod windows;
 
 #[cfg(target_os = "macos")]
 pub mod events_macos;
+
+#[cfg(target_os = "macos")]
+pub mod unresponsive_macos;
 
 #[cfg(target_os = "windows")]
 pub mod events_windows;

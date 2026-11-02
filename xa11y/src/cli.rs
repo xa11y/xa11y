@@ -1552,9 +1552,84 @@ pub(crate) fn parse_action_args(
     Ok(args)
 }
 
-/// Dispatch a named action verb onto `locator`.
+/// The verb match behind [`perform_action`] and [`perform_action_on`].
 ///
-/// Shared by `xa11y action` and the MCP `action` tool so the two cannot drift
+/// A macro rather than a function generic over a trait because the two
+/// targets share method *names*, not a trait: `Locator`'s auto-wait and then
+/// act, `Element`'s act on the snapshot they hold. One body keeps the verb
+/// list and the payload checks identical for both.
+macro_rules! dispatch_action {
+    ($target:expr, $verb:expr, $args:expr) => {
+        match $verb {
+            "press" => $target.press()?,
+            "focus" => $target.focus()?,
+            "blur" => $target.blur()?,
+            "toggle" => $target.toggle()?,
+            "expand" => $target.expand()?,
+            "collapse" => $target.collapse()?,
+            "select" => $target.select()?,
+            "show-menu" => $target.show_menu()?,
+            "scroll-into-view" => $target.scroll_into_view()?,
+            "increment" => $target.increment()?,
+            "decrement" => $target.decrement()?,
+            "set-value" => {
+                let v = $args
+                    .value
+                    .as_deref()
+                    .ok_or_else(|| CliError::Usage(format!("{} requires a value", $verb)))?;
+                $target.set_value(v)?;
+            }
+            "set-numeric-value" => {
+                let v = $args
+                    .numeric
+                    .ok_or_else(|| CliError::Usage(format!("{} requires a value", $verb)))?;
+                $target.set_numeric_value(v)?;
+            }
+            "type-text" => {
+                let v = $args
+                    .value
+                    .as_deref()
+                    .ok_or_else(|| CliError::Usage(format!("{} requires a value", $verb)))?;
+                $target.type_text(v)?;
+            }
+            "select-text" => {
+                let (start, end) = $args
+                    .range
+                    .ok_or_else(|| CliError::Usage(format!("{} requires a value", $verb)))?;
+                $target.select_text(start, end)?;
+            }
+            "minimize" => $target.minimize()?,
+            "maximize" => $target.maximize()?,
+            "enter-fullscreen" => $target.enter_fullscreen()?,
+            "restore" => $target.restore()?,
+            "close" => $target.close()?,
+            "activate" => $target.activate()?,
+            "move-to" => {
+                let (x, y) = $args
+                    .at
+                    .ok_or_else(|| CliError::Usage(format!("{} requires --at X,Y", $verb)))?;
+                $target.move_to(x, y)?;
+            }
+            "resize-to" => {
+                let (w, h) = $args
+                    .size
+                    .ok_or_else(|| CliError::Usage(format!("{} requires --size W,H", $verb)))?;
+                $target.resize_to(w, h)?;
+            }
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown action: {other} (expected one of: {})",
+                    ACTION_NAMES.join(", ")
+                )));
+            }
+        }
+    };
+}
+
+/// Dispatch a named action verb onto `locator`, auto-waiting on it.
+///
+/// `xa11y action`'s half; the MCP `action` tool uses [`perform_action_on`].
+/// Both expand one `dispatch_action!` body, so the two cannot drift
 /// on which verbs exist or which of them need a value/geometry argument.
 /// The payload is parsed by [`parse_action_args`], which the callers run
 /// *before* resolving the target, so a bad `X,Y` / `W,H` / value is refused
@@ -1573,72 +1648,30 @@ pub(crate) fn perform_action(
     // The dispatch runs inside a closure so every arm's failure passes through
     // `relabel_action_error` on the way out, and the verb spelling a caller is
     // told about is the one this function accepts.
-    let dispatch =
-        || -> CliResult<()> {
-            match action_name {
-                "press" => locator.press()?,
-                "focus" => locator.focus()?,
-                "blur" => locator.blur()?,
-                "toggle" => locator.toggle()?,
-                "expand" => locator.expand()?,
-                "collapse" => locator.collapse()?,
-                "select" => locator.select()?,
-                "show-menu" => locator.show_menu()?,
-                "scroll-into-view" => locator.scroll_into_view()?,
-                "increment" => locator.increment()?,
-                "decrement" => locator.decrement()?,
-                "set-value" => {
-                    let v = args.value.as_deref().ok_or_else(|| {
-                        CliError::Usage(format!("{action_name} requires a value"))
-                    })?;
-                    locator.set_value(v)?;
-                }
-                "set-numeric-value" => {
-                    let v = args.numeric.ok_or_else(|| {
-                        CliError::Usage(format!("{action_name} requires a value"))
-                    })?;
-                    locator.set_numeric_value(v)?;
-                }
-                "type-text" => {
-                    let v = args.value.as_deref().ok_or_else(|| {
-                        CliError::Usage(format!("{action_name} requires a value"))
-                    })?;
-                    locator.type_text(v)?;
-                }
-                "select-text" => {
-                    let (start, end) = args.range.ok_or_else(|| {
-                        CliError::Usage(format!("{action_name} requires a value"))
-                    })?;
-                    locator.select_text(start, end)?;
-                }
-                "minimize" => locator.minimize()?,
-                "maximize" => locator.maximize()?,
-                "enter-fullscreen" => locator.enter_fullscreen()?,
-                "restore" => locator.restore()?,
-                "close" => locator.close()?,
-                "activate" => locator.activate()?,
-                "move-to" => {
-                    let (x, y) = args.at.ok_or_else(|| {
-                        CliError::Usage(format!("{action_name} requires --at X,Y"))
-                    })?;
-                    locator.move_to(x, y)?;
-                }
-                "resize-to" => {
-                    let (w, h) = args.size.ok_or_else(|| {
-                        CliError::Usage(format!("{action_name} requires --size W,H"))
-                    })?;
-                    locator.resize_to(w, h)?;
-                }
-                other => {
-                    return Err(CliError::Usage(format!(
-                        "unknown action: {other} (expected one of: {})",
-                        ACTION_NAMES.join(", ")
-                    )));
-                }
-            }
-            Ok(())
-        };
+    let dispatch = || -> CliResult<()> {
+        dispatch_action!(locator, action_name, args);
+        Ok(())
+    };
+    dispatch().map_err(|e| relabel_action_error(e, action_name))
+}
 
+/// Dispatch a named action verb onto an already-resolved `element`, without
+/// re-resolving or waiting.
+///
+/// The MCP `action` tool's half: it resolves through
+/// [`Locator::auto_wait_unique`], which proves the selector matched exactly
+/// one actionable element, and then acts on *that* element. Going back
+/// through [`perform_action`] would re-resolve the selector, and a UI that
+/// changed in between would get the action on an element nobody counted.
+pub(crate) fn perform_action_on(
+    element: &Element,
+    action_name: &str,
+    args: &ActionArgs,
+) -> CliResult<()> {
+    let dispatch = || -> CliResult<()> {
+        dispatch_action!(element, action_name, args);
+        Ok(())
+    };
     dispatch().map_err(|e| relabel_action_error(e, action_name))
 }
 
@@ -1723,6 +1756,14 @@ pub(crate) fn parse_text_range(raw: &str) -> CliResult<(u32, u32)> {
         .trim()
         .parse()
         .map_err(|_| CliError::Usage(format!("invalid END in select-text value: {}", parts[1])))?;
+    // Refused here rather than by the provider: the provider's check runs
+    // only after the auto-wait, so a reversed range would spend the whole
+    // timeout before failing on a value that could never succeed.
+    if start > end {
+        return Err(CliError::Usage(format!(
+            "select-text START must not exceed END, got: {raw}"
+        )));
+    }
     Ok((start, end))
 }
 

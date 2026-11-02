@@ -774,6 +774,11 @@ impl Keyboard<'_> {
     ///
     /// Unlike [`press`](Self::press), this accepts any text (including
     /// uppercase and shifted symbols); backends handle the case/shift synthesis.
+    ///
+    /// On Linux (X11 and Wayland) every character is resolved against the
+    /// active keyboard layout before the first key event is sent: if any
+    /// character cannot be typed, the call returns [`Error::Unsupported`]
+    /// naming it and its index, and nothing is typed.
     pub fn type_text(&self, text: &str) -> Result<()> {
         self.backend.type_text(text)
     }

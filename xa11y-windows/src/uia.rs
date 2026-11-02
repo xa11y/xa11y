@@ -11,9 +11,9 @@ use windows::Win32::System::Com::{CoInitializeEx, COINIT};
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId,
-    IsWindow, IsWindowVisible, SetForegroundWindow, GWL_EXSTYLE, STATE_SYSTEM_SELECTED,
-    WS_EX_LAYERED, WS_EX_TRANSPARENT,
+    EnumWindows, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
+    GetWindowThreadProcessId, IsHungAppWindow, IsWindow, IsWindowVisible, SetForegroundWindow,
+    GWL_EXSTYLE, STATE_SYSTEM_SELECTED, WS_EX_LAYERED, WS_EX_TRANSPARENT,
 };
 
 use xa11y_core::{
@@ -159,16 +159,51 @@ fn is_event_subscriber_failure(e: &windows::core::Error) -> bool {
 
 /// Initialize COM for UIA. Called once per WindowsProvider creation.
 /// Does not uninitialize on drop — COM lifetime is managed by the process.
+///
+/// # Why `RPC_E_CHANGED_MODE` is accepted (issue #499)
+///
+/// That HRESULT means the calling thread is already a single-threaded
+/// apartment: a Python host that imported comtypes / pywinauto first, or
+/// Electron's main thread. The `CUIAutomation8` object is then created in
+/// that STA. This is safe for two reasons:
+///
+/// - `CUIAutomation8` is registered `ThreadingModel=Both`, so it is created
+///   directly in the caller's apartment with no proxy. UIA's client objects
+///   (the automation object, elements, cache requests, walkers) aggregate
+///   the free-threaded marshaler, so another thread calls them directly
+///   instead of marshalling the call back into the STA. That STA never has
+///   to pump messages for xa11y's calls to complete.
+/// - Event handlers, the one part of UIA that does call back into an
+///   apartment, are registered from [`registration_worker`], a thread of
+///   xa11y's own that enters the MTA itself, never from the host's thread.
+///
+/// `xa11y-windows/tests/sta_host.rs` is the regression guard: it creates the
+/// provider on an STA thread that never pumps, then reads the tree from four
+/// other threads.
 fn ensure_com_initialized() -> windows::core::Result<()> {
     // Use MTA (0x0) — same mode as the Rust runtime default.
     // STA (0x2) would conflict with Rust's thread pool.
     let hr = unsafe { CoInitializeEx(None, COINIT(0x0)) };
-    // S_OK, S_FALSE (already initialized), or RPC_E_CHANGED_MODE are all fine
+    // S_OK, S_FALSE (already initialized), or RPC_E_CHANGED_MODE (an STA
+    // host thread; safe, see above) are all fine.
     if hr.is_err() && hr.0 as u32 != 0x80010106 {
         hr.ok()?;
     }
     Ok(())
 }
+
+/// Serializes UIA creation and its first call across threads.
+///
+/// Creating `CUIAutomation8` and making the first `GetRootElement` call on
+/// several threads at once can fail with `E_FAIL` (issue #500): UIA's
+/// first-touch initialization in the client process is not safe to race.
+/// Holding this lock across COM init, creation, and one warm-up call makes
+/// every later provider find UIA already initialized. It guards no data, so
+/// a poisoned lock is recovered.
+static UIA_FIRST_TOUCH: Mutex<()> = Mutex::new(());
+/// Set once a provider has completed the first touch, after which creation
+/// no longer needs [`UIA_FIRST_TOUCH`].
+static UIA_WARMED: AtomicBool = AtomicBool::new(false);
 
 /// Windows accessibility provider using UI Automation.
 pub struct WindowsProvider {
@@ -191,7 +226,11 @@ pub struct WindowsProvider {
     synthetic_apps: Mutex<BoundedHandleCache<SyntheticAppIdentity>>,
 }
 
-// IUIAutomation is COM and thread-safe via proxy
+// UIA's client objects (IUIAutomation, elements, cache requests, walkers)
+// are agile: they aggregate the free-threaded marshaler, so any thread may
+// call them directly whatever apartment created them, with no proxy and no
+// message pump needed (see `ensure_com_initialized`, issue #499;
+// tests/sta_host.rs checks it).
 unsafe impl Send for WindowsProvider {}
 unsafe impl Sync for WindowsProvider {}
 
@@ -202,21 +241,38 @@ impl WindowsProvider {
         // convert to logical. Shared once-only init with the screenshot
         // backend — see `crate::dpi` and issue #300.
         crate::dpi::ensure_process_dpi_aware();
+        // COM initialization is per thread and not part of the race.
         ensure_com_initialized().map_err(|e| Error::Platform {
             code: e.code().0 as i64,
             message: format!("COM initialization failed: {}", e),
         })?;
-        let automation: IUIAutomation = unsafe {
-            windows::Win32::System::Com::CoCreateInstance(
-                &CUIAutomation8,
-                None,
-                windows::Win32::System::Com::CLSCTX_ALL,
-            )
-        }
-        .map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("Failed to create IUIAutomation: {}", e),
-        })?;
+        let automation: IUIAutomation = {
+            let _first_touch = if UIA_WARMED.load(Ordering::Acquire) {
+                None
+            } else {
+                Some(UIA_FIRST_TOUCH.lock().unwrap_or_else(|e| e.into_inner()))
+            };
+            let automation: IUIAutomation = unsafe {
+                windows::Win32::System::Com::CoCreateInstance(
+                    &CUIAutomation8,
+                    None,
+                    windows::Win32::System::Com::CLSCTX_ALL,
+                )
+            }
+            .map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("Failed to create IUIAutomation: {}", e),
+            })?;
+            // The warm-up call is part of the first touch: it is what races
+            // when made concurrently, so it runs under the lock too. Its
+            // failure is the provider's failure.
+            unsafe { automation.GetRootElement() }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("IUIAutomation.GetRootElement warm-up failed: {e}"),
+            })?;
+            UIA_WARMED.store(true, Ordering::Release);
+            automation
+        };
         let batch_request = create_batch_request(&automation)?;
         let raw_walker = unsafe { automation.RawViewWalker() }.map_err(|e| Error::Platform {
             code: e.code().0 as i64,
@@ -714,45 +770,136 @@ impl WindowsProvider {
         Ok(children)
     }
 
-    /// Extract a UIA element's RuntimeId as a `Vec<i32>` for use as a stable
-    /// cross-call identity key. `GetRuntimeId` returns a SAFEARRAY of i32 that
-    /// uniquely identifies an element within the UIA tree session — the only
-    /// identifier safe to use for dedup across `narrow_multi_segment` walks
-    /// within a single `find_elements_group` call.
+    /// A UIA element's RuntimeId as a `Vec<i32>`: the identity UIA itself
+    /// compares elements by (`CompareElements`), and the one key that
+    /// survives this provider minting a fresh handle on every fetch.
+    /// `GetRuntimeId` hands back a SAFEARRAY of i32 that this copies and
+    /// destroys. A failure propagates (tenet 1): `UIA_E_ELEMENTNOTAVAILABLE`
+    /// means the element is gone, which callers handle with `live_snapshot`.
     ///
-    /// Returns `None` if the COM call fails or the SAFEARRAY shape isn't what
-    /// UIA documents (1D, VT_I4). Callers treat `None` as "untracked" — the
-    /// element falls through dedup, which is harmless because untracked
-    /// duplicates would only over-report, never under-report.
-    fn runtime_id_key(element: &IUIAutomationElement) -> Option<Vec<i32>> {
+    /// An element with no RuntimeId comes back as an empty `Vec`; it has no
+    /// identity to compare, so callers must not dedup on it. `handle` is only
+    /// for the error messages.
+    fn runtime_id(element: &IUIAutomationElement, handle: u64) -> Result<Vec<i32>> {
         use windows::Win32::System::Com::SAFEARRAY;
-        use windows::Win32::System::Ole::{SafeArrayAccessData, SafeArrayUnaccessData};
-
-        let sa: *mut SAFEARRAY = match unsafe { element.GetRuntimeId() } {
-            Ok(p) if !p.is_null() => p,
-            _ => return None,
+        use windows::Win32::System::Ole::{
+            SafeArrayAccessData, SafeArrayDestroy, SafeArrayUnaccessData,
         };
 
-        // Safety: GetRuntimeId hands us ownership of a SAFEARRAY*. We must
-        // free it via SafeArrayDestroy when done, otherwise we leak. Lock
-        // the data via SafeArrayAccessData, copy out the i32s, unlock,
-        // destroy.
-        let result = unsafe {
-            let mut data_ptr: *mut core::ffi::c_void = core::ptr::null_mut();
-            if SafeArrayAccessData(sa, &mut data_ptr as *mut _).is_err() {
-                let _ = windows::Win32::System::Ole::SafeArrayDestroy(sa);
-                return None;
+        let context =
+            |message: String| format!("GetRuntimeId for element handle {handle}: {message}");
+        let sa: *mut SAFEARRAY =
+            uia_call(|| unsafe { element.GetRuntimeId() }).map_err(|e| match e {
+                Error::Platform { code, message } => Error::Platform {
+                    code,
+                    message: context(message),
+                },
+                other => other,
+            })?;
+        if sa.is_null() {
+            // UIA documents a null array for an element without a RuntimeId.
+            return Ok(Vec::new());
+        }
+        // SAFETY: GetRuntimeId handed us ownership of `sa`. Its shape is
+        // checked before the data is read; it is unlocked and destroyed on
+        // every path.
+        unsafe {
+            let dims = (*sa).cDims;
+            if dims != 1 {
+                // Already failing; a failed destroy only leaks the array.
+                let _ = SafeArrayDestroy(sa);
+                return Err(Error::Platform {
+                    code: -1,
+                    message: context(format!("expected a 1-D array, got {dims} dimensions")),
+                });
             }
-            // SAFEARRAY of i32 — rgsabound[0].cElements is the count.
-            let bounds = (*sa).rgsabound.as_ptr();
-            let count = (*bounds).cElements as usize;
-            let slice = std::slice::from_raw_parts(data_ptr as *const i32, count);
-            let v = slice.to_vec();
+            let count = (*sa).rgsabound[0].cElements as usize;
+            let mut data_ptr: *mut core::ffi::c_void = core::ptr::null_mut();
+            if let Err(e) = SafeArrayAccessData(sa, &mut data_ptr as *mut _) {
+                let _ = SafeArrayDestroy(sa);
+                return Err(Error::Platform {
+                    code: e.code().0 as i64,
+                    message: context(format!("SafeArrayAccessData failed: {e}")),
+                });
+            }
+            let v = if count == 0 || data_ptr.is_null() {
+                Vec::new()
+            } else {
+                std::slice::from_raw_parts(data_ptr as *const i32, count).to_vec()
+            };
+            // The values are already copied; a failed unlock or destroy
+            // leaks the array and changes nothing about them.
             let _ = SafeArrayUnaccessData(sa);
-            let _ = windows::Win32::System::Ole::SafeArrayDestroy(sa);
-            v
+            let _ = SafeArrayDestroy(sa);
+            Ok(v)
+        }
+    }
+}
+
+/// Identity-stable `get_children` for one query's tree walk (issue #571).
+///
+/// `WindowsProvider` mints a fresh handle each time it builds an element, so
+/// a walk that reaches one element through two anchors (`* button`: the
+/// button sits under several `*` matches) gets two handles, and the core
+/// walkers' handle dedup keeps both. This wrapper gives every element the
+/// first handle this query minted for its RuntimeId, which turns that dedup
+/// (and `:nth` counting after it) into a dedup by UIA identity. If the
+/// canonical handle was evicted from the handle cache, it is re-inserted with
+/// the newest element. An element without a RuntimeId keeps its own handle,
+/// and an element that vanishes before its RuntimeId is read is left out, as
+/// the walk does for any element that goes away mid-snapshot.
+struct CanonicalWalk<'a> {
+    provider: &'a WindowsProvider,
+    handles: std::cell::RefCell<HashMap<Vec<i32>, u64>>,
+}
+
+impl<'a> CanonicalWalk<'a> {
+    fn new(provider: &'a WindowsProvider) -> Self {
+        Self {
+            provider,
+            handles: std::cell::RefCell::new(HashMap::new()),
+        }
+    }
+
+    fn children(&self, parent: Option<&ElementData>) -> Result<Vec<ElementData>> {
+        let children = self.provider.get_children(parent)?;
+        let mut out = Vec::with_capacity(children.len());
+        for mut child in children {
+            if let Some(handle) = self.canonical_handle(child.handle)? {
+                child.handle = handle;
+                out.push(child);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The query's handle for the element behind `handle`; `None` when the
+    /// element is gone. Synthesized app nodes have stable handles already.
+    fn canonical_handle(&self, handle: u64) -> Result<Option<u64>> {
+        if is_synthetic_handle(handle) {
+            return Ok(Some(handle));
+        }
+        let element = self.provider.get_cached(handle)?;
+        let Some(id) = live_snapshot(WindowsProvider::runtime_id(&element, handle))? else {
+            return Ok(None);
         };
-        Some(result)
+        if id.is_empty() {
+            return Ok(Some(handle));
+        }
+        let canonical = *self.handles.borrow_mut().entry(id).or_insert(handle);
+        if canonical != handle {
+            let mut cache = self
+                .provider
+                .handle_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            // Only an evicted entry needs re-inserting; refreshing a live one
+            // would cost the cache an O(n) reorder per duplicate.
+            if cache.get(&canonical).is_none() {
+                cache.insert(canonical, element);
+            }
+        }
+        Ok(Some(canonical))
     }
 }
 
@@ -1656,6 +1803,83 @@ fn ensure_top_level_window_target(
     }
 }
 
+/// How many times `activate` calls `SetForegroundWindow` before giving up.
+const FOREGROUND_ATTEMPTS: u32 = 3;
+/// How long each attempt waits for `GetForegroundWindow` to report the target.
+const FOREGROUND_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+const FOREGROUND_POLL: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// Bring `hwnd` to the foreground and verify that it got there.
+///
+/// `SetForegroundWindow` is subject to the foreground lock: Windows can refuse
+/// it outright (returns FALSE), or accept the call and only flash the taskbar
+/// button. The return value alone therefore proves nothing, so success is
+/// `GetForegroundWindow() == hwnd`, polled for a short settle period because a
+/// cross-thread foreground switch lands asynchronously.
+///
+/// A refused or unverified attempt is retried with the same call, a bounded
+/// number of times. That is a retry, not a fallback to another mechanism
+/// (tenet 1), and there is deliberately no simulated-input trick such as the
+/// Alt-key tap that unlocks the foreground (tenet 2). When every attempt fails
+/// the error says what was in front instead and whether the target is hung,
+/// so the caller can tell a foreground-lock refusal from a frozen app.
+fn bring_to_foreground(hwnd: HWND) -> Result<()> {
+    let mut refused = 0u32;
+    for _ in 0..FOREGROUND_ATTEMPTS {
+        if !unsafe { SetForegroundWindow(hwnd) }.as_bool() {
+            refused += 1;
+        }
+        let deadline = std::time::Instant::now() + FOREGROUND_SETTLE;
+        loop {
+            if unsafe { GetForegroundWindow() } == hwnd {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(FOREGROUND_POLL);
+        }
+    }
+
+    let foreground = unsafe { GetForegroundWindow() };
+    let in_front = if foreground.0.is_null() {
+        "no window (the foreground is between windows or on the secure desktop)".to_string()
+    } else {
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(foreground, Some(&mut pid)) };
+        format!(
+            "HWND {:#x} \"{}\" (pid {pid})",
+            foreground.0 as usize,
+            window_text(foreground)
+        )
+    };
+    let hung = if unsafe { IsHungAppWindow(hwnd) }.as_bool() {
+        "; the target window is not responding (IsHungAppWindow)"
+    } else {
+        ""
+    };
+    Err(Error::Platform {
+        code: -1,
+        message: format!(
+            "activate: HWND {:#x} \"{}\" did not become the foreground window after {} \
+             SetForegroundWindow attempts ({refused} refused outright, the rest accepted but \
+             not applied, most likely the foreground lock); in front instead: {in_front}{hung}",
+            hwnd.0 as usize,
+            window_text(hwnd),
+            FOREGROUND_ATTEMPTS,
+        ),
+    })
+}
+
+/// A window's title for an error message; empty when it has none or the read fails.
+fn window_text(hwnd: HWND) -> String {
+    let mut buf = [0u16; 256];
+    let len = unsafe { GetWindowTextW(hwnd, &mut buf) };
+    // A failed read (0) is indistinguishable from an untitled window here, and
+    // either way the HWND printed alongside identifies it.
+    String::from_utf16_lossy(&buf[..usize::try_from(len).unwrap_or(0).min(buf.len())])
+}
+
 /// Locate the caret within a control's TextPattern, as a character offset
 /// from the start of the document.
 ///
@@ -2318,12 +2542,16 @@ impl Provider for WindowsProvider {
         max_depth: u32,
         limit: Option<usize>,
     ) -> Result<Vec<ElementData>> {
+        xa11y_core::selector::validate_tail_segments(segments)?;
+        // Dedup below is by handle; the canonical walk makes that a dedup by
+        // UIA identity (issue #571).
+        let walk = CanonicalWalk::new(self);
         for segment in segments {
             let mut next_candidates = Vec::new();
             for candidate in &candidates {
                 match segment.combinator {
                     Combinator::Child => {
-                        let children = self.get_children(Some(candidate))?;
+                        let children = walk.children(Some(candidate))?;
                         for child in children {
                             if matches_simple(&child, &segment.simple) {
                                 next_candidates.push(child);
@@ -2340,7 +2568,7 @@ impl Provider for WindowsProvider {
                             }],
                         };
                         let mut sub_results = xa11y_core::selector::find_elements_in_tree(
-                            |el| self.get_children(el),
+                            |el| walk.children(el),
                             Some(candidate),
                             &sub_selector,
                             None,
@@ -2348,7 +2576,8 @@ impl Provider for WindowsProvider {
                         )?;
                         next_candidates.append(&mut sub_results);
                     }
-                    Combinator::Root => unreachable!(),
+                    // `validate_tail_segments` above rejects a Root here.
+                    Combinator::Root => unreachable!("validated: no Root in tail segments"),
                 }
             }
             let mut seen = std::collections::HashSet::new();
@@ -2378,15 +2607,10 @@ impl Provider for WindowsProvider {
         limit: Option<usize>,
         max_depth: Option<u32>,
     ) -> Result<Vec<ElementData>> {
-        if group.clauses.is_empty() {
-            return Ok(vec![]);
-        }
-        // Reject any clause with zero segments early — `clause.segments[0]`
-        // below would otherwise panic. The parser doesn't produce empty
-        // clauses, but be defensive against direct `SelectorGroup` builders.
-        if group.clauses.iter().any(|c| c.segments.is_empty()) {
-            return Ok(vec![]);
-        }
+        // The AST's fields are public, so a hand-built group can break the
+        // invariants the walk below indexes on (`clause.segments[0]`, Root
+        // only first, 1-based `:nth`). Reject it before traversal.
+        group.validate()?;
 
         let max_depth_val = max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH);
 
@@ -2398,8 +2622,9 @@ impl Provider for WindowsProvider {
         // fallback further down — the walk is the honest primitive for a
         // root that is not a UIA HWND fragment.
         if is_synthetic_handle(root.handle) {
+            let walk = CanonicalWalk::new(self);
             return xa11y_core::selector::find_elements_in_tree_group(
-                |el| self.get_children(el),
+                |el| walk.children(el),
                 Some(root),
                 group,
                 limit,
@@ -2447,8 +2672,9 @@ impl Provider for WindowsProvider {
             .map(|h| !h.0.is_null())
             .unwrap_or(false);
         if !is_hwnd_root {
+            let walk = CanonicalWalk::new(self);
             return xa11y_core::selector::find_elements_in_tree_group(
-                |el| self.get_children(el),
+                |el| walk.children(el),
                 Some(root),
                 group,
                 limit,
@@ -2551,37 +2777,23 @@ impl Provider for WindowsProvider {
 
         // Stable sort by walk position keeps doc-order; dedup by UIA
         // RuntimeId so descendants reached via multiple phase-1 anchors
-        // (or matched by multiple clauses) collapse to one result.
+        // (or matched by multiple clauses) collapse to the first one found
+        // (issue #571). Every narrowing above minted its own handles, so the
+        // handle cannot be the key.
         merged.sort_by_key(|(pos, _)| *pos);
-        let mut seen_rt: HashSet<Vec<i32>> = HashSet::new();
-        let mut seen_handle: HashSet<u64> = HashSet::new();
+        let mut seen: HashSet<Vec<i32>> = HashSet::new();
         let mut out: Vec<ElementData> = Vec::with_capacity(merged.len());
         for (_, data) in merged {
-            // Primary identity: RuntimeId. Cheap to fetch from the cached
-            // element and stable across narrowings within this call.
-            let key = self
-                .get_cached(data.handle)
-                .ok()
-                .and_then(|el| Self::runtime_id_key(&el));
-            match key {
-                Some(rt) => {
-                    if !seen_rt.insert(rt) {
-                        continue;
-                    }
-                }
-                None => {
-                    // Fall back to handle dedup if RuntimeId is unavailable.
-                    // Handle uniqueness across the call is weaker than
-                    // RuntimeId (the same physical element rebuilt in phase
-                    // 2 gets a fresh handle), but it's better than nothing
-                    // — over-counting beats under-counting on the rare path
-                    // where the COM call fails.
-                    if !seen_handle.insert(data.handle) {
-                        continue;
-                    }
-                }
+            let element = self.get_cached(data.handle)?;
+            // An element that vanished since the walk is left out, as the
+            // walk itself does.
+            let Some(id) = live_snapshot(Self::runtime_id(&element, data.handle))? else {
+                continue;
+            };
+            // No RuntimeId means no identity to dedup on: keep it.
+            if id.is_empty() || seen.insert(id) {
+                out.push(data);
             }
-            out.push(data);
         }
         if let Some(l) = limit {
             out.truncate(l);
@@ -2861,19 +3073,17 @@ impl Provider for WindowsProvider {
 
     fn scroll_into_view(&self, element: &ElementData) -> Result<()> {
         let uia_element = self.get_cached(element.handle)?;
-        if let Ok(pattern) = unsafe {
+        // Only a genuinely absent ScrollItemPattern is "not supported"; any
+        // other lookup failure (a dead element, a wedged provider) is a real
+        // error and propagates rather than reading as unsupported (tenet 1).
+        let pattern = unsafe {
             uia_element
                 .GetCurrentPatternAs::<IUIAutomationScrollItemPattern>(UIA_ScrollItemPatternId)
-        } {
-            unsafe { pattern.ScrollIntoView() }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("ScrollIntoView failed: {}", e),
-            })?;
-            return Ok(());
         }
-        Err(Error::ActionNotSupported {
-            action: "scroll_into_view".to_string(),
-            role: element.role,
+        .map_err(|e| pattern_acquisition_error(&e, "scroll_into_view", element.role))?;
+        unsafe { pattern.ScrollIntoView() }.map_err(|e| Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("ScrollIntoView failed: {}", e),
         })
     }
 
@@ -2937,17 +3147,7 @@ impl Provider for WindowsProvider {
                 message: "window has no native handle; cannot activate".to_string(),
             });
         }
-        if !unsafe { SetForegroundWindow(hwnd) }.as_bool() {
-            // Windows restricts foreground changes (foreground lock); a
-            // denied SetForegroundWindow is a real failure, not a no-op —
-            // surface it (tenet 1).
-            return Err(Error::Platform {
-                code: -1,
-                message: "SetForegroundWindow was denied (foreground lock); the window may not \
-                          have been activated"
-                    .to_string(),
-            });
-        }
+        bring_to_foreground(hwnd)?;
         unsafe { uia.SetFocus() }.map_err(|e| Error::Platform {
             code: e.code().0 as i64,
             message: format!("SetFocus during activate failed: {e}"),
@@ -3841,13 +4041,13 @@ fn map_uia_control_type(control_type: UIA_CONTROLTYPE_ID) -> Role {
 
 // ── Event subscription (native UIA event handlers) ───────────────────────────
 
-/// Moves a COM interface into a `Send` closure. COM in MTA (the apartment
-/// xa11y uses) serializes access via proxies, so transferring a raw pointer
-/// across threads is safe as long as every dereference happens under MTA —
-/// which is the case for the shared registration worker and UIA callbacks.
+/// Moves a COM interface into a `Send` closure. The UIA client objects
+/// captured this way are agile (they aggregate the free-threaded
+/// marshaler), so the pointer is valid on any thread; the registration
+/// worker and the UIA callback threads that dereference it are also MTA.
 ///
 /// Mirrors the `unsafe impl Send for WindowsProvider` assertion in this file:
-/// the same MTA guarantee holds for every COM type we need to capture.
+/// the same agility holds for every COM type we need to capture.
 ///
 /// Note the private inner field + accessor method: Rust 2021's disjoint
 /// closure captures will grab `wrapper.0` (the inner `T`) if it's reachable,
@@ -4464,16 +4664,15 @@ struct EventContext {
     /// subscriptions have no saved-app identity and retain PID-only behavior.
     saved_app: Option<SavedSyntheticAppIdentity>,
     /// Clone of the provider's raw-view walker, so event-target snapshots
-    /// resolve DataItem cells the same way tree traversal does. COM in MTA
-    /// serializes access via proxies (see `ComCallbackWrapper`), so sharing
-    /// the interface pointer with UIA callback threads is safe.
+    /// resolve DataItem cells the same way tree traversal does. The walker
+    /// is agile (free-threaded marshaler), so sharing the interface pointer
+    /// with UIA callback threads is safe.
     walker: IUIAutomationTreeWalker,
 }
 
 // The COM walker pointer keeps EventContext from auto-deriving Send/Sync
-// (it's shared via Arc with UIA's MTA callback threads). The same MTA proxy
-// guarantee behind `unsafe impl Send for WindowsProvider` covers it: every
-// dereference happens under MTA.
+// (it's shared via Arc with UIA's MTA callback threads). The same agility
+// behind `unsafe impl Send for WindowsProvider` covers it.
 unsafe impl Send for EventContext {}
 unsafe impl Sync for EventContext {}
 
@@ -5339,26 +5538,19 @@ mod tests {
         );
     }
 
-    /// Helper: create a provider, skipping the test if COM init fails
-    /// (happens when cargo test runs with multiple threads in CI).
+    /// A provider for a live-desktop unit test.
+    ///
+    /// Every failure panics. This used to skip on `E_FAIL`, the first-touch
+    /// race the multi-threaded test runner hit; `UIA_FIRST_TOUCH` fixes that
+    /// race, and the skip would hide it coming back (issue #500). The
+    /// `Option` keeps the call sites' shape.
     fn try_provider() -> Option<WindowsProvider> {
-        match WindowsProvider::new() {
-            Ok(p) => Some(p),
-            Err(Error::Platform {
-                code: -2147467259, ..
-            }) => {
-                // E_FAIL (0x80004005) — COM init race in multi-threaded test runner
-                eprintln!("Skipping: COM init failed (multi-threaded test runner)");
-                None
-            }
-            Err(e) => panic!("Unexpected provider error: {}", e),
-        }
+        Some(WindowsProvider::new().unwrap_or_else(|e| panic!("WindowsProvider::new failed: {e}")))
     }
 
     #[test]
     fn provider_new_succeeds() {
-        // May fail in multi-threaded test runners; that's expected.
-        let _ = try_provider();
+        WindowsProvider::new().expect("WindowsProvider::new must succeed on a desktop");
     }
 
     #[test]
@@ -5936,7 +6128,7 @@ mod tests {
     }
 
     #[test]
-    fn find_elements_empty_selector_returns_empty() {
+    fn find_elements_empty_selector_is_invalid() {
         let Some(provider) = try_provider() else {
             return;
         };
@@ -5947,10 +6139,11 @@ mod tests {
             return;
         };
         let empty_selector = Selector { segments: vec![] };
-        let result = provider
-            .find_elements(&root, &empty_selector, None, None)
-            .unwrap();
-        assert!(result.is_empty());
+        let result = provider.find_elements(&root, &empty_selector, None, None);
+        assert!(
+            matches!(result, Err(Error::InvalidSelector { .. })),
+            "an empty selector must be rejected, got {result:?}"
+        );
     }
 
     #[test]

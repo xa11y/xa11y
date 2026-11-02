@@ -360,11 +360,14 @@ There is no `AXToggle` action. `AXPress` is the platform's toggle for
 checkboxes, switches, and radio buttons. Code expecting a dedicated toggle action
 on macOS will never find one.
 
-### macOS has no `ScrollIntoView` equivalent
+### macOS `AXScrollToVisible` is opt-in per element
 
-There is no AX action to scroll an element into view. On Linux this maps to
-`Component.ScrollTo`; on Windows to `ScrollItemPattern.ScrollIntoView`; on macOS
-it really is a no-op.
+macOS scrolls an element into view with `AXScrollToVisible`, but only elements
+that list it in their action names support it. AppKit answers success for an
+action the element does not implement, so dispatching it blindly would report a
+scroll that never happened. xa11y therefore performs it only when the element
+advertises it, and returns `ActionNotSupported` otherwise. On Linux this maps to
+`Component.ScrollTo`; on Windows to `ScrollItemPattern.ScrollIntoView`.
 
 ### Numeric vs text values diverge
 

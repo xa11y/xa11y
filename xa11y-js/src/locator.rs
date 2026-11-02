@@ -218,8 +218,9 @@ impl Locator {
 
     /// Scroll the element into the visible area.
     ///
-    /// No-op on macOS — the macOS accessibility API has no equivalent. Uses
-    /// `Component.ScrollTo` on Linux and `ScrollItemPattern` on Windows.
+    /// Uses `AXScrollToVisible` on macOS when the element advertises it and
+    /// rejects with `ActionNotSupported` otherwise; `Component.ScrollTo` on
+    /// Linux; `ScrollItemPattern` on Windows.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn scroll_into_view(&self) -> AsyncTask<ActionTask> {
         AsyncTask::new(ActionTask::nullary(

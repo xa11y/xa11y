@@ -287,11 +287,13 @@ def test_action_resize_to_requires_a_size_and_dispatches_it(
     _, _, width, height = _window_bounds(run_cli, app_pid)
     resized = False
     try:
+        # Shrink rather than grow: a window already filling a small display's
+        # visible frame cannot grow (see the MCP resize test in test_mcp.py).
         rc, stdout, stderr = run_cli(
             "action",
             "resize-to",
             "--size",
-            f"{width + 50},{height + 50}",
+            f"{width - 50},{height - 50}",
             "window, dialog",
             "--pid",
             str(app_pid),
@@ -315,22 +317,18 @@ def test_action_resize_to_requires_a_size_and_dispatches_it(
                     "Qt/UIA applies client size to decorated outer bounds; "
                     "tracked as qt_windows_geometry_offsets"
                 )
-            resize_noop = app_name in {"cocoa", "egui", "winforms", "wpf"} or (
-                app_name == "tauri" and not sys.platform.startswith("linux")
-            )
-            if resize_noop:
+            # Windows-only gap; on macOS resize_to verifies its own write and
+            # a refused resize already failed the dispatch above.
+            if sys.platform == "win32" and app_name in {
+                "egui",
+                "tauri",
+                "winforms",
+                "wpf",
+            }:
                 gap = (
-                    "cocoa_resize_noop"
-                    if app_name == "cocoa"
-                    else (
-                        "egui_transform_resize_noop"
-                        if app_name == "egui"
-                        else (
-                            f"{app_name}_transform_resize_noop"
-                            if app_name in {"winforms", "wpf"}
-                            else "tauri_desktop_resize_noop"
-                        )
-                    )
+                    "tauri_desktop_resize_noop"
+                    if app_name == "tauri"
+                    else f"{app_name}_transform_resize_noop"
                 )
                 pytest.skip(
                     f"{app_name} accepts Resize without changing bounds; "
@@ -339,8 +337,8 @@ def test_action_resize_to_requires_a_size_and_dispatches_it(
             _wait_for_bounds(
                 run_cli,
                 app_pid,
-                lambda b: abs(b[2] - (width + 50)) <= 2
-                and abs(b[3] - (height + 50)) <= 2,
+                lambda b: abs(b[2] - (width - 50)) <= 2
+                and abs(b[3] - (height - 50)) <= 2,
                 "resize-to to change the reported size",
             )
             rc, _, stderr = run_cli(

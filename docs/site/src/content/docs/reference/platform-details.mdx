@@ -72,14 +72,14 @@ Roles not recognized by a platform map to `Unknown`.
 | `Increment` | AXIncrement | increment *(or Value +step)* | RangeValuePattern *(+step)* |
 | `Decrement` | AXDecrement | decrement *(or Value -step)* | RangeValuePattern *(-step)* |
 | `ShowMenu` | AXShowMenu | menu, showmenu, popup | ExpandCollapsePattern |
-| `ScrollIntoView` | *(no-op, no AX equivalent)* | Component.ScrollTo | ScrollItemPattern |
+| `ScrollIntoView` | AXScrollToVisible *(when advertised)* | Component.ScrollTo | ScrollItemPattern |
 
 Window verbs map differently again, because each platform's window control
 API is separate from its element-action interface:
 
 | xa11y Action | macOS | Linux X11 | Linux Wayland (Sway) | Windows (UIA) |
 | --- | --- | --- | --- | --- |
-| `Activate` | activate app, restore if minimized, then AXRaise | `_NET_ACTIVE_WINDOW` | Sway `focus` | restore if minimized, then SetForegroundWindow and SetFocus |
+| `Activate` | activate app, restore if minimized, then AXRaise | `_NET_ACTIVE_WINDOW` | Sway `focus` | restore if minimized, then SetForegroundWindow (verified with GetForegroundWindow, up to 3 tries; fails if the window is still not in front) and SetFocus |
 | `Minimize` | clear AXFullScreen when fullscreen, then set AXMinimized=true | ICCCM `WM_CHANGE_STATE(IconicState)` | unsupported | WindowPattern.SetWindowVisualState(Minimized) |
 | `Maximize` | unsupported | `_NET_WM_STATE_MAXIMIZED_HORZ` + `_VERT` | unsupported | WindowPattern.SetWindowVisualState(Maximized) |
 | `EnterFullscreen` | set AXFullScreen=true | `_NET_WM_STATE_FULLSCREEN` | Sway `fullscreen enable` | unsupported |
@@ -136,7 +136,7 @@ that the selected backend can represent.
 
 ### ScrollIntoView
 
-macOS has no direct equivalent, so this action is a **no-op**. On Linux it uses `Component.ScrollTo` with top-edge alignment. On Windows it uses `ScrollItemPattern.ScrollIntoView`.
+On macOS it performs `AXScrollToVisible` when the element advertises that action, and returns `ActionNotSupported` otherwise. On Linux it uses `Component.ScrollTo` with top-edge alignment. On Windows it uses `ScrollItemPattern.ScrollIntoView`.
 
 ### Activate: AXRaise alone does not activate
 
@@ -195,6 +195,24 @@ window. Minimized, maximized, and fullscreen are mutually exclusive on macOS:
 a fullscreen window cannot be minimized, and entering fullscreen brings the
 window back from the Dock first. `Restore` has one effect from any state.
 
+### `MoveTo` and `ResizeTo`: verified geometry on macOS
+
+Setting `AXPosition` or `AXSize` succeeds when the window receives the
+request, not when the window applies it. Some toolkits apply the write later
+or drop it while the window settles from another transition. The window
+server also keeps a window inside the screen's visible frame, so it refuses a
+size that would extend past it, such as growing a window that already fills
+the display's height. The app can refuse a size outside its own minimum or
+maximum too.
+
+So the macOS provider reads the attribute back after the write and re-issues
+the same absolute value until the window reports the requested geometry,
+within 2 points, for up to 5 seconds. If the window never gets there, the
+call fails with a timeout error whose diagnosis names the requested geometry
+and the geometry the window last reported. A `ResizeTo` error also gives the
+window's origin. The verb never returns success for a window that kept its
+old frame.
+
 ### SetValue: text vs numeric
 
 - **macOS** sets the `AXValue` attribute directly, which works for both text and numeric values.
@@ -213,6 +231,10 @@ Text is inserted through the accessibility API. Keyboard events are never simula
 
 - **macOS** sets `AXFocused` to false on the element.
 - **Linux and Windows** have no direct API equivalent, so the action is unsupported.
+
+### Unresponsive apps (macOS)
+
+When the provider is created, xa11y sets the process-wide accessibility messaging timeout to 2 seconds per message, in place of the system default. The setting applies to every accessibility call the host process makes, including ones that don't go through xa11y. A read or action on an app that doesn't answer in time fails with `Error::Platform` carrying `kAXErrorCannotComplete` (-25204). The message names the app's PID, and for actions the app's name too. The message says whether the call ran out the timeout or was refused sooner. A timed-out action may still take effect once the app catches up.
 
 ### Coordinates
 

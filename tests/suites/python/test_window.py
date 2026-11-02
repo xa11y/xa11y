@@ -20,6 +20,8 @@ Rust integ suite, which owns its own app lifecycle and restore guards.
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 
@@ -63,3 +65,19 @@ def test_window_activate_reaches_the_platform(app) -> None:
     if not windows:
         pytest.skip("this app's windows advertise no activate action")
     windows[0].activate()
+    if sys.platform == "win32":
+        # Windows' activate verifies with GetForegroundWindow before it
+        # returns (issue #504), so the re-read window must report active —
+        # the same GetForegroundWindow comparison backs the `active` state.
+        title = windows[0].name
+        again = [w for w in app.windows() if w.name == title]
+        if not title or not again:
+            pytest.skip(
+                f"window name {title!r} cannot be matched on re-read, so the "
+                f"activated window cannot be told apart from the others"
+            )
+        # Names can repeat; one of the same-named windows must be the active one.
+        assert any(w.active for w in again), (
+            f"activate returned but window {title!r} is not active; "
+            f"windows: {[(w.name, w.active) for w in app.windows()]}"
+        )
