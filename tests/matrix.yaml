@@ -459,32 +459,6 @@ gaps:
       language: rust
       features: [windows]
 
-  - id: windows_dpi_awareness_embedding
-    description: >
-      xa11y-windows assumes the process is Per-Monitor-V2 aware
-      (ensure_process_dpi_aware sets it, and the dpi.rs transforms treat UIA
-      bounds/BitBlt/SendInput coordinates as physical). A host that pinned a
-      lower awareness (SYSTEM_DPI_AWARE / DPI_UNAWARE) before xa11y loads
-      gets ERROR_ACCESS_DENIED from SetProcessDpiAwarenessContext, which is
-      currently ignored — the monitor-lookup and physical/logical transforms
-      then run against virtualized coordinates, so move_to / click /
-      screenshot can land on the wrong monitor. Accepted for now (copilot
-      review round on PR #3): the exposure is confined to embedding hosts
-      that pinned a lower awareness, while standalone binaries and the
-      language bindings set Per-Monitor-V2 themselves. A hard constructor
-      failure would also break embedded hosts that work today on uniform-DPI
-      desktops, so the fix is deferred. When picked up: make
-      ensure_process_dpi_aware fallible, query the effective awareness on
-      ERROR_ACCESS_DENIED, fail only when it is below per-monitor, and
-      decide fail-at-init vs fail-at-transform-boundary after verifying
-      SYSTEM_DPI_AWARE coordinate semantics on uniform and mixed-DPI
-      desktops.
-    severity: low
-    workaround: "Not covered by any cell: reproducing requires a host process that pinned lower DPI awareness before loading xa11y. Standalone CLI/binding cells run the common path where the set succeeds."
-    affects:
-      language: rust
-      features: [windows]
-
   - id: winforms_transform_resize_noop
     description: >
       The WinForms UIA provider answers TransformPattern.Resize with success

@@ -12,9 +12,10 @@
 //! Per-Monitor-V2 DPI awareness is set once, eagerly, via
 //! [`crate::dpi::ensure_process_dpi_aware`] — the same shared init the UIA
 //! provider calls — so it is established before the first UIA bounds read
-//! regardless of call order (issue #300). If a higher awareness has already
-//! been set (for example by a host application), the call is a no-op and we
-//! keep the existing awareness — we never downgrade.
+//! regardless of call order (issue #300). If the host application already
+//! fixed a lower awareness, Windows keeps it, and each capture instead runs
+//! inside a [`crate::dpi::DpiScope`] that switches the calling thread to
+//! Per-Monitor V2 for the call and back afterwards (issue #506).
 //!
 //! Windows `Element::bounds`, input points, and capture regions all use
 //! physical desktop pixels. The returned screenshot has an identity desktop
@@ -69,9 +70,8 @@ impl ScreenshotProvider for WindowsScreenshot {
 
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
-    ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC,
-    HGDIOBJ, SRCCOPY,
+    CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, ReleaseDC, SelectObject,
+    BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ,
 };
 #[cfg(target_os = "windows")]
 impl WindowsScreenshot {
@@ -86,14 +86,17 @@ impl WindowsScreenshot {
 }
 
 #[cfg(target_os = "windows")]
+// Both methods enter a `DpiScope`: monitor geometry, `GetSystemMetrics` and
+// the screen DC all answer in the calling thread's DPI space (issue #506).
 impl ScreenshotProvider for WindowsScreenshot {
     fn capture_full(&self) -> Result<(Screenshot, Point)> {
-        let (physical, scale, mapping) = crate::dpi::full_capture_plan()?;
+        let dpi = crate::dpi::DpiScope::enter()?;
+        let (physical, scale, mapping) = crate::dpi::full_capture_plan(&dpi)?;
         let w = i32::try_from(physical.width)
             .map_err(|_| platform("virtual screen width is out of i32 range"))?;
         let h = i32::try_from(physical.height)
             .map_err(|_| platform("virtual screen height is out of i32 range"))?;
-        let shot = capture_rect(physical.x, physical.y, w, h, scale)?.with_mapping(mapping);
+        let shot = capture_rect(&dpi, physical.x, physical.y, w, h, scale)?.with_mapping(mapping);
 
         // Pixel (0, 0) of this capture is physical (vx, vy) — the top-left of
         // the *virtual desktop*, not of the primary monitor. `vx`/`vy` go
@@ -103,8 +106,9 @@ impl ScreenshotProvider for WindowsScreenshot {
     }
 
     fn capture_region(&self, rect: Rect) -> Result<Screenshot> {
+        let dpi = crate::dpi::DpiScope::enter()?;
         // `rect` already uses the physical desktop pixels BitBlt reads.
-        let (phys, scale, mapping) = crate::dpi::region_capture_plan(rect)?;
+        let (phys, scale, mapping) = crate::dpi::region_capture_plan(&dpi, rect)?;
         if phys.width == 0 || phys.height == 0 {
             return Err(Error::Platform {
                 code: -1,
@@ -119,7 +123,7 @@ impl ScreenshotProvider for WindowsScreenshot {
             code: -1,
             message: "rect height out of i32 range".into(),
         })?;
-        Ok(capture_rect(phys.x, phys.y, w, h, scale)?.with_mapping(mapping))
+        Ok(capture_rect(&dpi, phys.x, phys.y, w, h, scale)?.with_mapping(mapping))
     }
 }
 
@@ -129,11 +133,18 @@ impl ScreenshotProvider for WindowsScreenshot {
 /// multi-monitor setups); `w`/`h` are positive physical pixel dimensions.
 /// `scale` is `1.0` for Windows desktop coordinates.
 #[cfg(target_os = "windows")]
-fn capture_rect(x: i32, y: i32, w: i32, h: i32, scale: f32) -> Result<Screenshot> {
+fn capture_rect(
+    dpi: &crate::dpi::DpiScope,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    scale: f32,
+) -> Result<Screenshot> {
     let width = w as u32;
     let height = h as u32;
 
-    let screen_dc = unsafe { GetDC(None) };
+    let screen_dc = crate::coords::screen_dc(dpi);
     if screen_dc.is_invalid() {
         return Err(platform("GetDC(NULL) returned an invalid DC"));
     }
@@ -154,7 +165,7 @@ fn capture_rect(x: i32, y: i32, w: i32, h: i32, scale: f32) -> Result<Screenshot
     let prev = unsafe { SelectObject(mem_dc, HGDIOBJ(bitmap.0)) };
 
     unsafe {
-        BitBlt(mem_dc, 0, 0, w, h, Some(screen_dc), x, y, SRCCOPY).map_err(|e| {
+        crate::coords::blit_from_screen(dpi, mem_dc, w, h, screen_dc, x, y).map_err(|e| {
             let code = e.code().0;
             // HRESULT_FROM_WIN32(ERROR_INVALID_HANDLE) — what BitBlt actually
             // returns on disconnected / non-interactive sessions. Surface as
@@ -200,12 +211,12 @@ fn capture_rect(x: i32, y: i32, w: i32, h: i32, scale: f32) -> Result<Screenshot
     let mut pixels = vec![0u8; byte_len];
 
     let scanned = unsafe {
-        GetDIBits(
+        crate::coords::dib_bits(
+            dpi,
             mem_dc,
             bitmap,
-            0,
             height,
-            Some(pixels.as_mut_ptr().cast()),
+            pixels.as_mut_ptr().cast(),
             &mut header,
             DIB_RGB_COLORS,
         )

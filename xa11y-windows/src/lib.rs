@@ -6,6 +6,8 @@
 mod splice;
 
 #[cfg(target_os = "windows")]
+mod coords;
+#[cfg(target_os = "windows")]
 mod dpi;
 #[cfg(target_os = "windows")]
 mod input;
@@ -20,6 +22,14 @@ mod screenshot;
 pub use input::WindowsInputProvider;
 #[cfg(target_os = "windows")]
 pub use uia::WindowsProvider;
+
+/// How many times an xa11y call on this thread switched it to Per-Monitor V2
+/// DPI awareness. Test support for the system-aware host test; not API.
+#[doc(hidden)]
+#[cfg(target_os = "windows")]
+pub fn __dpi_scope_switches() -> u64 {
+    dpi::scope_switches()
+}
 
 pub use screenshot::WindowsScreenshot;
 

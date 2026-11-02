@@ -11,8 +11,8 @@ use std::sync::Mutex;
 
 use windows::Win32::Foundation::{GetLastError, HWND, POINT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyboardLayout, SendInput, VkKeyScanExW, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE,
-    KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
+    GetKeyboardLayout, VkKeyScanExW, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
+    KEYBD_EVENT_FLAGS, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
     MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP,
     MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
     MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT, VIRTUAL_KEY, VK_0,
@@ -24,10 +24,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_RETURN, VK_RIGHT, VK_S, VK_SHIFT, VK_SPACE, VK_T, VK_TAB, VK_U, VK_UP, VK_V, VK_W, VK_X,
     VK_Y, VK_Z,
 };
-use windows::Win32::UI::WindowsAndMessaging::{
-    GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowThreadProcessId, WindowFromPoint,
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-};
+use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
 use xa11y_core::input::{InputProvider, Key, MouseButton, Point, ScrollDelta};
 use xa11y_core::{Error, Result};
@@ -83,12 +80,10 @@ impl WindowsInputProvider {
         Ok(Self::default())
     }
 
-    fn send(&self, inputs: &[INPUT], target: Target) -> Result<()> {
+    fn send(&self, dpi: &crate::dpi::DpiScope, inputs: &[INPUT], target: Target) -> Result<()> {
         let _guard = self.lock.lock().unwrap_or_else(|e| e.into_inner());
-        self.preflight(target)?;
-        let size = std::mem::size_of::<INPUT>() as i32;
-        // SAFETY: `inputs` is a valid slice and `size` matches `INPUT`.
-        let sent = unsafe { SendInput(inputs, size) };
+        self.preflight(dpi, target)?;
+        let sent = crate::coords::send_input(dpi, inputs);
         if sent as usize != inputs.len() {
             // SAFETY: GetLastError takes no args and is always safe to call.
             let code = unsafe { GetLastError().0 } as i64;
@@ -106,25 +101,21 @@ impl WindowsInputProvider {
     /// UIPI drops input to a higher-integrity window while SendInput still
     /// counts every event as sent, so check where it will land before posting
     /// (issue #503).
-    fn preflight(&self, target: Target) -> Result<()> {
+    fn preflight(&self, dpi: &crate::dpi::DpiScope, target: Target) -> Result<()> {
         let (hwnd, what) = match target {
             Target::Unchecked => (HWND::default(), "input"),
             // SAFETY: no arguments.
             Target::Keyboard => (unsafe { GetForegroundWindow() }, "keyboard input"),
             Target::PointerAt(p) => (
-                // SAFETY: plain Win32 call on a value POINT.
-                unsafe { WindowFromPoint(POINT { x: p.x, y: p.y }) },
+                crate::coords::window_from_point(dpi, POINT { x: p.x, y: p.y }),
                 "mouse input",
             ),
             Target::PointerHere => {
-                let mut p = POINT::default();
-                // SAFETY: `p` outlives the call.
-                unsafe { GetCursorPos(&mut p) }.map_err(|e| Error::Platform {
+                let p = crate::coords::cursor_pos(dpi).map_err(|e| Error::Platform {
                     code: e.code().0 as i64,
                     message: format!("GetCursorPos failed while checking the mouse target: {e}"),
                 })?;
-                // SAFETY: plain Win32 call on a value POINT.
-                (unsafe { WindowFromPoint(p) }, "mouse input")
+                (crate::coords::window_from_point(dpi, p), "mouse input")
             }
         };
         crate::uipi::check_target(hwnd, what)
@@ -220,14 +211,9 @@ fn unicode_input(code_unit: u16, key_up: bool) -> INPUT {
 
 /// Normalize a physical screen pixel to the 0..=65535 absolute coordinate
 /// range expected by `SendInput` with `MOUSEEVENTF_VIRTUALDESK`.
-fn to_absolute(x: i32, y: i32) -> (i32, i32) {
-    // SAFETY: GetSystemMetrics takes a constant and returns i32; always safe.
-    let vx = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
-    let vy = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
-    let vw = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) }.max(1);
-    let vh = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) }.max(1);
-    // +vw/2 / vw biases toward the logical centre of each pixel (Microsoft's
-    // documented formula for normalised absolute mouse coordinates).
+fn to_absolute(dpi: &crate::dpi::DpiScope, x: i32, y: i32) -> (i32, i32) {
+    let (vx, vy, vw, vh) = crate::coords::virtual_screen(dpi);
+    let (vw, vh) = (vw.max(1), vh.max(1));
     let ax = (((x - vx) as i64 * 65535 + (vw as i64 / 2)) / vw as i64) as i32;
     let ay = (((y - vy) as i64 * 65535 + (vh as i64 / 2)) / vh as i64) as i32;
     (ax, ay)
@@ -430,10 +416,14 @@ fn button_down_up(button: MouseButton) -> (u32, u32) {
     }
 }
 
+// Every method enters a `DpiScope`: they all read or produce coordinates
+// (bounds in snapshots, window geometry, input points), which Windows answers
+// in the calling thread's DPI space (issue #506).
 impl InputProvider for WindowsInputProvider {
     fn pointer_move(&self, to: Point) -> Result<()> {
+        let dpi = crate::dpi::DpiScope::enter()?;
         // Windows Point and Element::bounds use physical desktop pixels.
-        let (ax, ay) = to_absolute(to.x, to.y);
+        let (ax, ay) = to_absolute(&dpi, to.x, to.y);
         let input = mouse_input(
             MOUSEEVENTF_MOVE.0 | MOUSEEVENTF_ABSOLUTE.0 | MOUSEEVENTF_VIRTUALDESK.0,
             ax,
@@ -447,21 +437,23 @@ impl InputProvider for WindowsInputProvider {
         } else {
             Target::PointerAt(to)
         };
-        self.send(&[input], target)
+        self.send(&dpi, &[input], target)
     }
 
     fn pointer_down(&self, button: MouseButton) -> Result<()> {
+        let dpi = crate::dpi::DpiScope::enter()?;
         let (down, _) = button_down_up(button);
-        self.send(&[mouse_input(down, 0, 0, 0)], Target::PointerHere)?;
+        self.send(&dpi, &[mouse_input(down, 0, 0, 0)], Target::PointerHere)?;
         self.buttons_down
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         Ok(())
     }
 
     fn pointer_up(&self, button: MouseButton) -> Result<()> {
+        let dpi = crate::dpi::DpiScope::enter()?;
         let (_, up) = button_down_up(button);
         // Never refused: a release must always reach the wire.
-        let sent = self.send(&[mouse_input(up, 0, 0, 0)], Target::Unchecked);
+        let sent = self.send(&dpi, &[mouse_input(up, 0, 0, 0)], Target::Unchecked);
         // Saturating, for an up with no matching down through this provider.
         // A compare-exchange loop rather than `fetch_update`, which newer
         // toolchains deprecate and the MSRV has no replacement for.
@@ -490,8 +482,11 @@ impl InputProvider for WindowsInputProvider {
         // Pre-flight both ends before anything is pressed, so a refusal can
         // never strand a held button mid-drag. The moves in between run
         // unchecked once the button is down (see `pointer_move`).
-        self.preflight(Target::PointerAt(from))?;
-        self.preflight(Target::PointerAt(to))?;
+        {
+            let dpi = crate::dpi::DpiScope::enter()?;
+            self.preflight(&dpi, Target::PointerAt(from))?;
+            self.preflight(&dpi, Target::PointerAt(to))?;
+        }
         const STEP: std::time::Duration = std::time::Duration::from_millis(16);
         self.pointer_move(from)?;
         self.pointer_down(button)?;
@@ -514,6 +509,7 @@ impl InputProvider for WindowsInputProvider {
     }
 
     fn pointer_click(&self, at: Point, button: MouseButton, count: u32) -> Result<()> {
+        let dpi = crate::dpi::DpiScope::enter()?;
         if count == 0 {
             return Ok(());
         }
@@ -524,6 +520,7 @@ impl InputProvider for WindowsInputProvider {
         // calls arrive within the OS double-click time.
         for _ in 0..count {
             self.send(
+                &dpi,
                 &[mouse_input(down, 0, 0, 0), mouse_input(up, 0, 0, 0)],
                 Target::PointerAt(at),
             )?;
@@ -532,18 +529,21 @@ impl InputProvider for WindowsInputProvider {
     }
 
     fn pointer_scroll(&self, at: Point, delta: ScrollDelta) -> Result<()> {
+        let dpi = crate::dpi::DpiScope::enter()?;
         self.pointer_move(at)?;
         let step = WHEEL_DELTA;
         if delta.dy != 0 {
             // `Input.dy > 0` means scroll content down per module docs, which
             // maps to a *positive* wheel delta on Win32 (wheel rolled forward).
             self.send(
+                &dpi,
                 &[mouse_input(MOUSEEVENTF_WHEEL.0, 0, 0, delta.dy * step)],
                 Target::PointerAt(at),
             )?;
         }
         if delta.dx != 0 {
             self.send(
+                &dpi,
                 &[mouse_input(MOUSEEVENTF_HWHEEL.0, 0, 0, delta.dx * step)],
                 Target::PointerAt(at),
             )?;
@@ -552,12 +552,13 @@ impl InputProvider for WindowsInputProvider {
     }
 
     fn key_down(&self, key: &Key) -> Result<()> {
+        let dpi = crate::dpi::DpiScope::enter()?;
         let (vk, extended) = vk_for(key)?;
         let mut flags = KEYBD_EVENT_FLAGS(0);
         if extended {
             flags |= KEYEVENTF_EXTENDEDKEY;
         }
-        self.send(&[key_input(vk, flags)], Target::Keyboard)?;
+        self.send(&dpi, &[key_input(vk, flags)], Target::Keyboard)?;
         if let Key::Char(c) = key {
             self.held_chars
                 .lock()
@@ -568,6 +569,7 @@ impl InputProvider for WindowsInputProvider {
     }
 
     fn key_up(&self, key: &Key) -> Result<()> {
+        let dpi = crate::dpi::DpiScope::enter()?;
         // Release the key `key_down` pressed, not what the layout says now.
         let held = match key {
             Key::Char(c) => self
@@ -587,7 +589,7 @@ impl InputProvider for WindowsInputProvider {
             flags |= KEYEVENTF_EXTENDEDKEY;
         }
         // Never refused: a release must always reach the wire.
-        self.send(&[key_input(vk, flags)], Target::Unchecked)?;
+        self.send(&dpi, &[key_input(vk, flags)], Target::Unchecked)?;
         if let Key::Char(c) = key {
             self.held_chars
                 .lock()
@@ -598,6 +600,7 @@ impl InputProvider for WindowsInputProvider {
     }
 
     fn type_text(&self, text: &str) -> Result<()> {
+        let dpi = crate::dpi::DpiScope::enter()?;
         // Use KEYEVENTF_UNICODE so case/shift/IME behaviour is produced by
         // the OS text-input path rather than by synthesising shift chords
         // against whatever keyboard layout happens to be active.
@@ -618,7 +621,7 @@ impl InputProvider for WindowsInputProvider {
         if inputs.is_empty() {
             return Ok(());
         }
-        self.send(&inputs, Target::Keyboard)
+        self.send(&dpi, &inputs, Target::Keyboard)
     }
 }
 
