@@ -11,9 +11,9 @@ use windows::Win32::System::Com::{CoInitializeEx, COINIT};
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId,
-    IsWindow, IsWindowVisible, SetForegroundWindow, GWL_EXSTYLE, STATE_SYSTEM_SELECTED,
-    WS_EX_LAYERED, WS_EX_TRANSPARENT,
+    EnumWindows, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
+    GetWindowThreadProcessId, IsHungAppWindow, IsWindow, IsWindowVisible, SetForegroundWindow,
+    GWL_EXSTYLE, STATE_SYSTEM_SELECTED, WS_EX_LAYERED, WS_EX_TRANSPARENT,
 };
 
 use xa11y_core::{
@@ -1656,6 +1656,83 @@ fn ensure_top_level_window_target(
     }
 }
 
+/// How many times `activate` calls `SetForegroundWindow` before giving up.
+const FOREGROUND_ATTEMPTS: u32 = 3;
+/// How long each attempt waits for `GetForegroundWindow` to report the target.
+const FOREGROUND_SETTLE: std::time::Duration = std::time::Duration::from_millis(500);
+const FOREGROUND_POLL: std::time::Duration = std::time::Duration::from_millis(25);
+
+/// Bring `hwnd` to the foreground and verify that it got there.
+///
+/// `SetForegroundWindow` is subject to the foreground lock: Windows can refuse
+/// it outright (returns FALSE), or accept the call and only flash the taskbar
+/// button. The return value alone therefore proves nothing, so success is
+/// `GetForegroundWindow() == hwnd`, polled for a short settle period because a
+/// cross-thread foreground switch lands asynchronously.
+///
+/// A refused or unverified attempt is retried with the same call, a bounded
+/// number of times. That is a retry, not a fallback to another mechanism
+/// (tenet 1), and there is deliberately no simulated-input trick such as the
+/// Alt-key tap that unlocks the foreground (tenet 2). When every attempt fails
+/// the error says what was in front instead and whether the target is hung,
+/// so the caller can tell a foreground-lock refusal from a frozen app.
+fn bring_to_foreground(hwnd: HWND) -> Result<()> {
+    let mut refused = 0u32;
+    for _ in 0..FOREGROUND_ATTEMPTS {
+        if !unsafe { SetForegroundWindow(hwnd) }.as_bool() {
+            refused += 1;
+        }
+        let deadline = std::time::Instant::now() + FOREGROUND_SETTLE;
+        loop {
+            if unsafe { GetForegroundWindow() } == hwnd {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(FOREGROUND_POLL);
+        }
+    }
+
+    let foreground = unsafe { GetForegroundWindow() };
+    let in_front = if foreground.0.is_null() {
+        "no window (the foreground is between windows or on the secure desktop)".to_string()
+    } else {
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(foreground, Some(&mut pid)) };
+        format!(
+            "HWND {:#x} \"{}\" (pid {pid})",
+            foreground.0 as usize,
+            window_text(foreground)
+        )
+    };
+    let hung = if unsafe { IsHungAppWindow(hwnd) }.as_bool() {
+        "; the target window is not responding (IsHungAppWindow)"
+    } else {
+        ""
+    };
+    Err(Error::Platform {
+        code: -1,
+        message: format!(
+            "activate: HWND {:#x} \"{}\" did not become the foreground window after {} \
+             SetForegroundWindow attempts ({refused} refused outright, the rest accepted but \
+             not applied, most likely the foreground lock); in front instead: {in_front}{hung}",
+            hwnd.0 as usize,
+            window_text(hwnd),
+            FOREGROUND_ATTEMPTS,
+        ),
+    })
+}
+
+/// A window's title for an error message; empty when it has none or the read fails.
+fn window_text(hwnd: HWND) -> String {
+    let mut buf = [0u16; 256];
+    let len = unsafe { GetWindowTextW(hwnd, &mut buf) };
+    // A failed read (0) is indistinguishable from an untitled window here, and
+    // either way the HWND printed alongside identifies it.
+    String::from_utf16_lossy(&buf[..usize::try_from(len).unwrap_or(0).min(buf.len())])
+}
+
 /// Locate the caret within a control's TextPattern, as a character offset
 /// from the start of the document.
 ///
@@ -2934,17 +3011,7 @@ impl Provider for WindowsProvider {
                 message: "window has no native handle; cannot activate".to_string(),
             });
         }
-        if !unsafe { SetForegroundWindow(hwnd) }.as_bool() {
-            // Windows restricts foreground changes (foreground lock); a
-            // denied SetForegroundWindow is a real failure, not a no-op —
-            // surface it (tenet 1).
-            return Err(Error::Platform {
-                code: -1,
-                message: "SetForegroundWindow was denied (foreground lock); the window may not \
-                          have been activated"
-                    .to_string(),
-            });
-        }
+        bring_to_foreground(hwnd)?;
         unsafe { uia.SetFocus() }.map_err(|e| Error::Platform {
             code: e.code().0 as i64,
             message: format!("SetFocus during activate failed: {e}"),

@@ -79,7 +79,7 @@ API is separate from its element-action interface:
 
 | xa11y Action | macOS | Linux X11 | Linux Wayland (Sway) | Windows (UIA) |
 | --- | --- | --- | --- | --- |
-| `Activate` | activate app, restore if minimized, then AXRaise | `_NET_ACTIVE_WINDOW` | Sway `focus` | restore if minimized, then SetForegroundWindow and SetFocus |
+| `Activate` | activate app, restore if minimized, then AXRaise | `_NET_ACTIVE_WINDOW` | Sway `focus` | restore if minimized, then SetForegroundWindow (verified with GetForegroundWindow, up to 3 tries; fails if the window is still not in front) and SetFocus |
 | `Minimize` | clear AXFullScreen when fullscreen, then set AXMinimized=true | ICCCM `WM_CHANGE_STATE(IconicState)` | unsupported | WindowPattern.SetWindowVisualState(Minimized) |
 | `Maximize` | unsupported | `_NET_WM_STATE_MAXIMIZED_HORZ` + `_VERT` | unsupported | WindowPattern.SetWindowVisualState(Maximized) |
 | `EnterFullscreen` | set AXFullScreen=true | `_NET_WM_STATE_FULLSCREEN` | Sway `fullscreen enable` | unsupported |
