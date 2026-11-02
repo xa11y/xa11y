@@ -3157,6 +3157,125 @@ mod tests {
         );
     }
 
+    /// The `kind` column of the agent guide's failure table.
+    fn guide_failure_kinds() -> Vec<String> {
+        crate::cli::AGENT_GUIDE
+            .lines()
+            .filter_map(|line| line.strip_prefix("| `"))
+            .filter_map(|rest| rest.split_once("` |"))
+            .map(|(kind, _)| kind.to_string())
+            .filter(|kind| kind != "kind")
+            .collect()
+    }
+
+    #[test]
+    fn the_agent_guide_explains_every_failure_kind_the_server_returns() {
+        use crate::Error as E;
+        let diag = || None;
+        let every = [
+            CliError::Usage("x".into()),
+            CliError::NotFound("x".into()),
+            CliError::Ambiguous {
+                count: 2,
+                diagnosis: Box::default(),
+            },
+            CliError::AmbiguousShellSurface {
+                count: 2,
+                kind: "taskbar".into(),
+                diagnosis: Box::default(),
+            },
+            CliError::NoSubscription {
+                id: "s".into(),
+                expired: true,
+                live: Vec::new(),
+            },
+            CliError::NoSubscription {
+                id: "s".into(),
+                expired: false,
+                live: Vec::new(),
+            },
+            CliError::Xa11y(E::PermissionDenied {
+                instructions: "x".into(),
+            }),
+            CliError::Xa11y(E::AccessibilityNotEnabled {
+                app: "x".into(),
+                instructions: "x".into(),
+            }),
+            CliError::Xa11y(E::SelectorNotMatched {
+                selector: "x".into(),
+                diagnosis: diag(),
+            }),
+            CliError::Xa11y(E::ElementStale {
+                selector: "x".into(),
+            }),
+            CliError::Xa11y(E::ActionNotSupported {
+                action: "x".into(),
+                role: crate::Role::Button,
+            }),
+            CliError::Xa11y(E::TextValueNotSupported),
+            CliError::Xa11y(E::Timeout {
+                elapsed: std::time::Duration::ZERO,
+                diagnosis: diag(),
+            }),
+            CliError::Xa11y(E::InvalidSelector {
+                selector: "x".into(),
+                message: "x".into(),
+            }),
+            CliError::Xa11y(E::InvalidActionData {
+                message: "x".into(),
+            }),
+            CliError::Xa11y(E::InvalidConfig {
+                message: "x".into(),
+            }),
+            CliError::Xa11y(E::NoElementBounds),
+            CliError::Xa11y(E::Unsupported {
+                feature: "x".into(),
+            }),
+            CliError::Xa11y(E::Platform {
+                code: 1,
+                message: "x".into(),
+            }),
+        ];
+        let documented = guide_failure_kinds();
+        let mut returned: Vec<&str> = every.iter().map(failure_kind).collect();
+        // `failure_kind`'s catch-all for a variant this build cannot name.
+        returned.push("unknown");
+        for kind in &returned {
+            assert!(
+                documented.iter().any(|d| d == kind),
+                "AGENT_GUIDE.md has no row for `{kind}`: {documented:?}"
+            );
+        }
+        for kind in &documented {
+            assert!(
+                returned.contains(&kind.as_str()),
+                "AGENT_GUIDE.md documents `{kind}`, which the server never returns"
+            );
+        }
+    }
+
+    #[test]
+    fn the_agent_guide_names_what_the_tools_actually_take() {
+        let guide = crate::cli::AGENT_GUIDE;
+        // Every action verb, spelled as the tool takes it.
+        for verb in cli::ACTION_NAMES {
+            assert!(guide.contains(&format!("`{verb}`")), "verb {verb}");
+        }
+        assert!(guide.contains(crate::DEFAULT_TIMEOUT_ENV_VAR));
+        assert!(guide.contains(&format!("default {TREE_DEFAULT_MAX_DEPTH}")));
+        assert!(guide.contains(&format!("default {FIND_DEFAULT_LIMIT}")));
+        assert!(guide.contains(super::super::protocol::GUIDE_URI));
+        // Every tool the guide names in backticks is one the server lists.
+        let tools: Vec<String> = Xa11yTools::new()
+            .list()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_owned))
+            .collect();
+        for tool in ["apps", "tree", "find", "action", "shell", "events_start"] {
+            assert!(tools.iter().any(|t| t == tool), "{tool}");
+        }
+    }
+
     #[test]
     fn a_diagnosis_reaches_the_structured_payload() {
         let err = CliError::Xa11y(crate::Error::SelectorNotMatched {

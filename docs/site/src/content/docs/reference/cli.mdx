@@ -261,6 +261,18 @@ new value.
 
 Useful for understanding what events fire when you interact with an app, or for debugging event subscriptions in your code.
 
+### `xa11y guide`
+
+Print the [agent guide](/reference/agent-guide/): the guide an agent reads
+before driving xa11y. It is compiled into the binary, so it matches the build
+that prints it. `xa11y mcp` serves the same text.
+
+```bash
+xa11y guide
+```
+
+The command takes no arguments.
+
 ## Input simulation
 
 These synthesise OS-level events at screen coordinates. They take no selector
@@ -531,7 +543,21 @@ result with `isError: true`, carrying the failure's `kind` and, where the error
 has one, its [diagnosis](/explanation/errors-and-diagnosis/): what the operation
 was waiting for, what it last observed, and which near-miss elements were
 present. `find` and `action` report a miss the same way, so a typo costs one
-call from either.
+call from either. The [agent guide](/reference/agent-guide/#failures) lists
+every `kind`.
+
+### Prompts and resources
+
+The server also serves the [agent guide](/reference/agent-guide/), the text
+`xa11y guide` prints, in both protocol eras.
+
+| Surface | Name | Content |
+| --- | --- | --- |
+| Resource | `xa11y://guide` | The guide as `text/markdown`, from `resources/read` |
+| Prompt | `guide` | One user message holding the guide, from `prompts/get`. Takes no arguments |
+
+`resources/templates/list` returns an empty list. An unknown URI or prompt name
+is a `-32602` error whose `data.available` names what exists.
 
 ## Composing the two halves
 
