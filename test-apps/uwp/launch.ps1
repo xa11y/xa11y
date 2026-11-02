@@ -55,4 +55,38 @@ namespace Xa11yUwp {
 }
 '@
 
-[Xa11yUwp.UwpLauncher]::Activate($aumid)
+$started = Get-Date
+try {
+    [Xa11yUwp.UwpLauncher]::Activate($aumid)
+}
+catch {
+    # Activation errors ("The app didn't start.") say nothing about why. The
+    # reason is in the event logs: a crash of the app's process (Application
+    # Error / Windows Error Reporting), or the app model's own account of the
+    # activation. Print what they recorded since this launch, then fail.
+    $err = $_
+    $ex = $err.Exception
+    if ($ex.InnerException) { $ex = $ex.InnerException }
+    [Console]::Error.WriteLine(("Activation of {0} failed: HRESULT 0x{1:X8}: {2}" -f $aumid, $ex.HResult, $ex.Message.Trim()))
+    [Console]::Error.WriteLine("Account: $(whoami /user /fo csv /nh)")
+    $logs = @(
+        @{ LogName = 'Application'; ProviderName = 'Application Error', 'Windows Error Reporting' },
+        @{ LogName = 'Microsoft-Windows-AppModel-Runtime/Admin' },
+        @{ LogName = 'Microsoft-Windows-TWinUI/Operational' },
+        @{ LogName = 'Microsoft-Windows-Immersive-Shell/Operational' }
+    )
+    foreach ($filter in $logs) {
+        $filter.StartTime = $started.AddSeconds(-5)
+        try {
+            Get-WinEvent -FilterHashtable $filter -MaxEvents 20 -ErrorAction Stop |
+                ForEach-Object {
+                    [Console]::Error.WriteLine("[$($filter.LogName)] $($_.TimeCreated) id=$($_.Id) $($_.LevelDisplayName): $($_.Message)")
+                }
+        }
+        catch [System.Exception] {
+            # "No events were found" is the expected answer from a quiet log.
+            [Console]::Error.WriteLine("[$($filter.LogName)] $($_.Exception.Message)")
+        }
+    }
+    throw $err
+}

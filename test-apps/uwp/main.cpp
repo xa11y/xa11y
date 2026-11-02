@@ -177,8 +177,11 @@ struct App : ApplicationT<App> {
 
 }  // namespace
 
+// No init_apartment: the UWP runtime initializes the main thread itself
+// (as MTA) when Application::Start runs CoreApplication, and an STA set up
+// here first makes activation fail with "The app didn't start". This is the
+// same wWinMain the C++/WinRT UWP project template generates.
 int __stdcall wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
-    init_apartment(apartment_type::single_threaded);
     Application::Start([](auto&&) { make<App>(); });
     return 0;
 }
