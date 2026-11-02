@@ -11,7 +11,10 @@ use windows::Win32::System::Com::{CoInitializeEx, COINIT};
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GA_PARENT, GA_ROOT, GWL_EXSTYLE, GetAncestor, GetDesktopWindow, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible, STATE_SYSTEM_SELECTED, SetForegroundWindow, WS_EX_LAYERED, WS_EX_TRANSPARENT,
+    EnumWindows, GetAncestor, GetDesktopWindow, GetForegroundWindow, GetWindowLongPtrW,
+    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsHungAppWindow, IsIconic, IsWindow,
+    IsWindowVisible, SetForegroundWindow, GA_PARENT, GWL_EXSTYLE, STATE_SYSTEM_SELECTED,
+    WS_EX_LAYERED, WS_EX_TRANSPARENT,
 };
 
 use xa11y_core::{
