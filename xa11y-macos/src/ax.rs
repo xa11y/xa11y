@@ -2976,7 +2976,10 @@ fn build_snapshot_data(
             // attributes one at a time. That re-read is error-preserving for
             // `AXRole`, so an element invalidated between the batch fetch and
             // the individual reads carries its platform error out instead of
-            // being built as a role-less ghost (tenet 1).
+            // being built as a role-less ghost (tenet 1). A genuinely
+            // role-less element also lands here (its role slot holds an
+            // error object too), paying the individual reads; that is rare,
+            // and the cost buys telling it apart from an unreadable one.
             None => ResolvedAttrs::from_individual(element)?,
         };
 
