@@ -720,35 +720,57 @@ impl WindowsProvider {
     /// `GetRuntimeId` hands back a SAFEARRAY of i32 that this copies and
     /// destroys. A failure propagates (tenet 1): `UIA_E_ELEMENTNOTAVAILABLE`
     /// means the element is gone, which callers handle with `live_snapshot`.
-    fn runtime_id(element: &IUIAutomationElement) -> Result<Vec<i32>> {
+    ///
+    /// An element with no RuntimeId comes back as an empty `Vec`; it has no
+    /// identity to compare, so callers must not dedup on it. `handle` is only
+    /// for the error messages.
+    fn runtime_id(element: &IUIAutomationElement, handle: u64) -> Result<Vec<i32>> {
         use windows::Win32::System::Com::SAFEARRAY;
         use windows::Win32::System::Ole::{
             SafeArrayAccessData, SafeArrayDestroy, SafeArrayUnaccessData,
         };
 
-        let sa: *mut SAFEARRAY = uia_call(|| unsafe { element.GetRuntimeId() })?;
+        let context =
+            |message: String| format!("GetRuntimeId for element handle {handle}: {message}");
+        let sa: *mut SAFEARRAY =
+            uia_call(|| unsafe { element.GetRuntimeId() }).map_err(|e| match e {
+                Error::Platform { code, message } => Error::Platform {
+                    code,
+                    message: context(message),
+                },
+                other => other,
+            })?;
         if sa.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "IUIAutomationElement.GetRuntimeId returned no array".into(),
-            });
+            // UIA documents a null array for an element without a RuntimeId.
+            return Ok(Vec::new());
         }
-        // SAFETY: GetRuntimeId handed us ownership of `sa`, a 1-D SAFEARRAY
-        // of VT_I4. It is locked while the i32s are copied out, then
-        // unlocked and destroyed on every path.
+        // SAFETY: GetRuntimeId handed us ownership of `sa`. Its shape is
+        // checked before the data is read; it is unlocked and destroyed on
+        // every path.
         unsafe {
-            let mut data_ptr: *mut core::ffi::c_void = core::ptr::null_mut();
-            if let Err(e) = SafeArrayAccessData(sa, &mut data_ptr as *mut _) {
+            let dims = (*sa).cDims;
+            if dims != 1 {
                 // Already failing; a failed destroy only leaks the array.
                 let _ = SafeArrayDestroy(sa);
                 return Err(Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!("SafeArrayAccessData on a RuntimeId failed: {e}"),
+                    code: -1,
+                    message: context(format!("expected a 1-D array, got {dims} dimensions")),
                 });
             }
-            let bounds = (*sa).rgsabound.as_ptr();
-            let count = (*bounds).cElements as usize;
-            let v = std::slice::from_raw_parts(data_ptr as *const i32, count).to_vec();
+            let count = (*sa).rgsabound[0].cElements as usize;
+            let mut data_ptr: *mut core::ffi::c_void = core::ptr::null_mut();
+            if let Err(e) = SafeArrayAccessData(sa, &mut data_ptr as *mut _) {
+                let _ = SafeArrayDestroy(sa);
+                return Err(Error::Platform {
+                    code: e.code().0 as i64,
+                    message: context(format!("SafeArrayAccessData failed: {e}")),
+                });
+            }
+            let v = if count == 0 || data_ptr.is_null() {
+                Vec::new()
+            } else {
+                std::slice::from_raw_parts(data_ptr as *const i32, count).to_vec()
+            };
             // The values are already copied; a failed unlock or destroy
             // leaks the array and changes nothing about them.
             let _ = SafeArrayUnaccessData(sa);
@@ -765,10 +787,11 @@ impl WindowsProvider {
 /// button sits under several `*` matches) gets two handles, and the core
 /// walkers' handle dedup keeps both. This wrapper gives every element the
 /// first handle this query minted for its RuntimeId, which turns that dedup
-/// (and `:nth` counting after it) into a dedup by UIA identity. The handle
-/// cache entry is refreshed with the newest element so the canonical handle
-/// stays live. An element that vanishes before its RuntimeId is read is left
-/// out, as the walk does for any element that goes away mid-snapshot.
+/// (and `:nth` counting after it) into a dedup by UIA identity. If the
+/// canonical handle was evicted from the handle cache, it is re-inserted with
+/// the newest element. An element without a RuntimeId keeps its own handle,
+/// and an element that vanishes before its RuntimeId is read is left out, as
+/// the walk does for any element that goes away mid-snapshot.
 struct CanonicalWalk<'a> {
     provider: &'a WindowsProvider,
     handles: std::cell::RefCell<HashMap<Vec<i32>, u64>>,
@@ -801,16 +824,24 @@ impl<'a> CanonicalWalk<'a> {
             return Ok(Some(handle));
         }
         let element = self.provider.get_cached(handle)?;
-        let Some(id) = live_snapshot(WindowsProvider::runtime_id(&element))? else {
+        let Some(id) = live_snapshot(WindowsProvider::runtime_id(&element, handle))? else {
             return Ok(None);
         };
+        if id.is_empty() {
+            return Ok(Some(handle));
+        }
         let canonical = *self.handles.borrow_mut().entry(id).or_insert(handle);
         if canonical != handle {
-            self.provider
+            let mut cache = self
+                .provider
                 .handle_cache
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .insert(canonical, element);
+                .unwrap_or_else(|e| e.into_inner());
+            // Only an evicted entry needs re-inserting; refreshing a live one
+            // would cost the cache an O(n) reorder per duplicate.
+            if cache.get(&canonical).is_none() {
+                cache.insert(canonical, element);
+            }
         }
         Ok(Some(canonical))
     }
@@ -2700,10 +2731,11 @@ impl Provider for WindowsProvider {
             let element = self.get_cached(data.handle)?;
             // An element that vanished since the walk is left out, as the
             // walk itself does.
-            let Some(id) = live_snapshot(Self::runtime_id(&element))? else {
+            let Some(id) = live_snapshot(Self::runtime_id(&element, data.handle))? else {
                 continue;
             };
-            if seen.insert(id) {
+            // No RuntimeId means no identity to dedup on: keep it.
+            if id.is_empty() || seen.insert(id) {
                 out.push(data);
             }
         }
