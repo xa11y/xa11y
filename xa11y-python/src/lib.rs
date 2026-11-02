@@ -1937,7 +1937,7 @@ impl InputSim {
         held: Option<Vec<String>>,
         anchor: Option<Bound<'_, PyAny>>,
     ) -> PyResult<()> {
-        let pt = parse_target_anchored(&target, parse_anchor(anchor.as_ref())?)?;
+        let pt = parse_target_anchored(&self.inner, &target, parse_anchor(anchor.as_ref())?)?;
         let opts = xa11y::ClickOptions::new()
             .button(parse_button(button)?)
             .count(count)
@@ -1952,21 +1952,21 @@ impl InputSim {
 
     /// Left double-click at `target`.
     fn double_click(&self, py: Python<'_>, target: Bound<'_, PyAny>) -> PyResult<()> {
-        let pt = parse_target(&target)?;
+        let pt = parse_target(&self.inner, &target)?;
         py.detach(move || self.inner.mouse().double_click(pt))
             .map_err(to_py_err)
     }
 
     /// Right-click at `target`.
     fn right_click(&self, py: Python<'_>, target: Bound<'_, PyAny>) -> PyResult<()> {
-        let pt = parse_target(&target)?;
+        let pt = parse_target(&self.inner, &target)?;
         py.detach(move || self.inner.mouse().right_click(pt))
             .map_err(to_py_err)
     }
 
     /// Move the pointer to `target` without pressing any button.
     fn move_to(&self, py: Python<'_>, target: Bound<'_, PyAny>) -> PyResult<()> {
-        let pt = parse_target(&target)?;
+        let pt = parse_target(&self.inner, &target)?;
         py.detach(move || self.inner.mouse().move_to(pt))
             .map_err(to_py_err)
     }
@@ -2007,8 +2007,8 @@ impl InputSim {
         held: Option<Vec<String>>,
         duration: f64,
     ) -> PyResult<()> {
-        let from = parse_target(&start)?;
-        let to = parse_target(&end)?;
+        let from = parse_target(&self.inner, &start)?;
+        let to = parse_target(&self.inner, &end)?;
         let opts = xa11y::DragOptions::new()
             .button(parse_button(button)?)
             .held(parse_keys(held)?)
@@ -2021,7 +2021,7 @@ impl InputSim {
     /// scroll content down.
     #[pyo3(signature = (target, dx=0, dy=0))]
     fn scroll(&self, py: Python<'_>, target: Bound<'_, PyAny>, dx: i32, dy: i32) -> PyResult<()> {
-        let pt = parse_target(&target)?;
+        let pt = parse_target(&self.inner, &target)?;
         py.detach(move || {
             self.inner
                 .mouse()
@@ -2074,15 +2074,22 @@ impl InputSim {
 /// Convert a Python target (`(int, int)` tuple or `Element`) to an
 /// [`xa11y::Point`]. Keeps the target-resolution cost explicit at the call
 /// site, matching the Rust [`IntoPoint`] contract.
-fn parse_target(target: &Bound<'_, PyAny>) -> PyResult<xa11y::Point> {
-    parse_target_anchored(target, xa11y::Anchor::Center)
+fn parse_target(sim: &xa11y::InputSim, target: &Bound<'_, PyAny>) -> PyResult<xa11y::Point> {
+    parse_target_anchored(sim, target, xa11y::Anchor::Center)
 }
 
 /// [`parse_target`] with an explicit anchor for `Element` targets.
 ///
 /// `anchor` is ignored for raw points, matching core's
 /// `ClickTarget::Point` arm.
+///
+/// Element targets go through core's `Mouse::point_for_bounds`, which refuses
+/// them on backends whose accessibility bounds are not screen coordinates
+/// (Wayland, issue #495) — the same check core applies to its own `Element`
+/// targets. That check is not an OS call, so parsing still finishes before
+/// the first event is posted.
 fn parse_target_anchored(
+    sim: &xa11y::InputSim,
     target: &Bound<'_, PyAny>,
     anchor: xa11y::Anchor,
 ) -> PyResult<xa11y::Point> {
@@ -2091,15 +2098,18 @@ fn parse_target_anchored(
         let (x, y, width, height) = element
             .bounds_data
             .ok_or_else(|| PyValueError::new_err("Element has no bounds"))?;
-        return Ok(xa11y::anchor_point(
-            &xa11y::Rect {
-                x,
-                y,
-                width,
-                height,
-            },
-            anchor,
-        ));
+        return sim
+            .mouse()
+            .point_for_bounds(
+                Some(xa11y::Rect {
+                    x,
+                    y,
+                    width,
+                    height,
+                }),
+                anchor,
+            )
+            .map_err(to_py_err);
     }
     let tup: (i32, i32) = target
         .extract()

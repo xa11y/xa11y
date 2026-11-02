@@ -168,6 +168,15 @@ pub fn point_for(element: &Element, anchor: Anchor) -> Result<Point> {
 /// (and the failure mode) visible at the call site.
 pub trait IntoPoint {
     fn into_point(self) -> Result<Point>;
+
+    /// Whether this target's point comes from an element's accessibility
+    /// bounds rather than being a literal screen point. [`Mouse`] refuses
+    /// such targets on backends whose bounds are not screen coordinates
+    /// (see [`InputProvider::element_bounds_are_screen_coordinates`]).
+    #[doc(hidden)]
+    fn is_element_target(&self) -> bool {
+        false
+    }
 }
 
 impl IntoPoint for Point {
@@ -185,6 +194,10 @@ impl IntoPoint for (i32, i32) {
 impl IntoPoint for &Element {
     fn into_point(self) -> Result<Point> {
         point_for(self, Anchor::Center)
+    }
+
+    fn is_element_target(&self) -> bool {
+        true
     }
 }
 
@@ -490,6 +503,22 @@ impl DragOptions {
 ///   degrade — surface the missing capability per Tenet 1.
 /// - [`Error::Platform`] for raw OS failures.
 pub trait InputProvider: Send + Sync {
+    // ── Capabilities (provided) ─────────────────────────────────────
+
+    /// Whether an element's accessibility bounds are usable as screen
+    /// coordinates for this backend's pointer events.
+    ///
+    /// `true` (the default) everywhere bounds and pointer share one global
+    /// coordinate space. A backend returns `false` when they do not — on
+    /// Wayland, clients do not know their global position, so AT-SPI bounds
+    /// are not screen coordinates — and pointer actions targeted at an
+    /// [`Element`] then fail with [`Error::Unsupported`] instead of clicking
+    /// somewhere else. Raw-point pointer actions and keyboard input are
+    /// unaffected.
+    fn element_bounds_are_screen_coordinates(&self) -> bool {
+        true
+    }
+
     // ── Pointer (required) ──────────────────────────────────────────
 
     /// Move the pointer to `to` without pressing any buttons.
@@ -624,9 +653,25 @@ impl InputSim {
     }
 
     /// Resolve an element's current bounds to a screen point using `anchor`.
-    /// Equivalent to the free function [`point_for`].
+    ///
+    /// Like the free function [`point_for`], but refuses with
+    /// [`Error::Unsupported`] when this backend's element bounds are not
+    /// screen coordinates (see
+    /// [`InputProvider::element_bounds_are_screen_coordinates`]).
     pub fn point_for(&self, element: &Element, anchor: Anchor) -> Result<Point> {
-        point_for(element, anchor)
+        self.mouse().point_for_bounds(element.bounds, anchor)
+    }
+}
+
+/// The refusal for an element-targeted pointer action on a backend whose
+/// accessibility bounds are not screen coordinates.
+fn element_target_unsupported() -> Error {
+    Error::Unsupported {
+        feature: "pointer action targeted at an element: on this session (Wayland) \
+                  applications do not know their global position, so accessibility \
+                  bounds are not screen coordinates. Use a semantic action (press, \
+                  focus, ...) or pass a raw screen point"
+            .to_string(),
     }
 }
 
@@ -636,10 +681,36 @@ pub struct Mouse<'a> {
 }
 
 impl Mouse<'_> {
+    /// Turn an element's accessibility `bounds` into the screen point for a
+    /// pointer action, refusing when the backend's bounds are not screen
+    /// coordinates.
+    ///
+    /// The one place element targets are lowered to points: core's own
+    /// `Element` targets and both language bindings (whose element types are
+    /// not core `Element`s) route through it, so every surface refuses the
+    /// same way. The capability is checked before the bounds, so a refused
+    /// backend says why even for an element with no bounds.
+    #[doc(hidden)]
+    pub fn point_for_bounds(&self, bounds: Option<Rect>, anchor: Anchor) -> Result<Point> {
+        if !self.backend.element_bounds_are_screen_coordinates() {
+            return Err(element_target_unsupported());
+        }
+        let bounds = bounds.ok_or(Error::NoElementBounds)?;
+        Ok(anchor_point(&bounds, anchor))
+    }
+
+    /// Lower an [`IntoPoint`] target, applying the element-target check.
+    fn resolve(&self, target: impl IntoPoint) -> Result<Point> {
+        if target.is_element_target() && !self.backend.element_bounds_are_screen_coordinates() {
+            return Err(element_target_unsupported());
+        }
+        target.into_point()
+    }
+
     /// Left-click `target` once at its [`Anchor::Center`] (for elements) or
     /// at the literal point.
     pub fn click(&self, target: impl IntoPoint) -> Result<()> {
-        let pt = target.into_point()?;
+        let pt = self.resolve(target)?;
         self.backend.pointer_click(pt, MouseButton::Left, 1)
     }
 
@@ -653,7 +724,7 @@ impl Mouse<'_> {
         }
         let pt = match target {
             ClickTarget::Point(p) => p,
-            ClickTarget::Element(el) => point_for(el, opts.anchor)?,
+            ClickTarget::Element(el) => self.point_for_bounds(el.bounds, opts.anchor)?,
         };
         with_keys_held(self.backend.as_ref(), &opts.held, || {
             self.backend.pointer_click(pt, opts.button, opts.count)
@@ -662,13 +733,13 @@ impl Mouse<'_> {
 
     /// Convenience for a left double-click at `target`.
     pub fn double_click(&self, target: impl IntoPoint) -> Result<()> {
-        let pt = target.into_point()?;
+        let pt = self.resolve(target)?;
         self.backend.pointer_click(pt, MouseButton::Left, 2)
     }
 
     /// Convenience for a right-click at `target`.
     pub fn right_click(&self, target: impl IntoPoint) -> Result<()> {
-        let pt = target.into_point()?;
+        let pt = self.resolve(target)?;
         self.backend.pointer_click(pt, MouseButton::Right, 1)
     }
 
@@ -684,15 +755,15 @@ impl Mouse<'_> {
 
     /// Move the pointer to `target` without pressing any buttons.
     pub fn move_to(&self, target: impl IntoPoint) -> Result<()> {
-        let pt = target.into_point()?;
+        let pt = self.resolve(target)?;
         self.backend.pointer_move(pt)
     }
 
     /// Press the left button at `from`, move to `to`, release. Default
     /// duration: 150 ms. Use [`drag_with`](Self::drag_with) to customise.
     pub fn drag(&self, from: impl IntoPoint, to: impl IntoPoint) -> Result<()> {
-        let from = from.into_point()?;
-        let to = to.into_point()?;
+        let from = self.resolve(from)?;
+        let to = self.resolve(to)?;
         self.backend
             .pointer_drag(from, to, MouseButton::Left, Duration::from_millis(150))
     }
@@ -707,8 +778,8 @@ impl Mouse<'_> {
         for k in &opts.held {
             k.validate()?;
         }
-        let from = from.into_point()?;
-        let to = to.into_point()?;
+        let from = self.resolve(from)?;
+        let to = self.resolve(to)?;
         with_keys_held(self.backend.as_ref(), &opts.held, || {
             self.backend
                 .pointer_drag(from, to, opts.button, opts.duration)
@@ -717,7 +788,7 @@ impl Mouse<'_> {
 
     /// Scroll at `target` by `delta` ticks.
     pub fn scroll(&self, target: impl IntoPoint, delta: ScrollDelta) -> Result<()> {
-        let pt = target.into_point()?;
+        let pt = self.resolve(target)?;
         self.backend.pointer_scroll(pt, delta)
     }
 }
@@ -901,6 +972,152 @@ mod point_scale_tests {
         assert_eq!(
             anchor_point(&bounds, Anchor::BottomRight),
             Point::new(12, 21)
+        );
+    }
+}
+
+#[cfg(test)]
+mod element_target_tests {
+    use super::*;
+    use crate::element::ElementData;
+    use crate::role::Role;
+    use std::sync::Mutex;
+
+    /// Records every input event, so a refusal can be shown to send none.
+    struct Recording {
+        bounds_are_screen: bool,
+        events: Mutex<Vec<String>>,
+    }
+
+    impl Recording {
+        fn new(bounds_are_screen: bool) -> Arc<Self> {
+            Arc::new(Self {
+                bounds_are_screen,
+                events: Mutex::new(Vec::new()),
+            })
+        }
+        fn log(&self, e: String) -> Result<()> {
+            self.events
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(e);
+            Ok(())
+        }
+        fn events(&self) -> Vec<String> {
+            self.events
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+        }
+    }
+
+    impl InputProvider for Recording {
+        fn element_bounds_are_screen_coordinates(&self) -> bool {
+            self.bounds_are_screen
+        }
+        fn pointer_move(&self, to: Point) -> Result<()> {
+            self.log(format!("move {to:?}"))
+        }
+        fn pointer_down(&self, button: MouseButton) -> Result<()> {
+            self.log(format!("down {button:?}"))
+        }
+        fn pointer_up(&self, button: MouseButton) -> Result<()> {
+            self.log(format!("up {button:?}"))
+        }
+        fn pointer_click(&self, at: Point, button: MouseButton, count: u32) -> Result<()> {
+            self.log(format!("click {at:?} {button:?} x{count}"))
+        }
+        fn pointer_scroll(&self, at: Point, delta: ScrollDelta) -> Result<()> {
+            self.log(format!("scroll {at:?} {delta:?}"))
+        }
+        fn key_down(&self, key: &Key) -> Result<()> {
+            self.log(format!("keydown {key:?}"))
+        }
+        fn key_up(&self, key: &Key) -> Result<()> {
+            self.log(format!("keyup {key:?}"))
+        }
+        fn type_text(&self, text: &str) -> Result<()> {
+            self.log(format!("type {text}"))
+        }
+    }
+
+    fn element() -> Element {
+        let mut data = ElementData::for_role(Role::Button);
+        data.bounds = Some(Rect {
+            x: 10,
+            y: 20,
+            width: 100,
+            height: 40,
+        });
+        Element::new(data, crate::mock::build_provider())
+    }
+
+    fn assert_refused(r: Result<()>) {
+        match r {
+            Err(Error::Unsupported { feature }) => {
+                assert!(feature.contains("not screen coordinates"), "{feature}")
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn element_targets_are_refused_when_bounds_are_not_screen_coordinates() {
+        let backend = Recording::new(false);
+        let sim = InputSim::new(backend.clone());
+        let el = element();
+        let mouse = sim.mouse();
+        assert_refused(mouse.click(&el));
+        assert_refused(mouse.double_click(&el));
+        assert_refused(mouse.right_click(&el));
+        assert_refused(mouse.move_to(&el));
+        assert_refused(mouse.scroll(&el, ScrollDelta::vertical(1)));
+        assert_refused(mouse.drag(&el, (5, 5)));
+        assert_refused(mouse.drag((5, 5), &el));
+        assert_refused(mouse.click_with(ClickTarget::Element(&el), ClickOptions::new()));
+        assert!(matches!(
+            sim.point_for(&el, Anchor::Center),
+            Err(Error::Unsupported { .. })
+        ));
+        // The binding entry point refuses before even looking at the bounds.
+        assert!(matches!(
+            mouse.point_for_bounds(None, Anchor::Center),
+            Err(Error::Unsupported { .. })
+        ));
+        assert!(
+            backend.events().is_empty(),
+            "a refused target must send no event: {:?}",
+            backend.events()
+        );
+
+        // Raw points and the keyboard are unaffected.
+        mouse.click((1, 2)).expect("raw point");
+        mouse.move_to(Point::new(3, 4)).expect("raw point");
+        sim.keyboard().type_text("ok").expect("keyboard");
+        assert_eq!(backend.events().len(), 3);
+    }
+
+    #[test]
+    fn element_targets_resolve_when_bounds_are_screen_coordinates() {
+        let backend = Recording::new(true);
+        let sim = InputSim::new(backend.clone());
+        let el = element();
+        sim.mouse().click(&el).expect("element click");
+        assert_eq!(
+            sim.mouse()
+                .point_for_bounds(el.bounds, Anchor::TopLeft)
+                .expect("bounds"),
+            Point::new(10, 20)
+        );
+        assert!(matches!(
+            sim.mouse().point_for_bounds(None, Anchor::Center),
+            Err(Error::NoElementBounds)
+        ));
+        assert_eq!(backend.events().len(), 1);
+        assert!(
+            backend.events()[0].starts_with("click"),
+            "{:?}",
+            backend.events()
         );
     }
 }
