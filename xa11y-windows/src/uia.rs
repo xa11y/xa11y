@@ -2397,11 +2397,10 @@ fn window_text(hwnd: HWND) -> String {
 ///   fails. These are propagated rather than silently falling back, so
 ///   genuine platform errors surface (tenet 1).
 fn caret_char_offset(uia_element: &IUIAutomationElement) -> Result<Option<usize>> {
-    let text_pattern = match unsafe {
-        uia_element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
-    } {
-        Ok(p) => p,
-        Err(_) => return Ok(None), // TextPattern not supported on this control.
+    let Some(text_pattern) =
+        current_pattern::<IUIAutomationTextPattern>(uia_element, UIA_TextPatternId, "TextPattern")?
+    else {
+        return Ok(None); // TextPattern not supported on this control.
     };
 
     let selection = match unsafe { text_pattern.GetSelection() } {
@@ -2753,55 +2752,61 @@ impl Provider for WindowsProvider {
             return Ok(None);
         }
         let uia = self.get_cached(element.handle)?;
-        if let Ok(walker) = unsafe { self.automation.RawViewWalker() } {
-            if let Ok(parent) = unsafe { walker.GetParentElement(&uia) } {
-                // Check if the parent is the desktop root (no further parent)
-                let parent_parent = unsafe { walker.GetParentElement(&parent) };
-                if parent_parent.is_err() {
-                    // The desktop root is not a "real" parent: the owning
-                    // process is. Answer with the synthetic Application node
-                    // for the element's pid, using the element itself as the
-                    // representative window — name resolution reads the
-                    // process path in the common case. An element whose
-                    // pid could not be resolved (rare — a shell Pane from a
-                    // vanished process) has no process identity to report,
-                    // which is "no parent", not an error.
-                    let Some(pid) = element.pid else {
-                        return Ok(None);
-                    };
-                    return Ok(Some(self.build_synthetic_app_data(pid, &uia)?));
-                }
-                // Populate snapshot so build_element_data can read Cached* props
-                let parent = self
-                    .populate_cache(dpi, &parent)
-                    .map_err(|e| Error::Platform {
-                        code: e.code().0 as i64,
-                        message: format!("BuildUpdatedCache failed: {}", e),
-                    })?;
-                // A windowless child shares its parent's nearest window (an
-                // HWND-bearing parent uses its own anyway), so the child's
-                // remembered answer serves; a child with its own HWND, or one
-                // not built here, needs the walk.
-                let child_has_own_hwnd = element
-                    .stable_id
-                    .as_deref()
-                    .is_some_and(|id| id.starts_with("hwnd:"));
-                let host_hwnd = if child_has_own_hwnd {
-                    self.walk_to_host_hwnd(&parent)?
-                } else {
-                    self.host_hwnd_of(element.handle, &uia)?
-                };
-                let data = self.build_element_data_in(
-                    dpi,
-                    &parent,
-                    element.pid,
-                    host_hwnd,
-                    HostHint::Parent,
-                )?;
-                return Ok(Some(data));
-            }
+        // `GetParentElement` reports "no parent" as S_OK with a null
+        // element, which windows-rs surfaces as an error whose code is
+        // S_OK. Only that is "no parent"; a failed HRESULT propagates
+        // (tenet 1).
+        let parent_of = |el: &IUIAutomationElement, what: &str| match unsafe {
+            self.raw_walker.GetParentElement(el)
+        } {
+            Ok(parent) => Ok(Some(parent)),
+            Err(e) if e.code().is_ok() => Ok(None),
+            Err(e) => Err(Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("GetParentElement of {what} failed: {e}"),
+            }),
+        };
+        let Some(parent) = parent_of(&uia, "the element")? else {
+            return Ok(None);
+        };
+        // A parent with no parent of its own is the desktop root.
+        if parent_of(&parent, "the element's parent")?.is_none() {
+            // The desktop root is not a "real" parent: the owning
+            // process is. Answer with the synthetic Application node
+            // for the element's pid, using the element itself as the
+            // representative window — name resolution reads the
+            // process path in the common case. An element whose
+            // pid could not be resolved (rare — a shell Pane from a
+            // vanished process) has no process identity to report,
+            // which is "no parent", not an error.
+            let Some(pid) = element.pid else {
+                return Ok(None);
+            };
+            return Ok(Some(self.build_synthetic_app_data(pid, &uia)?));
         }
-        Ok(None)
+        // Populate snapshot so build_element_data can read Cached* props
+        let parent = self
+            .populate_cache(dpi, &parent)
+            .map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("BuildUpdatedCache failed: {}", e),
+            })?;
+        // A windowless child shares its parent's nearest window (an
+        // HWND-bearing parent uses its own anyway), so the child's
+        // remembered answer serves; a child with its own HWND, or one
+        // not built here, needs the walk.
+        let child_has_own_hwnd = element
+            .stable_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("hwnd:"));
+        let host_hwnd = if child_has_own_hwnd {
+            self.walk_to_host_hwnd(&parent)?
+        } else {
+            self.host_hwnd_of(element.handle, &uia)?
+        };
+        let data =
+            self.build_element_data_in(dpi, &parent, element.pid, host_hwnd, HostHint::Parent)?;
+        Ok(Some(data))
     }
 
     /// Enumerate the Windows shell surfaces by classifying the UIA desktop
@@ -3606,9 +3611,11 @@ impl Provider for WindowsProvider {
     fn toggle(&self, element: &ElementData) -> Result<()> {
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
-        if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
-        } {
+        if let Some(pattern) = current_pattern::<IUIAutomationTogglePattern>(
+            &uia_element,
+            UIA_TogglePatternId,
+            "TogglePattern",
+        )? {
             unsafe { pattern.Toggle() }.or_else(|e| {
                 if is_event_subscriber_failure(&e) {
                     Ok(())
@@ -3630,11 +3637,11 @@ impl Provider for WindowsProvider {
     fn select(&self, element: &ElementData) -> Result<()> {
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
-        if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
-                UIA_SelectionItemPatternId,
-            )
-        } {
+        if let Some(pattern) = current_pattern::<IUIAutomationSelectionItemPattern>(
+            &uia_element,
+            UIA_SelectionItemPatternId,
+            "SelectionItemPattern",
+        )? {
             unsafe { pattern.Select() }.or_else(|e| {
                 if is_event_subscriber_failure(&e) {
                     Ok(())
@@ -3656,11 +3663,11 @@ impl Provider for WindowsProvider {
     fn expand(&self, element: &ElementData) -> Result<()> {
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
-        if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
-                UIA_ExpandCollapsePatternId,
-            )
-        } {
+        if let Some(pattern) = current_pattern::<IUIAutomationExpandCollapsePattern>(
+            &uia_element,
+            UIA_ExpandCollapsePatternId,
+            "ExpandCollapsePattern",
+        )? {
             unsafe { pattern.Expand() }.map_err(|e| Error::Platform {
                 code: e.code().0 as i64,
                 message: format!("Expand failed: {}", e),
@@ -3676,11 +3683,11 @@ impl Provider for WindowsProvider {
     fn collapse(&self, element: &ElementData) -> Result<()> {
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
-        if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
-                UIA_ExpandCollapsePatternId,
-            )
-        } {
+        if let Some(pattern) = current_pattern::<IUIAutomationExpandCollapsePattern>(
+            &uia_element,
+            UIA_ExpandCollapsePatternId,
+            "ExpandCollapsePattern",
+        )? {
             unsafe { pattern.Collapse() }.map_err(|e| Error::Platform {
                 code: e.code().0 as i64,
                 message: format!("Collapse failed: {}", e),
@@ -3715,15 +3722,21 @@ impl Provider for WindowsProvider {
     fn increment(&self, element: &ElementData) -> Result<()> {
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
-        if let Ok(pattern) = unsafe {
-            uia_element
-                .GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId)
-        } {
+        if let Some(pattern) = current_pattern::<IUIAutomationRangeValuePattern>(
+            &uia_element,
+            UIA_RangeValuePatternId,
+            "RangeValuePattern",
+        )? {
             let current = unsafe { pattern.CurrentValue() }.map_err(|e| Error::Platform {
                 code: e.code().0 as i64,
                 message: format!("RangeValue.CurrentValue failed: {}", e),
             })?;
-            let small = unsafe { pattern.CurrentSmallChange() }.unwrap_or(1.0);
+            let small = unsafe { pattern.CurrentSmallChange() }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("RangeValue.CurrentSmallChange failed: {e}"),
+            })?;
+            // A provider that reports no positive step still gets one unit,
+            // as `increment`/`decrement` documents.
             let step = if small <= 0.0 { 1.0 } else { small };
             unsafe { pattern.SetValue(current + step) }.map_err(|e| Error::Platform {
                 code: e.code().0 as i64,
@@ -3740,15 +3753,21 @@ impl Provider for WindowsProvider {
     fn decrement(&self, element: &ElementData) -> Result<()> {
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
-        if let Ok(pattern) = unsafe {
-            uia_element
-                .GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId)
-        } {
+        if let Some(pattern) = current_pattern::<IUIAutomationRangeValuePattern>(
+            &uia_element,
+            UIA_RangeValuePatternId,
+            "RangeValuePattern",
+        )? {
             let current = unsafe { pattern.CurrentValue() }.map_err(|e| Error::Platform {
                 code: e.code().0 as i64,
                 message: format!("RangeValue.CurrentValue failed: {}", e),
             })?;
-            let small = unsafe { pattern.CurrentSmallChange() }.unwrap_or(1.0);
+            let small = unsafe { pattern.CurrentSmallChange() }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("RangeValue.CurrentSmallChange failed: {e}"),
+            })?;
+            // A provider that reports no positive step still gets one unit,
+            // as `increment`/`decrement` documents.
             let step = if small <= 0.0 { 1.0 } else { small };
             unsafe { pattern.SetValue(current - step) }.map_err(|e| Error::Platform {
                 code: e.code().0 as i64,
@@ -4039,9 +4058,11 @@ impl Provider for WindowsProvider {
     fn set_value(&self, element: &ElementData, value: &str) -> Result<()> {
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
-        if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
-        } {
+        if let Some(pattern) = current_pattern::<IUIAutomationValuePattern>(
+            &uia_element,
+            UIA_ValuePatternId,
+            "ValuePattern",
+        )? {
             let s: windows::core::BSTR = value.into();
             unsafe { pattern.SetValue(&s) }.map_err(|_| Error::TextValueNotSupported)?;
             return Ok(());
@@ -4052,11 +4073,12 @@ impl Provider for WindowsProvider {
     fn set_numeric_value(&self, element: &ElementData, value: f64) -> Result<()> {
         let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
-        let pattern = unsafe {
-            uia_element
-                .GetCurrentPatternAs::<IUIAutomationRangeValuePattern>(UIA_RangeValuePatternId)
-        }
-        .map_err(|_| Error::ActionNotSupported {
+        let pattern = current_pattern::<IUIAutomationRangeValuePattern>(
+            &uia_element,
+            UIA_RangeValuePatternId,
+            "RangeValuePattern",
+        )?
+        .ok_or_else(|| Error::ActionNotSupported {
             action: "set_numeric_value".to_string(),
             role: element.role,
         })?;
@@ -4072,9 +4094,11 @@ impl Provider for WindowsProvider {
         let uia_element = self.get_cached(element.handle)?;
         // Insert text via ValuePattern (accessibility API, not input simulation).
         // Get current value, get insertion point from TextPattern, splice, set new value.
-        if let Ok(value_pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
-        } {
+        if let Some(value_pattern) = current_pattern::<IUIAutomationValuePattern>(
+            &uia_element,
+            UIA_ValuePatternId,
+            "ValuePattern",
+        )? {
             let current = unsafe { value_pattern.CurrentValue() }
                 .map(|s| s.to_string())
                 .map_err(|e| Error::Platform {
@@ -4106,9 +4130,11 @@ impl Provider for WindowsProvider {
             });
         }
         let uia_element = self.get_cached(element.handle)?;
-        if let Ok(pattern) = unsafe {
-            uia_element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
-        } {
+        if let Some(pattern) = current_pattern::<IUIAutomationTextPattern>(
+            &uia_element,
+            UIA_TextPatternId,
+            "TextPattern",
+        )? {
             let range = unsafe { pattern.DocumentRange() }.map_err(|e| Error::Platform {
                 code: e.code().0 as i64,
                 message: "DocumentRange failed".to_string(),
