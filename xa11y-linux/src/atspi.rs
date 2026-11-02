@@ -588,18 +588,32 @@ impl LinuxProvider {
     /// `QString` to `length`, i.e. UTF-16 code units: a byte count pads
     /// non-ASCII text with NULs and a character count splits a surrogate
     /// pair (issue #493). The toolkit is read from
-    /// `Application.ToolkitName`; one that cannot be read keeps the
-    /// documented byte count.
-    fn insert_text_length(&self, target: &AccessibleRef, text: &str) -> i32 {
-        let toolkit = self
-            .make_proxy(
-                &target.bus_name,
-                "/org/a11y/atspi/accessible/root",
-                "org.a11y.atspi.Application",
-            )
-            .ok()
-            .and_then(|proxy| proxy.get_property::<String>("ToolkitName").ok());
-        insert_text_length_for(toolkit.as_deref(), text)
+    /// `Application.ToolkitName`. Only a toolkit that genuinely does not
+    /// expose that property (the reply says the property or interface is
+    /// unknown) gets libatspi's documented byte count; any other failure to
+    /// read it is returned, because guessing bytes for a Qt app is exactly
+    /// the corruption this exists to prevent.
+    fn insert_text_length(&self, target: &AccessibleRef, text: &str) -> Result<i32> {
+        let proxy = self.make_proxy(
+            &target.bus_name,
+            "/org/a11y/atspi/accessible/root",
+            "org.a11y.atspi.Application",
+        )?;
+        let toolkit = match proxy.get_property::<String>("ToolkitName") {
+            Ok(name) => Some(name),
+            Err(e) if is_property_absent(&e) => None,
+            Err(e) => {
+                return Err(Error::Platform {
+                    code: -1,
+                    message: format!(
+                        "reading Application.ToolkitName of {} to size an InsertText \
+                         failed: {e}",
+                        target.bus_name
+                    ),
+                })
+            }
+        };
+        Ok(insert_text_length_for(toolkit.as_deref(), text))
     }
 
     /// GTK press-fallback resolver.
@@ -2645,7 +2659,7 @@ impl Provider for LinuxProvider {
         // including a FALSE reply, is the result of the write (tenet 1).
         match proxy.call_method("SetTextContents", &(value,)) {
             Ok(reply) => {
-                return editable_text_reply(reply, "SetTextContents", &target, element);
+                return atspi_bool_reply(reply, "EditableText.SetTextContents", &target, element);
             }
             Err(zbus::Error::MethodError(name, ..))
                 if name.as_str() == "org.freedesktop.DBus.Error.UnknownMethod" => {}
@@ -2654,12 +2668,14 @@ impl Provider for LinuxProvider {
         let reply = proxy
             .call_method("DeleteText", &(0i32, i32::MAX))
             .map_err(|e| editable_text_call_error("DeleteText", e, &target))?;
-        editable_text_reply(reply, "DeleteText", &target, element)?;
-        let length = self.insert_text_length(&target, value);
+        atspi_bool_reply(reply, "EditableText.DeleteText", &target, element)?;
+        // Not atomic: if InsertText fails after DeleteText succeeded, the
+        // field is left empty, and the error says which call failed.
+        let length = self.insert_text_length(&target, value)?;
         let reply = proxy
             .call_method("InsertText", &(0i32, value, length))
             .map_err(|e| editable_text_call_error("InsertText", e, &target))?;
-        editable_text_reply(reply, "InsertText", &target, element)
+        atspi_bool_reply(reply, "EditableText.InsertText", &target, element)
     }
 
     fn set_numeric_value(&self, element: &ElementData, value: f64) -> Result<()> {
@@ -2699,14 +2715,18 @@ impl Provider for LinuxProvider {
         } else {
             i32::MAX
         };
-        let length = self.insert_text_length(&target, text);
+        let length = self.insert_text_length(&target, text)?;
         let reply = proxy
             .call_method("InsertText", &(pos, text, length))
             .map_err(|e| editable_text_call_error("InsertText", e, &target))?;
-        editable_text_reply(reply, "InsertText", &target, element)
+        atspi_bool_reply(reply, "EditableText.InsertText", &target, element)
     }
 
     fn set_text_selection(&self, element: &ElementData, start: u32, end: u32) -> Result<()> {
+        // Units: `start`/`end` are passed through in whatever offset unit the
+        // toolkit uses (characters for GTK, UTF-16 code units for Qt). The
+        // public offset contract is #477; this only stops a FALSE reply from
+        // reading as success.
         let target = self.get_cached(element.handle)?;
         let proxy = self.make_proxy(&target.bus_name, &target.path, "org.a11y.atspi.Text")?;
         let reply = proxy
@@ -2715,22 +2735,12 @@ impl Provider for LinuxProvider {
                 code: -1,
                 message: format!("Text.SetSelection failed: {}", e),
             })?;
-        let applied: bool = reply.body().deserialize().map_err(|e| Error::Platform {
-            code: -1,
-            message: format!("Text.SetSelection reply decode failed: {e}"),
-        })?;
-        if applied {
-            Ok(())
-        } else {
-            Err(Error::Platform {
-                code: -1,
-                message: format!(
-                    "Text.SetSelection({start}, {end}) on {} {}{} returned FALSE: the toolkit \
-                     refused the selection",
-                    element.role, target.bus_name, target.path
-                ),
-            })
-        }
+        atspi_bool_reply(
+            reply,
+            &format!("Text.SetSelection({start}, {end})"),
+            &target,
+            element,
+        )
     }
 
     fn perform_action(&self, element: &ElementData, action: &str) -> Result<()> {
@@ -3151,18 +3161,19 @@ fn insert_text_length_for(toolkit: Option<&str>, text: &str) -> i32 {
     i32::try_from(units).unwrap_or(i32::MAX)
 }
 
-/// Decode an `EditableText` write's boolean reply. `FALSE` is the toolkit
-/// refusing the write, so it is an error naming the method and the element,
-/// never `Ok` (issue #486).
-fn editable_text_reply(
+/// Decode the boolean reply of an AT-SPI write (`EditableText.*`,
+/// `Text.SetSelection`). `FALSE` is the toolkit refusing the request, so it
+/// is an error naming the call and the element, never `Ok` (issue #486).
+/// `call` is the qualified member, e.g. `"EditableText.InsertText"`.
+fn atspi_bool_reply(
     reply: zbus::Message,
-    method: &str,
+    call: &str,
     target: &AccessibleRef,
     element: &ElementData,
 ) -> Result<()> {
     let applied: bool = reply.body().deserialize().map_err(|e| Error::Platform {
         code: -1,
-        message: format!("EditableText.{method} reply decode failed: {e}"),
+        message: format!("{call} reply decode failed: {e}"),
     })?;
     if applied {
         Ok(())
@@ -3170,7 +3181,7 @@ fn editable_text_reply(
         Err(Error::Platform {
             code: -1,
             message: format!(
-                "EditableText.{method} on {} {}{} returned FALSE: the toolkit refused the write",
+                "{call} on {} {}{} returned FALSE: the toolkit refused it",
                 element.role, target.bus_name, target.path
             ),
         })
@@ -3193,6 +3204,23 @@ fn editable_text_call_error(method: &str, e: zbus::Error, target: &AccessibleRef
                 target.bus_name, target.path
             ),
         }
+    }
+}
+
+/// Whether a property read failed because the property (or its interface)
+/// does not exist on the object — an answer, not a failure. Property reads
+/// go through `org.freedesktop.DBus.Properties`, whose error replies zbus
+/// surfaces as a structured `fdo::Error`.
+fn is_property_absent(err: &zbus::Error) -> bool {
+    const ABSENT: [&str; 3] = [
+        "org.freedesktop.DBus.Error.UnknownProperty",
+        "org.freedesktop.DBus.Error.UnknownInterface",
+        "org.freedesktop.DBus.Error.UnknownMethod",
+    ];
+    match err {
+        zbus::Error::FDO(e) => ABSENT.contains(&zbus::DBusError::name(e.as_ref()).as_str()),
+        zbus::Error::MethodError(name, ..) => ABSENT.contains(&name.as_str()),
+        _ => false,
     }
 }
 
@@ -3379,9 +3407,20 @@ mod tests {
     #[test]
     fn false_editable_text_reply_is_an_error_naming_method_and_element() {
         let (target, element) = text_target();
-        assert!(editable_text_reply(bool_reply(true), "InsertText", &target, &element).is_ok());
-        let err = editable_text_reply(bool_reply(false), "InsertText", &target, &element)
-            .expect_err("FALSE is the toolkit refusing the write");
+        assert!(atspi_bool_reply(
+            bool_reply(true),
+            "EditableText.InsertText",
+            &target,
+            &element
+        )
+        .is_ok());
+        let err = atspi_bool_reply(
+            bool_reply(false),
+            "EditableText.InsertText",
+            &target,
+            &element,
+        )
+        .expect_err("FALSE is the toolkit refusing the write");
         let msg = err.to_string();
         assert!(msg.contains("EditableText.InsertText"), "{msg}");
         assert!(msg.contains(":1.9/org/a11y/atspi/accessible/9"), "{msg}");
@@ -3417,6 +3456,39 @@ mod tests {
                     Error::Platform { message, .. } if message.contains(name)),
                 "{name}"
             );
+        }
+    }
+
+    #[test]
+    fn false_set_selection_reply_is_an_error() {
+        let (target, element) = text_target();
+        let err = atspi_bool_reply(
+            bool_reply(false),
+            "Text.SetSelection(2, 5)",
+            &target,
+            &element,
+        )
+        .expect_err("a refused selection is not success");
+        assert!(err.to_string().contains("Text.SetSelection(2, 5)"), "{err}");
+    }
+
+    #[test]
+    fn only_an_absent_toolkit_name_defaults_to_bytes() {
+        let absent = zbus::Error::from(zbus::fdo::Error::UnknownProperty("ToolkitName".into()));
+        assert!(is_property_absent(&absent));
+        let absent = zbus::Error::from(zbus::fdo::Error::UnknownInterface("x".into()));
+        assert!(is_property_absent(&absent));
+        // A peer that did not answer, or answered with anything else, is not
+        // "no toolkit" — it must not silently size Qt text in bytes.
+        for e in [
+            zbus::Error::from(zbus::fdo::Error::NoReply("hung".into())),
+            zbus::Error::from(zbus::fdo::Error::ServiceUnknown("gone".into())),
+            zbus::Error::InputOutput(std::sync::Arc::new(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "timed out",
+            ))),
+        ] {
+            assert!(!is_property_absent(&e), "{e}");
         }
     }
 
