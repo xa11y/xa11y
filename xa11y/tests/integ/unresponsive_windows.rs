@@ -203,6 +203,16 @@ if (-not ($f.IsHandleCreated -and $f.Visible)) {{
         );
         let diagnosis = err.diagnosis().expect("the timeout carries a diagnosis");
         let observed = diagnosis.last_observed.clone().unwrap_or_default();
+        // The OS-hung form means the fixture had already gone 5 s without
+        // pumping before UIA was asked: the runner stalled between the
+        // fixture's ready line and the listing, and this run did not exercise
+        // the #599 path at all.
+        assert!(
+            !observed.contains("IsHungAppWindow"),
+            "the listing failed through the OS hung check, not a UIA timeout: the runner \
+             stalled for more than 5 s after the fixture stopped pumping, so this run did \
+             not test the #599 path (listing took {elapsed:?}): {err}"
+        );
         assert!(
             observed.contains("UIA_E_TIMEOUT") && observed.contains("did not answer"),
             "the diagnosis should say UIA timed out and which window the probe found \

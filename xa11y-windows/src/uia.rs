@@ -1393,21 +1393,24 @@ fn uia_timeout_message(err: &Error) -> Option<&str> {
     }
 }
 
-/// Which of the two UIA limits a `UIA_E_TIMEOUT` after `elapsed` ran out.
+/// Which of the two UIA limits a `UIA_E_TIMEOUT` after `elapsed` fits.
 ///
-/// The HRESULT is the same for both, so this is read off the wait itself: a
-/// call that gave up before the transaction timeout could have elapsed hit
-/// the connection timeout.
+/// The HRESULT is the same for both, so this is read off the wait itself. A
+/// call that gave up before the transaction timeout could have elapsed can
+/// only have hit the connection timeout. A longer wait is *consistent with*
+/// the transaction timeout but does not prove it (a slow connection attempt
+/// can follow a slow transaction), so it is stated as such.
 fn uia_timeout_which(elapsed: std::time::Duration) -> String {
     if elapsed < std::time::Duration::from_millis(u64::from(UIA_TRANSACTION_TIMEOUT_MS)) {
         format!(
-            "the {UIA_CONNECTION_TIMEOUT_MS} ms connection timeout: UIA could not reach a \
+            "too soon for the {UIA_TRANSACTION_TIMEOUT_MS} ms transaction timeout, so it was \
+             the {UIA_CONNECTION_TIMEOUT_MS} ms connection timeout: UIA could not reach a \
              window's provider"
         )
     } else {
         format!(
-            "the {UIA_TRANSACTION_TIMEOUT_MS} ms transaction timeout: a provider took the call \
-             but did not finish it"
+            "consistent with the {UIA_TRANSACTION_TIMEOUT_MS} ms transaction timeout: a \
+             provider took the call but did not finish it"
         )
     }
 }
@@ -1415,7 +1418,7 @@ fn uia_timeout_which(elapsed: std::time::Duration) -> String {
 /// The `last_observed` text for a `UIA_E_TIMEOUT` after `elapsed`.
 fn uia_timeout_observed(elapsed: std::time::Duration, message: &str) -> String {
     format!(
-        "UIA gave up after {elapsed:.1?} (UIA_E_TIMEOUT), so it was {}: {message}",
+        "UIA gave up after {elapsed:.1?} (UIA_E_TIMEOUT), {}: {message}",
         uia_timeout_which(elapsed)
     )
 }
@@ -1464,8 +1467,38 @@ struct ProbeReport {
     probed: usize,
     /// The probed windows that did not answer in time.
     unresponsive: Vec<HungWindow>,
+    /// The probed windows whose `SendMessageTimeoutW` failed for another
+    /// reason (for example UIPI refusing a message to an elevated window),
+    /// with that error. Not suspects: they say nothing about responsiveness.
+    failed: Vec<(HungWindow, String)>,
     /// Why probing stopped before every window was sent to, if it did.
     stopped: Option<String>,
+}
+
+/// What one zero return from `SendMessageTimeoutW` means for the probe.
+#[derive(Debug, PartialEq, Eq)]
+enum ProbeMiss {
+    /// The window did not answer: `ERROR_TIMEOUT`, or the OS considers it
+    /// hung (`SMTO_ABORTIFHUNG` returns at once for those).
+    Unresponsive,
+    /// The window closed while it was probed; it is not what UIA waits on.
+    Closed,
+    /// The send failed for another reason, which says nothing about whether
+    /// the window answers.
+    Failed,
+}
+
+/// Classify a failed probe send. `code` is the thread's last error, read
+/// straight after the send; `hung` is `IsHungAppWindow`; `exists` is
+/// `IsWindow`.
+fn classify_probe_miss(code: windows::core::HRESULT, hung: bool, exists: bool) -> ProbeMiss {
+    if code == windows::core::HRESULT::from_win32(ERROR_TIMEOUT.0) || (exists && hung) {
+        ProbeMiss::Unresponsive
+    } else if !exists {
+        ProbeMiss::Closed
+    } else {
+        ProbeMiss::Failed
+    }
 }
 
 impl ProbeReport {
@@ -1479,16 +1512,37 @@ impl ProbeReport {
         if let Some(stopped) = &self.stopped {
             out.push_str(&format!(", stopped early: {stopped}"));
         }
-        if self.unresponsive.is_empty() {
+        if self.unresponsive.is_empty() && self.failed.is_empty() {
             out.push_str(
                 "; every probed window answered, so the window UIA could not reach recovered \
                  before the probe, or its message loop is fine and its UIA provider is not",
             );
+        } else if self.unresponsive.is_empty() {
+            out.push_str("; no probed window timed out");
         } else {
             out.push_str(&format!(
                 "; {} did not answer: {}",
                 self.unresponsive.len(),
                 self.candidates().join("; ")
+            ));
+        }
+        if !self.failed.is_empty() {
+            let mut failed: Vec<String> = self
+                .failed
+                .iter()
+                .take(DIAG_HUNG_WINDOW_LIMIT)
+                .map(|(w, err)| format!("probe of {} failed: {err}", describe_hung_window(*w)))
+                .collect();
+            if self.failed.len() > DIAG_HUNG_WINDOW_LIMIT {
+                failed.push(format!(
+                    "… (+{} more)",
+                    self.failed.len() - DIAG_HUNG_WINDOW_LIMIT
+                ));
+            }
+            out.push_str(&format!(
+                "; {} probe(s) failed and say nothing about responsiveness: {}",
+                self.failed.len(),
+                failed.join("; ")
             ));
         }
         out
@@ -1524,12 +1578,13 @@ impl ProbeReport {
 /// [`PROBE_BUDGET`] in total, so it never costs more than the timeout that
 /// led here (tenet 6: rich, but bounded).
 fn probe_unresponsive_windows() -> Result<ProbeReport> {
+    // The budget covers enumerating and classifying the windows too.
+    let start = std::time::Instant::now();
     let windows = interactive_top_level_windows("probing for an unresponsive window")?;
     let mut report = ProbeReport {
         visible: windows.len(),
         ..ProbeReport::default()
     };
-    let start = std::time::Instant::now();
     for (i, hwnd) in windows.iter().copied().enumerate() {
         if i == PROBE_WINDOW_LIMIT {
             report.stopped = Some(format!("window limit of {PROBE_WINDOW_LIMIT} reached"));
@@ -1552,13 +1607,24 @@ fn probe_unresponsive_windows() -> Result<ProbeReport> {
                 Some(&mut result),
             )
         };
-        // Zero is "no answer" (timed out, or hung); a window that closed
-        // meanwhile is not the one UIA is waiting on.
-        if answered.0 == 0 && unsafe { IsWindow(Some(hwnd)) }.as_bool() {
-            report.unresponsive.push(HungWindow {
-                hwnd,
-                pid: hwnd_pid(hwnd),
-            });
+        if answered.0 != 0 {
+            continue;
+        }
+        // Zero means "failed or timed out". Read the reason before any other
+        // call can overwrite the thread's last error.
+        let err = windows::core::Error::from_thread();
+        let window = HungWindow {
+            hwnd,
+            pid: hwnd_pid(hwnd),
+        };
+        match classify_probe_miss(
+            err.code(),
+            window_is_hung(hwnd),
+            unsafe { IsWindow(Some(hwnd)) }.as_bool(),
+        ) {
+            ProbeMiss::Unresponsive => report.unresponsive.push(window),
+            ProbeMiss::Closed => {}
+            ProbeMiss::Failed => report.failed.push((window, err.to_string())),
         }
     }
     Ok(report)
@@ -1573,6 +1639,10 @@ fn probe_unresponsive_windows() -> Result<ProbeReport> {
 /// The listing's `Timeout` is terminal: no poll loop retries it (`App::find`
 /// retries only `SelectorNotMatched`), so the probe runs once, for the error
 /// the caller sees.
+///
+/// `elapsed` is the `FindAll` call alone, and it is what the `Timeout`
+/// reports. The probe runs afterwards and its time (at most
+/// [`PROBE_BUDGET`] plus one window's wait) is not included.
 fn desktop_listing_timeout(err: Error, elapsed: std::time::Duration) -> Error {
     let Some(message) = uia_timeout_message(&err) else {
         return err;
@@ -6635,8 +6705,70 @@ mod tests {
         let txn = Duration::from_millis(u64::from(UIA_TRANSACTION_TIMEOUT_MS));
         assert!(uia_timeout_which(Duration::from_millis(2_000)).contains("connection timeout"));
         assert!(uia_timeout_which(txn - Duration::from_millis(1)).contains("connection timeout"));
-        assert!(uia_timeout_which(txn).contains("transaction timeout"));
+        // A long wait fits the transaction timeout but does not prove it.
+        assert!(uia_timeout_which(txn).starts_with("consistent with the 20000 ms transaction"));
         assert!(uia_timeout_which(txn + Duration::from_secs(1)).contains("transaction timeout"));
+    }
+
+    #[test]
+    fn a_probe_miss_counts_as_unresponsive_only_on_timeout_or_hung() {
+        let timeout = windows::core::HRESULT::from_win32(ERROR_TIMEOUT.0);
+        let denied = windows::core::HRESULT::from_win32(ERROR_ACCESS_DENIED.0);
+        assert_eq!(
+            classify_probe_miss(timeout, false, true),
+            ProbeMiss::Unresponsive
+        );
+        // SMTO_ABORTIFHUNG returns at once for a hung window, whatever the
+        // last error says.
+        assert_eq!(
+            classify_probe_miss(denied, true, true),
+            ProbeMiss::Unresponsive
+        );
+        // UIPI refusing a message to an elevated window is not a suspect.
+        assert_eq!(classify_probe_miss(denied, false, true), ProbeMiss::Failed);
+        assert_eq!(classify_probe_miss(denied, false, false), ProbeMiss::Closed);
+    }
+
+    #[test]
+    fn probe_report_lists_failed_probes_apart_from_suspects() {
+        let window = |i: u32| HungWindow {
+            hwnd: HWND(i as usize as *mut core::ffi::c_void),
+            pid: 9000 + i,
+        };
+        let report = ProbeReport {
+            visible: 3,
+            probed: 3,
+            unresponsive: vec![window(1)],
+            failed: vec![(window(2), "Access is denied. (0x80070005)".to_string())],
+            stopped: None,
+        };
+        let summary = report.summary();
+        assert!(summary.contains("1 did not answer"), "{summary}");
+        assert!(
+            summary.contains("1 probe(s) failed and say nothing about responsiveness"),
+            "{summary}"
+        );
+        assert!(summary.contains("probe of HWND 0x2"), "{summary}");
+        assert!(summary.contains("(pid 9002"), "{summary}");
+        assert!(summary.contains("failed: Access is denied."), "{summary}");
+        // Only the window that did not answer is a candidate.
+        let candidates = report.candidates();
+        assert_eq!(candidates.len(), 1, "{candidates:?}");
+        assert!(candidates[0].contains("pid 9001"), "{candidates:?}");
+
+        let only_failed = ProbeReport {
+            visible: 1,
+            probed: 1,
+            failed: vec![(window(3), "x".to_string())],
+            ..ProbeReport::default()
+        };
+        let summary = only_failed.summary();
+        assert!(summary.contains("no probed window timed out"), "{summary}");
+        assert!(
+            !summary.contains("every probed window answered"),
+            "{summary}"
+        );
+        assert!(only_failed.candidates().is_empty());
     }
 
     #[test]
@@ -6662,6 +6794,7 @@ mod tests {
                     pid: 7000 + i,
                 })
                 .collect(),
+            failed: Vec::new(),
             stopped: Some(format!("window limit of {PROBE_WINDOW_LIMIT} reached")),
         };
         let candidates = report.candidates();
