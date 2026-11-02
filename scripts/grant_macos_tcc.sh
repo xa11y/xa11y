@@ -44,6 +44,10 @@
 #   * This script exists for the contexts the action can't serve: local macOS
 #     development and the standalone shell harnesses (run_integ_tests_macos.sh
 #     et al.) that run outside Actions.
+#   * This repo's own CI (the macOS cells of the `integ` matrix in ci.yml)
+#     also calls this script rather than the action, because the action's
+#     inline copy has no busy timeout or retry and intermittently failed on
+#     "database is locked (5)" when tccd held TCC.db.
 #
 # So there are intentionally two copies — the action's inline one and this
 # one — and they must be kept in sync. When you change the INSERT here, mirror
@@ -64,12 +68,55 @@ fi
 
 echo "Granting kTCCServiceAccessibility to: $CLIENT"
 
+TCC_DB="/Library/Application Support/com.apple.TCC/TCC.db"
+
+# tccd keeps TCC.db open and writes to it on its own schedule, so our write can
+# collide with one of its transactions and fail with "database is locked (5)"
+# (SQLITE_BUSY). That is transient contention, not a refusal, and it was
+# intermittently failing the macOS integ cells in CI. Two layers handle it:
+#
+#   * `.timeout` installs sqlite's busy handler, so one attempt waits up to
+#     TCC_BUSY_TIMEOUT_MS for tccd's lock to clear instead of failing on first
+#     contact.
+#   * A bounded retry covers a lock held past that window (tccd mid-restart, a
+#     long write). Every failed attempt is printed, and the last one exits
+#     non-zero: a grant that did not land must fail here, where the cause is
+#     visible, rather than later as an empty accessibility tree.
+TCC_BUSY_TIMEOUT_MS="${TCC_BUSY_TIMEOUT_MS:-10000}"
+TCC_WRITE_ATTEMPTS="${TCC_WRITE_ATTEMPTS:-5}"
+
+# A single quote in the path would end the SQL string literal early.
+CLIENT_SQL="$(printf '%s' "$CLIENT" | sed "s/'/''/g")"
+
 # Named columns keep the INSERT working across macOS versions regardless of
 # how many extra columns (boots_count, is_deleted on macOS 14+, …) the access
 # table grows. auth_value=2 is "allowed"; client_type=1 is "absolute path".
-sudo sqlite3 "/Library/Application Support/com.apple.TCC/TCC.db" \
-    "INSERT OR REPLACE INTO access(service,client,client_type,auth_value,auth_reason,auth_version,csreq,policy_id,indirect_object_identifier_type,indirect_object_identifier,indirect_object_code_identity,flags,last_modified) \
-     VALUES('kTCCServiceAccessibility','${CLIENT}',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));"
+GRANT_SQL="INSERT OR REPLACE INTO access(service,client,client_type,auth_value,auth_reason,auth_version,csreq,policy_id,indirect_object_identifier_type,indirect_object_identifier,indirect_object_code_identity,flags,last_modified) \
+ VALUES('kTCCServiceAccessibility','${CLIENT_SQL}',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));"
+VERIFY_SQL="SELECT auth_value FROM access WHERE service='kTCCServiceAccessibility' AND client='${CLIENT_SQL}' AND client_type=1;"
+
+tcc_sqlite() {
+    sudo sqlite3 -cmd ".timeout ${TCC_BUSY_TIMEOUT_MS}" "$TCC_DB" "$1"
+}
+
+attempt=1
+until err="$(tcc_sqlite "$GRANT_SQL" 2>&1)"; do
+    echo "grant_macos_tcc.sh: TCC.db write attempt ${attempt}/${TCC_WRITE_ATTEMPTS} failed: ${err}" >&2
+    if [ "$attempt" -ge "$TCC_WRITE_ATTEMPTS" ]; then
+        echo "::error::grant_macos_tcc.sh: could not write the kTCCServiceAccessibility grant for ${CLIENT} after ${TCC_WRITE_ATTEMPTS} attempts (busy timeout ${TCC_BUSY_TIMEOUT_MS}ms each). Last error: ${err}" >&2
+        exit 1
+    fi
+    sleep $((attempt * 2))
+    attempt=$((attempt + 1))
+done
+
+# Read the row back. A write that reported success but left no allowed row
+# would otherwise surface only as empty trees once the tests run.
+granted="$(tcc_sqlite "$VERIFY_SQL")"
+if [ "$granted" != "2" ]; then
+    echo "::error::grant_macos_tcc.sh: TCC.db holds no allowed kTCCServiceAccessibility row for ${CLIENT} after the write (auth_value read back: '${granted}')" >&2
+    exit 1
+fi
 
 # Restart tccd so the grant is picked up without waiting for the next natural
 # reload cycle. launchctl stop triggers an auto-restart.
