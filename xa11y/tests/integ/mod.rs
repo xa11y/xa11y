@@ -21,6 +21,8 @@
 //!   module declaration below so individual tests don't need it.
 //! * `unresponsive_macos` — actions on a `SIGSTOP`ped app are bounded by the
 //!   AX messaging timeout and name the app (macOS-only, gated the same way).
+//! * `unresponsive_linux` — enumeration with a `SIGSTOP`ped app on the
+//!   AT-SPI bus (Linux-only, gated the same way).
 //!
 //! The helpers in this file (`app_root`, `one`, `named`, `act`, `try_act`)
 //! are reached from submodule tests via `use crate::integ as h;`.
@@ -44,6 +46,9 @@ pub mod events_windows;
 
 #[cfg(target_os = "linux")]
 pub mod events_linux;
+
+#[cfg(target_os = "linux")]
+pub mod unresponsive_linux;
 
 use xa11y::*;
 
