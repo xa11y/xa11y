@@ -930,13 +930,41 @@ fn container_selection_contains(element: AXUIElementRef, max_hops: usize) -> boo
     false
 }
 
+/// The element's native action names, with every failure read as "none".
+/// For snapshots, where a missing action list only narrows `actions`.
+/// Dispatch decisions use [`try_ax_action_names`].
 fn ax_action_names(element: AXUIElementRef) -> Vec<String> {
+    try_ax_action_names(element).unwrap_or_default()
+}
+
+/// The element's native action names, error-preserving: an element that
+/// answered with no actions is `Ok(vec![])`, while an unanswered or malformed
+/// reply is `Error::Platform`. A dispatch that picks its AX action from this
+/// list must not mistake a failed read for an empty one (tenet 1).
+fn try_ax_action_names(element: AXUIElementRef) -> Result<Vec<String>> {
     let mut names: CFArrayRef = std::ptr::null();
     let err = ffi_copy_action_names(element, &mut names);
-    if err != AX_ERROR_SUCCESS || names.is_null() {
-        return vec![];
+    match err {
+        AX_ERROR_SUCCESS => {}
+        AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE => return Ok(vec![]),
+        code => {
+            return Err(Error::Platform {
+                code: i64::from(code),
+                message: format!("AXUIElementCopyActionNames failed (AXError {code})"),
+            })
+        }
     }
-    unsafe {
+    if names.is_null() {
+        return Ok(vec![]);
+    }
+    if unsafe { safe_cf_get_type_id(names) } != unsafe { safe_cf_array_get_type_id() } {
+        unsafe { safe_cf_release(names) };
+        return Err(Error::Platform {
+            code: -1,
+            message: "AXUIElementCopyActionNames returned a non-array value".to_string(),
+        });
+    }
+    Ok(unsafe {
         let count = safe_cf_array_get_count(names);
         let mut result = Vec::with_capacity(count as usize);
         for i in 0..count {
@@ -948,7 +976,7 @@ fn ax_action_names(element: AXUIElementRef) -> Vec<String> {
         }
         safe_cf_release(names);
         result
-    }
+    })
 }
 
 fn ax_position(element: AXUIElementRef) -> Option<(f64, f64)> {
@@ -4428,7 +4456,10 @@ impl Provider for MacOSProvider {
         // The snapshot's `press` cannot say which AX action it came from
         // (`AXPress` + `AXOpen` and `AXOpen` alone both list `press` and
         // `open`), so the dispatch target is read from the live action list.
-        let ax_name = press_ax_action(&ax_action_names(ax.as_ptr()));
+        // That read must not fail open: an empty list would pick AXPress,
+        // which AppKit acknowledges on an AXOpen-only element without doing
+        // anything.
+        let ax_name = press_ax_action(&try_ax_action_names(ax.as_ptr())?);
         perform_ax_action(ax.as_ptr(), ax_name, "press", element.role)
     }
 
@@ -5812,6 +5843,15 @@ mod tests {
     }
 
     #[test]
+    fn try_ax_action_names_reports_a_failed_read() {
+        // A null element is an AX error, not "no actions".
+        assert!(matches!(
+            try_ax_action_names(std::ptr::null()),
+            Err(Error::Platform { .. })
+        ));
+    }
+
+    #[test]
     fn container_selection_probe_gated_to_selectable_item_roles() {
         // Only roles that live inside AXSelectedChildren-style containers
         // may trigger the (IPC-costly) ancestor probe.
@@ -5967,6 +6007,9 @@ mod tests {
         assert_eq!(press_ax_action(&names(&["AXPress"])), "AXPress");
         // No AXOpen: unchanged from before.
         assert_eq!(press_ax_action(&names(&["AXConfirm"])), "AXPress");
+        // AXConfirm does not count as AXPress: an element with AXConfirm and
+        // AXOpen but no AXPress opens.
+        assert_eq!(press_ax_action(&names(&["AXConfirm", "AXOpen"])), "AXOpen");
         assert_eq!(press_ax_action(&[]), "AXPress");
     }
 

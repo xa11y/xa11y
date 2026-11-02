@@ -59,7 +59,7 @@ Roles not recognized by a platform map to `Unknown`.
 
 | xa11y Action | macOS | Linux (AT-SPI) | Windows (UIA) |
 | --- | --- | --- | --- |
-| `Press` | AXPress | click, activate, press, invoke | InvokePattern |
+| `Press` | AXPress *(AXOpen when the element has AXOpen and no AXPress)* | click, activate, press, invoke | InvokePattern |
 | `Focus` | set AXFocused=true | Component.GrabFocus | SetFocus |
 | `Blur` | set AXFocused=false | *(not directly supported)* | *(not directly supported)* |
 | `Toggle` | AXPress *(on checkbox)* | toggle, check, uncheck | TogglePattern |
