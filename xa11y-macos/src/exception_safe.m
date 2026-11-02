@@ -126,6 +126,17 @@ CFArrayRef safe_cg_window_list_copy(uint32_t option, uint32_t relativeToWindow) 
     }
 }
 
+// Safe wrapper for CGPreflightScreenCaptureAccess (macOS 10.15+): whether this
+// process has Screen Recording access, without prompting. Returns false if an
+// ObjC exception was thrown.
+bool safe_cg_preflight_screen_capture_access(void) {
+    @try {
+        return CGPreflightScreenCaptureAccess();
+    } @catch (NSException *e) {
+        return false;
+    }
+}
+
 // ── Create Application Element ───────────────────────────────────────────────
 
 // Safe wrapper for AXUIElementCreateApplication.
