@@ -363,7 +363,12 @@ def test_atspi_geometry_capability_is_measured_for_gtk_and_qt(app: xa11y.App) ->
     listed since role numbers take precedence over its misleading
     ``application`` role name (issue #485), and it does not advertise AT-SPI
     geometry either. Neither therefore provides a capability xa11y can
-    honestly advertise.
+    honestly advertise through AT-SPI.
+
+    Under a window manager, ``move_to`` / ``resize_to`` come from the native
+    EWMH backend instead, which binds GTK 4's window by pid and title (issue
+    #487). CI's gtk cell runs one, so there the verbs must be advertised and
+    must really move and resize the window; the Qt cell runs none.
     """
     if APP not in {"gtk", "qt"}:
         pytest.skip("this probe is specifically for the GTK and Qt adapters")
@@ -373,14 +378,52 @@ def test_atspi_geometry_capability_is_measured_for_gtk_and_qt(app: xa11y.App) ->
     else:
         assert windows, "Qt must expose its top-level window through AT-SPI"
     win = windows[0]
-    assert "move_to" not in win.actions, win.actions
-    assert "resize_to" not in win.actions, win.actions
     bounds = win.bounds
     assert bounds is not None
-    with pytest.raises(xa11y.ActionNotSupportedError):
-        win.move_to(bounds.x + 10, bounds.y + 10)
-    with pytest.raises(xa11y.ActionNotSupportedError):
-        win.resize_to(bounds.width + 10, bounds.height + 10)
+    # `minimize` is advertised by the X11 backend exactly when a window
+    # manager runs (and by the Wayland backend never).
+    if "minimize" not in win.actions:
+        assert "move_to" not in win.actions, win.actions
+        assert "resize_to" not in win.actions, win.actions
+        with pytest.raises(xa11y.ActionNotSupportedError):
+            win.move_to(bounds.x + 10, bounds.y + 10)
+        with pytest.raises(xa11y.ActionNotSupportedError):
+            win.resize_to(bounds.width + 10, bounds.height + 10)
+        return
+    assert "move_to" in win.actions and "resize_to" in win.actions, (
+        f"under a window manager the EWMH verbs must be advertised: {win.actions}"
+    )
+
+    def current():
+        found = app.windows()
+        return found[0].bounds if found else None
+
+    try:
+        win.move_to(bounds.x + 40, bounds.y + 30)
+        moved = _wait_until(
+            lambda: (
+                (b := current()) is not None
+                and (b.x, b.y) != (bounds.x, bounds.y)
+                and b
+            ),
+            5.0,
+            "the window bounds to change after move_to",
+        )
+        assert (moved.x - bounds.x, moved.y - bounds.y) == (40, 30), (bounds, moved)
+        win.resize_to(bounds.width - 50, bounds.height - 40)
+        resized = _wait_until(
+            lambda: (b := current()) is not None and b.width != bounds.width and b,
+            5.0,
+            "the window bounds to change after resize_to",
+        )
+        assert (resized.width, resized.height) == (
+            bounds.width - 50,
+            bounds.height - 40,
+        ), (bounds, resized)
+    finally:
+        restore = app.windows()[0]
+        restore.resize_to(bounds.width, bounds.height)
+        restore.move_to(bounds.x, bounds.y)
 
 
 def test_minimize_and_restore(app: xa11y.App) -> None:
@@ -1405,11 +1448,24 @@ def test_gtk4_element_bounds_follow_the_window(app: xa11y.App) -> None:
     def ok_bounds():
         return button.element().bounds
 
+    def assert_inside_window(inner) -> None:
+        # Absolute, not just relative: the button lies within the window's
+        # own bounds, which the window backend reads from the X server.
+        outer = app.windows()[0].bounds
+        assert outer is not None, "GTK 4 window has no bounds on X11"
+        assert (
+            outer.x <= inner.x
+            and outer.y <= inner.y
+            and inner.x + inner.width <= outer.x + outer.width
+            and inner.y + inner.height <= outer.y + outer.height
+        ), f"button {inner} is not inside window {outer}"
+
     before = ok_bounds()
     assert before is not None, "GTK 4 button has no bounds on X11"
     assert (before.x, before.y) != (0, 0), (
         f"GTK 4 button bounds look like raw screen extents: {before}"
     )
+    assert_inside_window(before)
     try:
         _x11_move_client_window(app.pid, title, 200, 150)
         _wait_until(
@@ -1437,5 +1493,6 @@ def test_gtk4_element_bounds_follow_the_window(app: xa11y.App) -> None:
             after,
             again,
         )
+        assert_inside_window(again)
     finally:
         _x11_move_client_window(app.pid, title, 0, 0)

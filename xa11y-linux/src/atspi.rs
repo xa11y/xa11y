@@ -77,9 +77,16 @@ pub struct LinuxProvider {
 #[derive(Default)]
 struct Gtk4Geometry {
     is_gtk4: Mutex<HashMap<String, bool>>,
-    /// `bus + path` → the top-level window's `(bus, path)`.
+    /// Each GTK 4 application bus's process id.
+    pids: Mutex<HashMap<String, u32>>,
+    /// `bus + path` → the top-level window's `(bus, path)`. Bounded by
+    /// [`GTK4_TOPLEVEL_CACHE_LIMIT`]: objects that go defunct are never
+    /// removed one by one, so the map is cleared when it fills.
     toplevels: Mutex<HashMap<String, AccessibleRef>>,
 }
+
+/// Entries [`Gtk4Geometry::toplevels`] holds before it is cleared.
+const GTK4_TOPLEVEL_CACHE_LIMIT: usize = 4096;
 
 /// AT-SPI2 accessible reference: (bus_name, object_path).
 #[derive(Debug, Clone)]
@@ -276,6 +283,11 @@ impl LinuxProvider {
                 .clear();
             self.gtk4
                 .is_gtk4
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+            self.gtk4
+                .pids
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clear();
@@ -709,10 +721,23 @@ impl LinuxProvider {
         if !ifaces.component {
             return None;
         }
-        if self.is_gtk4(&aref.bus_name) {
-            return self
-                .gtk4_screen_extents(aref)
-                .map(|r| r.to_logical(crate::scale::coordinate_scale()));
+        match self.is_gtk4(&aref.bus_name) {
+            Ok(true) => {
+                return self
+                    .gtk4_screen_extents(aref)
+                    .map(|r| r.to_logical(crate::scale::coordinate_scale()));
+            }
+            Ok(false) => {}
+            // Unknown toolkit: raw SCREEN extents could be GTK 4's (0, 0),
+            // the wrong coordinates issue #487 is about, so report none.
+            Err(error) => {
+                log::debug!(
+                    "no bounds for {}{}: cannot tell whether it is GTK 4: {error}",
+                    aref.bus_name,
+                    aref.path
+                );
+                return None;
+            }
         }
         let proxy = self
             .make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Component")
@@ -729,10 +754,13 @@ impl LinuxProvider {
     }
 
     /// Whether the application on `bus` is GTK 4, from
-    /// `Application.ToolkitName` / `Version`. Cached per bus; an
-    /// unreadable answer is "not GTK 4" and is not cached, so a transient
-    /// failure is retried.
-    fn is_gtk4(&self, bus: &str) -> bool {
+    /// `Application.ToolkitName` / `Version`, cached per bus.
+    ///
+    /// An unreadable answer is an error, not "no": treating it as "not
+    /// GTK 4" would report GTK 4's raw SCREEN extents. Errors are not
+    /// cached, so a transient failure is retried. A toolkit name other than
+    /// GTK settles the answer without reading the version.
+    fn is_gtk4(&self, bus: &str) -> Result<bool> {
         if let Some(known) = self
             .gtk4
             .is_gtk4
@@ -740,26 +768,31 @@ impl LinuxProvider {
             .unwrap_or_else(|e| e.into_inner())
             .get(bus)
         {
-            return *known;
+            return Ok(*known);
         }
-        let Ok(proxy) = self.make_proxy(bus, APP_ROOT_PATH, "org.a11y.atspi.Application") else {
-            return false;
+        let proxy = self.make_proxy(bus, APP_ROOT_PATH, "org.a11y.atspi.Application")?;
+        let read = |property: &str| {
+            proxy
+                .get_property::<String>(property)
+                .map_err(|e| Error::Platform {
+                    code: -1,
+                    message: format!("Application.{property} on {bus}: {e}"),
+                })
         };
-        let (Ok(name), Ok(version)) = (
-            proxy.get_property::<String>("ToolkitName"),
+        let name = read("ToolkitName")?;
+        let gtk4 = if name.eq_ignore_ascii_case("GTK") {
             // The toolkit's version is the `Version` property (GTK 4 has no
             // `ToolkitVersion`; `AtspiVersion` is the protocol's).
-            proxy.get_property::<String>("Version"),
-        ) else {
-            return false;
+            is_gtk4_toolkit(&name, &read("Version")?)
+        } else {
+            false
         };
-        let gtk4 = is_gtk4_toolkit(&name, &version);
         self.gtk4
             .is_gtk4
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(bus.to_owned(), gtk4);
-        gtk4
+        Ok(gtk4)
     }
 
     /// Screen extents (physical pixels) for a GTK 4 object.
@@ -769,9 +802,9 @@ impl LinuxProvider {
     /// window-relative position, wherever the window is (issue #487). The
     /// `WINDOW` extents are right, so the screen position is those plus the
     /// root origin of the top-level's X11 client window, found by pid and
-    /// title. `None` — no bounds, rather than wrong ones — on Wayland, when
-    /// the window cannot be matched to exactly one X11 window, or when any
-    /// read fails.
+    /// title. `None` — no bounds, rather than wrong ones — under the Wayland
+    /// window backend, when the window cannot be matched to exactly one X11
+    /// window, or when any read fails; the reason is logged at debug level.
     fn gtk4_screen_extents(&self, aref: &AccessibleRef) -> Option<Rect> {
         const ATSPI_COORD_TYPE_WINDOW: u32 = 1;
         let proxy = self
@@ -783,9 +816,49 @@ impl LinuxProvider {
         let (x, y, w, h): (i32, i32, i32, i32) = reply.body().deserialize().ok()?;
         let toplevel = self.toplevel_of(aref)?;
         let title = self.get_name(&toplevel).ok().filter(|t| !t.is_empty())?;
-        let pid = self.get_dbus_pid(&aref.bus_name)?;
-        let (ox, oy) = self.window_manager.x11_client_origin(pid, &title).ok()??;
+        let pid = self.gtk4_pid(&aref.bus_name)?;
+        let (ox, oy) = match self.window_manager.x11_client_origin(pid, &title) {
+            Ok(Some(origin)) => origin,
+            Ok(None) => {
+                log::debug!(
+                    "no bounds for {}{}: no single X11 client window for pid {pid} titled \
+                     {title:?}",
+                    aref.bus_name,
+                    aref.path
+                );
+                return None;
+            }
+            Err(error) => {
+                log::debug!(
+                    "no bounds for {}{}: X11 client origin for pid {pid} titled {title:?}: \
+                     {error}",
+                    aref.bus_name,
+                    aref.path
+                );
+                return None;
+            }
+        };
         extents_to_rect(x.checked_add(ox)?, y.checked_add(oy)?, w, h)
+    }
+
+    /// The process id behind a GTK 4 application bus, cached per bus.
+    fn gtk4_pid(&self, bus: &str) -> Option<u32> {
+        if let Some(pid) = self
+            .gtk4
+            .pids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(bus)
+        {
+            return Some(*pid);
+        }
+        let pid = self.get_dbus_pid(bus)?;
+        self.gtk4
+            .pids
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(bus.to_owned(), pid);
+        Some(pid)
     }
 
     /// The top-level window `aref` belongs to: the ancestor whose parent is
@@ -821,6 +894,9 @@ impl LinuxProvider {
             .toplevels
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        if cache.len() + visited.len() > GTK4_TOPLEVEL_CACHE_LIMIT {
+            cache.clear();
+        }
         for r in visited {
             cache.insert(key(&r), toplevel.clone());
         }

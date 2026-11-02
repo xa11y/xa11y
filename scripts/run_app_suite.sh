@@ -113,10 +113,12 @@ if [ "$(uname)" = "Linux" ]; then
     fi
     echo "DISPLAY=$DISPLAY"
 
-    # egui and Tauri need a window manager: egui's AccessKit bridge only
-    # publishes its tree once the window is focused, and Tauri's input-sim
-    # tests need focus routing so synthesised events reach the webview.
-    if [ "$APP" = "egui" ] || [ "$APP" = "tauri" ]; then
+    # egui, Tauri and GTK need a window manager: egui's AccessKit bridge only
+    # publishes its tree once the window is focused, Tauri's input-sim tests
+    # need focus routing so synthesised events reach the webview, and GTK 4's
+    # X11 bounds and the EWMH window verbs are only exercised under one (as
+    # in CI's gtk cell, issue #487).
+    if [ "$APP" = "egui" ] || [ "$APP" = "tauri" ] || [ "$APP" = "gtk" ]; then
         if command -v fluxbox >/dev/null 2>&1; then
             echo "Starting fluxbox (focus routing under Xvfb)..."
             fluxbox >/dev/null 2>&1 &
