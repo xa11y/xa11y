@@ -107,17 +107,13 @@ fn parse_target_anchored(
             }
             Ok(xa11y::Point::new(tup[0], tup[1]))
         }
-        Either::B(el) => {
-            let rect = el.data.bounds.ok_or_else(|| {
-                napi::Error::from_reason(
-                    "XA11Y_NO_ELEMENT_BOUNDS: element has no bounds; cannot compute a screen point"
-                        .to_string(),
-                )
-            })?;
-            sim.mouse()
-                .point_for_bounds(Some(rect), anchor)
-                .map_err(map_err)
-        }
+        // The bounds go in as an `Option`: core checks the capability
+        // first, so a Wayland refusal wins over "no bounds", and a missing
+        // rect is core's own `NoElementBounds`.
+        Either::B(el) => sim
+            .mouse()
+            .point_for_bounds(el.data.bounds, anchor)
+            .map_err(map_err),
     }
 }
 
@@ -231,6 +227,12 @@ impl InputSim {
     /// down for the duration, and `anchor` picks the point inside an
     /// `Element`'s bounds. With no options this is a single left click at the
     /// element's centre.
+    ///
+    /// On a Linux Wayland session an `Element` target rejects with
+    /// `ActionNotSupportedError` (code `XA11Y_UNSUPPORTED`): Wayland clients
+    /// do not know their global position, so accessibility bounds are not
+    /// screen coordinates. Use a semantic action (`press`, `focus`) or pass
+    /// a raw `[x, y]`.
     #[napi(ts_return_type = "Promise<void>")]
     pub fn click(
         &self,

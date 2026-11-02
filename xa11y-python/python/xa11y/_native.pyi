@@ -830,6 +830,11 @@ class InputSim:
         duration, and ``anchor`` picks the point inside an ``Element``'s
         bounds — a named anchor or an ``(dx, dy)`` offset from its top-left
         corner. ``anchor`` is ignored when ``target`` is a raw tuple.
+
+        On a Linux Wayland session an ``Element`` target raises
+        ``ActionNotSupportedError``: Wayland clients do not know their global
+        position, so accessibility bounds are not screen coordinates. Use a
+        semantic action (``press``, ``focus``) or pass a raw ``(x, y)``.
         """
     def double_click(self, target: tuple[int, int] | Element) -> None:
         """Left double-click at ``target``."""

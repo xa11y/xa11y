@@ -1927,6 +1927,12 @@ impl InputSim {
     /// lists keys held down for the duration, and `anchor` picks the point
     /// inside an `Element`'s bounds. `anchor` is ignored when `target` is a
     /// raw `(x, y)` tuple.
+    ///
+    /// On a Linux Wayland session an `Element` target raises
+    /// `ActionNotSupportedError` (an `Unsupported` error): Wayland clients do
+    /// not know their global position, so accessibility bounds are not screen
+    /// coordinates. Use a semantic action (`press`, `focus`) or pass a raw
+    /// `(x, y)`.
     #[pyo3(signature = (target, *, button="left", count=1, held=None, anchor=None))]
     fn click(
         &self,
@@ -2095,20 +2101,20 @@ fn parse_target_anchored(
 ) -> PyResult<xa11y::Point> {
     if let Ok(el) = target.cast::<Element>() {
         let element = el.borrow();
-        let (x, y, width, height) = element
+        // The bounds go in as an `Option`: core checks the capability
+        // first, so a Wayland refusal wins over "no bounds", and a missing
+        // rect is core's own `NoElementBounds`.
+        let bounds = element
             .bounds_data
-            .ok_or_else(|| PyValueError::new_err("Element has no bounds"))?;
+            .map(|(x, y, width, height)| xa11y::Rect {
+                x,
+                y,
+                width,
+                height,
+            });
         return sim
             .mouse()
-            .point_for_bounds(
-                Some(xa11y::Rect {
-                    x,
-                    y,
-                    width,
-                    height,
-                }),
-                anchor,
-            )
+            .point_for_bounds(bounds, anchor)
             .map_err(to_py_err);
     }
     let tup: (i32, i32) = target
