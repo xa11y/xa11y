@@ -411,6 +411,11 @@ def test_controls_of_a_minimized_window_are_not_visible(
     would pass its ``visible`` wait and act on a control nobody can see
     (issue #501). WinForms controls carry their own HWND and WPF's do not,
     so the two cells cover both of the provider's paths.
+
+    A provider may also drop the controls from the tree while the window is
+    minimized; the WinForms cell does (its child-HWND controls are gone
+    from UIA until restore). Either way nothing reports visible, which is
+    what an auto-waiting action depends on, so absence passes too.
     """
     win = _window_advertising(app, "minimize")
     if win is None or "restore" not in win.actions:
@@ -422,8 +427,10 @@ def test_controls_of_a_minimized_window_are_not_visible(
         minimized = _settled_window(
             app, "minimize", lambda w: w.minimized is True, "minimize must report minimized"
         )
-        assert button.element().visible is False, (
-            "a button in a minimized window must not report visible"
+        still_listed = button.elements()
+        assert all(e.visible is False for e in still_listed), (
+            "a button in a minimized window must not report visible; got "
+            f"{[(e.name, e.visible) for e in still_listed]}"
         )
         minimized.restore()
         _settled_window(
