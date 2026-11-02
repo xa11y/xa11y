@@ -387,9 +387,10 @@ mod tests {
     fn activate_brings_window_to_foreground() {
         // Every platform can activate: activate-then-AXRaise on macOS,
         // SetForegroundWindow + SetFocus on Windows, Component.GrabFocus on
-        // Linux. The assertion is that the call succeeds — foreground
-        // verification is intentionally not attempted on Windows/Linux, since
-        // a headless CI session cannot reliably observe the system foreground.
+        // Linux. macOS and Windows are also asserted to end up foreground
+        // below. Windows' activate verifies with GetForegroundWindow before
+        // returning (issue #504), so the re-read must agree. Linux is not
+        // checked: a headless session cannot reliably observe the foreground.
         let app = h::app_root();
         let win = h::one(&app, "window");
         win.activate().expect("activate must succeed");
@@ -409,6 +410,18 @@ mod tests {
                 let root = h::app_root();
                 root.is_foreground().then_some(())
             },
+        );
+
+        // Windows: the same guard against a silent success, since
+        // SetForegroundWindow can accept the call and only flash the taskbar.
+        // The synthesized Application node carries no foreground state, so
+        // the window's own `active` (GetForegroundWindow == its HWND) is what
+        // is asserted.
+        #[cfg(target_os = "windows")]
+        wait_until(
+            Duration::from_secs(5),
+            "test app window to be active after activate",
+            || h::one(&h::app_root(), "window").states.active.then_some(()),
         );
     }
 

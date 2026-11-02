@@ -1716,7 +1716,7 @@ fn bring_to_foreground(hwnd: HWND) -> Result<()> {
         message: format!(
             "activate: HWND {:#x} \"{}\" did not become the foreground window after {} \
              SetForegroundWindow attempts ({refused} refused outright, the rest accepted but \
-             not applied, which is the foreground lock); in front instead: {in_front}{hung}",
+             not applied, most likely the foreground lock); in front instead: {in_front}{hung}",
             hwnd.0 as usize,
             window_text(hwnd),
             FOREGROUND_ATTEMPTS,
