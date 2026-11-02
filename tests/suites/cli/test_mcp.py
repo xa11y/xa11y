@@ -1008,6 +1008,78 @@ def test_tree_defaults_to_a_bounded_depth(mcp, app_pid):
     assert structured["max_depth"] == 12, "the default must be bounded, not unlimited"
 
 
+def _walk(node):
+    yield node
+    for child in node.get("children", []):
+        yield from _walk(child)
+
+
+def test_a_depth_cut_is_marked_on_the_node_that_lost_its_children(mcp, app_pid):
+    """A pruned node read as a leaf is the silent shortening the bound forbids.
+
+    At `max_depth: 1` the application's windows are the frontier, and every
+    one of them has children, so each must say it was cut and how many it has.
+    """
+    structured = mcp.call_tool("tree", {"pid": app_pid, "max_depth": 1})["result"][
+        "structuredContent"
+    ]
+    assert structured["truncated"]["by_depth"] is True, structured["truncated"]
+    root = structured["tree"]
+    windows = [c for c in root.get("children", []) if c["role"] == "window"]
+    assert windows, root
+    for window in windows:
+        assert "children" not in window, window
+        assert window.get("subtree_truncated") is True, window
+        assert window["children_count"] >= 1, window
+    for child in root.get("children", []):
+        if "subtree_truncated" not in child:
+            assert "children_count" not in child, child
+
+
+def test_an_uncut_tree_marks_no_node(mcp, app_pid):
+    """When neither limit bit, no node may claim it lost children."""
+    structured = mcp.call_tool("tree", {"pid": app_pid, "max_depth": 64})["result"][
+        "structuredContent"
+    ]
+    cut = structured["truncated"]
+    marked = [n for n in _walk(structured["tree"]) if n.get("subtree_truncated")]
+    if not cut["by_depth"] and not cut["by_node_limit"]:
+        assert not marked, marked[:3]
+    else:
+        assert marked, "a reported cut must be locatable on some node"
+    for node in marked:
+        assert node["children_count"] > len(node.get("children", [])), node
+
+
+def test_a_document_sized_label_is_capped_and_says_so(mcp, app_pid):
+    """The test app's ~4 KiB label must come back as a bounded prefix.
+
+    Selectors still match the full text, which is how the label is found;
+    the encoding cuts each of `name` / `value` / `description` and names the
+    cut beside the field.
+    """
+    selector = '[name^="Long text:"], [value^="Long text:"]'
+    result = mcp.call_tool("find", {"pid": app_pid, "selector": selector})["result"]
+    assert result["isError"] is False, result["content"]
+    matches = result["structuredContent"]["matches"]
+    assert matches, result["structuredContent"]
+    label = matches[0]
+    cut_fields = []
+    for field in ("name", "value", "description"):
+        if field not in label:
+            continue
+        assert len(label[field].encode("utf-8")) <= 1024, (field, len(label[field]))
+        if label.get(f"{field}_truncated"):
+            assert label[f"{field}_bytes"] >= 4096, label
+            assert label[field].startswith("Long text: "), label[field][:40]
+            cut_fields.append(field)
+        else:
+            assert f"{field}_bytes" not in label, label
+    assert cut_fields, f"the long text must be reported as cut: {sorted(label)}"
+    # The whole response stays small even though the element is not.
+    assert len(json.dumps(label)) < 4096, len(json.dumps(label))
+
+
 def test_find_reports_bounds_and_a_precomputed_center(mcp, app_pid):
     """Named, because `button` alone leads with window chrome on Windows.
 
