@@ -37,7 +37,8 @@ use xa11y_core::{
 };
 
 use crate::atspi::{
-    is_password_role, map_atspi_role, map_atspi_role_number, read_interfaces, AccessibleRef,
+    is_listable_top_level, is_password_role, map_atspi_role, map_atspi_role_number,
+    read_interfaces, AccessibleRef,
     Interfaces, LinuxProvider,
 };
 
@@ -123,7 +124,7 @@ pub(crate) fn subscribe_for_pid(
     // was silent (issue #488). Registration is tied to this connection's
     // bus name; the cancel path deregisters, and the registry also drops it
     // when the connection closes.
-    let registered = register_events(&conn)?;
+    let registered = register_events(&conn, &sender_buses)?;
 
     // Seed the top-level window states. This is also the barrier that makes
     // registration effective before `subscribe` returns: the application
@@ -134,6 +135,23 @@ pub(crate) fn subscribe_for_pid(
     for bus in &sender_buses {
         seed_top_level_windows(&conn, bus, &mut windows)?;
     }
+    // Windows already open get a snapshot now, so their eventual
+    // `WindowClosed` names them even when a destroyed window no longer
+    // answers by then.
+    let window_snapshots: HashMap<String, ElementData> = windows
+        .iter()
+        .filter(|(_, listed)| **listed)
+        .filter_map(|(key, _)| {
+            let (bus, path) = split_window_key(key, &sender_buses)?;
+            let aref = AccessibleRef {
+                bus_name: bus.to_owned(),
+                path: path.to_owned(),
+            };
+            build_event_snapshot(&conn, &aref, Some(pid))
+                .filter(|t| is_window_role(t.role))
+                .map(|t| (key.clone(), t))
+        })
+        .collect();
 
     let (tx, rx) = std::sync::mpsc::channel::<Event>();
     let ctx = Arc::new(EventContext {
@@ -143,7 +161,7 @@ pub(crate) fn subscribe_for_pid(
         tx: Mutex::new(tx),
         conn: conn.clone(),
         windows: Mutex::new(windows),
-        window_snapshots: Mutex::new(HashMap::new()),
+        window_snapshots: Mutex::new(window_snapshots),
     });
 
     // Activate the broadcast receiver *before* spawning the worker. If we
@@ -339,8 +357,11 @@ impl EventContext {
                 bus_name: bus.to_owned(),
                 path: key[bus.len()..].to_owned(),
             };
-            let snapshot = build_event_snapshot(&self.conn, &aref, Some(self.app_pid));
-            self.window_listed(&aref, listed, snapshot);
+            // Snapshot only on a real transition: a rescan revisits every
+            // window, and most have not changed.
+            self.window_listed_with(&aref, listed, || {
+                build_event_snapshot(&self.conn, &aref, Some(self.app_pid))
+            });
         }
         for key in gone {
             let aref = AccessibleRef {
@@ -353,35 +374,54 @@ impl EventContext {
 
     /// Record that a top-level window entered (`listed`) or left the
     /// window list, emitting `WindowOpened` / `WindowClosed` only on a
-    /// change. A window the subscription has not seen yet always emits.
+    /// change (see [`note_window`]).
     fn window_listed(&self, aref: &AccessibleRef, listed: bool, target: Option<ElementData>) {
+        self.window_listed_with(aref, listed, || target);
+    }
+
+    /// [`Self::window_listed`] with the target built only when the
+    /// transition is real.
+    fn window_listed_with(
+        &self,
+        aref: &AccessibleRef,
+        listed: bool,
+        target: impl FnOnce() -> Option<ElementData>,
+    ) {
         let key = window_key(aref);
+        let changed = note_window(
+            &mut self.windows.lock().unwrap_or_else(|e| e.into_inner()),
+            key.clone(),
+            listed,
+        );
+        if !changed {
+            return;
+        }
         let target = {
             let mut snapshots = self
                 .window_snapshots
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            match target {
-                Some(t) if is_window_role(t.role) => {
-                    snapshots.insert(key.clone(), t.clone());
-                    Some(t)
-                }
+            let target = match target() {
+                Some(t) if is_window_role(t.role) => Some(t),
                 other => snapshots.get(&key).cloned().or(other),
-            }
-        };
-        let changed = note_window(
-            &mut self.windows.lock().unwrap_or_else(|e| e.into_inner()),
-            key,
-            listed,
-        );
-        if changed {
-            let kind = if listed {
-                EventKind::WindowOpened
-            } else {
-                EventKind::WindowClosed
             };
-            self.emit(kind, target);
-        }
+            // A closed window's entry goes with it, so neither map grows
+            // with every window the application ever opened.
+            if listed {
+                if let Some(t) = &target {
+                    snapshots.insert(key, t.clone());
+                }
+            } else {
+                snapshots.remove(&key);
+            }
+            target
+        };
+        let kind = if listed {
+            EventKind::WindowOpened
+        } else {
+            EventKind::WindowClosed
+        };
+        self.emit(kind, target);
     }
 
     /// Derive window open/close for toolkits that never emit `Window:Create`
@@ -491,10 +531,28 @@ fn event_body_fields(msg: &zbus::Message) -> Option<(String, i32)> {
 /// The application object's path on every AT-SPI application connection.
 const APP_ROOT_PATH: &str = "/org/a11y/atspi/accessible/root";
 
-/// Record `listed` for `key`; whether that is a change worth an event. A
-/// window not seen before always counts.
+/// Record `listed` for `key`; whether that is a change worth an event.
+///
+/// Opening counts unless the window is already listed. Closing counts only
+/// for a window known to be listed, and drops its entry, so the map holds
+/// the open windows (plus seeded hidden ones) rather than every window the
+/// application ever had; a second close signal for the same window (GTK 4's
+/// `defunct` then `Window:Destroy`) finds no entry and stays silent.
 fn note_window(windows: &mut HashMap<String, bool>, key: String, listed: bool) -> bool {
-    windows.insert(key, listed) != Some(listed)
+    if listed {
+        windows.insert(key, true) != Some(true)
+    } else {
+        windows.remove(&key) == Some(true)
+    }
+}
+
+/// Split a [`window_key`] back into bus name and path, given the buses it
+/// can belong to.
+fn split_window_key<'k>(key: &'k str, buses: &[String]) -> Option<(&'k str, &'k str)> {
+    buses.iter().find_map(|bus| {
+        let path = key.strip_prefix(bus.as_str())?;
+        path.starts_with('/').then(|| (&key[..bus.len()], path))
+    })
 }
 
 fn window_key(aref: &AccessibleRef) -> String {
@@ -513,6 +571,10 @@ fn is_window_role_number(role: u32) -> bool {
 }
 
 /// Whether the object's parent is its application object.
+///
+/// Any failed read is "not top-level": this only gates deriving a window
+/// event from a state change, and the subscription has no error channel to
+/// report it on; the window's own `ChildrenChanged` / `defunct` still apply.
 fn is_top_level(conn: &Connection, aref: &AccessibleRef) -> bool {
     let Some(proxy) = make_proxy(
         conn,
@@ -531,14 +593,6 @@ fn is_top_level(conn: &Connection, aref: &AccessibleRef) -> bool {
     let parsed: std::result::Result<(String, zbus::zvariant::OwnedObjectPath), _> =
         zbus::zvariant::Value::from(variant).try_into();
     parsed.is_ok_and(|(_, path)| path.as_str() == APP_ROOT_PATH)
-}
-
-/// Whether a top-level window is listed by `App::windows()`: `VISIBLE` or
-/// `ICONIFIED` (the rule #492 applies to the listing).
-fn is_listable_top_level(bits: u64) -> bool {
-    const ICONIFIED: u64 = 1 << 15;
-    const VISIBLE: u64 = 1 << 30;
-    bits & (VISIBLE | ICONIFIED) != 0
 }
 
 /// Record each current top-level window of the application on `bus` as
@@ -666,7 +720,10 @@ fn register_signature_from_xml(xml: &str) -> Result<RegisterSignature> {
     let body = &xml[start..];
     let method = &body[..body.find("</method>").unwrap_or(body.len())];
     // Method arguments are inputs unless marked `direction="out"`.
-    let in_args = method.matches("<arg ").count() - method.matches("direction=\"out\"").count();
+    let in_args = method
+        .matches("<arg ")
+        .count()
+        .saturating_sub(method.matches("direction=\"out\"").count());
     Ok(if in_args >= 3 {
         RegisterSignature::WithProperties
     } else {
@@ -676,25 +733,38 @@ fn register_signature_from_xml(xml: &str) -> Result<RegisterSignature> {
 
 /// Register [`REGISTERED_EVENTS`] for this connection. Returns what was
 /// registered, for [`deregister_events`].
-fn register_events(conn: &Connection) -> Result<Vec<&'static str>> {
+///
+/// On the 2.46+ signature each registration names the application's bus
+/// (`app_bus_name`), so only the subscribed application switches its
+/// emission on; an empty name would make every application on the desktop
+/// emit object events.
+fn register_events(conn: &Connection, app_buses: &[String]) -> Result<Vec<&'static str>> {
     let signature = register_signature(conn)?;
     let registry = registry_proxy(conn, "org.a11y.atspi.Registry")?;
-    let mut done = Vec::with_capacity(REGISTERED_EVENTS.len());
-    for event in REGISTERED_EVENTS {
-        let reply = match signature {
-            RegisterSignature::EventOnly => registry.call_method("RegisterEvent", &(*event,)),
-            RegisterSignature::WithProperties => {
-                registry.call_method("RegisterEvent", &(*event, Vec::<String>::new(), ""))
+    let mut done = Vec::new();
+    let apps: Vec<&str> = match signature {
+        RegisterSignature::EventOnly => vec![""],
+        RegisterSignature::WithProperties => app_buses.iter().map(String::as_str).collect(),
+    };
+    for app in apps {
+        for event in REGISTERED_EVENTS {
+            let reply = match signature {
+                RegisterSignature::EventOnly => registry.call_method("RegisterEvent", &(*event,)),
+                RegisterSignature::WithProperties => {
+                    registry.call_method("RegisterEvent", &(*event, Vec::<String>::new(), app))
+                }
+            };
+            if let Err(e) = reply {
+                deregister_events(conn, &done);
+                return Err(Error::Platform {
+                    code: -1,
+                    message: format!(
+                        "RegisterEvent({event}) for {app:?} with the AT-SPI registry: {e}"
+                    ),
+                });
             }
-        };
-        if let Err(e) = reply {
-            deregister_events(conn, &done);
-            return Err(Error::Platform {
-                code: -1,
-                message: format!("RegisterEvent({event}) with the AT-SPI registry: {e}"),
-            });
+            done.push(*event);
         }
-        done.push(*event);
     }
     Ok(done)
 }
@@ -1532,27 +1602,30 @@ mod tests {
     #[test]
     fn window_transitions_fire_once_per_change() {
         let mut windows = HashMap::new();
-        // Unseen window: both directions count.
+        // A new window opens once.
         assert!(note_window(&mut windows, "a".into(), true));
         // GTK 4 ChildrenChanged:add and a later showing re-read agree: once.
         assert!(!note_window(&mut windows, "a".into(), true));
         assert!(note_window(&mut windows, "a".into(), false));
-        // Defunct after the hide: no second close.
+        // Defunct then Window:Destroy: no second close, and no entry left.
         assert!(!note_window(&mut windows, "a".into(), false));
+        assert!(windows.is_empty());
+        // A close for a window never seen open says nothing.
+        assert!(!note_window(&mut windows, "c".into(), false));
         // A seeded hidden window (Qt's dialog before it is first shown).
         windows.insert("b".into(), false);
         assert!(note_window(&mut windows, "b".into(), true));
     }
 
     #[test]
-    fn listable_top_level_matches_the_window_list_rule() {
-        const ICONIFIED: u64 = 1 << 15;
-        const SHOWING: u64 = 1 << 25;
-        const VISIBLE: u64 = 1 << 30;
-        assert!(is_listable_top_level(VISIBLE | SHOWING));
-        assert!(is_listable_top_level(ICONIFIED));
-        assert!(!is_listable_top_level(SHOWING));
-        assert!(!is_listable_top_level(0));
+    fn window_keys_split_back_into_bus_and_path() {
+        let buses = vec![":1.1".to_string(), ":1.12".to_string()];
+        assert_eq!(
+            split_window_key(":1.12/org/a11y/atspi/accessible/3", &buses),
+            Some((":1.12", "/org/a11y/atspi/accessible/3"))
+        );
+        assert_eq!(split_window_key(":1.1/x", &buses), Some((":1.1", "/x")));
+        assert_eq!(split_window_key(":1.9/x", &buses), None);
     }
 
     #[test]

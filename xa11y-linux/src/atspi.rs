@@ -3453,7 +3453,7 @@ fn extents_to_rect(x: i32, y: i32, w: i32, h: i32) -> Option<Rect> {
 /// A window with neither is a hidden toolkit object, not a window (issue
 /// #492). `SHOWING` alone does not count, matching the provider's own
 /// definition of a hidden element.
-fn is_listable_top_level(bits: u64) -> bool {
+pub(crate) fn is_listable_top_level(bits: u64) -> bool {
     const ICONIFIED: u64 = 1 << 15;
     const VISIBLE: u64 = 1 << 30;
     bits & (VISIBLE | ICONIFIED) != 0

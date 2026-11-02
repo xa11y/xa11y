@@ -187,8 +187,8 @@ UIA provides COM event handler interfaces registered against the `IUIAutomation`
 | **Name changed** | `AXTitleChanged` | `Object:PropertyChange(Name)` | `PropertyChanged(Name)` |
 | **State changed** | Separate per-state notifications¹ | `Object:StateChanged(state, value)` | `PropertyChanged(IsEnabled/ToggleState/ExpandCollapseState/WindowVisualState)` |
 | **Structure changed** | `AXUIElementDestroyed` (app) / `AXCreated` (elem only) | `Object:ChildrenChanged` | `StructureChangedEventHandler` |
-| **Window opened** | `AXWindowCreated` | `Window:Create` | `UIA_Window_WindowOpenedEventId` |
-| **Window closed** | `AXUIElementDestroyed` on window | `Window:Destroy` | `UIA_Window_WindowClosedEventId` |
+| **Window opened** | `AXWindowCreated` | `Window:Create`, or derived: window enters the listing ³ | `UIA_Window_WindowOpenedEventId` |
+| **Window closed** | `AXUIElementDestroyed` on window | `Window:Destroy`, or derived: window leaves the listing ³ | `UIA_Window_WindowClosedEventId` |
 | **Window activated** | `AXFocusedWindowChanged` | `Window:Activate` | Not emitted² |
 | **Window deactivated** | `AXFocusedWindowChanged` | `Window:Deactivate` | Not emitted² |
 | **Menu opened/closed** | `AXMenuOpened` / `AXMenuClosed` | None reliably | `UIA_MenuOpenedEventId` / `UIA_MenuClosedEventId` |
@@ -199,6 +199,8 @@ UIA provides COM event handler interfaces registered against the `IUIAutomation`
 ¹ macOS has no single "state changed" notification. Separate notifications exist for some state transitions (`AXValueChanged` covers checkbox toggle, `AXElementBusyChanged` for busy), but `AXEnabledChanged` does not exist as a public notification. To detect enabled/disabled changes on macOS, you must either poll or observe `AXValueChanged` on the element and re-query `AXEnabled`. This is a genuine gap.
 
 ² Windows has no `WindowActivated` UIA event ID. Inferring from `AddFocusChangedEventHandler` is possible but lossy — focus moves from an always-focused child across apps (alt-tab) don't fire, tool windows that open without taking element focus don't fire, and internal focus moves across windows in a multi-window app fire spuriously. xa11y does not emit `WindowActivated`/`WindowDeactivated` on Windows; consumers that need it should watch `WindowOpened` plus focus changes explicitly.
+
+³ Neither GTK 4 nor Qt emits `Window:Create` / `Window:Destroy`. On Linux the two kinds mean a top-level window entering or leaving `App::windows()` (`VISIBLE` or `ICONIFIED`), derived from the application's children and the window's states; see "Linux — shipping".
 
 ---
 
@@ -490,8 +492,8 @@ Subscribe to signals on the AT-SPI2 bus, filtered to the target app's D-Bus send
 - `Object:StateChanged(visible, _)` → `StateChanged { Visible, _ }`
 - `Object:PropertyChange(Name)` → `NameChanged`
 - `Object:ChildrenChanged` → `StructureChanged`
-- `Window:Create` → `WindowOpened`
-- `Window:Destroy` → `WindowClosed`
+- `Window:Create` → `WindowOpened`, and derived for GTK 4 / Qt (see "Linux — shipping")
+- `Window:Destroy` → `WindowClosed`, and derived likewise
 - `Window:Activate` → `WindowActivated`
 - `Window:Deactivate` → `WindowDeactivated`
 - `Object:SelectionChanged` → `SelectionChanged`
@@ -606,7 +608,7 @@ On Windows the tests now run in CI on `windows-latest` via `scripts/run_integ_te
 | `Announcement`                    | Yes   | Yes     | Yes   | Press "Announce" button (updates a `Live::Polite` label value) |
 | `StructureChanged`                | **No** | **No** | **No** | See below                                                     |
 | `SelectionChanged`                | **No** | **No** | **No** | See below                                                     |
-| `WindowOpened` / `WindowClosed`   | **No** | **No** | **No** | Test app is single-window                                     |
+| `WindowOpened` / `WindowClosed`   | **No** | **No** | Yes (GTK, Qt) | Linux: the GTK / Qt dialog opens and closes (`test_window_opened_and_closed_for_dialog`); the AccessKit test app is single-window |
 | `WindowActivated`                 | **No** | **n/a** | **No** | Not emitted on Windows (UIA has no such event)                |
 | `WindowDeactivated`               | **No** | **n/a** | **No** | Not emitted on Windows (UIA has no such event)                |
 | `MenuOpened` / `MenuClosed`       | **No** | **No** | **No**² | AccessKit bridges do not synthesize menu events               |
