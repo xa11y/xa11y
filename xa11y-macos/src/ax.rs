@@ -1348,7 +1348,10 @@ impl ResolvedAttrs {
     /// element, and the remaining attributes keep the tree-walk tolerance
     /// `ax_attr` documents.
     fn from_individual(element: AXUIElementRef) -> Result<Self> {
-        let role_str = match read_raw_attr(element, "AXRole") {
+        let role_read_start = Instant::now();
+        let role_read = read_raw_attr(element, "AXRole");
+        let role_read_elapsed = role_read_start.elapsed();
+        let role_str = match role_read {
             RawAttr::Value(v) => {
                 if unsafe { safe_cf_get_type_id(v) } == unsafe { safe_cf_string_get_type_id() } {
                     // `wrap_under_create_rule` adopts the +1 retain; the
@@ -1371,6 +1374,17 @@ impl ResolvedAttrs {
                 }
             }
             RawAttr::Absent => String::new(),
+            // Say which process did not answer, and whether it timed out.
+            // PID only: callers such as `list_apps` and attach read this as a
+            // retry signal and may discard it.
+            RawAttr::Unanswered(AX_ERROR_CANNOT_COMPLETE) => {
+                return Err(cannot_complete_error(
+                    element,
+                    "AXRole read failed while building an element snapshot",
+                    role_read_elapsed,
+                    CannotCompleteContext::Snapshot,
+                ));
+            }
             RawAttr::Unanswered(code) => {
                 return Err(Error::Platform {
                     code: code as i64,
@@ -1408,31 +1422,210 @@ impl ResolvedAttrs {
 
 // ── Safe FFI Wrappers ────────────────────────────────────────────────────────
 
-fn do_perform_action(element: AXUIElementRef, action: &CFString) -> i32 {
-    unsafe { safe_ax_perform_action(element, action.as_concrete_TypeRef() as CFTypeRef) }
+/// The result of one AX message: its AXError code and how long it took.
+///
+/// The duration is what tells a messaging timeout apart from an app that
+/// answered `kAXErrorCannotComplete` straight away (see
+/// [`cannot_complete_error`]). It compares equal to a bare code, so callers
+/// test `call != AX_ERROR_SUCCESS` as they would the `i32`.
+#[derive(Debug, Clone, Copy)]
+struct AxCall {
+    code: i32,
+    elapsed: Duration,
 }
 
-fn do_set_attribute(element: AXUIElementRef, attribute: &CFString, value: CFTypeRef) -> i32 {
-    unsafe {
-        safe_ax_set_attribute_value(element, attribute.as_concrete_TypeRef() as CFTypeRef, value)
+impl AxCall {
+    fn timed(f: impl FnOnce() -> i32) -> Self {
+        let start = Instant::now();
+        let code = f();
+        Self {
+            code,
+            elapsed: start.elapsed(),
+        }
     }
 }
 
-/// Convert an AX error code from `do_perform_action` into an appropriate
-/// `Error`.  Returns `ActionNotSupported` for -25206 (kAXErrorActionUnsupported)
-/// so callers get a clear, structured error instead of a raw platform code.
-fn action_error(err: i32, action: &str, role: Role, fallback_msg: &str) -> Error {
-    if err == AX_ERROR_ACTION_UNSUPPORTED {
+impl PartialEq<i32> for AxCall {
+    fn eq(&self, code: &i32) -> bool {
+        self.code == *code
+    }
+}
+
+fn do_perform_action(element: AXUIElementRef, action: &CFString) -> AxCall {
+    AxCall::timed(|| unsafe {
+        safe_ax_perform_action(element, action.as_concrete_TypeRef() as CFTypeRef)
+    })
+}
+
+fn do_set_attribute(element: AXUIElementRef, attribute: &CFString, value: CFTypeRef) -> AxCall {
+    AxCall::timed(|| unsafe {
+        safe_ax_set_attribute_value(element, attribute.as_concrete_TypeRef() as CFTypeRef, value)
+    })
+}
+
+/// Convert a failed AX action call into an appropriate `Error`. Returns
+/// `ActionNotSupported` for -25206 (kAXErrorActionUnsupported) so callers get
+/// a clear, structured error instead of a raw platform code, and describes a
+/// `kAXErrorCannotComplete` with the application it was sent to.
+fn action_error(
+    el_ptr: AXUIElementRef,
+    call: AxCall,
+    action: &str,
+    role: Role,
+    fallback_msg: &str,
+) -> Error {
+    if call == AX_ERROR_ACTION_UNSUPPORTED {
         Error::ActionNotSupported {
             action: action.to_string(),
             role,
         }
+    } else if call == AX_ERROR_CANNOT_COMPLETE {
+        // An action is a terminal call, not a retry signal, so the app name
+        // lookup is affordable here.
+        cannot_complete_error(
+            el_ptr,
+            &format!("{action}: {fallback_msg}"),
+            call.elapsed,
+            CannotCompleteContext::Action,
+        )
     } else {
         Error::Platform {
-            code: err as i64,
+            code: call.code as i64,
             message: fallback_msg.to_string(),
         }
     }
+}
+
+// ── Messaging Timeout ───────────────────────────────────────────────────────
+
+/// Upper bound on each accessibility message this process sends, in seconds.
+///
+/// Without it every message waits for the system default (about six
+/// seconds), and a walk over a busy or hung app pays that per attribute
+/// read. Set once, process-wide, by [`set_global_messaging_timeout`]. Issue
+/// #531 tracks deriving it from the caller's remaining deadline instead.
+const AX_MESSAGING_TIMEOUT_SECS: f32 = 2.0;
+
+/// Apply [`AX_MESSAGING_TIMEOUT_SECS`] to every AX message from this process.
+///
+/// Apple documents a timeout set on the system-wide element as the global
+/// value for the calling process, and a `0` set on any other element as
+/// "use the current global value". That is what the shell scan's release
+/// (`unbound_shell_probe`) writes, so a released probe returns to this bound.
+fn set_global_messaging_timeout() -> Result<()> {
+    let system_wide = AXElement::from_owned(unsafe { safe_ax_create_system_wide() });
+    if system_wide.is_null() {
+        return Err(Error::Platform {
+            code: -1,
+            message: "AXUIElementCreateSystemWide returned NULL".to_string(),
+        });
+    }
+    let err =
+        unsafe { safe_ax_set_messaging_timeout(system_wide.as_ptr(), AX_MESSAGING_TIMEOUT_SECS) };
+    if err != AX_ERROR_SUCCESS {
+        return Err(Error::Platform {
+            code: err as i64,
+            message: format!(
+                "AXUIElementSetMessagingTimeout({AX_MESSAGING_TIMEOUT_SECS}s) on the \
+                 system-wide element failed"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Where a `kAXErrorCannotComplete` came from, which decides how much the
+/// error may cost to describe and what it must warn about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CannotCompleteContext {
+    /// A terminal action or attribute write. The app name is looked up (one
+    /// window-list copy), and the message warns that the action may already
+    /// have been delivered.
+    Action,
+    /// A snapshot read. Enumeration, attach and churn handling read this
+    /// error as a retry signal and often discard it, so it carries the PID
+    /// only (tenet 6: no expensive diagnosis on a retry-signal path).
+    Snapshot,
+}
+
+/// A call that took at least this fraction of [`AX_MESSAGING_TIMEOUT_SECS`]
+/// before failing with `kAXErrorCannotComplete` is reported as a timeout;
+/// a faster one is the app (or the AX server) refusing outright.
+const TIMEOUT_FRACTION: f32 = 0.9;
+
+/// Whether a `kAXErrorCannotComplete` after `elapsed` was the messaging
+/// timeout expiring.
+fn hit_messaging_timeout(elapsed: Duration) -> bool {
+    elapsed.as_secs_f32() >= AX_MESSAGING_TIMEOUT_SECS * TIMEOUT_FRACTION
+}
+
+/// The `kAXErrorCannotComplete` error for a message sent to `el_ptr`.
+///
+/// `kAXErrorCannotComplete` is also what an expired messaging timeout
+/// surfaces as, but not only that, so the message claims a timeout only when
+/// the call actually ran for (about) the whole timeout. The PID comes from
+/// the element itself, with no IPC to the unresponsive app. The name lookup
+/// copies the window server's list, so it happens only for
+/// [`CannotCompleteContext::Action`]. The code stays
+/// `kAXErrorCannotComplete`, so `classify_element_churn` still reads it as
+/// `Unreachable`.
+fn cannot_complete_error(
+    el_ptr: AXUIElementRef,
+    what: &str,
+    elapsed: Duration,
+    context: CannotCompleteContext,
+) -> Error {
+    let mut pid = 0;
+    let pid_known = !el_ptr.is_null()
+        && unsafe { safe_ax_get_pid(el_ptr, &mut pid) } == AX_ERROR_SUCCESS
+        && pid > 0;
+    let name = if pid_known && context == CannotCompleteContext::Action {
+        MacOSProvider::list_gui_apps()
+            .into_iter()
+            .find(|(p, _)| *p == pid)
+            .map(|(_, name)| name)
+    } else {
+        None
+    };
+    let app = match (pid_known, name) {
+        (true, Some(name)) => format!("application {name:?} (pid {pid})"),
+        (true, None) => format!("the application with pid {pid}"),
+        (false, _) => "the owning application (pid unknown)".to_string(),
+    };
+    Error::Platform {
+        code: AX_ERROR_CANNOT_COMPLETE as i64,
+        message: cannot_complete_message(what, &app, elapsed, context),
+    }
+}
+
+/// The text of [`cannot_complete_error`], split out so its wording is
+/// unit-testable without an unresponsive app.
+fn cannot_complete_message(
+    what: &str,
+    app: &str,
+    elapsed: Duration,
+    context: CannotCompleteContext,
+) -> String {
+    let ms = elapsed.as_millis();
+    let mut message = if hit_messaging_timeout(elapsed) {
+        format!(
+            "{what}: {app} did not respond within the {AX_MESSAGING_TIMEOUT_SECS}s accessibility \
+             messaging timeout (kAXErrorCannotComplete after {ms} ms); it may be busy or hung"
+        )
+    } else {
+        format!(
+            "{what}: {app} returned kAXErrorCannotComplete after {ms} ms (not a timeout: the \
+             {AX_MESSAGING_TIMEOUT_SECS}s messaging timeout was not reached, so the app or the \
+             accessibility server refused the request)"
+        )
+    };
+    if context == CannotCompleteContext::Action {
+        message.push_str(
+            "; the request may still have been delivered, so the action may already have \
+             taken effect",
+        );
+    }
+    message
 }
 
 // ── Action Helpers ──────────────────────────────────────────────────────────
@@ -1451,6 +1644,7 @@ fn perform_ax_action(
     let err = do_perform_action(el_ptr, &cf);
     if err != AX_ERROR_SUCCESS {
         return Err(action_error(
+            el_ptr,
             err,
             action,
             role,
@@ -1512,6 +1706,7 @@ fn set_bool_attr(
     let err = do_set_attribute(el_ptr, &attr, val.as_CFTypeRef());
     if err != AX_ERROR_SUCCESS {
         return Err(action_error(
+            el_ptr,
             err,
             action,
             role,
@@ -2272,7 +2467,13 @@ fn set_window_position(
     let err = do_set_attribute(el_ptr, &attr, value);
     unsafe { safe_cf_release(value) };
     if err != AX_ERROR_SUCCESS {
-        return Err(action_error(err, action, role, "Set AXPosition failed"));
+        return Err(action_error(
+            el_ptr,
+            err,
+            action,
+            role,
+            "Set AXPosition failed",
+        ));
     }
     Ok(())
 }
@@ -2734,13 +2935,13 @@ pub struct MacOSProvider {
 
 /// Holds a shell-probe messaging-timeout bound, releasing it on drop.
 ///
-/// The bound is taken on an **application** element, and Apple documents
-/// `AXUIElementSetMessagingTimeout` on an application element as applying to
-/// every message sent to that application — not to that element alone. The
-/// scan therefore cannot leave one in place: the frontmost app, each
-/// status-item host and Finder would stay pinned at a quarter-second timeout
-/// for the life of the process, and a caller who then walked the menu bar or
-/// the desktop would see spurious `kAXErrorCannotComplete`.
+/// The bound is taken on an **application** element. Apple's header scopes
+/// `AXUIElementSetMessagingTimeout` on a non-system-wide object to that object
+/// alone, but the scan's elements can outlive it (an `AXMenuBar` surface hands
+/// out the frontmost app's element), so the scan does not leave one pinned at
+/// a quarter-second timeout: a caller who then walked the menu bar or the
+/// desktop would see spurious `kAXErrorCannotComplete`. Releasing with `0`
+/// returns the element to the process-wide value `MacOSProvider::new` set.
 ///
 /// A guard rather than a call at the end of each probe, because every one of
 /// those probes can leave early — `?` on a missing child, an unanswered
@@ -2776,6 +2977,10 @@ impl MacOSProvider {
                         .to_string(),
             });
         }
+
+        // Bound every AX message, so one busy or hung app cannot stall a
+        // walk or an action for the system default per call (issue #512).
+        set_global_messaging_timeout()?;
 
         Ok(Self {
             handle_cache: Mutex::new(HashMap::new()),
@@ -3479,11 +3684,11 @@ impl MacOSProvider {
 
     /// Messaging timeout for one shell-surface probe, in seconds.
     ///
-    /// The AX default is ~1.5s *per attribute*, so a handful of wedged
-    /// processes otherwise dominate the whole scan (PROPOSAL §4, measured).
-    /// `AXUIElementSetMessagingTimeout` applies to the element it is set on
-    /// and to nothing else from the same process — so it is set on the very
-    /// element each probe then reads.
+    /// The process-wide bound ([`AX_MESSAGING_TIMEOUT_SECS`]) applies *per
+    /// attribute*, so a handful of wedged processes otherwise dominate the
+    /// whole scan (PROPOSAL §4, measured). `AXUIElementSetMessagingTimeout`
+    /// on a non-system-wide object applies to that object alone — so it is
+    /// set on the very element each probe then reads.
     ///
     /// It bounds **every** application element the scan reads, not only the
     /// status-item fan-out: the frontmost app for `AXMenuBar`, the Dock, and
@@ -3496,8 +3701,8 @@ impl MacOSProvider {
     /// [`SHELL_PROBE_TIMEOUT_SECS`](Self::SHELL_PROBE_TIMEOUT_SECS).
     ///
     /// Returns `false` when the bound could not be established, which is the
-    /// scan's cue to skip the element rather than read it at the ~1.5s
-    /// default: an element whose cost cannot be bounded is not one this scan
+    /// scan's cue to skip the element rather than read it at the
+    /// process-wide bound: an element whose cost cannot be bounded is not one this scan
     /// can query inside its contract.
     fn bound_shell_probe(element: &AXElement) -> bool {
         let err = unsafe {
@@ -3648,7 +3853,7 @@ impl MacOSProvider {
                 // Bound the probe *before* making it. If the bound cannot be
                 // established the element is not one we can query within the
                 // scan's cost contract, so it is skipped rather than probed
-                // at the ~1.5s default.
+                // at the process-wide bound.
                 // Bound for the rest of this closure; the guard releases it.
                 let _bound = Self::shell_probe_bound(&app_element)?;
 
@@ -4685,6 +4890,7 @@ impl Provider for MacOSProvider {
         unsafe { safe_cf_release(value) };
         if err != AX_ERROR_SUCCESS {
             return Err(action_error(
+                ax.as_ptr(),
                 err,
                 "resize_to",
                 element.role,
@@ -4707,6 +4913,7 @@ impl Provider for MacOSProvider {
         );
         if err != AX_ERROR_SUCCESS {
             return Err(action_error(
+                ax.as_ptr(),
                 err,
                 "set_value",
                 element.role,
@@ -4727,6 +4934,7 @@ impl Provider for MacOSProvider {
         );
         if err != AX_ERROR_SUCCESS {
             return Err(action_error(
+                ax.as_ptr(),
                 err,
                 "set_numeric_value",
                 element.role,
@@ -4747,6 +4955,7 @@ impl Provider for MacOSProvider {
         );
         if err != AX_ERROR_SUCCESS {
             return Err(action_error(
+                ax.as_ptr(),
                 err,
                 "type_text",
                 element.role,
@@ -4772,6 +4981,7 @@ impl Provider for MacOSProvider {
         unsafe { safe_cf_release(range_value) };
         if err != AX_ERROR_SUCCESS {
             return Err(action_error(
+                ax.as_ptr(),
                 err,
                 "set_text_selection",
                 element.role,
@@ -4826,7 +5036,7 @@ impl Provider for MacOSProvider {
                     let cf_action = CFString::new(&ax_name);
                     let err = do_perform_action(el_ptr, &cf_action);
                     if err != AX_ERROR_SUCCESS {
-                        return Err(action_error(err, action, element.role, &ax_name));
+                        return Err(action_error(el_ptr, err, action, element.role, &ax_name));
                     }
                     return Ok(());
                 }
@@ -4836,7 +5046,7 @@ impl Provider for MacOSProvider {
                     let cf_action = CFString::new(action);
                     let err = do_perform_action(el_ptr, &cf_action);
                     if err != AX_ERROR_SUCCESS {
-                        return Err(action_error(err, action, element.role, action));
+                        return Err(action_error(el_ptr, err, action, element.role, action));
                     }
                     return Ok(());
                 }
@@ -5755,6 +5965,108 @@ mod tests {
             ElementProbe::Found(_) => panic!("null element cannot vend an AXMenuBar"),
             ElementProbe::Absent => panic!("null element must not read as an honest absence"),
         }
+    }
+
+    #[test]
+    fn global_messaging_timeout_is_accepted() {
+        set_global_messaging_timeout().expect("system-wide messaging timeout");
+    }
+
+    fn call(code: i32, ms: u64) -> AxCall {
+        AxCall {
+            code,
+            elapsed: Duration::from_millis(ms),
+        }
+    }
+
+    #[test]
+    fn cannot_complete_says_timeout_only_when_the_call_ran_that_long() {
+        let timeout_ms = (AX_MESSAGING_TIMEOUT_SECS * 1000.0) as u64;
+        // A call that ran the full timeout is reported as one, keeps its
+        // kAXErrorCannotComplete code (so churn classification still sees
+        // `Unreachable`), and warns that the action may have landed.
+        let err = action_error(
+            std::ptr::null(),
+            call(AX_ERROR_CANNOT_COMPLETE, timeout_ms),
+            "press",
+            Role::Button,
+            "AXPress failed",
+        );
+        match err {
+            Error::Platform { code, ref message } => {
+                assert_eq!(code, AX_ERROR_CANNOT_COMPLETE as i64);
+                assert!(message.contains("press: AXPress failed"), "{message}");
+                assert!(message.contains("did not respond within"), "{message}");
+                assert!(message.contains("pid unknown"), "{message}");
+                assert!(
+                    message.contains("may already have taken effect"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected Platform, got {other:?}"),
+        }
+        assert_eq!(
+            classify_element_churn(&err),
+            ElementChurn::Unreachable,
+            "the enriched error must still classify as unreachable"
+        );
+
+        // A fast refusal is not a timeout and must not be called one.
+        let Error::Platform { message, .. } = action_error(
+            std::ptr::null(),
+            call(AX_ERROR_CANNOT_COMPLETE, 5),
+            "press",
+            Role::Button,
+            "AXPress failed",
+        ) else {
+            panic!("expected Platform");
+        };
+        assert!(!message.contains("did not respond"), "{message}");
+        assert!(message.contains("after 5 ms (not a timeout"), "{message}");
+
+        // Other codes are untouched.
+        assert!(matches!(
+            action_error(
+                std::ptr::null(),
+                call(AX_ERROR_ACTION_UNSUPPORTED, 0),
+                "press",
+                Role::Button,
+                "x"
+            ),
+            Error::ActionNotSupported { .. }
+        ));
+        assert!(matches!(
+            action_error(std::ptr::null(), call(-1, 0), "press", Role::Button, "x"),
+            Error::Platform { code: -1, ref message } if message == "x"
+        ));
+    }
+
+    #[test]
+    fn timeout_threshold_is_ninety_percent_of_the_bound() {
+        let bound = Duration::from_secs_f32(AX_MESSAGING_TIMEOUT_SECS);
+        assert!(hit_messaging_timeout(bound));
+        assert!(hit_messaging_timeout(bound.mul_f32(0.95)));
+        assert!(!hit_messaging_timeout(bound.mul_f32(0.5)));
+    }
+
+    #[test]
+    fn snapshot_context_names_the_pid_without_an_action_warning() {
+        let app =
+            AXElement::from_owned(unsafe { safe_ax_create_application(std::process::id() as i32) });
+        let err = cannot_complete_error(
+            app.as_ptr(),
+            "probe",
+            Duration::from_secs_f32(AX_MESSAGING_TIMEOUT_SECS),
+            CannotCompleteContext::Snapshot,
+        );
+        let Error::Platform { message, .. } = err else {
+            panic!("expected Platform");
+        };
+        assert!(
+            message.contains(&format!("the application with pid {}", std::process::id())),
+            "{message}"
+        );
+        assert!(!message.contains("taken effect"), "{message}");
     }
 
     #[test]
