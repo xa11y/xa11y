@@ -3069,9 +3069,11 @@ fn instructions_for_major(major: u32) -> String {
 }
 
 /// macOS major version from `kern.osproductversion`, cached after the first
-/// read. On a probe failure it reports 0, which yields the pre-27 section
-/// name: the probe is a local `sysctl` and should not fail, and a wrong
-/// section name is only a hint, but this keeps the behavior stable.
+/// read. On a probe failure it reports 0. The probe is a local `sysctl` and
+/// should not fail. `0` has two consumers: the grant instruction falls back to
+/// the pre-27 section name (only a hint), and `screen_recording_gates_ax`
+/// treats it as "requires Screen Recording", so an unknown version makes
+/// `MacOSProvider::new` demand the grant rather than skip it.
 fn macos_major_version() -> u32 {
     static VERSION: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| {
         std::process::Command::new("sysctl")
@@ -3090,6 +3092,26 @@ fn macos_major_version() -> u32 {
             .unwrap_or(0)
     });
     *VERSION
+}
+
+/// The provider's Screen Recording denial, naming the detected version (or
+/// that it could not be detected, which is why the grant is demanded).
+fn screen_recording_instructions(major: u32) -> String {
+    let why = if major == 0 {
+        "The macOS version could not be detected, so xa11y requires it as it does on \
+         macOS 26+, where it is needed to read window content via the accessibility API."
+            .to_string()
+    } else {
+        format!(
+            "This is macOS {major}; on macOS 26+ it is required to read window content via \
+             the accessibility API."
+        )
+    };
+    format!(
+        "Enable Screen Recording in System Settings → Privacy & Security → \
+         Screen & System Audio Recording, then restart this process (or the terminal \
+         that launched it): the permission is read once per process.\n{why}"
+    )
 }
 
 /// Whether the accessibility API needs Screen Recording to read window
@@ -3169,11 +3191,7 @@ impl MacOSProvider {
             && !Self::has_screen_recording_permission()
         {
             return Err(Error::PermissionDenied {
-                instructions:
-                    "Enable Screen Recording in System Settings → Privacy & Security → \
-                     Screen & System Audio Recording.\n\
-                     On macOS 26+, this is required to read window content via the accessibility API."
-                        .to_string(),
+                instructions: screen_recording_instructions(macos_major_version()),
             });
         }
 
@@ -6267,6 +6285,16 @@ mod tests {
         assert!(screen_recording_gates_ax(26));
         assert!(screen_recording_gates_ax(27));
         assert!(screen_recording_gates_ax(0));
+    }
+
+    #[test]
+    fn screen_recording_instructions_name_the_version_and_the_restart() {
+        let known = screen_recording_instructions(26);
+        assert!(known.contains("This is macOS 26"), "{known}");
+        assert!(known.contains("restart this process"), "{known}");
+        let unknown = screen_recording_instructions(0);
+        assert!(unknown.contains("could not be detected"), "{unknown}");
+        assert!(unknown.contains("restart this process"), "{unknown}");
     }
 
     #[test]
