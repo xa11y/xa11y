@@ -847,10 +847,6 @@ mod tests {
     /// duplicates (issue #514). Windows minted a fresh handle per read and
     /// returned nested buttons (title bar, toolbar) once per `*` ancestor
     /// (issue #571).
-    ///
-    /// Not on macOS until #548 (the #514 fix) lands; that change drops this
-    /// gate.
-    #[cfg(not(target_os = "macos"))]
     #[test]
     #[ignore]
     fn descendant_search_returns_each_element_once() {

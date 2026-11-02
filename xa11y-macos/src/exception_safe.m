@@ -295,6 +295,21 @@ Boolean safe_cf_equal(CFTypeRef a, CFTypeRef b) {
     }
 }
 
+// Safe CFHash. Consistent with CFEqual, so AXUIElementRefs to the same
+// accessibility object hash alike; used to bucket candidates before the
+// CFEqual comparison when de-duplicating search results. Returns 0 (one shared
+// bucket, still correct) if an ObjC exception was thrown.
+unsigned long safe_cf_hash(CFTypeRef cf) {
+    @try {
+        if (cf != NULL) {
+            return CFHash(cf);
+        }
+        return 0;
+    } @catch (NSException *e) {
+        return 0;
+    }
+}
+
 // Safe CFNumberGetValue.
 Boolean safe_cf_number_get_value(CFNumberRef num, CFNumberType type, void *valuePtr) {
     @try {
