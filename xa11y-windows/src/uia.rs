@@ -718,6 +718,13 @@ impl WindowsProvider {
             let Some(element) = elements[j].as_ref() else {
                 continue;
             };
+            // The root heads the array, and everything after it is its
+            // descendants: no fetch needed to say so.
+            if j == 0 && cached_own_hwnd(element).is_some() && cached_own_hwnd(element) == root_hwnd
+            {
+                apply_range(&mut clips, element, 0, len - 1, is_popup[0], overflows[0]);
+                continue;
+            }
             // An element that has gone since the subtree fetch is one more
             // way the array no longer matches the tree.
             let Some(descendants) = live_snapshot(uia_call(|| unsafe {
@@ -750,17 +757,7 @@ impl WindowsProvider {
                     }
                 }
             }
-            if is_popup[j] {
-                // The popup itself and everything under it start afresh.
-                for clip in &mut clips[j..=j + m] {
-                    *clip = Clip::default();
-                }
-            }
-            if overflows[j] {
-                for clip in &mut clips[j + 1..=j + m] {
-                    *clip = clip.below(element);
-                }
-            }
+            apply_range(&mut clips, element, j, m, is_popup[j], overflows[j]);
         }
         Ok(Some(clips))
     }
@@ -2253,6 +2250,29 @@ impl Clip {
     }
 }
 
+/// Apply element `j` of a subtree array to the clips of itself and its `m`
+/// descendants (the entries after it): a popup starts them afresh, and an
+/// overflowing element narrows its descendants' to its viewport.
+fn apply_range(
+    clips: &mut [Clip],
+    element: &IUIAutomationElement,
+    j: usize,
+    m: usize,
+    is_popup: bool,
+    overflows: bool,
+) {
+    if is_popup {
+        for clip in &mut clips[j..=j + m] {
+            *clip = Clip::default();
+        }
+    }
+    if overflows {
+        for clip in &mut clips[j + 1..=j + m] {
+            *clip = clip.below(element);
+        }
+    }
+}
+
 /// The clip an element was built under, as [`WindowsProvider::clips`]
 /// remembers it.
 #[derive(Clone)]
@@ -2335,11 +2355,12 @@ fn intersect_clip(a: Option<RECT>, b: Option<RECT>) -> Option<RECT> {
 
 /// Whether `clip` leaves no part of `bounds` showing.
 ///
-/// Edges are closed, so a zero-width or zero-height element (a separator
-/// line) is judged like any other, and an element touching the viewport's
-/// edge counts as showing; so does one only partly inside. An element with
-/// no bounds at all is not judged: there is nothing to place, and its
-/// `IsOffscreen` stands.
+/// An element with real size shows when it overlaps the viewport by some
+/// area, so one only partly inside counts as showing and one merely touching
+/// the edge does not. A zero-width or zero-height element (a separator line)
+/// has no area to overlap, so for it the edges are closed: it shows when it
+/// lies on or within the viewport. An element with no bounds at all is not
+/// judged: there is nothing to place, and its `IsOffscreen` stands.
 fn clipped_out(bounds: RECT, clip: Option<RECT>) -> bool {
     let Some(c) = clip else { return false };
     if c.right < c.left || c.bottom < c.top {
@@ -2349,10 +2370,19 @@ fn clipped_out(bounds: RECT, clip: Option<RECT>) -> bool {
     if no_bounds(&bounds) {
         return false;
     }
-    !(bounds.left <= c.right
-        && c.left <= bounds.right
-        && bounds.top <= c.bottom
-        && c.top <= bounds.bottom)
+    let sized = bounds.right > bounds.left && bounds.bottom > bounds.top;
+    let overlaps = if sized {
+        bounds.left < c.right
+            && c.left < bounds.right
+            && bounds.top < c.bottom
+            && c.top < bounds.bottom
+    } else {
+        bounds.left <= c.right
+            && c.left <= bounds.right
+            && bounds.top <= c.bottom
+            && c.top <= bounds.bottom
+    };
+    !overlaps
 }
 
 /// The stable identity of a UIA element, or `None` when it has none.
@@ -6332,14 +6362,15 @@ mod tests {
     #[test]
     fn clipped_out_needs_no_overlap_at_all() {
         let clip = Some(rect(0, 0, 100, 100));
-        // Inside, partly inside, and touching the edge: showing.
+        // Inside and partly inside: showing.
         assert!(!clipped_out(rect(10, 10, 90, 30), clip));
         assert!(!clipped_out(rect(10, 90, 90, 110), clip));
-        assert!(!clipped_out(rect(10, 100, 90, 120), clip));
-        // Scrolled below the viewport.
+        // Scrolled below the viewport, or only touching its edge.
         assert!(clipped_out(rect(10, 120, 90, 140), clip));
-        // A separator line is judged too, inside and out.
+        assert!(clipped_out(rect(10, 100, 90, 120), clip));
+        // A separator line is judged too: inside, on the edge, and out.
         assert!(!clipped_out(rect(10, 50, 90, 50), clip));
+        assert!(!clipped_out(rect(10, 100, 90, 100), clip));
         assert!(clipped_out(rect(10, 150, 90, 150), clip));
         assert!(clipped_out(rect(150, 10, 150, 90), clip));
         // No clip, or no bounds at all: UIA's answer stands.

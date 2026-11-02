@@ -676,7 +676,6 @@ def test_locator_dump_shorthand(app, app_config):
     assert "button" in text
 
 
-
 def _scrolled_list_visibility(app, list_name: str, first: str, last: str):
     """The first and last entries' ``visible``, read both ways the provider
     computes it: a selector search, which takes the one-pass subtree fetch,
@@ -696,9 +695,8 @@ def test_items_scrolled_out_of_a_list_are_not_visible(app, app_config):
     WinForms leaves ``IsOffscreen`` false on list items scrolled out of the
     viewport, so without the provider's own clipping they counted as visible
     and an auto-waiting action would act on an item nobody can see (issue
-    #502). The scrolled-out entry's ``raw["uia_is_offscreen"]`` is reported as
-    a warning so the CI log shows that premise holds, and with it that the
-    test fails without the fix.
+    #502). The test first asserts that premise on the scrolled-out entry's
+    ``raw["uia_is_offscreen"]``, so it cannot pass with or without the fix.
     """
     list_name = app_config.get("scrolled_list_name")
     if not list_name:
@@ -706,13 +704,14 @@ def test_items_scrolled_out_of_a_list_are_not_visible(app, app_config):
     first = app_config["scrolled_list_first_item"]
     last = app_config["scrolled_list_last_item"]
 
-    # A warning, so it lands in the run's summary even when the test passes.
+    # The premise: UIA itself says the scrolled-out entry is on screen.
+    # Without it this test would pass with or without the fix.
     hidden = app.locator(f'[name="{last}"]').element()
-    warnings.warn(
-        f"issue #502 premise: {last!r} uia_is_offscreen="
-        f"{hidden.raw.get('uia_is_offscreen')!r} visible={hidden.visible!r} "
-        f"bounds={hidden.bounds!r}",
-        stacklevel=1,
+    assert hidden.raw.get("uia_is_offscreen") is False, (
+        f"{last!r} reports uia_is_offscreen="
+        f"{hidden.raw.get('uia_is_offscreen')!r}, so the fixture no longer "
+        f"exercises issue #502 (UIA leaving IsOffscreen false on a "
+        f"scrolled-out item)"
     )
 
     found, listed = _scrolled_list_visibility(app, list_name, first, last)
@@ -771,15 +770,32 @@ def test_open_dropdown_in_a_scrolled_panel_is_visible(app, app_config):
         pytest.skip("this app has no combo box in an overflowing panel yet")
     entry = app_config["scrolled_panel_combo_last_item"]
 
+    # The panel must really clip, or the drop-down has nothing to escape:
+    # its filler sits below the panel's viewport.
+    filler = app.locator(f'[name="{app_config["scrolled_panel_filler_name"]}"]')
+    assert filler.element().visible is False, (
+        "the panel's filler must be scrolled out of view; if it is visible, "
+        "the panel exposes no UIA Scroll pattern and this fixture tests "
+        "nothing"
+    )
+    panel = (
+        app.locator(f'[name="{app_config["scrolled_panel_name"]}"]').element().bounds
+    )
+
     combo = app.locator(f'[name="{combo_name}"]')
     combo.expand()
     try:
         el = app.locator(f'[name="{entry}"]').element()
-        warnings.warn(
-            f"open drop-down: {entry!r} uia_is_offscreen="
-            f"{el.raw.get('uia_is_offscreen')!r} visible={el.visible!r} "
-            f"bounds={el.bounds!r}",
-            stacklevel=1,
+        b = el.bounds
+        outside = b is not None and (
+            b.y >= panel.y + panel.height
+            or b.y + b.height <= panel.y
+            or b.x >= panel.x + panel.width
+            or b.x + b.width <= panel.x
+        )
+        assert outside, (
+            f"the drop-down entry must lie wholly outside the panel "
+            f"({panel!r}) for this to test popup clipping; got bounds={b!r}"
         )
         assert el.visible is True, (
             f"an open drop-down entry must be visible, not clipped to the "

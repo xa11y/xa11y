@@ -401,7 +401,7 @@ internal sealed class TestForm : Form
         panel.Controls.Add(combo);
         panel.Controls.Add(filler);
 
-        return MakeGroup("Scroll Panel", new Size(300, 80), FlowDirection.TopDown, panel);
+        return MakeGroup("Overflow", new Size(300, 80), FlowDirection.TopDown, panel);
     }
 
     /// <summary>

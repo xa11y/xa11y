@@ -574,6 +574,8 @@ APP_CONFIGS: dict[str, dict] = {
         "scrolled_list_last_item": "Long Entry 40",
         # A ComboBox in an overflowing panel: its open drop-down extends past
         # the panel and must not be clipped to it.
+        "scrolled_panel_name": "Scroll Panel",
+        "scrolled_panel_filler_name": "Panel Filler",
         "scrolled_panel_combo_name": "Panel Combo",
         "scrolled_panel_combo_last_item": "Panel Choice 3",
         "submit_button_name": "Submit",
