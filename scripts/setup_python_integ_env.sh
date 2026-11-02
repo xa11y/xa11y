@@ -9,8 +9,8 @@
 #
 # This helper consolidates all three suites onto a single `.venv-test` venv
 # and short-circuits the xa11y-python build when the installed package was
-# built from the current source (see the stamp below). On a fresh runner the first caller pays the full build; the
-# second and third callers are no-ops.
+# built from the current source (see the stamp below). On a fresh runner the
+# first caller pays the full build; the second and third callers are no-ops.
 #
 # Usage: source scripts/setup_python_integ_env.sh [EXTRA_REQUIREMENTS_FILE ...]
 #
@@ -143,8 +143,11 @@ else
     fi
     echo "Building xa11y-python and installing into $VENV_DIR..."
     rm -f "$BINDINGS_STAMP_FILE"
-    if (cd "$PROJECT_ROOT/xa11y-python" && "$PIP" install --quiet -e .) \
-            && [ -n "$BINDINGS_STAMP" ]; then
+    # A plain command, not an `if` condition: the caller's `set -e` must
+    # abort on a failed build, or the suites would run against whatever
+    # `_native` the failed build left behind.
+    (cd "$PROJECT_ROOT/xa11y-python" && "$PIP" install --quiet -e .)
+    if [ -n "$BINDINGS_STAMP" ]; then
         printf '%s\n' "$BINDINGS_STAMP" > "$BINDINGS_STAMP_FILE"
     fi
 fi
