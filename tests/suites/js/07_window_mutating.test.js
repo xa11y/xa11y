@@ -85,6 +85,20 @@ async function waitUntil(predicate, timeoutMs, what) {
   throw new Error(`Timed out waiting for ${what}`);
 }
 
+function describeWindows(windows) {
+  // One bounded entry per window, so a settle assertion that found nothing
+  // tells "the window was missing from the list" from "it was listed without
+  // the verb", which an empty lookup alone cannot.
+  if (windows.length === 0) return '[] (the target window is not enumerated)';
+  const clip = (text, limit) =>
+    (text.length <= limit ? text : `${text.slice(0, limit - 3)}...`);
+  const shown = windows.slice(0, 8).map((w) =>
+    `${w.role} ${clip(JSON.stringify(w.name), 60)} ` +
+    `actions=${clip(w.actions.join(','), 120)} ` +
+    `minimized=${w.minimized} fullscreen=${w.fullscreen}`);
+  return `[${shown.join('; ')}${windows.length > 8 ? '; ...' : ''}]`;
+}
+
 async function settledWindow(app, verb, predicate, what) {
   // macOS settles a window-state transition before the verb returns (the
   // provider polls the platform state), so one fresh read must already hold
@@ -93,8 +107,12 @@ async function settledWindow(app, verb, predicate, what) {
   // succeeded, so it keeps the poll. Linux never reaches either branch: the
   // window verbs are unsupported there and the callers skip.
   if (MACOS) {
-    const win = await windowAdvertising(app, verb);
-    assert.ok(win, `${what}: no window advertises ${verb}`);
+    const windows = await app.windows();
+    const win = windows.find((w) => w.actions.includes(verb)) || null;
+    assert.ok(
+      win,
+      `${what}: no window advertises ${verb}; app.windows() = ${describeWindows(windows)}`,
+    );
     assert.ok(
       predicate(win),
       `${what}: minimized=${win.minimized} fullscreen=${win.fullscreen} maximized=${win.maximized}`,
