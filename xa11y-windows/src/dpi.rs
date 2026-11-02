@@ -12,25 +12,162 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::Once;
 
-use windows::Win32::Foundation::{LPARAM, RECT};
-use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR};
+use windows::Win32::Foundation::RECT;
 use windows::Win32::UI::HiDpi::{
-    SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    GetAwarenessFromDpiAwarenessContext, GetThreadDpiAwarenessContext,
+    SetProcessDpiAwarenessContext, SetThreadDpiAwarenessContext, DPI_AWARENESS,
+    DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    DPI_AWARENESS_PER_MONITOR_AWARE, DPI_AWARENESS_SYSTEM_AWARE, DPI_AWARENESS_UNAWARE,
 };
 
 use xa11y_core::{CaptureMapping, CaptureMappingSegment, Error, Rect, Result};
 
-static DPI_AWARENESS: Once = Once::new();
+static PROCESS_AWARENESS: Once = Once::new();
 
-/// Set process DPI awareness before the first UIA bounds read or capture.
+/// Ask for Per-Monitor-V2 awareness for the whole process, once.
+///
+/// This is the cheap path for a standalone binary or a binding host that has
+/// not chosen an awareness: every thread then defaults to per-monitor and
+/// [`DpiScope::enter`] never has to switch anything. Windows refuses a second
+/// process-awareness setting, so a host that already fixed its own keeps it;
+/// that refusal is expected rather than a failure, because each coordinate
+/// call is covered by a [`DpiScope`] on its own thread instead (issue #506).
 pub fn ensure_process_dpi_aware() {
-    DPI_AWARENESS.call_once(|| {
-        // A host may already have fixed its process awareness. Windows then
-        // rejects a second setting; the host-awareness limitation is documented.
-        unsafe {
-            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-        }
+    PROCESS_AWARENESS.call_once(|| {
+        // SAFETY: plain Win32 call with a predefined context constant.
+        // Refused when the host fixed its own awareness first; DpiScope
+        // covers that case per call, so the result is deliberately unused.
+        let _ =
+            unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     });
+}
+
+/// Per-Monitor-V2 DPI awareness on the calling thread for the lifetime of
+/// the guard.
+///
+/// UIA, GDI capture, `GetSystemMetrics` and `SendInput` all answer in the
+/// coordinate space of the *calling thread's* DPI awareness. A thread that is
+/// per-monitor aware (V1 or V2) sees physical desktop pixels, which is what
+/// xa11y reports. A system-aware thread sees coordinates scaled by
+/// system DPI on any monitor whose DPI differs from it, and an unaware thread
+/// sees them scaled on every monitor not at 100%. So every xa11y call that
+/// reads or produces coordinates enters a scope: a per-monitor thread is left
+/// alone, and any other thread is switched to Per-Monitor V2 with
+/// `SetThreadDpiAwarenessContext` and switched back when the scope drops.
+///
+/// The scope covers xa11y's own work: the provider methods it wraps make no
+/// direct call back into host code (core runs host predicates *between*
+/// provider calls, outside any scope). One indirect case remains. On a host
+/// thread that is a single-threaded COM apartment (a GUI thread, or Python
+/// with comtypes loaded), an outgoing COM call made inside the scope pumps
+/// that apartment's messages while it waits, so the host's own window
+/// procedures can run inside the scope, at Per-Monitor V2. A host that reads
+/// coordinates in such a window procedure sees physical pixels for its
+/// duration.
+///
+/// It is also the token [`crate::coords`] demands: each coordinate-bearing
+/// wrapper takes `&DpiScope`, so a call path without a scope does not
+/// compile. The scope is `!Send` (thread awareness is per thread, so a scope
+/// entered on one thread proves nothing on another).
+#[must_use = "the awareness is restored when the scope drops"]
+pub struct DpiScope {
+    previous: Option<DPI_AWARENESS_CONTEXT>,
+    _not_send: std::marker::PhantomData<*const ()>,
+}
+
+thread_local! {
+    /// How many times a [`DpiScope`] on this thread actually switched its
+    /// awareness. The observable the system-aware host test asserts on, since
+    /// a single-monitor 96-DPI runner gives the same coordinates either way.
+    static SCOPE_SWITCHES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// See [`SCOPE_SWITCHES`].
+pub fn scope_switches() -> u64 {
+    SCOPE_SWITCHES.with(std::cell::Cell::get)
+}
+
+/// Whether the calling thread is per-monitor DPI aware (V1 or V2).
+pub fn thread_is_per_monitor() -> bool {
+    // SAFETY: both calls only read the calling thread's DPI context.
+    let awareness = unsafe { GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext()) };
+    awareness == DPI_AWARENESS_PER_MONITOR_AWARE
+}
+
+impl DpiScope {
+    pub fn enter() -> Result<Self> {
+        // SAFETY: both calls only read the calling thread's DPI context.
+        let awareness =
+            unsafe { GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext()) };
+        if awareness == DPI_AWARENESS_PER_MONITOR_AWARE {
+            return Ok(Self {
+                previous: None,
+                _not_send: std::marker::PhantomData,
+            });
+        }
+        // SAFETY: plain Win32 call; it returns the previous context, or null
+        // when the switch was refused.
+        let previous =
+            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        if previous.0.is_null() {
+            return Err(Error::Platform {
+                code: -1,
+                message: format!(
+                    "SetThreadDpiAwarenessContext(PER_MONITOR_AWARE_V2) failed on a thread that \
+                     is {}, so bounds, input points, and captures would be read in scaled \
+                     coordinates",
+                    awareness_name(awareness)
+                ),
+            });
+        }
+        SCOPE_SWITCHES.with(|n| n.set(n.get() + 1));
+        Ok(Self {
+            previous: Some(previous),
+            _not_send: std::marker::PhantomData,
+        })
+    }
+}
+
+impl DpiScope {
+    /// Whether entering this scope switched the thread's awareness (it was
+    /// not already per-monitor).
+    pub fn switched(&self) -> bool {
+        self.previous.is_some()
+    }
+}
+
+impl Drop for DpiScope {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous {
+            // SAFETY: restores the context SetThreadDpiAwarenessContext
+            // returned for this thread. Restoring a context the thread itself
+            // held cannot be refused, and a destructor has nowhere to report
+            // to, so a failure is only asserted in debug builds.
+            let restored = unsafe { SetThreadDpiAwarenessContext(previous) };
+            debug_assert!(
+                !restored.0.is_null(),
+                "restoring the host thread's DPI awareness failed"
+            );
+        }
+    }
+}
+
+/// Make the calling thread Per-Monitor V2 for its whole life. For threads
+/// xa11y owns (the UIA registration worker), which run only xa11y code.
+pub fn make_thread_per_monitor_aware() -> Result<()> {
+    let scope = DpiScope::enter()?;
+    // Keep the switch: the thread is xa11y's and never runs host code.
+    std::mem::forget(scope);
+    Ok(())
+}
+
+fn awareness_name(awareness: DPI_AWARENESS) -> &'static str {
+    match awareness {
+        DPI_AWARENESS_UNAWARE => "DPI unaware",
+        DPI_AWARENESS_SYSTEM_AWARE => "system DPI aware",
+        DPI_AWARENESS_PER_MONITOR_AWARE => "per-monitor DPI aware",
+        _ => "of unknown DPI awareness",
+    }
 }
 
 /// UIA bounds are already in the Windows desktop coordinate space.
@@ -44,8 +181,8 @@ pub fn physical_rect_to_desktop(rect: RECT) -> Rect {
 }
 
 /// Capture the physical virtual desktop with an identity coordinate mapping.
-pub fn full_capture_plan() -> Result<(Rect, f32, CaptureMapping)> {
-    let monitors = monitor_rects()?;
+pub fn full_capture_plan(scope: &DpiScope) -> Result<(Rect, f32, CaptureMapping)> {
+    let monitors = crate::coords::monitor_rects(scope)?;
     let physical = bounding_rect(monitors.iter().copied().map(physical_rect_to_desktop))
         .ok_or_else(|| Error::Platform {
             code: -1,
@@ -56,8 +193,8 @@ pub fn full_capture_plan() -> Result<(Rect, f32, CaptureMapping)> {
 }
 
 /// A requested region is already in physical desktop pixels.
-pub fn region_capture_plan(rect: Rect) -> Result<(Rect, f32, CaptureMapping)> {
-    let monitors = monitor_rects()?;
+pub fn region_capture_plan(scope: &DpiScope, rect: Rect) -> Result<(Rect, f32, CaptureMapping)> {
+    let monitors = crate::coords::monitor_rects(scope)?;
     Ok((rect, 1.0, capture_mapping(&monitors, rect)?))
 }
 
@@ -105,7 +242,10 @@ fn capture_segments(monitors: &[RECT], capture: Rect) -> Vec<CaptureMappingSegme
 }
 
 fn validate_layout_token(expected: u64) -> Result<bool> {
-    Ok(layout_token(&monitor_rects()?) == expected)
+    // Called back from `CaptureMapping` on whatever thread maps a point, so
+    // it enters its own scope.
+    let scope = DpiScope::enter()?;
+    Ok(layout_token(&crate::coords::monitor_rects(&scope)?) == expected)
 }
 
 fn layout_token(monitors: &[RECT]) -> u64 {
@@ -141,45 +281,69 @@ fn bounding_rect(rects: impl Iterator<Item = Rect>) -> Option<Rect> {
     })
 }
 
-fn monitor_rects() -> Result<Vec<RECT>> {
-    let mut monitors = Vec::new();
-    // SAFETY: the callback receives the pointer unchanged; `monitors` lives
-    // until EnumDisplayMonitors returns.
-    let ok = unsafe {
-        EnumDisplayMonitors(
-            None,
-            None,
-            Some(collect_monitor),
-            LPARAM(&mut monitors as *mut Vec<RECT> as isize),
-        )
-    }
-    .as_bool();
-    if !ok {
-        return Err(Error::Platform {
-            code: -1,
-            message: "EnumDisplayMonitors failed while reading desktop layout".into(),
-        });
-    }
-    Ok(monitors)
-}
-
-unsafe extern "system" fn collect_monitor(
-    _hmonitor: HMONITOR,
-    _hdc: HDC,
-    lprc: *mut RECT,
-    user_data: LPARAM,
-) -> windows::core::BOOL {
-    let monitors = unsafe { &mut *(user_data.0 as *mut Vec<RECT>) };
-    // A null HDC makes the supplied rectangle use virtual-screen pixels.
-    // EnumDisplayMonitors keeps this pointer valid for the callback.
-    monitors.push(unsafe { *lprc });
-    windows::core::BOOL(1)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use xa11y_core::{anchor_point, Anchor, Point, Screenshot};
+
+    use windows::Win32::UI::HiDpi::{
+        DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, DPI_AWARENESS_CONTEXT_SYSTEM_AWARE,
+        DPI_AWARENESS_CONTEXT_UNAWARE,
+    };
+
+    fn thread_awareness() -> DPI_AWARENESS {
+        unsafe { GetAwarenessFromDpiAwarenessContext(GetThreadDpiAwarenessContext()) }
+    }
+
+    /// Run `f` on a fresh thread whose awareness starts as `context`.
+    fn on_thread_with(context: DPI_AWARENESS_CONTEXT, f: fn()) {
+        let context = context.0 as isize;
+        std::thread::spawn(move || {
+            let previous =
+                unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(context as _)) };
+            assert!(!previous.0.is_null(), "test thread awareness can be set");
+            f();
+        })
+        .join()
+        .expect("test thread");
+    }
+
+    #[test]
+    fn scope_switches_a_system_aware_thread_and_restores_it() {
+        on_thread_with(DPI_AWARENESS_CONTEXT_SYSTEM_AWARE, || {
+            assert_eq!(thread_awareness(), DPI_AWARENESS_SYSTEM_AWARE);
+            {
+                let _scope = DpiScope::enter().expect("scope enters");
+                assert_eq!(thread_awareness(), DPI_AWARENESS_PER_MONITOR_AWARE);
+            }
+            assert_eq!(thread_awareness(), DPI_AWARENESS_SYSTEM_AWARE);
+        });
+    }
+
+    #[test]
+    fn scope_switches_an_unaware_thread_and_restores_it() {
+        on_thread_with(DPI_AWARENESS_CONTEXT_UNAWARE, || {
+            {
+                let _scope = DpiScope::enter().expect("scope enters");
+                assert_eq!(thread_awareness(), DPI_AWARENESS_PER_MONITOR_AWARE);
+            }
+            assert_eq!(thread_awareness(), DPI_AWARENESS_UNAWARE);
+        });
+    }
+
+    #[test]
+    fn scope_leaves_a_per_monitor_v1_thread_alone() {
+        on_thread_with(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE, || {
+            let before = unsafe { GetThreadDpiAwarenessContext() };
+            let scope = DpiScope::enter().expect("scope enters");
+            assert!(
+                scope.previous.is_none(),
+                "a per-monitor thread is not switched"
+            );
+            drop(scope);
+            assert_eq!(unsafe { GetThreadDpiAwarenessContext() }.0, before.0);
+        });
+    }
 
     fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
         RECT {

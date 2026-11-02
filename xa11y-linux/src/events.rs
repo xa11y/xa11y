@@ -37,8 +37,8 @@ use xa11y_core::{
 };
 
 use crate::atspi::{
-    is_listable_top_level, is_password_role, map_atspi_role, map_atspi_role_number,
-    read_interfaces, AccessibleRef, Interfaces, LinuxProvider,
+    is_listable_top_level, is_password_role, read_interfaces, role_from_atspi,
+    try_map_atspi_role_number, AccessibleRef, Interfaces, LinuxProvider,
 };
 
 /// AT-SPI2 event-interface names we subscribe to via match rules.
@@ -121,9 +121,9 @@ pub(crate) fn subscribe_for_pid(
     // registered-listener list (Qt, GTK 3's atk-bridge) emit nothing at all
     // for an unregistered event, so without this a Qt app's subscription
     // was silent (issue #488). Registration is tied to this connection's
-    // bus name; the cancel path deregisters each (event, app) pair in the
-    // form it was registered, and the registry also drops it
-    // when the connection closes.
+    // bus name; the cancel path deregisters each one in the form the
+    // registry declares for `DeregisterEvent`, and the registry also drops
+    // them when the connection closes.
     let registered = register_events(&conn, &sender_buses)?;
 
     // Seed the top-level window states. This is also the barrier that makes
@@ -133,20 +133,16 @@ pub(crate) fn subscribe_for_pid(
     // switched its emission on.
     let mut windows = HashMap::new();
     for bus in &sender_buses {
-        seed_top_level_windows(&conn, bus, &mut windows)?;
+        seed_top_level_windows(&conn, bus, &sender_buses, &mut windows)?;
     }
     // Windows already open get a snapshot now, so their eventual
     // `WindowClosed` names them even when a destroyed window no longer
     // answers by then.
     let window_snapshots: HashMap<String, ElementData> = windows
         .iter()
-        .filter(|(_, listed)| **listed)
+        .filter(|(_, window)| window.listed)
         .filter_map(|(key, _)| {
-            let (bus, path) = split_window_key(key, &sender_buses)?;
-            let aref = AccessibleRef {
-                bus_name: bus.to_owned(),
-                path: path.to_owned(),
-            };
+            let aref = window_ref(key, &sender_buses)?;
             build_event_snapshot(&conn, &aref, Some(pid))
                 .filter(|t| is_window_role(t.role))
                 .map(|t| (key.clone(), t))
@@ -241,10 +237,11 @@ struct EventContext {
     /// until every `Arc<EventContext>` (including the one held by the
     /// spawned thread) is dropped.
     conn: Connection,
-    /// Whether each top-level window (keyed `bus` + `path`) is currently
-    /// listed in `App::windows()`, so `WindowOpened` / `WindowClosed` fire
-    /// once per transition however many signals report it.
-    windows: Mutex<HashMap<String, bool>>,
+    /// Each tracked top-level window (keyed `bus` + `path`): whether it is
+    /// currently listed in `App::windows()`, so `WindowOpened` /
+    /// `WindowClosed` fire once per transition however many signals report
+    /// it, and which application bus it belongs to.
+    windows: Mutex<HashMap<String, TrackedWindow>>,
     /// The last window-role snapshot of each tracked window, for the
     /// `WindowClosed` target: a destroyed GTK 4 window no longer answers
     /// its role or name by the time `defunct` arrives.
@@ -337,65 +334,47 @@ impl EventContext {
     /// the subscription has no error channel, and a later change rescans.
     fn rescan_top_level_windows(&self, bus: &str) {
         let mut current = HashMap::new();
-        if seed_top_level_windows(&self.conn, bus, &mut current).is_err() {
+        if seed_top_level_windows(&self.conn, bus, &self.sender_buses, &mut current).is_err() {
             return;
         }
-        let mut gone = Vec::new();
-        let mut vanished_hidden = Vec::new();
-        {
+        let plan = {
             let windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
-            for (key, listed) in windows.iter() {
-                if key.strip_prefix(bus).is_some_and(|p| p.starts_with('/'))
-                    && !current.contains_key(key)
-                {
-                    if *listed {
-                        gone.push(key.clone());
-                    } else {
-                        vanished_hidden.push(key.clone());
-                    }
-                }
-            }
-        }
+            plan_rescan(&windows, current, bus, &self.sender_buses)
+        };
         // A seeded hidden window that has since been destroyed was never
         // listed, so it leaves without an event, but must not linger.
-        if !vanished_hidden.is_empty() {
+        if !plan.vanished_hidden.is_empty() {
             let mut windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
-            for key in &vanished_hidden {
+            for key in &plan.vanished_hidden {
                 windows.remove(key);
             }
         }
-        for (key, listed) in current {
-            let aref = AccessibleRef {
-                bus_name: bus.to_owned(),
-                path: key[bus.len()..].to_owned(),
-            };
+        for (aref, listed) in plan.current {
             // Snapshot only on a real transition: a rescan revisits every
             // window, and most have not changed.
-            self.window_listed_with(&aref, listed, || {
+            self.window_listed_with(&aref, bus, listed, || {
                 build_event_snapshot(&self.conn, &aref, Some(self.app_pid))
             });
         }
-        for key in gone {
-            let aref = AccessibleRef {
-                bus_name: bus.to_owned(),
-                path: key[bus.len()..].to_owned(),
-            };
+        for aref in plan.gone {
             self.window_listed(&aref, false, None);
         }
     }
 
     /// Record that a top-level window entered (`listed`) or left the
     /// window list, emitting `WindowOpened` / `WindowClosed` only on a
-    /// change (see [`note_window`]).
+    /// change (see [`note_window`]). For a window named by an event's
+    /// sender, whose bus is the application's own.
     fn window_listed(&self, aref: &AccessibleRef, listed: bool, target: Option<ElementData>) {
-        self.window_listed_with(aref, listed, || target);
+        self.window_listed_with(aref, &aref.bus_name, listed, || target);
     }
 
-    /// [`Self::window_listed`] with the target built only when the
-    /// transition is real.
+    /// [`Self::window_listed`] for a window of the application on
+    /// `app_bus`, with the target built only when the transition is real.
     fn window_listed_with(
         &self,
         aref: &AccessibleRef,
+        app_bus: &str,
         listed: bool,
         target: impl FnOnce() -> Option<ElementData>,
     ) {
@@ -403,6 +382,7 @@ impl EventContext {
         let changed = note_window(
             &mut self.windows.lock().unwrap_or_else(|e| e.into_inner()),
             key.clone(),
+            app_bus,
             listed,
         );
         if !changed {
@@ -550,11 +530,45 @@ const APP_ROOT_PATH: &str = "/org/a11y/atspi/accessible/root";
 /// the open windows (plus seeded hidden ones) rather than every window the
 /// application ever had; a second close signal for the same window (GTK 4's
 /// `defunct` then `Window:Destroy`) finds no entry and stays silent.
-fn note_window(windows: &mut HashMap<String, bool>, key: String, listed: bool) -> bool {
+///
+/// A newly tracked window belongs to `app_bus`; one already tracked keeps
+/// the application it was first recorded under.
+fn note_window(
+    windows: &mut HashMap<String, TrackedWindow>,
+    key: String,
+    app_bus: &str,
+    listed: bool,
+) -> bool {
     if listed {
-        windows.insert(key, true) != Some(true)
+        match windows.get_mut(&key) {
+            Some(window) => !std::mem::replace(&mut window.listed, true),
+            None => {
+                windows.insert(key, TrackedWindow::new(true, app_bus));
+                true
+            }
+        }
     } else {
-        windows.remove(&key) == Some(true)
+        windows.remove(&key).is_some_and(|window| window.listed)
+    }
+}
+
+/// One top-level window the subscription tracks.
+#[derive(Debug, Clone, PartialEq)]
+struct TrackedWindow {
+    /// Whether `App::windows()` lists it.
+    listed: bool,
+    /// The application bus whose children it was read from. A window's own
+    /// key can name another bus (a child reports its own), so a rescan of
+    /// an application diffs on this rather than on the key's prefix.
+    app_bus: String,
+}
+
+impl TrackedWindow {
+    fn new(listed: bool, app_bus: &str) -> Self {
+        Self {
+            listed,
+            app_bus: app_bus.to_owned(),
+        }
     }
 }
 
@@ -565,6 +579,70 @@ fn split_window_key<'k>(key: &'k str, buses: &[String]) -> Option<(&'k str, &'k 
         let path = key.strip_prefix(bus.as_str())?;
         path.starts_with('/').then(|| (&key[..bus.len()], path))
     })
+}
+
+/// Rebuild the [`AccessibleRef`] a [`window_key`] was made from. `None` for
+/// a key on none of `buses`.
+fn window_ref(key: &str, buses: &[String]) -> Option<AccessibleRef> {
+    let (bus, path) = split_window_key(key, buses)?;
+    Some(AccessibleRef {
+        bus_name: bus.to_owned(),
+        path: path.to_owned(),
+    })
+}
+
+/// What a rescan of `bus` changes, given the windows already `known` and
+/// the `current` ones just read.
+struct RescanPlan {
+    /// Every current window, with whether it is listed.
+    current: Vec<(AccessibleRef, bool)>,
+    /// Known listed windows of `bus`'s application that are no longer
+    /// current.
+    gone: Vec<AccessibleRef>,
+    /// Known hidden windows of `bus`'s application that are no longer
+    /// current.
+    vanished_hidden: Vec<String>,
+}
+
+/// Diff a rescan of the application on `bus` against the `known` windows.
+///
+/// A window's key can name a bus other than `bus`, because
+/// [`seed_top_level_windows`] keys a child under the bus the child reports.
+/// So the windows a rescan can close are the ones recorded under `bus` as
+/// their application ([`TrackedWindow::app_bus`]), not the ones whose key
+/// starts with it, and each key is split against all of `buses` rather
+/// than cut at `bus`'s length.
+///
+/// Every key here splits: [`seed_top_level_windows`] records only windows
+/// on one of `buses`, and the dispatcher drops any signal whose sender is
+/// not one of them, so no other key is ever tracked. The `filter_map`s
+/// below therefore drop nothing.
+fn plan_rescan(
+    known: &HashMap<String, TrackedWindow>,
+    current: HashMap<String, TrackedWindow>,
+    bus: &str,
+    buses: &[String],
+) -> RescanPlan {
+    let mut gone = Vec::new();
+    let mut vanished_hidden = Vec::new();
+    for (key, window) in known {
+        if window.app_bus == bus && !current.contains_key(key) {
+            if window.listed {
+                gone.extend(window_ref(key, buses));
+            } else {
+                vanished_hidden.push(key.clone());
+            }
+        }
+    }
+    let current = current
+        .into_iter()
+        .filter_map(|(key, window)| Some((window_ref(&key, buses)?, window.listed)))
+        .collect();
+    RescanPlan {
+        current,
+        gone,
+        vanished_hidden,
+    }
 }
 
 fn window_key(aref: &AccessibleRef) -> String {
@@ -612,12 +690,18 @@ fn is_top_level(conn: &Connection, aref: &AccessibleRef) -> bool {
 ///
 /// A peer that left, or a window destroyed mid-read, is absence; any other
 /// failure fails the subscription.
+///
+/// A child that reports a bus outside `buses` is skipped: the subscription
+/// does not listen to that bus, and the dispatcher drops its senders, so no
+/// event could ever move that window, and tracking it would only leave an
+/// entry that can be neither updated nor turned back into a reference.
 fn seed_top_level_windows(
     conn: &Connection,
     bus: &str,
-    windows: &mut HashMap<String, bool>,
+    buses: &[String],
+    windows: &mut HashMap<String, TrackedWindow>,
 ) -> Result<()> {
-    let call = |path: &str, method: &str| -> Result<Option<zbus::Message>> {
+    let call = |bus: &str, path: &str, method: &str| -> Result<Option<zbus::Message>> {
         let proxy = zbus::blocking::Proxy::new(
             conn,
             bus.to_owned(),
@@ -637,7 +721,7 @@ fn seed_top_level_windows(
             }),
         }
     };
-    let Some(reply) = call(APP_ROOT_PATH, "GetChildren")? else {
+    let Some(reply) = call(bus, APP_ROOT_PATH, "GetChildren")? else {
         return Ok(());
     };
     let children: Vec<(String, zbus::zvariant::OwnedObjectPath)> =
@@ -654,7 +738,14 @@ fn seed_top_level_windows(
             },
             path: path.to_string(),
         };
-        let Some(role) = call(&aref.path, "GetRole")? else {
+        if !buses.contains(&aref.bus_name) {
+            log::debug!(
+                "not tracking window {}: its bus is outside the subscription",
+                window_key(&aref)
+            );
+            continue;
+        }
+        let Some(role) = call(&aref.bus_name, &aref.path, "GetRole")? else {
             continue;
         };
         let role: u32 = role.body().deserialize().map_err(|e| Error::Platform {
@@ -664,7 +755,7 @@ fn seed_top_level_windows(
         if !is_window_role_number(role) {
             continue;
         }
-        let Some(state) = call(&aref.path, "GetState")? else {
+        let Some(state) = call(&aref.bus_name, &aref.path, "GetState")? else {
             continue;
         };
         let words: Vec<u32> = state.body().deserialize().map_err(|e| Error::Platform {
@@ -673,7 +764,7 @@ fn seed_top_level_windows(
         })?;
         windows.insert(
             window_key(&aref),
-            is_listable_top_level(bits_from_u32s(&words)),
+            TrackedWindow::new(is_listable_top_level(bits_from_u32s(&words)), bus),
         );
     }
     Ok(())
@@ -707,10 +798,20 @@ fn registry_proxy(conn: &Connection, iface: &str) -> Result<Proxy<'static>> {
     })
 }
 
-/// Read the registry's `RegisterEvent` signature from its introspection
-/// data, so the call is made in the one form the registry accepts rather
-/// than tried in one form and retried in the other.
-fn register_signature(conn: &Connection) -> Result<RegisterSignature> {
+/// The registry's `RegisterEvent` and `DeregisterEvent` signatures.
+struct RegistrySignature {
+    register: RegisterSignature,
+    /// `DeregisterEvent` declares an `app_bus_name` argument after the
+    /// event. at-spi2-core 2.52 declares only the event: libdbus there
+    /// ignores an extra argument, but a registry that checks signatures
+    /// (GDBus) rejects one, so `(ss)` is sent only when it is declared.
+    deregister_with_app: bool,
+}
+
+/// Read the registry's `RegisterEvent` and `DeregisterEvent` signatures
+/// from its introspection data, so each call is made in the one form the
+/// registry declares rather than tried in one form and retried in the other.
+fn register_signature(conn: &Connection) -> Result<RegistrySignature> {
     let xml: String = registry_proxy(conn, "org.freedesktop.DBus.Introspectable")?
         .call("Introspect", &())
         .map_err(|e| Error::Platform {
@@ -720,27 +821,40 @@ fn register_signature(conn: &Connection) -> Result<RegisterSignature> {
     register_signature_from_xml(&xml)
 }
 
-fn register_signature_from_xml(xml: &str) -> Result<RegisterSignature> {
-    let start = xml
-        .find("<method name=\"RegisterEvent\"")
-        .ok_or_else(|| Error::Platform {
-            code: -1,
-            message: "the AT-SPI registry has no RegisterEvent method, so toolkits that \
-                      emit only for registered listeners (Qt, GTK 3) would stay silent"
-                .to_string(),
-        })?;
-    let body = &xml[start..];
-    let method = &body[..body.find("</method>").unwrap_or(body.len())];
-    // Method arguments are inputs unless marked `direction="out"`.
-    let in_args = method
-        .matches("<arg ")
-        .count()
-        .saturating_sub(method.matches("direction=\"out\"").count());
-    Ok(if in_args >= 3 {
-        RegisterSignature::WithProperties
-    } else {
-        RegisterSignature::EventOnly
+fn register_signature_from_xml(xml: &str) -> Result<RegistrySignature> {
+    let register_args = in_arg_count(xml, "RegisterEvent").ok_or_else(|| Error::Platform {
+        code: -1,
+        message: "the AT-SPI registry has no RegisterEvent method, so toolkits that \
+                  emit only for registered listeners (Qt, GTK 3) would stay silent"
+            .to_string(),
+    })?;
+    Ok(RegistrySignature {
+        register: if register_args >= 3 {
+            RegisterSignature::WithProperties
+        } else {
+            RegisterSignature::EventOnly
+        },
+        // An undeclared DeregisterEvent gets the one-argument form. Every
+        // registry version accepts it, but one that matches deregistrations
+        // by app removes nothing with it; closing the connection is what
+        // cleans those registrations up.
+        deregister_with_app: in_arg_count(xml, "DeregisterEvent").is_some_and(|n| n >= 2),
     })
+}
+
+/// The number of input arguments introspection `xml` declares for
+/// `method`, or `None` when it declares no such method.
+fn in_arg_count(xml: &str, method: &str) -> Option<usize> {
+    let start = xml.find(&format!("<method name=\"{method}\""))?;
+    let body = &xml[start..];
+    let declaration = &body[..body.find("</method>").unwrap_or(body.len())];
+    // Method arguments are inputs unless marked `direction="out"`.
+    Some(
+        declaration
+            .matches("<arg ")
+            .count()
+            .saturating_sub(declaration.matches("direction=\"out\"").count()),
+    )
 }
 
 /// One registration made by [`register_events`], kept so
@@ -752,6 +866,14 @@ struct Registration {
     app: Option<String>,
 }
 
+/// What [`register_events`] registered, and how [`deregister_events`]
+/// undoes it.
+struct Registrations {
+    entries: Vec<Registration>,
+    /// See [`RegistrySignature::deregister_with_app`].
+    deregister_with_app: bool,
+}
+
 /// Register [`REGISTERED_EVENTS`] for this connection. Returns what was
 /// registered, for [`deregister_events`].
 ///
@@ -760,14 +882,17 @@ struct Registration {
 /// the registry: at-spi2-core still broadcasts `EventListenerRegistered` to
 /// every application, and scopes only what `GetRegisteredEvents` returns,
 /// so other applications may still switch their emission on.
-fn register_events(conn: &Connection, app_buses: &[String]) -> Result<Vec<Registration>> {
+fn register_events(conn: &Connection, app_buses: &[String]) -> Result<Registrations> {
     let signature = register_signature(conn)?;
     let registry = registry_proxy(conn, "org.a11y.atspi.Registry")?;
-    let apps: Vec<Option<&str>> = match signature {
+    let apps: Vec<Option<&str>> = match signature.register {
         RegisterSignature::EventOnly => vec![None],
         RegisterSignature::WithProperties => app_buses.iter().map(|b| Some(b.as_str())).collect(),
     };
-    let mut done = Vec::new();
+    let mut done = Registrations {
+        entries: Vec::new(),
+        deregister_with_app: signature.deregister_with_app,
+    };
     for app in apps {
         for event in REGISTERED_EVENTS {
             let reply = match app {
@@ -785,7 +910,7 @@ fn register_events(conn: &Connection, app_buses: &[String]) -> Result<Vec<Regist
                     ),
                 });
             }
-            done.push(Registration {
+            done.entries.push(Registration {
                 event,
                 app: app.map(str::to_owned),
             });
@@ -794,25 +919,30 @@ fn register_events(conn: &Connection, app_buses: &[String]) -> Result<Vec<Regist
     Ok(done)
 }
 
-/// Undo [`register_events`]: `DeregisterEvent(s)` for a one-argument
-/// registration, `DeregisterEvent(ss)` with the same app for a 2.46+ one,
-/// so a registry that matches a deregistration by app removes exactly what
-/// was registered. (at-spi2-core 2.52 matches by sender and event and
-/// accepts either form.)
-fn deregister_events(conn: &Connection, registrations: &[Registration]) {
+/// Undo [`register_events`]. Where the registry declares
+/// `DeregisterEvent(s event, s app_bus_name)`, an app-scoped registration
+/// is undone with the same app, so a registry that matches by app removes
+/// exactly what was registered; otherwise `DeregisterEvent(s)`, which
+/// at-spi2-core 2.52 matches by sender and event alone.
+fn deregister_events(conn: &Connection, registrations: &Registrations) {
     let Ok(registry) = registry_proxy(conn, "org.a11y.atspi.Registry") else {
         return;
     };
-    for registration in registrations {
+    for registration in &registrations.entries {
         // Teardown cannot report a failure, and the registry forgets a
         // closed connection's registrations on its own.
-        let _ = match &registration.app {
-            None => registry.call_method("DeregisterEvent", &(registration.event,)),
-            Some(app) => {
-                registry.call_method("DeregisterEvent", &(registration.event, app.as_str()))
-            }
+        let _ = match deregister_args(registration, registrations.deregister_with_app) {
+            (event, None) => registry.call_method("DeregisterEvent", &(event,)),
+            (event, Some(app)) => registry.call_method("DeregisterEvent", &(event, app)),
         };
     }
+}
+
+/// The `DeregisterEvent` arguments for `registration`: the app as well only
+/// when it was registered with one and the registry declares the argument.
+fn deregister_args(registration: &Registration, with_app: bool) -> (&'static str, Option<&str>) {
+    let app = registration.app.as_deref().filter(|_| with_app);
+    (registration.event, app)
 }
 
 // ── Signal → EventKind mapping ──────────────────────────────────────────────
@@ -1009,26 +1139,19 @@ fn build_event_snapshot(
     aref: &AccessibleRef,
     pid: Option<u32>,
 ) -> Option<ElementData> {
-    let role_name = get_role_name(conn, aref).unwrap_or_default();
-    let role_num = if role_name.is_empty() {
-        get_role_number(conn, aref).unwrap_or(0)
+    // Number first, name only as a fallback: the same rule the tree read
+    // uses (`role_from_atspi`, issue #485), so an event's target role
+    // matches the element the tree returns.
+    let role_num = get_role_number(conn, aref).unwrap_or(0);
+    let role_name = if try_map_atspi_role_number(role_num).is_some() {
+        String::new()
     } else {
-        0
+        get_role_name(conn, aref).unwrap_or_default()
     };
-    let mut role = if !role_name.is_empty() {
-        let r = map_atspi_role(&role_name);
-        if r == Role::Unknown {
-            let n = get_role_number(conn, aref).unwrap_or(0);
-            map_atspi_role_number(n)
-        } else {
-            r
-        }
-    } else {
-        map_atspi_role_number(role_num)
-    };
-    // `role_num` is read only when the name is empty; a named role is
-    // decided by its name, which `is_password_role` also accepts.
+    // The role number is always read and the name only when the number
+    // is unmapped; `is_password_role` accepts either form.
     let password = is_password_role(&role_name, role_num);
+    let mut role = role_from_atspi(role_num, &role_name);
 
     // State bits (used both for role refinement and for StateSet).
     // A failed GetState is `None` — preserve that as `state_read_ok = false`
@@ -1612,7 +1735,10 @@ mod tests {
             </interface></node>"#;
         assert!(matches!(
             register_signature_from_xml(old),
-            Ok(RegisterSignature::EventOnly)
+            Ok(RegistrySignature {
+                register: RegisterSignature::EventOnly,
+                deregister_with_app: false,
+            })
         ));
         let new = r#"<node><interface name="org.a11y.atspi.Registry">
             <method name="RegisterEvent">
@@ -1620,11 +1746,44 @@ mod tests {
               <arg direction="in" name="properties" type="as"/>
               <arg direction="in" name="app_bus_name" type="s"/>
             </method>
+            <method name="DeregisterEvent"><arg direction="in" name="event" type="s"/></method>
             <method name="GetRegisteredEvents"><arg direction="out" type="a(ss)"/></method>
             </interface></node>"#;
+        // at-spi2-core 2.52: RegisterEvent takes the app, DeregisterEvent
+        // declares only the event, so deregistration sends `(s)`.
         assert!(matches!(
             register_signature_from_xml(new),
-            Ok(RegisterSignature::WithProperties)
+            Ok(RegistrySignature {
+                register: RegisterSignature::WithProperties,
+                deregister_with_app: false,
+            })
+        ));
+        // A registry that declares DeregisterEvent's app argument gets it.
+        let with_app = new.replace(
+            r#"<method name="DeregisterEvent"><arg direction="in" name="event" type="s"/></method>"#,
+            r#"<method name="DeregisterEvent">
+              <arg direction="in" name="event" type="s"/>
+              <arg direction="in" name="app_bus_name" type="s"/>
+            </method>"#,
+        );
+        assert!(matches!(
+            register_signature_from_xml(&with_app),
+            Ok(RegistrySignature {
+                register: RegisterSignature::WithProperties,
+                deregister_with_app: true,
+            })
+        ));
+        // No DeregisterEvent declared: the one-argument form.
+        let undeclared = new.replace(
+            r#"<method name="DeregisterEvent"><arg direction="in" name="event" type="s"/></method>"#,
+            "",
+        );
+        assert!(matches!(
+            register_signature_from_xml(&undeclared),
+            Ok(RegistrySignature {
+                deregister_with_app: false,
+                ..
+            })
         ));
         // No RegisterEvent at all is an error naming the consequence, not a
         // subscription that silently hears nothing from Qt.
@@ -1638,18 +1797,20 @@ mod tests {
     fn window_transitions_fire_once_per_change() {
         let mut windows = HashMap::new();
         // A new window opens once.
-        assert!(note_window(&mut windows, "a".into(), true));
+        assert!(note_window(&mut windows, "a".into(), ":1.5", true));
         // GTK 4 ChildrenChanged:add and a later showing re-read agree: once.
-        assert!(!note_window(&mut windows, "a".into(), true));
-        assert!(note_window(&mut windows, "a".into(), false));
+        assert!(!note_window(&mut windows, "a".into(), ":1.5", true));
+        assert!(note_window(&mut windows, "a".into(), ":1.5", false));
         // Defunct then Window:Destroy: no second close, and no entry left.
-        assert!(!note_window(&mut windows, "a".into(), false));
+        assert!(!note_window(&mut windows, "a".into(), ":1.5", false));
         assert!(windows.is_empty());
         // A close for a window never seen open says nothing.
-        assert!(!note_window(&mut windows, "c".into(), false));
-        // A seeded hidden window (Qt's dialog before it is first shown).
-        windows.insert("b".into(), false);
-        assert!(note_window(&mut windows, "b".into(), true));
+        assert!(!note_window(&mut windows, "c".into(), ":1.5", false));
+        // A seeded hidden window (Qt's dialog before it is first shown)
+        // keeps the application it was seeded under when it opens.
+        windows.insert("b".into(), TrackedWindow::new(false, ":1.5"));
+        assert!(note_window(&mut windows, "b".into(), ":1.12", true));
+        assert_eq!(windows["b"], TrackedWindow::new(true, ":1.5"));
     }
 
     #[test]
@@ -1661,6 +1822,100 @@ mod tests {
         );
         assert_eq!(split_window_key(":1.1/x", &buses), Some((":1.1", "/x")));
         assert_eq!(split_window_key(":1.9/x", &buses), None);
+    }
+
+    fn tracked(entries: &[(&str, bool, &str)]) -> HashMap<String, TrackedWindow> {
+        entries
+            .iter()
+            .map(|(key, listed, app)| (key.to_string(), TrackedWindow::new(*listed, app)))
+            .collect()
+    }
+
+    fn current_refs(plan: &RescanPlan) -> Vec<(&str, &str, bool)> {
+        let mut current: Vec<_> = plan
+            .current
+            .iter()
+            .map(|(r, listed)| (r.bus_name.as_str(), r.path.as_str(), *listed))
+            .collect();
+        current.sort();
+        current
+    }
+
+    fn gone_refs(plan: &RescanPlan) -> Vec<(&str, &str)> {
+        let mut gone: Vec<_> = plan
+            .gone
+            .iter()
+            .map(|r| (r.bus_name.as_str(), r.path.as_str()))
+            .collect();
+        gone.sort();
+        gone
+    }
+
+    #[test]
+    fn rescan_keeps_each_window_on_its_own_bus() {
+        let buses = vec![":1.5".to_string(), ":1.12".to_string()];
+        let known = tracked(&[
+            (":1.5/w/listed", true, ":1.5"),
+            (":1.5/w/hidden", false, ":1.5"),
+            (":1.5/w/still", true, ":1.5"),
+            // Another application's window is not this rescan's to close.
+            (":1.12/w/other", true, ":1.12"),
+        ]);
+        let current = tracked(&[
+            (":1.5/w/still", true, ":1.5"),
+            // Read from :1.5 but keyed under the bus the child reported.
+            // Cutting at ":1.5".len() would give the path "2/w/child".
+            (":1.12/w/child", false, ":1.5"),
+        ]);
+        let plan = plan_rescan(&known, current, ":1.5", &buses);
+        assert_eq!(
+            current_refs(&plan),
+            vec![(":1.12", "/w/child", false), (":1.5", "/w/still", true)]
+        );
+        assert_eq!(gone_refs(&plan), vec![(":1.5", "/w/listed")]);
+        assert_eq!(plan.vanished_hidden, vec![":1.5/w/hidden".to_string()]);
+    }
+
+    #[test]
+    fn rescan_closes_a_cross_bus_window_from_its_own_application_only() {
+        let buses = vec![":1.5".to_string(), ":1.12".to_string()];
+        // :1.5's window keyed under :1.12, alongside :1.12's own window.
+        let known = tracked(&[
+            (":1.12/w/child", true, ":1.5"),
+            (":1.12/w/own", true, ":1.12"),
+        ]);
+
+        // :1.12's rescan, still listing its own window, must not close
+        // :1.5's (it used to, and :1.5's next rescan reopened it).
+        let plan = plan_rescan(
+            &known,
+            tracked(&[(":1.12/w/own", true, ":1.12")]),
+            ":1.12",
+            &buses,
+        );
+        assert_eq!(gone_refs(&plan), Vec::<(&str, &str)>::new());
+
+        // :1.5's rescan, without the child, does close it (it used to stay
+        // listed, because its key does not start with ":1.5").
+        let plan = plan_rescan(&known, HashMap::new(), ":1.5", &buses);
+        assert_eq!(gone_refs(&plan), vec![(":1.12", "/w/child")]);
+    }
+
+    #[test]
+    fn deregistration_names_the_app_only_where_declared() {
+        let scoped = Registration {
+            event: "object:",
+            app: Some(":1.5".to_string()),
+        };
+        let unscoped = Registration {
+            event: "window:",
+            app: None,
+        };
+        assert_eq!(deregister_args(&scoped, true), ("object:", Some(":1.5")));
+        // at-spi2-core 2.52: registered with the app, deregistered with `(s)`.
+        assert_eq!(deregister_args(&scoped, false), ("object:", None));
+        assert_eq!(deregister_args(&unscoped, true), ("window:", None));
+        assert_eq!(deregister_args(&unscoped, false), ("window:", None));
     }
 
     #[test]

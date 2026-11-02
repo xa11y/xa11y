@@ -6,9 +6,8 @@ the negative argument case; this is the first real exercise of provider
 enumeration, the filtered/unfiltered paths, output formatting, and the
 geometry-argument dispatch for ``move-to`` / ``resize-to``.
 
-Not every matrix app exposes a window-like element (the GTK app's AT-SPI tree
-starts at a plain group, with no frame node), so a ``No windows found``
-listing skips rather than fails; and a window-like element may be Role::Dialog
+Not every matrix app exposes a window-like element, so a ``No windows
+found`` listing skips rather than fails; and a window-like element may be Role::Dialog
 (the Cocoa app's top level), which the ``window, dialog`` selector and the
 line-format check both accept.
 """
@@ -96,7 +95,7 @@ def _assert_windows_listing(rc: int, stdout: str, stderr: str) -> None:
 def _require_windows(run_cli, app_pid) -> None:
     """Skip the geometry tests on apps that expose no window-like element.
 
-    A selector that never matches (the GTK app's tree has no window node at
+    A selector that never matches (an app whose tree has no window node at
     all) times out with a *timeout*, not `Unsupported` — which would
     otherwise read as a dispatch regression when it is really the honest
     absence of a window. The `windows` listing is the unambiguous gate.

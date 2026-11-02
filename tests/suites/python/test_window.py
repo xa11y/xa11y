@@ -28,14 +28,22 @@ import pytest
 def test_app_windows_lists_the_main_window(app, app_name) -> None:
     """``App.windows()`` returns the app's top-level windows via the provider.
 
-    Not every matrix app exposes a window-like element at all (the GTK app's
-    AT-SPI tree starts at a plain group — no frame node), so an empty listing
-    is the provider answering honestly rather than a test failure; the
-    per-app matrix is the Rust integ suite's ground truth, this file's point
-    is the boundary. The assertion is about the shape, not the exact set.
+    Not every matrix app exposes a window-like element at all, so an empty
+    listing is the provider answering honestly rather than a test failure;
+    the per-app matrix is the Rust integ suite's ground truth, this file's
+    point is the boundary. The assertion is about the shape, not the exact
+    set.
+
+    GTK is the exception that must list one: GTK 4 names its window's role
+    ``application`` while numbering it a frame, and reading the name first
+    turned the window into a nested application that was flattened out of
+    the tree (issue #485).
     """
     windows = app.windows()
     assert isinstance(windows, list)
+    if app_name == "gtk":
+        assert windows, "the GTK 4 window frame must be listed (issue #485)"
+        assert any(w.role == "window" for w in windows), [w.role for w in windows]
     if not windows:
         pytest.skip(f"{app_name!r} exposes no window-like element")
     for w in windows:

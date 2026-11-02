@@ -608,3 +608,28 @@ def test_press_dispatches_to_axopen_when_it_is_the_only_activation(app, app_name
             break
         time.sleep(0.05)
     assert value == f"opened {before + 1}", f"AXOpen never arrived; value={value!r}"
+
+
+def test_action_on_a_destroyed_widget_is_stale(app):
+    """Acting on a handle whose widget was destroyed fails as stale (#491).
+
+    GTK 3 keeps a destroyed widget's accessible answering for ~15-20 s and
+    reports ``DoAction`` as performed while doing nothing, so a press on a
+    handle read just before a re-render claimed success. The GTK app's
+    "Rebuild" button swaps itself for a fresh one on every click; the old
+    handle must then raise the stale-element error, and a locator must
+    re-resolve to the new widget.
+    """
+    locator = app.locator('button[name="Rebuild"]')
+    if locator.count() == 0:
+        pytest.skip("this app has no self-replacing Rebuild button")
+    old = locator.element()
+    before = old.description
+    old.press()
+    deadline = time.monotonic() + 5.0
+    while locator.element().description == before:
+        assert time.monotonic() < deadline, "the Rebuild button never swapped"
+        time.sleep(0.1)
+    with pytest.raises(xa11y.SelectorNotMatchedError, match="stale"):
+        old.press()
+    locator.press()

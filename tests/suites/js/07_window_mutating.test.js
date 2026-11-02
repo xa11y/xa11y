@@ -141,9 +141,9 @@ async function restoreWindowBestEffort(app) {
 
 async function dialogWindow(app) {
   // Prefer the top-level window shape (what `close` acts on); fall back to
-  // the in-tree dialog node — the GTK app's AT-SPI tree has no top-level
-  // window node, but its dialog is a Role::Dialog child (the same shape the
-  // shared Python dialog test relies on).
+  // the in-tree dialog node, for a toolkit whose dialog is a Role::Dialog
+  // child but not in app.windows() (the same shape the shared Python dialog
+  // test relies on). GTK 4 windows are listed since issue #485.
   //
   // Only a *visible* dialog counts. The Qt fixture hides its dialog rather
   // than destroying it, and Qt keeps the hidden node in the AT-SPI tree

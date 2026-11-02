@@ -6,15 +6,14 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use windows::core::{implement, BOOL};
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT};
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetAncestor, GetDesktopWindow, GetForegroundWindow, GetWindowLongPtrW,
-    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsHungAppWindow, IsIconic, IsWindow,
-    IsWindowVisible, SetForegroundWindow, GA_PARENT, GWL_EXSTYLE, GWL_STYLE, STATE_SYSTEM_SELECTED,
-    WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_POPUP,
+    GetWindowTextW, GetWindowThreadProcessId, IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible,
+    SetForegroundWindow, GA_PARENT, GWL_EXSTYLE, GWL_STYLE, STATE_SYSTEM_SELECTED, WS_EX_LAYERED,
+    WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 use xa11y_core::{
@@ -211,10 +210,10 @@ pub struct WindowsProvider {
     automation: IUIAutomation,
     /// Describes which properties and patterns to pre-fetch in bulk queries.
     /// Not a cache — each FindAllBuildCache call takes a fresh snapshot.
-    batch_request: IUIAutomationCacheRequest,
+    batch_request: crate::coords::BoundsCacheRequest,
     /// Bounds and scroll overflow only: the cheap refresh behind the scroll
     /// clipping in [`Self::children_clip_of`] (issue #502).
-    scroll_request: IUIAutomationCacheRequest,
+    scroll_request: crate::coords::BoundsCacheRequest,
     /// Raw-view tree walker, created once. Snapshot builds use it to probe a
     /// pattern-less `DataItem`'s parent (the cell-vs-row disambiguation in
     /// `map_uia_role`); raw view matches `batch_request`'s TrueCondition so
@@ -527,10 +526,11 @@ impl WindowsProvider {
     /// scrolling ancestor, which is true of nothing below the desktop root.
     fn build_element_data(
         &self,
+        dpi: &crate::dpi::DpiScope,
         element: &IUIAutomationElement,
         pid: Option<u32>,
     ) -> Result<ElementData> {
-        self.build_element_data_in(element, pid, None, HostHint::Parent, &Clip::default())
+        self.build_element_data_in(dpi, element, pid, None, HostHint::Parent, &Clip::default())
     }
 
     /// [`Self::build_element_data`] for an element whose nearest native
@@ -554,6 +554,7 @@ impl WindowsProvider {
     /// children can be clipped without a walk.
     fn build_element_data_in(
         &self,
+        dpi: &crate::dpi::DpiScope,
         element: &IUIAutomationElement,
         pid: Option<u32>,
         host_hwnd: Option<HWND>,
@@ -582,7 +583,7 @@ impl WindowsProvider {
         // would fail a whole level the snapshot builds fine. `no_bounds`
         // keeps such an element from being judged, and its record from ever
         // counting as unchanged.
-        let bounds = unsafe { element.CachedBoundingRectangle() }.unwrap_or_default();
+        let bounds = crate::coords::cached_bounding_rect(dpi, element).unwrap_or_default();
         let clip = if own.is_some_and(resets_clip) {
             Clip::default()
         } else {
@@ -597,15 +598,23 @@ impl WindowsProvider {
                 inherited: clip,
             },
         );
-        build_snapshot_data(element, pid, handle, Some(&self.raw_walker), hidden)
+        build_snapshot_data(dpi, element, pid, handle, Some(&self.raw_walker), hidden)
     }
 
     /// The clip `element`'s children are built under: the one it sits under
     /// narrowed by its own viewport (issue #502). Costs one refresh of
     /// `element`, plus whatever [`Self::inherited_clip_of`] needs.
-    fn children_clip_of(&self, handle: u64, element: &IUIAutomationElement) -> Result<Clip> {
-        let fresh = uia_call(|| unsafe { element.BuildUpdatedCache(&self.scroll_request) })?;
-        Ok(self.inherited_clip_of(handle, &fresh)?.below(&fresh))
+    fn children_clip_of(
+        &self,
+        dpi: &crate::dpi::DpiScope,
+        handle: u64,
+        element: &IUIAutomationElement,
+    ) -> Result<Clip> {
+        let fresh =
+            uia_call(|| unsafe { element.BuildUpdatedCache(self.scroll_request.get(dpi)) })?;
+        Ok(self
+            .inherited_clip_of(dpi, handle, &fresh)?
+            .below(dpi, &fresh))
     }
 
     /// The clip `fresh` (refreshed with [`Self::scroll_request`]) sits under.
@@ -616,10 +625,15 @@ impl WindowsProvider {
     /// each, usually one or none). Anything else walks the raw view, and the
     /// answer is remembered. An ancestor that has only started overflowing
     /// since, without moving the element, is the one change this misses.
-    fn inherited_clip_of(&self, handle: u64, fresh: &IUIAutomationElement) -> Result<Clip> {
+    fn inherited_clip_of(
+        &self,
+        dpi: &crate::dpi::DpiScope,
+        handle: u64,
+        fresh: &IUIAutomationElement,
+    ) -> Result<Clip> {
         // Read as `build_element_data_in` reads it: a failure is no bounds,
         // and no bounds never reuses a record.
-        let bounds = unsafe { fresh.CachedBoundingRectangle() }.unwrap_or_default();
+        let bounds = crate::coords::cached_bounding_rect(dpi, fresh).unwrap_or_default();
         let remembered = self
             .clips
             .lock()
@@ -629,12 +643,12 @@ impl WindowsProvider {
         if let Some(record) = remembered {
             if !no_bounds(&bounds)
                 && record.bounds == bounds
-                && self.clip_still_holds(&record.inherited)?
+                && self.clip_still_holds(dpi, &record.inherited)?
             {
                 return Ok(record.inherited);
             }
         }
-        let inherited = self.walk_inherited_clip(fresh)?;
+        let inherited = self.walk_inherited_clip(dpi, fresh)?;
         self.clips.lock().unwrap_or_else(|e| e.into_inner()).insert(
             handle,
             ClipRecord {
@@ -647,15 +661,17 @@ impl WindowsProvider {
 
     /// Whether every ancestor `clip` came from still overflows with the same
     /// viewport. One that has gone away means the clip no longer holds.
-    fn clip_still_holds(&self, clip: &Clip) -> Result<bool> {
+    fn clip_still_holds(&self, dpi: &crate::dpi::DpiScope, clip: &Clip) -> Result<bool> {
         for source in clip.sources.iter() {
             let Some(fresh) = live_snapshot(uia_call(|| unsafe {
-                source.element.BuildUpdatedCache(&self.scroll_request)
+                source
+                    .element
+                    .BuildUpdatedCache(self.scroll_request.get(dpi))
             }))?
             else {
                 return Ok(false);
             };
-            if cached_viewport(&fresh) != Some(source.viewport) {
+            if cached_viewport(dpi, &fresh) != Some(source.viewport) {
                 return Ok(false);
             }
         }
@@ -684,19 +700,24 @@ impl WindowsProvider {
     /// for the root itself, including its having gone, is returned.
     fn subtree_clips(
         &self,
+        dpi: &crate::dpi::DpiScope,
         root_handle: u64,
         uia_root: &IUIAutomationElement,
         subtree: &IUIAutomationElementArray,
         count: i32,
     ) -> Result<Option<Vec<Clip>>> {
-        let fresh_root = uia_call(|| unsafe { uia_root.BuildUpdatedCache(&self.scroll_request) })?;
-        let base = self.inherited_clip_of(root_handle, &fresh_root)?;
+        let fresh_root =
+            uia_call(|| unsafe { uia_root.BuildUpdatedCache(self.scroll_request.get(dpi)) })?;
+        let base = self.inherited_clip_of(dpi, root_handle, &fresh_root)?;
         let len = count.max(0) as usize;
         let elements: Vec<Option<IUIAutomationElement>> =
             (0..count).map(|i| uia_get(subtree, i)).collect();
         let overflows: Vec<bool> = elements
             .iter()
-            .map(|el| el.as_ref().is_some_and(|el| cached_viewport(el).is_some()))
+            .map(|el| {
+                el.as_ref()
+                    .is_some_and(|el| cached_viewport(dpi, el).is_some())
+            })
             .collect();
         if base.rect.is_none() && !overflows.iter().any(|&o| o) {
             // Nothing clips, so popups have nothing to reset.
@@ -725,13 +746,25 @@ impl WindowsProvider {
             // descendants: no fetch needed to say so.
             if j == 0 && cached_own_hwnd(element).is_some() && cached_own_hwnd(element) == root_hwnd
             {
-                apply_range(&mut clips, element, 0, len - 1, is_popup[0], overflows[0]);
+                apply_range(
+                    dpi,
+                    &mut clips,
+                    element,
+                    0,
+                    len - 1,
+                    is_popup[0],
+                    overflows[0],
+                );
                 continue;
             }
             // An element that has gone since the subtree fetch is one more
             // way the array no longer matches the tree.
             let Some(descendants) = live_snapshot(uia_call(|| unsafe {
-                element.FindAllBuildCache(TreeScope_Descendants, &true_cond, &self.scroll_request)
+                element.FindAllBuildCache(
+                    TreeScope_Descendants,
+                    &true_cond,
+                    self.scroll_request.get(dpi),
+                )
             }))?
             else {
                 return Ok(None);
@@ -760,7 +793,7 @@ impl WindowsProvider {
                     }
                 }
             }
-            apply_range(&mut clips, element, j, m, is_popup[j], overflows[j]);
+            apply_range(dpi, &mut clips, element, j, m, is_popup[j], overflows[j]);
         }
         Ok(Some(clips))
     }
@@ -772,6 +805,7 @@ impl WindowsProvider {
     /// ([`resets_clip`]) says nothing about its parent's, and walks.
     fn parent_clip(
         &self,
+        dpi: &crate::dpi::DpiScope,
         child_handle: u64,
         child: &IUIAutomationElement,
         parent: &IUIAutomationElement,
@@ -784,7 +818,7 @@ impl WindowsProvider {
             .cloned();
         if let Some(record) = remembered {
             if !cached_own_hwnd(child).is_some_and(resets_clip)
-                && self.clip_still_holds(&record.inherited)?
+                && self.clip_still_holds(dpi, &record.inherited)?
             {
                 let mut sources = record.inherited.sources;
                 if let Some(nearest) = sources.last() {
@@ -801,7 +835,7 @@ impl WindowsProvider {
                 return Ok(Clip { rect, sources });
             }
         }
-        self.walk_inherited_clip(parent)
+        self.walk_inherited_clip(dpi, parent)
     }
 
     /// The clip `element` sits under, found by walking the raw view up to
@@ -809,7 +843,11 @@ impl WindowsProvider {
     /// One call per level: each parent comes back with the scroll
     /// properties cached. `element` itself must carry them, or the batch
     /// set, for its own window handle.
-    fn walk_inherited_clip(&self, element: &IUIAutomationElement) -> Result<Clip> {
+    fn walk_inherited_clip(
+        &self,
+        dpi: &crate::dpi::DpiScope,
+        element: &IUIAutomationElement,
+    ) -> Result<Clip> {
         if cached_own_hwnd(element).is_some_and(resets_clip) {
             return Ok(Clip::default());
         }
@@ -819,7 +857,7 @@ impl WindowsProvider {
         for _ in 0..HOST_WINDOW_WALK_LIMIT {
             current = match unsafe {
                 self.raw_walker
-                    .GetParentElementBuildCache(&current, &self.scroll_request)
+                    .GetParentElementBuildCache(&current, self.scroll_request.get(dpi))
             } {
                 Ok(parent) => parent,
                 // S_OK with a null parent: the top of the tree.
@@ -857,7 +895,7 @@ impl WindowsProvider {
         Ok(ancestors
             .iter()
             .rev()
-            .fold(Clip::default(), |clip, ancestor| clip.below(ancestor)))
+            .fold(Clip::default(), |clip, ancestor| clip.below(dpi, ancestor)))
     }
 
     /// The nearest native window of an element this provider built, from
@@ -1029,8 +1067,12 @@ impl WindowsProvider {
     ///
     /// An empty result is a truth, not an error: the last window closing is
     /// exactly the state "no windows" must report.
-    fn top_level_windows_of_pid(&self, pid: u32) -> Result<Vec<IUIAutomationElement>> {
-        top_level_windows_of_pid_with(&self.automation, pid, &self.batch_request)
+    fn top_level_windows_of_pid(
+        &self,
+        dpi: &crate::dpi::DpiScope,
+        pid: u32,
+    ) -> Result<Vec<IUIAutomationElement>> {
+        top_level_windows_of_pid_with(&self.automation, pid, self.batch_request.get(dpi))
     }
 
     /// Populate a UIA element's snapshot so Cached* accessors work.
@@ -1038,15 +1080,20 @@ impl WindowsProvider {
     /// through FindAllBuildCache.
     fn populate_cache(
         &self,
+        dpi: &crate::dpi::DpiScope,
         element: &IUIAutomationElement,
     ) -> windows::core::Result<IUIAutomationElement> {
-        retry_transient(|| unsafe { element.BuildUpdatedCache(&self.batch_request) })
+        retry_transient(|| unsafe { element.BuildUpdatedCache(self.batch_request.get(dpi)) })
     }
 
     /// Get direct UIA children of an element with properties pre-fetched.
     /// batch_request uses raw view (TrueCondition), so FindAllBuildCache sees
     /// all elements including virtual/fragment elements.
-    fn uia_children(&self, element: &IUIAutomationElement) -> Vec<IUIAutomationElement> {
+    fn uia_children(
+        &self,
+        dpi: &crate::dpi::DpiScope,
+        element: &IUIAutomationElement,
+    ) -> Vec<IUIAutomationElement> {
         let true_cond = match unsafe { self.automation.CreateTrueCondition() } {
             Ok(c) => c,
             Err(_) => return Vec::new(),
@@ -1055,7 +1102,7 @@ impl WindowsProvider {
         // so a transiently-busy provider would make a populated subtree look
         // empty. Retry the classified-transient HRESULTs before degrading.
         match retry_transient(|| unsafe {
-            element.FindAllBuildCache(TreeScope_Children, &true_cond, &self.batch_request)
+            element.FindAllBuildCache(TreeScope_Children, &true_cond, self.batch_request.get(dpi))
         }) {
             Ok(arr) => (0..uia_len(&arr))
                 .filter_map(|i| uia_get(&arr, i))
@@ -1065,10 +1112,14 @@ impl WindowsProvider {
     }
 
     /// Fetch the entire subtree with all properties pre-fetched in one COM call.
-    fn find_all_subtree(&self, root: &IUIAutomationElement) -> Result<IUIAutomationElementArray> {
+    fn find_all_subtree(
+        &self,
+        dpi: &crate::dpi::DpiScope,
+        root: &IUIAutomationElement,
+    ) -> Result<IUIAutomationElementArray> {
         let true_cond = uia_call(|| unsafe { self.automation.CreateTrueCondition() })?;
         uia_call(|| unsafe {
-            root.FindAllBuildCache(TreeScope_Subtree, &true_cond, &self.batch_request)
+            root.FindAllBuildCache(TreeScope_Subtree, &true_cond, self.batch_request.get(dpi))
         })
     }
 
@@ -1086,10 +1137,14 @@ impl WindowsProvider {
     /// closed" (tenet 1). The caller re-wraps that failure with the surface it
     /// was probing and the surfaces the scan had already classified, because
     /// `Error::Platform` has no diagnosis field to attach one to (tenet 6).
-    fn has_onscreen_child(&self, element: &IUIAutomationElement) -> Result<bool> {
+    fn has_onscreen_child(
+        &self,
+        dpi: &crate::dpi::DpiScope,
+        element: &IUIAutomationElement,
+    ) -> Result<bool> {
         let true_cond = uia_call(|| unsafe { self.automation.CreateTrueCondition() })?;
         let children = uia_call(|| unsafe {
-            element.FindAllBuildCache(TreeScope_Children, &true_cond, &self.batch_request)
+            element.FindAllBuildCache(TreeScope_Children, &true_cond, self.batch_request.get(dpi))
         })?;
         Ok((0..uia_len(&children))
             .filter_map(|i| uia_get(&children, i))
@@ -1111,6 +1166,7 @@ impl WindowsProvider {
     /// 1): "the subtree could not be searched" is not "the class is absent".
     fn descendant_by_class(
         &self,
+        dpi: &crate::dpi::DpiScope,
         root: &IUIAutomationElement,
         class: &str,
     ) -> Result<Option<IUIAutomationElement>> {
@@ -1119,7 +1175,11 @@ impl WindowsProvider {
                 .CreatePropertyCondition(UIA_ClassNamePropertyId, &VARIANT::from(class))
         })?;
         match unsafe {
-            root.FindFirstBuildCache(TreeScope_Descendants, &condition, &self.batch_request)
+            root.FindFirstBuildCache(
+                TreeScope_Descendants,
+                &condition,
+                self.batch_request.get(dpi),
+            )
         } {
             Ok(el) => Ok(Some(el)),
             Err(e) if e.code().is_ok() => Ok(None),
@@ -1139,11 +1199,12 @@ impl WindowsProvider {
     /// elements, so the shell scan must navigate with `RawViewWalker` too.
     fn raw_children_with_cache(
         &self,
+        dpi: &crate::dpi::DpiScope,
         root: &IUIAutomationElement,
     ) -> Result<Vec<IUIAutomationElement>> {
         let mut current = match retry_transient(|| unsafe {
             self.raw_walker
-                .GetFirstChildElementBuildCache(root, &self.batch_request)
+                .GetFirstChildElementBuildCache(root, self.batch_request.get(dpi))
         }) {
             Ok(element) => element,
             Err(e) if e.code().is_ok() => return Ok(Vec::new()),
@@ -1160,7 +1221,7 @@ impl WindowsProvider {
             children.push(current.clone());
             current = match retry_transient(|| unsafe {
                 self.raw_walker
-                    .GetNextSiblingElementBuildCache(&current, &self.batch_request)
+                    .GetNextSiblingElementBuildCache(&current, self.batch_request.get(dpi))
             }) {
                 Ok(element) => element,
                 Err(e) if e.code().is_ok() => break,
@@ -1830,24 +1891,17 @@ fn is_interactive_top_level(hwnd: HWND) -> Result<bool> {
     if ex_style & click_through == click_through {
         return Ok(false);
     }
-    let mut cloaked = 0u32;
-    let cloaked_read = unsafe {
-        DwmGetWindowAttribute(
-            hwnd,
-            DWMWA_CLOAKED,
-            (&raw mut cloaked).cast(),
-            std::mem::size_of::<u32>() as u32,
-        )
-    };
-    cloaked_read.map_err(|e| Error::Platform {
+    // Cloaking and the rect are both read inside one scope.
+    let dpi = &crate::dpi::DpiScope::enter()?;
+    let cloaked = crate::coords::is_cloaked(dpi, hwnd).map_err(|e| Error::Platform {
         code: e.code().0 as i64,
         message: format!("DwmGetWindowAttribute(DWMWA_CLOAKED) failed for {hwnd:?}: {e}"),
     })?;
-    if cloaked != 0 {
+    if cloaked {
         return Ok(false);
     }
-    let mut rect = RECT::default();
-    unsafe { GetWindowRect(hwnd, &mut rect) }.map_err(|e| Error::Platform {
+    // Only emptiness is read here, but GetWindowRect is coordinate-bearing.
+    let rect = crate::coords::window_rect(dpi, hwnd).map_err(|e| Error::Platform {
         code: e.code().0 as i64,
         message: format!("GetWindowRect failed for {hwnd:?}: {e}"),
     })?;
@@ -2041,6 +2095,7 @@ fn uia_cached_i32(element: &IUIAutomationElement, prop: UIA_PROPERTY_ID) -> Opti
 /// leaves `IsOffscreen` false, namely a minimized window (issue #501) or a
 /// scrolling ancestor it is scrolled out of (issue #502).
 fn build_snapshot_data(
+    dpi: &crate::dpi::DpiScope,
     element: &IUIAutomationElement,
     pid: Option<u32>,
     handle: u64,
@@ -2113,7 +2168,7 @@ fn build_snapshot_data(
 
     let states = parse_states(element, role, &patterns, hidden_by_ancestor);
 
-    let bounds = unsafe { element.CachedBoundingRectangle() }
+    let bounds = crate::coords::cached_bounding_rect(dpi, element)
         .ok()
         .and_then(|r| {
             let width = (r.right - r.left).max(0) as u32;
@@ -2250,7 +2305,7 @@ fn build_snapshot_data(
 
 /// Build the small request behind the scroll-clip refresh and walk: bounds
 /// and the two overflow flags, in the raw view like the batch request.
-fn create_scroll_request(automation: &IUIAutomation) -> Result<IUIAutomationCacheRequest> {
+fn create_scroll_request(automation: &IUIAutomation) -> Result<crate::coords::BoundsCacheRequest> {
     let request = uia_call(|| unsafe { automation.CreateCacheRequest() })?;
     for prop in SCROLL_PROPERTIES {
         unsafe { request.AddProperty(*prop) }.map_err(|e| Error::Platform {
@@ -2260,17 +2315,31 @@ fn create_scroll_request(automation: &IUIAutomation) -> Result<IUIAutomationCach
     }
     let raw_view = uia_call(|| unsafe { automation.CreateTrueCondition() })?;
     uia_call(|| unsafe { request.SetTreeFilter(&raw_view) })?;
-    Ok(request)
+    crate::coords::BoundsCacheRequest::new(request)
+}
+
+/// [`BATCH_PROPERTIES`], for the coords test that bounds are not among them.
+#[cfg(test)]
+pub(crate) fn batch_properties() -> &'static [UIA_PROPERTY_ID] {
+    BATCH_PROPERTIES
+}
+
+/// [`SCROLL_PROPERTIES`], for the same coords test.
+#[cfg(test)]
+pub(crate) fn scroll_properties() -> &'static [UIA_PROPERTY_ID] {
+    SCROLL_PROPERTIES
 }
 
 /// Build the batch request that describes which properties and patterns
 /// to pre-fetch. Created once per provider, used on every query.
-fn create_batch_request(automation: &IUIAutomation) -> Result<IUIAutomationCacheRequest> {
+fn create_batch_request(automation: &IUIAutomation) -> Result<crate::coords::BoundsCacheRequest> {
     create_cache_request(automation, BATCH_PROPERTIES)
 }
 
 /// The cache request event handlers fetch their targets with.
-fn create_event_cache_request(automation: &IUIAutomation) -> Result<IUIAutomationCacheRequest> {
+fn create_event_cache_request(
+    automation: &IUIAutomation,
+) -> Result<crate::coords::BoundsCacheRequest> {
     create_cache_request(automation, &event_cache_properties())
 }
 
@@ -2308,7 +2377,7 @@ const EVENT_EXCLUDED_PROPERTIES: &[UIA_PROPERTY_ID] = &[
 fn create_cache_request(
     automation: &IUIAutomation,
     properties: &[UIA_PROPERTY_ID],
-) -> Result<IUIAutomationCacheRequest> {
+) -> Result<crate::coords::BoundsCacheRequest> {
     let request = uia_call(|| unsafe { automation.CreateCacheRequest() })?;
 
     // The property list is a fixed constant array of valid UIA property IDs.
@@ -2335,10 +2404,11 @@ fn create_cache_request(
     let raw_view = uia_call(|| unsafe { automation.CreateTrueCondition() })?;
     uia_call(|| unsafe { request.SetTreeFilter(&raw_view) })?;
 
-    Ok(request)
+    crate::coords::BoundsCacheRequest::new(request)
 }
 
-/// Properties pre-fetched in every bulk query.
+/// Properties pre-fetched in every bulk query, besides the bounds that
+/// [`crate::coords::BoundsCacheRequest`] adds.
 const BATCH_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     UIA_ControlTypePropertyId,
     UIA_AriaRolePropertyId,
@@ -2347,7 +2417,6 @@ const BATCH_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     UIA_NamePropertyId,
     UIA_FullDescriptionPropertyId,
     UIA_HelpTextPropertyId,
-    UIA_BoundingRectanglePropertyId,
     UIA_AutomationIdPropertyId,
     UIA_ClassNamePropertyId,
     UIA_ProcessIdPropertyId,
@@ -2378,9 +2447,9 @@ const BATCH_PROPERTIES: &[UIA_PROPERTY_ID] = &[
 ];
 
 /// Properties [`create_scroll_request`] fetches: what
-/// [`WindowsProvider::children_clip_of`] needs to re-check one element.
+/// [`WindowsProvider::children_clip_of`] needs to re-check one element,
+/// besides the bounds that [`crate::coords::BoundsCacheRequest`] adds.
 const SCROLL_PROPERTIES: &[UIA_PROPERTY_ID] = &[
-    UIA_BoundingRectanglePropertyId,
     // For `resets_clip`: a popup's ancestors do not clip it.
     UIA_NativeWindowHandlePropertyId,
     UIA_ScrollHorizontallyScrollablePropertyId,
@@ -2499,8 +2568,8 @@ impl Clip {
     /// The clip `element`'s children sit under, when `self` is the one
     /// `element` sits under: narrowed by `element`'s own viewport if its
     /// content overflows.
-    fn below(&self, element: &IUIAutomationElement) -> Clip {
-        let Some(viewport) = cached_viewport(element) else {
+    fn below(&self, dpi: &crate::dpi::DpiScope, element: &IUIAutomationElement) -> Clip {
+        let Some(viewport) = cached_viewport(dpi, element) else {
             return self.clone();
         };
         let mut sources = Vec::with_capacity(self.sources.len() + 1);
@@ -2520,6 +2589,7 @@ impl Clip {
 /// descendants (the entries after it): a popup starts them afresh, and an
 /// overflowing element narrows its descendants' to its viewport.
 fn apply_range(
+    dpi: &crate::dpi::DpiScope,
     clips: &mut [Clip],
     element: &IUIAutomationElement,
     j: usize,
@@ -2534,7 +2604,7 @@ fn apply_range(
     }
     if overflows {
         for clip in &mut clips[j + 1..=j + m] {
-            *clip = clip.below(element);
+            *clip = clip.below(dpi, element);
         }
     }
 }
@@ -2592,14 +2662,14 @@ fn resets_clip(hwnd: HWND) -> bool {
 /// overflowing element without bounds of its own, which UIA already reports
 /// off screen along with its content. A custom scroller that implements no
 /// Scroll pattern is invisible to this.
-fn cached_viewport(element: &IUIAutomationElement) -> Option<RECT> {
+fn cached_viewport(dpi: &crate::dpi::DpiScope, element: &IUIAutomationElement) -> Option<RECT> {
     let overflows = uia_cached_bool(element, UIA_ScrollVerticallyScrollablePropertyId)
         == Some(true)
         || uia_cached_bool(element, UIA_ScrollHorizontallyScrollablePropertyId) == Some(true);
     if !overflows {
         return None;
     }
-    unsafe { element.CachedBoundingRectangle() }
+    crate::coords::cached_bounding_rect(dpi, element)
         .ok()
         .filter(|r| r.right > r.left && r.bottom > r.top)
 }
@@ -2960,13 +3030,14 @@ struct ElementPatterns {
 impl WindowsProvider {
     fn synthetic_app_windows(
         &self,
+        dpi: &crate::dpi::DpiScope,
         app: &ElementData,
         identity: SyntheticAppIdentity,
         distinct_roots: bool,
     ) -> Result<Vec<ElementData>> {
         let windows = windows_of_saved_app_with(
             &self.automation,
-            &self.batch_request,
+            self.batch_request.get(dpi),
             SavedSyntheticAppIdentity {
                 handle: app.handle,
                 identity,
@@ -2978,7 +3049,7 @@ impl WindowsProvider {
             // The enumerated window may close during any live snapshot read.
             // A vanished candidate contributes no subtree; all other failures,
             // including process-generation mismatches, still abort enumeration.
-            if let Some(window) = live_snapshot(self.build_app_window(&el, app, identity))? {
+            if let Some(window) = live_snapshot(self.build_app_window(dpi, &el, app, identity))? {
                 data.push(window);
             }
         }
@@ -2987,6 +3058,7 @@ impl WindowsProvider {
 
     fn build_app_window(
         &self,
+        dpi: &crate::dpi::DpiScope,
         el: &IUIAutomationElement,
         app: &ElementData,
         identity: SyntheticAppIdentity,
@@ -3024,11 +3096,11 @@ impl WindowsProvider {
             identity,
             process_creation_time(reacquired_pid),
         )?;
-        let el = self.populate_cache(&el).map_err(|e| Error::Platform {
+        let el = self.populate_cache(dpi, &el).map_err(|e| Error::Platform {
             code: e.code().0 as i64,
             message: format!("populating the re-acquired top-level window cache failed: {e}"),
         })?;
-        let mut window_data = self.build_element_data(&el, Some(identity.pid))?;
+        let mut window_data = self.build_element_data(dpi, &el, Some(identity.pid))?;
         if window_data.name.is_none() {
             // Error-preserving live name read (tenet 1): a
             // CurrentName COM failure must not collapse into
@@ -3061,15 +3133,24 @@ impl WindowsProvider {
     }
 }
 
+// Every method enters a `DpiScope`. The ones that read or produce
+// coordinates (bounds in snapshots, window geometry, input points) need it,
+// because Windows answers those in the calling thread's DPI space (issue
+// #506); the compiler enforces that through the `&DpiScope` parameters in
+// coords.rs. The methods bound to `_dpi` touch no coordinates, and their
+// scope is a defensive habit, not a requirement: it keeps a coordinate call
+// added to one of them later from needing a scope threaded in first.
 impl Provider for WindowsProvider {
     fn app_windows(&self, app: &ElementData) -> Result<Vec<ElementData>> {
+        let dpi = &crate::dpi::DpiScope::enter()?;
         if let Some(identity) = self.synthetic_app_identity_checked(app.handle)? {
-            return self.synthetic_app_windows(app, identity, false);
+            return self.synthetic_app_windows(dpi, app, identity, false);
         }
         self.get_children(Some(app))
     }
 
     fn get_children(&self, element: Option<&ElementData>) -> Result<Vec<ElementData>> {
+        let dpi = &crate::dpi::DpiScope::enter()?;
         match element {
             None => {
                 // Top-level: enumerate the desktop root's named top-level
@@ -3098,7 +3179,11 @@ impl Provider for WindowsProvider {
                     )
                 })?;
                 let found = uia_call(|| unsafe {
-                    root.FindAllBuildCache(TreeScope_Children, &condition, &self.batch_request)
+                    root.FindAllBuildCache(
+                        TreeScope_Children,
+                        &condition,
+                        self.batch_request.get(dpi),
+                    )
                 })
                 .map_err(|e| {
                     uia_timeout_as_timeout(e, || "the desktop's top-level windows".to_string())
@@ -3184,10 +3269,10 @@ impl Provider for WindowsProvider {
                 // across platforms, and an empty result is the truth of a
                 // process whose last window closed.
                 if let Some(identity) = self.synthetic_app_identity_checked(element_data.handle)? {
-                    return self.synthetic_app_windows(element_data, identity, true);
+                    return self.synthetic_app_windows(dpi, element_data, identity, true);
                 }
                 let uia = self.get_cached(element_data.handle)?;
-                let children = self.uia_children(&uia);
+                let children = self.uia_children(dpi, &uia);
                 if children.is_empty() {
                     return Ok(Vec::new());
                 }
@@ -3199,7 +3284,8 @@ impl Provider for WindowsProvider {
                     return Ok(Vec::new());
                 };
                 // Likewise the scroll clip: one refresh of the parent.
-                let Some(clip) = live_snapshot(self.children_clip_of(element_data.handle, &uia))?
+                let Some(clip) =
+                    live_snapshot(self.children_clip_of(dpi, element_data.handle, &uia))?
                 else {
                     return Ok(Vec::new());
                 };
@@ -3207,6 +3293,7 @@ impl Provider for WindowsProvider {
                 let mut data = Vec::with_capacity(children.len());
                 for child in children {
                     if let Some(child) = live_snapshot(self.build_element_data_in(
+                        dpi,
                         &child,
                         pid,
                         host_hwnd,
@@ -3222,6 +3309,7 @@ impl Provider for WindowsProvider {
     }
 
     fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
+        let dpi = &crate::dpi::DpiScope::enter()?;
         // A synthesized Application node is top-level by construction — no
         // element has the process as a child. The walk needs a live element
         // the node does not have, so answer `None` directly instead of
@@ -3250,10 +3338,12 @@ impl Provider for WindowsProvider {
                     return Ok(Some(self.build_synthetic_app_data(pid, &uia)?));
                 }
                 // Populate snapshot so build_element_data can read Cached* props
-                let parent = self.populate_cache(&parent).map_err(|e| Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!("BuildUpdatedCache failed: {}", e),
-                })?;
+                let parent = self
+                    .populate_cache(dpi, &parent)
+                    .map_err(|e| Error::Platform {
+                        code: e.code().0 as i64,
+                        message: format!("BuildUpdatedCache failed: {}", e),
+                    })?;
                 // A windowless child shares its parent's nearest window (an
                 // HWND-bearing parent uses its own anyway), so the child's
                 // remembered answer serves; a child with its own HWND, or one
@@ -3267,8 +3357,9 @@ impl Provider for WindowsProvider {
                 } else {
                     self.host_hwnd_of(element.handle, &uia)?
                 };
-                let clip = self.parent_clip(element.handle, &uia, &parent)?;
+                let clip = self.parent_clip(dpi, element.handle, &uia, &parent)?;
                 let data = self.build_element_data_in(
+                    dpi,
                     &parent,
                     element.pid,
                     host_hwnd,
@@ -3325,8 +3416,9 @@ impl Provider for WindowsProvider {
     /// surface it was probing and lists the surfaces classified before the
     /// scan aborted.
     fn list_shell_surfaces(&self) -> Result<Vec<(ShellSurfaceKind, ElementData)>> {
+        let dpi = &crate::dpi::DpiScope::enter()?;
         let root = uia_call(|| unsafe { self.automation.GetRootElement() })?;
-        let found = self.raw_children_with_cache(&root)?;
+        let found = self.raw_children_with_cache(dpi, &root)?;
 
         // (rank, kind, data) — rank groups the output; the stable sort below
         // keeps enumeration order within a group.
@@ -3363,7 +3455,7 @@ impl Provider for WindowsProvider {
                     // structured diagnosis field, so the `Diagnosis` is
                     // rendered into the message through its `Display` impl —
                     // the same clauses a `SelectorNotMatched` would show.
-                    let on_screen = self.has_onscreen_child(&el).map_err(|e| {
+                    let on_screen = self.has_onscreen_child(dpi, &el).map_err(|e| {
                         let diagnosis = xa11y_core::Diagnosis::new()
                             .condition(
                                 "a Quick Settings flyout surface, if its content is on screen",
@@ -3407,7 +3499,7 @@ impl Provider for WindowsProvider {
             // When the chain is absent no desktop surface is emitted at all —
             // never the Progman pane as a stand-in (tenet 1).
             let el = if kind == ShellSurfaceKind::Desktop {
-                match self.descendant_by_class(&el, DESKTOP_LIST_VIEW_CLASS)? {
+                match self.descendant_by_class(dpi, &el, DESKTOP_LIST_VIEW_CLASS)? {
                     Some(list_view) => list_view,
                     None => continue,
                 }
@@ -3434,10 +3526,10 @@ impl Provider for WindowsProvider {
             // build_element_data reads. Best-effort here, as in
             // get_children — see the rationale there.
             let el = match self.reacquire_via_hwnd(&el) {
-                Ok(re) => self.populate_cache(&re).unwrap_or(el),
+                Ok(re) => self.populate_cache(dpi, &re).unwrap_or(el),
                 Err(_) => el,
             };
-            let data = self.build_element_data(&el, (pid != 0).then_some(pid))?;
+            let data = self.build_element_data(dpi, &el, (pid != 0).then_some(pid))?;
             surfaces.push((rank, kind, data));
         }
 
@@ -3460,6 +3552,7 @@ impl Provider for WindowsProvider {
     /// reports. This is the canonical app discovery primitive (replaces the
     /// old `find_elements(None, "application"/"window", …, depth=0)` idiom).
     fn list_apps(&self) -> Result<Vec<ElementData>> {
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         self.get_children(None)
     }
 
@@ -3488,6 +3581,7 @@ impl Provider for WindowsProvider {
                 &hung,
             ));
         }
+        let dpi = &crate::dpi::DpiScope::enter()?;
         let root = uia_call(|| unsafe { self.automation.GetRootElement() })?;
         let value = pid_variant(pid)?;
         let pid_condition = uia_call(|| unsafe {
@@ -3521,7 +3615,7 @@ impl Provider for WindowsProvider {
         // SelectorNotMatched, so the core poll loop retries — while a
         // failing HRESULT is a genuine UIA error and short-circuits.
         let el = match unsafe {
-            root.FindFirstBuildCache(TreeScope_Children, &condition, &self.batch_request)
+            root.FindFirstBuildCache(TreeScope_Children, &condition, self.batch_request.get(dpi))
         } {
             Ok(el) => el,
             Err(e) if e.code().is_ok() => {
@@ -3562,6 +3656,7 @@ impl Provider for WindowsProvider {
     /// error and propagates; a foreground window with no resolvable pid is an
     /// honest `Platform` error, not "no foreground app" (tenet 1).
     fn focused_app(&self) -> Result<ElementData> {
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         let hwnd = unsafe { GetForegroundWindow() };
         if hwnd.0.is_null() {
             return Err(Error::selector_not_matched("focused application"));
@@ -3617,6 +3712,7 @@ impl Provider for WindowsProvider {
         limit: Option<usize>,
     ) -> Result<Vec<ElementData>> {
         xa11y_core::selector::validate_tail_segments(segments)?;
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         // Dedup below is by handle; the canonical walk makes that a dedup by
         // UIA identity (issue #571).
         let walk = CanonicalWalk::new(self);
@@ -3685,6 +3781,7 @@ impl Provider for WindowsProvider {
         // invariants the walk below indexes on (`clause.segments[0]`, Root
         // only first, 1-based `:nth`). Reject it before traversal.
         group.validate()?;
+        let dpi = &crate::dpi::DpiScope::enter()?;
 
         let max_depth_val = max_depth.unwrap_or(xa11y_core::MAX_TREE_DEPTH);
 
@@ -3757,7 +3854,7 @@ impl Provider for WindowsProvider {
         }
 
         // One COM call fetches the whole subtree in doc order.
-        let Some(subtree) = live_snapshot(self.find_all_subtree(&uia_root))? else {
+        let Some(subtree) = live_snapshot(self.find_all_subtree(dpi, &uia_root))? else {
             return Ok(Vec::new());
         };
         let count = uia_len(&subtree);
@@ -3781,8 +3878,13 @@ impl Provider for WindowsProvider {
         let clips = if nested_minimized {
             None
         } else {
-            let Some(clips) =
-                live_snapshot(self.subtree_clips(root_data.handle, &uia_root, &subtree, count))?
+            let Some(clips) = live_snapshot(self.subtree_clips(
+                dpi,
+                root_data.handle,
+                &uia_root,
+                &subtree,
+                count,
+            ))?
             else {
                 return Ok(Vec::new());
             };
@@ -3823,6 +3925,7 @@ impl Provider for WindowsProvider {
             // root, so it is not recorded); elements with an HWND of their
             // own use and record it.
             let Some(data) = live_snapshot(self.build_element_data_in(
+                dpi,
                 &el,
                 pid,
                 root_hwnd,
@@ -3924,6 +4027,7 @@ impl Provider for WindowsProvider {
 
     #[allow(non_upper_case_globals)]
     fn press(&self, element: &ElementData) -> Result<()> {
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         // `press` dispatches to the element's primary-activation UIA pattern:
         // Invoke (buttons, menu items, links), Toggle (checkboxes, switches),
         // SelectionItem.Select (list items, radio buttons), or ExpandCollapse
@@ -4064,6 +4168,7 @@ impl Provider for WindowsProvider {
     }
 
     fn focus(&self, element: &ElementData) -> Result<()> {
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
         unsafe { uia_element.SetFocus() }.map_err(|e| Error::Platform {
             code: e.code().0 as i64,
@@ -4073,6 +4178,7 @@ impl Provider for WindowsProvider {
     }
 
     fn blur(&self, _element: &ElementData) -> Result<()> {
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         // Focus the desktop root to blur the current element
         let root = unsafe { self.automation.GetRootElement() }.map_err(|e| Error::Platform {
             code: e.code().0 as i64,
@@ -4086,6 +4192,7 @@ impl Provider for WindowsProvider {
     }
 
     fn toggle(&self, element: &ElementData) -> Result<()> {
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
         if let Ok(pattern) = unsafe {
             uia_element.GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
@@ -4109,6 +4216,7 @@ impl Provider for WindowsProvider {
     }
 
     fn select(&self, element: &ElementData) -> Result<()> {
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
         if let Ok(pattern) = unsafe {
             uia_element.GetCurrentPatternAs::<IUIAutomationSelectionItemPattern>(
@@ -4134,6 +4242,7 @@ impl Provider for WindowsProvider {
     }
 
     fn expand(&self, element: &ElementData) -> Result<()> {
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
         if let Ok(pattern) = unsafe {
             uia_element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
@@ -4153,6 +4262,7 @@ impl Provider for WindowsProvider {
     }
 
     fn collapse(&self, element: &ElementData) -> Result<()> {
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
         if let Ok(pattern) = unsafe {
             uia_element.GetCurrentPatternAs::<IUIAutomationExpandCollapsePattern>(
@@ -4172,6 +4282,7 @@ impl Provider for WindowsProvider {
     }
 
     fn show_menu(&self, element: &ElementData) -> Result<()> {
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         // No direct UIA equivalent; try context menu via legacy.
         //
         // `get_actions` never advertises `show_menu`, which is what keeps this
@@ -4190,6 +4301,7 @@ impl Provider for WindowsProvider {
     }
 
     fn increment(&self, element: &ElementData) -> Result<()> {
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
         if let Ok(pattern) = unsafe {
             uia_element
@@ -4214,6 +4326,7 @@ impl Provider for WindowsProvider {
     }
 
     fn decrement(&self, element: &ElementData) -> Result<()> {
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
         if let Ok(pattern) = unsafe {
             uia_element
@@ -4238,6 +4351,7 @@ impl Provider for WindowsProvider {
     }
 
     fn scroll_into_view(&self, element: &ElementData) -> Result<()> {
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
         // Only a genuinely absent ScrollItemPattern is "not supported"; any
         // other lookup failure (a dead element, a wedged provider) is a real
@@ -4260,6 +4374,7 @@ impl Provider for WindowsProvider {
     // input simulation is involved (tenet 2).
 
     fn activate(&self, element: &ElementData) -> Result<()> {
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia = self.get_cached(element.handle)?;
         ensure_top_level_window_target(&uia, "activate", element.role)?;
         // winlenium parity: if minimized, restore; then bring the HWND to the
@@ -4322,6 +4437,7 @@ impl Provider for WindowsProvider {
     }
 
     fn minimize(&self, element: &ElementData) -> Result<()> {
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia = self.get_cached(element.handle)?;
         ensure_top_level_window_target(&uia, "minimize", element.role)?;
         let pattern =
@@ -4351,6 +4467,7 @@ impl Provider for WindowsProvider {
     }
 
     fn maximize(&self, element: &ElementData) -> Result<()> {
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia = self.get_cached(element.handle)?;
         ensure_top_level_window_target(&uia, "maximize", element.role)?;
         let pattern =
@@ -4378,6 +4495,7 @@ impl Provider for WindowsProvider {
     }
 
     fn enter_fullscreen(&self, element: &ElementData) -> Result<()> {
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia = self.get_cached(element.handle)?;
         // Same target contract as the sibling verbs: a non-window target is
         // rejected as an unsupported action on that element, before the
@@ -4399,6 +4517,7 @@ impl Provider for WindowsProvider {
     }
 
     fn restore(&self, element: &ElementData) -> Result<()> {
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia = self.get_cached(element.handle)?;
         ensure_top_level_window_target(&uia, "restore", element.role)?;
         let pattern =
@@ -4433,6 +4552,7 @@ impl Provider for WindowsProvider {
     }
 
     fn close(&self, element: &ElementData) -> Result<()> {
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia = self.get_cached(element.handle)?;
         ensure_top_level_window_target(&uia, "close", element.role)?;
         let pattern =
@@ -4446,6 +4566,7 @@ impl Provider for WindowsProvider {
     }
 
     fn move_to(&self, element: &ElementData, x: i32, y: i32) -> Result<()> {
+        let dpi = &crate::dpi::DpiScope::enter()?;
         let uia = self.get_cached(element.handle)?;
         ensure_top_level_window_target(&uia, "move_to", element.role)?;
         let pattern = unsafe {
@@ -4465,14 +4586,17 @@ impl Provider for WindowsProvider {
             });
         }
         // Windows desktop coordinates match TransformPattern's pixels.
-        unsafe { pattern.Move(f64::from(x), f64::from(y)) }.map_err(|e| Error::Platform {
-            code: e.code().0 as i64,
-            message: format!("TransformPattern.Move({x}, {y}) failed: {e}"),
+        crate::coords::transform_move(dpi, &pattern, f64::from(x), f64::from(y)).map_err(|e| {
+            Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("TransformPattern.Move({x}, {y}) failed: {e}"),
+            }
         })?;
         Ok(())
     }
 
     fn resize_to(&self, element: &ElementData, width: u32, height: u32) -> Result<()> {
+        let dpi = &crate::dpi::DpiScope::enter()?;
         let uia = self.get_cached(element.handle)?;
         ensure_top_level_window_target(&uia, "resize_to", element.role)?;
         let pattern = unsafe {
@@ -4492,16 +4616,16 @@ impl Provider for WindowsProvider {
             });
         }
         // Width and height use the same physical desktop units as bounds.
-        unsafe { pattern.Resize(f64::from(width), f64::from(height)) }.map_err(|e| {
-            Error::Platform {
+        crate::coords::transform_resize(dpi, &pattern, f64::from(width), f64::from(height))
+            .map_err(|e| Error::Platform {
                 code: e.code().0 as i64,
                 message: format!("TransformPattern.Resize({width}, {height}) failed: {e}"),
-            }
-        })?;
+            })?;
         Ok(())
     }
 
     fn set_value(&self, element: &ElementData, value: &str) -> Result<()> {
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
         if let Ok(pattern) = unsafe {
             uia_element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
@@ -4514,6 +4638,7 @@ impl Provider for WindowsProvider {
     }
 
     fn set_numeric_value(&self, element: &ElementData, value: f64) -> Result<()> {
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
         let pattern = unsafe {
             uia_element
@@ -4531,6 +4656,7 @@ impl Provider for WindowsProvider {
     }
 
     fn type_text(&self, element: &ElementData, text: &str) -> Result<()> {
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         let uia_element = self.get_cached(element.handle)?;
         // Insert text via ValuePattern (accessibility API, not input simulation).
         // Get current value, get insertion point from TextPattern, splice, set new value.
@@ -4561,6 +4687,7 @@ impl Provider for WindowsProvider {
     }
 
     fn set_text_selection(&self, element: &ElementData, start: u32, end: u32) -> Result<()> {
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         if start > end {
             return Err(Error::InvalidActionData {
                 message: format!("set_text_selection start ({start}) must be <= end ({end})"),
@@ -4577,12 +4704,14 @@ impl Provider for WindowsProvider {
             // Collapse and move to start position. If the move fails, the
             // subsequent Select() would land on the wrong range — propagate
             // rather than silently mis-selecting (tenet 1).
-            unsafe { range.Move(TextUnit_Character, start as i32) }.map_err(|e| {
-                Error::Platform {
+            // Text-range Move counts characters, not pixels; spelled through
+            // the trait path so check-windows-dpi's `.Move(` rule (which
+            // guards TransformPattern) does not apply to it.
+            unsafe { IUIAutomationTextRange::Move(&range, TextUnit_Character, start as i32) }
+                .map_err(|e| Error::Platform {
                     code: e.code().0 as i64,
                     message: format!("TextRange::Move to {start} failed: {e}"),
-                }
-            })?;
+                })?;
             // Extend end to selection length. `end >= start` is enforced
             // above, so the u32 subtraction cannot underflow.
             unsafe {
@@ -4609,6 +4738,7 @@ impl Provider for WindowsProvider {
     }
 
     fn perform_action(&self, element: &ElementData, action: &str) -> Result<()> {
+        let _dpi = &crate::dpi::DpiScope::enter()?;
         match action {
             "press" => self.press(element),
             "focus" => self.focus(element),
@@ -4647,6 +4777,7 @@ impl Provider for WindowsProvider {
     }
 
     fn subscribe(&self, element: &ElementData) -> Result<Subscription> {
+        let dpi = &crate::dpi::DpiScope::enter()?;
         // A synthesized Application node resolves its pid from the identity
         // map; a plain element carries its pid directly. Either way, the
         // stale-process guard runs: subscribing to a reused pid would attach
@@ -4674,7 +4805,7 @@ impl Provider for WindowsProvider {
             })?,
         };
         let app_name = element.name.clone().unwrap_or_default();
-        self.subscribe_impl(pid, app_name, saved_app)
+        self.subscribe_impl(dpi, pid, app_name, saved_app)
     }
 }
 
@@ -5279,6 +5410,20 @@ fn registration_worker() -> Result<std::sync::mpsc::Sender<RegistrationJob>> {
                                 "COM initialization failed on UIA registration worker: {e}"
                             ),
                         });
+                    // The worker is xa11y's and runs no host code, so it is
+                    // made per-monitor aware once for its whole life rather
+                    // than per job (issue #506).
+                    let initialized = initialized.and_then(|()| {
+                        crate::dpi::make_thread_per_monitor_aware().map_err(|e| {
+                            RegistrationWorkerError {
+                                code: -1,
+                                message: format!(
+                                    "making the UIA registration worker per-monitor DPI aware \
+                                     failed: {e}"
+                                ),
+                            }
+                        })
+                    });
                     if ready_tx.send(initialized.clone()).is_err() || initialized.is_err() {
                         return;
                     }
@@ -5472,13 +5617,15 @@ fn register_window_handlers(
     autom: &IUIAutomation,
     window: &IUIAutomationElement,
     hwnd: usize,
-    cache: &IUIAutomationCacheRequest,
+    cache_request: &crate::coords::BoundsCacheRequest,
     ctx: &EventContext,
     automation_handler: &IUIAutomationEventHandler,
     property: &IUIAutomationPropertyChangedEventHandler,
     structure: &IUIAutomationStructureChangedEventHandler,
     visual_states: &Mutex<HashMap<usize, i32>>,
 ) -> Result<RegisteredWindow> {
+    let dpi = &crate::dpi::DpiScope::enter()?;
+    let cache = cache_request.get(dpi);
     // Acquire the window pattern once: the baseline seed below and the
     // post-attach reconciliation both read `CurrentWindowVisualState` from
     // it, and a second acquisition could fail transiently between two reads
@@ -5633,7 +5780,7 @@ fn register_window_handlers(
                     }
                 };
                 if !kinds.is_empty() {
-                    let target = ctx.snapshot_or_log(window, cache);
+                    let target = ctx.snapshot_or_log(window, cache_request);
                     for kind in kinds {
                         ctx.emit(kind, target.clone());
                     }
@@ -5707,10 +5854,14 @@ fn remove_handlers_of(
 /// (the asynchronous watch path).
 fn sync_registrations(
     state: &SubscriptionState,
-    cache: &IUIAutomationCacheRequest,
+    cache_request: &crate::coords::BoundsCacheRequest,
     ctx: &EventContext,
     pid: u32,
 ) -> Result<bool> {
+    // Runs on the registration worker, which is per-monitor for life, so
+    // this scope is the token the fetches below need rather than a switch.
+    let dpi = &crate::dpi::DpiScope::enter()?;
+    let cache = cache_request.get(dpi);
     // The process-wide worker serializes native registration operations
     // across subscriptions. This per-subscription guard makes the associated
     // diff and bookkeeping one transaction as well.
@@ -5780,7 +5931,7 @@ fn sync_registrations(
             autom,
             window,
             hwnd,
-            cache,
+            cache_request,
             ctx,
             state.automation_handler.get(),
             state.property_handler.get(),
@@ -5914,20 +6065,30 @@ impl EventContext {
 
     /// Build a full ElementData snapshot from a UIA sender element.
     ///
-    /// Event handlers are registered with a cache request, so cached accessors
-    /// should work directly on `sender`. If the cache is cold for any reason,
-    /// we fall back to `BuildUpdatedCache` so the target is always populated.
+    /// Event handlers are registered with a cache request, so the sender
+    /// arrives with its properties prefetched, converted at the awareness of
+    /// UIA's event thread. That prefetch is used as is when the thread was
+    /// already per-monitor; when the scope had to switch it (or the cache is
+    /// cold), the sender is refetched inside the scope so its bounds are
+    /// physical. A refetch failure is the snapshot's failure, and the caller
+    /// then delivers the event without a target.
     fn snapshot(
         &self,
         sender: &IUIAutomationElement,
-        cache: &IUIAutomationCacheRequest,
+        cache: &crate::coords::BoundsCacheRequest,
     ) -> Result<ElementData> {
-        // `CachedControlType()` is cheap and indicates whether the cache
-        // covers our expected properties. If it errors, refresh the cache.
-        let cached_element = if unsafe { sender.CachedControlType() }.is_ok() {
+        // UIA calls event handlers on its own threads, whose DPI awareness
+        // xa11y does not control; the snapshot reads bounds (issue #506).
+        let dpi = &crate::dpi::DpiScope::enter()?;
+        let prefetched_is_physical =
+            !dpi.switched() && unsafe { sender.CachedControlType() }.is_ok();
+        let cached_element = if prefetched_is_physical {
             sender.clone()
         } else {
-            unsafe { sender.BuildUpdatedCache(cache) }.unwrap_or_else(|_| sender.clone())
+            unsafe { sender.BuildUpdatedCache(cache.get(dpi)) }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("BuildUpdatedCache for the event sender failed: {e}"),
+            })?
         };
         // Event targets are not walked to their host window: the handler
         // must stay cheap. One with its own HWND is still checked, so a
@@ -5939,6 +6100,7 @@ impl EventContext {
             .ok()
             .is_some_and(|h| !h.0.is_null() && hwnd_in_minimized_window(h));
         build_snapshot_data(
+            dpi,
             &cached_element,
             Some(self.app_pid),
             0,
@@ -5956,7 +6118,7 @@ impl EventContext {
     fn snapshot_or_log(
         &self,
         el: &IUIAutomationElement,
-        cache: &IUIAutomationCacheRequest,
+        cache: &crate::coords::BoundsCacheRequest,
     ) -> Option<ElementData> {
         match self.snapshot(el, cache) {
             Ok(data) => Some(data),
@@ -6042,7 +6204,7 @@ fn visual_state_delta_kinds(from: i32, to: i32) -> Vec<EventKind> {
 #[implement(IUIAutomationFocusChangedEventHandler)]
 struct FocusHandler {
     ctx: Arc<EventContext>,
-    cache: IUIAutomationCacheRequest,
+    cache: crate::coords::BoundsCacheRequest,
 }
 
 impl IUIAutomationFocusChangedEventHandler_Impl for FocusHandler_Impl {
@@ -6063,7 +6225,7 @@ impl IUIAutomationFocusChangedEventHandler_Impl for FocusHandler_Impl {
 #[implement(IUIAutomationEventHandler)]
 struct AutomationHandler {
     ctx: Arc<EventContext>,
-    cache: IUIAutomationCacheRequest,
+    cache: crate::coords::BoundsCacheRequest,
 }
 
 impl IUIAutomationEventHandler_Impl for AutomationHandler_Impl {
@@ -6102,7 +6264,7 @@ impl IUIAutomationEventHandler_Impl for AutomationHandler_Impl {
 #[implement(IUIAutomationPropertyChangedEventHandler)]
 struct PropertyHandler {
     ctx: Arc<EventContext>,
-    cache: IUIAutomationCacheRequest,
+    cache: crate::coords::BoundsCacheRequest,
     /// Current `WindowVisualState` per top-level window, keyed by HWND. UIA
     /// reports the whole visual state on every transition while
     /// `StateChanged` promises a *change*, so a delta is only meaningful
@@ -6230,7 +6392,7 @@ impl IUIAutomationPropertyChangedEventHandler_Impl for PropertyHandler_Impl {
 #[implement(IUIAutomationStructureChangedEventHandler)]
 struct StructureHandler {
     ctx: Arc<EventContext>,
-    cache: IUIAutomationCacheRequest,
+    cache: crate::coords::BoundsCacheRequest,
 }
 
 impl IUIAutomationStructureChangedEventHandler_Impl for StructureHandler_Impl {
@@ -6267,7 +6429,7 @@ impl IUIAutomationStructureChangedEventHandler_Impl for StructureHandler_Impl {
 #[implement(IUIAutomationEventHandler)]
 struct WatchHandler {
     ctx: Arc<EventContext>,
-    cache: IUIAutomationCacheRequest,
+    cache: crate::coords::BoundsCacheRequest,
     state: Arc<SubscriptionState>,
 }
 
@@ -6396,6 +6558,7 @@ const PROPERTY_CHANGE_IDS: &[UIA_PROPERTY_ID] = &[
 impl WindowsProvider {
     fn subscribe_impl(
         &self,
+        dpi: &crate::dpi::DpiScope,
         pid: u32,
         app_name: String,
         saved_app: Option<SavedSyntheticAppIdentity>,
@@ -6411,10 +6574,12 @@ impl WindowsProvider {
         // open/close watch below keeps the set in step as windows come and
         // go, so "app subscription" now means "the process".
         let windows = match saved_app {
-            Some(saved) => {
-                top_level_windows_of_saved_app_with(&self.automation, &self.batch_request, saved)?
-            }
-            None => self.top_level_windows_of_pid(pid)?,
+            Some(saved) => top_level_windows_of_saved_app_with(
+                &self.automation,
+                self.batch_request.get(dpi),
+                saved,
+            )?,
+            None => self.top_level_windows_of_pid(dpi, pid)?,
         };
         if windows.is_empty() {
             // Not reachable yet (or its last window just closed): surface it
@@ -6507,7 +6672,9 @@ impl WindowsProvider {
         let initial_ctx = Arc::clone(&ctx);
         on_registration_worker(move || {
             let autom = initial_automation.get();
-            let cache = initial_cache.get();
+            let dpi = &crate::dpi::DpiScope::enter()?;
+            let cache_request = initial_cache.get();
+            let cache = cache_request.get(dpi);
             let focus = initial_focus.get();
             let watch = initial_watch.get();
             let root = initial_root.get();
@@ -6529,7 +6696,7 @@ impl WindowsProvider {
                     autom,
                     window,
                     hwnd,
-                    cache,
+                    cache_request,
                     &initial_ctx,
                     initial_automation_handler.get(),
                     initial_property.get(),
@@ -6558,7 +6725,7 @@ impl WindowsProvider {
             }
 
             // Close the enumeration/watch gap before subscribe returns.
-            sync_registrations(&initial_state, cache, &initial_ctx, pid)
+            sync_registrations(&initial_state, cache_request, &initial_ctx, pid)
                 .map(|_| ())
                 .map_err(cleanup_error)
         })?;
@@ -7280,7 +7447,6 @@ mod tests {
         // Verify essential properties are included
         assert!(BATCH_PROPERTIES.contains(&UIA_ControlTypePropertyId));
         assert!(BATCH_PROPERTIES.contains(&UIA_NamePropertyId));
-        assert!(BATCH_PROPERTIES.contains(&UIA_BoundingRectanglePropertyId));
         assert!(BATCH_PROPERTIES.contains(&UIA_IsEnabledPropertyId));
         assert!(BATCH_PROPERTIES.contains(&UIA_ProcessIdPropertyId));
         assert!(BATCH_PROPERTIES.contains(&UIA_IsPasswordPropertyId));
