@@ -257,6 +257,10 @@ fn a_medium_integrity_sender_is_refused_input_to_an_elevated_window() {
         panic!("the medium-integrity child (exit code {code}) wrote no result: {e}")
     });
     let _ = std::fs::remove_file(&result_file);
+    // Always printed (the integ script runs this with --nocapture), so a
+    // passing run also records whether the token was readable and where the
+    // point landed.
+    eprintln!("medium-integrity child reported:\n{outcome}");
     let first = outcome.lines().next().unwrap_or("");
     assert!(
         first.starts_with("refused:") && first.contains("high integrity"),
