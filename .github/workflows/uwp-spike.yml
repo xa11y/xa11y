@@ -105,3 +105,31 @@ jobs:
           Start-Sleep 3
           & $plm /query $pfn
           & $plm /disableDebug $pfn
+
+  xa11y-view:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Rust
+        uses: ./.github/actions/setup-rust
+        with:
+          cache-key: integ
+      - name: Build xa11y CLI
+        run: cargo build -p xa11y
+      - name: Build + install UWP app
+        shell: pwsh
+        run: |
+          test-apps/uwp/build.ps1
+          test-apps/uwp/install.ps1
+      - name: Launch and inspect with xa11y
+        shell: pwsh
+        run: |
+          $pfn = (Get-AppxPackage -Name xa11y.UwpTestApp).PackageFamilyName
+          Start-Process explorer.exe "shell:AppsFolder\$pfn!App"
+          Start-Sleep 15
+          Get-Process | Where-Object { $_.ProcessName -match 'xa11y|ApplicationFrameHost' } | Format-Table Id,ProcessName,MainWindowTitle
+          target/debug/xa11y.exe apps
+          target/debug/xa11y.exe tree --app ApplicationFrameHost
+          target/debug/xa11y.exe tree --app "xa11y UWP Test"
+          target/debug/xa11y.exe tree --app xa11y-uwp-test-app
+          exit 0
