@@ -470,6 +470,17 @@ class OpenOnlyView: NSView {
         [OpenOnlyView.openAction]
     }
 
+    // AppKit only routes a legacy action to `accessibilityPerformAction:` when
+    // the selector is allowed; without this, AXOpen is listed but performing
+    // it answers kAXErrorAttributeUnsupported (-25205). AccessKit's macOS
+    // adapter allows the same selector for the same reason.
+    override func isAccessibilitySelectorAllowed(_ selector: Selector) -> Bool {
+        if selector == #selector(OpenOnlyView.accessibilityPerformAction(_:)) {
+            return true
+        }
+        return super.isAccessibilitySelectorAllowed(selector)
+    }
+
     override func accessibilityPerformAction(_ action: NSAccessibility.Action) {
         if action == OpenOnlyView.openAction {
             openCount += 1
