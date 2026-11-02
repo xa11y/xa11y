@@ -177,6 +177,27 @@ impl MacOSInputProvider {
         Ok(ev)
     }
 
+    /// Post one key-down/key-up pair carrying `text` (at most
+    /// [`TYPE_CHUNK_CHARS`] characters, no line breaks).
+    /// `CGEventKeyboardSetUnicodeString` replaces the synthetic keystroke
+    /// the event would normally generate with the supplied UTF-16 string,
+    /// so we get correct case/IME without synthesising shift chords.
+    fn type_unicode_chunk(&self, text: &str) -> Result<()> {
+        let utf16: Vec<u16> = text.encode_utf16().collect();
+        let ev = self.keyboard_event(0, true)?;
+        // SAFETY: `utf16.as_ptr()` is valid for `utf16.len()` u16 reads
+        // for the duration of the call.
+        unsafe {
+            CGEventKeyboardSetUnicodeString(ev, utf16.len(), utf16.as_ptr());
+        }
+        self.post(ev)?;
+        let ev = self.keyboard_event(0, false)?;
+        unsafe {
+            CGEventKeyboardSetUnicodeString(ev, utf16.len(), utf16.as_ptr());
+        }
+        self.post(ev)
+    }
+
     fn keyboard_event(&self, vk: u16, down: bool) -> Result<CGEventRef> {
         // SAFETY: nil source is allowed by CGEventSource contract.
         let ev = unsafe { CGEventCreateKeyboardEvent(std::ptr::null_mut(), vk, down) };
@@ -447,24 +468,18 @@ impl InputProvider for MacOSInputProvider {
     }
 
     fn type_text(&self, text: &str) -> Result<()> {
-        // CGEventKeyboardSetUnicodeString replaces the synthetic keystroke
-        // the event would normally generate with the supplied UTF-16 string,
-        // so we get correct case/IME without synthesising shift chords.
-        for chunk in text.chars().collect::<Vec<_>>().chunks(20) {
-            let s: String = chunk.iter().collect();
-            let utf16: Vec<u16> = s.encode_utf16().collect();
-            let ev = self.keyboard_event(0, true)?;
-            // SAFETY: `utf16.as_ptr()` is valid for `utf16.len()` u16 reads
-            // for the duration of the call.
-            unsafe {
-                CGEventKeyboardSetUnicodeString(ev, utf16.len(), utf16.as_ptr());
+        for step in plan_type_text(text) {
+            match step {
+                TypeStep::Text(s) => self.type_unicode_chunk(&s)?,
+                // A line break is the Enter key on every platform (#498).
+                // As Unicode text, AppKit text views insert "\r" or "\n"
+                // inconsistently and controls that act on Return never see
+                // the key.
+                TypeStep::Return => {
+                    self.key_down(&Key::Enter)?;
+                    self.key_up(&Key::Enter)?;
+                }
             }
-            self.post(ev)?;
-            let ev = self.keyboard_event(0, false)?;
-            unsafe {
-                CGEventKeyboardSetUnicodeString(ev, utf16.len(), utf16.as_ptr());
-            }
-            self.post(ev)?;
         }
         Ok(())
     }
@@ -503,6 +518,46 @@ impl InputProvider for MacOSInputProvider {
     }
 }
 
+/// Characters per Unicode keyboard event in `type_text`.
+const TYPE_CHUNK_CHARS: usize = 20;
+
+/// One step of `type_text`: a run of text posted as Unicode, or a line break
+/// posted as the Return key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TypeStep {
+    Text(String),
+    Return,
+}
+
+/// Split `text` into Unicode chunks of at most [`TYPE_CHUNK_CHARS`]
+/// characters, with each line break (`"\r\n"`, `"\r"` or `"\n"`) as one
+/// [`TypeStep::Return`].
+fn plan_type_text(text: &str) -> Vec<TypeStep> {
+    let mut steps = Vec::new();
+    let mut run: Vec<char> = Vec::new();
+    let flush = |run: &mut Vec<char>, steps: &mut Vec<TypeStep>| {
+        for chunk in run.chunks(TYPE_CHUNK_CHARS) {
+            steps.push(TypeStep::Text(chunk.iter().collect()));
+        }
+        run.clear();
+    };
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' | '\n' => {
+                if c == '\r' && chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                flush(&mut run, &mut steps);
+                steps.push(TypeStep::Return);
+            }
+            _ => run.push(c),
+        }
+    }
+    flush(&mut run, &mut steps);
+    steps
+}
+
 fn modifier_flag_for(key: &Key) -> u64 {
     match key {
         Key::Shift => K_CG_EVENT_FLAG_MASK_SHIFT,
@@ -510,5 +565,64 @@ fn modifier_flag_for(key: &Key) -> u64 {
         Key::Alt => K_CG_EVENT_FLAG_MASK_ALTERNATE,
         Key::Meta => K_CG_EVENT_FLAG_MASK_COMMAND,
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(s: &str) -> TypeStep {
+        TypeStep::Text(s.to_string())
+    }
+
+    #[test]
+    fn every_line_break_shape_is_one_return() {
+        // "\r\n" is one line break, not two (#498).
+        assert_eq!(
+            plan_type_text("a\r\nb\rc\nd"),
+            vec![
+                text("a"),
+                TypeStep::Return,
+                text("b"),
+                TypeStep::Return,
+                text("c"),
+                TypeStep::Return,
+                text("d"),
+            ]
+        );
+    }
+
+    #[test]
+    fn consecutive_breaks_stay_separate() {
+        assert_eq!(
+            plan_type_text("\n\r\r\n\n"),
+            vec![
+                TypeStep::Return,
+                TypeStep::Return,
+                TypeStep::Return,
+                TypeStep::Return
+            ]
+        );
+        // "\n\r" is two breaks: only CR followed by LF pairs up.
+        assert_eq!(
+            plan_type_text("x\n\ry"),
+            vec![text("x"), TypeStep::Return, TypeStep::Return, text("y")]
+        );
+    }
+
+    #[test]
+    fn text_runs_are_chunked_by_characters() {
+        let long: String = "é".repeat(TYPE_CHUNK_CHARS + 3);
+        assert_eq!(
+            plan_type_text(&format!("{long}\n")),
+            vec![
+                text(&"é".repeat(TYPE_CHUNK_CHARS)),
+                text("ééé"),
+                TypeStep::Return,
+            ]
+        );
+        assert_eq!(plan_type_text(""), vec![]);
+        assert_eq!(plan_type_text("plain"), vec![text("plain")]);
     }
 }
