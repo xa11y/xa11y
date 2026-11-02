@@ -225,10 +225,13 @@ struct App : ApplicationT<App> {
 
 }  // namespace
 
-// No init_apartment: Application::Start runs CoreApplication, which sets up
-// the main thread itself. This is the wWinMain the C++/WinRT UWP project
-// template generates, plus the startup failure log.
+// The main thread must join the MTA before Application::Start. With no
+// apartment, Application::Start throws RPC_E_WRONG_THREAD (0x8001010E, "The
+// Application Object must initially be accessed from the multi-thread
+// apartment"), and an STA here failed activation the same way: both reach the
+// activator only as "The app didn't start".
 int __stdcall wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
+    init_apartment(apartment_type::multi_threaded);
     std::set_terminate([] {
         log_failure(L"std::terminate", L"uncaught exception or noexcept violation");
         std::abort();
