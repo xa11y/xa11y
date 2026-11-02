@@ -48,7 +48,7 @@ use xkbcommon::xkb;
 use xa11y_core::input::{Key as XaKey, MouseButton, Point, ScrollDelta};
 use xa11y_core::{Error, Result};
 
-use crate::input::{char_keysym, key_to_keysym, plan_keystrokes, XK_SHIFT_L};
+use crate::input::{key_to_keysym, plan_keystrokes};
 
 /// Virtual coordinate range for the absolute pointer. Compositors scale
 /// this onto the active virtual screen — same convention used by graphics
@@ -397,6 +397,7 @@ fn detect_screen_size() -> (i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::{char_keysym, XK_SHIFT_L};
     use xa11y_core::input::Key as XaKey;
 
     fn default_keymap() -> xkb::Keymap {
