@@ -459,9 +459,13 @@ impl LinuxProvider {
         ))
     }
 
-    /// `GetState` for a registry scan, as one 64-bit set. `Ok(None)` when
-    /// the object or its peer is gone; [`Error::Timeout`] naming the app when
-    /// it does not answer.
+    /// `GetState` as one 64-bit set, for a decision that must not guess (the
+    /// registry scans and the `App::windows()` filter, #492). `Ok(None)` when
+    /// the object or its peer is gone: GDBus (GTK 4) answers a destroyed
+    /// object with `UnknownMethod`, so every absent-member reply counts.
+    /// [`Error::Timeout`] naming the app when it does not answer; any other
+    /// failure is returned. Contrast [`Self::state_bits`], which the snapshot
+    /// path uses to tolerate an unreadable state per field.
     fn scan_state_bits(&self, aref: &AccessibleRef) -> Result<Option<u64>> {
         let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
         let reply = match proxy.call_method("GetState", &()) {
@@ -479,7 +483,10 @@ impl LinuxProvider {
         };
         let words: Vec<u32> = reply.body().deserialize().map_err(|e| Error::Platform {
             code: -1,
-            message: format!("GetState deserialize failed: {e}"),
+            message: format!(
+                "GetState deserialize failed for {}{}: {e}",
+                aref.bus_name, aref.path
+            ),
         })?;
         Ok(Some(
             words
@@ -2260,6 +2267,35 @@ impl Provider for LinuxProvider {
         Ok(surfaces)
     }
 
+    /// The application's top-level children, minus windows that are not on
+    /// screen in any sense.
+    ///
+    /// Qt keeps a hidden top-level dialog alive in the AT-SPI tree after
+    /// `hide()`, with no native window behind it, so it was listed as a window
+    /// the user cannot see (issue #492). A top-level window or dialog is
+    /// dropped when its state set has neither `VISIBLE` nor `ICONIFIED`. A
+    /// minimized window keeps `ICONIFIED`, and an unmapped one (minimized,
+    /// or on another workspace) keeps `VISIBLE` without `SHOWING`; both stay
+    /// listed. A window destroyed since the children read is gone and
+    /// skipped; any other state-read failure fails the listing rather than
+    /// guessing either way.
+    fn app_windows(&self, app: &ElementData) -> Result<Vec<ElementData>> {
+        let children = self.get_children(Some(app))?;
+        let mut windows = Vec::with_capacity(children.len());
+        for child in children {
+            if matches!(child.role, Role::Window | Role::Dialog) {
+                let aref = self.get_cached(child.handle)?;
+                match self.scan_state_bits(&aref)? {
+                    Some(bits) if is_listable_top_level(bits) => {}
+                    // Hidden toolkit object, or destroyed since enumeration.
+                    _ => continue,
+                }
+            }
+            windows.push(child);
+        }
+        Ok(windows)
+    }
+
     /// A single process can register several AT-SPI Application entries
     /// (per-process instance plus per-event-loop pieces), so `App::windows`
     /// must merge their window children by pid. The same-pid merge and the
@@ -3375,6 +3411,18 @@ fn extents_to_rect(x: i32, y: i32, w: i32, h: i32) -> Option<Rect> {
     })
 }
 
+/// Whether a top-level window's AT-SPI state set means it exists for the
+/// user: `VISIBLE` (mapped, or unmapped but not hidden: minimized or on
+/// another workspace, where `SHOWING` is clear) or `ICONIFIED` (minimized).
+/// A window with neither is a hidden toolkit object, not a window (issue
+/// #492). `SHOWING` alone does not count, matching the provider's own
+/// definition of a hidden element.
+fn is_listable_top_level(bits: u64) -> bool {
+    const ICONIFIED: u64 = 1 << 15;
+    const VISIBLE: u64 = 1 << 30;
+    bits & (VISIBLE | ICONIFIED) != 0
+}
+
 /// Classify the structured reply before rendering it. `UnknownObject` means
 /// this exact accessible was destroyed, not that the peer timed out or that
 /// `GetChildren` is unimplemented. Direct reads retain the stale-element error;
@@ -3892,6 +3940,23 @@ mod tests {
         // N×0 and 0×N are thin but real (a separator), as on Windows.
         assert!(extents_to_rect(5, 5, 30, 0).is_some());
         assert!(extents_to_rect(5, 5, 0, 30).is_some());
+    }
+
+    #[test]
+    fn hidden_top_levels_are_not_listed_but_minimized_ones_are() {
+        const ICONIFIED: u64 = 1 << 15;
+        const SHOWING: u64 = 1 << 25;
+        const VISIBLE: u64 = 1 << 30;
+        // Qt's hidden dialog: none of the three.
+        assert!(!is_listable_top_level(0));
+        assert!(!is_listable_top_level(1 << 8)); // ENABLED alone
+        assert!(is_listable_top_level(VISIBLE | SHOWING));
+        // Unmapped (another workspace): VISIBLE without SHOWING.
+        assert!(is_listable_top_level(VISIBLE));
+        // SHOWING without VISIBLE is not a shown window.
+        assert!(!is_listable_top_level(SHOWING));
+        // Minimized: no SHOWING, but ICONIFIED keeps it listed.
+        assert!(is_listable_top_level(ICONIFIED));
     }
 
     #[test]
@@ -4434,6 +4499,166 @@ mod tests {
             ),
             Error::Platform { .. }
         ));
+    }
+
+    /// AT-SPI peer for the #492 window filter: a role, a state set, and a
+    /// `GetState` that can fail the way a destroyed or hung object does.
+    struct StatePeer {
+        name: &'static str,
+        role: &'static str,
+        children: Vec<&'static str>,
+        state: u64,
+        state_error: Option<&'static str>,
+    }
+
+    #[zbus::interface(name = "org.a11y.atspi.Accessible")]
+    impl StatePeer {
+        fn get_children(&self) -> Vec<(String, zbus::zvariant::OwnedObjectPath)> {
+            self.children
+                .iter()
+                .map(|path| {
+                    (
+                        "org.test.States".into(),
+                        zbus::zvariant::OwnedObjectPath::try_from(*path).expect("test path"),
+                    )
+                })
+                .collect()
+        }
+
+        fn get_role_name(&self) -> &str {
+            self.role
+        }
+
+        fn get_role(&self) -> u32 {
+            match self.role {
+                "application" => 75,
+                "frame" => 23,
+                "dialog" => 16,
+                "push button" => 43,
+                other => panic!("no role number for fixture role {other:?}"),
+            }
+        }
+
+        fn get_state(&self) -> zbus::fdo::Result<Vec<u32>> {
+            match self.state_error {
+                None => Ok(vec![self.state as u32, (self.state >> 32) as u32]),
+                Some("UnknownObject") => Err(zbus::fdo::Error::UnknownObject("destroyed".into())),
+                Some("NoReply") => Err(zbus::fdo::Error::NoReply("unresponsive".into())),
+                Some("UnknownMethod") => Err(zbus::fdo::Error::UnknownMethod(
+                    "Object does not exist at path".into(),
+                )),
+                Some(other) => panic!("unsupported test error {other:?}"),
+            }
+        }
+
+        #[zbus(property)]
+        fn name(&self) -> &str {
+            self.name
+        }
+    }
+
+    /// Serve `peers` (path, peer) under an application at `/root` and return
+    /// a provider connected to them plus the application snapshot.
+    fn state_peer_app(
+        peers: Vec<(&'static str, StatePeer)>,
+    ) -> (Connection, LinuxProvider, ElementData) {
+        let (server_socket, client_socket) =
+            std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let server = std::thread::spawn(move || {
+            let root = StatePeer {
+                name: "App",
+                role: "application",
+                children: peers.iter().map(|(path, _)| *path).collect(),
+                state: 0,
+                state_error: None,
+            };
+            let mut builder =
+                zbus::blocking::connection::Builder::async_io_unix_stream(server_socket)
+                    .server(zbus::Guid::generate())
+                    .expect("server GUID")
+                    .p2p()
+                    .serve_at("/root", root)
+                    .expect("root interface");
+            for (path, peer) in peers {
+                builder = builder.serve_at(path, peer).expect("peer interface");
+            }
+            builder.build().expect("server connection")
+        });
+        let connection = zbus::blocking::connection::Builder::async_io_unix_stream(client_socket)
+            .p2p()
+            .build()
+            .expect("client connection");
+        let server = server.join().expect("server thread");
+        let provider = LinuxProvider {
+            a11y_bus: Mutex::new(connection),
+            handle_cache: Mutex::new(HashMap::new()),
+            action_indices: Mutex::new(HashMap::new()),
+            window_manager: WindowManager::new(),
+        };
+        let root = provider.build_element_data(
+            &AccessibleRef {
+                bus_name: "org.test.States".into(),
+                path: "/root".into(),
+            },
+            None,
+        );
+        (server, provider, root)
+    }
+
+    fn state_peer(name: &'static str, role: &'static str, state: u64) -> StatePeer {
+        StatePeer {
+            name,
+            role,
+            children: vec![],
+            state,
+            state_error: None,
+        }
+    }
+
+    /// Issue #492: Qt's hidden dialog (neither VISIBLE nor ICONIFIED) is not
+    /// a window; a minimized or unmapped one is; a window destroyed since the
+    /// children read is gone, whether the peer says `UnknownObject` (zbus) or
+    /// `UnknownMethod` (GDBus); a non-window child is never filtered.
+    #[test]
+    fn app_windows_drops_hidden_top_levels_and_keeps_minimized_ones() {
+        const ICONIFIED: u64 = 1 << 15;
+        const SHOWING: u64 = 1 << 25;
+        const VISIBLE: u64 = 1 << 30;
+        let mut gone = state_peer("Gone", "frame", VISIBLE | SHOWING);
+        gone.state_error = Some("UnknownObject");
+        // GDBus (GTK 4) answers a destroyed object with UnknownMethod.
+        let mut gdbus_gone = state_peer("GdbusGone", "frame", VISIBLE | SHOWING);
+        gdbus_gone.state_error = Some("UnknownMethod");
+        let (_server, provider, app) = state_peer_app(vec![
+            ("/main", state_peer("Main", "frame", VISIBLE | SHOWING)),
+            ("/hidden", state_peer("Sample Dialog", "dialog", 1 << 8)),
+            ("/minimized", state_peer("Minimized", "frame", ICONIFIED)),
+            ("/unmapped", state_peer("Unmapped", "dialog", VISIBLE)),
+            ("/gdbus_gone", gdbus_gone),
+            ("/gone", gone),
+            ("/button", state_peer("Stray", "push button", 0)),
+        ]);
+        let windows = provider.app_windows(&app).expect("app windows");
+        let names: Vec<_> = windows
+            .iter()
+            .map(|w| w.name.as_deref().unwrap_or(""))
+            .collect();
+        assert_eq!(names, vec!["Main", "Minimized", "Unmapped", "Stray"]);
+    }
+
+    /// A state read that fails for any reason but a destroyed object fails
+    /// the listing: the window is neither listed nor hidden on a guess.
+    #[test]
+    fn app_windows_surfaces_a_failed_state_read() {
+        let mut hung = state_peer("Hung", "frame", 0);
+        hung.state_error = Some("NoReply");
+        let (_server, provider, app) = state_peer_app(vec![("/hung", hung)]);
+        let err = provider.app_windows(&app).expect_err("NoReply must fail");
+        assert!(
+            matches!(&err, Error::Platform { message, .. }
+                if message.contains("GetState") && message.contains("/hung")),
+            "{err:?}"
+        );
     }
 
     /// Minimal AT-SPI peer: the first child disappears when its children are

@@ -160,9 +160,9 @@ def _window_named(app: xa11y.App, dialog_name: str) -> xa11y.Element | None:
         raise
     # Only a *visible* window counts: the Qt fixture hides its dialog rather
     # than destroying it, and Qt keeps the hidden node in the AT-SPI tree with
-    # no X11 window behind it. Counting it would make "the dialog closed"
-    # unobservable and hand the next test a stale node before the reopened
-    # dialog is shown.
+    # no X11 window behind it. App.windows() leaves that node out since issue
+    # #492 (test_closed_dialog_is_not_listed_as_a_window pins it); the filter
+    # stays so a window caught mid-hide is not handed to the next test.
     for w in windows:
         if w.visible and w.name and dialog_name in w.name:
             return w
@@ -1072,6 +1072,28 @@ def test_close_dialog_via_locator(app: xa11y.App, app_config: dict) -> None:
         # Same rail as test_close_dialog_via_element: the dialog must be gone
         # before the next suite enumerates windows.
         _close_dialog_from_finally(app, app_config)
+
+
+def test_closed_dialog_is_not_listed_as_a_window(
+    app: xa11y.App, app_config: dict
+) -> None:
+    """A dialog the user closed does not linger in ``App.windows()``.
+
+    The Qt fixture hides its dialog rather than destroying it, and Qt keeps
+    the hidden node in the AT-SPI tree with no native window behind it. It
+    used to be listed as a window the user cannot see (issue #492). Unlike
+    the helpers above, this reads ``App.windows()`` with no ``visible``
+    filter of its own: the listing itself must leave the ghost out.
+    """
+    dialog_name = app_config.get("dialog_name", "")
+    _open_dialog(app, app_config)
+    _close_dialog(app, app_config, strict=True)
+    if _dialog_present(app, dialog_name):
+        pytest.skip("this platform cannot dispatch a close to its dialog")
+    listed = [w.name for w in app.windows() if w.name and dialog_name in w.name]
+    assert listed == [], (
+        f"a closed dialog is still listed as a window: {listed!r} (issue #492)"
+    )
 
 
 @pytest.mark.skipif(
