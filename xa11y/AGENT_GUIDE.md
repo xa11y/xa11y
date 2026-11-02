@@ -1,7 +1,7 @@
 # xa11y agent guide
 
 xa11y reads and drives desktop application UIs through each platform's
-accessibility API: AX on macOS, UI Automation on Windows, and AT-SPI2 on Linux.
+accessibility API (AX on macOS, UI Automation on Windows, AT-SPI2 on Linux).
 This guide describes the tools `xa11y mcp` serves, for an agent driving them.
 The binary embeds it, so it matches the version you are talking to. `xa11y mcp`
 serves it as the `xa11y://guide` resource and the `guide` prompt, and
@@ -10,7 +10,7 @@ serves it as the `xa11y://guide` resource and the `guide` prompt, and
 The command line runs the same operations with two differences. `xa11y action`
 acts on the first match instead of refusing a selector that matches several.
 A failure is an exit code (1 for a failed operation, 2 for a usage error) and a
-message on stderr, without the `kind` and `diagnosis` fields described under
+message on standard error, without the `kind` and `diagnosis` fields described under
 Failures.
 
 ## Workflow
@@ -66,7 +66,7 @@ visible and enabled, then acts on that element. The window verbs and
 `scroll-into-view` wait only for enabled, because a minimized window or a
 scrolled-away element is invisible by design. The wait lasts up to the default
 timeout: 5 seconds unless `XA11Y_DEFAULT_TIMEOUT` sets another number of
-seconds in the server's environment. A call that fails therefore takes that
+seconds in the server's environment. A call that fails takes that
 long, and its `timeout` failure names what it waited for and what it last saw.
 The wait is already a retry loop, so wrapping `action` in another one only
 multiplies the delay.
@@ -111,11 +111,11 @@ diagnosis before retrying.
 
 | `kind` | Meaning | What to do |
 | --- | --- | --- |
-| `invalid_arguments` | An argument is missing, has the wrong type, or is out of range. | Fix the argument the message names. |
+| `invalid_arguments` | An argument is missing or invalid (wrong type, out of range). | Fix the argument the message names. |
 | `no_match` | No application or element matched. | Read the candidates in the diagnosis, then correct the selector or target. |
 | `ambiguous_selector` | The selector matched several elements where one is required. | Narrow it with an attribute filter or `:nth(n)`. |
 | `ambiguous_shell_surface` | Several shell surfaces of the requested kind exist. | Pass the `pid` of the one you mean, from the candidates. |
-| `timeout` | An auto-wait ran out before its condition held. | Read `last_observed`. "never matched" means the selector is wrong; a state such as `visible=false` means the element exists and is not actionable yet. |
+| `timeout` | An auto-wait ran out before its condition held. | Read `last_observed`. "never matched" means the selector is wrong. A state such as `visible=false` means the element exists and cannot be acted on yet. |
 | `element_stale` | The element vanished between being found and being acted on. | Run the lookup again. |
 | `action_not_supported` | The element cannot perform this verb. | Pick another verb from the element's properties. |
 | `text_value_not_supported` | The platform cannot set text on this element. | Use `type-text`, or the `type` tool after focusing the element. |
@@ -123,7 +123,7 @@ diagnosis before retrying.
 | `invalid_action_data` | An action payload failed validation. | Fix the value, point, size or range. |
 | `invalid_config` | Process configuration is invalid, such as a malformed `XA11Y_DEFAULT_TIMEOUT`. | Fix the server's environment and restart it. |
 | `no_element_bounds` | The element has no screen bounds. | Use `action`, which needs none, or scroll the element into view first. |
-| `unsupported` | No backend covers this operation on this platform or session. | Use another approach; retrying cannot succeed. |
+| `unsupported` | No backend covers this operation on this platform or session. | Use another approach. Retrying cannot succeed. |
 | `permission_denied` | An OS permission is missing. | Relay the instructions in the message to the user. |
 | `accessibility_not_enabled` | The application exposes an empty tree because its accessibility bridge is off. | Relay the fix in the message to the user. The application needs a restart afterwards. |
 | `subscription_expired` | An event subscription handle expired. | Start a new subscription with `events_start`. |

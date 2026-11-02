@@ -3189,7 +3189,9 @@ mod tests {
     /// Parsed rather than listed by hand, so a kind added to the function is
     /// a kind this test sees without anyone remembering to update a list.
     fn failure_kinds_in_source() -> Vec<String> {
-        let source = include_str!("tools.rs");
+        // A Windows checkout may carry CRLF line endings, which would hide
+        // the `\n}\n` that ends the function.
+        let source = include_str!("tools.rs").replace("\r\n", "\n");
         let start = source
             .find("\nfn failure_kind(")
             .expect("failure_kind is defined in this file");
