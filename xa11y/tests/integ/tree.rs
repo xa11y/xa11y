@@ -841,6 +841,40 @@ mod tests {
         );
     }
 
+    /// `* button` reaches every button once per ancestor; the provider must
+    /// collapse those sightings to one result per element. macOS compared
+    /// `AXUIElementRef` pointers, which differ per read, and returned
+    /// duplicates (issue #514). Windows minted a fresh handle per read and
+    /// returned nested buttons (title bar, toolbar) once per `*` ancestor
+    /// (issue #571).
+    ///
+    /// Not on macOS until #548 (the #514 fix) lands; that change drops this
+    /// gate.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    #[ignore]
+    fn descendant_search_returns_each_element_once() {
+        let app = h::app_root();
+        let direct = app.locator("button").elements().expect("button search");
+        let via_ancestors = app
+            .locator("* button")
+            .elements()
+            .expect("descendant search");
+        assert!(!direct.is_empty(), "test app has buttons");
+        // Sorted: this checks the set and the multiplicity, not the order.
+        let names = |els: &[Element]| -> Vec<Option<String>> {
+            let mut names: Vec<_> = els.iter().map(|e| e.name.clone()).collect();
+            names.sort();
+            names
+        };
+        assert_eq!(
+            names(&via_ancestors),
+            names(&direct),
+            "every button sits under its window, so `* button` must find the \
+             same buttons as `button`, each once"
+        );
+    }
+
     #[test]
     #[ignore]
     fn wildcard_with_filter_equals_bare_attribute_selector() {
