@@ -18,7 +18,7 @@
 //! app.locator(r#"button[name="OK"]"#).press().expect("Failed to press");
 //! ```
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex};
 
 // Re-export public types.
 pub use xa11y_core::{
@@ -87,22 +87,22 @@ pub use shell_ext::ShellSurfaceExt;
 
 // ── Internal singleton ──────────────────────────────────────────────────────
 
-static PROVIDER: OnceLock<std::result::Result<&'static dyn Provider, Error>> = OnceLock::new();
+static PROVIDER: Mutex<Option<&'static dyn Provider>> = Mutex::new(None);
 
-/// Clone a memoized construction result out of a process-wide cache.
-///
-/// The caches hold the `Error` itself rather than a stringified form: the
-/// variant is part of the contract. A construction failure that is
-/// `PermissionDenied` must reach the CLI, MCP, and both bindings as that
-/// variant, not as a generic `Platform(-1)`. A stringified `Platform` error
-/// re-wrapped in `Platform` also renders its prefix twice
-/// (`Platform error (-1): Platform error (-1): …`), which is why the old
-/// stringifying cache stripped a `Platform` prefix before storing.
+/// Clone a successfully constructed value out of a process-wide cache.
+/// Failures are not cached: permissions and desktop services may recover.
+/// Return the original error variant to the caller unchanged.
 fn cached<T: Clone>(
-    cell: &OnceLock<std::result::Result<T, Error>>,
+    cell: &Mutex<Option<T>>,
     init: impl FnOnce() -> std::result::Result<T, Error>,
 ) -> Result<T> {
-    cell.get_or_init(init).clone()
+    let mut value = cell.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(value) = value.as_ref() {
+        return Ok(value.clone());
+    }
+    let created = init()?;
+    *value = Some(created.clone());
+    Ok(created)
 }
 
 fn get_provider_ref() -> Result<&'static dyn Provider> {
@@ -163,8 +163,8 @@ pub fn input_sim() -> Result<InputSim> {
 // Three bare functions instead of a factory + handle. The platform backend
 // (ScreenCaptureKit on macOS, X11 `GetImage` or xdg-desktop-portal on Linux,
 // GDI on Windows) is initialised lazily on first call and memoized in a
-// `OnceLock`, so repeated captures reuse the same backend without paying
-// construction cost per call.
+// `Mutex<Option<_>>`, so repeated captures reuse a successfully initialized
+// backend without paying construction cost per call. Failed grants can retry.
 //
 // All three return:
 // - [`Error::PermissionDenied`] on macOS if Screen Recording is not granted
@@ -172,8 +172,7 @@ pub fn input_sim() -> Result<InputSim> {
 // - [`Error::Unsupported`] on Linux if neither `DISPLAY` nor `WAYLAND_DISPLAY`
 //   is set, and on older Windows contexts where `BitBlt` is unavailable.
 
-static SCREENSHOT_BACKEND: OnceLock<std::result::Result<Arc<dyn ScreenshotProvider>, Error>> =
-    OnceLock::new();
+static SCREENSHOT_BACKEND: Mutex<Option<Arc<dyn ScreenshotProvider>>> = Mutex::new(None);
 
 fn screenshot_backend() -> Result<Arc<dyn ScreenshotProvider>> {
     cached(&SCREENSHOT_BACKEND, create_screenshot_backend)
@@ -1601,13 +1600,41 @@ mod annotated_tests {
 mod cached_error_tests {
     use super::*;
 
-    /// The caches hold the `Error` itself, so a construction failure's variant
-    /// reaches callers unchanged. This is what makes a missing macOS grant
+    #[test]
+    fn failed_construction_retries_and_then_caches_success() {
+        let cell = Mutex::new(None);
+        let mut attempts = 0;
+        let mut init = || {
+            attempts += 1;
+            if attempts == 1 {
+                Err(Error::PermissionDenied {
+                    instructions: "grant Accessibility".to_string(),
+                })
+            } else {
+                Ok(42)
+            }
+        };
+        assert!(matches!(
+            cached(&cell, &mut init),
+            Err(Error::PermissionDenied { .. })
+        ));
+        assert_eq!(
+            cached(&cell, &mut init).expect("retry after permission grant"),
+            42
+        );
+        assert_eq!(
+            cached(&cell, &mut init).expect("cache successful initialization"),
+            42
+        );
+        assert_eq!(attempts, 2);
+    }
+
+    /// Construction failures retain their original variant. This makes a missing macOS grant
     /// surface as `PermissionDenied` in the CLI, MCP, and both bindings
     /// instead of a generic `Platform(-1)`.
     #[test]
-    fn a_cached_construction_error_keeps_its_variant() {
-        let cell: OnceLock<std::result::Result<(), Error>> = OnceLock::new();
+    fn a_construction_error_keeps_its_variant() {
+        let cell: Mutex<Option<()>> = Mutex::new(None);
         let err = cached(&cell, || {
             Err(Error::PermissionDenied {
                 instructions: "grant Accessibility".to_string(),
@@ -1620,12 +1647,12 @@ mod cached_error_tests {
         );
     }
 
-    /// A cached `Platform` error is handed out as-is. Stringifying it and
+    /// A `Platform` error is handed out as-is. Stringifying it and
     /// re-wrapping it in `Platform` rendered the prefix twice:
     /// `Platform error (-1): Platform error (-1): …`.
     #[test]
-    fn a_cached_platform_error_renders_its_prefix_once() {
-        let cell: OnceLock<std::result::Result<(), Error>> = OnceLock::new();
+    fn a_platform_error_renders_its_prefix_once() {
+        let cell: Mutex<Option<()>> = Mutex::new(None);
         let err = cached(&cell, || {
             Err(Error::Platform {
                 code: -1,
