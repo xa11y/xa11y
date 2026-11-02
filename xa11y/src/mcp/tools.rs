@@ -2150,43 +2150,34 @@ fn insert_some(map: &mut Map<String, Value>, key: &str, value: Option<Value>) {
     }
 }
 
+/// The boolean states [`states_json`] sends only when true, so an absent one
+/// reads as false. One table of name and accessor, so a name cannot drift
+/// from the field it reports, and the agent guide's list is checked against
+/// the names here.
+type StateGetter = fn(&crate::StateSet) -> bool;
+const SENT_WHEN_TRUE: [(&str, StateGetter); 9] = [
+    ("focused", |s| s.focused),
+    ("focusable", |s| s.focusable),
+    ("active", |s| s.active),
+    ("editable", |s| s.editable),
+    ("selected", |s| s.selected),
+    ("modal", |s| s.modal),
+    ("required", |s| s.required),
+    ("busy", |s| s.busy),
+    ("password", |s| s.password),
+];
+
 /// Encode the state set, sending only what is true or explicitly known.
 ///
 /// `enabled` and `visible` are always sent because they gate whether an
 /// element can be acted on at all, and their absence would read as unknown
 /// rather than as the documented default.
-/// The boolean states [`states_json`] sends only when true, so an absent one
-/// reads as false. Named once so the agent guide's list can be checked
-/// against it.
-const SENT_WHEN_TRUE: [&str; 9] = [
-    "focused",
-    "focusable",
-    "active",
-    "editable",
-    "selected",
-    "modal",
-    "required",
-    "busy",
-    "password",
-];
-
 fn states_json(states: &crate::StateSet) -> Value {
     let mut out = Map::new();
     out.insert("enabled".into(), json!(states.enabled));
     out.insert("visible".into(), json!(states.visible));
-    let flags = [
-        states.focused,
-        states.focusable,
-        states.active,
-        states.editable,
-        states.selected,
-        states.modal,
-        states.required,
-        states.busy,
-        states.password,
-    ];
-    for (key, value) in SENT_WHEN_TRUE.into_iter().zip(flags) {
-        if value {
+    for (key, get) in SENT_WHEN_TRUE {
+        if get(states) {
             out.insert(key.into(), json!(true));
         }
     }
@@ -3303,8 +3294,36 @@ mod tests {
         let section = &guide[start..];
         let section = &section[..section.find("\n- ").unwrap_or(section.len())];
         assert!(section.contains("appear only when true"), "{section}");
-        for key in SENT_WHEN_TRUE {
+        for (key, _) in SENT_WHEN_TRUE {
             assert!(section.contains(&format!("`{key}`")), "{key} in {section}");
+        }
+    }
+
+    #[test]
+    fn each_sent_when_true_name_reports_its_own_field() {
+        let set = |name: &str, s: &mut crate::StateSet| match name {
+            "focused" => s.focused = true,
+            "focusable" => s.focusable = true,
+            "active" => s.active = true,
+            "editable" => s.editable = true,
+            "selected" => s.selected = true,
+            "modal" => s.modal = true,
+            "required" => s.required = true,
+            "busy" => s.busy = true,
+            "password" => s.password = true,
+            other => panic!("no setter for {other}; add one here"),
+        };
+        for (name, _) in SENT_WHEN_TRUE {
+            let mut states = crate::StateSet::default();
+            set(name, &mut states);
+            let sent = states_json(&states);
+            let extra: Vec<&String> = sent
+                .as_object()
+                .expect("object")
+                .keys()
+                .filter(|k| !matches!(k.as_str(), "enabled" | "visible"))
+                .collect();
+            assert_eq!(extra, [name], "setting {name} alone");
         }
     }
 
