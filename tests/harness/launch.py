@@ -25,6 +25,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Sequence
@@ -315,6 +316,7 @@ def _launch_app(
     def _is_test_app(candidate: "xa11y.App") -> bool:
         return candidate.pid == proc.pid or candidate.name in app_names
 
+    started = time.monotonic()
     try:
         app = xa11y.App.find(_is_test_app, timeout=STARTUP_TIMEOUT)
     except xa11y.PermissionDeniedError:
@@ -326,7 +328,14 @@ def _launch_app(
         # `finally` only sees a `proc` this function returned.
         _kill_app(proc)
         raise
-    except (xa11y.SelectorNotMatchedError, xa11y.PlatformError) as exc:
+    except (
+        xa11y.SelectorNotMatchedError,
+        xa11y.PlatformError,
+        # A discovery call that ran out a UIA / AT-SPI timeout (#599). It ends
+        # `App.find` early, so the elapsed time below is not the budget.
+        xa11y.TimeoutError,
+    ) as exc:
+        elapsed = time.monotonic() - started
         # Distinguish "app crashed on launch" from "app never registered".
         if proc.poll() is not None:
             out = proc.stdout.read().decode() if proc.stdout else ""
@@ -337,13 +346,14 @@ def _launch_app(
             ) from exc
         try:
             app_list = [(a.name, a.pid) for a in xa11y.App.list()]
-        except Exception:
-            app_list = "<failed to list>"
+        except Exception as list_exc:  # reported in the message, not swallowed
+            app_list = f"<failed to list: {type(list_exc).__name__}: {list_exc}>"
         _kill_app(proc)
         out = proc.stdout.read().decode() if proc.stdout else ""
         err = proc.stderr.read().decode() if proc.stderr else ""
         raise RuntimeError(
-            f"Test app (pid={proc.pid}) not found after {STARTUP_TIMEOUT}s.\n"
+            f"Test app (pid={proc.pid}) not found: discovery ended after "
+            f"{elapsed:.1f}s of its {STARTUP_TIMEOUT}s budget.\n"
             f"Last error: {exc}\n"
             f"Available apps: {app_list}\n"
             f"stdout: {out}\nstderr: {err}"

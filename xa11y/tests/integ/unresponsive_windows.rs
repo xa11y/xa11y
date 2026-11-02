@@ -9,8 +9,9 @@
 //!   would never count as hung);
 //! - the form overrides `ShowWithoutActivation`, so it does not take the
 //!   foreground from the test app;
-//! - it prints a ready line once the form is up, and the test then waits past
-//!   Windows' 5 s threshold, so the first listing already sees it hung.
+//! - it prints a ready line once the form is up. The hung-window test then
+//!   waits past Windows' 5 s threshold, so the first listing already sees it
+//!   hung; the #599 test lists at once, while the OS does not call it hung yet.
 //!
 //! It is killed on drop, so a failed assertion cannot leave it on the desktop
 //! for the tests after it.
@@ -33,9 +34,15 @@ mod tests {
     struct HungFixture(Child);
 
     impl HungFixture {
-        /// Start the fixture and return once its window is shown and its UI
-        /// thread has stopped pumping.
+        /// Start the fixture and return once Windows considers its window
+        /// hung (no message pumped for longer than the OS's 5 s threshold).
         fn start() -> Self {
+            Self::start_then_wait(Duration::from_secs(7))
+        }
+
+        /// Start the fixture and return `settle` after its window is shown
+        /// and its UI thread has stopped pumping.
+        fn start_then_wait(settle: Duration) -> Self {
             let script = format!(
                 r#"
 $ErrorActionPreference = 'Stop'
@@ -119,7 +126,7 @@ if (-not ($f.IsHandleCreated -and $f.Visible)) {{
                 }
             }
             // The UI thread is now blocked; Windows calls it hung after 5 s.
-            std::thread::sleep(Duration::from_secs(7));
+            std::thread::sleep(settle);
             fixture
         }
 
@@ -155,6 +162,59 @@ if (-not ($f.IsHandleCreated -and $f.Visible)) {{
                 && observed.contains(FIXTURE_TITLE),
             "{what}: the diagnosis should name the hung window (pid {pid}, \
              {FIXTURE_TITLE:?}): {err}"
+        );
+    }
+
+    /// Issue #599: a window that has *just* stopped answering is not hung by
+    /// the OS's 5 s rule yet, so the listing's hung pre-check passes it, and
+    /// the desktop-wide UIA `FindAll` then runs out a UIA timeout without
+    /// saying which window it could not reach. That is what a test app does
+    /// while it starts up. The listing's error must name the window, which
+    /// the `WM_NULL` probe on that failure path does.
+    #[test]
+    #[ignore]
+    fn listing_names_a_window_that_stopped_answering_before_the_os_calls_it_hung() {
+        let fixture = HungFixture::start_then_wait(Duration::ZERO);
+        let pid = fixture.pid();
+
+        let start = Instant::now();
+        let listed = App::list();
+        let elapsed = start.elapsed();
+        eprintln!("App::list with a freshly unresponsive window took {elapsed:?}: {listed:?}");
+        let err = match listed {
+            Err(e) => e,
+            Ok(apps) => panic!(
+                "App::list succeeded while a window was not answering messages; UIA should \
+                 have timed out on it. Listed: {:?}",
+                apps.iter().map(|a| a.name.clone()).collect::<Vec<_>>()
+            ),
+        };
+        let Error::Timeout {
+            elapsed: reported, ..
+        } = &err
+        else {
+            panic!("expected Error::Timeout, got: {err}");
+        };
+        // The error reports the wait that happened, which the test bounds
+        // from outside (#599: it used to claim 20 s whatever the wait).
+        assert!(
+            *reported <= elapsed,
+            "reported {reported:?}, measured {elapsed:?}: {err}"
+        );
+        let diagnosis = err.diagnosis().expect("the timeout carries a diagnosis");
+        let observed = diagnosis.last_observed.clone().unwrap_or_default();
+        assert!(
+            observed.contains("UIA_E_TIMEOUT") && observed.contains("did not answer"),
+            "the diagnosis should say UIA timed out and which window the probe found \
+             unresponsive: {err}"
+        );
+        assert!(
+            diagnosis
+                .candidates
+                .iter()
+                .any(|c| c.contains(&format!("pid {pid}")) && c.contains(FIXTURE_TITLE)),
+            "the candidates should name the fixture window (pid {pid}, {FIXTURE_TITLE:?}): {:?}",
+            diagnosis.candidates
         );
     }
 
