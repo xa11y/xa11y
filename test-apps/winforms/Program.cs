@@ -9,9 +9,6 @@
 //     pattern (DataGridViewCell.DataGridViewCellAccessibleObject), exercising
 //     the row-vs-cell disambiguation in xa11y-windows/src/uia.rs against a
 //     Microsoft framework rather than Qt.
-//   * A ListBox longer than its viewport ("Long List"), whose items scrolled
-//     out of view keep `IsOffscreen = false`; the provider clips them to the
-//     list's bounds (issue #502).
 //   * A ComboBox at the top of an overflowing AutoScroll panel ("Scroll
 //     Panel"): its drop-down is a popup window that extends past the panel,
 //     and must not be clipped to it.
@@ -242,7 +239,7 @@ internal sealed class TestForm : Form
     }
 
     private GroupBox BuildList() =>
-        MakeGroup("List", new Size(300, 230), FlowDirection.TopDown, _itemsList, MakeLongList());
+        MakeGroup("List", new Size(300, 150), FlowDirection.TopDown, _itemsList);
 
     private GroupBox BuildTable() =>
         MakeGroup("Table", new Size(460, 180), FlowDirection.TopDown, _usersTable);
@@ -402,27 +399,6 @@ internal sealed class TestForm : Form
         panel.Controls.Add(filler);
 
         return MakeGroup("Overflow", new Size(300, 80), FlowDirection.TopDown, panel);
-    }
-
-    /// <summary>
-    ///  Forty items in a viewport that shows a few, scrolled to the top, so
-    ///  "Long Entry 40" is out of view while UIA still reports it on screen
-    ///  (issue #502). Named apart from "Item N" so the Add/Remove Item tests,
-    ///  and selectors on the grid's "Row N", never match it.
-    /// </summary>
-    private static ListBox MakeLongList()
-    {
-        var list = new ListBox
-        {
-            AccessibleName = "Long List",
-            Size = new Size(260, 60),
-        };
-        for (int i = 1; i <= 40; i++)
-        {
-            list.Items.Add($"Long Entry {i}");
-        }
-
-        return list;
     }
 
     /// <summary>

@@ -772,8 +772,18 @@ def test_open_dropdown_in_a_scrolled_panel_is_visible(app, app_config):
 
     # The panel must really clip, or the drop-down has nothing to escape:
     # its filler sits below the panel's viewport.
-    filler = app.locator(f'[name="{app_config["scrolled_panel_filler_name"]}"]')
-    assert filler.element().visible is False, (
+    # And it must be the provider's clip that hides the filler, not UIA's own
+    # IsOffscreen, or a clip that wrongly swallowed the popup could hide
+    # behind a framework that already reports it.
+    filler = app.locator(
+        f'[name="{app_config["scrolled_panel_filler_name"]}"]'
+    ).element()
+    assert filler.raw.get("uia_is_offscreen") is False, (
+        f"the panel's filler reports uia_is_offscreen="
+        f"{filler.raw.get('uia_is_offscreen')!r}, so its visibility does not "
+        f"show the panel's clip at work"
+    )
+    assert filler.visible is False, (
         "the panel's filler must be scrolled out of view; if it is visible, "
         "the panel exposes no UIA Scroll pattern and this fixture tests "
         "nothing"

@@ -20,6 +20,11 @@
 //     numeric value and range assertions run here rather than skipping.
 //   * AutomationProperties.IsDialog publishes UIA_IsDialogPropertyId, so the
 //     native-dialog role test runs (WinForms sets that property nowhere).
+//   * A ListBox longer than its viewport ("Long List"). WPF leaves
+//     `IsOffscreen = false` on content scrolled out of a ScrollViewer, which
+//     the provider corrects by clipping to the list's viewport (issue #502).
+//     The WinForms ListBox already reports those items offscreen, so it
+//     cannot show the bug.
 //
 // Widget names mirror test-apps/qt/app.py so the shared Python/JS/CLI suites
 // can run unmodified; see APP_CONFIGS["wpf"] in
@@ -129,8 +134,12 @@ internal sealed class TestWindow : Window
         _usersTable = MakeUsersTable();
 
         // Wrap into a second column instead of scrolling, so every widget stays
-        // on screen (an offscreen widget is still in the UIA tree, but keeping
-        // it visible makes failures easier to reproduce by eye).
+        // in view. The vertical scroll bar is disabled rather than automatic:
+        // with it on, the ScrollViewer measures the WrapPanel at unbounded
+        // height, the panel never wraps, and WPF scrolls the page whenever a
+        // test focuses a control near the bottom. A control scrolled out of
+        // the page reports not visible (issue #502), and the suites' actions
+        // wait for visible.
         var page = new WrapPanel { Orientation = Orientation.Vertical, Margin = new Thickness(8) };
         page.Children.Add(BuildButtons());
         page.Children.Add(BuildCheckBoxes());
@@ -149,7 +158,7 @@ internal sealed class TestWindow : Window
         root.Children.Add(Dock(BuildStatusBar(), System.Windows.Controls.Dock.Bottom));
         root.Children.Add(new ScrollViewer
         {
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             Content = page,
         });
@@ -269,7 +278,27 @@ internal sealed class TestWindow : Window
         var list = new ListBox { ItemsSource = _items, Width = 260, Height = 100 };
         AutomationProperties.SetName(list, "Items");
 
-        return MakeGroup("List", Orientation.Vertical, list);
+        return MakeGroup("List", Orientation.Vertical, list, MakeLongList());
+    }
+
+    /// <summary>
+    ///  Forty items in a viewport that shows a few, scrolled to the top, so
+    ///  "Long Entry 40" is out of view while UIA still reports it on screen
+    ///  (issue #502). Virtualization is off so the scrolled-out items exist in
+    ///  the UIA tree at all. Named apart from "Item N" so the Add/Remove Item
+    ///  tests, and selectors on the grid's rows, never match it.
+    /// </summary>
+    private static ListBox MakeLongList()
+    {
+        var list = new ListBox { Width = 260, Height = 60 };
+        AutomationProperties.SetName(list, "Long List");
+        VirtualizingPanel.SetIsVirtualizing(list, false);
+        for (int i = 1; i <= 40; i++)
+        {
+            list.Items.Add($"Long Entry {i}");
+        }
+
+        return list;
     }
 
     private GroupBox BuildTable() => MakeGroup("Table", Orientation.Vertical, _usersTable);
