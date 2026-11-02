@@ -211,6 +211,7 @@ def test_the_node_budget_stops_the_walk_and_is_reported_not_confused_with_a_bad_
         ({"busy": True}, "busy"),
         ({"modal": True}, "modal"),
         ({"active": True}, "active"),
+        ({"password": True}, "password"),
     ],
 )
 def test_each_state_that_changes_what_to_do_next_is_rendered(editor, states, expected):

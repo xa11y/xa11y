@@ -101,7 +101,9 @@ def read_states(element: Any) -> List[str]:
     expanded = element.expanded
     if expanded is not None:
         states.append("expanded" if expanded else "collapsed")
-    for flag in ("required", "busy", "modal", "active"):
+    # `password` is read with a default because it is newer than the oldest
+    # xa11y this package admits; an older xa11y simply never reports it.
+    for flag in ("required", "busy", "modal", "active", "password"):
         if getattr(element, flag, False):
             states.append(flag)
     return states
@@ -309,6 +311,7 @@ def properties(element: Any) -> Dict[str, Any]:
         "modal",
         "required",
         "busy",
+        "password",
     )
     read: Dict[str, Any] = {}
     for name in fields:
