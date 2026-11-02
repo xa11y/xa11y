@@ -3453,7 +3453,7 @@ fn extents_to_rect(x: i32, y: i32, w: i32, h: i32) -> Option<Rect> {
 /// A window with neither is a hidden toolkit object, not a window (issue
 /// #492). `SHOWING` alone does not count, matching the provider's own
 /// definition of a hidden element.
-fn is_listable_top_level(bits: u64) -> bool {
+pub(crate) fn is_listable_top_level(bits: u64) -> bool {
     const ICONIFIED: u64 = 1 << 15;
     const VISIBLE: u64 = 1 << 30;
     bits & (VISIBLE | ICONIFIED) != 0
@@ -3701,6 +3701,15 @@ fn is_peer_gone(err: &zbus::Error) -> bool {
         zbus::Error::FDO(e) => PEER_GONE_ERRORS.contains(&e.name().as_str()),
         _ => false,
     }
+}
+
+/// Whether a failed D-Bus call means the object or its application is gone:
+/// an absent member (see [`is_absent_member`]; GDBus answers a destroyed
+/// object with `UnknownMethod`) or a departed peer (see [`is_peer_gone`]).
+/// Only for members every accessible implements, where absence can mean
+/// nothing else.
+pub(crate) fn is_gone(err: &zbus::Error) -> bool {
+    is_absent_member(err) || is_peer_gone(err)
 }
 
 /// Whether a failed D-Bus call means the member is absent (see
