@@ -153,7 +153,7 @@ case "$APP_NAME" in
             make -C "$PROJECT_ROOT/test-apps/cocoa" build
         fi
         echo "Launching Cocoa test app (log: $APP_LOG)..."
-        "$COCOA_BIN" --headless >"$APP_LOG" 2>&1 &
+        "$COCOA_BIN" >"$APP_LOG" 2>&1 &
         APP_PID=$!
         ;;
     tauri)

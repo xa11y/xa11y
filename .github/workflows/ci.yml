@@ -335,6 +335,11 @@ jobs:
           # in the matrix producing ControlType.Custom + TableItem cells, the
           # map_uia_role branch that was unit-tested only (issues #323, #324).
           - { os: windows-latest, app: wpf }
+          # UWP — the only app whose top-level window belongs to another
+          # process: its CoreWindow is hosted in an ApplicationFrameHost frame
+          # (issue #497). Built with the MSVC tools + Windows SDK, packaged
+          # as an MSIX signed with a throwaway certificate, and sideloaded.
+          - { os: windows-latest, app: uwp }
     steps:
       - uses: actions/checkout@v7
 
@@ -411,6 +416,24 @@ jobs:
       - name: Build WPF test app
         if: matrix.app == 'wpf'
         run: dotnet build test-apps/wpf
+
+      # ── UWP app (MSVC + Windows SDK, both preinstalled) ───────────
+      # build.ps1 compiles, packs with makeappx, and signs with a
+      # self-signed certificate it generates and then deletes the private
+      # key of. install.ps1 trusts the public half in
+      # LocalMachine\TrustedPeople (the runner account is an administrator)
+      # and sideloads the package with Add-AppxPackage; sideloading is
+      # enabled by default on Windows Server 2022 and later. The harness
+      # launches the app by AUMID through test-apps/uwp/launch.ps1.
+      # Windows PowerShell rather than pwsh: the Appx cmdlets are a Windows
+      # PowerShell module, and pwsh 7 only reaches them through implicit
+      # remoting on some images.
+      - name: Build and install UWP test app
+        if: matrix.app == 'uwp'
+        shell: powershell
+        run: |
+          test-apps/uwp/build.ps1
+          test-apps/uwp/install.ps1
 
       # ── Electron node_modules ──────────────────────────────────────
       - name: Cache Electron node_modules
@@ -553,16 +576,24 @@ jobs:
       # script, the Node bin) is missing. Without it the suite would narrow
       # itself to whatever happened to be built, and a cell that exercised one
       # launcher would look exactly like one that exercised three.
+      #
+      # XA11Y_REQUIRE_FRONTMOST (tests/strict_frontmost.py) makes an
+      # @pytest.mark.xa11y_frontmost test whose frontmost claim fails FAIL
+      # instead of skip, so a cell cannot quietly stop running them. Off macOS
+      # the claim itself always succeeds; the one way it fails there is an app
+      # that reports no pid, and failing on that is intended too.
       - name: Run integration harness (Linux)
         if: runner.os == 'Linux'
         env:
           XA11Y_REQUIRE_ALL_CLI: "1"
+          XA11Y_REQUIRE_FRONTMOST: "1"
         run: .venv-integ/bin/python tests/harness/launch.py ${{ matrix.app }} python js cli js-window python-window
 
       - name: Run integration harness (macOS)
         if: runner.os == 'macOS'
         env:
           XA11Y_REQUIRE_ALL_CLI: "1"
+          XA11Y_REQUIRE_FRONTMOST: "1"
         run: .venv-integ/bin/python tests/harness/launch.py ${{ matrix.app }} python js cli js-window python-window
 
       - name: Run integration harness (Windows)
@@ -570,6 +601,7 @@ jobs:
         shell: bash
         env:
           XA11Y_REQUIRE_ALL_CLI: "1"
+          XA11Y_REQUIRE_FRONTMOST: "1"
         run: .venv-integ/Scripts/python.exe tests/harness/launch.py ${{ matrix.app }} python js cli js-window python-window
 
   # ── Published end-to-end examples (issue #192) ─────────────────────

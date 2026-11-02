@@ -129,8 +129,12 @@ internal sealed class TestWindow : Window
         _usersTable = MakeUsersTable();
 
         // Wrap into a second column instead of scrolling, so every widget stays
-        // on screen (an offscreen widget is still in the UIA tree, but keeping
-        // it visible makes failures easier to reproduce by eye).
+        // in view. The vertical scroll bar is disabled rather than automatic:
+        // with it on, the ScrollViewer measures the WrapPanel at unbounded
+        // height, the panel never wraps, and WPF scrolls the page whenever a
+        // test focuses a control near the bottom. A control scrolled out of
+        // the page reports not visible (issue #502), and the suites' actions
+        // wait for visible.
         var page = new WrapPanel { Orientation = Orientation.Vertical, Margin = new Thickness(8) };
         page.Children.Add(BuildButtons());
         page.Children.Add(BuildCheckBoxes());
@@ -149,7 +153,7 @@ internal sealed class TestWindow : Window
         root.Children.Add(Dock(BuildStatusBar(), System.Windows.Controls.Dock.Bottom));
         root.Children.Add(new ScrollViewer
         {
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
             Content = page,
         });

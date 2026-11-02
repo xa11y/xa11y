@@ -308,6 +308,17 @@ On Linux, `visible` requires the AT-SPI `Showing` state as well as `Visible`. `V
 
 `bounds` is `None` when `Component.GetExtents` reports a sentinel instead of a position: an `INT32_MIN` coordinate (unrealized GTK widgets), a negative size, or `0x0`. A zero width or a zero height alone, such as a separator line, is still reported, matching Windows.
 
+### Visible state (Windows)
+
+On Windows, `visible` starts from the UIA `IsOffscreen` property, which some providers leave false on content that can't be seen. xa11y corrects two cases:
+
+- The contents of a minimized window are not visible.
+- An item that lies entirely outside the bounds of an ancestor whose content overflows is not visible, while one partly inside still counts as visible. "Overflows" means the ancestor's UIA Scroll pattern says it can scroll horizontally or vertically, so a custom scrolling control with no Scroll pattern isn't covered.
+
+The scroll check has limits. UIA has no viewport rectangle, so the ancestor's bounds stand in for it, and an item hidden only behind a scroll bar or header still counts as visible. A popup or top-level window, such as an open drop-down list, isn't clipped by anything above it, because it's drawn over its owner's content. Event targets skip the scroll check, so a scrolled-out item can report visible on an event. Each element's `raw` map carries `uia_is_offscreen`, the UIA value before these corrections.
+
+Auto-waiting actions wait for `visible`, so an action on a control scrolled out of view times out instead of acting. `scroll_into_view()` waits only for attached and enabled, but it needs the UIA ScrollItem pattern, which list items, tree items and similar controls have. A plain control such as a button has none, and the call returns `Unsupported`. For those, call `focus()` on an `Element` snapshot: frameworks such as WinForms scroll a focused control into view. `Locator.focus()` doesn't help there, because it also waits for `visible`. See the [locator reference](/reference/locator/).
+
 ### Selected state
 
 Per-item selection (`selected` on rows, cells, list items) is read differently:

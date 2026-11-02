@@ -45,9 +45,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.title = "xa11y-cocoa-test-app"
         window.setFrameAutosaveName("TestWindow")
 
-        if headless {
-            NSApp.setActivationPolicy(.accessory)
-        }
+        // An unbundled executable is not a regular app until it says so, and
+        // only a regular app can hold the frontmost slot — which synthesized
+        // input (CGEventPost) and OS-focus tests need. `--headless` keeps the
+        // window out of the Dock and the front slot for manual runs that
+        // must not steal focus; the test harness launches it regular.
+        NSApp.setActivationPolicy(headless ? .accessory : .regular)
 
         // A genuine NSStatusItem fixture for shell-surface integration tests.
         // The test locates and pointer-clicks this actual menu-bar element.
@@ -424,17 +427,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func onToggleFullscreenPressed() {
         // Native fullscreen (the Spaces transition the fullscreen state test
-        // drives) is only available to regular-policy apps; the harness
-        // launches this app accessory (--headless) so every suite before the
-        // fullscreen test keeps it out of the frontmost slot. Lift the
-        // policy for the transition — the fullscreen test runs in the last
-        // suite (python-window), after which nothing depends on accessory
-        // policy.
+        // drives) is only available to regular-policy apps. The harness
+        // launches this app regular already; a `--headless` (accessory) run
+        // has its policy lifted here for the transition. Activate either
+        // way: a regular app that lost the front slot to an earlier test
+        // still needs it for the transition.
         if NSApp.activationPolicy() != .regular {
             NSApp.setActivationPolicy(.regular)
-            NSApp.activate(ignoringOtherApps: true)
-            window.makeKeyAndOrderFront(nil)
         }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
         // Keep a second app window on the original Space. App.windows() must
         // continue to discover it while the primary window occupies the
         // fullscreen Space; filtering by the active Space would lose it.

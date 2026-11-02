@@ -13,10 +13,14 @@ from __future__ import annotations
 
 import os
 import sys
+from pathlib import Path
 
 import pytest
+import pytest_xa11y.plugin
+from pytest_xa11y.frontmost import macos_visible_processes
 
 import xa11y
+from tests import strict_frontmost
 from tests.launchers import launcher_for
 
 # ---------------------------------------------------------------------------
@@ -596,6 +600,19 @@ APP_CONFIGS: dict[str, dict] = {
         "legacy_press_name": "Legacy Tile",
         "legacy_press_status_prefix": "Legacy activations: ",
         "window_name_contains": "xa11y-winforms-test-app",
+        # A panel longer than its viewport (issue #502): its first button is in
+        # view and its last is scrolled out, while UIA still reports the last
+        # one on screen. Scrolled-out *list items* are no use here: WinForms
+        # and WPF both report those offscreen themselves.
+        "scrolled_pane_name": "Long Pane",
+        "scrolled_pane_first_item": "Long Entry 1",
+        "scrolled_pane_last_item": "Long Entry 10",
+        # A ComboBox in an overflowing panel: its open drop-down extends past
+        # the panel and must not be clipped to it.
+        "scrolled_panel_name": "Scroll Panel",
+        "scrolled_panel_filler_name": "Panel Filler",
+        "scrolled_panel_combo_name": "Panel Combo",
+        "scrolled_panel_combo_last_item": "Panel Choice 3",
         "submit_button_name": "Submit",
         "add_item_button_name": "Add Item",
         "remove_item_button_name": "Remove Item",
@@ -699,6 +716,62 @@ APP_CONFIGS: dict[str, dict] = {
         "add_item_button_name": "Add Item",
         "remove_item_button_name": "Remove Item",
     },
+    "uwp": {
+        # A UWP (Windows.UI.Xaml) app hosted by ApplicationFrameHost — the
+        # only app in the matrix whose top-level window belongs to another
+        # process (issue #497). Built from test-apps/uwp; Windows-only.
+        #
+        # No dialog: a UWP app has one CoreWindow, and ContentDialog is an
+        # in-window overlay rather than a top-level window.
+        "dialog_button_name": None,
+        "dialog_name": None,
+        "ok_button_name": "OK",
+        "cancel_button_name": "Cancel",
+        # AutomationProperties.HelpText maps to UIA HelpText.
+        "ok_button_description": "Confirm the dialog",
+        "has_checkbox": True,
+        "checkbox_unchecked_name": "Agree to terms",
+        "checkbox_checked_name": "Subscribe",
+        "has_radio": True,
+        "radio_role": "radio_button",
+        "radio_a_name": "Option A",
+        "radio_b_name": "Option B",
+        # SliderAutomationPeer and ProgressBarAutomationPeer implement
+        # IRangeValueProvider.
+        "slider_selector": 'slider[name="Volume"]',
+        "slider_initial_value": 50.0,
+        "slider_min": 0.0,
+        "slider_max": 100.0,
+        # Windows.UI.Xaml ships no spin-button control (NumberBox is WinUI 2,
+        # a NuGet dependency this app deliberately does not take).
+        "spinbutton_selector": unsupported(
+            "Windows.UI.Xaml ships no in-box control that reports "
+            "ControlType.Spinner"
+        ),
+        "progress_bar_selector": 'progress_bar[name="Progress"]',
+        "textfield_selector": 'text_field[name="Search"]',
+        "textfield_initial_value": "hello world",
+        "textarea_selector": unsupported(
+            "UIA has no distinct multiline edit control type, so a multiline "
+            "TextBox is indistinguishable from a single-line one"
+        ),
+        # No grid: Windows.UI.Xaml has no in-box DataGrid (it lives in the
+        # Windows Community Toolkit). WinForms and WPF cover table shapes.
+        "table_selector": None,
+        "table_min_cells": 0,
+        "table_cell_names": None,
+        "table_content_names": None,
+        "table_cell_values": None,
+        "table_selected_cell_name": None,
+        "table_selected_cell_value": None,
+        "table_header_names": None,
+        "expect_no_unknown_roles": False,
+        # The window title is the package DisplayName (AppxManifest.xml).
+        "window_name_contains": "xa11y UWP Test",
+        "submit_button_name": "Submit",
+        "add_item_button_name": "Add Item",
+        "remove_item_button_name": "Remove Item",
+    },
 }
 
 
@@ -764,10 +837,18 @@ def _tauri_input_sim_reprobe(app) -> str:
     return "\n".join(lines)
 
 
+# Strict frontmost: see tests/strict_frontmost.py.
+_PYTEST_XA11Y_PLUGIN = Path(pytest_xa11y.plugin.__file__)
+
+
 @pytest.hookimpl(hookwrapper=True, tryfirst=True)
 def pytest_runtest_makereport(item, call):
     outcome = yield
     rep = outcome.get_result()
+    if strict_frontmost.enforce(
+        item, call, rep, _PYTEST_XA11Y_PLUGIN, macos_visible_processes
+    ):
+        return
     global _INPUT_SIM_DIAGNOSTICS_EMITTED
     if (
         rep.when != "call"
