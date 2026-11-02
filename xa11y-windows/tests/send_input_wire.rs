@@ -431,6 +431,24 @@ fn unmappable_char_is_rejected_before_any_event_is_posted() {
 
 #[test]
 #[ignore = "injects input; run via the Windows (SendInput) CI job"]
+fn shifted_symbol_is_rejected_before_any_event_is_posted() {
+    // The runner's layout is US, where '!' is Shift+1. `Key::Char` names a
+    // key, not a shifted symbol, so the layout lookup refuses it (#508).
+    let _guard = capture();
+    let err = provider()
+        .key_down(&Key::Char('!'))
+        .expect_err("Key::Char('!') needs Shift on the US layout and must be rejected");
+    assert!(matches!(err, Error::Unsupported { .. }), "{err:?}");
+    assert!(err.to_string().contains("Shift"), "{err}");
+    assert!(
+        settled().is_empty(),
+        "a rejected key must not reach the wire: {:?}",
+        snapshot()
+    );
+}
+
+#[test]
+#[ignore = "injects input; run via the Windows (SendInput) CI job"]
 fn function_key_out_of_range_is_rejected_before_any_event_is_posted() {
     let _guard = capture();
     let err = provider()
