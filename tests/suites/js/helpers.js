@@ -97,7 +97,10 @@ const APP_CONFIG = {
   },
   uwp: {
     okButtonName: 'OK',
-    textFieldName: 'Search',      // AutomationProperties.Name = "Search"
+    // The XAML TextBox reads as text_field "Search" with a nested child
+    // text_field "Search" (same name and value), so the exact-one lookup this
+    // key drives matches two. The Python suite still reads the field.
+    textFieldName: null,
     minButtons: 2,
     hasCheckbox: true,
     hasRadio: true,

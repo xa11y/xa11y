@@ -612,33 +612,55 @@ def test_windows_tool_reports_limit_truncation_honestly(mcp, app_pid):
         assert payload["truncated"] is False, payload
 
 
-def _mcp_window_target_or_none(mcp, app_pid: int, *required_actions: str):
-    """A uniquely nameable window advertising every requested action, or None."""
+def _find_mcp_window_target(
+    mcp, app_pid: int, *required_actions: str
+) -> tuple[tuple[dict, str] | None, list[str]]:
+    """Pick a window whose `role[name=...]` selector matches it alone.
+
+    A name unique among the `windows` tool's top-level windows is not enough:
+    `action` resolves the selector against the whole tree, so a descendant
+    window with the same name makes it ambiguous. A UWP app's frame window
+    shares its name with its title bar and its CoreWindow. So each candidate
+    selector is resolved with `find` before it is used. Returns the target
+    and, when there is none, why each candidate was rejected.
+    """
     result = mcp.call_tool("windows", {"pid": app_pid})["result"]
     assert result["isError"] is False, result["content"]
     windows = result["structuredContent"]["windows"]
-    names = [w.get("name") for w in windows]
+    rejected = []
     for window in windows:
         name = window.get("name")
         actions = window.get("actions", [])
-        if (
-            name
-            and '"' not in name
-            and names.count(name) == 1
-            and all(action in actions for action in required_actions)
-        ):
-            selector = f'{window["role"]}[name="{name}"]'
-            return window, selector
-    return None
+        if not name or '"' in name:
+            continue
+        if not all(action in actions for action in required_actions):
+            continue
+        selector = f'{window["role"]}[name="{name}"]'
+        found = mcp.call_tool(
+            "find", {"pid": app_pid, "selector": selector, "limit": 2}
+        )["result"]
+        assert found["isError"] is False, found["content"]
+        count = len(found["structuredContent"]["matches"])
+        if count == 1:
+            return (window, selector), rejected
+        # `limit: 2` caps the count, so 2 means "two or more".
+        rejected.append(
+            f"{selector} matches "
+            + ("nothing" if count == 0 else "more than one element")
+        )
+    return None, rejected
 
 
 def _mcp_window_target(mcp, app_pid: int, *required_actions: str) -> tuple[dict, str]:
-    """Return a uniquely nameable window advertising every requested action."""
-    target = _mcp_window_target_or_none(mcp, app_pid, *required_actions)
+    """Return a uniquely addressable window advertising every requested action."""
+    target, rejected = _find_mcp_window_target(mcp, app_pid, *required_actions)
     if target is not None:
         return target
+    detail = f" ({'; '.join(rejected)})" if rejected else ""
     pytest.skip(
-        "no uniquely named window advertises " + ", ".join(required_actions)
+        "no uniquely addressable window advertises "
+        + ", ".join(required_actions)
+        + detail
     )
 
 
@@ -734,17 +756,21 @@ def test_mcp_screen_fill_restore_mutates_and_reports_window_state(
     deliberately not the same bit.
     """
     candidate = None
+    rejected = []
     for action, state, other in (
         ("enter-fullscreen", "fullscreen", "maximized"),
         ("maximize", "maximized", "fullscreen"),
     ):
-        target = _mcp_window_target_or_none(mcp, app_pid, action, "restore")
+        target, why = _find_mcp_window_target(mcp, app_pid, action, "restore")
+        rejected.extend(why)
         if target is not None:
             candidate = (action, state, other, target)
             break
     if candidate is None:
+        detail = f" ({'; '.join(rejected)})" if rejected else ""
         pytest.skip(
-            "no uniquely named window advertises a screen-filling verb with restore"
+            "no uniquely addressable window advertises a screen-filling verb "
+            "with restore" + detail
         )
     action, state, other, (window, selector) = candidate
     assert action in window["actions"] and "restore" in window["actions"]
