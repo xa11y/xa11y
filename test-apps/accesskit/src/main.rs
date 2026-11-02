@@ -119,6 +119,10 @@ const BIDI_BUTTON: NodeId = NodeId(74);
 // #304/#305 foreground/active-window changes exist for.
 const OPEN_DIALOG_BTN: NodeId = NodeId(75);
 
+// A read-only text input. AT-SPI writes to it must be refused from its
+// READ_ONLY state rather than reported as success (issue #486).
+const READONLY_FIELD: NodeId = NodeId(76);
+
 // Dynamic items start at NodeId(100) to leave room for future static nodes
 const DYNAMIC_ITEM_BASE: u64 = 100;
 
@@ -148,6 +152,8 @@ struct AppState {
     /// Counter so each press produces a distinct announcement payload
     /// (AccessKit only posts AXAnnouncementRequested when the value changes).
     announcement_counter: u32,
+    /// ScrollIntoView requests received by the Cherry list item.
+    cherry_scroll_requests: u32,
 }
 
 impl AppState {
@@ -166,6 +172,7 @@ impl AppState {
             dynamic_item_count: 0,
             announcement_text: String::new(),
             announcement_counter: 0,
+            cherry_scroll_requests: 0,
         }
     }
 }
@@ -613,6 +620,24 @@ fn build_lists_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
         item.set_label(label);
         item.add_action(Action::Click);
         item.add_action(Action::Focus);
+        if id == CHERRY_ITEM {
+            // The scroll-into-view fixture: the only node that advertises
+            // ScrollIntoView, so the others are the "not supported" case. The
+            // tree is not really scrolled, so the request count is what a
+            // test reads back to prove the platform action reached the app.
+            item.add_action(Action::ScrollIntoView);
+            item.set_description(format!("Scroll requests: {}", state.cherry_scroll_requests));
+            // AccessKit's AT-SPI bridge exposes the Component interface (and
+            // with it Component.ScrollTo) only on nodes that have bounds, so
+            // the fixture needs a rect for Linux to have a scroll action at
+            // all. Placed below the image, clear of every other bounded node.
+            item.set_bounds(Rect {
+                x0: 16.0,
+                y0: 460.0,
+                x1: 196.0,
+                y1: 480.0,
+            });
+        }
         if state.selected_list_item == Some(idx) {
             item.set_selected(true);
         }
@@ -705,6 +730,7 @@ fn build_extra_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
         SPLIT_GROUP_NODE,
         ANNOUNCE_BTN,
         ANNOUNCE_LIVE_REGION,
+        READONLY_FIELD,
     ]);
     nodes.push((EXTRA_PANEL, extra_panel));
 
@@ -724,6 +750,12 @@ fn build_extra_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
     live.set_value(state.announcement_text.as_str());
     live.set_live(Live::Polite);
     nodes.push((ANNOUNCE_LIVE_REGION, live));
+
+    let mut readonly_field = Node::new(Role::TextInput);
+    readonly_field.set_label("Read-only Field");
+    readonly_field.set_value("locked");
+    readonly_field.set_read_only();
+    nodes.push((READONLY_FIELD, readonly_field));
 
     let mut link = Node::new(Role::Link);
     link.set_label("Visit Example");
@@ -938,7 +970,14 @@ fn handle_action(request: &ActionRequest, state: &mut AppState) -> bool {
             true
         }
 
-        // ScrollIntoView / ShowMenu — accepted no-ops
+        // ScrollIntoView on the fixture list item — counted so a test can
+        // observe that the request arrived (see `build_lists_panel`).
+        (id, Action::ScrollIntoView) if id == CHERRY_ITEM => {
+            state.cherry_scroll_requests += 1;
+            true
+        }
+
+        // ScrollIntoView elsewhere / ShowMenu — accepted no-ops
         (_, Action::ScrollIntoView) | (_, Action::ShowContextMenu) => false,
 
         _ => false,

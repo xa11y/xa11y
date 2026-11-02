@@ -38,6 +38,9 @@ windows-core = "0.62"
 # crate from outside, so they need their own handle on the `windows` bindings.
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Com_Marshal",
+    "Win32_UI_Accessibility",
     "Win32_UI_HiDpi",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",

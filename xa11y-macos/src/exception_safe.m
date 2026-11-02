@@ -168,14 +168,15 @@ int safe_ax_get_pid(AXUIElementRef element, int *outPid) {
 
 // ── Messaging Timeout ───────────────────────────────────────────────────────
 
-// Safe wrapper for AXUIElementSetMessagingTimeout. Apple documents the scope by
-// what the element IS: set on the system-wide object it affects every
-// application, set on an application element it affects every message to that
-// application, and only on some other element does it affect that element
-// alone. The shell scan sets it on application elements, so it is NOT
-// element-scoped there — the bound must be released again (see
-// ShellProbeBound in ax.rs) or the app stays pinned at the scan's timeout.
-// The default is ~1.5s per attribute, which is why the scan bounds each probe.
+// Safe wrapper for AXUIElementSetMessagingTimeout. Apple's header
+// (AXUIElement.h) scopes it by the element it is called on: on the system-wide
+// object it sets the global timeout for this process, and on any other object
+// it sets the timeout for that object only, not for other objects equal to it.
+// A value of 0 resets the system-wide object to the default, and makes any
+// other object use the current global value. MacOSProvider::new sets the
+// global value (AX_MESSAGING_TIMEOUT_SECS in ax.rs); the shell scan tightens
+// the application elements it reads and resets them to 0 afterwards (see
+// ShellProbeBound in ax.rs).
 // Returns the AX error code, or -9999 if an ObjC exception was thrown.
 int safe_ax_set_messaging_timeout(AXUIElementRef element, float timeoutInSeconds) {
     @try {

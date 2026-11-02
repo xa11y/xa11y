@@ -195,6 +195,8 @@ Scroll units are platform "ticks", typically one notch of a physical scroll whee
 
 Modifier keys (`Shift`, `Ctrl`, `Alt`, `Meta`) are ordinary keys, so pass them alongside character keys. `Meta` is the platform's "command" modifier, spelled Cmd on macOS, Win on Windows, and Super on Linux.
 
+On Windows, letters and digits are positional virtual keys (`VK_A`, `VK_1`), as keyboard shortcuts expect. Any other character key is looked up on the keyboard layout of the foreground window. If the layout needs a modifier to type the character (Shift for `/` on a German layout), the call returns `Unsupported`. xa11y does not add the modifier for you.
+
 <Tabs syncKey="lang">
   <TabItem label="Rust">
     ```rust
@@ -301,7 +303,7 @@ Drag-and-drop has no accessibility equivalent on most platforms. Resolve both en
 Input simulation raises five of xa11y's error variants:
 
 - `PermissionDenied` when the OS denied the synthesis permission. On Linux this is the missing `input` group; macOS cannot report a missing Input Monitoring grant, so the events are dropped silently instead.
-- `Unsupported` when the platform has no backend for the operation, or when the Linux `uinput` kernel module is unavailable.
+- `Unsupported` when the platform has no backend for the operation, when the Linux `uinput` kernel module is unavailable, when a `Char` key is on no key of the active Windows layout, or when that layout needs a modifier to produce it.
 - `NoElementBounds` when the target `Element` has no bounds. Re-fetch it, or anchor on a point.
 - `InvalidActionData` for an uppercase `Char` key, a malformed key name, or a bad target tuple.
 - `Platform` for a raw OS failure such as an FFI return code.

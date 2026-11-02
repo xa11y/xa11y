@@ -1140,6 +1140,14 @@ impl BatchAttrs {
         if err != AX_ERROR_SUCCESS || values.is_null() {
             return None;
         }
+        // The reply is indexed as a CFArray below; a misbehaving app can hand
+        // back some other CF type with `kAXErrorSuccess`, and indexing that is
+        // undefined behavior. Treat it as a failed batch, so the caller re-reads
+        // through the individual attribute path.
+        if unsafe { safe_cf_get_type_id(values) } != unsafe { safe_cf_array_get_type_id() } {
+            unsafe { safe_cf_release(values) };
+            return None;
+        }
 
         let count = unsafe { safe_cf_array_get_count(values) } as usize;
         let mut vals = [std::ptr::null(); attr_idx::COUNT];
@@ -1321,7 +1329,17 @@ struct ResolvedAttrs {
 
 impl ResolvedAttrs {
     /// Populate from a BatchAttrs (1 Mach IPC round-trip).
-    fn from_batch(batch: &BatchAttrs) -> Self {
+    ///
+    /// Returns `None` when the role slot does not hold a string. The batch
+    /// call never fails per attribute; it puts an `AXValue` error object in
+    /// the slot of each attribute it could not read. For most attributes
+    /// that is an absent value, but an unreadable role would build a
+    /// `Role::Unknown` element with no sign that the read failed. The caller
+    /// re-reads the element through [`from_individual`](Self::from_individual),
+    /// which tells a role-less element apart from an unreadable one and
+    /// propagates the latter.
+    fn from_batch(batch: &BatchAttrs) -> Option<Self> {
+        let role_str = batch.string(attr_idx::ROLE)?;
         let value_is_bool = {
             let v = batch.vals[attr_idx::VALUE];
             if v.is_null() {
@@ -1337,8 +1355,8 @@ impl ResolvedAttrs {
             }
         };
 
-        Self {
-            role_str: batch.string(attr_idx::ROLE).unwrap_or_default(),
+        Some(Self {
+            role_str,
             subrole_str: batch.string(attr_idx::SUBROLE),
             ax_title: batch.string(attr_idx::TITLE),
             ax_description: batch.string(attr_idx::DESCRIPTION),
@@ -1358,7 +1376,7 @@ impl ResolvedAttrs {
             position: batch.position(),
             size: batch.size(),
             identifier: batch.string(attr_idx::IDENTIFIER),
-        }
+        })
     }
 
     /// Populate from individual AX API calls (fallback path).
@@ -1376,7 +1394,10 @@ impl ResolvedAttrs {
     /// element, and the remaining attributes keep the tree-walk tolerance
     /// `ax_attr` documents.
     fn from_individual(element: AXUIElementRef) -> Result<Self> {
-        let role_str = match read_raw_attr(element, "AXRole") {
+        let role_read_start = Instant::now();
+        let role_read = read_raw_attr(element, "AXRole");
+        let role_read_elapsed = role_read_start.elapsed();
+        let role_str = match role_read {
             RawAttr::Value(v) => {
                 if unsafe { safe_cf_get_type_id(v) } == unsafe { safe_cf_string_get_type_id() } {
                     // `wrap_under_create_rule` adopts the +1 retain; the
@@ -1399,6 +1420,17 @@ impl ResolvedAttrs {
                 }
             }
             RawAttr::Absent => String::new(),
+            // Say which process did not answer, and whether it timed out.
+            // PID only: callers such as `list_apps` and attach read this as a
+            // retry signal and may discard it.
+            RawAttr::Unanswered(AX_ERROR_CANNOT_COMPLETE) => {
+                return Err(cannot_complete_error(
+                    element,
+                    "AXRole read failed while building an element snapshot",
+                    role_read_elapsed,
+                    CannotCompleteContext::Snapshot,
+                ));
+            }
             RawAttr::Unanswered(code) => {
                 return Err(Error::Platform {
                     code: code as i64,
@@ -1436,31 +1468,210 @@ impl ResolvedAttrs {
 
 // ── Safe FFI Wrappers ────────────────────────────────────────────────────────
 
-fn do_perform_action(element: AXUIElementRef, action: &CFString) -> i32 {
-    unsafe { safe_ax_perform_action(element, action.as_concrete_TypeRef() as CFTypeRef) }
+/// The result of one AX message: its AXError code and how long it took.
+///
+/// The duration is what tells a messaging timeout apart from an app that
+/// answered `kAXErrorCannotComplete` straight away (see
+/// [`cannot_complete_error`]). It compares equal to a bare code, so callers
+/// test `call != AX_ERROR_SUCCESS` as they would the `i32`.
+#[derive(Debug, Clone, Copy)]
+struct AxCall {
+    code: i32,
+    elapsed: Duration,
 }
 
-fn do_set_attribute(element: AXUIElementRef, attribute: &CFString, value: CFTypeRef) -> i32 {
-    unsafe {
-        safe_ax_set_attribute_value(element, attribute.as_concrete_TypeRef() as CFTypeRef, value)
+impl AxCall {
+    fn timed(f: impl FnOnce() -> i32) -> Self {
+        let start = Instant::now();
+        let code = f();
+        Self {
+            code,
+            elapsed: start.elapsed(),
+        }
     }
 }
 
-/// Convert an AX error code from `do_perform_action` into an appropriate
-/// `Error`.  Returns `ActionNotSupported` for -25206 (kAXErrorActionUnsupported)
-/// so callers get a clear, structured error instead of a raw platform code.
-fn action_error(err: i32, action: &str, role: Role, fallback_msg: &str) -> Error {
-    if err == AX_ERROR_ACTION_UNSUPPORTED {
+impl PartialEq<i32> for AxCall {
+    fn eq(&self, code: &i32) -> bool {
+        self.code == *code
+    }
+}
+
+fn do_perform_action(element: AXUIElementRef, action: &CFString) -> AxCall {
+    AxCall::timed(|| unsafe {
+        safe_ax_perform_action(element, action.as_concrete_TypeRef() as CFTypeRef)
+    })
+}
+
+fn do_set_attribute(element: AXUIElementRef, attribute: &CFString, value: CFTypeRef) -> AxCall {
+    AxCall::timed(|| unsafe {
+        safe_ax_set_attribute_value(element, attribute.as_concrete_TypeRef() as CFTypeRef, value)
+    })
+}
+
+/// Convert a failed AX action call into an appropriate `Error`. Returns
+/// `ActionNotSupported` for -25206 (kAXErrorActionUnsupported) so callers get
+/// a clear, structured error instead of a raw platform code, and describes a
+/// `kAXErrorCannotComplete` with the application it was sent to.
+fn action_error(
+    el_ptr: AXUIElementRef,
+    call: AxCall,
+    action: &str,
+    role: Role,
+    fallback_msg: &str,
+) -> Error {
+    if call == AX_ERROR_ACTION_UNSUPPORTED {
         Error::ActionNotSupported {
             action: action.to_string(),
             role,
         }
+    } else if call == AX_ERROR_CANNOT_COMPLETE {
+        // An action is a terminal call, not a retry signal, so the app name
+        // lookup is affordable here.
+        cannot_complete_error(
+            el_ptr,
+            &format!("{action}: {fallback_msg}"),
+            call.elapsed,
+            CannotCompleteContext::Action,
+        )
     } else {
         Error::Platform {
-            code: err as i64,
+            code: call.code as i64,
             message: fallback_msg.to_string(),
         }
     }
+}
+
+// ── Messaging Timeout ───────────────────────────────────────────────────────
+
+/// Upper bound on each accessibility message this process sends, in seconds.
+///
+/// Without it every message waits for the system default (about six
+/// seconds), and a walk over a busy or hung app pays that per attribute
+/// read. Set once, process-wide, by [`set_global_messaging_timeout`]. Issue
+/// #531 tracks deriving it from the caller's remaining deadline instead.
+const AX_MESSAGING_TIMEOUT_SECS: f32 = 2.0;
+
+/// Apply [`AX_MESSAGING_TIMEOUT_SECS`] to every AX message from this process.
+///
+/// Apple documents a timeout set on the system-wide element as the global
+/// value for the calling process, and a `0` set on any other element as
+/// "use the current global value". That is what the shell scan's release
+/// (`unbound_shell_probe`) writes, so a released probe returns to this bound.
+fn set_global_messaging_timeout() -> Result<()> {
+    let system_wide = AXElement::from_owned(unsafe { safe_ax_create_system_wide() });
+    if system_wide.is_null() {
+        return Err(Error::Platform {
+            code: -1,
+            message: "AXUIElementCreateSystemWide returned NULL".to_string(),
+        });
+    }
+    let err =
+        unsafe { safe_ax_set_messaging_timeout(system_wide.as_ptr(), AX_MESSAGING_TIMEOUT_SECS) };
+    if err != AX_ERROR_SUCCESS {
+        return Err(Error::Platform {
+            code: err as i64,
+            message: format!(
+                "AXUIElementSetMessagingTimeout({AX_MESSAGING_TIMEOUT_SECS}s) on the \
+                 system-wide element failed"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Where a `kAXErrorCannotComplete` came from, which decides how much the
+/// error may cost to describe and what it must warn about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CannotCompleteContext {
+    /// A terminal action or attribute write. The app name is looked up (one
+    /// window-list copy), and the message warns that the action may already
+    /// have been delivered.
+    Action,
+    /// A snapshot read. Enumeration, attach and churn handling read this
+    /// error as a retry signal and often discard it, so it carries the PID
+    /// only (tenet 6: no expensive diagnosis on a retry-signal path).
+    Snapshot,
+}
+
+/// A call that took at least this fraction of [`AX_MESSAGING_TIMEOUT_SECS`]
+/// before failing with `kAXErrorCannotComplete` is reported as a timeout;
+/// a faster one is the app (or the AX server) refusing outright.
+const TIMEOUT_FRACTION: f32 = 0.9;
+
+/// Whether a `kAXErrorCannotComplete` after `elapsed` was the messaging
+/// timeout expiring.
+fn hit_messaging_timeout(elapsed: Duration) -> bool {
+    elapsed.as_secs_f32() >= AX_MESSAGING_TIMEOUT_SECS * TIMEOUT_FRACTION
+}
+
+/// The `kAXErrorCannotComplete` error for a message sent to `el_ptr`.
+///
+/// `kAXErrorCannotComplete` is also what an expired messaging timeout
+/// surfaces as, but not only that, so the message claims a timeout only when
+/// the call actually ran for (about) the whole timeout. The PID comes from
+/// the element itself, with no IPC to the unresponsive app. The name lookup
+/// copies the window server's list, so it happens only for
+/// [`CannotCompleteContext::Action`]. The code stays
+/// `kAXErrorCannotComplete`, so `classify_element_churn` still reads it as
+/// `Unreachable`.
+fn cannot_complete_error(
+    el_ptr: AXUIElementRef,
+    what: &str,
+    elapsed: Duration,
+    context: CannotCompleteContext,
+) -> Error {
+    let mut pid = 0;
+    let pid_known = !el_ptr.is_null()
+        && unsafe { safe_ax_get_pid(el_ptr, &mut pid) } == AX_ERROR_SUCCESS
+        && pid > 0;
+    let name = if pid_known && context == CannotCompleteContext::Action {
+        MacOSProvider::list_gui_apps()
+            .into_iter()
+            .find(|(p, _)| *p == pid)
+            .map(|(_, name)| name)
+    } else {
+        None
+    };
+    let app = match (pid_known, name) {
+        (true, Some(name)) => format!("application {name:?} (pid {pid})"),
+        (true, None) => format!("the application with pid {pid}"),
+        (false, _) => "the owning application (pid unknown)".to_string(),
+    };
+    Error::Platform {
+        code: AX_ERROR_CANNOT_COMPLETE as i64,
+        message: cannot_complete_message(what, &app, elapsed, context),
+    }
+}
+
+/// The text of [`cannot_complete_error`], split out so its wording is
+/// unit-testable without an unresponsive app.
+fn cannot_complete_message(
+    what: &str,
+    app: &str,
+    elapsed: Duration,
+    context: CannotCompleteContext,
+) -> String {
+    let ms = elapsed.as_millis();
+    let mut message = if hit_messaging_timeout(elapsed) {
+        format!(
+            "{what}: {app} did not respond within the {AX_MESSAGING_TIMEOUT_SECS}s accessibility \
+             messaging timeout (kAXErrorCannotComplete after {ms} ms); it may be busy or hung"
+        )
+    } else {
+        format!(
+            "{what}: {app} returned kAXErrorCannotComplete after {ms} ms (not a timeout: the \
+             {AX_MESSAGING_TIMEOUT_SECS}s messaging timeout was not reached, so the app or the \
+             accessibility server refused the request)"
+        )
+    };
+    if context == CannotCompleteContext::Action {
+        message.push_str(
+            "; the request may still have been delivered, so the action may already have \
+             taken effect",
+        );
+    }
+    message
 }
 
 // ── Action Helpers ──────────────────────────────────────────────────────────
@@ -1479,6 +1690,7 @@ fn perform_ax_action(
     let err = do_perform_action(el_ptr, &cf);
     if err != AX_ERROR_SUCCESS {
         return Err(action_error(
+            el_ptr,
             err,
             action,
             role,
@@ -1540,6 +1752,7 @@ fn set_bool_attr(
     let err = do_set_attribute(el_ptr, &attr, val.as_CFTypeRef());
     if err != AX_ERROR_SUCCESS {
         return Err(action_error(
+            el_ptr,
             err,
             action,
             role,
@@ -1673,19 +1886,19 @@ const WINDOW_FULLSCREEN_SETTLE_GRACE: Duration = Duration::from_millis(700);
 const WINDOW_MINIMIZED_SETTLE_BUDGET: Duration = Duration::from_secs(5);
 const WINDOW_MINIMIZED_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
 
-/// How long `move_to` waits for an `AXPosition` write to become observable,
-/// and the poll cadence during the wait.
+/// How long `move_to` and `resize_to` wait for an `AXPosition` / `AXSize` write
+/// to become observable, and the poll cadence during the wait.
 ///
-/// Some toolkit bridges acknowledge `AXPosition` before their event loop has
+/// Some toolkit bridges acknowledge a geometry write before their event loop has
 /// applied it, and can drop that first write while the window is settling
-/// from another transition. Re-issuing the absolute position is idempotent
-/// and turns the accepted write into the promise `move_to` exposes.
-const WINDOW_POSITION_SETTLE_BUDGET: Duration = Duration::from_secs(5);
-const WINDOW_POSITION_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
+/// from another transition. Re-issuing the absolute value is idempotent
+/// and turns the accepted write into the promise `move_to` and `resize_to` expose.
+const WINDOW_GEOMETRY_SETTLE_BUDGET: Duration = Duration::from_secs(5);
+const WINDOW_GEOMETRY_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
 /// AX bridges can round logical coordinates while crossing the native
 /// boundary. This matches the tolerance used by the cross-binding integration
 /// tests and is small enough to distinguish their 10-point move.
-const WINDOW_POSITION_TOLERANCE: f64 = 2.0;
+const WINDOW_GEOMETRY_TOLERANCE: f64 = 2.0;
 
 /// Read a boolean AX attribute with the tenet-1 distinction: a failed read is
 /// an error (the state is unknown, not false), an absent / unsupported
@@ -2300,14 +2513,20 @@ fn set_window_position(
     let err = do_set_attribute(el_ptr, &attr, value);
     unsafe { safe_cf_release(value) };
     if err != AX_ERROR_SUCCESS {
-        return Err(action_error(err, action, role, "Set AXPosition failed"));
+        return Err(action_error(
+            el_ptr,
+            err,
+            action,
+            role,
+            "Set AXPosition failed",
+        ));
     }
     Ok(())
 }
 
-fn position_near(actual: (f64, f64), expected: (f64, f64)) -> bool {
-    (actual.0 - expected.0).abs() <= WINDOW_POSITION_TOLERANCE
-        && (actual.1 - expected.1).abs() <= WINDOW_POSITION_TOLERANCE
+fn geometry_near(actual: (f64, f64), expected: (f64, f64)) -> bool {
+    (actual.0 - expected.0).abs() <= WINDOW_GEOMETRY_TOLERANCE
+        && (actual.1 - expected.1).abs() <= WINDOW_GEOMETRY_TOLERANCE
 }
 
 /// Wait until `AXPosition` reflects the requested logical coordinates,
@@ -2327,7 +2546,7 @@ fn settle_window_position(
     role: Role,
 ) -> Result<()> {
     let app = owning_app_element(el_ptr, action, role)?;
-    let deadline = Instant::now() + WINDOW_POSITION_SETTLE_BUDGET;
+    let deadline = Instant::now() + WINDOW_GEOMETRY_SETTLE_BUDGET;
     let expected = (f64::from(x), f64::from(y));
     let mut last_observed: Option<String> = None;
     let mut fresh: Option<AXElement> = None;
@@ -2336,7 +2555,7 @@ fn settle_window_position(
         let failure = match read_window_position(target, action, role) {
             Ok(Some(actual)) => {
                 last_observed = Some(format!("AXPosition reads ({}, {})", actual.0, actual.1));
-                if position_near(actual, expected) {
+                if geometry_near(actual, expected) {
                     return Ok(());
                 }
                 set_window_position(target, x, y, action, role).err()
@@ -2359,18 +2578,184 @@ fn settle_window_position(
             }
         }
         if Instant::now() >= deadline {
-            return Err(Error::timeout(WINDOW_POSITION_SETTLE_BUDGET).diagnose(
+            return Err(Error::timeout(WINDOW_GEOMETRY_SETTLE_BUDGET).diagnose(
                 xa11y_core::Diagnosis::new()
                     .condition(format!(
                         "window reaches position ({x}, {y}) within {} points",
-                        WINDOW_POSITION_TOLERANCE
+                        WINDOW_GEOMETRY_TOLERANCE
                     ))
                     .last_observed(last_observed.unwrap_or_else(|| {
                         "AXPosition could not be observed before the deadline".to_string()
                     })),
             ));
         }
-        std::thread::sleep(WINDOW_POSITION_SETTLE_INTERVAL);
+        std::thread::sleep(WINDOW_GEOMETRY_SETTLE_INTERVAL);
+    }
+}
+
+// ── Window Size Settling ──────────────────────────────────────────────────────
+
+/// Read `AXSize` with the same failure distinction as
+/// [`read_window_position`]: a failed or malformed read is an error, and only
+/// a genuinely absent attribute is `None`.
+fn read_window_size(
+    el_ptr: AXUIElementRef,
+    action: &str,
+    role: Role,
+) -> Result<Option<(f64, f64)>> {
+    match read_raw_attr(el_ptr, "AXSize") {
+        RawAttr::Value(value) => {
+            let mut size = CGSize::default();
+            let ok = unsafe {
+                safe_ax_value_get_value(value, AX_VALUE_CGSIZE, &mut size as *mut _ as *mut c_void)
+            };
+            unsafe { safe_cf_release(value) };
+            if ok {
+                Ok(Some((size.width, size.height)))
+            } else {
+                Err(Error::Platform {
+                    code: -1,
+                    message: format!(
+                        "AXSize returned a non-size value while handling {action} on a \
+                         {role}; the size is unknown"
+                    ),
+                })
+            }
+        }
+        RawAttr::Absent => Ok(None),
+        RawAttr::Unanswered(code) => Err(Error::Platform {
+            code: code as i64,
+            message: format!(
+                "AXSize read failed while handling {action} on a {role} (AXError {code}); \
+                 the size is unknown"
+            ),
+        }),
+    }
+}
+
+/// Set the window's absolute AX size once.
+fn set_window_size(
+    el_ptr: AXUIElementRef,
+    width: u32,
+    height: u32,
+    action: &str,
+    role: Role,
+) -> Result<()> {
+    let value = unsafe { safe_ax_value_create_cg_size(f64::from(width), f64::from(height)) };
+    if value.is_null() {
+        return Err(Error::Platform {
+            code: -1,
+            message: "Failed to create CGSize AXValue for window resize".to_string(),
+        });
+    }
+    let attr = CFString::new("AXSize");
+    let err = do_set_attribute(el_ptr, &attr, value);
+    unsafe { safe_cf_release(value) };
+    if err != AX_ERROR_SUCCESS {
+        return Err(action_error(el_ptr, err, action, role, "Set AXSize failed"));
+    }
+    Ok(())
+}
+
+/// What `resize_to` saw when the window would not take the requested size:
+/// the requested rect and the one the window actually reports, so the error
+/// says which way it was refused without a re-run.
+fn describe_refused_resize(
+    width: u32,
+    height: u32,
+    observed_size: (f64, f64),
+    origin: &str,
+) -> String {
+    let (ow, oh) = observed_size;
+    format!(
+        "requested {width}x{height} at origin {origin} but the window reports {ow}x{oh}; \
+         AXSize accepted the write and the window refused it. The window server \
+         constrains windows to the screen's visible frame (and the app to its own \
+         minimum/maximum size), so a size that does not fit there is refused"
+    )
+}
+
+/// Wait until `AXSize` reflects the requested size, re-issuing the absolute
+/// write while it does not — the `resize_to` counterpart of
+/// [`settle_window_position`].
+///
+/// `AXUIElementSetAttributeValue(AXSize)` returns success when the window
+/// *received* the request, not when it applied it, and macOS silently keeps
+/// the old frame for a size the window cannot take (one already filling the
+/// visible height cannot grow taller). Without this read-back `resize_to`
+/// reported `ok` for a resize that never happened (tenet 1). Element churn is
+/// handled exactly as in the move settle.
+fn settle_window_size(
+    el_ptr: AXUIElementRef,
+    width: u32,
+    height: u32,
+    action: &str,
+    role: Role,
+) -> Result<()> {
+    let app = owning_app_element(el_ptr, action, role)?;
+    let deadline = Instant::now() + WINDOW_GEOMETRY_SETTLE_BUDGET;
+    let expected = (f64::from(width), f64::from(height));
+    // Only raw observations are kept while polling; the diagnosis text (and
+    // the extra origin read it needs) is built once, at the deadline.
+    let mut last_size: Option<(f64, f64)> = None;
+    let mut last_other: Option<String> = None;
+    let mut fresh: Option<AXElement> = None;
+    loop {
+        let target = fresh.as_ref().map_or(el_ptr, |el| el.as_ptr());
+        let failure = match read_window_size(target, action, role) {
+            Ok(Some(actual)) => {
+                if geometry_near(actual, expected) {
+                    return Ok(());
+                }
+                last_size = Some(actual);
+                last_other = None;
+                set_window_size(target, width, height, action, role).err()
+            }
+            Ok(None) => {
+                last_size = None;
+                last_other = Some("the window has no AXSize attribute".to_string());
+                set_window_size(target, width, height, action, role).err()
+            }
+            Err(err) => Some(err),
+        };
+        if let Some(err) = failure {
+            match classify_element_churn(&err) {
+                ElementChurn::Gone => {
+                    last_size = None;
+                    last_other = Some(err.to_string());
+                    if let Some(found) = fresh_target_in_app(app.as_ptr(), el_ptr)? {
+                        fresh = Some(found);
+                    }
+                }
+                ElementChurn::Unreachable | ElementChurn::Fatal => return Err(err),
+            }
+        }
+        if Instant::now() >= deadline {
+            let observed = match (last_size, last_other) {
+                (Some(actual), _) => {
+                    // The origin is context for the error only, so a failed
+                    // origin read is reported in that context rather than
+                    // replacing the size the window did report.
+                    let origin = match read_window_position(target, action, role) {
+                        Ok(Some((x, y))) => format!("({x}, {y})"),
+                        Ok(None) => "(no AXPosition)".to_string(),
+                        Err(err) => format!("(origin unreadable: {err})"),
+                    };
+                    describe_refused_resize(width, height, actual, &origin)
+                }
+                (None, Some(other)) => other,
+                (None, None) => "AXSize could not be observed before the deadline".to_string(),
+            };
+            return Err(Error::timeout(WINDOW_GEOMETRY_SETTLE_BUDGET).diagnose(
+                xa11y_core::Diagnosis::new()
+                    .condition(format!(
+                        "window reaches size {width}x{height} within {} points",
+                        WINDOW_GEOMETRY_TOLERANCE
+                    ))
+                    .last_observed(observed),
+            ));
+        }
+        std::thread::sleep(WINDOW_GEOMETRY_SETTLE_INTERVAL);
     }
 }
 
@@ -2494,6 +2879,7 @@ fn ax_action_to_name(ax_name: &str) -> Option<&'static str> {
         "AXIncrement" => Some("increment"),
         "AXDecrement" => Some("decrement"),
         "AXRaise" => Some("activate"),
+        "AXScrollToVisible" => Some("scroll_into_view"),
         _ => None,
     }
 }
@@ -2780,13 +3166,13 @@ pub struct MacOSProvider {
 
 /// Holds a shell-probe messaging-timeout bound, releasing it on drop.
 ///
-/// The bound is taken on an **application** element, and Apple documents
-/// `AXUIElementSetMessagingTimeout` on an application element as applying to
-/// every message sent to that application — not to that element alone. The
-/// scan therefore cannot leave one in place: the frontmost app, each
-/// status-item host and Finder would stay pinned at a quarter-second timeout
-/// for the life of the process, and a caller who then walked the menu bar or
-/// the desktop would see spurious `kAXErrorCannotComplete`.
+/// The bound is taken on an **application** element. Apple's header scopes
+/// `AXUIElementSetMessagingTimeout` on a non-system-wide object to that object
+/// alone, but the scan's elements can outlive it (an `AXMenuBar` surface hands
+/// out the frontmost app's element), so the scan does not leave one pinned at
+/// a quarter-second timeout: a caller who then walked the menu bar or the
+/// desktop would see spurious `kAXErrorCannotComplete`. Releasing with `0`
+/// returns the element to the process-wide value `MacOSProvider::new` set.
 ///
 /// A guard rather than a call at the end of each probe, because every one of
 /// those probes can leave early — `?` on a missing child, an unanswered
@@ -2822,6 +3208,10 @@ impl MacOSProvider {
                         .to_string(),
             });
         }
+
+        // Bound every AX message, so one busy or hung app cannot stall a
+        // walk or an action for the system default per call (issue #512).
+        set_global_messaging_timeout()?;
 
         Ok(Self {
             handle_cache: Mutex::new(HashMap::new()),
@@ -2995,15 +3385,20 @@ fn build_snapshot_data(
     }
 
     let body = move || -> Result<ElementData> {
-        let attrs = if let Some(batch) = BatchAttrs::fetch(element) {
-            ResolvedAttrs::from_batch(&batch)
-        } else {
-            // The batch call is an optimisation, not a requirement: fall back
-            // to individual reads. The fallback is error-preserving for
+        let batched =
+            BatchAttrs::fetch(element).and_then(|batch| ResolvedAttrs::from_batch(&batch));
+        let attrs = match batched {
+            Some(attrs) => attrs,
+            // The batch call is an optimisation, not a requirement. When it
+            // fails, or answers without a readable role, re-read the same
+            // attributes one at a time. That re-read is error-preserving for
             // `AXRole`, so an element invalidated between the batch fetch and
-            // the fallback reads carries its platform error out instead of
-            // being built as a role-less ghost (tenet 1).
-            ResolvedAttrs::from_individual(element)?
+            // the individual reads carries its platform error out instead of
+            // being built as a role-less ghost (tenet 1). A genuinely
+            // role-less element also lands here (its role slot holds an
+            // error object too), paying the individual reads; that is rare,
+            // and the cost buys telling it apart from an unreadable one.
+            None => ResolvedAttrs::from_individual(element)?,
         };
 
         let role = map_ax_role(&attrs.role_str, attrs.subrole_str.as_deref());
@@ -3533,11 +3928,11 @@ impl MacOSProvider {
 
     /// Messaging timeout for one shell-surface probe, in seconds.
     ///
-    /// The AX default is ~1.5s *per attribute*, so a handful of wedged
-    /// processes otherwise dominate the whole scan (PROPOSAL §4, measured).
-    /// `AXUIElementSetMessagingTimeout` applies to the element it is set on
-    /// and to nothing else from the same process — so it is set on the very
-    /// element each probe then reads.
+    /// The process-wide bound ([`AX_MESSAGING_TIMEOUT_SECS`]) applies *per
+    /// attribute*, so a handful of wedged processes otherwise dominate the
+    /// whole scan (PROPOSAL §4, measured). `AXUIElementSetMessagingTimeout`
+    /// on a non-system-wide object applies to that object alone — so it is
+    /// set on the very element each probe then reads.
     ///
     /// It bounds **every** application element the scan reads, not only the
     /// status-item fan-out: the frontmost app for `AXMenuBar`, the Dock, and
@@ -3550,8 +3945,8 @@ impl MacOSProvider {
     /// [`SHELL_PROBE_TIMEOUT_SECS`](Self::SHELL_PROBE_TIMEOUT_SECS).
     ///
     /// Returns `false` when the bound could not be established, which is the
-    /// scan's cue to skip the element rather than read it at the ~1.5s
-    /// default: an element whose cost cannot be bounded is not one this scan
+    /// scan's cue to skip the element rather than read it at the
+    /// process-wide bound: an element whose cost cannot be bounded is not one this scan
     /// can query inside its contract.
     fn bound_shell_probe(element: &AXElement) -> bool {
         let err = unsafe {
@@ -3702,7 +4097,7 @@ impl MacOSProvider {
                 // Bound the probe *before* making it. If the bound cannot be
                 // established the element is not one we can query within the
                 // scan's cost contract, so it is skipped rather than probed
-                // at the ~1.5s default.
+                // at the process-wide bound.
                 // Bound for the rest of this closure; the guard releases it.
                 let _bound = Self::shell_probe_bound(&app_element)?;
 
@@ -3973,14 +4368,10 @@ impl Provider for MacOSProvider {
         limit: Option<usize>,
         max_depth: Option<u32>,
     ) -> Result<Vec<ElementData>> {
-        if group.clauses.is_empty() {
-            return Ok(vec![]);
-        }
-        // Reject any clause with zero segments early — `clause.segments[0]`
-        // below would otherwise panic.
-        if group.clauses.iter().any(|c| c.segments.is_empty()) {
-            return Ok(vec![]);
-        }
+        // The AST's fields are public, so a hand-built group can break the
+        // invariants the walk below indexes on (`clause.segments[0]`, Root
+        // only first, 1-based `:nth`). Reject it before traversal.
+        group.validate()?;
 
         // ONE AX walk that evaluates every clause's first SimpleSelector
         // inline. Each match is tagged with its clause index; per-clause
@@ -4533,9 +4924,27 @@ impl Provider for MacOSProvider {
         set_bool_attr(ax.as_ptr(), "AXExpanded", false, "collapse", element.role)
     }
 
-    fn scroll_into_view(&self, _element: &ElementData) -> Result<()> {
-        // macOS has no accessibility API equivalent for scroll-into-view.
-        Ok(())
+    fn scroll_into_view(&self, element: &ElementData) -> Result<()> {
+        // `AXScrollToVisible` is the AX counterpart of AT-SPI
+        // `Component.ScrollTo` and UIA `ScrollItemPattern.ScrollIntoView`.
+        // Gate on the advertised list, as `press` does: AppKit answers
+        // `kAXErrorSuccess` for actions an element does not implement, so a
+        // blind dispatch would report a scroll that never happened (tenet 1).
+        // Setting the enclosing scroll bar's `AXValue` would be a second
+        // mechanism, so it is deliberately not tried here.
+        if !element.actions.iter().any(|a| a == "scroll_into_view") {
+            return Err(Error::ActionNotSupported {
+                action: "scroll_into_view".to_string(),
+                role: element.role,
+            });
+        }
+        let ax = self.get_cached(element.handle)?;
+        perform_ax_action(
+            ax.as_ptr(),
+            "AXScrollToVisible",
+            "scroll_into_view",
+            element.role,
+        )
     }
 
     // ── Window management ──────────────────────────────────────────
@@ -4738,25 +5147,8 @@ impl Provider for MacOSProvider {
                 role: element.role,
             });
         }
-        let value = unsafe { safe_ax_value_create_cg_size(f64::from(width), f64::from(height)) };
-        if value.is_null() {
-            return Err(Error::Platform {
-                code: -1,
-                message: "Failed to create CGSize AXValue for window resize".to_string(),
-            });
-        }
-        let attr = CFString::new("AXSize");
-        let err = do_set_attribute(ax.as_ptr(), &attr, value);
-        unsafe { safe_cf_release(value) };
-        if err != AX_ERROR_SUCCESS {
-            return Err(action_error(
-                err,
-                "resize_to",
-                element.role,
-                "Set AXSize failed",
-            ));
-        }
-        Ok(())
+        set_window_size(ax.as_ptr(), width, height, "resize_to", element.role)?;
+        settle_window_size(ax.as_ptr(), width, height, "resize_to", element.role)
     }
 
     // ── Typed operations ────────────────────────────────────────────
@@ -4772,6 +5164,7 @@ impl Provider for MacOSProvider {
         );
         if err != AX_ERROR_SUCCESS {
             return Err(action_error(
+                ax.as_ptr(),
                 err,
                 "set_value",
                 element.role,
@@ -4792,6 +5185,7 @@ impl Provider for MacOSProvider {
         );
         if err != AX_ERROR_SUCCESS {
             return Err(action_error(
+                ax.as_ptr(),
                 err,
                 "set_numeric_value",
                 element.role,
@@ -4812,6 +5206,7 @@ impl Provider for MacOSProvider {
         );
         if err != AX_ERROR_SUCCESS {
             return Err(action_error(
+                ax.as_ptr(),
                 err,
                 "type_text",
                 element.role,
@@ -4837,6 +5232,7 @@ impl Provider for MacOSProvider {
         unsafe { safe_cf_release(range_value) };
         if err != AX_ERROR_SUCCESS {
             return Err(action_error(
+                ax.as_ptr(),
                 err,
                 "set_text_selection",
                 element.role,
@@ -4891,7 +5287,7 @@ impl Provider for MacOSProvider {
                     let cf_action = CFString::new(&ax_name);
                     let err = do_perform_action(el_ptr, &cf_action);
                     if err != AX_ERROR_SUCCESS {
-                        return Err(action_error(err, action, element.role, &ax_name));
+                        return Err(action_error(el_ptr, err, action, element.role, &ax_name));
                     }
                     return Ok(());
                 }
@@ -4901,7 +5297,7 @@ impl Provider for MacOSProvider {
                     let cf_action = CFString::new(action);
                     let err = do_perform_action(el_ptr, &cf_action);
                     if err != AX_ERROR_SUCCESS {
-                        return Err(action_error(err, action, element.role, action));
+                        return Err(action_error(el_ptr, err, action, element.role, action));
                     }
                     return Ok(());
                 }
@@ -5400,10 +5796,26 @@ mod tests {
     }
 
     #[test]
-    fn position_near_allows_only_the_documented_rounding_tolerance() {
-        assert!(position_near((12.0, 18.0), (10.0, 20.0)));
-        assert!(!position_near((12.1, 18.0), (10.0, 20.0)));
-        assert!(!position_near((12.0, 17.9), (10.0, 20.0)));
+    fn settle_window_size_propagates_unreadable_element() {
+        // Same contract as the move settle: an unreadable target surfaces its
+        // platform failure instead of a resize reported as applied.
+        let result = settle_window_size(std::ptr::null(), 900, 700, "resize_to", Role::Window);
+        assert!(matches!(result, Err(Error::Platform { .. })));
+    }
+
+    #[test]
+    fn refused_resize_names_the_requested_and_observed_rects() {
+        let msg = describe_refused_resize(900, 723, (850.0, 673.0), "(0, 31)");
+        assert!(msg.contains("requested 900x723 at origin (0, 31)"), "{msg}");
+        assert!(msg.contains("window reports 850x673"), "{msg}");
+        assert!(msg.contains("visible frame"), "{msg}");
+    }
+
+    #[test]
+    fn geometry_near_allows_only_the_documented_rounding_tolerance() {
+        assert!(geometry_near((12.0, 18.0), (10.0, 20.0)));
+        assert!(!geometry_near((12.1, 18.0), (10.0, 20.0)));
+        assert!(!geometry_near((12.0, 17.9), (10.0, 20.0)));
     }
 
     /// An enumerated target sample holding `fullscreen` / `settable`.
@@ -5823,6 +6235,108 @@ mod tests {
     }
 
     #[test]
+    fn global_messaging_timeout_is_accepted() {
+        set_global_messaging_timeout().expect("system-wide messaging timeout");
+    }
+
+    fn call(code: i32, ms: u64) -> AxCall {
+        AxCall {
+            code,
+            elapsed: Duration::from_millis(ms),
+        }
+    }
+
+    #[test]
+    fn cannot_complete_says_timeout_only_when_the_call_ran_that_long() {
+        let timeout_ms = (AX_MESSAGING_TIMEOUT_SECS * 1000.0) as u64;
+        // A call that ran the full timeout is reported as one, keeps its
+        // kAXErrorCannotComplete code (so churn classification still sees
+        // `Unreachable`), and warns that the action may have landed.
+        let err = action_error(
+            std::ptr::null(),
+            call(AX_ERROR_CANNOT_COMPLETE, timeout_ms),
+            "press",
+            Role::Button,
+            "AXPress failed",
+        );
+        match err {
+            Error::Platform { code, ref message } => {
+                assert_eq!(code, AX_ERROR_CANNOT_COMPLETE as i64);
+                assert!(message.contains("press: AXPress failed"), "{message}");
+                assert!(message.contains("did not respond within"), "{message}");
+                assert!(message.contains("pid unknown"), "{message}");
+                assert!(
+                    message.contains("may already have taken effect"),
+                    "{message}"
+                );
+            }
+            other => panic!("expected Platform, got {other:?}"),
+        }
+        assert_eq!(
+            classify_element_churn(&err),
+            ElementChurn::Unreachable,
+            "the enriched error must still classify as unreachable"
+        );
+
+        // A fast refusal is not a timeout and must not be called one.
+        let Error::Platform { message, .. } = action_error(
+            std::ptr::null(),
+            call(AX_ERROR_CANNOT_COMPLETE, 5),
+            "press",
+            Role::Button,
+            "AXPress failed",
+        ) else {
+            panic!("expected Platform");
+        };
+        assert!(!message.contains("did not respond"), "{message}");
+        assert!(message.contains("after 5 ms (not a timeout"), "{message}");
+
+        // Other codes are untouched.
+        assert!(matches!(
+            action_error(
+                std::ptr::null(),
+                call(AX_ERROR_ACTION_UNSUPPORTED, 0),
+                "press",
+                Role::Button,
+                "x"
+            ),
+            Error::ActionNotSupported { .. }
+        ));
+        assert!(matches!(
+            action_error(std::ptr::null(), call(-1, 0), "press", Role::Button, "x"),
+            Error::Platform { code: -1, ref message } if message == "x"
+        ));
+    }
+
+    #[test]
+    fn timeout_threshold_is_ninety_percent_of_the_bound() {
+        let bound = Duration::from_secs_f32(AX_MESSAGING_TIMEOUT_SECS);
+        assert!(hit_messaging_timeout(bound));
+        assert!(hit_messaging_timeout(bound.mul_f32(0.95)));
+        assert!(!hit_messaging_timeout(bound.mul_f32(0.5)));
+    }
+
+    #[test]
+    fn snapshot_context_names_the_pid_without_an_action_warning() {
+        let app =
+            AXElement::from_owned(unsafe { safe_ax_create_application(std::process::id() as i32) });
+        let err = cannot_complete_error(
+            app.as_ptr(),
+            "probe",
+            Duration::from_secs_f32(AX_MESSAGING_TIMEOUT_SECS),
+            CannotCompleteContext::Snapshot,
+        );
+        let Error::Platform { message, .. } = err else {
+            panic!("expected Platform");
+        };
+        assert!(
+            message.contains(&format!("the application with pid {}", std::process::id())),
+            "{message}"
+        );
+        assert!(!message.contains("taken effect"), "{message}");
+    }
+
+    #[test]
     fn safe_ax_set_messaging_timeout_is_callable_on_null_element() {
         // Exercises the wrapper: it must return an AXError rather than let an
         // ObjC exception unwind into Rust. The code Apple picks for a NULL
@@ -6020,6 +6534,10 @@ mod tests {
         assert_eq!(ax_action_to_name("AXShowMenu"), Some("show_menu"));
         assert_eq!(ax_action_to_name("AXIncrement"), Some("increment"));
         assert_eq!(ax_action_to_name("AXDecrement"), Some("decrement"));
+        assert_eq!(
+            ax_action_to_name("AXScrollToVisible"),
+            Some("scroll_into_view")
+        );
         assert_eq!(ax_action_to_name("AXRaise"), Some("activate"));
     }
 
@@ -6092,6 +6610,40 @@ mod tests {
         assert!(batch.position().is_none());
         assert!(batch.size().is_none());
         // Don't drop — _values_array is null so Drop is a no-op.
+    }
+
+    #[test]
+    fn from_batch_requires_a_readable_role() {
+        // A role slot holding anything but a string (the batch call's
+        // per-attribute error object, kCFNull, ...) must not become an
+        // empty role: `from_batch` declines, and the caller re-reads the
+        // element individually (issue #513).
+        let role = CFString::new("AXButton");
+        let not_a_string = core_foundation::boolean::CFBoolean::true_value();
+
+        let mut vals = [std::ptr::null(); attr_idx::COUNT];
+        let missing = BatchAttrs {
+            _values_array: std::ptr::null(),
+            vals,
+        };
+        assert!(ResolvedAttrs::from_batch(&missing).is_none());
+
+        vals[attr_idx::ROLE] = not_a_string.as_CFTypeRef();
+        let malformed = BatchAttrs {
+            _values_array: std::ptr::null(),
+            vals,
+        };
+        assert!(ResolvedAttrs::from_batch(&malformed).is_none());
+
+        vals[attr_idx::ROLE] = role.as_concrete_TypeRef() as CFTypeRef;
+        let readable = BatchAttrs {
+            _values_array: std::ptr::null(),
+            vals,
+        };
+        let attrs = ResolvedAttrs::from_batch(&readable).expect("string role is readable");
+        assert_eq!(attrs.role_str, "AXButton");
+        // The borrowed values outlive the batches: `role` and `not_a_string`
+        // drop after them, and each `_values_array` is null so Drop is a no-op.
     }
 
     #[test]

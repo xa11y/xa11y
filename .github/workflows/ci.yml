@@ -495,18 +495,21 @@ jobs:
 
       # ── Grant TCC on macOS ─────────────────────────────────────────
       # The grant must target the *resolved* interpreter (TCC matches the real
-      # on-disk binary, not the venv symlink), so compute it first, then let
-      # setup-a11y perform the grant via its macos-tcc-client path — the same
-      # sqlite write lives in scripts/grant_macos_tcc.sh for local use.
+      # on-disk binary, not the venv symlink), so compute it first.
+      #
+      # The grant runs through scripts/grant_macos_tcc.sh, not setup-a11y's
+      # macos-tcc-client input: tccd holds TCC.db open, and the action's
+      # one-shot sqlite write intermittently failed with "database is locked
+      # (5)". The script waits on the lock (sqlite busy timeout), retries a
+      # bounded number of times, reads the row back, and fails the step if
+      # the grant still did not land.
       - name: Resolve venv python for TCC grant
         if: runner.os == 'macOS'
         run: echo "TCC_CLIENT=$(.venv-integ/bin/python -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
 
       - name: Grant accessibility TCC permission
         if: runner.os == 'macOS'
-        uses: xa11y/setup-a11y@v1
-        with:
-          macos-tcc-client: ${{ env.TCC_CLIENT }}
+        run: bash scripts/grant_macos_tcc.sh "$TCC_CLIENT"
 
       # Front-most focus on macOS is claimed at app-launch time, not here: the
       # harness actively activates the test app and polls until it is verified

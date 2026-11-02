@@ -531,7 +531,7 @@ macOS exposes some operations as AX actions (performed via `AXUIElementPerformAc
 | `set_value` | Set `AXValue` (string or numeric) |
 | `type_text` | Set `AXSelectedText` (replaces current selection) |
 | `set_text_selection` | Set `AXSelectedTextRange` |
-| `scroll_into_view` | Not supported (no AX equivalent) |
+| `scroll_into_view` | `AXScrollToVisible` when advertised, else `ActionNotSupported` |
 
 For **reading** which actions an element supports: the provider calls `AXUIElementCopyActionNames` to get the element's action list (e.g. `["AXPress", "AXShowMenu", "AXCustomThing"]`). Known AX action names map to their standard `snake_case` name (e.g. `"AXPress"` → `"press"`, `"AXRaise"` → `"activate"`). All other actions have the `AX` prefix stripped and are converted from `PascalCase` to `snake_case` (e.g. `"AXCustomThing"` → `"custom_thing"`). No actions are silently hidden — if the platform reports it, it appears in `element.actions`.
 
