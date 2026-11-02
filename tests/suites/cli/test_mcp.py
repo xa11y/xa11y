@@ -1008,6 +1008,52 @@ def test_tree_defaults_to_a_bounded_depth(mcp, app_pid):
     assert structured["max_depth"] == 12, "the default must be bounded, not unlimited"
 
 
+def _walk(node):
+    yield node
+    for child in node.get("children", []):
+        yield from _walk(child)
+
+
+def test_a_depth_cut_is_marked_on_the_node_that_lost_its_children(mcp, app_pid):
+    """A pruned node read as a leaf is the silent shortening the bound forbids.
+
+    At `max_depth: 1` the application's top-level children are the frontier.
+    Their roles vary by toolkit (GTK's top level is not always `window`), so
+    the test goes by position: every frontier node with children must say it
+    was cut and how many it has, and one that was not cut claims no count.
+    """
+    structured = mcp.call_tool("tree", {"pid": app_pid, "max_depth": 1})["result"][
+        "structuredContent"
+    ]
+    assert structured["truncated"]["by_depth"] is True, structured["truncated"]
+    root = structured["tree"]
+    frontier = root.get("children", [])
+    assert frontier, root
+    marked = [c for c in frontier if c.get("subtree_truncated")]
+    assert marked, "by_depth is set, so some frontier node must carry the cut"
+    for child in frontier:
+        assert "children" not in child, child
+        if child.get("subtree_truncated") is True:
+            assert child["children_count"] >= 1, child
+        else:
+            assert "children_count" not in child, child
+
+
+def test_an_uncut_tree_marks_no_node(mcp, app_pid):
+    """When neither limit bit, no node may claim it lost children."""
+    structured = mcp.call_tool("tree", {"pid": app_pid, "max_depth": 64})["result"][
+        "structuredContent"
+    ]
+    cut = structured["truncated"]
+    marked = [n for n in _walk(structured["tree"]) if n.get("subtree_truncated")]
+    if not cut["by_depth"] and not cut["by_node_limit"]:
+        assert not marked, marked[:3]
+    else:
+        assert marked, "a reported cut must be locatable on some node"
+    for node in marked:
+        assert node["children_count"] > len(node.get("children", [])), node
+
+
 def test_find_reports_bounds_and_a_precomputed_center(mcp, app_pid):
     """Named, because `button` alone leads with window chrome on Windows.
 

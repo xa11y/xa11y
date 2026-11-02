@@ -29,6 +29,7 @@
 
 pub mod actions;
 pub mod errors;
+pub mod mcp;
 pub mod multi_window;
 pub mod screenshot;
 pub mod shell;

@@ -266,6 +266,31 @@ def test_the_element_tools_say_what_the_actions_field_is_not(run_client):
         assert "numeric_value" in description, f"{name} must name what to read instead"
 
 
+def test_the_element_tools_state_their_per_field_byte_cap(run_client):
+    """A document-sized `value` is cut, and the cut is named where it happens.
+
+    Node and match limits bound how many elements come back, not how large one
+    is. The description is what tells a model that `value` may be a prefix and
+    which sibling field says so.
+    """
+    for name in ("tree", "find"):
+        description = _tool(run_client, name).description
+        assert "bytes of UTF-8" in description, f"{name} must state the cap"
+        assert "`<field>_truncated: true`" in description, name
+        assert "`<field>_bytes`" in description, name
+
+
+def test_the_tree_tool_says_how_a_pruned_node_reads(run_client):
+    """A node cut by `max_depth` or the node cap is not a leaf, and must not read as one."""
+    tree = _tool(run_client, "tree")
+    description = tree.description
+    assert "`subtree_truncated: true`" in description
+    assert "`children_count`" in description
+    assert "no `children` means a leaf" in description
+    depth = tree.input_schema["properties"]["max_depth"]["description"]
+    assert "marked where it happened" in depth, depth
+
+
 def test_the_advertised_selector_example_is_valid_syntax(run_client):
     """`find` advertised `checkbox[checked]`, in which both halves are wrong.
 
