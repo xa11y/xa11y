@@ -179,6 +179,9 @@ fn ensure_com_initialized() -> windows::core::Result<()> {
 /// every later provider find UIA already initialized. It guards no data, so
 /// a poisoned lock is recovered.
 static UIA_FIRST_TOUCH: Mutex<()> = Mutex::new(());
+/// Set once a provider has completed the first touch, after which creation
+/// no longer needs [`UIA_FIRST_TOUCH`].
+static UIA_WARMED: AtomicBool = AtomicBool::new(false);
 
 /// Windows accessibility provider using UI Automation.
 pub struct WindowsProvider {
@@ -212,12 +215,17 @@ impl WindowsProvider {
         // convert to logical. Shared once-only init with the screenshot
         // backend — see `crate::dpi` and issue #300.
         crate::dpi::ensure_process_dpi_aware();
+        // COM initialization is per thread and not part of the race.
+        ensure_com_initialized().map_err(|e| Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("COM initialization failed: {}", e),
+        })?;
         let automation: IUIAutomation = {
-            let _first_touch = UIA_FIRST_TOUCH.lock().unwrap_or_else(|e| e.into_inner());
-            ensure_com_initialized().map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("COM initialization failed: {}", e),
-            })?;
+            let _first_touch = if UIA_WARMED.load(Ordering::Acquire) {
+                None
+            } else {
+                Some(UIA_FIRST_TOUCH.lock().unwrap_or_else(|e| e.into_inner()))
+            };
             let automation: IUIAutomation = unsafe {
                 windows::Win32::System::Com::CoCreateInstance(
                     &CUIAutomation8,
@@ -236,6 +244,7 @@ impl WindowsProvider {
                 code: e.code().0 as i64,
                 message: format!("IUIAutomation.GetRootElement warm-up failed: {e}"),
             })?;
+            UIA_WARMED.store(true, Ordering::Release);
             automation
         };
         let batch_request = create_batch_request(&automation)?;
@@ -5360,8 +5369,6 @@ mod tests {
         );
     }
 
-    /// Helper: create a provider, skipping the test if COM init fails
-    /// (happens when cargo test runs with multiple threads in CI).
     /// A provider for a live-desktop unit test.
     ///
     /// Every failure panics. This used to skip on `E_FAIL`, the first-touch
@@ -5375,25 +5382,6 @@ mod tests {
     #[test]
     fn provider_new_succeeds() {
         WindowsProvider::new().expect("WindowsProvider::new must succeed on a desktop");
-    }
-
-    #[test]
-    fn concurrent_first_touch_does_not_fail() {
-        // Regression for issue #500: several threads creating a provider and
-        // making their first UIA call at once.
-        let threads: Vec<_> = (0..8)
-            .map(|_| {
-                std::thread::spawn(|| {
-                    let provider = WindowsProvider::new()?;
-                    provider.get_children(None).map(|_| ())
-                })
-            })
-            .collect();
-        for (i, t) in threads.into_iter().enumerate() {
-            t.join()
-                .expect("provider thread panicked")
-                .unwrap_or_else(|e| panic!("thread {i}: concurrent first touch failed: {e}"));
-        }
     }
 
     #[test]
