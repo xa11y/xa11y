@@ -50,8 +50,11 @@
 #     "database is locked (5)" when tccd held TCC.db.
 #
 # So there are intentionally two copies — the action's inline one and this
-# one — and they must be kept in sync. When you change the INSERT here, mirror
-# it in the xa11y/setup-a11y repo's action.yml.
+# one. They are currently NOT in sync: this script waits on TCC.db's lock
+# (sqlite busy timeout), retries a bounded number of times, and reads the
+# grant back; the action's copy does a single unguarded INSERT and still needs
+# the same busy timeout and retry in the xa11y/setup-a11y repo's action.yml.
+# When you change the INSERT here, mirror it there too.
 
 set -euo pipefail
 
@@ -93,26 +96,34 @@ CLIENT_SQL="$(printf '%s' "$CLIENT" | sed "s/'/''/g")"
 # table grows. auth_value=2 is "allowed"; client_type=1 is "absolute path".
 GRANT_SQL="INSERT OR REPLACE INTO access(service,client,client_type,auth_value,auth_reason,auth_version,csreq,policy_id,indirect_object_identifier_type,indirect_object_identifier,indirect_object_code_identity,flags,last_modified) \
  VALUES('kTCCServiceAccessibility','${CLIENT_SQL}',1,2,4,1,NULL,NULL,0,'UNUSED',NULL,0,$(date +%s));"
-VERIFY_SQL="SELECT auth_value FROM access WHERE service='kTCCServiceAccessibility' AND client='${CLIENT_SQL}' AND client_type=1;"
+# Matches exactly the row GRANT_SQL writes (the access table's primary key is
+# service + client + client_type + indirect_object_identifier).
+VERIFY_SQL="SELECT auth_value FROM access WHERE service='kTCCServiceAccessibility' AND client='${CLIENT_SQL}' AND client_type=1 AND indirect_object_identifier='UNUSED';"
 
-tcc_sqlite() {
-    sudo sqlite3 -cmd ".timeout ${TCC_BUSY_TIMEOUT_MS}" "$TCC_DB" "$1"
+# Run one statement against TCC.db with the busy timeout and the bounded
+# retry. On success the statement's stdout is left in TCC_OUT; after the last
+# failed attempt the script exits with an ::error:: naming what it was doing.
+TCC_OUT=""
+tcc_sqlite_retry() {
+    local what="$1" sql="$2" attempt=1 out
+    until out="$(sudo sqlite3 -cmd ".timeout ${TCC_BUSY_TIMEOUT_MS}" "$TCC_DB" "$sql" 2>&1)"; do
+        echo "grant_macos_tcc.sh: TCC.db ${what} attempt ${attempt}/${TCC_WRITE_ATTEMPTS} failed: ${out}" >&2
+        if [ "$attempt" -ge "$TCC_WRITE_ATTEMPTS" ]; then
+            echo "::error::grant_macos_tcc.sh: TCC.db ${what} for ${CLIENT} failed after ${TCC_WRITE_ATTEMPTS} attempts (busy timeout ${TCC_BUSY_TIMEOUT_MS}ms each). Last error: ${out}" >&2
+            exit 1
+        fi
+        sleep $((attempt * 2))
+        attempt=$((attempt + 1))
+    done
+    TCC_OUT="$out"
 }
 
-attempt=1
-until err="$(tcc_sqlite "$GRANT_SQL" 2>&1)"; do
-    echo "grant_macos_tcc.sh: TCC.db write attempt ${attempt}/${TCC_WRITE_ATTEMPTS} failed: ${err}" >&2
-    if [ "$attempt" -ge "$TCC_WRITE_ATTEMPTS" ]; then
-        echo "::error::grant_macos_tcc.sh: could not write the kTCCServiceAccessibility grant for ${CLIENT} after ${TCC_WRITE_ATTEMPTS} attempts (busy timeout ${TCC_BUSY_TIMEOUT_MS}ms each). Last error: ${err}" >&2
-        exit 1
-    fi
-    sleep $((attempt * 2))
-    attempt=$((attempt + 1))
-done
+tcc_sqlite_retry "write of the kTCCServiceAccessibility grant" "$GRANT_SQL"
 
 # Read the row back. A write that reported success but left no allowed row
 # would otherwise surface only as empty trees once the tests run.
-granted="$(tcc_sqlite "$VERIFY_SQL")"
+tcc_sqlite_retry "read-back of the kTCCServiceAccessibility grant" "$VERIFY_SQL"
+granted="$TCC_OUT"
 if [ "$granted" != "2" ]; then
     echo "::error::grant_macos_tcc.sh: TCC.db holds no allowed kTCCServiceAccessibility row for ${CLIENT} after the write (auth_value read back: '${granted}')" >&2
     exit 1
