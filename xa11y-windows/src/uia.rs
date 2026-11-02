@@ -159,11 +159,33 @@ fn is_event_subscriber_failure(e: &windows::core::Error) -> bool {
 
 /// Initialize COM for UIA. Called once per WindowsProvider creation.
 /// Does not uninitialize on drop — COM lifetime is managed by the process.
+///
+/// # Why `RPC_E_CHANGED_MODE` is accepted (issue #499)
+///
+/// That HRESULT means the calling thread is already a single-threaded
+/// apartment: a Python host that imported comtypes / pywinauto first, or
+/// Electron's main thread. The `CUIAutomation8` object is then created in
+/// that STA. This is safe for two reasons:
+///
+/// - `CUIAutomation8` is registered `ThreadingModel=Both`, so it is created
+///   directly in the caller's apartment with no proxy. UIA's client objects
+///   (the automation object, elements, cache requests, walkers) aggregate
+///   the free-threaded marshaler, so another thread calls them directly
+///   instead of marshalling the call back into the STA. That STA never has
+///   to pump messages for xa11y's calls to complete.
+/// - Event handlers, the one part of UIA that does call back into an
+///   apartment, are registered from [`registration_worker`], a thread of
+///   xa11y's own that enters the MTA itself, never from the host's thread.
+///
+/// `xa11y-windows/tests/sta_host.rs` is the regression guard: it creates the
+/// provider on an STA thread that never pumps, then reads the tree from four
+/// other threads.
 fn ensure_com_initialized() -> windows::core::Result<()> {
     // Use MTA (0x0) — same mode as the Rust runtime default.
     // STA (0x2) would conflict with Rust's thread pool.
     let hr = unsafe { CoInitializeEx(None, COINIT(0x0)) };
-    // S_OK, S_FALSE (already initialized), or RPC_E_CHANGED_MODE are all fine
+    // S_OK, S_FALSE (already initialized), or RPC_E_CHANGED_MODE (an STA
+    // host thread; safe, see above) are all fine.
     if hr.is_err() && hr.0 as u32 != 0x80010106 {
         hr.ok()?;
     }
@@ -204,7 +226,11 @@ pub struct WindowsProvider {
     synthetic_apps: Mutex<BoundedHandleCache<SyntheticAppIdentity>>,
 }
 
-// IUIAutomation is COM and thread-safe via proxy
+// UIA's client objects (IUIAutomation, elements, cache requests, walkers)
+// are agile: they aggregate the free-threaded marshaler, so any thread may
+// call them directly whatever apartment created them, with no proxy and no
+// message pump needed (see `ensure_com_initialized`, issue #499;
+// tests/sta_host.rs checks it).
 unsafe impl Send for WindowsProvider {}
 unsafe impl Sync for WindowsProvider {}
 
@@ -4015,13 +4041,13 @@ fn map_uia_control_type(control_type: UIA_CONTROLTYPE_ID) -> Role {
 
 // ── Event subscription (native UIA event handlers) ───────────────────────────
 
-/// Moves a COM interface into a `Send` closure. COM in MTA (the apartment
-/// xa11y uses) serializes access via proxies, so transferring a raw pointer
-/// across threads is safe as long as every dereference happens under MTA —
-/// which is the case for the shared registration worker and UIA callbacks.
+/// Moves a COM interface into a `Send` closure. The UIA client objects
+/// captured this way are agile (they aggregate the free-threaded
+/// marshaler), so the pointer is valid on any thread; the registration
+/// worker and the UIA callback threads that dereference it are also MTA.
 ///
 /// Mirrors the `unsafe impl Send for WindowsProvider` assertion in this file:
-/// the same MTA guarantee holds for every COM type we need to capture.
+/// the same agility holds for every COM type we need to capture.
 ///
 /// Note the private inner field + accessor method: Rust 2021's disjoint
 /// closure captures will grab `wrapper.0` (the inner `T`) if it's reachable,
@@ -4638,16 +4664,15 @@ struct EventContext {
     /// subscriptions have no saved-app identity and retain PID-only behavior.
     saved_app: Option<SavedSyntheticAppIdentity>,
     /// Clone of the provider's raw-view walker, so event-target snapshots
-    /// resolve DataItem cells the same way tree traversal does. COM in MTA
-    /// serializes access via proxies (see `ComCallbackWrapper`), so sharing
-    /// the interface pointer with UIA callback threads is safe.
+    /// resolve DataItem cells the same way tree traversal does. The walker
+    /// is agile (free-threaded marshaler), so sharing the interface pointer
+    /// with UIA callback threads is safe.
     walker: IUIAutomationTreeWalker,
 }
 
 // The COM walker pointer keeps EventContext from auto-deriving Send/Sync
-// (it's shared via Arc with UIA's MTA callback threads). The same MTA proxy
-// guarantee behind `unsafe impl Send for WindowsProvider` covers it: every
-// dereference happens under MTA.
+// (it's shared via Arc with UIA's MTA callback threads). The same agility
+// behind `unsafe impl Send for WindowsProvider` covers it.
 unsafe impl Send for EventContext {}
 unsafe impl Sync for EventContext {}
 
