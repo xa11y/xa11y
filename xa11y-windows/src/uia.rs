@@ -2118,6 +2118,22 @@ fn is_pattern_absent(err: &windows::core::Error) -> bool {
     code == E_NOINTERFACE.0 || code == UIA_E_INVALIDOPERATION as i32 || code == 0
 }
 
+/// Map a failed `ValuePattern.SetValue`. UIA reports a read-only control
+/// with `UIA_E_INVALIDOPERATION`, which is the one failure that means "this
+/// value cannot be set as text". Anything else (a disabled control, a dead
+/// element, a wedged provider) is a platform error with its HRESULT
+/// (tenet 1).
+fn value_set_error(e: windows::core::Error, what: &str) -> Error {
+    if e.code().0 == UIA_E_INVALIDOPERATION as i32 {
+        Error::TextValueNotSupported
+    } else {
+        Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("{what} failed: {e}"),
+        }
+    }
+}
+
 /// Upper bound on the raw-view walk in [`WindowsProvider::walk_to_host_hwnd`].
 const HOST_WINDOW_WALK_LIMIT: usize = 256;
 
@@ -2390,8 +2406,9 @@ fn window_text(hwnd: HWND) -> String {
 ///   characters into the document. For a collapsed caret, `n` is the caret
 ///   position. For a non-empty selection, `n` is the selection's start —
 ///   mirroring macOS/AT-SPI semantics of "insert at selection start".
-/// - `Ok(None)` if the control has no TextPattern, or its selection array is
-///   empty (no caret available). The caller should fall back to "append at
+/// - `Ok(None)` if the control has no TextPattern, its selection array is
+///   empty (no caret available), or its provider does not support reading
+///   the selection. The caller should fall back to "append at
 ///   end" — the behaviour documented in design/README.md.
 /// - `Err(..)` if TextPattern is present but a COM call to walk the range
 ///   fails. These are propagated rather than silently falling back, so
@@ -2403,13 +2420,28 @@ fn caret_char_offset(uia_element: &IUIAutomationElement) -> Result<Option<usize>
         return Ok(None); // TextPattern not supported on this control.
     };
 
+    // A control with no selection answers with an empty array, handled
+    // below. A provider that does not support text selection says so with
+    // UIA_E_INVALIDOPERATION, or (AccessKit) with a null array and S_OK:
+    // also "no caret". Every other failure propagates (tenet 1).
     let selection = match unsafe { text_pattern.GetSelection() } {
         Ok(s) => s,
-        // No active selection (e.g. control never focused) — treat as "no caret".
-        Err(_) => return Ok(None),
+        Err(e) if e.code().0 == UIA_E_INVALIDOPERATION as i32 || e.code().is_ok() => {
+            return Ok(None)
+        }
+        Err(e) => {
+            return Err(Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("TextPattern::GetSelection failed: {e}"),
+            })
+        }
     };
 
-    if unsafe { selection.Length() }.unwrap_or(0) == 0 {
+    let selected = unsafe { selection.Length() }.map_err(|e| Error::Platform {
+        code: e.code().0 as i64,
+        message: format!("TextRangeArray::Length failed: {e}"),
+    })?;
+    if selected == 0 {
         return Ok(None);
     }
 
@@ -3735,8 +3767,10 @@ impl Provider for WindowsProvider {
                 code: e.code().0 as i64,
                 message: format!("RangeValue.CurrentSmallChange failed: {e}"),
             })?;
-            // A provider that reports no positive step still gets one unit,
-            // as `increment`/`decrement` documents.
+            // UIA's step is SmallChange. A provider reporting zero or less
+            // (a continuous range has no natural step) would make the call
+            // a no-op, so one unit stands in. Core promises "one step", not
+            // a size.
             let step = if small <= 0.0 { 1.0 } else { small };
             unsafe { pattern.SetValue(current + step) }.map_err(|e| Error::Platform {
                 code: e.code().0 as i64,
@@ -3766,8 +3800,10 @@ impl Provider for WindowsProvider {
                 code: e.code().0 as i64,
                 message: format!("RangeValue.CurrentSmallChange failed: {e}"),
             })?;
-            // A provider that reports no positive step still gets one unit,
-            // as `increment`/`decrement` documents.
+            // UIA's step is SmallChange. A provider reporting zero or less
+            // (a continuous range has no natural step) would make the call
+            // a no-op, so one unit stands in. Core promises "one step", not
+            // a size.
             let step = if small <= 0.0 { 1.0 } else { small };
             unsafe { pattern.SetValue(current - step) }.map_err(|e| Error::Platform {
                 code: e.code().0 as i64,
@@ -4064,7 +4100,8 @@ impl Provider for WindowsProvider {
             "ValuePattern",
         )? {
             let s: windows::core::BSTR = value.into();
-            unsafe { pattern.SetValue(&s) }.map_err(|_| Error::TextValueNotSupported)?;
+            unsafe { pattern.SetValue(&s) }
+                .map_err(|e| value_set_error(e, "ValuePattern.SetValue"))?;
             return Ok(());
         }
         Err(Error::TextValueNotSupported)
@@ -4116,7 +4153,8 @@ impl Provider for WindowsProvider {
 
             let new_value = crate::splice::splice_at_char_offset(&current, text, caret_char_offset);
             let bstr: windows::core::BSTR = new_value.into();
-            unsafe { value_pattern.SetValue(&bstr) }.map_err(|_| Error::TextValueNotSupported)?;
+            unsafe { value_pattern.SetValue(&bstr) }
+                .map_err(|e| value_set_error(e, "ValuePattern.SetValue"))?;
             return Ok(());
         }
         Err(Error::TextValueNotSupported)
@@ -6684,6 +6722,22 @@ mod tests {
                 "DefaultAction and FrameworkId must be cached together"
             );
         }
+    }
+
+    #[test]
+    fn only_a_read_only_set_value_is_text_value_not_supported() {
+        use windows::core::{Error as CoreError, HRESULT};
+        let read_only = CoreError::from_hresult(HRESULT(UIA_E_INVALIDOPERATION as i32));
+        assert!(matches!(
+            value_set_error(read_only, "SetValue"),
+            Error::TextValueNotSupported
+        ));
+        // A dead element or wedged provider keeps its HRESULT (tenet 1).
+        let failed = CoreError::from_hresult(HRESULT(E_FAIL.0));
+        assert!(matches!(
+            value_set_error(failed, "SetValue"),
+            Error::Platform { code, .. } if code == E_FAIL.0 as i64
+        ));
     }
 
     #[test]
