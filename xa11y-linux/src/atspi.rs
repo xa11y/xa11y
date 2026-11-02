@@ -233,10 +233,34 @@ impl LinuxProvider {
     /// is returned as-is and leaves the closed connection in place, so the
     /// call after that tries again.
     fn connection(&self) -> Result<Connection> {
+        self.connection_with(Self::connect_a11y_bus)
+    }
+
+    /// [`connection`](Self::connection) with the reconnect step supplied,
+    /// so the replacement path is testable without a desktop bus.
+    fn connection_with(
+        &self,
+        reconnect: impl FnOnce() -> Result<Connection>,
+    ) -> Result<Connection> {
         let mut conn = self.a11y_bus.lock().unwrap_or_else(|e| e.into_inner());
         if conn.is_closed() {
             log::warn!("AT-SPI accessibility bus connection closed; reconnecting");
-            *conn = Self::connect_a11y_bus()?;
+            *conn = reconnect()?;
+            // Handles minted on the old connection name objects by bus
+            // unique name, and a restarted bus hands the same `:1.N` names
+            // out again — to different applications. Forget them, so an old
+            // handle is `ElementStale` instead of silently resolving to
+            // whatever owns that name now. Taken while `a11y_bus` is held so
+            // no call can mint a handle on the new connection first; neither
+            // map's lock is ever held while acquiring `a11y_bus`.
+            self.handle_cache
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+            self.action_indices
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
         }
         Ok(conn.clone())
     }
@@ -404,6 +428,66 @@ impl LinuxProvider {
                 ),
             }),
         }
+    }
+
+    /// `GetChildren` for a registry scan: `Ok(None)` when the peer left the
+    /// bus, the object was destroyed, or it does not implement the call;
+    /// [`Error::Timeout`] naming the app when it does not answer.
+    fn scan_children(&self, aref: &AccessibleRef) -> Result<Option<Vec<AccessibleRef>>> {
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
+        let reply = match proxy.call_method("GetChildren", &()) {
+            Ok(reply) => reply,
+            Err(e) if is_peer_gone(&e) || is_absent_member(&e) => return Ok(None),
+            Err(e) if is_timeout(&e) => {
+                return Err(self.unresponsive_peer(aref, "Accessible.GetChildren"))
+            }
+            Err(e) => return Err(children_call_error(e, aref)),
+        };
+        let children: Vec<(String, zbus::zvariant::OwnedObjectPath)> =
+            reply.body().deserialize().map_err(|e| Error::Platform {
+                code: -1,
+                message: format!("GetChildren deserialize failed: {}", e),
+            })?;
+        Ok(Some(
+            children
+                .into_iter()
+                .map(|(bus_name, path)| AccessibleRef {
+                    bus_name,
+                    path: path.to_string(),
+                })
+                .collect(),
+        ))
+    }
+
+    /// `GetState` for a registry scan, as one 64-bit set. `Ok(None)` when
+    /// the object or its peer is gone; [`Error::Timeout`] naming the app when
+    /// it does not answer.
+    fn scan_state_bits(&self, aref: &AccessibleRef) -> Result<Option<u64>> {
+        let proxy = self.make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Accessible")?;
+        let reply = match proxy.call_method("GetState", &()) {
+            Ok(reply) => reply,
+            Err(e) if is_peer_gone(&e) || is_absent_member(&e) => return Ok(None),
+            Err(e) if is_timeout(&e) => {
+                return Err(self.unresponsive_peer(aref, "Accessible.GetState"))
+            }
+            Err(e) => {
+                return Err(Error::Platform {
+                    code: -1,
+                    message: format!("GetState on {}{} failed: {e}", aref.bus_name, aref.path),
+                })
+            }
+        };
+        let words: Vec<u32> = reply.body().deserialize().map_err(|e| Error::Platform {
+            code: -1,
+            message: format!("GetState deserialize failed: {e}"),
+        })?;
+        Ok(Some(
+            words
+                .iter()
+                .take(2)
+                .enumerate()
+                .fold(0u64, |acc, (i, w)| acc | ((*w as u64) << (32 * i))),
+        ))
     }
 
     /// The [`Error::Timeout`] for a peer that did not answer `call` within
@@ -2281,9 +2365,14 @@ impl Provider for LinuxProvider {
             total += 1;
             match self.get_app_pid(child) {
                 Some(p) if p == pid => {
+                    // Read the name before building: it is the one read that
+                    // fails fast on a hung app. `build_element_data` tolerates
+                    // per-field failures, so on an unresponsive peer it would
+                    // wait out a method timeout for every field instead.
+                    let name = self.read_app_name(child)?;
                     let mut data = self.build_element_data(child, Some(p));
                     // Mirror list_apps: prefer the registry-reported name.
-                    if let Some(name) = self.read_app_name(child)?.filter(|n| !n.is_empty()) {
+                    if let Some(name) = name.filter(|n| !n.is_empty()) {
                         data.name = Some(name);
                     }
                     return Ok(data);
@@ -2325,20 +2414,30 @@ impl Provider for LinuxProvider {
         let apps = self.get_atspi_children(&registry)?;
 
         for app in apps.iter().filter(|c| c.path != "/org/a11y/atspi/null") {
-            let windows = match self.get_atspi_children(app) {
-                Ok(w) => w,
-                // A single app failing to enumerate its windows shouldn't abort
-                // the whole foreground probe — skip it and keep scanning.
-                Err(_) => continue,
+            // An application that left the bus mid-scan (or whose root has no
+            // children to give) is skipped. One that does not answer is an
+            // error naming it: skipping it would report "nothing focused"
+            // when the hung app may be exactly the one in the foreground.
+            let Some(windows) = self.scan_children(app)? else {
+                continue;
             };
-            let has_active_window = windows
-                .iter()
-                .filter(|w| w.path != "/org/a11y/atspi/null")
-                .any(|w| self.state_bits(w).0 & ACTIVE != 0);
+            let mut has_active_window = false;
+            for w in windows.iter().filter(|w| w.path != "/org/a11y/atspi/null") {
+                if self
+                    .scan_state_bits(w)?
+                    .is_some_and(|bits| bits & ACTIVE != 0)
+                {
+                    has_active_window = true;
+                    break;
+                }
+            }
             if has_active_window {
+                let Some(name) = self.read_app_name(app)? else {
+                    // Gone between the state read and now.
+                    continue;
+                };
                 let pid = self.get_app_pid(app);
                 let mut data = self.build_element_data(app, pid);
-                let name = self.get_name(app).unwrap_or_default();
                 if !name.is_empty() {
                     data.name = Some(name);
                 }
@@ -4989,8 +5088,74 @@ mod tests {
             .contains("org.test.Hung"));
     }
 
+    /// A registry listing one application whose own `GetChildren` hangs.
+    struct RegistryRoot;
+
+    #[zbus::interface(name = "org.a11y.atspi.Accessible")]
+    impl RegistryRoot {
+        fn get_children(&self) -> Vec<(String, zbus::zvariant::OwnedObjectPath)> {
+            vec![(
+                "org.test.Hung".into(),
+                zbus::zvariant::OwnedObjectPath::try_from("/hungapp").expect("path"),
+            )]
+        }
+    }
+
+    struct HungChildren;
+
+    #[zbus::interface(name = "org.a11y.atspi.Accessible")]
+    impl HungChildren {
+        fn get_children(&self) -> Vec<(String, zbus::zvariant::OwnedObjectPath)> {
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            vec![]
+        }
+    }
+
     #[test]
-    fn closed_connection_is_replaced_on_next_use() {
+    fn focused_app_reports_a_hung_app_instead_of_skipping_it() {
+        let (server_socket, client_socket) =
+            std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let server = std::thread::spawn(move || {
+            zbus::blocking::connection::Builder::async_io_unix_stream(server_socket)
+                .server(zbus::Guid::generate())
+                .expect("server GUID")
+                .p2p()
+                .serve_at("/org/a11y/atspi/accessible/root", RegistryRoot)
+                .expect("registry interface")
+                .serve_at("/hungapp", HungChildren)
+                .expect("hung interface")
+                .build()
+                .expect("server connection")
+        });
+        let connection = zbus::blocking::connection::Builder::async_io_unix_stream(client_socket)
+            .p2p()
+            .method_timeout(std::time::Duration::from_millis(200))
+            .build()
+            .expect("client connection");
+        let _server = server.join().expect("server thread");
+        let provider = LinuxProvider {
+            a11y_bus: Mutex::new(connection),
+            handle_cache: Mutex::new(HashMap::new()),
+            action_indices: Mutex::new(HashMap::new()),
+            window_manager: WindowManager::new(),
+        };
+        let err = provider
+            .focused_app()
+            .expect_err("a hung app must not read as 'nothing focused'");
+        assert!(matches!(err, Error::Timeout { .. }), "{err:?}");
+        let condition = err
+            .diagnosis()
+            .and_then(|d| d.condition.clone())
+            .unwrap_or_default();
+        assert!(
+            condition.contains("org.test.Hung") && condition.contains("GetChildren"),
+            "{condition}"
+        );
+    }
+
+    /// A connected client/server pair over a socket pair: the server end
+    /// stands in for the bus, so dropping it is the bus hanging up.
+    fn p2p_pair() -> (Connection, Connection) {
         let (server_socket, client_socket) =
             std::os::unix::net::UnixStream::pair().expect("socket pair");
         let server = std::thread::spawn(move || {
@@ -5001,39 +5166,75 @@ mod tests {
                 .build()
                 .expect("server connection")
         });
-        let connection = zbus::blocking::connection::Builder::async_io_unix_stream(client_socket)
+        let client = zbus::blocking::connection::Builder::async_io_unix_stream(client_socket)
             .p2p()
             .build()
             .expect("client connection");
-        let server = server.join().expect("server thread");
-        let provider = LinuxProvider {
-            a11y_bus: Mutex::new(connection.clone()),
-            handle_cache: Mutex::new(HashMap::new()),
-            action_indices: Mutex::new(HashMap::new()),
-            window_manager: WindowManager::new(),
-        };
-        drop(server);
+        (server.join().expect("server thread"), client)
+    }
+
+    fn wait_closed(conn: &Connection) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !connection.is_closed() {
+        while !conn.is_closed() {
             assert!(
                 std::time::Instant::now() < deadline,
                 "peer hang-up never closed the client connection"
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        // The closed connection is never handed out again. Whether the
-        // reconnect then succeeds depends on whether this test host runs an
-        // AT-SPI bus; either way the outcome is the reconnect's, not a call
-        // failing on a dead socket.
-        match provider.connection() {
-            Ok(conn) => assert!(!conn.is_closed(), "handed out the closed connection"),
-            Err(Error::Platform { message, .. }) => assert!(
-                message.contains("session bus")
-                    || message.contains("AT-SPI")
-                    || message.contains("org.a11y.Bus"),
-                "reconnect error should name what it tried: {message}"
-            ),
-            Err(other) => panic!("unexpected reconnect error {other:?}"),
-        }
+    }
+
+    #[test]
+    fn closed_connection_is_replaced_and_old_handles_go_stale() {
+        let (server, client) = p2p_pair();
+        let provider = LinuxProvider {
+            a11y_bus: Mutex::new(client.clone()),
+            handle_cache: Mutex::new(HashMap::new()),
+            action_indices: Mutex::new(HashMap::new()),
+            window_manager: WindowManager::new(),
+        };
+        let handle = provider.cache_element(AccessibleRef {
+            bus_name: ":1.7".into(),
+            path: "/org/a11y/atspi/accessible/3".into(),
+        });
+        provider
+            .action_indices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(handle, HashMap::from([("press".to_string(), 0)]));
+
+        // While the connection is live, nothing is reconnected or forgotten.
+        let live = provider
+            .connection_with(|| panic!("reconnected a live connection"))
+            .expect("live connection");
+        assert!(!live.is_closed());
+        assert!(provider.get_cached(handle).is_ok());
+
+        drop(server);
+        wait_closed(&client);
+
+        // A failed reconnect is returned as-is, and the next call retries.
+        let err = provider
+            .connection_with(|| {
+                Err(Error::Platform {
+                    code: -1,
+                    message: "bus still down".into(),
+                })
+            })
+            .expect_err("reconnect failure surfaces");
+        assert!(err.to_string().contains("bus still down"));
+
+        let (_server2, client2) = p2p_pair();
+        let fresh = provider
+            .connection_with(|| Ok(client2))
+            .expect("reconnected");
+        assert!(!fresh.is_closed(), "handed out the closed connection");
+        // A restarted bus reuses `:1.N` names, so a handle from the old
+        // connection must not resolve to whoever owns that name now.
+        assert!(matches!(
+            provider.get_cached(handle),
+            Err(Error::ElementStale { .. })
+        ));
+        assert!(provider.get_action_index(handle, "press").is_err());
     }
 }
