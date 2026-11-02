@@ -2,10 +2,13 @@
 
 The Tauri input page (``test_input_sim.py``) covers typing in general, but
 its fields are single-line, and WebView2 is not where the bug in issue #498
-lived: a Win32/WinForms/WPF edit control turns a ``WM_CHAR`` CR *and* a
+lived. A Win32/WinForms edit control turns a ``WM_CHAR`` CR *and* a
 ``WM_CHAR`` LF into a line break, so ``"\\r\\n"`` sent one UTF-16 unit at a
-time typed a blank line between the two halves. The WinForms and WPF test
-apps each have a multiline "Notes" TextBox, which is the control this needs.
+time typed a blank line between the two halves. WPF's TextBox drops Unicode
+CR/LF taps entirely and breaks the line only on the Enter key. type_text now
+types every line break as Enter, and these two frameworks are the two failure
+shapes. The WinForms and WPF test apps each have a multiline "Notes"
+TextBox, which is the control this needs.
 
 The test types into the box, reads the value back through UIA, and counts
 lines. It restores the original Notes text afterwards so the shared app is

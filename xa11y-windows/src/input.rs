@@ -114,26 +114,41 @@ fn key_input(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> INPUT {
     }
 }
 
-/// The UTF-16 code units `type_text` sends, one `KEYEVENTF_UNICODE` tap each.
+/// One tap `type_text` sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Typed {
+    /// A UTF-16 code unit, as a `KEYEVENTF_UNICODE` tap.
+    Unit(u16),
+    /// A line break, as a `VK_RETURN` tap.
+    LineBreak,
+}
+
+/// What `type_text` sends for `text`.
 ///
-/// An LF directly after a CR is dropped. Edit controls turn both a `WM_CHAR`
-/// CR and a `WM_CHAR` LF into a line break, so sending `"\r\n"` unit by unit
-/// typed two of them. A lone CR or a lone LF still sends its one tap: only
-/// the pair collapses, so `"\n\r"` and `"\r\r"` are two breaks as written.
-/// The collapse is per call: a CR ending one `type_text` call and an LF
-/// starting the next are two separate taps.
-fn typed_code_units(text: &str) -> Vec<u16> {
+/// Line breaks are the Enter key, not Unicode CR / LF taps. Two reasons:
+/// a Win32 / WinForms edit control turns a `WM_CHAR` CR *and* a `WM_CHAR` LF
+/// into a line break each, so `"\r\n"` sent unit by unit typed two of them
+/// (issue #498); and WPF's TextBox drops a Unicode CR or LF altogether and
+/// starts a new line only on the Enter key. Enter is how a person types a
+/// line break, so every control handles it.
+///
+/// A `"\r\n"` pair is one break, and a lone CR or a lone LF is one break
+/// each, so `"\n\r"` and `"\r\r"` are two. The pairing is per call: a CR
+/// ending one `type_text` call and an LF starting the next are two breaks.
+fn typed_events(text: &str) -> Vec<Typed> {
     const CR: u16 = b'\r' as u16;
     const LF: u16 = b'\n' as u16;
-    let mut units = Vec::with_capacity(text.len());
+    let mut out = Vec::with_capacity(text.len());
     let mut prev = None;
     for unit in text.encode_utf16() {
-        if !(unit == LF && prev == Some(CR)) {
-            units.push(unit);
+        match unit {
+            LF if prev == Some(CR) => {}
+            CR | LF => out.push(Typed::LineBreak),
+            _ => out.push(Typed::Unit(unit)),
         }
         prev = Some(unit);
     }
-    units
+    out
 }
 
 fn unicode_input(code_unit: u16, key_up: bool) -> INPUT {
@@ -468,11 +483,19 @@ impl InputProvider for WindowsInputProvider {
         // Use KEYEVENTF_UNICODE so case/shift/IME behaviour is produced by
         // the OS text-input path rather than by synthesising shift chords
         // against whatever keyboard layout happens to be active.
-        let units = typed_code_units(text);
-        let mut inputs: Vec<INPUT> = Vec::with_capacity(units.len() * 2);
-        for code_unit in units {
-            inputs.push(unicode_input(code_unit, false));
-            inputs.push(unicode_input(code_unit, true));
+        let events = typed_events(text);
+        let mut inputs: Vec<INPUT> = Vec::with_capacity(events.len() * 2);
+        for event in events {
+            match event {
+                Typed::Unit(code_unit) => {
+                    inputs.push(unicode_input(code_unit, false));
+                    inputs.push(unicode_input(code_unit, true));
+                }
+                Typed::LineBreak => {
+                    inputs.push(key_input(VK_RETURN, KEYBD_EVENT_FLAGS(0)));
+                    inputs.push(key_input(VK_RETURN, KEYEVENTF_KEYUP));
+                }
+            }
         }
         if inputs.is_empty() {
             return Ok(());
@@ -524,40 +547,48 @@ mod keymap_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::typed_code_units;
+    use super::{typed_events, Typed};
 
+    /// Render the events as text, with `⏎` for each Enter tap.
     fn typed(text: &str) -> String {
-        String::from_utf16(&typed_code_units(text)).expect("input was valid UTF-16")
+        typed_events(text)
+            .into_iter()
+            .map(|e| match e {
+                Typed::Unit(u) => String::from_utf16(&[u]).unwrap_or_else(|_| "?".into()),
+                Typed::LineBreak => "\u{23CE}".into(),
+            })
+            .collect()
     }
 
     #[test]
-    fn crlf_collapses_to_one_break() {
-        assert_eq!(typed("line1\r\nline2"), "line1\rline2");
-        assert_eq!(typed("a\r\nb\r\nc"), "a\rb\rc");
+    fn crlf_is_one_enter() {
+        assert_eq!(typed("line1\r\nline2"), "line1\u{23CE}line2");
+        assert_eq!(typed("a\r\nb\r\nc"), "a\u{23CE}b\u{23CE}c");
     }
 
     #[test]
-    fn lone_breaks_are_kept() {
-        assert_eq!(typed("a\nb"), "a\nb");
-        assert_eq!(typed("a\rb"), "a\rb");
-        assert_eq!(typed("\n"), "\n");
-        assert_eq!(typed("\r"), "\r");
+    fn lone_breaks_are_one_enter_each() {
+        assert_eq!(typed("a\nb"), "a\u{23CE}b");
+        assert_eq!(typed("a\rb"), "a\u{23CE}b");
+        assert_eq!(typed("\n"), "\u{23CE}");
+        assert_eq!(typed("\r"), "\u{23CE}");
     }
 
     #[test]
     fn only_the_cr_lf_pair_collapses() {
         // LF then CR is two breaks, as is CR CR; CR CR LF is CR + CRLF.
-        assert_eq!(typed("\n\r"), "\n\r");
-        assert_eq!(typed("\r\r"), "\r\r");
-        assert_eq!(typed("\r\r\n"), "\r\r");
+        assert_eq!(typed("\n\r"), "\u{23CE}\u{23CE}");
+        assert_eq!(typed("\r\r"), "\u{23CE}\u{23CE}");
+        assert_eq!(typed("\r\r\n"), "\u{23CE}\u{23CE}");
         // The LF after a collapsed pair is a break of its own.
-        assert_eq!(typed("\r\n\n"), "\r\n");
+        assert_eq!(typed("\r\n\n"), "\u{23CE}\u{23CE}");
     }
 
     #[test]
-    fn non_bmp_text_is_untouched() {
-        // Surrogate pairs pass through unit by unit.
-        assert_eq!(typed("x\u{1F600}\r\ny"), "x\u{1F600}\ry");
-        assert_eq!(typed(""), "");
+    fn surrogate_pairs_pass_through_unit_by_unit() {
+        let events = typed_events("x\u{1F600}");
+        assert_eq!(events.len(), 3, "{events:?}");
+        assert!(events.iter().all(|e| matches!(e, Typed::Unit(_))));
+        assert!(typed_events("").is_empty());
     }
 }

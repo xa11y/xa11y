@@ -501,6 +501,22 @@ fn type_text_sends_one_unicode_pair_per_utf16_unit() {
 
 #[test]
 #[ignore = "injects input; run via the Windows (SendInput) CI job"]
+fn type_text_sends_a_crlf_line_break_as_one_enter_tap() {
+    // Issue #498: "\r\n" is one line break, typed as the Enter key.
+    let _guard = capture();
+    provider().type_text("a\r\nb").expect("type_text failed");
+    let events = wait_for(6);
+    assert_eq!(events.len(), 6, "a, Enter, b as down/up pairs: {events:?}");
+    let (down, vk, _, _) = expect_key(events[2]);
+    assert!(is_key_down(down), "{events:?}");
+    assert_eq!(vk, u32::from(VK_RETURN.0), "{events:?}");
+    let (up, vk, _, _) = expect_key(events[3]);
+    assert!(is_key_up(up), "{events:?}");
+    assert_eq!(vk, u32::from(VK_RETURN.0), "{events:?}");
+}
+
+#[test]
+#[ignore = "injects input; run via the Windows (SendInput) CI job"]
 fn type_text_of_empty_string_sends_nothing() {
     let _guard = capture();
     provider().type_text("").expect("type_text failed");
