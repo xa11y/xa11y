@@ -726,7 +726,12 @@ fn bits_from_u32s(state_bits: &[u32]) -> u64 {
 ///
 /// `password` comes from the raw role, not the bits (see
 /// `is_password_role`).
-pub(crate) fn states_from_bits(bits: u64, role: Role, state_read_ok: bool, password: bool) -> StateSet {
+pub(crate) fn states_from_bits(
+    bits: u64,
+    role: Role,
+    state_read_ok: bool,
+    password: bool,
+) -> StateSet {
     // Same bit positions as `LinuxProvider::parse_states` — kept in sync.
     // Each constant is `1 << ordinal` of the `AtspiStateType` enum in
     // at-spi2-core's `atspi/atspi-constants.h` (e.g. ICONIFIED=15,

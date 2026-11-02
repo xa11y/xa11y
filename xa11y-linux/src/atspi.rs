@@ -3902,7 +3902,9 @@ mod tests {
         assert!(!atspi_visible(0));
         // The event decoder uses the same rule.
         assert!(!crate::events::states_from_bits(VISIBLE, Role::Button, true, false).visible);
-        assert!(crate::events::states_from_bits(VISIBLE | SHOWING, Role::Button, true, false).visible);
+        assert!(
+            crate::events::states_from_bits(VISIBLE | SHOWING, Role::Button, true, false).visible
+        );
     }
 
     #[test]
