@@ -107,6 +107,19 @@ apps:
       Built with `dotnet build` (the .NET SDK is preinstalled on
       windows-latest runners).
 
+  uwp:
+    platforms: [windows]
+    notes: >
+      The only app in the matrix whose top-level window belongs to another
+      process: a UWP app's CoreWindow is parented into an
+      ApplicationFrameWindow owned by ApplicationFrameHost.exe (issue #497).
+      C++/WinRT with Windows.UI.Xaml built in code, compiled with the MSVC
+      tools and Windows SDK preinstalled on windows-latest, packed with
+      makeappx, signed with a throwaway self-signed certificate, sideloaded
+      with Add-AppxPackage and activated by AppUserModelID
+      (test-apps/uwp/launch.ps1). tests/suites/python/test_uwp.py holds the
+      frame-attribution checks, strict-xfailed until #497 is fixed.
+
 features:
   compat:
     description: "a11y API compatibility: tree structure, find, roles, widget discovery"
@@ -205,7 +218,7 @@ features:
   mcp:
     description: "MCP stdio server: framing, dual-era handshake, tool schemas, tool contracts, event subscriptions, and identical behaviour from all three CLI launchers"
     per_app: false
-    tested_on: [qt, gtk, cocoa, tauri, electron, egui, winforms, wpf]
+    tested_on: [qt, gtk, cocoa, tauri, electron, egui, winforms, wpf, uwp]
     notes: >
       Runs inside the cli suite (tests/suites/cli/test_mcp.py), so it covers
       every app whose cell runs that suite; the accesskit cells skip it along
@@ -335,6 +348,11 @@ coverage:
     cli: [compat, actions, mcp, windows]
 
   wpf:
+    python: [compat, actions, events, errors, windows]
+    js: [compat, actions, windows]
+    cli: [compat, actions, mcp, windows]
+
+  uwp:
     python: [compat, actions, events, errors, windows]
     js: [compat, actions, windows]
     cli: [compat, actions, mcp, windows]
@@ -490,6 +508,60 @@ gaps:
     affects:
       apps: [wpf]
       features: [windows]
+
+  - id: uwp_frame_window_name_shared
+    description: >
+      A UWP app's ApplicationFrameWindow shares its name with the title-bar
+      window and the CoreWindow beneath it, so `window[name="xa11y UWP Test"]`
+      matches three elements. The MCP window-mutation tests address their
+      target by that selector, and `action` refuses an ambiguous one. On the
+      uwp cell they skip with a reason that starts with this gap's id, and
+      only when `find` returns exactly that shape: three matches, one of them
+      the title bar reporting the title as its value. Any other ambiguity, on
+      any cell, fails (_no_mcp_window_target in tests/suites/cli/test_mcp.py).
+      A selector's first segment never matches the app root, so
+      `application > window[...]` cannot single out the frame either.
+      The Python, JS and CLI window suites act on the window element itself
+      and run in full there.
+    severity: low
+    workaround: "Python, JS and CLI window suites enforce the verbs on the uwp cell; the MCP window-mutation tests run on qt/winforms/wpf/egui."
+    affects:
+      apps: [uwp]
+      language: cli
+      features: [windows]
+
+  - id: uwp_events_attributed_to_frame_host
+    description: >
+      Until #497 is fixed (#567), xa11y resolves the UWP test app to
+      ApplicationFrameHost, so the Python events suite subscribes on the
+      frame host's pid while the XAML events come from the UWP process.
+      FocusChanged, ValueChanged (slider), StateChanged (check box),
+      NameChanged, event app metadata, event target and wait_for all time
+      out there, though the same tests XPASS on the wpf cell. They are
+      strict xfails with `raises=` on the uwp cell
+      (uwp_frame_host_xfail in tests/suites/python/test_events.py), so the
+      #567 fix has to flip them. Subscription lifecycle, try_recv, and
+      StructureChanged (non-strict, XPASS) do run there.
+    severity: medium
+    workaround: "The wpf cell covers UIA event delivery from a XAML framework; #567 is the fix."
+    affects:
+      apps: [uwp]
+      language: python
+      features: [events]
+
+  - id: uwp_textbox_nested_text_field
+    description: >
+      The XAML TextBox reads as text_field "Search" with a nested child
+      text_field "Search" of the same value, so the JS compat check that
+      requires exactly one named text field is turned off for uwp
+      (textFieldName: null in tests/suites/js/helpers.js). Whether the inner
+      element should be surfaced at all is open.
+    severity: low
+    workaround: "The Python compat suite reads the field and its value on the uwp cell."
+    affects:
+      apps: [uwp]
+      language: js
+      features: [compat]
 
   - id: egui_transform_resize_noop
     description: >

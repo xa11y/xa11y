@@ -113,6 +113,7 @@ cargo xtask test-electron    # Electron (Linux only)
 cargo xtask test-egui        # egui/eframe
 cargo xtask test-winforms    # WinForms (Windows only)
 cargo xtask test-wpf         # WPF (Windows only)
+cargo xtask test-uwp         # UWP (Windows only; sideloads a package, needs elevation)
 
 # Unit-test the harness and the coverage-index checker (no app launched)
 cargo xtask test-harness
@@ -132,6 +133,15 @@ The `cli` suite needs the `xa11y` binary (`cargo build -p xa11y`) and the `js`
 suite needs the built bindings; `scripts/run_app_suite.sh` builds both on
 demand. If the CLI binary is missing the harness **fails** rather than skipping
 — see the note under Coverage Matrix.
+
+`cargo xtask test-uwp` leaves its setup behind on a dev machine: the
+`xa11y.UwpTestApp` package and a `CN=xa11y Test` certificate in
+`LocalMachine\TrustedPeople`. Remove them from an elevated PowerShell with
+`Get-AppxPackage xa11y.UwpTestApp | Remove-AppxPackage` and
+`Get-ChildItem Cert:\LocalMachine\TrustedPeople | Where-Object Subject -eq 'CN=xa11y Test' | Remove-Item`.
+Until #497 is fixed, the harness finds the UWP app through
+`ApplicationFrameHost`, which hosts the frame of *every* running UWP app, so
+close other UWP apps (Settings, Calculator, …) before running it locally.
 
 CI configuration: see `.github/workflows/ci.yml`.
 
