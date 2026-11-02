@@ -1484,21 +1484,35 @@ fn tool_action_parsed(
     selector: &str,
     action_args: &cli::ActionArgs,
 ) -> CliResult<ToolOutput> {
+    // An unknown verb is refused before the auto-wait can spend its timeout
+    // on a call that could never be made.
+    if !cli::ACTION_NAMES.contains(&action) {
+        return Err(usage(format!(
+            "unknown action: {action} (expected one of: {})",
+            cli::ACTION_NAMES.join(", ")
+        )));
+    }
     let locator = target.locator(selector);
     // The schema promises "must match exactly one element", so enforce it here
     // rather than letting the locator's document-order first-match stand in
     // for it: a model told "exactly one" that silently gets the first of
     // several has no way to notice it pressed the wrong control.
     //
-    // Zero matches deliberately falls through to the action, whose auto-wait
-    // is what gives an element still being built time to appear — and whose
-    // timeout carries the richer "never matched" diagnosis.
-    let matches = locator.elements()?;
-    if matches.len() > 1 {
-        return Err(ambiguous(selector, &matches));
-    }
-
-    cli::perform_action(&locator, action, action_args)?;
+    // The count and the action share one resolution: `auto_wait_unique`
+    // hands back the single element it counted, and that element is what is
+    // acted on. Counting and then calling the locator's action re-resolved in
+    // between, so a UI changing in that gap got the action on an element that
+    // was never counted — possibly one of several (#528).
+    //
+    // Zero matches and a not-yet-actionable match keep polling, which is
+    // what gives an element still being built time to appear, and the
+    // timeout carries the "never matched" diagnosis. Several matches refuse
+    // at once rather than waiting for the UI to settle into one.
+    let element = match locator.auto_wait_unique(&action.replace('-', "_"))? {
+        Ok(element) => element,
+        Err(matches) => return Err(ambiguous(selector, &matches)),
+    };
+    cli::perform_action_on(&element, action, action_args)?;
 
     // `ok` reports that the platform accepted the call. Whether the
     // application did anything with it is only knowable by re-reading, which
@@ -3389,6 +3403,163 @@ mod tests {
                 .any(|(_, name, data)| name == "resize_to" && data.as_deref() == Some("800x600")),
             "the dispatching must reach the resize_to verb with the parsed size: {actions:?}"
         );
+    }
+
+    #[test]
+    fn action_refuses_several_matches_and_touches_none_of_them() {
+        let (target, provider) = mock_target_app();
+        let err = tool_action_parsed(&target, "press", "button", &cli::ActionArgs::default())
+            .expect_err("two buttons match");
+        let CliError::Ambiguous { count, .. } = err else {
+            panic!("expected ambiguous_selector, got {err:?}");
+        };
+        assert_eq!(count, 2);
+        assert!(provider.actions().is_empty(), "{:?}", provider.actions());
+    }
+
+    /// A mock whose UI changes after the first tree walk once armed: from the
+    /// second walk on, an intruder "Back" button sits ahead of the real one.
+    /// Counting in one resolution and acting in another presses the intruder.
+    struct ShiftingProvider {
+        inner: std::sync::Arc<xa11y_core::mock::MockProvider>,
+        armed: std::sync::atomic::AtomicBool,
+        walks: std::sync::atomic::AtomicUsize,
+    }
+
+    const INTRUDER_HANDLE: u64 = 9_999;
+
+    macro_rules! forward {
+        ($($name:ident($($arg:ident: $ty:ty),*) -> $ret:ty;)*) => {
+            $(fn $name(&self, e: &crate::ElementData $(, $arg: $ty)*) -> crate::Result<$ret> {
+                self.inner.$name(e $(, $arg)*)
+            })*
+        };
+    }
+
+    impl crate::Provider for ShiftingProvider {
+        fn get_children(
+            &self,
+            element: Option<&crate::ElementData>,
+        ) -> crate::Result<Vec<crate::ElementData>> {
+            use std::sync::atomic::Ordering::SeqCst;
+            let mut children = self.inner.get_children(element)?;
+            let armed = self.armed.load(SeqCst);
+            if armed && element.is_some_and(|e| e.role == crate::Role::Application) {
+                self.walks.fetch_add(1, SeqCst);
+            }
+            let shifted = armed && self.walks.load(SeqCst) > 1;
+            if shifted && element.is_some_and(|e| e.name.as_deref() == Some("Navigation")) {
+                let mut intruder = children[0].clone();
+                intruder.handle = INTRUDER_HANDLE;
+                children.insert(0, intruder);
+            }
+            Ok(children)
+        }
+        fn get_parent(&self, e: &crate::ElementData) -> crate::Result<Option<crate::ElementData>> {
+            self.inner.get_parent(e)
+        }
+        fn list_apps(&self) -> crate::Result<Vec<crate::ElementData>> {
+            self.inner.list_apps()
+        }
+        fn focused_app(&self) -> crate::Result<crate::ElementData> {
+            self.inner.focused_app()
+        }
+        fn list_shell_surfaces(
+            &self,
+        ) -> crate::Result<Vec<(crate::ShellSurfaceKind, crate::ElementData)>> {
+            self.inner.list_shell_surfaces()
+        }
+        forward! {
+            press() -> (); focus() -> (); blur() -> (); toggle() -> (); select() -> ();
+            expand() -> (); collapse() -> (); show_menu() -> (); increment() -> ();
+            decrement() -> (); scroll_into_view() -> (); set_value(v: &str) -> ();
+            set_numeric_value(v: f64) -> (); type_text(t: &str) -> ();
+            set_text_selection(s: u32, f: u32) -> (); perform_action(a: &str) -> ();
+            activate() -> (); minimize() -> (); maximize() -> (); enter_fullscreen() -> ();
+            restore() -> (); close() -> (); move_to(x: i32, y: i32) -> ();
+            resize_to(w: u32, h: u32) -> ();
+            subscribe() -> xa11y_core::Subscription;
+        }
+    }
+
+    #[test]
+    fn action_acts_on_the_element_it_counted_even_when_the_ui_shifts() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let inner = xa11y_core::mock::build_provider();
+        let shifting = std::sync::Arc::new(ShiftingProvider {
+            inner: inner.clone(),
+            armed: std::sync::atomic::AtomicBool::new(false),
+            walks: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let provider: std::sync::Arc<dyn crate::Provider> = shifting.clone();
+        let app = App::list_with(provider)
+            .expect("the mock lists its app")
+            .into_iter()
+            .next()
+            .expect("one app");
+        let target = Target::App(app);
+        let selector = r#"button[name="Back"]"#;
+        let real = target.locator(selector).elements().expect("resolve");
+        assert_eq!(real.len(), 1);
+
+        shifting.armed.store(true, SeqCst);
+        tool_action_parsed(&target, "press", selector, &cli::ActionArgs::default())
+            .expect("one actionable match when counted");
+        let actions = inner.actions();
+        assert_eq!(
+            actions,
+            vec![(real[0].handle, "press".to_string(), None)],
+            "pressed something other than the element that was counted: {actions:?}"
+        );
+        // The hazard was live: a later resolution sees the intruder too.
+        assert_eq!(target.locator(selector).count().expect("count"), 2);
+    }
+
+    #[test]
+    fn every_action_verb_has_an_auto_wait_gate() {
+        // A verb core does not know would be refused as `InvalidActionData`
+        // before any wait; a known one with nothing to match times out.
+        let (target, _) = mock_target_app();
+        for verb in cli::ACTION_NAMES {
+            let err = target
+                .locator(r#"button[name="Nope"]"#)
+                .with_timeout(std::time::Duration::ZERO)
+                .auto_wait_unique(&verb.replace('-', "_"))
+                .expect_err("nothing matches");
+            assert!(
+                matches!(err, crate::Error::Timeout { .. }),
+                "{verb}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_reversed_text_range_is_refused_before_the_wait() {
+        let err = cli::parse_action_args("select-text", Some("5,2"), None, None)
+            .expect_err("start > end");
+        assert!(matches!(err, CliError::Usage(_)), "{err:?}");
+        cli::parse_action_args("select-text", Some("2,2"), None, None).expect("empty range");
+    }
+
+    #[test]
+    fn an_unknown_verb_is_refused_before_anything_is_resolved() {
+        let (target, provider) = mock_target_app();
+        // A selector that never matches: reaching the auto-wait would spend
+        // the default timeout before the verb was ever looked at.
+        let start = std::time::Instant::now();
+        let err = tool_action_parsed(
+            &target,
+            "frobnicate",
+            r#"button[name="Nope"]"#,
+            &cli::ActionArgs::default(),
+        )
+        .expect_err("not a verb");
+        assert!(
+            matches!(err, CliError::Usage(ref m) if m.contains("unknown action")),
+            "{err:?}"
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        assert!(provider.actions().is_empty());
     }
 
     #[test]
