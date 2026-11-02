@@ -2864,26 +2864,11 @@ impl Provider for WindowsProvider {
         // Only a genuinely absent ScrollItemPattern is "not supported"; any
         // other lookup failure (a dead element, a wedged provider) is a real
         // error and propagates rather than reading as unsupported (tenet 1).
-        let pattern = match unsafe {
+        let pattern = unsafe {
             uia_element
                 .GetCurrentPatternAs::<IUIAutomationScrollItemPattern>(UIA_ScrollItemPatternId)
-        } {
-            Ok(pattern) => pattern,
-            Err(e) if is_pattern_absent(&e) => {
-                return Err(Error::ActionNotSupported {
-                    action: "scroll_into_view".to_string(),
-                    role: element.role,
-                });
-            }
-            Err(e) => {
-                return Err(Error::Platform {
-                    code: e.code().0 as i64,
-                    message: format!(
-                        "acquiring ScrollItemPattern for scroll_into_view failed: {e}"
-                    ),
-                });
-            }
-        };
+        }
+        .map_err(|e| pattern_acquisition_error(&e, "scroll_into_view", element.role))?;
         unsafe { pattern.ScrollIntoView() }.map_err(|e| Error::Platform {
             code: e.code().0 as i64,
             message: format!("ScrollIntoView failed: {}", e),
