@@ -35,7 +35,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var contextMenu: NSMenu!
 
     func applicationDidFinishLaunching(_: Notification) {
-        let contentRect = NSRect(x: 0, y: 0, width: 700, height: 800)
+        // 800 points of scrolling content above a 40-point strip that never
+        // scrolls (the drag-and-drop fixture, which a pointer must reach).
+        let dragStripHeight: CGFloat = 40
+        let contentRect = NSRect(x: 0, y: 0, width: 700, height: 800 + dragStripHeight)
         window = NSWindow(
             contentRect: contentRect,
             styleMask: [.titled, .closable, .resizable, .miniaturizable],
@@ -66,13 +69,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusMenu.addItem(statusAction)
         statusItem.menu = statusMenu
 
-        let scroll = NSScrollView(frame: contentRect)
+        let container = NSView(frame: contentRect)
+        let scroll = NSScrollView(frame: NSRect(
+            x: 0, y: dragStripHeight, width: contentRect.width, height: 800
+        ))
         scroll.hasVerticalScroller = true
         scroll.autoresizingMask = [.width, .height]
+        container.addSubview(scroll)
+
+        // ── Drag and drop (fixed strip below the scroll view) ─────────────
+        // A real NSDraggingSession source and a drop target that counts
+        // string drops in its value. Outside the scroll view so a pointer
+        // drag reaches both whatever the scroll position.
+        let dragSource = DragSourceView(frame: NSRect(x: 16, y: 6, width: 120, height: 28))
+        dragSource.autoresizingMask = [.maxYMargin]
+        container.addSubview(dragSource)
+        let dropTarget = DropTargetView(frame: NSRect(x: 300, y: 6, width: 160, height: 28))
+        dropTarget.autoresizingMask = [.maxYMargin]
+        container.addSubview(dropTarget)
 
         let docView = NSView(frame: NSRect(x: 0, y: 0, width: 680, height: 1480))
         scroll.documentView = docView
-        window.contentView = scroll
+        window.contentView = container
 
         var y: CGFloat = 1320
         func addSection(_ title: String) -> NSView {
@@ -529,6 +547,87 @@ class OpenOnlyHost: NSView {
     override func accessibilityChildren() -> [Any]? {
         element.setAccessibilityFrameInParentSpace(bounds)
         return [element]
+    }
+}
+
+// ── Drag and drop ─────────────────────────────────────────────────────────────
+
+let dragPayload = "xa11y-drag-payload"
+
+/// Starts a real NSDraggingSession carrying `dragPayload` on the first
+/// mouse-dragged event after a mouse-down: the path a synthesized drag has to
+/// drive for an AppKit drop to happen.
+class DragSourceView: NSView, NSDraggingSource {
+    private var sessionStarted = false
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .group }
+    override func accessibilityLabel() -> String? { "Drag Source" }
+
+    // The headless app is never active; without this the first click on an
+    // inactive window only activates it and never reaches the view.
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.systemBlue.setFill()
+        bounds.fill()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        sessionStarted = false
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard !sessionStarted else { return }
+        sessionStarted = true
+        let item = NSDraggingItem(pasteboardWriter: dragPayload as NSString)
+        item.setDraggingFrame(bounds, contents: nil)
+        beginDraggingSession(with: [item], event: event, source: self)
+    }
+
+    func draggingSession(
+        _ session: NSDraggingSession,
+        sourceOperationMaskFor context: NSDraggingContext
+    ) -> NSDragOperation {
+        .copy
+    }
+}
+
+/// Accepts `dragPayload` drops and counts them in its accessibility value
+/// ("drops: N"), which is what the drag test reads back.
+class DropTargetView: NSView {
+    private var drops = 0
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        registerForDraggedTypes([.string])
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not used")
+    }
+
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityRole() -> NSAccessibility.Role? { .group }
+    override func accessibilityLabel() -> String? { "Drop Target" }
+    override func accessibilityValue() -> Any? { "drops: \(drops)" }
+
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.systemGreen.setFill()
+        bounds.fill()
+    }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        .copy
+    }
+
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+        guard sender.draggingPasteboard.string(forType: .string) == dragPayload else {
+            return false
+        }
+        drops += 1
+        NSAccessibility.post(element: self, notification: .valueChanged)
+        return true
     }
 }
 
