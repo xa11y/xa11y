@@ -1756,6 +1756,14 @@ pub(crate) fn parse_text_range(raw: &str) -> CliResult<(u32, u32)> {
         .trim()
         .parse()
         .map_err(|_| CliError::Usage(format!("invalid END in select-text value: {}", parts[1])))?;
+    // Refused here rather than by the provider: the provider's check runs
+    // only after the auto-wait, so a reversed range would spend the whole
+    // timeout before failing on a value that could never succeed.
+    if start > end {
+        return Err(CliError::Usage(format!(
+            "select-text START must not exceed END, got: {raw}"
+        )));
+    }
     Ok((start, end))
 }
 

@@ -117,16 +117,26 @@ impl Actionability {
     /// One table rather than a gate argument at each call site, so the
     /// named action methods and [`Locator::auto_wait_unique`] — which is
     /// handed a verb by name — cannot disagree about a verb's gate.
-    fn for_action(action: &str) -> Self {
-        match action {
+    ///
+    /// Every name is listed: an unknown or misspelled one is refused with
+    /// [`Error::InvalidActionData`] rather than quietly given the default gate.
+    fn for_action(action: &str) -> Result<Self> {
+        Ok(match action {
             // Making an off-screen element visible is this verb's purpose.
             "scroll_into_view" => Self::ENABLED,
             // A minimized window is legitimately invisible; see the window
             // management section below.
             "activate" | "minimize" | "maximize" | "enter_fullscreen" | "restore" | "close"
             | "move_to" | "resize_to" => Self::ENABLED,
-            _ => Self::VISIBLE_AND_ENABLED,
-        }
+            "press" | "focus" | "blur" | "toggle" | "select" | "expand" | "collapse"
+            | "show_menu" | "increment" | "decrement" | "set_value" | "set_numeric_value"
+            | "type_text" | "select_text" | "perform_action" => Self::VISIBLE_AND_ENABLED,
+            other => {
+                return Err(Error::InvalidActionData {
+                    message: format!("no auto-wait gate for unknown action {other:?}"),
+                })
+            }
+        })
     }
 }
 
@@ -728,11 +738,16 @@ impl Locator {
         }
         let only_match = || {
             let group = SelectorGroup::parse(&self.selector)?;
-            let mut all = self.resolve_group(&group, None)?;
-            if all.len() > 1 {
-                return Ok(ControlFlow::Break(all));
+            // Two matches are enough to know the answer is "several", so
+            // each poll asks for at most two and keeps the backend's limit
+            // pushdown. Only a refusal pays for the full list, which is what
+            // its candidate diagnosis needs; the element acted on still comes
+            // from the single resolution that counted it.
+            let mut first_two = self.resolve_group(&group, Some(2))?;
+            if first_two.len() > 1 {
+                return Ok(ControlFlow::Break(self.resolve_group(&group, None)?));
             }
-            Ok(ControlFlow::Continue(all.pop()))
+            Ok(ControlFlow::Continue(first_two.pop()))
         };
         Ok(match self.auto_wait_with(action, only_match)? {
             ControlFlow::Continue(element) => Ok(element),
@@ -753,7 +768,7 @@ impl Locator {
         action: &str,
         mut resolve: impl FnMut() -> Result<ControlFlow<B, Option<ElementData>>>,
     ) -> Result<ControlFlow<B, Element>> {
-        let gate = Actionability::for_action(action);
+        let gate = Actionability::for_action(action)?;
         let timeout = self.effective_timeout()?;
         let start = std::time::Instant::now();
         let poll_interval = Duration::from_millis(100);
@@ -2098,6 +2113,13 @@ mod tests {
         let d = err.diagnosis().expect("diagnosis");
         assert_eq!(d.last_observed.as_deref(), Some("selector never matched"));
         assert!(!d.candidates.is_empty(), "near misses are listed: {d:?}");
+    }
+
+    #[test]
+    fn an_unknown_action_name_is_refused_rather_than_given_a_default_gate() {
+        let loc = root_locator(r#"button[name="Back"]"#).with_timeout(Duration::ZERO);
+        let err = loc.auto_wait_unique("prees").expect_err("misspelled");
+        assert!(matches!(err, Error::InvalidActionData { .. }), "{err:?}");
     }
 
     #[test]
