@@ -429,12 +429,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Native fullscreen (the Spaces transition the fullscreen state test
         // drives) is only available to regular-policy apps. The harness
         // launches this app regular already; a `--headless` (accessory) run
-        // has its policy lifted here for the transition.
+        // has its policy lifted here for the transition. Activate either
+        // way: a regular app that lost the front slot to an earlier test
+        // still needs it for the transition.
         if NSApp.activationPolicy() != .regular {
             NSApp.setActivationPolicy(.regular)
-            NSApp.activate(ignoringOtherApps: true)
-            window.makeKeyAndOrderFront(nil)
         }
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
         // Keep a second app window on the original Space. App.windows() must
         // continue to discover it while the primary window occupies the
         // fullscreen Space; filtering by the active Space would lose it.
