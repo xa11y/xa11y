@@ -275,7 +275,7 @@ The tri-state checked value (`Off` / `On` / `Mixed`) is derived differently:
 
 ### Visible state and bounds (Linux)
 
-On Linux, `visible` requires the AT-SPI `Showing` state as well as `Visible`. `Visible` alone means the object would be drawn if its ancestors were. Rows scrolled out of a list, widgets in a hidden page, and the contents of a minimized window keep `Visible` but lose `Showing`, so xa11y reports them as not visible. An auto-wait on `visible` therefore waits for the element to be on screen.
+On Linux, `visible` requires the AT-SPI `Showing` state as well as `Visible`. `Visible` alone means the object would be drawn if its ancestors were. Rows scrolled out of a list, widgets in a hidden page, and the contents of a minimized window keep `Visible` but lose `Showing`, so xa11y reports them as not visible. So an auto-wait on `visible` waits for the element to be on screen.
 
 `bounds` is `None` when `Component.GetExtents` reports a sentinel instead of a position: an `INT32_MIN` coordinate (unrealized GTK widgets), a negative size, or `0x0`. A zero width or a zero height alone, such as a separator line, is still reported, matching Windows.
 
