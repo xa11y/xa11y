@@ -169,6 +169,33 @@ mod tests {
         }
     }
 
+    /// A text write to a read-only field is refused from the element's
+    /// state, before the toolkit is asked — GTK 3 and others answer such a
+    /// write with success and change nothing (issue #486). Linux-only: the
+    /// gate is on AT-SPI's READ_ONLY / EDITABLE states.
+    #[test]
+    #[ignore]
+    #[cfg(target_os = "linux")]
+    fn action_text_writes_to_read_only_field_are_refused() {
+        let app = h::app_root();
+        let field = h::one(&app, r#"text_field[name="Read-only Field"]"#);
+        assert!(
+            !field.states.editable,
+            "read-only field must not report editable"
+        );
+        for (action, result) in [
+            ("set_value", field.provider().set_value(&field, "changed")),
+            ("type_text", field.provider().type_text(&field, "changed")),
+        ] {
+            match result {
+                Err(Error::ActionNotSupported { action: a, .. }) => assert_eq!(a, action),
+                other => panic!(
+                    "{action} on a read-only field: expected ActionNotSupported, got {other:?}"
+                ),
+            }
+        }
+    }
+
     #[test]
     #[ignore]
     fn action_set_value_numeric() {
