@@ -3412,6 +3412,44 @@ impl MacOSProvider {
         false
     }
 
+    /// Snapshot `children` of `parent`, dropping system chrome.
+    ///
+    /// Filters first (cheap string checks), then builds ElementData in
+    /// parallel (each build is an IPC round-trip). A child that vanished
+    /// between the children read and its snapshot (macOS invalidates a
+    /// window's AX object during fullscreen transitions and on close) is no
+    /// longer part of this parent's live surface, so it is dropped. A child
+    /// the process did not answer for is *not* a fact about the tree —
+    /// reporting a smaller one would be indistinguishable from a genuine
+    /// subtree, so the walk fails with the platform error (tenet 1).
+    fn snapshot_children(
+        &self,
+        parent: &ElementData,
+        children: &[AXElement],
+    ) -> Result<Vec<ElementData>> {
+        let role = parent.role;
+        let name = parent.name.as_deref();
+        let filtered: Vec<&AXElement> = children
+            .iter()
+            .filter(|child| !Self::should_filter_child(role, name, child))
+            .collect();
+        let built: Vec<Result<ElementData>> = filtered
+            .par_iter()
+            .map(|child| self.build_element_data(child, parent.pid))
+            .collect();
+        let mut results: Vec<ElementData> = Vec::with_capacity(built.len());
+        for data in built {
+            match data {
+                Ok(data) => results.push(data),
+                Err(err) => match classify_element_churn(&err) {
+                    ElementChurn::Gone => {}
+                    ElementChurn::Unreachable | ElementChurn::Fatal => return Err(err),
+                },
+            }
+        }
+        Ok(results)
+    }
+
     /// Convenience wrapper that fetches role/subrole before filtering.
     fn should_filter_child(
         parent_role: Role,
@@ -3920,53 +3958,34 @@ impl Provider for MacOSProvider {
             }
             Some(element_data) => {
                 let ax = self.get_cached(element_data.handle)?;
-                let role = element_data.role;
-                let name = element_data.name.as_deref();
 
-                // An Application element's children are its top-level windows:
-                // `AXWindows` is the single canonical window-discovery source
-                // (the same answer `App::windows` now reads on every platform).
-                // Every other role keeps the raw `AXChildren` walk. The read is
-                // error-preserving on purpose — a dead app must report its
-                // failure, not an empty window list (tenet 1).
-                let ax_children_list = match role {
+                // An Application element's children are its top-level
+                // windows (`AXWindows`) followed by any app-level `AXMenu`,
+                // such as an open context menu, which search reaches through
+                // `AXChildren` and `AXWindows` never lists (see
+                // `app_top_level_children`). Every other role keeps the raw
+                // `AXChildren` walk. The application read is error-preserving
+                // on purpose: a dead app must report its failure, not an
+                // empty list (tenet 1).
+                let ax_children_list = match element_data.role {
                     Role::Application => app_top_level_children(ax.as_ptr())?,
                     _ => ax_children(ax.as_ptr()),
                 };
-
-                // Filter first (cheap string checks), then build ElementData
-                // in parallel (each build_element_data is an IPC round-trip).
-                let filtered: Vec<&AXElement> = ax_children_list
-                    .iter()
-                    .filter(|child| !Self::should_filter_child(role, name, child))
-                    .collect();
-
-                // A child that vanished between the children read and its
-                // snapshot (macOS invalidates a window's AX object during
-                // fullscreen transitions and on close) is no longer part of
-                // this parent's live surface, so it is dropped. A child the
-                // process did not answer for is *not* a fact about the tree —
-                // reporting a smaller one would be indistinguishable from a
-                // genuine subtree, so the walk fails with the platform error
-                // (tenet 1).
-                let built: Vec<Result<ElementData>> = filtered
-                    .par_iter()
-                    .map(|child| self.build_element_data(child, element_data.pid))
-                    .collect();
-                let mut results: Vec<ElementData> = Vec::with_capacity(built.len());
-                for data in built {
-                    match data {
-                        Ok(data) => results.push(data),
-                        Err(err) => match classify_element_churn(&err) {
-                            ElementChurn::Gone => {}
-                            ElementChurn::Unreachable | ElementChurn::Fatal => return Err(err),
-                        },
-                    }
-                }
-
-                Ok(results)
+                self.snapshot_children(element_data, &ax_children_list)
             }
         }
+    }
+
+    /// `App::windows` reads `AXWindows` alone: windows are all it keeps, so
+    /// the app-level menu read `get_children` adds would only cost an IPC
+    /// round-trip and a failure mode.
+    fn app_windows(&self, app: &ElementData) -> Result<Vec<ElementData>> {
+        if app.role != Role::Application {
+            return self.get_children(Some(app));
+        }
+        let ax = self.get_cached(app.handle)?;
+        let windows = ax_windows(ax.as_ptr())?;
+        self.snapshot_children(app, &windows)
     }
 
     fn find_elements_group(

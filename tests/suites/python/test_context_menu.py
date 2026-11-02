@@ -47,6 +47,7 @@ def test_cocoa_context_menu_is_listed_and_searchable(app_name, app):
 
         assert found == 1, (
             f"search found {found} context-menu items after the right-click; "
+            f"children={[(c.role, c.name) for c in app.children()]!r}; "
             f"app tree:\n{app.dump(max_depth=3)}"
         )
         assert len(listed) == 1, (
