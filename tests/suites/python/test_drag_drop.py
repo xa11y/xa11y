@@ -23,6 +23,10 @@ def _drops(app: xa11y.App) -> int:
     return int(value.removeprefix("drops: "))
 
 
+# The drag is synthesized, and the harness runs the Cocoa app in the
+# background: with Finder frontmost, AppKit never started a drag session.
+@pytest.mark.xa11y_requires("input_sim")
+@pytest.mark.xa11y_frontmost
 def test_cocoa_drag_delivers_a_drop(app_name, app):
     if sys.platform != "darwin" or app_name != "cocoa":
         pytest.skip("the AppKit drag-and-drop fixture belongs to the macOS Cocoa cell")
