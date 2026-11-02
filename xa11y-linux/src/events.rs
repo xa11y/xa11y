@@ -38,8 +38,7 @@ use xa11y_core::{
 
 use crate::atspi::{
     is_listable_top_level, is_password_role, map_atspi_role, map_atspi_role_number,
-    read_interfaces, AccessibleRef,
-    Interfaces, LinuxProvider,
+    read_interfaces, AccessibleRef, Interfaces, LinuxProvider,
 };
 
 /// AT-SPI2 event-interface names we subscribe to via match rules.
@@ -122,7 +121,8 @@ pub(crate) fn subscribe_for_pid(
     // registered-listener list (Qt, GTK 3's atk-bridge) emit nothing at all
     // for an unregistered event, so without this a Qt app's subscription
     // was silent (issue #488). Registration is tied to this connection's
-    // bus name; the cancel path deregisters, and the registry also drops it
+    // bus name; the cancel path deregisters each (event, app) pair in the
+    // form it was registered, and the registry also drops it
     // when the connection closes.
     let registered = register_events(&conn, &sender_buses)?;
 
@@ -340,18 +340,30 @@ impl EventContext {
         if seed_top_level_windows(&self.conn, bus, &mut current).is_err() {
             return;
         }
-        let gone: Vec<String> = {
+        let mut gone = Vec::new();
+        let mut vanished_hidden = Vec::new();
+        {
             let windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
-            windows
-                .iter()
-                .filter(|(key, listed)| {
-                    **listed
-                        && key.strip_prefix(bus).is_some_and(|p| p.starts_with('/'))
-                        && !current.contains_key(*key)
-                })
-                .map(|(key, _)| key.clone())
-                .collect()
-        };
+            for (key, listed) in windows.iter() {
+                if key.strip_prefix(bus).is_some_and(|p| p.starts_with('/'))
+                    && !current.contains_key(key)
+                {
+                    if *listed {
+                        gone.push(key.clone());
+                    } else {
+                        vanished_hidden.push(key.clone());
+                    }
+                }
+            }
+        }
+        // A seeded hidden window that has since been destroyed was never
+        // listed, so it leaves without an event, but must not linger.
+        if !vanished_hidden.is_empty() {
+            let mut windows = self.windows.lock().unwrap_or_else(|e| e.into_inner());
+            for key in &vanished_hidden {
+                windows.remove(key);
+            }
+        }
         for (key, listed) in current {
             let aref = AccessibleRef {
                 bus_name: bus.to_owned(),
@@ -731,26 +743,36 @@ fn register_signature_from_xml(xml: &str) -> Result<RegisterSignature> {
     })
 }
 
+/// One registration made by [`register_events`], kept so
+/// [`deregister_events`] can undo exactly it.
+struct Registration {
+    event: &'static str,
+    /// The `app_bus_name` it was registered for (2.46+), or `None` for the
+    /// one-argument form.
+    app: Option<String>,
+}
+
 /// Register [`REGISTERED_EVENTS`] for this connection. Returns what was
 /// registered, for [`deregister_events`].
 ///
 /// On the 2.46+ signature each registration names the application's bus
-/// (`app_bus_name`), so only the subscribed application switches its
-/// emission on; an empty name would make every application on the desktop
-/// emit object events.
-fn register_events(conn: &Connection, app_buses: &[String]) -> Result<Vec<&'static str>> {
+/// (`app_bus_name`) rather than empty. That scoping is best-effort and up to
+/// the registry: at-spi2-core still broadcasts `EventListenerRegistered` to
+/// every application, and scopes only what `GetRegisteredEvents` returns,
+/// so other applications may still switch their emission on.
+fn register_events(conn: &Connection, app_buses: &[String]) -> Result<Vec<Registration>> {
     let signature = register_signature(conn)?;
     let registry = registry_proxy(conn, "org.a11y.atspi.Registry")?;
-    let mut done = Vec::new();
-    let apps: Vec<&str> = match signature {
-        RegisterSignature::EventOnly => vec![""],
-        RegisterSignature::WithProperties => app_buses.iter().map(String::as_str).collect(),
+    let apps: Vec<Option<&str>> = match signature {
+        RegisterSignature::EventOnly => vec![None],
+        RegisterSignature::WithProperties => app_buses.iter().map(|b| Some(b.as_str())).collect(),
     };
+    let mut done = Vec::new();
     for app in apps {
         for event in REGISTERED_EVENTS {
-            let reply = match signature {
-                RegisterSignature::EventOnly => registry.call_method("RegisterEvent", &(*event,)),
-                RegisterSignature::WithProperties => {
+            let reply = match app {
+                None => registry.call_method("RegisterEvent", &(*event,)),
+                Some(app) => {
                     registry.call_method("RegisterEvent", &(*event, Vec::<String>::new(), app))
                 }
             };
@@ -763,20 +785,33 @@ fn register_events(conn: &Connection, app_buses: &[String]) -> Result<Vec<&'stat
                     ),
                 });
             }
-            done.push(*event);
+            done.push(Registration {
+                event,
+                app: app.map(str::to_owned),
+            });
         }
     }
     Ok(done)
 }
 
-fn deregister_events(conn: &Connection, events: &[&'static str]) {
+/// Undo [`register_events`]: `DeregisterEvent(s)` for a one-argument
+/// registration, `DeregisterEvent(ss)` with the same app for a 2.46+ one,
+/// so a registry that matches a deregistration by app removes exactly what
+/// was registered. (at-spi2-core 2.52 matches by sender and event and
+/// accepts either form.)
+fn deregister_events(conn: &Connection, registrations: &[Registration]) {
     let Ok(registry) = registry_proxy(conn, "org.a11y.atspi.Registry") else {
         return;
     };
-    for event in events {
+    for registration in registrations {
         // Teardown cannot report a failure, and the registry forgets a
         // closed connection's registrations on its own.
-        let _ = registry.call_method("DeregisterEvent", &(*event,));
+        let _ = match &registration.app {
+            None => registry.call_method("DeregisterEvent", &(registration.event,)),
+            Some(app) => {
+                registry.call_method("DeregisterEvent", &(registration.event, app.as_str()))
+            }
+        };
     }
 }
 
