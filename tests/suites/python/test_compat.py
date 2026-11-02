@@ -13,6 +13,7 @@ does not include a particular widget type.
 from __future__ import annotations
 
 import sys
+import time
 import warnings
 
 import pytest
@@ -691,3 +692,156 @@ def test_locator_dump_shorthand(app, app_config):
     text = app.locator(f'button[name="{ok_name}"]').element().dump(max_depth=0)
     assert isinstance(text, str)
     assert "button" in text
+
+
+def _scrolled_pane_visibility(app, pane_name: str, first: str, last: str):
+    """The first and last entries' ``visible``, read both ways the provider
+    computes it: a selector search, which takes the one-pass subtree fetch,
+    and ``children()``, which clips each level to its parent."""
+    found = {
+        name: app.locator(f'[name="{name}"]').element().visible
+        for name in (first, last)
+    }
+    pane = app.locator(f'[name="{pane_name}"]').element()
+    listed = {c.name: c.visible for c in pane.children() if c.name in (first, last)}
+    return found, listed
+
+
+def test_controls_scrolled_out_of_a_pane_are_not_visible(app, app_config):
+    """A control scrolled out of its pane reports ``visible == False``.
+
+    Some UIA providers leave ``IsOffscreen`` false on content outside the
+    viewport, so without the provider's own clipping it counted as visible
+    and an auto-waiting action would act on a control nobody can see (issue
+    #502). The test first asserts that premise on the scrolled-out entry's
+    ``raw["uia_is_offscreen"]``, so it cannot pass with or without the fix.
+    """
+    pane_name = app_config.get("scrolled_pane_name")
+    if not pane_name:
+        pytest.skip("this app has no pane longer than its viewport yet")
+    first = app_config["scrolled_pane_first_item"]
+    last = app_config["scrolled_pane_last_item"]
+
+    # The premise: UIA itself says the scrolled-out entry is on screen.
+    # Without it this test would pass with or without the fix.
+    hidden = app.locator(f'[name="{last}"]').element()
+    assert hidden.raw.get("uia_is_offscreen") is False, (
+        f"{last!r} reports uia_is_offscreen="
+        f"{hidden.raw.get('uia_is_offscreen')!r}, so the fixture no longer "
+        f"exercises issue #502 (UIA leaving IsOffscreen false on a "
+        f"scrolled-out control)"
+    )
+
+    found, listed = _scrolled_pane_visibility(app, pane_name, first, last)
+    expected = {first: True, last: False}
+    assert found == expected, (
+        f"selector search: the first entry must be visible and the last "
+        f"scrolled out; got {found}"
+    )
+    assert listed == expected, (
+        f"children(): the first entry must be visible and the last scrolled "
+        f"out; got {listed}"
+    )
+
+
+def test_scrolling_a_pane_flips_which_controls_are_visible(app, app_config):
+    """After the pane scrolls to the last entry, it reports visible and the
+    first does not: the clip follows the scroll position rather than a
+    remembered answer.
+
+    Focus moves the viewport: the framework scrolls a pane to the control
+    that takes focus. ``scroll_into_view`` cannot, because plain buttons
+    have no UIA ScrollItem pattern. ``Element.focus`` acts without waiting
+    for ``visible``, which the scrolled-out entry is not.
+    """
+    pane_name = app_config.get("scrolled_pane_name")
+    if not pane_name:
+        pytest.skip("this app has no pane longer than its viewport yet")
+    first = app_config["scrolled_pane_first_item"]
+    last = app_config["scrolled_pane_last_item"]
+    expected = {first: False, last: True}
+
+    app.locator(f'[name="{last}"]').element().focus()
+    try:
+        deadline = time.monotonic() + 5.0
+        while True:
+            found, listed = _scrolled_pane_visibility(app, pane_name, first, last)
+            settled = found == expected and listed == expected
+            if settled or time.monotonic() > deadline:
+                break
+            time.sleep(0.2)
+        assert found == expected, (
+            f"selector search after scrolling to the last entry: got {found}"
+        )
+        assert listed == expected, (
+            f"children() after scrolling to the last entry: got {listed}"
+        )
+        # The premise again, from the other side: UIA still calls the entry
+        # that just scrolled out on screen, so the flip is the viewport clip.
+        gone = app.locator(f'[name="{first}"]').element()
+        assert gone.raw.get("uia_is_offscreen") is False, (
+            f"{first!r} reports uia_is_offscreen="
+            f"{gone.raw.get('uia_is_offscreen')!r} after scrolling out, so "
+            f"this test no longer exercises issue #502"
+        )
+    finally:
+        # Put the shared app back for the test above, whatever the order.
+        app.locator(f'[name="{first}"]').element().focus()
+
+
+def test_open_dropdown_in_a_scrolled_panel_is_visible(app, app_config):
+    """An open drop-down's entries report visible although they lie outside
+    the overflowing panel that holds the combo box.
+
+    The drop-down is a popup window, drawn above the panel, but UIA lists it
+    under the combo in the raw view. Clipping it to the panel would leave the
+    entries not visible and time out any auto-waiting action on them.
+    """
+    combo_name = app_config.get("scrolled_panel_combo_name")
+    if not combo_name:
+        pytest.skip("this app has no combo box in an overflowing panel yet")
+    entry = app_config["scrolled_panel_combo_last_item"]
+
+    # The panel must really clip, or the drop-down has nothing to escape:
+    # its filler sits below the panel's viewport.
+    # And it must be the provider's clip that hides the filler, not UIA's own
+    # IsOffscreen, or a clip that wrongly swallowed the popup could hide
+    # behind a framework that already reports it.
+    filler = app.locator(
+        f'[name="{app_config["scrolled_panel_filler_name"]}"]'
+    ).element()
+    assert filler.raw.get("uia_is_offscreen") is False, (
+        f"the panel's filler reports uia_is_offscreen="
+        f"{filler.raw.get('uia_is_offscreen')!r}, so its visibility does not "
+        f"show the panel's clip at work"
+    )
+    assert filler.visible is False, (
+        "the panel's filler must be scrolled out of view; if it is visible, "
+        "the panel exposes no UIA Scroll pattern and this fixture tests "
+        "nothing"
+    )
+    panel = (
+        app.locator(f'[name="{app_config["scrolled_panel_name"]}"]').element().bounds
+    )
+
+    combo = app.locator(f'[name="{combo_name}"]')
+    combo.expand()
+    try:
+        el = app.locator(f'[name="{entry}"]').element()
+        b = el.bounds
+        outside = b is not None and (
+            b.y >= panel.y + panel.height
+            or b.y + b.height <= panel.y
+            or b.x >= panel.x + panel.width
+            or b.x + b.width <= panel.x
+        )
+        assert outside, (
+            f"the drop-down entry must lie wholly outside the panel "
+            f"({panel!r}) for this to test popup clipping; got bounds={b!r}"
+        )
+        assert el.visible is True, (
+            f"an open drop-down entry must be visible, not clipped to the "
+            f"scrolling panel; got visible={el.visible!r} bounds={el.bounds!r}"
+        )
+    finally:
+        combo.collapse()

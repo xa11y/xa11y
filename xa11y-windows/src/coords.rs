@@ -266,9 +266,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn bounds_are_never_in_the_shared_batch_list() {
+    fn bounds_are_never_in_a_shared_property_list() {
         // The bounds property must only be added by BoundsCacheRequest::new,
         // so a fetch of it always needs a scope.
         assert!(!crate::uia::batch_properties().contains(&UIA_BoundingRectanglePropertyId));
+        assert!(!crate::uia::scroll_properties().contains(&UIA_BoundingRectanglePropertyId));
     }
 }
