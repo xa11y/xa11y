@@ -418,6 +418,17 @@ impl LinuxInputProvider {
 }
 
 impl InputProvider for LinuxInputProvider {
+    /// X11 shares one global coordinate space between AT-SPI extents and
+    /// XTest. On Wayland, clients do not know their global position, so the
+    /// bounds AT-SPI reports are not screen coordinates and an
+    /// element-targeted click would land somewhere else (issue #495).
+    fn element_bounds_are_screen_coordinates(&self) -> bool {
+        match self.backend {
+            InputBackend::X11(_) => true,
+            InputBackend::Wayland(_) => false,
+        }
+    }
+
     fn pointer_move(&self, to: Point) -> Result<()> {
         let to = self.to_physical(to);
         match &self.backend {

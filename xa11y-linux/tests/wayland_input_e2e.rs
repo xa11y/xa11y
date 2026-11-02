@@ -274,6 +274,56 @@ fn type_text_holds_shift_for_uppercase() {
     });
 }
 
+/// On Wayland, element bounds are not screen coordinates, so an
+/// element-targeted pointer action is refused before any event reaches the
+/// device (issue #495). Raw points still go through.
+#[test]
+#[ignore]
+fn element_targets_are_refused_with_no_events_on_the_wire() {
+    unsafe { std::env::remove_var("DISPLAY") };
+    let provider =
+        LinuxInputProvider::new().expect("uinput backend should construct in the e2e container");
+    assert!(
+        !provider.element_bounds_are_screen_coordinates(),
+        "the uinput backend must report that AT-SPI bounds are not screen coordinates"
+    );
+    let sim = xa11y_core::input::InputSim::new(std::sync::Arc::new(provider));
+    let mut dev = open_xa11y_evdev();
+    dev.set_nonblocking(true).expect("set_nonblocking");
+
+    let bounds = xa11y_core::Rect {
+        x: 100,
+        y: 100,
+        width: 50,
+        height: 20,
+    };
+    let err = sim
+        .mouse()
+        .point_for_bounds(Some(bounds), xa11y_core::input::Anchor::Center)
+        .expect_err("element bounds must be refused on Wayland");
+    assert!(
+        matches!(err, xa11y_core::Error::Unsupported { .. }),
+        "expected Unsupported, got {err:?}"
+    );
+    let events = collect_events(
+        &mut dev,
+        &[EventType::KEY, EventType::ABSOLUTE],
+        1,
+        Duration::from_millis(300),
+    );
+    assert!(
+        events.is_empty(),
+        "a refusal must send nothing, got {events:?}"
+    );
+
+    // A raw point is unaffected.
+    sim.mouse()
+        .click(Point::new(100, 100))
+        .expect("raw-point click");
+    let events = collect_events(&mut dev, &[EventType::KEY], 2, Duration::from_secs(1));
+    assert!(!events.is_empty(), "raw-point click reached the device");
+}
+
 #[test]
 #[ignore]
 fn the_evdev_node_path_is_under_dev_input() {
