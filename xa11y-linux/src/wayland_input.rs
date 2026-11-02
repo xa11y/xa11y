@@ -425,6 +425,18 @@ mod tests {
     }
 
     #[test]
+    fn line_breaks_type_key_enter() {
+        let reverse = ReverseKeymap::from_xkb(&default_keymap());
+        let enter = KeyCode::KEY_ENTER.code();
+        for text in ["\n", "\r", "\r\n"] {
+            let frames = typing_frames(&reverse, text).expect("a line break types");
+            assert_eq!(frames.len(), 1, "{text:?} is one key press");
+            let codes: Vec<u16> = frames[0].iter().map(|e| e.code()).collect();
+            assert_eq!(codes, vec![enter, enter], "{text:?}");
+        }
+    }
+
+    #[test]
     fn reverse_keymap_maps_lowercase_letter() {
         let reverse = ReverseKeymap::from_xkb(&default_keymap());
         let (_kc, needs_shift) = reverse.lookup(char_keysym('a')).expect("'a' in US keymap");

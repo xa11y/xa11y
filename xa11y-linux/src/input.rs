@@ -49,7 +49,7 @@ pub(crate) const XK_SHIFT_L: u32 = 0xffe1;
 pub(crate) const XK_CONTROL_L: u32 = 0xffe3;
 pub(crate) const XK_ALT_L: u32 = 0xffe9;
 pub(crate) const XK_SUPER_L: u32 = 0xffeb;
-const XK_RETURN: u32 = 0xff0d;
+pub(crate) const XK_RETURN: u32 = 0xff0d;
 const XK_ESCAPE: u32 = 0xff1b;
 const XK_BACKSPACE: u32 = 0xff08;
 const XK_TAB: u32 = 0xff09;
@@ -135,8 +135,22 @@ pub(crate) fn plan_keystrokes<K: Copy>(
 ) -> Result<Vec<Keystroke<K>>> {
     let mut shift: Option<K> = None;
     let mut plan = Vec::with_capacity(text.len());
-    for (index, c) in text.chars().enumerate() {
-        let keysym = char_keysym(c);
+    let mut chars = text.chars().enumerate().peekable();
+    while let Some((index, c)) = chars.next() {
+        // A line break is the Enter key on every platform (issue #498):
+        // "\r\n", "\r" and "\n" each type one Return press. The Unicode
+        // keysyms for U+000A / U+000D are in no layout, so without this a
+        // multi-line string could not be typed at all.
+        let keysym = match c {
+            '\r' => {
+                if matches!(chars.peek(), Some((_, '\n'))) {
+                    chars.next();
+                }
+                XK_RETURN
+            }
+            '\n' => XK_RETURN,
+            _ => char_keysym(c),
+        };
         let (keycode, needs_shift) = lookup(keysym).ok_or_else(|| Error::Unsupported {
             feature: format!(
                 "typing character '{c}' (U+{:04X}, keysym 0x{keysym:04x}) at index {index} of \
@@ -545,6 +559,32 @@ mod tests {
         assert!(feature.contains("U+65E5"), "{feature}");
         assert!(feature.contains("index 2"), "{feature}");
         assert!(feature.contains("nothing was typed"), "{feature}");
+    }
+
+    #[test]
+    fn line_breaks_type_one_return_each() {
+        let mut map = keymap(true);
+        // Keycode 11: Return.
+        map.syms.extend([XK_RETURN, 0]);
+        let plan = |text: &str| {
+            plan_keystrokes(text, "X keyboard layout", |k| map.lookup(k)).expect("plans")
+        };
+        let ret = (11, None);
+        assert_eq!(plan("a\nb"), vec![(8, None), ret, (9, None)]);
+        assert_eq!(plan("a\rb"), vec![(8, None), ret, (9, None)]);
+        // CRLF is one line break, not two.
+        assert_eq!(plan("a\r\nb"), vec![(8, None), ret, (9, None)]);
+        // …but LF CR is two, as are consecutive breaks.
+        assert_eq!(plan("\n\r"), vec![ret, ret]);
+        assert_eq!(plan("\r\n\r\n"), vec![ret, ret]);
+    }
+
+    #[test]
+    fn line_break_without_return_key_fails_before_typing() {
+        let map = keymap(true);
+        let err = plan_keystrokes("a\nb", "X keyboard layout", |k| map.lookup(k))
+            .expect_err("no Return in this keymap");
+        assert!(err.to_string().contains("index 1"), "{err}");
     }
 
     #[test]

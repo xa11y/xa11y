@@ -474,6 +474,23 @@ def test_type_text_writes_to_focused_input(tauri_input_app, sim):
     pytest.fail(f"typed-text field did not receive expected text, got: {val!r}")
 
 
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="Linux X11/uinput line-break mapping (#498); other platforms cover it in their own PRs",
+)
+def test_type_text_line_breaks_press_enter(tauri_input_app, sim):
+    """Each line break — CRLF, CR or LF — types exactly one Enter (#498)."""
+    _clear_log(tauri_input_app)
+    _focus_hit_target(tauri_input_app)
+    sim.type_text("a\r\nb\rc\nd")
+
+    def enters(text: str) -> int:
+        return sum(1 for line in text.split("\n") if line.startswith("keyup key=Enter"))
+
+    log = _wait_for_log(tauri_input_app, lambda t: "keyup key=d" in t and enters(t) >= 3)
+    assert enters(log) == 3, f"expected 3 Enter presses, log:\n{log}"
+
+
 # ---------------------------------------------------------------------------
 # Scroll
 # ---------------------------------------------------------------------------
