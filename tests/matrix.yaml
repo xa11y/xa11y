@@ -535,6 +535,36 @@ gaps:
       apps: [wpf]
       features: [windows]
 
+  - id: uwp_frame_window_name_shared
+    description: >
+      A UWP app's ApplicationFrameWindow shares its name with the title-bar
+      window and the CoreWindow beneath it, so `window[name="xa11y UWP Test"]`
+      matches three elements. The MCP window-mutation tests address their
+      target by that selector, and `action` refuses an ambiguous one, so they
+      skip on the uwp cell and name the ambiguous selector in the skip reason.
+      The Python, JS and CLI window suites act on the window element itself
+      and run in full there.
+    severity: low
+    workaround: "Python, JS and CLI window suites enforce the verbs on the uwp cell; the MCP window-mutation tests run on qt/winforms/wpf/egui."
+    affects:
+      apps: [uwp]
+      language: cli
+      features: [windows]
+
+  - id: uwp_textbox_nested_text_field
+    description: >
+      The XAML TextBox reads as text_field "Search" with a nested child
+      text_field "Search" of the same value, so the JS compat check that
+      requires exactly one named text field is turned off for uwp
+      (textFieldName: null in tests/suites/js/helpers.js). Whether the inner
+      element should be surfaced at all is open.
+    severity: low
+    workaround: "The Python compat suite reads the field and its value on the uwp cell."
+    affects:
+      apps: [uwp]
+      language: js
+      features: [compat]
+
   - id: egui_transform_resize_noop
     description: >
       egui windows advertise the native resize action and accept its dispatch,
