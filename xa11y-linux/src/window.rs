@@ -85,6 +85,24 @@ impl WindowManager {
         }
     }
 
+    /// The root-window origin (physical pixels) of the X11 client window
+    /// that is `pid`'s top-level titled `title`, for toolkits whose
+    /// AT-SPI screen extents ignore the window position (GTK 4 on X11,
+    /// issue #487).
+    ///
+    /// The window is found by pid and title only, never by geometry: the
+    /// geometry is what is being computed. `Ok(None)` when there is no X11
+    /// backend (Wayland: a client has no global origin) or when zero or
+    /// several windows match, so the caller reports no bounds rather than
+    /// wrong ones. The origin is cached per window and dropped when the
+    /// window is configured, reparented or destroyed.
+    pub(crate) fn x11_client_origin(&self, pid: u32, title: &str) -> Result<Option<(i32, i32)>> {
+        match &self.backend {
+            WindowBackend::X11(backend) => backend.client_origin(pid, title),
+            WindowBackend::Sway(_) | WindowBackend::Unavailable(_) => Ok(None),
+        }
+    }
+
     pub(crate) fn uses_native(&self) -> bool {
         matches!(
             &self.backend,
@@ -746,8 +764,19 @@ impl X11Atoms {
     }
 }
 
+/// A top-level window's identity for [`X11WindowBackend::client_origin`]:
+/// owning pid and title.
+type OriginKey = (u32, String);
+
+/// A cached client window and its root origin (physical pixels).
+type CachedOrigin = (Window, (i32, i32));
+
 struct X11WindowBackend {
     conn: Mutex<RustConnection>,
+    /// [`Self::client_origin`] results keyed by (pid, title): the window and
+    /// its root origin. An entry is dropped on that window's
+    /// `ConfigureNotify` / `ReparentNotify` / `DestroyNotify`.
+    origins: Mutex<HashMap<OriginKey, CachedOrigin>>,
     bindings: Mutex<HashMap<u64, NativeBinding<Window>>>,
     destroyed_handles: Mutex<HashSet<u64>>,
     root: Window,
@@ -793,6 +822,7 @@ impl X11WindowBackend {
         .is_empty();
         Ok(Self {
             conn: Mutex::new(conn),
+            origins: Mutex::new(HashMap::new()),
             bindings: Mutex::new(HashMap::new()),
             destroyed_handles: Mutex::new(HashSet::new()),
             root,
@@ -1100,6 +1130,7 @@ impl X11WindowBackend {
             .map_err(platform)?;
         let mut destroyed_windows = HashSet::new();
         while let Some(event) = conn.poll_for_event().map_err(platform)? {
+            self.forget_origin(&event);
             if let Event::DestroyNotify(event) = event {
                 destroyed_windows.insert(event.window);
                 let bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
@@ -1115,6 +1146,86 @@ impl X11WindowBackend {
             }
         }
         Ok(destroyed_windows)
+    }
+
+    /// Drop a cached [`Self::client_origin`] whose window `event` says moved
+    /// or went away. A reparenting window manager moves the frame, not the
+    /// client, and tells the client with a synthetic `ConfigureNotify`
+    /// (ICCCM 4.1.5), which reaches us through the same event mask.
+    fn forget_origin(&self, event: &Event) {
+        let window = match event {
+            Event::ConfigureNotify(e) => e.window,
+            Event::ReparentNotify(e) => e.window,
+            Event::DestroyNotify(e) => e.window,
+            _ => return,
+        };
+        self.origins
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, (cached, _)| *cached != window);
+    }
+
+    fn client_origin(&self, pid: u32, title: &str) -> Result<Option<(i32, i32)>> {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        // Apply whatever invalidations have already arrived; no round trip,
+        // so a cache hit costs no X request.
+        while let Some(event) = conn.poll_for_event().map_err(platform)? {
+            self.forget_origin(&event);
+            if let Event::DestroyNotify(event) = event {
+                let bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
+                let mut destroyed = self
+                    .destroyed_handles
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                for (&handle, binding) in bindings.iter() {
+                    if binding.id == event.window {
+                        destroyed.insert(handle);
+                    }
+                }
+            }
+        }
+        let key = (pid, title.to_owned());
+        if let Some((_, origin)) = self
+            .origins
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+        {
+            return Ok(Some(*origin));
+        }
+        let mut matches = Vec::new();
+        for window in self.top_level_windows(&conn)? {
+            if let Some(candidate) = self.candidate(&conn, window)? {
+                if candidate.pid == pid && candidate.title.as_deref() == Some(title) {
+                    matches.push(window);
+                }
+            }
+        }
+        let [window] = matches.as_slice() else {
+            return Ok(None);
+        };
+        let window = *window;
+        // Watch it before reading the origin, so a move after the read
+        // invalidates the entry instead of racing past it.
+        conn.change_window_attributes(
+            window,
+            &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
+                .event_mask(EventMask::STRUCTURE_NOTIFY),
+        )
+        .map_err(platform)?
+        .check()
+        .map_err(platform)?;
+        let translated = conn
+            .translate_coordinates(window, self.root, 0, 0)
+            .map_err(platform)?
+            .reply()
+            .map_err(platform)?;
+        let origin = (i32::from(translated.dst_x), i32::from(translated.dst_y));
+        self.origins
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(key, (window, origin));
+        Ok(Some(origin))
     }
 
     fn candidate(&self, conn: &RustConnection, window: Window) -> Result<Option<X11Candidate>> {
@@ -2172,6 +2283,7 @@ mod tests {
         observer.flush().expect("flush setup");
         let backend = super::X11WindowBackend {
             conn: std::sync::Mutex::new(backend_conn),
+            origins: std::sync::Mutex::new(std::collections::HashMap::new()),
             bindings: std::sync::Mutex::new(std::collections::HashMap::new()),
             destroyed_handles: std::sync::Mutex::new(std::collections::HashSet::new()),
             root,

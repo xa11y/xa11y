@@ -67,6 +67,18 @@ pub struct LinuxProvider {
     /// Native X11/Wayland window-manager channel, selected independently of
     /// the AT-SPI accessibility connection.
     window_manager: WindowManager,
+    /// Per-application facts for GTK 4's screen extents (issue #487).
+    gtk4: Gtk4Geometry,
+}
+
+/// Caches for [`LinuxProvider::gtk4_screen_extents`]: whether each
+/// application bus is GTK 4, and each object's top-level window. Cleared
+/// with the handle cache on a reconnect, which reuses bus names.
+#[derive(Default)]
+struct Gtk4Geometry {
+    is_gtk4: Mutex<HashMap<String, bool>>,
+    /// `bus + path` → the top-level window's `(bus, path)`.
+    toplevels: Mutex<HashMap<String, AccessibleRef>>,
 }
 
 /// AT-SPI2 accessible reference: (bus_name, object_path).
@@ -133,6 +145,7 @@ impl LinuxProvider {
             handle_cache: Mutex::new(HashMap::new()),
             action_indices: Mutex::new(HashMap::new()),
             window_manager: WindowManager::new(),
+            gtk4: Gtk4Geometry::default(),
         })
     }
 
@@ -258,6 +271,16 @@ impl LinuxProvider {
                 .unwrap_or_else(|e| e.into_inner())
                 .clear();
             self.action_indices
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+            self.gtk4
+                .is_gtk4
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clear();
+            self.gtk4
+                .toplevels
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .clear();
@@ -686,6 +709,11 @@ impl LinuxProvider {
         if !ifaces.component {
             return None;
         }
+        if self.is_gtk4(&aref.bus_name) {
+            return self
+                .gtk4_screen_extents(aref)
+                .map(|r| r.to_logical(crate::scale::coordinate_scale()));
+        }
         let proxy = self
             .make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Component")
             .ok()?;
@@ -698,6 +726,105 @@ impl LinuxProvider {
         // screenshot/input layers) using the detected display scale. On the
         // common 1.0 case this is a no-op. See `crate::scale`.
         extents_to_rect(x, y, w, h).map(|r| r.to_logical(crate::scale::coordinate_scale()))
+    }
+
+    /// Whether the application on `bus` is GTK 4, from
+    /// `Application.ToolkitName` / `Version`. Cached per bus; an
+    /// unreadable answer is "not GTK 4" and is not cached, so a transient
+    /// failure is retried.
+    fn is_gtk4(&self, bus: &str) -> bool {
+        if let Some(known) = self
+            .gtk4
+            .is_gtk4
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(bus)
+        {
+            return *known;
+        }
+        let Ok(proxy) = self.make_proxy(bus, APP_ROOT_PATH, "org.a11y.atspi.Application") else {
+            return false;
+        };
+        let (Ok(name), Ok(version)) = (
+            proxy.get_property::<String>("ToolkitName"),
+            // The toolkit's version is the `Version` property (GTK 4 has no
+            // `ToolkitVersion`; `AtspiVersion` is the protocol's).
+            proxy.get_property::<String>("Version"),
+        ) else {
+            return false;
+        };
+        let gtk4 = is_gtk4_toolkit(&name, &version);
+        self.gtk4
+            .is_gtk4
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(bus.to_owned(), gtk4);
+        gtk4
+    }
+
+    /// Screen extents (physical pixels) for a GTK 4 object.
+    ///
+    /// GTK 4 does not know its window's position, and on X11 its
+    /// `GetExtents(SCREEN)` reports (0, 0) for every widget (GTK 4.14) or a
+    /// window-relative position, wherever the window is (issue #487). The
+    /// `WINDOW` extents are right, so the screen position is those plus the
+    /// root origin of the top-level's X11 client window, found by pid and
+    /// title. `None` — no bounds, rather than wrong ones — on Wayland, when
+    /// the window cannot be matched to exactly one X11 window, or when any
+    /// read fails.
+    fn gtk4_screen_extents(&self, aref: &AccessibleRef) -> Option<Rect> {
+        const ATSPI_COORD_TYPE_WINDOW: u32 = 1;
+        let proxy = self
+            .make_proxy(&aref.bus_name, &aref.path, "org.a11y.atspi.Component")
+            .ok()?;
+        let reply = proxy
+            .call_method("GetExtents", &(ATSPI_COORD_TYPE_WINDOW,))
+            .ok()?;
+        let (x, y, w, h): (i32, i32, i32, i32) = reply.body().deserialize().ok()?;
+        let toplevel = self.toplevel_of(aref)?;
+        let title = self.get_name(&toplevel).ok().filter(|t| !t.is_empty())?;
+        let pid = self.get_dbus_pid(&aref.bus_name)?;
+        let (ox, oy) = self.window_manager.x11_client_origin(pid, &title).ok()??;
+        extents_to_rect(x.checked_add(ox)?, y.checked_add(oy)?, w, h)
+    }
+
+    /// The top-level window `aref` belongs to: the ancestor whose parent is
+    /// the application object. Every object visited on the way is cached,
+    /// so siblings and descendants resolve without walking again.
+    fn toplevel_of(&self, aref: &AccessibleRef) -> Option<AccessibleRef> {
+        let key = |r: &AccessibleRef| format!("{}{}", r.bus_name, r.path);
+        let mut visited = Vec::new();
+        let mut current = aref.clone();
+        let toplevel = loop {
+            if let Some(found) = self
+                .gtk4
+                .toplevels
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&key(&current))
+            {
+                break found.clone();
+            }
+            if current.path == APP_ROOT_PATH {
+                return None;
+            }
+            let parent = self.get_atspi_parent(&current).ok()?;
+            visited.push(current.clone());
+            match parent {
+                Some(p) if p.path == APP_ROOT_PATH => break current,
+                Some(p) => current = p,
+                None => break current,
+            }
+        };
+        let mut cache = self
+            .gtk4
+            .toplevels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for r in visited {
+            cache.insert(key(&r), toplevel.clone());
+        }
+        Some(toplevel)
     }
 
     /// Get available actions via Action interface, returning both the action list
@@ -3579,6 +3706,14 @@ pub(crate) fn atspi_visible(bits: u64) -> bool {
     bits & SHOWING != 0 && bits & VISIBLE != 0
 }
 
+/// The application object's path on every AT-SPI application connection.
+const APP_ROOT_PATH: &str = "/org/a11y/atspi/accessible/root";
+
+/// Whether `Application.ToolkitName` / `Version` name GTK 4.
+fn is_gtk4_toolkit(name: &str, version: &str) -> bool {
+    name.eq_ignore_ascii_case("GTK") && version.trim().split('.').next() == Some("4")
+}
+
 /// Turn a `Component.GetExtents` reply into bounds, or `None` when the reply
 /// is a sentinel rather than a position.
 ///
@@ -4196,6 +4331,16 @@ mod tests {
         assert!(!is_listable_top_level(SHOWING));
         // Minimized: no SHOWING, but ICONIFIED keeps it listed.
         assert!(is_listable_top_level(ICONIFIED));
+    }
+
+    #[test]
+    fn gtk4_is_detected_from_toolkit_name_and_major_version() {
+        assert!(is_gtk4_toolkit("GTK", "4.14.5"));
+        assert!(is_gtk4_toolkit("gtk", "4.16.0"));
+        assert!(!is_gtk4_toolkit("GTK", "3.24.41"));
+        assert!(!is_gtk4_toolkit("GTK", "40.1"));
+        assert!(!is_gtk4_toolkit("Qt", "4.8.7"));
+        assert!(!is_gtk4_toolkit("GTK", ""));
     }
 
     #[test]
@@ -4853,6 +4998,7 @@ mod tests {
             handle_cache: Mutex::new(HashMap::new()),
             action_indices: Mutex::new(HashMap::new()),
             window_manager: WindowManager::new(),
+            gtk4: Gtk4Geometry::default(),
         };
         let root = provider.build_element_data(
             &AccessibleRef {
@@ -5212,6 +5358,7 @@ mod tests {
             handle_cache: Mutex::new(HashMap::new()),
             action_indices: Mutex::new(HashMap::new()),
             window_manager: WindowManager::new(),
+            gtk4: Gtk4Geometry::default(),
         });
         let root_ref = AccessibleRef {
             bus_name: "org.test.LiveTree".into(),
@@ -5325,6 +5472,7 @@ mod tests {
             handle_cache: Mutex::new(HashMap::new()),
             action_indices: Mutex::new(HashMap::new()),
             window_manager: WindowManager::new(),
+            gtk4: Gtk4Geometry::default(),
         };
         let root = provider.build_element_data(
             &AccessibleRef {
@@ -5694,6 +5842,7 @@ mod tests {
             handle_cache: Mutex::new(HashMap::new()),
             action_indices: Mutex::new(HashMap::new()),
             window_manager: WindowManager::new(),
+            gtk4: Gtk4Geometry::default(),
         });
         let root = provider.build_element_data(
             &AccessibleRef {
@@ -5885,6 +6034,7 @@ mod tests {
             handle_cache: Mutex::new(HashMap::new()),
             action_indices: Mutex::new(HashMap::new()),
             window_manager: WindowManager::new(),
+            gtk4: Gtk4Geometry::default(),
         };
         let aref = AccessibleRef {
             bus_name: "org.test.Hung".into(),
@@ -5958,6 +6108,7 @@ mod tests {
             handle_cache: Mutex::new(HashMap::new()),
             action_indices: Mutex::new(HashMap::new()),
             window_manager: WindowManager::new(),
+            gtk4: Gtk4Geometry::default(),
         };
         let err = provider
             .focused_app()
@@ -6012,6 +6163,7 @@ mod tests {
             handle_cache: Mutex::new(HashMap::new()),
             action_indices: Mutex::new(HashMap::new()),
             window_manager: WindowManager::new(),
+            gtk4: Gtk4Geometry::default(),
         };
         let handle = provider.cache_element(AccessibleRef {
             bus_name: ":1.7".into(),
