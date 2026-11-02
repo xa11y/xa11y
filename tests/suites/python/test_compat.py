@@ -778,11 +778,13 @@ def test_controls_scrolled_out_of_a_pane_are_not_visible(app, app_config):
 
 def test_a_control_its_container_hides_is_not_showing(app, app_config):
     """A control on an inactive tab page reads ``hidden_reason ==
-    "not_showing"``, not ``"scrolled_out"``.
+    "not_showing"`` (#590).
 
-    It lies outside its container like a scrolled-out row does, but nothing
-    scrolls it: the reason must come from the container's role, not the
-    geometry alone (#590).
+    A contract test: the hidden control reports no bounds, so this does not
+    exercise the scroll-role check that tells a control lying outside a
+    container that does not scroll from a scrolled-out one. The Linux unit
+    tests ``scrolled_out_needs_a_scrolling_container_on_the_climb`` and
+    ``a_hidden_row_beyond_its_list_is_scrolled_out`` guard that check.
     """
     name = app_config.get("not_showing_name")
     if not name:

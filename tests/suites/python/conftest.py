@@ -124,8 +124,9 @@ APP_CONFIGS: dict[str, dict] = {
         "scrolled_pane_end_button": "Scroll Long Pane To End",
         "scrolled_pane_start_button": "Scroll Long Pane To Start",
         # A button on an inactive tab page: hidden by a container that does
-        # not scroll, so not_showing even though it lies outside its parent
-        # (#590). Linux only, for the same reason as the pane above.
+        # not scroll, so not_showing (#590). Qt reports it without bounds,
+        # so the scroll-role check is guarded by the Linux unit tests rather
+        # than here. Linux only, for the same reason as the pane above.
         "not_showing_name": "Tab Two Button"
         if sys.platform.startswith("linux")
         else None,

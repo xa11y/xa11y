@@ -319,6 +319,7 @@ The test is "does a new variant require work in another crate?"
 | `Anchor` | `#[non_exhaustive]` | `anchor_point` resolves it in core; no backend sees it. |
 | `Error`, `EventKind`, `StateFlag` | `#[non_exhaustive]` | Only the bindings map them, and `[[types.variant_coverage]]` guards that. |
 | `ElementState` | `#[non_exhaustive]` | Resolved in core by `ElementState::is_met`; no binding or backend maps it, so nothing needs a coverage entry. |
+| `HiddenReason` | `#[non_exhaustive]` | Backends map platform facts to a reason, never the reverse, and `Unknown` is the documented fallback; the bindings' string spelling is guarded by `[[types.variant_coverage]]`. |
 
 `#[non_exhaustive]` forbids struct expressions from *other crates*, including
 functional-update syntax — `Diagnosis { .., ..Default::default() }` does not

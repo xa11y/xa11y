@@ -1079,7 +1079,7 @@ impl LinuxProvider {
         let (
             ((mut name, value), description),
             (
-                ((states, state_bits), bounds_read),
+                ((states, state_bits, state_read_ok), bounds_read),
                 ((actions, action_index_map), (numeric_value, min_value, max_value)),
             ),
         ) = rayon::join(
@@ -1249,13 +1249,19 @@ impl LinuxProvider {
         };
         let mut states = states;
         states.hidden_reason = match states.hidden_reason {
+            // The element's own state read failed: nothing to refine.
+            reason if !state_read_ok => reason,
             // VISIBLE without SHOWING: the answer is above it.
             Some(HiddenReason::Unknown) => {
                 Some(self.ancestor_hidden_reason(aref, &bounds_read, memo))
             }
             // VISIBLE cleared, which is also how a Qt item view reports a
-            // row scrolled out of it.
-            Some(HiddenReason::NotShowing) if state_bits & ATSPI_VISIBLE == 0 => {
+            // row scrolled out of it. Only item cells take this path: a
+            // hidden widget (a GTK 3 list box child with a stale
+            // allocation, say) is hidden by its toolkit wherever it lies.
+            Some(HiddenReason::NotShowing)
+                if state_bits & ATSPI_VISIBLE == 0 && is_item_cell_role(role_num) =>
+            {
                 Some(self.item_view_hidden_reason(aref, &bounds_read, memo))
             }
             reason => reason,
@@ -1401,11 +1407,12 @@ impl LinuxProvider {
     /// Usually because its toolkit hid it (`NotShowing`), but Qt item views
     /// also clear `VISIBLE`, not just `SHOWING`, on a row or cell outside the
     /// view's viewport (`QAccessibleTableCell::state` marks it `invisible`).
-    /// So an object whose parent is a drawn scrolling container, and which
-    /// lies entirely outside that parent's extents, is `ScrolledOut`. Only
-    /// the parent is consulted: a hidden widget further down is hidden by
-    /// its toolkit whatever scrolls above it. Read failures are `Unknown`,
-    /// as in [`ancestor_hidden_reason`](Self::ancestor_hidden_reason).
+    /// So an item cell ([`is_item_cell_role`], checked by the caller) whose
+    /// parent is a drawn scrolling container, and which lies entirely
+    /// outside that parent's extents, is `ScrolledOut`. Only the parent is
+    /// consulted: a cell further down is hidden by its toolkit whatever
+    /// scrolls above it. Read failures are `Unknown`, as in
+    /// [`ancestor_hidden_reason`](Self::ancestor_hidden_reason).
     fn item_view_hidden_reason(
         &self,
         aref: &AccessibleRef,
@@ -1584,7 +1591,7 @@ impl LinuxProvider {
         aref: &AccessibleRef,
         role: Role,
         password: bool,
-    ) -> (StateSet, u64) {
+    ) -> (StateSet, u64, bool) {
         let (bits, state_read_ok) = self.state_bits(aref);
 
         // AT-SPI2 state bit positions: each is `1 << ordinal` of the
@@ -1632,7 +1639,13 @@ impl LinuxProvider {
         let states = StateParts {
             enabled,
             visible,
-            hidden_reason: hidden_reason_from_bits(bits),
+            // An unread state set is not one read as empty: its zero bits
+            // would say not_showing, a guess.
+            hidden_reason: if state_read_ok {
+                hidden_reason_from_bits(bits)
+            } else {
+                Some(HiddenReason::Unknown)
+            },
             focused: (bits & FOCUSED) != 0,
             // AT-SPI `ACTIVE` marks the foreground window/frame (see
             // `focused_app`, which relies on the same bit).
@@ -1668,7 +1681,7 @@ impl LinuxProvider {
             password,
         }
         .into();
-        (states, bits)
+        (states, bits, state_read_ok)
     }
 
     /// Find an application by PID.
@@ -3818,6 +3831,13 @@ struct AncestorMemo(Mutex<HashMap<(String, String), Option<AncestorFacts>>>);
 /// says it.
 fn is_scrolling_container_role(role: u32) -> bool {
     matches!(role, 31 | 49 | 55 | 65 | 66 | 68 | 98)
+}
+
+/// AT-SPI roles of the cells an item view lays out, and hides once they are
+/// scrolled out: `ListItem` (32), `TableCell` (56), `TableRow` (90) and
+/// `TreeItem` (91).
+fn is_item_cell_role(role: u32) -> bool {
+    matches!(role, 32 | 56 | 90 | 91)
 }
 
 /// `ScrolledOut` when the object lies entirely outside a drawn ancestor's
@@ -6398,6 +6418,8 @@ mod tests {
         extents_error: bool,
         /// Counts `GetState` calls, to tell a memoized answer from a re-read.
         state_reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        /// Reject `GetState` the way a hung peer does.
+        state_error: bool,
     }
 
     #[zbus::interface(name = "org.a11y.atspi.Accessible")]
@@ -6406,10 +6428,13 @@ mod tests {
             self.role
         }
 
-        fn get_state(&self) -> Vec<u32> {
+        fn get_state(&self) -> zbus::fdo::Result<Vec<u32>> {
             self.state_reads
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            vec![self.state as u32, (self.state >> 32) as u32]
+            if self.state_error {
+                return Err(zbus::fdo::Error::NoReply("unresponsive".into()));
+            }
+            Ok(vec![self.state as u32, (self.state >> 32) as u32])
         }
 
         fn get_interfaces(&self) -> Vec<String> {
@@ -6446,7 +6471,7 @@ mod tests {
 
     const CLIMB_DRAWN: u64 = ATSPI_VISIBLE | ATSPI_SHOWING;
     const ROLE_FILLER: u32 = 20;
-    const ROLE_LAYERED_PANE: u32 = 28;
+    const ROLE_LAYERED_PANE: u32 = 30;
     const ROLE_LIST: u32 = 31;
     const ROLE_SCROLL_PANE: u32 = 49;
 
@@ -6473,6 +6498,7 @@ mod tests {
             extents: VIEWPORT,
             extents_error: false,
             state_reads: Default::default(),
+            state_error: false,
         }
     }
 
@@ -6690,8 +6716,54 @@ mod tests {
             assert!(is_scrolling_container_role(role), "{role}");
         }
         // Filler, panel, layered pane, page tab, frame.
-        for role in [20, 39, 28, 37, 23] {
+        for role in [20, 39, 30, 37, 23] {
             assert!(!is_scrolling_container_role(role), "{role}");
         }
+    }
+
+    /// An element whose own `GetState` fails reads `unknown`. Its zero bits
+    /// would otherwise say `not_showing`, and a list row lying outside its
+    /// list would then be refined into `scrolled_out`: two guesses.
+    #[test]
+    fn a_failed_state_read_is_unknown_and_never_refined() {
+        let mut row = climb_peer("/list", 32, 0);
+        row.state_error = true;
+        row.extents = (0, 500, 200, 20);
+        let (_server, provider) = climb_provider(vec![
+            ("/row", row),
+            (
+                "/list",
+                climb_peer("/org/a11y/atspi/null", ROLE_LIST, CLIMB_DRAWN),
+            ),
+        ]);
+        let data = provider.build_element_data(&climb_ref("/row"), None);
+        assert!(!data.states.visible);
+        assert_eq!(data.states.hidden_reason, Some(HiddenReason::Unknown));
+    }
+
+    /// The control: the same row with a readable state set is scrolled out,
+    /// and a hidden cell-less widget in the same place is not.
+    #[test]
+    fn only_an_item_cell_beyond_its_list_is_scrolled_out() {
+        let mut row = climb_peer("/list", 32, 0);
+        row.extents = (0, 500, 200, 20);
+        let mut widget = climb_peer("/list", 43, 0);
+        widget.extents = (0, 500, 200, 20);
+        let (_server, provider) = climb_provider(vec![
+            ("/row", row),
+            ("/widget", widget),
+            (
+                "/list",
+                climb_peer("/org/a11y/atspi/null", ROLE_LIST, CLIMB_DRAWN),
+            ),
+        ]);
+        let reason = |path| {
+            provider
+                .build_element_data(&climb_ref(path), None)
+                .states
+                .hidden_reason
+        };
+        assert_eq!(reason("/row"), Some(HiddenReason::ScrolledOut));
+        assert_eq!(reason("/widget"), Some(HiddenReason::NotShowing));
     }
 }

@@ -334,8 +334,8 @@ What each platform can tell apart:
 - **Linux** reads the reason from AT-SPI states and, where those don't settle it, from the element's ancestors:
   - The `Iconified` state, on the element or on an ancestor climbed past, gives `window_minimized`.
   - For an element that keeps `Visible` but lacks `Showing`, xa11y climbs to the nearest ancestor that is showing. The reason is `scrolled_out` only when the element lies outside that ancestor's extents and one of the ancestors climbed is a scrolling container: `list`, `list box`, `scroll pane`, `table`, `tree`, `tree table`, or `viewport`. Lying outside a container that doesn't scroll gives `not_showing`.
-  - An element without `Visible` reports `not_showing`, unless its parent is a showing scrolling container and the element lies outside it. Qt clears `Visible` on a list or table row scrolled out of its view, so such a row reports `scrolled_out`.
-  - A read that fails during these checks gives `unknown`, and so does a failed read of the element's own bounds. Event targets skip the ancestor walk and report `unknown` for the `Visible`-without-`Showing` case.
+  - An element without `Visible` reports `not_showing`, with one exception. An item cell (`list item`, `table cell`, `table row` or `tree item`) that lies outside a showing scrolling container that is its parent reports `scrolled_out`, because Qt clears `Visible` on a row scrolled out of its view.
+  - A read that fails during these checks gives `unknown`, and so does a failed read of the element's own bounds or state set. Event targets skip the ancestor walk and report `unknown` for the `Visible`-without-`Showing` case.
   - GTK 4 keeps `Visible` and `Showing` on widgets scrolled out of a `GtkScrolledWindow`, so they read as visible.
 - **macOS** has only `AXHidden`, which carries no reason, so every hidden element reports `not_showing`.
 
