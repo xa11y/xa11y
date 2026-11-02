@@ -205,6 +205,38 @@ static UIA_FIRST_TOUCH: Mutex<()> = Mutex::new(());
 /// no longer needs [`UIA_FIRST_TOUCH`].
 static UIA_WARMED: AtomicBool = AtomicBool::new(false);
 
+/// The desktop's top-level windows with their app pids, and notes for the
+/// UWP frames that belong to no app (see `WindowsProvider::desktop_app_windows`).
+type DesktopAppWindows = (Vec<(IUIAutomationElement, u32)>, Vec<String>);
+
+/// Keep the process MTA alive for xa11y's lifetime (`CoIncrementMTAUsage`,
+/// once per process).
+///
+/// Provider methods run on whatever thread the caller uses, and most of
+/// those threads never initialized COM. UIA's client objects are agile, so
+/// they work there anyway, but the shell calls UWP attribution makes
+/// (`SHGetPropertyStoreForWindow`, `SHCreateItemInKnownFolder`) need COM on
+/// the calling thread, and fail with `CO_E_NOTINITIALIZED` without it. With
+/// the MTA usage held, every thread that has not chosen an apartment is
+/// implicitly in the MTA (issue #497; an STA host thread keeps its STA, which
+/// those calls also accept). The cookie is never released: the usage lasts
+/// as long as the process.
+fn ensure_mta_usage() -> Result<()> {
+    // Set only on success, so a failed attempt is retried by the next
+    // provider (#533). Two threads racing here both increment; a second
+    // usage count is harmless.
+    static HELD: AtomicBool = AtomicBool::new(false);
+    if HELD.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    unsafe { windows::Win32::System::Com::CoIncrementMTAUsage() }.map_err(|e| Error::Platform {
+        code: e.code().0 as i64,
+        message: format!("CoIncrementMTAUsage failed: {e}"),
+    })?;
+    HELD.store(true, Ordering::Release);
+    Ok(())
+}
+
 /// Windows accessibility provider using UI Automation.
 pub struct WindowsProvider {
     automation: IUIAutomation,
@@ -246,6 +278,7 @@ impl WindowsProvider {
             code: e.code().0 as i64,
             message: format!("COM initialization failed: {}", e),
         })?;
+        ensure_mta_usage()?;
         let automation: IUIAutomation = {
             let _first_touch = if UIA_WARMED.load(Ordering::Acquire) {
                 None
@@ -521,9 +554,10 @@ impl WindowsProvider {
     /// `get_children` answer.
     ///
     /// `representative` is the process's first top-level window in z-order;
-    /// it is the *fallback* name source only. Name resolution: process
-    /// executable stem (`OpenProcess` + `QueryFullProcessImageNameW`) first;
-    /// the representative window's title when the process cannot be opened.
+    /// it is the *fallback* name source only. Name resolution: a packaged
+    /// app's shell display name (issue #497), else the process executable
+    /// stem (`OpenProcess` + `QueryFullProcessImageNameW`); the
+    /// representative window's title when the process cannot be opened.
     /// `raw` records which one was used (`uia_name_source`), plus the
     /// synthesized marker and the full executable path when known — the
     /// fallback is explicit, not silent (tenet 1).
@@ -538,13 +572,21 @@ impl WindowsProvider {
         pid: u32,
         representative: &IUIAutomationElement,
     ) -> Result<ElementData> {
+        let mut aumid = None;
         let (name, name_source, executable) = match process_image_name(pid) {
-            Some(path) => {
-                let stem = std::path::Path::new(&path)
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| path.clone());
-                (stem, "process", Some(path))
+            Some((path, process_aumid)) => {
+                // A packaged app is named as the shell names it ("Calculator",
+                // not "CalculatorApp"); everything else by its executable
+                // (issue #497). The AUMID was read through the handle the
+                // image name came from, so a failure there is a real error,
+                // not "unpackaged".
+                aumid = process_aumid?;
+                let display = match aumid.as_deref() {
+                    Some(a) => crate::uwp::app_display_name(a)?,
+                    None => None,
+                };
+                let (name, source) = process_app_name(&path, display);
+                (name, source, Some(path))
             }
             None => {
                 // The fallback name source is explicit, so a failing read must
@@ -581,6 +623,12 @@ impl WindowsProvider {
         if let Some(path) = executable {
             raw.insert("uia_process_name".into(), serde_json::Value::String(path));
         }
+        if let Some(aumid) = aumid {
+            raw.insert(
+                "uia_app_user_model_id".into(),
+                serde_json::Value::String(aumid),
+            );
+        }
         Ok(ElementParts {
             role: Role::Application,
             name: if name.is_empty() { None } else { Some(name) },
@@ -598,6 +646,109 @@ impl WindowsProvider {
             handle,
         }
         .into())
+    }
+
+    /// The desktop's named top-level windows with the app (pid) each belongs
+    /// to, plus notes for the UWP frames that belong to no app. `list_apps`
+    /// and `unlisted_apps` share it, so the frames one leaves out are exactly
+    /// the ones the other reports (issue #497).
+    fn desktop_app_windows(&self) -> Result<DesktopAppWindows> {
+        let root = uia_call(|| unsafe { self.automation.GetRootElement() })?;
+        let condition = uia_call(|| unsafe {
+            self.automation.CreatePropertyCondition(
+                UIA_ControlTypePropertyId,
+                &VARIANT::from(UIA_WindowControlTypeId.0),
+            )
+        })?;
+        let found = uia_call(|| unsafe {
+            root.FindAllBuildCache(TreeScope_Children, &condition, &self.batch_request)
+        })?;
+
+        let mut windows: Vec<(IUIAutomationElement, u32)> = Vec::new();
+        let mut attribution = crate::uwp::Attribution::new();
+        let mut unlisted: Vec<String> = Vec::new();
+        // Strict iteration: `Length` and `GetElement` failures are real COM
+        // failures, not absent windows — propagating keeps a transient
+        // UIA failure from silently truncating the process list to
+        // zero or a partial subset (tenet 1). `uia_call` retries the
+        // classified-transient HRESULTs first; what survives is
+        // persistent and must surface.
+        let len = uia_call(|| unsafe { found.Length() })?;
+        for i in 0..len {
+            let el = uia_call(|| unsafe { found.GetElement(i) }).map_err(|e| match e {
+                Error::Platform { code, message } => Error::Platform {
+                    code,
+                    message: format!("IUIAutomationElementArray.GetElement({i}) failed: {message}"),
+                },
+                other => other,
+            })?;
+            // The Cached* reads come from the batch cache populated by
+            // FindAllBuildCache, so a failure here is an enumeration
+            // failure rather than an absent value — propagate it with
+            // the index it failed for (tenet 6), instead of letting
+            // `pid == 0` / empty-name filters turn it into a silent
+            // dismissal of the window.
+            let pid = uia_call(|| unsafe { el.CachedProcessId() })
+                .map_err(|e| match e {
+                    Error::Platform { code, message } => Error::Platform {
+                        code,
+                        message: format!(
+                            "reading the process id of desktop window #{i} failed: \
+                             {message}"
+                        ),
+                    },
+                    other => other,
+                })?
+                .max(0) as u32;
+            // `pid == 0` skips windows with no resolvable owning
+            // process; the empty-name skip drops windows that are
+            // still unnamed mid-startup. Both are the same filters
+            // the pre-unification enumeration applied.
+            if pid == 0 {
+                continue;
+            }
+            // Attribute UWP frames to their app (issue #497). A frame
+            // whose app has exited belongs to no app; it is reported
+            // by `unlisted_apps` instead.
+            let hwnd = unsafe { el.CachedNativeWindowHandle() }.map_err(|e| Error::Platform {
+                code: e.code().0 as i64,
+                message: format!("reading the window handle of desktop window #{i} failed: {e}"),
+            })?;
+            // A window with no HWND (rare at the desktop level) keeps
+            // the UIA pid; only an HWND can be a UWP frame.
+            let pid = if hwnd.0.is_null() {
+                pid
+            } else {
+                match attribution.owner(hwnd) {
+                    Ok(crate::uwp::WindowOwner::Process(p)) => p,
+                    Ok(crate::uwp::WindowOwner::Unresolved { note }) => {
+                        unlisted.push(note);
+                        continue;
+                    }
+                    // The window closed while it was being attributed.
+                    Err(_) if !unsafe { IsWindow(Some(hwnd)) }.as_bool() => continue,
+                    Err(e) => return Err(e),
+                }
+            };
+            let name = uia_call(|| unsafe { el.CachedName() })
+                .map_err(|e| match e {
+                    Error::Platform { code, message } => Error::Platform {
+                        code,
+                        message: format!(
+                            "reading the name of desktop window #{i} failed: \
+                             {message}"
+                        ),
+                    },
+                    other => other,
+                })?
+                .to_string();
+            if name.is_empty() {
+                continue;
+            }
+            windows.push((el, pid));
+        }
+
+        Ok((windows, unlisted))
     }
 
     /// Enumerate the interactive top-level windows owned by `pid` on the
@@ -1086,24 +1237,35 @@ fn native_windows_of_pid_with(
     cache: &IUIAutomationCacheRequest,
 ) -> Result<Vec<IUIAutomationElement>> {
     unsafe extern "system" fn collect(hwnd: HWND, param: LPARAM) -> BOOL {
-        let (pid, handles) = unsafe { &mut *(param.0 as *mut (u32, Vec<HWND>)) };
-        let mut window_pid = 0;
-        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut window_pid)) };
-        if window_pid == *pid {
-            handles.push(hwnd);
-        }
+        let handles = unsafe { &mut *(param.0 as *mut Vec<HWND>) };
+        handles.push(hwnd);
         true.into()
     }
 
-    let mut state = (pid, Vec::new());
-    unsafe { EnumWindows(Some(collect), LPARAM((&raw mut state) as isize)) }.map_err(|e| {
+    let mut all: Vec<HWND> = Vec::new();
+    unsafe { EnumWindows(Some(collect), LPARAM((&raw mut all) as isize)) }.map_err(|e| {
         Error::Platform {
             code: e.code().0 as i64,
             message: format!("EnumWindows failed: {e}"),
         }
     })?;
-    let mut out = Vec::with_capacity(state.1.len());
-    for hwnd in state.1 {
+    // App attribution, not raw Win32 ownership: a UWP frame belongs to the
+    // app it shows, not to ApplicationFrameHost (issue #497). Non-frames are
+    // decided by their native pid; frames are only examined in depth for a
+    // packaged target.
+    let mut filter = crate::uwp::PidFilter::for_pid(pid);
+    let mut mine: Vec<HWND> = Vec::new();
+    for hwnd in all {
+        match filter.owns(hwnd) {
+            Ok(true) => mine.push(hwnd),
+            Ok(false) => {}
+            // The window closed while it was being attributed.
+            Err(_) if !unsafe { IsWindow(Some(hwnd)) }.as_bool() => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let mut out = Vec::with_capacity(mine.len());
+    for hwnd in mine {
         if !unsafe { IsWindow(Some(hwnd)) }.as_bool() {
             continue; // The window closed after EnumWindows visited it.
         }
@@ -1294,6 +1456,22 @@ fn windows_of_saved_app_with(
     Ok(windows)
 }
 
+/// The name and `uia_name_source` of a process's Application node: the
+/// packaged app's shell display name when it has one, else the executable's
+/// file stem (issue #497).
+fn process_app_name(path: &str, display: Option<String>) -> (String, &'static str) {
+    match display {
+        Some(display) => (display, "package"),
+        None => {
+            let stem = std::path::Path::new(path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_owned());
+            (stem, "process")
+        }
+    }
+}
+
 /// Resolve the executable image path of `pid` via
 /// `OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION)` +
 /// `QueryFullProcessImageNameW`.
@@ -1307,7 +1485,11 @@ fn windows_of_saved_app_with(
 /// inspectable, and the caller records which source produced the name in
 /// `raw["uia_name_source"]` so the fallback is explicit, not silent
 /// (tenet 1).
-fn process_image_name(pid: u32) -> Option<String> {
+///
+/// The process's AppUserModelID is read through the same handle (see
+/// [`crate::uwp::handle_aumid`]), so a process that exits between the two
+/// reads cannot turn into an error for one and a name for the other.
+fn process_image_name(pid: u32) -> Option<(String, Result<Option<String>>)> {
     use windows::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
         PROCESS_QUERY_LIMITED_INFORMATION,
@@ -1328,6 +1510,11 @@ fn process_image_name(pid: u32) -> Option<String> {
         )
     }
     .is_ok();
+    let aumid = if ok {
+        crate::uwp::handle_aumid(handle, pid)
+    } else {
+        Ok(None)
+    };
     // Releasing the OpenProcess handle is best-effort only: a failure here
     // leaks a single process handle we only queried for a name — the leak is
     // unrecoverable at this layer, and the name lookup's outcome was already
@@ -1338,7 +1525,7 @@ fn process_image_name(pid: u32) -> Option<String> {
         return None;
     }
     let path = String::from_utf16_lossy(&buf[..size as usize]);
-    Some(path)
+    Some((path, aumid))
 }
 
 /// Resolve the creation time of `pid` (FILETIME, 100ns since 1601-01-01) via
@@ -2088,77 +2275,7 @@ impl Provider for WindowsProvider {
                 // code returned one entry per window (issue #304's shape);
                 // grouping now reports one Application node per process on
                 // every platform, and the windows are the node's children.
-                let root = uia_call(|| unsafe { self.automation.GetRootElement() })?;
-                let condition = uia_call(|| unsafe {
-                    self.automation.CreatePropertyCondition(
-                        UIA_ControlTypePropertyId,
-                        &VARIANT::from(UIA_WindowControlTypeId.0),
-                    )
-                })?;
-                let found = uia_call(|| unsafe {
-                    root.FindAllBuildCache(TreeScope_Children, &condition, &self.batch_request)
-                })?;
-
-                let mut windows: Vec<(IUIAutomationElement, u32)> = Vec::new();
-                // Strict iteration: `Length` and `GetElement` failures are real COM
-                // failures, not absent windows — propagating keeps a transient
-                // UIA failure from silently truncating the process list to
-                // zero or a partial subset (tenet 1). `uia_call` retries the
-                // classified-transient HRESULTs first; what survives is
-                // persistent and must surface.
-                let len = uia_call(|| unsafe { found.Length() })?;
-                for i in 0..len {
-                    let el = uia_call(|| unsafe { found.GetElement(i) }).map_err(|e| match e {
-                        Error::Platform { code, message } => Error::Platform {
-                            code,
-                            message: format!(
-                                "IUIAutomationElementArray.GetElement({i}) failed: {message}"
-                            ),
-                        },
-                        other => other,
-                    })?;
-                    // The Cached* reads come from the batch cache populated by
-                    // FindAllBuildCache, so a failure here is an enumeration
-                    // failure rather than an absent value — propagate it with
-                    // the index it failed for (tenet 6), instead of letting
-                    // `pid == 0` / empty-name filters turn it into a silent
-                    // dismissal of the window.
-                    let pid = uia_call(|| unsafe { el.CachedProcessId() })
-                        .map_err(|e| match e {
-                            Error::Platform { code, message } => Error::Platform {
-                                code,
-                                message: format!(
-                                    "reading the process id of desktop window #{i} failed: \
-                                     {message}"
-                                ),
-                            },
-                            other => other,
-                        })?
-                        .max(0) as u32;
-                    // `pid == 0` skips windows with no resolvable owning
-                    // process; the empty-name skip drops windows that are
-                    // still unnamed mid-startup. Both are the same filters
-                    // the pre-unification enumeration applied.
-                    if pid == 0 {
-                        continue;
-                    }
-                    let name = uia_call(|| unsafe { el.CachedName() })
-                        .map_err(|e| match e {
-                            Error::Platform { code, message } => Error::Platform {
-                                code,
-                                message: format!(
-                                    "reading the name of desktop window #{i} failed: \
-                                     {message}"
-                                ),
-                            },
-                            other => other,
-                        })?
-                        .to_string();
-                    if name.is_empty() {
-                        continue;
-                    }
-                    windows.push((el, pid));
-                }
+                let (windows, _unlisted) = self.desktop_app_windows()?;
 
                 let mut seen = HashSet::new();
                 let mut results = Vec::new();
@@ -2417,6 +2534,13 @@ impl Provider for WindowsProvider {
         self.get_children(None)
     }
 
+    /// UWP frames whose app could not be found: `list_apps` leaves them out
+    /// because they belong to no running process (issue #497). The same
+    /// enumeration as `list_apps`, so the two sets match.
+    fn unlisted_apps(&self) -> Result<Vec<String>> {
+        Ok(self.desktop_app_windows()?.1)
+    }
+
     /// Attach to an application directly by pid via a UIA `ProcessId`
     /// property search over the desktop root's children.
     ///
@@ -2467,12 +2591,47 @@ impl Provider for WindowsProvider {
         } {
             Ok(el) => el,
             Err(e) if e.code().is_ok() => {
-                return Err(
-                    Error::selector_not_matched(format!("application[pid={pid}]")).diagnose(
-                        xa11y_core::Diagnosis::new()
-                            .last_observed("no top-level UIA element owned by the process yet"),
-                    ),
-                );
+                // A UWP app owns no top-level window of its own: its frame
+                // belongs to ApplicationFrameHost and only the hosted core
+                // window is the app's (issue #497). That frame is the app's
+                // window, found by attribution rather than by ProcessId.
+                let mut frame = None;
+                // An exited pid falls through to "not matched" with the
+                // unpackaged ones; only a packaged one can have a frame.
+                if matches!(
+                    crate::uwp::PidFilter::for_pid(pid).packaging()?,
+                    crate::uwp::Packaging::Packaged(_)
+                ) {
+                    for el in
+                        native_windows_of_pid_with(&self.automation, pid, &self.batch_request)?
+                    {
+                        let hwnd = unsafe { el.CachedNativeWindowHandle() }.map_err(|e| {
+                            Error::Platform {
+                                code: e.code().0 as i64,
+                                message: format!(
+                                    "reading the window handle of a window attributed to \
+                                         pid {pid} failed: {e}"
+                                ),
+                            }
+                        })?;
+                        if !hwnd.0.is_null() && crate::uwp::is_frame(hwnd) {
+                            frame = Some(el);
+                            break;
+                        }
+                    }
+                }
+                match frame {
+                    Some(frame) => frame,
+                    None => {
+                        return Err(
+                            Error::selector_not_matched(format!("application[pid={pid}]"))
+                                .diagnose(xa11y_core::Diagnosis::new().last_observed(
+                                "no top-level UIA element owned by the process yet, and no UWP \
+                             frame hosting it",
+                            )),
+                        );
+                    }
+                }
             }
             Err(e) => {
                 return Err(Error::Platform {
@@ -2509,12 +2668,40 @@ impl Provider for WindowsProvider {
         // A failing read propagates with its HRESULT; this branch is reserved
         // for a *successfully returned* zero pid (an honest "no owning
         // process", tenet 1 — not "no foreground app").
-        let pid = unsafe { el.CurrentProcessId() }.map_err(|e| Error::Platform {
+        let uia_pid = unsafe { el.CurrentProcessId() }.map_err(|e| Error::Platform {
             code: e.code().0 as i64,
             message: format!(
                 "IUIAutomationElement.CurrentProcessId failed for the foreground window: {e}"
             ),
         })? as u32;
+        // A foreground UWP frame is its app, not ApplicationFrameHost
+        // (issue #497).
+        let pid = if uia_pid == 0 {
+            0
+        } else {
+            let owner = match crate::uwp::Attribution::new().owner(hwnd) {
+                Ok(owner) => owner,
+                // The foreground window closed while it was being attributed:
+                // there is no foreground app to report right now.
+                Err(_) if !unsafe { IsWindow(Some(hwnd)) }.as_bool() => {
+                    return Err(Error::selector_not_matched("focused application").diagnose(
+                        xa11y_core::Diagnosis::new()
+                            .last_observed("the foreground window closed while it was read"),
+                    ))
+                }
+                Err(e) => return Err(e),
+            };
+            match owner {
+                crate::uwp::WindowOwner::Process(p) => p,
+                crate::uwp::WindowOwner::Unresolved { note } => {
+                    return Err(Error::selector_not_matched("focused application").diagnose(
+                        xa11y_core::Diagnosis::new().last_observed(format!(
+                            "the foreground window belongs to no app: {note}"
+                        )),
+                    ))
+                }
+            }
+        };
         if pid == 0 {
             return Err(Error::Platform {
                 code: -1,
@@ -5387,6 +5574,25 @@ impl WindowsProvider {
 #[cfg(test)]
 #[allow(non_upper_case_globals)]
 mod tests {
+    #[test]
+    fn a_packaged_app_is_named_by_its_display_name() {
+        assert_eq!(
+            super::process_app_name(
+                r"C:\Program Files\WindowsApps\Microsoft.WindowsCalculator_11.0_x64__8wekyb3d8bbwe\CalculatorApp.exe",
+                Some("Calculator".into()),
+            ),
+            ("Calculator".to_string(), "package")
+        );
+    }
+
+    #[test]
+    fn an_unpackaged_app_is_named_by_its_executable() {
+        assert_eq!(
+            super::process_app_name(r"C:\Windows\System32\notepad.exe", None),
+            ("notepad".to_string(), "process")
+        );
+    }
+
     use super::*;
 
     /// Build a shell-scan partial result of `n` classified surfaces.

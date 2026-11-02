@@ -131,6 +131,25 @@ fn running_apps_diagnosis(provider: &Arc<dyn Provider>) -> Diagnosis {
         // dropping it (tenet 1) — the original lookup error still wins.
         Err(e) => vec![format!("(application enumeration failed: {e})")],
     };
+    let mut candidates = candidates;
+    match provider.unlisted_apps() {
+        Ok(unlisted) => {
+            let total = unlisted.len();
+            candidates.extend(
+                unlisted
+                    .into_iter()
+                    .take(DIAG_APP_LIST_LIMIT)
+                    .map(|note| format!("(not listed: {note})")),
+            );
+            if total > DIAG_APP_LIST_LIMIT {
+                candidates.push(format!(
+                    "(… +{} more not listed)",
+                    total - DIAG_APP_LIST_LIMIT
+                ));
+            }
+        }
+        Err(e) => candidates.push(format!("(scan for unlisted applications failed: {e})")),
+    }
     Diagnosis {
         condition: Some("application discovery".to_string()),
         candidates,
@@ -680,6 +699,8 @@ mod tests {
     struct FocusModeProvider {
         inner: Arc<crate::mock::MockProvider>,
         mode: FocusMode,
+        /// What `unlisted_apps` reports.
+        unlisted: Vec<String>,
     }
 
     impl FocusModeProvider {
@@ -687,11 +708,15 @@ mod tests {
             Self {
                 inner: build_provider(),
                 mode,
+                unlisted: Vec::new(),
             }
         }
     }
 
     impl Provider for FocusModeProvider {
+        fn unlisted_apps(&self) -> Result<Vec<String>> {
+            Ok(self.unlisted.clone())
+        }
         fn focused_app(&self) -> Result<ElementData> {
             match self.mode {
                 FocusMode::None => Err(Error::selector_not_matched("focused application")),
@@ -790,6 +815,27 @@ mod tests {
         fn subscribe(&self, e: &ElementData) -> Result<Subscription> {
             self.inner.subscribe(e)
         }
+    }
+
+    #[test]
+    fn app_lookup_diagnosis_lists_unlisted_apps() {
+        let mut provider = FocusModeProvider::new(FocusMode::None);
+        provider.unlisted = vec!["UWP frame \"Calculator\" whose app has exited".into()];
+        let provider: Arc<dyn Provider> = Arc::new(provider);
+        let d = running_apps_diagnosis(&provider);
+        assert!(
+            d.candidates
+                .iter()
+                .any(|c| c == "(not listed: UWP frame \"Calculator\" whose app has exited)"),
+            "{:?}",
+            d.candidates
+        );
+        // The listed apps are still there ahead of it.
+        assert!(
+            d.candidates.iter().any(|c| c.contains("TestApp")),
+            "{:?}",
+            d.candidates
+        );
     }
 
     /// Provider modelling the Windows modal case (issue #304): one process
