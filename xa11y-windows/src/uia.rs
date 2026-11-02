@@ -159,11 +159,33 @@ fn is_event_subscriber_failure(e: &windows::core::Error) -> bool {
 
 /// Initialize COM for UIA. Called once per WindowsProvider creation.
 /// Does not uninitialize on drop — COM lifetime is managed by the process.
+///
+/// # Why `RPC_E_CHANGED_MODE` is accepted (issue #499)
+///
+/// That HRESULT means the calling thread is already a single-threaded
+/// apartment: a Python host that imported comtypes / pywinauto first, or
+/// Electron's main thread. The `CUIAutomation8` object is then created in
+/// that STA. This is safe for two reasons:
+///
+/// - `CUIAutomation8` is registered `ThreadingModel=Both`, so it is created
+///   directly in the caller's apartment with no proxy. UIA's client objects
+///   (the automation object, elements, cache requests, walkers) aggregate
+///   the free-threaded marshaler, so another thread calls them directly
+///   instead of marshalling the call back into the STA. That STA never has
+///   to pump messages for xa11y's calls to complete.
+/// - Event handlers, the one part of UIA that does call back into an
+///   apartment, are registered from [`registration_worker`], a thread of
+///   xa11y's own that enters the MTA itself, never from the host's thread.
+///
+/// `xa11y-windows/tests/sta_host.rs` is the regression guard: it creates the
+/// provider on an STA thread that never pumps, then reads the tree from four
+/// other threads.
 fn ensure_com_initialized() -> windows::core::Result<()> {
     // Use MTA (0x0) — same mode as the Rust runtime default.
     // STA (0x2) would conflict with Rust's thread pool.
     let hr = unsafe { CoInitializeEx(None, COINIT(0x0)) };
-    // S_OK, S_FALSE (already initialized), or RPC_E_CHANGED_MODE are all fine
+    // S_OK, S_FALSE (already initialized), or RPC_E_CHANGED_MODE (an STA
+    // host thread; safe, see above) are all fine.
     if hr.is_err() && hr.0 as u32 != 0x80010106 {
         hr.ok()?;
     }
