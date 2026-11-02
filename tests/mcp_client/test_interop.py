@@ -592,6 +592,70 @@ def test_the_instructions_warn_that_ok_is_not_verification(run_client):
     assert "not that anything changed" in instructions
 
 
+# ── The agent guide ──────────────────────────────────────────────────────────
+
+GUIDE_URI = "xa11y://guide"
+
+
+def test_the_prompts_and_resources_capabilities_are_advertised(run_client):
+    caps = run_client(lambda c: _identity(c.server_capabilities))
+    assert caps.prompts is not None, "the guide prompt needs the capability declared"
+    assert caps.resources is not None, "the guide resource needs the capability declared"
+
+
+def test_the_guide_resource_round_trips_through_a_real_client(run_client, mode):
+    """`resources/list` and `resources/read` are cacheable on the modern revisions.
+
+    The SDK's wire models for those results require `ttlMs` and `cacheScope`,
+    the omission `tools/list` once shipped with, so a parse here is the check.
+    """
+
+    async def body(c):
+        listed = await c.list_resources()
+        read = await c.read_resource(GUIDE_URI)
+        templates = await c.list_resource_templates()
+        return listed, read, templates
+
+    listed, read, templates = run_client(body)
+    assert [str(r.uri) for r in listed.resources] == [GUIDE_URI]
+    assert listed.resources[0].mime_type == "text/markdown"
+    assert templates.resource_templates == []
+    text = read.contents[0].text
+    assert text.startswith("# xa11y agent guide"), text[:60]
+    assert "`ambiguous_selector`" in text, "the failure kinds are part of the guide"
+    if mode == "auto":
+        assert listed.ttl_ms >= 0 and read.ttl_ms >= 0
+
+
+def test_the_guide_prompt_round_trips_through_a_real_client(run_client):
+    async def body(c):
+        listed = await c.list_prompts()
+        got = await c.get_prompt("guide")
+        read = await c.read_resource(GUIDE_URI)
+        return listed, got, read
+
+    listed, got, read = run_client(body)
+    assert [p.name for p in listed.prompts] == ["guide"]
+    assert not listed.prompts[0].arguments, "the prompt takes no arguments"
+    message = got.messages[0]
+    assert message.role == "user"
+    assert message.content.text == read.contents[0].text, "one text behind both"
+
+
+def test_an_unknown_resource_is_a_protocol_error_naming_what_exists(run_client):
+    with pytest.raises(BaseException) as excinfo:
+        run_client(lambda c: c.read_resource("xa11y://nope"))
+    errors = flatten_exception(excinfo.value)
+    codes = [getattr(e, "code", None) for e in errors]
+    assert -32602 in codes, f"expected an invalid-params error, got {errors}"
+
+
+def test_the_instructions_point_at_the_guide(run_client):
+    instructions = run_client(lambda c: _identity(c.instructions))
+    assert GUIDE_URI in instructions
+    assert "`guide` prompt" in instructions
+
+
 def test_an_unknown_tool_is_a_protocol_error(run_client):
     """Not fixable by adjusting arguments, so the spec puts it on the envelope.
 

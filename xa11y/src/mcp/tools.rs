@@ -2150,6 +2150,23 @@ fn insert_some(map: &mut Map<String, Value>, key: &str, value: Option<Value>) {
     }
 }
 
+/// The boolean states [`states_json`] sends only when true, so an absent one
+/// reads as false. One table of name and accessor, so a name cannot drift
+/// from the field it reports, and the agent guide's list is checked against
+/// the names here.
+type StateGetter = fn(&crate::StateSet) -> bool;
+const SENT_WHEN_TRUE: [(&str, StateGetter); 9] = [
+    ("focused", |s| s.focused),
+    ("focusable", |s| s.focusable),
+    ("active", |s| s.active),
+    ("editable", |s| s.editable),
+    ("selected", |s| s.selected),
+    ("modal", |s| s.modal),
+    ("required", |s| s.required),
+    ("busy", |s| s.busy),
+    ("password", |s| s.password),
+];
+
 /// Encode the state set, sending only what is true or explicitly known.
 ///
 /// `enabled` and `visible` are always sent because they gate whether an
@@ -2159,18 +2176,8 @@ fn states_json(states: &crate::StateSet) -> Value {
     let mut out = Map::new();
     out.insert("enabled".into(), json!(states.enabled));
     out.insert("visible".into(), json!(states.visible));
-    for (key, value) in [
-        ("focused", states.focused),
-        ("focusable", states.focusable),
-        ("active", states.active),
-        ("editable", states.editable),
-        ("selected", states.selected),
-        ("modal", states.modal),
-        ("required", states.required),
-        ("busy", states.busy),
-        ("password", states.password),
-    ] {
-        if value {
+    for (key, get) in SENT_WHEN_TRUE {
+        if get(states) {
             out.insert(key.into(), json!(true));
         }
     }
@@ -3155,6 +3162,204 @@ mod tests {
             }),
             "subscription_not_found"
         );
+    }
+
+    /// The `kind` column of the agent guide's failure table.
+    fn guide_failure_kinds() -> Vec<String> {
+        crate::cli::AGENT_GUIDE
+            .lines()
+            .filter_map(|line| line.strip_prefix("| `"))
+            .filter_map(|rest| rest.split_once("` |"))
+            .map(|(kind, _)| kind.to_string())
+            .filter(|kind| kind != "kind")
+            .collect()
+    }
+
+    /// Every tag `failure_kind` can return, read from its own source.
+    ///
+    /// Parsed rather than listed by hand, so a kind added to the function is
+    /// a kind this test sees without anyone remembering to update a list.
+    fn failure_kinds_in_source() -> Vec<String> {
+        // A Windows checkout may carry CRLF line endings, which would hide
+        // the `\n}\n` that ends the function.
+        let source = include_str!("tools.rs").replace("\r\n", "\n");
+        let start = source
+            .find("\nfn failure_kind(")
+            .expect("failure_kind is defined in this file");
+        let body = &source[start..];
+        let end = body
+            .find("\n}\n")
+            .expect("failure_kind has a closing brace");
+        let mut kinds: Vec<String> = body[..end]
+            .lines()
+            // Comment lines quote nothing that is returned.
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .flat_map(|line| line.split('"').skip(1).step_by(2).map(str::to_owned))
+            .collect();
+        kinds.sort();
+        kinds.dedup();
+        kinds
+    }
+
+    #[test]
+    fn the_agent_guide_explains_every_failure_kind_the_server_returns() {
+        let returned = failure_kinds_in_source();
+        assert!(
+            returned.len() > 10,
+            "the parse found too little: {returned:?}"
+        );
+        // Spot-check the parse against the function itself.
+        assert!(returned.contains(&failure_kind(&CliError::Usage("x".into())).to_string()));
+        let documented = guide_failure_kinds();
+        for kind in &returned {
+            assert!(
+                documented.contains(kind),
+                "AGENT_GUIDE.md has no row for `{kind}`: {documented:?}"
+            );
+        }
+        for kind in &documented {
+            assert!(
+                returned.contains(kind),
+                "AGENT_GUIDE.md documents `{kind}`, which the server never returns"
+            );
+        }
+    }
+
+    #[test]
+    fn the_agent_guide_names_what_the_tools_actually_take() {
+        let guide = crate::cli::AGENT_GUIDE;
+        // Every action verb, spelled as the tool takes it.
+        for verb in cli::ACTION_NAMES {
+            assert!(guide.contains(&format!("`{verb}`")), "verb {verb}");
+        }
+        assert!(guide.contains(crate::DEFAULT_TIMEOUT_ENV_VAR));
+        assert!(guide.contains(&format!("default {TREE_DEFAULT_MAX_DEPTH}")));
+        assert!(guide.contains(&format!("default {FIND_DEFAULT_LIMIT}")));
+        assert!(guide.contains(super::super::protocol::GUIDE_URI));
+        // The workflow's numbered steps each name a tool; each must be one
+        // the server lists.
+        let tools: Vec<String> = Xa11yTools::new()
+            .list()
+            .iter()
+            .filter_map(|t| t["name"].as_str().map(str::to_owned))
+            .collect();
+        let steps: Vec<&str> = guide
+            .lines()
+            .filter(|l| l.chars().next().is_some_and(|c| c.is_ascii_digit()))
+            .filter_map(|l| l.split('`').nth(1))
+            .collect();
+        assert!(steps.len() >= 4, "{steps:?}");
+        for tool in steps {
+            assert!(tools.iter().any(|t| t == tool), "workflow names `{tool}`");
+        }
+    }
+
+    #[test]
+    fn the_agent_guide_states_the_selector_case_rule_the_engine_applies() {
+        use xa11y_core::selector::{match_op, MatchOp};
+        let guide = crate::cli::AGENT_GUIDE;
+        assert!(guide.contains("`=` is case-sensitive. `*=`, `^=` and `$=` ignore case."));
+        assert!(!match_op(&MatchOp::Exact, "ok", Some("OK")));
+        assert!(match_op(&MatchOp::Contains, "ok", Some("OK")));
+        assert!(match_op(&MatchOp::StartsWith, "ok", Some("OKAY")));
+        assert!(match_op(&MatchOp::EndsWith, "ok", Some("BOOK")));
+    }
+
+    #[test]
+    fn the_agent_guide_states_the_default_timeout() {
+        assert!(crate::cli::AGENT_GUIDE.contains("5 seconds unless `XA11Y_DEFAULT_TIMEOUT`"));
+        // The number is pinned against the runtime default whenever nothing
+        // overrides it; a developer's environment may legitimately set it.
+        if std::env::var_os(crate::DEFAULT_TIMEOUT_ENV_VAR).is_none() {
+            assert_eq!(
+                crate::default_timeout().expect("the built-in default resolves"),
+                std::time::Duration::from_secs(5)
+            );
+        }
+    }
+
+    #[test]
+    fn the_agent_guide_states_the_absent_state_rules_the_encoder_applies() {
+        let guide = crate::cli::AGENT_GUIDE;
+        // Nothing set: only the always-sent pair appears.
+        let mut states = crate::StateSet::default();
+        states.enabled = false;
+        states.visible = false;
+        let none = states_json(&states);
+        let keys: Vec<&String> = none.as_object().expect("object").keys().collect();
+        assert_eq!(keys, ["enabled", "visible"]);
+        assert!(guide.contains("`enabled` and `visible` are always present"));
+        // Each flag sent only when true is named in the guide's list of them.
+        let start = guide.find("- `focused`").expect("the sent-when-true list");
+        let section = &guide[start..];
+        let section = &section[..section.find("\n- ").unwrap_or(section.len())];
+        assert!(section.contains("appear only when true"), "{section}");
+        for (key, _) in SENT_WHEN_TRUE {
+            assert!(section.contains(&format!("`{key}`")), "{key} in {section}");
+        }
+    }
+
+    #[test]
+    fn each_sent_when_true_name_reports_its_own_field() {
+        let set = |name: &str, s: &mut crate::StateSet| match name {
+            "focused" => s.focused = true,
+            "focusable" => s.focusable = true,
+            "active" => s.active = true,
+            "editable" => s.editable = true,
+            "selected" => s.selected = true,
+            "modal" => s.modal = true,
+            "required" => s.required = true,
+            "busy" => s.busy = true,
+            "password" => s.password = true,
+            other => panic!("no setter for {other}; add one here"),
+        };
+        for (name, _) in SENT_WHEN_TRUE {
+            let mut states = crate::StateSet::default();
+            set(name, &mut states);
+            let sent = states_json(&states);
+            let extra: Vec<&String> = sent
+                .as_object()
+                .expect("object")
+                .keys()
+                .filter(|k| !matches!(k.as_str(), "enabled" | "visible"))
+                .collect();
+            assert_eq!(extra, [name], "setting {name} alone");
+        }
+    }
+
+    #[test]
+    fn the_agent_guide_states_the_field_cap_the_encoder_applies() {
+        let guide = crate::cli::AGENT_GUIDE;
+        // Compared with whitespace collapsed: the sentence wraps, and a
+        // Windows checkout wraps it with CRLF.
+        let flat = guide.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains(&format!("cut to {MAX_FIELD_BYTES} bytes")),
+            "the guide must state the cap as {MAX_FIELD_BYTES} bytes"
+        );
+        let mut data = crate::ElementData::for_role(crate::Role::StaticText);
+        data.name = Some("x".repeat(MAX_FIELD_BYTES + 1));
+        let encoded = element_data_json(&data);
+        for key in ["name_truncated", "name_bytes"] {
+            assert!(encoded.get(key).is_some(), "{key} in {encoded}");
+        }
+        assert!(guide.contains("`<field>_truncated: true`"));
+        assert!(guide.contains("`<field>_bytes`"));
+    }
+
+    #[test]
+    fn the_agent_guide_names_the_per_node_cut_markers_the_encoder_sets() {
+        let guide = crate::cli::AGENT_GUIDE;
+        let (root, _) = mock_tree(0, TREE_MAX_NODES);
+        let marked: Vec<&String> = root
+            .as_object()
+            .expect("object")
+            .keys()
+            .filter(|k| matches!(k.as_str(), "subtree_truncated" | "children_count"))
+            .collect();
+        assert_eq!(marked.len(), 2, "{root}");
+        assert!(guide.contains("`subtree_truncated: true`"));
+        assert!(guide.contains("`children_count`"));
     }
 
     #[test]

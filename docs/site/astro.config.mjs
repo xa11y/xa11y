@@ -68,6 +68,7 @@ export default defineConfig({
             { label: "Annotate a screenshot", slug: "guides/annotate-screenshots" },
             { label: "Drive a desktop from a Strands agent", slug: "guides/strands" },
             { label: "Serve xa11y over MCP", slug: "guides/mcp" },
+            { label: "Drive xa11y as an agent", slug: "guides/agent-guide" },
           ],
         },
         {

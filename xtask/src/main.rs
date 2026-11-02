@@ -46,6 +46,7 @@ COMMANDS:
     coverage            Generate code coverage report
     fuzz [ARGS..]       Run provider fuzzer (pass-through args)
     sync-readmes [--check]  Generate crates.io/PyPI READMEs from root README.md
+    sync-agent-guide [--check]  Render xa11y/AGENT_GUIDE.md into the docs site
     check-macos-ffi     Verify xa11y-macos/src/ax.rs only uses safe_* CF/AX wrappers
     check-mcp-stdout    Verify xa11y/src/mcp writes nothing to stdout but protocol
     check-workspace-pins   Verify intra-workspace deps keep their `=` version pins
@@ -92,6 +93,7 @@ fn main() -> ExitCode {
         "coverage" => do_coverage(),
         "fuzz" => do_fuzz(rest),
         "sync-readmes" => do_sync_readmes(rest),
+        "sync-agent-guide" => do_sync_agent_guide(rest),
         "check-macos-ffi" => do_check_macos_ffi(),
         "check-mcp-stdout" => do_check_mcp_stdout(),
         "check-workspace-pins" => do_check_workspace_pins(),
@@ -908,6 +910,132 @@ fn do_sync_readmes(args: &[String]) -> bool {
     ok
 }
 
+/// Source of the agent guide. The binary embeds it with `include_str!`, so it
+/// lives inside the `xa11y` crate and ships with the crate's package.
+const AGENT_GUIDE_SOURCE: &str = "xa11y/AGENT_GUIDE.md";
+/// The docs-site page rendered from [`AGENT_GUIDE_SOURCE`].
+const AGENT_GUIDE_PAGE: &str = "docs/site/src/content/docs/guides/agent-guide.mdx";
+
+/// Render the agent guide into its docs-site page, or with `--check` fail
+/// when the page has drifted from the source.
+///
+/// CLAUDE.md's docs rule is that a reference has exactly one home. The guide
+/// has to be embedded in the binary, so the binary's copy is the source and
+/// the page is generated from it, the same arrangement as the package READMEs.
+fn do_sync_agent_guide(args: &[String]) -> bool {
+    let check = args.iter().any(|a| a == "--check");
+    heading(if check {
+        "Check the agent guide page is in sync"
+    } else {
+        "Sync the agent guide page"
+    });
+    let root = project_root();
+    let source = match fs::read_to_string(root.join(AGENT_GUIDE_SOURCE)) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Failed to read {AGENT_GUIDE_SOURCE}: {e}");
+            return false;
+        }
+    };
+    let expected = match render_agent_guide(&source) {
+        Ok(page) => page,
+        Err(e) => {
+            eprintln!("{AGENT_GUIDE_SOURCE}: {e}");
+            return false;
+        }
+    };
+    let path = root.join(AGENT_GUIDE_PAGE);
+    if check {
+        // A missing page is drift like any other; any other read failure is
+        // an I/O problem and is reported as one rather than as "out of date".
+        let actual = match fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                eprintln!("Failed to read {AGENT_GUIDE_PAGE}: {e}");
+                return false;
+            }
+        };
+        if actual.replace("\r\n", "\n") != expected {
+            eprintln!(
+                "{AGENT_GUIDE_PAGE} is out of date. Edit {AGENT_GUIDE_SOURCE}, then run \
+                 `cargo xtask sync-agent-guide`."
+            );
+            return false;
+        }
+        eprintln!("{AGENT_GUIDE_PAGE} is up to date.");
+        true
+    } else if let Err(e) = fs::write(&path, &expected) {
+        eprintln!("Failed to write {AGENT_GUIDE_PAGE}: {e}");
+        false
+    } else {
+        eprintln!("Wrote {AGENT_GUIDE_PAGE}");
+        true
+    }
+}
+
+/// Turn the guide's Markdown into the docs-site page.
+///
+/// The source opens with an `# ` title, which becomes the frontmatter title
+/// (Starlight renders it). Absolute links to the docs site become site-root
+/// links, so `docs/check_links.py` validates them. Anything MDX would read as
+/// JSX or an expression (`<`, `{`, `}` outside code) is refused here rather
+/// than breaking the site build, because the guide is written as plain
+/// Markdown for agents and nothing else stops it growing one.
+fn render_agent_guide(source: &str) -> Result<String, String> {
+    let source = source.replace("\r\n", "\n");
+    let (first, body) = source
+        .split_once('\n')
+        .ok_or_else(|| "the guide is empty".to_string())?;
+    let title = first
+        .strip_prefix("# ")
+        .ok_or_else(|| "the guide must open with an `# ` title line".to_string())?;
+    let body = body
+        .trim_start_matches('\n')
+        .replace("https://xa11y.dev/", "/");
+
+    let mut in_fence = false;
+    for (n, line) in body.lines().enumerate() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            continue;
+        }
+        if in_fence {
+            continue;
+        }
+        // Drop inline code spans, which MDX leaves literal.
+        let prose: String = line
+            .split('`')
+            .enumerate()
+            .filter(|(i, _)| i % 2 == 0)
+            .map(|(_, part)| part)
+            .collect();
+        if let Some(c) = prose.chars().find(|c| matches!(c, '<' | '{' | '}')) {
+            return Err(format!(
+                "line {} has `{c}` outside code, which MDX would parse; wrap it in backticks",
+                n + 2
+            ));
+        }
+    }
+
+    Ok(format!(
+        "---\n\
+         title: {title}\n\
+         description: How an agent drives xa11y over MCP, as the binary serves it to `xa11y guide` and the MCP server.\n\
+         pageType: how-to\n\
+         ---\n\
+         \n\
+         {{/* DIATAXIS: how-to — a goal-oriented recipe for a reader who already knows\n    \
+         what they want. Steps and decisions only. Concepts go to explanation/,\n    \
+         exhaustive option lists go to reference/. */}}\n\
+         \n\
+         {{/* GENERATED from {AGENT_GUIDE_SOURCE} by `cargo xtask sync-agent-guide`.\n    \
+         Edit that file and re-run the command; CI fails when this page differs. */}}\n\
+         \n\
+         {body}"
+    ))
+}
+
 /// Languages a README block can be tagged for. The root README renders every
 /// visible block, so it is the one page that shows all three install steps;
 /// each package README keeps its own language's blocks and drops the rest.
@@ -1524,6 +1652,12 @@ fn do_check() -> bool {
     heading("PRE-PR CHECK: sync-readmes");
     if !do_sync_readmes(&["--check".to_string()]) {
         eprintln!("!! READMEs out of date. Run `cargo xtask sync-readmes` to fix.");
+        ok = false;
+    }
+
+    heading("PRE-PR CHECK: sync-agent-guide");
+    if !do_sync_agent_guide(&["--check".to_string()]) {
+        eprintln!("!! Agent guide page out of date. Run `cargo xtask sync-agent-guide` to fix.");
         ok = false;
     }
 
