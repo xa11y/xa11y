@@ -545,7 +545,7 @@ def test_resize_to_restores_the_original_size(app: xa11y.App) -> None:
     if bounds is None:
         pytest.skip("the window reports no bounds to restore from")
     try:
-        win.resize_to(bounds.width + 50, bounds.height + 50)
+        win.resize_to(bounds.width - 50, bounds.height - 50)
         win.resize_to(bounds.width, bounds.height)
     except Exception:
         # Same failure-preserving cleanup: don't leave the shared app resized
@@ -997,7 +997,7 @@ def test_locator_resize_to_restores_the_original_size(app: xa11y.App) -> None:
         pytest.skip("the window reports no bounds to restore from")
     locator = _locator_for_window(app, win)
     try:
-        locator.resize_to(bounds.width + 50, bounds.height + 50)
+        locator.resize_to(bounds.width - 50, bounds.height - 50)
         locator.resize_to(bounds.width, bounds.height)
     except Exception:
         # Same failure-preserving cleanup: don't leave the shared app resized

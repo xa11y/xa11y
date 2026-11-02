@@ -50,7 +50,11 @@ class TestWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("xa11y-qt-test-app")
-        self.setMinimumSize(800, 600)
+        # The minimum sits well below the initial size so the window-geometry
+        # suites can shrink the window (a grown target can be refused on a
+        # small display that the window already fills).
+        self.setMinimumSize(400, 300)
+        self.resize(800, 600)
 
         self._build_menu_bar()
         self._build_toolbar()

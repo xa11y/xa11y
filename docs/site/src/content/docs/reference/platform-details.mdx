@@ -195,6 +195,24 @@ window. Minimized, maximized, and fullscreen are mutually exclusive on macOS:
 a fullscreen window cannot be minimized, and entering fullscreen brings the
 window back from the Dock first. `Restore` has one effect from any state.
 
+### `MoveTo` and `ResizeTo`: verified geometry on macOS
+
+Setting `AXPosition` or `AXSize` succeeds when the window receives the
+request, not when the window applies it. Some toolkits apply the write later
+or drop it while the window settles from another transition. The window
+server also keeps a window inside the screen's visible frame, so it refuses a
+size that would extend past it, such as growing a window that already fills
+the display's height. The app can refuse a size outside its own minimum or
+maximum too.
+
+So the macOS provider reads the attribute back after the write and re-issues
+the same absolute value until the window reports the requested geometry,
+within 2 points, for up to 5 seconds. If the window never gets there, the
+call fails with a timeout error whose diagnosis names the requested geometry
+and the geometry the window last reported. A `ResizeTo` error also gives the
+window's origin. The verb never returns success for a window that kept its
+old frame.
+
 ### SetValue: text vs numeric
 
 - **macOS** sets the `AXValue` attribute directly, which works for both text and numeric values.
