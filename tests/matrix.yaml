@@ -540,8 +540,11 @@ gaps:
       A UWP app's ApplicationFrameWindow shares its name with the title-bar
       window and the CoreWindow beneath it, so `window[name="xa11y UWP Test"]`
       matches three elements. The MCP window-mutation tests address their
-      target by that selector, and `action` refuses an ambiguous one, so they
-      skip on the uwp cell and name the ambiguous selector in the skip reason.
+      target by that selector, and `action` refuses an ambiguous one. On the
+      uwp cell they skip with a reason that starts with this gap's id, and
+      only when every extra match is a same-named window. The same ambiguity
+      on any other cell fails (_no_mcp_window_target in
+      tests/suites/cli/test_mcp.py).
       The Python, JS and CLI window suites act on the window element itself
       and run in full there.
     severity: low
