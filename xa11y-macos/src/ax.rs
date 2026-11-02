@@ -641,7 +641,63 @@ fn read_raw_attr(element: AXUIElementRef, attribute: &str) -> RawAttr {
 /// platform failure and propagates (tenet 1), never an empty success that
 /// reads as "no windows".
 fn ax_windows(element: AXUIElementRef) -> Result<Vec<AXElement>> {
-    let attr = CFString::new("AXWindows");
+    ax_element_list_strict(element, "AXWindows")
+}
+
+/// The top-level children of an application element: its `AXWindows`, then
+/// any app-level `AXMenu` from `AXChildren` that is not one of them.
+///
+/// An open context menu is an `AXMenu` child of the application, never an
+/// entry in `AXWindows`. Search walks `AXChildren`, so a listing built from
+/// `AXWindows` alone missed a menu that a selector found (issue #518). The
+/// menu bar stays out, as it does for search (`should_filter_child_with_role`).
+/// Both reads are error-preserving, like [`ax_windows`]: a child that vanished
+/// between the reads is dropped, any other unreadable role is an error.
+fn app_top_level_children(app: AXUIElementRef) -> Result<Vec<AXElement>> {
+    let mut out = ax_windows(app)?;
+    let windows = out.len();
+    for child in ax_element_list_strict(app, "AXChildren")? {
+        let is_menu = match read_raw_attr(child.as_ptr(), "AXRole") {
+            RawAttr::Value(v) => {
+                if unsafe { safe_cf_get_type_id(v) } == unsafe { safe_cf_string_get_type_id() } {
+                    // Adopts the +1 retain; released when the CFString drops.
+                    let role = unsafe { CFString::wrap_under_create_rule(v as *const _) };
+                    role == "AXMenu"
+                } else {
+                    // Not a role string, so not a menu; release the copy.
+                    unsafe { safe_cf_release(v) };
+                    false
+                }
+            }
+            RawAttr::Absent => false,
+            RawAttr::Unanswered(code) => match classify_element_churn_code(i64::from(code)) {
+                ElementChurn::Gone => false,
+                ElementChurn::Unreachable | ElementChurn::Fatal => {
+                    return Err(Error::Platform {
+                        code: i64::from(code),
+                        message: format!(
+                            "AXRole read of an application child failed (AXError {code}); \
+                             cannot tell whether it is a menu"
+                        ),
+                    })
+                }
+            },
+        };
+        let already_listed = out[..windows].iter().any(|w| unsafe {
+            safe_cf_equal(w.as_ptr() as CFTypeRef, child.as_ptr() as CFTypeRef)
+        });
+        if is_menu && !already_listed {
+            out.push(child);
+        }
+    }
+    Ok(out)
+}
+
+/// Read an attribute holding an array of accessibility elements, preserving
+/// its AXError: absent / no value is an empty list, anything unanswered or
+/// malformed is an error. Each element is retained via `from_borrowed`.
+fn ax_element_list_strict(element: AXUIElementRef, attribute: &str) -> Result<Vec<AXElement>> {
+    let attr = CFString::new(attribute);
     let mut value: CFTypeRef = std::ptr::null();
     let err =
         ffi_copy_attribute_value(element, attr.as_concrete_TypeRef() as CFTypeRef, &mut value);
@@ -655,9 +711,10 @@ fn ax_windows(element: AXUIElementRef) -> Result<Vec<AXElement>> {
                     safe_cf_release(value);
                     return Err(Error::Platform {
                         code: -1,
-                        message: "AXWindows returned a non-array value; the provider answered \
-                                  malformed, not empty"
-                            .to_string(),
+                        message: format!(
+                            "{attribute} returned a non-array value; the provider answered \
+                             malformed, not empty"
+                        ),
                     });
                 }
                 let count = safe_cf_array_get_count(value);
@@ -673,14 +730,14 @@ fn ax_windows(element: AXUIElementRef) -> Result<Vec<AXElement>> {
             }
         }
         // The process answered and said it has no such attribute / no value:
-        // an application without windows, honestly reported as an empty list.
+        // e.g. an application without windows, honestly an empty list.
         AX_ERROR_ATTRIBUTE_UNSUPPORTED | AX_ERROR_NO_VALUE => Ok(vec![]),
         // Everything else — kAXErrorCannotComplete (the code a messaging
         // timeout surfaces as), kAXErrorInvalidUIElement, an ObjC exception
         // caught by the wrapper — means we did not get an answer.
         code => Err(Error::Platform {
             code: code as i64,
-            message: format!("AXUIElementCopyAttributeValue(AXWindows) failed (AXError {code})"),
+            message: format!("AXUIElementCopyAttributeValue({attribute}) failed (AXError {code})"),
         }),
     }
 }
@@ -3873,7 +3930,7 @@ impl Provider for MacOSProvider {
                 // error-preserving on purpose — a dead app must report its
                 // failure, not an empty window list (tenet 1).
                 let ax_children_list = match role {
-                    Role::Application => ax_windows(ax.as_ptr())?,
+                    Role::Application => app_top_level_children(ax.as_ptr())?,
                     _ => ax_children(ax.as_ptr()),
                 };
 

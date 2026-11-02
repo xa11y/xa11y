@@ -32,6 +32,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var spaceCompanion: NSWindow?
     var statusItem: NSStatusItem!
     var statusMenu: NSMenu!
+    var contextMenu: NSMenu!
 
     func applicationDidFinishLaunching(_: Notification) {
         let contentRect = NSRect(x: 0, y: 0, width: 700, height: 800)
@@ -202,6 +203,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         progress.setAccessibilityLabel("Progress")
         rangeBox.addSubview(progress)
 
+        // Right-click target with a real context menu: an open context menu
+        // is an app-level AXMenu child, not an AXWindows entry, which is the
+        // shape the listing-vs-search test checks. Placed low in this box so
+        // it sits in the strip of the document (y 680–800) that the scroll
+        // view shows whichever end it starts scrolled to.
+        let contextTarget = NSTextField(labelWithString: "Context Target")
+        contextTarget.frame = NSRect(x: 340, y: 30, width: 200, height: 24)
+        contextTarget.setAccessibilityLabel("Context Target")
+        contextMenu = NSMenu(title: "xa11y context menu")
+        let contextAction = NSMenuItem(
+            title: "xa11y Context Action",
+            action: #selector(AppDelegate.onContextAction),
+            keyEquivalent: ""
+        )
+        contextAction.target = self
+        contextMenu.addItem(contextAction)
+        contextTarget.menu = contextMenu
+        rangeBox.addSubview(contextTarget)
+
         // ── Text field ────────────────────────────────────────────────────
         let inputBox = NSBox(frame: NSRect(x: 12, y: y - 90, width: 656, height: 90))
         inputBox.title = "Input"
@@ -370,6 +390,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func onStatusAction() {
         // The integration test presses this real NSMenuItem to close the menu.
+    }
+
+    @objc func onContextAction() {
+        // The context-menu test presses this item to close the menu.
     }
 
     @objc func onSubmitPressed() {
