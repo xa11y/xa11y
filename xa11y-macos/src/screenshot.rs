@@ -31,7 +31,8 @@ impl MacOSScreenshot {
         if !MacOSProvider::has_screen_recording_permission() {
             return Err(Error::PermissionDenied {
                 instructions: "Enable Screen Recording in System Settings → Privacy & Security → \
-                 Screen & System Audio Recording."
+                 Screen & System Audio Recording, then restart this process (or the terminal \
+                 that launched it): the permission is read once per process."
                     .to_string(),
             });
         }

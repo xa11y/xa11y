@@ -95,6 +95,7 @@ extern "C" {
     fn safe_ax_set_messaging_timeout(element: AXUIElementRef, timeout_seconds: f32) -> i32;
     fn safe_ax_value_get_value(value: CFTypeRef, the_type: i32, value_ptr: *mut c_void) -> bool;
     fn safe_cg_window_list_copy(option: u32, relative_to: u32) -> CFArrayRef;
+    fn safe_cg_preflight_screen_capture_access() -> bool;
     fn safe_ax_observer_create(
         pid: i32,
         callback: unsafe extern "C" fn(CFTypeRef, AXUIElementRef, CFTypeRef, *mut c_void),
@@ -3125,9 +3126,11 @@ fn instructions_for_major(major: u32) -> String {
 }
 
 /// macOS major version from `kern.osproductversion`, cached after the first
-/// read. On a probe failure it reports 0, which yields the pre-27 section
-/// name: the probe is a local `sysctl` and should not fail, and a wrong
-/// section name is only a hint, but this keeps the behavior stable.
+/// read. On a probe failure it reports 0. The probe is a local `sysctl` and
+/// should not fail. `0` has two consumers: the grant instruction falls back to
+/// the pre-27 section name (only a hint), and `screen_recording_gates_ax`
+/// treats it as "requires Screen Recording", so an unknown version makes
+/// `MacOSProvider::new` demand the grant rather than skip it.
 fn macos_major_version() -> u32 {
     static VERSION: std::sync::LazyLock<u32> = std::sync::LazyLock::new(|| {
         std::process::Command::new("sysctl")
@@ -3146,6 +3149,35 @@ fn macos_major_version() -> u32 {
             .unwrap_or(0)
     });
     *VERSION
+}
+
+/// The provider's Screen Recording denial, naming the detected version (or
+/// that it could not be detected, which is why the grant is demanded).
+fn screen_recording_instructions(major: u32) -> String {
+    let why = if major == 0 {
+        "The macOS version could not be detected, so xa11y requires it as it does on \
+         macOS 26+, where it is needed to read window content via the accessibility API."
+            .to_string()
+    } else {
+        format!(
+            "This is macOS {major}; on macOS 26+ it is required to read window content via \
+             the accessibility API."
+        )
+    };
+    format!(
+        "Enable Screen Recording in System Settings → Privacy & Security → \
+         Screen & System Audio Recording, then restart this process (or the terminal \
+         that launched it): the permission is read once per process.\n{why}"
+    )
+}
+
+/// Whether the accessibility API needs Screen Recording to read window
+/// content on macOS `major` (26 and later). An unknown version (`0`, the
+/// probe-failure value of [`macos_major_version`]) is treated as needing it:
+/// demanding a grant the system may not need fails loudly, while skipping
+/// one it does need returns window-less trees with no error.
+fn screen_recording_gates_ax(major: u32) -> bool {
+    major == 0 || major >= 26
 }
 
 /// Global handle counter for mapping ElementData back to AXElements.
@@ -3210,13 +3242,13 @@ impl MacOSProvider {
         // On macOS 26+, Screen Recording permission is required to read
         // window content via the accessibility API. Without it, AXChildren
         // returns only self-referencing AXApplication wrappers and menu bars.
-        if !Self::has_screen_recording_permission() {
+        // Earlier releases read window content without it, so the provider
+        // does not demand it there (the screenshot backend always does).
+        if screen_recording_gates_ax(macos_major_version())
+            && !Self::has_screen_recording_permission()
+        {
             return Err(Error::PermissionDenied {
-                instructions:
-                    "Enable Screen Recording in System Settings → Privacy & Security → \
-                     Screen & System Audio Recording.\n\
-                     On macOS 26+, this is required to read window content via the accessibility API."
-                        .to_string(),
+                instructions: screen_recording_instructions(macos_major_version()),
             });
         }
 
@@ -3290,44 +3322,16 @@ impl MacOSProvider {
         apps
     }
 
-    /// Check if Screen Recording permission is granted by inspecting
-    /// CGWindowListCopyWindowInfo. Without this permission, the list
-    /// contains only system chrome (layer != 0). With it, app windows
-    /// (layer 0) are included.
+    /// Whether this process has Screen Recording permission, from
+    /// `CGPreflightScreenCaptureAccess` (macOS 10.15+), which reads the grant
+    /// itself and never prompts.
+    ///
+    /// This used to be inferred from `CGWindowListCopyWindowInfo` listing a
+    /// layer-0 (app) window, which read as "denied" whenever no app window
+    /// was open — a fresh CI runner, a cleared desktop — however the
+    /// permission was set (issue #516).
     pub(crate) fn has_screen_recording_permission() -> bool {
-        let info = unsafe { safe_cg_window_list_copy(0, 0) };
-        if info.is_null() {
-            return false;
-        }
-        let layer_key = CFString::new("kCGWindowLayer");
-        let mut has_app_window = false;
-        unsafe {
-            let count = safe_cf_array_get_count(info);
-            for i in 0..count {
-                let dict = safe_cf_array_get_value(info, i);
-                if dict.is_null() {
-                    continue;
-                }
-                let layer_val =
-                    safe_cf_dict_get_value(dict, layer_key.as_concrete_TypeRef() as CFTypeRef);
-                if !layer_val.is_null()
-                    && safe_cf_get_type_id(layer_val) == safe_cf_number_get_type_id()
-                {
-                    let mut layer: i32 = -1;
-                    safe_cf_number_get_value(
-                        layer_val,
-                        CF_NUMBER_SINT32,
-                        &mut layer as *mut _ as *mut c_void,
-                    );
-                    if layer == 0 {
-                        has_app_window = true;
-                        break;
-                    }
-                }
-            }
-            safe_cf_release(info);
-        }
-        has_app_window
+        unsafe { safe_cg_preflight_screen_capture_access() }
     }
 
     /// Cache an AXElement and return a new handle ID.
@@ -6349,6 +6353,32 @@ mod tests {
             "{message}"
         );
         assert!(!message.contains("taken effect"), "{message}");
+    }
+
+    #[test]
+    fn screen_recording_gates_ax_from_macos_26_and_when_unknown() {
+        assert!(!screen_recording_gates_ax(15));
+        assert!(screen_recording_gates_ax(26));
+        assert!(screen_recording_gates_ax(27));
+        assert!(screen_recording_gates_ax(0));
+    }
+
+    #[test]
+    fn screen_recording_instructions_name_the_version_and_the_restart() {
+        let known = screen_recording_instructions(26);
+        assert!(known.contains("This is macOS 26"), "{known}");
+        assert!(known.contains("restart this process"), "{known}");
+        let unknown = screen_recording_instructions(0);
+        assert!(unknown.contains("could not be detected"), "{unknown}");
+        assert!(unknown.contains("restart this process"), "{unknown}");
+    }
+
+    #[test]
+    fn screen_recording_preflight_is_callable() {
+        // The answer depends on the host's grant; the call must not prompt,
+        // throw, or crash. Whatever it says, it agrees with itself.
+        let first = MacOSProvider::has_screen_recording_permission();
+        assert_eq!(first, MacOSProvider::has_screen_recording_permission());
     }
 
     #[test]
