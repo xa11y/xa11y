@@ -397,6 +397,48 @@ def test_minimize_and_restore(app: xa11y.App) -> None:
         raise
 
 
+@pytest.mark.skipif(
+    sys.platform != "win32" or APP not in ("winforms", "wpf"),
+    reason="minimized-window visibility is asserted on the Microsoft framework cells",
+)
+def test_controls_of_a_minimized_window_are_not_visible(
+    app: xa11y.App, app_config: dict
+) -> None:
+    """A button in a minimized window reports ``visible == False``.
+
+    UIA leaves ``IsOffscreen`` false on the descendants of a minimized
+    window, so without the provider's own check an auto-waiting action
+    would pass its ``visible`` wait and act on a control nobody can see
+    (issue #501). WinForms controls carry their own HWND and WPF's do not,
+    so the two cells cover both of the provider's paths.
+    """
+    win = _window_advertising(app, "minimize")
+    if win is None or "restore" not in win.actions:
+        pytest.skip("no window advertises both minimize and restore")
+    button = app.locator(f'button[name="{app_config["ok_button_name"]}"]')
+    assert button.element().visible is True, "precondition: OK is visible before minimizing"
+    try:
+        win.minimize()
+        minimized = _settled_window(
+            app, "minimize", lambda w: w.minimized is True, "minimize must report minimized"
+        )
+        assert button.element().visible is False, (
+            "a button in a minimized window must not report visible"
+        )
+        minimized.restore()
+        _settled_window(
+            app, "minimize", lambda w: w.minimized is False, "restore must report restored"
+        )
+        _wait_until(
+            lambda: button.element().visible is True,
+            5.0,
+            "OK must report visible again after restore",
+        )
+    except Exception:
+        _restore_window_best_effort(app)
+        raise
+
+
 # The screen-filling operation each platform exposes. macOS has native
 # fullscreen (``enter_fullscreen``, ``AXFullScreen``) and refuses ``maximize``
 # — there is no readable or writable zoom state — while Windows has

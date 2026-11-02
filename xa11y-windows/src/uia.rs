@@ -11,8 +11,9 @@ use windows::Win32::System::Com::{CoInitializeEx, COINIT};
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
-    GetWindowThreadProcessId, IsHungAppWindow, IsWindow, IsWindowVisible, SetForegroundWindow,
+    EnumWindows, GetAncestor, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
+    GetWindowTextW, GetWindowThreadProcessId, IsHungAppWindow, IsIconic, IsWindow,
+    IsWindowVisible, SetForegroundWindow, GA_ROOT,
     GWL_EXSTYLE, STATE_SYSTEM_SELECTED, WS_EX_LAYERED, WS_EX_TRANSPARENT,
 };
 
@@ -478,8 +479,64 @@ impl WindowsProvider {
         element: &IUIAutomationElement,
         pid: Option<u32>,
     ) -> Result<ElementData> {
+        self.build_element_data_in(element, pid, false)
+    }
+
+    /// [`Self::build_element_data`] for an element the caller knows sits in
+    /// a minimized top-level window (`host_minimized`), which makes it not
+    /// visible whatever UIA's `IsOffscreen` says (issue #501).
+    fn build_element_data_in(
+        &self,
+        element: &IUIAutomationElement,
+        pid: Option<u32>,
+        host_minimized: bool,
+    ) -> Result<ElementData> {
         let handle = self.cache_element(element.clone());
-        build_snapshot_data(element, pid, handle, Some(&self.raw_walker))
+        build_snapshot_data(element, pid, handle, Some(&self.raw_walker), host_minimized)
+    }
+
+    /// Whether `element`'s top-level window is minimized.
+    ///
+    /// Walks the raw view up to the nearest element with a native window
+    /// handle (the element itself when it has one) and asks Win32 about that
+    /// HWND's root. Windowless elements (WPF, WebView2, Qt) have no HWND of
+    /// their own, which is why this is a walk, and why callers run it once
+    /// per query rather than once per element. Reaching the top of the tree
+    /// without an HWND means there is no window to be minimized.
+    fn host_window_minimized(&self, element: &IUIAutomationElement) -> Result<bool> {
+        let mut current = element.clone();
+        for _ in 0..HOST_WINDOW_WALK_LIMIT {
+            let hwnd =
+                unsafe { current.CurrentNativeWindowHandle() }.map_err(|e| Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!(
+                        "CurrentNativeWindowHandle failed while finding the host window: {e}"
+                    ),
+                })?;
+            if !hwnd.0.is_null() {
+                return Ok(hwnd_in_minimized_window(hwnd));
+            }
+            current = match unsafe { self.raw_walker.GetParentElement(&current) } {
+                Ok(parent) => parent,
+                // S_OK with a null parent: the top of the tree.
+                Err(e) if e.code().0 == 0 => return Ok(false),
+                Err(e) => {
+                    return Err(Error::Platform {
+                        code: e.code().0 as i64,
+                        message: format!(
+                            "walking to the host window (GetParentElement) failed: {e}"
+                        ),
+                    })
+                }
+            };
+        }
+        Err(Error::Platform {
+            code: -1,
+            message: format!(
+                "no element with a native window handle within {HOST_WINDOW_WALK_LIMIT} \
+                 ancestors; the raw view is deeper than any real tree or cyclic"
+            ),
+        })
     }
 
     /// Build the per-process Application node Windows lacks natively.
@@ -1326,6 +1383,7 @@ fn build_snapshot_data(
     pid: Option<u32>,
     handle: u64,
     walker: Option<&IUIAutomationTreeWalker>,
+    host_minimized: bool,
 ) -> Result<ElementData> {
     let control_type = unsafe { element.CachedControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
     let is_table_item = (control_type == UIA_DataItemControlTypeId
@@ -1391,7 +1449,13 @@ fn build_snapshot_data(
     let description = uia_cached_bstr(element, UIA_FullDescriptionPropertyId)
         .or_else(|| uia_cached_bstr(element, UIA_HelpTextPropertyId));
 
-    let states = parse_states(element, role, &patterns);
+    // An element with its own HWND answers for itself, cheaply (two Win32
+    // calls, no COM); a windowless one relies on the caller's `host_minimized`.
+    let in_minimized_window = host_minimized
+        || unsafe { element.CachedNativeWindowHandle() }
+            .ok()
+            .is_some_and(|h| !h.0.is_null() && hwnd_in_minimized_window(h));
+    let states = parse_states(element, role, &patterns, in_minimized_window);
 
     let bounds = unsafe { element.CachedBoundingRectangle() }
         .ok()
@@ -1594,6 +1658,23 @@ fn uia_get(arr: &IUIAutomationElementArray, index: i32) -> Option<IUIAutomationE
 fn is_pattern_absent(err: &windows::core::Error) -> bool {
     let code = err.code().0;
     code == E_NOINTERFACE.0 || code == UIA_E_INVALIDOPERATION as i32 || code == 0
+}
+
+/// Upper bound on the raw-view walk in [`WindowsProvider::host_window_minimized`].
+const HOST_WINDOW_WALK_LIMIT: usize = 256;
+
+/// Whether `hwnd` belongs to a minimized top-level window.
+///
+/// UIA keeps `IsOffscreen = false` on the descendants of a minimized window,
+/// so the window's own iconic state is the only signal that its content
+/// cannot be seen (issue #501). `GA_ROOT` maps a child control's HWND to its
+/// top-level window; a top-level HWND maps to itself.
+fn hwnd_in_minimized_window(hwnd: HWND) -> bool {
+    let root = unsafe { GetAncestor(hwnd, GA_ROOT) };
+    // GetAncestor returns null only for an invalid HWND, in which case the
+    // HWND itself is all there is to ask about.
+    let window = if root.0.is_null() { hwnd } else { root };
+    unsafe { IsIconic(window) }.as_bool()
 }
 
 /// The stable identity of a UIA element, or `None` when it has none.
@@ -2066,10 +2147,20 @@ impl Provider for WindowsProvider {
                 }
                 let uia = self.get_cached(element_data.handle)?;
                 let children = self.uia_children(&uia);
+                if children.is_empty() {
+                    return Ok(Vec::new());
+                }
+                // One walk for the whole level, not one per child. A parent
+                // that vanished mid-walk has no children to report.
+                let Some(host_minimized) = live_snapshot(self.host_window_minimized(&uia))? else {
+                    return Ok(Vec::new());
+                };
                 let pid = element_data.pid;
                 let mut data = Vec::with_capacity(children.len());
                 for child in children {
-                    if let Some(child) = live_snapshot(self.build_element_data(&child, pid))? {
+                    if let Some(child) =
+                        live_snapshot(self.build_element_data_in(&child, pid, host_minimized))?
+                    {
                         data.push(child);
                     }
                 }
@@ -2111,7 +2202,8 @@ impl Provider for WindowsProvider {
                     code: e.code().0 as i64,
                     message: format!("BuildUpdatedCache failed: {}", e),
                 })?;
-                let data = self.build_element_data(&parent, element.pid)?;
+                let host_minimized = self.host_window_minimized(&parent)?;
+                let data = self.build_element_data_in(&parent, element.pid, host_minimized)?;
                 return Ok(Some(data));
             }
         }
@@ -2546,10 +2638,10 @@ impl Provider for WindowsProvider {
         // Fragment elements (no HWND) don't support reliable
         // `TreeScope_Subtree` traversal. Fall through to the path-based
         // default which goes level-by-level through `get_children`.
-        let is_hwnd_root = unsafe { uia_root.CurrentNativeWindowHandle() }
+        let root_hwnd = unsafe { uia_root.CurrentNativeWindowHandle() }
             .ok()
-            .map(|h| !h.0.is_null())
-            .unwrap_or(false);
+            .filter(|h| !h.0.is_null());
+        let is_hwnd_root = root_hwnd.is_some();
         if !is_hwnd_root {
             return xa11y_core::selector::find_elements_in_tree_group(
                 |el| self.get_children(el),
@@ -2565,6 +2657,8 @@ impl Provider for WindowsProvider {
             return Ok(Vec::new());
         };
         let count = uia_len(&subtree);
+        // Every element in the subtree shares the root's top-level window.
+        let host_minimized = root_hwnd.is_some_and(hwnd_in_minimized_window);
 
         // Single-pass: visit every subtree element once and check every
         // clause's first segment. Per-element results carry the array
@@ -2586,7 +2680,8 @@ impl Provider for WindowsProvider {
             };
             // Build ElementData once; reuse for every clause check. The
             // handle assigned here is stable for the rest of this call.
-            let Some(data) = live_snapshot(self.build_element_data(&el, pid))? else {
+            let Some(data) = live_snapshot(self.build_element_data_in(&el, pid, host_minimized))?
+            else {
                 continue;
             };
 
@@ -3576,6 +3671,7 @@ fn parse_states(
     element: &IUIAutomationElement,
     role: Role,
     patterns: &ElementPatterns,
+    in_minimized_window: bool,
 ) -> StateSet {
     let enabled = unsafe { element.CachedIsEnabled() }
         .unwrap_or(BOOL(1))
@@ -3583,7 +3679,9 @@ fn parse_states(
     let offscreen = unsafe { element.CachedIsOffscreen() }
         .unwrap_or(BOOL(0))
         .as_bool();
-    let visible = !offscreen;
+    // A minimized window's content is not visible, even though UIA leaves
+    // `IsOffscreen` false on its descendants (issue #501).
+    let visible = !offscreen && !in_minimized_window;
     let focused = unsafe { element.CachedHasKeyboardFocus() }
         .unwrap_or(BOOL(0))
         .as_bool();
@@ -4633,7 +4731,16 @@ impl EventContext {
         } else {
             unsafe { sender.BuildUpdatedCache(cache) }.unwrap_or_else(|_| sender.clone())
         };
-        build_snapshot_data(&cached_element, Some(self.app_pid), 0, Some(&self.walker))
+        // Event targets are not walked to their host window: the handler
+        // must stay cheap, and an element with its own HWND is still checked
+        // inside build_snapshot_data.
+        build_snapshot_data(
+            &cached_element,
+            Some(self.app_pid),
+            0,
+            Some(&self.walker),
+            false,
+        )
     }
 
     /// Snapshot an event sender's ElementData, or deliver the event without
