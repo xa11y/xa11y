@@ -46,7 +46,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         window.title = "xa11y-cocoa-test-app"
-        window.setFrameAutosaveName("TestWindow")
+        window.setFrameAutosaveName("TestWindow2")
 
         // An unbundled executable is not a regular app until it says so, and
         // only a regular app can hold the frontmost slot — which synthesized

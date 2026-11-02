@@ -975,8 +975,9 @@ class InputSim:
         """Drag from ``start`` to ``end``.
 
         ``button`` selects the button held during the drag, ``held`` lists
-        keys held for its duration, and ``duration`` is the total drag time
-        in **seconds**.
+        keys held for its duration, and ``duration`` is the time spent moving
+        the pointer from start to end, in **seconds**. On macOS the drag also
+        holds 200 ms after press and 500 ms before release.
         """
     def scroll(
         self,
