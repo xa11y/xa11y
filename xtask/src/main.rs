@@ -34,6 +34,7 @@ COMMANDS:
     test-egui [SUITE..]  Run egui (eframe) integration tests
     test-winforms [SUITE..]  Run WinForms integration tests (Windows only)
     test-wpf [SUITE..]  Run WPF integration tests (Windows only)
+    test-uwp [SUITE..]  Run UWP integration tests (Windows only; installs a sideloaded package, needs elevation)
     test-apps           Run the Python suite for every app (qt, gtk, cocoa, tauri, electron, egui, winforms, wpf)
     test-compat [APP]   Run shared harness (python + js + cli suites) against APP (default: tauri)
     test-matrix-check   Validate the tests/matrix.yaml coverage index
@@ -80,6 +81,7 @@ fn main() -> ExitCode {
         "test-egui" => do_test_egui(rest),
         "test-winforms" => do_test_winforms(rest),
         "test-wpf" => do_test_wpf(rest),
+        "test-uwp" => do_test_uwp(rest),
         "test-apps" => do_test_apps(),
         "test-compat" => do_test_compat(rest),
         "test-matrix-check" => do_test_matrix_check(),
@@ -577,6 +579,10 @@ fn do_test_winforms(rest: &[String]) -> bool {
 
 fn do_test_wpf(rest: &[String]) -> bool {
     do_test_app_suite("wpf", rest, "WPF integration tests")
+}
+
+fn do_test_uwp(rest: &[String]) -> bool {
+    do_test_app_suite("uwp", rest, "UWP integration tests")
 }
 
 fn do_test_apps() -> bool {

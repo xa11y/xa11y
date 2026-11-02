@@ -1,6 +1,6 @@
 # Build, package and sign the xa11y UWP test app.
 #
-#   pwsh test-apps/uwp/build.ps1
+#   powershell -File test-apps/uwp/build.ps1
 #
 # Produces, under test-apps/uwp/out/:
 #   xa11y-uwp-test-app.msix   the signed package

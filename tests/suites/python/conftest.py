@@ -699,6 +699,62 @@ APP_CONFIGS: dict[str, dict] = {
         "add_item_button_name": "Add Item",
         "remove_item_button_name": "Remove Item",
     },
+    "uwp": {
+        # A UWP (Windows.UI.Xaml) app hosted by ApplicationFrameHost — the
+        # only app in the matrix whose top-level window belongs to another
+        # process (issue #497). Built from test-apps/uwp; Windows-only.
+        #
+        # No dialog: a UWP app has one CoreWindow, and ContentDialog is an
+        # in-window overlay rather than a top-level window.
+        "dialog_button_name": None,
+        "dialog_name": None,
+        "ok_button_name": "OK",
+        "cancel_button_name": "Cancel",
+        # AutomationProperties.HelpText maps to UIA HelpText.
+        "ok_button_description": "Confirm the dialog",
+        "has_checkbox": True,
+        "checkbox_unchecked_name": "Agree to terms",
+        "checkbox_checked_name": "Subscribe",
+        "has_radio": True,
+        "radio_role": "radio_button",
+        "radio_a_name": "Option A",
+        "radio_b_name": "Option B",
+        # SliderAutomationPeer and ProgressBarAutomationPeer implement
+        # IRangeValueProvider.
+        "slider_selector": 'slider[name="Volume"]',
+        "slider_initial_value": 50.0,
+        "slider_min": 0.0,
+        "slider_max": 100.0,
+        # Windows.UI.Xaml ships no spin-button control (NumberBox is WinUI 2,
+        # a NuGet dependency this app deliberately does not take).
+        "spinbutton_selector": unsupported(
+            "Windows.UI.Xaml ships no in-box control that reports "
+            "ControlType.Spinner"
+        ),
+        "progress_bar_selector": 'progress_bar[name="Progress"]',
+        "textfield_selector": 'text_field[name="Search"]',
+        "textfield_initial_value": "hello world",
+        "textarea_selector": unsupported(
+            "UIA has no distinct multiline edit control type, so a multiline "
+            "TextBox is indistinguishable from a single-line one"
+        ),
+        # No grid: Windows.UI.Xaml has no in-box DataGrid (it lives in the
+        # Windows Community Toolkit). WinForms and WPF cover table shapes.
+        "table_selector": None,
+        "table_min_cells": 0,
+        "table_cell_names": None,
+        "table_content_names": None,
+        "table_cell_values": None,
+        "table_selected_cell_name": None,
+        "table_selected_cell_value": None,
+        "table_header_names": None,
+        "expect_no_unknown_roles": False,
+        # The window title is the package DisplayName (AppxManifest.xml).
+        "window_name_contains": "xa11y UWP Test",
+        "submit_button_name": "Submit",
+        "add_item_button_name": "Add Item",
+        "remove_item_button_name": "Remove Item",
+    },
 }
 
 

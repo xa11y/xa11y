@@ -113,6 +113,7 @@ cargo xtask test-electron    # Electron (Linux only)
 cargo xtask test-egui        # egui/eframe
 cargo xtask test-winforms    # WinForms (Windows only)
 cargo xtask test-wpf         # WPF (Windows only)
+cargo xtask test-uwp         # UWP (Windows only; sideloads a package, needs elevation)
 
 # Unit-test the harness and the coverage-index checker (no app launched)
 cargo xtask test-harness

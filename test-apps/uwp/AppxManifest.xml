@@ -43,7 +43,10 @@
         Description="xa11y UWP integration test app"
         BackgroundColor="transparent"
         Square150x150Logo="Assets\Square150x150Logo.png"
-        Square44x44Logo="Assets\Square44x44Logo.png" />
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <!-- Required by the uap schema; makeappx rejects a manifest without it. -->
+        <uap:SplashScreen Image="Assets\SplashScreen.png" />
+      </uap:VisualElements>
     </Application>
   </Applications>
 </Package>

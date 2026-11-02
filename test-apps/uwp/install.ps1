@@ -1,6 +1,6 @@
 # Trust the signing certificate and install the xa11y UWP test app.
 #
-#   pwsh test-apps/uwp/install.ps1        # elevated; after build.ps1
+#   powershell -File test-apps/uwp/install.ps1        # elevated; after build.ps1
 #
 # Importing into LocalMachine\TrustedPeople needs an elevated shell (CI's
 # runner account is an administrator). Any previous install of the package

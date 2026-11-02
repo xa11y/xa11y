@@ -57,6 +57,7 @@ UI Automation tree, not a fixture shaped to match the code.
 | `egui` | Rust immediate-mode (eframe) | ✓ | ✓ | ✓ | compat, actions, events, errors, windows |
 | `winforms` | .NET Windows Forms | ○ | ○ | ✓ | compat, actions, events, errors, windows |
 | `wpf` | .NET WPF | ○ | ○ | ✓ | compat, actions, events, errors, windows |
+| `uwp` | UWP (C++/WinRT, Windows.UI.Xaml) | ○ | ○ | ✓ | compat, actions, events, errors, windows |
 
 A hollow circle means the combination is not run in CI. † AccessKit on macOS
 runs locally through `./scripts/run_integ_tests_macos.sh` rather than in CI,
@@ -176,9 +177,9 @@ three.
 
 Every push runs the suites across operating systems and toolkits in GitHub
 Actions ([`.github/workflows/ci.yml`](https://github.com/xa11y/xa11y/blob/main/.github/workflows/ci.yml)).
-The `integ` job alone is a matrix of fifteen OS × app cells (e.g.
+The `integ` job alone is a matrix of sixteen OS × app cells (e.g.
 `ubuntu × {accesskit, qt, gtk, tauri, electron, egui}`,
-`macos × {cocoa, tauri, qt, egui}`, `windows × {tauri, qt, egui, winforms, wpf}`), each standing up
+`macos × {cocoa, tauri, qt, egui}`, `windows × {tauri, qt, egui, winforms, wpf, uwp}`), each standing up
 a headless display, accessibility bus, and the app under test before running
 the Python, JS, and CLI suites against it. Alongside it run the Rust unit and
 integration jobs per OS, two wire-level input jobs (Linux `uinput` read back

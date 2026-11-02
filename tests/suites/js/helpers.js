@@ -95,6 +95,13 @@ const APP_CONFIG = {
     duplicateButtonName: 'Open Duplicate Windows',
     duplicateWindowName: 'Duplicate Window',
   },
+  uwp: {
+    okButtonName: 'OK',
+    textFieldName: 'Search',      // AutomationProperties.Name = "Search"
+    minButtons: 2,
+    hasCheckbox: true,
+    hasRadio: true,
+  },
 };
 
 // Candidate app names. `scripts/run_js_tests.sh` can pre-resolve the actual
@@ -113,6 +120,9 @@ const APP_NAMES_BY_APP = {
   egui: ['xa11y-egui-test-app'],
   winforms: ['xa11y-winforms-test-app'],
   wpf: ['xa11y-wpf-test-app'],
+  // TODO(#497): drop 'ApplicationFrameHost' — see _app_command("uwp") in
+  // tests/harness/launch.py.
+  uwp: ['xa11y UWP Test', 'xa11y-uwp-test-app', 'ApplicationFrameHost'],
 };
 
 const appEnv = process.env.XA11Y_TEST_APP || 'accesskit';
