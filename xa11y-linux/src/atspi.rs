@@ -1614,6 +1614,8 @@ impl LinuxProvider {
         else {
             return Err(stale());
         };
+        // A sibling inserted between the two calls can shift the index and
+        // make this a spurious stale; a locator re-resolves and retries.
         if bus == aref.bus_name && path.as_str() == aref.path {
             Ok(())
         } else {
