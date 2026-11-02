@@ -3309,6 +3309,39 @@ mod tests {
     }
 
     #[test]
+    fn the_agent_guide_states_the_field_cap_the_encoder_applies() {
+        let guide = crate::cli::AGENT_GUIDE;
+        assert!(
+            guide.contains(&format!("cut\nto {MAX_FIELD_BYTES} bytes"))
+                || guide.contains(&format!("cut to {MAX_FIELD_BYTES} bytes")),
+            "the guide must state the cap as {MAX_FIELD_BYTES} bytes"
+        );
+        let mut data = crate::ElementData::for_role(crate::Role::StaticText);
+        data.name = Some("x".repeat(MAX_FIELD_BYTES + 1));
+        let encoded = element_data_json(&data);
+        for key in ["name_truncated", "name_bytes"] {
+            assert!(encoded.get(key).is_some(), "{key} in {encoded}");
+        }
+        assert!(guide.contains("`<field>_truncated: true`"));
+        assert!(guide.contains("`<field>_bytes`"));
+    }
+
+    #[test]
+    fn the_agent_guide_names_the_per_node_cut_markers_the_encoder_sets() {
+        let guide = crate::cli::AGENT_GUIDE;
+        let (root, _) = mock_tree(0, TREE_MAX_NODES);
+        let marked: Vec<&String> = root
+            .as_object()
+            .expect("object")
+            .keys()
+            .filter(|k| matches!(k.as_str(), "subtree_truncated" | "children_count"))
+            .collect();
+        assert_eq!(marked.len(), 2, "{root}");
+        assert!(guide.contains("`subtree_truncated: true`"));
+        assert!(guide.contains("`children_count`"));
+    }
+
+    #[test]
     fn a_diagnosis_reaches_the_structured_payload() {
         let err = CliError::Xa11y(crate::Error::SelectorNotMatched {
             selector: "button[name=\"Ok\"]".into(),

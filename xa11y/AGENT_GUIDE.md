@@ -94,6 +94,17 @@ Every result is bounded and reports what it dropped.
 - `windows`, `events_poll` and the `annotate` legend of `screenshot` carry
   their own `truncated` fields.
 
+`tree` also marks each place it cut. A node whose children were dropped by
+`max_depth` or the node cap carries `subtree_truncated: true` and
+`children_count`, its real number of children. Its `children`, if present, are
+only the first ones. A node without `subtree_truncated` is complete, so a node
+with no `children` is a leaf. To see a cut subtree, call `tree` or `find` on it.
+
+A single element is bounded too. `name`, `value` and `description` are each cut
+to 1024 bytes. A cut field is followed by `<field>_truncated: true` and
+`<field>_bytes`, the full length in bytes. Selectors still match the full text,
+so `[name^="..."]` finds an element by a prefix of a long name.
+
 An element's `states` object follows three rules:
 
 - `enabled` and `visible` are always present, as `true` or `false`.
