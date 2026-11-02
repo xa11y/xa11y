@@ -325,7 +325,9 @@ impl<H: ToolHost> Session<H> {
             .ok_or_else(|| RpcError::new(INVALID_PARAMS, "resources/read requires a \"uri\""))?;
         if uri != GUIDE_URI {
             // Named with what does exist, so the client can correct itself
-            // from one reply (tenet 6).
+            // from one reply (tenet 6). -32602 is deliberate in both eras:
+            // the older "resource not found" code -32002 is retired by the
+            // 2026-07-28 revision and reserved never to be reused.
             return Err(
                 RpcError::new(INVALID_PARAMS, format!("unknown resource: {uri}"))
                     .with_data(json!({ "uri": uri, "available": [GUIDE_URI] })),

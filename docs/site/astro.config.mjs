@@ -68,6 +68,7 @@ export default defineConfig({
             { label: "Annotate a screenshot", slug: "guides/annotate-screenshots" },
             { label: "Drive a desktop from a Strands agent", slug: "guides/strands" },
             { label: "Serve xa11y over MCP", slug: "guides/mcp" },
+            { label: "Drive xa11y as an agent", slug: "guides/agent-guide" },
           ],
         },
         {
@@ -107,7 +108,6 @@ export default defineConfig({
             { label: "Events", slug: "reference/events" },
             { label: "Errors", slug: "reference/errors" },
             { label: "CLI", slug: "reference/cli" },
-            { label: "Agent guide", slug: "reference/agent-guide" },
             { label: "Shell surfaces", slug: "reference/shell" },
             { label: "pytest plugin", slug: "reference/pytest" },
             { label: "Platform Details", slug: "reference/platform-details" },

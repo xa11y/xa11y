@@ -2155,21 +2155,37 @@ fn insert_some(map: &mut Map<String, Value>, key: &str, value: Option<Value>) {
 /// `enabled` and `visible` are always sent because they gate whether an
 /// element can be acted on at all, and their absence would read as unknown
 /// rather than as the documented default.
+/// The boolean states [`states_json`] sends only when true, so an absent one
+/// reads as false. Named once so the agent guide's list can be checked
+/// against it.
+const SENT_WHEN_TRUE: [&str; 9] = [
+    "focused",
+    "focusable",
+    "active",
+    "editable",
+    "selected",
+    "modal",
+    "required",
+    "busy",
+    "password",
+];
+
 fn states_json(states: &crate::StateSet) -> Value {
     let mut out = Map::new();
     out.insert("enabled".into(), json!(states.enabled));
     out.insert("visible".into(), json!(states.visible));
-    for (key, value) in [
-        ("focused", states.focused),
-        ("focusable", states.focusable),
-        ("active", states.active),
-        ("editable", states.editable),
-        ("selected", states.selected),
-        ("modal", states.modal),
-        ("required", states.required),
-        ("busy", states.busy),
-        ("password", states.password),
-    ] {
+    let flags = [
+        states.focused,
+        states.focusable,
+        states.active,
+        states.editable,
+        states.selected,
+        states.modal,
+        states.required,
+        states.busy,
+        states.password,
+    ];
+    for (key, value) in SENT_WHEN_TRUE.into_iter().zip(flags) {
         if value {
             out.insert(key.into(), json!(true));
         }
@@ -3168,87 +3184,49 @@ mod tests {
             .collect()
     }
 
+    /// Every tag `failure_kind` can return, read from its own source.
+    ///
+    /// Parsed rather than listed by hand, so a kind added to the function is
+    /// a kind this test sees without anyone remembering to update a list.
+    fn failure_kinds_in_source() -> Vec<String> {
+        let source = include_str!("tools.rs");
+        let start = source
+            .find("\nfn failure_kind(")
+            .expect("failure_kind is defined in this file");
+        let body = &source[start..];
+        let end = body
+            .find("\n}\n")
+            .expect("failure_kind has a closing brace");
+        let mut kinds: Vec<String> = body[..end]
+            .lines()
+            // Comment lines quote nothing that is returned.
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .flat_map(|line| line.split('"').skip(1).step_by(2).map(str::to_owned))
+            .collect();
+        kinds.sort();
+        kinds.dedup();
+        kinds
+    }
+
     #[test]
     fn the_agent_guide_explains_every_failure_kind_the_server_returns() {
-        use crate::Error as E;
-        let diag = || None;
-        let every = [
-            CliError::Usage("x".into()),
-            CliError::NotFound("x".into()),
-            CliError::Ambiguous {
-                count: 2,
-                diagnosis: Box::default(),
-            },
-            CliError::AmbiguousShellSurface {
-                count: 2,
-                kind: "taskbar".into(),
-                diagnosis: Box::default(),
-            },
-            CliError::NoSubscription {
-                id: "s".into(),
-                expired: true,
-                live: Vec::new(),
-            },
-            CliError::NoSubscription {
-                id: "s".into(),
-                expired: false,
-                live: Vec::new(),
-            },
-            CliError::Xa11y(E::PermissionDenied {
-                instructions: "x".into(),
-            }),
-            CliError::Xa11y(E::AccessibilityNotEnabled {
-                app: "x".into(),
-                instructions: "x".into(),
-            }),
-            CliError::Xa11y(E::SelectorNotMatched {
-                selector: "x".into(),
-                diagnosis: diag(),
-            }),
-            CliError::Xa11y(E::ElementStale {
-                selector: "x".into(),
-            }),
-            CliError::Xa11y(E::ActionNotSupported {
-                action: "x".into(),
-                role: crate::Role::Button,
-            }),
-            CliError::Xa11y(E::TextValueNotSupported),
-            CliError::Xa11y(E::Timeout {
-                elapsed: std::time::Duration::ZERO,
-                diagnosis: diag(),
-            }),
-            CliError::Xa11y(E::InvalidSelector {
-                selector: "x".into(),
-                message: "x".into(),
-            }),
-            CliError::Xa11y(E::InvalidActionData {
-                message: "x".into(),
-            }),
-            CliError::Xa11y(E::InvalidConfig {
-                message: "x".into(),
-            }),
-            CliError::Xa11y(E::NoElementBounds),
-            CliError::Xa11y(E::Unsupported {
-                feature: "x".into(),
-            }),
-            CliError::Xa11y(E::Platform {
-                code: 1,
-                message: "x".into(),
-            }),
-        ];
+        let returned = failure_kinds_in_source();
+        assert!(
+            returned.len() > 10,
+            "the parse found too little: {returned:?}"
+        );
+        // Spot-check the parse against the function itself.
+        assert!(returned.contains(&failure_kind(&CliError::Usage("x".into())).to_string()));
         let documented = guide_failure_kinds();
-        let mut returned: Vec<&str> = every.iter().map(failure_kind).collect();
-        // `failure_kind`'s catch-all for a variant this build cannot name.
-        returned.push("unknown");
         for kind in &returned {
             assert!(
-                documented.iter().any(|d| d == kind),
+                documented.contains(kind),
                 "AGENT_GUIDE.md has no row for `{kind}`: {documented:?}"
             );
         }
         for kind in &documented {
             assert!(
-                returned.contains(&kind.as_str()),
+                returned.contains(kind),
                 "AGENT_GUIDE.md documents `{kind}`, which the server never returns"
             );
         }
@@ -3265,14 +3243,66 @@ mod tests {
         assert!(guide.contains(&format!("default {TREE_DEFAULT_MAX_DEPTH}")));
         assert!(guide.contains(&format!("default {FIND_DEFAULT_LIMIT}")));
         assert!(guide.contains(super::super::protocol::GUIDE_URI));
-        // Every tool the guide names in backticks is one the server lists.
+        // The workflow's numbered steps each name a tool; each must be one
+        // the server lists.
         let tools: Vec<String> = Xa11yTools::new()
             .list()
             .iter()
             .filter_map(|t| t["name"].as_str().map(str::to_owned))
             .collect();
-        for tool in ["apps", "tree", "find", "action", "shell", "events_start"] {
-            assert!(tools.iter().any(|t| t == tool), "{tool}");
+        let steps: Vec<&str> = guide
+            .lines()
+            .filter(|l| l.chars().next().is_some_and(|c| c.is_ascii_digit()))
+            .filter_map(|l| l.split('`').nth(1))
+            .collect();
+        assert!(steps.len() >= 4, "{steps:?}");
+        for tool in steps {
+            assert!(tools.iter().any(|t| t == tool), "workflow names `{tool}`");
+        }
+    }
+
+    #[test]
+    fn the_agent_guide_states_the_selector_case_rule_the_engine_applies() {
+        use xa11y_core::selector::{match_op, MatchOp};
+        let guide = crate::cli::AGENT_GUIDE;
+        assert!(guide.contains("`=` is case-sensitive. `*=`, `^=` and `$=` ignore case."));
+        assert!(!match_op(&MatchOp::Exact, "ok", Some("OK")));
+        assert!(match_op(&MatchOp::Contains, "ok", Some("OK")));
+        assert!(match_op(&MatchOp::StartsWith, "ok", Some("OKAY")));
+        assert!(match_op(&MatchOp::EndsWith, "ok", Some("BOOK")));
+    }
+
+    #[test]
+    fn the_agent_guide_states_the_default_timeout() {
+        assert!(crate::cli::AGENT_GUIDE.contains("5 seconds unless `XA11Y_DEFAULT_TIMEOUT`"));
+        // The number is pinned against the runtime default whenever nothing
+        // overrides it; a developer's environment may legitimately set it.
+        if std::env::var_os(crate::DEFAULT_TIMEOUT_ENV_VAR).is_none() {
+            assert_eq!(
+                crate::default_timeout().expect("the built-in default resolves"),
+                std::time::Duration::from_secs(5)
+            );
+        }
+    }
+
+    #[test]
+    fn the_agent_guide_states_the_absent_state_rules_the_encoder_applies() {
+        let guide = crate::cli::AGENT_GUIDE;
+        // Nothing set: only the always-sent pair appears.
+        let mut states = crate::StateSet::default();
+        states.enabled = false;
+        states.visible = false;
+        let none = states_json(&states);
+        let keys: Vec<&String> = none.as_object().expect("object").keys().collect();
+        assert_eq!(keys, ["enabled", "visible"]);
+        assert!(guide.contains("`enabled` and `visible` are always present"));
+        // Each flag sent only when true is named in the guide's list of them.
+        let start = guide.find("- `focused`").expect("the sent-when-true list");
+        let section = &guide[start..];
+        let section = &section[..section.find("\n- ").unwrap_or(section.len())];
+        assert!(section.contains("appear only when true"), "{section}");
+        for key in SENT_WHEN_TRUE {
+            assert!(section.contains(&format!("`{key}`")), "{key} in {section}");
         }
     }
 

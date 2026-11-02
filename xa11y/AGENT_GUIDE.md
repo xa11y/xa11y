@@ -2,13 +2,20 @@
 
 xa11y reads and drives desktop application UIs through each platform's
 accessibility API: AX on macOS, UI Automation on Windows, and AT-SPI2 on Linux.
-This guide is the one an agent reads. The binary embeds it, so it describes the
-version you are talking to. `xa11y guide` prints it, and `xa11y mcp` serves it
-as the `xa11y://guide` resource and the `guide` prompt.
+This guide describes the tools `xa11y mcp` serves, for an agent driving them.
+The binary embeds it, so it matches the version you are talking to. `xa11y mcp`
+serves it as the `xa11y://guide` resource and the `guide` prompt, and
+`xa11y guide` prints it.
+
+The command line runs the same operations with two differences. `xa11y action`
+acts on the first match instead of refusing a selector that matches several.
+A failure is an exit code (1 for a failed operation, 2 for a usage error) and a
+message on stderr, without the `kind` and `diagnosis` fields described under
+Failures.
 
 ## Workflow
 
-1. List running applications with `apps` (CLI: `xa11y apps`).
+1. List running applications with `apps`.
 2. Read one application's structure with `tree`, giving `app` or `pid`. Start
    with a small `max_depth` such as 2 or 3, then read deeper where you need to.
 3. Locate elements with `find` and a selector.
@@ -29,24 +36,16 @@ flyouts. `tree`, `find` and `action` then take a `shell` argument in place of
 
 ## Selectors
 
-Selectors are CSS-like and match against the accessibility tree.
-
-- A bare role matches by role, as in `button` or `text_field`. Roles are
-  snake_case: `check_box`, `radio_button`, `static_text`, `list_item`.
-- Attribute filters take `=` (exact), `*=` (contains), `^=` (starts with) and
-  `$=` (ends with). Matching is case-sensitive. `button[name="OK"]` and
-  `text_field[name*="Search"]` are typical.
-- States are attributes too. `checked` takes `"on"`, `"off"` or `"mixed"`.
-  `enabled`, `visible`, `focused`, `selected`, `editable`, `expanded` and the
-  other boolean states take `"true"` or `"false"`. An attribute with no
-  operator, such as `[checked]`, is a syntax error.
-- `A B` matches a descendant and `A > B` a direct child, as in
-  `window > group button`.
-- `:nth(n)` picks the nth match, counting from 1. It is the only
-  pseudo-class, so `:first-child`, `:checked` and similar forms fail to parse.
-- A comma joins alternatives: `button[name="Save"], button[name="Save As"]`.
-
+Selectors are CSS-like, as in `button[name="OK"]` or `window > group button`.
 The full grammar is in the [selector reference](https://xa11y.dev/reference/selectors/).
+These are the rules agents get wrong most often:
+
+- Roles are written in `snake_case`: `check_box`, `radio_button`, `text_field`.
+- `=` is case-sensitive. `*=`, `^=` and `$=` ignore case.
+- Every attribute filter needs an operator and a value. `[checked]` is a syntax
+  error; write `[checked="on"]`.
+- `:nth(n)` is the only pseudo-class, and it counts from 1. `:first-child`,
+  `:checked` and similar forms fail to parse.
 
 ## Actions
 
@@ -64,24 +63,23 @@ element is touched. Narrow it with an attribute filter or pick one with
 
 `action` auto-waits. It polls until the selector matches one element that is
 visible and enabled, then acts on that element. The window verbs and
-`scroll-into-view` wait only for enabled, because a minimized or scrolled-away
-element is legitimately invisible. The wait lasts up to the default timeout,
-which `XA11Y_DEFAULT_TIMEOUT` sets in seconds in the server's environment. The
-`action` tool's description states the current value. A call that fails
-therefore takes that long, and its `timeout` failure names what it waited for
-and what it last saw. The wait is already a retry loop, so wrapping `action`
-in another one only multiplies the delay.
+`scroll-into-view` wait only for enabled, because a minimized window or a
+scrolled-away element is invisible by design. The wait lasts up to the default
+timeout: 5 seconds unless `XA11Y_DEFAULT_TIMEOUT` sets another number of
+seconds in the server's environment. A call that fails therefore takes that
+long, and its `timeout` failure names what it waited for and what it last saw.
+The wait is already a retry loop, so wrapping `action` in another one only
+multiplies the delay.
 
-`ok: true` means the platform accepted the call. It does not mean the
-application did anything: a control may accept an action and ignore it.
-Confirm the effect by reading the tree again.
+`ok: true` reports that the platform accepted the call. A control may accept an
+action and ignore it, so confirm the effect by reading the tree again.
 
 An element's `actions` field lists what the application advertises through the
-platform's action interface. It is neither the set of verbs `action` accepts
-nor a capability list. Pick the verb from the element's other properties.
-`increment`, `decrement` and `set-numeric-value` apply to anything reporting
-`numeric_value`. `set-value`, `type-text` and `select-text` apply to anything
-whose `states` include `editable`. `toggle` applies to anything with a
+platform's action interface. That list is neither the set of verbs `action`
+accepts nor a capability list. Pick the verb from the element's other
+properties. `increment`, `decrement` and `set-numeric-value` apply to anything
+reporting `numeric_value`. `set-value`, `type-text` and `select-text` apply to
+anything whose `states` include `editable`. `toggle` applies to anything with a
 `checked` state, `expand` and `collapse` to anything with `expanded`, and
 `press` to any control.
 
@@ -96,8 +94,13 @@ Every result is bounded and reports what it dropped.
 - `windows`, `events_poll` and the `annotate` legend of `screenshot` carry
   their own `truncated` fields.
 
-A field that is absent was not reported by the platform. It does not mean
-false. The exception is `enabled` and `visible`, which are always present.
+An element's `states` object follows three rules:
+
+- `enabled` and `visible` are always present, as `true` or `false`.
+- `focused`, `focusable`, `active`, `editable`, `selected`, `modal`, `required`
+  and `busy` appear only when true, so an absent one is false.
+- `checked`, `expanded`, `minimized`, `maximized` and `fullscreen` appear only
+  when the platform reports them, so an absent one is unknown.
 
 ## Failures
 
@@ -112,7 +115,7 @@ diagnosis before retrying.
 | `no_match` | No application or element matched. | Read the candidates in the diagnosis, then correct the selector or target. |
 | `ambiguous_selector` | The selector matched several elements where one is required. | Narrow it with an attribute filter or `:nth(n)`. |
 | `ambiguous_shell_surface` | Several shell surfaces of the requested kind exist. | Pass the `pid` of the one you mean, from the candidates. |
-| `timeout` | An auto-wait ran out before its condition held. | Read `last_observed`. "never matched" means the selector is wrong; a state such as `visible=false` means the element exists but is not actionable yet. |
+| `timeout` | An auto-wait ran out before its condition held. | Read `last_observed`. "never matched" means the selector is wrong; a state such as `visible=false` means the element exists and is not actionable yet. |
 | `element_stale` | The element vanished between being found and being acted on. | Run the lookup again. |
 | `action_not_supported` | The element cannot perform this verb. | Pick another verb from the element's properties. |
 | `text_value_not_supported` | The platform cannot set text on this element. | Use `type-text`, or the `type` tool after focusing the element. |
@@ -122,7 +125,7 @@ diagnosis before retrying.
 | `no_element_bounds` | The element has no screen bounds. | Use `action`, which needs none, or scroll the element into view first. |
 | `unsupported` | No backend covers this operation on this platform or session. | Use another approach; retrying cannot succeed. |
 | `permission_denied` | An OS permission is missing. | Relay the instructions in the message to the user. |
-| `accessibility_not_enabled` | The application exposes an empty tree because its accessibility bridge is off. | Relay the fix in the message to the user; the application usually needs a restart. |
+| `accessibility_not_enabled` | The application exposes an empty tree because its accessibility bridge is off. | Relay the fix in the message to the user. The application needs a restart afterwards. |
 | `subscription_expired` | An event subscription handle expired. | Start a new subscription with `events_start`. |
 | `subscription_not_found` | An event subscription handle was never issued. | Use the handle `events_start` returned. |
 | `platform` | The OS accessibility API failed. | Retry once, then report the message. |
@@ -146,7 +149,5 @@ the tree again to see the current state.
 - Windows: screen coordinates are physical pixels. On macOS and Linux they are
   logical points.
 - Element handles go stale whenever the application rebuilds its UI.
-  Selectors re-resolve on every call, so address elements by selector rather
-  than by remembered position.
-- Window states such as `minimized` are absent, rather than false, on a
-  platform that cannot report them.
+  Selectors re-resolve on every call, so address elements by selector and not
+  by remembered position.

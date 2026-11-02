@@ -914,7 +914,7 @@ fn do_sync_readmes(args: &[String]) -> bool {
 /// lives inside the `xa11y` crate and ships with the crate's package.
 const AGENT_GUIDE_SOURCE: &str = "xa11y/AGENT_GUIDE.md";
 /// The docs-site page rendered from [`AGENT_GUIDE_SOURCE`].
-const AGENT_GUIDE_PAGE: &str = "docs/site/src/content/docs/reference/agent-guide.mdx";
+const AGENT_GUIDE_PAGE: &str = "docs/site/src/content/docs/guides/agent-guide.mdx";
 
 /// Render the agent guide into its docs-site page, or with `--check` fail
 /// when the page has drifted from the source.
@@ -946,7 +946,16 @@ fn do_sync_agent_guide(args: &[String]) -> bool {
     };
     let path = root.join(AGENT_GUIDE_PAGE);
     if check {
-        let actual = fs::read_to_string(&path).unwrap_or_default();
+        // A missing page is drift like any other; any other read failure is
+        // an I/O problem and is reported as one rather than as "out of date".
+        let actual = match fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                eprintln!("Failed to read {AGENT_GUIDE_PAGE}: {e}");
+                return false;
+            }
+        };
         if actual.replace("\r\n", "\n") != expected {
             eprintln!(
                 "{AGENT_GUIDE_PAGE} is out of date. Edit {AGENT_GUIDE_SOURCE}, then run \
@@ -1012,13 +1021,13 @@ fn render_agent_guide(source: &str) -> Result<String, String> {
     Ok(format!(
         "---\n\
          title: {title}\n\
-         description: What an agent driving xa11y needs, as the binary serves it to `xa11y guide` and the MCP server.\n\
-         pageType: reference\n\
+         description: How an agent drives xa11y over MCP, as the binary serves it to `xa11y guide` and the MCP server.\n\
+         pageType: how-to\n\
          ---\n\
          \n\
-         {{/* DIATAXIS: reference — a factual description of the machinery, structured\n    \
-         for lookup rather than for reading through. Neutral and complete. No task\n    \
-         narratives, no rationale, no teaching. */}}\n\
+         {{/* DIATAXIS: how-to — a goal-oriented recipe for a reader who already knows\n    \
+         what they want. Steps and decisions only. Concepts go to explanation/,\n    \
+         exhaustive option lists go to reference/. */}}\n\
          \n\
          {{/* GENERATED from {AGENT_GUIDE_SOURCE} by `cargo xtask sync-agent-guide`.\n    \
          Edit that file and re-run the command; CI fails when this page differs. */}}\n\
