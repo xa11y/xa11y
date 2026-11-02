@@ -758,6 +758,14 @@ def test_scrolling_a_pane_flips_which_controls_are_visible(app, app_config):
         assert listed == expected, (
             f"children() after scrolling to the last entry: got {listed}"
         )
+        # The premise again, from the other side: UIA still calls the entry
+        # that just scrolled out on screen, so the flip is the viewport clip.
+        gone = app.locator(f'[name="{first}"]').element()
+        assert gone.raw.get("uia_is_offscreen") is False, (
+            f"{first!r} reports uia_is_offscreen="
+            f"{gone.raw.get('uia_is_offscreen')!r} after scrolling out, so "
+            f"this test no longer exercises issue #502"
+        )
     finally:
         # Put the shared app back for the test above, whatever the order.
         app.locator(f'[name="{first}"]').element().focus()

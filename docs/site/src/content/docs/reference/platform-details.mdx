@@ -306,7 +306,7 @@ On Windows, `visible` starts from the UIA `IsOffscreen` property, which some pro
 
 The scroll check has limits. UIA has no viewport rectangle, so the ancestor's bounds stand in for it, and an item hidden only behind a scroll bar or header still counts as visible. A popup or top-level window, such as an open drop-down list, isn't clipped by anything above it, because it's drawn over its owner's content. Event targets skip the scroll check, so a scrolled-out item can report visible on an event. Each element's `raw` map carries `uia_is_offscreen`, the UIA value before these corrections.
 
-Auto-waiting actions wait for `visible`, so an action on a control scrolled out of view times out instead of acting. Call `scroll_into_view()` on it first; it waits only for attached and enabled. See the [locator reference](/reference/locator/).
+Auto-waiting actions wait for `visible`, so an action on a control scrolled out of view times out instead of acting. `scroll_into_view()` waits only for attached and enabled, but it needs the UIA ScrollItem pattern, which list items, tree items and similar controls have. A plain control such as a button has none, and the call returns `Unsupported`. For those, call `focus()` on an `Element` snapshot: frameworks such as WinForms scroll a focused control into view. `Locator.focus()` doesn't help there, because it also waits for `visible`. See the [locator reference](/reference/locator/).
 
 ### Selected state
 

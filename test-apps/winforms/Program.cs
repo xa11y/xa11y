@@ -371,11 +371,12 @@ internal sealed class TestForm : Form
     ///  Ten buttons in an AutoScroll panel that shows two, scrolled to the
     ///  top, so "Long Entry 10" is out of view while UIA still reports it on
     ///  screen (issue #502). Kept short: every button here also lands in the
-    ///  suites' `button` selectors, and the MCP screenshot legend is capped. Focusing a button scrolls the panel to it, which
-    ///  is how the suites move the viewport: plain buttons have no UIA
-    ///  ScrollItem pattern for `scroll_into_view`. TabStop is off so keyboard
-    ///  navigation tests never wander in. Named apart from "Item N" so no
-    ///  other selector matches them.
+    ///  suites' `button` selectors, and the MCP screenshot legend is capped.
+    ///  Focusing a button scrolls the panel to it, which is how the suites
+    ///  move the viewport: plain buttons have no UIA ScrollItem pattern for
+    ///  `scroll_into_view`. TabStop is off so keyboard navigation tests never
+    ///  wander in. Named apart from "Item N" so no other selector matches
+    ///  them.
     /// </summary>
     private static GroupBox BuildLongPane()
     {
