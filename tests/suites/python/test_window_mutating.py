@@ -424,6 +424,15 @@ def test_atspi_geometry_capability_is_measured_for_gtk_and_qt(app: xa11y.App) ->
         restore = app.windows()[0]
         restore.resize_to(bounds.width, bounds.height)
         restore.move_to(bounds.x, bounds.y)
+    # The shared app must leave this test at its original size and place:
+    # later tests read positions inside it (issue #487's CI failure was a
+    # window left 50x40 smaller, which scrolled their target out of view).
+    _wait_until(
+        lambda: (b := current()) is not None
+        and (b.x, b.y, b.width, b.height) == (bounds.x, bounds.y, bounds.width, bounds.height),
+        5.0,
+        f"the window to return to {bounds}",
+    )
 
 
 def test_minimize_and_restore(app: xa11y.App) -> None:
@@ -1448,27 +1457,31 @@ def test_gtk4_element_bounds_follow_the_window(app: xa11y.App) -> None:
     def ok_bounds():
         return button.element().bounds
 
-    def assert_inside_window(inner) -> None:
-        # Absolute, not just relative: the button lies on the window, whose
-        # bounds the window backend reads from the X server. Horizontally it
-        # is inside; vertically it need only overlap, because the app's
-        # content is in a ScrolledWindow that earlier suites may have
-        # scrolled, leaving OK partly above the viewport.
+    # The window's direct child is the app's ScrolledWindow. Unlike the OK
+    # button inside it, its position does not depend on how far earlier
+    # suites scrolled, so it is the element the absolute check uses.
+    viewport = app.locator(f'window[name="{title}"] > group')
+
+    def assert_viewport_inside_window() -> None:
+        # Absolute, not just relative: GTK 4 bounds land on the window,
+        # whose bounds the window backend reads from the X server.
+        inner = viewport.element().bounds
         outer = app.windows()[0].bounds
+        assert inner is not None, "GTK 4 scrolled window has no bounds on X11"
         assert outer is not None, "GTK 4 window has no bounds on X11"
         assert (
             outer.x <= inner.x
+            and outer.y <= inner.y
             and inner.x + inner.width <= outer.x + outer.width
-            and inner.y < outer.y + outer.height
-            and outer.y < inner.y + inner.height
-        ), f"button {inner} is not on window {outer}"
+            and inner.y + inner.height <= outer.y + outer.height
+        ), f"scrolled window {inner} is not inside window {outer}"
 
     before = ok_bounds()
     assert before is not None, "GTK 4 button has no bounds on X11"
     assert (before.x, before.y) != (0, 0), (
         f"GTK 4 button bounds look like raw screen extents: {before}"
     )
-    assert_inside_window(before)
+    assert_viewport_inside_window()
     try:
         _x11_move_client_window(app.pid, title, 200, 150)
         _wait_until(
@@ -1496,6 +1509,6 @@ def test_gtk4_element_bounds_follow_the_window(app: xa11y.App) -> None:
             after,
             again,
         )
-        assert_inside_window(again)
+        assert_viewport_inside_window()
     finally:
         _x11_move_client_window(app.pid, title, 0, 0)
