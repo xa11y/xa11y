@@ -129,6 +129,7 @@ extern "C" {
     fn safe_cf_array_get_value(arr: CFArrayRef, idx: CFIndex) -> CFTypeRef;
     fn safe_cf_boolean_get_value(b: CFTypeRef) -> bool;
     fn safe_cf_equal(a: CFTypeRef, b: CFTypeRef) -> bool;
+    fn safe_cf_hash(cf: CFTypeRef) -> u64;
     fn safe_cf_number_get_value(num: CFTypeRef, the_type: i32, value_ptr: *mut c_void) -> bool;
     fn safe_cf_dict_get_value(dict: CFTypeRef, key: CFTypeRef) -> CFTypeRef;
     fn safe_cf_array_create(values: *const CFTypeRef, num_values: CFIndex) -> CFArrayRef;
@@ -805,6 +806,39 @@ fn tolerate_churn<T>(result: Result<T>) -> Result<Option<T>> {
             ElementChurn::Unreachable | ElementChurn::Fatal => Err(err),
         },
     }
+}
+
+/// Drop repeat sightings of the same accessibility object from `items`,
+/// keeping order, then apply `limit`. Each item carries its walk position
+/// (ignored here), its `AXUIElementRef`, and its payload.
+///
+/// Pointer identity is not element identity: every `AXChildren` read vends
+/// fresh `AXUIElementRef`s, so an element reached along two paths (`group
+/// button` with nested groups finds the button under each group) arrives as
+/// two different pointers. `CFEqual` compares the underlying object, and
+/// `CFHash` is consistent with it, so hashing buckets the candidates and
+/// keeps this linear for distinct results. The pointers must stay valid for
+/// the call; the search's are retained by the handle cache.
+fn dedup_by_ax_identity<T>(items: Vec<(usize, AXUIElementRef, T)>, limit: Option<usize>) -> Vec<T> {
+    let mut buckets: HashMap<u64, Vec<AXUIElementRef>> = HashMap::new();
+    let mut out = Vec::with_capacity(items.len());
+    for (_, ptr, item) in items {
+        if limit.is_some_and(|l| out.len() >= l) {
+            break;
+        }
+        let bucket = buckets
+            .entry(unsafe { safe_cf_hash(ptr as CFTypeRef) })
+            .or_default();
+        if bucket
+            .iter()
+            .any(|&seen| unsafe { safe_cf_equal(seen as CFTypeRef, ptr as CFTypeRef) })
+        {
+            continue;
+        }
+        bucket.push(ptr);
+        out.push(item);
+    }
+    out
 }
 
 /// The close button of a window, or `None` when there is none.
@@ -4584,34 +4618,20 @@ impl Provider for MacOSProvider {
                 for n in narrowed {
                     // Anchor identity is for dedup vs other clauses' phase-1
                     // hits; for phase-2 outputs we use the narrowed element's
-                    // own AXUIElement pointer (resolved via the cache).
-                    let ptr = self
-                        .get_cached(n.handle)
-                        .map(|ax| ax.as_ptr())
-                        .unwrap_or(std::ptr::null());
+                    // own AXUIElement (resolved via the cache, which retains
+                    // it, so the pointer stays valid for the merge below).
+                    // The handle was minted by this call; a miss is a bug,
+                    // not an element to keep without identity.
+                    let ptr = self.get_cached(n.handle)?.as_ptr();
                     merged.push((anchor_pos, ptr, n));
                 }
             }
         }
 
-        // Stable sort by walk position keeps doc-order; dedup by
-        // AXUIElement pointer identity ensures `X, X` collapses correctly.
+        // Stable sort by walk position keeps doc-order; the dedup keeps the
+        // first of each accessibility object.
         merged.sort_by_key(|(pos, _, _)| *pos);
-        let mut seen: HashSet<usize> = HashSet::new();
-        let mut out: Vec<ElementData> = Vec::with_capacity(merged.len());
-        for (_, ptr, data) in merged {
-            // Null pointers (resolution failures) can't be sensibly deduped;
-            // treat each null as its own key so we keep the element.
-            let key = ptr as usize;
-            if key != 0 && !seen.insert(key) {
-                continue;
-            }
-            out.push(data);
-        }
-        if let Some(l) = limit {
-            out.truncate(l);
-        }
-        Ok(out)
+        Ok(dedup_by_ax_identity(merged, limit))
     }
 
     fn get_parent(&self, element: &ElementData) -> Result<Option<ElementData>> {
@@ -6440,6 +6460,30 @@ mod tests {
         // throw, or crash. Whatever it says, it agrees with itself.
         let first = MacOSProvider::has_screen_recording_permission();
         assert_eq!(first, MacOSProvider::has_screen_recording_permission());
+    }
+
+    #[test]
+    fn dedup_by_ax_identity_compares_objects_not_pointers() {
+        // Two refs to one application are distinct pointers but the same
+        // accessibility object; a ref to another process is not (issue #514).
+        // AXUIElementCreateApplication sends no message, so this needs no
+        // running app or permission.
+        let me = std::process::id() as i32;
+        let a = AXElement::from_owned(unsafe { safe_ax_create_application(me) });
+        let b = AXElement::from_owned(unsafe { safe_ax_create_application(me) });
+        let other = AXElement::from_owned(unsafe { safe_ax_create_application(1) });
+        assert_ne!(a.as_ptr(), b.as_ptr(), "fixture needs two distinct refs");
+
+        let items = vec![
+            (0, a.as_ptr(), "a"),
+            (1, other.as_ptr(), "other"),
+            (2, b.as_ptr(), "b"),
+        ];
+        assert_eq!(
+            dedup_by_ax_identity(items.clone(), None),
+            vec!["a", "other"]
+        );
+        assert_eq!(dedup_by_ax_identity(items, Some(1)), vec!["a"]);
     }
 
     #[test]
