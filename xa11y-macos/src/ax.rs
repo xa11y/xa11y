@@ -1840,19 +1840,19 @@ const WINDOW_FULLSCREEN_SETTLE_GRACE: Duration = Duration::from_millis(700);
 const WINDOW_MINIMIZED_SETTLE_BUDGET: Duration = Duration::from_secs(5);
 const WINDOW_MINIMIZED_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
 
-/// How long `move_to` waits for an `AXPosition` write to become observable,
-/// and the poll cadence during the wait.
+/// How long `move_to` and `resize_to` wait for an `AXPosition` / `AXSize` write
+/// to become observable, and the poll cadence during the wait.
 ///
-/// Some toolkit bridges acknowledge `AXPosition` before their event loop has
+/// Some toolkit bridges acknowledge a geometry write before their event loop has
 /// applied it, and can drop that first write while the window is settling
-/// from another transition. Re-issuing the absolute position is idempotent
-/// and turns the accepted write into the promise `move_to` exposes.
-const WINDOW_POSITION_SETTLE_BUDGET: Duration = Duration::from_secs(5);
-const WINDOW_POSITION_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
+/// from another transition. Re-issuing the absolute value is idempotent
+/// and turns the accepted write into the promise `move_to` and `resize_to` expose.
+const WINDOW_GEOMETRY_SETTLE_BUDGET: Duration = Duration::from_secs(5);
+const WINDOW_GEOMETRY_SETTLE_INTERVAL: Duration = Duration::from_millis(50);
 /// AX bridges can round logical coordinates while crossing the native
 /// boundary. This matches the tolerance used by the cross-binding integration
 /// tests and is small enough to distinguish their 10-point move.
-const WINDOW_POSITION_TOLERANCE: f64 = 2.0;
+const WINDOW_GEOMETRY_TOLERANCE: f64 = 2.0;
 
 /// Read a boolean AX attribute with the tenet-1 distinction: a failed read is
 /// an error (the state is unknown, not false), an absent / unsupported
@@ -2478,9 +2478,9 @@ fn set_window_position(
     Ok(())
 }
 
-fn position_near(actual: (f64, f64), expected: (f64, f64)) -> bool {
-    (actual.0 - expected.0).abs() <= WINDOW_POSITION_TOLERANCE
-        && (actual.1 - expected.1).abs() <= WINDOW_POSITION_TOLERANCE
+fn geometry_near(actual: (f64, f64), expected: (f64, f64)) -> bool {
+    (actual.0 - expected.0).abs() <= WINDOW_GEOMETRY_TOLERANCE
+        && (actual.1 - expected.1).abs() <= WINDOW_GEOMETRY_TOLERANCE
 }
 
 /// Wait until `AXPosition` reflects the requested logical coordinates,
@@ -2500,7 +2500,7 @@ fn settle_window_position(
     role: Role,
 ) -> Result<()> {
     let app = owning_app_element(el_ptr, action, role)?;
-    let deadline = Instant::now() + WINDOW_POSITION_SETTLE_BUDGET;
+    let deadline = Instant::now() + WINDOW_GEOMETRY_SETTLE_BUDGET;
     let expected = (f64::from(x), f64::from(y));
     let mut last_observed: Option<String> = None;
     let mut fresh: Option<AXElement> = None;
@@ -2509,7 +2509,7 @@ fn settle_window_position(
         let failure = match read_window_position(target, action, role) {
             Ok(Some(actual)) => {
                 last_observed = Some(format!("AXPosition reads ({}, {})", actual.0, actual.1));
-                if position_near(actual, expected) {
+                if geometry_near(actual, expected) {
                     return Ok(());
                 }
                 set_window_position(target, x, y, action, role).err()
@@ -2532,18 +2532,18 @@ fn settle_window_position(
             }
         }
         if Instant::now() >= deadline {
-            return Err(Error::timeout(WINDOW_POSITION_SETTLE_BUDGET).diagnose(
+            return Err(Error::timeout(WINDOW_GEOMETRY_SETTLE_BUDGET).diagnose(
                 xa11y_core::Diagnosis::new()
                     .condition(format!(
                         "window reaches position ({x}, {y}) within {} points",
-                        WINDOW_POSITION_TOLERANCE
+                        WINDOW_GEOMETRY_TOLERANCE
                     ))
                     .last_observed(last_observed.unwrap_or_else(|| {
                         "AXPosition could not be observed before the deadline".to_string()
                     })),
             ));
         }
-        std::thread::sleep(WINDOW_POSITION_SETTLE_INTERVAL);
+        std::thread::sleep(WINDOW_GEOMETRY_SETTLE_INTERVAL);
     }
 }
 
@@ -2647,30 +2647,27 @@ fn settle_window_size(
     role: Role,
 ) -> Result<()> {
     let app = owning_app_element(el_ptr, action, role)?;
-    let deadline = Instant::now() + WINDOW_POSITION_SETTLE_BUDGET;
+    let deadline = Instant::now() + WINDOW_GEOMETRY_SETTLE_BUDGET;
     let expected = (f64::from(width), f64::from(height));
-    let mut last_observed: Option<String> = None;
+    // Only raw observations are kept while polling; the diagnosis text (and
+    // the extra origin read it needs) is built once, at the deadline.
+    let mut last_size: Option<(f64, f64)> = None;
+    let mut last_other: Option<String> = None;
     let mut fresh: Option<AXElement> = None;
     loop {
         let target = fresh.as_ref().map_or(el_ptr, |el| el.as_ptr());
         let failure = match read_window_size(target, action, role) {
             Ok(Some(actual)) => {
-                if position_near(actual, expected) {
+                if geometry_near(actual, expected) {
                     return Ok(());
                 }
-                // The origin is context for the error only, so a failed
-                // origin read is reported in that context rather than
-                // replacing the size the window did report.
-                let origin = match read_window_position(target, action, role) {
-                    Ok(Some((x, y))) => format!("({x}, {y})"),
-                    Ok(None) => "(no AXPosition)".to_string(),
-                    Err(err) => format!("(origin unreadable: {err})"),
-                };
-                last_observed = Some(describe_refused_resize(width, height, actual, &origin));
+                last_size = Some(actual);
+                last_other = None;
                 set_window_size(target, width, height, action, role).err()
             }
             Ok(None) => {
-                last_observed = Some("the window has no AXSize attribute".to_string());
+                last_size = None;
+                last_other = Some("the window has no AXSize attribute".to_string());
                 set_window_size(target, width, height, action, role).err()
             }
             Err(err) => Some(err),
@@ -2678,7 +2675,8 @@ fn settle_window_size(
         if let Some(err) = failure {
             match classify_element_churn(&err) {
                 ElementChurn::Gone => {
-                    last_observed = Some(err.to_string());
+                    last_size = None;
+                    last_other = Some(err.to_string());
                     if let Some(found) = fresh_target_in_app(app.as_ptr(), el_ptr)? {
                         fresh = Some(found);
                     }
@@ -2687,18 +2685,31 @@ fn settle_window_size(
             }
         }
         if Instant::now() >= deadline {
-            return Err(Error::timeout(WINDOW_POSITION_SETTLE_BUDGET).diagnose(
+            let observed = match (last_size, last_other) {
+                (Some(actual), _) => {
+                    // The origin is context for the error only, so a failed
+                    // origin read is reported in that context rather than
+                    // replacing the size the window did report.
+                    let origin = match read_window_position(target, action, role) {
+                        Ok(Some((x, y))) => format!("({x}, {y})"),
+                        Ok(None) => "(no AXPosition)".to_string(),
+                        Err(err) => format!("(origin unreadable: {err})"),
+                    };
+                    describe_refused_resize(width, height, actual, &origin)
+                }
+                (None, Some(other)) => other,
+                (None, None) => "AXSize could not be observed before the deadline".to_string(),
+            };
+            return Err(Error::timeout(WINDOW_GEOMETRY_SETTLE_BUDGET).diagnose(
                 xa11y_core::Diagnosis::new()
                     .condition(format!(
                         "window reaches size {width}x{height} within {} points",
-                        WINDOW_POSITION_TOLERANCE
+                        WINDOW_GEOMETRY_TOLERANCE
                     ))
-                    .last_observed(last_observed.unwrap_or_else(|| {
-                        "AXSize could not be observed before the deadline".to_string()
-                    })),
+                    .last_observed(observed),
             ));
         }
-        std::thread::sleep(WINDOW_POSITION_SETTLE_INTERVAL);
+        std::thread::sleep(WINDOW_GEOMETRY_SETTLE_INTERVAL);
     }
 }
 
@@ -5698,10 +5709,10 @@ mod tests {
     }
 
     #[test]
-    fn position_near_allows_only_the_documented_rounding_tolerance() {
-        assert!(position_near((12.0, 18.0), (10.0, 20.0)));
-        assert!(!position_near((12.1, 18.0), (10.0, 20.0)));
-        assert!(!position_near((12.0, 17.9), (10.0, 20.0)));
+    fn geometry_near_allows_only_the_documented_rounding_tolerance() {
+        assert!(geometry_near((12.0, 18.0), (10.0, 20.0)));
+        assert!(!geometry_near((12.1, 18.0), (10.0, 20.0)));
+        assert!(!geometry_near((12.0, 17.9), (10.0, 20.0)));
     }
 
     /// An enumerated target sample holding `fullscreen` / `settable`.

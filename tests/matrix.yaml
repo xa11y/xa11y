@@ -520,7 +520,7 @@ gaps:
   - id: egui_transform_resize_noop
     description: >
       egui windows advertise the native resize action and accept its dispatch,
-      but their reported bounds remain unchanged on Windows and macOS. The CLI,
+      but their reported bounds remain unchanged on Windows. The CLI,
       MCP, and JS mutation suites dispatch the action and record an explicit
       skip rather than passing a no-op as mutation coverage.
     severity: low
@@ -557,7 +557,7 @@ gaps:
 
   - id: tauri_desktop_resize_noop
     description: >
-      Tauri on macOS and Windows advertises resize_to and accepts the native
+      Tauri on Windows advertises resize_to and accepts the native
       action, but the reported bounds remain unchanged. MCP, CLI, and JS
       dispatch the action and explicitly skip the bounds mutation assertion.
     severity: low
@@ -577,18 +577,6 @@ gaps:
       fixture's native Toggle Fullscreen action.
     severity: low
     workaround: "Fullscreen state is enforced through the Cocoa fixture's native Toggle Fullscreen action."
-    affects:
-      apps: [cocoa]
-      features: [windows]
-
-  - id: cocoa_resize_noop
-    description: >
-      The native Cocoa fixture advertises AX resize and accepts dispatch, but
-      fresh app-wide enumeration continues to report unchanged bounds in the
-      CLI, MCP, and JS suites. Those surfaces dispatch then explicitly skip;
-      move_to remains an enforced observable geometry mutation.
-    severity: low
-    workaround: "Exact resize bounds are enforced by the Qt macOS fixture."
     affects:
       apps: [cocoa]
       features: [windows]

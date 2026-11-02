@@ -517,8 +517,10 @@ test('resizeTo() changes the reported bounds and restores the original size', as
       t.skip('Qt/UIA client size differs from decorated outer bounds (qt_windows_geometry_offsets)');
       return;
     }
-    const resizeNoop = appEnv === 'cocoa' || appEnv === 'winforms' || appEnv === 'wpf' || appEnv === 'egui' ||
-      (appEnv === 'tauri' && process.platform !== 'linux');
+    // Windows-only gap: on macOS resizeTo() verifies its own write, so a
+    // refused resize has already rejected above.
+    const resizeNoop = process.platform === 'win32' &&
+      ['egui', 'tauri', 'winforms', 'wpf'].includes(appEnv);
     if (resizeNoop) {
       // The provider advertises and accepts TransformPattern.Resize, but the
       // framework leaves its bounds unchanged. Keep the dispatch covered and
@@ -529,13 +531,9 @@ test('resizeTo() changes the reported bounds and restores the original size', as
       } catch (_cleanup) {
         // best-effort cleanup before reporting the known platform gap
       }
-      const gap = appEnv === 'cocoa'
-        ? 'cocoa_resize_noop'
-        : appEnv === 'egui'
-          ? 'egui_transform_resize_noop'
-        : appEnv === 'winforms' || appEnv === 'wpf'
-          ? `${appEnv}_transform_resize_noop`
-          : 'tauri_desktop_resize_noop';
+      const gap = appEnv === 'tauri'
+        ? 'tauri_desktop_resize_noop'
+        : `${appEnv}_transform_resize_noop`;
       t.skip(`${appEnv} accepts Resize without changing bounds (${gap})`);
       return;
     }
@@ -801,8 +799,10 @@ test('Locator resizeTo() dispatches and restores the original size', async (t) =
       t.skip('Qt/UIA client size differs from decorated outer bounds (qt_windows_geometry_offsets)');
       return;
     }
-    const resizeNoop = appEnv === 'cocoa' || appEnv === 'winforms' || appEnv === 'wpf' || appEnv === 'egui' ||
-      (appEnv === 'tauri' && process.platform !== 'linux');
+    // Windows-only gap: on macOS resizeTo() verifies its own write, so a
+    // refused resize has already rejected above.
+    const resizeNoop = process.platform === 'win32' &&
+      ['egui', 'tauri', 'winforms', 'wpf'].includes(appEnv);
     if (resizeNoop) {
       try {
         const current = await currentWindow(app, win, 'resize_to');
@@ -810,13 +810,9 @@ test('Locator resizeTo() dispatches and restores the original size', async (t) =
       } catch (_cleanup) {
         // best-effort cleanup before reporting the known platform gap
       }
-      const gap = appEnv === 'cocoa'
-        ? 'cocoa_resize_noop'
-        : appEnv === 'egui'
-          ? 'egui_transform_resize_noop'
-        : appEnv === 'winforms' || appEnv === 'wpf'
-          ? `${appEnv}_transform_resize_noop`
-          : 'tauri_desktop_resize_noop';
+      const gap = appEnv === 'tauri'
+        ? 'tauri_desktop_resize_noop'
+        : `${appEnv}_transform_resize_noop`;
       t.skip(`${appEnv} accepts Resize without changing bounds (${gap})`);
       return;
     }

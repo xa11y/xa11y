@@ -317,22 +317,18 @@ def test_action_resize_to_requires_a_size_and_dispatches_it(
                     "Qt/UIA applies client size to decorated outer bounds; "
                     "tracked as qt_windows_geometry_offsets"
                 )
-            resize_noop = app_name in {"cocoa", "egui", "winforms", "wpf"} or (
-                app_name == "tauri" and not sys.platform.startswith("linux")
-            )
-            if resize_noop:
+            # Windows-only gap; on macOS resize_to verifies its own write and
+            # a refused resize already failed the dispatch above.
+            if sys.platform == "win32" and app_name in {
+                "egui",
+                "tauri",
+                "winforms",
+                "wpf",
+            }:
                 gap = (
-                    "cocoa_resize_noop"
-                    if app_name == "cocoa"
-                    else (
-                        "egui_transform_resize_noop"
-                        if app_name == "egui"
-                        else (
-                            f"{app_name}_transform_resize_noop"
-                            if app_name in {"winforms", "wpf"}
-                            else "tauri_desktop_resize_noop"
-                        )
-                    )
+                    "tauri_desktop_resize_noop"
+                    if app_name == "tauri"
+                    else f"{app_name}_transform_resize_noop"
                 )
                 pytest.skip(
                     f"{app_name} accepts Resize without changing bounds; "

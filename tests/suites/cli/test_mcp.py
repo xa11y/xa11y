@@ -872,8 +872,9 @@ def test_mcp_resize_to_mutates_and_restores_window_bounds(mcp, app_pid, app_name
     # Shrink, never grow: the window server keeps a window inside the screen's
     # visible frame, and on a small runner display the test app opens already
     # filling the visible height, so a grown target is refused (the Qt/macOS
-    # cell failed exactly that way). A smaller rect always fits; every fixture
-    # stays above its minimum size 50 points down.
+    # cell failed exactly that way). A smaller rect always fits, as long as it
+    # stays above the fixture's minimum size: the Qt fixture's minimum is set
+    # well below its 800x600 initial size for this reason.
     resized_to = (original[0] - 50, original[1] - 50)
     needs_restore = False
     try:
@@ -902,22 +903,14 @@ def test_mcp_resize_to_mutates_and_restores_window_bounds(mcp, app_pid, app_name
                 "Qt/UIA interprets requested client size as decorated outer "
                 "bounds; tracked as qt_windows_geometry_offsets"
             )
-        resize_noop = app_name in {"cocoa", "egui", "winforms", "wpf"} or (
-            app_name == "tauri" and not sys.platform.startswith("linux")
-        )
-        if resize_noop:
+        # Windows-only: UIA TransformPattern.Resize answers success without
+        # moving these frameworks' bounds. On macOS resize_to verifies its own
+        # write and would have raised above instead of returning ok.
+        if sys.platform == "win32" and app_name in {"egui", "tauri", "winforms", "wpf"}:
             gap = (
-                "cocoa_resize_noop"
-                if app_name == "cocoa"
-                else (
-                    "egui_transform_resize_noop"
-                    if app_name == "egui"
-                    else (
-                        f"{app_name}_transform_resize_noop"
-                        if app_name in {"winforms", "wpf"}
-                        else "tauri_desktop_resize_noop"
-                    )
-                )
+                "tauri_desktop_resize_noop"
+                if app_name == "tauri"
+                else f"{app_name}_transform_resize_noop"
             )
             pytest.skip(
                 f"{app_name} accepts Resize without changing bounds ({gap})"
