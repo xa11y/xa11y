@@ -2861,19 +2861,32 @@ impl Provider for WindowsProvider {
 
     fn scroll_into_view(&self, element: &ElementData) -> Result<()> {
         let uia_element = self.get_cached(element.handle)?;
-        if let Ok(pattern) = unsafe {
+        // Only a genuinely absent ScrollItemPattern is "not supported"; any
+        // other lookup failure (a dead element, a wedged provider) is a real
+        // error and propagates rather than reading as unsupported (tenet 1).
+        let pattern = match unsafe {
             uia_element
                 .GetCurrentPatternAs::<IUIAutomationScrollItemPattern>(UIA_ScrollItemPatternId)
         } {
-            unsafe { pattern.ScrollIntoView() }.map_err(|e| Error::Platform {
-                code: e.code().0 as i64,
-                message: format!("ScrollIntoView failed: {}", e),
-            })?;
-            return Ok(());
-        }
-        Err(Error::ActionNotSupported {
-            action: "scroll_into_view".to_string(),
-            role: element.role,
+            Ok(pattern) => pattern,
+            Err(e) if is_pattern_absent(&e) => {
+                return Err(Error::ActionNotSupported {
+                    action: "scroll_into_view".to_string(),
+                    role: element.role,
+                });
+            }
+            Err(e) => {
+                return Err(Error::Platform {
+                    code: e.code().0 as i64,
+                    message: format!(
+                        "acquiring ScrollItemPattern for scroll_into_view failed: {e}"
+                    ),
+                });
+            }
+        };
+        unsafe { pattern.ScrollIntoView() }.map_err(|e| Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("ScrollIntoView failed: {}", e),
         })
     }
 
