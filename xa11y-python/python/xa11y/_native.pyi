@@ -41,9 +41,10 @@ class AccessibilityNotEnabledError(XA11yError):
     """The target app advertises an accessibility tree but it is empty.
 
     Raised on Linux when a Chromium/Electron app is launched without
-    ``--force-renderer-accessibility`` (or the ``ACCESSIBILITY_ENABLED=1``
-    environment variable), so the renderer accessibility bridge never
-    populates the window's subtree.
+    ``--force-renderer-accessibility``, so the renderer accessibility bridge
+    never populates the window's subtree. In a bare session with no settings
+    daemon (CI, Xvfb, a container) the app needs both the flag and
+    ``ACCESSIBILITY_ENABLED=1`` in its environment.
     """
 
 class SelectorNotMatchedError(XA11yError):

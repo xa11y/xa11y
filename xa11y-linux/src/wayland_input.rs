@@ -13,11 +13,12 @@
 //! ## Privilege model
 //!
 //! Opening `/dev/uinput` for writing requires root, membership in the
-//! `input` group, or a udev rule that grants the user access. Granting the user the `input` group also grants
-//! global keystroke read access via `/dev/input/event*` — the same threat
-//! surface as macOS "Input Monitoring" or any X11 client connecting to
-//! `$DISPLAY`. xa11y surfaces an actionable [`Error::PermissionDenied`]
-//! when the open fails with `EACCES`.
+//! `input` group, or a udev rule that grants the user access. Granting the
+//! user the `input` group also grants global keystroke read access via
+//! `/dev/input/event*` — the same threat surface as macOS "Input
+//! Monitoring" or any X11 client connecting to `$DISPLAY`. xa11y surfaces
+//! an actionable [`Error::PermissionDenied`] when the open fails with
+//! `EACCES`.
 //!
 //! ## Keymap
 //!
