@@ -114,6 +114,26 @@ fn key_input(vk: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS) -> INPUT {
     }
 }
 
+/// The UTF-16 code units `type_text` sends, one `KEYEVENTF_UNICODE` tap each.
+///
+/// An LF directly after a CR is dropped. Edit controls turn both a `WM_CHAR`
+/// CR and a `WM_CHAR` LF into a line break, so sending `"\r\n"` unit by unit
+/// typed two of them. A lone CR or a lone LF still sends its one tap: only
+/// the pair collapses, so `"\n\r"` and `"\r\r"` are two breaks as written.
+fn typed_code_units(text: &str) -> Vec<u16> {
+    const CR: u16 = b'\r' as u16;
+    const LF: u16 = b'\n' as u16;
+    let mut units = Vec::with_capacity(text.len());
+    let mut prev = None;
+    for unit in text.encode_utf16() {
+        if !(unit == LF && prev == Some(CR)) {
+            units.push(unit);
+        }
+        prev = Some(unit);
+    }
+    units
+}
+
 fn unicode_input(code_unit: u16, key_up: bool) -> INPUT {
     let mut flags = KEYEVENTF_UNICODE;
     if key_up {
@@ -446,8 +466,9 @@ impl InputProvider for WindowsInputProvider {
         // Use KEYEVENTF_UNICODE so case/shift/IME behaviour is produced by
         // the OS text-input path rather than by synthesising shift chords
         // against whatever keyboard layout happens to be active.
-        let mut inputs: Vec<INPUT> = Vec::with_capacity(text.len() * 2);
-        for code_unit in text.encode_utf16() {
+        let units = typed_code_units(text);
+        let mut inputs: Vec<INPUT> = Vec::with_capacity(units.len() * 2);
+        for code_unit in units {
             inputs.push(unicode_input(code_unit, false));
             inputs.push(unicode_input(code_unit, true));
         }
@@ -496,5 +517,45 @@ mod keymap_tests {
             decode_vk_scan('/', VK_OEM_2.0 as i16, 0x409).unwrap(),
             VK_OEM_2
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::typed_code_units;
+
+    fn typed(text: &str) -> String {
+        String::from_utf16(&typed_code_units(text)).expect("input was valid UTF-16")
+    }
+
+    #[test]
+    fn crlf_collapses_to_one_break() {
+        assert_eq!(typed("line1\r\nline2"), "line1\rline2");
+        assert_eq!(typed("a\r\nb\r\nc"), "a\rb\rc");
+    }
+
+    #[test]
+    fn lone_breaks_are_kept() {
+        assert_eq!(typed("a\nb"), "a\nb");
+        assert_eq!(typed("a\rb"), "a\rb");
+        assert_eq!(typed("\n"), "\n");
+        assert_eq!(typed("\r"), "\r");
+    }
+
+    #[test]
+    fn only_the_cr_lf_pair_collapses() {
+        // LF then CR is two breaks, as is CR CR; CR CR LF is CR + CRLF.
+        assert_eq!(typed("\n\r"), "\n\r");
+        assert_eq!(typed("\r\r"), "\r\r");
+        assert_eq!(typed("\r\r\n"), "\r\r");
+        // The LF after a collapsed pair is a break of its own.
+        assert_eq!(typed("\r\n\n"), "\r\n");
+    }
+
+    #[test]
+    fn non_bmp_text_is_untouched() {
+        // Surrogate pairs pass through unit by unit.
+        assert_eq!(typed("x\u{1F600}\r\ny"), "x\u{1F600}\ry");
+        assert_eq!(typed(""), "");
     }
 }
