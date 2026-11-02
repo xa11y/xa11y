@@ -172,10 +172,10 @@ def _window_named(app: xa11y.App, dialog_name: str) -> xa11y.Element | None:
 def _tree_dialog(app: xa11y.App, dialog_name: str) -> xa11y.Element | None:
     """The first window/dialog element in the app's tree named `dialog_name`.
 
-    Covers toolkits whose secondary dialog appears in the accessibility tree
-    but not in ``App.windows()`` (the GTK app's AT-SPI tree has no top-level
-    window node, but its dialog is a Role::Dialog child — the same shape
-    ``test_dialog_role`` in test_compat.py relies on).
+    Covers a toolkit whose secondary dialog appears in the accessibility tree
+    as a Role::Dialog node but not in ``App.windows()`` (the shape
+    ``test_dialog_role`` in test_compat.py relies on). GTK 4 is no longer one
+    of them: its windows are listed since issue #485.
     """
     if not dialog_name:
         return None
@@ -346,14 +346,11 @@ def test_atspi_geometry_capability_is_measured_for_gtk_and_qt(app: xa11y.App) ->
     windows = app.windows()
     if APP == "gtk":
         assert windows, "GTK 4 must expose its top-level window (issue #485)"
-        for win in windows:
-            assert "move_to" not in win.actions, win.actions
-            assert "resize_to" not in win.actions, win.actions
-        return
-    assert windows, "Qt must expose its top-level window through AT-SPI"
+    else:
+        assert windows, "Qt must expose its top-level window through AT-SPI"
     win = windows[0]
-    assert "move_to" not in win.actions
-    assert "resize_to" not in win.actions
+    assert "move_to" not in win.actions, win.actions
+    assert "resize_to" not in win.actions, win.actions
     bounds = win.bounds
     assert bounds is not None
     with pytest.raises(xa11y.ActionNotSupportedError):

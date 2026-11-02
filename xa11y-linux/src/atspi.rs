@@ -1627,17 +1627,15 @@ impl LinuxProvider {
         }
     }
 
-    /// AT-SPI role-name probe for top-level decisions: is `parent` the
-    /// application node?
+    /// Top-level probe: is `parent` the application node?
     ///
-    /// AccessKit's AT-SPI bridge reports role names as empty strings and
-    /// carries the actual role as the numeric one (see `resolve_role`); an
-    /// empty name fed to `map_atspi_role` would hit the strict mapper's panic
-    /// arm — the exact failure the integration suite surfaced (every element's
-    /// snapshot went through the round-4 top-level probe and died). The empty
-    /// name is resolved numerically, exactly like `resolve_role`, so the
-    /// probe agrees with the snapshot path, and a D-Bus failure is the
-    /// caller's decision to make (propagated for the runtime guard).
+    /// Decided by the `GetRole` *number* alone (`ATSPI_ROLE_APPLICATION`),
+    /// never the role name. GTK 4 names its top-level window `application`
+    /// while numbering it a frame, so a name check took the window for the
+    /// application and its own children for top-level windows (issue #485);
+    /// AccessKit reports no role names at all. The number is the AT-SPI
+    /// contract and every bridge sets it. A D-Bus failure is the caller's
+    /// decision to make (propagated for the runtime guard).
     fn parent_role_is_application(&self, parent: &AccessibleRef) -> Result<bool> {
         Ok(self.get_role_number(parent)? == ATSPI_ROLE_APPLICATION)
     }
@@ -1670,10 +1668,10 @@ impl LinuxProvider {
         let Some(parent) = self.get_atspi_parent(&target)? else {
             return Ok(());
         };
-        // Same resolution as the advertisement probe (`is_atspi_top_level`),
-        // so a window the snapshot advertised and the runtime guard can never
-        // disagree; empty role names resolve numerically (AccessKit's bridge)
-        // instead of feeding the strict mapper's panic arm.
+        // Same probe as the advertisement (`is_top_level_window_ref`), so a window
+        // the snapshot advertised and the runtime guard can never disagree.
+        // Both key on the role number, which GTK 4 and AccessKit report
+        // correctly where their role names do not (#485).
         if self.parent_role_is_application(&parent)? {
             Ok(())
         } else {
@@ -4135,7 +4133,7 @@ mod tests {
         // Sanity-check a few well-established numeric mappings.
         assert_eq!(map_atspi_role_number(43), Role::Button); // PushButton
         assert_eq!(map_atspi_role_number(7), Role::CheckBox);
-        assert_eq!(map_atspi_role_number(67), Role::Unknown); // AT-SPI Unknown
+        assert!(try_map_atspi_role_number(67).is_none()); // AT-SPI Unknown: defers to the name
     }
 
     #[test]
@@ -4812,6 +4810,9 @@ mod tests {
         role: &'static str,
         children: Vec<&'static str>,
         children_error: Option<&'static str>,
+        /// Overrides the role number derived from `role`, for a toolkit
+        /// whose name and number disagree (GTK 4).
+        role_number: Option<u32>,
     }
 
     #[zbus::interface(name = "org.a11y.atspi.Accessible")]
@@ -4845,6 +4846,9 @@ mod tests {
         /// The number for each role name these fixtures use: the provider
         /// keys on the number and reads the name only as a fallback.
         fn get_role(&self) -> u32 {
+            if let Some(number) = self.role_number {
+                return number;
+            }
             match self.role {
                 "application" => ATSPI_ROLE_APPLICATION,
                 "panel" => 39,
@@ -4877,6 +4881,7 @@ mod tests {
                         role: "application",
                         children: vec!["/vanished", "/survivor"],
                         children_error: None,
+                        role_number: None,
                     },
                 )
                 .expect("root interface")
@@ -4887,6 +4892,7 @@ mod tests {
                         role: vanished_role,
                         children: vec![],
                         children_error: Some(error),
+                        role_number: None,
                     },
                 )
                 .expect("vanished interface")
@@ -4897,6 +4903,7 @@ mod tests {
                         role: "push button",
                         children: vec![],
                         children_error: None,
+                        role_number: None,
                     },
                 )
                 .expect("survivor interface")
@@ -4966,6 +4973,85 @@ mod tests {
         let dump = app.dump(None).expect("nested application pruned");
         assert!(dump.contains("Survivor"));
         assert!(!dump.contains("Vanished"));
+    }
+
+    /// GTK 4 names its top-level window `application` while numbering it a
+    /// frame (23). The application flattening keys on the number, so the
+    /// window survives as a window instead of being dissolved into its
+    /// children (issue #485); a real nested application (number 75) is still
+    /// flattened.
+    #[test]
+    fn a_window_named_application_survives_window_flattening() {
+        let (server_socket, client_socket) =
+            std::os::unix::net::UnixStream::pair().expect("socket pair");
+        let peer = |name, role, children, role_number| LiveTreePeer {
+            name,
+            role,
+            children,
+            children_error: None,
+            role_number,
+        };
+        let server = std::thread::spawn(move || {
+            zbus::blocking::connection::Builder::async_io_unix_stream(server_socket)
+                .server(zbus::Guid::generate())
+                .expect("server GUID")
+                .p2p()
+                .serve_at(
+                    "/root",
+                    peer("App", "application", vec!["/frame", "/nested"], None),
+                )
+                .expect("root interface")
+                .serve_at(
+                    "/frame",
+                    peer(
+                        "Main Window",
+                        "application",
+                        vec!["/inner"],
+                        Some(ATSPI_ROLE_FRAME),
+                    ),
+                )
+                .expect("frame interface")
+                .serve_at("/inner", peer("Inner", "push button", vec![], None))
+                .expect("inner interface")
+                .serve_at(
+                    "/nested",
+                    peer("Nested", "application", vec!["/hoisted"], None),
+                )
+                .expect("nested interface")
+                .serve_at("/hoisted", peer("Hoisted", "push button", vec![], None))
+                .expect("hoisted interface")
+                .build()
+                .expect("server connection")
+        });
+        let connection = zbus::blocking::connection::Builder::async_io_unix_stream(client_socket)
+            .p2p()
+            .build()
+            .expect("client connection");
+        let _server = server.join().expect("server thread");
+        let provider = LinuxProvider {
+            a11y_bus: Mutex::new(connection),
+            handle_cache: Mutex::new(HashMap::new()),
+            action_indices: Mutex::new(HashMap::new()),
+            window_manager: WindowManager::new(),
+        };
+        let root = provider.build_element_data(
+            &AccessibleRef {
+                bus_name: "org.test.LiveTree".into(),
+                path: "/root".into(),
+            },
+            None,
+        );
+        let windows = provider.app_windows(&root).expect("app windows");
+        let names: Vec<_> = windows
+            .iter()
+            .map(|w| (w.name.as_deref().unwrap_or(""), w.role))
+            .collect();
+        assert_eq!(
+            names,
+            vec![("Main Window", Role::Window), ("Hoisted", Role::Button)],
+            "the frame named `application` stays a window; the real nested \
+             application is flattened into its children"
+        );
     }
 
     #[test]
