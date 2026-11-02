@@ -49,7 +49,7 @@ pub(crate) const XK_SHIFT_L: u32 = 0xffe1;
 pub(crate) const XK_CONTROL_L: u32 = 0xffe3;
 pub(crate) const XK_ALT_L: u32 = 0xffe9;
 pub(crate) const XK_SUPER_L: u32 = 0xffeb;
-pub(crate) const XK_RETURN: u32 = 0xff0d;
+const XK_RETURN: u32 = 0xff0d;
 const XK_ESCAPE: u32 = 0xff1b;
 const XK_BACKSPACE: u32 = 0xff08;
 const XK_TAB: u32 = 0xff09;
@@ -153,7 +153,7 @@ pub(crate) fn plan_keystrokes<K: Copy>(
         };
         let (keycode, needs_shift) = lookup(keysym).ok_or_else(|| Error::Unsupported {
             feature: format!(
-                "typing character '{c}' (U+{:04X}, keysym 0x{keysym:04x}) at index {index} of \
+                "typing character {c:?} (U+{:04X}, keysym 0x{keysym:04x}) at index {index} of \
                  the text: it has no keycode in the current {layout}; nothing was typed",
                 c as u32
             ),
@@ -164,7 +164,7 @@ pub(crate) fn plan_keystrokes<K: Copy>(
                 None => {
                     let (kc, _) = lookup(XK_SHIFT_L).ok_or_else(|| Error::Unsupported {
                         feature: format!(
-                            "typing character '{c}' at index {index} of the text needs Shift, \
+                            "typing character {c:?} at index {index} of the text needs Shift, \
                              but Shift_L has no keycode in the current {layout}; nothing was \
                              typed"
                         ),
