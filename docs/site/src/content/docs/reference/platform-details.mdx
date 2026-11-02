@@ -282,6 +282,8 @@ The node's `raw` map records how it was built:
 
 The representative window is the process's first top-level window in z-order.
 
+xa11y sets the UIA connection timeout to 2 s and the transaction timeout to 20 s, so one hung provider cannot stall a call for longer than that. A window Windows already reports as not responding (`IsHungAppWindow`) fails fast instead. Listing apps, looking an app up by process ID, reading an app's windows, and finding the foreground app all return `Timeout`, and the diagnosis names each hung window with its title, process ID and executable. The elapsed time on that `Timeout` reports the 5 s threshold Windows uses to call a window hung. xa11y itself does not wait. A window that is only briefly busy is read normally. A UIA call that runs out the transaction timeout also becomes `Timeout` for those discovery operations. Calls on a single element still report it as `Platform`.
+
 Windows subscriptions register their UIA handlers on every current top-level
 window of the process, and a desktop-scoped open/close watch attaches windows
 opened after `subscribe` (and drops closed ones, so a closed window stops
