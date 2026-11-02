@@ -195,7 +195,7 @@ Scroll units are platform "ticks", typically one notch of a physical scroll whee
 
 Modifier keys (`Shift`, `Ctrl`, `Alt`, `Meta`) are ordinary keys, so pass them alongside character keys. `Meta` is the platform's "command" modifier, spelled Cmd on macOS, Win on Windows, and Super on Linux.
 
-On Windows, letters and digits are positional virtual keys (`VK_A`, `VK_1`), as keyboard shortcuts expect. Any other character key is looked up on the keyboard layout of the foreground window. A character that layout can only produce with a modifier, such as `/` on a German layout, is refused with `Unsupported` rather than pressed with that modifier added.
+On Windows, letters and digits are positional virtual keys (`VK_A`, `VK_1`), as keyboard shortcuts expect. Any other character key is looked up on the keyboard layout of the foreground window. If the layout needs a modifier to type the character (Shift for `/` on a German layout), the call returns `Unsupported`. xa11y does not add the modifier for you.
 
 <Tabs syncKey="lang">
   <TabItem label="Rust">
