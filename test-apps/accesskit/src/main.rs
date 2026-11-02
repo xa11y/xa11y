@@ -122,6 +122,9 @@ const OPEN_DIALOG_BTN: NodeId = NodeId(75);
 // A read-only text input. AT-SPI writes to it must be refused from its
 // READ_ONLY state rather than reported as success (issue #486).
 const READONLY_FIELD: NodeId = NodeId(76);
+// A node whose bounds are a zero-size rectangle. AT-SPI GetExtents reports
+// 0x0 for it, which is "no bounds", not a clickable point (issue #489).
+const ZERO_SIZE_NODE: NodeId = NodeId(77);
 
 // Dynamic items start at NodeId(100) to leave room for future static nodes
 const DYNAMIC_ITEM_BASE: u64 = 100;
@@ -353,7 +356,11 @@ fn build_main_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
     // Name row
     let mut name_row = Node::new(Role::GenericContainer);
     name_row.set_label("Name Row");
-    name_row.set_children(vec![NAME_LABEL, NAME_FIELD]);
+    // The zero-size node sits right after a sibling with real bounds:
+    // AccessKit drops a child whose box does not intersect a clipping
+    // parent's unless an adjacent sibling's does, and an empty box never
+    // intersects anything.
+    name_row.set_children(vec![NAME_LABEL, NAME_FIELD, ZERO_SIZE_NODE]);
     nodes.push((NAME_ROW, name_row));
 
     let mut name_label = Node::new(Role::Label);
@@ -735,6 +742,17 @@ fn build_extra_panel(state: &AppState, nodes: &mut Vec<(NodeId, Node)>) {
     readonly_field.set_value("locked");
     readonly_field.set_read_only();
     nodes.push((READONLY_FIELD, readonly_field));
+    let mut zero_size = Node::new(Role::Label);
+    // Label + value: AT-SPI reads a Label's name from its value.
+    zero_size.set_label("Zero-size Marker");
+    zero_size.set_value("Zero-size Marker");
+    zero_size.set_bounds(Rect {
+        x0: 20.0,
+        y0: 20.0,
+        x1: 20.0,
+        y1: 20.0,
+    });
+    nodes.push((ZERO_SIZE_NODE, zero_size));
 
     let mut link = Node::new(Role::Link);
     link.set_label("Visit Example");

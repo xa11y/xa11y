@@ -3122,11 +3122,13 @@ pub(crate) fn atspi_visible(bits: u64) -> bool {
 /// is a sentinel rather than a position.
 ///
 /// Toolkits report an unrealised or off-screen widget as `INT32_MIN`
-/// coordinates (GTK 3) or a non-positive size (`-1,-1,-1,-1` and `0x0`).
-/// Accepting those as bounds put click targets and screenshot crops at
-/// -2147483648, so they are "no bounds" (issue #489).
+/// coordinates (GTK 3), a negative size (`-1,-1,-1,-1`) or `0x0`. Accepting
+/// those as bounds put click targets and screenshot crops at -2147483648, so
+/// they are "no bounds" (issue #489). A zero width *or* height alone (a
+/// separator line) is a real, if thin, rectangle and is kept — the same rule
+/// the Windows backend applies.
 fn extents_to_rect(x: i32, y: i32, w: i32, h: i32) -> Option<Rect> {
-    if x == i32::MIN || y == i32::MIN || w <= 0 || h <= 0 {
+    if x == i32::MIN || y == i32::MIN || w < 0 || h < 0 || (w == 0 && h == 0) {
         return None;
     }
     Some(Rect {
@@ -3568,8 +3570,11 @@ mod tests {
         assert_eq!(extents_to_rect(i32::MIN, 0, 30, 40), None);
         assert_eq!(extents_to_rect(0, i32::MIN, 30, 40), None);
         assert_eq!(extents_to_rect(-1, -1, -1, -1), None);
+        assert_eq!(extents_to_rect(5, 5, -3, 10), None);
         assert_eq!(extents_to_rect(5, 5, 0, 0), None);
-        assert_eq!(extents_to_rect(5, 5, 30, 0), None);
+        // N×0 and 0×N are thin but real (a separator), as on Windows.
+        assert!(extents_to_rect(5, 5, 30, 0).is_some());
+        assert!(extents_to_rect(5, 5, 0, 30).is_some());
     }
 
     #[test]
