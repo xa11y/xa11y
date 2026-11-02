@@ -72,7 +72,7 @@ Roles not recognized by a platform map to `Unknown`.
 | `Increment` | AXIncrement | increment *(or Value +step)* | RangeValuePattern *(+step)* |
 | `Decrement` | AXDecrement | decrement *(or Value -step)* | RangeValuePattern *(-step)* |
 | `ShowMenu` | AXShowMenu | menu, showmenu, popup | ExpandCollapsePattern |
-| `ScrollIntoView` | *(no-op, no AX equivalent)* | Component.ScrollTo | ScrollItemPattern |
+| `ScrollIntoView` | AXScrollToVisible *(when advertised)* | Component.ScrollTo | ScrollItemPattern |
 
 Window verbs map differently again, because each platform's window control
 API is separate from its element-action interface:
@@ -136,7 +136,7 @@ that the selected backend can represent.
 
 ### ScrollIntoView
 
-macOS has no direct equivalent, so this action is a **no-op**. On Linux it uses `Component.ScrollTo` with top-edge alignment. On Windows it uses `ScrollItemPattern.ScrollIntoView`.
+On macOS it performs `AXScrollToVisible` when the element advertises that action, and returns `ActionNotSupported` otherwise. On Linux it uses `Component.ScrollTo` with top-edge alignment. On Windows it uses `ScrollItemPattern.ScrollIntoView`.
 
 ### Activate: AXRaise alone does not activate
 

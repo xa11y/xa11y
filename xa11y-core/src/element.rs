@@ -423,7 +423,9 @@ impl Element {
 
     /// Scroll this element into the visible area.
     ///
-    /// No-op on macOS — the macOS accessibility API has no equivalent.
+    /// Uses `AXScrollToVisible` on macOS when the element advertises it, and
+    /// returns [`Error::ActionNotSupported`](crate::error::Error::ActionNotSupported)
+    /// otherwise; `Component.ScrollTo` on Linux; `ScrollItemPattern` on Windows.
     pub fn scroll_into_view(&self) -> crate::error::Result<()> {
         self.provider.scroll_into_view(&self.data)
     }

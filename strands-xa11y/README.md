@@ -129,7 +129,7 @@ Usually enough for the model to fix its own selector without falling back to pix
 
 ## Known limits
 
-- `scroll_into_view` is a no-op on macOS (no accessibility equivalent) — use `scroll`.
+- With xa11y 0.15.4 and earlier, `scroll_into_view` does nothing on macOS, so use `scroll` there. Later releases perform `AXScrollToVisible` when the element advertises it, and raise `ActionNotSupported` otherwise.
 - `blur` only works on macOS.
 - The `*` selector materialises every element's attributes; it is cheap on Windows, expensive on macOS and Linux.
 - `detail="rich"` snapshots read each property individually, which is one D-Bus round trip apiece on Linux. Use `detail="basic"` on large trees, or scope with `selector`.
