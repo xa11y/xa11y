@@ -450,6 +450,11 @@ impl InputProvider for WindowsInputProvider {
     }
 
     fn pointer_up(&self, button: MouseButton) -> Result<()> {
+        // Entering the scope can fail before anything is sent, leaving the
+        // button or key held. That is acceptable: the result is deterministic
+        // per thread (the thread's awareness and whether it may switch do not
+        // change between calls), so the matching down on this thread would
+        // already have failed the same way and pressed nothing.
         let dpi = crate::dpi::DpiScope::enter()?;
         let (_, up) = button_down_up(button);
         // Never refused: a release must always reach the wire.
@@ -569,6 +574,11 @@ impl InputProvider for WindowsInputProvider {
     }
 
     fn key_up(&self, key: &Key) -> Result<()> {
+        // Entering the scope can fail before anything is sent, leaving the
+        // button or key held. That is acceptable: the result is deterministic
+        // per thread (the thread's awareness and whether it may switch do not
+        // change between calls), so the matching down on this thread would
+        // already have failed the same way and pressed nothing.
         let dpi = crate::dpi::DpiScope::enter()?;
         // Release the key `key_down` pressed, not what the layout says now.
         let held = match key {
