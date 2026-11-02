@@ -63,6 +63,14 @@ if ($LASTEXITCODE -ne 0) { throw "cl.exe failed with exit code $LASTEXITCODE" }
 # ── Layout + pack ──────────────────────────────────────────────────────────
 Copy-Item (Join-Path $Here 'AppxManifest.xml') $Layout
 Copy-Item -Recurse (Join-Path $Here 'Assets') (Join-Path $Layout 'Assets')
+# resources.pri is the package resource index. Visual Studio always generates
+# one; Windows.UI.Xaml resolves the app's resources (ms-appx: URIs, the
+# manifest's display strings) through it.
+$priConfig = Join-Path $Obj 'priconfig.xml'
+& (Join-Path $sdkBin 'makepri.exe') createconfig /cf $priConfig /dq en-US /pv 10.0.0 /o
+if ($LASTEXITCODE -ne 0) { throw "makepri createconfig failed with exit code $LASTEXITCODE" }
+& (Join-Path $sdkBin 'makepri.exe') new /pr $Layout /cf $priConfig /of (Join-Path $Layout 'resources.pri') /o
+if ($LASTEXITCODE -ne 0) { throw "makepri new failed with exit code $LASTEXITCODE" }
 & (Join-Path $sdkBin 'makeappx.exe') pack /o /d $Layout /p $Msix
 if ($LASTEXITCODE -ne 0) { throw "makeappx pack failed with exit code $LASTEXITCODE" }
 

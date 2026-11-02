@@ -68,7 +68,15 @@ catch {
     $ex = $err.Exception
     if ($ex.InnerException) { $ex = $ex.InnerException }
     [Console]::Error.WriteLine(("Activation of {0} failed: HRESULT 0x{1:X8}: {2}" -f $aumid, $ex.HResult, $ex.Message.Trim()))
-    [Console]::Error.WriteLine("Account: $(whoami /user /fo csv /nh)")
+    # The full path: on a CI runner's git-bash PATH, a bare `whoami` is MSYS's.
+    [Console]::Error.WriteLine("Account: $(& "$env:SystemRoot\System32\whoami.exe" /user /fo csv /nh)")
+    # Written by the app itself (main.cpp, log_failure) when startup fails.
+    $failureLog = Join-Path $env:LOCALAPPDATA "Packages\$($pkg.PackageFamilyName)\LocalState\startup-failure.log"
+    if (Test-Path $failureLog) {
+        Get-Content $failureLog | ForEach-Object { [Console]::Error.WriteLine("[app] $_") }
+    } else {
+        [Console]::Error.WriteLine("[app] no $failureLog")
+    }
     $logs = @(
         @{ LogName = 'Application'; ProviderName = 'Application Error', 'Windows Error Reporting' },
         @{ LogName = 'Microsoft-Windows-AppModel-Runtime/Admin' },

@@ -21,11 +21,17 @@
 // workaround).
 #undef GetCurrentTime
 
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <exception>
 #include <string>
+#include <string_view>
 
 #include <winrt/Windows.ApplicationModel.Activation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Storage.h>
 #include <winrt/Windows.UI.Xaml.Automation.h>
 #include <winrt/Windows.UI.Xaml.Controls.Primitives.h>
 #include <winrt/Windows.UI.Xaml.Controls.h>
@@ -164,24 +170,74 @@ UIElement build_content() {
     return scroller;
 }
 
-struct App : ApplicationT<App> {
-    void OnLaunched(LaunchActivatedEventArgs const&) {
-        auto window = Window::Current();
-        // Activating a running app calls OnLaunched again; build only once.
-        if (!window.Content()) {
-            window.Content(build_content());
+// ── Startup failure log ─────────────────────────────────────────────────
+// A UWP process that dies during startup leaves only "The app didn't start"
+// and an exception code in the event log. So every failure path appends what
+// it caught to LocalState\startup-failure.log (the one folder an app
+// container may write, at %LOCALAPPDATA%\Packages\<family>\LocalState), and
+// test-apps/uwp/launch.ps1 prints that file when activation fails. The
+// failure still propagates: logging is the only thing these handlers add.
+void log_failure(std::wstring_view where, std::wstring_view what) noexcept {
+    try {
+        std::wstring path{Windows::Storage::ApplicationData::Current().LocalFolder().Path()};
+        path += L"\\startup-failure.log";
+        FILE* file = nullptr;
+        if (_wfopen_s(&file, path.c_str(), L"a, ccs=UTF-8") == 0 && file) {
+            fwprintf(file, L"%.*s: %.*s\n", static_cast<int>(where.size()), where.data(),
+                     static_cast<int>(what.size()), what.data());
+            fclose(file);
         }
-        window.Activate();
+    } catch (...) {
+        // Nowhere left to report a failure to write the failure report; the
+        // original failure is still propagating to the caller.
+    }
+}
+
+void log_hresult(std::wstring_view where, hresult_error const& error) noexcept {
+    wchar_t code[16];
+    swprintf_s(code, L"0x%08X ", static_cast<uint32_t>(error.code().value));
+    log_failure(where, std::wstring{code} + std::wstring{error.message()});
+}
+
+struct App : ApplicationT<App> {
+    App() {
+        UnhandledException([](auto&&, UnhandledExceptionEventArgs const& args) {
+            wchar_t code[16];
+            swprintf_s(code, L"0x%08X ", static_cast<uint32_t>(args.Exception().value));
+            log_failure(L"Application.UnhandledException", std::wstring{code} + std::wstring{args.Message()});
+        });
+    }
+
+    void OnLaunched(LaunchActivatedEventArgs const&) {
+        try {
+            auto window = Window::Current();
+            // Activating a running app calls OnLaunched again; build only once.
+            if (!window.Content()) {
+                window.Content(build_content());
+            }
+            window.Activate();
+        } catch (hresult_error const& error) {
+            log_hresult(L"OnLaunched", error);
+            throw;
+        }
     }
 };
 
 }  // namespace
 
-// No init_apartment: the UWP runtime initializes the main thread itself
-// (as MTA) when Application::Start runs CoreApplication, and an STA set up
-// here first makes activation fail with "The app didn't start". This is the
-// same wWinMain the C++/WinRT UWP project template generates.
+// No init_apartment: Application::Start runs CoreApplication, which sets up
+// the main thread itself. This is the wWinMain the C++/WinRT UWP project
+// template generates, plus the startup failure log.
 int __stdcall wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
-    Application::Start([](auto&&) { make<App>(); });
+    std::set_terminate([] {
+        log_failure(L"std::terminate", L"uncaught exception or noexcept violation");
+        std::abort();
+    });
+    try {
+        Application::Start([](auto&&) { make<App>(); });
+    } catch (hresult_error const& error) {
+        log_hresult(L"Application::Start", error);
+        throw;
+    }
     return 0;
 }
