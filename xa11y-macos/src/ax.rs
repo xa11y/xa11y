@@ -2466,6 +2466,7 @@ fn ax_action_to_name(ax_name: &str) -> Option<&'static str> {
         "AXIncrement" => Some("increment"),
         "AXDecrement" => Some("decrement"),
         "AXRaise" => Some("activate"),
+        "AXScrollToVisible" => Some("scroll_into_view"),
         _ => None,
     }
 }
@@ -4472,9 +4473,27 @@ impl Provider for MacOSProvider {
         set_bool_attr(ax.as_ptr(), "AXExpanded", false, "collapse", element.role)
     }
 
-    fn scroll_into_view(&self, _element: &ElementData) -> Result<()> {
-        // macOS has no accessibility API equivalent for scroll-into-view.
-        Ok(())
+    fn scroll_into_view(&self, element: &ElementData) -> Result<()> {
+        // `AXScrollToVisible` is the AX counterpart of AT-SPI
+        // `Component.ScrollTo` and UIA `ScrollItemPattern.ScrollIntoView`.
+        // Gate on the advertised list, as `press` does: AppKit answers
+        // `kAXErrorSuccess` for actions an element does not implement, so a
+        // blind dispatch would report a scroll that never happened (tenet 1).
+        // Setting the enclosing scroll bar's `AXValue` would be a second
+        // mechanism, so it is deliberately not tried here.
+        if !element.actions.iter().any(|a| a == "scroll_into_view") {
+            return Err(Error::ActionNotSupported {
+                action: "scroll_into_view".to_string(),
+                role: element.role,
+            });
+        }
+        let ax = self.get_cached(element.handle)?;
+        perform_ax_action(
+            ax.as_ptr(),
+            "AXScrollToVisible",
+            "scroll_into_view",
+            element.role,
+        )
     }
 
     // ── Window management ──────────────────────────────────────────
@@ -5934,6 +5953,10 @@ mod tests {
         assert_eq!(ax_action_to_name("AXShowMenu"), Some("show_menu"));
         assert_eq!(ax_action_to_name("AXIncrement"), Some("increment"));
         assert_eq!(ax_action_to_name("AXDecrement"), Some("decrement"));
+        assert_eq!(
+            ax_action_to_name("AXScrollToVisible"),
+            Some("scroll_into_view")
+        );
         assert_eq!(ax_action_to_name("AXRaise"), Some("activate"));
     }
 
