@@ -16,6 +16,10 @@
 // Item) so the shared suites' APP_CONFIGS shape applies unchanged.
 
 #include <windows.h>
+// <windows.h> defines GetCurrentTime as a macro, which collides with the
+// C++/WinRT projection's Storyboard::GetCurrentTime (the usual C++/WinRT
+// workaround).
+#undef GetCurrentTime
 
 #include <string>
 

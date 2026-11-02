@@ -49,9 +49,11 @@ Write-Host "Windows SDK: $sdkVer"
 # /APPCONTAINER marks the image as runnable only inside an app container,
 # which a UWP entry point requires. The CRT is linked statically (/MT) so the
 # package needs no Microsoft.VCLibs framework dependency; Store certification
-# would reject that, sideloading does not care.
+# would reject that, sideloading does not care. C++20, because under C++17
+# C++/WinRT falls back to <experimental/coroutine>, which current MSVC
+# rejects outright (STL1011).
 $exe = Join-Path $Layout 'xa11y-uwp-test-app.exe'
-& cl.exe /nologo /std:c++17 /EHsc /permissive- /W4 /MT /O1 `
+& cl.exe /nologo /std:c++20 /EHsc /permissive- /W4 /MT /O1 `
     /I $cppwinrt `
     /Fo"$Obj\\" (Join-Path $Here 'main.cpp') `
     /Fe"$exe" `
