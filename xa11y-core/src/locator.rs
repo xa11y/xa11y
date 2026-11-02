@@ -592,7 +592,13 @@ impl Locator {
             ..Diagnosis::default()
         };
         match last {
-            Some(data) => d.last_observed = Some(describe_observed(data)),
+            Some(data) => {
+                d.last_observed = Some(describe_observed(data));
+                // `visible=false` alone does not say what would fix it (issue
+                // #590): a scrolled-out element needs `scroll_into_view`, a
+                // minimized window needs restoring.
+                d.hidden_reason = data.states.hidden_reason;
+            }
             None if ever_matched => {
                 d.last_observed =
                     Some("selector matched earlier in the wait but no longer matches".to_string());
@@ -1898,6 +1904,10 @@ mod tests {
             last.contains(r#"static_text "Status""#) && last.contains("visible=false"),
             "last observed should describe the matched element's state, got: {last}"
         );
+        // And say why it is hidden, structurally and in the message (#590).
+        assert_eq!(d.hidden_reason, Some(crate::HiddenReason::NotShowing));
+        let msg = format!("{err}");
+        assert!(msg.contains("hidden because: not_showing"), "{msg}");
         // A matched element needs no candidate/scope sweep.
         assert!(d.candidates.is_empty(), "{:?}", d.candidates);
         assert!(d.scope.is_none(), "{:?}", d.scope);
@@ -2100,6 +2110,7 @@ mod tests {
                 .is_some_and(|o| o.contains("visible=false")),
             "{d:?}"
         );
+        assert_eq!(d.hidden_reason, Some(crate::HiddenReason::NotShowing));
         loc.auto_wait_unique("scroll_into_view")
             .expect("enabled is enough")
             .expect("one match");

@@ -40,6 +40,7 @@ export type {
   ClickOptions,
   DragOptions,
   EventTypeName,
+  HiddenReasonName,
   LegendEntry,
   MouseButtonName,
   Omission,
@@ -51,6 +52,7 @@ import type {
   Element,
   Event,
   EventTypeName,
+  HiddenReasonName,
   Locator,
   Rect,
   Screenshot,
@@ -548,6 +550,8 @@ export class SelectorNotMatchedError extends XA11yError {
   condition: string | null;
   /** What the failing operation last observed. */
   lastObserved: string | null;
+  /** Always `null` for this class (parity with {@link TimeoutError}). */
+  hiddenReason: HiddenReasonName | null;
   /** Bounded near-miss candidates (e.g. same-role elements). */
   candidates: string[];
   /** Bounded rendering of the search scope (tree dump or app list). */
@@ -577,6 +581,13 @@ export class TimeoutError extends XA11yError {
   selector: string | null;
   /** The last poll's observation (matched-with-states vs never matched). */
   lastObserved: string | null;
+  /**
+   * Why the last observed element was not visible, when it matched but read
+   * `visible: false`: `'scrolled_out'` (scroll it into view first),
+   * `'window_minimized'` (restore its window), `'not_showing'` or
+   * `'unknown'`. `null` when nothing hidden was observed.
+   */
+  hiddenReason: HiddenReasonName | null;
   /** Bounded near-miss candidates; collected only when the selector never matched. */
   candidates: string[];
   /** Bounded rendering of the search scope; collected only when the selector never matched. */

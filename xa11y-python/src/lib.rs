@@ -54,7 +54,7 @@ where
 
 /// Attach the structured diagnosis fields (tenet 6) as attributes on an
 /// exception instance, so harnesses can read `e.selector`, `e.condition`,
-/// `e.last_observed`, `e.candidates`, `e.scope` (and `e.elapsed` on
+/// `e.last_observed`, `e.hidden_reason`, `e.candidates`, `e.scope` (and `e.elapsed` on
 /// timeouts) instead of parsing the message. Every attribute is always set
 /// (`None` / `[]` when absent) so consumers don't need `hasattr` guards.
 fn attach_diagnosis_attrs(
@@ -74,6 +74,10 @@ fn attach_diagnosis_attrs(
         let _ = value.setattr(
             "last_observed",
             diagnosis.and_then(|d| d.last_observed.clone()),
+        );
+        let _ = value.setattr(
+            "hidden_reason",
+            diagnosis.and_then(|d| d.hidden_reason.map(|r| r.to_snake_case())),
         );
         let _ = value.setattr(
             "candidates",
@@ -229,6 +233,10 @@ fn make_py_element(
             bounds_data: data.bounds.as_ref().map(|r| (r.x, r.y, r.width, r.height)),
             enabled: data.states.enabled,
             visible: data.states.visible,
+            hidden_reason: data
+                .states
+                .hidden_reason
+                .map(|r| r.to_snake_case().to_string()),
             focused: data.states.focused,
             active: data.states.active,
             checked,
@@ -332,6 +340,11 @@ struct Element {
     enabled: bool,
     #[pyo3(get)]
     visible: bool,
+    /// Why the element is not visible: ``'scrolled_out'``,
+    /// ``'window_minimized'``, ``'not_showing'`` or ``'unknown'``. ``None``
+    /// exactly when ``visible`` is ``True``.
+    #[pyo3(get)]
+    hidden_reason: Option<String>,
     #[pyo3(get)]
     focused: bool,
     /// Whether this element is the active (foreground) window — the window that

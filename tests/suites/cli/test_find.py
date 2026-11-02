@@ -161,3 +161,19 @@ def test_find_lists_the_password_state(run_cli, app_pid, app_name):
     assert "Password" in result_lines[0], stdout
     states = re.search(r"\[([^\]]*)\]", result_lines[0])
     assert states and "password" in states.group(1).split(), result_lines[0]
+
+
+def test_find_says_why_a_scrolled_out_element_is_hidden(run_cli, app_pid, app_name):
+    """A hidden element's state block names the reason (#590).
+
+    Only the WinForms app has a control scrolled out of its pane (the
+    ``Long Pane`` fixture of issue #502); a visible one carries no reason.
+    """
+    if app_name != "winforms":
+        pytest.skip("only the WinForms app has a scrolled-out control")
+    rc, stdout, stderr = run_cli("find", '[name="Long Entry 10"]', "--pid", str(app_pid))
+    assert rc == 0, f"expected exit 0, got {rc}\nstderr: {stderr}"
+    assert "hidden=scrolled_out" in stdout, stdout
+    rc, stdout, stderr = run_cli("find", '[name="Long Entry 1"]', "--pid", str(app_pid))
+    assert rc == 0, f"expected exit 0, got {rc}\nstderr: {stderr}"
+    assert "hidden" not in stdout.splitlines()[0], stdout

@@ -19,8 +19,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use xa11y_core::{
     selector::{matches_simple, Combinator, Selector, SelectorSegment},
     CancelHandle, ElementData, ElementParts, Error, Event, EventKind, EventParts, EventReceiver,
-    Provider, Result, Role, ShellSurfaceKind, StateFlag, StateParts, StateSet, Subscription,
-    Toggled,
+    HiddenReason, Provider, Result, Role, ShellSurfaceKind, StateFlag, StateParts, StateSet,
+    Subscription, Toggled,
 };
 
 static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
@@ -589,8 +589,15 @@ impl WindowsProvider {
         } else {
             clip.clone()
         };
-        let hidden =
-            nearest.is_some_and(hwnd_in_minimized_window) || clipped_out(bounds, clip.rect);
+        // A minimized window outranks the clip: restoring the window is
+        // what has to happen first (see `HiddenReason`).
+        let hidden = if nearest.is_some_and(hwnd_in_minimized_window) {
+            Some(HiddenReason::WindowMinimized)
+        } else if clipped_out(bounds, clip.rect) {
+            Some(HiddenReason::ScrolledOut)
+        } else {
+            None
+        };
         self.clips.lock().unwrap_or_else(|e| e.into_inner()).insert(
             handle,
             ClipRecord {
@@ -2092,15 +2099,15 @@ fn uia_cached_i32(element: &IUIAutomationElement, prop: UIA_PROPERTY_ID) -> Opti
 /// because event targets are snapshots — callers don't act on them directly).
 ///
 /// `hidden_by_ancestor`: something above the element hides it although UIA
-/// leaves `IsOffscreen` false, namely a minimized window (issue #501) or a
-/// scrolling ancestor it is scrolled out of (issue #502).
+/// may leave `IsOffscreen` false, and why: a minimized window (issue #501)
+/// or a scrolling ancestor it is scrolled out of (issue #502).
 fn build_snapshot_data(
     dpi: &crate::dpi::DpiScope,
     element: &IUIAutomationElement,
     pid: Option<u32>,
     handle: u64,
     walker: Option<&IUIAutomationTreeWalker>,
-    hidden_by_ancestor: bool,
+    hidden_by_ancestor: Option<HiddenReason>,
 ) -> Result<ElementData> {
     let control_type = unsafe { element.CachedControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
     let is_table_item = (control_type == UIA_DataItemControlTypeId
@@ -4987,13 +4994,31 @@ fn get_actions(
     Ok(actions)
 }
 
+/// Why an element is not visible, or `None` when it is.
+///
+/// What the provider established about the element's ancestors wins over
+/// `IsOffscreen`, because it is the more specific answer: UIA sets
+/// `IsOffscreen` on a WPF `ListBoxItem` scrolled out of its list and on the
+/// content of a minimized window alike, and on a collapsed menu's items too,
+/// so on its own it says only that the element is not drawn.
+fn hidden_reason(
+    offscreen: bool,
+    hidden_by_ancestor: Option<HiddenReason>,
+) -> Option<HiddenReason> {
+    match hidden_by_ancestor {
+        Some(reason) => Some(reason),
+        None if offscreen => Some(HiddenReason::NotShowing),
+        None => None,
+    }
+}
+
 /// Parse UIA element properties into xa11y StateSet using pre-queried patterns.
 #[allow(non_upper_case_globals)]
 fn parse_states(
     element: &IUIAutomationElement,
     role: Role,
     patterns: &ElementPatterns,
-    hidden_by_ancestor: bool,
+    hidden_by_ancestor: Option<HiddenReason>,
 ) -> StateSet {
     let enabled = unsafe { element.CachedIsEnabled() }
         .unwrap_or(BOOL(1))
@@ -5004,7 +5029,8 @@ fn parse_states(
     // A minimized window's content (issue #501) and an item scrolled out of
     // its list (issue #502) are not visible, even though UIA leaves
     // `IsOffscreen` false on them.
-    let visible = !offscreen && !hidden_by_ancestor;
+    let hidden_reason = hidden_reason(offscreen, hidden_by_ancestor);
+    let visible = hidden_reason.is_none();
     let focused = unsafe { element.CachedHasKeyboardFocus() }
         .unwrap_or(BOOL(0))
         .as_bool();
@@ -5137,6 +5163,7 @@ fn parse_states(
     StateParts {
         enabled,
         visible,
+        hidden_reason,
         focused,
         active,
         focusable,
@@ -6105,7 +6132,7 @@ impl EventContext {
             Some(self.app_pid),
             0,
             Some(&self.walker),
-            in_minimized_window,
+            in_minimized_window.then_some(HiddenReason::WindowMinimized),
         )
     }
 
@@ -6950,6 +6977,26 @@ mod tests {
             intersect_clip(Some(list), Some(rect(50, -20, 200, 60))),
             Some(rect(50, 0, 100, 60))
         );
+    }
+
+    #[test]
+    fn hidden_reason_prefers_what_the_ancestors_say() {
+        // Visible only when nothing hides it.
+        assert_eq!(hidden_reason(false, None), None);
+        // IsOffscreen alone says only "not drawn".
+        assert_eq!(hidden_reason(true, None), Some(HiddenReason::NotShowing));
+        // A WPF ListBoxItem scrolled out reports IsOffscreen too; the clip
+        // is the more specific answer.
+        for offscreen in [false, true] {
+            assert_eq!(
+                hidden_reason(offscreen, Some(HiddenReason::ScrolledOut)),
+                Some(HiddenReason::ScrolledOut)
+            );
+            assert_eq!(
+                hidden_reason(offscreen, Some(HiddenReason::WindowMinimized)),
+                Some(HiddenReason::WindowMinimized)
+            );
+        }
     }
 
     #[test]

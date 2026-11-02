@@ -82,10 +82,12 @@ def test_minimize_restore_roundtrip_updates_state():
     # the mock models that decision as False, not unknown.
     assert minimized.fullscreen is False
     assert minimized.visible is False
+    assert minimized.hidden_reason == "window_minimized"
     minimized.restore()
     restored = _window(probe)
     assert restored.minimized is False
     assert restored.visible is True
+    assert restored.hidden_reason is None
 
 
 def test_enter_fullscreen_minimize_sequence_keeps_every_step_honest():

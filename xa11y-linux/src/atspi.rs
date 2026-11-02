@@ -6,8 +6,8 @@ use std::sync::Mutex;
 
 use rayon::prelude::*;
 use xa11y_core::{
-    ElementData, ElementParts, Error, Provider, Rect, Result, Role, ShellSurfaceKind, StateParts,
-    StateSet, Subscription, Toggled,
+    ElementData, ElementParts, Error, HiddenReason, Provider, Rect, Result, Role, ShellSurfaceKind,
+    StateParts, StateSet, Subscription, Toggled,
 };
 use zbus::blocking::{Connection, Proxy};
 use zbus::DBusError;
@@ -1223,6 +1223,11 @@ impl LinuxProvider {
                 .insert(handle, action_index_map);
         }
 
+        let mut states = states;
+        if states.hidden_reason == Some(HiddenReason::Unknown) {
+            states.hidden_reason = Some(self.ancestor_hidden_reason(aref, bounds.as_ref()));
+        }
+
         let mut data: ElementData = ElementParts {
             role,
             name,
@@ -1304,6 +1309,56 @@ impl LinuxProvider {
         }
 
         data
+    }
+
+    /// Why an object that is `VISIBLE` but not `SHOWING` is not drawn.
+    ///
+    /// Such an object would be drawn if its ancestors were, so the answer
+    /// is above it. Climb to the first ancestor that is drawn (or minimized):
+    ///
+    /// - a minimized (`ICONIFIED`) frame on the way: `WindowMinimized`;
+    /// - a drawn ancestor whose extents the object lies entirely outside:
+    ///   `ScrolledOut`. Laid out but beyond the area its nearest drawn
+    ///   container shows is what an item scrolled out of a list or a
+    ///   scrolled window looks like (Qt item views and GTK 3 tree views
+    ///   clear `SHOWING` on exactly those);
+    /// - a drawn ancestor it overlaps, or no bounds to compare: `NotShowing`
+    ///   (a collapsed panel, an inactive tab page);
+    /// - no drawn ancestor at all: `NotShowing`.
+    ///
+    /// It runs only for hidden objects, so a tree of visible ones pays
+    /// nothing. A failed read on the way returns `Unknown` rather than a
+    /// guess: the snapshot reads every other property the same way, an
+    /// unreadable one degrading to absent, and `Unknown` is the reason's
+    /// "absent".
+    fn ancestor_hidden_reason(&self, aref: &AccessibleRef, bounds: Option<&Rect>) -> HiddenReason {
+        let mut current = aref.clone();
+        for _ in 0..HIDDEN_REASON_MAX_WALK {
+            let parent = match self.get_atspi_parent(&current) {
+                Ok(Some(parent)) => parent,
+                Ok(None) => return HiddenReason::NotShowing,
+                Err(_) => return HiddenReason::Unknown,
+            };
+            let (bits, read_ok) = self.state_bits(&parent);
+            if !read_ok {
+                return HiddenReason::Unknown;
+            }
+            if bits & ATSPI_ICONIFIED != 0 {
+                return HiddenReason::WindowMinimized;
+            }
+            if atspi_visible(bits) {
+                let Some(bounds) = bounds else {
+                    return HiddenReason::NotShowing;
+                };
+                let ifaces = self.get_interfaces(&parent).unwrap_or_default();
+                return match self.get_extents(&parent, ifaces) {
+                    Some(viewport) if !shows_within(bounds, &viewport) => HiddenReason::ScrolledOut,
+                    _ => HiddenReason::NotShowing,
+                };
+            }
+            current = parent;
+        }
+        HiddenReason::Unknown
     }
 
     /// Get the AT-SPI parent of an accessible ref.
@@ -1453,6 +1508,7 @@ impl LinuxProvider {
         let states = StateParts {
             enabled,
             visible,
+            hidden_reason: hidden_reason_from_bits(bits),
             focused: (bits & FOCUSED) != 0,
             // AT-SPI `ACTIVE` marks the foreground window/frame (see
             // `focused_app`, which relies on the same bit).
@@ -3574,9 +3630,51 @@ fn is_dock_frame(role_number: u32, attributes: &HashMap<String, String>) -> bool
 /// `SHOWING` lingers. Shared by the tree read and the event decoder so the
 /// two never disagree.
 pub(crate) fn atspi_visible(bits: u64) -> bool {
-    const SHOWING: u64 = 1 << 25;
-    const VISIBLE: u64 = 1 << 30;
-    bits & SHOWING != 0 && bits & VISIBLE != 0
+    bits & ATSPI_SHOWING != 0 && bits & ATSPI_VISIBLE != 0
+}
+
+const ATSPI_ICONIFIED: u64 = 1 << 15;
+const ATSPI_SHOWING: u64 = 1 << 25;
+const ATSPI_VISIBLE: u64 = 1 << 30;
+
+/// Why a state set means "not on screen", as far as the bits alone say, or
+/// `None` when it is on screen.
+///
+/// `ICONIFIED` (a minimized frame) and a cleared `VISIBLE` (an object its
+/// toolkit hid) answer it. `VISIBLE` without `SHOWING` does not: the object
+/// would be drawn if its ancestors were, so the answer is above it, and this
+/// returns [`HiddenReason::Unknown`] for the tree read to settle with
+/// [`LinuxProvider::ancestor_hidden_reason`]. The event decoder leaves it
+/// `Unknown`, because a signal handler does not walk ancestors.
+pub(crate) fn hidden_reason_from_bits(bits: u64) -> Option<HiddenReason> {
+    if atspi_visible(bits) {
+        None
+    } else if bits & ATSPI_ICONIFIED != 0 {
+        Some(HiddenReason::WindowMinimized)
+    } else if bits & ATSPI_VISIBLE != 0 {
+        Some(HiddenReason::Unknown)
+    } else {
+        Some(HiddenReason::NotShowing)
+    }
+}
+
+/// How many ancestors [`LinuxProvider::ancestor_hidden_reason`] climbs
+/// looking for a drawn one before it gives up and says `Unknown`.
+const HIDDEN_REASON_MAX_WALK: usize = 32;
+
+/// Whether `inner` shows through `outer` at all: some area in common, or, for
+/// a zero-width or zero-height `inner` (a separator), lying on or within
+/// `outer`'s edges. The same rule as the Windows provider's scroll clip.
+fn shows_within(inner: &Rect, outer: &Rect) -> bool {
+    let (il, it) = (inner.x as i64, inner.y as i64);
+    let (ir, ib) = (il + inner.width as i64, it + inner.height as i64);
+    let (ol, ot) = (outer.x as i64, outer.y as i64);
+    let (or, ob) = (ol + outer.width as i64, ot + outer.height as i64);
+    if inner.width > 0 && inner.height > 0 {
+        il < or && ol < ir && it < ob && ot < ib
+    } else {
+        il <= or && ol <= ir && it <= ob && ot <= ib
+    }
 }
 
 /// Turn a `Component.GetExtents` reply into bounds, or `None` when the reply
@@ -4117,6 +4215,61 @@ mod tests {
         assert!(
             crate::events::states_from_bits(VISIBLE | SHOWING, Role::Button, true, false).visible
         );
+    }
+
+    #[test]
+    fn hidden_reason_from_bits_says_what_the_bits_can() {
+        const ICONIFIED: u64 = 1 << 15;
+        const SHOWING: u64 = 1 << 25;
+        const VISIBLE: u64 = 1 << 30;
+        assert_eq!(hidden_reason_from_bits(VISIBLE | SHOWING), None);
+        assert_eq!(
+            hidden_reason_from_bits(VISIBLE | ICONIFIED),
+            Some(HiddenReason::WindowMinimized)
+        );
+        // Hidden by its toolkit.
+        assert_eq!(
+            hidden_reason_from_bits(SHOWING),
+            Some(HiddenReason::NotShowing)
+        );
+        assert_eq!(hidden_reason_from_bits(0), Some(HiddenReason::NotShowing));
+        // Would be drawn if its ancestors were: the answer is above it.
+        assert_eq!(
+            hidden_reason_from_bits(VISIBLE),
+            Some(HiddenReason::Unknown)
+        );
+        // The event decoder agrees, and `Some` exactly when not visible.
+        for bits in [0, VISIBLE, SHOWING, VISIBLE | SHOWING, VISIBLE | ICONIFIED] {
+            let states = crate::events::states_from_bits(bits, Role::Button, true, false);
+            assert_eq!(states.hidden_reason, hidden_reason_from_bits(bits));
+            assert_eq!(states.visible, states.hidden_reason.is_none());
+        }
+    }
+
+    #[test]
+    fn shows_within_needs_area_in_common() {
+        let viewport = Rect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        let at = |x, y, width, height| Rect {
+            x,
+            y,
+            width,
+            height,
+        };
+        assert!(shows_within(&at(10, 10, 20, 20), &viewport));
+        // Partly inside still shows.
+        assert!(shows_within(&at(90, 90, 20, 20), &viewport));
+        // Touching the edge is not showing; beyond it is not either.
+        assert!(!shows_within(&at(0, 100, 20, 20), &viewport));
+        assert!(!shows_within(&at(0, 250, 20, 20), &viewport));
+        assert!(!shows_within(&at(-30, 10, 20, 20), &viewport));
+        // A separator on the edge shows; one beyond it does not.
+        assert!(shows_within(&at(0, 100, 50, 0), &viewport));
+        assert!(!shows_within(&at(0, 101, 50, 0), &viewport));
     }
 
     #[test]

@@ -145,6 +145,7 @@ test('TimeoutError carries a structured diagnosis when the selector never matche
       assert.equal(err.condition, 'visible');
       assert.equal(err.selector, 'application button[name="Nope"]');
       assert.equal(err.lastObserved, 'selector never matched');
+      assert.equal(err.hiddenReason, null);
       assert.ok(err.candidates.includes('button "Back"'), `candidates: ${err.candidates}`);
       assert.ok(err.scope.includes('TestApp'), `scope: ${err.scope}`);
       assert.ok(err.elapsedMs >= 300, `elapsedMs: ${err.elapsedMs}`);
@@ -154,6 +155,29 @@ test('TimeoutError carries a structured diagnosis when the selector never matche
       return true;
     },
   );
+});
+
+test('TimeoutError names why a matched element is hidden', async () => {
+  // static_text "Status" exists in the mock tree but is not visible.
+  await assert.rejects(
+    _makeTestLocator().descendant('static_text[name="Status"]').waitVisible(0.3),
+    (err) => {
+      assert.ok(err instanceof TimeoutError);
+      assert.match(err.lastObserved, /visible=false/);
+      assert.equal(err.hiddenReason, 'not_showing');
+      assert.ok(err.message.includes('hidden because: not_showing'), err.message);
+      return true;
+    },
+  );
+});
+
+test('a hidden element says why, and a visible one does not', async () => {
+  const status = await _makeTestLocator().descendant('static_text[name="Status"]').element();
+  assert.equal(status.visible, false);
+  assert.equal(status.hiddenReason, 'not_showing');
+  const app = await _makeTestLocator().element();
+  assert.equal(app.visible, true);
+  assert.equal(app.hiddenReason, null);
 });
 
 test('SelectorNotMatchedError carries a structured diagnosis on element() miss', async () => {
@@ -180,6 +204,7 @@ test('diagnosis fields default to null/[] when a path produces no context', asyn
       assert.equal(t.selector, null);
       assert.equal(t.condition, null);
       assert.equal(t.lastObserved, null);
+      assert.equal(t.hiddenReason, null);
       assert.deepEqual(t.candidates, []);
       assert.equal(t.scope, null);
       assert.equal(t.elapsedMs, null);

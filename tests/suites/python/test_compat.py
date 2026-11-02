@@ -694,6 +694,24 @@ def test_locator_dump_shorthand(app, app_config):
     assert "button" in text
 
 
+def test_hidden_reason_is_set_exactly_when_not_visible(app):
+    """Every element carries a ``hidden_reason`` exactly when it is not
+    visible (#590), and the reason is one of the documented names."""
+    known = {"window_minimized", "scrolled_out", "not_showing", "unknown"}
+    elements = app.locator("*").elements()
+    assert elements, "the app's tree must not be empty"
+    broken = [
+        (e.role, e.name, e.visible, e.hidden_reason)
+        for e in elements
+        if (e.hidden_reason is None) != e.visible
+        or (e.hidden_reason is not None and e.hidden_reason not in known)
+    ]
+    assert not broken, (
+        f"hidden_reason must be a known name exactly when visible is False; "
+        f"these elements break it: {broken[:20]}"
+    )
+
+
 def _scrolled_pane_visibility(app, pane_name: str, first: str, last: str):
     """The first and last entries' ``visible``, read both ways the provider
     computes it: a selector search, which takes the one-pass subtree fetch,
@@ -742,6 +760,16 @@ def test_controls_scrolled_out_of_a_pane_are_not_visible(app, app_config):
         f"children(): the first entry must be visible and the last scrolled "
         f"out; got {listed}"
     )
+    # A hidden element says why, and a visible one says nothing (#590).
+    assert hidden.hidden_reason == "scrolled_out", (
+        f"{last!r} is hidden because its pane clips it, so hidden_reason "
+        f"must be 'scrolled_out'; got {hidden.hidden_reason!r}"
+    )
+    shown = app.locator(f'[name="{first}"]').element()
+    assert shown.hidden_reason is None, (
+        f"a visible element has no hidden_reason; {first!r} reports "
+        f"{shown.hidden_reason!r}"
+    )
 
 
 def test_scrolling_a_pane_flips_which_controls_are_visible(app, app_config):
@@ -783,6 +811,10 @@ def test_scrolling_a_pane_flips_which_controls_are_visible(app, app_config):
             f"{first!r} reports uia_is_offscreen="
             f"{gone.raw.get('uia_is_offscreen')!r} after scrolling out, so "
             f"this test no longer exercises issue #502"
+        )
+        assert gone.hidden_reason == "scrolled_out", (
+            f"{first!r} scrolled out of its pane, so hidden_reason must be "
+            f"'scrolled_out'; got {gone.hidden_reason!r}"
         )
     finally:
         # Put the shared app back for the test above, whatever the order.

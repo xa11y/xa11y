@@ -203,7 +203,9 @@ ordinary attributes: `checked` takes `\"on\"` / `\"off\"` / `\"mixed\"`, and \
 `modal`, `active`, `password`, and the window states `minimized`, `maximized`, and \
 `fullscreen`. A window state that the platform cannot report reads as absent \
 (no attribute) rather than `\"false\"`, so match `minimized=\"true\"` if you \
-need to be sure the state is known.";
+need to be sure the state is known. `hidden_reason` is present only on an \
+element that is not visible, and says why: `\"scrolled_out\"` (scroll it into \
+view), `\"window_minimized\"`, `\"not_showing\"`, or `\"unknown\"`.";
 
 /// What one tool call produced.
 #[derive(Debug)]
@@ -678,7 +680,11 @@ fn tool_definition(name: &str) -> Value {
                      (in seconds) in the environment the server is launched with to \
                      change it; no tool argument does. A call that is going to fail \
                      therefore takes that long and returns a `timeout` failure \
-                     naming what it was waiting for and what it last saw. Do not wrap \
+                     naming what it was waiting for and what it last saw. When it \
+                     matched an element that was not visible, the diagnosis also has \
+                     `hidden_reason`: `scrolled_out` means it has to be scrolled into \
+                     view first (`scroll-into-view`, where the element supports it), \
+                     `window_minimized` that its window has to be restored. Do not wrap \
                      this tool in a retry loop; the wait is the retry loop.\n\n\
                      `ok: true` means the application accepted the call, not that \
                      anything changed: a control is free to accept an action and do \
@@ -1701,7 +1707,10 @@ fn describe_candidate(data: &crate::ElementData) -> String {
         extras.push("disabled".into());
     }
     if !data.states.visible {
-        extras.push("hidden".into());
+        extras.push(match data.states.hidden_reason {
+            Some(reason) => format!("hidden={reason}"),
+            None => "hidden".into(),
+        });
     }
     // The centre point is what tells two identically-named siblings apart,
     // and it is also what `click` would need if the caller goes that way.
@@ -2176,6 +2185,9 @@ fn states_json(states: &crate::StateSet) -> Value {
     let mut out = Map::new();
     out.insert("enabled".into(), json!(states.enabled));
     out.insert("visible".into(), json!(states.visible));
+    if let Some(reason) = states.hidden_reason {
+        out.insert("hidden_reason".into(), json!(reason.to_snake_case()));
+    }
     for (key, get) in SENT_WHEN_TRUE {
         if get(states) {
             out.insert(key.into(), json!(true));
@@ -2286,6 +2298,11 @@ fn diagnosis_json(d: &crate::Diagnosis) -> Value {
         &mut out,
         "last_observed",
         d.last_observed.as_deref().map(Value::from),
+    );
+    insert_some(
+        &mut out,
+        "hidden_reason",
+        d.hidden_reason.map(|r| Value::from(r.to_snake_case())),
     );
     if !d.candidates.is_empty() {
         out.insert(
@@ -3379,6 +3396,24 @@ mod tests {
         assert_eq!(structured["tool"], "find");
         assert_eq!(structured["diagnosis"]["condition"], "visible");
         assert_eq!(structured["diagnosis"]["candidates"][0], "button \"OK\"");
+        assert!(structured["diagnosis"].get("hidden_reason").is_none());
+    }
+
+    #[test]
+    fn a_timeout_on_a_hidden_element_names_the_reason() {
+        let err = CliError::Xa11y(
+            crate::Error::timeout(std::time::Duration::from_secs(1)).diagnose(
+                crate::Diagnosis::new()
+                    .condition("press target actionable (visible && enabled)")
+                    .last_observed(
+                        "matched button \"Save\" (visible=false, enabled=true, focused=false)",
+                    )
+                    .hidden_reason(crate::HiddenReason::ScrolledOut),
+            ),
+        );
+        let (text, structured) = describe_failure("action", &err);
+        assert!(text.contains("hidden because: scrolled_out"), "{text}");
+        assert_eq!(structured["diagnosis"]["hidden_reason"], "scrolled_out");
     }
 
     #[test]
@@ -4107,6 +4142,10 @@ mod tests {
         assert!(states.contains_key("visible"));
         assert!(!states.contains_key("focused"), "false states are omitted");
         assert!(!states.contains_key("password"), "false states are omitted");
+        assert!(
+            !states.contains_key("hidden_reason"),
+            "a visible element has no hidden reason"
+        );
     }
 
     #[test]
@@ -4116,6 +4155,16 @@ mod tests {
         let encoded = element_data_json(&data);
         assert_eq!(encoded["role"], "text_field");
         assert_eq!(encoded["states"]["password"], true);
+    }
+
+    #[test]
+    fn a_hidden_element_says_why() {
+        let mut data = crate::ElementData::for_role(crate::Role::Button);
+        data.states.visible = false;
+        data.states.hidden_reason = Some(crate::HiddenReason::ScrolledOut);
+        let encoded = element_data_json(&data);
+        assert_eq!(encoded["states"]["visible"], false);
+        assert_eq!(encoded["states"]["hidden_reason"], "scrolled_out");
     }
 
     #[test]

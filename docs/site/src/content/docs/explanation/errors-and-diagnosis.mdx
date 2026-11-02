@@ -54,6 +54,10 @@ Reading it back:
   - `matched button "Export" (visible=false, enabled=true, focused=false)`
     means the element was there in the wrong state. No candidate or scope
     sweep is attached in this case. The states already tell the story.
+    When it was hidden, the message ends with `hidden because:
+    scrolled_out` (or `window_minimized`, `not_showing`, `unknown`), and the
+    reason is also the `hidden_reason` field. See
+    [hidden reason](/reference/platform-details/#hidden-reason).
   - `selector matched 2 element(s); nth(5) requested` means an `nth()`
     index out of range.
 - **`candidates`** lists near-misses: elements with the selector's target

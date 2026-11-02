@@ -317,6 +317,25 @@ The scroll check has limits. UIA has no viewport rectangle, so the ancestor's bo
 
 Auto-waiting actions wait for `visible`, so an action on a control scrolled out of view times out instead of acting. `scroll_into_view()` waits only for attached and enabled, but it needs the UIA ScrollItem pattern, which list items, tree items and similar controls have. A plain control such as a button has none, and the call returns `Unsupported`. For those, call `focus()` on an `Element` snapshot: frameworks such as WinForms scroll a focused control into view. `Locator.focus()` doesn't help there, because it also waits for `visible`. See the [locator reference](/reference/locator/).
 
+### Hidden reason
+
+When `visible` is false, `hidden_reason` says why, and it is `None` (`null` in JavaScript) whenever `visible` is true. When more than one reason applies, the first in this table wins:
+
+| Value | Meaning |
+| --- | --- |
+| `window_minimized` | The element's window is minimized. Restore it to act. |
+| `scrolled_out` | An ancestor that scrolls has moved the element out of its viewport. Scroll it into view to act. |
+| `not_showing` | The platform reports the element hidden for a reason it doesn't name, such as a collapsed section or a hidden page. |
+| `unknown` | The element is hidden, and xa11y couldn't tell which of the reasons above applies. |
+
+What each platform can tell apart:
+
+- **Windows** reports `window_minimized` for the contents of a minimized window and `scrolled_out` for the scroll check described above. `IsOffscreen` alone gives `not_showing`.
+- **Linux** reports `window_minimized` for an element that carries the AT-SPI `Iconified` state. An element that keeps `Visible` but lacks `Showing` is checked against its ancestors: an `Iconified` one gives `window_minimized`. Otherwise, if the element's bounds lie outside the extents of its nearest ancestor that is showing, the reason is `scrolled_out`, and if not, `not_showing`. Elements without `Visible` report `not_showing`. Event targets skip the ancestor walk and report `unknown` for the `Visible`-without-`Showing` case.
+- **macOS** has only `AXHidden`, which carries no reason, so every hidden element reports `not_showing`.
+
+A timeout on an element that matched but stayed hidden carries the reason in its diagnosis. See [errors](/reference/errors/).
+
 ### Selected state
 
 Per-item selection (`selected` on rows, cells, list items) is read differently:
