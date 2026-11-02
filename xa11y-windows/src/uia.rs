@@ -212,6 +212,9 @@ pub struct WindowsProvider {
     /// Describes which properties and patterns to pre-fetch in bulk queries.
     /// Not a cache — each FindAllBuildCache call takes a fresh snapshot.
     batch_request: IUIAutomationCacheRequest,
+    /// Bounds and scroll overflow only: the cheap refresh behind the scroll
+    /// clipping in [`Self::children_clip_of`] (issue #502).
+    scroll_request: IUIAutomationCacheRequest,
     /// Raw-view tree walker, created once. Snapshot builds use it to probe a
     /// pattern-less `DataItem`'s parent (the cell-vs-row disambiguation in
     /// `map_uia_role`); raw view matches `batch_request`'s TrueCondition so
@@ -225,6 +228,12 @@ pub struct WindowsProvider {
     /// with one lookup instead of a raw-view walk (issue #501). A miss (the
     /// element was not built through a parent here) falls back to the walk.
     host_hwnds: Mutex<BoundedHandleCache<usize>>,
+    /// The scroll clip each cached element was built under, with the bounds
+    /// it had then (issue #502). Lets `get_children` clip a level with one
+    /// refresh of the parent instead of a raw-view walk; the walk runs on a
+    /// miss, or when the parent has moved since, which means an ancestor's
+    /// viewport may have too.
+    clips: Mutex<BoundedHandleCache<ClipRecord>>,
     /// Identities of the synthesized Application nodes this provider minted,
     /// keyed by their tagged handle. `get_children(Some(app))` validates the
     /// identity (creation time) before enumerating, so a stale `App` whose
@@ -281,6 +290,7 @@ impl WindowsProvider {
             automation
         };
         let batch_request = create_batch_request(&automation)?;
+        let scroll_request = create_scroll_request(&automation)?;
         let raw_walker = unsafe { automation.RawViewWalker() }.map_err(|e| Error::Platform {
             code: e.code().0 as i64,
             message: format!("Failed to get RawViewWalker: {}", e),
@@ -289,9 +299,11 @@ impl WindowsProvider {
         Ok(Self {
             automation,
             batch_request,
+            scroll_request,
             raw_walker,
             handle_cache: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
             host_hwnds: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
+            clips: Mutex::new(BoundedHandleCache::new(MAX_CACHED_ELEMENTS)),
             synthetic_apps: Mutex::new(BoundedHandleCache::new(MAX_SYNTHETIC_APPS)),
         })
     }
@@ -507,12 +519,15 @@ impl WindowsProvider {
     /// The element MUST have been obtained via `FindAllBuildCache` or
     /// `BuildUpdatedCache` so that Cached* accessors are populated.
     /// Every query takes a fresh snapshot — callers never see stale data.
+    ///
+    /// For top-level windows only: it assumes no host window and no
+    /// scrolling ancestor, which is true of nothing below the desktop root.
     fn build_element_data(
         &self,
         element: &IUIAutomationElement,
         pid: Option<u32>,
     ) -> Result<ElementData> {
-        self.build_element_data_in(element, pid, None, HostHint::Parent)
+        self.build_element_data_in(element, pid, None, HostHint::Parent, None)
     }
 
     /// [`Self::build_element_data`] for an element whose nearest native
@@ -527,12 +542,19 @@ impl WindowsProvider {
     /// root's ([`HostHint::Ancestor`]) is used for this snapshot's visibility
     /// but not remembered, because a child HWND between the root and the
     /// element would make it the wrong window for later navigation.
+    ///
+    /// `clip` is the intersection of the element's scrolling ancestors'
+    /// viewports (see [`Self::children_clip_of`]). An element entirely
+    /// outside it is scrolled out of view and not visible, whatever
+    /// `IsOffscreen` says (issue #502). It is remembered with the element's
+    /// bounds, so its children can be clipped without a walk.
     fn build_element_data_in(
         &self,
         element: &IUIAutomationElement,
         pid: Option<u32>,
         host_hwnd: Option<HWND>,
         hint: HostHint,
+        clip: Option<RECT>,
     ) -> Result<ElementData> {
         let own = unsafe { element.CachedNativeWindowHandle() }
             .ok()
@@ -551,14 +573,88 @@ impl WindowsProvider {
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(handle, recorded.map_or(0, |h| h.0 as usize));
         }
-        let in_minimized_window = nearest.is_some_and(hwnd_in_minimized_window);
-        build_snapshot_data(
-            element,
-            pid,
+        // No bounds reads as an empty rectangle: never clipped out, and a
+        // later refresh that finds real bounds re-walks for the clip.
+        let bounds = unsafe { element.CachedBoundingRectangle() }.unwrap_or_default();
+        self.clips.lock().unwrap_or_else(|e| e.into_inner()).insert(
             handle,
-            Some(&self.raw_walker),
-            in_minimized_window,
-        )
+            ClipRecord {
+                bounds,
+                inherited: clip,
+            },
+        );
+        let hidden = nearest.is_some_and(hwnd_in_minimized_window) || clipped_out(bounds, clip);
+        build_snapshot_data(element, pid, handle, Some(&self.raw_walker), hidden)
+    }
+
+    /// The clip `element`'s children are built under: its scrolling
+    /// ancestors' viewports intersected with its own (issue #502).
+    ///
+    /// One refresh of `element` gives its current bounds and overflow. The
+    /// ancestors' part comes from [`Self::clips`] while the element has not
+    /// moved since it was built there; otherwise from a raw-view walk, which
+    /// is then remembered.
+    fn children_clip_of(
+        &self,
+        handle: u64,
+        element: &IUIAutomationElement,
+    ) -> Result<Option<RECT>> {
+        let fresh = uia_call(|| unsafe { element.BuildUpdatedCache(&self.scroll_request) })?;
+        let bounds = uia_call(|| unsafe { fresh.CachedBoundingRectangle() })?;
+        let remembered = self
+            .clips
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&handle)
+            .copied();
+        let inherited = match remembered {
+            Some(record) if record.bounds == bounds => record.inherited,
+            _ => {
+                let inherited = self.walk_inherited_clip(&fresh)?;
+                self.clips
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(handle, ClipRecord { bounds, inherited });
+                inherited
+            }
+        };
+        Ok(intersect_clip(inherited, cached_viewport(&fresh)))
+    }
+
+    /// The intersection of the viewports of `element`'s overflowing
+    /// ancestors, found by walking the raw view to the top. `None` when none
+    /// of them overflows. One call per level: each parent comes back with
+    /// the scroll properties cached.
+    fn walk_inherited_clip(&self, element: &IUIAutomationElement) -> Result<Option<RECT>> {
+        let mut clip = None;
+        let mut current = element.clone();
+        for _ in 0..HOST_WINDOW_WALK_LIMIT {
+            current = match unsafe {
+                self.raw_walker
+                    .GetParentElementBuildCache(&current, &self.scroll_request)
+            } {
+                Ok(parent) => parent,
+                // S_OK with a null parent: the top of the tree.
+                Err(e) if e.code().0 == 0 => return Ok(clip),
+                Err(e) => {
+                    return Err(Error::Platform {
+                        code: e.code().0 as i64,
+                        message: format!(
+                            "walking to the scrolling ancestors \
+                             (GetParentElementBuildCache) failed: {e}"
+                        ),
+                    })
+                }
+            };
+            clip = intersect_clip(clip, cached_viewport(&current));
+        }
+        Err(Error::Platform {
+            code: -1,
+            message: format!(
+                "no top of the raw view within {HOST_WINDOW_WALK_LIMIT} ancestors while \
+                 finding scroll viewports; the tree is deeper than any real one or cyclic"
+            ),
+        })
     }
 
     /// The nearest native window of an element this provider built, from
@@ -1549,12 +1645,16 @@ fn uia_cached_i32(element: &IUIAutomationElement, prop: UIA_PROPERTY_ID) -> Opti
 /// Used both by [`WindowsProvider::build_element_data`] (which allocates a
 /// handle and wraps this call) and by event handlers (which pass `handle=0`
 /// because event targets are snapshots — callers don't act on them directly).
+///
+/// `hidden_by_ancestor`: something above the element hides it although UIA
+/// leaves `IsOffscreen` false, namely a minimized window (issue #501) or a
+/// scrolling ancestor it is scrolled out of (issue #502).
 fn build_snapshot_data(
     element: &IUIAutomationElement,
     pid: Option<u32>,
     handle: u64,
     walker: Option<&IUIAutomationTreeWalker>,
-    in_minimized_window: bool,
+    hidden_by_ancestor: bool,
 ) -> Result<ElementData> {
     let control_type = unsafe { element.CachedControlType() }.unwrap_or(UIA_CONTROLTYPE_ID(0));
     let is_table_item = (control_type == UIA_DataItemControlTypeId
@@ -1620,7 +1720,7 @@ fn build_snapshot_data(
     let description = uia_cached_bstr(element, UIA_FullDescriptionPropertyId)
         .or_else(|| uia_cached_bstr(element, UIA_HelpTextPropertyId));
 
-    let states = parse_states(element, role, &patterns, in_minimized_window);
+    let states = parse_states(element, role, &patterns, hidden_by_ancestor);
 
     let bounds = unsafe { element.CachedBoundingRectangle() }
         .ok()
@@ -1724,6 +1824,21 @@ fn build_snapshot_data(
     .into())
 }
 
+/// Build the small request behind the scroll-clip refresh and walk: bounds
+/// and the two overflow flags, in the raw view like the batch request.
+fn create_scroll_request(automation: &IUIAutomation) -> Result<IUIAutomationCacheRequest> {
+    let request = uia_call(|| unsafe { automation.CreateCacheRequest() })?;
+    for prop in SCROLL_PROPERTIES {
+        unsafe { request.AddProperty(*prop) }.map_err(|e| Error::Platform {
+            code: e.code().0 as i64,
+            message: format!("AddProperty({:?}) failed: {e}", prop),
+        })?;
+    }
+    let raw_view = uia_call(|| unsafe { automation.CreateTrueCondition() })?;
+    uia_call(|| unsafe { request.SetTreeFilter(&raw_view) })?;
+    Ok(request)
+}
+
 /// Build the batch request that describes which properties and patterns
 /// to pre-fetch. Created once per provider, used on every query.
 fn create_batch_request(automation: &IUIAutomation) -> Result<IUIAutomationCacheRequest> {
@@ -1780,6 +1895,18 @@ const BATCH_PROPERTIES: &[UIA_PROPERTY_ID] = &[
     // MSAA role — the only role signal for providers that publish no UIA
     // control type (see `map_msaa_role`).
     UIA_LegacyIAccessibleRolePropertyId,
+    // Scroll overflow: an element whose content overflows clips its
+    // descendants to its bounds (see `cached_viewport`, issue #502).
+    UIA_ScrollHorizontallyScrollablePropertyId,
+    UIA_ScrollVerticallyScrollablePropertyId,
+];
+
+/// Properties [`create_scroll_request`] fetches: what
+/// [`WindowsProvider::children_clip_of`] needs to re-check one element.
+const SCROLL_PROPERTIES: &[UIA_PROPERTY_ID] = &[
+    UIA_BoundingRectanglePropertyId,
+    UIA_ScrollHorizontallyScrollablePropertyId,
+    UIA_ScrollVerticallyScrollablePropertyId,
 ];
 
 /// Interfaces needed while turning a cached UIA element into ElementData.
@@ -1867,6 +1994,68 @@ fn hwnd_in_minimized_window(hwnd: HWND) -> bool {
         current = parent;
     }
     false
+}
+
+/// The clip an element was built under, as [`WindowsProvider::clips`]
+/// remembers it.
+#[derive(Clone, Copy)]
+struct ClipRecord {
+    /// The element's physical bounds when it was built. A different value
+    /// later means it moved, so `inherited` may be stale.
+    bounds: RECT,
+    /// The intersection of its scrolling ancestors' viewports, `None` when
+    /// none of them overflows.
+    inherited: Option<RECT>,
+}
+
+/// The viewport `element` clips its descendants to, from its cached
+/// properties: its bounds, when its content overflows in either direction.
+///
+/// UIA has no viewport rectangle, so the bounds stand in. They include any
+/// scroll bars and header, which can leave an item hidden behind those
+/// counted as visible; an item scrolled fully out of view is what this
+/// catches (issue #502). An element that does not overflow clips nothing:
+/// its content fits, so no descendant can be scrolled out of it. Nor does an
+/// overflowing element without bounds of its own, which UIA already reports
+/// off screen along with its content.
+fn cached_viewport(element: &IUIAutomationElement) -> Option<RECT> {
+    let overflows = uia_cached_bool(element, UIA_ScrollVerticallyScrollablePropertyId)
+        == Some(true)
+        || uia_cached_bool(element, UIA_ScrollHorizontallyScrollablePropertyId) == Some(true);
+    if !overflows {
+        return None;
+    }
+    unsafe { element.CachedBoundingRectangle() }
+        .ok()
+        .filter(|r| r.right > r.left && r.bottom > r.top)
+}
+
+/// The intersection of two clips, where `None` clips nothing. Disjoint
+/// viewports give an empty rectangle, which hides everything under it.
+fn intersect_clip(a: Option<RECT>, b: Option<RECT>) -> Option<RECT> {
+    match (a, b) {
+        (None, other) | (other, None) => other,
+        (Some(a), Some(b)) => Some(RECT {
+            left: a.left.max(b.left),
+            top: a.top.max(b.top),
+            right: a.right.min(b.right),
+            bottom: a.bottom.min(b.bottom),
+        }),
+    }
+}
+
+/// Whether `clip` leaves no part of `bounds` showing. An element with no
+/// area is not judged: there is nothing to overlap, and its `IsOffscreen`
+/// stands.
+fn clipped_out(bounds: RECT, clip: Option<RECT>) -> bool {
+    let Some(c) = clip else { return false };
+    if bounds.right <= bounds.left || bounds.bottom <= bounds.top {
+        return false;
+    }
+    !(bounds.left < c.right
+        && c.left < bounds.right
+        && bounds.top < c.bottom
+        && c.top < bounds.bottom)
 }
 
 /// The stable identity of a UIA element, or `None` when it has none.
@@ -2349,6 +2538,11 @@ impl Provider for WindowsProvider {
                 else {
                     return Ok(Vec::new());
                 };
+                // Likewise the scroll clip: one refresh of the parent.
+                let Some(clip) = live_snapshot(self.children_clip_of(element_data.handle, &uia))?
+                else {
+                    return Ok(Vec::new());
+                };
                 let pid = element_data.pid;
                 let mut data = Vec::with_capacity(children.len());
                 for child in children {
@@ -2357,6 +2551,7 @@ impl Provider for WindowsProvider {
                         pid,
                         host_hwnd,
                         HostHint::Parent,
+                        clip,
                     ))? {
                         data.push(child);
                     }
@@ -2412,8 +2607,14 @@ impl Provider for WindowsProvider {
                 } else {
                     self.host_hwnd_of(element.handle, &uia)?
                 };
-                let data =
-                    self.build_element_data_in(&parent, element.pid, host_hwnd, HostHint::Parent)?;
+                let clip = self.walk_inherited_clip(&parent)?;
+                let data = self.build_element_data_in(
+                    &parent,
+                    element.pid,
+                    host_hwnd,
+                    HostHint::Parent,
+                    clip,
+                )?;
                 return Ok(Some(data));
             }
         }
@@ -2878,14 +3079,28 @@ impl Provider for WindowsProvider {
         // the flat array does not say which nested window an element sits
         // in. When one is, take the level-by-level path, which tracks each
         // element's nearest window (issue #501).
+        //
+        // The same goes for scroll clipping (issue #502): the array does not
+        // say which elements sit inside an overflowing one. So the single
+        // pass runs only when nothing clips: the root has no overflowing
+        // ancestor and does not overflow itself, and neither does anything
+        // below it. Otherwise the level-by-level path clips each level to
+        // its parent's viewport.
         let root_minimized = root_hwnd.is_some_and(hwnd_in_minimized_window);
-        if !root_minimized
+        let Some(root_clip) = live_snapshot(self.children_clip_of(root_data.handle, &uia_root))?
+        else {
+            return Ok(Vec::new());
+        };
+        let nested_minimized = !root_minimized
             && (0..count).any(|i| {
                 uia_get(&subtree, i)
                     .and_then(|el| unsafe { el.CachedNativeWindowHandle() }.ok())
                     .is_some_and(|h| !h.0.is_null() && hwnd_in_minimized_window(h))
-            })
-        {
+            });
+        let scroll_clipped = root_clip.is_some()
+            || (0..count)
+                .any(|i| uia_get(&subtree, i).is_some_and(|el| cached_viewport(&el).is_some()));
+        if nested_minimized || scroll_clipped {
             return xa11y_core::selector::find_elements_in_tree_group(
                 |el| self.get_children(el),
                 Some(root),
@@ -2920,7 +3135,14 @@ impl Provider for WindowsProvider {
             // root, so it is not recorded); elements with an HWND of their
             // own use and record it.
             let Some(data) =
-                live_snapshot(self.build_element_data_in(&el, pid, root_hwnd, HostHint::Ancestor))?
+                // `None` clip: the check above found nothing that scrolls.
+                live_snapshot(self.build_element_data_in(
+                    &el,
+                    pid,
+                    root_hwnd,
+                    HostHint::Ancestor,
+                    None,
+                ))?
             else {
                 continue;
             };
@@ -3897,7 +4119,7 @@ fn parse_states(
     element: &IUIAutomationElement,
     role: Role,
     patterns: &ElementPatterns,
-    in_minimized_window: bool,
+    hidden_by_ancestor: bool,
 ) -> StateSet {
     let enabled = unsafe { element.CachedIsEnabled() }
         .unwrap_or(BOOL(1))
@@ -3905,9 +4127,10 @@ fn parse_states(
     let offscreen = unsafe { element.CachedIsOffscreen() }
         .unwrap_or(BOOL(0))
         .as_bool();
-    // A minimized window's content is not visible, even though UIA leaves
-    // `IsOffscreen` false on its descendants (issue #501).
-    let visible = !offscreen && !in_minimized_window;
+    // A minimized window's content (issue #501) and an item scrolled out of
+    // its list (issue #502) are not visible, even though UIA leaves
+    // `IsOffscreen` false on them.
+    let visible = !offscreen && !hidden_by_ancestor;
     let focused = unsafe { element.CachedHasKeyboardFocus() }
         .unwrap_or(BOOL(0))
         .as_bool();
@@ -4959,7 +5182,9 @@ impl EventContext {
         // Event targets are not walked to their host window: the handler
         // must stay cheap. One with its own HWND is still checked, so a
         // windowless event target in a minimized window can report visible
-        // where a tree read of the same element would not.
+        // where a tree read of the same element would not. Nor are they
+        // clipped to their scrolling ancestors (issue #502), for the same
+        // reason: an item scrolled out of view can report visible here.
         let in_minimized_window = unsafe { cached_element.CachedNativeWindowHandle() }
             .ok()
             .is_some_and(|h| !h.0.is_null() && hwnd_in_minimized_window(h));
@@ -5786,6 +6011,45 @@ mod tests {
     fn provider_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<WindowsProvider>();
+    }
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    #[test]
+    fn intersect_clip_narrows_and_none_clips_nothing() {
+        let list = rect(0, 0, 100, 100);
+        assert_eq!(intersect_clip(None, None), None);
+        assert_eq!(intersect_clip(Some(list), None), Some(list));
+        assert_eq!(intersect_clip(None, Some(list)), Some(list));
+        assert_eq!(
+            intersect_clip(Some(list), Some(rect(50, -20, 200, 60))),
+            Some(rect(50, 0, 100, 60))
+        );
+    }
+
+    #[test]
+    fn clipped_out_needs_no_overlap_at_all() {
+        let clip = Some(rect(0, 0, 100, 100));
+        // Inside, and partly inside: visible.
+        assert!(!clipped_out(rect(10, 10, 90, 30), clip));
+        assert!(!clipped_out(rect(10, 90, 90, 110), clip));
+        // Scrolled below the viewport, and exactly touching its edge.
+        assert!(clipped_out(rect(10, 120, 90, 140), clip));
+        assert!(clipped_out(rect(10, 100, 90, 120), clip));
+        // No clip, or no area to judge: UIA's answer stands.
+        assert!(!clipped_out(rect(10, 120, 90, 140), None));
+        assert!(!clipped_out(rect(10, 120, 10, 140), clip));
+        // Disjoint viewports leave an empty clip that hides everything.
+        let empty = intersect_clip(clip, Some(rect(200, 200, 300, 300)));
+        assert!(clipped_out(rect(10, 10, 90, 30), empty));
+        assert!(clipped_out(rect(210, 210, 290, 290), empty));
     }
 
     #[test]

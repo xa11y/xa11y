@@ -297,6 +297,10 @@ On Linux, `visible` requires the AT-SPI `Showing` state as well as `Visible`. `V
 
 `bounds` is `None` when `Component.GetExtents` reports a sentinel instead of a position: an `INT32_MIN` coordinate (unrealized GTK widgets), a negative size, or `0x0`. A zero width or a zero height alone, such as a separator line, is still reported, matching Windows.
 
+### Visible state (Windows)
+
+On Windows, `visible` starts from the UIA `IsOffscreen` property, which some providers leave false on content that can't be seen. xa11y corrects two cases. The contents of a minimized window are not visible. An item that lies entirely outside an ancestor whose content overflows (a list or grid scrolled past it) is not visible either. UIA has no viewport rectangle, so the ancestor's bounds stand in for it, and an item hidden only behind a scroll bar or header still counts as visible. Event targets skip the scroll check, so a scrolled-out item can report visible on an event.
+
 ### Selected state
 
 Per-item selection (`selected` on rows, cells, list items) is read differently:

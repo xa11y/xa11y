@@ -567,6 +567,11 @@ APP_CONFIGS: dict[str, dict] = {
         # opt-in whole-tree guard stays off.
         "expect_no_unknown_roles": False,
         "window_name_contains": "xa11y-winforms-test-app",
+        # A ListBox longer than its viewport (issue #502): its first entry is
+        # in view and its last is scrolled out. Only this cell has one yet.
+        "scrolled_list_name": "Long List",
+        "scrolled_list_first_item": "Long Entry 1",
+        "scrolled_list_last_item": "Long Entry 40",
         "submit_button_name": "Submit",
         "add_item_button_name": "Add Item",
         "remove_item_button_name": "Remove Item",

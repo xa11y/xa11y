@@ -673,3 +673,34 @@ def test_locator_dump_shorthand(app, app_config):
     text = app.locator(f'button[name="{ok_name}"]').element().dump(max_depth=0)
     assert isinstance(text, str)
     assert "button" in text
+
+
+def test_items_scrolled_out_of_a_list_are_not_visible(app, app_config):
+    """An item scrolled out of its list reports ``visible == False``.
+
+    WinForms leaves ``IsOffscreen`` false on list items scrolled out of the
+    viewport, so without the provider's own clipping they counted as visible
+    and an auto-waiting action would act on an item nobody can see (issue
+    #502). Checked through both of the provider's paths: a selector search,
+    which leaves the one-pass subtree fetch when anything scrolls, and a
+    plain ``children()`` read, which clips each level to its parent.
+    """
+    list_name = app_config.get("scrolled_list_name")
+    if not list_name:
+        pytest.skip("this app has no list longer than its viewport yet")
+    first = app_config["scrolled_list_first_item"]
+    last = app_config["scrolled_list_last_item"]
+
+    found = {
+        name: app.locator(f'[name="{name}"]').element().visible
+        for name in (first, last)
+    }
+    assert found == {first: True, last: False}, (
+        f"selector search: the first entry must be visible and the last scrolled out; got {found}"
+    )
+
+    lst = app.locator(f'[name="{list_name}"]').element()
+    listed = {c.name: c.visible for c in lst.children() if c.name in (first, last)}
+    assert listed == {first: True, last: False}, (
+        f"children(): the first entry must be visible and the last scrolled out; got {listed}"
+    )
