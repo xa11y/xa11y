@@ -27,6 +27,11 @@ def _context_menus(app: xa11y.App) -> list[xa11y.Element]:
     ]
 
 
+# The right-click is a synthesized event, and the harness runs the Cocoa app
+# in the background: without the frontmost slot the click lands behind
+# Finder and no menu opens.
+@pytest.mark.xa11y_requires("input_sim")
+@pytest.mark.xa11y_frontmost
 def test_cocoa_context_menu_is_listed_and_searchable(app_name, app):
     if sys.platform != "darwin" or app_name != "cocoa":
         pytest.skip("the native context-menu fixture belongs to the macOS Cocoa cell")
