@@ -119,8 +119,9 @@ so `[name^="..."]` finds an element by a prefix of a long name.
 An element's `states` object follows three rules:
 
 - `enabled` and `visible` are always present, as `true` or `false`.
-- `focused`, `focusable`, `active`, `editable`, `selected`, `modal`, `required`
-  and `busy` appear only when true, so an absent one is false.
+- `focused`, `focusable`, `active`, `editable`, `selected`, `modal`,
+  `required`, `busy` and `password` appear only when true, so an absent one is
+  false. `password` marks a password field, whose role stays `text_field`.
 - `checked`, `expanded`, `minimized`, `maximized` and `fullscreen` appear only
   when the platform reports them, so an absent one is unknown.
 
